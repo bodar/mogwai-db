@@ -23,7 +23,8 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 - `src/sql/CLAUDE.md` — the `q` SQL kernel
 - `src/compiler/CLAUDE.md` — IR passes, the DI object model, fast paths
 - `src/services/CLAUDE.md` — `call()` + Service Registry + full-text search
-- `test/CLAUDE.md` — the L1–L5 conformance ladder (L5 = property-based; everything tracks
+- `test/CLAUDE.md` — the conformance ladder, L1–L5 + L8 (L5 = property-based, L8 = the whole suite
+  perturbed under `reverse_unordered_selects`, a gate in `ci`; everything tracks
   tinkerpop `origin/master`, the old version split is gone)
 - `.claude/rules/{wire-protocol,schema-storage,management-api}.md` — glob-scoped, fire on the
   matching files

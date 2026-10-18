@@ -50,7 +50,7 @@ const PRESERVE = 3;
  *  nothing is dirty. Only rows that need a rev (dirty 1/2) read labels/properties. */
 function refreshNodes(store: GraphStore): void {
   const rows = store.query<{ id: number; gid: string; rev: string | null; dirty: number }>(
-    'SELECT id, hex(gid) AS gid, json(rev) AS rev, dirty FROM nodes WHERE dirty');
+    'SELECT id, hex(gid) AS gid, json(rev) AS rev, dirty FROM nodes WHERE dirty ORDER BY id');
   if (!rows.length) return;
   const contentIds = rows.filter((r) => r.dirty !== PRESERVE).map((r) => r.id);
   const labels = labelsForOwners(store, contentIds);
@@ -71,7 +71,7 @@ function refreshEdges(store: GraphStore): void {
             hex(sv.gid) AS srcgid, hex(tv.gid) AS tgtgid
      FROM edges e JOIN labels l ON l.id = e.label
        JOIN nodes sv ON sv.id = e.src JOIN nodes tv ON tv.id = e.tgt
-     WHERE e.dirty`);
+     WHERE e.dirty ORDER BY e.id`);
   if (!rows.length) return;
   const props = edgePropsForOwners(store, rows.filter((r) => r.dirty !== PRESERVE).map((r) => r.id), true);
   const base = store.nextSeqBlock(rows.length);
@@ -86,7 +86,7 @@ function refreshEdges(store: GraphStore): void {
  *  delete enters the by-seq feed after the same write's live elements. The gid/rev were captured by the
  *  compiled drop; only the local seq is the refresh's to assign. A no-op when nothing was deleted. */
 function refreshTombstones(store: GraphStore): void {
-  const rows = store.query<{ id: number }>('SELECT id FROM tombstones WHERE seq IS NULL');
+  const rows = store.query<{ id: number }>('SELECT id FROM tombstones WHERE seq IS NULL ORDER BY id');
   if (!rows.length) return;
   const base = store.nextSeqBlock(rows.length);
   updateSet(store, 'tombstones', 'id', [SEQ], rows.map((r, i) => [r.id, base + i + 1]));

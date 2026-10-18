@@ -841,6 +841,36 @@ export function renumber(
 export const originOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'origin');
 
+/** The origin DOMAIN's copy of the entering traverser's POSITION (`originDomainOf`), present when the host
+ *  stream carried an encounter. */
+export const DOMAIN_ENCOUNTER = 'dencounter';
+
+/**
+ * A SEEDED per-origin barrier's output — the per-origin values (`perOrigin`: `originCol` + `valCol`) LEFT
+ * JOINed onto the origin DOMAIN so an origin whose sub-stream was empty still emits, its value `COALESCE`d
+ * to the empty seed (`fold()`'s `[]`, `group()`'s `{}`), and the origin re-declared as the channel. When the
+ * domain carries the host's position it is re-declared as the ENCOUNTER too: one row per entering traverser,
+ * so `local(__.out().order().fold())` after an `order()` answers in the host's order rather than the join's.
+ */
+export function seedPerOrigin(domain: Rel, perOrigin: Rel, originCol: string, valCol: string, fresh: Minter, ids: readonly [string, string]): Rel {
+  const ordered = domain.type.cols.some((column) => column.name === DOMAIN_ENCOUNTER);
+  const joined = make.join({
+    id: fresh(ids[0]), left: domain, right: perOrigin, join: 'left', channels: [],
+    // The right side is NULL for a domain origin with no group (an empty sub-stream) — the whole point.
+    type: typeOf(meta('dorigin', 'int'), ...(ordered ? [meta(DOMAIN_ENCOUNTER, 'int')] : []),
+      meta(originCol, 'int', true), meta(valCol, 'json', true)),
+    on: eq(col(domain.id, 'dorigin'), col(perOrigin.id, originCol)),
+  });
+  const origin: Channel = { col: originCol, role: 'origin' };
+  return make.project({
+    id: fresh(ids[1]), input: joined,
+    channels: ordered ? [origin, { col: 'encounter', role: 'encounter' }] : [origin],
+    type: typeOf(meta(valCol, 'json'), meta(originCol, 'int'), ...(ordered ? [meta('encounter', 'int')] : [])),
+    exprs: [[valCol, coalesce(col(joined.id, valCol), EMPTY_ARRAY)], [originCol, col(joined.id, 'dorigin')],
+      ...(ordered ? [['encounter', col(joined.id, DOMAIN_ENCOUNTER)] as const] : [])],
+  });
+}
+
 /**
  * THE TRAVERSER EQUALITY a merge, a dedup and a group key partition on — the SQLite VALUE plus a coarse
  * FAMILY (`valueFamily`). SQLite's own comparison already equates `1`, `1.0` and `-0.0`/`0.0` and keeps a

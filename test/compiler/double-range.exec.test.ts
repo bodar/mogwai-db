@@ -72,7 +72,8 @@ describe('a stored Double outside the exact range reads back within one ulp', ()
   test('g.E() — an edge property', async () => {
     const store = seededStore();
     for (const x of EDGES) executeQuery(store, "g.V(1).addE('f').to(V(2)).property('w', p)", { p: x }, { p: 'double' });
-    const got = (await decodeAll(executeQuery(store, "g.E().hasLabel('f')"))).map((e) => e.properties[0].value);
+    // In write order (`order().by(id)`) so each value pairs with the one written; `g.E()` itself is unordered.
+    const got = (await decodeAll(executeQuery(store, "g.E().hasLabel('f').order().by(id)"))).map((e) => e.properties[0].value);
     expect(far(got, EDGES)).toEqual([]);
   });
 

@@ -14,7 +14,9 @@ describe('a per-traverser seeded fold answers a fresh list per parent', () => {
     const seeded = bare(run(s, "g.V().hasLabel('person').local(__.out().values('name').fold([], Operator.addAll))"));
     const plain = bare(run(s, "g.V().hasLabel('person').local(__.out().values('name').fold())"));
     expect(seeded).toEqual(plain);
-    expect(seeded.map((r: any) => JSON.parse(r.list).sort())).toEqual([['josh', 'lop', 'vadas'], [], ['lop', 'ripple'], ['lop']]);
+    // One list per person; hasLabel('person') is an unordered stream, so the lists compare as a multiset.
+    const lists = (xs: readonly string[][]) => xs.map((l) => JSON.stringify([...l].sort())).sort();
+    expect(lists(seeded.map((r: any) => JSON.parse(r.list)))).toEqual(lists([['josh', 'lop', 'vadas'], [], ['lop', 'ripple'], ['lop']]));
   });
   test('where(size > 2) keeps marko', () => {
     expect(names("g.V().hasLabel('person').where(__.out().values('name').fold([], Operator.addAll).count(local).is(gt(2))).values('name')"))

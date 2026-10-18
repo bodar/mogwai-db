@@ -22,19 +22,17 @@
   `mise run test [-- args]`, so the fast inner loop on one file is `mise run test -- <file>` (which
   runs a targeted single `bun test` after the deps have set up). `mise run test` itself fans the suite
   across cores — one `bun test` process per bracket (`scripts/test-all.ts`, sharing the CI bracket
-  function in `scripts/brackets.ts`). `mise run L1`..`L5` run one level each; `mise run ci` is the
+  function in `scripts/brackets.ts`). `mise run L1`..`L5` run one level each (`mise run L8` re-runs the whole fan-out perturbed); `mise run ci` is the
   full gate. Re-runs are incremental (`sources` in `mise.toml`) — an unchanged tree skips.
 - **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
-  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `sql-hygiene`, `rel-sweep`, `test` and
+  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `sql-hygiene`, `rel-sweep`, `test`, `L8` and
   `build`, and `test` fans one `bun test` per bracket over ALL discovered files (`scripts/test-all.ts`),
-  so **L1–L5 and `test/L7-census` are inside it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
+  so **L1–L5, `test/L7-census` and L8 are inside it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
   what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks
   exist for the inner loop — before `ci`, not after it.
-  Only three things are genuinely outside: the two ENV-switch runs (`test:cf-limits`,
-  `test:perturbed` — a different RUN of the same suite, so they cannot be folded in) and a post-commit
-  `mise run L5`, whose seed derives from `HEAD`. `test:perturbed` is worth a run only
-  when the change touches ORDER; it is an instrument at a known 4, and running it on a change with no
-  ordering surface reports nothing.
+  Only two things are genuinely outside: the ENV-switch run `test:cf-limits` (a different RUN of the
+  same suite) and a post-commit `mise run L5`, whose seed derives from `HEAD`. L8 is also an ENV-switch
+  run, but it is a GATE at zero and `ci` runs it after `test` (`wait_for` in `mise.toml`).
 - **"Did my change slow the build?" is answered by `[test] Finished in`, NOT by CI wall-clock.**
   mise prints a `Finished in` per task and those are the measurement; wall-clock also contains three
   network-bound phases (`submodule` git fetch, `install`, `build`'s `bunx wrangler`) whose cost is
@@ -106,6 +104,8 @@
   which is the thing the L3 count structurally cannot. Current state + runbook:
   `L5-properties/README.md`; design rationale + the unbuilt oracles:
   `docs/property-based-testing-l5.md`.
+- **L8** (no folder — a MODE) — the whole suite re-run under `reverse_unordered_selects`, gated at zero:
+  every order an answer relies on is pinned by the SQL. See "L8 — the perturbation rung" below.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
   (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they
   live in neither.
@@ -150,34 +150,37 @@ rejections, 3 raw `TypeError`s, 2 `RangeError`s, 1 `UNIQUE constraint`, and 1 ca
 syntactically invalid SQL). The gate holds that count from growing; each one should become a clear
 deferral or a fix.
 
-## The perturbation instrument — `mise run test:perturbed`
+## L8 — the perturbation rung (`mise run L8`, alias `test:perturbed`)
 
-Runs the WHOLE suite with `PRAGMA reverse_unordered_selects = ON`: SQLite reverses every scan whose
+Runs the WHOLE suite again with `PRAGMA reverse_unordered_selects = ON`: SQLite reverses every scan whose
 order the query did not constrain, and leaves an `ORDER BY` alone. So a result that holds under both
 settings is pinned by the SQL we emit; one that holds only under the default is pinned by SQLite's
 scan choice — and on a six-vertex fixture that choice is reliably the flattering one, which is why
 this class of defect cannot be found by reading or by any assertion in the ladder.
 
-It is an **instrument, not a gate** (the `orphans` standing) and is absent from `ci`, because it is
-still red. **What it checks changed on 2026-10-18, and that is the point of reading this paragraph:**
-it proves the order the QUERY imposes is pinned by the SQL — after `order()`, a `tail()`, fold/aggregate/
-group member lists, `path()`, `dedup(label)`, a branch's per-start arm order, write id assignment
-(`test/compiler/meaningful-order.exec.test.ts` is that keep-list, asserted exactly). It no longer expects
-an UNORDERED stream to hold its order: an unordered stream reaching the wire, and an unordered
+**It is a GATE at zero failures, with no ignore list** — part of `mise run ci` (after `test`, never
+beside it: both write L3's state and telemetry files) and, in CI, an `L8 (<bracket>)` matrix over the
+same brackets as `test` with `MOGWAI_REVERSE_UNORDERED=1` set. It is not a `test/L8-…/` dir because it
+is a different RUN of the same suite, so it is wired explicitly (`mise.toml` `[tasks.L8]`,
+`.github/workflows/ci.yml` job `L8`); its per-bracket logs are `.logs/L8-<bracket>.log`.
+`mise run L8 -- <path>` is the targeted perturbed run of one file.
+
+What it checks: the order the QUERY imposes is pinned by the SQL — after `order()` (through a branch
+merge and a per-traverser body, until the next fan-out), a `tail()`, fold/aggregate/group member lists,
+`path()`, `dedup(label)`, a branch's per-start arm order, write id assignment
+(`test/compiler/meaningful-order.exec.test.ts` is that keep-list, asserted exactly). It does NOT expect an
+UNORDERED stream to hold its order: an unordered stream reaching the wire, and an unordered
 `limit`/`range`/`skip`, come back in SQLite's planner order (`computeDemandsEncounter`'s `wireTerminal`,
-a deliberate divergence in `docs/feature-support-matrix.md` §17), so the encounter that used to be seeded
-for them — and that made `out().out().limit(10)` sort the whole walk — is gone. A test over such a stream
-compares a MULTISET (`bagOf`, `test/support/harness.ts`), or a COUNT/sub-multiset for an unordered slice;
-the census digests an unordered window's COUNT, and L5's differential tolerates the members it picks
-(`orderIndeterminacy`, `test/support/graph.ts`). The 6 that remain (measured 2026-10-18; trunk had 8
-before that change) are order-substrate residue: federated member folds (`group().by(T.label).by(name-fold)`,
-`path().fold()`), a bare `coalesce()`-over-record-arms emission, `order().by(k).local(…fold())` (a
-`local` after the order re-enters per row), and two unit pins (an edge-Double read-back, `seq`). A failure here is a real
-under-specification, never a flake — the remainder are the "Encounter and order" item in
-`docs/outstanding-work.md`, and this becomes a gate when they are cleared. **Baseline it before blaming a
-diff**: re-run the instrument with the change set aside,
-because a pre-existing failure here reads exactly like one the diff caused. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
-rather than a parameter precisely so the suite under test cannot know it is being perturbed.
+a deliberate divergence in `docs/feature-support-matrix.md` §17). A test over such a stream compares a
+MULTISET (`bagOf`, `test/support/harness.ts`), or a COUNT/sub-multiset for an unordered slice; the census
+digests an unordered window's COUNT, and L5's differential tolerates the members it picks
+(`orderIndeterminacy`, `test/support/graph.ts`). The same goes for an order that comes from ANOTHER
+graph's unordered stream (a federated subgraph's landed order). So an L8 failure is one of two things,
+and never a flake: a test pinning an unordered stream (rewrite it to a multiset) or a meaningful order
+the SQL does not pin (fix the lowering — never weaken the test). **Baseline it before blaming a diff**:
+re-run with the change set aside. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in
+`src/bun/BunSqlite.ts`) rather than a parameter precisely so the suite under test cannot know it is being
+perturbed.
 
 Related: an `ordered` L4 assertion is only worth writing if it survives this. Check before adding one.
 

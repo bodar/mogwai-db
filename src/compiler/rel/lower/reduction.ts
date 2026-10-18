@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, firstRootedValue, presenceFenced, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, presenceFenced, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
@@ -594,9 +594,13 @@ function shedBodyAliases(rel: Rel, keep: AliasMap, fresh: Minter): Rel {
  *  origin values, and a narrow relation keeps the join cheap. Carried on `ChainCtx.originDomain`. */
 export function originDomainOf(seeded: Rel, fresh: Minter): Rel {
   const origin = originOf(seeded.channels)!;
+  // The entering POSITION rides too where the host has one (`DOMAIN_ENCOUNTER`), so the seeded barrier's
+  // one row per entering traverser keeps the host's order.
+  const enc = encounterOf(seeded.channels);
   return make.project({
-    id: fresh('od'), input: seeded, channels: [], type: typeOf(meta('dorigin', 'int')),
-    exprs: [['dorigin', col(seeded.id, origin.col)]],
+    id: fresh('od'), input: seeded, channels: [],
+    type: typeOf(meta('dorigin', 'int'), ...(enc ? [meta(DOMAIN_ENCOUNTER, 'int')] : [])),
+    exprs: [['dorigin', col(seeded.id, origin.col)], ...(enc ? [[DOMAIN_ENCOUNTER, col(seeded.id, enc.col)] as const] : [])],
   });
 }
 

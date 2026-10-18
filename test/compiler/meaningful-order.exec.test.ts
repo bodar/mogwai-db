@@ -24,6 +24,24 @@ describe('an explicit order() and the slices after it', () => {
   ] as const)('%s', async (q, want) => expect(await answer(q)).toEqual([...want]));
 });
 
+// An order() holds through a branch merge until the next fan-out: each start's outputs together, in the
+// order the starts arrive, its arms in the order they are written.
+describe('an order() survives a branch merge and a per-traverser body', () => {
+  test.each([
+    ['g.V(1).out().order().by("name").coalesce(__.values("age"), __.constant(0))', [32, 0, 27]],
+    ['g.V(1).out().order().by("name").choose(__.has("age"), __.values("age"), __.constant(0))', [32, 0, 27]],
+    ['g.V(1).out().order().by("name").union(__.values("age"), __.constant(0))', [32, 0, 0, 27, 0]],
+    ['g.V(1).out().order().by("name").optional(__.values("age")).count()', [3]],
+    ['g.V().order().by("name").local(__.out("created").values("name").order().fold())',
+      [['lop', 'ripple'], [], ['lop'], ['lop'], [], []]],
+  ] as const)('%s', async (q, want) => expect(await answer(q)).toEqual([...want]));
+
+  test('optional() keeps the start order, an element where the arm is empty', async () => {
+    const got = await answer('g.V(1).out().order().by("name").optional(__.values("age"))');
+    expect(got.map((x: any) => (typeof x === 'number' ? x : x.id))).toEqual([32, 3, 27]);
+  });
+});
+
 describe('a tail reads the far end of the stream it is given', () => {
   test('g.V().values("name").tail(2)', async () => expect(await answer('g.V().values("name").tail(2)')).toEqual(['ripple', 'peter']));
 });

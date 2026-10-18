@@ -50,10 +50,14 @@ const cores = navigator.hardwareConcurrency || 1;
 // one bracket's file, never a tangle of eight.
 const logdir = `${process.env.MISE_PROJECT_ROOT ?? root}/.logs`;
 mkdirSync(logdir, { recursive: true });
-const logPathFor = (bracket: string) => `${logdir}/test-${bracket}.log`;
+// `--log-prefix=<p>` names the per-bracket logs `<p>-<bracket>.log` — L8 (the perturbed re-run of this same
+// fan-out) passes `L8`, so its logs never overwrite `test`'s.
+const prefixFlag = Bun.argv.slice(2).find((a) => a.startsWith('--log-prefix='));
+const logPrefix = prefixFlag?.slice('--log-prefix='.length) || 'test';
+const logPathFor = (bracket: string) => `${logdir}/${logPrefix}-${bracket}.log`;
 
-// Passthrough args (everything after the script name). Present ⇒ targeted single-process run.
-const passthrough = Bun.argv.slice(2);
+// Passthrough args (everything after the script name and our own flag). Present ⇒ targeted single-process run.
+const passthrough = Bun.argv.slice(2).filter((a) => a !== prefixFlag);
 
 /** The env a given bracket's `bun test` needs. Only `browser` is special: it drives a real Chrome, so
  *  it must run with the lane flag set and in its own process (both true here). Unlike CI we do NOT set
@@ -119,7 +123,7 @@ if (passthrough.length) {
 const limit = Math.max(1, cores - 2);
 const groups = brackets(root);
 const entries = [...groups.entries()];
-console.log(`test-all: ${groups.size} brackets [${entries.map(([k]) => k).join(', ')}] · up to ${limit} concurrent (of ${cores} cores) · per-bracket logs in .logs/test-<bracket>.log`);
+console.log(`test-all: ${groups.size} brackets [${entries.map(([k]) => k).join(', ')}] · up to ${limit} concurrent (of ${cores} cores) · per-bracket logs in .logs/${logPrefix}-<bracket>.log`);
 
 const codes = await pool(
   limit,
@@ -142,7 +146,7 @@ const codes = await pool(
 const failed = entries.filter((_e, i) => codes[i] !== 0).map(([b]) => b);
 console.log(
   failed.length
-    ? `test-all: FAIL — ${failed.length}/${entries.length} bracket(s) red: ${failed.join(', ')} (see .logs/test-<bracket>.log)`
+    ? `test-all: FAIL — ${failed.length}/${entries.length} bracket(s) red: ${failed.join(', ')} (see .logs/${logPrefix}-<bracket>.log)`
     : `test-all: PASS — all ${entries.length} brackets green`,
 );
 process.exit(failed.length ? 1 : 0);

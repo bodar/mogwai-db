@@ -232,13 +232,15 @@ const SEQ_KEY: Channel = { col: 'bks', role: 'branchKey' };
  * (`ORDER_READERS` — a slice, a fold's member order, a first-arrival merge). Past the end of the list the
  * HOST decides where it knows (`ChainCtx.bodyOrder` — an EXISTS gate reads none, an owed merge's arm reads
  * it), and otherwise the chain does: wherever it carries an emission order (`ctx.ordered`) or a slice in
- * this body or an enclosing one reads it (`ctx.sliced`, set by `continueAs` at every depth). A merge that
- * owes nothing is positionless (`dropEncounter`).
+ * this body or an enclosing one reads it (`ctx.sliced`, set by `continueAs` at every depth) — or where the
+ * INPUT already carries one (an `order()` upstream): that order is meaningful until the next fan-out, so
+ * `order().by('name').coalesce(values('age'), constant(0))` answers in name order, each start's outputs
+ * together. A merge that owes nothing is positionless (`dropEncounter`).
  */
-export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): boolean => {
+export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined, input: Rel): boolean => {
   if (position && !orderReadAfter(position.steps, position.at + 1, true)) return false;
   if (position && position.steps.slice(position.at + 1).some((s) => ORDER_READERS.has(s.name) && !isLocalScope(s))) return true;
-  return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
+  return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced || !!encounterOf(input.channels);
 };
 
 /** The steps that READ the arrival order of the stream reaching them: the positional slices, the collecting
@@ -718,8 +720,20 @@ function terminal(
     // payload's `json_group_array(name ORDER BY lid)` and `by(T.label)`'s first-label pick use. Across
     // origins the order is the arriving emission order where the stream has one, else `lord` — total
     // either way, which the `encounter` channel requires.
+    // Where NOTHING reads the order — an unordered stream reaching the wire, no slice, no collect — the
+    // labels stream is unordered too, and minting a position would only sort it (`wireTerminal`). Only on a
+    // ROOTED chain, where `ordered` is the whole traversal's answer; a body's collect still pins label order.
     const named = ctx.source.labelNames(input, elem, fresh);
     const arriving = encounterOf(input.channels);
+    if (!arriving && ctx.traversal?.rooted && !ctx.ordered && !ctx.sliced && !ctx.bodyOrder) {
+      return {
+        rel: make.project({
+          id: fresh('lv'), input: named, channels: named.channels, type: typeOf(meta('v', 'text'), ...carriedCols(named.channels)),
+          exprs: [['v', col(named.id, 'v')], ...carriedCols(named.channels).map((column) => [column.name, col(named.id, column.name)] as const)],
+        }),
+        framing: { kind: 'scalar', type: STATIC('string') },
+      };
+    }
     const channels = arriving ? named.channels : withChannel(named.channels, ENCOUNTER);
     return {
       rel: renumber(

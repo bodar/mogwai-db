@@ -11,8 +11,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
-import { withChannel } from '../../channels.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -781,17 +780,7 @@ function mapOfGroupsPerOrigin(grouped: Rel, entry: Entry, order: Expr, originCol
     groupBy: [col(grouped.id, originCol)],
     aggs: [[MAP_COL, collectedArray(pairOf(entry.key, entry.val), [{ expr: order, dir: 'asc' }])]],
   });
-  const joined = make.join({
-    id: fresh('mj'), left: domain, right: perOrigin, join: 'left', channels: [],
-    // The right side is NULL for a domain origin with no group — an empty group, seeded `{}` below.
-    type: typeOf(meta('dorigin', 'int'), meta(originCol, 'int', true), meta(MAP_COL, 'json', true)),
-    on: eq(col(domain.id, 'dorigin'), col(perOrigin.id, originCol)),
-  });
-  return make.project({
-    id: fresh('mo'), input: joined, channels: withChannel([], { col: originCol, role: 'origin' }),
-    type: typeOf(meta(MAP_COL, 'json'), meta(originCol, 'int')),
-    exprs: [[MAP_COL, coalesce(col(joined.id, MAP_COL), EMPTY_ARRAY)], [originCol, col(joined.id, 'dorigin')]],
-  });
+  return seedPerOrigin(domain, perOrigin, originCol, MAP_COL, fresh, ['mj', 'mo']);
 }
 
 /**

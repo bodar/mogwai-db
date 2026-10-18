@@ -432,13 +432,22 @@ description = "Bank the sql-hygiene per-family maxima (commit scripts/sql-hygien
 depends = ["install"]
 run = "bun scripts/sql-hygiene.ts --record"
 
-# An ENV switch rather than a parameter, deliberately: the suite under test must not be able to see
-# that it is being perturbed.
-[tasks."test:perturbed"]
-description = "Instrument: the full suite under reversed unordered scans (finds order-by-luck results)"
-depends = ["install", "check", "submodule"]
+# L8 — THE PERTURBATION RUNG: the whole suite again under `PRAGMA reverse_unordered_selects`, so every
+# order an answer relies on must be pinned by the SQL we emit rather than by SQLite's scan choice
+# (test/CLAUDE.md). A GATE at zero, with no ignore list. It is a different RUN of the same suite rather
+# than a `test/L8-…/` dir, so it is wired explicitly: the same per-bracket fan-out as `test`
+# (scripts/test-all.ts, logs as .logs/L8-<bracket>.log), and in CI an `L8` matrix over the same brackets.
+# An ENV switch rather than a parameter, deliberately: the suite under test must not be able to see that
+# it is being perturbed. `wait_for` (not `depends`) on `test`: inside `ci` the two full suites run one
+# after the other — both write L3's state/telemetry files and would contend for every core — while
+# `mise run L8` alone does not drag `test` in. `mise run L8 -- <path>` is the targeted perturbed run.
+[tasks.L8]
+alias = "test:perturbed"
+description = "L8 — the full suite under reversed unordered scans: every order an answer relies on is pinned by the SQL"
+depends = ["install", "check", "submodule", "assets", "examples"]
+wait_for = ["test"]
 env = { MOGWAI_REVERSE_UNORDERED = "1" }
-run = "bun test"
+run = "bun scripts/test-all.ts --log-prefix=L8"
 sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
 
 
@@ -455,10 +464,10 @@ run = "echo 'gates passed'"
 # CI no longer invokes this task — it fans the same work across runners (`gates`, `rel-sweep`, and one
 # `test:bracket` per bracket, discovered dynamically) because one runner has 4 cores and `test` alone
 # saturates barely more than one of them. The COVERAGE is identical by construction, and this
-# dependency list is where that is checkable: CI's jobs are exactly `gates` + `rel-sweep` + `test` (as
+# dependency list is where that is checkable: CI's jobs are exactly `gates` + `rel-sweep` + `test` + `L8` (as
 # brackets whose union is `test`). Keep the two in step — a job added here without a job there is a
-# gate that only fires locally.
+# gate that only fires locally. `L8` is CI's `L8` matrix (the brackets again, perturbed).
 [tasks.ci]
-description = "CI gate: the static gates + RelIR decline contract + the full suite (locally: all of it, in one command)"
-depends = ["gates", "rel-sweep", "test"]
+description = "CI gate: the static gates + RelIR decline contract + the full suite + L8 (locally: all of it, in one command)"
+depends = ["gates", "rel-sweep", "test", "L8"]
 run = "echo 'CI passed'"

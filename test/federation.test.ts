@@ -737,9 +737,12 @@ describe('federate — SUBGRAPH aggregation (group/order/project via the main fo
     expect(await one(sg('.V().group().by(T.label).by(__.count())')))
       .toEqual(await one(`${crewBoth}.group().by(T.label).by(__.count())`, 'crew'));
   });
-  test('group().by(T.label).by(name-fold) — group value folds in the landed order', async () => {
-    expect(await one(sg('.V().group().by(T.label).by(__.values("name").fold())')))
-      .toEqual(await one(`${crewBoth}.group().by(T.label).by(__.values("name").fold())`, 'crew'));
+  // A fold over an UNORDERED V() keeps its members in that stream's order, which is unspecified — so the
+  // member lists compare as multisets (the unordered-encounter divergence, docs/feature-support-matrix.md).
+  test('group().by(T.label).by(name-fold) — group value folds each label\'s names', async () => {
+    const sorted = (m: Map<string, string[]>) => new Map([...m].map(([k, v]) => [k, [...v].sort()]));
+    expect(sorted(await one(sg('.V().group().by(T.label).by(__.values("name").fold())'))))
+      .toEqual(sorted(await one(`${crewBoth}.group().by(T.label).by(__.values("name").fold())`, 'crew')));
   });
 
   // CHANNELS OVER A BOUND GRAPH: a source-form subgraph seed mints an `encounter` from the landed
@@ -794,12 +797,12 @@ describe('federate — SUBGRAPH path() + fold() (the combined path+encounter see
     Promise.all((await mgr.executor(on).framedAsync(g, {})).map(dec));
   const sortd = (a: any[]) => [...a].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
 
-  test('path().fold() preserves the seed order AND each path — self-consistent', async () => {
-    // fold() collects the paths in the SEED (landed) order; each path is intact. So the folded list
-    // equals the individual path stream collected — the encounter and the path channel both correct.
+  test('path().fold() keeps each path — self-consistent with the path stream', async () => {
+    // fold() collects every path intact, so the folded list holds exactly the individual path stream's
+    // paths. Both streams are unordered (no order() upstream), so they compare as multisets.
     const folded = ((await list(sg('.V().out("develops").path().fold()')))[0] as any[]).map(pathNames);
     const individual = (await list(sg('.V().out("develops").path()'))).map(pathNames);
-    expect(folded).toEqual(individual);
+    expect(sortd(folded)).toEqual(sortd(individual));
     expect(folded.length).toBeGreaterThan(0);
     expect(folded.every((p: any[]) => p.length === 2)).toBe(true); // [developer, software] per path
   });

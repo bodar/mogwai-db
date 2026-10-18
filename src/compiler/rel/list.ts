@@ -1,5 +1,5 @@
 import { and, col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { withChannel, type Channel } from '../../channels.ts';
+import { type Channel } from '../../channels.ts';
 import { constLit, itemTypeAt, sliceBound } from './const.ts';
 import { flatType, NUMBER_STORED_NON_NUMBERS, valueNodeOf, type TypeNode } from '../../gremlin/types.ts';
 import * as make from '../../rel/factory.ts';
@@ -12,7 +12,7 @@ import { asStringOf, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -20,9 +20,9 @@ import { byProjection, modulations, productivityFilter, type ByProjection } from
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
 import { exactWideTotal, inferredVtype, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { transformExpr } from './transform.ts';
 /** The column a list reducer carries its members' class pair in (`numberClassPair`). */
 const CLASS_PAIR = 'cw';
-import { transformExpr } from './transform.ts';
 
 /**
  * THE LIST VOCABULARY — a traverser whose VALUE is a collection, and the ops that read its members.
@@ -1157,22 +1157,8 @@ function foldPerOrigin(
     aggs: [[LIST_COL, collectedArray(member, order)]],
   });
   // LEFT JOIN the origin DOMAIN so an origin whose sub-stream was empty (no group above) still emits a row,
-  // its list `COALESCE`d to the seed `[]`. `domain`'s column is `dorigin` (not `origin`) so it rides beside
-  // the fold's own `origin` key without a duplicate column.
-  const joined = make.join({
-    id: fresh('fj'), left: domain, right: grouped, join: 'left', channels: [],
-    // The right side is NULL for a domain origin with no group (an empty sub-stream) — the whole point.
-    type: typeOf(meta('dorigin', 'int'), meta(origin.col, 'int', true), meta(LIST_COL, 'json', true)),
-    on: { kind: 'binary', op: '=', left: col(domain.id, 'dorigin'), right: col(grouped.id, origin.col) },
-  });
-  return {
-    rel: make.project({
-      id: fresh('fo'), input: joined, channels: withChannel([], origin),
-      type: typeOf(meta(LIST_COL, 'json'), meta(origin.col, 'int')),
-      exprs: [[LIST_COL, coalesce(col(joined.id, LIST_COL), EMPTY_ARRAY)], [origin.col, col(joined.id, 'dorigin')]],
-    }),
-    of,
-  };
+  // its list `COALESCE`d to the seed `[]`, in the host's order (`seedPerOrigin`).
+  return { rel: seedPerOrigin(domain, grouped, origin.col, LIST_COL, fresh, ['fj', 'fo']), of };
 }
 
 /**

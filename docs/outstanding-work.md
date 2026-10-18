@@ -79,7 +79,9 @@ lowered.
   **`path().group()`** / a Path in a group VALUE (needs a `{t:'path'}` arm in `frameTypedNode`/`listNodeExpr`,
   fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
   (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
-  (Graph capabilities, below).
+  (Graph capabilities, below). The order-substrate residue the perturbation run found is CLEARED: it is the
+  **L8** ladder rung (`mise run L8`, a CI gate at zero, no ignore list — `test/CLAUDE.md`), so a new
+  order defect now fails the build instead of waiting here.
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`

@@ -9,7 +9,7 @@ import type { Sql } from '../storage.ts';
  * `ORDER BY` alone. So a test that passes under BOTH settings is pinned by the SQL; one that only
  * passes under the default is pinned by luck.
  *
- * Set `MOGWAI_REVERSE_UNORDERED=1` to run any suite the perturbed way — `mise run test:perturbed`.
+ * Set `MOGWAI_REVERSE_UNORDERED=1` to run any suite the perturbed way — `mise run L8` (the ladder rung, a CI gate).
  * It is an ENV switch rather than a constructor argument on purpose: the value is in flipping it
  * for a WHOLE suite that has no idea it is being perturbed, and a parameter would need threading
  * through every store construction in `test/`, which is precisely the code a perturbation must not

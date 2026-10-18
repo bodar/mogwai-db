@@ -87,8 +87,9 @@ describe('record-valued branch arms', () => {
   // asserted: `lop` and `ripple` have no `age`, so arm 1 gives them `{}` (the key omitted per
   // `ifProductive`) rather than falling through to arm 2's `lang`.
   test('coalesce() over project arms — the first arm always wins, empty map included', async () => {
-    expect(await decodedRows(`g.V().coalesce(__.project('a').by(__.values('age')),__.project('a').by(__.values('lang')))`))
-      .toEqual([{ a: 29 }, { a: 27 }, {}, { a: 32 }, {}, { a: 35 }]);
+    // `g.V()` is unordered, so the rows compare as a multiset.
+    expect(sortByJson(await decodedRows(`g.V().coalesce(__.project('a').by(__.values('age')),__.project('a').by(__.values('lang')))`)))
+      .toEqual(sortByJson([{ a: 29 }, { a: 27 }, {}, { a: 32 }, {}, { a: 35 }]));
     // `valueMap` is the same `ScalarMapStep` rule: an absent key yields `{}`, not a fall-through.
     expect(await decodedRows(`g.V().hasLabel('software').coalesce(__.valueMap('nope'),__.valueMap('lang'))`))
       .toEqual([{}, {}]);
@@ -96,8 +97,8 @@ describe('record-valued branch arms', () => {
     // vertices really do fall through to `lang` here. Same query shape, opposite outcome, and the only
     // difference is which step ends the arm.
     const store = seededStore();
-    expect((await decodeAll(executeQuery(store, `g.V().coalesce(__.values('age'),__.values('lang'))`))).map(norm))
-      .toEqual([29, 27, 32, 35, 'java', 'java']);
+    expect(sortByJson((await decodeAll(executeQuery(store, `g.V().coalesce(__.values('age'),__.values('lang'))`))).map(norm)))
+      .toEqual(sortByJson([29, 27, 32, 35, 'java', 'java']));
   });
 
   // ---------- arms whose records DISAGREE: the divergence moves inside the value ----------

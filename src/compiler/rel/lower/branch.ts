@@ -240,7 +240,7 @@ export function unionArms(
   // merge either owes nothing (`branchOrderOwed` false: a position the input carried or an arm minted inside
   // itself does not survive, which is what lets an ordered or limited arm merge beside one that has none) or
   // is numbered by that key.
-  const owed = branchOrderOwed(ctx, position);
+  const owed = branchOrderOwed(ctx, position, input);
   const args = step.args.map((a) => a.value);
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
@@ -676,7 +676,7 @@ export function chooseOptions(
   // THE EMISSION ORDER is the emission key's (`mintBranchOrder`): `ChooseStep.pickBranches` routes each
   // traverser to ONE option (`…/step/branch/ChooseStep.java:139-142`), so within a start only that option's
   // own order shows, and the options are numbered in the order they were written.
-  const owed = branchOrderOwed(ctx, position);
+  const owed = branchOrderOwed(ctx, position, input);
   const optionBodies = arms.map((arm) => (arm.discard ? [] : seam.body(arm.nested, 'child')));
   if (optionBodies.some((body) => !!body && seedsUngated(body))) return null;
   const from = emissionSource(input, owed, optionBodies.some((body) => !!body && isReductionArm(body)), fresh,
@@ -895,7 +895,7 @@ export function coalesceMerge(
   bodies: readonly (readonly IRStep[])[], input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, position: Arrival | undefined,
 ): BranchRel | null {
-  const owed = branchOrderOwed(ctx, position);
+  const owed = branchOrderOwed(ctx, position, input);
   const from = emissionSource(input, owed, false, fresh);
   const source = from.source;
   const subject = branchSubject(source, framing);
@@ -1037,7 +1037,7 @@ export function chooseArms(
   if (seedsUngated(then) || (otherwise && seedsUngated(otherwise))) return null;
 
   // The arms are numbered `[then, else]` by the emission key wherever the order is owed. See `unionArms`.
-  const owed = branchOrderOwed(ctx, position);
+  const owed = branchOrderOwed(ctx, position, input);
   const reduced = [then, otherwise ?? []].map((body) => isReductionArm(body));
   const from = emissionSource(input, owed, reduced.some(Boolean), fresh, [then, otherwise ?? []].some(armCollectsInOrder));
   const source = from.source;
