@@ -79,7 +79,7 @@ const upper = (gid: string): string => gid.toUpperCase();
 function resolveGids(store: GraphStore, table: 'nodes' | 'edges', gids: readonly string[]): Map<string, number> {
   if (!gids.length) return new Map();
   const rows = execute<{ gid: string; id: number }>(store,
-    q`SELECT hex(gid) AS gid, id FROM ${identifier(table)} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
+    q`SELECT hex(gid) AS gid, id FROM ${identifier(table)} WHERE gid IN (SELECT unhex(value) FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
   return new Map(rows.map((r) => [r.gid, r.id]));
 }
 
@@ -150,7 +150,7 @@ function applyUids(store: GraphStore, table: 'nodes' | 'edges', items: readonly 
   const kind = table === 'nodes' ? 'vertex' : 'edge';
   const t = identifier(table);
   const setUid = (uid: string | null, gid: string) =>
-    execute(store, q`UPDATE ${t} SET uid = ${value(uid)} WHERE hex(gid) = ${value(gid)}`);
+    execute(store, q`UPDATE ${t} SET uid = ${value(uid)} WHERE gid = unhex(${value(gid)})`);
   for (const it of items) {
     if (it.uid == null) continue;
     const gid = upper(it.gid);
@@ -180,10 +180,10 @@ function resurrect(store: GraphStore, gids: readonly string[]): void {
   if (!gids.length) return;
   const j = JSON.stringify(gids.map(upper));
   const toms = store.query<{ gid: string; rev: string | null; kind: string }>(
-    'SELECT hex(gid) AS gid, json(rev) AS rev, kind FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))', [j]);
+    'SELECT hex(gid) AS gid, json(rev) AS rev, kind FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))', [j]);
   if (!toms.length) return;
   for (const t of toms) shadowDelete(store, t.gid, t.rev, t.kind as 'vertex' | 'edge');
-  store.query('DELETE FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))', [j]);
+  store.query('DELETE FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))', [j]);
 }
 
 /** Surface a losing DELETE in the shadow store — a delete carries no body, so its "doc" is a marker
@@ -280,7 +280,7 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
     ...weakCascade.filter((w) => w.gid).map((w) => ({ gid: upper(w.gid!), rev: w.rev, kind: 'edge' })),
   ];
   const already = new Set(store.query<{ gid: string }>(
-    'SELECT hex(gid) AS gid FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))',
+    'SELECT hex(gid) AS gid FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))',
     [JSON.stringify(toTombstone.map((t) => t.gid))]).map((r) => r.gid));
   const record = toTombstone.filter((t) => !already.has(t.gid));
   if (record.length) insertSet(store, 'tombstones',
@@ -303,7 +303,7 @@ export function bulkGet(store: GraphStore, refs: readonly BulkGetRef[]): WireCha
   const plain: BulkGetRef[] = [];
   for (const ref of refs) {
     if (!ref.rev) { plain.push(ref); continue; }
-    const row = store.query<{ doc: string }>('SELECT json(doc) AS doc FROM conflicts WHERE hex(gid) = ? AND rev_hash = ?', [upper(ref.gid), ref.rev])[0];
+    const row = store.query<{ doc: string }>('SELECT json(doc) AS doc FROM conflicts WHERE gid = unhex(?) AND rev_hash = ?', [upper(ref.gid), ref.rev])[0];
     if (row) {
       const doc = JSON.parse(row.doc) as WireVertex & WireEdge & { deleted?: boolean; uidConflict?: string };
       if (!doc.deleted && !doc.uidConflict) (ref.kind === 'vertex' ? vertices : edges).push(doc);
@@ -321,7 +321,7 @@ function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices:
   const eGids = refs.filter((r) => r.kind === 'edge').map((r) => upper(r.gid));
 
   const vRows = vGids.length ? store.query<{ id: number; gid: string; rev: string; uid: string | null }>(
-    'SELECT id, hex(gid) AS gid, json(rev) AS rev, uid FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))',
+    'SELECT id, hex(gid) AS gid, json(rev) AS rev, uid FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))',
     [JSON.stringify(vGids)]) : [];
   const vIds = vRows.map((r) => r.id);
   const labels = labelsForOwners(store, vIds);
@@ -335,7 +335,7 @@ function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices:
   const eRows = eGids.length ? store.query<{ id: number; gid: string; rev: string; uid: string | null; label: string; src: string; tgt: string }>(
     `SELECT e.id AS id, hex(e.gid) AS gid, json(e.rev) AS rev, e.uid AS uid, l.name AS label, hex(sv.gid) AS src, hex(tv.gid) AS tgt
      FROM edges e JOIN labels l ON l.id = e.label JOIN nodes sv ON sv.id = e.src JOIN nodes tv ON tv.id = e.tgt
-     WHERE e.gid IS NOT NULL AND hex(e.gid) IN (SELECT value FROM json_each(?))`, [JSON.stringify(eGids)]) : [];
+     WHERE e.gid IN (SELECT unhex(value) FROM json_each(?))`, [JSON.stringify(eGids)]) : [];
   const eprops = edgePropsForOwners(store, eRows.map((r) => r.id), true);
   const edges: WireEdge[] = eRows.map((r) => ({
     gid: r.gid, rev: r.rev, uid: r.uid, label: r.label, srcGid: r.src, tgtGid: r.tgt,
@@ -349,7 +349,7 @@ function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices:
 function localRevs(store: GraphStore, table: 'nodes' | 'edges', gids: readonly string[]): Map<string, Rev> {
   if (!gids.length) return new Map();
   const rows = execute<{ gid: string; rev: string | null }>(store,
-    q`SELECT hex(gid) AS gid, json(rev) AS rev FROM ${identifier(table)} WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
+    q`SELECT hex(gid) AS gid, json(rev) AS rev FROM ${identifier(table)} WHERE gid IN (SELECT unhex(value) FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
   const out = new Map<string, Rev>();
   for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, rev); }
   return out;
@@ -427,7 +427,7 @@ export function applyWire(store: GraphStore, ws: WireChangeSet): void {
  *  (the live winner is the ordinary row). Each is the losing wire document at its rev. */
 export function conflictsFor(store: GraphStore, gidHex: string): { rev_hash: string; kind: string; doc: unknown }[] {
   return store.query<{ rev_hash: string; kind: string; doc: string }>(
-    'SELECT rev_hash, kind, json(doc) AS doc FROM conflicts WHERE hex(gid) = ?', [gidHex.toUpperCase()])
+    'SELECT rev_hash, kind, json(doc) AS doc FROM conflicts WHERE gid = unhex(?)', [gidHex.toUpperCase()])
     .map((r) => ({ rev_hash: r.rev_hash, kind: r.kind, doc: JSON.parse(r.doc) as unknown }));
 }
 
@@ -437,9 +437,9 @@ function liveRevs(store: GraphStore, gids: readonly string[]): Map<string, WireR
   if (!gids.length) return out;
   const j = JSON.stringify(gids);
   const rows = store.query<{ gid: string; rev: string | null }>(
-    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))
+    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))
      UNION ALL
-     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))`,
+     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IN (SELECT unhex(value) FROM json_each(?))`,
     [j, j]);
   for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, { gen: rev.gen, hash: rev.hash }); }
   return out;

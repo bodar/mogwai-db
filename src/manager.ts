@@ -104,7 +104,7 @@ function conflictLeaves(store: GraphStore, gids: readonly string[]): Map<string,
   const out = new Map<string, WireRev[]>();
   if (!gids.length) return out;
   const rows = store.query<{ gid: string; doc: string }>(
-    'SELECT hex(gid) AS gid, json(doc) AS doc FROM conflicts WHERE hex(gid) IN (SELECT value FROM json_each(?))',
+    'SELECT hex(gid) AS gid, json(doc) AS doc FROM conflicts WHERE gid IN (SELECT unhex(value) FROM json_each(?))',
     [JSON.stringify(gids)]);
   for (const r of rows) {
     const doc = JSON.parse(r.doc) as { deleted?: boolean; uidConflict?: string; rev?: string };
@@ -139,19 +139,20 @@ const fullRev = (raw: string | null): WireRev | null => {
  * "Has gid@rev" is: the offered leaf hash appears ANYWHERE in this graph's rev-TREE for that gid — its
  * live row's tree OR a tombstone's — so a newer local rev SUBSUMES an offered ancestor (that hash is on
  * the ancestry line) and the ancestor is not re-fetched (§6·4). Membership is by HASH (the tree's `ids`
- * are hashes); gids are hex (as `_changes` emits), looked up via `hex(gid) IN (json_each(?))` — ONE JSON
- * bind, never a data-sized placeholder list (§6·2).
+ * are hashes); gids are hex (as `_changes` emits), looked up via
+ * `gid IN (SELECT unhex(value) FROM json_each(?))` — unhex on the BIND side so the `gid` index serves it
+ * (`hex(gid)` on the column would scan) — ONE JSON bind, never a data-sized placeholder list (§6·2).
  */
 export function revsDiff(store: GraphStore, request: RevsDiffRequest): RevsDiffResponse {
   const gids = Object.keys(request).map((g) => g.toUpperCase());
   if (!gids.length) return {};
   const gidsJson = JSON.stringify(gids);
   const rows = store.query<{ gid: string; rev: string | null }>(
-    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))
+    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))
      UNION ALL
-     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IS NOT NULL AND hex(gid) IN (SELECT value FROM json_each(?))
+     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IN (SELECT unhex(value) FROM json_each(?))
      UNION ALL
-     SELECT hex(gid) AS gid, json(rev) AS rev FROM tombstones WHERE hex(gid) IN (SELECT value FROM json_each(?))`,
+     SELECT hex(gid) AS gid, json(rev) AS rev FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))`,
     [gidsJson, gidsJson, gidsJson]);
   // gid (upper hex) → every hash on this graph's rev-tree(s) for it (leaf + ancestry), so an offered
   // ancestor is recognised as already held.
