@@ -1728,13 +1728,13 @@ function streamKey(rel: Rel): 'id' | 'v' | null {
  *    traverser is its object AND the state it carries — its labelled path (`alias`, `path`), sack, loops,
  *    origin, graph (`B_LP_O_S_SE_SL_Traverser.equals`,
  *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_LP_O_S_SE_SL_Traverser.java:113-125`);
- *    order, bulk and a deferred raise are not identity;
+ *    order and bulk are not identity;
  *  - `'object'` — what a write or read on the traverser's OWN element owes where that element may be
  *    another traverser's too: two traversers on one element, whatever their paths (`streamKey`).
  */
 function repeatedGuard(rel: Rel, by: 'traverser' | 'object', message: string, fresh: Minter): GuardBinding {
   const identity = new Set([streamKey(rel) ?? 'id', ...(by === 'object' ? [] : rel.channels
-    .filter((channel) => channel.role !== 'encounter' && channel.role !== 'bulk' && channel.role !== 'raise').map((channel) => channel.col))]);
+    .filter((channel) => channel.role !== 'encounter' && channel.role !== 'bulk').map((channel) => channel.col))]);
   const keys = rel.type.cols.filter((column) => identity.has(column.name));
   const bulk = rel.channels.find((channel) => channel.role === 'bulk');
   const counted = make.aggregate({

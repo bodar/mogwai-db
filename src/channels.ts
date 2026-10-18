@@ -50,7 +50,7 @@ import { UnsupportedTraversal } from './compiler/unsupported.ts';
  * the census answer-gate refuted it on the spot (it over-partitions the group pool). So the ROLE is one;
  * the value each producer writes is its own.
  */
-export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops' | 'graph' | 'raise';
+export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops' | 'graph';
 
 export interface Channel { readonly col: string; readonly role: ChannelRole; }
 export type Channels = readonly Channel[];
@@ -85,11 +85,6 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
   // own graph value; the values differ per row but the column must be present on all), so an arm that
   // forgot it fails the peer check loudly rather than merging two graphs' ids under no discriminator.
   graph: 'identical',
-  // A PENDING RAISE (`src/compiler/rel/raise-channel.ts`) — the message a row's evaluation raised, carried
-  // to the step that decides whether the reference ever pulled that row. It lives over a span the
-  // lowering builds and claims itself (a source to the head slice or the reducing barrier that consumes
-  // it) and never reaches a merge, so `identical` is the fail-closed answer for one that did.
-  raise: 'identical',
 };
 
 /**
@@ -114,10 +109,6 @@ export const CHANNEL_BARRIER_POLICY: Readonly<Record<ChannelRole, BarrierPolicy>
   // downstream needs the graph tag: every identity consumer (dedup/group-key/has(id)) reads the LIVE
   // channel to build its key BEFORE such a barrier. `drop`, like every other per-row role.
   graph: 'drop',
-  // A barrier ESCALATES a pending raise — any input row's raise is every output's — and that is its
-  // CONSUMER's act (`raise-channel.ts`), never a column surviving the aggregate; a barrier that reached
-  // one without a consumer is refused by `raiseContained`.
-  raise: 'drop',
 };
 
 /** Same-scope peer arms must agree on the rigid roles; re-homed child arms cannot be compared with
@@ -131,7 +122,7 @@ export type RigidPolicy = 'peer' | 'rehomed';
  * would see a merge silently reorder its columns. The framing layer's own column accessor is the
  * tie — `test/channel-contracts.test.ts` pins the two against each other.
  */
-export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'fromV', 'encounter', 'path', 'graph', 'raise'];
+export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'fromV', 'encounter', 'path', 'graph'];
 
 export const channelCols = (channels: Channels): readonly string[] => channels.map((channel) => channel.col);
 
@@ -211,9 +202,6 @@ export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'und
   // outside `groupableChannels`). `undefined` so a relation that reaches the generic aggregate with a
   // still-live, unconsulted graph channel declines rather than silently averaging it across graphs.
   graph: 'undefined',
-  // Which member's raise a group keeps is not arbitrary — the FIRST in traverser order raises — and no
-  // grouping is built over a pending raise (its span ends at the slice or barrier that consumes it).
-  raise: 'undefined',
 };
 
 /** May a grouping carry this whole channel list through? See `CHANNEL_GROUP_POLICY`. */
@@ -258,8 +246,6 @@ export const CHANNEL_ROW_UNIQUE: Readonly<Record<ChannelRole, boolean>> = {
   // and must not claim to be: the merged `dedup()` builds a `Distinct` over `(id, graph, bulk=1)` that
   // genuinely collapses duplicate `(id, graph)` pairs, which a row-unique claim would make inert.
   graph: false,
-  // NULL on every clean row.
-  raise: false,
 };
 
 /** The channels that make a whole-row `DISTINCT` inert — empty is the only legal answer for one. */

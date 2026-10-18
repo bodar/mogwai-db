@@ -188,14 +188,9 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[6].l |
       | d[32].i |
 
-  # @Unsupported: math()'s variable must resolve to a Number, and a stored age is typed per row, so each
-  # arm may raise. The reference evaluates an arm only for the traversers the limit pulls through the
-  # union (josh and marko, never peter or vadas), and a raise cannot yet be carried out of a branch arm
-  # to the limit after it (`raise-channel.ts`), while SQL would evaluate the arms over every person — so
-  # it declines rather than raise where the reference answers. The traverser-major order itself is
-  # pinned by the non-raising scalar-arm scenario after it.
+  # math()'s variable must resolve to a Number and a stored age is typed per row, so each arm carries an
+  # in-statement raise test; every age is a Number, so none fires.
   @gap:branch-traverser-major
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXmathX_plus_1X_mathX_times_2XX_limitX3X
     Given the modern graph
     And the traversal of

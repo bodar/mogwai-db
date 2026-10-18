@@ -1386,7 +1386,7 @@ export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, a
  * `withoutStrategies(IdentityRemovalStrategy)` — DECLINE where a kept `identity()` could change the answer.
  *
  * This compiler treats `identity()` as absent everywhere (`early-limit.ts`' `ONE_TO_ONE`, `bulk.ts`'
- * `NOT_A_REFERENCE_STEP`, `raise-channel.ts`), which is the reference only while the strategy runs. A kept
+ * `NOT_A_REFERENCE_STEP`), which is the reference only while the strategy runs. A kept
  * `IdentityStep` is neither a `MapStep` nor a `SideEffectStep`, so `EarlyLimitStrategy` stops at it
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/EarlyLimitStrategy.java:68-98`)
  * and the slice then pulls one more row through a raising step before it can stop

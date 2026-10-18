@@ -11,7 +11,6 @@ import type { Collections } from '../collection.ts';
 import type { LabelRegime } from '../../../api.ts';
 import type { ChainRead, Subject } from '../child.ts';
 import type { ProgramWrites } from '../write.ts';
-import type { PullPosition } from '../raise-channel.ts';
 import type { ProgramScopeNames } from '../../ir/labels.ts';
 
 // THE SHARED VOCABULARY OF THE CHAIN FOLD — the types every tail returns, the context every tail
@@ -223,21 +222,6 @@ export interface ChainCtx extends FilterCtx {
    * STREAM, so a map in it may make equal traversers that a barrier in it then merges (`startsSingle`).
    */
   readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean; readonly allStarts?: true };
-  /**
-   * THE CHILD BODY WHOSE RAISE ITS HOST TAKES AS DATA — set by `correlatedReduce` when the host asked for
-   * the child value's `raise` (`ChildValue.raise`), so a raise born just before the body's terminal reducing
-   * barrier defers into it and is escalated (`raise-channel.ts`'s `defersRaise`/`escalatedRaise`) rather
-   * than settled inside the correlated subquery, where SQL would evaluate it for every host row. Compared
-   * BY IDENTITY against the step list a source holds, as `traversal` is, so nothing nested inherits it.
-   */
-  readonly raiseEscalates?: readonly IRStep[];
-  /**
-   * WHERE THIS SCOPE STANDS in the chain the reference pulls — the list a tail is folding, the step it is
-   * at, and how fully that list is pulled (`raise-channel.ts`'s `PullLevel`). Every tail marks it per step
-   * (`pullAt`), so a body lowered from that step reads its own level off its host's position, at any depth:
-   * a raise inside `optional(…)` under a later `limit()` is not one the reference meets on every row.
-   */
-  readonly pull?: PullPosition;
   /**
    * THE TRAVERSAL A NESTED ROOTED READ BEGINS, for merge placement only (`mergedAt`). A `rootedRead` /
    * source-union arm is a whole child traversal the reference runs its own strategies over, so WHERE it

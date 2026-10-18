@@ -8,10 +8,9 @@ import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeO
 import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, PRESENT_COL, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
-import { freeRelIds } from '../../rel/walk.ts';
+import { containsSelfRef, exprHasSubquery, freeRelIds } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations, type ByField } from './modulator.ts';
-import { raisingColumns } from './receiver.ts';
 import type { GraphSource } from './source.ts';
 import { aliasGuard, aliasPresent, boundBeyondMap, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
@@ -201,9 +200,12 @@ export function recordOf(
     type: typeOf(...cols, ...carriedCols(input.channels)),
     exprs: [...payload, ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
   });
-  // A field whose by() may RAISE is evaluated on every row whether or not a consumer reads it
-  // (`raisingColumns`): `project('x').by(__.values('age').toUpper()).count()` answered the count.
-  return { rel: raisingColumns(record, payload, fresh), fields };
+  // A field that READS A SUBPLAN is computed ONCE: a reader of the record (a field re-entry, a nested
+  // record's `select`) inlines a `Project`'s column definition at every reference, so a nested
+  // `project().by(project().by(…max()))` re-spelled the inner reducer per mention (281 KB → 3.4 MB). The
+  // same self-containment gate as `recordToMap`'s fence (`freeRelIds`; a walk's own reference cannot be hoisted).
+  const fence = freeRelIds(record).size === 0 && !containsSelfRef(record) && payload.some(([, e]) => exprHasSubquery(e));
+  return { rel: fence ? make.materialize({ id: fresh('rcm'), input: record, channels: record.channels, type: record.type }) : record, fields };
 }
 
 /**

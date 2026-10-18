@@ -1,15 +1,13 @@
 import { writesAnywhere } from '../../ir/strategies.ts';
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
-import { exprMayRaise } from '../../../rel/raise.ts';
+import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
 import { and, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
-import { filterRankingMoves } from '../raise-channel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, knownPresence, raisingPresence, type ChildHost, type ChildValue, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
@@ -21,37 +19,12 @@ import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
 import { BULK, NO_ALIASES, bodyOf, elementSubject, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
-import { foldedListSet, nestedFirstValue, scalarChild, scalarChildDeferred } from './reduction.ts';
+import { foldedListSet, nestedFirstValue, scalarChild } from './reduction.ts';
 
 // FILTER / PREDICATE FAMILY — a step or a sub-traversal body lowered to a boolean `Expr`:
 // correlatedExists (a body as EXISTS), bodyPredicate/childPredicate/valuePredicate (the three shapes a
 // where()/and()/or() body takes), sourceFilter + hasLabel/has/hasToken clauses, and the child-subject
 // helpers (childHostOf/branchSubject). Extracted from lower.ts; calls back into the fold core there.
-
-/**
- * WHERE A FILTER BODY'S RAISE GOES AS DATA — handed down from a `where`/`filter`/`not` host whose next
- * step consumes a pending raise (`hostFilter`, `lower.ts`) to the ONE predicate shape that can escalate
- * one (`projectionProductive`). Only the host's own body reaches it: a connective arm (`and`/`or`) is
- * evaluated only where the arms before it allowed, so its raise is not the row's and it is never handed
- * one. Absent, every raise stays an in-statement arm of the clause.
- */
-export interface RaiseSink { raise?: Expr }
-
-/**
- * A CONNECTIVE THAT EVALUATES ITS ARMS IN ORDER wherever one of them may raise. `AndStep` stops at the
- * first arm that fails and `OrStep` at the first that holds (`…/step/filter/{And,Or}Step.java`), and a run
- * of filters stops at the first that drops the traverser — so a later arm's raise is met only where the
- * earlier ones left the answer open, and an earlier arm's raise is met first. SQL's `AND`/`OR` fix no
- * evaluation order (SQLite may take either operand first), so a raising pair is spelled as one `CASE`,
- * which does. A NULL arm (unproductive) is a failed test either way; the null-safe negation a `not()`
- * applies (`notProduced`) cannot tell the `CASE`'s 0 from SQL's NULL.
- */
-function inOrder(op: string, left: Expr | undefined, right: Expr): Expr {
-  if (!left || !(exprMayRaise(left) || exprMayRaise(right))) return op === 'and' ? and(left, right) : or(left, right);
-  return op === 'and'
-    ? { kind: 'case', whens: [[left, right]], else: compilerInt(0) }
-    : { kind: 'case', whens: [[left, compilerInt(1)]], else: right };
-}
 
 /**
  * A SUB-TRAVERSAL AS A BOOLEAN — `EXISTS (<the body, rooted at the current row>)`.
@@ -179,31 +152,18 @@ function matchPredicate(
  * value comparison over a correlated sub-read, which is a further arm rather than this one.
  */
 export function bodyPredicate(
-  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   // A write anywhere in a predicate body declines (`writesAnywhere`, see `correlatedExists`).
   if (writesAnywhere(body, ctx.params)) return null;
   let clause: Expr | undefined;
-  // A filter step's raise is the row's only where the steps before it PASSED the traverser on — the
-  // `and` connective's rule, since a run of filters is one (`sourceFilter`'s connective arm).
-  let raise: Expr | undefined;
-  for (const [at, step] of body.entries()) {
-    const stepSink: RaiseSink | undefined = sink ? {} : undefined;
-    const filter = sourceFilter(step, subject, fresh, ctx, aliases, stepSink);
+  for (const step of body) {
+    const filter = sourceFilter(step, subject, fresh, ctx, aliases);
     if (!filter) return correlatedExists(body, subject, fresh, ctx, false, aliases)
-      ?? valuePredicate(body, subject, fresh, ctx, false, aliases, sink)
-      ?? projectionProductive(body, subject, fresh, ctx, aliases, sink);
-    // A filter that may raise meets the traversers the reference hands it only where
-    // `FilterRankingStrategy` leaves it in place (`filterRankingMoves`), and only after the filters
-    // before it in the run have passed the row (`inOrder`).
-    if ((exprMayRaise(filter) || stepSink?.raise) && filterRankingMoves(body, at)) return null;
-    if (stepSink?.raise) {
-      const reached: Expr = clause ? { kind: 'case', whens: [[clause, stepSink.raise]], else: compilerNull('text') } : stepSink.raise;
-      raise = raise ? { kind: 'call', fn: 'COALESCE', args: [raise, reached] } : reached;
-    }
-    clause = inOrder('and', clause, filter);
+      ?? valuePredicate(body, subject, fresh, ctx, false, aliases)
+      ?? projectionProductive(body, subject, fresh, ctx, aliases);
+    clause = and(clause, filter);
   }
-  if (clause && sink && raise) sink.raise = raise;
   return clause ?? null;
 }
 
@@ -223,34 +183,12 @@ export function bodyPredicate(
  * not be read as unproductive. A FALLBACK, so every body the two above answer keeps the SQL it has.
  */
 function projectionProductive(
-  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
-  const hosted = hostedChild(body, childHostOf(subject, aliases), ctx, fresh, sink);
-  const present = hosted && knownPresence(hosted.produced.present);
+  const produced = scalarChild(body, childHostOf(subject, aliases), ctx, fresh);
+  const present = produced && knownPresence(produced.present);
   if (!present) return null;
-  if (sink && hosted.raise) sink.raise = hosted.raise;
   return present === ALWAYS_PRODUCTIVE ? CONSTANT.true : present;
-}
-
-/**
- * A FILTER BODY'S CHILD VALUE, as its host can use it. A host that carries the raise (`sink`, `hostFilter`)
- * takes the body's escalated raise as DATA beside a value and claim that do not raise; every other host
- * has the raise folded into the claim (`scalarChild`). A value that still raises eagerly is one the
- * escalation could not reach, so the claim evaluates it exactly as `raisingPresence` makes it — and
- * `hostFilter` declines the eager raise the clause then carries. The caller hands `raise` to the sink only
- * once its clause is built, so a shape that gives up leaves no stray raise behind.
- */
-function hostedChild(
-  body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter, sink: RaiseSink | undefined,
-): { readonly produced: ChildValue; readonly raise?: Expr } | null {
-  if (!sink) {
-    const produced = scalarChild(body, host, ctx, fresh);
-    return produced && { produced };
-  }
-  const deferred = scalarChildDeferred(body, host, ctx, fresh);
-  if (!deferred) return null;
-  const eager = exprMayRaise(deferred.expr) || (deferred.present !== 'unknown' && exprMayRaise(deferred.present));
-  return deferred.raise && !eager ? { produced: deferred, raise: deferred.raise } : { produced: raisingPresence(deferred) };
 }
 
 /**
@@ -272,7 +210,7 @@ function hostedChild(
  */
 export function childPredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
-  aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
+  aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   // A write anywhere in a predicate body declines (`writesAnywhere`, see `correlatedExists`).
   if (writesAnywhere(body, ctx.params)) return null;
@@ -285,13 +223,13 @@ export function childPredicate(
     const re = selectRerootSubject(body[0]!, subject, aliases, fresh);
     if (!re) return null;
     if (body.length === 1) return negated ? CONSTANT.false : CONSTANT.true;
-    return childPredicate(body.slice(1), re, fresh, ctx, negated, aliases, sink);
+    return childPredicate(body.slice(1), re, fresh, ctx, negated, aliases);
   }
-  const direct = childPredicateDirect(body, subject, fresh, ctx, negated, aliases, sink);
+  const direct = childPredicateDirect(body, subject, fresh, ctx, negated, aliases);
   if (direct) return direct;
   // LAST RESORT — a trailing MAPPING terminal contributes nothing to the QUESTION, so ask the prefix.
   const prefix = withoutMappingTerminal(body);
-  return prefix ? childPredicate(prefix, subject, fresh, ctx, negated, aliases, sink) : null;
+  return prefix ? childPredicate(prefix, subject, fresh, ctx, negated, aliases) : null;
 }
 
 /**
@@ -350,19 +288,19 @@ const withoutMappingTerminal = (body: readonly IRStep[]): readonly IRStep[] | nu
  *  retry the whole ladder against a prefix rather than duplicating it. */
 function childPredicateDirect(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
-  aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
+  aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   // A `match`-headed body is a correlated EXISTS rooted at the subject — self-negating, so it answers
   // both polarities and only fires for a match head (every other head falls through to the arms below).
   const asMatch = matchPredicate(body, subject, fresh, ctx, negated);
   if (asMatch) return asMatch;
-  if (!negated) return bodyPredicate(body, subject, fresh, ctx, aliases, sink);
+  if (!negated) return bodyPredicate(body, subject, fresh, ctx, aliases);
   // The two self-negating shapes FIRST, so every body they already answered keeps the SQL it has and
   // this is new coverage rather than a re-spelling — `valuePredicate`'s own ordering rule, one level up.
   const exact = correlatedExists(body, subject, fresh, ctx, true, aliases)
-    ?? valuePredicate(body, subject, fresh, ctx, true, aliases, sink);
+    ?? valuePredicate(body, subject, fresh, ctx, true, aliases);
   if (exact) return exact;
-  const positive = bodyPredicate(body, subject, fresh, ctx, aliases, sink);
+  const positive = bodyPredicate(body, subject, fresh, ctx, aliases);
   return positive && notProduced(positive);
 }
 
@@ -385,28 +323,18 @@ function childPredicateDirect(
  */
 export function valuePredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negate: boolean,
-  aliases: AliasMap = NO_ALIASES, sink?: RaiseSink,
+  aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   const last = body.at(-1);
   if (body.length < 2 || last?.name !== 'is' || last.modulators?.length || last.optionArms) return null;
-  const hosted = hostedChild(body.slice(0, -1), childHostOf(subject, aliases), ctx, fresh, sink);
-  if (!hosted) return null;
+  const produced = scalarChild(body.slice(0, -1), childHostOf(subject, aliases), ctx, fresh);
+  if (!produced) return null;
   // ONE value is the comparison's subject only where the prefix had ONE to give: `is()` tests EVERY result
   // of a multi-valued read (`values('loc')` over `loc = [a, b]`), and the filter passes when ANY survives —
   // the first SURVIVOR, which `scalarChild` builds for the whole body (`propertyFirstPassing`) and
   // `projectionProductive` reads. Comparing the first stored value answered `where(values('loc').is('b'))`
   // with a dropped vertex.
-  if (hosted.produced.yields !== 'one') return null;
-  const clause = valueClause(hosted.produced, last, subject, fresh, ctx, negate, aliases);
-  if (clause && sink && hosted.raise) sink.raise = hosted.raise;
-  return clause;
-}
-
-/** `valuePredicate`'s comparison of the produced value — split so the raise is handed over only once the
- *  clause exists. */
-function valueClause(
-  produced: ChildValue, last: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx, negate: boolean, aliases: AliasMap,
-): Expr | null {
+  if (produced.yields !== 'one') return null;
   const args = last.args.map((a) => a.value);
   if (args.length !== 1) return null;
   // The value's own type is what a range comparison needs — a big long carried as decimal TEXT orders
@@ -526,7 +454,7 @@ export function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
 }
 
 
-export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES, sink?: RaiseSink): Expr | null {
+export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
   // `isAliasCompareWhere` detects structurally rather than by name — and it is not covered at all
   // (it needs the alias channel). So this stays a blanket decline, and `modulator.ts` is what it will
@@ -587,7 +515,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     // body that MOVES is a correlated `EXISTS`, and a body that PROJECTS a value is that value
     // compared. This used to offer only the last two, so `where(__.has('age', P.gt(27)))` declined —
     // a body every clause of which this very function builds.
-    return childPredicate(body, subject, fresh, ctx, step.name === 'not', aliases, sink);
+    return childPredicate(body, subject, fresh, ctx, step.name === 'not', aliases);
   }
 
   /**
@@ -618,30 +546,17 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     if (!args.length) return null;
     if (!ctx.correlatedChildren) return null;
     let clause: Expr | undefined;
-    // An arm's raise, carried as DATA for a host that takes one (`sink`), is the row's only where the
-    // reference EVALUATED that arm: `AndStep` stops at the first arm that fails and `OrStep` at the first
-    // that holds, so a later arm's raise counts only where the arms before it left the answer open.
-    let raise: Expr | undefined;
     for (const arm of args) {
       if (!isNested(arm)) return null;
       const body = bodyOf(arm.nested, ctx.params);
       if (!body?.length) return null;
-      const armSink: RaiseSink | undefined = sink ? {} : undefined;
-      const pred = childPredicate(body, subject, fresh, ctx, false, aliases, armSink);
+      const pred = childPredicate(body, subject, fresh, ctx, false, aliases);
       // ONE ARM THIS ROUTE CANNOT ANSWER DECLINES THE WHOLE STEP. A connective is not decomposable
       // into the arms it happens to understand: dropping an arm of an `and` widens the result and
       // dropping one of an `or` narrows it, and either is a plausible answer to a different question.
       if (!pred) return null;
-      if (armSink?.raise) {
-        // A NULL clause is an arm that did not produce — a failed test — so an `or` goes on past it.
-        const reached: Expr | undefined = clause && (step.name === 'and' ? clause
-          : { kind: 'case', whens: [[clause, compilerInt(0)]], else: compilerInt(1) });
-        const armRaise: Expr = reached ? { kind: 'case', whens: [[reached, armSink.raise]], else: compilerNull('text') } : armSink.raise;
-        raise = raise ? { kind: 'call', fn: 'COALESCE', args: [raise, armRaise] } : armRaise;
-      }
-      clause = inOrder(step.name, clause, pred);
+      clause = step.name === 'and' ? and(clause, pred) : or(clause, pred);
     }
-    if (clause && sink && raise) sink.raise = raise;
     return clause ?? null;
   }
 

@@ -407,13 +407,10 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
     When iterated to list
     Then the traversal will raise an error with message containing text of "The variable a for math() step must resolve to a Number"
 
-  # A CHILD BODY'S RAISE IS EVALUATED WHATEVER THE HOST DOES WITH ITS VALUE. The raise rides inside the
-  # value, and a host that reads only whether the body produced (a filter body, a seeded fold/count's
-  # always-true claim) or a tail that never reads the column (count(), select() of a sibling field) left
-  # it unevaluated: each of these answered the input stream. The reference evaluates every by()/body per
-  # traverser (ProjectStep.java:63-69, TraversalUtil.produce). Two authorities: a body's productivity claim
-  # evaluates a raising value (`raisingPresence`, src/compiler/rel/child.ts), and a host that projects one
-  # as a column evaluates it on every row (`raisingColumns`, src/compiler/rel/receiver.ts).
+  # A TYPE ERROR IN A VALUE NOTHING READS IS NOT EVALUATED (docs/feature-support-matrix.md §17, error
+  # timing): a raise is an in-statement arm evaluated wherever SQLite evaluates the value, and SQLite prunes
+  # a column no consumer reads — so a count() or a sibling field's select() answers the stream, which is the
+  # right row count. The reference evaluates every by()/body per traverser and raises.
   Scenario: g_V_hasLabelXpersonX_projectXxX_byXvaluesXageX_toUpperX_count
     Given the modern graph
     And the traversal of
@@ -421,7 +418,9 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().hasLabel("person").project("x").by(__.values("age").toUpper()).count()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+    Then the result should be unordered
+      | result |
+      | d[4].l |
 
   Scenario: g_V_hasLabelXpersonX_projectXx_yX_byXnameX_byXvaluesXageX_toUpperX_selectXxX
     Given the modern graph
@@ -430,7 +429,12 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().hasLabel("person").project("x", "y").by("name").by(__.values("age").toUpper()).select("x")
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | josh |
+      | peter |
 
   Scenario: g_V_hasLabelXpersonX_localXvaluesXageX_toUpper_foldX_count
     Given the modern graph
@@ -439,7 +443,9 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().hasLabel("person").local(__.values("age").toUpper().fold()).count()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+    Then the result should be unordered
+      | result |
+      | d[4].l |
 
   Scenario: g_V_hasLabelXpersonX_mapXvaluesXageX_toUpper_foldX_count
     Given the modern graph
@@ -448,16 +454,9 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().hasLabel("person").map(__.values("age").toUpper().fold()).count()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
-
-  Scenario: g_V_hasLabelXpersonX_whereXvaluesXageX_toUpper_foldX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V().hasLabel("person").where(__.values("age").toUpper().fold())
-      """
-    When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+    Then the result should be unordered
+      | result |
+      | d[4].l |
 
   Scenario: g_V_hasLabelXpersonX_asXaX_selectXaX_byXvaluesXageX_toUpper_foldX_count
     Given the modern graph
@@ -466,7 +465,9 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().hasLabel("person").as("a").select("a").by(__.values("age").toUpper().fold()).count()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
+    Then the result should be unordered
+      | result |
+      | d[4].l |
 
   Scenario: g_V_hasLabelXpersonX_coalesceXvaluesXageX_toUpper_fold_constantX1XX_count
     Given the modern graph
@@ -475,18 +476,9 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().hasLabel("person").coalesce(__.values("age").toUpper().fold(), __.constant(1)).count()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The toUpper() step can only take string as argument"
-
-  # sum() over a String is SumGlobalStep's ClassCastException; the reducer's own in-statement deferral
-  # (src/compiler/rel/reducer.ts) was pruned with the unread value.
-  Scenario: g_V_whereXvaluesXnameX_sumX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V().where(__.values("name").sum())
-      """
-    When iterated to list
-    Then the traversal will raise an error
+    Then the result should be unordered
+      | result |
+      | d[4].l |
 
   Scenario: g_V_projectXxX_byXvaluesXnameX_sumX_count
     Given the modern graph
@@ -495,7 +487,9 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
       g.V().project("x").by(__.values("name").sum()).count()
       """
     When iterated to list
-    Then the traversal will raise an error
+    Then the result should be unordered
+      | result |
+      | d[6].l |
 
   # A body that cannot raise keeps its answer.
   Scenario: g_V_hasLabelXpersonX_localXvaluesXnameX_toUpper_foldX_count
@@ -508,3 +502,13 @@ Feature: mogwai addendum — a type-demanding step RAISES over a receiver of the
     Then the result should be unordered
       | result |
       | d[4].l |
+
+  # A DateDiff subject is checked per value: the second, not the first, is the one that is no Date.
+  Scenario: g_injectXdatetime_aX_dateDiffXdatetimeX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(datetime("2020-01-01T00:00:00Z"), "a").dateDiff(datetime("2020-01-01T00:00:00Z"))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "encountered String"

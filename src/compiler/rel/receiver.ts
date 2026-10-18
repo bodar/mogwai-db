@@ -1,15 +1,13 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, signBit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { deferralExpr, exprMayRaise, raiseInRow as raise } from '../../rel/raise.ts';
+import { deferralExpr, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
 import { letValues, type Minter } from './build.ts';
 import { floatShortest } from './float.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, type IRStep } from '../ir/step.ts';
-import { poisonRows, raiseMessage } from './raise-channel.ts';
 
 /**
  * THE RECEIVER-TYPE AUTHORITY — is the value a type-demanding step receives PROVABLY of the type the
@@ -171,41 +169,9 @@ export const raisingWhen = (offences: readonly (readonly [Expr, string])[], valu
  * receiver offences (asString/asNumber/concat/dateDiff/the string family) and the sack's operator
  * offences (`sack.ts`) alike.
  */
-export function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr, defer = false): Rel {
+export function raisingRows(rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, fence?: Expr): Rel {
   if (!offences.length && !fence) return rel;
-  // DEFERRED where the next step consumes a pending raise (`raise-channel.ts`'s `defersRaise`): the
-  // offending row is KEPT with the message on it rather than raised here, over every row, before the
-  // slice above it decides which rows the reference ever pulls. A fence filters as well as raises, so it
-  // cannot ride a row and keeps the eager form.
-  if (defer && !fence) return poisonRows(rel, raiseMessage(offences), fresh);
   return make.filter({ id: fresh('txf'), input: rel, channels: rel.channels, type: rel.type, pred: raisingWhen(offences, fence ?? compilerInt(1)) });
-}
-
-/**
- * `raisingRows` FOR A VALUE BUILT ELSEWHERE — a host that projects a child body's value as a column
- * (`project().by(…)`'s field, a `local()`/`map()` body's result) cannot see the body's offences, only
- * the value that carries them. Where that value MAY RAISE (`exprMayRaise`: a raise arm in it or in a
- * correlated subplan it reads), the column is EVALUATED by a row predicate as well, for the reason a
- * receiver offence is a WHERE: a consumer that never reads the column (`count()`, `select()` of a sibling
- * field) prunes it, raise and all, where the reference evaluates the by()/body for every traverser
- * (`ProjectStep.map`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:63-69`;
- * a `LocalStep`/`TraversalMapStep` body likewise). The predicate is always true — `typeof()` is never
- * `'raise'` — but it cannot be decided without evaluating the column. A value that cannot raise costs
- * nothing: no filter is added.
- */
-export function raisingColumns(rel: Rel, columns: readonly (readonly [string, Expr])[], fresh: Minter): Rel {
-  const raising = columns.filter(([, expr]) => exprMayRaise(expr));
-  if (!raising.length) return rel;
-  // FENCED where the relation is self-contained, so the test reads a computed column rather than
-  // re-inlining the value (often a correlated aggregate) beside every reader of it — the same gate
-  // `recordToMap`'s fence uses (`freeRelIds`; a walk's own reference may not be hoisted either).
-  const base = rel.kind === 'materialize' ? rel : freeRelIds(rel).size === 0 && !containsSelfRef(rel)
-    ? make.materialize({ id: fresh('txm'), input: rel, channels: rel.channels, type: rel.type })
-    : rel;
-  const evaluated = raising.map(([name]): Expr =>
-    ({ kind: 'binary', op: 'is not', left: { kind: 'call', fn: 'typeof', args: [{ kind: 'col', rel: base.id, name }] }, right: text('raise') }));
-  const pred = evaluated.reduce((left, right) => and(left, right));
-  return make.filter({ id: fresh('txe'), input: base, channels: base.channels, type: base.type, pred });
 }
 
 /** The reference's message for a string-family step over a non-String receiver — the corpus-checked
@@ -306,12 +272,9 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, 
  * HOW A STEP THAT RENDERS `String.valueOf` MEETS A VALUE `asStringOf` CANNOT SPELL — the step's name for
  * the message, the ARM the deferral is spelled with, and whether a BigDecimal's carried text is spelled.
  *
- * `asString()` raises its deferral as a reference-style raise (`raiseInRow`), which every pulled-extent
- * rule (`settlesExactly`) treats as an answer. `format()` spells it as a READ-only deferral
+ * `asString()` raises its deferral in-row (`raiseInRow`). `format()` spells it as a READ-only deferral
  * (`deferralExpr`): a token's rendering never decides whether the traverser exists (the productivity drop
- * reads the raw token values), so the deferral belongs to the value's READ, and a slice after the step
- * (`format(…).limit(n)`) stays a plain slice rather than an extent the raise must be settled over. The
- * two differ only to keep this decline-only change from widening `asString()`'s coverage.
+ * reads the raw token values), so the deferral belongs to the value's READ.
  */
 export interface StringSpelling {
   readonly step: string;

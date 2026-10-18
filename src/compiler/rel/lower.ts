@@ -8,9 +8,9 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
-import { exprMayRaise, mayRaise } from '../../rel/raise.ts';
-import { isRel, type Rel } from '../../rel/rel.ts';
-import { freeRelIds, rewriteExpr, stmtChildren } from '../../rel/walk.ts';
+import { mayRaise } from '../../rel/raise.ts';
+import type { Rel } from '../../rel/rel.ts';
+import { freeRelIds, rewriteExpr } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { armHoldsSortedLocal, beginsWithSource, hostSortsBody, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, sortedHostMergeAt, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
@@ -32,7 +32,7 @@ import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
 import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
     labelSetArgs, scalarFramedValue, meta, minter,
@@ -72,10 +72,9 @@ import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
-import { childHostOf, sourceFilter, type RaiseSink } from './lower/filter.ts';
-import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild, selfCollapses } from './lower/reduction.ts';
+import { childHostOf, sourceFilter } from './lower/filter.ts';
+import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
-import { defersRaise, filterRankingMoves, keepingRaise, pendingRaise, pullAt, pullExtent, raiseContained, raiseOrdered, RAISE, raisesWherePulled, settlesExactly, type PullPosition } from './raise-channel.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -1511,59 +1510,11 @@ function naturalSort(
 /** The column a `projectRaising` projection carries its raise test in, read once by the filter above it. */
 const RAISE_COL = 'rz';
 
-/** May a raise born at `steps[at - 1]` ride to `steps[at]` (`raise-channel.ts`'s `defersRaise`) — the one
- *  question every raise source in the fold asks, with this scope's escalation request and the reducers
- *  that end a correlated body (`selfCollapses`). */
-const raiseDefersTo = (steps: readonly IRStep[], at: number, ctx: ChainCtx): boolean =>
-  defersRaise(steps, at, ctx, selfCollapses);
-
-/** Where a raise born at `steps[at - 1]` goes (`sackMutate`, `projectorTail`): carried to the step consuming it, or settled where it is
- *  born — and whether that settle is exact. */
-const raiseSiteAt = (steps: readonly IRStep[], at: number, ctx: ChainCtx): { readonly defer: boolean; readonly exact: boolean } =>
-  ({ defer: raiseDefersTo(steps, at, ctx), exact: settlesExactly(steps, at, ctx) });
-
-/**
- * THE FILTER HOSTS' ONE LOWERING — `sourceFilter`'s clause over `rel`, at every tail that hosts one.
- *
- * Where the next step consumes a pending raise (`raiseDefersTo`), a body whose raise the child seam can
- * escalate (`ChildValue.raise`) hands it here through `sink`, and the filter KEEPS a raising row with the
- * message on it: `FilterStep` runs the body on the traverser it is handed, so the raise belongs to exactly
- * the rows the head slice after it takes. A clause that still raises eagerly there would be evaluated on
- * every row SQL scans, which the reference does not, so it DECLINES (`'decline'`) rather than over-raise; `null` is
- * "not a filter step".
- */
-function hostFilter(
-  rel: Rel, step: IRStep, subject: Subject, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): Rel | 'decline' | null {
-  const sink: RaiseSink | undefined = raiseDefersTo(steps, at + 1, ctx) ? {} : undefined;
-  const clause = sourceFilter(step, subject, fresh, ctx, labels, sink);
-  if (!clause) return null;
-  // A clause that raises IN-STATEMENT is evaluated on every row SQL scans: exact only where the reference
-  // pulls every row too (`settlesExactly`), and never where a slice the raise could have ridden to follows.
-  if (exprMayRaise(clause) && (sink || !settlesExactly(steps, at + 1, ctx))) return 'decline';
-  // A clause that may raise meets exactly the traversers the reference hands it only where
-  // `FilterRankingStrategy` leaves it where it is written (`filterRankingMoves`).
-  if ((exprMayRaise(clause) || sink?.raise) && filterRankingMoves(steps, at)) return 'decline';
-  const prior = pendingRaise(rel);
-  if (!sink?.raise && !prior) return make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
-  // A raising row — one this body raised on, or one a raise earlier in the run already rides (the
-  // reference raised there before this filter ever saw it) — PASSES whatever the clause says; a clean one
-  // only where the clause holds. The clause and the message are both read off `rel`'s row, so both are
-  // NAMED beside it and the filter reads the names.
-  const HELD = 'fc';
-  const channels = prior ? rel.channels : withChannel(rel.channels, RAISE);
-  const cols = prior ? rel.type.cols : [...rel.type.cols, meta(RAISE.col, 'text', true)];
-  const raise: Expr = !sink?.raise ? col(rel.id, prior!.col)
-    : prior ? { kind: 'call', fn: 'COALESCE', args: [col(rel.id, prior.col), sink.raise] } : sink.raise;
-  const held = make.project({
-    id: fresh('fh'), input: rel, channels, type: typeOf(...cols, meta(HELD, 'any', true)),
-    exprs: [...cols.map((column) => [column.name, column.name === RAISE.col ? raise : col(rel.id, column.name)] as const), [HELD, clause]],
-  });
-  const kept = keepingRaise(held, col(held.id, HELD), fresh('fk'));
-  return make.project({
-    id: fresh('fs'), input: kept, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
-  });
+/** THE FILTER HOSTS' ONE LOWERING — `sourceFilter`'s clause over `rel`, at every tail that hosts one;
+ *  `null` where it is no filter this route answers. */
+function hostFilter(rel: Rel, step: IRStep, subject: Subject, ctx: ChainCtx, fresh: Minter, labels: AliasMap): Rel | null {
+  const clause = sourceFilter(step, subject, fresh, ctx, labels);
+  return clause && make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
 }
 
 /**
@@ -1982,13 +1933,7 @@ function scalarTail(
   if (CLAUSE_READERS.has(steps[from]?.name ?? '') && seed.kind !== 'values')
     rel = make.materialize({ id: fresh('m'), input: rel, channels: rel.channels, type: rel.type });
 
-  for (let at = from; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
+  for (let at = from; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
@@ -2088,7 +2033,7 @@ function scalarTail(
         out = read.framing;
         continue;
       }
-      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
+      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh);
       if (!folded) return null;
       rel = folded;
       continue;
@@ -2098,7 +2043,7 @@ function scalarTail(
     // One lowering at every host, for `project()`'s reason: a shape works wherever it is legal, not
     // wherever a host was taught it.
     if (REL_PROJECTORS.has(step.name)) {
-      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       rel = projected.rel;
       out = projected.framing;
@@ -2286,13 +2231,8 @@ function scalarTail(
       // — is a WHERE, not part of the value: a position that consumes only existence (`where`/`not`/
       // `filter`, a `choose` condition, `count()`) never reads the value, and the reference raises there
       // all the same (`asNumberFilter`). The value is then the plain conversion over the filter's rows.
-      // DEFERRED instead — the row kept with its message — where the next step consumes a pending raise
-      // (`raiseDefersTo`) and the value itself raises nothing eagerly.
-      // An eager raise where the reference does not pull every row DECLINES (`settlesExactly`).
       const raises = offences.length > 0 || transformed.fenced !== undefined;
-      const defer = raises && !transformed.fenced && raiseDefersTo(steps, at + 1, ctx) && !exprMayRaise(transformed.expr);
-      if (raises && !defer && !settlesExactly(steps, at + 1, ctx)) return null;
-      const source = raises ? raisingRows(rel, offences, fresh, transformed.fenced?.filter, defer) : rel;
+      const source = raises ? raisingRows(rel, offences, fresh, transformed.fenced?.filter) : rel;
       const carried = source.channels;
       const plain = raises
         ? transformExpr(step, col(source.id, 'v'), seed.kind === 'values', fresh, transformInput(out), receiverEvidence(source))
@@ -2397,8 +2337,8 @@ function scalarTail(
     }
 
     if (SCALAR_FILTER_HOSTS.has(step.name)) {
-      const filtered = hostFilter(rel, step, scalarSubject(), steps, at, ctx, fresh, labels);
-      if (!filtered || filtered === 'decline') return null;
+      const filtered = hostFilter(rel, step, scalarSubject(), ctx, fresh, labels);
+      if (!filtered) return null;
       rel = filtered;
       continue;
     }
@@ -2744,24 +2684,7 @@ const exactTailConst = (a: Arg | undefined): { expr: Expr; tag: string } | null 
   return { expr: a!.name != null ? param(v, a!.name) : compilerText(String(v)), tag };
 };
 
-/**
- * DOES THE REFERENCE MEET a parse failure the compile-time coercion fold hit over an `inject()`'s values?
- * The first value's cast is met wherever this chain is reached at all (`settlesExactly` from the source);
- * a later value's only where the step after the coercion prefix drains it — the prefix's end, which the
- * fold itself reports when handed no values.
- */
-function foldRaiseMet(steps: readonly IRStep[], args: readonly unknown[], ctx: ChainCtx): boolean {
-  const first = [args[0]];
-  try { foldConstantCoercions(steps as IRStep[], first); } catch (error) {
-    if (error instanceof ValueParseError) return settlesExactly(steps, steps.length, ctx);
-    return false;
-  }
-  return settlesExactly(steps, foldConstantCoercions(steps as IRStep[], []).at, ctx);
-}
-
-function injectSource(
-  steps: readonly IRStep[], ordered: boolean, fresh: Minter, ctx: ChainCtx,
-): { rel: Rel; framing: RelFraming; at: number } | null {
+function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
@@ -2780,27 +2703,12 @@ function injectSource(
   // it would turn *"Can't parse string '1,000' as number."* into a generic "not supported", which is a
   // required error becoming the wrong error. The module's `null` contract still means "not learned
   // yet"; this is not that.
-  // Where a slice run follows the coercion prefix, the reference casts only the values it PULLS
-  // (`pullExtent`), so only those are folded — and only those can raise; the rest are never reached and
-  // never emitted, since the run keeps a subset of them.
-  let prefixEnd = 1;
-  try { prefixEnd = foldConstantCoercions(steps as IRStep[], []).at; } catch { /* the full fold below decides */ }
-  const extent = prefixEnd > 1 ? pullExtent(steps, prefixEnd, ctx.pull) : null;
-  const pulled = typeof extent === 'number' && extent > 0;
-  const vals = pulled ? args.slice(0, extent) : [...args];
+  const vals = [...args];
   let folded: { at: number; as?: string; perRow?: (ValueType | null)[] };
   // A `CoercionDeferral` is vocabulary the fold has not learned, so it DECLINES like any other; a
   // `ValueParseError` is the traversal's answer and travels on.
   try { folded = foldConstantCoercions(steps as IRStep[], vals); }
-  catch (error) {
-    if (error instanceof CoercionDeferral) return null;
-    // The fold runs over EVERY value at compile time, but the reference casts a value only when the step
-    // after the prefix pulls it. The FIRST value is pulled wherever this chain runs at all; a later one only
-    // where the rest of the chain drains the prefix (`settlesExactly`) — under a slice it may never be, and
-    // the answer would be the values before it, so the traversal DECLINES rather than raise there.
-    if (error instanceof ValueParseError && !pulled && !foldRaiseMet(steps, args, ctx)) return null;
-    throw error;
-  }
+  catch (error) { if (error instanceof CoercionDeferral) return null; throw error; }
 
   // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
   // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Flattening
@@ -2985,15 +2893,8 @@ function listTail(
   // The sub-read lowerer is INJECTED rather than imported, which is what keeps the module DAG a DAG
   // (`build ◂ {predicate, modulator, transform, reducer, list} ◂ lower ◂ spine`): a list op that needs
   // a nested chain lowered would otherwise import the fold that imports it.
-  let seam = childSeam(ctx, fresh);
-  for (let at = from; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
-    seam = childSeam(ctx, fresh);
+  const seam = childSeam(ctx, fresh);
+  for (let at = from; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
@@ -3182,13 +3083,7 @@ function pathTail(
 ): Tail | null {
   let rel = seed;
   const labels = aliases;
-  for (let at = from; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
+  for (let at = from; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
@@ -3220,7 +3115,7 @@ function pathTail(
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
-    const sliced = sliceOp(step, rel, false, fresh, ctx.pull);
+    const sliced = sliceOp(step, rel, false, fresh);
     if (sliced) { rel = sliced; continue; }
 
     // `select(label)` over a PATH traverser reads the traverser's own LABELS, not the Path value:
@@ -3281,13 +3176,7 @@ function mapTail(
 ): Tail | null {
   let rel = seed;
   let labels = aliases;
-  for (let at = from; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
+  for (let at = from; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
@@ -3312,7 +3201,7 @@ function mapTail(
     // stream, so the rest of the chain continues through `continueAs`.
     if (REL_PROJECTORS.has(step.name)) {
       const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}), row: { rel, aliases: labels, elsewhere: beyondAliases(ctx) } };
-      const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh);
       return projected && continueAs(projected.rel, projected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
 
@@ -3564,13 +3453,7 @@ function mapEntryTail(
 ): Tail | null {
   let rel = seed;
   const labels = aliases;
-  for (let at = from; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
+  for (let at = from; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
@@ -3613,7 +3496,7 @@ function mapEntryTail(
     // emitter as an internal error.
     const row = rowOp(step, rel, payloadRowShape(entryHost(rel, keyOf, valOf, labels)), false, ctx, fresh, { steps, at });
     if (row) { rel = row; continue; }
-    const sliced = sliceOp(step, rel, false, fresh, ctx.pull);
+    const sliced = sliceOp(step, rel, false, fresh);
     if (!sliced) return null;
     rel = sliced;
   }
@@ -3771,10 +3654,6 @@ export interface Lowering {
    * comparator.
    */
   readonly rankedOrders?: RankedOrders;
-  /** WHERE the chain being lowered stands in the one the reference pulls — the host position of a rooted
-   *  body (`rootedRead`), so its raises know how fully it is pulled (`ChainCtx.pull`). Absent: the
-   *  top-level chain. Read straight into the chain's ctx, never settled. */
-  readonly pull?: PullPosition | null;
 }
 
 /**
@@ -3807,7 +3686,6 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   writes: opts.writes ?? null,
   scopeNames: opts.scopeNames ?? null,
   rankedOrders: opts.rankedOrders ?? NO_RANKED_ORDERS,
-  pull: opts.pull ?? null,
 });
 
 /** No `order()` ranked through JS — every lowering but a ranked-order barrier's two statements. */
@@ -4083,13 +3961,6 @@ const lowered = (
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
   if (!wire) return null;
-  // EVERY PENDING RAISE ANSWERED FOR (`raise-channel.ts`): a raising relation read by anything but a vetted
-  // carrier or a consumer would have dropped the raise and answered, so the plan declines instead.
-  const effectRoots = (chain.effects ?? []).flatMap((binding) => (isRel(binding.node) ? [binding.node] : stmtChildren(binding.node)));
-  if (![wire.rel, ...effectRoots].every(raiseContained)) return null;
-  // EVERY IN-STATEMENT RAISE EVALUATED IN THE REFERENCE'S ORDER (`raiseOrdered`): a filter or join over a
-  // raise in one statement may drop the row before SQLite evaluates it, so such a plan declines.
-  if (![wire.rel, ...effectRoots].every(raiseOrdered)) return null;
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
   // exists. `semijoin` (`src/rel/passes/semijoin.ts`) is the physical tier: a `Rel → Rel` identity on
@@ -4711,7 +4582,6 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
       writes: writes ?? programWrites(steps, params),
       scopeNames: scopeNames ?? programScopeNames(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]),
       rankedOrders,
-      ...(opts.pull ? { pull: opts.pull } : {}),
     },
   };
 }
@@ -4741,12 +4611,10 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // barrier's resume drops its `call()`, a federated arm reads a landed marker) is a REWRITTEN list.
   // Merge placement (`mergedAt`) needs less: WHERE a whole traversal merges, which a nested rooted read
   // states as well as the root does (`ChainCtx.mergeScope`); only a rewritten list cannot (`rewritten`).
-  // Marked at the SOURCE step, so a source `union`'s arms (and any body a source step holds) read their
-  // pull level off it; every tail re-marks at its own step.
   const placeable = !opts.seed && analysed.ctx.source === BaseGraph;
-  const ctx: ChainCtx = pullAt(!placeable ? { ...analysed.ctx, rewritten: true }
+  const ctx: ChainCtx = !placeable ? { ...analysed.ctx, rewritten: true }
     : root ? { ...analysed.ctx, traversal: { steps, rooted: true } }
-      : { ...analysed.ctx, mergeScope: { steps, rooted: beginsWithSource(steps) } }, steps, 0);
+      : { ...analysed.ctx, mergeScope: { steps, rooted: beginsWithSource(steps) } };
   const { params } = ctx;
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
@@ -4815,7 +4683,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
       const withSack = sacked(listed.rel);
       return withSack && listTail(withSack, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);
     }
-    const injected = injectSource(steps, ordered, fresh, ctx);
+    const injected = injectSource(steps, ordered, fresh);
     if (!injected) return null;
     const withSack = sacked(injected.rel);
     return withSack && scalarTail(withSack, injected.framing, steps, injected.at, false, ctx, fresh);
@@ -4913,15 +4781,8 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   let at = 1;
   let elem = elem0;
   for (; at < steps.length; at++) {
-    // A filter whose raise a head slice after it may consume is the fold's (`hostFilter`), not a fused
-    // clause of the scan's one `WHERE`, where its raise could only be evaluated on every row.
-    const here = pullAt(readCtx, steps, at);
-    const sink: RaiseSink | undefined = raiseDefersTo(steps, at + 1, here) ? {} : undefined;
-    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, here, NO_ALIASES, sink);
-    // A clause that may raise is the fold's too: `and` fixes no evaluation order against the clauses fused
-    // beside it, while the fold's filter over this scan is conjoined IN ORDER (`conjoinInOrder`) and asks
-    // whether `FilterRankingStrategy` moves it (`filterRankingMoves`).
-    if (!clause || sink?.raise || exprMayRaise(clause)) break;
+    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx);
+    if (!clause) break;
     pred = and(pred, clause);
   }
 
@@ -5164,13 +5025,7 @@ function elementTail(
   let bulked = bulked0;
   let labels = aliases;
   let at = from;
-  for (; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
+  for (; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, elementKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
@@ -5235,7 +5090,7 @@ function elementTail(
     const aliased = aliasWhere(step, rel, labels, ctx, fresh);
     if (aliased === 'decline') return null;
     if (aliased) { rel = aliased; continue; }
-    const filtered = hostFilter(rel, step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, steps, at, ctx, fresh, labels);
+    const filtered = hostFilter(rel, step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, ctx, fresh, labels);
     // `rel.channels`, NOT `BULK`: a `Filter` is channel-preserving by contract (§3.5), so naming a
     // list rather than passing the input's through is a chance to name a SHORTER one — and under
     // `demandsEncounter` the relation carries `bulk` AND `encounter`, so the hardcoded `BULK` dropped
@@ -5243,7 +5098,6 @@ function elementTail(
     // channels`), which made a fail-closed VIOLATION rather than a wrong answer: the lowering threw
     // where the traversal must answer. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no
     // corpus traversal has that prefix, so the corpus sweep could not reach it.
-    if (filtered === 'decline') return null;
     if (filtered) { rel = filtered; continue; }
     // `as()` is SHAPE-PRESERVING at every position, which is why it sits in the ordinary loop rather
     // than at a boundary: the payload passes through and only the alias channels change.
@@ -5370,7 +5224,7 @@ function elementTail(
       // A carried PATH declines for `terminal()`'s reason: the value is a new traverser object and
       // nothing here appends it as a path position.
       if (pathCarried(rel)) return null;
-      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -5397,7 +5251,7 @@ function elementTail(
     // ordinary shape-preserving step of this loop. The bare READ form is a RETYPE and falls through
     // to `terminal()`, which is where every element→value boundary lives.
     if (step.name === 'sack' && sackOperator(step) !== undefined) {
-      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
+      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh);
       if (!folded) return null;
       rel = folded;
       continue;
@@ -5542,9 +5396,6 @@ export function continueAs(
   rel: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
-  // A HANDOFF: the relation may carry what the step before minted (`raisesWherePulled`), then this step is marked.
-  if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-  ctx = pullAt(ctx, steps, from, rel);
   // A POSITIONAL SLICE IN THIS STEP LIST reads the order of a branch merged ahead of it here, at whatever
   // depth the list is a body (`local(union(a, b).limit(1))`), and the root chain's `sliced` cannot see a
   // body's own slice. With it the branch owes the reference's order (`branchOrderOwed`) and numbers its
@@ -5656,9 +5507,6 @@ function propertyTail(
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels, bulked: false };
-  // A HANDOFF: the relation may carry what the step before minted (`raisesWherePulled`), then this step is marked.
-  if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-  ctx = pullAt(ctx, steps, from, rel);
   const step = steps[from]!;
   {
     const merged = mergedAt(ctx, steps, from, rel, (r) => propertyIdentityKey(r, elem), fresh);
@@ -5703,8 +5551,8 @@ function propertyTail(
   // compare, so a value predicate declines rather than answering off the wrong column.
   if (SCALAR_FILTER_HOSTS.has(step.name)) {
     const subject: Subject = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, rel };
-    const filtered = hostFilter(rel, step, subject, steps, from, ctx, fresh, labels);
-    return filtered && filtered !== 'decline' ? propertyTail(filtered, elem, steps, from + 1, bulked, ctx, fresh, labels) : null;
+    const filtered = hostFilter(rel, step, subject, ctx, fresh, labels);
+    return filtered ? propertyTail(filtered, elem, steps, from + 1, bulked, ctx, fresh, labels) : null;
   }
 
   // THE BRANCH FAMILY over a PROPERTY stream — the same `branchArms` the element and value tails call,
@@ -6027,13 +5875,7 @@ function recordTail(
 ): Tail | null {
   let rel = seed;
   let labels = aliases;
-  for (let at = from; ; at++) {
-    // Every step is folded at its marked position (`pullAt`), and whatever in-statement raise the step
-    // before minted — here, or in the tail that handed this one its relation — is checked against how
-    // fully the reference pulls it (`raisesWherePulled`).
-    if (!raisesWherePulled(ctx.pull, steps, rel)) return null;
-    if (at >= steps.length) break;
-    ctx = pullAt(ctx, steps, at, rel);
+  for (let at = from; at < steps.length; at++) {
     { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at]!;
     if (step.optionArms) return null;
@@ -6120,7 +5962,7 @@ function recordTail(
     // against the FIELDS by the same rule `by(__.select('a'))` already followed here. `_` is the whole
     // map, so it declines through the identity guard rather than projecting one.
     if (REL_PROJECTORS.has(step.name)) {
-      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }

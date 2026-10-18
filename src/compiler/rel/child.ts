@@ -1,10 +1,8 @@
 import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { exprMayRaise } from '../../rel/raise.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
 import type { IRStep } from '../ir/step.ts';
-import type { PullPosition } from './raise-channel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
@@ -130,9 +128,6 @@ export interface ChildSeam {
   readonly unscopeRows: (rows: Rel) => Rel;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
-  /** WHERE the host whose bodies this seam lowers stands (`ChainCtx.pull`), so a raise a body evaluates
-   *  in-statement asks how fully the reference pulls it (`raise-channel.ts`'s `settlesExactly`). */
-  readonly pull?: PullPosition;
 }
 
 /** A continued chain: a rooted read plus the labels live at its end. */
@@ -243,14 +238,6 @@ export interface ChildValue {
    * `ProjectStep.java:66` reads `TraversalProduct.isProductive`, not the value's nullness).
    */
   readonly present: Presence;
-  /**
-   * THE RAISE THIS BODY'S EVALUATION HIT, as DATA — the reference's message, NULL where the body raised
-   * nothing (`raise-channel.ts`). Present only where the HOST asked for it (`scalarChildDeferred`) and the
-   * producing arm could escalate it; `expr`/`present` are then the body's answer only where it is NULL,
-   * and the host carries it on its row so a later head slice decides whether the reference ever met it.
-   * Absent, every raise rides inside `expr`/`present` as an in-statement arm, as it always has.
-   */
-  readonly raise?: Expr;
 }
 
 /** A child body's PRODUCTIVITY — a per-row boolean expression (`ALWAYS_PRODUCTIVE` for "always"), or
@@ -280,28 +267,6 @@ export function casePresence(whens: readonly (readonly [Expr, Presence])[], othe
  *  `optional` decision) reads the SAME object — the productivity test is a reference-equality check, and
  *  a second copy would silently answer "cannot say" where one meant "always". */
 export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
-
-/**
- * A BODY THAT MAY RAISE PRODUCES ONLY WHERE IT DID NOT RAISE — its productivity claim EVALUATES its value.
- *
- * The reference evaluates a child body for every traverser that reaches its host, and a body that raises
- * raises there whatever the host does with the result (`TraversalUtil.produce`,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:108-123`).
- * In SQL the raise rides INSIDE the value (a receiver offence's CASE arm, `receiver.ts`; a fold over such
- * values), and a host that asks only WHETHER the body produced never reads it: `where(__.values('age')
- * .toUpper().fold())` kept every vertex, because a seeded `fold()` is always productive and the predicate
- * folded to TRUE. A reducing barrier ESCALATES its input's raise exactly here — the value it reduces is
- * evaluated by the claim. The added test is always true (`typeof()` is never `'raise'`) and costs nothing
- * where the value cannot raise (`exprMayRaise`), and an `'unknown'` presence stays unknown. A claim that
- * already RAISES (a value run's receiver offences ride on it, `valueRun`) already evaluates them, and is
- * left as it is rather than spelling the value a second time.
- */
-export function raisingPresence(produced: ChildValue): ChildValue {
-  if (produced.present === 'unknown' || !exprMayRaise(produced.expr)) return produced;
-  if (produced.present !== ALWAYS_PRODUCTIVE && exprMayRaise(produced.present)) return produced;
-  const evaluated: Expr = { kind: 'binary', op: 'is not', left: { kind: 'call', fn: 'typeof', args: [produced.expr] }, right: compilerText('raise') };
-  return { ...produced, present: produced.present === ALWAYS_PRODUCTIVE ? evaluated : { kind: 'binary', op: 'and', left: produced.present, right: evaluated } };
-}
 
 /**
  * WHICH normalization a nested argument gets, and the two are not interchangeable.

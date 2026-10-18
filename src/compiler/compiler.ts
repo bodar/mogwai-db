@@ -4,7 +4,6 @@ import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
 import { perTraverserMutableFold } from './ir/fold-seed.ts';
 import { ambiguousEntryBind, erasedPathEntry } from './ir/strategies.ts';
-import { sackFoldsNaN } from './ir/sack-nan.ts';
 import { uncarriedLiteral } from './ir/uncarried-literal.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
@@ -92,9 +91,6 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // (`ambiguousEntryBind`) decline here, once, at every depth — both are path-entry facts no single
   // lowering position owns.
   if (erasedPathEntry(steps, params) !== null || ambiguousEntryBind(steps, params)) throw new UnsupportedTraversal(gremlin);
-  // A NaN literal the sack may fold declines here, once, for every host (`sackFoldsNaN`) — SQLite stores
-  // NaN as NULL, and the fold would answer for a NULL operand where the reference computes with NaN.
-  if (sackFoldsNaN(steps, params, sackInit)) throw new UnsupportedTraversal(gremlin);
   // A literal VALUE no carrier keeps — a NaN (SQLite stores it as NULL) or a negative-scale BigDecimal
   // (plain decimal text cannot spell its scale) — declines here, once, at every depth (`uncarriedLiteral`).
   if (uncarriedLiteral(steps, params) !== null) throw new UnsupportedTraversal(gremlin);

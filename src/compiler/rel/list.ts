@@ -8,7 +8,7 @@ import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
 import { countOf, GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
-import { asStringOf, raisingColumns, raisingWhen, type ValueEvidence } from './receiver.ts';
+import { asStringOf, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
@@ -837,9 +837,8 @@ export function listRetype(
       // pair; a statically-typed list is already of one class.
       const tag = memberType?.kind === 'static' ? null : memberOwnTag(of, present);
       const info = tag && scalar(numberClassPair(payload, tag, 'number'), 'cw', 'any');
-      // A mixed-class refusal rides inside the pick, so the pick is EVALUATED as well (`raisingColumns`).
-      const held = raisingColumns(fenced(withPayload(host, [['w', picked], ...(info ? [info] : [])],
-        [meta('w', 'any', true), ...(info ? [meta('cw', 'any', true)] : [])], fresh), fresh), [['w', picked]], fresh);
+      const held = fenced(withPayload(host, [['w', picked], ...(info ? [info] : [])],
+        [meta('w', 'any', true), ...(info ? [meta('cw', 'any', true)] : [])], fresh), fresh);
       const winnerV = jsonField(col(held.id, 'w'), 'v');
       const winnerT = jsonField(col(held.id, 'w'), 't');
       // The winner promoted to the members' common class IS its widening (`float.ts` `promotedExtremum`),
@@ -897,13 +896,10 @@ export function listRetype(
     // (`reducer.ts` `commonNumberClass`) — the storage class alone frames a Double stored integral as an
     // Int. Its class pair is one more correlated read, and the class is named over it and the held sum.
     const tag = step.name !== 'sum' ? undefined : memberType?.kind === 'static' ? compilerText(memberType.type) : isTypedList(of) ? memberOwnTag(of, members) : undefined;
-    // The reducer's own deferral (a text operand, a Float total) rides INSIDE the value, so the value is
-    // EVALUATED by a row predicate (`raisingColumns`) as well: a consumer that never reads it (`count()`)
-    // would prune it with the raise, where `sum(local)` raises on every traverser it reaches.
     const sumValue = scalar(reduced.value, 'v', 'any')[1];
-    const held = raisingColumns(fenced(withPayload(host,
+    const held = fenced(withPayload(host,
       [['v', sumValue], ...(tag ? [scalar(numberClassPair(payload, tag, 'not-a-number'), CLASS_PAIR, 'any')] : [])],
-      [meta('v', 'any', true), ...(tag ? [meta(CLASS_PAIR, 'any', true)] : [])], fresh), fresh), [['v', sumValue]], fresh);
+      [meta('v', 'any', true), ...(tag ? [meta(CLASS_PAIR, 'any', true)] : [])], fresh), fresh);
     const v = col(held.id, 'v');
     const inferred = inferredVtype(v);
     return {

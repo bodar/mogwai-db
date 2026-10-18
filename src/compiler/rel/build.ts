@@ -61,8 +61,6 @@ const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readon
   // The graph a bound element came from — the federate call's own graph name (or the `$local` sentinel
   // for the base graph). A TEXT tag, present on every row of a multi-graph merge.
   graph: { type: 'text', nullable: false },
-  // A pending raise's MESSAGE — NULL on a row whose evaluation raised nothing.
-  raise: { type: 'text', nullable: true },
 };
 
 /** The carried channels' COLUMNS, in the channel list's own order — every relation that carries

@@ -56,9 +56,7 @@ function sentinelRaise(open: string, message: string, dependsOn: Expr): Expr {
  */
 export const raiseInRow = (message: string): Expr => raiseExpr(message, { kind: 'call', fn: 'random', args: [] });
 
-/** The text every `raiseExpr` arm's path opens with — what the emitter reads to tell a raising term. */
-export const RAISE_SENTINEL = '$!raise:';
-const OPEN = RAISE_SENTINEL;
+const OPEN = '$!raise:';
 const CLOSE = '!$';
 const OPEN_DEFERRAL = '$!defer:';
 const RAISED = /\$!(?:raise|defer):(.*?)!\$/;
@@ -83,35 +81,15 @@ export class RaisedByQuery extends Error {
 }
 
 /** Is `e` a `raiseExpr` arm — the sentinel path is a compiler literal, so this is a syntactic test. */
-const isRaise = (e: Expr): boolean => {
-  if (e.kind !== 'call' || e.fn !== 'json_extract') return false;
-  const path = e.args[1];
-  if (path?.kind === 'lit') return typeof path.value === 'string' && path.value.startsWith(OPEN);
-  // A RAISE OF A CARRIED MESSAGE (`raiseCarried`): the path is `OPEN || message || CLOSE`.
-  let head: Expr | undefined = path;
-  while (head?.kind === 'binary' && head.op === '||') head = head.left;
-  return head?.kind === 'lit' && head.value === OPEN;
-};
+const isRaise = (e: Expr): boolean =>
+  e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
+  && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN);
 
 /** Is `e` ITSELF an arm that never yields a value — a `raiseExpr` or a `deferralExpr`? Syntactic, like
  *  `isRaise`: a physical rewrite that may drop a row taking this arm (it errors rather than answers) asks it. */
 export const alwaysRaises = (e: Expr): boolean =>
   isRaise(e) || (e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
     && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN_DEFERRAL));
-
-/**
- * `raiseExpr` FOR A MESSAGE THE DATA CARRIES — a pending raise's column (`src/compiler/rel/raise-channel.ts`)
- * holds the reference's message as TEXT, NULL on a clean row, and the step that settles it raises THAT
- * message. The path is built from the message, so the arm is never a constant expression either; a caller
- * guards it with the message's own non-nullness, since a NULL path is no error at all.
- */
-export function raiseCarried(message: Expr): Expr {
-  const concat = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '||', left, right });
-  return {
-    kind: 'call', fn: 'json_extract',
-    args: [{ kind: 'call', fn: 'json_quote', args: [message] }, concat(concat(compilerText(OPEN), message), compilerText(CLOSE))],
-  };
-}
 
 /**
  * CAN EVALUATING THIS RELATION RAISE — does any expression in it, correlated subplans included, hold a
@@ -136,52 +114,4 @@ export function exprMayRaise(e: Expr): boolean {
     if (!found && (isRaise(node) || exprRels(node).some(mayRaise))) found = true;
   });
   return found;
-}
-/**
- * IS THIS NODE A RAISE TEST — a filter whose predicate raises when evaluated (a raise arm in it, or a
- * predicate that IS a carried test column — a projected expression holding one, which the flattener inlines
- * into the predicate), or an `EXISTS` (semi/anti join) whose condition or body may raise. A filter that
- * merely READS a raising value (a productivity test, a drain) evaluates that value whichever `WHERE` term
- * SQLite takes first, so it is no ordering hazard of its own. Read by the emitter (`conjoinInOrder`, a
- * raising CTE's fence) and by `raiseOrdered` (`compiler/rel/raise-channel.ts`).
- */
-export function raiseTest(rel: Rel): boolean {
-  if (rel.kind === 'filter') return exprMayRaise(rel.pred) || readsRaisingColumn(rel.pred, rel.input);
-  if (rel.kind === 'join') return (rel.on !== undefined && exprMayRaise(rel.on)) || ((rel.join === 'semi' || rel.join === 'anti') && mayRaise(rel.right));
-  return false;
-}
-
-/** Does `pred` read, ANYWHERE in it (not only as the whole predicate), a column of `input` whose projected
- *  expression may raise — `presence IS NOT NULL` over a carried presence column the flattener inlines is as
- *  much a raise test as the bare column (a coalesce arm's exhaustion guard). */
-function readsRaisingColumn(pred: Expr, input: Rel): boolean {
-  let found = false;
-  forEachExpr(pred, (node) => { if (!found && node.kind === 'col' && columnRaises(input, node.rel, node.name)) found = true; });
-  return found;
-}
-
-function columnRaises(rel: Rel, id: string, name: string): boolean {
-  if (rel.id !== id || rel.kind !== 'project') return false;
-  const expr = rel.exprs.find(([column]) => column === name)?.[1];
-  if (!expr) return false;
-  if (exprMayRaise(expr)) return true;
-  return expr.kind === 'col' && columnRaises(rel.input, expr.rel, expr.name);
-}
-
-/** Does the SELECT block `rel` heads hold a raise test — through every node the emitter fuses into one
- *  block (a projection, a filter, a sort, a DISTINCT, an unbound materialize, a join's sides, an explode's
- *  input), stopping where a block closes (an aggregate, a window, a LIMIT, a union, a recursive term). */
-export function blockRaiseTest(rel: Rel): boolean {
-  switch (rel.kind) {
-    case 'filter': return raiseTest(rel) || blockRaiseTest(rel.input);
-    case 'project': case 'sort': case 'distinct': case 'materialize': return blockRaiseTest(rel.input);
-    case 'join': return raiseTest(rel) || blockRaiseTest(rel.left) || (rel.join !== 'semi' && rel.join !== 'anti' && blockRaiseTest(rel.right));
-    case 'explode': return rel.input !== undefined && blockRaiseTest(rel.input);
-    // A UNION ALL closes its arms' blocks, but SQLite's PUSH-DOWN optimization copies a reader's `WHERE` term
-    // into EACH arm (https://sqlite.org/optoverview.html#pushdown), where it becomes one more term beside the
-    // arm's own raise test, in no fixed order: a `coalesce(values('age'), constant(0).math('1/_'))` arm whose
-    // guard says "never evaluated" raised `Division by zero!` once an `is(gt(30))` after it was pushed in.
-    case 'union': return rel.inputs.some(blockRaiseTest);
-    default: return false;
-  }
 }

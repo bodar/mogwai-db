@@ -621,18 +621,6 @@ const DECLINED = [
   // `Pick.unproductive` are distinguishable only where the choice reports productivity BESIDE its
   // value. What still declines is a choice whose body cannot report one, and a `T`-TOKEN choice
   // (`choose(T.label)`, no nested body at all), which is a different projection.
-  // A raise ahead of a slice at the END of a BranchStep body (`union`/`choose`/`branch`): the body is
-  // never reset per start (`BranchStep.standardAlgorithm`), so the slice's pull count is `n` + the number
-  // of later starts — data, not traversal — and the raise cannot be settled there (`LAZY_BODY_HOSTS`,
-  // `src/compiler/rel/raise-channel.ts`). The reference RAISES on each of these; SQL would answer.
-  "g.inject('a','b',1,'c').union(__.toUpper().limit(1))",
-  "g.V().order().by(T.label, Order.desc).union(__.values('name','age').toUpper().limit(1))",
-  "g.V().order().by(T.label, Order.desc).union(__.values('name','age').toUpper().limit(2))",
-  "g.V().order().by(T.label, Order.desc).union(__.values('name','age').toUpper().limit(1)).count()",
-  "g.V().order().by(T.label, Order.desc).union(__.values('name','age').toUpper().limit(1), __.constant(1))",
-  "g.V().order().by(T.label, Order.desc).union(__.where(__.values('age').toUpper().fold()).limit(1)).values('name')",
-  "g.V().order().by(T.label, Order.desc).union(__.local(__.values('name','age').toUpper().limit(1)))",
-  "g.V().order().by(T.label, Order.desc).choose(__.constant(true), __.values('name','age').toUpper().limit(1))",
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
   // `g.inject(['a','b']).order(Scope.local)` LEFT this list: the member sort landed, and it takes the

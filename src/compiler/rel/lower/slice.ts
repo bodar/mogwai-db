@@ -23,46 +23,13 @@ import { freshTraverserRow, type ChildHost } from '../child.ts';
 import { elementHost } from '../map.ts';
 import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../property.ts';
 import { pathCarried } from '../path.ts';
-import { mayRaise } from '../../../rel/raise.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
 import { barrierRows, dropPath, orderRows } from '../lower.ts';
 import { streamDistinctAt } from '../../ir/bulk.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
-import { markPositional, pendingRaise, pullExtent, pulledBy, settledSlice, settleRaise, trustSlice, type PullPosition } from '../raise-channel.ts';
 
-/**
- * THE SLICE — and the consumer of a PENDING RAISE (`raise-channel.ts`) the step before it deferred.
- *
- * A head slice settles the raise over exactly the rows the reference PULLS — `pullExtent`: its bound (the
- * least of a run of head slices) plus the one more traverser `RangeGlobalStep` drags through before it
- * learns the bound is met — and then takes its own rows from those, so a raising row past them is never
- * met. `pull` is where the slice stands (`ChainCtx.pull`, marked at this very step); a slice that cannot
- * say, or whose extent the rest of the chain leaves open, DECLINES. Any other slice pulls rows it does not
- * keep, so the raise is settled over its whole input first — the eager answer, and `defersRaise` never
- * hands it one.
- */
-export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter, pull: PullPosition | undefined): Rel | null {
-  if (!pendingRaise(input)) return sliceRows(step, input, bulked, fresh);
-  // A raise reaches only a slice `defersRaise` handed it to; anything else here is a lowering that lost
-  // track of where it stands, and declines rather than guess an extent.
-  const extent = pull && pull.steps[pull.at] === step ? pullExtent(pull.steps, pull.at, pull) : null;
-  if (extent === null) return null;
-  if (extent === 'all') return sliceRows(step, settleRaise(input, fresh), bulked, fresh);
-  const pulled = sliceRows(pulledBy(step, extent), input, bulked, fresh);
-  if (pulled) trustSlice(pulled, input);
-  const settled = pulled && settledSlice(pulled, fresh);
-  return settled && sliceRows(step, settled, bulked, fresh);
-}
-
-/** A slice's rows, its filters registered as POSITIONAL (`markPositional`, `raiseOrdered`). */
-function sliceRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
-  const sliced = slicedRows(step, input, bulked, fresh);
-  if (sliced) markPositional(sliced, input);
-  return sliced;
-}
-
-function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
+export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
   if (!SLICE_STEPS.has(step.name)) return null;
   const encounter = encounterOf(input.channels);
@@ -128,7 +95,6 @@ function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): R
   // It NEEDS a carried position, and that is not a limitation to work around — "last" is a question
   // ABOUT emission order, so a relation carrying none has no last, and the traversal declines.
   if (step.name === 'tail') {
-    if (countOf(step) === 0 && evaluationMayRaise(input)) return null;
     if (!encounter) return null;
     const last = { offset: 0, limit: countOf(step) };
     if (bulked && bulk) return bulkSlice(input, last, encounter, bulk, 'desc', fresh);
@@ -144,7 +110,6 @@ function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): R
   // shows up at all.
   let window;
   try { window = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
-  if (window.limit === 0 && evaluationMayRaise(input)) return null;
   // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
   // answer a different question. `bulked` says the multiplicity is not provably 1, and then the
   // slice must count traversers — which needs a position to accumulate along, so a bulked relation
@@ -154,21 +119,6 @@ function slicedRows(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): R
   if (bulked && bulk) return encounter ? bulkSlice(input, window, encounter, bulk, 'asc', fresh) : null;
   return slice(input, { ...window, ...paramOf(step) }, encounter, 'asc', fresh);
 }
-
-/**
- * A ZERO-WIDTH SLICE OVER AN INPUT WHOSE EVALUATION MAY RAISE — declines.
- *
- * The reference still PULLS a zero-width slice's input: `RangeGlobalStep.filter` runs only after
- * `FilterStep.processNextStart` has pulled a start, so `limit(0)`/`range(k,k)` meet `low + 1` traversers
- * before the bound throws, and `TailGlobalStep` drains every start
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/FilterStep.java`,
- * `…/step/filter/RangeGlobalStep.java`, `…/step/filter/TailGlobalStep.java`; no strategy short-circuits
- * `high == 0`). So `g.inject(1).toUpper().limit(0)` RAISES. SQLite never evaluates anything beneath a
- * `LIMIT 0` — neither a pending raise's settle nor an in-statement raise arm — so the plan would answer
- * `[]`. Fail closed: a zero-width slice over anything that may raise declines (a pending raise channel,
- * or a `raiseExpr` arm anywhere below, correlated subplans included).
- */
-const evaluationMayRaise = (input: Rel): boolean => pendingRaise(input) !== undefined || mayRaise(input);
 
 /** Which slice bound, if any, carries a user PARAMETER that binds untouched. Only `limit` (its count)
  *  and `skip` (its offset) qualify — a single value SQL takes as a plain `?`. `range` reduces (its
@@ -438,7 +388,7 @@ export function rowOp(
     return barrierRows(step, input, shape.mergeKey, ctx, position.steps, position.at, fresh);
   }
   if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, { ...shape, ...(!distinct && !isLocalScope(step) ? { merge: true } : {}) });
-  const sliced = sliceOp(step, input, bulked, fresh, ctx.pull);
+  const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
   // `dedup()` collapses by traverser IDENTITY. A carried path would make every row distinct (two walks
   // to one vertex differ by route), defeating the collapse — but the path has already done its work

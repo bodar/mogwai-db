@@ -304,7 +304,9 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | String order | SQLite code-point order, not Java's UTF-16 code-unit order (they differ only for astral characters vs U+E000–U+FFFF) |
 | Case mapping | `toUpper`/`toLower` follow SQLite's ASCII mapping; non-ASCII letters may be left as written |
 | Write visibility | SNAPSHOT: a write step sees a snapshot of its input; steps after it see all of its writes (Java's lazy pipeline interleaves per traverser unless a `barrier()` is added) |
-| Error timing | eager and in-statement: a query containing a type error may raise even where Java's lazy pull would have stopped before reaching the bad value |
+| Error timing | eager and in-statement: a query containing a type error may raise even where Java's lazy pull would have stopped before reaching the bad value (`limit(0)` over a raising step answers `[]`) |
+| Error vs filter order | a filter after a type error may drop the row before SQLite evaluates the error (`inject(1).toUpper().is('x')` answers `[]`); `FilterRankingStrategy`'s reordering is not modelled |
+| Unread erroneous values | a type error inside a value nothing reads is not evaluated: `project('x').by(values('age').toUpper()).count()` answers the row count, `where(<…>.fold())` keeps the row |
 | Number equality | by VALUE across Int/Long/Double/Float/BigDecimal — `1`, `1L` and `1.0` compare, dedup and group alike; `true` and `1` stay distinct. The result CLASS is still kept on output |
 | Signed zero | none: `-0.0` is `0.0` (as in SQLite) in compare, order, dedup, group keys and output |
 | Ties in `order()` | values equal by value (`1m`/`1.0d`; `0m`/`-0.0d`/`0.0d`) tie and fall to the existing tie-break, not Java's class-aware order; such a sort always answers, never defers |

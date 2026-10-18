@@ -705,7 +705,7 @@ UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/featu
 - ⛔ **E — raise extent: SUPERSEDED (revert to the eager form).** A raise is ONE in-statement predicate
   (`raisingRows`, the `593317fe` design) evaluated wherever SQLite evaluates it; a query containing a type
   error may raise "early". The pull-level/span machinery (`raise-channel.ts`), `conjoinInOrder`, the
-  MATERIALIZED raise fence, the FilterRankingStrategy model and `sack-nan.ts` go. Kept: the five guards
+  MATERIALIZED raise fence, the FilterRankingStrategy model and `sack-nan.ts` are DELETED. Kept: the five guards
   consolidated into one raise, `hostTag`, every no-bare-`Error` fix, the per-value `dateAdd` message.
 - ⛔ **F — write interleave: SUPERSEDED (snapshot writes).** A write step sees a SNAPSHOT of its input;
   steps after it see all its writes (what `barrier()` gives in Java, and what TinkerPop's docs tell users
