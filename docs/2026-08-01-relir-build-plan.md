@@ -1041,6 +1041,17 @@ authorities.
   + search reads via `mergeSiteOf`), drop (kind- and key-scoped) — as a site, refusing a clash over >1 traverser.
   LEFT: the READ-after-write class (a later read of an EARLIER traverser's write, incl. another traverser's
   creation) — `docs/outstanding-work.md`; needs `sequentialGuard`'s per-element split + `bulk.ts` barrier positions.
+  ✅ **Write narrowing (read-after-write / read-before-write) LANDED ON TRUNK 2026-10-18 (`3cbd369d`, `2f836643`,
+  `8116aba7`, `140ddf37`, ff-write-narrowing).** ONE placement scan (`interleaving`/`Placement`,
+  `src/compiler/rel/write.ts`, barrier positions from `ir/bulk.ts` per `LazyBarrierStrategy.java:93-130`) places
+  every step after a write — in the window, past a sized NoOpBarrier, or past a drain; own element or not — and
+  every guard reads it: `readAfterWrite` (a window read of another traverser's write declines; own-element reads
+  stay exact where alike), `readBeforeWrite` (an upstream read a later traverser re-runs, incl. a new edge and a
+  terminal drop; pinned hops via `edgeAnchor` and drop idempotence via `finalHop` lift the exact forms, a
+  stream-counting step voids the lift), `writeAfterWrite` narrowed by kind, freshness (`feedReach`), ownership and
+  barrier; `iterate()` is `discard()`. A drop's guard and target share one bind name space (`name()` mint).
+  Pinned in `test/L4-addendum/write-interleave.feature` + `test/write-interleave.exec.test.ts`. No baselines
+  moved. CI green.
   ✅ **Keyed side effect run per traverser behind a slice LANDED 2026-10-17 (`ffca8f77`):** `local`/`map`/`flatMap`
   (`__.aggregate('a')`) spliced by `inlineIdentityHostBody`, then sliced, answered the full collection;
   `ProgramWrites.truncated` now counts a KEYED side-effect collector (`collectsSideEffect`: aggregate, keyed
