@@ -251,11 +251,16 @@ function numericPair(subject: NumClass, bound: NumClass, value: unknown, castBou
   const pair = widenedPair(subject, bound, value, castBound);
   // `Double.compare`'s SIGNED ZERO, wherever the common class floats (a BigDecimal has no negative zero):
   // `inject(0.0d).is(-0.0d)` is false and `inject(-0.0d).is(P.lt(0.0d))` true. Only a REAL subject can be
-  // a negative zero, so an integral subject needs the cell only against a `-0.0` bound.
+  // a negative zero, so an integral subject needs the cell only against a `-0.0` bound — and only a SMALL
+  // integral one: a BigInteger/BigDecimal subject against a Double widens BOTH sides to BigDecimal, where
+  // `BigDecimal.valueOf(-0.0)` is an UNSIGNED zero, so `0n` EQUALS `-0.0d` — SQLite's own `0 = -0.0`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-399,850-859`).
+  // Every compare site (`ordered`, `equality`, and so has/is/where/within/between/inside/outside at any
+  // depth) reaches this one rule, per class arm.
   const floating = (cls: NumClass): boolean => cls === 'float' || cls === 'double';
   const zero = typeof value === 'number' && value === 0;
   const negativeBound = zero && Object.is(value, -0);
-  if (zero && !pair.cells && (floating(subject) ? !BIG.has(bound) : floating(bound) && negativeBound))
+  if (zero && !pair.cells && (floating(subject) ? !BIG.has(bound) : !BIG.has(subject) && floating(bound) && negativeBound))
     return { ...pair, cells: [{ at: 0, negative: negativeBound ? 0 : -1, positive: negativeBound ? 1 : 0 }] };
   return pair;
 }
@@ -1014,7 +1019,7 @@ export function orderedBy(
       const negative = binary('<', atan2(k), compilerInt(0));
       if (key.carrier === 'encoded')
         return [flag(i, 'f', negative), flag(i, 'b', isInteger(k)),
-          ...(stable ? [flag(i, 'p', and(binary('>', atan2(k), compilerInt(0)), { kind: 'unary', op: 'not', arg: isInteger(k) }))] : [])];
+          flag(i, 'p', and(binary('>', atan2(k), compilerInt(0)), { kind: 'unary', op: 'not', arg: isInteger(k) }))];
       if (key.carrier === 'unknown') return [flag(i, 'f', negative), flag(i, 'u', binary('>', atan2(k), compilerInt(0)))];
       return [];
     });
@@ -1053,10 +1058,13 @@ export function orderedBy(
     // possibly-text sort term for UTF-16 order (`utf16Key`, `src/rel/emit.ts`) — the arm never yields a value.
     const defer = (message: string): Expr => ({ kind: 'call', fn: 'abs', args: [deferralExpr(message, k)] });
     const iif = (test: Expr, then: Expr, otherwise: Expr): Expr => ({ kind: 'call', fn: 'iif', args: [test, then, otherwise] });
+    // A big zero beside BOTH signed Double zeros is unordered whether or not the sort is stable: a value
+    // stream's tie guard reads SQLite equality, under which INTEGER `0` and REAL `±0.0` are one value, so it
+    // cannot see that tie group at all — the class flags must decide it, as they do for a stable sort.
     const sign: Expr = key.carrier === 'encoded'
-      ? iif(and(flagOf(i, 'b'), zeroOf(k)), stable
-        ? iif(and(flagOf(i, 'f'), flagOf(i, 'p')), defer(ZERO_CLASSES_UNORDERED), compilerInt(0))
-        : tieDiffers ? compilerInt(0) : iif(flagOf(i, 'f'), defer(ZERO_TIE_UNSTABLE), compilerInt(0)), atan2(k))
+      ? iif(and(flagOf(i, 'b'), zeroOf(k)), iif(and(flagOf(i, 'f'), flagOf(i, 'p')), defer(ZERO_CLASSES_UNORDERED), stable || tieDiffers
+        ? compilerInt(0)
+        : iif(flagOf(i, 'f'), defer(ZERO_TIE_UNSTABLE), compilerInt(0))), atan2(k))
       : key.carrier === 'unknown'
         ? iif(and(and(flagOf(i, 'f'), flagOf(i, 'u')), zeroOf(k)), defer(ZERO_CLASS_UNKNOWN), atan2(k))
         : atan2(k);

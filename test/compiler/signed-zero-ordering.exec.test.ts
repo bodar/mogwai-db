@@ -131,6 +131,64 @@ describe('a BigInteger/BigDecimal zero ties -0.0d (NumberHelper promotes to BigD
     ]) expect(() => executeQuery(big, q, {})).toThrow(RaisedByQuery);
   });
 
+  // A BigINTEGER zero beside both Double zeros: SQLite calls INTEGER `0` and REAL `±0.0` one value, so the
+  // value stream's tie guard cannot see the group — the class flags must defer it, as the element sort does.
+  // Java's binary-insertion sort over this intransitive comparator answers per arrival order
+  // (`OrderGlobalStep.java:78`, `NumberHelper.java:278-310`); no answer here may be one of them by luck.
+  test('a BigInteger zero among both signed zeros DEFERS in a value stream too, at every position', () => {
+    const tri = seededStore();
+    for (const x of ['0n', '0.0d', '-0.0d']) executeQuery(tri, `g.addV('z').property('x', ${x})`, {});
+    for (const q of [
+      "g.V().hasLabel('z').values('x').order().tail(1)",
+      "g.V().hasLabel('z').values('x').order().range(1, 2)",
+      "g.V().hasLabel('z').values('x').order().by(desc).limit(1)",
+      "g.V().hasLabel('z').values('x').fold().order(local)",
+      "g.V().hasLabel('z').local(values('x').order().limit(1))",
+      "g.inject(0n, 0.0d, -0.0d).order().tail(1)",
+      "g.inject(0.0d, -0.0d, 0n).order().limit(1)",
+      "g.inject(0n, 0i, -0.0d).order().limit(1)", // 0i promotes to +0.0 against -0.0d: the same intransitive set
+    ]) expect(() => executeQuery(tri, q, {})).toThrow(RaisedByQuery);
+  });
+
+  // A BigInteger/BigDecimal SUBJECT against a `-0.0d` LITERAL widens both to BigDecimal, where
+  // `BigDecimal.valueOf(-0.0)` is an unsigned zero — EQUAL (`NumberHelper.java:362-399,850-859`). One rule in
+  // `numericPair`, so every predicate site and depth agrees; the two Double zeros still compare by sign.
+  describe('a stored big zero EQUALS a -0.0d literal, at every predicate site', () => {
+    for (const big of ['0n', '0m']) {
+      const s = seededStore();
+      for (const x of [big, '-0.0d', '0.0d']) executeQuery(s, `g.addV('z').property('x', ${x})`, {});
+      const at = (q: string) => typedAll(executeQuery(s, q, {}));
+      test.each([
+        ["g.V().hasLabel('z').values('x').is(eq(-0.0d)).count()", '2L'],
+        ["g.V().hasLabel('z').has('x', -0.0d).count()", '2L'],
+        ["g.V().hasLabel('z').has('x', neq(-0.0d)).count()", '1L'],
+        ["g.V().hasLabel('z').values('x').is(lte(-0.0d)).count()", '2L'],
+        ["g.V().hasLabel('z').values('x').is(gt(-0.0d)).count()", '1L'],
+        ["g.V().hasLabel('z').values('x').is(lt(-0.0d)).count()", '0L'],
+        ["g.V().hasLabel('z').has('x', within(-0.0d)).count()", '2L'],
+        ["g.V().hasLabel('z').has('x', without(-0.0d)).count()", '1L'],
+        ["g.V().hasLabel('z').has('x', inside(-0.0d, 1.0d)).count()", '1L'],
+        ["g.V().hasLabel('z').has('x', between(-0.0d, 1.0d)).count()", '3L'],
+        ["g.V().hasLabel('z').has('x', not(eq(-0.0d))).count()", '1L'],
+        ["g.V().hasLabel('z').has('x', eq(-0.0d).or(eq(5))).count()", '2L'],
+        ["g.V().hasLabel('z').where(values('x').is(eq(-0.0d))).count()", '2L'],
+        ["g.V().hasLabel('z').filter(has('x', eq(-0.0d))).count()", '2L'],
+        ["g.V().hasLabel('z').union(has('x', eq(-0.0d))).count()", '2L'],
+        ["g.V().hasLabel('z').local(has('x', lte(-0.0d))).count()", '2L'],
+        ["g.V().hasLabel('z').values('x').choose(is(eq(-0.0d)), constant(1), constant(0)).sum()", '2i'],
+        [`g.inject(${big}).is(eq(-0.0d)).count()`, '1L'],
+        [`g.inject(${big}).is(gt(-0.0d)).count()`, '0L'],
+      ])(`${big}: %s`, (q, expected) => expect(at(q)).toEqual([expected]));
+    }
+    test('a SMALL integral zero still promotes to +0.0d, above -0.0d', () => {
+      const s = seededStore();
+      for (const x of ['0n', '0L', '0i', '-0.0d']) executeQuery(s, `g.addV('z').property('x', ${x})`, {});
+      expect(typedAll(executeQuery(s, "g.V().hasLabel('z').values('x').is(eq(-0.0d)).count()", {}))).toEqual(['2L']);
+      expect(typedAll(executeQuery(s, "g.V().hasLabel('z').values('x').is(gt(-0.0d)).count()", {}))).toEqual(['2L']);
+      expect(typedAll(executeQuery(s, "g.inject(0L).is(gt(-0.0d)).count()", {}))).toEqual(['1L']);
+    });
+  });
+
   test('a value-stream tie SQLite also calls equal keeps arrival order', () => {
     // `0n` is stored INTEGER 0 and `-0.0d` REAL -0.0: equal bytes to SQLite, so the tie keeps the rows' order.
     expect(names("g.V().hasLabel('n').values('x').order().range(1, 2)")).toEqual(['-0d']);
