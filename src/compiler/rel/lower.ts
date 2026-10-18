@@ -582,13 +582,22 @@ export const framingMergeKey = (framing: RelFraming): ((rel: Rel) => readonly Ex
  * each arm's own `TraverserSet` before the arm runs (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:87-88,123-158`),
  * so an arm sees the merged slots in first-arrival order. Reproduced on the arms' shared input where it
  * carries an emission order (`mergeEqual`); a framing whose merge cannot be stated declines.
+ *
+ * Where the merge's order is OWED (`owed`, the branch's `branchOrderOwed`) and the input carries no order
+ * yet, it is POSITIONED first — the realization the emission key freezes anyway (`positioned`, declining
+ * under a slice where none is trivial) — so the merge has an arrival order to keep. Left unpositioned, the
+ * key numbered the UNMERGED starts: `g.V().hasLabel('person').out().union(local(in().values('name').order()))`
+ * ran the arm once per arrival of `v3` where the reference runs it over ONE slot of bulk 3, which
+ * `LocalStep` splits into consecutive units (`…/step/branch/LocalStep.java:80-88`).
  */
 export function armStartMerge(
-  input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
+  input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, owed?: { readonly slicing: boolean },
 ): Rel | null {
-  if (!encounterOf(input.channels)) return input;
+  const arrived = owed && !encounterOf(input.channels) ? positioned(input, fresh, owed.slicing) : input;
+  if (!arrived) return null;
+  if (!encounterOf(arrived.channels)) return arrived;
   const key = framingMergeKey(framing);
-  return key ? mergeEqual(input, key(input), Infinity, ctx, fresh) : null;
+  return key ? mergeEqual(arrived, key(arrived), Infinity, ctx, fresh) : null;
 }
 
 /**

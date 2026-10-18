@@ -314,7 +314,7 @@ export function unionArms(
   if (bodies.some((body) => seedsUngated(body!))) return null;
   // An option's own end merges equal traversers (`armEndMerges`) where a root or a local child would not:
   // where the merge's order or membership is read, that merge is not reproduced here, so decline.
-  if (endMergeObservable(ctx, position) && bodies.some((body) => armEndMerges(body!))) return null;
+  if (endMergeObservable(ctx, position) && bodies.some((body) => armEndMerges(body!, readPastBranch(ctx, position)))) return null;
   // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects one
   // start), an arm holding a barrier at any depth makes it ARM-major over the whole input (`branchMajor`) —
   // a single arm included — and that is how each arm is FED (`armScope`).
@@ -330,7 +330,10 @@ export function unionArms(
   // the position it ends with — or declines if it ends with none.
   if (args.length === 1) {
     if (isReductionArm(bodies[0]!)) return null;
-    const at = owed ? positioned(input, fresh, branchSliced(ctx, position)) : input;
+    // The one arm is still an option of a `BranchStep`: holding a barrier, it receives every start into its
+    // own `TraverserSet` first (`armStartMerge`) — a single-arm union is no exception.
+    const started = major === 'arm' ? armStartMerge(input, framing, ctx, fresh, owed ? { slicing: branchSliced(ctx, position) } : undefined) : input;
+    const at = started && (owed ? positioned(started, fresh, branchSliced(ctx, position)) : started);
     const only = at && continueAs(at, framing, bodies[0]!, 0, bulked, armCtx(bodies[0]!), fresh, labels);
     if (!only || (owed && !encounterOf(only.rel.channels))) return null;
     // A write in the single arm (`union(__.mergeV(…))`) threads its effects out — a `Tail`'s `effects`
@@ -344,7 +347,7 @@ export function unionArms(
   // ARM-major, every start is first merged into each arm's set (`armStartMerge`). Every arm here is lowered
   // over the whole input either way, so the two orders differ only in the KEY the merge is numbered by
   // (`branchMajor`, `emissionSource`).
-  const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
+  const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh, owed ? { slicing: branchSliced(ctx, position) } : undefined) : input;
   if (!merged) return null;
   const keys = branchKeys(merged);
   const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input, bodies.some((body) => armCollectsInOrder(body!)));
@@ -535,6 +538,13 @@ function endMergeObservable(ctx: ChainCtx, position: Arrival | undefined): boole
   return !reader || !SUBSUMING_MERGES.has(reader.name) || (reader.name === 'dedup' && (reader.args.length > 0 || !!reader.modulators?.length));
 }
 const SUBSUMING_MERGES: ReadonlySet<string> = new Set(['order', 'barrier', 'dedup']);
+
+/** Does anything PAST the branch read its order — a reader after it in its own list (`ORDER_READERS`), an
+ *  enclosing slice (`ctx.sliced`), or an owed enclosing merge (`ctx.bodyOrder`)? Unplaced answers yes. The
+ *  bare emission's order is the terminal's alone (`armEndMerges`' `readPast`). */
+const readPastBranch = (ctx: ChainCtx, position: Arrival | undefined): boolean =>
+  !position || ctx.sliced || ctx.bodyOrder === 'read'
+  || position.steps.slice(position.at + 1).some((s) => ORDER_READERS.has(s.name) && !isLocalScope(s));
 
 export function variantMerge(
   arms: readonly Tail[], labels: AliasMap, fresh: Minter,
@@ -781,9 +791,9 @@ export function chooseOptions(
   const owed = branchOrderOwed(ctx, position);
   const optionBodies = arms.map((arm) => (arm.discard ? [] : seam.body(arm.nested, 'child')));
   if (optionBodies.some((body) => !!body && seedsUngated(body))) return null;
-  if (endMergeObservable(ctx, position) && optionBodies.some((body) => !!body && armEndMerges(body))) return null;
+  if (endMergeObservable(ctx, position) && optionBodies.some((body) => !!body && armEndMerges(body, readPastBranch(ctx, position)))) return null;
   const major = branchMajor(step, optionBodies, ctx);
-  const startMerged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
+  const startMerged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh, owed ? { slicing: branchSliced(ctx, position) } : undefined) : input;
   if (!startMerged) return null;
   const keys = branchKeys(startMerged);
   const from = emissionSource(startMerged, owed, branchSliced(ctx, position), major, keys, fresh, input, optionBodies.some((body) => !!body && armCollectsInOrder(body)));
@@ -1159,7 +1169,7 @@ export function chooseArms(
   const [then, otherwise] = bodies;
   if (!condition?.length || !then?.length) return null;
   if (seedsUngated(then) || (otherwise && seedsUngated(otherwise))) return null;
-  if (endMergeObservable(ctx, position) && (armEndMerges(then) || (!!otherwise && armEndMerges(otherwise)))) return null;
+  if (endMergeObservable(ctx, position) && (armEndMerges(then, readPastBranch(ctx, position)) || (!!otherwise && armEndMerges(otherwise, readPastBranch(ctx, position))))) return null;
 
   // A `choose` is a `BranchStep` like `union` — barrier-free it is TRAVERSER-major, an arm holding a barrier
   // makes it ARM-major (`BranchStep.java:143-150`). Only the ARM bodies decide `hasBarrier` (the condition
@@ -1169,7 +1179,7 @@ export function chooseArms(
   // `[then, else]` by the emission key wherever the order is owed. See `unionArms`.
   const owed = branchOrderOwed(ctx, position);
   const major = branchMajor(step, [then, otherwise ?? []], ctx);
-  const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh) : input;
+  const merged = major === 'arm' ? armStartMerge(input, framing, ctx, fresh, owed ? { slicing: branchSliced(ctx, position) } : undefined) : input;
   if (!merged) return null;
   const keys = branchKeys(merged);
   const from = emissionSource(merged, owed, branchSliced(ctx, position), major, keys, fresh, input, [then, otherwise ?? []].some(armCollectsInOrder));

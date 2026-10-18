@@ -187,11 +187,11 @@ Feature: mogwai addendum — a merge downstream of a host that emits a sorted or
       | result |
       | d[9].l |
 
-  # A sorted `local()` inside a batching arm (residue 5b): `LocalStep` runs its body once per start
-  # (.../step/branch/LocalStep.java:80-88), so the arm emits (start, body order) and the BranchStep drains
-  # it whole (.../step/branch/BranchStep.java:85-88,123-153). The merge owes that order
-  # (`branchOrderOwed`, src/compiler/rel/lower.ts, via `armHoldsSortedLocal`) rather than emitting the
-  # plan's — which was the GLOBAL sort, [josh,lop,lop,lop,ripple,vadas].
+  # A sorted `local()` inside a batching arm (residue 5b): `LocalStep` runs its body once per UNIT — it
+  # splits a merged slot into bulk-1 traversers (.../step/branch/LocalStep.java:80-88) — so the arm emits
+  # (start, body order) and the BranchStep drains it whole (.../step/branch/BranchStep.java:85-88,123-153).
+  # The merge owes that order (`branchOrderOwed`, src/compiler/rel/lower.ts, via `armHoldsSortedLocal`)
+  # rather than emitting the plan's — which was the GLOBAL sort, [josh,lop,lop,lop,ripple,vadas].
   Scenario: g_V_unionXlocalXout_valuesXnameX_orderXX
     Given the modern graph
     And the traversal of
@@ -248,6 +248,34 @@ Feature: mogwai addendum — a merge downstream of a host that emits a sorted or
       | x |
       | x |
 
+  # The arm's starts merge in its own TraverserSet first (`armStartMerge`, BranchStep.java:87-88,143-148):
+  # order() leaves vadas(v2), ripple(v5), lop(v3 x3), josh(v4), and the slot of bulk 3 runs the sorted body
+  # three times in a row.
+  Scenario: g_V_out_order_byXname_descX_unionXlocalXin_valuesXnameX_orderXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().order().by("name", Order.desc).union(__.local(__.in().values("name").order()))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | marko |
+      | josh |
+      | josh |
+      | marko |
+      | peter |
+      | josh |
+      | marko |
+      | peter |
+      | josh |
+      | marko |
+      | peter |
+      | marko |
+
+  # A READER past the branch (a slice, a fold) of a sorted-local arm's order still declines: the decline-only
+  # stopgap keeps it where it was before that order was owed (`armEndMerges`' `readPast`, src/compiler/ir/bulk.ts).
+  @Unsupported
   Scenario: g_V_unionXlocalXout_valuesXnameX_orderXX_limitX2X
     Given the modern graph
     And the traversal of

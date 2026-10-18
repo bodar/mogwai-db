@@ -139,6 +139,12 @@ lowered.
   (5b) **a merge downstream of a host that emits a sorted order** — a sorted `local()` inside a batching arm
   now OWES its (start, body order) (`armHoldsSortedLocal`, `ir/bulk.ts`, read by `branchOrderOwed` and the
   terminal seed), so `g.V().union(local(out().values('name').order()))` is `[josh, lop, vadas, lop, ripple, lop]`.
+  Over a MERGED slot the per-arrival interleave is the reference's too: `LocalStep` splits a slot into bulk-1
+  units and runs the body once per unit (`vendor/tinkerpop/…/step/branch/LocalStep.java:80-88`), so only the
+  slot's POSITION moves — the arm-start merge (`armStartMerge`, now also on a single-arm `union` and positioned
+  first where the owed order has none yet) places it. Still DECLINING as a decline-only stopgap: a READER past the
+  branch of that order (`union(local(…sorted)).fold()`/`.limit(n)`, `choose(…).fold()` — `armEndMerges`'
+  `readPast`); the same keys answer it exactly, so lifting it is verification, not substrate.
   What remains DECLINES (`sortedHostMergeAt`): a `LazyBarrierStrategy` NoOp after a flat-map downstream of a
   sorted `optional`/`local`/`union`/`choose` host (`…optional(out().order().by('name')).values('name').is(neq('x'))`,
   ref merged at first arrival), because the exact scan cannot place merges past a bulk-forwarding host

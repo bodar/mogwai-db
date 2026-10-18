@@ -371,3 +371,45 @@ describe('a sack with no merge operator merges nothing — B_O_S_SE_SL_Traverser
     await expect(run('g.withSack(1, sum).V().both().both().limit(4).sack()')).rejects.toThrow(/not supported/);
   });
 });
+
+describe('a sorted local() runs once per UNIT of a merged slot — LocalStep.java:80-88', () => {
+  // `LocalStep.nextStart` splits the slot it pulls into bulk-1 units, so a slot of bulk 3 runs the sorted body
+  // three times in a row: `josh,marko,peter` x3, never `josh x3, marko x3, peter x3`. What the slot merge moves
+  // is only WHERE those runs sit — together, at the slot's first arrival.
+  const V3_RUNS = ['josh', 'marko', 'peter', 'josh', 'marko', 'peter', 'josh', 'marko', 'peter'];
+  const SORTED = ['josh', 'josh', 'josh', 'josh', 'marko', 'marko', 'marko', 'marko', 'marko', 'peter', 'peter', 'peter'];
+
+  test('the slots are the reference’s wherever their order is pinned', async () => {
+    // order() merges v3 into one slot: vadas(v2), ripple(v5), lop(v3 x3), josh(v4).
+    const expected = ['marko', 'josh', ...V3_RUNS, 'marko'];
+    expect(await run('g.V().out().order().by("name", desc).local(__.in().values("name").order())')).toEqual(expected);
+    expect(await run('g.V().out().order().by("name", desc).union(__.local(__.in().values("name").order()))')).toEqual(expected);
+    expect(await run('g.V().out().order().by("name", desc).choose(__.hasLabel("software"), __.local(__.in().values("name").order()), __.constant("z"))'))
+      .toEqual(['josh', ...V3_RUNS, 'z', 'z']);
+  });
+
+  test('a single-arm union holding a barrier still merges its starts into the arm’s set — BranchStep.java:87-88,143-148', async () => {
+    // hasLabel() after V() keeps LazyBarrierStrategy from placing a merge after out() (LazyBarrierStrategy.java:113-115),
+    // so only the arm's own TraverserSet merges the three v3 arrivals — the two-arm form always did; the
+    // single-arm one ran its arm once per arrival.
+    for (const q of [
+      'g.V().hasLabel("person").out().union(__.local(__.in().values("name").order()))',
+      'g.V().hasLabel("person").out().union(__.local(__.in().values("name").order()), __.constant("y"))',
+      'g.V().out().union(__.local(__.in().values("name").order()))',
+      'g.V().out().local(__.in().values("name").order())',
+    ]) {
+      const names = (await run(q)).filter((v: unknown) => v !== 'y');
+      expect(names.join(',')).toContain(V3_RUNS.join(','));
+      expect([...names].sort()).toEqual(SORTED);
+    }
+  });
+
+  test('a reader of a sorted-local arm’s order still declines — the decline-only stopgap', async () => {
+    for (const q of [
+      'g.V().out().union(__.local(__.in().values("name").order())).fold()',
+      'g.V().out().union(__.local(__.in().values("name").order())).limit(4)',
+      'g.V().union(__.local(__.out().values("name").order())).limit(2)',
+      'g.V().choose(__.hasLabel("person"), __.local(__.out().values("name").order()), __.constant("x")).fold()',
+    ]) await expect(run(q)).rejects.toThrow(/not supported/);
+  });
+});

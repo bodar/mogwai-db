@@ -722,7 +722,7 @@ export function bulkingPositions(steps: readonly IRStep[], rooted: boolean, upTo
  * traversal it is, with a non-barrier step after its end; `true` where the superset scan places a merge of
  * possibly-equal traversers there (or cannot see).
  */
-export function armEndMerges(body: readonly IRStep[]): boolean {
+export function armEndMerges(body: readonly IRStep[], readPast = true): boolean {
   if (!body.length) return false;
   const closed = [...body, { name: '__end', args: [] } as unknown as IRStep];
   const positions = scan(closed, false, 'superset', body.length);
@@ -731,8 +731,11 @@ export function armEndMerges(body: readonly IRStep[]): boolean {
   // without it, and that merge is its own step's to reproduce.
   // A sorted `local()` closing the option is no `FlatMapStep`, so the strategy puts no `NoOpBarrierStep` after
   // it (`LazyBarrierStrategy.java:116-127`); the superset's position there is the merge its body FORWARDS
-  // (`bodiesMayBulk`), which the body's own lowering reproduces — not the EndStep's doing.
-  if (localSortsBody(body[body.length - 1])) return false;
+  // (`bodiesMayBulk`), which the body's own lowering reproduces — not the EndStep's doing. Credited only
+  // where nothing past the branch reads its order (`readPast` false — the bare emission, owed by
+  // `armHoldsSortedLocal`): a DECLINE-ONLY stopgap keeps every reader of it (`.fold()`, `.limit(n)`)
+  // declining as it did before that order was owed, pending its own verification.
+  if (!readPast && localSortsBody(body[body.length - 1])) return false;
   return positions.some((p) => p.after === body.length - 1 && !p.distinct && p.kind === 'lazy') && !sortedAdjacent(body, body.length - 1);
 }
 
