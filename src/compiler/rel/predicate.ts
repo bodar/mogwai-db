@@ -931,6 +931,9 @@ const isInteger = (k: Expr): Expr => binary('=', { kind: 'call', fn: 'typeof', a
 export const ZERO_CLASSES_UNORDERED = 'ordering a big-number zero among both signed Double zeros is not supported';
 /** The deferral where the sort's zeros tie but the stream carries no arrival order to keep them in. */
 const ZERO_TIE_UNSTABLE = 'ordering a big-number zero beside another zero of a value stream is not supported';
+/** The deferral where two DISTINCT values tie under the comparator and the stream's tie-break (its value's
+ *  representation — there is no arrival order) would order them: `0m` beside `0.0d`, `1m` beside `1.0d`. */
+export const EQUAL_TIE_UNSTABLE = 'ordering distinct values that compare equal, in a stream with no arrival order, is not supported';
 /** The deferral where a key's zero class is not carried and a negative zero meets it. */
 const ZERO_CLASS_UNKNOWN = 'ordering -0.0 beside a zero of unknown number class is not supported';
 
@@ -953,7 +956,9 @@ const ZERO_CLASS_UNKNOWN = 'ordering -0.0 beside a zero of unknown number class 
  *   is the one order `NumberHelper.compare` gives a set of pairwise-equal values: the stable arrival order.
  *   That needs a tie-break that IS arrival order (`stable` — a carried encounter, an element's or a
  *   property's rowid, a list member's position); a value stream ties on its value's BYTES, which orders
- *   `0m` and `-0.0d` by representation, so there the row DEFERS (`ZERO_TIE_UNSTABLE`);
+ *   `0m` and `0.0d` by representation, so there a tie group whose tie values differ DEFERS
+ *   (`EQUAL_TIE_UNSTABLE` — the rule is the tie's, not the zero's: `1m` beside `1.0d` is the same tie), and
+ *   without a caller tie at all a big zero beside `-0.0` DEFERS (`ZERO_TIE_UNSTABLE`);
  * - a big zero beside BOTH signed zeros → no order is the reference's (it depends on the sort algorithm
  *   meeting an intransitive comparator), so the row DEFERS (`ZERO_CLASSES_UNORDERED`);
  * - an `unknown` key whose negative zero meets a non-negative one → DEFERS: its class is not carried.
@@ -967,15 +972,21 @@ const ZERO_CLASS_UNKNOWN = 'ordering -0.0 beside a zero of unknown number class 
  */
 export function orderedBy(
   rel: Rel, keys: readonly OrderKey[], fresh: Minter,
-  { stable = true, open = false }: { readonly stable?: boolean; readonly open?: boolean } = {},
+  { stable = true, open = false, tie }: {
+    readonly stable?: boolean; readonly open?: boolean;
+    /** An UNSTABLE sort's own tie-break (the payload), read off the relation it is handed — `orderRows`'. */
+    readonly tie?: (input: Rel) => readonly Expr[];
+  } = {},
 ): { readonly rel: Rel; readonly terms: readonly SortTerm[] } {
   const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
   const flagged = keys.some((key) => zeroesMixed(key.carrier));
+  // Does the sort owe the unstable-tie guard (below)?
+  const guarded = !stable && tie !== undefined && keys.some((key) => zeroesMixed(key.carrier) || key.carrier === 'big');
   const respelled = keys.some((key) => signTermOwed(key.carrier) && !cheap(key.expr));
   let input = rel;
   let exprs = keys.map((key) => key.expr);
   const name = (i: number): string => `sk${i}`;
-  const project = respelled || (flagged && keys.some((key) => !cheap(key.expr)));
+  const project = respelled || ((flagged || guarded) && keys.some((key) => !cheap(key.expr)));
   if (project) {
     input = make.project({
       id: fresh('skp'), input: rel, channels: rel.channels,
@@ -1013,6 +1024,26 @@ export function orderedBy(
     });
     exprs = exprs.map((e) => (e.kind === 'col' && e.rel === at.id ? col(input.id, e.name) : e));
   }
+  // AN UNSTABLE TIE. A sort with no arrival order breaks a key tie by the caller's `tie` — the value's own
+  // bytes. Where a key's type rides per row or is a BigInteger/BigDecimal, the key is a CAST of the stored
+  // value (`storedCompareOn`; a BigDecimal is stored as decimal TEXT), so two rows the comparator calls EQUAL
+  // can hold tie values SQLite does not (`0m` is TEXT `'0'`, `0.0d` INTEGER `0`, `1n` INTEGER `1`): the
+  // tie-break would order them by representation, where the reference keeps ARRIVAL order — `OrderGlobalStep`
+  // stable-sorts its `TraverserSet` over `NumberHelper.compare`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:78`,
+  // `.../util/NumberHelper.java:278-310`). So each key-tie group is read for a tie value that differs from
+  // another's (`min IS NOT max` over the group), and such a row DEFERS (`EQUAL_TIE_UNSTABLE`). Tie values
+  // SQLite calls equal (`1i` beside `1L`, `0n` beside `-0.0d`) keep the order the rows reached the sort.
+  let tieDiffers: SortTerm | undefined;
+  if (guarded && tie) {
+    const at = input;
+    const guard = unstableTieGuard(at, exprs, tie(at), fresh);
+    if (guard) {
+      input = guard.rel;
+      exprs = exprs.map((e) => (e.kind === 'col' && e.rel === at.id ? col(input.id, e.name) : e));
+      tieDiffers = guard.term;
+    }
+  }
   const flagOf = (i: number, which: string): Expr => col(input.id, `sz${i}${which}`);
   const terms = keys.flatMap((key, i): readonly SortTerm[] => {
     const k = exprs[i]!;
@@ -1025,13 +1056,41 @@ export function orderedBy(
     const sign: Expr = key.carrier === 'encoded'
       ? iif(and(flagOf(i, 'b'), zeroOf(k)), stable
         ? iif(and(flagOf(i, 'f'), flagOf(i, 'p')), defer(ZERO_CLASSES_UNORDERED), compilerInt(0))
-        : iif(flagOf(i, 'f'), defer(ZERO_TIE_UNSTABLE), compilerInt(0)), atan2(k))
+        : tieDiffers ? compilerInt(0) : iif(flagOf(i, 'f'), defer(ZERO_TIE_UNSTABLE), compilerInt(0)), atan2(k))
       : key.carrier === 'unknown'
         ? iif(and(and(flagOf(i, 'f'), flagOf(i, 'u')), zeroOf(k)), defer(ZERO_CLASS_UNKNOWN), atan2(k))
         : atan2(k);
     return [head, { expr: sign, dir: key.dir }];
   });
-  return { rel: input, terms };
+  return { rel: input, terms: tieDiffers ? [...terms, tieDiffers] : terms };
+}
+
+/**
+ * THE UNSTABLE-TIE GUARD — `rel` widened by, per `ties` expression, its `min` and `max` over each group of
+ * rows equal on `group` (a window), and the sort term that DEFERS (`EQUAL_TIE_UNSTABLE`) a row whose group
+ * holds two tie values SQLite does not call equal (`min IS NOT max`) — else a constant `0`. It is how a sort
+ * whose last resort is a row's own CONTENT, not its arrival, refuses to order two values the comparator
+ * calls equal by their representation: `orderedBy` over a value stream, and `positioned`'s content
+ * realization (`lower.ts`). `null` where there is no tie to read. Every `rel` column rides through by name.
+ */
+export function unstableTieGuard(
+  rel: Rel, group: readonly Expr[], ties: readonly Expr[], fresh: Minter,
+): { readonly rel: Rel; readonly term: SortTerm } | null {
+  if (!ties.length || !group.length) return null;
+  const spec = { partitionBy: group, orderBy: [] };
+  const specs = ties.flatMap((t, j) => [
+    [`stn${j}`, { kind: 'window-expr', fn: 'min', args: [t], spec }] as const,
+    [`stx${j}`, { kind: 'window-expr', fn: 'max', args: [t], spec }] as const,
+  ]);
+  const guarded = make.window({
+    id: fresh('stw'), input: rel, channels: rel.channels,
+    type: typeOf(...rel.type.cols, ...specs.map(([name]) => meta(name, 'any', true))), specs,
+  });
+  const differs = ties.map((_, j): Expr => ({ kind: 'binary', op: 'is not', left: col(guarded.id, `stn${j}`), right: col(guarded.id, `stx${j}`) }))
+    .reduce((a, b) => binary('or', a, b));
+  // `abs()` keeps the term NUMERIC to the emitter (see `orderedBy`'s deferral arm); the arm never yields a value.
+  const deferred: Expr = { kind: 'call', fn: 'abs', args: [deferralExpr(EQUAL_TIE_UNSTABLE, col(guarded.id, 'stn0'))] };
+  return { rel: guarded, term: { expr: { kind: 'call', fn: 'iif', args: [differs, deferred, compilerInt(0)] }, dir: 'asc' } };
 }
 
 /** How one side of a compare knows its zero's class — a `ZeroCarrier`, or a per-row test of the side's

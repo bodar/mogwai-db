@@ -31,7 +31,7 @@ import { whereHasScopeKey } from '../ir/labels.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
-import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, orderedBy, perRowSubject, predicateExpr, signedCompare, signTermOwed, storedCompareOn, SUBJECT_UNKNOWN, type CarriedKey, type OrderKey, type SubjectType, type ZeroCarrier } from './predicate.ts';
+import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, orderedBy, orderingKey, perRowSubject, predicateExpr, signedCompare, signTermOwed, storedCompareOn, SUBJECT_UNKNOWN, unstableTieGuard, type CarriedKey, type OrderKey, type SubjectType, type ZeroCarrier } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
@@ -340,8 +340,16 @@ export const positioned = (input: Rel, fresh: Minter, slicing: boolean): Rel | n
   const payload = payloadCols(input);
   if (!position) {
     if (slicing) return null;
-    const terms = input.type.cols.map((column) => ({ expr: col(input.id, column.name), dir: 'asc' as const }));
-    return renumber(input, terms, [...payload, ...carriedCols(channels)], channels, fresh);
+    // A VALUE stream realized by content orders two values the comparator calls EQUAL by their
+    // representation (`0.0d` before `0m`, `1i` before `1L`), which is no arrival order a consumer of the
+    // branch's order (a stable `order()`'s ties) may read — those rows DEFER (`unstableTieGuard`).
+    const typed = payload.some((column) => column.name === 'v') && payload.some((column) => column.name === 'vtype');
+    const guard = typed
+      ? unstableTieGuard(input, [orderingKey(col(input.id, 'vtype'), col(input.id, 'v')).key], [col(input.id, 'v'), col(input.id, 'vtype')], fresh)
+      : null;
+    const at = guard?.rel ?? input;
+    const terms = [...input.type.cols.map((column) => ({ expr: col(at.id, column.name), dir: 'asc' as const })), ...(guard ? [guard.term] : [])];
+    return renumber(at, terms, [...payload, ...carriedCols(channels)], channels, fresh);
   }
   return make.project({
     id: fresh('bq'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
@@ -1343,7 +1351,7 @@ export function orderRows(
   const fence = !freeRelIds(domain).size;
   const keyed = costly ? keyedSort(rel, sort.terms, sort.drop, fence, fresh) : undefined;
   const { rel: input, terms } = orderedBy(keyed?.rel ?? domain, keyed?.keys ?? orderKeys(sort.terms), fresh,
-    { stable: !!carried || opts.stableTie === true, open: !!keyed && !fence });
+    { stable: !!carried || opts.stableTie === true, open: !!keyed && !fence, ...(opts.tie ? { tie: opts.tie } : {}) });
   // The deterministic tie-break: the carried emission position where there is one (a STABLE re-mint), else
   // the shape's own last resort — an element's id, a scalar's value, a record's whole field tuple. A shape
   // that mints fresh has nothing to be stable against, so a MULTI-column tie is spelled here in full.

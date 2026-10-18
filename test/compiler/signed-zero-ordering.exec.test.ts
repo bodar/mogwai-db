@@ -126,9 +126,15 @@ describe('a BigInteger/BigDecimal zero ties -0.0d (NumberHelper promotes to BigD
     for (const q of [
       "g.V().hasLabel('t').order().by('x').values('name')", // 0m = -0.0d, 0m = 0.0d, -0.0d < 0.0d
       "g.V().hasLabel('t').fold().order(local).by('x').unfold().values('name')",
-      "g.V().hasLabel('m').values('x').order()", // a value stream ties on its bytes, not its arrival
-      "g.V().hasLabel('n2').values('x').order()",
+      "g.V().hasLabel('m').values('x').order()", // a value stream ties on its bytes ('0' TEXT), not its arrival
+      "g.V().hasLabel('m2').values('x').order()",
     ]) expect(() => executeQuery(big, q, {})).toThrow(RaisedByQuery);
+  });
+
+  test('a value-stream tie SQLite also calls equal keeps arrival order', () => {
+    // `0n` is stored INTEGER 0 and `-0.0d` REAL -0.0: equal bytes to SQLite, so the tie keeps the rows' order.
+    expect(names("g.V().hasLabel('n').values('x').order().range(1, 2)")).toEqual(['-0d']);
+    expect(names("g.V().hasLabel('n2').values('x').order().limit(1)")).toEqual(['-0d']);
   });
 
   // The same carrier, for the key's MAGNITUDE: a stored BigDecimal is decimal TEXT, so a child body's raw
@@ -151,4 +157,35 @@ test("an edge Property's natural order orders -0.0 below 0.0", () => {
   expect(run("g.V().hasLabel('e1').outE('r').properties('w').order().by(desc).value()")).toEqual(['0d', '-0d']);
   executeQuery(edges, "g.V().hasLabel('e1').as('a').addE('r').from('a').to('a').property('w', 0m).iterate()", {});
   expect(() => executeQuery(edges, "g.V().hasLabel('e1').outE('r').properties('w').order().value()", {})).toThrow(RaisedByQuery);
+});
+
+// A VALUE stream carries no arrival order (`orderRows`' scalar tie is the value), so a tie between two
+// DISTINCT numbers the comparator calls equal fell to the value's REPRESENTATION — a stored BigDecimal is
+// decimal TEXT, so `0m` sorted after `0.0d`/`0i`/`0L` whichever arrived first, and `limit(1)` took the wrong
+// element. The reference stable-sorts over `NumberHelper.compare` and keeps ARRIVAL order
+// (`.../step/map/OrderGlobalStep.java:78`, `.../util/NumberHelper.java:278-310`), which such a stream cannot
+// state, so the tie DEFERS (`unstableTieGuard`) — in either insertion order, and through a branch whose
+// input is realized by content (`positioned`). A by() sort carries the arrival order and answers it.
+describe('a value-stream tie between distinct equal numbers defers rather than order by representation', () => {
+  const ties = seededStore();
+  const sets: Record<string, readonly [string, string]> = {
+    b: ['0m', '0.0d'], rb: ['0.0d', '0m'], h: ['0m', '0i'], rh: ['0i', '0m'], u: ['0m', '0L'], ru: ['0L', '0m'],
+    r: ['1m', '1.0d'], rr: ['1.0d', '1m'], mn: ['1m', '1n'],
+  };
+  for (const [label, xs] of Object.entries(sets)) for (const x of xs) executeQuery(ties, `g.addV('${label}').property('x', ${x})`, {});
+  const forms = [
+    "values('x').order()", "values('x').order().limit(1)", "values('x').order().range(1, 2)",
+    "map(identity()).values('x').order()", "values('x').map(identity()).order()",
+    "values('x').union(identity()).order()", "properties('x').value().order()",
+  ];
+  test.each(Object.keys(sets).flatMap((label) => forms.map((form) => [label, form] as const)))('%s: %s', (label, form) =>
+    expect(() => executeQuery(ties, `g.V().hasLabel('${label}').${form}`, {})).toThrow(RaisedByQuery));
+
+  test('an arrival-carrying sort answers the stable order', () => {
+    const first = (label: string, q: string) => typedAll(executeQuery(ties, `g.V().hasLabel('${label}').${q}`, {}));
+    expect(first('rb', "values('x').order().by(asc).limit(1)")).toEqual(['0d']);
+    expect(first('rh', "values('x').order().by(identity(), asc).limit(1)")).toEqual(['0i']);
+    expect(first('rr', "order().by('x').values('x').limit(1)")).toEqual(['1d']);
+    expect(first('ru', "values('x').order().by(desc).limit(1)")).toEqual(['0L']);
+  });
 });
