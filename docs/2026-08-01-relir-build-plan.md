@@ -1194,6 +1194,18 @@ values frame as the enum. `split()` keeps the trailing empty token (commons `spl
 `test/java-strings.test.ts`. Baseline move: sql-hygiene `format` bytes 10328 -> 24807 (per-row rendering arms),
 compiler 360 -> 372, `math` bytes 31069 -> 32253 — reasons in the commits. CI green.
 
+✅ **Write body interleave LANDED ON TRUNK 2026-10-18 (`0fede73b`, `2c6cf741`, ff-write-body-interleave).**
+`readBeforeWrite`'s single-reached exemption is now ONE walker, `handsOnWithoutRereading` (`rel/write.ts`), at
+every depth: a body that fans one traverser out runs lazily (`vendor/tinkerpop/gremlin-core/.../step/branch/BranchStep.java`,
+`RepeatStep.java`), so nothing after the fan-out may observe the write. `local(out().both()).drop()`,
+`union(identity(), out()).drop()` and `repeat(…).emit()` forms refuse. `finalHop`'s counted lift (unbounded skip,
+bounded count off `outE()`/`inE()`) requires `distinctAt(hop)`: a pairwise-distinct entering stream AND nothing
+upstream observing the drop. A step standing on an edge observes an edge drop (a removed TinkerEdge has no
+vertices), except its own dropped traverser. An unbound `where(__.as('a')…)` start label declines instead of a
+compile-time ValueParseError (`WhereTraversalStep.java`, `Scoping.java`). Recorded loss in `outstanding-work.md`:
+`g.V(1).outE().inV().outE().drop()` now refuses on modern. Pinned in `test/write-interleave.exec.test.ts`,
+`test/L4-addendum/write-interleave.feature`, `where-start-label.feature`. No baseline moves. CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
