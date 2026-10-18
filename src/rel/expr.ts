@@ -65,6 +65,20 @@ export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'li
  * client guarantees same-name ⇒ same-value); a mechanical `'bound'` bind has no name and never dedups. */
 export const param = (value: unknown, name: string, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'parameter', name });
 
+/**
+ * A COMPILER-MINTED parameter name — the reuse key of a bind the compiler itself introduces (a barrier's
+ * re-injected survivor set, a ranking, a value resume), spelled where NO user parameter can be.
+ *
+ * A name is the bind-dedup's reuse key (`keyedValue`, `sql/kernel/q.ts`), so a minted name a user
+ * parameter can also spell MERGES the two binds: `regexSurvivorsParam` was `_mogwai_regex_survivors_<at>`,
+ * which the grammar lexes as a variable, and `has('name', within(_mogwai_regex_survivors_1))` with that
+ * user parameter after a regex barrier answered `[]` where the reference answers `[lop]`. A user parameter
+ * reaches the IR only by a `variable` in the query text — `Gremlin.g4`'s `Identifier`
+ * (`vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4`: `IdentifierStart IdentifierPart*`),
+ * whose alphabet has no `~` and no `:` — so a name holding both cannot collide by construction.
+ */
+export const compilerParamName = (name: string): string => `~mogwai:${name}`;
+
 /** Does this `Lit` render as a DO bind parameter (a `?`), rather than inline SQL text? A user PARAMETER
  * and a mechanical `'bound'` bind (an oversized collection / decimal tail) both do; a compiler-authored
  * constant (`compiler-*`) renders as an escaped literal and spends none of the 100-parameter budget. The

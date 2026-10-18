@@ -5,6 +5,7 @@ import type { Plan, SegmentPlan } from '../segment.ts';
 import { lowerToRel, type Lowering } from './lower.ts';
 import { valueHead } from './barrier-value.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
+import { compilerParamName } from '../../rel/expr.ts';
 
 // ---------- regex as a barrier — `has(key, TextP.regex(...))`, on the RelIR route ----------
 //
@@ -48,14 +49,14 @@ import { UnsupportedTraversal } from '../unsupported.ts';
 // dependency (root working rules); declining the rest is what keeps the subset exact.
 
 /** The reserved bind name the resume's re-injected `within(<survivors>)` at chain position `at` carries.
- *  Underscore-prefixed and mogwai-namespaced so it cannot collide with a user bound-param. It names the
+ *  Minted by `compilerParamName`, so no user parameter can spell it (`rel/expr.ts`). It names the
  *  ONE `json_each` bind that survivor set crosses as, and it is PER POSITION because a resumed statement
  *  can hold SEVERAL re-injected `within`s: a further regex in the tail becomes the next segment, whose
  *  resume re-injects into the chain that still carries the first barrier's `within`. A name is the
  *  bind-dedup's REUSE KEY (`keyedValue`, `rel/emit.ts`), so one shared name made both `within`s read ONE
  *  survivor set — `has(name, regex('marko')).out().has(name, regex('lop'))` answered `[]`. Positions in
  *  one chain are distinct, so the names are too. */
-const regexSurvivorsParam = (at: number): string => `_mogwai_regex_survivors_${at}`;
+const regexSurvivorsParam = (at: number): string => compilerParamName(`regex_survivors_${at}`);
 
 /** A `has(key, regex/notRegex(pattern))` occurrence in the chain — the ONLY position regex is lifted
  *  to a barrier. Every other position (`is(regex)`, `where(...regex)`, `match`, a composed predicate)

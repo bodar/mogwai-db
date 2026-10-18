@@ -9,6 +9,7 @@ import type { BarrierInput } from '../../services/spi/types.ts';
 import { listSeed, lowerListResumeOf, lowerMapResumeOf, lowerRankHead, lowerToRel, mapSeed, type Lowering } from './lower.ts';
 import { buildValueStreamTransformSegment, buildValueTransformSegment, mapHead, valueHead } from './barrier-value.ts';
 import { rankKeys } from './ranked-order.ts';
+import { compilerParamName } from '../../rel/expr.ts';
 import { finishLowering } from './spine.ts';
 
 /** Re-plan a value-transform barrier's resume TAIL as a nested segment rooted at the re-injected values
@@ -201,7 +202,7 @@ export function buildRankedOrderSegment(
     if (head.kind !== 'read') continue;
     // One bind per ranked step, named by its position in the ranking so two ranked `order()`s in one
     // plan never share a parameter.
-    const param = `_mogwai_order_rank_${ranked.size}`;
+    const param = compilerParamName(`order_rank_${ranked.size}`);
     const under = (ranks: readonly (readonly [string, number])[]): Lowering =>
       ({ ...lowering, rankedOrders: new Map([...ranked, [step, { kind: 'ranks', ranks, param }]]) });
     // DECLINE NOW rather than raise after the head has run: the resume's plan does not depend on the

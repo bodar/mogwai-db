@@ -23,6 +23,7 @@
 // description of a plan, importing only leaf types, never the store / framing / engine.
 
 import type { Compiled, Executable } from '../sql/kernel/render.ts';
+import { UnsupportedTraversal } from './unsupported.ts';
 import type { ForeignResult } from '../api.ts';
 import type { BarrierInput, BarrierOutput, BarrierResidency, CallParams } from '../services/spi/types.ts';
 
@@ -105,10 +106,16 @@ export type Plan =
  * has run there is nothing left to decline to. Its own class so a COMPILE-TIME probe of a resume (the
  * ranked-order barrier plans its rest before any head runs) can turn exactly this into a decline, while
  * every other throw — a lowering bug, a kernel invariant — still surfaces as the defect it is.
+ *
+ * It IS an `UnsupportedTraversal`: to the user an uncoverable resume is the same answer as an uncoverable
+ * chain — a clear decline, never an internal error. Before, a plain `Error` subclass reached the client with
+ * a developer-facing message (`g.V().has('name', regex('m')).sideEffect(out()).values('name')`), where the
+ * same tail without the regex barrier declined as `UnsupportedTraversal`.
  */
-export class ResumeGap extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ResumeGap';
+export class ResumeGap extends UnsupportedTraversal {
+  constructor(sentence: string) {
+    super(sentence);
+    this.message = `this traversal is not supported yet: ${sentence}`;
+    this.name = 'UnsupportedTraversal';
   }
 }

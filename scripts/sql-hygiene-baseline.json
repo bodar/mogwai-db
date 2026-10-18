@@ -38,7 +38,7 @@
   "as": {
     "binds": 4,
     "bytes": 2046,
-    "compiler": 73,
+    "compiler": 75,
     "bound": 0
   },
   "asBool": {
@@ -193,8 +193,8 @@
   },
   "filter": {
     "binds": 0,
-    "bytes": 3060,
-    "compiler": 93,
+    "bytes": 4002,
+    "compiler": 105,
     "bound": 0
   },
   "flatMap": {
@@ -319,8 +319,8 @@
   },
   "length": {
     "binds": 0,
-    "bytes": 3395,
-    "compiler": 87,
+    "bytes": 3828,
+    "compiler": 95,
     "bound": 0
   },
   "limit": {
@@ -464,7 +464,7 @@
   "property": {
     "binds": 20,
     "bytes": 20474,
-    "compiler": 322,
+    "compiler": 367,
     "bound": 0
   },
   "range": {
@@ -517,8 +517,8 @@
   },
   "substring": {
     "binds": 0,
-    "bytes": 3911,
-    "compiler": 99,
+    "bytes": 4344,
+    "compiler": 107,
     "bound": 0
   },
   "sum": {
@@ -536,7 +536,7 @@
   "to": {
     "binds": 13,
     "bytes": 2140,
-    "compiler": 297,
+    "compiler": 312,
     "bound": 0
   },
   "toLower": {

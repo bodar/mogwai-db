@@ -10,6 +10,7 @@ import { BigDecimal, Duration, flatType, normalizeTypeName, numberClassOf, STORA
 import { constLit } from './const.ts';
 import { adjacent, decimalCompare, decimalOf, doubleText, floatingDecimal, floatText } from '../../gremlin/float.ts';
 import { floatValueOf } from './float.ts';
+import { containedText } from './text-units.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -1266,7 +1267,9 @@ export function predicateExpr(
       : { kind: 'call', fn: 'like', args: [like.pattern, subject, compilerText('\\')] };
     // The type gate stays outside the negative form: null is a legal String reference and the
     // negative TextP variants return true for it, but a non-String is not a TextP match at all.
-    return binary('and', textSubject(subject, type), like.negated ? negated(call) : call);
+    // `like` reads its text as a C string, so a NUL in either side defers (`containedText`, `text-units.ts`).
+    const matched = like.negated ? negated(call) : call;
+    return binary('and', textSubject(subject, type), like.nullOperand ? matched : containedText(subject, like.pattern, matched));
   }
 
   if (op === 'typeOf') return operands.length === 1 ? typeOfExpr(subject, operands[0].value, type) : null;

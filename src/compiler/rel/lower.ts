@@ -1,6 +1,6 @@
 import { stringifyExactOrRefuse } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, compilerParamName, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -4452,8 +4452,8 @@ export function lowerPairResume(
 }
 
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
- *  of a data-sized set, underscore-namespaced so it cannot collide with a user parameter. */
-const VALUE_RESUME_PARAM = '_mogwai_value_resume';
+ *  of a data-sized set, minted by `compilerParamName` so no user parameter can spell it. */
+const VALUE_RESUME_PARAM = compilerParamName('value_resume');
 
 /**
  * THE VALUE-SOURCE RESUME — substrate A's value arm, the value-stream twin of `lowerForeignResume`.

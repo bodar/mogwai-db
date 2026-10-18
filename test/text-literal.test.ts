@@ -9,6 +9,11 @@ import { UnsupportedTraversal } from '../src/compiler/unsupported.ts';
 import { unescapeJava } from '../src/gremlin/frontend.ts';
 import { ValueParseError } from '../src/gremlin/coerce.ts';
 import { run, seededStore } from './support/harness.ts';
+import { executeQuery } from './support/executor.ts';
+import { typedAll } from './support/decode.ts';
+import { stringifyExact } from '../src/json-exact.ts';
+import { compilerParamName } from '../src/rel/expr.ts';
+import { UNREADABLE_TEXT } from '../src/compiler/rel/text-units.ts';
 
 /** A NUL, or a surrogate outside a well-formed pair — the only strings SQL text cannot carry faithfully. */
 const unsayable = (s: string): boolean => /\u0000|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);
@@ -104,5 +109,111 @@ describe('a Gremlin string literal decodes with unescapeJava (GenericLiteralVisi
       "g.V().project('a').by(constant('\\0'))", "g.V().group().by(constant('\\udc00'))", "g.V().values('\\0')",
       "g.addV('p').property('name','x\\ud83dy')",
     ]) expect(() => run(seededStore(), gremlin)).toThrow(UnsupportedTraversal);
+  });
+});
+
+// THE STRING VALUE, wherever it enters SQL — not only as statement text. A string reaches SQLite three
+// more ways than `textLiteral`: a BIND (a user parameter, a mechanical bind), a JSON text (a map/list
+// literal's blob, a bound collection, a barrier's re-injected values), and as stored DATA. Each one is
+// exact or declines, at every depth a value can sit at.
+describe('a string VALUE that SQLite would misread declines at every door, never a different answer', () => {
+  const runP = (gremlin: string, params: Record<string, unknown> = {}): string[] =>
+    typedAll(executeQuery(seededStore(), gremlin, params));
+  const NUL = 'a\u0000bc';
+
+  test('a lone surrogate in ANY string leaf of a JSON text declines (`assertCarriable` in `stringifyExact`)', () => {
+    for (const gremlin of [
+      "g.inject(['k':'\\ud83d']).select('k')", "g.inject(['\\ud83d':'k'])", "g.inject(['k':['\\udc00']])",
+      "g.V().has('name','marko').constant(['k':'\\ud83d']).select('k')", "g.withSideEffect('m',['k':'\\ud83d']).inject(1).select('m')",
+    ]) expect(() => runP(gremlin)).toThrow(UnsupportedTraversal);
+    // `stringifyExact` is the ONE writer of a JSON text headed into SQLite; a key is a leaf too.
+    expect(() => stringifyExact({ k: '\ud83d' })).toThrow(UnsupportedTraversal);
+    expect(() => stringifyExact({ '\udc00': 1 })).toThrow(UnsupportedTraversal);
+    expect(stringifyExact({ k: 'a\u0000😀' })).toBe('{"k":"a\\u0000😀"}');   // a NUL and a PAIR are carried
+  });
+
+  test('a lone surrogate in a BOUND string declines (the driver would bind U+FFFD)', () => {
+    for (const [gremlin, params] of [
+      ['g.inject(x)', { x: '\ud83d' }], ['g.inject(x).toUpper()', { x: 'a\ud83d' }], ['g.inject(x)', { x: ['\udc00'] }],
+      ["g.V().has('name', x).count()", { x: '\ud83d' }], ["g.V().has('name', within(x)).count()", { x: ['\ud83d', 'marko'] }],
+    ] as const) expect(() => runP(gremlin, params)).toThrow(UnsupportedTraversal);
+  });
+
+  // A NUL arriving as DATA travels whole (a bind and a JSON escape both carry it), so the value itself is
+  // exact; only SQLite's `length`/`substr`/`like` stop at it, and those defer for that row.
+  test('a NUL carried as data is exact where nothing reads it as text', () => {
+    expect(runP('g.inject(x)', { x: NUL })).toEqual([JSON.stringify(NUL)]);
+    expect(runP("g.inject(['k':'a\\u0000b']).select('k')")).toEqual([JSON.stringify('a\u0000b')]);
+    expect(runP("g.V().has('name', x).count()", { x: NUL })).toEqual(['0L']);
+  });
+
+  const MAPPED = "g.inject(['k':'a\\u0000bc']).select('k')";
+  test.each([
+    // the bind door
+    ['g.inject(x).length()'], ['g.inject(x).map(length())'], ['g.inject(x).local(length())'], ['g.inject(x).substring(2)'],
+    ['g.inject(x).substring(1,3)'], ["g.inject(x).is(containing('b'))"], ["g.inject(x).is(endingWith('c'))"],
+    ["g.inject(x).is(notContaining('b'))"], ["g.V().has('name', containing(x)).values('name')"],
+    ["g.inject('ab').is(containing(x))"],
+    // the JSON door, at every depth
+    [`${MAPPED}.length()`], [`${MAPPED}.substring(2)`], [`${MAPPED}.is(containing('b'))`], [`${MAPPED}.map(length())`],
+    [`${MAPPED}.local(length())`], [`${MAPPED}.union(length(),length())`],
+    [`${MAPPED}.choose(length().is(4),constant('y'),constant('n'))`], [`${MAPPED}.where(length().is(1))`],
+    [`${MAPPED}.coalesce(length(), constant(0))`], ["g.inject(['k':'a\\u0000bc']).unfold().select(values).length()"],
+    ["g.V().has('name','marko').constant(['k':'a\\u0000b']).select('k').length()"],
+    ["g.withSideEffect('m',['k':'a\\u0000bc']).inject(1).select('m').select('k').length()"],
+  ])('a NUL through a text function defers: %s', (gremlin) => {
+    expect(() => runP(gremlin, { x: NUL })).toThrow(UNREADABLE_TEXT);
+  });
+
+  // `String.length()` counts UTF-16 units — `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/LengthGlobalStep.java:53` —
+  // and SQLite counts code points, so an astral character in a COUNTING function defers.
+  test.each([
+    ["g.inject('😀').length()"], ["g.inject('a😀b').substring(1,3)"], ["g.inject('a😀b').substring(3)"],
+    ["g.inject(['😀','ab']).length(local)"], ["g.inject(['a😀','ab']).substring(local, 1)"],
+    ["g.inject('😀').map(length())"], ["g.inject('😀').union(length(), constant(1))"],
+    ["g.addV('p').property('name','😀').values('name').length()"], ['g.inject(x).length()'],
+  ])('an astral character through a counting text function defers: %s', (gremlin) => {
+    expect(() => runP(gremlin, { x: '😀' })).toThrow(UNREADABLE_TEXT);
+  });
+
+  test('BMP text, and astral text through a unit-agnostic function, stay exact', () => {
+    expect(runP("g.inject('abc').length()")).toEqual(['3i']);
+    expect(runP("g.inject('abc').substring(1,3)")).toEqual(['"bc"']);
+    expect(runP("g.inject('\\uffff').length()")).toEqual(['1i']);
+    expect(runP("g.inject('a😀b').reverse()")).toEqual(['"b😀a"']);
+    expect(runP("g.inject('a😀b').is(containing('😀'))")).toEqual(['"a😀b"']);
+    expect(runP("g.V().values('name').length()")).toEqual(['5i', '5i', '3i', '4i', '6i', '5i']);
+    expect(runP("g.V().has('name', containing(x)).values('name')", { x: 'ar' })).toEqual(['"marko"']);
+  });
+});
+
+describe('a compiler-minted bind name is one no user parameter can spell', () => {
+  test('a user parameter named like the old reserved survivor bind keeps its own value after a regex barrier', () => {
+    const answer = typedAll(executeQuery(seededStore(),
+      "g.V().has('name', regex('marko')).out().has('name', within(_mogwai_regex_survivors_1)).values('name')",
+      { _mogwai_regex_survivors_1: ['lop'] }));
+    expect(answer).toEqual(['"lop"']);
+  });
+
+  test("the minted name lies outside the grammar's Identifier alphabet", () => {
+    // `Gremlin.g4` `Identifier: IdentifierStart IdentifierPart*` — `$`, `A-Z`, `_`, `a-z`, digits and non-ASCII ranges.
+    expect(compilerParamName('x')).toMatch(/[~:]/);
+    expect(() => run(seededStore(), `g.inject(${compilerParamName('x')})`)).toThrow(ValueParseError);
+  });
+});
+
+describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never an internal error', () => {
+  test.each([
+    ["g.V().has('name', regex('m')).sideEffect(out()).values('name')"],
+    ["g.V().has('name', regex('m')).out().has('name', regex('l')).local(values('name'))"],
+    ["g.V().has('name', regex('m')).local(out().has('name', regex('l'))).values('name')"],
+    ["g.V().has('name', regex('m')).repeat(out()).until(has('name', regex('l'))).values('name')"],
+    ["g.V().has('name', regex('m')).sideEffect(out().has('name', regex('l'))).values('name')"],
+  ])('%s', (gremlin) => {
+    let thrown: unknown;
+    try { executeQuery(seededStore(), gremlin); } catch (error) { thrown = error; }
+    expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+    expect((thrown as Error).message).toStartWith('this traversal is not supported yet: ');
+    expect((thrown as Error).name).toBe('UnsupportedTraversal');
   });
 });

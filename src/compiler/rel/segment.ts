@@ -520,7 +520,7 @@ function planOf(steps: readonly IRStep[], request: SegmentRequest): Plan {
   const lowered = lowerToRel(steps, request.lowering);
   const ranked = lowered ? null : rankedOrderPlan(steps, request);
   if (ranked) return ranked;
-  if (!lowered) throw new ResumeGap('barrier resume: no lowering covers the traversal after the barrier — push the unsupported step into the sub-traversal the service runs, or file it as a resume gap');
+  if (!lowered) throw new ResumeGap('barrier resume: no lowering covers the traversal after the barrier');
   return { kind: 'sql', compiled: finishLowering(lowered) };
 }
 

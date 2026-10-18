@@ -32,6 +32,7 @@
 // with a point (`1.0`, `-0.0`).
 import { binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
 import { RaisedByQuery } from './rel/raise.ts';
+import { assertCarriable } from './sql/kernel/q.ts';
 
 const WIDE_DIGITS =/\d{16}|\d[eE]|\d\.0/;
 const INTEGRAL = /^-?\d+$/;
@@ -136,7 +137,12 @@ export function decodeCarriers(value: unknown): any {
  *  re-injected values and a retained binding alike. */
 export function stringifyExact(value: unknown): string | null {
   let lost = false;
-  const text = JSON.stringify(value, (_key, member: unknown) => {
+  const text = JSON.stringify(value, (key, member: unknown) => {
+    // EVERY STRING LEAF — a member and an object key alike — obeys the carrier rule (`assertCarriable`):
+    // JSON spells a lone surrogate as an ASCII `\ud83d` escape, so the statement-text check never sees it,
+    // and SQLite's JSON reader turns it into `''` (`g.inject(['k':'\ud83d']).select('k')` answered `""`).
+    assertCarriable(key);
+    if (typeof member === 'string') assertCarriable(member);
     // A raw exact number is a Double only when spelled with a point or exponent (`exactNumberOf`).
     const raw = isExactNumber(member) ? exactNumberOf(member) : null;
     const number = typeof member === 'number' ? member : raw && !raw.integral ? Number(raw.text) : null;
