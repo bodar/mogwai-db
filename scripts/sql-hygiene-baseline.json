@@ -85,7 +85,7 @@
   },
   "choose": {
     "binds": 0,
-    "bytes": 8757,
+    "bytes": 8812,
     "compiler": 198,
     "bound": 0
   },
@@ -325,13 +325,13 @@
   },
   "limit": {
     "binds": 0,
-    "bytes": 6940,
+    "bytes": 7537,
     "compiler": 99,
     "bound": 0
   },
   "local": {
     "binds": 0,
-    "bytes": 6610,
+    "bytes": 6693,
     "compiler": 67,
     "bound": 0
   },
@@ -421,8 +421,8 @@
   },
   "order": {
     "binds": 0,
-    "bytes": 40689,
-    "compiler": 335,
+    "bytes": 40744,
+    "compiler": 337,
     "bound": 0
   },
   "out": {
@@ -439,7 +439,7 @@
   },
   "path": {
     "binds": 0,
-    "bytes": 8732,
+    "bytes": 9324,
     "compiler": 97,
     "bound": 0
   },
@@ -469,7 +469,7 @@
   },
   "range": {
     "binds": 0,
-    "bytes": 6015,
+    "bytes": 6471,
     "compiler": 100,
     "bound": 0
   },
@@ -505,8 +505,8 @@
   },
   "select": {
     "binds": 0,
-    "bytes": 54804,
-    "compiler": 342,
+    "bytes": 55274,
+    "compiler": 360,
     "bound": 0
   },
   "skip": {
@@ -565,8 +565,8 @@
   },
   "union": {
     "binds": 0,
-    "bytes": 10729,
-    "compiler": 103,
+    "bytes": 10838,
+    "compiler": 107,
     "bound": 0
   },
   "V": {
@@ -577,7 +577,7 @@
   },
   "value": {
     "binds": 0,
-    "bytes": 3239,
+    "bytes": 3266,
     "compiler": 38,
     "bound": 0
   },
@@ -589,7 +589,7 @@
   },
   "values": {
     "binds": 3,
-    "bytes": 6848,
+    "bytes": 6875,
     "compiler": 113,
     "bound": 0
   },

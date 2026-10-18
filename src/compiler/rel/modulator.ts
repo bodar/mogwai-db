@@ -224,6 +224,9 @@ export const isProductiveBy = (step: IRStep): boolean => step.productiveBy === t
 export interface ByProjection {
   readonly value: Expr;
   readonly present: Presence;
+  /** The value's scalar type where the producing arm KNOWS it (a child body's framing, an alias's
+   *  recorded type) — what lets `byKeyMaySignZero` skip the sign term for a key statically integral. */
+  readonly type?: ScalarType;
 }
 
 export function byProjection(
@@ -261,7 +264,7 @@ export function byProjection(
     // is a comparable value, and ordering by either would be a plausible-looking answer to a traversal
     // TinkerPop rejects. The body's own PRESENCE rides out — the seam's claim, never re-derived here.
     const produced = child.scalar(key.body, host);
-    return produced && produced.framing.kind === 'scalar' ? { value: produced.expr, present: produced.present } : null;
+    return produced && produced.framing.kind === 'scalar' ? { value: produced.expr, present: produced.present, type: produced.framing.type } : null;
   }
 
   if (key.kind === 'alias') {
@@ -272,7 +275,7 @@ export function byProjection(
     const scoped = scopeValue(key, host);
     if (!scoped || scoped.framing.kind !== 'scalar') return null;
     const [value, type] = [scoped.payload[0]![1], scoped.payload[1]?.[1]];
-    return { value: ordering && type ? storedCompareOn(type)(value) : value, present: scoped.present };
+    return { value: ordering && type ? storedCompareOn(type)(value) : value, present: scoped.present, type: scoped.framing.type };
   }
 
   if (host.kind === 'scalar') {
@@ -370,6 +373,27 @@ export const keepOnNamed = (keep: Expr, value: Expr, named: Expr): Expr | undefi
 export const valueMayBeNull = (modulation: Modulation, host: ChildHost): boolean =>
   modulation.key.kind === 'child' || modulation.key.kind === 'alias' || modulation.key.kind === 'column'
   || (modulation.key.kind === 'identity' && host.kind === 'scalar');
+
+/**
+ * CAN THIS PROJECTION'S VALUE BE A SIGNED FLOAT ZERO — does an ordering over it owe `orderingTerms`'
+ * sign term? ORDERABILITY is `NumberHelper.compare`, i.e. `Double.compare(-0.0, 0.0) = -1`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:277,670-680`),
+ * whichever `by()` produced the number — `OrderGlobalStep`/`OrderLocalStep` compare the PROJECTED key,
+ * not the traverser. Every key that reads a VALUE can hold one: a stored property, a child body, an
+ * alias, a map entry's side, a property's `T.value`, the scalar traverser itself. What cannot: an
+ * element's rowid (`by()` over an element), `T.id`/`T.label`/`T.key`, and any key whose producer
+ * reports a static non-floating type. Answered per KEY KIND, at the one place every `order()` position
+ * asks it, so no host can forget it.
+ */
+export const byKeyMaySignZero = (modulation: Modulation, host: ChildHost, projected?: ByProjection): boolean => {
+  const { key } = modulation;
+  // A STATICALLY non-floating key (a `count()`, an `asNumber(GType.INT)`, a typed literal) holds no zero
+  // sign; `BigDecimal` has no negative zero either. A per-row or unknown type may hold a Double.
+  if (projected?.type?.kind === 'static' && !['float', 'double', 'real'].includes(projected.type.type)) return false;
+  if (key.kind === 'identity') return host.kind === 'scalar';
+  if (key.kind === 'token') return host.kind === 'property' && key.token === 'value';
+  return true;
+};
 
 /** `byProjection`'s VALUE alone — for a consumer that owes no productivity drop (a token read, a key whose
  *  presence another column already answers). A consumer that DROPS on an unproductive `by()` takes

@@ -837,13 +837,56 @@ export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
  * not tie. The sign is read off `value` — the raw value the key was cast from, a column — rather than off
  * the key, which is a per-row CASE that a second spelling would duplicate. A key statically INTEGRAL
  * (`CAST … AS INT`) holds no negative zero and takes the key alone. The ONE spelling every `order()`
- * position over a value shares — the row-level sort and `order(Scope.local)`.
+ * position over a value shares — the row-level sort and `order(Scope.local)`, over the traverser itself
+ * AND over every `by()`-PROJECTED key that can carry a float (`byKeyMaySignZero`). A projected key has
+ * no raw column of its own, so `value` defaults to the key: the compare key's REAL cast keeps the zero's
+ * sign, which is all the sign term reads. NaN never reaches a key — SQLite has no NaN (a NaN literal or
+ * parameter declines, a NaN-producing `math()` raises), so `Double.compare`'s NaN-last arm has nothing
+ * to order here; the ranked path's JS comparator (`orderability.ts`) carries it.
  */
-export function orderingTerms(key: Expr, dir: 'asc' | 'desc', value: Expr, tag?: Expr): readonly SortTerm[] {
+export function orderingTerms(key: Expr, dir: 'asc' | 'desc', value: Expr = key, tag?: Expr): readonly SortTerm[] {
   const staticTag = tag?.kind === 'lit' && tag.source === 'compiler-text' ? String(tag.value) : undefined;
   if ((key.kind === 'cast' && key.to === 'int') || (staticTag !== undefined && !['float', 'double', 'real'].includes(staticTag))) return [{ expr: key, dir }];
-  const sign: Expr = { kind: 'case', whens: [[{ kind: 'binary', op: '=', left: value, right: compilerInt(0) }, { kind: 'call', fn: 'atan2', args: [value, compilerReal(-1)] }]] };
+  const atan2: Expr = { kind: 'call', fn: 'atan2', args: [value, compilerReal(-1)] };
+  // Read off the KEY itself the sign term needs no zero guard: rows that tie on the key tie on `atan2(key, -1)`
+  // too, except two zeros of opposite sign — so the bare call reorders exactly those, and spells the key
+  // (a correlated read, for a projected key) once more rather than twice.
+  const sign: Expr = value === key ? atan2 : { kind: 'case', whens: [[{ kind: 'binary', op: '=', left: value, right: compilerInt(0) }, atan2]] };
   return [{ expr: key, dir }, { expr: sign, dir }];
+}
+
+/**
+ * `left <op> right` over two per-row compare keys, under `Double.compare`'s SIGNED ZERO — the comparison
+ * twin of `orderingTerms`. `Compare.lt/lte/gt/gte` and `eq`/`neq` all reach `NumberHelper.compare` for two
+ * Numbers (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`
+ * → `.../util/GremlinValueComparator.java:97-139` → `.../util/NumberHelper.java:277,670-680`), so `-0.0 < 0.0`
+ * holds and `-0.0 = 0.0` does not, where SQLite calls the two equal. Only where BOTH keys are a zero does
+ * the answer change, and there it compares their SIGN BITS (`signBit`, the one spelling) with the sides
+ * SWAPPED — a set sign bit is the SMALLER zero; every other pair is the plain compare. A BigDecimal has
+ * no negative zero (its text never spells one), so its REAL cast is a positive zero and ties an Int `0`
+ * exactly as `BigDecimal.compareTo` does.
+ *
+ * The rule reads each operand three times, and an operand is typically a correlated read (a `by()` key's
+ * subquery). So with a `fresh` minter an operand that is not a bare column or literal is evaluated ONCE,
+ * as the one row of a `VALUES` the compare is projected over — `typedNodeOnce`'s shape (`build.ts`) —
+ * rather than re-spelling the read three times over (measured: a three-leaf `where(…).by(…)` ring went
+ * from 55 KB to 88 KB of statement text inline, against DO's 100 KB cap).
+ */
+export function signedCompare(op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr, fresh?: Minter): Expr {
+  const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
+  if (fresh && !(cheap(left) && cheap(right))) {
+    const one = make.values({ id: fresh('sco'), channels: [], type: typeOf(meta('l', 'any', true), meta('r', 'any', true)), rows: [[left, right]] });
+    return { kind: 'scalar', plan: make.project({
+      id: fresh('scp'), input: one, channels: [], type: typeOf(meta('c', 'int', true)),
+      exprs: [['c', signedCompare(op, col(one.id, 'l'), col(one.id, 'r'))]],
+    }) };
+  }
+  const zero = (e: Expr): Expr => ({ kind: 'binary', op: '=', left: e, right: compilerInt(0) });
+  return {
+    kind: 'case',
+    whens: [[and(zero(left), zero(right)), { kind: 'binary', op, left: signBit(right), right: signBit(left) }]],
+    else: { kind: 'binary', op, left, right },
+  };
 }
 
 /** The common case: the `vtype` is a COLUMN of a relation in scope. Derived from the general form
@@ -882,8 +925,9 @@ export const comparableTheta = (
   return {
     kind: 'case',
     whens: [
-      // Number: ONE bucket across int/real — cast each side by its own storage class, then compare.
-      [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), binary(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB))],
+      // Number: ONE bucket across int/real — cast each side by its own storage class, then compare under
+      // `Double.compare`'s signed zero (`signedCompare`).
+      [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), signedCompare(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB))],
       // Date (epoch) and Duration (total nanos) each ride as an integer → chronological order.
       [bothEq('datetime'), binary(op, asInt(valA), asInt(valB))],
       [bothEq('duration'), binary(op, asInt(valA), asInt(valB))],

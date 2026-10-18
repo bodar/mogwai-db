@@ -17,7 +17,7 @@ import { promotedExtremum, resultIsDecimal } from './float.ts';
 import { comparabilityClass, mixedClassesRefused, orderingTerms, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
-import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
+import { byKeyMaySignZero, byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
 import { exactWideTotal, inferredVtype, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
@@ -582,8 +582,12 @@ export function listMemberOp(
     if (!key) return null;
     return {
       rel: withList(rel, listOfMembers(kept, memberNode(of, kept), [
-        // A scalar member orders its zero's sign (`orderingTerms`); an element member's key is its own.
-        ...(elemOf ? [{ expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' } as const]
+        // A scalar member orders its zero's sign (`orderingTerms`); so does an element member's PROJECTED
+        // key wherever it can carry a float (`byKeyMaySignZero` — `by('x')`, not the rowid or a token).
+        ...(elemOf
+          ? (byKeyMaySignZero(only, { kind: 'element', elem: elemOf, id: col(kept.id, MEMBER.value) }, probe)
+            ? orderingTerms(key, only.order === 'desc' ? 'desc' : 'asc')
+            : [{ expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' } as const])
           : orderingTerms(key, only.order === 'desc' ? 'desc' : 'asc', memberPayload(of, kept),
             ((type) => (type?.kind === 'static' ? compilerText(type.type) : undefined))(memberTypeOf(of)))),
         // THE ORIGINAL POSITION BREAKS TIES, and it is not tidiness: `json_group_array` takes rows in
