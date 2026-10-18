@@ -6,7 +6,7 @@ import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { countOf, isLocalScope, SLICE_STEPS, sliceOf, type IRStep } from '../ir/step.ts';
-import { isReferenceBarrier, placedMergeBefore } from '../ir/bulk.ts';
+import { isReferenceBarrier, placedMergeBefore, sortsStartBatch } from '../ir/bulk.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -1012,6 +1012,9 @@ function groupReduced(
   // mean survives and the decline is gone. It was never a mean-specific bug; every reducer whose result
   // needs 16-17 digits goes through the same repair now.
   const counting = reducer === 'count';
+  // An order-free reducer reads the pool as a multiset, so a member-scoped sort (`sortsStartBatch`) the pool
+  // lowers pool-wide moves nothing — until a top-level slice picks WHICH rows survive by that order.
+  if (pre.some(sortsStartBatch) && pre.some((bodyStep) => SLICE_STEPS.has(bodyStep.name) || bodyStep.name === 'tail' || bodyStep.name === 'sample')) return null;
   const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
   // A COUNT counts TRAVERSERS, so it needs no value at all and admits any body shape; every other
   // reducer reads one, so a body that does not end in a per-row value has nothing to reduce.
@@ -1181,6 +1184,11 @@ function groupCollected(
   // The EXACT scan only: where it cannot see (a label read in the body) the pool keeps its previous answer —
   // residue recorded in the build plan (§10, cluster A), not a guess in either direction.
   if (placedMergeBefore(pre, cut < 0 ? pre.length : cut) === true) return null;
+  // A sort the reference scopes to ONE member — an `order()` in a batching arm or a kept `repeat` body
+  // (`sortsStartBatch`) — is lowered over the whole pool, which interleaves the members the fold
+  // concatenates: `by(union(out().order().by('name',desc)).values('name').fold())` answered
+  // `person:[vadas,ripple,lop,…]` for `[vadas,lop,josh,ripple,lop,lop]`. The list reads that order, so decline.
+  if (pre.some(sortsStartBatch)) return null;
   // A `dedup()` in the value traversal belongs to the OUTER group key, not to the whole child stream.
   // `GroupStep.projectTraverser` resets its dedup state per value traversal and the barrier accumulates
   // per key (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:113,127-128,205-216`;

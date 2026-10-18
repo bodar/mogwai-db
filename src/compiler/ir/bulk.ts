@@ -1,4 +1,4 @@
-import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
+import { BATCHING_BRANCHES, type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import { eachChildChain, rawBodies, someStepDeep } from './walk.ts';
 
@@ -881,7 +881,10 @@ export function sortedHostMergeAt(steps: readonly IRStep[], at: number, rooted: 
   const before = steps[at - 1]!;
   const next = nextReferenceStep(steps, at - 1);
   if (!next || isReferenceBarrier(next)) return false;
-  if (SUPERSET_PATH_PROCESSORS.has(before.name)) return true;
+  // A path processor takes its strategy barrier from `PathRetractionStrategy`'s placeholder, not from
+  // `foundFlatMap` (`LazyBarrierStrategy.java:95-102`), so it is asked first. A spliced (`perTraverser`) step
+  // is only ever a stream identity (`isStreamIdentity`), never a path processor, so the order changes no root.
+  if (SUPERSET_PATH_PROCESSORS.has(before.name) && !before.perTraverser) return true;
   // A strategy barrier goes after a flat-map only once an EARLIER one set `foundFlatMap`
   // (`LazyBarrierStrategy.java:111-127`). A root's start step usually is that one; a CHILD has no start, so
   // its first `FlatMapStep` takes no barrier (`group().by(label()).by(optional(sorted).values('name').is(…).fold())`
@@ -1047,6 +1050,46 @@ export function hostSortsBody(step: IRStep | undefined): boolean {
   eachChildChain(step, read, (chain) => {
     if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
     else arm(chain as IRStep[]);
+  }, unreadable);
+  return sorts;
+}
+
+/** The hosts whose child sorts the WHOLE BATCH of starts the host's traversal holds, not one start: a
+ *  batching `BranchStep` drains every start into its arm before the arm's `order()` runs
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88,123-153`),
+ *  and a `RepeatStep` whose body holds a `Barrier` adds every start before iterating it
+ *  (`…/step/branch/RepeatStep.java:217-230`). */
+const BATCH_SORTING_HOSTS: ReadonlySet<string> = new Set([...BATCHING_BRANCHES, 'branch', 'repeat']);
+/** The per-start hosts a batch sort can sit under: their child runs per start, but a batching host INSIDE
+ *  it still sorts that child's batch. */
+const PER_START_HOSTS: ReadonlySet<string> = new Set([...EMITTING_HOSTS, 'local', 'map']);
+
+/**
+ * THE ONE AUTHORITY FOR "THIS STEP SORTS A BATCH OF STARTS, NOT THE STREAM IT SITS IN": does `step` hold a
+ * global `order()` whose scope is the batch of starts its TRAVERSAL is fed — inside a batching host's child
+ * (`BATCH_SORTING_HOSTS`, at any depth through per-start hosts), or a step spliced out of a `repeat` the
+ * reference keeps (`unrolled: 'beyond'`, which `RepeatUnrollStrategy` never unrolls for an `order()`,
+ * `…/strategy/optimization/RepeatUnrollStrategy.java:67-73`)? That batch is whatever the traversal holds:
+ * the whole stream at a root (so a root lowering that sorts the stream is exact), but ONE member in a
+ * group value child, which `GroupStep.projectTraverser` resets and runs once per member
+ * (`…/step/map/GroupStep.java:111-114`), the pool being cut only at a TOP-LEVEL barrier
+ * (`…/step/Grouping.java:74-90`). So `group().by(label()).by(union(out().order().by('name',desc)).values('name').fold())`
+ * is `person:[vadas,lop,josh,ripple,lop,lop]` — each member sorted alone, concatenated in member order —
+ * and a pool that sorts every member's rows together answers `[vadas,ripple,lop,lop,lop,josh]`. The pooled
+ * group value (`rel/map.ts`) asks this and declines. An unreadable body answers yes.
+ */
+export function sortsStartBatch(step: IRStep): boolean {
+  if (step.name === 'order' && !isLocalScope(step)) return step.unrolled === 'beyond';
+  const batching = BATCH_SORTING_HOSTS.has(step.name);
+  if (!batching && !PER_START_HOSTS.has(step.name)) return false;
+  const read = rawBodies({});
+  let sorts = false;
+  const unreadable = (): void => { sorts = true; };
+  const sortsIn = (body: readonly IRStep[]): boolean =>
+    body.some((s) => (batching && s.name === 'order' && !isLocalScope(s)) || sortsStartBatch(s));
+  eachChildChain(step, read, (chain) => {
+    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => { if (sortsIn(body as IRStep[])) sorts = true; }, unreadable);
+    else if (sortsIn(chain as IRStep[])) sorts = true;
   }, unreadable);
   return sorts;
 }
