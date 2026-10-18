@@ -1899,7 +1899,9 @@ const OWN_ELEMENT_WRITERS: ReadonlySet<string> = new Set(['property', 'addLabel'
  * every traverser before anything after it, `drains`) that can observe what the write writes
  * (`chainObserves`, any depth of its bodies) owes, by where it stands:
  *  - nothing, where at most ONE traverser reaches it (`singleSource`, then `KEEPS_ONE` steps) — no later
- *    traverser re-runs it — or it is the traversal's own start;
+ *    traverser re-runs it — AND that one traverser's pass hands the writer nothing before the step's last
+ *    read (`handsOnWithoutRereading`: a body that fans it out runs lazily, so the step's later outputs are
+ *    read after the earlier ones were written) — or it is the traversal's own start;
  *  - before a sized `NoOpBarrierStep` (`bulkingPositions`): `barrierHoldsAll`, which makes every traverser
  *    pass the step before any reaches the write;
  *  - a read of the traverser's OWN element (nothing moving it between) before a write of that element:
@@ -1941,7 +1943,7 @@ function readBeforeWrite(
   }
   // A `drop()` lands on the traverser's own element too — a property drop on a property only its element owns.
   const ownElement = own !== null && (OWN_ELEMENT_WRITERS.has(own[0]!.name) || own[0]!.name === 'drop');
-  const anchor = edgeAnchor(steps, from);
+  const anchor = edgeAnchor(steps, from, (at) => rooted && streamDistinctAt(steps, at, traversal));
   const sites = entry.effect.sites;
   const site = sites !== 'unknown' && sites.length === 1 && steps[from]?.name === 'drop' ? sites[0]! : null;
   // The final hop before a VERTEX drop (`droppingHop`) and whether the guard it owes is taken.
@@ -1956,6 +1958,7 @@ function readBeforeWrite(
   // A collector at or after the writer may hold what the write made for an earlier traverser, which a
   // side-effect or label read before it then hands back; with none, such a read reaches nothing (`bodyReach`'s `bound`).
   const bound = !someStepDeep(steps.slice(from), read, (s) => collectsSideEffect(s as IRStep), true);
+  const observedBy = (chain: readonly IRStep[]): boolean => !!chainObserves(bodyReach(chain, read, true, bound), bySites(entry.effect, 'unknown'));
   let owed: 'none' | 'sized' | 'window' = 'none';
   let ownOwed = false;
   const ids = new Set<number | string>();
@@ -1968,7 +1971,7 @@ function readBeforeWrite(
     const onOwn = mine;
     // A `properties()` step hands on a property only its element owns: that element still owns what is written.
     mine &&= KIND_PRESERVING.has(step.name) || (step.name === 'properties' && !hasBody(step));
-    if (single[i]) continue;
+    if (single[i] && handsOnWithoutRereading(step, read, observedBy)) continue;
     if (writeSiteOf(step) !== null || (WRITE_MODULATORS.has(step.name) && modulatesWrite(steps, i))) continue;
     const reach = bodyReach([step], read, true, bound);
     // A step reading only the traverser's own element reads an element of the kind the chain says it is.
@@ -2011,6 +2014,55 @@ function readBeforeWrite(
 }
 
 /**
+ * **DOES ONE TRAVERSER'S PASS THROUGH `step` HAND THE WRITER ITS OUTPUTS ONLY AFTER EVERY READ IT MAKES?**
+ * The question `readBeforeWrite` owes a step only one traverser reaches: no LATER traverser re-runs the
+ * step, but its body runs lazily, so where it fans that one traverser out, an output reaches the writer
+ * while the body still has reads to make for the next one — `g.V(1).local(__.out().both()).drop()` drops
+ * vadas, then runs `both()` for lop, then for josh, each after the drops before it, exactly as the root
+ * chain `g.V(1).out().both().drop()` does (which `readBeforeWrite` refuses). Answered for the step's own
+ * bodies, at any depth, by ONE walk (`chainHandsOnWithoutRereading`):
+ *  - a step that hands on at most one traverser (`KEEPS_ONE`) completes every body read before it hands it
+ *    on; a bare step reads its one traverser's adjacency at once (what the root chain lifts too);
+ *  - `local()`/`flatMap()`/`optional()`/`coalesce()`/`choose()` (no folded option arms) run ONE body lazily
+ *    for the traverser (`LocalStep`, `TraversalFlatMapStep`, `CoalesceStep.flatMap` — an arm it rejects
+ *    handed nothing on — and `BranchStep.standardAlgorithm`, whose choice is tested before any option
+ *    runs): each body is weighed as a chain of its own;
+ *  - `union()` drains its arms one after another (`BranchStep.standardAlgorithm`,
+ *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:123-153`),
+ *    so a later arm runs after every output of the earlier ones was written: the first arm is weighed as a
+ *    chain, every later one must observe nothing the write changes —
+ *    `g.V(1).union(__.identity(), __.out()).drop()` drops marko before `out()` reads his edges;
+ *  - anything else — a `repeat()`, whose emitted traverser reaches the writer before its loop-back is
+ *    expanded (`RepeatStep.java:208-278`, `RepeatEndStep` 334-354), a folded option cluster, an unreadable
+ *    body — must observe nothing the write changes at all.
+ * `observed` is the writer's `chainObserves` over a chain.
+ */
+function handsOnWithoutRereading(step: IRStep, read: BodyReader, observed: (chain: readonly IRStep[]) => boolean): boolean {
+  if (KEEPS_ONE.has(step.name) || !hasBody(step)) return true;
+  const arms: (readonly IRStep[])[] = [];
+  let unreadable = false;
+  eachChildChain(step, read, (chain) => arms.push(chain as readonly IRStep[]), () => { unreadable = true; });
+  const plain = !step.modulators?.length && !step.withArgs?.length && !step.repeatRegion && !step.optionArms;
+  if (!plain || unreadable || !LAZY_BODY_HOSTS.has(step.name)) return !observed([step]);
+  if (step.name === 'union') return arms.every((arm, k) => k === 0 ? chainHandsOnWithoutRereading(arm, read, observed) : !observed(arm));
+  return arms.every((arm) => chainHandsOnWithoutRereading(arm, read, observed));
+}
+/** The hosts that run a body LAZILY for the one traverser they are given (`handsOnWithoutRereading`). */
+const LAZY_BODY_HOSTS: ReadonlySet<string> = new Set(['local', 'flatMap', 'optional', 'coalesce', 'choose', 'union']);
+
+/** `handsOnWithoutRereading` for a CHAIN one traverser enters: while at most one traverser reaches a step
+ *  (`KEEPS_ONE` before it) the step is weighed on its own; once one fans out, every step after it re-runs
+ *  per traverser, after the writer took the earlier ones, so it must observe nothing the write changes. */
+function chainHandsOnWithoutRereading(chain: readonly IRStep[], read: BodyReader, observed: (chain: readonly IRStep[]) => boolean): boolean {
+  let one = true;
+  for (const step of chain) {
+    if (one ? !handsOnWithoutRereading(step, read, observed) : observed([step])) return false;
+    one &&= KEEPS_ONE.has(step.name);
+  }
+  return true;
+}
+
+/**
  * THE FINAL HOP BEFORE A VERTEX `drop()` — a bare `out`/`in`/`both` with nothing but kind-preserving steps
  * after it — or `-1`. A `DropStep` switches `LazyBarrierStrategy` off (`LazyBarrierStrategy.java:80-86`), so a
  * later traverser re-runs the hop after an earlier one dropped. What it then reaches differs only where the
@@ -2021,7 +2073,7 @@ function readBeforeWrite(
  * either way, and `g.V().out().drop()` refuses (josh is dropped from marko, then reached from his own start).
  */
 function droppingHop(steps: readonly IRStep[], from: number): number {
-  return finalHop(steps, from, VERTEX_MOVES);
+  return finalHop(steps, from, VERTEX_MOVES, () => false);
 }
 
 /**
@@ -2034,17 +2086,29 @@ function droppingHop(steps: readonly IRStep[], from: number): number {
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/`)
  * spends its budget on the plan's extra duplicates the reference never makes:
  * `g.V().bothE().limit(4).drop()` drops 9, 7, 8 and 11 in the reference (vadas's 7 is gone before his own
- * start is read), but the plan's fourth traverser is 7 again. So there, no hop is final.
+ * start is read), but the plan's fourth traverser is 7 again. So there, no hop is final — but for two
+ * counts that by construction meet no duplicate:
+ *  - a slice with no upper bound (`skip(n)`, `range(n, -1)`) spends its whole budget on the first `n`
+ *    traversers, which reach it before any reaches the write — the plan's prefix is the reference's — and
+ *    keeps every traverser after them by itself alone: `g.V().bothE().skip(3).drop()`;
+ *  - an `outE()`/`inE()` hop out of a pairwise-distinct stream (`distinctAt`, the vertex entering it) reaches
+ *    each edge ONCE, and an edge drop removes that edge alone, so no later traverser of the reference's stream
+ *    differs from the plan's: `g.V().outE().limit(4).drop()`.
  */
-function finalHop(steps: readonly IRStep[], from: number, moves: ReadonlySet<string>): number {
+function finalHop(steps: readonly IRStep[], from: number, moves: ReadonlySet<string>, distinctAt: (at: number) => boolean): number {
   let m = from - 1;
+  let counted = false;
   while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) {
-    if (STREAM_COUNTING.has(steps[m]!.name)) return -1;
+    if (STREAM_COUNTING.has(steps[m]!.name) && !unboundedSkip(steps[m]!)) counted = true;
     m--;
   }
   const move = steps[m];
-  return move && moves.has(move.name) && !hasBody(move) ? m : -1;
+  if (!move || !moves.has(move.name) || hasBody(move)) return -1;
+  return !counted || ((move.name === 'outE' || move.name === 'inE') && distinctAt(m)) ? m : -1;
 }
+/** A GLOBAL slice with no upper bound — `skip(n)`, `range(n, -1)` (`finalHop`). */
+const unboundedSkip = (step: IRStep): boolean =>
+  !isLocalScope(step) && (step.name === 'skip' || (step.name === 'range' && step.args.length === 2 && Number(step.args[1]!.value) === -1));
 /** The filters whose verdict on a traverser depends on the traversers before it (`finalHop`). */
 const STREAM_COUNTING: ReadonlySet<string> = unionOf(SLICE_STEPS, new Set(['tail', 'coin', 'sample']));
 
@@ -2124,7 +2188,7 @@ function bySites(effect: ProgramWrites, kind: TargetKind): ProgramWrites {
  * vertex never crosses it: `where(__.not(__.inE('l'))).addE('l').from(…)` (replication's placement) reads
  * only edges INTO its own vertex, and another traverser's new edge goes into that one's.
  */
-function edgeAnchor(steps: readonly IRStep[], from: number): { readonly at: number; readonly pinned: ReadonlySet<string>; readonly keyed: boolean } | null {
+function edgeAnchor(steps: readonly IRStep[], from: number, distinctAt: (at: number) => boolean): { readonly at: number; readonly pinned: ReadonlySet<string>; readonly keyed: boolean } | null {
   const writer = steps[from];
   if (writer?.name === 'addE') {
     let named = new Set<string>();
@@ -2133,7 +2197,7 @@ function edgeAnchor(steps: readonly IRStep[], from: number): { readonly at: numb
     return pinned.size ? { at: from, pinned, keyed: true } : null;
   }
   if (writer?.name !== 'drop') return null;
-  const m = finalHop(steps, from, EDGE_MOVES);
+  const m = finalHop(steps, from, EDGE_MOVES, distinctAt);
   if (m < 0) return null;
   // A `bothE()` drop removes an edge out of ONE vertex and into another, so it pins no direction: another
   // traverser's drop may take an edge either way off this vertex. Only the hop itself is lifted (`readBeforeWrite`).

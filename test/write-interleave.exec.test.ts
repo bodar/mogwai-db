@@ -308,7 +308,98 @@ describe('drop() after EVERY hop kind, at depth and under local()/union(): the r
 
   // A stream-counting step after the final hop spends its budget on the plan's duplicates (`finalHop`): the
   // reference drops 9, 7, 8 and 11 (vadas's 7 is gone before his start is read); the plan's fourth is 7 again.
-  for (const q of ['g.V().bothE().limit(4).drop()', 'g.V().outE().limit(4).drop()', 'g.V().both().drop()', "g.V(1).out('knows').both().drop()"]) {
+  for (const q of [
+    'g.V().bothE().limit(4).drop()', 'g.V().bothE().range(1,3).drop()', 'g.V().local(__.bothE().limit(1)).drop()',
+    'g.V().out().outE().limit(1).drop()', 'g.V().both().drop()', "g.V(1).out('knows').both().drop()",
+  ]) {
     test(q, () => refuses(q));
   }
+
+  test('a count that meets no duplicate by construction: an unbounded skip, an outE()/inE() off a distinct stream', () => {
+    // skip(n) spends its budget on the first n traversers, before anything is dropped: every edge marko's three
+    // name is reached again from its other end, and every later traverser passes.
+    expect(graph('g.V().bothE().skip(3).drop()')).toEqual([[1, 2, 3, 4, 5, 6], []]);
+    expect(graph('g.V().bothE().range(3,-1).drop()')).toEqual([[1, 2, 3, 4, 5, 6], []]);
+    expect(graph('g.V().outE().skip(2).drop()')).toEqual([[1, 2, 3, 4, 5, 6], [7, 8]]);
+    // outE() off distinct vertices reaches each edge once, and an edge drop removes that edge alone: the stream is
+    // the reference's (marko's three, then one of josh's — which one is implementation-defined order).
+    expect(graph('g.V().outE().limit(4).drop()')).toEqual([[1, 2, 3, 4, 5, 6], [11, 12]]);
+    expect(graph('g.V().outE().range(1,3).drop()')).toEqual([[1, 2, 3, 4, 5, 6], [7, 10, 11, 12]]);
+    expect(graph("g.V().hasLabel('person').inE().limit(2).drop()")).toEqual([[1, 2, 3, 4, 5, 6], [9, 10, 11, 12]]);
+  });
+});
+
+describe('a step ONE traverser reaches, whose body hands the drop several (handsOnWithoutRereading)', () => {
+  // The body runs lazily: an output reaches the drop while the body still has reads to make for the next
+  // (BranchStep.java:123-153 drains union arms in order; RepeatStep.java:262-278 / RepeatEndStep emitSplit
+  // emits before the loop-back is expanded). The reference answers, after each, are in the comments.
+  for (const q of [
+    'g.V(1).local(__.out().both()).drop()', // V=[2,3,5]
+    'g.V(1).flatMap(__.out().both()).drop()',
+    'g.V(1).local(__.both().both()).drop()',
+    'g.V(4).local(__.both().both()).drop()',
+    'g.V(1).coalesce(__.out().both(), __.identity()).drop()',
+    'g.V(1).optional(__.out().both()).drop()',
+    'g.V(1).union(__.local(__.out().both())).drop()',
+    "g.V(1).as('a').local(__.out().both()).drop()",
+    'g.V(1).union(__.identity(), __.out()).drop()', // V=[2,3,4,5,6] E=[10,11,12]: marko is gone before out() reads him
+    'g.V(4).union(__.identity(), __.both()).drop()',
+    "g.V(1).union(__.identity(), __.out('knows')).drop()",
+    "g.V(1).union(__.identity(), __.out()).hasLabel('person').drop()",
+    'g.V(1).union(__.identity(), __.local(__.out())).drop()',
+    "g.V(1).as('a').union(__.identity(), __.out()).drop()",
+    'g.V(1).choose(__.out(), __.union(__.identity(), __.out()), __.identity()).drop()',
+    'g.V(1).union(__.outE(), __.out().outE()).drop()', // E=[10,11,12]
+    'g.V(1).union(__.identity(), __.out()).outE().drop()',
+    'g.V(1).repeat(__.out()).emit().drop()', // V=[1,5,6]: josh is dropped before his loop-back is expanded
+    'g.V(1).repeat(__.out()).emit().times(2).drop()',
+    'g.V(1).repeat(__.out()).times(2).emit().drop()',
+    'g.V(1).repeat(__.outE().inV()).emit().drop()',
+    "g.V(1).repeat(__.out()).emit().until(__.hasLabel('software')).drop()",
+    'g.V(1).repeat(__.out()).emit().dedup().drop()',
+    "g.V(1).repeat(__.out()).emit().as('x').drop()",
+    'g.V(1).emit().repeat(__.out()).drop()', // V=[2,3,4,5,6] E=[10,11,12]
+    'g.V(1).emit().repeat(__.out()).times(2).drop()',
+    'g.V(1).emit().repeat(__.out()).times(1).drop()',
+  ]) test(q, () => refuses(q));
+
+  const graph = (q: string): [unknown[], unknown[]] => { const store = seededStore(); run(store, q); return [values(store, 'g.V().id()'), values(store, 'g.E().id()')]; };
+
+  // EVERY host kind, at depth one and two, around a body that fans the traverser out and reads again — each must
+  // refuse — and around a body whose one hop is its last read, which must answer as the root chain does.
+  const hosts = [
+    (b: string) => `local(__.${b})`, (b: string) => `flatMap(__.${b})`, (b: string) => `optional(__.${b})`,
+    (b: string) => `coalesce(__.${b}, __.identity())`, (b: string) => `union(__.${b})`,
+    (b: string) => `choose(__.identity(), __.${b}, __.identity())`, (b: string) => `union(__.identity(), __.${b})`,
+  ];
+  const nested = hosts.flatMap((outer) => hosts.map((inner) => (b: string) => outer(inner(b))));
+  test('the depth sweep: a body that reads after it fans out refuses at every depth', () => {
+    // One store throughout: a refusal rolls back, and a form that answers must have dropped nothing.
+    const store = seededStore();
+    const state = (): unknown[] => [values(store, 'g.V().id()'), values(store, 'g.E().id()')];
+    const modern = state();
+    for (const host of [...hosts, ...nested]) for (const start of ['V(1)', 'V(4)']) for (const body of ['out().both()', 'both().both()', 'out().outE()', 'outE().inV().both()']) {
+      const q = `g.${start}.${host(body)}.drop()`;
+      // The refusal is a run-time guard on a traverser REACHING the drop: where none does (`V(4)` has no
+      // `out().outE()`), every read ran before any drop, the reference's answer too — the graph as it was.
+      try { run(store, q); } catch (e) { expect((e as Error).message, q).toMatch(NOT_YET); }
+      expect(state(), q).toEqual(modern);
+    }
+  }, 60_000);
+
+  test('a body whose one fan-out is its last read answers as the root chain', () => {
+    // (`choose()` around a drop has no lowering at all yet, so it sits out here.)
+    const lone = hosts.slice(0, 5);
+    for (const host of lone) {
+      expect(graph(`g.V(1).${host('out()')}.drop()`), host('out()')).toEqual([[1, 5, 6], []]);
+      expect(graph(`g.V(4).${host('both()')}.drop()`), host('both()')).toEqual([[2, 4, 6], []]);
+    }
+    // At depth two a host may not lower at all; where it does, it is the root chain's answer.
+    for (const host of lone.flatMap((outer) => lone.map((inner) => (b: string) => outer(inner(b))))) {
+      try { expect(graph(`g.V(1).${host('out()')}.drop()`), host('out()')).toEqual([[1, 5, 6], []]); } catch (e) { expect((e as Error).message, host('out()')).toMatch(NOT_YET); }
+    }
+    expect(graph('g.V(1).out().drop()')).toEqual([[1, 5, 6], []]);
+    // a later union arm that reads nothing the drop changes
+    expect(graph('g.V(1).union(__.identity(), __.identity()).drop()')).toEqual([[2, 3, 4, 5, 6], [10, 11, 12]]);
+  }, 60_000);
 });

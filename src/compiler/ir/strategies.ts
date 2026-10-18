@@ -2115,14 +2115,19 @@ function rewriteStartLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
   if (body.length < 2 || head.name !== 'as') return body;
   const labels = asLabelsOf(head);
   if (labels.length !== 1) return body;
-  // A start variable the enclosing chain never bound is the one case TinkerPop hard-errors on
-  // (WhereStartStep's path lookup fails), and it is the ONLY place this rule throws. It has to:
-  // the re-root is now expressed solely as `select(label)`, so leaving an unbound `as()` here
-  // would silently degrade the scope variable into a bind — the same class of wrong answer the
-  // end-label rule exists to prevent, and previously it only threw when the fast path happened
-  // to be on.
+  // A start variable the enclosing chain never bound by `as()` is not ours to answer, and not ours to
+  // refuse as an error either: `WhereStartStep` resolves it per TRAVERSER through `getSafeScopeValue`
+  // — the traverser's own MAP key, then a SIDE EFFECT, then the path — and raises only for a traverser
+  // that reaches it with the key in none of them
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WhereTraversalStep.java:175,
+  // `Scoping.getScopeValue`/`KeyNotFoundException`, …/traversal/step/Scoping.java:119-145,187-196).
+  // So `g.V().project('a').by(identity()).where(__.as('a').out())` answers, an empty stream answers
+  // `[]`, and only a reached unbound key raises. Leaving the `as()` in place would silently degrade the
+  // scope variable into a bind (the end-label rule's wrong-answer class); `select(label)` would DROP
+  // where the reference raises. Neither a compile-time error nor either rewrite is the reference, so
+  // the traversal is declined.
   if (!bound.has(labels[0]))
-    throw new ValueParseError(`where(__.as("${labels[0]}")): no such label — as("${labels[0]}") was not seen`);
+    throw UnsupportedTraversal.because(`where(__.as("${labels[0]}")) re-roots on a label no as() before it binds — its map-key/side-effect/path resolution is not lowered`);
   return [{ ...head, name: 'select' }, ...body.slice(1)];
 }
 

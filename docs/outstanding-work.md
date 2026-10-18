@@ -49,6 +49,15 @@ lowered.
     window (the read-before scan stops at the writer and is not affected);
   - an earlier read in a body run per traverser (a writer inside `local()`/`sideEffect()` whose chain is not the
     traversal's own) is refused rather than placed: only the root chain says "one traverser" or "distinct";
+  - over-refusals of a step ONE traverser reaches whose body fans it out (`handsOnWithoutRereading`): a later
+    `union()` arm, any `repeat()`, a folded option cluster must read nothing the write changes AT ALL, so
+    `g.V(1).union(__.out(), __.in()).drop()` refuses although marko has no in-edges for the drop to touch; and a
+    stream-counting slice after a final hop that meets duplicates (`g.V().bothE().range(1,3).drop()`,
+    `g.V().local(__.bothE().limit(1)).drop()` — lop's first edge may be the one marko dropped) refuses, where an
+    exact answer needs a run-time "no element twice in the window" guard;
+  - a `where(__.as('a')…)` start label no `as()` before it binds declines: `WhereStartStep` resolves it per
+    traverser through a map key, a side effect, then the path (`Scoping.getSafeScopeValue`), raising only for a
+    reached traverser (`test/L4-addendum/where-start-label.feature`);
   - over-refusals by identity: a later write reached by a literal-id re-source
     (`g.V(1,2).property(single,'w',5).V(3).property(single,'w',9)`), a vertex drop after a multi-traverser
     write (`…V(3).drop()`), a merge `onMatch` of a key an earlier write wrote on a different element

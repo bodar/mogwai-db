@@ -242,3 +242,93 @@ Feature: mogwai addendum — a write runs ONE TRAVERSER AT A TIME through every 
     When iterated to list
     Then the result should be empty
     And the graph should return 4 for count of "g.V()"
+
+  # A step ONE traverser reaches still runs its BODY lazily: an output reaches the drop while the body has reads
+  # left to make (`handsOnWithoutRereading`). local(): lop and josh's both() run after vadas is gone.
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_VX1X_localXout_bothX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.out().both()).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 3 for count of "g.V()"
+
+  # union() drains its arms in order (BranchStep.java:123-153): marko is dropped before the second arm's out().
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_VX1X_unionXidentity_outX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.identity(), __.out()).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 5 for count of "g.V()"
+    And the graph should return 3 for count of "g.E()"
+
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_VX1X_unionXoutE_out_outEX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).union(__.outE(), __.out().outE()).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 3 for count of "g.E()"
+
+  # repeat() emits josh, and the drop removes him, before his loop-back is expanded (RepeatEndStep's emitSplit).
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_VX1X_repeatXoutX_emit_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).repeat(__.out()).emit().drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 3 for count of "g.V()"
+
+  # emit() first: marko is emitted and dropped before he is expanded (RepeatStep.processTraverser).
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_VX1X_emit_repeatXoutX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).emit().repeat(__.out()).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 5 for count of "g.V()"
+
+  # A body whose one fan-out is its last read hands on nothing before it: the root chain's answer.
+  @gap:write-interleave
+  Scenario: g_VX1X_localXoutX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).local(__.out()).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 3 for count of "g.V()"
+
+  # An unbounded skip spends its count before anything is dropped, and keeps every traverser after it.
+  @gap:write-interleave
+  Scenario: g_V_bothE_skipX3X_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().bothE().skip(3).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 0 for count of "g.E()"
