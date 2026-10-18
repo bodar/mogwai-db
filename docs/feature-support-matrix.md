@@ -187,7 +187,7 @@ heterogeneous stream frames each value by its own tag.
 | `asString` | ✅ | works over every shape (a collection renders through a JS barrier) and through a global `order().fold()` (a nested barrier); a NULL value / list member RAISES `Can't parse null as String.` via a runtime guard (`AsStringGlobalStep`/`AsStringLocalStep`) |
 | `asNumber` | 🟡 | mixed numeric subtypes ride per-row (§6·7); a bare `asNumber()` / `asNumber(GType)` after a reducer works (`GType` rides a runtime overflow guard); ❌ over an `unfold()`-ed list member |
 | `reverse` | ✅ | ❌ NESTED scalar reverse (in a child body, where a barrier cannot segment) — a fail-closed deferral |
-| `split` | 🟡 | ❌ `split(Scope.local, sep)` over a folded list, and a LIST-shaped head — both fail-closed deferrals |
+| `split` | 🟡 | ❌ `split(Scope.local, sep)` over a folded list, a LIST-shaped head, and a read past `split()` of a label bound BEFORE it (`as("x").split(sep).select("x")` — only the value crosses the barrier) — fail-closed deferrals |
 
 🔴 **Five documented deviations, not defects:**
 
@@ -326,3 +326,4 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | A null `by()` value | ABSENT: presence is value nullness, so a `by()`/child body that yields NULL (only from a literal — `constant([null]).unfold().sum()`, a `withSack(null)` sack) is "nothing": `project()` omits the key, `select`/`order`/`dedup`/`sack`/`where`/`map` drop the traverser, `aggregate()` collects nothing, and `coalesce(x, constant(1))` is SQL `COALESCE` (null-coalescing) — where Java keeps a productive null |
 | Number spelling | `asString()`/`format()`/`conjoin()` print a Boolean `true`/`false`, an integral number its digits, a Double/Float SQLite's text of the REAL — 15 significant digits, a whole value keeps `.0`, exponent form below 1e-4 or from 1e15 (`1.0e7` is `10000000.0`, `1e-5` is `1.0e-05`, `1e20` is `1.0e+20`, an infinity `Inf`) — and a BigDecimal its plain carried decimal text (`0.0000001`); a list member prints exactly as the same value alone. A Float prints its carried value, today its 32-bit binary value (`0.1f` is `0.100000001490116`). Never `Double`/`Float`/`BigDecimal.toString`'s layout, never a deferral for a number |
 | `format()` over a multi-valued property | a named token answers the property's FIRST value, as `by(key)` does (Java's `Vertex.property(key)` throws) |
+| A non-String text receiver | the raise names the offending VALUE (`The split() step can only take string as argument, encountered 1.`), not its Java class (`encountered class java.lang.Integer.`) |

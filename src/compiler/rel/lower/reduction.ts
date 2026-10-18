@@ -1699,8 +1699,39 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     // to the first stored value, which over `loc = [a, b]` made `by(__.values('loc').is('b'))` unproductive
     // and `where(__.values('loc').is('b'))` drop the vertex. The filtered read names the base property
     // tables, so any other source declines rather than read rows it does not hold.
+    // A TRANSFORM before the test (`values('name').toUpper().is('MARKO')`) is the same question one map
+    // later: the transform-and-test run is applied to EACH property row, and the first survivor
+    // contributes its transformed value. The run is `valueRun` over the stored row, so a failed `is()`
+    // is a NULL there and a survivor is a non-NULL.
+    let runEnd = 0;
+    if (REL_TRANSFORMS.has(body[1]?.name ?? '')) {
+      for (let j = 1; j < body.length && (REL_TRANSFORMS.has(body[j]!.name) || body[j]!.name === 'is'); j++)
+        if (body[j]!.name === 'is') runEnd = j;
+    }
+    if (runEnd) {
+      if (ctx.source !== BaseGraph) return null;
+      const testRun = body.slice(0, runEnd + 1);
+      const runOver = (stored: Expr, storedType: Expr) => valueRun(testRun, 1,
+        { value: stored, type: UNKNOWN, vtype: storedType, present: 'value-nullness', yields: 'one' },
+        host.row, childSeam(ctx, fresh), ctx.source, fresh);
+      let runType: ScalarType = UNKNOWN;
+      const passing = propertyFirstPassing(args[0], host, (stored, storedType) => {
+        const ran = runOver(stored, storedType);
+        return ran && isNot(ran.expr, compilerNull());
+      }, fresh, (stored, storedType) => {
+        const ran = runOver(stored, storedType);
+        if (ran?.framing.kind === 'scalar' && !ran.vtype) runType = ran.framing.type;
+        return ran?.framing.kind === 'scalar' && !ran.vtype ? ran.expr : null;
+      });
+      if (!passing) return null;
+      value = passing.value;
+      type = runType;
+      vtype = undefined;
+      present = 'value-nullness';
+      at = runEnd + 1;
+    }
     const tests: { readonly pred: unknown; readonly arg: IRStep['args'][number] }[] = [];
-    while (body[at]?.name === 'is' && !body[at]!.modulators?.length) {
+    while (!runEnd && body[at]?.name === 'is' && !body[at]!.modulators?.length) {
       const pred = body[at]!.args[0]?.value;
       if (pred == null || body[at]!.args.length !== 1) return null;
       tests.push({ pred, arg: body[at]!.args[0]! });

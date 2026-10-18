@@ -251,8 +251,8 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
       | result |
       | m[{"m":"b"}] |
 
-  # A transform between the read and the test is not pushed into the property rows: decline.
-  @Unsupported
+  # A transform between the read and the test is pushed into the property rows with it: the first value
+  # whose TRANSFORMED form survives contributes that transformed form.
   Scenario: g_V_projectXpX_byXvaluesXlocX_toUpper_isXBXX_multi
     Given the empty graph
     And the graph initializer of
@@ -267,6 +267,43 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
     Then the result should be unordered
       | result |
       | m[{"p":"B"}] |
+
+  Scenario: g_V_whereXvaluesXlocX_toUpper_isXBXX_count_multi
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("m").property(Cardinality.list, "loc", "a").property(Cardinality.list, "loc", "b")
+      """
+    And the traversal of
+      """
+      g.V().where(__.values("loc").toUpper().is("B")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  Scenario: g_V_hasLabelXpersonX_whereXvaluesXnameX_toUpper_isXMARKOXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").where(__.values("name").toUpper().is("MARKO"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | v[marko] |
+
+  Scenario: g_V_notXvaluesXnameX_toUpper_isXMARKOXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().not(__.values("name").toUpper().is("MARKO")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
 
   # ---- a by() on a SCOPE value runs on a NEW traverser ----
   # TraversalUtil.produce(S start, …) generates a fresh traverser (TraversalUtil.java:125-130;

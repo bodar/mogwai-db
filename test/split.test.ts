@@ -73,3 +73,18 @@ describe('split() — deferred forms fail closed (never a wrong answer)', () => 
       .rejects.toThrow(/not supported/);
   });
 });
+
+describe('split() — a label bound before the barrier', () => {
+  // Only the VALUE crosses the barrier; a label read past it declines rather than answer the unbound
+  // key's empty result (`g.V(1).values('name').as('x').split('r').select('x')` answered `[]`).
+  test('a pre-barrier label read past split() declines, never a lost row', async () => {
+    for (const g of [
+      "g.V(1).values('name').as('x').split('r').select('x')",
+      "g.inject('a,b').as('x').split(',').as('y').select('x','y')",
+      "g.V(1).as('a').values('name').split('r').select('a')",
+    ]) await expect(mgr.executor('home').framedAsync(g, {})).rejects.toThrow(/not supported/);
+  });
+  test('a label bound AFTER split() still reads', async () => {
+    expect(await run("g.V(1).values('name').as('x').split('r').as('y').select('y')")).toEqual([['ma', 'ko']]);
+  });
+});

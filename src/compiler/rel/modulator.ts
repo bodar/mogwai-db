@@ -932,11 +932,14 @@ function propertyRowFor(host: Extract<ChildHost, { kind: 'element' }>, key: stri
  * `…/util/TraversalUtil.java:108-123`). Testing only the first stored value answers a different question: over
  * `loc = [a, b]`, `by(__.values('loc').is('b'))` is `b`, not unproductive, and `where(values('loc').is('b'))`
  * keeps the vertex. The same rows `propertyRowFor` names, filtered by `test` over each row's `(value, vtype)`,
- * read three ways like the unfiltered reads. `null` where `test` cannot be built.
+ * read three ways like the unfiltered reads. `null` where `test` cannot be built. `project` is what the
+ * survivor CONTRIBUTES: the stored value itself, or — for `values(k).toUpper().is(P)` — the value the
+ * test's transform run made of that same row.
  */
 export function propertyFirstPassing(
   key: string, host: Extract<ChildHost, { kind: 'element' }>,
   test: (value: Expr, vtype: Expr) => Expr | null, fresh: Minter,
+  project: (value: Expr, vtype: Expr) => Expr | null = (value) => value,
 ): { readonly value: Expr; readonly vtype: Expr } | null {
   const filtered = (): Rel | null => {
     const mine = propertyRowFor(host, key, fresh);
@@ -945,8 +948,10 @@ export function propertyFirstPassing(
   };
   const [forValue, forVtype] = [filtered(), filtered()];
   if (!forValue || !forVtype) return null;
+  const contributed = project(col(forValue.id, 'value'), col(forValue.id, 'vtype'));
+  if (!contributed) return null;
   return {
-    value: firstOf(forValue, col(forValue.id, 'value'), col(forValue.id, 'id'), fresh),
+    value: firstOf(forValue, contributed, col(forValue.id, 'id'), fresh),
     vtype: firstOf(forVtype, col(forVtype.id, 'vtype'), col(forVtype.id, 'id'), fresh),
   };
 }

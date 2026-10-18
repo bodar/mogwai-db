@@ -3992,7 +3992,12 @@ function valueResume(
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
-  const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
+  const { ctx: tailCtx, facts } = chainCtxOf(steps.slice(from), settled);
+  // A label bound BEFORE the barrier is on the traverser's path, but only the value crossed: it rides in
+  // as an ENCLOSING label, so a tail that reads it (`as('x').split(',').select('x')`) declines instead of
+  // answering the unbound key's empty result.
+  const bound = steps.slice(0, from).flatMap((s) => s.name === 'as' ? s.args.map((a) => a.value).filter((v): v is string => typeof v === 'string') : []);
+  const ctx: ChainCtx = bound.length ? { ...tailCtx, enclosingLabels: new Set([...(tailCtx.enclosingLabels ?? []), ...bound]) } : tailCtx;
   // A tail that tracks a PATH cannot be seeded from a bare value list (no path history crossed the
   // barrier), so it declines rather than compile a plan with the column silently missing. An
   // ENCOUNTER demand IS satisfiable: every seed threads the array index (stream order) as the encounter
