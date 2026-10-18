@@ -840,6 +840,12 @@ authorities.
   raises a raw `TypeError` and agrees with the in-process hop; an undecodable GraphBinary type and a leaked raw
   `bigint` decline as `UnsupportedTraversal`. Pinned in `test/federate-double-carrier.test.ts`. No baselines
   moved. CI green.
+  ✅ **Signed-zero keys + parented federate LANDED ON TRUNK 2026-10-18 (`98b3fbfd`, ff-signed-zero-keys).**
+  A `by(select(label))` group/groupCount key node (`byNode`, modulator.ts) carries the label's recorded static
+  type, so the one JSON-entry authority keeps `-0.0d` distinct from `0.0d` (GroupCountStep's HashMap,
+  `Double.equals(0.0,-0.0)` false) and keeps 17 digits; a federate in a union arm under a parent stream
+  (`unifiedBoundGraph`, `rel/boundgraph.ts`) declines as `UnsupportedTraversal` instead of a bare `Error`.
+  No baselines moved. CI green.
   ✅ **Fix-forward LANDED ON TRUNK 2026-10-17 (`2c602783`, `6e027a28`, `6fd4a7dc`, ff-double-carrier-json).**
   `parseElementJson` is total (every framer parse of an element-bearing payload, so the untyped-JSON tail no
   longer leaks the `<w>p<n>` carrier); `asNumber` over an untyped JS number asks `numberClassOf`; a bulk
