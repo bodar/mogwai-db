@@ -11,8 +11,8 @@ import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
-import { asStringOf, evidenceOf, mathVariableMessage, raisingWhen, receiverOffence, type ValueEvidence } from './receiver.ts';
-import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
+import { asStringOf, evidenceOf, FORMAT_STRING, mathVariableMessage, raisingWhen, receiverOffence, type ValueEvidence } from './receiver.ts';
+import { deferralExpr, exprMayRaise, raiseInRow } from '../../rel/raise.ts';
 import { keepingRaise, pendingRaise, RAISE, raiseMessage } from './raise-channel.ts';
 import { withChannel } from '../../channels.ts';
 import type { GraphSource } from './source.ts';
@@ -226,8 +226,26 @@ export const multiplePropertiesMessage = (key: string): string =>
  * `by(key)`'s read) wherever the vertex has at most one. The count is the graph source's own
  * (`propertyHasSeveral`), so a bound or decorated graph answers it as the base tables do.
  */
-const multiValueRaises = (id: Expr, key: string, value: Expr, source: GraphSource, fresh: Minter): Expr =>
-  ({ kind: 'case', whens: [[source.propertyHasSeveral('vertex', id, key, fresh), raiseInRow(multiplePropertiesMessage(key))]], else: value });
+const multiValueRaises = (several: Expr, key: string, value: Expr, multi: 'raise' | 'defer'): Expr =>
+  ({ kind: 'case', whens: [[several, multi === 'raise' ? raiseInRow(multiplePropertiesMessage(key))
+    : deferralExpr(MULTI_VALUED_UNPULLED, { kind: 'call', fn: 'random', args: [] })]], else: value });
+
+/**
+ * HOW A MULTI-VALUED PROPERTY TOKEN'S RAISE IS SPELLED, by where the step stands (`projectorTail`'s `site`):
+ *
+ * - an OFFENCES list — a slice consumes the raise, so it rides the row as the reference's message and the
+ *   slice settles it over exactly the traversers the reference pulls;
+ * - `'raise'` — the statement evaluates exactly the traversers the reference pulls (`settlesExactly`), so
+ *   the reference's own error is raised in-row;
+ * - `'defer'` — anywhere else (a slice past a `dedup()`, a bounded branch): the statement may evaluate a
+ *   traverser the reference never pulls, where raising would answer an error the reference does not, so
+ *   the row DEFERS instead. It still fires on every row the drop filter evaluates, which includes every
+ *   row the reference pulls — so it can only fail closed, never answer past the reference's raise.
+ */
+type MultiValued = 'raise' | 'defer' | (readonly [Expr, string])[];
+
+/** The deferral of a multi-valued property token the reference may not reach (`MultiValued`'s `'defer'`). */
+const MULTI_VALUED_UNPULLED = 'format() of a multi-valued property where the reference may not pull the traverser is not supported';
 
 /**
  * `format("…%{token}…")` — the template's tokens resolved and concatenated, or `null` to decline.
@@ -252,6 +270,7 @@ const multiValueRaises = (id: Expr, key: string, value: Expr, source: GraphSourc
  */
 function formatValue(
   step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
+  multi: MultiValued = 'raise',
 ): { readonly expr: Expr; readonly tokens: number; readonly keep?: Expr } | null {
   const template = step.args[0]?.value, extra = step.args[1]?.value;
   if (typeof template !== 'string' || extra !== undefined || step.optionArms) return null;
@@ -271,12 +290,12 @@ function formatValue(
   // 20 KB, and a handful of them past the platform's 100 KB statement-text limit.
   const token = (value: Expr, evidence: ValueEvidence): Expr | null => {
     const tag = evidence.kind === 'tag' ? evidence.tag : undefined;
-    if (value.kind !== 'scalar' && tag?.kind !== 'scalar') return asStringOf(value, evidence, fresh, 'format()');
+    if (value.kind !== 'scalar' && tag?.kind !== 'scalar') return asStringOf(value, evidence, fresh, FORMAT_STRING);
     const one = make.values({
       id: fresh('fto'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)),
       rows: [[value, tag ?? compilerNull('text')]],
     });
-    const rendered = asStringOf(col(one.id, 'v'), evidence.kind === 'tag' ? { ...evidence, tag: col(one.id, 't') } : evidence, fresh, 'format()');
+    const rendered = asStringOf(col(one.id, 'v'), evidence.kind === 'tag' ? { ...evidence, tag: col(one.id, 't') } : evidence, fresh, FORMAT_STRING);
     return rendered && { kind: 'scalar', plan: make.project({
       id: fresh('ftp'), input: one, channels: [], type: typeOf(meta('s', 'text', true)), exprs: [['s', rendered]],
     }) };
@@ -344,7 +363,14 @@ function formatValue(
       // (`Vertex.property`'s `multiplePropertiesExistForProvidedKey`,
       // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Vertex.java:69-79`)
       // — so the token raises the reference's own message there, rather than appending the first value.
-      const value = host.elem === 'vertex' ? multiValueRaises(host.id, part.name, typed.value, source, fresh) : typed.value;
+      // Where the caller collects OFFENCES (a slice consumes the raise, `projectorTail`), the raise rides
+      // the row instead, met only where every earlier token was productive: `processNextStart` breaks at
+      // the first unproductive one.
+      const several = host.elem === 'vertex' ? source.propertyHasSeveral('vertex', host.id, part.name, fresh) : null;
+      if (several && typeof multi !== 'string') multi.push([raws.reduce<Expr>((met, raw) =>
+        ({ kind: 'binary', op: 'and', left: { kind: 'binary', op: 'is not', left: raw, right: compilerNull() }, right: met }), several),
+      multiplePropertiesMessage(part.name)]);
+      const value = several && typeof multi === 'string' ? multiValueRaises(several, part.name, typed.value, multi) : typed.value;
       const property = token(value, typed.evidence);
       if (!property) return null;
       // The reference falls through to the SCOPE only where the property is ABSENT, which is what COALESCE
@@ -399,6 +425,8 @@ export const REL_PROJECTORS: ReadonlySet<string> = new Set(['math', 'format']);
  */
 export function projectorValue(
   step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
+  /** How `format()` spells a multi-valued property token's raise (`MultiValued`). */
+  multi: MultiValued = 'raise',
 ): {
   readonly value: Expr; readonly drop: boolean; readonly sqlType: SqlType; readonly framing: RelFraming;
   /** The drop's predicate over the HOST's scope where it is cheaper than `value IS NOT NULL` (`format()`'s
@@ -411,7 +439,7 @@ export function projectorValue(
     return value && { value, drop: true, sqlType: 'real', framing: { kind: 'scalar', type: STATIC('double') } };
   }
   if (step.name !== 'format') return null;
-  const produced = formatValue(step, host, child, source, fresh);
+  const produced = formatValue(step, host, child, source, fresh, multi);
   // `format()` is ALWAYS a String (`FormatStep extends MapStep<S, String>`) — the reference's own
   // declared type, and the `CAST(… AS TEXT)` above is what makes the relation agree with it.
   return produced && {
@@ -436,19 +464,29 @@ export function projectorValue(
  * a token at all, so a constant template emits every traverser.
  */
 export function projectorTail(
-  input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter, deferRaise = false,
+  input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
+  site: { readonly defer: boolean; readonly exact: boolean } = { defer: false, exact: true },
 ): FramedRel | null {
   // DEFERRED where the step after consumes a pending raise (`raise-channel.ts`'s `defersRaise`): a variable
   // that is not a Number rides the row as the reference's message (`MathStep` raises on the traverser it is
   // handed, so it is the slice's to decide whether that one is ever pulled), and the value is the plain
   // formula. Otherwise the raise is part of the value, which the drop filter below always evaluates.
-  const parts = deferRaise && step.name === 'math' ? mathParts(step, host, child, source, fresh) : null;
-  const produced = parts?.offences.length ? null : projectorValue(step, host, child, source, fresh);
+  // `format()`'s one per-row raise (a multi-valued property token) rides the same way, as an offence
+  // `formatValue` hands back — unless the value it then builds still raises eagerly (a child body's own
+  // raise), where the eager form stands. That eager form is the reference's raise only where the reference
+  // pulls every row the statement evaluates (`site.exact`); elsewhere it is a DEFERRAL (`MultiValued`).
+  const parts = site.defer && step.name === 'math' ? mathParts(step, host, child, source, fresh) : null;
+  const formatOffences: (readonly [Expr, string])[] = [];
+  const deferred = site.defer && step.name === 'format' ? projectorValue(step, host, child, source, fresh, formatOffences) : null;
+  const formatDeferred = deferred && formatOffences.length && !exprMayRaise(deferred.value) ? deferred : null;
+  const produced = parts?.offences.length ? null
+    : formatDeferred ?? projectorValue(step, host, child, source, fresh, site.exact ? 'raise' : 'defer');
   if (!parts?.offences.length && !produced) return null;
   const value = parts?.offences.length ? parts.value : produced!.value;
   const { drop, sqlType, framing } = parts?.offences.length ? MATH_SHAPE : produced!;
   const prior = pendingRaise(input);
-  const raised = parts?.offences.length ? raiseMessage(parts.offences) : undefined;
+  const raised = parts?.offences.length ? raiseMessage(parts.offences)
+    : formatDeferred ? raiseMessage(formatOffences) : undefined;
   const carried = raised && !prior ? withChannel(input.channels, RAISE) : input.channels;
   const carriedExpr = (name: string): Expr => !raised || name !== RAISE.col ? col(input.id, name)
     : prior ? { kind: 'call', fn: 'COALESCE', args: [col(input.id, prior.col), raised] } : raised;

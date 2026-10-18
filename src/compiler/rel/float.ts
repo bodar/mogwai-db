@@ -86,9 +86,10 @@ const NOT_A_FLOAT = 'printing a Float that is not carried as its exact value is 
  * minimum (`floatText` states it: `Float.MIN_VALUE` is `1.4E-45`, not `1E-45`) — the fewest that reads
  * back wins (nine always does): ONE correlated read over the eight precisions, so `x` is spelled a fixed
  * few times rather than once per precision. A subnormal reads back through the float grid
- * (`floatRoundedOf`). NULL only for a NULL; an `x` no candidate reads back as RAISES.
+ * (`floatRoundedOf`). NULL only for a NULL; an `x` no candidate reads back as RAISES — through `arm`, a
+ * reference-style raise unless the caller spells its deferral as a READ-only one (`asStringOf`).
  */
-export function floatShortest(x: Expr, fresh: Minter): Expr {
+export function floatShortest(x: Expr, fresh: Minter, arm: (message: string) => Expr = raiseInRow): Expr {
   const precisions = make.explode({
     id: fresh('fsp'), channels: [], type: typeOf(meta('p', 'int')), as: { value: 'p' },
     expr: compilerText(JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8])),
@@ -110,10 +111,10 @@ export function floatShortest(x: Expr, fresh: Minter): Expr {
   const readsBack = make.filter({ id: fresh('fsr'), input: candidates, channels: [], type: candidates.type, pred: bin('=', floatRoundedOf(c), x) });
   const fewest = make.sort({ id: fresh('fss'), input: readsBack, channels: [], type: readsBack.type, terms: [{ expr: col(readsBack.id, 'p'), dir: 'asc' }] });
   const first = make.limit({ id: fresh('fsl'), input: fewest, channels: [], type: fewest.type, count: compilerInt(1) });
-  const chosen: Expr = { kind: 'case', whens: [[col(first.id, 't'), raiseInRow(FLOAT_TIE)]], else: col(first.id, 'c') };
+  const chosen: Expr = { kind: 'case', whens: [[col(first.id, 't'), arm(FLOAT_TIE)]], else: col(first.id, 'c') };
   const shortest: Expr = { kind: 'scalar', plan: make.project({ id: fresh('fsv'), input: first, channels: [], type: typeOf(meta('c', 'real', true)), exprs: [['c', chosen]] }) };
   return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: x, right: compilerNull('real') }, compilerNull('real')]],
-    else: { kind: 'call', fn: 'coalesce', args: [shortest, raiseInRow(NOT_A_FLOAT)] } };
+    else: { kind: 'call', fn: 'coalesce', args: [shortest, arm(NOT_A_FLOAT)] } };
 }
 
 /**

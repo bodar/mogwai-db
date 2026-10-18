@@ -1,6 +1,6 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, signBit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { exprMayRaise, raiseInRow as raise } from '../../rel/raise.ts';
+import { deferralExpr, exprMayRaise, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
 import { letValues, type Minter } from './build.ts';
@@ -270,8 +270,11 @@ const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bi
  *   raises the deferral.
  *
  * A NULL renders NULL here; whether a null RAISES is `transformOffences`' question, not this one's.
+ *
+ * `spelling` says how the caller's step meets what this cannot render (`StringSpelling`).
  */
-export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, step = 'asString()'): Expr | null {
+export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, spelling: StringSpelling = AS_STRING): Expr | null {
+  const { step } = spelling;
   const cast: Expr = { kind: 'cast', arg: value, to: 'text' };
   const bool: Expr = { kind: 'case', whens: [[value, text('true')]], else: text('false') };
   const nullable = (rendered: Expr): Expr => ({ kind: 'case', whens: [[isNull(value), compilerNull()]], else: rendered });
@@ -280,7 +283,8 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, 
     if (tag === 'string') return value;
     if (INTEGRAL_TAGS.includes(tag)) return cast;
     if (tag === 'boolean') return nullable(bool);
-    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float', fresh, step));
+    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float', fresh, spelling));
+    if (tag === 'bigdecimal' && spelling.decimal) return nullable(decimalText(value, spelling));
     return null;
   }
   // Per row: a NULL, a String and an integral Number are all `CAST(v AS TEXT)` (identity over text, NULL
@@ -293,8 +297,62 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, 
     ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
     // ONE floating arm for a Double and a Float: a Float prints its shortest decimal, per row.
     [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]),
-      floatingText(value, tagged ? inList(type, ['float']) : false, fresh, step)],
-  ], else: raise(deferral(`${step}: rendering this value at run time`)) };
+      floatingText(value, tagged ? inList(type, ['float']) : false, fresh, spelling)],
+    ...(tagged && spelling.decimal ? [[inList(type, ['bigdecimal']), decimalText(value, spelling)] as const] : []),
+  ], else: spelling.arm(deferral(`${step}: rendering this value at run time`)) };
+}
+
+/**
+ * HOW A STEP THAT RENDERS `String.valueOf` MEETS A VALUE `asStringOf` CANNOT SPELL — the step's name for
+ * the message, the ARM the deferral is spelled with, and whether a BigDecimal's carried text is spelled.
+ *
+ * `asString()` raises its deferral as a reference-style raise (`raiseInRow`), which every pulled-extent
+ * rule (`settlesExactly`) treats as an answer. `format()` spells it as a READ-only deferral
+ * (`deferralExpr`): a token's rendering never decides whether the traverser exists (the productivity drop
+ * reads the raw token values), so the deferral belongs to the value's READ, and a slice after the step
+ * (`format(…).limit(n)`) stays a plain slice rather than an extent the raise must be settled over. The
+ * two differ only to keep this decline-only change from widening `asString()`'s coverage.
+ */
+export interface StringSpelling {
+  readonly step: string;
+  readonly arm: (message: string) => Expr;
+  /** Spell a BigDecimal from its carried decimal TEXT where that text is its `toString` (`decimalText`). */
+  readonly decimal: boolean;
+}
+
+/** `asString()`'s spelling — see `StringSpelling`. */
+export const AS_STRING: StringSpelling = { step: 'asString()', arm: raise, decimal: false };
+
+/** `format()`'s spelling — see `StringSpelling`. */
+export const FORMAT_STRING: StringSpelling = {
+  step: 'format()', arm: (message) => deferralExpr(message, { kind: 'call', fn: 'random', args: [] }), decimal: true,
+};
+
+/**
+ * `BigDecimal.toString()` of a BigDecimal carried as its DECIMAL TEXT (the literal's digits and scale, which the
+ * BigDecimal serializer reads back) — that text itself exactly where `toString` prints the plain form,
+ * else the deferral. `toString` is plain iff the scale is non-negative and the adjusted exponent
+ * (`precision - 1 - scale`) is at least -6
+ * (`java.math.BigDecimal#toString`, the JDK's `layoutChars`; the JDK is not vendored). Over the text that
+ * is: no exponent, no leading zero, and either a non-zero integer part, a first non-zero digit within six
+ * places of the point, or a ZERO of scale six or less (`0.000000`; `0.0000000` is `0E-7`). A negative zero
+ * defers (`-0.0` prints `0.0`), as does a BigDecimal carried as anything but TEXT.
+ */
+function decimalText(value: Expr, spelling: StringSpelling): Expr {
+  const glob = (pattern: string, of: Expr): Expr => ({ kind: 'call', fn: 'glob', args: [text(pattern), of] });
+  const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
+  // The unsigned digits: a carried decimal has at most one leading `-`, and anything else fails `plain`.
+  const digits: Expr = { kind: 'call', fn: 'ltrim', args: [value, text('-')] };
+  // Digits with at most one point, starting and ending with a digit, with no leading zero but a lone `0`.
+  const plain = and(and(glob('[0-9]*', digits), not(glob('*[^0-9.]*', digits))),
+    and(not(glob('*.*.*', digits)), and(not(glob('*.', digits)), not(glob('0[0-9]*', digits)))));
+  // A zero integer part leaves `0.<fraction>`, so the first six fraction digits start at the third character.
+  const firstSix: Expr = { kind: 'call', fn: 'substr', args: [digits, int(3), int(6)] };
+  const zero = and(not(glob('-*', value)), and(not(glob('*[1-9]*', digits)), { kind: 'binary', op: '<=', left: { kind: 'call', fn: 'length', args: [digits] }, right: int(8) }));
+  const shown = and(plain, or(or(glob('[1-9]*', digits), glob('*[1-9]*', firstSix)), zero));
+  const carried: Expr = { kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: text('text') };
+  return { kind: 'case', whens: [[and(carried, shown), value]],
+    else: spelling.arm(deferral(`${spelling.step}: a BigDecimal whose toString is not its plain decimal text`)) };
 }
 
 /**
@@ -309,7 +367,7 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, 
  * reads several times, so it is spelled once, in a one-row LET carrying its exact digits (`%!.17g`; JSON's
  * own REAL keeps only 15).
  */
-function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, step = 'asString()'): Expr {
+function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, spelling: StringSpelling): Expr {
   const real: Expr = { kind: 'cast', arg: value, to: 'real' };
   const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
   // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
@@ -324,11 +382,11 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, step = 
     [{ kind: 'binary', op: '<', left: real, right: compilerReal(-Number.MAX_VALUE) }, text('-Infinity')],
   ];
   if (float !== false) {
-    const shortest = floatShortest(real, fresh);
+    const shortest = floatShortest(real, fresh, spelling.arm);
     const printed: Expr = { kind: 'call', fn: 'printf', args: [text('%!.17g'),
       float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: real }] };
     return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, signedZero], ...infinite],
-      else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh, step), fresh) };
+      else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh, spelling), fresh) };
   }
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
   const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
@@ -336,7 +394,7 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, step = 
     { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
   const exact: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
   return { kind: 'case', whens: [[zero, signedZero], ...infinite, [and(plain, exact), shown]],
-    else: raise(deferral(`${step}: a floating-point Number outside the plain shortest form`)) };
+    else: spelling.arm(deferral(`${spelling.step}: a floating-point Number outside the plain shortest form`)) };
 }
 
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to

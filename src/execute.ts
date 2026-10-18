@@ -219,6 +219,10 @@ function recordValueBuffer(row: any, prefix: string, type: ScalarType): Buffer {
 function scalarCellBuffer(v: any, row: any, type: ScalarType, at: string): Buffer {
   if (type.kind !== 'perRow') return frameValue(v, staticTypeOf(type));
   const vtype = row[perRowColumn(type, at)];
+  // A `T`/`Direction` TOKEN is a GraphBinary enum, not the string it prints as — an `elementMap()` key
+  // reached as a bare value (`elementMap().unfold().select(keys)`) frames by `frameTypedNode`'s token arm,
+  // exactly as the same key does inside a list or a map.
+  if ((vtype === 'T' || vtype === 'D') && typeof v === 'string') return frameTypedNode({ t: vtype, v } as FrameNode);
   return isCollectionType(vtype) ? frameStoredValue(v, vtype) : frameValue(v, vtypeToValueType(vtype));
 }
 

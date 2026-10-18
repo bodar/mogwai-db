@@ -1520,9 +1520,9 @@ const RAISE_COL = 'rz';
 const raiseDefersTo = (steps: readonly IRStep[], at: number, ctx: ChainCtx): boolean =>
   defersRaise(steps, at, ctx, selfCollapses);
 
-/** Where a sack fold's raise goes (`sackMutate`): carried to the step consuming it, or settled where it is
+/** Where a raise born at `steps[at - 1]` goes (`sackMutate`, `projectorTail`): carried to the step consuming it, or settled where it is
  *  born — and whether that settle is exact. */
-const sackRaiseAt = (steps: readonly IRStep[], at: number, ctx: ChainCtx): { readonly defer: boolean; readonly exact: boolean } =>
+const raiseSiteAt = (steps: readonly IRStep[], at: number, ctx: ChainCtx): { readonly defer: boolean; readonly exact: boolean } =>
   ({ defer: raiseDefersTo(steps, at, ctx), exact: settlesExactly(steps, at, ctx) });
 
 /**
@@ -2091,7 +2091,7 @@ function scalarTail(
         out = read.framing;
         continue;
       }
-      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh, sackRaiseAt(steps, at + 1, ctx));
+      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
       if (!folded) return null;
       rel = folded;
       continue;
@@ -2101,7 +2101,7 @@ function scalarTail(
     // One lowering at every host, for `project()`'s reason: a shape works wherever it is legal, not
     // wherever a host was taught it.
     if (REL_PROJECTORS.has(step.name)) {
-      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh, raiseDefersTo(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
       if (!projected) return null;
       rel = projected.rel;
       out = projected.framing;
@@ -3315,7 +3315,7 @@ function mapTail(
     // stream, so the rest of the chain continues through `continueAs`.
     if (REL_PROJECTORS.has(step.name)) {
       const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}), row: { rel, aliases: labels, elsewhere: beyondAliases(ctx) } };
-      const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh, raiseDefersTo(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
       return projected && continueAs(projected.rel, projected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
 
@@ -5373,7 +5373,7 @@ function elementTail(
       // A carried PATH declines for `terminal()`'s reason: the value is a new traverser object and
       // nothing here appends it as a path position.
       if (pathCarried(rel)) return null;
-      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, raiseDefersTo(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -5400,7 +5400,7 @@ function elementTail(
     // ordinary shape-preserving step of this loop. The bare READ form is a RETYPE and falls through
     // to `terminal()`, which is where every element→value boundary lives.
     if (step.name === 'sack' && sackOperator(step) !== undefined) {
-      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, sackRaiseAt(steps, at + 1, ctx));
+      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
       if (!folded) return null;
       rel = folded;
       continue;
@@ -6123,7 +6123,7 @@ function recordTail(
     // against the FIELDS by the same rule `by(__.select('a'))` already followed here. `_` is the whole
     // map, so it declines through the identity guard rather than projecting one.
     if (REL_PROJECTORS.has(step.name)) {
-      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh, raiseDefersTo(steps, at + 1, ctx));
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), ctx.source, fresh, raiseSiteAt(steps, at + 1, ctx));
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }

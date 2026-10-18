@@ -281,6 +281,64 @@ describe('format() renders every token as String.valueOf, or defers', () => {
     expect(answer(multi(), "g.V().has('name','b').format('%{x}')")).toEqual([str('3')]);
     expect(answer(multi(), "g.V().elementMap().format('%{x}')")).toEqual([str('2'), str('3')]);
   });
+
+  // UNDER A SLICE the raise is the slice's to settle over the traversers the reference PULLS: it rides the
+  // row and is met only where pulled. Where the statement may evaluate a traverser the reference never
+  // pulls (past a `dedup()`), the token DEFERS rather than raise an error the reference may not.
+  test('a multi-valued token under a slice raises exactly where pulled, or defers', () => {
+    expect(() => answer(multi(), "g.V().format('%{x}').limit(1)")).toThrow('Multiple properties exist for the provided key, use Vertex.properties(x)');
+    expect(answer(multi(), "g.V().has('name','b').format('%{x}').limit(1)")).toEqual([str('3')]);
+    // The first token is unproductive on `b`... and `a`'s `y` is absent, so `x` is never read.
+    expect(answer(multi(), "g.V().format('%{y}%{x}').limit(1)")).toEqual([]);
+    expect(() => answer(multi(), "g.V().format('%{x}').dedup().limit(1)")).toThrow(/not supported|Multiple properties/);
+  });
+
+  // A slice after `format()` is a plain slice: every token kind above answers through it (the rendering's
+  // deferral belongs to the value's READ, `FORMAT_STRING`), and a zero-width slice — whose input the
+  // reference still pulls — declines over a token that may raise.
+  test.each([
+    ["g.V().format('%{name}').limit(2)", ['marko', 'vadas']],
+    ["g.E().hasId(8).format('%{weight}').limit(1)", ['1.0']],
+    ["g.V().values('name').format('%{_}').limit(1)", ['marko']],
+    ["g.V().format('%{_}').by('name').limit(1)", ['marko']],
+    ["g.V().elementMap().format('%{name}').limit(1)", ['marko']],
+    ["g.V().format('%{name}').range(1,3)", ['vadas', 'lop']],
+    ["g.V().format('%{name}').dedup().limit(2)", ['marko', 'vadas']],
+    ["g.V().union(__.format('%{name}').limit(1), __.format('%{age}'))", ['marko', '29', '27', '32', '35']],
+  ] as const)('%s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual(expected.map(str));
+  });
+
+  // `BigDecimal.toString()` is its carried decimal text exactly where that is the plain form — a scale of
+  // zero or more and an adjusted exponent of -6 or more; `0.0000001m` is `1E-7` and `0.0000000m` `0E-7`.
+  test.each([
+    ["g.inject(3.5m).format('%{_}')", '3.5'], ["g.inject(1.0m).format('%{_}')", '1.0'],
+    ["g.inject(['a':3.5m]).format('%{a}')", '3.5'], ["g.inject(100m).format('%{_}')", '100'],
+    ["g.inject(-3.50m).format('%{_}')", '-3.50'], ["g.inject(0.000001m).format('%{_}')", '0.000001'],
+    ["g.inject(0.000000m).format('%{_}')", '0.000000'],
+  ])('%s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual([str(expected)]);
+  });
+  test.each([["g.inject(0.0000001m).format('%{_}')"], ["g.inject(0.0000000m).format('%{_}')"]])(
+    'a BigDecimal whose toString is not its text defers: %s', (gremlin) => {
+      expect(() => runP(gremlin)).toThrow(/not supported/);
+    });
+});
+
+// A `T`/`Direction` TOKEN reached as a bare value (an `elementMap()` key) is the enum, not its name: it
+// frames as the token and is never EQUAL to a String (`GremlinValueComparator.equals`, `ft == st`).
+describe('a T/Direction token is not the String it prints as', () => {
+  test.each([
+    ["g.V(1).elementMap().unfold().select(keys)", ['T.id', 'T.label', '"name"', '"age"']],
+    ["g.V(1).elementMap().select(keys).unfold()", ['T.id', 'T.label', '"name"', '"age"']],
+    ["g.E(7).elementMap().unfold().select(keys)", ['T.id', 'T.label', 'Direction.IN', 'Direction.OUT', '"weight"']],
+    ["g.V(1).elementMap().unfold().select(keys).is('label')", []],
+    ["g.V(1).elementMap().select(keys).unfold().is(within('id','name'))", ['"name"']],
+    ["g.V(1).elementMap().unfold().select(keys).where(__.is('label'))", []],
+    ["g.V(1).elementMap().unfold().select(keys).is(neq('label')).count()", ['4L']],
+  ] as const)('%s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual([...expected]);
+  });
 });
 
 // SPLIT. `StringUtil.split` (`vendor/tinkerpop/gremlin-core/.../util/StringUtil.java:49,51`): an EMPTY

@@ -729,6 +729,14 @@ function typeSpaced(equal: Expr, value: unknown, type: SubjectType, boundType: T
   } });
 }
 
+/** The per-row vtypes whose value rides as TEXT, whose Gremlin `Type` is not String, and whose text `bound`
+ *  could be: a `T` token's name, a `Direction`'s, a UUID's canonical form. */
+const textCarriedOthers = (bound: string): readonly string[] => [
+  ...(['id', 'label', 'key', 'value'].includes(bound) ? ['T'] : []),
+  ...(['IN', 'OUT', 'BOTH'].includes(bound) ? ['D'] : []),
+  ...(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bound) ? ['uuid'] : []),
+];
+
 const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: SubjectType, boundType: TypeNode | null): Expr | null => {
   const raw = binary('=', subject, bound);
   if (typeof value === 'string') {
@@ -739,6 +747,15 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
     // A NULL vtype is "read the value", and a TEXT value read that way is a String.
     if (type.kind === 'perRow' && numberSpelling(value))
       return binary('and', raw, binary('=', { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('string')] }, compilerText('string')));
+    // A TEXT-carried value of another `Type` — a `T`/`Direction` token (an `elementMap()` key, whose text
+    // is its name), a UUID — is never equal to a String (`GremlinValueComparator.equals`: `ft == st`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:239-275`),
+    // so `elementMap().unfold().select(keys).is('label')` is empty, not `T.label`. Only a bound that IS some
+    // such value's text can meet one, so only that bound pays for the guard.
+    const others = textCarriedOthers(value);
+    if (type.kind === 'perRow' && others.length)
+      return binary('and', raw, { kind: 'unary', op: 'not', arg: {
+        kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('')] }, values: others.map(compilerText) } });
     return raw;
   }
   const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
@@ -808,6 +825,7 @@ export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
     else: subject,
   };
 };
+
 
 /**
  * AN ORDERING over a compare key (`storedCompareOn`'s answer) as sort terms — the key, then its zero's
