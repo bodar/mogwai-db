@@ -10,16 +10,16 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { freeRelIds, rewriteExpr } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { armHoldsSortedLocal, beginsWithSource, hostSortsBody, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, sortedHostMergeAt, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
+import { assertsGType, BATCHING_BRANCHES, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
+import { eachChildChain, rawBodies } from '../ir/walk.ts';
+import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
-import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
+import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import { edgeEndpoint } from './element.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -36,7 +36,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffCo
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
     labelSetArgs, scalarFramedValue, meta, minter,
-    payloadCols, propertyKeyArgs, regroupFirstOccurrence, renumber, rowNumberWindow,
+    payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf, BRANCH_KEY_PREFIX,
     type Minter
 } from './build.ts';
@@ -48,12 +48,12 @@ import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingT
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
-import { deferralExpr, raiseExpr, raiseInRow } from '../../rel/raise.ts';
+import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { promotedExtremum, resultIsDecimal, widensDoubleToDecimal } from './float.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapIdentity, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -63,7 +63,7 @@ import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPa
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
-import { ADD_ALL, BULK_INVARIANT_OPS, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
+import { ADD_ALL, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
 import { keyProductive, nondeterministic, ORDER_KEY, ORDER_RANK, orderKeyTuple, rankJoin, type RankedOrders, type RankSink } from './ranked-order.ts';
 import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
@@ -271,11 +271,28 @@ export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): b
   // — `choose(p, values('name').order().by(desc), …)` emits `[vadas, peter, marko, josh]`, and a merge
   // left positionless emitted the names in start order. The client reads that order as surely as a
   // `fold()` would, so the merge owes it wherever nothing order-free consumes the branch (above).
-  // One authority answers it at every depth — a per-start host (`local`/`flatMap`/`coalesce`/`optional`)
-  // inside the arm emits `(start, body order)`, which the arm drains just as whole (`hostSortsBody`; a
-  // sorted `local()` in an arm, which that set leaves out, by `armHoldsSortedLocal`).
-  if (position && (hostSortsBody(position.steps[position.at]) || armHoldsSortedLocal(position.steps[position.at]))) return true;
+  if (position && armSorts(position.steps[position.at])) return true;
   return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
+};
+
+/** Does a `union`/`choose` body SORT ITS OWN STREAM — a global `order()` among one ARM's own steps, or a
+ *  nested `union`/`choose` there whose own arm sorts? The arms are every child chain of the step and, for
+ *  an option-map `choose`, the `option()` BODIES, one level below the folded `optionArms` cluster. One
+ *  nested in a per-traverser host (`local(out().order())`) sorts one start's output, not the arm's. An
+ *  unreadable body answers yes: owing an order costs a numbering, never an answer. */
+const armSorts = (step: IRStep | undefined): boolean => {
+  if (!step || !BATCHING_BRANCHES.has(step.name)) return false;
+  const read = rawBodies({});
+  let sorts = false;
+  const unreadable = (): void => { sorts = true; };
+  const arm = (body: readonly IRStep[]): void => {
+    if (body.some((s) => (s.name === 'order' && !isLocalScope(s)) || armSorts(s))) sorts = true;
+  };
+  eachChildChain(step, read, (chain) => {
+    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
+    else arm(chain as IRStep[]);
+  }, unreadable);
+  return sorts;
 };
 
 /** Does a positional SLICE read the order this branch emits — one after it in its own list, or (unless the
@@ -288,9 +305,9 @@ export const branchSliced = (ctx: ChainCtx, position: Arrival | undefined): bool
 const SLICE_READERS: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 'tail']);
 
 /** The steps that READ the arrival order of the stream reaching them: the positional slices, the collecting
- *  barriers whose members keep arrival order, and the steps that keep a FIRST arrival (`TraverserSet`'s
- *  merge, a stable sort's ties, `dedup`). */
-export const ORDER_READERS: ReadonlySet<string> = new Set([
+ *  barriers whose members keep arrival order, and the steps that keep a FIRST arrival (a stable sort's
+ *  ties, `dedup`). */
+const ORDER_READERS: ReadonlySet<string> = new Set([
   'limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'store', 'cap', 'group', 'tree', 'dedup', 'order', 'barrier', 'sample',
 ]);
 
@@ -452,230 +469,10 @@ const withBranchEffects = (
 ): Tail | null => (merged.effects?.length
   ? afterWrite(ctx.writes, null, steps, at, at + 1, merged.effects, ctx.params, fresh, tail) : tail());
 
-/** Does the stream reaching `steps[at]` hold exactly the reference's traversers — none merged by a
- *  bulking barrier before it? Answerable only where `steps` is KNOWN to begin a traversal
- *  (`ChainCtx.traversal`, compared by identity), and then by `referenceUnbulkedAt`'s conservative scan. */
-export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
-  mergesNothing(ctx) || (ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted, startsSingle(ctx.traversal)));
-
-/** Is a CHILD traversal fed one parent traverser at a time — not the root, and not a `BranchStep` arm
- *  handed every start at once (`ChainCtx.traversal.allStarts`)? The scan's `singleStart` (`ir/bulk.ts`). */
-const startsSingle = (traversal: { readonly rooted: boolean; readonly allStarts?: true }): boolean =>
-  !traversal.rooted && !traversal.allStarts;
-
-/** Does the reference merge NO two traversers anywhere in this traversal? A `withSack(seed)` with a
- *  non-null seed and no merge operator puts a sack on every traverser from the start, and a traverser
- *  that `carriesUnmergeableSack` equals no other
- *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java:131-156`),
- *  so every `TraverserSet` it reaches keeps one slot per traverser — at every bulking position and every
- *  depth. Asked here, once, rather than by the scan (`ir/bulk.ts` reads steps, and the sack is a SOURCE
- *  declaration). With a merge operator the set COMBINES sacks (`merge`, same file), which `mergeEqual`
- *  declines. */
-export const mergesNothing = (ctx: ChainCtx): boolean =>
-  !!ctx.sack && !ctx.sack.operator && ctx.sack.seed.value !== null;
-
-/** The traversal `steps` is known to BEGIN, for merge placement — `ChainCtx.traversal` (or a nested
- *  rooted read's `ChainCtx.mergeScope`) itself, or a PREFIX of it a lowering sliced off to lower apart from
- *  the step it ends in (a `by()` body's trailing reducer, an argmax's `min`/`max`): the same step objects
- *  from index 0, so position `i` of one is position `i` of the other and a merge placed in the whole
- *  traversal before `steps.length` is placed in the prefix. Anything else is a different array and
- *  answers `undefined`. */
-function placedIn(ctx: ChainCtx, steps: readonly IRStep[]): ChainCtx['traversal'] {
-  for (const traversal of [ctx.traversal, ctx.mergeScope]) {
-    if (!traversal) continue;
-    if (traversal.steps === steps) return traversal;
-    if (steps.length && steps.length <= traversal.steps.length && steps.every((s, i) => s === traversal.steps[i])) return traversal;
-  }
-  return undefined;
-}
-
-/**
- * May a BULK-FORWARDING parent at `steps[at]` answer differently than the reference because the reference
- * merged equal traversers before it? `OptionalStep` hands its child the traverser WITH its bulk
- * (`traverser.split()`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/OptionalStep.java:46-57`),
- * so a body whose answer is not linear in the bulk (`bulkNonlinear`, `ir/bulk.ts` — a reduction emits ONE
- * traverser for the k, a slice trims the bulk) answers once for a merged slot where this spine, one row
- * per traverser, answers once per copy. Decline there unless the reference provably merged nothing before
- * `at` (`unbulkedAt`). `LocalStep` splits a slot into units first (`LocalStep.java:80-88`), and
- * `coalesce`/`map`/`flatMap` reset the bulk to 1, so none of them diverges; a `BranchStep` whose arms hold
- * no barrier at any depth has only bulk-linear arms, and one whose arms do runs them over its merged
- * starts (`armStartMerge`).
- */
-export const bulkForwardingDiverges = (ctx: ChainCtx, steps: readonly IRStep[] | undefined, at: number, bodies: readonly (readonly IRStep[])[]): boolean =>
-  bodies.some(bulkNonlinear) && !(steps && unbulkedAt(ctx, steps, at));
-
-/** The deferral a merge raises where one drain of a `NoOpBarrierStep(window)` would not hold the stream
- *  (`regroupFirstOccurrence`): the reference merges in successive drains, which one window cannot state.
- *  Worded by the barrier that owns the window — an explicit `barrier(n)` names its own `n`; the implicit
- *  ones are `LazyBarrierStrategy`'s/`PathRetractionStrategy`'s `MAX_BARRIER_SIZE`. */
-export const mergeWindowExceeded = (window: number, explicit: boolean): string => explicit
-  ? `a barrier(${window}) that fills with more than ${window} distinct traversers while its order is read is not supported`
-  : `a traversal whose implicit barrier holds more than ${window} distinct traversers while its order is read is not supported`;
-/** The implicit barriers' deferral — `mergeWindowExceeded` at `MAX_BARRIER_SIZE`. */
-export const MERGE_WINDOW_EXCEEDED = mergeWindowExceeded(MAX_BARRIER_SIZE, false);
-
-/**
- * MERGE EQUAL TRAVERSERS into their first arrival's slot (`regroupFirstOccurrence`, `build.ts`) — the ONE
- * place a lowering reproduces a reference `TraverserSet`, whichever step owns the set. `key` is the
- * shape's traverser identity; every carried channel joins it there.
- *
- * Only an EMISSION ORDER can carry a merge — the copies' shared position is the bulk — so a stream with
- * none is returned as it is: nothing downstream reads its order, and a bulk-sensitive consumer asks
- * `referenceUnbulkedAt` for itself. A SACK makes a traverser unequal to every other unless the traversal
- * named a merge operator (`B_O_S_SE_SL_Traverser.carriesUnmergeableSack`,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java:140-156`):
- * unmergeable, the set merges nothing; mergeable, it COMBINES sacks, which this cannot state — a decline.
- *
- * The merge keeps the FIRST arrival's slot, so it reads the ARRIVAL order — the stream's `encounter`. That
- * is the reference's order at every position, a branch's output included: a branch whose order any reader
- * reads is numbered by the emission key (`BranchKeys`), and one nobody reads carries no position at all —
- * so the merge never needs to ask where it stands. (It used to: while a branch merged by content, a merge
- * behind or ahead of one declined.) `explicit` names an explicit `barrier(n)`'s window in the deferral.
- */
-export function mergeEqual(
-  rel: Rel, key: readonly Expr[], window: number, ctx: ChainCtx, fresh: Minter,
-  opts: { readonly explicit?: boolean } = {},
-): Rel | null {
-  if (!encounterOf(rel.channels)) return rel;
-  if (ctx.sack || rel.channels.some((channel) => channel.role === 'sack')) return ctx.sack?.operator ? null : rel;
-  const deferral = (message: string) => (dependsOn: Expr): Expr => deferralExpr(message, dependsOn);
-  // A MAP payload keys on its entries in no order (`mapIdentity`); every other term is widened to the
-  // typed equality where the set is built (`typedEquality`, build.ts). A map NESTED in one (a `{t:'map'}`
-  // node anywhere inside) would still compare in its own order, so such a row raises rather than merge
-  // short: `Map.equals` recurses through `equals` at every depth.
-  key = key.map((term) => {
-    if (term.kind !== 'col' || term.rel !== rel.id || term.name !== MAP_COL) return term;
-    const nested: Expr = { kind: 'binary', op: '>', left: { kind: 'call', fn: 'instr', args: [jsonOf(term), compilerText('"t":"map"')] }, right: compilerInt(0) };
-    return { kind: 'case', whens: [[nested, deferral(NESTED_MAP_MERGE)(term)]], else: mapIdentity(term, fresh) };
-  });
-  return regroupFirstOccurrence(rel, key, window, deferral(mergeWindowExceeded(window, !!opts.explicit)), fresh);
-}
-
-/** The deferral a merge raises over a map that holds a nested map (`mergeEqual`): the order-free key
- *  (`mapIdentity`) reorders one level only. */
-const NESTED_MAP_MERGE = 'merging equal traversers whose map value holds a nested map is not supported';
 
 /** WHERE a step stands: the step list the lowering is folding and the index of the step the stream reaches —
- *  what a branch asks of the steps after it (`branchOrderOwed`) and a bulk-forwarding host of the steps before. */
+ *  what a branch asks of the steps after it (`branchOrderOwed`). */
 export interface Arrival { readonly steps: readonly IRStep[]; readonly at: number }
-
-/** The merge key of a shape whose identity IS its payload (a value, a list, a map, a record, a path). */
-const payloadKey = (rel: Rel): readonly Expr[] => payloadCols(rel).map((column) => col(rel.id, column.name));
-/** The merge key of an element stream — `Element.equals` is by id. */
-const elementKey = (rel: Rel): readonly Expr[] => [col(rel.id, 'id')];
-
-/** The merge key of a FRAMING's traverser (`RowShape.mergeKey`), or `null` where re-positioning rows
- *  cannot state the merge (a detached or typed stream). */
-export const framingMergeKey = (framing: RelFraming): ((rel: Rel) => readonly Expr[]) | null =>
-  framing.kind === 'elements' ? elementKey
-    : framing.kind === 'property' ? (rel) => propertyIdentityKey(rel, framing.ownerElem)
-      : framing.kind === 'detached' || framing.kind === 'typedNode' || framing.kind === 'discard' ? null
-        : payloadKey;
-
-/**
- * THE ARM-START MERGE of a `BranchStep` that holds a barrier: with `hasBarrier` every start is added to
- * each arm's own `TraverserSet` before the arm runs (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:87-88,123-158`),
- * so an arm sees the merged slots in first-arrival order. Reproduced on the arms' shared input where it
- * carries an emission order (`mergeEqual`); a framing whose merge cannot be stated declines.
- *
- * Where the merge's order is OWED (`owed`, the branch's `branchOrderOwed`) and the input carries no order
- * yet, it is POSITIONED first — the realization the emission key freezes anyway (`positioned`, declining
- * under a slice where none is trivial) — so the merge has an arrival order to keep. Left unpositioned, the
- * key numbered the UNMERGED starts: `g.V().hasLabel('person').out().union(local(in().values('name').order()))`
- * ran the arm once per arrival of `v3` where the reference runs it over ONE slot of bulk 3, which
- * `LocalStep` splits into consecutive units (`…/step/branch/LocalStep.java:80-88`).
- */
-export function armStartMerge(
-  input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, owed?: { readonly slicing: boolean },
-): Rel | null {
-  const arrived = owed && !encounterOf(input.channels) ? positioned(input, fresh, owed.slicing) : input;
-  if (!arrived) return null;
-  if (!encounterOf(arrived.channels)) return arrived;
-  const key = framingMergeKey(framing);
-  return key ? mergeEqual(arrived, key(arrived), Infinity, ctx, fresh) : null;
-}
-
-/**
- * THE IMPLICIT MERGES on the stream reaching `steps[at]` — a start step's iterator, `LazyBarrierStrategy`'s
- * and `PathRetractionStrategy`'s `NoOpBarrierStep`s, a pass-through side-effect barrier — reproduced where
- * `bulkingPositions` (`ir/bulk.ts`) can place them: on the traversal `ctx.traversal` names (`placedIn`) —
- * the root, or a CHILD traversal at any depth (`local`/`map`/`flatMap`/`by()`/a `union`/`choose` arm/a
- * write's value traversal), each of which the reference runs its own strategies over. Every tail calls
- * this at the head of each step, so the merge lands whichever tail holds the stream there. The explicit
- * merges (`barrier()`, `order()`) are their own steps' (`barrierRows`, `orderRows`) and hold at any depth. Where the scan answers `'unknown'` it declines if the SUPERSET scan
- * places a merge here under a reader of the order (`mayMergeAt`), and otherwise leaves the stream as it is.
- */
-export function mergedAt(
-  ctx: ChainCtx, steps: readonly IRStep[], at: number, rel: Rel, key: (rel: Rel) => readonly Expr[], fresh: Minter,
-): Rel | null {
-  if (at === 0 || mergesNothing(ctx)) return rel;
-  // A stream with NO emission order cannot carry a merge (the copies' shared position IS the bulk), and
-  // every reader of it but one folds in a canonical order no merge can move. The one is a SLICE, whose
-  // membership the merged slots decide (`slicedAfter`) — so there, a merge the scan places (or may place)
-  // here declines rather than slice the unmerged rows.
-  if (!encounterOf(rel.channels)) {
-    if (!slicedAfter(steps, at)) return rel;
-    const scope = placedIn(ctx, steps);
-    if (!scope) return ctx.rewritten || !mayMergeUnplaced(steps, at) ? rel : null;
-    const single = startsSingle(scope);
-    const placed = bulkingPositions(scope.steps, scope.rooted, at, single);
-    if (placed === 'unknown') return referenceUnbulkedAt(scope.steps, at, scope.rooted, single) || !mayMergeAt(scope.steps, at, scope.rooted, false, single) ? rel : null;
-    return placed.some((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind) && !p.distinct) ? null : rel;
-  }
-  // A step list this scope does not KNOW begins a traversal (a resumed or rewritten chain, an arm handed
-  // a stream the reference may have merged) cannot place a merge. Every child traversal gets the
-  // strategies of its own (`DefaultTraversal.applyStrategies` → `TraversalHelper.applyTraversalRecursively`,
-  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversal.java:144-148`),
-  // so wherever the superset scan places one here under a reader of the order, the traversal declines.
-  // A REWRITTEN list (`ChainCtx.rewritten` — a barrier service's resume, a federated arm) is not the
-  // reference's traversal at all, so scanning it would only guess; it keeps the stream as it is (open in
-  // `docs/outstanding-work.md`).
-  const traversal = placedIn(ctx, steps);
-  if (!traversal) return ctx.rewritten || !mayMergeUnplaced(steps, at) ? rel : null;
-  const rooted = traversal.rooted;
-  // The scan stops at `at`: what follows cannot move a merge that happens before it. A CHILD traversal
-  // (`rooted: false`) is scanned from its own first step — the strategy runs per traversal, and a
-  // per-traverser child's set is per parent, which the merge key's carried `origin` (or the correlated
-  // subquery the body lowers in) scopes.
-  const single = startsSingle(traversal);
-  const positions = bulkingPositions(traversal.steps, rooted, at, single);
-  // Where the exact scan cannot place the merges (a label, a body unrolled past the strategy, a merge
-  // step…), the SUPERSET scan still says whether one MAY land here; if it may and a reader observes the
-  // order, the order this stream carries cannot be vouched for, so the traversal declines rather than
-  // answer the unmerged order.
-  if (positions === 'unknown') {
-    // A merge after a host that emits a SORTED order is read even at a bare root terminal, and in a child
-    // wherever its order is read (`sortedHostMergeAt`).
-    if (sortedHostMergeAt(traversal.steps, at, rooted, single, rooted || ctx.ordered)) return null;
-    return referenceUnbulkedAt(traversal.steps, at, rooted, single) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered, single) ? rel : null;
-  }
-  const merge = positions.find((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind));
-  if (!merge || merge.distinct) return rel;
-  // A child's traversers are the ROOT's class (`DefaultTraversal.getTraverserGenerator`, `…/util/DefaultTraversal.java:130-136`):
-  // under a root that tracks PATHS, `equals` compares the whole path (`B_LP_O_S_SE_SL_Traverser.java:113-125`),
-  // which a child stream not carrying it cannot state — decline rather than merge two different walks.
-  if (!rooted && ctx.tracksPath && !pathCarried(rel)) return null;
-  return mergeEqual(rel, key(rel), merge.window, ctx, fresh);
-}
-const IMPLICIT_MERGES: ReadonlySet<BulkingKind> = new Set<BulkingKind>(['start', 'lazy', 'retraction', 'side-effect']);
-
-/**
- * `barrier()` — a `NoOpBarrierStep` that drains its `TraverserSet` in slot order
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/NoOpBarrierStep.java:40-76`),
- * so `inject(1,2,1,3).barrier()` emits `1,1,2,3`. With an emission order the merge is reproduced
- * (`mergeEqual`, window `n` for `barrier(n)`); without one it is invisible unless a reader demands an order
- * the stream cannot carry, which declines (`unorderedBarrierMergeObservable`).
- */
-export function barrierRows(
-  step: IRStep, rel: Rel, key: (rel: Rel) => readonly Expr[], ctx: ChainCtx, steps: readonly IRStep[], at: number, fresh: Minter,
-): Rel | null {
-  const args = step.args ?? [];
-  const n = args[0]?.value;
-  const window = !args.length ? Infinity : typeof n === 'number' && Number.isInteger(n) && n > 0 && args.length === 1 ? n : undefined;
-  if (window === undefined) return null;
-  if (encounterOf(rel.channels)) return mergeEqual(rel, key(rel), window, ctx, fresh, { explicit: true });
-  return unorderedBarrierMergeObservable(steps, at, ctx.traversal?.steps === steps ? ctx.traversal : undefined, ctx.ordered) ? null : rel;
-}
 
 /**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
@@ -1289,25 +1086,12 @@ function sortTerms(
  */
 export function orderRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter,
-  opts: {
-    readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[];
-    /** Does the step's `TraverserSet` merge equal traversers (`mergeEqual`) — false where the stream is
-     *  provably pairwise distinct or the step is `Scope.local`. */
-    readonly merge?: boolean; readonly mergeKey?: (input: Rel) => readonly Expr[] | null;
-  } = {},
+  opts: { readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[] } = {},
 ): Rel | null {
   const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
   // No SQL comparator (a LIST/MAP/PATH key): the ranked-order barrier's two statements answer it, where
   // this step is one they rank; everywhere else it declines as before.
-  const merging = opts.merge ? { key: opts.mergeKey ?? (() => null) } : undefined;
-  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie, merging);
-  // `OrderGlobalStep` is a `CollectingBarrierStep`: it adds every start to ONE `TraverserSet` — merging an
-  // equal traverser into its first arrival's slot — and STABLE-sorts that set
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/CollectingBarrierStep.java:42-90`,
-  // `…/step/map/OrderGlobalStep.java:78`). So the tie-break is the MERGED position, whatever the key: the
-  // keys are projected as columns first, the merge re-positions the copies (`mergeEqual`), and the sort
-  // ranks them DENSELY so one merged traverser keeps one position after the sort as well.
-  if (merging && encounterOf(rel.channels)) return mergedOrder(rel, sort, merging.key, ctx, fresh);
+  if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie);
   const domain = sort.drop
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop })
     : rel;
@@ -1339,7 +1123,6 @@ export function orderRows(
  */
 function rankedRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter, tieOf?: (input: Rel) => readonly Expr[],
-  merging?: { readonly key: (input: Rel) => readonly Expr[] | null },
 ): Rel | null {
   const ranked = ctx.rankedOrders?.get(step);
   if (!ranked || isLocalScope(step) || (step.args ?? []).length) return null;
@@ -1364,12 +1147,7 @@ function rankedRows(
     ranked.sink.dirs = tuple.dirs;
     return rel;
   }
-  const joined = rankJoin(keyed, ranked, fresh);
-  // The same `TraverserSet` merge the SQL sort makes (`mergedOrder`): the rank is a column here already.
-  const key = merging && encounterOf(joined.channels) ? merging.key(joined) : undefined;
-  if (key === null) return null;
-  const withRank = key && merging ? mergeEqual(joined, key, Infinity, ctx, fresh) : joined;
-  if (!withRank) return null;
+  const withRank = rankJoin(keyed, ranked, fresh);
   const carried = encounterOf(withRank.channels);
   const channels = carried ? withRank.channels : withChannel(withRank.channels, ENCOUNTER);
   const tie: readonly Expr[] = carried ? [col(withRank.id, carried.col)] : (tieOf?.(withRank) ?? []);
@@ -1377,59 +1155,7 @@ function rankedRows(
     withRank,
     [{ expr: col(withRank.id, ORDER_RANK), dir: 'asc' }, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))],
     [...payloadCols(rel), ...carriedCols(channels)],
-    channels, fresh, key ? 'dense_rank' : 'row_number',
-  );
-}
-
-/**
- * `order()` over a stream that may hold EQUAL traversers — `orderRows`' merged arm. The sort keys are
- * projected as columns first (each is a correlated read of the row it keys), then the copies of each
- * traverser are re-positioned into its first arrival's slot (`mergeEqual`), and the stable sort ranks by
- * `(keys…, merged position)` with `DENSE_RANK`, so the copies of one merged traverser keep sharing one
- * position — the bulk the reference's merged slot carries out of the sort. `mergeKey` `null` (a shape
- * whose merge the rows cannot state) declines.
- */
-function mergedOrder(
-  rel: Rel, sort: { readonly terms: readonly SortTerm[]; readonly drop?: Expr },
-  mergeKey: ((input: Rel) => readonly Expr[] | null) | undefined, ctx: ChainCtx, fresh: Minter,
-): Rel | null {
-  const { terms, drop } = sort;
-  const name = (i: number): string => `ok${i}`;
-  const DROP = 'okd';
-  const projected = make.project({
-    id: fresh('okc'), input: rel, channels: rel.channels,
-    type: typeOf(...rel.type.cols, ...terms.map((_, i) => meta(name(i), 'any', true)), ...(drop ? [meta(DROP, 'int', true)] : [])),
-    exprs: [
-      ...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const),
-      ...terms.map((term, i) => [name(i), term.expr] as const),
-      ...(drop ? [[DROP, drop] as const] : []),
-    ],
-  });
-  // An unproductive key DROPS its traverser (`orderProductivity`) before the set ever sees it. The keyed
-  // rows are FENCED: the merge's window and the sort's window then read the keys and the identity as
-  // columns, where a fused projection would re-spell every correlated key read in each of them. The fence
-  // is a SPELLING economy, never a meaning, so a stream correlated to an enclosing row (a per-start body's
-  // rows, `freeRelIds`) goes unfenced: a fence is a named CTE, which cannot reference that row, and a
-  // correlated child declines on any Materialize below it (`correlatedReduce`) — `local(union(out().order(),
-  // identity()).fold())` would lose its answer to a re-spelling it never needed.
-  const filtered = drop
-    ? make.filter({ id: fresh('f'), input: projected, channels: projected.channels, type: projected.type, pred: col(projected.id, DROP) })
-    : projected;
-  const keyed = freeRelIds(filtered).size ? filtered : fenced(filtered, fresh);
-  // The traverser's identity is the INPUT's, re-addressed to the keyed relation that carries the input's
-  // columns under their own names — never the projected sort keys, which a fused window would re-spell.
-  const identity = mergeKey?.(rel);
-  if (!identity) return null;
-  const key = identity.map((expr) => rewriteExpr(expr, (node) =>
-    (node.kind === 'col' && node.rel === rel.id ? col(keyed.id, node.name) : node)));
-  const merged = mergeEqual(keyed, key, Infinity, ctx, fresh);
-  const encounter = merged && encounterOf(merged.channels);
-  if (!merged || !encounter) return null;
-  return renumber(
-    merged,
-    [...terms.map((term, i) => ({ ...term, expr: col(merged.id, name(i)) })), { expr: col(merged.id, encounter.col), dir: 'asc' as const }],
-    [...payloadCols(rel), ...carriedCols(rel.channels)],
-    rel.channels, fresh, 'dense_rank',
+    channels, fresh,
   );
 }
 
@@ -1928,7 +1654,6 @@ function scalarTail(
     rel = make.materialize({ id: fresh('m'), input: rel, channels: rel.channels, type: rel.type });
 
   for (let at = from; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
       const reSourced = reSource(step, rel, out, ctx, fresh);
@@ -2053,7 +1778,7 @@ function scalarTail(
     const kd = keyedDedup(step, rel, labels, ctx, fresh);
     if (kd === null) return null;
     if (kd !== 'skip') { rel = kd; bulked = false; continue; }
-    const row = rowOp(step, rel, scalarRowShape(host), bulked, ctx, fresh, { steps, at });
+    const row = rowOp(step, rel, scalarRowShape(host), bulked, ctx, fresh);
     if (row) { rel = row; if (step.name === 'dedup') bulked = false; continue; }
 
     // `concat(__.<t>…)` — a TRAVERSAL operand is a per-traverser CHILD value (`TraversalUtil.apply`),
@@ -2585,19 +2310,12 @@ function scalarTail(
         // approximated: it needs the walk partitioned by origin and seeded off the origin DOMAIN, which
         // `foldPerOrigin` does for the list fold and nothing does for this one yet.
         //
-        // BULK, from both sides. OURS: a `fold` — either overload — is `'reads-rows'` to the collapse
-        // authority (`ir/bulk.ts`, `verdictOf`'s default), so no movement collapse is introduced in
-        // front of one and every row here is one of the reference's traversers EXPANDED by its bulk.
-        // THE REFERENCE'S: the non-list `FoldStep.projectTraverser` applies the operator ONCE per
-        // traverser whatever its bulk
-        // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:58-68`),
-        // and its DEFAULT `LazyBarrierStrategy` merges equal traversers after every flat-map but the
-        // first — so `V().both().values('age').fold(0, sum)` adds marko's 29 ONCE (123, not 245). Only
-        // an operator for which folding a value twice IS folding it once (`min`/`max`/`and`/`or`) is
-        // indifferent; every other one folds only a stream the reference provably never bulked before
-        // this position (`referenceUnbulkedAt`), and declines anywhere it cannot say.
+        // BULK: a `fold` — either overload — is `'reads-rows'` to the collapse authority (`ir/bulk.ts`,
+        // `verdictOf`'s default), so no movement collapse is introduced in front of one and every row here
+        // is ONE traverser: the operator folds each of them. (Java's `LazyBarrierStrategy` may merge equal
+        // traversers first and fold a merged slot once — an execution detail, not an answer we emulate:
+        // `docs/feature-support-matrix.md`, deliberate divergences.)
         if (originOf(rel.channels)) return null;
-        if (!BULK_INVARIANT_OPS.has(declared.operator ?? '') && !unbulkedAt(ctx, steps, at)) return null;
         const folded = seededLeftFold(rel, 'v', streamType, encounter ? [encounter.col] : ['v'], declared, true, fresh);
         return folded && continueAs(folded.rel, folded.framing, steps, at + 1, false, ctx, fresh, labels);
       }
@@ -2889,7 +2607,6 @@ function listTail(
   // a nested chain lowered would otherwise import the fold that imports it.
   const seam = childSeam(ctx, fresh);
   for (let at = from; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
 
@@ -3006,7 +2723,7 @@ function listTail(
     if (kd === null) return null;
     if (kd !== 'skip') { rel = kd; continue; }
     const listHost: ChildHost = { kind: 'list', list: col(rel.id, LIST_COL), of: items };
-    const row = rowOp(step, rel, payloadRowShape(listHost), false, ctx, fresh, { steps, at });
+    const row = rowOp(step, rel, payloadRowShape(listHost), false, ctx, fresh);
     if (row) { rel = row; continue; }
 
     const member = listMemberOp(step, rel, items, ctx.source, fresh, seam);
@@ -3078,7 +2795,6 @@ function pathTail(
   let rel = seed;
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
@@ -3132,7 +2848,7 @@ function pathTail(
     // — the SAME `rowOp`/`payloadRowShape` the list stream uses, and the output stays a path stream. A bare
     // `order()` has no SQL comparator (element-wise ORDERABILITY is the JS-barrier increment) and declines
     // out of `rowOp`, falling through to the member ops below.
-    const row = rowOp(step, rel, payloadRowShape({ kind: 'list', list: col(rel.id, LIST_COL), of }), false, ctx, fresh, { steps, at });
+    const row = rowOp(step, rel, payloadRowShape({ kind: 'list', list: col(rel.id, LIST_COL), of }), false, ctx, fresh);
     if (row) { rel = row; continue; }
 
     // The relation is ALREADY a list relation, so the retype is the framing arm and nothing else — but only
@@ -3171,7 +2887,6 @@ function mapTail(
   let rel = seed;
   let labels = aliases;
   for (let at = from; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
@@ -3270,11 +2985,8 @@ function mapTail(
       // `fold(<map>, Operator.addAll)` — every map `putAll` into the seed (`mapsMerged`). Every other
       // seeded form over a map is the reference's own exception (`addAll` with a non-map seed raises
       // "Objects must be both of Map or Collection"; an arithmetic `Operator` casts the map to `Number`)
-      // and declines here. A per-origin stream declines for the scalar fold's reason, and so does one the
-      // reference may have BULKED: `putAll` once per traverser is not bulk-invariant, because merging
-      // `a, b, a` into `a×2, b` moves the LAST put of a shared key from `a` to `b` (`referenceUnbulkedAt`).
+      // and declines here. A per-origin stream declines for the scalar fold's reason.
       if (declared.operator !== ADD_ALL || !!originOf(rel.channels)) return null;
-      if (!unbulkedAt(ctx, steps, at)) return null;
       const merged = mapsMerged(rel, declared.seed, keyOf, valOf, encounter ? [encounter.col] : [], fresh);
       return merged && mapTail(merged, keyOf, valOf, steps, at + 1, ctx, fresh, labels);
     }
@@ -3354,7 +3066,7 @@ function mapTail(
     if (kd === null) return null;
     if (kd !== 'skip') { rel = kd; continue; }
     const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, row: { rel, aliases: labels, elsewhere: beyondAliases(ctx) } };
-    const row = rowOp(step, rel, payloadRowShape(mapHost), false, ctx, fresh, { steps, at });
+    const row = rowOp(step, rel, payloadRowShape(mapHost), false, ctx, fresh);
     if (!row) return null;
     rel = row;
   }
@@ -3448,7 +3160,6 @@ function mapEntryTail(
   let rel = seed;
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
@@ -3488,7 +3199,7 @@ function mapEntryTail(
     // a scalar's `v`, so its identity AND its tie are that whole payload (`payloadRowShape`) — the scalar
     // shape's `v` tie named a column the entry relation does not have, and `dedup().by(keys)` reached the
     // emitter as an internal error.
-    const row = rowOp(step, rel, payloadRowShape(entryHost(rel, keyOf, valOf, labels)), false, ctx, fresh, { steps, at });
+    const row = rowOp(step, rel, payloadRowShape(entryHost(rel, keyOf, valOf, labels)), false, ctx, fresh);
     if (row) { rel = row; continue; }
     const sliced = sliceOp(step, rel, false, fresh);
     if (!sliced) return null;
@@ -4603,12 +4314,8 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // (`rootedRead`, a source-union arm) may run once per parent traverser of a GLOBAL child; a seeded
   // resume (`opts.seed`) is a tail whose prefix ran elsewhere; and a re-sourced chain (a decorate
   // barrier's resume drops its `call()`, a federated arm reads a landed marker) is a REWRITTEN list.
-  // Merge placement (`mergedAt`) needs less: WHERE a whole traversal merges, which a nested rooted read
-  // states as well as the root does (`ChainCtx.mergeScope`); only a rewritten list cannot (`rewritten`).
-  const placeable = !opts.seed && analysed.ctx.source === BaseGraph;
-  const ctx: ChainCtx = !placeable ? { ...analysed.ctx, rewritten: true }
-    : root ? { ...analysed.ctx, traversal: { steps, rooted: true } }
-      : { ...analysed.ctx, mergeScope: { steps, rooted: beginsWithSource(steps) } };
+  const ctx: ChainCtx = root && !opts.seed && analysed.ctx.source === BaseGraph
+    ? { ...analysed.ctx, traversal: { steps, rooted: true } } : analysed.ctx;
   const { params } = ctx;
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
@@ -5020,7 +4727,6 @@ function elementTail(
   let labels = aliases;
   let at = from;
   for (; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, elementKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
       const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
@@ -5335,7 +5041,7 @@ function elementTail(
     // is built over the relation AFTER the drop; built over the pre-drop one, `simplePath().dedup().by(k)`
     // named a relation the dedup no longer reads and the checker threw "no relation 'spf…' is in scope".
     const from = step.name === 'dedup' ? dropPath(rel, fresh) : rel;
-    const row = rowOp(step, from, elementRowShape(from, elem, labels), bulked, ctx, fresh, { steps, at });
+    const row = rowOp(step, from, elementRowShape(from, elem, labels), bulked, ctx, fresh);
     if (!row) break;
     // A `dedup()` THAT LOWERED RESET THE MULTIPLICITY, and the fold learns it. Every arm `rowOp`
     // admits projects `bulk` as the literal 1 — the unordered `Distinct`, the ordered
@@ -5502,11 +5208,6 @@ function propertyTail(
 ): Tail | null {
   if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels, bulked: false };
   const step = steps[from]!;
-  {
-    const merged = mergedAt(ctx, steps, from, rel, (r) => propertyIdentityKey(r, elem), fresh);
-    if (!merged) return null;
-    rel = merged;
-  }
 
   // `hasKey()` / `hasValue()` — the property stream's OWN filters, and the only two steps whose subject
   // is a property rather than an element. They preserve the shape, so they recurse like a row op.
@@ -5519,7 +5220,7 @@ function propertyTail(
   }
 
   if (ROW_OPS.has(step.name)) {
-    const row = rowOp(step, rel, propertyRowShape(rel, elem, labels), bulked, ctx, fresh, { steps, at: from });
+    const row = rowOp(step, rel, propertyRowShape(rel, elem, labels), bulked, ctx, fresh);
     // A `dedup()` that lowered RESET the multiplicity — `dedupOn` projects `bulk` as the literal 1 — so
     // the fold learns it, for `elementTail`'s reason: a stale `bulked` sends a following slice to
     // `bulkSlice`, which declines without an emission order.
@@ -5589,10 +5290,7 @@ function propertyTail(
       : step.name === 'id' && elem === 'vertex' ? propertyId(rel, fresh)
         : step.name === 'value' ? propertyValue(rel, fresh)
           : step.name === 'asString' ? propertyAsString(rel, elem, fresh)
-          // An edge `Property` is equal to any other of its key and value (`property.ts`), so a merged slot
-          // is the FIRST arrival's — whose element this row may not hold. Where the reference may have
-          // merged before here, `element()` declines (`RowShape.mergeKey`).
-          : step.name === 'element' ? (elem === 'edge' && !unbulkedAt(ctx, steps, from) ? null : propertyElement(rel, elem, fresh))
+          : step.name === 'element' ? propertyElement(rel, elem, fresh)
         // `count()` is shape-agnostic and needs no property-specific arm: `countExpr` reads the BULK
         // CHANNEL, and `properties()` carries the parent's channels through its join — so a
         // bulk-collapsed parent's properties sum their multiplicity rather than counting rows, which
@@ -5870,7 +5568,6 @@ function recordTail(
   let rel = seed;
   let labels = aliases;
   for (let at = from; at < steps.length; at++) {
-    { const merged = mergedAt(ctx, steps, at, rel, payloadKey, fresh); if (!merged) return null; rel = merged; }
     const step = steps[at]!;
     if (step.optionArms) return null;
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
@@ -5917,7 +5614,7 @@ function recordTail(
     // its fields. A LABELLED `dedup(k…)` (it carries args) and every LOCAL-scope op decline out of
     // `rowOp` and fall to their own handlers below; a bare `dedup()` — long expressible, previously
     // declined as "a separate increment" — now lowers here, keeping the first occurrence's whole record.
-    const row = rowOp(step, rel, payloadRowShape(host), bulked, ctx, fresh, { steps, at });
+    const row = rowOp(step, rel, payloadRowShape(host), bulked, ctx, fresh);
     if (row) { rel = row; if (step.name === 'dedup') bulked = false; continue; }
 
     // A LOCAL op reads the record AS A MAP — `count(Scope.local)` is its entry count and a
@@ -6136,12 +5833,9 @@ function mergedElements(
     const effects = mergeFromTraversal(input, maps, op, tail, driverElem, aliases, ctx, fresh);
     return effects && { effects, at: end };
   }
-  // Does each input row stand for ONE reference traverser at the merge — none merged into a bulked slot
-  // before it? The merge's `onMatch` over a creation later drivers share counts them (`shareOnMatch`).
-  const unbulked = unbulkedAt(ctx, steps, at);
   const effects = op === 'mergeE'
-    ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh, unbulked)
-    : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh, unbulked);
+    ? elementMergeE(input, steps[at]!, arms, tail, aliases, driverElem, ctx.ordered, child, fresh)
+    : elementMergeV(input, steps[at]!, arms, tail, driverElem, ctx.ordered, child, fresh);
   return effects && { effects, at: end };
 }
 

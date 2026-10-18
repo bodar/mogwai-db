@@ -680,13 +680,13 @@ open**: their residue is NOT a worklist item, and their landed machinery is sche
 UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/feature-support-matrix.md`
 §17 *Deliberate divergences*. The code is the authority for every mechanism named below.
 
-- ⛔ **A — bulking positions / TraverserSet merges: SUPERSEDED (revert).** `bulkingPositions`,
+- ✅ **A — bulking positions / TraverserSet merges: REVERTED (simplification item 9).** `bulkingPositions`,
   `regroupFirstOccurrence`, `mergedAt`, the 2500-slot merge-window raise, `barrier()` merging, `order()`
   merge-then-DENSE_RANK, the sorted-host merge declines, the bulk-forwarding declines and `poolMergeGuard`
   emulate `LazyBarrierStrategy`/`TraverserSet` and change only the order of an unordered stream (and which
   rows an unordered `limit()` keeps). Kept: `count(1)` (SQLite's countOfView bug), the per-start
   reducing-option gate, `optional(count())` per start, `mergePeerArms`, the mergeV origin key,
-  `path().by()` value positions, `mergesNothing`.
+  `path().by()` value positions (`mergesNothing` went with the merges it guarded).
 - ✅ **B — the branch emission key.** ONE authority in `rel/lower.ts` (`branchOrderOwed`, `BranchKeys`,
   `mintBranchOrder`). The simplification reduces the key to one rule —
   `row_number() OVER (ORDER BY input.encounter, arm_ordinal, arm.encounter)` — with start-major order

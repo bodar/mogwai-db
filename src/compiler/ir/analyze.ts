@@ -1,7 +1,7 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { isNested, stepChain } from '../../gremlin/frontend.ts';
 import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
-import { armHoldsSortedLocal, bulkGroupCollapseTerminal, bulkObservedFrom, hostSortsBody, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
+import { bulkGroupCollapseTerminal, bulkObservedFrom, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -307,25 +307,12 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
       || terminal.name === 'group' || terminal.name === 'groupCount'
       || (REDUCERS.has(terminal.name) && (terminal.args?.length ?? 0) === 0)))
     return false;
-  //     …EXCEPT a host whose body SORTS (`hostSortsBody`, `ir/bulk.ts` — a per-start `coalesce`/`optional`/
-  //     `local`/`flatMap` emits `(start, body order)`, a batching arm drains sorted): the client reads an
-  //     order the reference states outright there, not one the corpus leaves unordered —
-  //     `g.V().coalesce(out().values('name').order(), values('name'))` is `[josh, lop, vadas, vadas, …]`.
-  //     A sorted `local()` in a batching arm (`armHoldsSortedLocal`) states one just as outright —
-  //     `g.V().union(local(out().values('name').order()))` is `[josh, lop, vadas, lop, ripple, lop]`.
-  if (steps.some((s) => PATH_STEPS.has(s.name))) return false;
-  if (steps.some((s) => BRANCH_MERGE_STEPS.has(s.name)) && !steps.some((s) => hostSortsBody(s) || armHoldsSortedLocal(s))) return false;
+  if (steps.some((s) => PATH_STEPS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name))) return false;
   // A trailing `order()` (the loop's `ordered`, not cleared by a later fan-out) has ALREADY pinned the
   // emission order as an `ORDER BY` in the SQL, so no encounter is owed — and forcing one changes how a
   // reader of that ordered stream behaves (a `has(k, __…order())` child took a different value, an L3
   // regression). The order the chain does specify survives a plan change on its own.
   if (ordered) return false;
-  // An explicit `barrier()` MERGES equal traversers into their first arrival's slot, which moves the
-  // emission order the chain ends with — `inject(1,2,1,3).barrier()` emits `1,1,2,3`
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/NoOpBarrierStep.java:40-76`).
-  // Only an emission order can carry that merge (`mergeEqual`, `rel/lower.ts`), so such a chain seeds one.
-  if (steps.some((s) => s.name === 'barrier' && !(s.args ?? []).length))
-    return steps.length > 1 && canCarryEncounter(steps);
   return steps.length > 1 && canCarryEncounter(steps) && !bulkObservedFrom(steps, 1);
 }
 

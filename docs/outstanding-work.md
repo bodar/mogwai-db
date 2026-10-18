@@ -80,17 +80,6 @@ lowered.
   fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
   (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
   (Graph capabilities, below).
-- **TraverserSet merge emulation — SUPERSEDED 2026-10-18, to be REMOVED (not extended).** The order an
-  unordered stream emits, and which rows an unordered `limit()` keeps, is not a semantic the reference
-  pins: `bulkingPositions`/`regroupFirstOccurrence`/`mergedAt`, the 2500-slot merge-window raise (a decline
-  that depends on DATA SIZE), `barrier()` merging, the sorted-host merge declines (`sortedHostMergeAt`)
-  and the bulk-forwarding declines are work items 1 and 9 of
-  [the simplification plan](./2026-10-18-simplification-plan.md). Equality for dedup/group/set ops becomes
-  the SQLite value plus a coarse family (boolean, number, string, other) — `1`, `1.0` and `1L` merge,
-  `true` and `1` stay apart, `-0.0` is `0.0`. `cap()`'s BulkSet member order is likewise unspecified (the
-  multiset is right). A write after a slot Java would have bulked creates one element per traverser
-  (`g.V().both().addV('x')` makes 12 vertices here, 6 in the reference) — an accepted divergence, feature
-  matrix §17.
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`

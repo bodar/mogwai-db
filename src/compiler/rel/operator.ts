@@ -89,14 +89,6 @@ export const FOLD_OPS: ReadonlySet<string> = new Set(['sum', 'minus', 'mult', 'd
  */
 export const COLLECTION_OPS: ReadonlySet<string> = new Set([...FOLD_OPS, ...BULK_OPS]);
 
-/**
- * The operators for which folding a value TWICE is folding it ONCE — `min`/`max`/`and`/`or` are
- * idempotent, so a fold over them answers the same whether or not the reference bulked equal
- * traversers before it (`FoldStep.projectTraverser` applies the operator once per traverser, whatever its
- * bulk). Every other operator is bulk-SENSITIVE, and a caller must prove the reference bulked nothing
- * (`referenceUnbulkedAt`, `ir/bulk.ts`) before folding rows that may repeat.
- */
-export const BULK_INVARIANT_OPS: ReadonlySet<string> = new Set(['min', 'max', 'and', 'or']);
 
 /** Does this operator produce a BOOLEAN rather than a value whose class the fold discovers? */
 const isLogicalOp = (operator: string): boolean => operator === 'and' || operator === 'or';

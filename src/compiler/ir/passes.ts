@@ -6,7 +6,7 @@ import {
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder, mergeStepLabels,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
-    inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias, verifyIdentityRemovalSuppressed,
+    inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
 } from './strategies.ts';
@@ -137,23 +137,6 @@ const FOLD: Pass[] = group('canonicalize', [
     name: 'markEarlyLimitSuppressed',
     applies: (_steps, ctx) => ctx.strategies.without.includes('EarlyLimitStrategy'),
     run: (steps, ctx) => markEarlyLimitSuppressed(steps, ctx.params),
-  },
-  // `withoutStrategies(IdentityRemovalStrategy)` keeps every `identity()`, which this compiler otherwise
-  // reads as absent: declined wherever that is observable (`verifyIdentityRemovalSuppressed`). On the RAW
-  // chain for the same reason as the two marks above — a nested body holds its `identity()` there.
-  {
-    name: 'verifyIdentityRemovalSuppressed',
-    applies: (_steps, ctx) => ctx.strategies.without.includes('IdentityRemovalStrategy'),
-    run: (steps, ctx) => { verifyIdentityRemovalSuppressed(steps, ctx.params); return steps; },
-  },
-  // `withoutStrategies(LazyBarrierStrategy)` / `(PathRetractionStrategy)` remove the implicit barriers at
-  // which the reference merges equal traversers, so the chain says so for `bulkingPositions`
-  // (`ir/bulk.ts`), which then answers `'unknown'` rather than place a merge that is not there. Top level
-  // only: the merges the lowering reproduces are the root traversal's.
-  {
-    name: 'markBulkingSuppressed',
-    applies: (_steps, ctx) => ctx.strategies.without.some((s) => s === 'LazyBarrierStrategy' || s === 'PathRetractionStrategy'),
-    run: (steps) => steps.map((s) => ({ ...s, bulkingSuppressed: true })),
   },
   // On the RAW chain, before any rewrite can delete an option's barrier: `BranchStep.hasBarrier` is
   // computed when the step is CONSTRUCTED (see `markBranchBarrier`). Every depth, identity-preserving.

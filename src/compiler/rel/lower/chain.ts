@@ -212,26 +212,12 @@ export interface ChainCtx extends FilterCtx {
    * THE TRAVERSAL THIS SCOPE'S `steps` BEGIN — set only where the step list a tail is handed is known
    * to be the reference's whole traversal from its first step: a rooted chain lowered from its source
    * (`rooted`), or a per-traverser child body (`by()`), which TinkerPop runs as its own traversal with
-   * one parent traverser at a time. A consumer whose answer depends on where the REFERENCE bulked
-   * (`referenceUnbulkedAt`, `ir/bulk.ts`) compares the `steps` it holds against this BY IDENTITY, so a
+   * one parent traverser at a time. A consumer whose answer depends on the stream being pairwise distinct
+   * (`streamDistinctAt`, `ir/bulk.ts`) compares the `steps` it holds against this BY IDENTITY, so a
    * resumed tail, a rewritten chain or an inherited parent scope cannot be mistaken for one — each is a
    * different array, and the consumer declines.
-   *
-   * `allStarts`: a CHILD handed EVERY start at once rather than one parent traverser at a time — an arm of a
-   * `BranchStep` whose arms hold a barrier (`BranchStep.hasBarrier`). Its first step sees a pairwise-distinct
-   * STREAM, so a map in it may make equal traversers that a barrier in it then merges (`startsSingle`).
    */
-  readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean; readonly allStarts?: true };
-  /**
-   * THE TRAVERSAL A NESTED ROOTED READ BEGINS, for merge placement only (`mergedAt`). A `rootedRead` /
-   * source-union arm is a whole child traversal the reference runs its own strategies over, so WHERE it
-   * merges is known — but it may run once per parent of a GLOBAL child, so it is not `traversal`, whose
-   * consumers also read its rows as the reference's traversers.
-   */
-  readonly mergeScope?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
-  /** This chain is a REWRITTEN list — a seeded resume or a re-sourced chain (`lowerChainOf`) — whose
-   *  positions are not the reference traversal's, so no merge can be placed in it by scanning it. */
-  readonly rewritten?: boolean;
+  readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
   /**
    * Is the order this body's END emits in READ by its host — where the host knows, rather than the
    * chain-global `ordered`/`sliced` guessing for it? `'free'`: the consumer provably ignores it — an EXISTS

@@ -155,9 +155,8 @@ describe('a branch arm keeps its tag through every re-read', () => {
   const coalesced = "g.V().project('a').by(coalesce(values('age'), constant(true)))";
   const answered: [string, string[]][] = [
     [`${coalesced}.select('a').fold()`, ['[29i,27i,true,32i,true,35i]']],
-    // The two equal `true` traversers merge at the reference's bulking position (`bulkingPositions`,
-    // `ir/bulk.ts`) and emit at the first one's place — the order the merge authority states.
-    [`${coalesced}.select('a').asString()`, ['"29"', '"27"', '"true"', '"true"', '"32"', '"35"']],
+    // Each row is one traverser in arrival order — no TraverserSet merge regroups the two `true`s.
+    [`${coalesced}.select('a').asString()`, ['"29"', '"27"', '"true"', '"32"', '"true"', '"35"']],
     [`${coalesced}.select('a').groupCount()`, ['{true:2L,27i:1L,29i:1L,32i:1L,35i:1L}']],
     ["g.V().project('a','b').by(coalesce(values('age'), constant(true))).by('name').select('a').fold()", ['[29i,27i,true,32i,true,35i]']],
     [`g.V().project('a').by(coalesce(values('age'), constant(${DATE}))).select('a').fold()`, ['[29i,27i,Date(2020),32i,Date(2020),35i]']],

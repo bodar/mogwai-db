@@ -713,13 +713,6 @@ export function inlineIdentityHostBody(steps: Step[], params: Record<string, any
     // walked past the position it lands in. A single pass would unwrap exactly one layer.
     if (!body) { out.push(s); continue; }
     const spliced = inlineIdentityHostBody(body, params).map(perTraverser);
-    // The host's name rides on the body's last stream step: a spliced `flatMap()` still stood where a
-    // counted flat-map stands (`bulkingPositions`, `ir/bulk.ts`).
-    for (let i = spliced.length - 1; i >= 0; i--) {
-      if (spliced[i]!.name === 'by') continue;
-      spliced[i] = { ...spliced[i]!, splicedHost: s.name } as IRStep;
-      break;
-    }
     out.push(...(OPENS_ENTRY_HOSTS.has(s.name) ? markOpensEntry(spliced) : spliced));
   }
   return out;
@@ -1383,30 +1376,6 @@ export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, a
 }
 
 /**
- * `withoutStrategies(IdentityRemovalStrategy)` — DECLINE where a kept `identity()` could change the answer.
- *
- * This compiler treats `identity()` as absent everywhere (`early-limit.ts`' `ONE_TO_ONE`, `bulk.ts`'
- * `NOT_A_REFERENCE_STEP`), which is the reference only while the strategy runs. A kept
- * `IdentityStep` is neither a `MapStep` nor a `SideEffectStep`, so `EarlyLimitStrategy` stops at it
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/EarlyLimitStrategy.java:68-98`)
- * and the slice then pulls one more row through a raising step before it can stop
- * (`g.withoutStrategies(IdentityRemovalStrategy).inject(1,'a').math('_+1').identity().limit(1)` raises
- * where this answered `[2.0]`); and it is a non-`Barrier` step after a flat-map, so `LazyBarrierStrategy`
- * places a merge the removal would not. Both are observable only to a SLICE or a reader of stream order, so
- * a traversal holding an `identity()` and one of those, at any depth, declines; any other traversal answers
- * the same with or without the step and keeps the no-op (`g_withoutStrategiesXIdentityRemovalStrategyX_V_identity_out`).
- */
-export function verifyIdentityRemovalSuppressed(steps: readonly Step[], params: Record<string, any>): void {
-  if (!someStepDeep(steps, params, (s) => s.name === 'identity', true)) return;
-  if (!someStepDeep(steps, params, (s) => KEPT_IDENTITY_OBSERVERS.has(s.name), true)) return;
-  throw UnsupportedTraversal.because(
-    'withoutStrategies(IdentityRemovalStrategy) over a traversal whose identity() a slice or an ordered read could observe is not supported yet');
-}
-const KEPT_IDENTITY_OBSERVERS: ReadonlySet<string> = new Set([
-  'limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'store', 'cap', 'group', 'groupCount', 'tree', 'sample', 'order', 'dedup', 'barrier',
-]);
-
-/**
  * `BranchStep.hasBarrier` IS A CONSTRUCTION-TIME FACT — set in `addChildOption` from
  * `getStepsOfAssignableClassRecursively(Barrier.class, option)`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88`),
@@ -1650,21 +1619,15 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // each phase boundary. TinkerPop's strategy remains suppressible above; its conservative admitted
   // set and provider-independent concern do not define this compiler's physical regime split.
   // No ceiling here: the platform enforces its own statement limits, and the build asserts them.
-  // Each copy is marked `unrolled`: where the reference merges equal traversers across unrolled bodies is
-  // no longer a function of the flat chain (`RepeatUnrollStrategy` inserts its own barriers, and declines
-  // the bodies this pass widens onto), so `bulkingPositions` (`ir/bulk.ts`) must be able to see it.
-  const strategy: 'strategy' | 'beyond' = !emit && !widensPastTheStrategy ? 'strategy' : 'beyond';
-  const phase = (last = false): Step[] => body.map((s, i) => ({
-    ...s, unrolled: strategy, ...(i === body.length - 1 ? { unrolledPhaseEnd: last ? 'last' : 'mid' } : {}),
-  }) as IRStep);
+  const phase = (): Step[] => body.map((s) => ({ ...s }));
 
   // WITHOUT emit — the plain bounded repeat. The output is the frontier after EXACTLY n iterations, so
   // splice n copies of the body inline (each an ordinary phase that collapses).
   if (!emit) {
     const phases: Step[] = [];
-    for (let k = 0; k < Math.min(n, lastLevel); k++) phases.push(...phase(k === n - 1));
+    for (let k = 0; k < Math.min(n, lastLevel); k++) phases.push(...phase());
     // Levels past `lastLevel` are EMPTY (the dedup argument above): `limit(0)` is the chain's empty.
-    if (lastLevel < n) phases.push({ name: 'limit', args: [arg(0)], ctx: rep.ctx, unrolled: 'beyond' } as IRStep);
+    if (lastLevel < n) phases.push({ name: 'limit', args: [arg(0)], ctx: rep.ctx });
     return phases;
   }
 
@@ -2289,9 +2252,8 @@ export function retractUnreadAlias(steps: IRStep[], params: Record<string, any>)
     const keep = args.filter((a) => typeof a.value !== 'string' || reads.labels.has(a.value));
     if (keep.length === args.length) { out.push(s); continue; }
     if (keep.length) { out.push({ ...s, args: keep }); continue; }
-    // The CHANNEL goes, the fact does not: the reference still carries the label, which suppresses
-    // `LazyBarrierStrategy`'s barriers and enters a traverser's `equals` — so the step it rode is marked
-    // for `bulkingPositions` (`ir/bulk.ts`), which a merge's placement depends on.
+    // The CHANNEL goes, the fact does not: the reference still carries the label on the path entry, so
+    // the step it rode is marked (`IRStep.labelsRetracted`).
     if (out.length) out[out.length - 1] = { ...out[out.length - 1]!, labelsRetracted: true };
   }
   return out;

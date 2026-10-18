@@ -4056,14 +4056,10 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * those creations' ids; the host runs this after the create and before the `property()` tail, the loop's
  * order. The pairs that would not share a creation stay `guardMergeInterleaving`'s to refuse.
  *
- * A host passes `sharesOnMatch` only where EVERY INPUT ROW IS ONE OF THE REFERENCE'S TRAVERSERS: this counts drivers by rows, and the
- * reference's `flatMap` runs once per TRAVERSER, a merged slot included: `g.inject(1,1,1)` drains into ONE
- * bulk-3 traverser (`StartStep` adds into a `TraverserSet`, `…/step/sideEffect/StartStep.java`), so its merge
- * creates once and never runs `onMatch`. So only a stream the reference reaches unmerged (`driversUnbulked`,
- * the host's `unbulkedAt`) qualifies; anything else keeps the refusal. Over such a stream every row of ours
- * is at bulk 1: the lowering merges rows only where the reference does (`regroupFirstOccurrence` at a
- * `bulkingPositions` merge, which `unbulkedAt` rules out) or under the movement collapse, which no chain
- * holding a write takes (`chainCollapseSafe` admits a movement/filter prefix only).
+ * This counts drivers by rows, and every row is ONE traverser: no lowering regroups equal traversers (Java's
+ * `TraverserSet` merge of, say, `g.inject(1,1,1)` into one bulk-3 traverser is an execution detail we do not
+ * emulate — `docs/feature-support-matrix.md`), and the movement collapse is never taken by a chain holding a
+ * write (`chainCollapseSafe` admits a movement/filter prefix only).
  */
 function shareOnMatch(
   elem: Elem, shared: Rel, writes: readonly PropertyWrite[], bind: Binder, guard: Guarder, fresh: Minter, child: ChildSeam, aliases: AliasMap,
@@ -4849,7 +4845,7 @@ export function mergeEFromMap(
 
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter, driversUnbulked = false,
+  driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -4934,7 +4930,7 @@ export function elementMergeV(
   // for an `onMatch` that is `onMatchShareable`.
   const multiDriver = incoming.type.cols.some((column) => column.name === ORD);
   const facts = mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes);
-  const sharesOnMatch = multiDriver && facts.acts && facts.onMatchShareable && driversUnbulked;
+  const sharesOnMatch = multiDriver && facts.acts && facts.onMatchShareable;
   guardMergeInterleaving('mergeV', incoming, matched, multiDriver ? {
     rel: make.filter({
       id: fresh('f'), channels: [], type: typeOf(meta(ORD, 'int')), pred: { kind: 'exists', plan: matched, negated: true },
@@ -5330,7 +5326,7 @@ function mergeEComputed(
  */
 export function elementMergeE(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  aliases: AliasMap, driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter, driversUnbulked = false,
+  aliases: AliasMap, driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -5461,8 +5457,7 @@ export function elementMergeE(
   // whose later search could find an earlier creation of a DIFFERENT pair — so a creation's sharers are
   // exactly the drivers joined to it below, and `shareOnMatch` answers the rest.
   const facts = mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(Object.keys(match.props)), propertySteps, child.writes);
-  const sharesOnMatch = creating && incoming.type.cols.some((column) => column.name === ORD) && facts.acts && facts.onMatchShareable
-    && driversUnbulked;
+  const sharesOnMatch = creating && incoming.type.cols.some((column) => column.name === ORD) && facts.acts && facts.onMatchShareable;
   guardMergeInterleaving('mergeE', incoming, matched, creating ? {
     rel: unmatched,
     createKey: createSides.length ? (rel) => ({ kind: 'call', fn: 'json_array', args: createSides.map((side) => col(rel, side)) }) : null,

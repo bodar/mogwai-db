@@ -682,6 +682,8 @@ describe('a slice after a side effect', () => {
     answers("g.V().property('x',1).id().limit(2).count()", [2], "g.V().has('x').count()", 2);
     answers("g.V().addLabel('z').limit(2).count()", [2], "g.V().hasLabel('z').count()", 2);
     answers("g.inject(1,2,3).addV('n').limit(1).count()", [1], "g.V().hasLabel('n').count()", 1);
+    // `inV()` maps one edge to one vertex, so the slice moves across it with the same answer.
+    answers("g.E().property('x',1).inV().limit(1).count()", [1], "g.E().has('x').count()", 1);
     // In a nested body too: the strategy applies to the child (`__.V()` is its `insertAfter`).
     answers("g.V(1).union(__.V().property('x',1).limit(2)).count()", [2], "g.V().has('x').count()", 2);
   });
@@ -713,8 +715,6 @@ describe('a slice after a side effect', () => {
   test('a slice it cannot move declines, writing nothing', () => {
     // A movement between: marko is written, then his first neighbour fills the slice.
     refuses("g.V().property('x',1).out().limit(1)", "g.V().has('x').count()");
-    // `inV()` is an `EdgeVertexStep` — a `FlatMapStep` (`…/step/map/EdgeVertexStep.java`), so never crossed.
-    refuses("g.E().property('x',1).inV().limit(1).count()", "g.E().has('x').count()");
     // The user turned the strategy off: the lazy pull writes the slice plus one.
     refuses("g.withoutStrategies(EarlyLimitStrategy).V().property('x',1).limit(1)", "g.V().has('x').count()");
     // A nested writer whose body is emitted lazily, cut by a slice after it.

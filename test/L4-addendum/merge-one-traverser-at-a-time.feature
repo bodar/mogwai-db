@@ -596,11 +596,10 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
     And the graph should return 1 for count of "g.V(3).outE(\"self\").has(\"w\",2)"
     And the graph should return 1 for count of "g.V(5).outE(\"self\").has(\"w\",1)"
 
-  # A MERGED SLOT is one traverser: inject(1,1,1) drains into ONE bulk-3 traverser (StartStep adds into a
-  # TraverserSet), so the merge's flatMap runs once — it creates and never runs onMatch. Rows are not
-  # traversers here, so the shared onMatch is refused (shareOnMatch needs an unbulked stream, unbulkedAt).
+  # Three traversers, one merge each: the first creates, the next two match and run onMatch. Java's start
+  # step merges inject(1,1,1) into ONE bulk-3 traverser first — an execution detail we do not emulate
+  # (docs/feature-support-matrix.md §17).
   @gap:merge-one-traverser-at-a-time
-  @Unsupported
   Scenario: g_injectX1_1_1X_mergeVXname_zzX_optionXonMatch_m_single_2X_count
     Given the modern graph
     And the traversal of
@@ -612,7 +611,7 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | result |
       | d[3].l |
     And the graph should return 1 for count of "g.V().has(\"name\",\"zz\")"
-    And the graph should return 0 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"zz\").has(\"m\")"
 
   # The onMatch key READ downstream: under SNAPSHOT WRITES (feature matrix §17) has("m") runs after the
   # merge's every write, so all three drivers pass it (the reference's lazy pipeline lets the first driver

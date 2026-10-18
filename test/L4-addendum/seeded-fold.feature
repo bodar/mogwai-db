@@ -403,27 +403,21 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       | result |
       | person |
 
-  # ---- BULK. A non-list fold applies its operator ONCE per traverser whatever its bulk
-  # (FoldStep.projectTraverser, .../step/map/FoldStep.java:58-68), and the default LazyBarrierStrategy
-  # merges equal traversers after every flat-map but the first (.../strategy/optimization/
-  # LazyBarrierStrategy.java:105-127), as does a start step's TraverserSet
-  # (.../step/util/ExpandableStepIterator.java:61-63). So a bulk-SENSITIVE operator over a stream the
-  # reference may have bulked has an answer the rows cannot give: it declines. ----
+  # ---- BULK. Every row is one traverser and the operator folds each of them. Java's TraverserSet may
+  # merge equal traversers first (LazyBarrierStrategy, a start step's set) and fold a merged slot once —
+  # an execution detail we deliberately do not emulate (docs/feature-support-matrix.md §17). ----
 
-  @Unsupported
   Scenario: g_V_both_valuesXageX_foldX0_sumX
     Given the modern graph
     And the traversal of
       """
       g.V().both().values("age").fold(0, Operator.sum)
       """
-    # A barrier lands after `both()` (the second flat-map); marko and josh arrive x3 and add once.
     When iterated to list
     Then the result should be unordered
-      | result   |
-      | d[123].i |
+      | result |
+      | d[245].i |
 
-  @Unsupported
   Scenario: g_V_both_barrier_valuesXageX_foldX0_sumX
     Given the modern graph
     And the traversal of
@@ -432,35 +426,30 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       """
     When iterated to list
     Then the result should be unordered
-      | result   |
-      | d[123].i |
+      | result |
+      | d[245].i |
 
-  @Unsupported
   Scenario: g_V_hasXname_markoX_projectXsX_byXboth_both_valuesXageX_foldX0_sumXX
     Given the modern graph
     And the traversal of
       """
       g.V().has("name","marko").project("s").by(__.both().both().values("age").fold(0, Operator.sum))
       """
-    # The by() child is its own traversal: a barrier lands after its second `both()`, so marko x3,
-    # josh and peter add once each — 29 + 32 + 35.
     When iterated to list
     Then the result should be unordered
-      | result             |
-      | m[{"s":"d[96].i"}] |
+      | result |
+      | m[{"s":"d[154].i"}] |
 
-  @Unsupported
   Scenario: g_injectX1_1_2X_foldX0_sumX
     Given the empty graph
     And the traversal of
       """
       g.inject(1, 1, 2).fold(0, Operator.sum)
       """
-    # inject drains its arguments into ONE TraverserSet, so the two 1s arrive as one traverser of bulk 2.
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[3].i |
+      | d[4].i |
 
   @gap:seeded-fold
   Scenario: g_V_both_valuesXageX_foldX0_maxX
@@ -488,25 +477,19 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       | result             |
       | m[{"s":"d[59].i"}] |
 
-  # ---- PATH PROCESSORS. PathRetractionStrategy, also a default strategy (.../TraversalStrategies.java:286),
-  # inserts a NoOpBarrierStep after EVERY PathProcessor step (math, where, simplePath, …) whose next step
-  # is not a Barrier, labels or no (.../strategy/optimization/PathRetractionStrategy.java:134-141). Its
-  # keepLabels retraction can make traversers whose paths differed equal there, so they merge. ----
+  # ---- PATH PROCESSORS. No merge after a math()/where() either: each traverser folds once. ----
 
-  @Unsupported
   Scenario: g_injectX1_2_3X_mathX_x0_plus5X_isXgtX0XX_foldX0_sumX
     Given the empty graph
     And the traversal of
       """
       g.inject(1, 2, 3).math("_ * 0 + 5").is(P.gt(0)).fold(0, Operator.sum)
       """
-    # The barrier after math merges 5.0 x3 into one traverser, which the fold adds once.
     When iterated to list
     Then the result should be unordered
-      | result   |
-      | d[5.0].d |
+      | result |
+      | d[15.0].d |
 
-  @Unsupported
   Scenario: g_V_mathX5X_isXgtX0XX_foldX0_sumX
     Given the modern graph
     And the traversal of
@@ -515,28 +498,24 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       """
     When iterated to list
     Then the result should be unordered
-      | result   |
-      | d[5.0].d |
+      | result |
+      | d[30.0].d |
 
-  @Unsupported
   Scenario: g_V_asXaX_constantX1X_whereXasXaX_outX_constantX5X_foldX0_sumX
     Given the modern graph
     And the traversal of
       """
       g.V().as("a").constant(1).where(__.as("a").out()).constant(5).fold(0, Operator.sum)
       """
-    # Nothing after the where() reads 'a', so its keepLabels is empty: the three surviving traversers
-    # are all `1` with a retracted path, and the barrier after where() merges them into 1 x3.
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].i |
+      | d[15].i |
 
   # ---- A WRAPPED where(). InlineFilterStrategy runs before PathRetractionStrategy and splices a filter()
   # or and() whose children are all FilterSteps into the parent (InlineFilterStrategy.java:80-84, 196-213),
   # so the where() lands in the root and gets the same NoOpBarrierStep after it. ----
 
-  @Unsupported
   Scenario: g_V_asXaX_constantX5X_filterXwhereXasXaX_outXX_isXgtX0XX_foldX0_sumX
     Given the modern graph
     And the traversal of
@@ -546,9 +525,8 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].i |
+      | d[15].i |
 
-  @Unsupported
   Scenario: g_V_asXaX_constantX5X_filterXwhereXasXaX_outXX_constantX5X_foldX0_sumX
     Given the modern graph
     And the traversal of
@@ -558,9 +536,8 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].i |
+      | d[15].i |
 
-  @Unsupported
   Scenario: g_V_asXaX_constantX5X_andXwhereXasXaX_outXX_isXgtX0XX_foldX0_sumX
     Given the modern graph
     And the traversal of
@@ -570,9 +547,8 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].i |
+      | d[15].i |
 
-  @Unsupported
   Scenario: g_V_asXaX_constantX5X_andXwhereXasXaX_outX_isXgtX0XX_constantX5X_foldX0_sumX
     Given the modern graph
     And the traversal of
@@ -582,20 +558,18 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].i |
+      | d[15].i |
 
-  @Unsupported
   Scenario: g_V_asXaX_constantX5X_filterXfilterXwhereXasXaX_outXXX_constantX5X_foldX0_sumX
     Given the modern graph
     And the traversal of
       """
       g.V().as("a").constant(5).filter(__.filter(__.where(__.as("a").out()))).constant(5).fold(0, Operator.sum)
       """
-    # The strategy re-runs to a fixpoint, so the nested wrapper inlines all the way down.
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].i |
+      | d[15].i |
 
   @gap:seeded-fold
   Scenario: g_V_asXaX_constantX5X_filterXwhereXasXaX_outXX_foldX0_sumX

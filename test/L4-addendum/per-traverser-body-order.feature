@@ -32,12 +32,9 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       | josh |
       | ripple |
 
-  # A MERGED start. `LazyBarrierStrategy` puts a `NoOpBarrierStep` after the non-first flat-map `out()`
-  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:105-127),
-  # so the three `lop` traversers reach `flatMap` as ONE bulk-3 traverser at the first one's place. The body
-  # runs once over it (the child start is bulk 1, .../traversal/util/TraversalUtil.java:185-191) and each
-  # result is split from the head with its bulk (FlatMapStep.java:42-52): `josh,josh,josh,marko,…`, not the
-  # three copies' sorted runs one after another. A slice then trims a result's bulk (RangeGlobalStep).
+  # A start that arrives several times (`lop` x3 after `out()`) runs its body once per arrival: each run is
+  # its own sorted block, start-major — no TraverserSet merges the three into one slot first (Java's
+  # LazyBarrierStrategy does; docs/feature-support-matrix.md §17).
   Scenario: g_V_out_flatMapXin_valuesXnameX_orderX_fold
     Given the modern graph
     And the traversal of
@@ -47,7 +44,7 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[marko,josh,josh,josh,marko,marko,marko,peter,peter,peter,marko,josh] |
+      | l[marko,josh,marko,peter,marko,josh,marko,peter,josh,josh,marko,peter] |
 
   Scenario: g_V_out_flatMapXin_valuesXnameX_order_limitX2XX_fold
     Given the modern graph
@@ -58,7 +55,7 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[marko,josh,josh,josh,marko,marko,marko,marko,josh] |
+      | l[marko,josh,marko,marko,josh,marko,josh,josh,marko] |
 
   Scenario: g_V_out_flatMapXin_valuesXnameX_orderX_limitX3X
     Given the modern graph
@@ -71,7 +68,7 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       | result |
       | marko |
       | josh |
-      | josh |
+      | marko |
 
   Scenario: g_V_both_flatMapXout_valuesXnameX_orderX_limitX4X
     Given the modern graph
@@ -83,14 +80,11 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
     Then the result should be ordered
       | result |
       | lop |
-      | lop |
-      | lop |
       | ripple |
+      | josh |
+      | lop |
 
-  # A step after the flatMap that is no `Barrier` takes `LazyBarrierStrategy`'s `NoOpBarrierStep` after the
-  # flatMap (`g.V()` counts as the first flat-map, LazyBarrierStrategy.java:113-127), which MERGES the equal
-  # names at the first one's place before `is()` sees them — so the start-major run is NOT what reaches the
-  # fold here. `identity()` is removed (IdentityRemovalStrategy) and leaves the flatMap's next step the fold.
+  # A non-Barrier step after the flatMap merges nothing: the start-major run is what reaches the fold.
   Scenario: g_V_flatMapXout_valuesXnameX_orderX_isXneqXxXX_fold
     Given the modern graph
     And the traversal of
@@ -100,7 +94,7 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[josh,lop,lop,lop,vadas,ripple] |
+      | l[josh,lop,vadas,lop,ripple,lop] |
 
   Scenario: g_V_flatMapXout_valuesXnameX_orderX_isXneqXxXX_limitX4X
     Given the modern graph
@@ -113,7 +107,7 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       | result |
       | josh |
       | lop |
-      | lop |
+      | vadas |
       | lop |
 
   Scenario: g_V_flatMapXout_valuesXnameX_orderX_identity_fold
@@ -127,8 +121,6 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       | result |
       | l[josh,lop,vadas,lop,ripple,lop] |
 
-  # `map(identity())` is spliced away here, but in the reference it is a `TraversalMapStep` no strategy
-  # removes — a non-`Barrier` next step, so the merge lands after the flatMap (`nextReferenceStep`, ir/bulk.ts).
   Scenario: g_V_flatMapXout_valuesXnameX_orderX_mapXidentityX_fold
     Given the modern graph
     And the traversal of
@@ -138,10 +130,8 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[josh,lop,lop,lop,vadas,ripple] |
+      | l[josh,lop,vadas,lop,ripple,lop] |
 
-  # …but `EarlyLimitStrategy` moves a `limit` left past that always-bound map, and a `RangeGlobalStep` IS a
-  # `Barrier`, so with a limit nothing merges after the flatMap.
   Scenario: g_V_flatMapXout_valuesXnameX_orderX_mapXidentityX_limitX4X
     Given the modern graph
     And the traversal of
@@ -156,8 +146,7 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       | vadas |
       | lop |
 
-  # The merged host with a label: the label rides to the `NoOpBarrierStep` after the flatMap, which the
-  # strategy still places (labels are read AFTER the step's own check, LazyBarrierStrategy.java:116-133).
+  # A label after the flatMap reads the start-major run as it stands.
   Scenario: g_V_out_flatMapXin_valuesXnameX_orderX_asXyX_selectXyX_fold
     Given the modern graph
     And the traversal of
@@ -167,12 +156,11 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[marko,marko,marko,marko,marko,josh,josh,josh,josh,peter,peter,peter] |
+      | l[marko,josh,marko,peter,marko,josh,marko,peter,josh,josh,marko,peter] |
 
-  # The OTHER per-start hosts. `CoalesceStep` is a `FlatMapStep` and `OptionalStep.processNextStart` drains
-  # its child for one start before the next (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/OptionalStep.java),
-  # so a sorted arm's order is the result stream's own, read at a bare terminal too (`hostSortsBody`,
-  # src/compiler/ir/bulk.ts). Both used to emit the arm's rows in scan order.
+  # The OTHER per-start hosts. A bare terminal emission of a coalesce()/optional() reads no order the
+  # query imposes, so it is asserted as the multiset; a reader that collects it (`fold()`) sees each
+  # start's sorted run.
   Scenario: g_V_coalesceXout_valuesXnameX_order_valuesXnameXX
     Given the modern graph
     And the traversal of
@@ -180,17 +168,17 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       g.V().coalesce(__.out().values("name").order(), __.values("name"))
       """
     When iterated to list
-    Then the result should be ordered
+    Then the result should be unordered
       | result |
+      | vadas |
       | josh |
       | lop |
-      | vadas |
-      | vadas |
-      | lop |
       | lop |
       | ripple |
-      | ripple |
       | lop |
+      | vadas |
+      | lop |
+      | ripple |
 
   Scenario: g_V_optionalXout_order_byXnameXX_valuesXnameX
     Given the modern graph
@@ -199,17 +187,17 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       g.V().optional(__.out().order().by("name")).values("name")
       """
     When iterated to list
-    Then the result should be ordered
+    Then the result should be unordered
       | result |
+      | vadas |
       | josh |
       | lop |
-      | vadas |
-      | vadas |
-      | lop |
       | lop |
       | ripple |
-      | ripple |
       | lop |
+      | vadas |
+      | lop |
+      | ripple |
 
   Scenario: g_V_unionXcoalesceXout_valuesXnameX_order_valuesXnameXXX
     Given the modern graph
@@ -218,14 +206,14 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       g.V().union(__.coalesce(__.out().values("name").order(), __.values("name")))
       """
     When iterated to list
-    Then the result should be ordered
+    Then the result should be unordered
       | result |
+      | vadas |
       | josh |
       | lop |
-      | vadas |
-      | vadas |
-      | lop |
       | lop |
       | ripple |
-      | ripple |
       | lop |
+      | vadas |
+      | lop |
+      | ripple |

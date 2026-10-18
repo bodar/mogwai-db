@@ -121,11 +121,7 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
       | result |
       | d[6].l |
 
-  # ---- a BranchStep option's EndStep takes LazyBarrierStrategy's NoOpBarrierStep ----
-  # Every option is closed by an EndStep (BranchStep.java:85), neither a Barrier nor the EmptyStep that ends
-  # any other traversal, so the last flat-map of an option merges equal traversers
-  # (LazyBarrierStrategy.java:116-127) — the lops of the out() arm group together. Not reproduced: declines.
-  @Unsupported
+  # ---- a BranchStep option's end merges nothing: each arm's rows reach the fold one per traverser ----
   Scenario: g_VX1_4_6X_unionXvaluesXnameX_order_out_valuesXnameXX_fold
     Given the modern graph
     And the traversal of
@@ -135,10 +131,7 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
     When iterated to list
     Then the result should have a count of 1
 
-  # ---- a group value body merges at its own NoOpBarrierStep, per member ----
-  # GroupStep.projectTraverser runs the value traversal per member (GroupStep.java:111-114); the NoOp after
-  # in() groups the three markos, which the pool collected apart.
-  @Unsupported
+  # ---- a group value body collects one member per traverser (no per-member TraverserSet merge) ----
   Scenario: g_VX1X_group_by_byXout_in_valuesXnameX_foldX
     Given the modern graph
     And the traversal of

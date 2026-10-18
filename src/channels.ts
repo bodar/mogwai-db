@@ -219,9 +219,7 @@ export const groupableChannels = (channels: Channels): boolean =>
  *
  * `encounter` is the only role that qualifies today: it is a minted emission position whose whole purpose
  * is a TOTAL order, which is why it carries a tie-break (`ROW_NUMBER() OVER (ORDER BY encounter, id)` —
- * §12). It is unique per TRAVERSER rather than per row: the copies of one traverser the reference holds
- * merged at bulk k share it (`regroupFirstOccurrence`, `src/compiler/rel/build.ts`), and a whole-row
- * `DISTINCT` over them would collapse that bulk — so the prohibition stands for the same reason.
+ * §12). Every row is one traverser, so a whole-row `DISTINCT` over it collapses nothing.
  *
  * ⚠️ **`bulk` is deliberately NOT row-unique, and the distinction is load-bearing rather than
  * pedantic.** `src/compiler/rel/lower.ts`'s unordered `dedup()` projects `bulk = 1` — a LITERAL —

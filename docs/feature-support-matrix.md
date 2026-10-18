@@ -316,5 +316,10 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | Float | stored and computed as the Double of its literal, rounded to 32 bits (`Math.fround`) only when framed |
 | Extreme-magnitude Doubles | outside roughly [1e-80, 1e116] a value crossing SQLite's decimal text may lose its last ulp |
 | Writes over a bulked slot | one element per traverser: `g.V().both().addV('x')` creates 12 vertices on the modern graph, where Java's `LazyBarrierStrategy` bulks equal traversers first and creates 6 |
-| Unordered-stream order | the order of a stream the query does not `order()` — and so which rows an unordered `limit()`/`range()` keeps — is unspecified (no TraverserSet/LazyBarrier merge-order emulation) |
+| Unordered-stream order | the order of a stream the query does not `order()` — and so which rows an unordered `limit()`/`range()` keeps — is arrival order, one row per traverser (no TraverserSet/LazyBarrier merge-order emulation): `g.V().both().both().limit(4)` keeps the first four arrivals |
+| `barrier()` | a pass-through, as is `barrier(n)`: `inject(1,2,1,3).barrier()` is `[1,2,1,3]`, not Java's regrouped `[1,1,2,3]`; ties in `order()` keep arrival order |
+| Seeded fold over repeats | `fold(seed, Operator)` folds every traverser: `inject(1,1,2).fold(0, sum)` is `4` and `g.V().both().values('age').fold(0, sum)` is `245`, where Java folds a merged slot once |
+| Group value pools | a group value body's slice or nested sort reads the key's pooled members one row per traverser — `by(union(out().order()).values('name').fold())` sorts a key's members together, not per member |
+| Per-start sorted bodies | `flatMap`/`local` keep each start's sorted run (start-major); a bare terminal `coalesce()`/`optional()` emission over a sorted arm is unordered |
+| Disabled strategies | `withoutStrategies(IdentityRemovalStrategy/LazyBarrierStrategy/PathRetractionStrategy)` answer as the default traversal (they change only Java's execution) |
 | Number spelling | `asString()`/`format()` render JS/SQLite number text (a whole Double still gets `.0`), not `Double.toString`'s exponent bands |

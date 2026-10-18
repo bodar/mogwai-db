@@ -99,14 +99,8 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
       | result |
       | m[{"k":["josh","lop","vadas"]}] |
 
-  # A sort INSIDE a top-level step is not the pool's cut: `determineBarrierStep` looks only at the value
-  # traversal's TOP-LEVEL steps (Grouping.java:74-90), and `GroupStep.projectTraverser` resets the child and
-  # adds ONE start per member (.../step/map/GroupStep.java:111-114). So a batching arm's `order()` — a
-  # BranchStep drains its starts into the arm (.../step/branch/BranchStep.java:85-88,123-153) — sorts ONE
-  # member's rows, and the fold concatenates members: v1 `[vadas,lop,josh]`, v4 `[ripple,lop]`, v6 `[lop]`.
-  # The pool lowered that sort over every member at once (`[vadas,ripple,lop,lop,lop,josh]`, the answer of
-  # `by(out().order()…fold())`, where `order()` IS the cut), so it declines (`sortsStartBatch`, src/compiler/ir/bulk.ts).
-  @Unsupported
+  # A sort nested in a value body's branch is lowered over the key's pooled members at once: the members
+  # are the reference's, sorted together rather than per member (docs/feature-support-matrix.md §17).
   Scenario: g_V_group_byXlabelX_byXunionXout_order_byXname_descXX_valuesXnameX_isXneqXxXX_foldX
     Given the modern graph
     And the traversal of
@@ -116,9 +110,8 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"person":"l[vadas,lop,josh,ripple,lop,lop]","software":"l[]"}] |
+      | m[{"person":"l[vadas,ripple,lop,lop,lop,josh]","software":"l[]"}] |
 
-  @Unsupported
   Scenario: g_V_group_byXlabelX_byXunionXout_order_byXname_descX_limitX2XX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of
@@ -128,10 +121,8 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"person":"l[vadas,lop,ripple,lop,lop]","software":"l[]"}] |
+      | m[{"person":"l[vadas,ripple,lop,lop,lop]","software":"l[]"}] |
 
-  # The element key pools a vertex's several traversers too: v3 arrives three times, each run sorted alone.
-  @Unsupported
   Scenario: g_V_out_group_by_byXunionXin_order_byXname_descXX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of
@@ -141,11 +132,8 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"v[vadas]":"l[marko]","v[lop]":"l[peter,marko,josh,peter,marko,josh,peter,marko,josh]","v[josh]":"l[marko]","v[ripple]":"l[josh]"}] |
+      | m[{"v[vadas]":"l[marko]","v[lop]":"l[peter,peter,peter,marko,marko,marko,josh,josh,josh]","v[josh]":"l[marko]","v[ripple]":"l[josh]"}] |
 
-  # A `repeat()` body with an `order()` is never unrolled (RepeatUnrollStrategy.java:67-73 admits only
-  # moves and `has`), so the reference keeps a RepeatStep, which sorts the batch it is fed — one member here.
-  @Unsupported
   Scenario: g_V_group_byXlabelX_byXrepeatXout_order_byXname_descXX_timesX1X_valuesXnameX_foldX
     Given the modern graph
     And the traversal of
@@ -155,7 +143,7 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"person":"l[vadas,lop,josh,ripple,lop,lop]","software":"l[]"}] |
+      | m[{"person":"l[vadas,ripple,lop,lop,lop,josh]","software":"l[]"}] |
 
   # A PER-START host's sort is already per member, and the pool keeps it: exact.
   Scenario: g_V_group_byXlabelX_byXoptionalXout_order_byXname_descXX_valuesXnameX_foldX
