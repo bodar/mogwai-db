@@ -1,4 +1,5 @@
-import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
+import { isNested, isPred, stepChain, type Arg, type Pred, type Step } from '../../gremlin/frontend.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 import { PATH_FAMILY, isStreamBarrier, type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, eachStepDeep, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 
@@ -256,6 +257,17 @@ const SIDE_EFFECT_KEYED: ReadonlySet<string> = new Set(['aggregate', 'store', 'g
 export function sideEffectShadowedLabel(
   steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
 ): string | null {
+  const { named, bound } = scopeNamespaces(steps, params, declared);
+  for (const label of bound) if (named.has(label)) return label;
+  return null;
+}
+
+/** The two namespaces `Scoping.getScopeValue` resolves a string key against, whole-tree: the names the
+ *  traversal registers as SIDE EFFECTS (`declared` — `withSideEffect` — plus every keyed writer's key)
+ *  and the PATH LABELS it binds (`as()`, a `match()` pattern's ends). Syntactic, every depth. */
+function scopeNamespaces(
+  steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
+): { named: Set<string>; bound: Set<string> } {
   const named = new Set(declared);
   const bound = new Set<string>();
   eachStepDeep(steps, rawBodies(params), (s) => {
@@ -264,8 +276,108 @@ export function sideEffectShadowedLabel(
     if (SIDE_EFFECT_KEYED.has(s.name))
       for (const a of s.args ?? []) if (typeof a.value === 'string') named.add(a.value);
   });
-  for (const label of bound) if (named.has(label)) return label;
+  return { named, bound };
+}
+
+/** The Java class `getSelectKey` names for a non-String scope key, by the literal's canonical type —
+ *  only the scalar types whose boxed class is unambiguous; any other key is not named, and declines. */
+const JAVA_SCALAR_CLASS: Readonly<Record<string, string>> = {
+  boolean: 'Boolean', byte: 'Byte', short: 'Short', int: 'Integer', long: 'Long', bigint: 'BigInteger',
+  float: 'Float', double: 'Double', bigdecimal: 'BigDecimal',
+};
+
+/** One select key of a `where(P)`, as `configurePredicates` collects it. `unnamed` marks a key whose
+ *  resolution this compile does not model (a parameterized predicate, an empty collection). */
+interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unnamed: boolean; }
+
+/**
+ * A `where(P)` / `where(startKey, P)` SCOPE KEY this compile cannot resolve the way the reference does —
+ * named by the key, or `null` when every key is a path label the lowering's alias readers own.
+ *
+ * `WherePredicateStep` does not compare against its predicate's operands: every non-traversal leaf of the
+ * `P` (through `and`/`or`; a collection value contributes its FIRST member — the `within("x")` hack) is a
+ * SELECT KEY, resolved per traverser through `Scoping.getSafeScopeValue` — the traverser's own Map, then
+ * the SIDE EFFECTS, then the PATH, else `IllegalArgumentException("Neither the map, sideEffects, nor path
+ * has a …-key")`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`
+ * `configurePredicates`/`setPredicateValues`/`getSelectKey`;
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`).
+ * A leaf holding a TRAVERSAL (`where(P.neq(__.constant('m')))`) is resolved per traverser instead and is
+ * not a key. So `where(P.eq('josh'))` is NOT `is(P.eq('josh'))`, and answering it as a literal compare is
+ * a different question. The lowering's readers resolve a key against the ALIAS MAP alone, so:
+ *
+ * - a key that is not a STRING is the reference's construction-time refusal (`getSelectKey`), raised here
+ *   with its exact wording where the boxed class is unambiguous — every depth, before any lowering;
+ * - a key a SIDE EFFECT names (`withSideEffect`, `aggregate('x')`, …) declines: the side effect wins over a
+ *   label, and no lowering reads the side-effect scope for a `where` key;
+ * - a key NO `as()`/`match()` binds anywhere in the tree declines: the reference reads a Map entry or
+ *   throws, where a lowering would read the string as a value;
+ * - a PARAMETERIZED predicate declines (`GraphTraversal.where` refuses a `P` holding a `GValue`).
+ *
+ * One whole-tree check, asked once before lowering (`sideEffectShadowedLabel`'s pattern), so the rule holds
+ * at EVERY depth — `local`/`union`/`choose`/`coalesce`/`repeat`/`by()`/`match` bodies alike. What survives
+ * is a key some `as()` binds; a lowering that finds it NOT LIVE at its position declines rather than
+ * compare the string (`whereHasScopeKey`, read by the scalar `where(P)` arm in `rel/lower.ts`).
+ */
+export function unresolvableWhereKey(
+  steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
+): string | null {
+  const keys: WhereKey[] = [];
+  eachStepDeep(steps, rawBodies(params), (s) => {
+    if (s.name !== 'where') return;
+    const args = s.args ?? [];
+    const predAt = args.findIndex((a) => isPred(a.value));
+    if (predAt < 0) return;
+    if (predAt === 1) keys.push({ key: args[0]!.value, type: args[0]!.type, unnamed: !!args[0]!.name });
+    collectWhereKeys(args[predAt]!.value as Pred, keys);
+  });
+  if (!keys.length) return null;
+  for (const k of keys) {
+    if (k.unnamed) return String(k.key);
+    if (typeof k.key === 'string') continue;
+    const cls = k.key === null ? 'null' : typeof k.type === 'string' ? JAVA_SCALAR_CLASS[k.type] : undefined;
+    if (!cls) return String(k.key);
+    throw new ValueParseError(`where(P) requires a String scope key but encountered ${cls}; use is(P) to compare values`);
+  }
+  const { named, bound } = scopeNamespaces(steps, params, declared);
+  for (const k of keys) if (named.has(k.key as string) || !bound.has(k.key as string)) return k.key as string;
   return null;
+}
+
+/** Does this `where` predicate hold a SELECT KEY — any non-traversal leaf (`collectWhereKeys`)? A
+ *  lowering that would otherwise compare the traverser against the operand as a VALUE asks this and
+ *  declines: a key is a scope read, never a literal. */
+export function whereHasScopeKey(pred: unknown): boolean {
+  if (!isPred(pred)) return false;
+  const keys: WhereKey[] = [];
+  collectWhereKeys(pred, keys);
+  return keys.length > 0;
+}
+
+/** A leaf that holds a traversal — `P.hasTraversal()`: resolved per traverser, not a select key. */
+const holdsTraversal = (operands: readonly Arg[]): boolean =>
+  operands.some((o) => isNested(o.value) || (Array.isArray(o.value) && o.value.some(isNested)));
+
+/** `configurePredicates`' walk: each non-traversal leaf's select key, in tree order. `not` is TinkerPop's
+ *  `negate()`, which keeps the leaf's value, so it is walked through. An EMPTY collection has no first
+ *  key (the reference's `iterator().next()` throws) and is reported unnamed. */
+function collectWhereKeys(pred: Pred, out: WhereKey[]): void {
+  if (pred.op === 'and' || pred.op === 'or' || pred.op === 'not') {
+    for (const o of pred.operands)
+      if (isPred(o.value)) collectWhereKeys(o.value, out);
+      else out.push({ key: o.value, type: o.type, unnamed: true });
+    return;
+  }
+  if (holdsTraversal(pred.operands)) return;
+  const first = pred.operands[0];
+  if (!first) { out.push({ key: undefined, type: undefined, unnamed: true }); return; }
+  const param = pred.operands.some((o) => !!o.name);
+  if (Array.isArray(first.value)) {
+    const member = first.members?.[0];
+    out.push(member ? { key: member.value, type: member.type, unnamed: param || !!member.name } : { key: undefined, type: undefined, unnamed: true });
+    return;
+  }
+  out.push({ key: first.value, type: first.type, unnamed: param });
 }
 
 /** The barriers that hand on the traverser they were GIVEN — so its path, and every label on it, survives

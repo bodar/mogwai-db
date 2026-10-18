@@ -43,12 +43,13 @@ describe('the filter family over a scalar stream', () => {
     expect(await vals("g.V().values('age').where(__.is(P.gt(33)))")).toEqual(['35']);
   });
 
-  test('where(P) / filter(P) with NO body is is(P) — the traverser tested against itself', async () => {
-    // `WherePredicateStep` with no start key tests the traverser; `filter(P)` asks the same thing.
-    expect(await vals("g.V().values('age').where(P.gt(33))")).toEqual(['35']);
+  test('filter(P) with NO body is is(P); where(P) is is(P) only over TRAVERSAL operands', async () => {
     expect(await vals("g.V().values('age').filter(P.lt(28))")).toEqual(['27']);
-    // A `__.constant(v)` operand is constant-folded by the Pass tier long before this, so the value
-    // form and the folded form must land on the same clause.
+    // `WherePredicateStep` reads every LITERAL leaf as a SELECT KEY (`getSelectKey`): a non-String one is
+    // refused at construction, and a String one is a scope read, never the value it spells.
+    await expect(vals("g.V().values('age').where(P.gt(33))")).rejects.toThrow(
+      'where(P) requires a String scope key but encountered Integer; use is(P) to compare values');
+    // A TRAVERSAL leaf is not a key — it is resolved per traverser (`P.resolve`), exactly as `is(P)` does.
     expect(await vals("g.V().values('name').where(P.neq(__.constant('marko')))"))
       .toEqual(['josh', 'lop', 'peter', 'ripple', 'vadas']);
   });

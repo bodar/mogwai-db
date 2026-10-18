@@ -122,13 +122,16 @@ describe('scalar split (Stage 2)', () => {
 // column required (previously threw "scalar tail requires explicit encounter order").
 describe('scalar tail at root (Stage 2 fix)', () => {
 
-  test('where(P)/filter(P) over a scalar filters by a predicate on the value', async () => {
+  test('filter(P) over a scalar filters by a predicate on the value; where(P) takes SCOPE KEYS, never values', async () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     for (const a of [29, 27, 35]) executeQuery(store, `g.addV('p').property('age',${a})`, {});
     const v = async (g: string) =>
       (await decodeAll(executeQuery(store, g, {}))).map(String).sort();
-    expect(await v("g.V().values('age').where(gt(30))")).toEqual(['35']);
-    expect(await v("g.V().values('age').where(lte(29)).where(gt(27))")).toEqual(['29']);
+    expect(await v("g.V().values('age').filter(gt(30))")).toEqual(['35']);
+    expect(await v("g.V().values('age').filter(lte(29)).filter(gt(27))")).toEqual(['29']);
+    // `WherePredicateStep.getSelectKey` refuses a non-String operand at construction.
+    await expect(v("g.V().values('age').where(gt(30))")).rejects.toThrow(
+      'where(P) requires a String scope key but encountered Integer; use is(P) to compare values');
   });
 
   test('aggregate(x)/local(__.aggregate(x)) collect the values; cap(x) reads them', async () => {

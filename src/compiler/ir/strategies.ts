@@ -1,6 +1,6 @@
 import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
-import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf } from './labels.ts';
+import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
@@ -818,7 +818,18 @@ function foldPredOperands(pred: any, params: Record<string, any>): any {
 }
 
 export function foldConstantPredicateOperands(steps: IRStep[], params: Record<string, any>): IRStep[] {
-  return steps.map((s) => {
+  return steps.map((s, at) => {
+    // NOT inside a `where(P)` as such: there a literal leaf is a SELECT KEY and a traversal leaf is a
+    // value (`WherePredicateStep`, `unresolvableWhereKey` in `ir/labels.ts`), so folding
+    // `P.neq(__.constant('m'))` to `P.neq('m')` would turn a value compare into a scope read of key `'m'`.
+    // A `where(P)` with NO key, no start key and no `by()` tests the traverser itself against its resolved
+    // traversal leaves — exactly `IsStep.filter` (`resolve`, then `test(traverser.get())`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/IsStep.java:47-52`)
+    // — so it IS `is(P)`, and becomes one before its operands fold. Any other `where(P)` is left unfolded.
+    if (s.name === 'where' && (s.args ?? []).some((a) => isPred(a.value))) {
+      if (s.args.length !== 1 || whereHasScopeKey(s.args[0]!.value) || steps[at + 1]?.name === 'by' || s.modulators?.length) return s;
+      s = { ...s, name: 'is' };
+    }
     const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
     let changed = false;
     const args = (s.args ?? []).map((argObj, i) => {

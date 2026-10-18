@@ -27,6 +27,7 @@ import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type Merge
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
+import { whereHasScopeKey } from '../ir/labels.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, orderingTerms, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
@@ -2387,6 +2388,9 @@ function scalarTail(
      */
     if ((step.name === 'where' || step.name === 'filter') && args.length === 1 && isPred(args[0])) {
       if (namesALiveLabel(args[0], labels)) return null;
+      // A `where` leaf that is not a traversal is a SELECT KEY (`whereHasScopeKey`), and here it names no
+      // live label — the reference reads a side effect, a Map entry or throws; never the string itself.
+      if (step.name === 'where' && whereHasScopeKey(args[0])) return null;
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
