@@ -73,6 +73,19 @@ describe('a WRITE after a write — matched by element kind, freshness, ownershi
     "g.inject(1,2).as('a').V(1).as('v').property(single,'w',5).filter(select('a').is(1)).select('v').property(single,'w',9)",
     "g.inject(1,2).addV('x').mergeV([(T.label):'x'])",
     "g.inject(1,2).addV('x').property('name','zz').mergeV([name:'zz'])",
+    // (a)'s exemption does NOT hold where the earlier write's FEED re-reads the graph: traverser 2's V() reaches
+    // traverser 1's new vertices and writes w=5 over their w=9 (`streamSeesCreation`)…
+    "g.inject(1,2).as('a').V().property(single,'w',5).filter(select('a').is(1)).addV('x').property(single,'w',9)",
+    "g.inject(1,2).V().property(single,'w',5).addV('x').property(single,'w',9)",
+    "g.inject(1,2).V().hasLabel('person','x').property(single,'w',5).addV('x').property(single,'w',9)",
+    // …or crosses an edge the program also creates, or reaches an edge where the creation is one
+    "g.inject(1,2).as('a').V(1).out().property(single,'w',5).filter(select('a').is(1)).addV('x').property(single,'w',9).addE('k').from(V(1))",
+    "g.inject(1,2).as('a').V(1).outE('knows').property('w',5).filter(select('a').is(1)).V(1).addE('knows').to(V(2)).property('w',9)",
+    // (d) past the barrier, a step between it and the later write runs per traverser and sees that write's
+    // effect for traversers the barrier emitted first (`readBeforeWrite`)
+    "g.V().property(single,'w',1).out().where(__.in().has('w',1)).property(single,'w',2)",
+    "g.V().property(single,'w',1).out().not(__.in().has('w',2)).property(single,'w',2)",
+    "g.V().property(single,'w',1).out().where(__.in().has('w',1)).property(single,'w',2).count()",
   ]) test(q, () => refuses(q));
 
   test('(a) a later write onto a FRESH element meets no other traverser\'s write', () => {
@@ -119,6 +132,36 @@ describe('a WRITE after a write — matched by element kind, freshness, ownershi
     // traverser 1 creates zz, traverser 2 finds it: one zz, emitted twice.
     expect(values(store, "g.inject(1,2).addV('x').mergeV([name:'zz']).values('name')")).toEqual(['zz', 'zz']);
     expect(values(store, "g.V().has('name','zz').count()")).toEqual([1]);
+  });
+});
+
+describe('a READ BEFORE a write, run for a later traverser after the write ran for an earlier one (readBeforeWrite)', () => {
+  // The reference's answers: josh alone written; 18 vertices; lop written once, then filtered.
+  for (const q of [
+    "g.V(4,5).where(__.in().hasNot('w')).property(single,'w',2)",
+    "g.inject(1,2).V().addV('x')",
+    "g.inject(1,2).V().hasLabel('person').addV('x')",
+    "g.V().out().where(__.in().values('w').count().is(0)).property(single,'w',1)",
+    "g.V().out().coalesce(__.in().has('w'), identity()).property(single,'w',1)",
+    // an own-element read where an element reaches the write twice (`repeatedGuard` at run time)
+    "g.V().out().hasNot('w').property(single,'w',1)",
+    "g.V().as('x').out().select('x').hasNot('w').property(single,'w',2)",
+  ]) test(q, () => refuses(q));
+
+  test('a read of the traverser\'s OWN element, no element reaching the write twice, is the reference exactly', () => {
+    expect(values(seededStore(), "g.V().hasNot('w').property(single,'w',1).count()")).toEqual([6]);
+    expect(values(seededStore(), "g.V().out().dedup().hasNot('w').property(single,'w',1).count()")).toEqual([4]);
+    // statically unproven, distinct at run time
+    expect(values(seededStore(), "g.V().out().out().hasNot('w').property(single,'w',2).count()")).toEqual([2]);
+  });
+
+  test('a read no write can change, or that no traverser passed before the first write, is the reference exactly', () => {
+    // a labelled move crosses no edge of another label; a vertex read sees no edge merge's keys
+    expect(values(seededStore(), "g.V().as('a').out('created').addE('createdBy').to('a').count()")).toEqual([4]);
+    // nothing passes the filter before a write, so no write precedes any traverser's read
+    expect(values(seededStore(), "g.V().out().where(__.in().has('w')).property(single,'w',1).count()")).toEqual([0]);
+    // one traverser reaches the read
+    expect(values(seededStore(), "g.V(1).where(__.out().hasNot('w')).property(single,'w',1).count()")).toEqual([1]);
   });
 });
 

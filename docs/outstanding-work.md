@@ -32,10 +32,20 @@ lowered.
   a later WRITE (`writeAfterWrite`, by kind/freshness/ownership as well as key), a value body
   (`sequentialGuard` — a drain between now answers, `…addLabel('z').fold().unfold()…property('n', …)`), and a
   write over traversers the reference MERGED (`mergedOnceAlike` — `g.V().out().addV('x')` makes 4 vertices,
-  not 6, and refuses where an element reaches it twice). What is left, all failing closed:
-  - an EARLIER read interleaves from the other side (a read UPSTREAM of a write, in its stream) — not
-    guarded by this scan (`g.inject(1,2).V().hasLabel('x').fold().coalesce(…, addV('x'))`-like forms that put
-    no drain between the read and the write);
+  not 6, and refuses where an element reaches it twice), and an EARLIER read of the writer's chain
+  (`readBeforeWrite` — `g.V(4,5).where(__.in().hasNot('w')).property(single,'w',2)` and
+  `g.inject(1,2).V().addV('x')` refuse; an own-element read over a distinct stream answers). What is left:
+  - **read-before-write through a NEW EDGE crossed by a move — still answers wrong, pre-existing**: a move
+    upstream of an `addE`/`mergeE` that a later traverser re-runs can cross an edge an earlier traverser just
+    made (`g.V(1,4).out().addE('k').to(V(1))` makes 5 edges where the reference makes 6: josh's `out()` crosses
+    the `k` edge marko's traverser at josh made, and reaches marko).
+    `readBeforeWrite` does not weigh it (`bySites` drops `edges`) because the common exact form —
+    `g.V(ids).where(__.not(__.inE('l'))).addE('l').from(…)`, replication's placement — reads only edges incident to
+    its own vertex, and telling the two apart needs the written edge's endpoints against the stream at the read;
+  - **read-before-DROP** — a terminal `drop()` has no `afterWrite`, so a read upstream of it is unweighed:
+    `g.V().not(__.out()).drop()` drops peter in the reference (lop is gone by the time peter is read), not here;
+  - an earlier read in a body run per traverser (a writer inside `local()`/`sideEffect()` whose chain is not the
+    traversal's own) is refused rather than placed: only the root chain says "one traverser" or "distinct";
   - over-refusals by identity: a later write reached by a literal-id re-source
     (`g.V(1,2).property(single,'w',5).V(3).property(single,'w',9)`), a vertex drop after a multi-traverser
     write (`…V(3).drop()`), a merge `onMatch` of a key an earlier write wrote on a different element
