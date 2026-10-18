@@ -58,6 +58,7 @@ const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readon
   bulk: { type: 'int', nullable: false },
   encounter: { type: 'int', nullable: false },
   origin: { type: 'int', nullable: false },
+  branchKey: { type: 'int', nullable: false },
   fromV: { type: 'int', nullable: true },
   // The graph a bound element came from — the federate call's own graph name (or the `$local` sentinel
   // for the base graph). A TEXT tag, present on every row of a multi-graph merge.
@@ -910,20 +911,9 @@ export function renumber(
   });
 }
 
-/**
- * A BRANCH EMISSION KEY — a `bord_*` column a branch merge freezes so its result can be numbered in the
- * reference's emission order (`BranchKeys`, `lower.ts`). The keys share the `origin` ROLE's policies
- * (identical merge, empty at a barrier, never a group key — `src/channels.ts`), but they are not a
- * PARTITION: a body scoping a slice/dedup/fold/merge "per origin" must never partition by one, because a
- * frozen parent position is copied across every hop of an arm and so names the BRANCH's traverser, not the
- * body's. `originOf` skips them.
- */
-export const BRANCH_KEY_PREFIX = 'bord_';
-export const isBranchKey = (channel: Channel): boolean => channel.col.startsWith(BRANCH_KEY_PREFIX);
-
-/** The PER-ORIGIN partition key a body scopes by — an `origin`-role channel that is not a branch key. */
+/** The PER-ORIGIN partition key a body scopes by. */
 export const originOf = (channels: Channels): Channel | undefined =>
-  channels.find((channel) => channel.role === 'origin' && !isBranchKey(channel));
+  channels.find((channel) => channel.role === 'origin');
 
 /**
  * THE TRAVERSER EQUALITY a merge partitions on — `Objects.equals(t, other.t)`

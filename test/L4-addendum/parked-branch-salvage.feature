@@ -81,9 +81,9 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
   # ---- a group value by(select(values)) is ASSIGNED, not collected ----
   # Pinned in map-value-element-reentry.feature (g_V_hasLabelXpersonX_group_byXnameX_byXout_foldX_unfold_group_byXkeysX_byXselect_valuesX).
 
-  # ---- BranchStep.hasBarrier is a CONSTRUCTION-time fact ----
-  # Set in addChildOption from the options as written (BranchStep.java:85-88), so removing the inert
-  # where(outE().count()) does not make the union traverser-major.
+  # ---- a branch's emission key does not depend on what its arms hold ----
+  # Each start's arms in turn, so the fold interleaves each person's name with its age (the reference goes
+  # arm-major because the where() arm holds a barrier — a deliberate divergence, feature-support-matrix.md).
 
   Scenario: g_V_unionXvaluesXnameX_whereXoutE_countX_valuesXageXX_fold
     Given the modern graph
@@ -94,7 +94,7 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[marko,vadas,lop,josh,ripple,peter,d[29].i,d[27].i,d[32].i,d[35].i] |
+      | l[marko,d[29].i,vadas,d[27].i,lop,josh,d[32].i,ripple,peter,d[35].i] |
 
   # ---- a BranchStep with a barrier drains NOTHING over no starts ----
   # BranchStep.standardAlgorithm throws FastNoSuchElement when hasBarrier and no starts

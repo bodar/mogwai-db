@@ -11,8 +11,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, BATCHING_BRANCHES, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { eachChildChain, rawBodies } from '../ir/walk.ts';
+import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -37,7 +36,7 @@ import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
     labelSetArgs, scalarFramedValue, meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
-    typedNode, typeOf, withPayload, originOf, BRANCH_KEY_PREFIX,
+    typedNode, typeOf, withPayload, originOf,
     type Minter
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
@@ -204,56 +203,29 @@ export const dropPath = (rel: Rel, fresh: Minter): Rel => {
 };
 
 /**
- * THE BRANCH EMISSION KEY — the ONE authority for the order a `union`/`choose`/`coalesce`/`optional`
- * emits in, wherever a consumer reads it (RelIR plan §10, cluster B).
+ * THE BRANCH EMISSION KEY — the ONE order a `union`/`choose`/`coalesce`/`optional` merge is numbered in
+ * wherever a consumer reads it:
  *
- * The reference's order is not impl-defined. `BranchStep.standardAlgorithm` without a barrier injects ONE
- * start (`applyCurrentTraverser`) and drains every option for it before the next start — TRAVERSER-major,
- * arm-minor; with an option holding a `Barrier` at ANY depth (`hasBarrier`, `getStepsOfAssignableClass
- * Recursively`) it injects EVERY start first and drains the options one after another — ARM-major
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:87-88,123-158`).
- * `coalesce`/`optional` reset their child per start, so they are traverser-major whatever the arms hold
- * (`…/step/map/CoalesceStep.java:52-60`, `…/step/branch/OptionalStep.java:47-57`). Within one (start, arm)
- * pair an arm emits in its OWN order. So the order is a KEY over carried columns:
+ *     encounter = row_number() OVER (ORDER BY input.encounter, arm, arm.encounter, payload…)
  *
- * - `parent` — the branch input's position, FROZEN (`augmentParent`) and copied unchanged across every hop
- *   of an arm, so all of one start's descendants sort together. Traverser-major only.
- * - `arm` — the arm ordinal (`tagArm`).
- * - `seq` — the arm's OWN emission position: its `encounter` as the arm lowered it (`tagArm` keeps it —
- *   dropping it picked the payload-least member, `union(constant([3,1]).unfold(), constant(0)).limit(1)`
- *   = `1` where the reference gives `3`).
+ * — each start's outputs together, its arms in the order they are written, each arm in its OWN order. The
+ * input's position is frozen into a `parent` column (`freezeParent`) that rides every hop of an arm unchanged;
+ * a branch nested in an arm freezes its own beside it under a fresh name, so one rule serves every depth. Where
+ * some arm no longer carries the parent — an arm that REDUCED over every start (`count()`/`fold()`), whose one
+ * row belongs to no start — the input term drops out and the order is `(arm, arm.encounter)`, scoped by a
+ * per-start body's `origin` where every arm carries one.
  *
- * A child run ONCE PER START (`LocalStep`, `TraversalUtil.applyAll`) scopes all of this per parent: an
- * arm-major branch at the head of a per-start body is prefixed by that body's per-row `origin`
- * (`armMajorScope`), and a traverser-major one freezes it as its parent (`positioned`).
- *
- * STACKED BY DEPTH. A branch nested in an ordered arm of another freezes its OWN keys beside the outer ones
- * (`branchKeys` — `bord_p1`, …) and numbers its merge into a fresh `encounter`, which the outer merge then
- * reads as that arm's `seq`; the outer keys ride the inner arms untouched. That is the whole key stack the
- * reference's nested order needs. The keys are `origin`-ROLE channels (identical merge, empty at a barrier —
- * `src/channels.ts`) but never a per-origin partition (`originOf`, `build.ts`).
- *
- * Calcite has the same split: a plain `Union` carries no collation (`RelMdCollation`), so the order is
- * IMPOSED as a window (`SqlStdOperatorTable.ROW_NUMBER`) over the keys.
+ * This is not the reference's exact drain — `BranchStep` goes ARM-major whenever an option holds any barrier
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:143-150`)
+ * and drains the `Pick` options first — but the multiset is the same and the order is a stable, explainable one
+ * (a deliberate divergence, `docs/feature-support-matrix.md`). Calcite has the same split: a plain `Union`
+ * carries no collation (`RelMdCollation`), so the order is IMPOSED as a window (`SqlStdOperatorTable.ROW_NUMBER`).
  */
-export interface BranchKeys { readonly parent: Channel; readonly arm: Channel; readonly seq: Channel }
-
-/** The keys this branch level mints: the shallowest depth none of whose keys the input already carries. */
-export const branchKeys = (input: Rel): BranchKeys => {
-  const taken = (name: string): boolean => input.channels.some((channel) => channel.col === name);
-  for (let depth = 0; ; depth++) {
-    const suffix = depth === 0 ? '' : String(depth);
-    const keys: BranchKeys = {
-      parent: { col: `${BRANCH_KEY_PREFIX}p${suffix}`, role: 'origin' },
-      arm: { col: `${BRANCH_KEY_PREFIX}a${suffix}`, role: 'origin' },
-      seq: { col: `${BRANCH_KEY_PREFIX}s${suffix}`, role: 'origin' },
-    };
-    if (![keys.parent, keys.arm, keys.seq].some((key) => taken(key.col))) return keys;
-  }
-};
+const ARM_KEY: Channel = { col: 'bka', role: 'branchKey' };
+const SEQ_KEY: Channel = { col: 'bks', role: 'branchKey' };
 
 /**
- * DOES A CONSUMER READ THIS BRANCH'S EMISSION ORDER — so that the merge owes the reference's? Never where an
+ * DOES A CONSUMER READ THIS BRANCH'S EMISSION ORDER — so that the merge is numbered at all? Never where an
  * order-free reduction follows the branch in its own list (`orderReadAfter` — a `count`/`sum`/`min`/…
  * answers the same in any arrival order). Always where a step after it in that list reads the order
  * (`ORDER_READERS` — a slice, a fold's member order, a first-arrival merge). Past the end of the list the
@@ -265,44 +237,8 @@ export const branchKeys = (input: Rel): BranchKeys => {
 export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): boolean => {
   if (position && !orderReadAfter(position.steps, position.at + 1, true)) return false;
   if (position && position.steps.slice(position.at + 1).some((s) => ORDER_READERS.has(s.name) && !isLocalScope(s))) return true;
-  // An arm that SORTS states an order the result stream itself carries: its `order()` is a `Barrier`, so
-  // the `BranchStep` feeds every start in and drains the sorted arm whole
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88,123-153`)
-  // — `choose(p, values('name').order().by(desc), …)` emits `[vadas, peter, marko, josh]`, and a merge
-  // left positionless emitted the names in start order. The client reads that order as surely as a
-  // `fold()` would, so the merge owes it wherever nothing order-free consumes the branch (above).
-  if (position && armSorts(position.steps[position.at])) return true;
   return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
 };
-
-/** Does a `union`/`choose` body SORT ITS OWN STREAM — a global `order()` among one ARM's own steps, or a
- *  nested `union`/`choose` there whose own arm sorts? The arms are every child chain of the step and, for
- *  an option-map `choose`, the `option()` BODIES, one level below the folded `optionArms` cluster. One
- *  nested in a per-traverser host (`local(out().order())`) sorts one start's output, not the arm's. An
- *  unreadable body answers yes: owing an order costs a numbering, never an answer. */
-const armSorts = (step: IRStep | undefined): boolean => {
-  if (!step || !BATCHING_BRANCHES.has(step.name)) return false;
-  const read = rawBodies({});
-  let sorts = false;
-  const unreadable = (): void => { sorts = true; };
-  const arm = (body: readonly IRStep[]): void => {
-    if (body.some((s) => (s.name === 'order' && !isLocalScope(s)) || armSorts(s))) sorts = true;
-  };
-  eachChildChain(step, read, (chain) => {
-    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
-    else arm(chain as IRStep[]);
-  }, unreadable);
-  return sorts;
-};
-
-/** Does a positional SLICE read the order this branch emits — one after it in its own list, or (unless the
- *  host's consumer ignores the order, `bodyOrder: 'free'`) one in this body or an enclosing one
- *  (`ctx.sliced`)? A slice picks a SUBSET by the order, so where the input's own order is unknown the branch
- *  declines rather than number it (`positioned`). */
-export const branchSliced = (ctx: ChainCtx, position: Arrival | undefined): boolean =>
-  (ctx.bodyOrder !== 'free' && ctx.sliced)
-  || (!!position && position.steps.slice(position.at + 1).some((s) => SLICE_READERS.has(s.name) && !isLocalScope(s)));
-const SLICE_READERS: ReadonlySet<string> = new Set(['limit', 'range', 'skip', 'tail']);
 
 /** The steps that READ the arrival order of the stream reaching them: the positional slices, the collecting
  *  barriers whose members keep arrival order, and the steps that keep a FIRST arrival (a stable sort's
@@ -335,118 +271,77 @@ const isRowOriginSeed = (rel: Rel): boolean => {
 };
 
 /**
- * A branch input with a POSITION its keys can freeze, or `null` where the order it arrives in is not known.
- * A stream carrying an `encounter` is returned as-is. One carrying none is positioned where its order is
- * TRIVIAL: at most one row (a correlated child's host row, a stream past a global reduction — position 0), or
- * the seed of a per-start body (`isRowOriginSeed` — position = the per-row origin, one start per origin).
- *
- * Any other stream without a position is one the chain never numbered — a child body's hop, whose order a
- * COLLECT over it already realizes by content (`foldScalars`/`defaultCollation`: the adjacency order is the
- * provider's, and the corpus asserts it unordered). There the branch freezes the same content order as its
- * parent order, so only the parents' order is a realization and the arms' interleaving is the reference's.
- * A SLICE (`slicing`) picks a SUBSET by that order, so it DECLINES there instead — never a different subset.
+ * A branch input with a POSITION its parent key can freeze. A stream carrying an `encounter` is returned
+ * as-is. One carrying none is positioned where its order is TRIVIAL — at most one row (a correlated child's
+ * host row, a stream past a global reduction: position 0), or the seed of a per-start body (`isRowOriginSeed`:
+ * position = the per-row origin) — and otherwise by its CONTENT, the order a collect over it realizes too
+ * (`foldScalars`/`defaultCollation`: the adjacency order is the provider's, and the corpus asserts it unordered).
  */
-export const positioned = (input: Rel, fresh: Minter, slicing: boolean): Rel | null => {
+export const positioned = (input: Rel, fresh: Minter): Rel => {
   if (encounterOf(input.channels)) return input;
   const origin = originOf(input.channels);
   const position: Expr | null = atMostOneRow(input) ? compilerInt(0)
     : origin && isRowOriginSeed(input) ? col(input.id, origin.col)
       : null;
   const channels = withChannel(input.channels, ENCOUNTER);
-  const payload = payloadCols(input);
   if (!position) {
-    if (slicing) return null;
     const terms = input.type.cols.map((column) => ({ expr: col(input.id, column.name), dir: 'asc' as const }));
-    return renumber(input, terms, [...payload, ...carriedCols(channels)], channels, fresh);
+    return renumber(input, terms, [...payloadCols(input), ...carriedCols(channels)], channels, fresh);
   }
-  return make.project({
-    id: fresh('bq'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
-    exprs: [
-      ...payload.map((column) => [column.name, col(input.id, column.name)] as const),
-      ...channels.map((channel) => [channel.col, channel.role === 'encounter' ? position : col(input.id, channel.col)] as const),
-    ],
-  });
+  return withCarried(input, channels, (channel) => (channel.role === 'encounter' ? position : null), fresh);
 };
 
-/** The key an ARM-major branch is SCOPED by — `[]` outside a per-start body, the body's per-row `origin` at
- *  the head of one (`isRowOriginSeed`: each start's arms drain arm-major for that start alone,
- *  `LocalStep`/`TraversalUtil.applyAll`), and `null` (decline) where an `origin` is carried but which start a
- *  row belongs to is not provable (a body past its first hop, a group-value pool keyed by element). */
-export const armMajorScope = (input: Rel): readonly Channel[] | null => {
-  const origin = originOf(input.channels);
-  return !origin ? [] : isRowOriginSeed(input) ? [origin] : null;
+/** Freeze a `positioned` branch input's `encounter` into a fresh `parent` column, so it survives each arm's
+ *  hops as the merge's leading key. Fresh per branch, so a nested branch's parent rides beside its host's. */
+export const freezeParent = (input: Rel, fresh: Minter): { readonly rel: Rel; readonly parent: Channel } => {
+  const enc = encounterOf(input.channels)!;
+  const parent: Channel = { col: fresh('bkp'), role: 'branchKey' };
+  const channels = withChannel(input.channels, parent);
+  return { rel: withCarried(input, channels, (channel) => (channel === parent ? col(input.id, enc.col) : null), fresh), parent };
 };
 
-/** Freeze the branch input's emission position into the `parent` key so it survives each arm's hops as the
- *  traverser-major major key. The input must be `positioned`. */
-export const augmentParent = (input: Rel, keys: BranchKeys, fresh: Minter): Rel => {
-  const enc = encounterOf(input.channels);
-  if (!enc) throw new Error('RelIR lowering: augmentParent needs a positioned branch input');
-  const channels = withChannel(input.channels, keys.parent);
-  const payload = payloadCols(input);
-  return make.project({
-    id: fresh('bp'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
-    exprs: [
-      ...payload.map((column) => [column.name, col(input.id, column.name)] as const),
-      ...channels.map((channel) => [channel.col,
-        channel.col === keys.parent.col ? col(input.id, enc.col) : col(input.id, channel.col)] as const),
-    ],
-  });
-};
-
-/**
- * Tag one arm with its ordinal (`keys.arm` = `k`) and its OWN emission position (`keys.seq` — the arm's
- * `encounter`), dropping that `encounter`: the merge re-numbers. An arm with no position has no within-arm
- * order to keep, which is exact only where it is ONE row per scope (`single` — an arm-major global
- * reduction) or nobody reads the order (`!owed`); elsewhere it DECLINES (`null`) rather than let the payload
- * pick a different subset.
- */
-export const tagArm = (rel: Rel, k: number, keys: BranchKeys, fresh: Minter, opts: { readonly owed: boolean; readonly single?: boolean }): Rel | null => {
-  const own = encounterOf(rel.channels);
-  if (!own && opts.owed && !opts.single) return null;
-  const channels = withChannel(withChannel(withoutEncounter(rel.channels), keys.arm), keys.seq);
+/** Re-project `rel` onto `channels`, each carried column copied through unless `value` names its expression. */
+const withCarried = (rel: Rel, channels: Channels, value: (channel: Channel) => Expr | null, fresh: Minter): Rel => {
   const payload = payloadCols(rel);
   return make.project({
     id: fresh('ba'), input: rel, channels, type: typeOf(...payload, ...carriedCols(channels)),
     exprs: [
       ...payload.map((column) => [column.name, col(rel.id, column.name)] as const),
-      ...channels.map((channel) => [channel.col,
-        channel.col === keys.arm.col ? compilerInt(k)
-          : channel.col === keys.seq.col ? (own ? col(rel.id, own.col) : compilerInt(0))
-            : col(rel.id, channel.col)] as const),
+      ...channels.map((channel) => [channel.col, value(channel) ?? col(rel.id, channel.col)] as const),
     ],
   });
 };
 
 /**
- * NUMBER A BRANCH MERGE IN THE REFERENCE'S ORDER — tag every arm (`tagArm`), merge through the ordinary
- * `mergeArms` (which reconciles shape, scalar meet and variant exactly as the positionless merge does — the
- * keys are orthogonal, carried as rigid channels), then re-mint `encounter` as a `ROW_NUMBER` over
- * `[parent, arm, seq, payload…]` (TRAVERSER-major) or `[scope…, arm, seq, payload…]` (ARM-major) and drop
- * this level's keys. Fails closed (`null`) when an arm lost a key it was owed — a barrier inside an arm
- * empties the `origin` role (`CHANNEL_BARRIER_POLICY`), and re-numbering over a column not in scope is a
- * THROW, not a decline.
+ * NUMBER A BRANCH MERGE BY THE EMISSION KEY — tag every arm with its ordinal and its OWN position (its
+ * `encounter`, or 0 where it carries none), merge through the ordinary `mergeArms` (which reconciles shape,
+ * scalar meet and variant exactly as the positionless merge does — the keys are orthogonal, carried as rigid
+ * channels), then re-mint `encounter` over `[parent | origin, arm, seq, payload…]` and drop the keys. The
+ * `parent` leads only where EVERY arm still carries it; otherwise it is dropped from all of them.
  */
 export const mintBranchOrder = (
-  arms: readonly Tail[], keys: BranchKeys, major: 'traverser' | 'arm', scope: readonly Channel[],
-  labels: AliasMap, graph: GraphSource, fresh: Minter, single: (k: number) => boolean = () => false,
+  arms: readonly Tail[], parent: Channel | undefined, labels: AliasMap, graph: GraphSource, fresh: Minter,
 ): BranchRel | null => {
-  const tagged: Tail[] = [];
-  for (const [k, arm] of arms.entries()) {
-    const rel = tagArm(arm.rel, k, keys, fresh, { owed: true, single: single(k) });
-    if (!rel) return null;
-    tagged.push({ ...arm, rel });
-  }
+  const keyed = !!parent && arms.every((arm) => arm.rel.channels.some((channel) => channel.col === parent.col));
+  const tagged = arms.map((arm, k): Tail => {
+    const own = encounterOf(arm.rel.channels);
+    const kept = withoutEncounter(arm.rel.channels).filter((channel) => keyed || channel.col !== parent?.col);
+    const channels = withChannel(withChannel(kept, ARM_KEY), SEQ_KEY);
+    return {
+      ...arm, rel: withCarried(arm.rel, channels, (channel) => (channel === ARM_KEY ? compilerInt(k)
+        : channel === SEQ_KEY ? (own ? col(arm.rel.id, own.col) : compilerInt(0)) : null), fresh),
+    };
+  });
   const merged = mergeArms(tagged, labels, graph, fresh);
   if (!merged) return null;
   const rel = merged.rel;
-  const owed = [...(major === 'traverser' ? [keys.parent] : scope), keys.arm, keys.seq];
-  if (!owed.every((key) => rel.channels.some((channel) => channel.col === key.col))) return null;
-  const mine = new Set([keys.parent.col, keys.arm.col, keys.seq.col]);
+  const origin = originOf(rel.channels);
+  const lead = keyed ? [parent!] : origin ? [origin] : [];
+  const mine = new Set([parent?.col, ARM_KEY.col, SEQ_KEY.col]);
   const outChannels = withChannel(withoutEncounter(rel.channels.filter((channel) => !mine.has(channel.col))), ENCOUNTER);
   const payload = payloadCols(rel);
   const terms = [
-    ...owed.map((key) => ({ expr: col(rel.id, key.col), dir: 'asc' as const })),
+    ...[...lead, ARM_KEY, SEQ_KEY].map((key) => ({ expr: col(rel.id, key.col), dir: 'asc' as const })),
     ...payload.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const })),
   ];
   return { ...merged, rel: renumber(rel, terms, [...payload, ...carriedCols(outChannels)], outChannels, fresh) };
@@ -5096,9 +4991,7 @@ export function continueAs(
 ): Tail | null {
   // A POSITIONAL SLICE IN THIS STEP LIST reads the order of a branch merged ahead of it here, at whatever
   // depth the list is a body (`local(union(a, b).limit(1))`), and the root chain's `sliced` cannot see a
-  // body's own slice. With it the branch owes the reference's order (`branchOrderOwed`) and numbers its
-  // merge by the emission key, or declines where its input's order is unknown (`positioned`) — a slice
-  // picks a SUBSET by that order (`BranchStep.java:123-158`).
+  // body's own slice. With it the branch numbers its merge by the emission key (`branchOrderOwed`).
   if (!ctx.sliced && chainDemandsSlice(steps.slice(from))) ctx = { ...ctx, sliced: true };
   // A re-source changes the payload to an element but is legal from every ordinary traverser shape.
   // Keeping it at the ONE framing dispatcher is what makes a scalar child body (`__.V().count()`),

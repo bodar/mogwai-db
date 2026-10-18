@@ -21,36 +21,22 @@ import { UnsupportedTraversal } from './compiler/unsupported.ts';
  * physical columns, so they are not channels — they are framing-layer bookkeeping, and keeping them
  * out is what makes "a channel is a column" true without exception.
  */
-
 /**
  * What a carried column IS, from the algebra's point of view — never what it means to Gremlin.
  *
- * ⚠️ **`origin` is a PROVENANCE/IDENTITY key that a rejoin groups children by, and it is ONE role — the
- * former `branchOrder` was the same thing.** The fan-out rejoin (one `origin` column), the branch
- * traverser-/arm-major emission keys (`bord_p`/`bord_a`/`bord_s`, `BranchKeys`), and the group-value reducer's member pool are all this
- * role: they share every policy below (`identical` merge, `empty` barrier, `undefined` group, not
- * row-unique), which is the algebra's definition of a role — so they are one role, not three. `encounter`
- * is the twin for SELF position (row-unique, `combine` group); `origin` is a GROUPING key, which is why
- * it groups `undefined`.
+ * ⚠️ **`origin` is a PROVENANCE/IDENTITY key that a rejoin groups children by** — the fan-out rejoin (one
+ * `origin` column) and the group-value reducer's member pool. `encounter` is the twin for SELF position
+ * (row-unique, `combine` group); `origin` is a GROUPING key, which is why it groups `undefined`. Its
+ * DERIVATION is the consumer's: a `group().by(k).by(<reducer>)` pools members by the ELEMENT they reached
+ * (`childRows` seeds `origin` from the rowid so three traversers reaching one `lop` pool together and sum
+ * once — `SideEffectCap.feature` `{lop:96, ripple:32}`).
  *
- * ⚠️ **This is a POLICY-based unification, and Calcite would NOT phrase it as one thing — the cross-check
- * that keeps the claim honest.** Calcite tracks the two underlying CONCEPTS as SEPARATE metadata: a
- * position is a collation trait (`RelCollation` — "physical ordering", `vendor/calcite/core/.../rel/RelCollation.java:25`)
- * and a parent identity is a correlation variable (`CorrelationId`,
- * `vendor/calcite/core/.../rel/core/CorrelationId.java:33`). Our channel core is POLICY-major where Calcite
- * is CONCEPT-major, so two carriers with identical merge/barrier/group/row-unique policies ARE one role
- * here even though Calcite keeps their concepts apart — a deliberate, simpler abstraction, not a claim
- * that Calcite merges them.
- *
- * ⚠️ **Its DERIVATION is the CONSUMER's, and deliberately NOT uniform — MEASURED, not chosen.** A
- * `group().by(k).by(<reducer>)` pools members by the ELEMENT they reached (`childRows` seeds `origin`
- * from the rowid so three traversers reaching one `lop` pool together and sum once — verified against
- * `SideEffectCap.feature` `{lop:96, ripple:32}`); the branch keys are minted from `encounter`
- * (`augmentParent`). A tempting "unify the derivation too — origin is always a position" was tried and
- * the census answer-gate refuted it on the spot (it over-partitions the group pool). So the ROLE is one;
- * the value each producer writes is its own.
+ * `branchKey` is a branch merge's ordering key (`mintBranchOrder`, `lower.ts`) — the frozen input position
+ * that rides every hop of an arm, and the arm ordinal/position the merge numbers by. Its policies match
+ * `origin`'s, but it is a separate role because a body must NEVER partition by it: a slice/dedup/fold scoped
+ * "per origin" inside an arm is scoped by the BODY's start, not the branch's.
  */
-export type ChannelRole = 'alias' | 'path' | 'origin' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops' | 'graph';
+export type ChannelRole = 'alias' | 'path' | 'origin' | 'branchKey' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops' | 'graph';
 
 export interface Channel { readonly col: string; readonly role: ChannelRole; }
 export type Channels = readonly Channel[];
@@ -73,6 +59,7 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
   alias: 'union',
   path: 'pad',
   origin: 'identical',
+  branchKey: 'identical',
   sack: 'identical',
   fromV: 'identical',
   encounter: 'identical',
@@ -98,6 +85,7 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
 export const CHANNEL_BARRIER_POLICY: Readonly<Record<ChannelRole, BarrierPolicy>> = {
   alias: 'consumed',
   origin: 'empty',
+  branchKey: 'empty',
   path: 'drop',
   sack: 'drop',
   fromV: 'drop',
@@ -122,7 +110,7 @@ export type RigidPolicy = 'peer' | 'rehomed';
  * would see a merge silently reorder its columns. The framing layer's own column accessor is the
  * tie — `test/channel-contracts.test.ts` pins the two against each other.
  */
-export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'fromV', 'encounter', 'path', 'graph'];
+export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'branchKey', 'fromV', 'encounter', 'path', 'graph'];
 
 export const channelCols = (channels: Channels): readonly string[] => channels.map((channel) => channel.col);
 
@@ -193,6 +181,7 @@ export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'und
   alias: 'undefined',
   path: 'undefined',
   origin: 'undefined',
+  branchKey: 'undefined',
   sack: 'undefined',
   fromV: 'undefined',
   // Choosing one member's depth when a group spans iterations would be arbitrary.
@@ -235,6 +224,7 @@ export const CHANNEL_ROW_UNIQUE: Readonly<Record<ChannelRole, boolean>> = {
   alias: false,
   path: false,
   origin: false,
+  branchKey: false,
   sack: false,
   fromV: false,
   bulk: false,

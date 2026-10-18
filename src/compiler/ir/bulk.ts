@@ -199,17 +199,6 @@ export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel',
 // (`docs/feature-support-matrix.md`, deliberate divergences). What a write still asks is narrower and
 // structural: can two rows reaching it be the SAME element — is the stream pairwise distinct?
 
-/** The reference's `Barrier` steps (`…/process/traversal/step/Barrier.java` and its implementors), by IR
- *  name. Only the GLOBAL form of a scoped step is one: `count(local)` is a map. */
-const BARRIER_NAMES: ReadonlySet<string> = new Set([
-  'count', 'sum', 'min', 'max', 'mean', 'fold', 'group', 'groupCount', 'order', 'sample', 'aggregate', 'cap',
-  'barrier', 'dedup', 'limit', 'range', 'skip', 'tail', 'tree', 'subgraph',
-]);
-/** A step spliced out of a per-traverser host stands for that host (`local`/`map`/`flatMap`), which is no
- *  `Barrier` whatever its body holds. */
-export const isReferenceBarrier = (s: IRStep | undefined): boolean =>
-  !!s && !s.perTraverser && BARRIER_NAMES.has(s.name) && !isLocalScope(s);
-
 /** A source argument's EQUALITY key, or `undefined` where it cannot be said. Deliberately COARSER than
  *  Java's `equals` (`1` and `1L` share a key, as do `1` and `"1"`): a false collision only answers "may
  *  repeat", which costs a write a guard, never an answer. */

@@ -388,7 +388,9 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | l[vadas,lop,josh,z] |
 
-  # ARM-major over the WHOLE input: one sort across every start's out(), then every start's constant.
+  # The emission key is the same whatever the arms hold: each start's arms in turn, so an arm's order()
+  # sorts that start's output (the reference sorts across every start here — a deliberate divergence,
+  # feature-support-matrix.md). Sort the merged stream with an order() after the branch.
   @gap:branch-traverser-major
   Scenario: g_VX1_4X_unionXout_order_byXname_descX_valuesXnameX_constantXzXX_fold
     Given the modern graph
@@ -399,7 +401,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[vadas,ripple,lop,lop,josh,z,z] |
+      | l[vadas,lop,josh,z,ripple,lop,z] |
 
   # …but ARM-major PER START inside `local`: each start drains its own arms.
   @gap:branch-traverser-major
@@ -560,8 +562,9 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | x |
 
-  # An ARM-major `choose(…).option(…)`: an option holding a barrier drains the `Pick` options first, then the
-  # keyed ones (BranchStep.java:110-114) — lop and ripple take `Pick.none` before any person's sorted out().
+  # An option-map `choose(…).option(…)` takes the same key: marko is the first start and takes the person
+  # option, whose sorted out() fills the slice (the reference drains the `Pick` options first when an option
+  # holds a barrier — a deliberate divergence, feature-support-matrix.md).
   @gap:branch-traverser-major
   Scenario: g_V_chooseXlabelX_optionXperson_out_order_byXnameXX_optionXnone_identityX_limitX3X_valuesXnameX
     Given the modern graph
@@ -572,6 +575,6 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
     When iterated to list
     Then the result should be unordered
       | result |
-      | lop |
-      | ripple |
       | josh |
+      | lop |
+      | vadas |

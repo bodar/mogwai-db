@@ -85,7 +85,7 @@ export const ENCOUNTER: Channel = { col: 'encounter', role: 'encounter' };
  */
 export const ORIGIN: Channel = { col: 'origin', role: 'origin' };
 
-/** The per-origin partition key — never a branch emission key (`originOf`, `build.ts`). */
+/** The per-origin partition key (`originOf`, `build.ts`). */
 export { originOf } from '../build.ts';
 export const encounterOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'encounter');
@@ -133,9 +133,8 @@ export interface ChainCtx extends FilterCtx {
    *  position channel exactly where the source would have. */
   readonly ordered: boolean;
   /** Does a POSITIONAL slice read the emission order downstream (`ChainFacts.demandsSlice`, or a body's
-   *  own slice, `continueAs`)? A branch merge it reads owes the reference's order, and declines rather
-   *  than number an input whose order is unknown (`branchSliced`, lower.ts). Threaded, not re-derived,
-   *  for the reason `ordered` is. */
+   *  own slice, `continueAs`)? A branch merge it reads is numbered by the emission key
+   *  (`branchOrderOwed`, lower.ts). Threaded, not re-derived, for the reason `ordered` is. */
   readonly sliced: boolean;
   /** How a `T.label` ENTRY renders — a set of names or one name. Decided ONLY by an explicit
    *  `with("multilabel")`/`with("singlelabel")`, since storage no longer carries a regime to inherit

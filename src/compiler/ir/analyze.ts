@@ -27,9 +27,7 @@ export interface ChainFacts {
   /** was demandsEncounterOrder  → seedSource: seed + thread the emission-order encounter? */
   readonly demandsEncounter: boolean;
   /** Does a POSITIONAL slice (limit/range/skip/tail at global scope) read the emission order? A
-   *  branch merge read by one owes the reference's emission order (`branchOrderOwed`, lower.ts), and
-   *  where its input carries no position to freeze it DECLINES rather than number the input by its
-   *  content (`positioned`) — a slice picks a SUBSET by that order (`branch-traverser-major.feature`). */
+   *  branch merge read by one is numbered by the emission key (`branchOrderOwed`, lower.ts). */
   readonly demandsSlice: boolean;
   /** Does a `from`/`to` on a path-family step scope the check to a SUB-path? Only then does each path
    *  position also carry the alias LABELS bound at it (`as()` appends to the last entry), so `subPath`
@@ -298,9 +296,8 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
   //     combination the seed does not build (`tracksPath && demandsEncounter` declines) — so leave it as
   //     it was rather than force the decline.
   //   - a BRANCH-MERGE chain (`union`/`choose`/`coalesce`/`optional`): under `ctx.ordered` a merge
-  //     presents the reference's emission order (`BranchKeys`, lower.ts) — or DECLINES where it cannot
-  //     name it. Seeding it for a bare terminal emission the corpus asserts unordered would only add those
-  //     declines, so a branch chain keeps its positionless emission; widening this is open residue.
+  //     is numbered by the emission key (`mintBranchOrder`, lower.ts). A bare terminal emission the corpus
+  //     asserts unordered needs no numbering, so a branch chain keeps its positionless emission.
   const terminal = steps.at(-1);
   if (terminal
     && (MUTATING_STEPS.has(terminal.name)

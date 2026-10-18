@@ -4,7 +4,6 @@ import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, m
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
-import { isReferenceBarrier } from './bulk.ts';
 import { eachChainDeep, eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -1373,44 +1372,6 @@ export function markUnrollSuppressed(steps: Step[], params: Record<string, any>)
  *  body is normalized later and in isolation, and `withoutStrategies` holds at every depth or not at all. */
 export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
   return markAtDepth(steps, params, (s) => SLICE_STEPS.has(s.name), (s) => { s.earlyLimitSuppressed = true; });
-}
-
-/**
- * `BranchStep.hasBarrier` IS A CONSTRUCTION-TIME FACT — set in `addChildOption` from
- * `getStepsOfAssignableClassRecursively(Barrier.class, option)`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:85-88`),
- * i.e. over the options AS WRITTEN, before any strategy runs, and never recomputed. So it is read off the RAW
- * chain here, at every depth, and stamped on the `union`/`choose`/`branch` step (`IRStep.hasBarrier`), before
- * a rewrite of ours can delete the barrier that set it: `isAlwaysProductiveFilterNoOp` drops
- * `where(outE().count())` as inert, which made `V().union(values('name'), where(outE().count()).values('age'))`
- * TRAVERSER-major where the reference drains it ARM-major. Every reader of the fact (`branchMajor`,
- * `branchHoldsBarrier`) consults the stamp. The options are the union's arguments, a predicate `choose`'s
- * true/false bodies, and the bodies of the `option()` steps that follow a `choose`/`branch` — never the
- * choice traversal itself, which is not an option.
- */
-export function markBranchBarrier(steps: Step[], params: Record<string, any>): IRStep[] {
-  const read = rawBodies(params);
-  const holds = (value: unknown): boolean => {
-    if (!isNested(value)) return false;
-    const body = read(value.nested);
-    return !body || someStepDeep(body, read, (s) => isReferenceBarrier(s as IRStep), true);
-  };
-  let changed = false;
-  const marked = steps.map((s, at) => {
-    const { args, changed: argsChanged } = mapNestedArgs(s.args, params, (inner) => markBranchBarrier(inner, params));
-    let options: readonly Arg[] = [];
-    if (s.name === 'union') options = s.args;
-    else if (s.name === 'choose' || s.name === 'branch') {
-      options = s.name === 'choose' ? s.args.slice(1) : [];
-      for (let next = at + 1; next < steps.length && steps[next]!.name === 'option'; next++)
-        options = [...options, ...steps[next]!.args.slice(-1)];
-    }
-    const hasBarrier = options.some((option) => holds(option.value));
-    if (!hasBarrier && !argsChanged) return s;
-    changed = true;
-    return { ...s, ...(argsChanged ? { args } : {}), ...(hasBarrier ? { hasBarrier: true } : {}) };
-  });
-  return (changed ? marked : steps) as IRStep[];
 }
 
 /** Mark each step `matches` accepts, at every depth, preserving identity where nothing was marked. */
