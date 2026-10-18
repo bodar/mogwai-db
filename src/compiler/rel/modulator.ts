@@ -11,7 +11,7 @@ import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
-import { aliasEntryNode, aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
+import { aliasEntryNode, aliasGuard, aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './receiver.ts';
@@ -466,9 +466,6 @@ function scopeValue(
     // A `Pop` names a position in a path HISTORY; a map key has no history, so a Pop-qualified read
     // of a field is a form Gremlin does not have and declining beats picking an end.
     if (key.pop !== 'last') return null;
-    // An ABSENT optional field falls through to a side effect or a same-named path label rather than
-    // reading as unproductive, so it is unproductive only where no other scope binds the name.
-    if (field.optional && boundBeyondMap(key.label, row)) return null;
     const cols = framingCols(field.framing);
     if (!cols) return null;
     // An optional field's presence is its value's nullness (`fieldPresence`).

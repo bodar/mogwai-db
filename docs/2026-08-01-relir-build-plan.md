@@ -713,8 +713,9 @@ UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/featu
   Kept: the side-effect-under-slice decline, `iterate()` → `discard()`, the `where(as(unbound))` decline,
   shared-creation onMatch (without `ProgramWrites.reads`/`overwritten`).
 - ✅ **G — label scope into nested arms.** ONE total IR walker (`ir/walk.ts`), arm column decline,
-  `writesAnywhere`. Residue: threading alias channels through `childSeam`. The path-entry maybe/ambiguous
-  lattice is removed by the simplification plan.
+  `writesAnywhere`. Residue: threading alias channels through `childSeam`, and a `where`/keyed `dedup` scope
+  key naming a `project()` FIELD (declines; it should read the field). The path-entry maybe/ambiguous
+  lattice is removed (simplification item 21).
 - 🚧 **H — reference strategy facts copied by hand.** Emit-first unroll and `PLAIN_FOLD` landed; open:
   one table per reference strategy in `ir/` (the `bulk.ts` pattern), each row citing its vendor line —
   for strategies that change WHICH rows a query returns, never for ones that only change execution order.

@@ -14,7 +14,7 @@ import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarTyp
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
-import { aliasProjection, boundBeyondMap, selectSpec } from '../alias.ts';
+import { aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { hostTag, meetPresence, presenceOf, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
@@ -2076,9 +2076,6 @@ function mapHostChild(
   // Map-key-vs-alias precedence (`Scoping`): a key NOT in the static key set cannot be a map key. The
   // child seam has no alias vocabulary here, so it declines rather than guessing (fail-closed).
   if (host.keys && !host.keys.includes(key)) return null;
-  // ...and a key the map may LACK falls through to a same-named side effect or path label rather than
-  // dropping (`boundBeyondMap`), which this read cannot follow: decline where another scope binds it.
-  if (!host.row || boundBeyondMap(key, host.row)) return null;
   const { node } = correlatedMapKey(host.map, key, fresh);
   const valOf = host.valOf;
   // Reroot to the value side's shape (the `sideOf` decode: a `{t,v}` scalar, a list/map blob).

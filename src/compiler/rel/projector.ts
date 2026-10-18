@@ -16,7 +16,6 @@ import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
-import { boundBeyondMap } from './alias.ts';
 
 /**
  * THE PER-TRAVERSER PROJECTORS — `math("<formula>")` and `format("…%{t}…")`.
@@ -267,8 +266,6 @@ function formatValue(
     if (host.kind === 'map') {
       if (host.valOf.kind !== 'scalar') return null;
       if (host.keys && !host.keys.includes(part.name)) return null;
-      // An ABSENT key falls through to a same-named side effect or path label, not to a null token.
-      if (!host.row || boundBeyondMap(part.name, host.row)) return null;
       // Rendered INSIDE the correlated read (`over`), so the per-row type test spells the matched pair's
       // column rather than re-running the read once per mention. A per-row tag never declines.
       pieces.push(correlatedMapKey(host.map, part.name, fresh,

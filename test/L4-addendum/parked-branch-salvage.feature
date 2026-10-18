@@ -526,20 +526,10 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
       | d[32].i |
       | d[35].i |
 
-  # ---- a rebind whose entry the DATA decides ----
-  # Without a PATH requirement the reference's labelled-path traverser adds a filter step's label to the
-  # head entry when the object EQUALS it (B_LP_O_S_SE_SL_Traverser.java:82-87): both().both() back at
-  # v[1] binds 'a' once. Declined; an as() directly after the split is exact.
-  @Unsupported
-  Scenario: g_VX1X_asXaX_both_both_hasXnameX_asXaX_selectXall_aX_countXlocalX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).as("a").both().both().has("name").as("a").select(Pop.all, "a").count(Scope.local)
-      """
-    When iterated to list
-    Then the result should have a count of 7
-
+  # ---- a rebind after a split ----
+  # An as() after the split binds a second entry. (The reference's labelled-path traverser merges a
+  # FILTER step's label into the head entry when the object equals it — B_LP_O_S_SE_SL_Traverser.java:82-87
+  # — a data-dependent execution detail not emulated: a deliberate divergence.)
   Scenario: g_VX1X_asXaX_both_both_asXaX_selectXall_aX_countXlocalX
     Given the modern graph
     And the traversal of

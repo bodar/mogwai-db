@@ -67,24 +67,6 @@ import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject 
 export const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
   new Map([...aliases].filter(([, entry]) => rel.channels.some((channel) => channel.col === entry.col)));
 
-/**
- * MAY A SCOPE PAST THE TRAVERSER'S OWN MAP BIND THIS NAME? — the question an ABSENT map key asks.
- *
- * `Scoping.getScopeValue` reads the traverser's Map only where it `containsKey`; a key the Map LACKS
- * falls through to the SIDE EFFECTS and then the PATH label of the same name
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:120-131`).
- * So an optional record field (a `project()` key whose `by()` was unproductive, `ProjectStep.java:66`)
- * is a DROP only where no other scope binds its name; elsewhere the answering scope is chosen PER ROW,
- * which one column set generally cannot hold (a scalar field over an element label), so every map-scope
- * reader DECLINES on `true` — a record's optional field and a map key alike. A path label counts where
- * the relation still carries it (a consumed one went with the path a reducing barrier discarded) or an
- * enclosing scope bound it; `elsewhere` absent (a reader handed no view of the side effects and enclosing
- * labels) is `true`, so the blind reader fails closed.
- */
-export const boundBeyondMap = (
-  label: string, row: { readonly rel: Rel; readonly aliases: AliasMap; readonly elsewhere?: (label: string) => boolean },
-): boolean => !row.elsewhere || liveAliases(row.aliases, row.rel).has(label) || row.elsewhere(label);
-
 /** Keep a traverser only where the label is actually bound on its path. An unbound label DROPS the
  *  row (an empty result), never an error — TinkerPop's `select()` rule, and the reason this is a
  *  predicate rather than a throw. */

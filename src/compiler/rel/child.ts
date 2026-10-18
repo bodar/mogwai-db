@@ -356,10 +356,6 @@ export type ChildHost =
 export interface HostRow {
   readonly rel: Rel;
   readonly aliases: AliasMap;
-  /** The scopes past the traverser's Map that the alias map cannot see — a side effect, a path label an
-   *  ENCLOSING scope bound — which an ABSENT map key falls through to (`boundBeyondMap`). Absent reads
-   *  as "may bind", so a map-scope reader handed no view declines rather than dropping the row. */
-  readonly elsewhere?: (label: string) => boolean;
   /** The host is a NEW traverser the reference GENERATES for this body, not a split of the row's own —
    *  see `freshTraverserRow`. Its path, labels, sack and loops are not the row's. */
   readonly fresh?: true;

@@ -129,10 +129,6 @@ export interface Step {
    *  `IRStep` only because the pass that knows it runs before the IR does; read it through
    *  `ranPerTraverser` (`compiler/ir/step.ts`), which is where what it MEANS is written down. */
   perTraverser?: boolean;
-  /** Set by the same splice when the erased host was a `map`/`flatMap`, whose output is a NEW PATH ENTRY
-   *  (`OPENS_ENTRY_HOSTS`, `compiler/ir/strategies.ts`): the entry the host opened, kept as a fact on the
-   *  last spliced step because the host that opened it is gone. */
-  opensPathEntry?: boolean;
 }
 
 // ---------- tagged non-value arguments ----------

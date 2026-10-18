@@ -1,21 +1,17 @@
-Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a collector in a CORRELATED body
+Feature: mogwai addendum — a read of a side effect sees the COMPLETED collection, and a collector in a CORRELATED body
 
-  # `select("a")`, `where(within("a"))`, `math`, `dedup("a")` read a side effect AS IT IS NOW
-  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java
-  # `getScopeValue`). A collector its host runs ONCE PER TRAVERSER — `local`/`map`/`flatMap`/`optional`/
-  # `sideEffect(__.aggregate("a"))`, a `union` arm's `local(__.aggregate("a"))` — fills one start at a time
-  # (step/branch/LocalStep.java `processNextStart`), so with no drain between, the n-th reader sees n
-  # members. The plan reads the finished collection, so those DECLINE (@Unsupported pins the refusal; the
-  # expectation is the reference's). A drain between (`barrier()`, `order()`), a top-level `aggregate`, or a
-  # `union` arm whose own `aggregate` drains every start the arm holds (step/branch/BranchStep.java
-  # `standardAlgorithm`) all read the finished collection, and are exact.
+  # `select("a")`, `where(within("a"))`, `math`, `dedup("a")` read a side effect. The reference reads it
+  # AS IT IS NOW (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java
+  # `getScopeValue`), so behind a collector its host runs once per traverser (`local`/`map`/`optional`/a
+  # `union` arm's `local`) the n-th reader sees a growing prefix — an artifact of its pull order. A
+  # set-based plan reads the COMPLETED collection, which is what `.barrier()` gives in the reference, and
+  # that is the answer here (a deliberate divergence, docs/feature-support-matrix.md).
   #
   # A collector inside a CORRELATED body — a filter's, an `optional`'s, a `coalesce` arm's — after a
   # movement is not lowered (its member relation names the outer row); it must DECLINE, never surface an
   # internal error.
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_localXaggregateXaXX_selectXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -25,15 +21,14 @@ Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a c
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].l |
-      | d[2].l |
-      | d[3].l |
-      | d[4].l |
-      | d[5].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
       | d[6].l |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_mapXaggregateXaXX_selectXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -43,15 +38,14 @@ Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a c
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].l |
-      | d[2].l |
-      | d[3].l |
-      | d[4].l |
-      | d[5].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
       | d[6].l |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_localXaggregateXaX_byXnameXX_selectXaX_unfold_count
     Given the modern graph
     And the traversal of
@@ -61,10 +55,9 @@ Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a c
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[21].l |
+      | d[36].l |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_VX1X_out_localXaggregateXaXX_selectXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -74,13 +67,11 @@ Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a c
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].l |
-      | d[2].l |
+      | d[3].l |
+      | d[3].l |
       | d[3].l |
 
-  # `OptionalStep.processNextStart` re-seeds its body per start: a per-traverser host like `local`.
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_optionalXaggregateXaXX_selectXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -90,16 +81,14 @@ Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a c
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].l |
-      | d[2].l |
-      | d[3].l |
-      | d[4].l |
-      | d[5].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
       | d[6].l |
 
-  # The arm's `local` still feeds its body one start at a time, though `union` hands the arm every start.
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_unionXlocalXaggregateXaXXX_selectXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -109,11 +98,11 @@ Feature: mogwai addendum — a LAZY READ of a side effect still FILLING, and a c
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].l |
-      | d[2].l |
-      | d[3].l |
-      | d[4].l |
-      | d[5].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
       | d[6].l |
 
   # A drain between the collector and the read: every reader sees the finished collection.

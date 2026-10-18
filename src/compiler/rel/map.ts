@@ -21,7 +21,6 @@ import { recordToMap } from './record.ts';
 import { relHostTag, type ChildHost, type ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
-import { raiseInRow } from '../../rel/raise.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -1836,7 +1835,7 @@ function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
  * `EXISTS` over the pairs and the value is its own extract, exactly the `present`-beside-the-value
  * split the option-map `choose` needed for `Pick.none` versus `Pick.unproductive`.
  */
-export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter, absent: 'drop' | 'raise' = 'drop'): Rel | null {
+export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Rel | null {
   const rel = fenced(input, fresh);
   // The key match is tolerant of both key encodings (`keyMatches`) — a `{t,v}` node key from
   // `group()`/`valueMap()` or a bare-string key from `project().fold().unfold()`.
@@ -1844,22 +1843,14 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter, abs
   const probePairs = pairsOf(col(rel.id, MAP_COL), fresh);
   // THE PRESENCE FILTER COMES FIRST, and the order is forced rather than chosen: the projection below
   // spends the `map` column, so a filter after it would reference a column that no longer exists.
-  const present: Expr = {
-    kind: 'exists', negated: false,
-    plan: make.project({
-      id: fresh('kp'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
-      input: make.filter({ id: fresh('kf'), input: probePairs, channels: [], type: probePairs.type, pred: matching(probePairs) }),
-    }),
-  };
-  // `raise`: ANOTHER scope binds the key (`boundBeyondMap`), so an absent key is not a drop but a
-  // fallthrough to that scope (`Scoping.java:120-131`) this read cannot follow. Where the key IS present
-  // the map answers, as the reference's does; on a row where it is absent the statement raises a
-  // deferral — a run-time decline, never the drop that would answer a different question.
   const kept = make.filter({
     id: fresh('kg'), input: rel, channels: rel.channels, type: rel.type,
-    pred: absent === 'drop' ? present : {
-      kind: 'binary', op: '=', right: compilerInt(1),
-      left: { kind: 'case', whens: [[present, compilerInt(1)]], else: raiseInRow(`select('${key}') of a map lacking that key, which another scope binds, is not supported yet`) },
+    pred: {
+      kind: 'exists', negated: false,
+      plan: make.project({
+        id: fresh('kp'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
+        input: make.filter({ id: fresh('kf'), input: probePairs, channels: [], type: probePairs.type, pred: matching(probePairs) }),
+      }),
     },
   });
   const valuePairs = pairsOf(col(kept.id, MAP_COL), fresh);

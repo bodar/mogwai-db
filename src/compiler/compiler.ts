@@ -3,7 +3,6 @@ import { type TypeNode } from '../gremlin/types.ts';
 import { canonicalFloatParams } from '../gremlin/float.ts';
 import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
-import { ambiguousEntryBind, erasedPathEntry } from './ir/strategies.ts';
 import { uncarriedLiteral } from './ir/uncarried-literal.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
@@ -84,11 +83,6 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   // once, for every path-family host (`unlocatableSubPath`) — the lowering's sub-path would answer an
   // empty path instead.
   if (unlocatableSubPath(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
-  // A path reader over a spliced `map`/`flatMap` identity host, whose erased path entry the read would miss
-  // (`erasedPathEntry`), and a re-bind of a label only SOME traversers' current entry holds
-  // (`ambiguousEntryBind`) decline here, once, at every depth — both are path-entry facts no single
-  // lowering position owns.
-  if (erasedPathEntry(steps, params) !== null || ambiguousEntryBind(steps, params)) throw new UnsupportedTraversal(gremlin);
   // A NaN literal VALUE (SQLite stores it as NULL) declines here, once, at every depth (`uncarriedLiteral`).
   if (uncarriedLiteral(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
 

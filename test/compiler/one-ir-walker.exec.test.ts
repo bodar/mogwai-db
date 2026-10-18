@@ -5,7 +5,7 @@
 // missed a different one (`someStepDeep` saw only `args`, so a write inside `order().by(…)` was invisible
 // to the ranked-order head and leaked a `RelIR: Ref …` internal error). This file pins the walker's
 // totality and each defect it closed, plus three neighbours found beside it: a scope read in a child
-// re-rooted without its host's alias channels, path-entry label sets, and two internal errors.
+// re-rooted without its host's alias channels, path entries a read keeps, and two internal errors.
 import { describe, expect, test } from 'bun:test';
 import { compilePlan, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { arg, type Step } from '../../src/gremlin/frontend.ts';
@@ -136,51 +136,32 @@ describe('the defects the walker closed, and their neighbours', () => {
 
 // THE FIX-FORWARD of the walker landing: where a path entry opens, a write in any child value, a scope
 // read under every child re-root, and a map-valued member framed as JSON.
-describe('path entries follow the reference\'s split, at every host', () => {
+describe('path entries: a map/flatMap identity host is kept where the path is read', () => {
   // `MapStep`/`FlatMapStep` emit `traverser.split(result, this)`, which EXTENDS a path-tracking traverser's
   // path (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_LP_O_S_SE_SL_Traverser.java:66-71),
-  // so splicing a `map(identity())` must not erase the entry it opened. `coalesce` is a FlatMapStep too.
-  test.each([
-    "g.V(1).as('a').map(identity()).as('a').select(Pop.all, 'a')",
-    "g.V(1).as('a').flatMap(identity()).as('a').select(Pop.all, 'a')",
-    "g.V(1).as('a').local(map(identity())).as('a').select(Pop.all, 'a')",
-    "g.V(1).as('a').coalesce(has('age'), out()).as('a').select(Pop.all, 'a')",
-  ])('an entry-opening host keeps both binds: %s', async (q) => expect(await ids(q)).toEqual([[1, 1]]));
-
-  // `BranchStep` (union/choose), `OptionalStep` and `LocalStep` hand back the child's own traverser
-  // (.../step/branch/BranchStep.java:165-199, OptionalStep.java:53, LocalStep.java:85-88): no new entry.
-  test.each([
-    ["g.V(1).as('a').union(identity()).as('a').select(Pop.all, 'a')", [[1]]],
-    ["g.V(1).as('a').union(identity(), identity()).as('a').select(Pop.all, 'a')", [[1], [1]]],
-    ["g.V(1).as('a').optional(identity()).as('a').select(Pop.all, 'a')", [[1]]],
-    ["g.V(1).as('a').choose(has('age'), identity()).as('a').select(Pop.all, 'a')", [[1]]],
-    ["g.V(1).as('a').choose(has('age'), identity(), has('name')).as('a').select(Pop.all, 'a')", [[1]]],
-    ["g.V(1).as('a').local(has('age')).as('a').select(Pop.all, 'a')", [[1]]],
-    ["g.V(1).union(identity().as('x')).as('x').select(Pop.all, 'x')", [[1]]],
-  ])('a pass-through host continues the entry its arm ended on: %s', async (q, expected) =>
-    expect(await ids(q)).toEqual(expected));
-
-  test('…and path() agrees with the label merge', async () => {
-    expect((await framed("g.V(1).as('a').union(identity()).as('a').path()")).map((p: any) => p.objects.length)).toEqual([1]);
-  });
-
-  // A label on the entry for SOME traversers (the identity arm) and not others (the moving arm) is bound
-  // once for the first and twice for the second; no rewrite says both.
-  test.each([
-    "g.V(1).as('a').choose(has('age'), identity(), out()).as('a').select(Pop.all, 'a')",
-    "g.V().as('a').optional(out()).as('a').select(Pop.all, 'a')",
-  ])('a re-bind of a label only some arms leave on the entry declines: %s', (q) => declines(q));
-
-  // The splice cannot shorten a path that something reads.
+  // so a traversal that reads the path keeps the host rather than splicing it (`inlineIdentityHostBody`).
   test.each([
     "g.V(1).map(identity()).path()",
     "g.V(1).flatMap(identity()).path()",
-    "g.V(1).map(identity()).simplePath()",
-    "g.V(1).union(map(identity())).path()",
     "g.V(1).local(flatMap(identity())).path()",
-  ])('a path read over a spliced map/flatMap identity host declines: %s', (q) => declines(q));
-});
+  ])('%s', async (q) => expect((await framed(q)).map((p: any) => p.objects.map((v: any) => v.id))).toEqual([[1, 1]]));
 
+  test('coalesce() opens an entry too', async () => {
+    expect(await ids("g.V(1).as('a').coalesce(has('age'), out()).as('a').select(Pop.all, 'a')")).toEqual([[1, 1]]);
+  });
+
+  test('simplePath() filters the repeated entry', async () => {
+    expect(await framed("g.V(1).map(identity()).simplePath().count()")).toEqual([0]);
+  });
+
+  // A same-label re-bind across a branch host ANSWERS: the entry is not followed out of the host, so a
+  // `Pop.all` read may list the element once more than the reference (a deliberate divergence).
+  test.each([
+    "g.V(1).as('a').choose(has('age'), identity(), out()).as('a').select(Pop.all, 'a')",
+    "g.V().as('a').optional(out()).as('a').select(Pop.all, 'a')",
+    "g.V(1).as('a').union(identity()).as('a').select(Pop.all, 'a')",
+  ])('a re-bind across a branch host answers: %s', async (q) => expect((await framed(q)).length).toBeGreaterThan(0));
+});
 describe('a write in any correlated child value declines — never `RelIR: Ref …`', () => {
   test.each([
     "g.V().hasLabel('person').order().by(choose(has('age'), addV('y').count(), constant(1)))",

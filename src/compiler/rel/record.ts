@@ -12,7 +12,7 @@ import { containsSelfRef, exprHasSubquery, freeRelIds } from '../../rel/walk.ts'
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import type { GraphSource } from './source.ts';
-import { aliasGuard, aliasPresent, boundBeyondMap, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
+import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 
@@ -535,12 +535,6 @@ export function selectKeys(
   const required: string[] = [];
   const bound: string[] = [];
 
-  // An ABSENT optional field falls through to a side effect or path label of the same name, so it is
-  // the `KeyNotFoundException` drop `scopeRead` builds only where no other scope binds it
-  // (`boundBeyondMap`); elsewhere decline — every arity, Pop and by() at once.
-  const elsewhere = host && ((label: string): boolean => host.named(label) || host.hidden(label));
-  if (spec.labels.some((label) => fieldOf(label)?.optional && boundBeyondMap(label, { rel, aliases, ...(elsewhere ? { elsewhere } : {}) }))) return null;
-
   // An ABSENT optional field is a drop (`SelectStep`'s `KeyNotFoundException`) over the record's own
   // columns — its first column's nullness (`fieldPresence`) — so it filters the input before any read.
   const present: Expr[] = [];
@@ -583,7 +577,8 @@ export function selectKeys(
     // The by()'s own productivity is a DROP, not an omission — named by the field's FIRST column, which
     // every shape has (a rowid, `v`, `list`, `map`): a NULL value is no value.
     if (built.optional) required.push(only ? cols[0]!.name : fieldCol(prefix, cols[0]!.name));
-    fields.push({ key: label, prefix, framing: built.framing, optional: false });
+    const mirrors = !fieldOf(label) && spec.pop === 'last' && !bys.length;
+    fields.push({ key: label, prefix, framing: built.framing, optional: false, ...(mirrors ? { mirrorsAlias: true as const } : {}) });
   }
 
   // ONE key is not a record: `SelectOneStep` yields the value itself, so the payload lands under its

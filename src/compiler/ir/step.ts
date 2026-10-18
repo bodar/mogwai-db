@@ -26,8 +26,6 @@ import { UnsupportedTraversal } from '../unsupported.ts';
  *    (`markEarlyLimitSuppressed`), so `earlyLimit` leaves it where it was written. A mark on the STEP
  *    rather than a flag consulted at the root, because a body is normalized in isolation later and a
  *    root-only answer cannot reach it.
- *  - `labelsRetracted` — an `as()` after this step was dropped because nothing reads it
- *    (`retractUnreadAlias`). The reference still carries the label on the path entry.
  *  - `graphTag` — the graph-identity VALUE a synthesized `V()`/`E()` seeds into the `graph` channel
  *    (`channels.ts`), so a multi-graph merge keeps per-graph identity through `dedup`. The nested-branch
  *    federate segment stamps it on every arm of an identity-sensitive merge: a landed arm gets its
@@ -42,7 +40,7 @@ import { UnsupportedTraversal } from '../unsupported.ts';
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; earlyLimitSuppressed?: boolean; labelsRetracted?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; earlyLimitSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
 
 /** Did this step run inside a PER-TRAVERSER host (`local`/`map`/`flatMap`) whose wrapper the splice pass
  *  erased — `inlineIdentityHostBody`, `ir/strategies.ts`?

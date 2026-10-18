@@ -174,12 +174,12 @@ const collectionKeyOf = (step: IRStep): string | null => {
 
 /** The IR fields a step's source text never carries: what a canonicalize Pass FOLDED onto it from a
  *  neighbouring step (`by()`/`with()`/`option()`/the repeat cluster/`from`/`to`) or ANNOTATED it with
- *  (`productiveBy`, the spliced-host `perTraverser`/`opensPathEntry`, the federate segment's own
+ *  (`productiveBy`, the spliced-host `perTraverser`, the federate segment's own
  *  `landedSource`/`graphTag`). `loopName` is absent on purpose: the front end splits it off the
  *  step's OWN text, so a re-parse reproduces it. */
 const TEXTLESS_FIELDS = [
   'modulators', 'withArgs', 'optionArms', 'repeatRegion', 'from', 'to',
-  'productiveBy', 'perTraverser', 'opensPathEntry', 'landedSource', 'graphTag',
+  'productiveBy', 'perTraverser', 'landedSource', 'graphTag',
 ] as const;
 
 /** Does an IR step denote the same thing as `parsed`, the step its source text parses to? Same name,

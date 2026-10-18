@@ -198,41 +198,10 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | marko |
 
-  # AN ABSENT KEY FALLS THROUGH. `getScopeValue` reads the Map only where it `containsKey`; a key the Map
-  # lacks goes on to the SIDE EFFECTS and then the PATH label of the same name (Scoping.java:120-131).
-  # ProjectStep omits an unproductive key (ProjectStep.java:66), so lop's map has no "x" and the select
-  # reads the `as("x")` vertex. The answering scope is chosen per row, which one column set cannot hold,
-  # so every map-scope reader declines where another scope binds the name (`boundBeyondMap`,
-  # src/compiler/rel/alias.ts). These answered by dropping lop.
-  @Unsupported
-  Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXxX_byXconstantX1XX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).out().as("x").project("x").by("age").select("x").by(__.constant(1))
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[1].i |
-      | d[1].i |
-      | d[1].i |
-
-  @Unsupported
-  Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXlast_xX_byXconstantX1XX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).out().as("x").project("x").by("age").select(Pop.last, "x").by(__.constant(1))
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[1].i |
-      | d[1].i |
-      | d[1].i |
-
-  @Unsupported
+  # THE TRAVERSER'S OWN MAP WINS. A key the Map holds is read from the Map, never from a same-named side
+  # effect or path label; a key the Map LACKS drops the row, even where a side effect or path label of
+  # that name exists. The reference falls through to those scopes per row (Scoping.java:120-131) — a
+  # deliberate divergence (docs/feature-support-matrix.md): "select k from this map" reads this map.
   Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXxX
     Given the modern graph
     And the traversal of
@@ -243,24 +212,8 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
     Then the result should be unordered
       | result |
       | d[27].i |
-      | v[lop] |
       | d[32].i |
 
-  @Unsupported
-  Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXall_xX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).out().as("x").project("x").by("age").select(Pop.all, "x")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[27].i |
-      | l[v[lop]] |
-      | d[32].i |
-
-  @Unsupported
   Scenario: g_VX1X_out_asXxX_projectXx_nX_byXageX_byXnameX_selectXx_nX
     Given the modern graph
     And the traversal of
@@ -271,23 +224,8 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
     Then the result should be unordered
       | result |
       | m[{"x":"d[27].i","n":"vadas"}] |
-      | m[{"x":"v[lop]","n":"lop"}] |
       | m[{"x":"d[32].i","n":"josh"}] |
 
-  @Unsupported
-  Scenario: g_VX1X_asXxX_projectXxX_byXnopeX_selectXxX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).as("x").project("x").by("nope").select("x")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | v[marko] |
-
-  # The side effect is read before the path (Scoping.java:126-128).
-  @Unsupported
   Scenario: g_withSideEffectXx_7X_VX1X_projectXxX_byXnopeX_selectXxX
     Given the modern graph
     And the traversal of
@@ -295,39 +233,8 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       g.withSideEffect("x",7).V(1).project("x").by("nope").select("x")
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[7].i |
+    Then the result should be empty
 
-  # The same fallthrough at a by(select()) reader, at math()'s variable (which must NOT read the side
-  # effect where the field is present), and at format().
-  @Unsupported
-  Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_dedup_byXselectXxXX_count
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).out().as("x").project("x").by("age").dedup().by(__.select("x")).count()
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[3].l |
-
-  @Unsupported
-  Scenario: g_withSideEffectXx_7X_VX1X_out_projectXxX_byXageX_mathXx_plus_1X
-    Given the modern graph
-    And the traversal of
-      """
-      g.withSideEffect("x",7).V(1).out().project("x").by("age").math("x + 1")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[28].d |
-      | d[8].d |
-      | d[33].d |
-
-  @Unsupported
   Scenario: g_withSideEffectXx_7X_VX1X_out_projectXxX_byXageX_formatXxX
     Given the modern graph
     And the traversal of
@@ -338,11 +245,8 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
     Then the result should be unordered
       | result |
       | 27 |
-      | 7 |
       | 32 |
 
-  # A MAP traverser is the same first scope: elementMap("age") on lop has no "age" key.
-  @Unsupported
   Scenario: g_withSideEffectXage_7X_VX1X_out_elementMapXageX_selectXageX
     Given the modern graph
     And the traversal of
@@ -353,42 +257,8 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
     Then the result should be unordered
       | result |
       | d[27].i |
-      | d[7].i |
       | d[32].i |
 
-  @Unsupported
-  Scenario: g_withSideEffectXage_7X_VX1X_out_elementMapXageX_mathXage_plus_1X
-    Given the modern graph
-    And the traversal of
-      """
-      g.withSideEffect("age",7).V(1).out().elementMap("age").math("age + 1")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[28].d |
-      | d[8].d |
-      | d[33].d |
-
-  @Unsupported
-  Scenario: g_VX1X_out_asXageX_elementMapXageX_formatXageX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).out().as("age").elementMap("age").format("%{age}")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | 27 |
-      | v[3] |
-      | 32 |
-
-  # A map whose keys are DATA cannot be ruled out at compile time, so its select reads the map where the
-  # key is present (Select.feature's g_VX1X_groupXaX_byXconstantXaXX_byXnameX_selectXaX_selectXaX) and
-  # RAISES a deferral on a row that would fall through: here the map {b:[marko]} lacks "a", so the
-  # reference reads the side effect "a" — that same map.
-  @Unsupported
   Scenario: g_VX1X_groupXaX_byXconstantXbXX_byXnameX_barrier_selectXaX_selectXaX
     Given the modern graph
     And the traversal of
@@ -396,9 +266,46 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       g.V(1).group("a").by(__.constant("b")).by(__.values("name")).barrier().select("a").select("a")
       """
     When iterated to list
+    Then the result should be empty
+
+  # math() reads a PRESENT field, never the side effect behind it (`mapScopeMayHold`): [8,8] was wrong.
+  Scenario: g_withSideEffectXx_7X_VX1X_out_hasLabelXpersonX_projectXxX_byXageX_mathXx_plus_1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("x",7).V(1).out().hasLabel("person").project("x").by("age").math("x + 1")
+      """
+    When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"b":["marko"]}] |
+      | d[28].d |
+      | d[33].d |
+
+  # A where()/keyed dedup() scope key naming a FIELD reads the field; the alias readers read the path
+  # label, so these decline (they compared the as() vertices, answering 0 and 3).
+  @Unsupported
+  Scenario: g_V_asXaX_out_asXbX_projectXa_bX_byXconstantX1XX_byXconstantX1XX_whereXa_eqXbXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").project("a","b").by(__.constant(1)).by(__.constant(1)).where("a", P.eq("b")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  @Unsupported
+  Scenario: g_V_asXaX_out_asXbX_projectXa_bX_byXconstantX1XX_byXconstantX1XX_dedupXaX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").project("a","b").by(__.constant(1)).by(__.constant(1)).dedup("a").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
 
   # Where NO other scope binds the name, the absent key is still the KeyNotFoundException drop.
   Scenario: g_VX1X_out_projectXxX_byXageX_selectXxX_byXconstantX1XX

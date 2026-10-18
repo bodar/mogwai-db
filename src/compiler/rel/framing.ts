@@ -161,6 +161,9 @@ export interface RecordField {
   readonly prefix: string;
   readonly framing: RelFraming;
   readonly optional: boolean;
+  /** The field IS the same-named path label's last value (an un-modulated `select(k1, k2, …)` of labels),
+   *  so a scope read of its name answers the same from the record or from the path. */
+  readonly mirrorsAlias?: true;
 }
 
 /**
