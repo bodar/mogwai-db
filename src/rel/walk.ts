@@ -348,6 +348,26 @@ export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
   go(plan);
 }
 
+/**
+ * Visit every sub-expression SQLite evaluates WHENEVER the root is evaluated — not one a `CASE` branch,
+ * the right operand of a short-circuit `AND`/`OR`, a `coalesce`/`ifnull`/`iif` fallback or an aggregate's
+ * per-member arguments hold back. A window's spec runs for every row it numbers, so it is not held back. A rewrite that moves a RAISING subquery may move only one of these:
+ * anywhere else the guard around it is what keeps it off the rows it would raise for.
+ */
+export function forEachUnconditional(e: Expr, visit: (node: Expr) => void): void {
+  visit(e);
+  const always: readonly Expr[] = (() => {
+    switch (e.kind) {
+      case 'case': return e.whens.length ? [e.whens[0]![0]] : [];
+      case 'binary': return e.op === 'and' || e.op === 'or' ? [e.left] : [e.left, e.right];
+      case 'call': return ['coalesce', 'ifnull', 'iif'].includes(e.fn) ? e.args.slice(0, 1) : e.args;
+      case 'agg': return [];
+      default: return exprChildren(e);
+    }
+  })();
+  always.forEach((child) => forEachUnconditional(child, visit));
+}
+
 /** Visit an expression and every sub-expression. Correlated subplans are the caller's business. */
 export function forEachExpr(e: Expr, visit: (node: Expr) => void): void {
   visit(e);

@@ -8,7 +8,8 @@ import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType, type WindowSpec } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RootedRead } from './child.ts';
-import { containsSelfRef, exprHasSubquery, freeRelIds } from '../../rel/walk.ts';
+import { containsSelfRef, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, mapExprChildren } from '../../rel/walk.ts';
+import { mayRaise } from '../../rel/raise.ts';
 
 /**
  * THE CONSTRUCTION LEAF every RelIR lowering module sits on — the physical schema as the algebra sees
@@ -980,3 +981,61 @@ export const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
   (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(storageClass)] }),
   { kind: 'call', fn: 'replace', args: [vt, compilerText('real'), compilerText('double')] },
 );
+
+/**
+ * COMPUTE A KEY'S SUBQUERIES ONCE — every scalar subquery `exprs` spell (one `plan`, however many
+ * wrappers) projected as a column of `rel`, and the rewrite that reads the column instead.
+ *
+ * An `order().by(k)` reads its key in two nodes — the productivity filter that drops a row with no
+ * `k`, then the sort — and a window spells its `ORDER BY` subquery twice more inside SQLite's own
+ * window rewrite. Neither node can share with the other, so both read a column computed below them:
+ * one subquery per row where the inlined spellings ran three. A subquery that may RAISE stays where it
+ * is, since moving it changes which rows it is evaluated for.
+ */
+export function withSubqueryColumns(rel: Rel, exprs: readonly Expr[], fresh: Minter): { readonly rel: Rel; readonly rewrite: (e: Expr) => Expr } | null {
+  const names = new Map<Rel, string>();
+  const added: ColMeta[] = [];
+  const computed: (readonly [string, Expr])[] = [];
+  const id = fresh('sk');
+  const visit = (e: Expr): void => {
+    if (e.kind === 'scalar') {
+      if (!names.has(e.plan) && !mayRaise(e.plan) && e.plan.type.cols.length === 1) {
+        const name = `${id}_${names.size}`;
+        names.set(e.plan, name);
+        added.push(meta(name, e.plan.type.cols[0]!.type, true));
+        computed.push([name, e]);
+      }
+      return;
+    }
+    exprChildren(e).forEach(visit);
+  };
+  exprs.forEach(visit);
+  if (!names.size) return null;
+  // An expression may name a relation FUSED below `rel` rather than `rel` itself — legal while the
+  // emitter keeps them in one SELECT, and unresolvable once a projection between them closes `rel`
+  // into a derived table. Such a key stays where it is.
+  const below = new Set<string>();
+  forEachRel(rel, (node) => { if (node !== rel) below.add(node.id); });
+  const reads = new Set<string>();
+  exprs.forEach((e) => forEachExpr(e, (node) => {
+    if (node.kind === 'col') reads.add(node.rel);
+    exprRels(node).forEach((plan) => freeRelIds(plan).forEach((id) => reads.add(id)));
+  }));
+  if ([...reads].some((id) => below.has(id))) return null;
+  const keyed = make.project({
+    id, input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, ...added),
+    exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), ...computed],
+  });
+  const memo = new Map<Expr, Expr>();
+  const rewrite = (e: Expr): Expr => {
+    const seen = memo.get(e);
+    if (seen) return seen;
+    const name = e.kind === 'scalar' ? names.get(e.plan) : undefined;
+    // `keyed` passes every column of `rel` through by name, so a read of `rel` reads `keyed` — the node a later
+    // fence keeps in scope.
+    const out = name ? col(keyed.id, name) : e.kind === 'col' && e.rel === rel.id ? col(keyed.id, e.name) : mapExprChildren(e, rewrite);
+    memo.set(e, out);
+    return out;
+  };
+  return { rel: keyed, rewrite };
+}

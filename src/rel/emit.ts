@@ -1,14 +1,16 @@
 import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
-import { NEEDS_SUBQUERY, aliasOf, free, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
+import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
-import { compilerInt, type Expr } from './expr.ts';
+import { col, compilerInt, type Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
-import { exprChildren, forEachExpr, rewriteExpr } from './walk.ts';
+import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
+import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, relChildren, relExprs, rewriteExpr } from './walk.ts';
+import { exprMayRaise } from './raise.ts';
+import { mayCarryJsonSubtype } from './subtype.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -157,7 +159,14 @@ interface Block extends Slots {
 }
 
 /** A set operation or a recursive CTE: a complete SELECT with no free slots to fill. */
-interface Closed { readonly kind: 'closed'; readonly body: Expression; }
+interface Closed {
+  readonly kind: 'closed';
+  readonly body: Expression;
+  /** The output columns some ARM spells with a subquery — what a flattened reader would inline. */
+  readonly subqueryCols?: ReadonlySet<string>;
+  /** The output columns some arm spells with a value that may carry the JSON subtype. */
+  readonly jsonCols?: ReadonlySet<string>;
+}
 type Built = Block | Closed;
 
 const EMPTY_SCOPE: Scope = new Map();
@@ -185,7 +194,117 @@ const JSON_WRITERS: ReadonlySet<string> = new Set([
   'json_insert', 'jsonb_insert', 'json_replace', 'jsonb_replace', 'json_set', 'jsonb_set',
 ]);
 
+/**
+ * HOW MANY TIMES A NODE'S OWN EXPRESSIONS READ EACH COLUMN — `rel\0name` → 1, or 2 meaning "more
+ * than once" (saturating, which is all the one caller asks and what keeps a DAG walk linear).
+ *
+ * A correlated subplan counts at every occurrence, because it is SPELLED at every occurrence: each
+ * renders the outer column it reads again. Memoised per node; both `Expr` and `Rel` are frozen.
+ */
+type Reads = ReadonlyMap<string, number>;
+const exprReadMemo = new WeakMap<Expr, Reads>();
+const relReadMemo = new WeakMap<Rel, Reads>();
+const addReads = (into: Map<string, number>, from: Reads): void => {
+  for (const [key, n] of from) into.set(key, Math.min(2, (into.get(key) ?? 0) + n));
+};
+function exprReads(e: Expr): Reads {
+  const known = exprReadMemo.get(e);
+  if (known) return known;
+  const out = new Map<string, number>();
+  if (e.kind === 'col') out.set(`${e.rel}\0${e.name}`, 1);
+  exprChildren(e).forEach((child) => addReads(out, exprReads(child)));
+  exprRels(e).forEach((plan) => addReads(out, relReads(plan)));
+  exprReadMemo.set(e, out);
+  return out;
+}
+/** The reads of a node's OWN expressions — its input is a block of its own, rendered once. */
+const ownReads = (r: Rel): Reads => {
+  const out = new Map<string, number>();
+  relExprs(r).forEach((e) => addReads(out, exprReads(e)));
+  return out;
+};
+/** A whole subplan's reads: its own and every descendant's, all spelled inside the one subquery. */
+function relReads(r: Rel): Reads {
+  const known = relReadMemo.get(r);
+  if (known) return known;
+  const out = new Map(ownReads(r));
+  relChildren(r).forEach((child) => addReads(out, relReads(child)));
+  relReadMemo.set(r, out);
+  return out;
+}
+
 function assembler(bindings: ReadonlyMap<string, Binding>) {
+
+  /**
+   * COMPUTE ONCE: the column spellings whose every inlining RE-RUNS A SUBQUERY.
+   *
+   * Fusion spells a column as the expression that computes it, and SQLite's query flattener does the
+   * same to a derived table or a single-use CTE — neither has a `let`, so a column read N times is a
+   * subquery evaluated N times per row. Measured on a 3 000-vertex graph: a `sum(local)` whose result
+   * column the next projection read 288 times planned 3 656 rows with 435 correlated subqueries and
+   * ran 6.4 s; read once from a fenced relation it is one subquery per row. So a spelling is MARKED
+   * here when it holds a subquery (or reads a marked one), and `inputBlock` closes a block a reader
+   * would re-read a marked column of (`rereadsSubquery`).
+   */
+  const subqueryCols = new WeakSet<Expression>();
+  /** Per non-retained CTE binding, the columns whose spelling inside it holds a subquery — what a
+   * flattened reference to it would inline. */
+  const cteSubqueryCols = new Map<string, ReadonlySet<string>>();
+  /** The spellings whose value may carry SQLite's JSON subtype (`mayCarryJsonSubtype`), which a fence
+   * strips. A RELATION column crossing one is the lowering's to re-wrap, as at every boundary (`jsonOf`,
+   * `compiler/rel/build.ts`); a subquery `once` would lift out of the MIDDLE of an expression is not, so
+   * one whose value flows out stays inline. Tracked like `subqueryCols`, through fusion, flattening and
+   * CTE boundaries. */
+  const jsonText = new WeakSet<Expression>();
+  const cteJsonCols = new Map<string, ReadonlySet<string>>();
+  const carriesJson = (e: Expr, scope: Scope): boolean => mayCarryJsonSubtype(e, (rel, name) => {
+    const spelled = scope.get(rel)?.get(name);
+    return spelled ? jsonText.has(spelled) : true;
+  });
+  const marks = (e: Expr, scope: Scope): boolean => {
+    if (exprHasSubquery(e)) return true;
+    let reads = false;
+    forEachExpr(e, (node) => {
+      if (node.kind !== 'col') return;
+      const spelled = scope.get(node.rel)?.get(node.name);
+      if (spelled && subqueryCols.has(spelled)) reads = true;
+    });
+    return reads;
+  };
+  /** Render `e` in `scope`, marking the spelling when it carries a subquery. */
+  const computed = (e: Expr, scope: Scope): Expression => {
+    const out = expr(e, scope);
+    if (marks(e, scope)) subqueryCols.add(out);
+    if (carriesJson(e, scope)) jsonText.add(out);
+    return out;
+  };
+  /** Does `reader` read a column of `b` MORE THAN ONCE whose spelling there runs a subquery? */
+  const rereadsSubquery = (reader: Rel, b: Block): boolean => {
+    // A FILTER keeps its input's select list, so a column its predicate reads is spelled twice — in the
+    // WHERE and again in the output. A WINDOW spells its spec twice itself (SQLite's window rewrite
+    // evaluates an `OVER (ORDER BY …)` subquery for the sorter and again for the row — measured,
+    // bun:sqlite 3.51). For both, ONE read is already a repeat.
+    const once = reader.kind === 'filter'
+      ? (spelled: Expression) => b.select.some(([, output]) => output === spelled)
+      : () => reader.kind === 'window';
+    for (const [key, n] of ownReads(reader)) {
+      const [rel, name] = key.split('\0') as [string, string];
+      const spelled = b.scope.get(rel)?.get(name);
+      if (spelled && subqueryCols.has(spelled) && (n > 1 || once(spelled))) return true;
+    }
+    return false;
+  };
+  /** A derived table's columns carry what its body's spellings carried: SQLite flattens it back. */
+  const inherit = (built: Built, cols: Cols): void => {
+    for (const name of carriesSubquery(built)) subqueryCols.add(cols.get(name)!);
+    for (const name of carriesJsonText(built)) jsonText.add(cols.get(name)!);
+  };
+  const carriesJsonText = (built: Built): readonly string[] => built.kind === 'closed'
+    ? [...built.jsonCols ?? []]
+    : built.select.filter(([, spelled]) => jsonText.has(spelled)).map(([name]) => name);
+  const carriesSubquery = (built: Built): readonly string[] => built.kind === 'closed'
+    ? [...built.subqueryCols ?? []]
+    : built.select.filter(([, spelled]) => subqueryCols.has(spelled)).map(([name]) => name);
 
   const expr = (e: Expr, scope: Scope): Expression => {
     const self = (x: Expr): Expression => expr(x, scope);
@@ -318,10 +437,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         const rows = list(r.rows.map((row) => q`(${list(row.map((e) => expr(e, outer)))})`));
         // SQLite names anonymous VALUES columns column1, column2, … . Bind the declared names to those
         // positions here rather than re-projecting, so the row source stays one FROM item.
-        return {
-          item: { text: q`(VALUES ${rows})`, alias: aliasOf(r) },
-          cols: new Map(r.type.cols.map((column, i) => [column.name, qualified(aliasOf(r), `column${i + 1}`)])),
-        };
+        const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, qualified(aliasOf(r), `column${i + 1}`)]));
+        for (const spelled of cols.values()) jsonText.add(spelled);
+        return { item: { text: q`(VALUES ${rows})`, alias: aliasOf(r) }, cols };
       }
     }
     // `isDirectSource` is the shared classification (`block.ts`); every kind it marks a table source
@@ -343,18 +461,127 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   });
 
   /** The input of a unary node, as a block this node can fill a slot in. `blocked` is that node's
-   * own rule about which already-occupied slots force a nested SELECT. */
-  const inputBlock = (input: Rel, outer: Scope, blocked: (b: Block) => boolean): Block => {
+   * own rule about which already-occupied slots force a nested SELECT.
+   *
+   * `reader` is the node about to fill the slot. When it would read a subquery-carrying column more
+   * than once (`rereadsSubquery`), the input closes into a derived table FENCED with `OFFSET 0` —
+   * SQLite's flattener refuses a subquery with an OFFSET (its rule 14), so the relation runs as a
+   * co-routine and each column is computed ONCE per row, streaming, unlike `AS MATERIALIZED`, which
+   * would also hold the whole relation and cannot sit inside a correlated subquery. Not over a
+   * recursive term's own reference: SQLite requires it unwrapped (P1, `block.ts`). */
+  const inputBlock = (input: Rel, outer: Scope, blocked: (b: Block) => boolean, reader?: Rel): Block => {
     const built = build(input, outer);
+    const fence = built.kind === 'block' && reader !== undefined && rereadsSubquery(reader, built)
+      && !fromTree(input).some((source) => source.kind === 'self-ref');
+    if (built.kind === 'block' && !blocked(built) && !fence) return built;
+    const closed = fence && built.kind === 'block' ? fenced(reader!, input, built, outer, input.id, []) : undefined;
+    if (closed) return closed;
     if (built.kind === 'block' && !blocked(built)) return built;
     const cols = colsOf(input.id, input);
+    inherit(built, cols);
+    const body = renderBuilt(built);
     return {
       kind: 'block',
       select: input.type.cols.map((column) => [column.name, cols.get(column.name)!] as const),
-      from: { text: q`(${renderBuilt(built)})`, alias: input.id },
+      from: { text: q`(${body})`, alias: input.id },
       joins: [], distinct: false, windowed: false,
       scope: withRel(outer, input.id, cols),
     };
+  };
+
+  /**
+   * ONE SUBQUERY, RUN ONCE PER ROW. A node whose own expressions spell the SAME subquery more than
+   * once — a `choose()` reading its choice value and testing it for presence, a `path().by()` key read
+   * in two arms — has no `let` in SQL to bind it to, and SQLite evaluates each spelling. So it is
+   * computed as a column of the input block, fenced (`OFFSET 0`, see `inputBlock`), and every
+   * occurrence reads that column.
+   *
+   * "The same" is one `plan` under one wrapper: a lowering that reuses a subquery reuses its `Rel`.
+   * A subquery that may RAISE moves only when one of its spellings already runs for every row — else a
+   * `CASE` may be what keeps it off the rows it would raise for. `fenced` re-projects every column the
+   * node reads, by whatever relation it is spelled under, so its expressions resolve as they did.
+   */
+  const once = (r: Rel & { readonly input: Rel }, b: Block, outer: Scope, exprs: readonly Expr[]): { readonly b: Block; readonly rewrite: (e: Expr) => Expr } | undefined => {
+    if (b.distinct || fromTree(r.input).some((source) => source.kind === 'self-ref')) return undefined;
+    const uses = new Map<Rel, Map<string, number>>();
+    const wrapper = (node: Expr): string | undefined =>
+      node.kind === 'scalar' ? 'scalar' : node.kind === 'exists' ? (node.negated ? 'not-exists' : 'exists') : undefined;
+    for (const e of exprs) forEachExpr(e, (node) => {
+      const w = wrapper(node);
+      if (!w) return;
+      const plan = (node as Extract<Expr, { readonly plan: Rel }>).plan;
+      const byWrapper = uses.get(plan) ?? new Map<string, number>();
+      byWrapper.set(w, (byWrapper.get(w) ?? 0) + 1);
+      uses.set(plan, byWrapper);
+    });
+    // A WINDOW spells its own spec twice — SQLite's window rewrite evaluates an `OVER (ORDER BY …)`
+    // subquery once for the sorter and once more for the row (measured, bun:sqlite 3.51) — so for it a
+    // single use is already a repeat.
+    const twice = r.kind === 'window' ? 1 : 2;
+    // A RAISING subquery moves only when some spelling of it already runs for every row (`forEachUnconditional`).
+    const always = new Set<Rel>();
+    for (const e of exprs) forEachUnconditional(e, (node) => { if (wrapper(node)) always.add((node as Extract<Expr, { readonly plan: Rel }>).plan); });
+    const outflows = new Set<Rel>();
+    const markOut = (e: Expr): void => forEachExpr(e, (node) => { if (wrapper(node)) outflows.add((node as Extract<Expr, { readonly plan: Rel }>).plan); });
+    if (r.kind === 'project') exprs.forEach(markOut);
+    if (r.kind === 'window') exprs.forEach((e) => { if (e.kind === 'window-expr') e.args.forEach(markOut); });
+    const hoisted = new Map<Rel, Map<string, string>>();
+    const computedCols: (readonly [string, Expression])[] = [];
+    for (const e of exprs) forEachExpr(e, (node) => {
+      const w = wrapper(node);
+      if (!w) return;
+      const plan = (node as Extract<Expr, { readonly plan: Rel }>).plan;
+      if ((uses.get(plan)?.get(w) ?? 0) < twice || hoisted.get(plan)?.has(w) || (!always.has(plan) && exprMayRaise(node))
+        // Its JSON subtype would not survive the fence (`mayCarryJsonSubtype`) — which matters only
+        // where the value flows OUT, not where it is a predicate or a sort key.
+        || (outflows.has(plan) && carriesJson(node, b.scope))) return;
+      const name = `${r.id}_s${computedCols.length}`;
+      hoisted.set(plan, (hoisted.get(plan) ?? new Map<string, string>()).set(w, name));
+      computedCols.push([name, expr(node, b.scope)]);
+    });
+    if (!computedCols.length) return undefined;
+    const alias = `${r.id}_once`;
+    const fencedBlock = fenced(r, r.input, b, outer, alias, computedCols);
+    if (!fencedBlock) return undefined;
+    const memo = new Map<Expr, Expr>();
+    const rewrite = (e: Expr): Expr => {
+      const seen = memo.get(e);
+      if (seen) return seen;
+      const w = wrapper(e);
+      const name = w && hoisted.get((e as Extract<Expr, { readonly plan: Rel }>).plan)?.get(w);
+      const out = name ? col(relId(alias), name) : mapExprChildren(e, rewrite);
+      memo.set(e, out);
+      return out;
+    };
+    return { b: fencedBlock, rewrite };
+  };
+
+  /**
+   * `b` closed into a derived table SQLite will not flatten (`OFFSET 0` — its flattener's rule 14), with
+   * `computed` columns beside the input's, aliased `alias`. The input's own columns pass through by
+   * name; any OTHER column of this block the reader reads (a relation fused below its input, which an
+   * IR expression may name directly) is carried under a minted name, so the reader's expressions
+   * resolve exactly as they did against the open block. An enclosing block's columns resolve inside
+   * the derived table as they did here, so they stay as they are.
+   */
+  const fenced = (reader: Rel, input: Rel, b: Block, outer: Scope, alias: string, computed: readonly (readonly [string, Expression])[]): Block | undefined => {
+    const passed = b.select.map(([name]) => [name, qualified(alias, name)] as const);
+    const scope = new Map<string, Cols>(outer).set(input.id, new Map(passed));
+    const remapped = new Map<string, Map<string, Expression>>();
+    const carried: (readonly [string, Expression])[] = [];
+    for (const key of ownReads(reader).keys()) {
+      const [rel, name] = key.split('\0') as [string, string];
+      const local = b.scope.get(rel);
+      const spelled = local?.get(name);
+      if (!spelled || rel === input.id || outer.get(rel) === local) continue;
+      const as = `${alias}_c${carried.length}`;
+      carried.push([as, spelled]);
+      remapped.set(rel, (remapped.get(rel) ?? new Map<string, Expression>()).set(name, qualified(alias, as)));
+    }
+    for (const [rel, cols] of remapped) scope.set(rel, cols);
+    if (computed.length) scope.set(alias, new Map(computed.map(([name]) => [name, qualified(alias, name)])));
+    const body = renderBlock({ ...b, select: [...b.select, ...carried, ...computed], offset: b.offset ?? raw('0') });
+    return { kind: 'block', select: passed, from: { text: q`(${body})`, alias }, joins: [], distinct: false, windowed: false, scope };
   };
 
   /** A node's own columns, as the block now spells them. */
@@ -406,6 +633,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const { item, cols } = direct && free([direct.item.alias], taken)
       ? direct
       : { item: { text: q`(${renderBuilt(built)})`, alias: r.id }, cols: colsOf(r.id, r) };
+    if (!direct) inherit(built, cols);
     return { from: item, joins: [], cols: r.type.cols.map((column) => cols.get(column.name)!), scope: withRel(outer, r.id, cols) };
   };
   const sideAliases = (s: Side): readonly string[] => [s.from.alias, ...s.joins.map((join) => join.item.alias)];
@@ -445,12 +673,16 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const bound = bindings.get(r.name);
     if (!bound) throw new Error(`RelIR emitter: Ref '${r.name}' has no Plan binding`);
     const alias = aliasOf(r);
-    if (!retained(bound)) return { item: { text: ident(r.name), alias }, cols: colsOf(alias, r) };
+    if (!retained(bound)) {
+      const cols = colsOf(alias, r);
+      for (const name of cteSubqueryCols.get(r.name) ?? []) { const spelled = cols.get(name); if (spelled) subqueryCols.add(spelled); }
+      for (const name of cteJsonCols.get(r.name) ?? r.type.cols.map((column) => column.name)) { const spelled = cols.get(name); if (spelled) jsonText.add(spelled); }
+      return { item: { text: ident(r.name), alias }, cols };
+    }
     const rows: RowsBind = { rowsOf: r.name };
-    return {
-      item: { text: q`json_each(${value(rows)})`, alias },
-      cols: new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${textLiteral(`$[${i}]`)})`])),
-    };
+    const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${textLiteral(`$[${i}]`)})`]));
+    for (const spelled of cols.values()) jsonText.add(spelled);
+    return { item: { text: q`json_each(${value(rows)})`, alias }, cols };
   };
 
   function build(r: Rel, outer: Scope): Built {
@@ -465,15 +697,19 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // aggregate: replacing the latter with constants would erase the aggregate's one-row shape.
         // This deliberately takes Calcite's safe superset instead of recursively proving which input
         // fields an arbitrary Expr reads; see SqlImplementor.java:2223-2241 (`fieldsUsed.isEmpty()`).
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.project(b, r));
-        const select = r.exprs.map(([name, e]) => [name, expr(e, b.scope)] as const);
+        const input = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.project(b, r), r);
+        const hoisted = once(r, input, outer, r.exprs.map(([, e]) => e));
+        const b = hoisted?.b ?? input;
+        const select = r.exprs.map(([name, e]) => [name, computed(hoisted ? hoisted.rewrite(e) : e, b.scope)] as const);
         return { ...b, select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'filter': {
         // Over an aggregate this IS `HAVING` — one of §3's declared collapses, not a second node.
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.filter(b, r));
-        const pred = expr(r.pred, b.scope);
+        const input = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.filter(b, r), r);
+        const hoisted = once(r, input, outer, [r.pred]);
+        const b = hoisted?.b ?? input;
+        const pred = expr(hoisted ? hoisted.rewrite(r.pred) : r.pred, b.scope);
         const placed = grouped(b) ? { having: conjoin(b.having, pred) }
           : { where: conjoin(b.where, pred) };
         return { ...b, ...placed, scope: withRel(b.scope, r.id, outMap(b)) };
@@ -486,18 +722,18 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // (`unanchoredAggregate`), so a fold meant per host collapses the whole host stream into one row.
         // Closing the input as a derived table makes every input column a column of THIS block's FROM,
         // which anchors the aggregate here — the one spelling with the algebra's meaning.
-        let b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.aggregate(b, r));
+        let b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.aggregate(b, r), r);
         if (unanchoredAggregate(r.aggs, b, outer)) {
           b = inputBlock(r.input, outer, () => true);
           if (unanchoredAggregate(r.aggs, b, outer))
             throw new Error(`RelIR emitter: aggregate '${r.id}' reads no column of its own input, so SQL would evaluate it in the enclosing query`);
         }
-        const groupBy = r.groupBy.map((e) => expr(e, b.scope));
+        const groupBy = r.groupBy.map((e) => computed(e, b.scope));
         const keys = r.type.cols.slice(0, groupBy.length).map((column) => column.name);
         const counted = countArgument(b);
         const select = [
           ...keys.map((name, i) => [name, groupBy[i]!] as const),
-          ...r.aggs.map(([name, e]) => [name, expr(counted(e), b.scope)] as const),
+          ...r.aggs.map(([name, e]) => [name, computed(counted(e), b.scope)] as const),
         ];
         return { ...b, select, groupBy, having: r.having ? expr(counted(r.having), b.scope) : undefined, scope: withRel(b.scope, r.id, new Map(select)) };
       }
@@ -510,12 +746,15 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // `g.V().order().by("age").range(1,3).values("name")`: the key spelled THREE times and 30
         // binds, so a second `order()` in one chain would approach the DO cap and fail closed.
         // Naming the column costs one nested SELECT.
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.sort(b, r));
-        return { ...b, orderBy: r.terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
+        const input = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.sort(b, r), r);
+        const hoisted = once(r, input, outer, r.terms.map((term) => term.expr));
+        const b = hoisted?.b ?? input;
+        const terms = hoisted ? r.terms.map((term) => ({ ...term, expr: hoisted.rewrite(term.expr) })) : r.terms;
+        return { ...b, orderBy: terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
       case 'limit': {
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.limit(b, r));
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.limit(b, r), r);
         return {
           ...b,
           limit: r.count ? expr(r.count, b.scope) : undefined,
@@ -525,7 +764,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'distinct': {
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.distinct(b, r));
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.distinct(b, r), r);
         return { ...b, distinct: true, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -537,16 +776,22 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // produces whenever a step MINTS an emission order and a later window ranks by it
         // (`dedup().by(k)` after `order()`, the cumulative-bulk slice). Refusing here is total; the
         // alternative was a `Materialize` fence at each such site, i.e. remembering the rule N times.
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.window(b, r));
-        const select = [...b.select, ...r.specs.map(([name, spec]) => [name, expr(spec, b.scope)] as const)];
+        const input = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.window(b, r), r);
+        const hoisted = once(r, input, outer, r.specs.map(([, spec]) => spec));
+        const b = hoisted?.b ?? input;
+        const select = [...b.select, ...r.specs.map(([name, spec]) => [name, computed(hoisted ? hoisted.rewrite(spec) : spec, b.scope)] as const)];
         return { ...b, select, windowed: true, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'explode': {
         // Exactly the columns `explodeColumns` declares — a member's key, its value, and its ordinal
         // (for a JSON array `json_each.key` IS the index).
-        const memberCol = (name: string): readonly [string, Expression] =>
-          [name, qualified(r.id, name === r.as.value ? 'value' : name === r.as.type ? 'type' : 'key')];
+        const memberCol = (name: string): readonly [string, Expression] => {
+          const spelled = qualified(r.id, name === r.as.value ? 'value' : name === r.as.type ? 'type' : 'key');
+          // A member's `value` is JSON text when it is an array or object.
+          if (name === r.as.value) jsonText.add(spelled);
+          return [name, spelled];
+        };
         // SOURCE-LESS: `json_each(<outer expression>)` is the whole FROM, and the expression resolves
         // in the OUTER scope because there is no input block to resolve it against. That is what makes
         // a per-member computation a CORRELATED subquery — the shape every list member op takes.
@@ -555,14 +800,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           const select = explodeColumns(r.as).map(memberCol);
           return { kind: 'block', select, from: item, joins: [], distinct: false, windowed: false, scope: withRel(outer, r.id, new Map(select)) };
         }
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.explode(b, r));
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.explode(b, r), r);
         const item: FromItem = { text: q`json_each(${expr(r.expr, b.scope)})`, alias: r.id };
         const select = [...b.select, ...explodeColumns(r.as).map(memberCol)];
         return { ...b, joins: [...b.joins, { kind: 'cross', item }], select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'materialize': {
-        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.materialize(b, r));
+        const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.materialize(b, r), r);
         return { ...b, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -596,13 +841,16 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // (`(SELECT 1) UNION ALL (SELECT 2)` → `near "(": syntax error`), and an arm may not carry
       // its own ORDER BY/LIMIT either — those belong to the compound as a whole. So an arm that
       // fills a tail slot, or is itself a set operation, gets a derived table of its own.
-      case 'union': return {
-        kind: 'closed',
-        body: list(
-          r.inputs.map((input) => renderBlock(inputBlock(input, outer, (b) => NEEDS_SUBQUERY.union(b, r)))),
-          r.all ? ' UNION ALL ' : ' UNION ',
-        ),
-      };
+      case 'union': {
+        const arms = r.inputs.map((input) => inputBlock(input, outer, (b) => NEEDS_SUBQUERY.union(b, r)));
+        return {
+          kind: 'closed',
+          body: list(arms.map(renderBlock), r.all ? ' UNION ALL ' : ' UNION '),
+          // Positional, as the compound itself is: an arm's i-th column is the union's i-th.
+          subqueryCols: new Set(r.type.cols.filter((_, i) => arms.some((arm) => subqueryCols.has(arm.select[i]![1]))).map((column) => column.name)),
+          jsonCols: new Set(r.type.cols.filter((_, i) => arms.some((arm) => jsonText.has(arm.select[i]![1]))).map((column) => column.name)),
+        };
+      }
 
       case 'recursive': return { kind: 'closed', body: q`WITH RECURSIVE ${recursiveDefinition(r, outer)} SELECT * FROM ${ident(r.name)}` };
     }
@@ -730,8 +978,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
       // A `fenced` Materialize renders `AS MATERIALIZED` — a barrier SQLite may not flatten. Only the
       // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`).
-      const materialized = binding.node.kind === 'materialize' && binding.node.fenced ? raw('MATERIALIZED ') : empty;
-      ctes.push(q`${ident(binding.name)} AS ${materialized}(${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
+      const fenced = binding.node.kind === 'materialize' && binding.node.fenced === true;
+      const built = build(binding.node, EMPTY_SCOPE);
+      // A fenced CTE is computed once by construction; any other one SQLite may flatten into its reader.
+      if (!fenced) cteSubqueryCols.set(binding.name, new Set(carriesSubquery(built)));
+      cteJsonCols.set(binding.name, new Set(carriesJsonText(built)));
+      ctes.push(q`${ident(binding.name)} AS ${fenced ? raw('MATERIALIZED ') : empty}(${renderBuilt(built)})`);
     }
     if (lastRetained) return { effects };
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.

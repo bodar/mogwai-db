@@ -39,7 +39,8 @@ import {
     meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf,
-    type Minter
+    type Minter,
+  withSubqueryColumns,
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
@@ -988,9 +989,13 @@ export function orderRows(
   // No SQL comparator (a LIST/MAP/PATH key): the ranked-order barrier's two statements answer it, where
   // this step is one they rank; everywhere else it declines as before.
   if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie);
+  // The key's subqueries are read by the productivity filter AND the sort: one column, read by both.
+  const keyed = withSubqueryColumns(rel, [...sort.terms.map((term) => term.expr), ...(sort.drop ? [sort.drop] : [])], fresh);
+  const terms = keyed ? sort.terms.map((term) => ({ ...term, expr: keyed.rewrite(term.expr) })) : sort.terms;
+  const keyedRel = keyed?.rel ?? rel;
   const domain = sort.drop
-    ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop })
-    : rel;
+    ? make.filter({ id: fresh('f'), input: keyedRel, channels: keyedRel.channels, type: keyedRel.type, pred: keyed ? keyed.rewrite(sort.drop) : sort.drop })
+    : keyedRel;
   const carried = encounterOf(domain.channels);
   const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
   // The deterministic tie-break: the carried emission position where there is one (a STABLE re-mint), else
@@ -999,8 +1004,9 @@ export function orderRows(
   const tie: readonly Expr[] = carried ? [col(domain.id, carried.col)] : (opts.tie?.(domain) ?? []);
   return renumber(
     domain,
-    tie.length ? [...sort.terms, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))] : sort.terms,
-    [...payloadCols(domain), ...carriedCols(channels)],
+    tie.length ? [...terms, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))] : terms,
+    // The INPUT's payload: a key column computed for the sort is not the traverser's.
+    [...payloadCols(rel), ...carriedCols(channels)],
     channels, fresh,
   );
 }

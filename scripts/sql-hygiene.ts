@@ -12,7 +12,9 @@ import { UnsupportedTraversal, compile } from '../src/compiler/compiler.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
-import { emit } from '../src/rel/emit.ts';
+import { emit, isRowsBind } from '../src/rel/emit.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { bindsAsParameter, type Expr } from '../src/rel/expr.ts';
 import { forEachExpr, forEachRel, relExprs, stmtChildren, stmtExprs } from '../src/rel/walk.ts';
 import { isStmt } from '../src/rel/stmt.ts';
@@ -40,6 +42,37 @@ const reordered: string[] = [];
 /** Vestigial telemetry: the differential it once fed is gone, so nothing populates it and the summary
  *  line's count is always 0. */
 const diverged: string[] = [];
+/**
+ * COMPUTE ONCE — no statement may evaluate one subquery more than once per row.
+ *
+ * SQL has no `let`: a column read N times off a relation the emitter fused, or SQLite flattened, is its
+ * defining subquery evaluated N times, and the cost compounds through every relation that re-reads it
+ * (measured: a `sum(local)` read 288 times planned 3 656 rows and ran 6.4 s on a 3 000-vertex graph;
+ * computed once, 75 rows and 0.36 s). The emitter computes such a column once (`subqueryCols` in
+ * `src/rel/emit.ts`); this is the independent check, asked of SQLite's own planner.
+ *
+ * `EXPLAIN QUERY PLAN` lists every evaluation SITE of a subquery as a row naming its select id, and an
+ * inlined copy keeps the original's id. So one id twice under ONE parent is one subquery spelled twice
+ * in one SELECT — the defect. The same id under DIFFERENT parents is a UNION ALL the planner pushed an
+ * outer select into, where each row runs one arm; that is not a repeat, and neither is a `REUSE` row.
+ */
+const planner = new GraphStore(new BunSqlite(':memory:'));
+const respelled = (sql: string, binds: readonly unknown[]): number => {
+  let plan: { id: number; parent: number; detail: string }[];
+  try { plan = planner.query(`EXPLAIN QUERY PLAN ${sql}`, binds.map((bind) => (isRowsBind(bind) ? '[]' : bind))); }
+  catch { return 0; }
+  const sites = new Map<string, number>();
+  let repeats = 0;
+  for (const row of plan) {
+    const subquery = String(row.detail).match(/^(?:CORRELATED )?(?:SCALAR|LIST) SUBQUERY (\d+)/);
+    if (!subquery) continue;
+    const site = `${row.parent}:${subquery[1]}`;
+    const seen = (sites.get(site) ?? 0) + 1;
+    sites.set(site, seen);
+    if (seen > 1) repeats++;
+  }
+  return repeats;
+};
 let admitted = 0;
 let statements = 0;
 let pairedReads = 0;
@@ -107,6 +140,8 @@ for (const query of corpus) {
     statements++;
     const violation = cfLimitViolation(step.emitted.sql, step.emitted.binds);
     if (violation) failures.push(`${query} [statement ${index + 1}]: ${violation}`);
+    const repeats = respelled(step.emitted.sql, step.emitted.binds);
+    if (repeats) failures.push(`${query} [statement ${index + 1}]: SQLite evaluates ${repeats} subquery spelling(s) more than once per row — compute the column once`);
     const next = { binds: step.emitted.binds.length, bytes: Buffer.byteLength(step.emitted.sql), compiler: counts.compiler, bound: counts.bound };
     const prior = maxima.get(family) ?? next;
     maxima.set(family, {
@@ -206,4 +241,4 @@ if (ratchetFailures.length) {
   for (const failure of ratchetFailures) console.log(`  RATCHET ${failure}`);
   throw new Error(`sql-hygiene: ${ratchetFailures.length} ratchet violation(s)`);
 }
-console.log('sql-hygiene: 0 DO-wall violations; literal provenance counted before emission');
+console.log('sql-hygiene: 0 DO-wall violations; no subquery evaluated twice per row; literal provenance counted before emission');
