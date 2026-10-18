@@ -71,6 +71,15 @@ lowered.
   - an intermediate overflow that the final total cannot show is not widened (a `sum` whose running total
     leaves the Long range and comes back) — a wrong value.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
+- **Value-transform barriers carry the traverser's channels — then spike exact big-number compares.** A
+  JS value-transform barrier (`split()`, regex, `lowerValueResume`) re-roots the stream as injected values,
+  so a label/path/sack bound before it is not carried across the resume; a read of one declines today.
+  Carrying the live channels through the resume would widen every barrier position. Once it exists, SPIKE
+  (measure complexity and how many positions it runs in before deciding) an exact numeric predicate for a
+  literal/parameter bound a double cannot represent (BigInteger past 2^53, a BigDecimal past ~15 significant
+  digits): a REAL-band SQL prefilter plus an exact JS BigInt compare over the survivors, re-injected through
+  the regex survivors bind. Until then those compare at double precision — an accepted divergence
+  (feature-support-matrix, "Numeric predicate compare"), deferred by the user 2026-10-18.
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
   ([archived](./archive/2026-09-05-fan-out-rejoin-authority-plan.md)). Remaining are PATH-as-a-VALUE
