@@ -96,6 +96,15 @@ describe('a BigInteger past int64 orders by value, never by a saturated cast', (
     ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.gte(-9223372036854775808L)).values('x')", []],
     ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.neq(-9223372036854775808L)).values('x')", ['-9223372036854775809N']],
     ['g.inject(-9223372036854775809n).is(P.lt(-9223372036854775808L))', ['-9223372036854775809N']],
+    // An in-range Long against a bound PAST int64 is ordered by the bound's sign — its REAL would tie ±2^63.
+    ['g.inject(9223372036854775807L).is(P.lt(9223372036854775808n))', ['9223372036854775807L']],
+    ['g.inject(-9223372036854775808L).is(P.gt(-9223372036854775809n))', ['-9223372036854775808L']],
+    ['g.inject(9223372036854775807L).is(P.eq(9223372036854775808n))', []],
+    ['g.inject(9223372036854775000L).is(P.gte(9223372036854775808n))', []],
+    ["g.V(1).property('x', 9223372036854775807L) ;; g.V().has('x', P.gte(9223372036854775808n)).values('x')", []],
+    ["g.V(1).property('x', 9223372036854775807L) ;; g.V().has('x', P.lt(9223372036854775808n)).values('x')", ['9223372036854775807L']],
+    ["g.V(1).property('x', 9223372036854775807L) ;; g.V().has('x', P.eq(9223372036854775808n)).values('x')", []],
+    ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.gt(9223372036854775808n)).values('x')", ['99999999999999999999N']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   // A floating bound at or past ±2^63 against a subject past int64 orders as REAL.
@@ -116,6 +125,12 @@ describe('a BigInteger past int64 equals only a NUMBER spelled with its digits',
     ["g.V(1).property('v', 100000000000000000000.0m) ;; g.V().has('v', P.within(100000000000000000000n, 5)).values('v')", ['1000000000000000000000e-1M']],
     ["g.V(1).property('v', 100000000000000000000.0m) ;; g.V().has('v', P.neq(100000000000000000000n)).values('v')", []],
     ["g.V(1).property('v', 1000000000000000000000m) ;; g.V().has('v', P.eq(100000000000000000000n)).values('v')", []],
+    // A String is never a Number, whatever its digits.
+    ["g.inject('100000000000000000000').is(100000000000000000000n)", []],
+    ["g.inject('1.0').is(1.0m)", []],
+    ["g.inject('5').is(P.within(5n, 5.0m))", []],
+    ["g.inject(1.0m).union(identity(), constant('1.0')).is(1.0m)", ['10e-1M']],
+    ["g.V(1).property('s', '1.0') ;; g.V().has('s', 1.0m).values('s')", []],
   ];
   for (const [q, expected] of sameNumber) test(q, async () => expect(await classes(q)).toEqual(expected));
 });

@@ -210,6 +210,17 @@ function intKey(subject: Expr, edge: boolean): Expr {
     binary('!=', { kind: 'cast', arg: cast, to: 'text' }, subject));
   return { kind: 'case', whens: [[saturated, binary('*', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(2))]], else: cast };
 }
+/** A subject's key against a `wideBound`. Against a BigInteger bound PAST int64, a subject whose INTEGER cast
+ *  round-trips (a native INTEGER, or a TEXT Long/BigInteger inside int64) lies strictly inside the bound, so
+ *  the bound's sign alone orders it: it keys as 0. Its REAL would round a Long within an ulp of the edge onto
+ *  ±2^63 and tie the bound (`inject(Long.MAX_VALUE).is(lt(2^63))` lost its row). Only a subject outside
+ *  int64 — a saturated TEXT BigInteger, a REAL — keys as its REAL. A floating bound keeps REAL throughout. */
+function wideKey(subject: Expr, value: unknown): Expr {
+  const real: Expr = { kind: 'cast', arg: subject, to: 'real' };
+  if (!pastInt64(value)) return real;
+  const inRange = binary('=', { kind: 'cast', arg: { kind: 'cast', arg: subject, to: 'int' }, to: 'text' }, { kind: 'cast', arg: subject, to: 'text' });
+  return { kind: 'case', whens: [[inRange, compilerInt(0)]], else: real };
+}
 function wideBound(value: unknown): Expr | null {
   if (typeof value === 'bigint') return pastInt64(value) ? compilerReal(Number(value)) : null;
   const n = typeof value === 'number' ? value : value instanceof BigDecimal ? Number(String(value)) : NaN;
@@ -221,10 +232,10 @@ function wideBound(value: unknown): Expr | null {
  *  row outside the vocabulary. */
 function byValue(
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, type: Exclude<SubjectType, { kind: 'static' }>,
-  against: Expr, wide: boolean, edge: boolean, otherwise: Expr,
+  against: Expr, value: unknown, wide: boolean, edge: boolean, otherwise: Expr,
   intVtypes: readonly string[] = NUMERIC_CAST_TO_INT, realVtypes: readonly string[] = CAST_TO_REAL,
 ): Expr {
-  const cast = (to: SqlType): Expr => wide || to !== 'int' ? { kind: 'cast', arg: subject, to: wide ? 'real' : to } : intKey(subject, edge);
+  const cast = (to: SqlType): Expr => wide ? wideKey(subject, value) : to !== 'int' ? { kind: 'cast', arg: subject, to } : intKey(subject, edge);
   if (type.kind === 'perRow') {
     const among = (names: readonly string[]): Expr => ({ kind: 'in-list', expr: type.vtype, values: names.map(compilerText) });
     return { kind: 'case', whens: [
@@ -304,7 +315,7 @@ const ordered = (
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
     if (wide && canonical !== null && NUMERIC_VTYPES.includes(canonical))
-      return binary(op, { kind: 'cast', arg: subject, to: 'real' }, wide);
+      return binary(op, wideKey(subject, value), wide);
     // A TEXT-stored exact-tail subject (`inject(9.99m)`, a bound big long/Duration — `type.text`) rides as
     // decimal/total-nanos TEXT, so ordering casts it to its numeric class. The SAME cast is identity on the
     // NATIVE form of the same tag (`count()`→INTEGER, `asNumber(BIGDECIMAL)`→REAL), which is why the flag —
@@ -324,7 +335,7 @@ const ordered = (
       : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
-  if (numericBound) return byValue(op, subject, type, wide ?? castBound, wide !== null, atInt64Edge(value), compilerFalse, intVtypes, realVtypes);
+  if (numericBound) return byValue(op, subject, type, wide ?? castBound, value, wide !== null, atInt64Edge(value), compilerFalse, intVtypes, realVtypes);
   return type.kind === 'perRow'
     ? { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse }
     : { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
@@ -425,6 +436,11 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   }
   const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
   if (temporal || !(typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal)) return raw;
+  // A String never equals a Number, however it is spelled (`inject('1.0').is(1.0m)`).
+  if (type.kind === 'static' && normalizeTypeName(type.type) === 'string') return CONSTANT.false;
+  // A row of no number class — a per-row String, an untagged TEXT (framed as a String by its storage class) —
+  // never equals a Number bound, even where its text spells the bound's.
+  const nonNumber: Expr = type.kind === 'unknown' && type.tag ? raw : compilerFalse;
   // A NUMBER bound compares BY VALUE: the raw `=` already is that answer for a plain number against a natively
   // stored row; a TEXT bound (a BigInteger/BigDecimal literal) is cast to its numeric class and met by the
   // subject keyed by its own (`byValue`), so a decimal-TEXT carrier reads as the number it is. A floating
@@ -433,16 +449,17 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   // A BigInteger past int64: a TEXT-carried NUMBER equals it exactly by its digits — a BigInteger's text IS
   // them, a BigDecimal's (plain decimal, never an exponent) once its zero fraction is trimmed, so
   // `100000000000000000000.0m` meets `100000000000000000000n` (a text with no '.' never trims to the match).
-  // A native INTEGER/REAL row meets it as a REAL. A String spelled with the same digits is TEXT too, so a
-  // typed subject must name a number class for the text arm to hold.
+  // A native INTEGER/REAL row meets it by `wideKey`. A String spelled with the same digits is TEXT too, so a
+  // subject must name a number class for the text arm to hold.
   if (pastInt64(value)) {
     const canonical = type.kind === 'static' ? normalizeTypeName(type.type) : null;
     const trimmed: Expr = { kind: 'call', fn: 'rtrim', args: [subject, compilerText('0')] };
     const digits = binary('or', raw, binary('=', trimmed, compilerText(`${String(value)}.`)));
     const text = type.kind === 'perRow' ? and({ kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) }, digits)
+      : type.kind === 'unknown' && !type.tag ? compilerFalse
       : canonical !== null && !NUMERIC_VTYPES.includes(canonical) ? CONSTANT.false : digits;
     return { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), text]],
-      else: binary('=', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(Number(value))) };
+      else: binary('=', wideKey(subject, value), compilerReal(Number(value))) };
   }
   const tailCast = exactTailCast(value);
   if (!tailCast && !wideAt && type.kind !== 'static') return raw;
@@ -452,7 +469,7 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
     if (canonical === null || !NUMERIC_VTYPES.includes(canonical)) return raw;
     return binary('=', wideAt ? { kind: 'cast', arg: subject, to: 'real' } : staticKey(subject, canonical, type.text, atInt64Edge(value)) ?? subject, against);
   }
-  return byValue('=', subject, type, against, wideAt !== null, atInt64Edge(value), raw);
+  return byValue('=', subject, type, against, value, wideAt !== null, atInt64Edge(value), nonNumber);
 };
 
 /**
