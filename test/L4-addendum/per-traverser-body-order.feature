@@ -86,3 +86,146 @@ Feature: mogwai addendum — a per-traverser body's global order() sorts ONE sta
       | lop |
       | lop |
       | ripple |
+
+  # A step after the flatMap that is no `Barrier` takes `LazyBarrierStrategy`'s `NoOpBarrierStep` after the
+  # flatMap (`g.V()` counts as the first flat-map, LazyBarrierStrategy.java:113-127), which MERGES the equal
+  # names at the first one's place before `is()` sees them — so the start-major run is NOT what reaches the
+  # fold here. `identity()` is removed (IdentityRemovalStrategy) and leaves the flatMap's next step the fold.
+  Scenario: g_V_flatMapXout_valuesXnameX_orderX_isXneqXxXX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.out().values("name").order()).is(P.neq("x")).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[josh,lop,lop,lop,vadas,ripple] |
+
+  Scenario: g_V_flatMapXout_valuesXnameX_orderX_isXneqXxXX_limitX4X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.out().values("name").order()).is(P.neq("x")).limit(4)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+
+  Scenario: g_V_flatMapXout_valuesXnameX_orderX_identity_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.out().values("name").order()).identity().fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[josh,lop,vadas,lop,ripple,lop] |
+
+  # `map(identity())` is spliced away here, but in the reference it is a `TraversalMapStep` no strategy
+  # removes — a non-`Barrier` next step, so the merge lands after the flatMap (`nextReferenceStep`, ir/bulk.ts).
+  Scenario: g_V_flatMapXout_valuesXnameX_orderX_mapXidentityX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.out().values("name").order()).map(__.identity()).fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[josh,lop,lop,lop,vadas,ripple] |
+
+  # …but `EarlyLimitStrategy` moves a `limit` left past that always-bound map, and a `RangeGlobalStep` IS a
+  # `Barrier`, so with a limit nothing merges after the flatMap.
+  Scenario: g_V_flatMapXout_valuesXnameX_orderX_mapXidentityX_limitX4X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().flatMap(__.out().values("name").order()).map(__.identity()).limit(4)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | lop |
+
+  # The merged host with a label: the label rides to the `NoOpBarrierStep` after the flatMap, which the
+  # strategy still places (labels are read AFTER the step's own check, LazyBarrierStrategy.java:116-133).
+  Scenario: g_V_out_flatMapXin_valuesXnameX_orderX_asXyX_selectXyX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().flatMap(__.in().values("name").order()).as("y").select("y").fold()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[marko,marko,marko,marko,marko,josh,josh,josh,josh,peter,peter,peter] |
+
+  # The OTHER per-start hosts. `CoalesceStep` is a `FlatMapStep` and `OptionalStep.processNextStart` drains
+  # its child for one start before the next (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/OptionalStep.java),
+  # so a sorted arm's order is the result stream's own, read at a bare terminal too (`hostSortsBody`,
+  # src/compiler/ir/bulk.ts). Both used to emit the arm's rows in scan order.
+  Scenario: g_V_coalesceXout_valuesXnameX_order_valuesXnameXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().coalesce(__.out().values("name").order(), __.values("name"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | vadas |
+      | lop |
+      | lop |
+      | ripple |
+      | ripple |
+      | lop |
+
+  Scenario: g_V_optionalXout_order_byXnameXX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().order().by("name")).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | vadas |
+      | lop |
+      | lop |
+      | ripple |
+      | ripple |
+      | lop |
+
+  Scenario: g_V_unionXcoalesceXout_valuesXnameX_order_valuesXnameXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.coalesce(__.out().values("name").order(), __.values("name")))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | vadas |
+      | lop |
+      | lop |
+      | ripple |
+      | ripple |
+      | lop |

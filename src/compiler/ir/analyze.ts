@@ -1,7 +1,7 @@
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { isNested, stepChain } from '../../gremlin/frontend.ts';
 import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
-import { bulkGroupCollapseTerminal, bulkObservedFrom, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
+import { bulkGroupCollapseTerminal, bulkObservedFrom, hostSortsBody, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -307,7 +307,12 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
       || terminal.name === 'group' || terminal.name === 'groupCount'
       || (REDUCERS.has(terminal.name) && (terminal.args?.length ?? 0) === 0)))
     return false;
-  if (steps.some((s) => PATH_STEPS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name))) return false;
+  //     …EXCEPT a host whose body SORTS (`hostSortsBody`, `ir/bulk.ts` — a per-start `coalesce`/`optional`/
+  //     `local`/`flatMap` emits `(start, body order)`, a batching arm drains sorted): the client reads an
+  //     order the reference states outright there, not one the corpus leaves unordered —
+  //     `g.V().coalesce(out().values('name').order(), values('name'))` is `[josh, lop, vadas, vadas, …]`.
+  if (steps.some((s) => PATH_STEPS.has(s.name))) return false;
+  if (steps.some((s) => BRANCH_MERGE_STEPS.has(s.name)) && !steps.some((s) => hostSortsBody(s))) return false;
   // A trailing `order()` (the loop's `ordered`, not cleared by a later fan-out) has ALREADY pinned the
   // emission order as an `ORDER BY` in the SQL, so no encounter is owed — and forcing one changes how a
   // reader of that ordered stream behaves (a `has(k, __…order())` child took a different value, an L3

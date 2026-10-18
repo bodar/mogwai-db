@@ -12,9 +12,8 @@ import { exprMayRaise, mayRaise } from '../../rel/raise.ts';
 import { isRel, type Rel } from '../../rel/rel.ts';
 import { freeRelIds, rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, BATCHING_BRANCHES, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { eachChildChain, rawBodies } from '../ir/walk.ts';
-import { beginsWithSource, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
+import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
+import { beginsWithSource, hostSortsBody, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
@@ -271,32 +270,10 @@ export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): b
   // — `choose(p, values('name').order().by(desc), …)` emits `[vadas, peter, marko, josh]`, and a merge
   // left positionless emitted the names in start order. The client reads that order as surely as a
   // `fold()` would, so the merge owes it wherever nothing order-free consumes the branch (above).
-  if (position && armSorts(position.steps[position.at])) return true;
+  // One authority answers it at every depth — a per-start host (`local`/`flatMap`/`coalesce`/`optional`)
+  // inside the arm emits `(start, body order)`, which the arm drains just as whole (`hostSortsBody`).
+  if (position && hostSortsBody(position.steps[position.at])) return true;
   return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
-};
-
-/** Does a `union`/`choose` body SORT ITS OWN STREAM — a global `order()` among one ARM's own steps, or a
- *  nested `union`/`choose` there whose own arm sorts (the inner branch drains its sorted arm whole, and the
- *  outer one — arm-major too, `hasBarrier` being RECURSIVE — drains that inner stream whole)? The arms are
- *  every child chain of the step and, for an option-map `choose`, the `option()` BODIES, one level below
- *  the folded `optionArms` cluster — `Pick.none`/`Pick.unproductive` among them, which `getGlobalChildren`
- *  drains FIRST (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:108-114`).
- *  Reading only the cluster chain saw `option` steps, never their `order()`, so a sorted `Pick.none` arm
- *  was emitted positionless. One nested in a per-traverser host (`local(out().order())`) sorts one start's
- *  output, not the arm's. An unreadable body answers yes: owing an order costs a numbering, never an answer. */
-const armSorts = (step: IRStep | undefined): boolean => {
-  if (!step || !BATCHING_BRANCHES.has(step.name)) return false;
-  const read = rawBodies({});
-  let sorts = false;
-  const unreadable = (): void => { sorts = true; };
-  const arm = (body: readonly IRStep[]): void => {
-    if (body.some((s) => (s.name === 'order' && !isLocalScope(s)) || armSorts(s))) sorts = true;
-  };
-  eachChildChain(step, read, (chain) => {
-    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
-    else arm(chain as IRStep[]);
-  }, unreadable);
-  return sorts;
 };
 
 /** Does a positional SLICE read the order this branch emits — one after it in its own list, or (unless the

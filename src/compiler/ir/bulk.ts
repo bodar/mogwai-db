@@ -1,6 +1,6 @@
 import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
-import { rawBodies, someStepDeep } from './walk.ts';
+import { eachChildChain, rawBodies, someStepDeep } from './walk.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
 //
@@ -362,9 +362,17 @@ export const beginsWithSource = (steps: readonly IRStep[]): boolean => knownStar
  *  removed (`IdentityRemovalStrategy`) — so neither separates two steps the reference sees as adjacent. */
 const NOT_A_REFERENCE_STEP: ReadonlySet<string> = new Set(['as', 'identity', 'by', 'with']);
 
-/** The step the reference runs right after `steps[i]`, skipping IR-only steps. */
+/** The step the reference runs right after `steps[i]`, skipping IR-only steps. A step SPLICED out of a
+ *  per-traverser host (`inlineIdentityHostBody` — `map(identity())`, `local(identity())`) still stands for
+ *  that host, a `TraversalMapStep`/`LocalStep` that no strategy removes (`IdentityRemovalStrategy` drops
+ *  only an `IdentityStep`), so it is the next step there whatever its name — and no `Barrier`
+ *  (`isReferenceBarrier`): `g.V().flatMap(out().values('name').order()).map(identity()).fold()` gets
+ *  `LazyBarrierStrategy`'s merge after the `flatMap` (`…/strategy/optimization/LazyBarrierStrategy.java:116-127`). */
 function nextReferenceStep(steps: readonly IRStep[], i: number): IRStep | undefined {
-  for (let j = i + 1; j < steps.length; j++) if (!NOT_A_REFERENCE_STEP.has(steps[j]!.name)) return steps[j];
+  for (let j = i + 1; j < steps.length; j++) {
+    const s = steps[j]!;
+    if (!NOT_A_REFERENCE_STEP.has(s.name) || s.perTraverser) return s;
+  }
   return undefined;
 }
 
@@ -911,4 +919,48 @@ const BULK_NONLINEAR: ReadonlySet<string> = new Set([
  *  ones (`BULK_NONLINEAR`, global scope)? Unreadable answers `true`. */
 export function bulkNonlinear(body: readonly IRStep[]): boolean {
   return someStepDeep(body, {}, (s) => BULK_NONLINEAR.has(s.name) && !isLocalScope(s as IRStep), true);
+}
+
+/** The hosts that EMIT their body's own traversers rather than one value per start — the per-start ones
+ *  (`FlatMapStep` and the `CoalesceStep` that is one, `OptionalStep`) and the batching `BranchStep`s
+ *  (`union`/`choose`). A `map()` body hands back ONE value per start, so an order inside it picks a value
+ *  (that step's own question) and never orders the stream.
+ *
+ *  `local()` is the one emitting host left OUT, and deliberately: `LocalStep` forwards its child's OWN
+ *  traversers, merged slots and all (`…/step/branch/LocalStep.java:60-67`), so where its order is read the
+ *  exact scan cannot place that merge (`bodiesMayBulk`) and the whole traversal declines —
+ *  `g.V().local(out().order().by('name')).fold()` declines on trunk. Owing an order through it would turn
+ *  every sorted `local()` arm into that decline, `g_V_chooseXvaluesXageX_isXlteX30XX_localXout_order_byXnameX_limitX1XX_…`
+ *  among them, which the corpus answers by count. The bare `local()` at a ROOT keeps its exact per-start
+ *  order on its own (`originMajor`, `rel/lower/reduction.ts`); the one inside a batching arm stays the
+ *  open residue `docs/outstanding-work.md` names. */
+const EMITTING_HOSTS: ReadonlySet<string> = new Set(['flatMap', 'coalesce', 'optional', 'union', 'choose']);
+
+/**
+ * THE ONE AUTHORITY FOR "THIS HOST'S OUTPUT CARRIES A SORTED ORDER": does an emitting host's body (an arm,
+ * at any depth through further emitting hosts) hold a global `order()`? A host that runs its child once per
+ * start emits in `(start, body order)` order — `FlatMapStep`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`,
+ * which `CoalesceStep` is), `OptionalStep.processNextStart`
+ * (`…/step/branch/OptionalStep.java`) — and a batching `BranchStep` drains a sorted arm whole
+ * (`…/step/branch/BranchStep.java:85-88,123-153`). Either way the CLIENT reads an order the reference
+ * states, even at a bare terminal, so a merge emitted positionless there answers a different question.
+ * Every consumer — the terminal emission seed (`ir/analyze.ts`) and a branch merge's owed order
+ * (`branchOrderOwed`, `rel/lower.ts`) — asks this, not a copy of it. A folded `option()` cluster is read
+ * one level down, to its option BODIES. An unreadable body answers yes: owing an order costs a numbering,
+ * never an answer.
+ */
+export function hostSortsBody(step: IRStep | undefined): boolean {
+  if (!step || !EMITTING_HOSTS.has(step.name)) return false;
+  const read = rawBodies({});
+  let sorts = false;
+  const unreadable = (): void => { sorts = true; };
+  const arm = (body: readonly IRStep[]): void => {
+    if (body.some((s) => (s.name === 'order' && !isLocalScope(s)) || hostSortsBody(s))) sorts = true;
+  };
+  eachChildChain(step, read, (chain) => {
+    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
+    else arm(chain as IRStep[]);
+  }, unreadable);
+  return sorts;
 }

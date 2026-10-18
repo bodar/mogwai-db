@@ -346,10 +346,18 @@ interface PoolMerge { readonly guard: Expr | true; readonly firstArrival: boolea
  *  - a key holds one traverser where no input element repeats and no row stands for several.
  * The guard reads the PRE-cut pool and defers where none of these holds. A label in the body joins a
  * traverser's equality (`B_LP_O_S_SE_SL_Traverser.equals`), which a value test cannot see, so it declines.
+ *
+ * `counted`: the cut is read by a `count()` and nothing between them — then the merge moves no answer
+ * WITHIN one traverser's set. `RangeGlobalStep.filter` trims a merged slot's BULK
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:73-120`),
+ * so the units it keeps number `clamp(total - low, 0, high - low)` however equal traversers were merged
+ * or ordered, and `CountGlobalStep` sums exactly those units. Only a key fed by SEVERAL traversers still
+ * defers: `RangeBiOperator` combines their sets by DISTINCT size, which the arrival pool does not state.
+ * (A `sum()`/`min()`/`max()` reads WHICH units survive, so it keeps the whole guard.)
  */
 function poolMergeGuard(
   pre: readonly IRStep[], input: Rel, host: Extract<ChildHost, { kind: 'element' }>, child: ChildSeam, fresh: Minter,
-  post: ChildRows,
+  post: ChildRows, counted = false,
 ): PoolMerge | null {
   const cut = pre.findIndex((bodyStep) => isReferenceBarrier(bodyStep));
   if (cut < 0 || mergeInvariantPoolCut(pre[cut]!) || !(SLICE_STEPS.has(pre[cut]!.name) || pre[cut]!.name === 'tail')) return { guard: true, firstArrival: false };
@@ -413,10 +421,9 @@ function poolMergeGuard(
     id: fresh('pgp'), input: members, channels: [], type: members.type,
     pred: { kind: 'binary', op: '>', left: col(members.id, 'n'), right: compilerInt(1) },
   });
-  const merges: Expr = {
-    kind: 'binary', op: 'or',
-    left: { kind: 'exists', negated: false, plan: scattered },
-    right: { kind: 'exists', negated: false, plan: repeated },
+  const several: Expr = { kind: 'exists', negated: false, plan: repeated };
+  const merges: Expr = counted && cut === pre.length - 1 ? several : {
+    kind: 'binary', op: 'or', left: { kind: 'exists', negated: false, plan: scattered }, right: several,
   };
   return {
     guard: { kind: 'case', whens: [[merges, deferralExpr(POOL_MERGE_DEFERRAL, { kind: 'call', fn: 'random', args: [] })]], else: compilerInt(1) },
@@ -1069,7 +1076,7 @@ function groupReduced(
     ? make.filter({ id: fresh('rf'), input: keyed, channels: [], type: keyed.type, pred: drop })
     : keyed;
   // An order-free reducer reads the pool as a multiset, so only the guard applies (`firstArrival` is moot).
-  const merge = poolMergeGuard(pre, input, host, child, fresh, rows);
+  const merge = poolMergeGuard(pre, input, host, child, fresh, rows, counting);
   if (!merge) return null;
   const rowsIn = merge.guard === true ? unguarded : make.filter({ id: fresh('rg'), input: unguarded, channels: [], type: unguarded.type, pred: merge.guard });
   // A REDUCER reads the pooled VALUES with no bulk weighting — the child rows are the pool, one

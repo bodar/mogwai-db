@@ -120,6 +120,12 @@ lowered.
   (5) a merge over a BRANCH's emission order is no longer refused: the branch emission key (cluster B,
   `BranchKeys`/`mintBranchOrder`, `lower.ts`) presents the reference's order wherever a reader owes it, and
   declines only where the branch input's own order is unknown under a slice (`positioned`).
+  (5b) **a sorted `local()` inside a batching arm, at a bare terminal** — `hostSortsBody` (`ir/bulk.ts`, the
+  one "this host emits a sorted order" authority) leaves `local` out, because owing that order declines
+  wherever `LocalStep` forwards merged slots the exact scan cannot place (`bodiesMayBulk`;
+  `g.V().local(out().order().by('name')).fold()` declines). So `g.V().union(local(out().values('name').order()))`
+  still emits positionless (whatever order the plan happens to produce; ref `[josh, lop, vadas, lop, ripple, lop]`). Placing the forwarded
+  merge (an `order()` already reproduces its own, `orderRows`) would let `local` join the set.
   (6) ✅ **LANDED 2026-10-17 (`03eefba2`..`e56e9352`)** for dedup/dedup(local)/set ops/label- and by()-keyed
   dedup/group keys (one authority, `typedEquality`/`classedKey`, build.ts); re-probe the remainder below.
   **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map
