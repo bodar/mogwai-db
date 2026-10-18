@@ -721,12 +721,6 @@ export type Framed = { buf: Buffer; bulk: bigint };
  *  framer uses, so a collection value nests its parsed tree and a scalar rides raw. */
 const foreignLeaf = (v: any, vtype: string | null): ValueNode => valueNodeFromStored(v, vtype);
 
-/** A scalar row's BigDecimal REAL carrier, which crosses a scalar frame as the one-member JSON array of its
- *  raw spelling (`scalarFramedValue`), back to the raw JSON REAL a `{t,v}` node holds — so a node re-entering
- *  SQL (a barrier, a federated stream) carries the number, never the bracketed text. */
-const decimalCarrier = (v: any, tag: string | null | undefined): any =>
-  tag === 'bigdecimal' && typeof v === 'string' && v.startsWith('[') ? (parseExactJson(v) as any[])[0] : v;
-
 /** One element row's public payload as a `{t,v}` element FrameNode — the SAME `{id,label,props}` tuple
  *  `rowVertex`/`rowEdge` consume, so a landed element re-frames byte-identically. A vertex's `label` is
  *  the JSON labels array; an edge carries `src`/`tgt`. */
@@ -768,13 +762,13 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
       const t = shape.type;
       if (t.kind === 'perRow') {
         const colName = perRowColumn(t, 'foreignValueNodes');
-        return rows.map((r) => foreignLeaf(decimalCarrier(r.v, r[colName]), r[colName] ?? null));
+        return rows.map((r) => foreignLeaf(r.v, r[colName] ?? null));
       }
-      return rows.map((r) => ({ t: staticTypeOf(t) ?? null, v: decimalCarrier(r.v, staticTypeOf(t)) }));
+      return rows.map((r) => ({ t: staticTypeOf(t) ?? null, v: r.v }));
     }
     // A numeric reducer stream that was NOT flagged 'reduce' (e.g. a local-scope reducer terminal): each
     // row's `vt` is a Gremlin vtype or a storage class, exactly as the scalar framer resolves.
-    case 'scalar': return rows.map((r) => ({ t: (r.vt ?? null) as ValueNode['t'], v: decimalCarrier(r.v, r.vt) }));
+    case 'scalar': return rows.map((r) => ({ t: (r.vt ?? null) as ValueNode['t'], v: r.v }));
     // A list/set VALUE per row (`values(k).fold()`, `cap('a')`, intersect/…): the members convert per the
     // item descriptor.
     case 'jsonbList': return rows.map((r) => ({ t: 'list', v: foreignListNodes(r.list, shape.items) }));
@@ -1165,9 +1159,8 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
   // millis) from the number it is stored as (`BarrierInput.injectedType`).
   if (head.shape.kind === 'value') {
     const tagCol = perRowColumnOf(head.shape.type);
-    const staticTag = staticTypeOf(head.shape.type);
-    return rows.map((r) => (tagCol ? { injectedValue: decimalCarrier(r.v, r[tagCol]), injectedType: r[tagCol] ?? null }
-      : { injectedValue: decimalCarrier(r.v, staticTag) }));
+    return rows.map((r) => (tagCol ? { injectedValue: r.v, injectedType: r[tagCol] ?? null }
+      : { injectedValue: r.v }));
   }
   if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list), injectedText: r.list }));
   // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same

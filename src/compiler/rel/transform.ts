@@ -4,8 +4,7 @@ import { constLit } from './const.ts';
 import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
 import { JAVA_WHITESPACE } from './text-units.ts';
 import { SAFE_INT } from './reducer.ts';
-import type { Minter } from './build.ts';
-import { doubleDecimalText, FLOAT_MAX } from './float.ts';
+import { FLOAT_MAX } from './float.ts';
 import { dateAddDeltaMs, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -131,21 +130,8 @@ const DOUBLE_MAX = Number.MAX_VALUE;
 export const asNumberType = (spec: NumericSpec): ScalarType =>
   STATIC(spec.as, spec.as === 'long' || spec.as === 'bigint' || spec.as === 'bigdecimal');
 
-/** What a run-time BigDecimal widening needs beyond the value: whether its CLASS is floating — a Double or
- *  a Float by its tag (statically, or per row), which a whole Double STORED as an INTEGER is and its storage
- *  class alone would not say — and the minter its carrier (`doubleDecimalText`) is built with. */
-export type DecimalSource = { readonly fresh: Minter; readonly floating: boolean | Expr };
-
-/** A static or per-row class tag naming a Double or a Float. */
-export const floatingTag = (tag: Expr): Expr => ({ kind: 'in-list', expr: tag, values: [held('double'), held('float')] });
-
-const requiredDecimal = (decimal: DecimalSource | undefined): DecimalSource => {
-  if (!decimal) throw new Error('asNumber(GType.BIGDECIMAL) at run time needs its source class for its decimal carrier');
-  return decimal;
-};
-
-export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false, decimal?: DecimalSource): Expr {
-  const { value, refuse } = asNumberParts(v, spec, integersGuarded, nativeNumber, decimal);
+export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false): Expr {
+  const { value, refuse } = asNumberParts(v, spec, integersGuarded, nativeNumber);
   return refuse ? { kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: value } : value;
 }
 
@@ -157,25 +143,15 @@ export const asNumberFilter = (v: Expr, refuse: Expr): Expr =>
   ({ kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: compilerInt(1) });
 
 /** The two halves of `asNumberCast`: the converted `value`, and the `refuse` condition (or null). */
-export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false, decimal?: DecimalSource): { readonly value: Expr; readonly refuse: Expr | null } {
+export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false): { readonly value: Expr; readonly refuse: Expr | null } {
   const notInteger = bin('!=', call('typeof', v), held('integer'));
   const abs = call('abs', { kind: 'cast', arg: v, to: 'real' });
   // A Float target is the value as a REAL, unrounded: a run-time Float is a Double (the shortest-float32
   // carrier, `floatCanonical`, is compile-time only — `docs/feature-support-matrix.md`), framed as float32.
-  // A BigDecimal target lands on the reference's SCALE (`NumberHelper.java:850-859`): a floating source — by
-  // its class tag, or a REAL — is `BigDecimal.valueOf(Double.toString(d))`, its decimal-TEXT carrier
-  // (`doubleDecimalText` — a bare REAL frames `100.0` as scale 0); an integral source is
-  // `BigDecimal.valueOf(long)`, scale 0, which the INTEGER itself already frames; a text carrier is one.
-  const cast: Expr = spec.as === 'bigdecimal'
-    ? ((): Expr => {
-      const { fresh, floating } = requiredDecimal(decimal);
-      const carrier = doubleDecimalText(v, fresh);
-      if (floating === true) return carrier;
-      const isReal = bin('=', call('typeof', v), held('real'));
-      const when = floating === false ? isReal : bin('or', floating, isReal);
-      return { kind: 'case', whens: [[when, carrier]], else: v };
-    })()
-    : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' };
+  // A BigDecimal target is the value itself: a text carrier is one already, an INTEGER is
+  // `BigDecimal.valueOf(long)`, and a REAL is widened by the JS framer (`bigDecimalOfCarrier`, the shortest
+  // JS spelling — a whole Double frames at scale 0, a deliberate divergence from `Double.toString`'s scale).
+  const cast: Expr = spec.as === 'bigdecimal' ? v : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' };
   const notANumber = bin('and',
     { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: call('typeof', v), values: [held('integer'), held('real'), held('null')] } },
     bin('is not', { kind: 'cast', arg: { kind: 'cast', arg: v, to: 'int' }, to: 'text' }, v));
@@ -354,7 +330,7 @@ export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
  * lowering entirely and never reaches here.
  */
 export function transformExpr(
-  step: IRStep, v: Expr, literal: boolean, fresh: Minter, incoming?: ScalarType, evidence?: ValueEvidence,
+  step: IRStep, v: Expr, literal: boolean, incoming?: ScalarType, evidence?: ValueEvidence,
 ): Transformed | null {
   const args = step.args.map((a) => a.value);
 
@@ -416,15 +392,11 @@ export function transformExpr(
     // target is fenced where the cast and the reference disagree (`asNumberCast`).
     const known = staticTypeOf(incoming);
     const native = !!known && NUMBER_FAMILY.has(known) && !staticIsText(incoming);
-    const floating = evidence?.kind === 'static' ? evidence.tag === 'double' || evidence.tag === 'float'
-      : known !== undefined ? known === 'double' || known === 'float'
-      : evidence?.kind === 'tag' ? floatingTag(evidence.tag) : false;
-    const decimal: DecimalSource = { fresh, floating };
-    const { value, refuse } = asNumberParts(v, spec, false, native, decimal);
+    const { value, refuse } = asNumberParts(v, spec, false, native);
     // A wide `long`/`bigint` result is decimal TEXT (`asNumberParts`), so its class is TEXT-carried.
     const type = asNumberType(spec);
     return refuse
-      ? { expr: asNumberCast(v, spec, false, native, decimal), type, fenced: { value, filter: asNumberFilter(v, refuse) } }
+      ? { expr: asNumberCast(v, spec, false, native), type, fenced: { value, filter: asNumberFilter(v, refuse) } }
       : { expr: value, type };
   }
 

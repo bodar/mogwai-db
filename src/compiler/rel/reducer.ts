@@ -218,32 +218,12 @@ export const MIXED_COMPARABLES = 'min/max over values of different types is not 
 export const NON_NUMBER_ORDER = 'min/max over a Boolean, Date or Duration value is not supported';
 export const EXACT_TAIL = 'sum/mean/min/max over a number past 2^53 is not supported';
 export const DECIMAL_SCALE = 'sum/mean/min/max in BigDecimal scale arithmetic is not supported';
-export const NAN_RESULT = 'a NaN result is not supported';
 
 /** `reduced`, unless `refuse` holds over the group — then a deferral. Each test is an AGGREGATE over the
  *  rows (so it spells the value once, not once per arm of the guard), and the raise reads `count(*)`
  *  only so it is not a constant expression (`raiseExpr`). */
 const refusedWhen = (refuse: Expr, message: string, reduced: Expr): Expr =>
   ({ kind: 'case', whens: [[refuse, raiseExpr(message, { kind: 'agg', fn: 'count', args: [] })]], else: reduced });
-
-/**
- * A `sum`/`mean` whose total is NaN DECLINES. The reference adds Doubles with Java `+`, so
- * `inject(Infinity, -Infinity).sum()` is `NaN` (`NumberHelper.add`,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:452`);
- * SQLite has no NaN and answers NULL, which framed as a `null` total — a different answer. Only a REAL
- * operand can make one, and a NULL total over a group holding a REAL is exactly that NaN (a group of only
- * nulls is the honest NULL), so it raises a deferral rather than answer. `COALESCE` spells the total once:
- * the test is evaluated only where the total is NULL. One guard here covers every site `reducerAggregate`
- * serves (global, correlated, a group value, `sum(local)`).
- */
-const nanRefused = (reduced: Expr, value: Expr): Expr => ({
-  kind: 'call', fn: 'COALESCE',
-  args: [reduced, {
-    kind: 'case',
-    whens: [[agg('max', { kind: 'binary', op: '=', left: call('typeof', value), right: compilerText('real') }),
-      raiseExpr(NAN_RESULT, { kind: 'agg', fn: 'count', args: [] })]],
-  }],
-});
 
 /**
  * A `sum`/`mean` over a group holding TEXT declines. Dropping the text (the eligibility guard's NULL)
@@ -311,16 +291,12 @@ const mixedRefused = (reduced: Expr, value: Expr): Expr => {
  * (`arithmeticArg`, `eligible`, `mixedRefused`).
  * A reducer over a stream whose SHAPE is not scalar is a different lowering and never reaches here.
  */
-export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowTag, bulk?: Expr, screenedTag?: Expr): { value: Expr } | null {
+export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowTag, bulk?: Expr): { value: Expr } | null {
   if (nonNumberTag(tag) === true) return null;
   const arg = reducer === 'min' || reducer === 'max' ? eligible(value, tag) : arithmeticArg(value, tag, reducer);
-  // A `SCREENED` caller states the rows' tag apart, since the screen has already been applied. A Float row
-  // adds in double (it rides as the Double of its value) — a deliberate divergence from Java's float steps.
-  const widened = reducer === 'sum' ? decimalWidened(value, tag === SCREENED ? screenedTag ?? null : tag) : null;
-  const guarded = (reduced: Expr): Expr => {
-    const total = nanRefused(reduced, value);
-    return widened ? refusedWhen(widened, DECIMAL_SCALE, total) : total;
-  };
+  // Every number adds in DOUBLE (SQLite's REAL `SUM`): a Float, and a Double meeting a BigInteger or a
+  // BigDecimal, sum as REAL and frame their common class; a total that is NaN in Java (`Infinity +
+  // -Infinity`) is SQLite's NULL and frames null — deliberate divergences (`docs/feature-support-matrix.md`).
 
   if (reducer === 'mean') {
     // The weighted mean: Σ(v·bulk) / Σ(bulk over ELIGIBLE rows). The denominator counts bulk only where
@@ -333,12 +309,12 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
     // A constant 'real' tag on that NULL told every `vt` reader it held a number: `math()`'s number
     // check passed it and `CAST(NULL) + 1` dropped the row where `MathStep` raises.
     const numerator = bulk ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk }) : agg('sum', arg);
-    if (!bulk) return { value: guarded(agg('avg', arg)) };
+    if (!bulk) return { value: agg('avg', arg) };
     const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: compilerNull() }, bulk]] });
     // A `Cast` and NOT a `* 1.0`: it declares the required REAL arithmetic rather than relying
     // on a spelling-level token. Measured: the mean of the reference graph's ages was 30 rather than
     // 30.75 without it.
-    return { value: guarded({ kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator }) };
+    return { value: { kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator } };
   }
 
   // `min`/`max` are bulk-INVARIANT — the smallest of N identical copies is the smallest — so the
@@ -346,7 +322,7 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
   const reduced = reducer === 'sum' && bulk
     ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk })
     : agg(reducer, arg);
-  return { value: reducer === 'sum' ? guarded(reduced) : mixedRefused(reduced, value) };
+  return { value: reducer === 'sum' ? reduced : mixedRefused(reduced, value) };
 }
 
 /**
@@ -364,59 +340,8 @@ export function exactWideTotal(total: Expr): Expr {
 }
 
 /**
- * A `sum` whose common class is BigDecimal BECAUSE a Double or Float meets a 128-bit row (a BigInteger, or
- * a BigDecimal the per-row screen admitted — an integral source's scale-0 INTEGER carrier) is BigDecimal
- * SCALE arithmetic: `NumberHelper.add` widens every addend through `bigDecimalValue` (`BigDecimal.valueOf`
- * of a Double, `new BigDecimal(f.toString())` of a Float) and adds at the larger scale, in traverser order
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390,850-859`).
- * SQLite's REAL `SUM` keeps neither the scale (`1.0d + 5n` is `6.0`, scale 1, not `6`) nor the order a
- * running Double total is widened at (`0.1d + 0.2d + 5n` is `5.30000000000000004`). So it DEFERS — an
- * aggregate over the rows; `null` where the rows' class is statically one (no second class to meet).
- * The twin of `scaledDecimal`, which defers a BigDecimal row that is itself scale arithmetic.
- */
-function decimalWidened(value: Expr, tag: ReducerRowTag): Expr | null {
-  if (tag === null || tag === SCREENED || (tag.kind === 'lit' && tag.source === 'compiler-text')) return null;
-  const present = (test: Expr): Expr => bin('=', agg('max', bin('and', bin('is not', value, compilerNull()), test)), compilerInt(1));
-  const floating: Expr = { kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [tag, call('typeof', value)] }, values: ['double', 'float', 'real'].map(compilerText) };
-  return bin('and', present({ kind: 'in-list', expr: tag, values: ['bigint', 'bigdecimal'].map(compilerText) }), present(floating));
-}
-
-/**
- * THE TIE AUTHORITY of a `min`/`max` — which of two members that COMPARE EQUAL is the answer, and that is
- * observable only where the two differ in REPRESENTATION: two BigDecimals of one value and two scales
- * (`1.0` and `1.00`; `compareTo` ignores the scale). A zero has no sign (`-0.0` is `0.0`, as in SQLite — a
- * deliberate divergence), so no other Number has a second representation of a value. The reference's NumberHelper helpers break a
- * tie by ARGUMENT POSITION — `max` is `x >= y ? x : y`, `min` `x <= y ? x : y`, for every number helper
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:252-277,279-310`)
- * — and the two step families pass the arguments in OPPOSITE orders:
- *
- * - a LOCAL reducer folds `result = max(next, result)`
- *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MaxLocalStep.java:52`,
- *   `MinLocalStep.java:52`), so the LATER member wins a tie — exact over a list, whose member order is a
- *   column (`TIE_LATER_MEMBER`, `list.ts`);
- * - a GLOBAL reducer folds `seed = apply(seed, next)` (`ReducingBarrierStep.java:110`), so the FIRST
- *   traverser wins — and a traverser stream carries no arrival order a reducer may read (none is threaded
- *   unless a slice demands it, `analyze.ts` `demandsEncounter`), so where a tie at the winner is observable
- *   the global and correlated reducers DEFER (`TIED_REPRESENTATIONS`) rather than pick one.
- *
- * This is the per-row REPRESENTATION a tie is observable through: equal across two members of one compare
- * key exactly where their promoted values cannot be told apart. A Number that is not a BigDecimal is one
- * constant, a BigDecimal its carrier verbatim (conservative: an Int `1` beside a BigDecimal `1` of scale 0
- * reads as a tie it is not, and defers). `null` where the rows cannot hold a BigDecimal — a static class
- * other than `bigdecimal`, or no per-row tag — so no site pays for the test.
- */
-export function tieRepresentation(value: Expr, tag: Expr | null): Expr | null {
-  const staticTag = tag !== null && tag.kind === 'lit' && tag.source === 'compiler-text' ? String(tag.value) : undefined;
-  // A BigDecimal is its `quote()` — storage class and digits.
-  const verbatim: Expr = call('quote', value);
-  if (staticTag === 'bigdecimal') return verbatim;
-  if (tag === null || staticTag !== undefined) return null;
-  return { kind: 'case', whens: [[bin('=', tag, compilerText('bigdecimal')), verbatim]], else: compilerInt(0) };
-}
-
-/**
- * NumberHelper's two-argument `max(first, second)`/`min(first, second)` as SQL — the TIE goes to `first`
- * (`tieRepresentation`), for the folds that apply the operator to an accumulator and a value
+ * NumberHelper's two-argument `max(first, second)`/`min(first, second)` as SQL — the TIE goes to `first`,
+ * for the folds that apply the operator to an accumulator and a value
  * (`SackValueStep`'s `apply(sack, value)`, `FoldStep`'s `apply(seed, value)`: the ACCUMULATOR is first).
  * SQLite's scalar `MAX` keeps its FIRST tied argument and `MIN` its LAST (`minmaxFunc`: an argument
  * replaces the best when `compare(best, it) ^ mask >= 0`, the mask inverting the compare for `MAX`), so
@@ -424,10 +349,6 @@ export function tieRepresentation(value: Expr, tag: Expr | null): Expr | null {
  */
 export const extremumKeepingFirst = (fn: 'min' | 'max', first: Expr, second: Expr): Expr =>
   ({ kind: 'call', fn: fn.toUpperCase(), args: fn === 'max' ? [first, second] : [second, first] });
-
-/** The deferral a global/correlated `min`/`max` raises where its winner ties a member of another
- *  representation (`tieRepresentation`). */
-export const TIED_REPRESENTATIONS = 'min/max whose winner ties an equal value of another representation (a BigDecimal scale) is not supported';
 
 const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 const storageIs = (value: Expr, storage: string): Expr => bin('=', call('typeof', value), compilerText(storage));

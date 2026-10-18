@@ -1,7 +1,5 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
-import type { RelId } from '../../../rel/types.ts';
-import { raiseExpr } from '../../../rel/raise.ts';
 import { and, carriedCols, elementCols, firstRootedValue, presenceFenced, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -25,7 +23,7 @@ import { recordNode } from '../record.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { REL_PROJECTORS, projectorValue } from '../projector.ts';
 import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
-import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, isReducer, numberFloating, numberWidth, REDUCED_TYPE, TIED_REPRESENTATIONS, tieRepresentation } from '../reducer.ts';
+import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { LIST_COL, correlatedListMembers, firstScalarMember } from '../list.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -38,8 +36,7 @@ import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, typ
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
-import { comparableClass, continueAs, dropPath, lowerChain, MIN_MAX_COMPARE_TERMS, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
-import { promotedExtremum } from '../float.ts';
+import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { BRANCH_HOSTS } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
@@ -1012,69 +1009,15 @@ export function correlatedReduce(
       // case rather than emit SQL that fails only in execution — fail closed, the class `capability.test.ts`
       // guards.
       if (valueColIsSubquery(values.rel, 'v')) return null;
-      // A winner tied with a value of another representation refuses rather than pick by an arrival order
-      // the rows do not carry (`reducer.ts` `tieRepresentation`). Over the compare order, the FIRST peer group
-      // is the rows of `rank()` 1, and the default window frame at any of them is exactly that group — so a
-      // rank-1 row whose group holds two representations (its least and greatest differ) is the observable
-      // tie. The test is a property of the GROUP, so it holds on whichever peer the pick lands on: a raising
-      // projection over a sorted slice is evaluated on the picked row alone (`NEEDS_SUBQUERY.project`,
-      // `src/rel/block.ts`). The representation is spelled over the relation that reads it.
-      const reprOn = (id: RelId): Expr | null => {
-        const tag = streamRowTag(values.rel, values.framing);
-        return tieRepresentation(col(id, 'v'), tag && tag.kind === 'col' ? col(id, tag.name) : tag);
-      };
-      const pickOf = (rel: Rel): Rel => {
-        const ordered = make.sort({ id: fresh('ms'), input: rel, channels: rel.channels, type: rel.type, terms: minMaxOrder(rel, values.framing, last.name === 'min') });
-        return make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
-      };
-      const tieTerm = reprOn(values.rel.id);
-      const peers = { partitionBy: [], orderBy: minMaxOrder(values.rel, values.framing, last.name === 'min').slice(0, MIN_MAX_COMPARE_TERMS) };
-      // The winner promoted to the stream's common class IS its widening (`float.ts` `promotedExtremum`). The
-      // class pair rides the SAME pick as two whole-stream windows, so the promotion re-reads no relation; a
-      // stream statically of one class never promotes.
-      const statically = values.framing.kind === 'scalar' && staticTypeOf(values.framing.type) !== undefined;
-      const whole = { partitionBy: [], orderBy: [] };
-      const rowTag = streamRowTag(values.rel, values.framing);
-      const classSpecs = statically ? [] : [
-        [CLASS_WIDTH_COL, { kind: 'window-expr', fn: 'max', args: [numberWidth(col(values.rel.id, 'v'), rowTag)], spec: whole }],
-        [CLASS_FLOATING_COL, { kind: 'window-expr', fn: 'max', args: [numberFloating(col(values.rel.id, 'v'), rowTag)], spec: whole }],
-      ] as const;
-      const rows = !tieTerm && !classSpecs.length ? values.rel : make.window({
-        id: fresh('mw'), input: values.rel, channels: values.rel.channels,
-        type: typeOf(...values.rel.type.cols, ...(tieTerm ? [meta('trk', 'int'), meta('tlo', 'any', true), meta('thi', 'any', true)] : []),
-          ...classSpecs.map(([name]) => meta(name, 'int', true))),
-        specs: [
-          ...(tieTerm ? [
-            ['trk', { kind: 'window-expr', fn: 'rank', args: [], spec: peers }],
-            ['tlo', { kind: 'window-expr', fn: 'min', args: [tieTerm], spec: peers }],
-            ['thi', { kind: 'window-expr', fn: 'max', args: [tieTerm], spec: peers }],
-          ] as const : []),
-          ...classSpecs,
-        ],
-      });
-      const winner = pickOf(rows);
+      // The winner keeps its OWN class (`lower.ts`'s global min/max — a deliberate divergence from
+      // NumberHelper's promotion).
+      const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
+      const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
       // A stream that may mix comparability classes refuses rather than let SQLite's class order pick.
       const cls = comparableClass(values.rel, values.framing);
-      const tied: Expr = { kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '=', left: col(winner.id, 'trk'), right: compilerInt(1) },
-        right: { kind: 'binary', op: 'is not', left: col(winner.id, 'tlo'), right: col(winner.id, 'thi') } };
-      // THE RESULT'S CLASS — the stream's highest common number class over EVERY row (`NumberHelper.max`
-      // promotes both sides, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:639-655`),
-      // else (no Number at all — a String's `max`) the winner's own; read off the pick's class windows. The
-      // result's own magnitude never widens a min/max (it is one of the rows), so `0` stands in for it.
-      const ownVt = minMaxWinnerVt(winner, values.framing);
-      const resultVt = statically ? ownVt
-        : commonNumberClass(col(winner.id, CLASS_WIDTH_COL), col(winner.id, CLASS_FLOATING_COL), compilerInt(0), ownVt);
-      // A FLOATING winner's result is BigDecimal exactly where the widest width is 128 (`resultIsDecimal`).
-      const value = statically ? col(winner.id, 'v')
-        : promotedExtremum(col(winner.id, 'v'), ownVt, { kind: 'binary', op: '=', left: col(winner.id, CLASS_WIDTH_COL), right: compilerInt(128) }, fresh);
-      const untied: Expr = tieTerm
-        ? { kind: 'case', whens: [[tied, raiseExpr(TIED_REPRESENTATIONS, col(winner.id, 'v'))]], else: value }
-        : value;
-      const picked = cls ? mixedClassesRefused(untied, values.rel, cls, fresh) : untied;
+      const picked = cls ? mixedClassesRefused(col(winner.id, 'v'), values.rel, cls, fresh) : col(winner.id, 'v');
       const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', picked]] });
-      // The CLASS reads the same pick.
-      const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', resultVt]] });
+      const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
       return {
         expr: { kind: 'scalar', plan: vExpr },
         // The result's class rides per row in `vt` (`REDUCED_TYPE`), so a predicate, a fold member and a
@@ -2034,7 +1977,7 @@ export function valueRun(
     const evidence = evidenceOf(type, vtype);
     const offences = transformOffences(step, value, evidence, present === 'unknown' ? undefined : present === 'always');
     if (!offences) return null;
-    const transformed = transformExpr(step, value, false, fresh, step.name === 'asNumber' ? type : undefined, evidence);
+    const transformed = transformExpr(step, value, false, step.name === 'asNumber' ? type : undefined, evidence);
     if (!transformed) return null;
     // A RAISING transform (a runtime `asNumber(GType.X)`, a receiver offence) raises when its VALUE is
     // evaluated — so a host that asks only WHETHER the run produced (`where`/`not`/`choose`) must read

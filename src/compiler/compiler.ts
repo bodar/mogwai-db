@@ -94,8 +94,7 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   // (`ambiguousEntryBind`) decline here, once, at every depth — both are path-entry facts no single
   // lowering position owns.
   if (erasedPathEntry(steps, params) !== null || ambiguousEntryBind(steps, params)) throw new UnsupportedTraversal(gremlin);
-  // A literal VALUE no carrier keeps — a NaN (SQLite stores it as NULL) or a negative-scale BigDecimal
-  // (plain decimal text cannot spell its scale) — declines here, once, at every depth (`uncarriedLiteral`).
+  // A NaN literal VALUE (SQLite stores it as NULL) declines here, once, at every depth (`uncarriedLiteral`).
   if (uncarriedLiteral(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /

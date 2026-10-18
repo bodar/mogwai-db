@@ -492,8 +492,8 @@ export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value')
  *  and SQLite's own `real` (what `typeof` reports for a computed reducer) are here. */
 const FLOATING_VTYPES: readonly string[] = ['float', 'double', 'real'];
 /** `FLOATING_VTYPES` plus `bigdecimal` — every tag whose value MAY be a binary64 REAL. A BigDecimal rides as
- *  decimal TEXT, an INTEGER (scale 0), or the REAL whose `BigDecimal.valueOf` it IS (a whole Double widened at
- *  or past 10^7, `doubleDecimalText` in `rel/float.ts`; read by `bigDecimalOfCarrier`, `src/gremlin/float.ts`).
+ *  decimal TEXT, an INTEGER (scale 0), or the REAL whose `BigDecimal.valueOf` it IS (a Double widened by
+ *  `asNumber(GType.BIGDECIMAL)` or a sum's class meet; read by `bigDecimalOfCarrier`, `src/gremlin/float.ts`).
  *  That REAL crosses SQLite's 15-digit JSON writer like any Double — `json_array(1.0000000000000002E20)` is
  *  `[1.0e+20]`, which reads back as `1.0E20`, another BigDecimal — so it takes `asExactReal` too, which
  *  re-spells a REAL only and leaves the TEXT and INTEGER carriers as they are. */
@@ -594,26 +594,6 @@ export const jsonMember = (value: Expr, vtype: Expr): Expr => {
  * `jsonMember` path is where a wide integer rides as TEXT). Everything else passes through.
  */
 export const jsonMemberByTypeof = (value: Expr): Expr => asExactReal(value);
-
-/**
- * A SCALAR result COLUMN as the framer reads it, where the row may be a BigDecimal (`decimal`: the test that
- * it is one, `null` where it never is). A BigDecimal's REAL carrier is `BigDecimal.valueOf(double)`
- * (`gremlin/float.ts` `bigDecimalOfCarrier`: `1.0E7` is (10, −6), `100.0` scale 1), and a scalar row would
- * hand it to the framer as the same bare JS number an integral source's scale-0 INTEGER is. So it crosses
- * HERE, the last SQL position, as the one-member JSON array of its exact spelling (`[10000000.0]`) — through
- * `asExactReal`, the entry a list member takes, so the scalar and the member cannot disagree (an always-17-digit
- * spelling did: `math('_*1.1e300')` of 27, i.e. `2.97E301`, framed 2.9699999999999996E301 at the top level while
- * its member kept `2.97E301`, because SQLite's `printf` 17th digit is not correctly rounded that far out)
- * — which the carrier authority reads as `valueOf`; never as decimal TEXT, which it would read as
- * `new BigDecimal(text)`. Every other row is the column itself.
- */
-export const scalarFramedValue = (value: Expr, decimal: Expr | null): Expr => decimal === null ? value : {
-  kind: 'case',
-  whens: [[{ kind: 'binary', op: 'and',
-    left: { kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') }, right: decimal },
-  { kind: 'call', fn: 'json_array', args: [asExactReal(value, false)] }]],
-  else: value,
-};
 
 /**
  * A SCALAR's binary64 repair alone, for a JSON entry whose other members stay as they were (a history

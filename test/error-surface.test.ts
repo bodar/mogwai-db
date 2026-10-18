@@ -86,9 +86,14 @@ describe('NaN is never answered as null', () => {
   ])('a NaN value declines: %s', async (q) => {
     expect(await failure(q)).toBeInstanceOf(UnsupportedTraversal);
   });
+  // A sum/mean whose Java total is NaN is SQLite's NULL total, framed null — a deliberate divergence.
   test.each([
-    'g.inject(Infinity,-Infinity).sum()', 'g.inject([Infinity,-Infinity]).sum(local)',
-    'g.inject(Infinity,-Infinity).mean()', "g.inject(Infinity).math('_ - _')",
+    'g.inject(Infinity,-Infinity).sum()', 'g.inject([Infinity,-Infinity]).sum(local)', 'g.inject(Infinity,-Infinity).mean()',
+  ])('a NaN sum/mean total answers null: %s', async (q) => {
+    expect(await run(q)).toEqual(['null']);
+  });
+  test.each([
+    "g.inject(Infinity).math('_ - _')",
     "g.inject(-1d).math('sqrt(_)')", 'g.withSack(Infinity).inject(1).sack(sum).by(constant(-Infinity)).sack()',
   ])('a NaN result raises a deferral rather than answer null or drop the row: %s', async (q) => {
     expect(await failure(q)).toBeInstanceOf(RaisedByQuery);
@@ -259,9 +264,12 @@ describe("a per-row bare asNumber() answers the value's own class", () => {
   test.each([
     ["g.V(1).values('s').asNumber(GType.BIGDECIMAL)", "g.V(1).property('s',Infinity)"],
     ["g.V(1).values('s').asNumber(GType.BIGDECIMAL)", "g.V(1).property('s',-Infinity)"],
-    ['g.inject(1n, Infinity).sum()', 'g.V(1)'],
   ])('%s over a non-finite value raises a deferral', async (q, setup) => {
     expect(await failure(q, [setup])).toBeInstanceOf(RaisedByQuery);
+  });
+  // A BigDecimal total that is an infinity is no BigDecimal: a clear decline at the framer.
+  test('g.inject(1n, Infinity).sum() declines', async () => {
+    expect(await failure('g.inject(1n, Infinity).sum()')).toBeInstanceOf(UnsupportedTraversal);
   });
 });
 

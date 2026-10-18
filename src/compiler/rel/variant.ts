@@ -1,9 +1,9 @@
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { isPerRow, meetScalarTypes, MERGED_VTYPE, perRowColumnOf, PER_ROW, staticTypeOf, UNKNOWN, withMemberType, type ListOf, type ScalarType, type Shape, type VariantShapeArm } from '../../sql/kernel/render.ts';
-import { byEncounter, carriedCols, mergedVtypeOf, meta, scalarFramedValue, typeOf, type Minter } from './build.ts';
+import { isPerRow, meetScalarTypes, MERGED_VTYPE, perRowColumnOf, PER_ROW, UNKNOWN, withMemberType, type ListOf, type ScalarType, type Shape, type VariantShapeArm } from '../../sql/kernel/render.ts';
+import { byEncounter, carriedCols, mergedVtypeOf, meta, typeOf, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { correlatedElementColumns } from './element.ts';
 import type { RelFraming } from './framing.ts';
@@ -190,7 +190,7 @@ export function variantArm(rel: Rel, arm: VariantArm, vocabulary: readonly Varia
  * `arms` is the DECLARED vocabulary (`variantVocabulary`), one arm per tag.
  */
 export function variantPayload(
-  rel: Rel, arms: readonly VariantArm[], source: GraphSource, fresh: Minter, realDecimals = false,
+  rel: Rel, arms: readonly VariantArm[], source: GraphSource, fresh: Minter,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
   const ordered = byEncounter(rel, fresh);
   const elems = new Set(arms.flatMap((arm) => (arm.kind === 'elements' ? [arm.elem] : [])));
@@ -203,17 +203,10 @@ export function variantPayload(
   const scalarType: ScalarType = arms.find((arm): arm is Extract<VariantArm, { kind: 'scalar' }> => arm.kind === 'scalar')?.type
     ?? { kind: 'unknown' };
   const perRow = scalarType.kind === 'perRow';
-  const uniform = staticTypeOf(scalarType);
-  // A BigDecimal scalar row frames off its carrier, as every scalar result does (`scalarFramedValue`,
-  // gated as `scalarPayload` gates it): by the static tag, else by the row's own per-row one.
-  const decimal: Expr | null = !realDecimals ? null
-    : uniform === 'bigdecimal' ? eqTag(ordered, 1)
-      : perRow ? { kind: 'binary', op: 'and', left: eqTag(ordered, 1), right: { kind: 'binary', op: '=', left: col(ordered.id, MERGED_VTYPE), right: compilerText('bigdecimal') } }
-        : null;
 
   const payload: (readonly [ColMeta, Expr])[] = [
     [meta(VK, 'int'), col(ordered.id, VK)],
-    [meta('v', 'any', true), scalarFramedValue(col(ordered.id, 'v'), decimal)],
+    [meta('v', 'any', true), col(ordered.id, 'v')],
     ...(perRow ? [[meta(MERGED_VTYPE, 'text', true), col(ordered.id, MERGED_VTYPE)] as const] : []),
   ];
   // The element triple is a CASE over the tag rather than a per-kind column, because the framer reads

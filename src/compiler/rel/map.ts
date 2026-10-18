@@ -977,7 +977,7 @@ function groupReduced(
   // carries one: a group whose every row is a zero seed must answer 0, not NULL.
   const reduced = counting
     ? { value: coalesce({ kind: 'agg' as const, fn: 'sum' as const, args: [col(rowsIn.id, VAL_COL)] }, compilerInt(0)), type: compilerText('long') }
-    : reducerAggregate(col(rowsIn.id, VAL_COL), reducer, SCREENED, undefined, rowTag ? col(rowsIn.id, TAG_COL) : undefined);
+    : reducerAggregate(col(rowsIn.id, VAL_COL), reducer, SCREENED);
   if (!reduced) return null;
   const keyedBy = groupKeyed(rowsIn, elementKey ? meta(KEY_COL, 'int', true) : undefined, []);
   const productive = make.aggregate({

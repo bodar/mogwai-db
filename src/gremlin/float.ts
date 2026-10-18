@@ -1,5 +1,5 @@
 import { BigDecimal, type TypeNode } from './types.ts';
-import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from '../json-exact.ts';
+import { exactNumberOf, isExactNumber, type ExactNumber } from '../json-exact.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
@@ -120,32 +120,28 @@ export function floatingDecimal(d: number): BigDecimal | null {
  * three carriers, and each one fixes the scale on its own (`NumberHelper.bigDecimalValue`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:850-859`):
  *
- * - **decimal TEXT** (a JS string — a literal, a stored value, a floating widening of positive scale): the
- *   text IS `new BigDecimal(text)`, scale and all.
+ * - **decimal TEXT** (a JS string — a literal, a stored value, a compile-time floating widening of positive
+ *   scale): the text IS `new BigDecimal(text)`, scale and all.
  * - **INTEGER** (a whole JS number, or an integral JSON spelling inside a list): an integral source's
  *   `BigDecimal.valueOf(long)`, scale 0.
- * - **REAL** (a whole Double the widening could not spell as plain text, `doubleDecimalText` — at or past
- *   10^7; inside a list, SQLite's JSON spells it with a point or exponent, `parseExactJson` keeps it raw):
- *   `BigDecimal.valueOf(double)`, i.e. `Double.toString`'s spelling, so `1.0E7` is (10, −6) and `1.0E21`
- *   (10, −20).
+ * - **REAL** (a Double widened at run time — `asNumber(GType.BIGDECIMAL)`, a sum's class meet; inside a list,
+ *   SQLite's JSON spells it with a point or exponent, `parseExactJson` keeps it raw): `BigDecimal.valueOf(double)`
+ *   from the shortest JS spelling.
  *
- * A bare whole JS number below 10^21 is read as the INTEGER carrier. A scalar framer, where SQLite hands a
- * REAL back as that same JS number, receives a REAL BigDecimal as the one-member JSON array of its raw
- * spelling instead (`[10000000.0]`, `scalarFramedValue`), so the two cannot be confused there.
+ * A bare whole JS number below 10^21 is read as the INTEGER carrier, so a whole REAL that SQLite hands a
+ * scalar framer frames at scale 0 (`1.0E7` and `100.0` as `10000000` and `100`) — a deliberate
+ * divergence from `Double.toString`'s scale (`docs/feature-support-matrix.md`).
  */
 export function bigDecimalOfCarrier(v: BigDecimal | string | bigint | number | ExactNumber): BigDecimal {
   if (v instanceof BigDecimal) return v;
   if (typeof v === 'bigint') return new BigDecimal(v, 0);
-  // A REAL handed to a SCALAR framer crosses as the one-member JSON array of its raw spelling (`[1.0E7]`,
-  // `scalarPayload`), since a bare REAL there is the same JS number an INTEGER is; decimal TEXT never opens
-  // with a bracket.
-  if (typeof v === 'string' && v.startsWith('[')) return bigDecimalOfCarrier((parseExactJson(v) as [number | ExactNumber])[0]);
   if (typeof v === 'string') return BigDecimal.fromText(v);
   if (isExactNumber(v)) {
     const { integral, text } = exactNumberOf(v);
     return integral ? new BigDecimal(BigInt(text), 0) : realDecimal(Number(text));
   }
-  return Number.isInteger(v) && Math.abs(v) < 1e21 ? new BigDecimal(BigInt(v), 0) : realDecimal(v);
+  // A whole number past 2^53 is a Double (an exact wide integer rides as decimal TEXT): its shortest digits.
+  return Number.isSafeInteger(v) ? new BigDecimal(BigInt(v), 0) : realDecimal(v);
 }
 
 const realDecimal = (d: number): BigDecimal => {

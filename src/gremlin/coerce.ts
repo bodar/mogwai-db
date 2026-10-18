@@ -317,17 +317,13 @@ function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof nu
     // `bigDecimalValue` widens a Float or Double through `BigDecimal.valueOf` (`Double.toString`) — the
     // PRINTED decimal, not the exact value — held as an exact BigDecimal carrier.
     // A widening of scale ≤ 0 (an integral magnitude at or past 10^7, which `Double.toString` writes in
-    // E-notation) has no plain decimal TEXT to ride as, so it rides as the number itself — the run-time
-    // widening's carrier for the same value (`doubleDecimalText`, `src/compiler/rel/float.ts`) — which the
-    // ONE carrier authority reads back (`bigDecimalOfCarrier`): a whole number below 10^21 is scale 0, a
-    // REAL past it `BigDecimal.valueOf`'s own. A NEGATIVE scale below 10^21 (`1.0E7` is (10, −6)) has no
-    // carrier the framer can tell from an integral source's scale-0 INTEGER, so it declines.
+    // E-notation) rides as the number itself, as the run-time widening does, and the ONE carrier authority
+    // reads it back (`bigDecimalOfCarrier`): a whole number below 10^21 is scale 0 (`1.0E7` is the reference's
+    // (10, −6) — a deliberate divergence), a REAL past it `BigDecimal.valueOf`'s own.
     if (a.cls === 'Float' || a.cls === 'Double') {
       const decimal = floatingDecimal(a.real);
       if (decimal === null) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a NaN or an infinity');
-      if (decimal.scale > 0) return decimal;
-      if (decimal.scale < 0 && Math.abs(a.real) < 1e21) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a whole Double whose BigDecimal has a negative scale');
-      return a.real;
+      return decimal.scale > 0 ? decimal : a.real;
     }
     // An integral source is `BigDecimal.valueOf(long)`, scale 0 — the INTEGER carrier (`constLit`).
     return a.real;

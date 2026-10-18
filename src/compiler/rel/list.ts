@@ -13,7 +13,6 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
-import { promotedExtremum, resultIsDecimal } from './float.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
@@ -429,7 +428,7 @@ export function listMemberOp(
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the
     // constant-folding arms could evaluate, so the folded transforms (`asBool`, bare `asNumber`)
     // decline here exactly as they do over a column. The member's own type is the receiver evidence.
-    const tx = transformExpr(step, memberPayload(of, members), false, fresh, undefined, memberEvidence(of, members));
+    const tx = transformExpr(step, memberPayload(of, members), false, undefined, memberEvidence(of, members));
     if (!tx) return null;
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as
@@ -769,11 +768,8 @@ export function listRetype(
         id: fresh('mw'),
         input: make.sort({
           id: fresh('mo'), input: present, channels: [], type: present.type,
-          // THE TIE goes to the LATER member, in both directions: `MaxLocalStep`/`MinLocalStep` fold
-          // `result = max(next, result)` and every NumberHelper `max`/`min` keeps its FIRST argument on a
-          // tie (`reducer.ts` `tieRepresentation`), so of two members that compare equal — a BigDecimal
-          // `1.0` and `1.00` — the one iterated last is the answer. The member's list
-          // position is a column, so this is exact (and total).
+          // A total tie-break on the member's list position keeps the survivor deterministic: the
+          // LATER member, as `MaxLocalStep`/`MinLocalStep`'s `result = max(next, result)` keeps it.
           terms: [
             { expr: { kind: 'binary', op: 'is', left: memberPayload(of, present), right: compilerNull() }, dir: 'asc' },
             { expr: key, dir }, memberOrder(present, 'desc'),
@@ -813,28 +809,13 @@ export function listRetype(
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
       // fenced, for the same plan).
-      // The winner's CLASS is the members' highest common number class (`NumberHelper.max` promotes,
-      // `reducer.ts` `commonNumberClass`), read in one more correlated pass as the `[width, floating]`
-      // pair; a statically-typed list is already of one class.
-      const tag = memberType?.kind === 'static' ? null : memberOwnTag(of, present);
-      const info = tag && scalar(numberClassPair(payload, tag, 'number'), 'cw', 'any');
-      const held = fenced(withPayload(host, [['w', picked], ...(info ? [info] : [])],
-        [meta('w', 'any', true), ...(info ? [meta('cw', 'any', true)] : [])], fresh), fresh);
-      const winnerV = jsonField(col(held.id, 'w'), 'v');
-      const winnerT = jsonField(col(held.id, 'w'), 't');
-      // The winner promoted to the members' common class IS its widening (`float.ts` `promotedExtremum`),
-      // over the class and the winner's own class each NAMED ONCE (fenced), so neither the widening nor the
-      // framer re-inlines them.
-      const resultCols = [meta('v', 'any', true), meta('vt', 'text', true)];
-      const classed = info && fenced(withPayload(held,
-        [['v', winnerV], ['vt', pairedNumberClass(col(held.id, 'cw'), winnerV, winnerT)], ['own', coalesce(winnerT, inferredVtype(winnerV))]],
-        [...resultCols, meta('own', 'text', true)], fresh), fresh);
+      // The winner keeps its OWN class (`lower.ts`'s global min/max — a deliberate divergence from
+      // NumberHelper's promotion).
+      const held = fenced(withPayload(host, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
       return {
-        rel: classed
-          ? fenced(withPayload(classed,
-            [['v', promotedExtremum(col(classed.id, 'v'), col(classed.id, 'own'), resultIsDecimal(col(classed.id, 'vt')), fresh)], ['vt', col(classed.id, 'vt')]],
-            resultCols, fresh), fresh)
-          : withPayload(held, [['v', winnerV], ['vt', winnerT]], resultCols, fresh),
+        rel: withPayload(held,
+          [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
+          [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
         // A known `long`/`bigint` member class is the winner's, stated as the row-level arm states it
         // (`wideClassOf`, `lower.ts`) so a later predicate casts the decimal TEXT before ordering.
         // Otherwise the winner's own member tag rides PER ROW in `vt` (`subjectType`, `lower.ts`).

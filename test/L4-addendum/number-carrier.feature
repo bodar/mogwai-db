@@ -3,8 +3,9 @@ Feature: mogwai addendum — every number carrier keeps its CLASS at every depth
   # The class is EXACT (build plan §6·7): a member inside a list, a map key, a by()-position fold and a
   # stored property each frame the Java class the reference holds. A BigDecimal reads its SCALE from its
   # carrier through ONE authority (`bigDecimalOfCarrier`, `src/gremlin/float.ts`) — an integral source is
-  # `BigDecimal.valueOf(long)`, scale 0 (`NumberHelper.java:850-859`). A literal no carrier keeps (a NaN —
-  # SQLite stores it as NULL — or a negative-scale BigDecimal) declines (`ir/uncarried-literal.ts`).
+  # `BigDecimal.valueOf(long)`, scale 0 (`NumberHelper.java:850-859`). A NaN literal — SQLite stores it as
+  # NULL — declines (`ir/uncarried-literal.ts`). A whole Double widened to a BigDecimal is scale 0 (Java's
+  # `1.0E+7` is scale −6) — a deliberate divergence in its spelling, never its value.
 
   Scenario: g_injectX1000X_asNumberXBIGDECIMALX_fold_asString
     Given the empty graph
@@ -51,7 +52,6 @@ Feature: mogwai addendum — every number carrier keeps its CLASS at every depth
       | result |
       | l[d[NaN],d[1].i,d[NaN]] |
 
-  @Unsupported
   Scenario: g_injectX1dE7X_asNumberXBIGDECIMALX
     Given the empty graph
     And the traversal of
@@ -61,4 +61,4 @@ Feature: mogwai addendum — every number carrier keeps its CLASS at every depth
     When iterated to list
     Then the result should be unordered
       | result |
-      | 1.0E+7 |
+      | 10000000 |

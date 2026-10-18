@@ -1,11 +1,10 @@
 import { collectionMembers, isNested, isPred, type Step } from '../../gremlin/frontend.ts';
-import { BigDecimal } from '../../gremlin/types.ts';
 import { eachChainDeep, rawBodies, valueNodes } from './walk.ts';
 
 // ---------- uncarried-literal: a literal VALUE the substrate has no carrier for ----------
 //
 // Every value a traverser holds must keep its CLASS at every depth, or the traversal declines (build plan
-// §6·7). Two literals have no carrier at all, so no depth can keep them:
+// §6·7). One literal has no carrier at all, so no depth can keep it:
 //
 // - **NaN.** SQLite has no NaN — it stores one as NULL however it arrives — so a NaN traverser is a null
 //   traverser to every later step: `inject(NaN, 1, NaN).fold()` framed `[null, null, 1]` where the reference
@@ -13,11 +12,9 @@ import { eachChainDeep, rawBodies, valueNodes } from './walk.ts';
 //   `constant(NaN)` framed null. A NaN is a `Double` (`Double.equals(NaN, NaN)` is true —
 //   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`),
 //   never a null.
-// - **A BigDecimal of NEGATIVE scale** (`1e7m` is `new BigDecimal("1e7")`, unscaled 1, scale −7). Its
-//   carrier is PLAIN decimal text (`BigDecimal.toString`, `src/gremlin/types.ts`), which cannot spell a
-//   negative scale, so it would frame as scale 0 — a different `BigDecimal` on the wire and to
-//   `asString()`. (A negative-scale widening a traversal COMPUTES rides as the REAL `BigDecimal.valueOf` carrier,
-//   which every position reads at its scale — `doubleDecimalText`, `scalarFramedValue`; a LITERAL has no such carrier.)
+//
+// (A BigDecimal of NEGATIVE scale — `1e7m` — rides as its plain decimal text and frames at scale 0: the same
+// value, a deliberate divergence in its scale, `docs/feature-support-matrix.md`.)
 //
 // Only a VALUE position declines. A predicate OPERAND (`is(P.lt(NaN))`, `has('k', NaN)`, a `P` anywhere)
 // is not a traverser — the predicate lowering reads it as the literal it is (`predicate.ts`). And a NaN
@@ -32,14 +29,8 @@ import { eachChainDeep, rawBodies, valueNodes } from './walk.ts';
 /** A step whose bare-value arguments are predicate OPERANDS (`is(v)` is `is(P.eq(v))`, `has(k, v)`). */
 const OPERAND_STEPS: ReadonlySet<string> = new Set(['is', 'has', 'hasValue', 'hasId', 'hasKey', 'hasLabel', 'hasNot', 'where']);
 
-/** Does this argument value hold a literal with no carrier — a NaN, or a negative-scale BigDecimal? */
-const holdsUncarried = (value: unknown): boolean => {
-  for (const node of valueNodes(value)) {
-    if (typeof node === 'number' && Number.isNaN(node)) return true;
-    if (node instanceof BigDecimal && node.scale < 0) return true;
-  }
-  return false;
-};
+/** Does this argument value hold a NaN literal? */
+const holdsNaN = (value: unknown): boolean => [...valueNodes(value)].some((node) => typeof node === 'number' && Number.isNaN(node));
 
 /**
  * A predicate's VERDICT over a NaN subject and over a NULL one — `undefined` where it is not decided here.
@@ -97,11 +88,9 @@ export function uncarriedLiteral(steps: readonly Step[], params: Record<string, 
     chain.forEach((s, i) => {
       if (found || OPERAND_STEPS.has(s.name)) return;
       const values = s.args.map((a) => a.value).filter((v) => !isPred(v));
-      if (!values.some(holdsUncarried)) return;
-      // A NaN the next step drops as it drops a NULL is never observed; a negative-scale BigDecimal is
-      // observed by any consumer that frames or prints it, so it has no such exemption.
-      const nanOnly = !values.some((v) => [...valueNodes(v)].some((n) => n instanceof BigDecimal && n.scale < 0));
-      if (nanOnly && (s.name === 'inject' || s.name === 'constant') && dropsNaNAsNull(chain[i + 1], s, params)) return;
+      if (!values.some(holdsNaN)) return;
+      // A NaN the next step drops as it drops a NULL is never observed.
+      if ((s.name === 'inject' || s.name === 'constant') && dropsNaNAsNull(chain[i + 1], s, params)) return;
       found = s;
     });
   });
