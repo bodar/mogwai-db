@@ -166,7 +166,22 @@ describe('path entries: a map/flatMap identity host is kept where the path is re
 
   test('a nested host under a root simplePath() is filtered', async () => {
     expect(await framed("g.V(1).union(map(identity())).simplePath().count()")).toEqual([0]);
+    expect(await framed("g.V(1).optional(out().map(identity())).simplePath().count()")).toEqual([0]);
   });
+
+  // A kept host BEHIND A MOVEMENT in an optional/coalesce arm: the arm's exhaustion probe runs the body
+  // over a path-free subject, so the flatMap there has no entering path to recover (it was an internal
+  // `RelIR: … no declared column 'path'`, and so was a non-identity `flatMap(out())` on trunk).
+  const paths = async (q: string) => (await framed(q)).map((p: any) => p.objects.map((v: any) => v.id));
+  test.each([
+    ["g.V(1).optional(out().map(identity())).path()", [[1, 2, 2], [1, 4, 4], [1, 3, 3]]],
+    ["g.V(1).optional(out().flatMap(identity())).path()", [[1, 2, 2], [1, 4, 4], [1, 3, 3]]],
+    ["g.V(2).optional(out().map(identity())).path()", [[2]]],
+    ["g.V(1).coalesce(out().map(identity()),identity()).path()", [[1, 2, 2], [1, 4, 4], [1, 3, 3]]],
+    ["g.V(1).optional(out().flatMap(identity()).out()).path()", [[1, 4, 4, 3], [1, 4, 4, 5]]],
+    ["g.V(1).optional(out().flatMap(out())).path()", [[1, 4, 3], [1, 4, 5]]],
+  ])('an arm host behind a movement under a path read: %s', async (q, expected) =>
+    expect(bagOf(await paths(q))).toEqual(bagOf(expected)));
 
   test.each([
     "g.V(1).repeat(map(identity())).times(1).path()",

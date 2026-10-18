@@ -281,8 +281,9 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | d[28].d |
       | d[33].d |
 
-  # A where()/keyed dedup() scope key naming a FIELD reads the field; the alias readers read the path
-  # label, so these decline (they compared the as() vertices, answering 0 and 3).
+  # A where()/keyed dedup() scope key naming a FIELD reads the field. The alias readers read the path
+  # label, so the where() declines (it compared the as() vertices, answering 0); the keyed dedup() reads
+  # the field itself (it answered 3 over the vertices).
   @Unsupported
   Scenario: g_V_asXaX_out_asXbX_projectXa_bX_byXconstantX1XX_byXconstantX1XX_whereXa_eqXbXX_count
     Given the modern graph
@@ -295,7 +296,6 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | d[6].l |
 
-  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_projectXa_bX_byXconstantX1XX_byXconstantX1XX_dedupXaX_count
     Given the modern graph
     And the traversal of

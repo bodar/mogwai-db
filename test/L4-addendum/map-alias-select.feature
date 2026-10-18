@@ -120,3 +120,38 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
     Then the result should be unordered
       | result |
       | d[1].l |
+
+  # A project() is a map too: a keyed dedup(k) naming a FIELD reads the field, and a field a by() may
+  # leave absent falls back per row to the same-named path label, as a map's absent key does.
+  Scenario: g_V_asXnameX_projectXnameX_byXageX_dedupXnameX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("name").project("name").by("age").dedup("name").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_projectXnameX_byXageX_dedupXnameX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("name").by("age").dedup("name").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
+  Scenario: g_V_asXaX_out_asXbX_projectXaX_byXnameX_dedupXa_bX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").project("a").by("name").dedup("a","b").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |

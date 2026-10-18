@@ -357,7 +357,9 @@ export function flatMapRejoin(
   // does in TinkerPop where the body's own paths are invisible), the entering path P is recovered by a
   // per-row origin, and the one output element is appended: P ++ [emitted]. Only an ELEMENT-output body has
   // an id to append; a scalar/list output under `path()` stays its own increment.
-  if (ctx.tracksPath && step.name === 'flatMap') {
+  // Only where the INPUT carries a path: a probe of the body's productivity (`coalesce`/`optional`'s
+  // exhaustion guard, `childPredicate`) runs it over a path-free subject, which has no P to recover.
+  if (ctx.tracksPath && step.name === 'flatMap' && pathCarried(rel)) {
     if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
     const numbered = mintRowOrigin(rel, fresh); // a per-row origin BESIDE the entering path P
     const origin = originOf(numbered.channels)!;

@@ -15,7 +15,7 @@ import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
-import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
@@ -2915,8 +2915,11 @@ function mapTail(
     // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
     const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && (!keys || keys.includes(a.value)))
       ? fenced(rel, fresh) : rel;
-    const mapScope: MapScope = (k) => keys && !keys.includes(k) ? undefined
-      : { node: correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node, always: !!keys };
+    const mapScope: MapScope = (k) => {
+      if (keys && !keys.includes(k)) return undefined;
+      const node = correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node;
+      return { terms: [node], absent: keys ? null : { kind: 'binary', op: 'is', left: node, right: compilerNull() } };
+    };
     const kd = keyedDedup(step, scoped, labels, ctx, fresh, mapScope);
     if (kd === null) return null;
     if (kd !== 'skip') { rel = kd; continue; }
@@ -5483,11 +5486,11 @@ function recordTail(
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
-    // THE RECORD'S OWN MAP SCOPE WINS: a `where`/keyed `dedup` scope key naming one of its FIELDS reads
-    // that field (`Scoping.getScopeValue` asks the traverser's Map first), and the alias readers below
-    // read the path label — so such a step declines, unless the field mirrors that label
-    // (`RecordField.mirrorsAlias`). Over-approximate (any name the step mentions).
-    if ((step.name === 'where' || step.name === 'dedup')
+    // THE RECORD'S OWN MAP SCOPE WINS: a `where` scope key naming one of its FIELDS reads that field
+    // (`Scoping.getScopeValue` asks the traverser's Map first), and the alias readers below read the path
+    // label — so such a step declines, unless the field mirrors that label (`RecordField.mirrorsAlias`).
+    // Over-approximate (any name the step mentions). A keyed `dedup` reads the field itself, below.
+    if (step.name === 'where'
       && [...labelReads([step], ctx.params).labels].some((label) => { const field = fieldNamed(fields, label); return !!field && !field.mirrorsAlias; })) return null;
 
     // `where(k1, P.eq/neq(k2))` THETA and `where(<body>)`/`not(<body>)` LEG over the record's bound
@@ -5497,15 +5500,31 @@ function recordTail(
     if (aliased === 'decline') return null;
     if (aliased) { rel = aliased; continue; }
 
-    // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the record's own alias channels. A bare `dedup()`
-    // over a record (identity grouping) is a separate increment; a LABELLED dedup reads the bound
-    // aliases the record already carries and collapses the tuple, optionally under a shared `by()`.
+    // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup. A key naming a FIELD reads the field first, keyed
+    // by its whole payload like the record's own identity (`payloadRowShape`); an OPTIONAL field
+    // (`project().by(<may be unproductive>)`) falls back per row to the same-named path label, as a
+    // map's absent key does. Any other key reads the bound alias the record carries.
     if (step.name === 'dedup' && !isLocalScope(step)) {
       const keys = step.args.map((a) => a.value);
       if (keys.length && keys.every((k) => typeof k === 'string')) {
         const bys = modulations(step, 1, childSeam(ctx, fresh));
         if (!bys) return null;
-        const deduped = dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh);
+        const current = rel;
+        const fieldScope: MapScope = (k) => {
+          const field = fieldNamed(fields, k);
+          const cols = field && framingCols(field.framing);
+          // A field that MIRRORS its label answers the same from the path, where a `by()` can read it.
+          if (!field || !cols || field.mirrorsAlias) return undefined;
+          const read = (name: string) => col(current.id, name);
+          const present = fieldPresence(field, read);
+          return {
+            terms: cols.map((column) => read(fieldCol(field.prefix, column.name))),
+            absent: field.optional && present ? { kind: 'unary', op: 'not', arg: present } : null,
+          };
+        };
+        // A field with no fixed payload to key on is not a scope this read can answer.
+        if (keys.some((k) => { const field = fieldNamed(fields, k as string); return !!field && !field.mirrorsAlias && !framingCols(field.framing); })) return null;
+        const deduped = dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh, fieldScope);
         if (!deduped) return null;
         rel = deduped;
         continue;
