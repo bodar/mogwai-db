@@ -423,7 +423,7 @@ export function rowOp(
   // column, so such a payload takes the window arm, whose partition carries the widened key.
   const identity = shape.identity(input);
   const typedKey = typedEquality(input, identity);
-  if (typedKey.length !== identity.length) return dedupOn(typedKey, input, shape.tie(input), fresh);
+  if (typedKey.length !== identity.length) return dedupOnTyped(typedKey, input, shape.tie(input), fresh);
 
   // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(payload, bulk[, encounter])`, so
   // they may carry ONLY the channels with a defined N→1 answer — `bulk`/`encounter`; an ALIAS/`sack`
