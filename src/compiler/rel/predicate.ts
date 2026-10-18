@@ -189,8 +189,8 @@ export const perRowSubject = (vtype: Expr, value: Expr): SubjectType =>
  * saturated subject stays on its side of it), so only a bound PAST int64 orders both sides as REAL —
  * `wideBound`, that bound as a REAL, or `null` where the exact INTEGER comparison stands. A bound of EXACTLY
  * `Long.MAX_VALUE`/`MIN_VALUE` (a common sentinel) fits int64 and keeps the exact INTEGER compare — as a REAL
- * it would tie every Long within an ulp of it — and only a subject whose cast saturated reads as its REAL
- * (`intKey`), which SQLite compares with the INTEGER bound exactly. (Equality uses `wideBound` for a floating
+ * it would tie every Long within an ulp of it — and only a subject whose cast saturated is keyed strictly
+ * beyond the edge on its own side (`intKey`). (Equality uses `wideBound` for a floating
  * bound only: a BigInteger past int64 equals its own canonical text, `sameSpaceEquality`.)
  */
 const LONG_MIN = -(2n ** 63n);
@@ -200,13 +200,15 @@ const pastInt64 = (value: unknown): boolean => typeof value === 'bigint' && (val
 /** A bound of exactly int64's edge — the one INTEGER bound a saturated subject can tie. */
 const atInt64Edge = (value: unknown): boolean => value === LONG_MAX || value === LONG_MIN;
 /** A subject's INTEGER key. Against an `atInt64Edge` bound, a TEXT subject whose cast does not round-trip
- *  (a BigInteger past int64, which the cast saturates onto the edge) reads as its REAL instead. */
+ *  (a BigInteger past int64, which the cast saturates onto the edge) lies strictly OUTSIDE int64, so its sign
+ *  alone orders it against the edge: it keys as its REAL doubled, which keeps the sign and clears ±2^63 (its
+ *  bare REAL rounds `-9223372036854775809` onto `Long.MIN_VALUE` and would tie it). */
 function intKey(subject: Expr, edge: boolean): Expr {
   const cast: Expr = { kind: 'cast', arg: subject, to: 'int' };
   if (!edge) return cast;
   const saturated = and(binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')),
     binary('!=', { kind: 'cast', arg: cast, to: 'text' }, subject));
-  return { kind: 'case', whens: [[saturated, { kind: 'cast', arg: subject, to: 'real' }]], else: cast };
+  return { kind: 'case', whens: [[saturated, binary('*', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(2))]], else: cast };
 }
 function wideBound(value: unknown): Expr | null {
   if (typeof value === 'bigint') return pastInt64(value) ? compilerReal(Number(value)) : null;
@@ -428,13 +430,17 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   // subject keyed by its own (`byValue`), so a decimal-TEXT carrier reads as the number it is. A floating
   // bound outside int64 is met as a REAL (`wideBound`) — a saturating INTEGER cast never equals it.
   const wideAt = typeof value === 'bigint' ? null : wideBound(value);
-  // A BigInteger past int64: a TEXT-carried NUMBER equals only its own canonical text (exactly); a native
-  // INTEGER/REAL row meets it as a REAL. A String spelled with the same digits is TEXT too, so a typed
-  // subject must name a number class for the text arm to hold.
+  // A BigInteger past int64: a TEXT-carried NUMBER equals it exactly by its digits — a BigInteger's text IS
+  // them, a BigDecimal's (plain decimal, never an exponent) once its zero fraction is trimmed, so
+  // `100000000000000000000.0m` meets `100000000000000000000n` (a text with no '.' never trims to the match).
+  // A native INTEGER/REAL row meets it as a REAL. A String spelled with the same digits is TEXT too, so a
+  // typed subject must name a number class for the text arm to hold.
   if (pastInt64(value)) {
     const canonical = type.kind === 'static' ? normalizeTypeName(type.type) : null;
-    const text = type.kind === 'perRow' ? and({ kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) }, raw)
-      : canonical !== null && !NUMERIC_VTYPES.includes(canonical) ? CONSTANT.false : raw;
+    const trimmed: Expr = { kind: 'call', fn: 'rtrim', args: [subject, compilerText('0')] };
+    const digits = binary('or', raw, binary('=', trimmed, compilerText(`${String(value)}.`)));
+    const text = type.kind === 'perRow' ? and({ kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) }, digits)
+      : canonical !== null && !NUMERIC_VTYPES.includes(canonical) ? CONSTANT.false : digits;
     return { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), text]],
       else: binary('=', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(Number(value))) };
   }

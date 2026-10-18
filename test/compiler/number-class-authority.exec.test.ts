@@ -91,6 +91,11 @@ describe('a BigInteger past int64 orders by value, never by a saturated cast', (
     ["g.V(1).property('x', -9223372036854775807L) ;; g.V().has('x', P.gt(-9223372036854775808L)).values('x')", ['-9223372036854775807L']],
     ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.gt(9223372036854775807L)).values('x')", ['99999999999999999999N']],
     ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.lte(9223372036854775807L)).values('x')", []],
+    // A saturated subject just BELOW Long.MIN_VALUE is strictly outside int64 — its REAL would round onto the edge.
+    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.lt(-9223372036854775808L)).values('x')", ['-9223372036854775809N']],
+    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.gte(-9223372036854775808L)).values('x')", []],
+    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.neq(-9223372036854775808L)).values('x')", ['-9223372036854775809N']],
+    ['g.inject(-9223372036854775809n).is(P.lt(-9223372036854775808L))', ['-9223372036854775809N']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   // A floating bound at or past ±2^63 against a subject past int64 orders as REAL.
@@ -103,6 +108,16 @@ describe('a BigInteger past int64 equals only a NUMBER spelled with its digits',
     const q = "g.V(1).property('x', '100000000000000000000') ;; g.V(2).property('x', 100000000000000000000n) ;; g.V().has('x', 100000000000000000000n).values('x')";
     expect(await classes(q)).toEqual(['100000000000000000000N']);
   });
+  // A BigDecimal with a zero fraction is the same number: its decimal TEXT matches once the fraction is trimmed.
+  const sameNumber: [string, string[]][] = [
+    ['g.inject(100000000000000000000.0m).is(P.eq(100000000000000000000n))', ['1000000000000000000000e-1M']],
+    ['g.inject(100000000000000000000.5m).is(P.eq(100000000000000000000n))', []],
+    ["g.V(1).property('v', 100000000000000000000.0m) ;; g.V().has('v', P.eq(100000000000000000000n)).values('v')", ['1000000000000000000000e-1M']],
+    ["g.V(1).property('v', 100000000000000000000.0m) ;; g.V().has('v', P.within(100000000000000000000n, 5)).values('v')", ['1000000000000000000000e-1M']],
+    ["g.V(1).property('v', 100000000000000000000.0m) ;; g.V().has('v', P.neq(100000000000000000000n)).values('v')", []],
+    ["g.V(1).property('v', 1000000000000000000000m) ;; g.V().has('v', P.eq(100000000000000000000n)).values('v')", []],
+  ];
+  for (const [q, expected] of sameNumber) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
 
 describe("asNumber() is createNumber's class — Float, Double or BigDecimal — and a Date's epoch Long", () => {
