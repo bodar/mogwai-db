@@ -193,9 +193,9 @@ export type ScalarType =
  * vocabularies — the second vocabulary is what silently dropped `productiveNull` and the static tag
  * whenever a list was retyped.
  *
- * The envelope is deliberately UNIFORM PER LIST (`barrier.ts foldMember` / `list.ts withLossyFlag`
- * ask once per relation whether ANY member is lossy under its storage class), because mixing the
- * two encodings inside one list is the corruption that dead end hit.
+ * The envelope is chosen PER MEMBER, as `listLiteralBlob` does (`list.ts lossyMember`: a member
+ * envelopes iff its type is lossy under its storage class). Every member reader discriminates one
+ * member at a time on `json_each`'s own `type` column, so bare and enveloped members mix safely.
  */
 export type TypeCarrier =
   | { kind: 'column'; name: string }      // a sibling column of the relation (the stored `vtype`)

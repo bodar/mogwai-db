@@ -568,7 +568,7 @@ describe('a run-time BigDecimal widening of a Double is its shortest digits — 
 });
 
 describe('the set-op family keeps every member class — combine/product/merge/intersect/difference/disjunct', () => {
-  // A set op's members re-enter a list under the fold's runtime rule (`withLossyFlag`), each with its own
+  // A set op's members re-enter a list under the fold's per-member rule (`lossyMember`), each with its own
   // class, and compare by value plus family — `1` and `1L` are one member (a deliberate divergence from
   // `IntersectStep.java:68-80`'s class-typed `equals`). A zero has no sign.
   const answered: [string, string[]][] = [

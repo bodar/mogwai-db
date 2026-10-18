@@ -283,8 +283,8 @@ function frameTypedNode(node: FrameNode): Buffer {
   // An untagged number past 2^53 the list framer kept exact (`exactNumberBuffer`).
   if (isExactNumber(node)) return exactNumberBuffer(node);
   // A BARE member: the producer omitted the envelope because the storage class already
-  // determines the type (a fold whose members are all string/int/long/double — see
-  // barrier.ts foldMember). Infer from the JS value, which is exactly what the envelope
+  // determines the type (a string/int member — per member, as `listLiteralBlob` and
+  // `list.ts lossyMember` decide). Infer from the JS value, which is exactly what the envelope
   // would have encoded. A node is always an OBJECT, so a primitive is unambiguous.
   if (typeof node !== 'object') return frameValue(node, undefined);
   // A BARE ARRAY is a list whose members are themselves bare — the same principle as the bare

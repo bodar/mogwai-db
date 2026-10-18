@@ -600,7 +600,7 @@ UNEVALUABLE`.
 **Leaf gaps** (one family, no downstream unlock):
 
 - 🚧 **Set-op keeps members' types** — `values('when').fold().merge(…)` returns raw millis; the lossy test must
-  span BOTH sides (`withLossyFlag` asks it of one). ⚠️ Gating on the compile-time `typed` flag is a DIFFERENT
+  span BOTH sides (now per member, `lossyMember`). ⚠️ Gating on the compile-time `typed` flag is a DIFFERENT
   question, measured wrong.
 - 🚧 **The `set` framing marker** survives all but `order(local)`/`unfold()`; the threading is in place but
   `order(local)` still does not drop it.

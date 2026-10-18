@@ -1057,10 +1057,11 @@ export function firstScalarMember(list: Expr, of: ListOf, fresh: Minter): { valu
  * - **no per-row type** (an `inject` source, a transformed value) — the storage class already
  *   determines every member, so the list is BARE and carries the stream's compile-time tag.
  * - **a per-row `vtype`** (a `values()` stream) — the members' types live in a COLUMN, so they may be
- *   heterogeneous and are unknown at compile time. Only a self-describing `{t,v}` node per member can
- *   express that, and whether one is NEEDED is a runtime question about the WHOLE list: wrap iff SOME
- *   member's type is lossy under its storage class. Asked once, so the encoding stays uniform per
- *   list — mixing encodings inside one list is the corruption this shape exists to avoid.
+ *   heterogeneous and are unknown at compile time. Only a self-describing `{t,v}` node can express
+ *   that, and whether one is NEEDED is asked PER MEMBER, as `listLiteralBlob` does: a member whose type
+ *   is lossy under its storage class envelopes, every other member stays bare. Every member reader
+ *   discriminates one member at a time (`json_each`'s own `type` column), so a list mixing the two
+ *   encodings reads back exactly — and a computed fold encodes identically to the equivalent literal.
  *
  * **THE STREAM'S `ScalarType` IS THE INPUT, not a `vtype?`/`staticTag?` pair.** The fold is the one
  * place a scalar ROW's type channel becomes a LIST MEMBER's, and both ends now spell it the same
@@ -1069,16 +1070,6 @@ export function firstScalarMember(list: Expr, of: ListOf, fresh: Minter): { valu
  * optionals at the call site is what let a `static`'s `text` flag — the fact that a big long rides
  * as decimal TEXT — fall out of every fold, which is why a `max(Scope.local)` over such a list
  * compared lexicographically and answered the smaller value.
- *
- * "About the whole list" is a WINDOW here: `MAX(<is this row lossy>) OVER ()` is 1 iff any row is. A
- * window "cannot nest inside the json_group_array aggregate" and the naive spelling reaches for
- * `EXISTS` over a second alias instead — true of one SELECT, and not a constraint on a normalized IR:
- * the window is its own node, so the
- * aggregate reads a COLUMN and the assembler opens the nested SELECT that makes it legal (it already
- * refuses to fuse an `Aggregate` over a windowed block). The alternative — an `Exists` whose subplan
- * SHARES the aggregate's input — is what the algebra actually refuses: the `name` pass does not walk
- * expression subplans, so one node would become a `Ref` in one place and stay itself in the other,
- * and `check` fails closed on the ambiguity ("names two different relations in one scope").
  *
  * The list's member order is whatever COLUMNS the caller names, in order: `Agg.orderBy` is what that
  * needs, so there is no node-set question. For a `fold()` that is the one encounter channel; a
@@ -1095,13 +1086,9 @@ export function foldScalars(
   fresh: Minter,
   domain?: Rel,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  // The type column and the position are named rather than passed as EXPRESSIONS, because the relation
-  // an expression must address is the window's output and not the caller's input: every node here
-  // addresses its own INPUT, and the lossy flag inserts one.
   const vtypeCol = perRowColumnOf(opts.type);
   const vtype = vtypeCol ? col(input.id, vtypeCol) : undefined;
-  const flagged = vtype ? withLossyFlag(input, vtype, fresh) : input;
-  const value = col(flagged.id, 'v');
+  const value = col(input.id, 'v');
   // ORDER BY the encounter when there is one; else by the VALUE — a DETERMINISTIC order for a per-origin
   // CORRELATED fold (`scalarChild`'s list arm), whose `EXISTS`-shaped hop mints no encounter, so without
   // this its `json_group_array` is SCAN order — right by luck, wrong under `test:perturbed`. Only the
@@ -1111,21 +1098,16 @@ export function foldScalars(
   // fold in either order — a list two statements over one graph would spell two ways (the ranked-order
   // barrier joins its head and its resume on exactly that text, `ranked-order.ts`).
   const order = opts.order?.length || !vtypeCol
-    ? foldOrder(flagged, opts.order, 'v')
-    : [...foldOrder(flagged, opts.order, 'v'), { expr: col(flagged.id, vtypeCol), dir: 'asc' as const }];
-  // A PER-ROW member envelopes when the whole list is lossy (any member's type does not survive its
-  // storage class — now including `double`, whose whole-number members would infer back as Int and whose
-  // 17-digit members would lose a bit), else stays bare (the remaining lossless types — `string`/`int` —
-  // infer back exactly). A STATIC member has one tag for the list, so it never needs the envelope, but a
+    ? foldOrder(input, opts.order, 'v')
+    : [...foldOrder(input, opts.order, 'v'), { expr: col(input.id, vtypeCol), dir: 'asc' as const }];
+  // A PER-ROW member envelopes when ITS type is lossy under its storage class (`lossyMember` — now
+  // including `double`, whose whole-number members would infer back as Int and whose 17-digit members
+  // would lose a bit), else stays bare (the lossless types — `string`/`int` — infer back exactly). A STATIC member has one tag for the list, so it never needs the envelope, but a
   // static REAL still crosses the lossy JSON writer — `jsonMember` makes it exact (a no-op for a static
   // string/int). Both paths reach the one JSON-entry authority.
   const staticTag = vtype ? undefined : staticTypeOf(opts.type);
-  const member = vtype
-    ? {
-      kind: 'case',
-      whens: [[col(flagged.id, LOSSY_COL), typedNode(value, col(flagged.id, vtypeCol!))]],
-      else: value,
-    } as Expr
+  const member: Expr = vtype
+    ? { kind: 'case', whens: [[lossyMember(vtype), typedNode(value, vtype)]], else: value }
     // A STATIC tag gates `jsonMember` at compile time; an UNKNOWN one (an inject literal, an untyped
     // stream) has no tag, so it infers from `typeof(value)` — safe because the member IS a column.
     : staticTag ? jsonMember(value, compilerText(staticTag)) : jsonMemberByTypeof(value);
@@ -1134,11 +1116,11 @@ export function foldScalars(
   // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.
   const memberType: ScalarType = vtype ? PER_ROW_ENVELOPE : opts.type;
   const of: ListOf = { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull };
-  const origin = originOf(flagged.channels);
-  if (origin && domain) return foldPerOrigin(flagged, origin, domain, member, order, of, fresh);
+  const origin = originOf(input.channels);
+  if (origin && domain) return foldPerOrigin(input, origin, domain, member, order, of, fresh);
   return {
     rel: make.aggregate({
-      id: fresh('fd'), input: flagged, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      id: fresh('fd'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
       groupBy: [],
       aggs: [[LIST_COL, collectedArray(member, order)]],
     }),
@@ -1312,33 +1294,12 @@ const foldNested = (
  *  AND makes it lossless (`jsonMember`). */
 const LOSSLESS_VTYPES = ['string', 'int'] as const;
 
-const LOSSY_COL = 'lossy';
-
-/** Add the whole-relation "does ANY member need an envelope?" answer as a COLUMN —
- *  `MAX(<per-row lossy>) OVER ()`, which is 1 iff some row's recorded type does not survive its
- *  storage class. One question per LIST rather than per member, which is what keeps a list's encoding
- *  uniform: mixing encodings inside one list is the corruption this shape exists to avoid. */
-const withLossyFlag = (input: Rel, vtype: Expr, fresh: Minter): Rel => make.window({
-  id: fresh('vw'), input, channels: input.channels,
-  type: typeOf(...input.type.cols, meta(LOSSY_COL, 'int')),
-  specs: [[LOSSY_COL, {
-    kind: 'window-expr',
-    fn: 'max',
-    args: [{
-      kind: 'case',
-      whens: [[{
-        kind: 'binary',
-        op: 'and',
-        left: { kind: 'binary', op: 'is not', left: vtype, right: compilerNull() },
-        // `NOT (x IN …)`, not an `InList` with a negation flag — the node has none, and with the
-        // `IS NOT NULL` guard on the left the two forms agree (a NULL is already excluded).
-        right: { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: vtype, values: LOSSLESS_VTYPES.map(compilerText) } },
-      }, compilerInt(1)]],
-      else: compilerInt(0),
-    }],
-    spec: { partitionBy: [], orderBy: [] },
-  }]],
-});
+/** Does THIS member need a `{t,v}` envelope? — its recorded type is known and does not survive its
+ *  storage class. Asked per member, as `listLiteralBlob` does, so a list's encoding is per member too.
+ *  A CASE `WHEN` only: an unknown (NULL) type makes the test NULL, which a `WHEN` reads as false — the
+ *  bare arm, so no separate `IS NOT NULL` guard is spelled. */
+const lossyMember = (vtype: Expr): Expr =>
+  ({ kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: vtype, values: LOSSLESS_VTYPES.map(compilerText) } });
 
 /**
  * THE SET-OP FAMILY — `combine`/`intersect`/`difference`/`disjunct`/`merge`/`product` over a list
@@ -1556,8 +1517,8 @@ export function listSetOp(
   // `1` two (a deliberate divergence from the reference's class-typed `HashSet`, `IntersectStep.java:68-80`).
   //
   // The CLASS then rides into the result (`collect`): a set op's members re-enter a list under the same
-  // runtime rule a `fold()` spends (`withLossyFlag` — envelope the whole list iff some member's class does
-  // not survive its storage), so a Float stays a Float, a Long a Long, a whole Double a Double, at every
+  // per-member rule a `fold()` spends (`lossyMember` — a member envelopes iff its class does not survive
+  // its storage), so a Float stays a Float, a Long a Long, a whole Double a Double, at every
   // depth past the set op. Flattening a typed side to bare payloads instead (the earlier rule) kept the
   // Float's exact Double carrier and dropped the tag that says it is a Float, so `combine` printed
   // `0.10000000149011612` and framed `[0.1f, 4L]` as `[0.1d, 4i]`. An ELEMENT list's members are rowids
@@ -1618,27 +1579,19 @@ export function listSetOp(
   // THE RESULT'S MEMBER TYPE. Where both sides are bare and AGREE on one static tag, that tag describes
   // every member of the result and the members stay bare (the static tag frames them). Otherwise each
   // member's class is per-member, so the result is a self-describing list whose members envelope under
-  // `withLossyFlag`'s runtime rule — bare when every member's class is what its storage says (the common
-  // `[1, 'a']` case keeps its bytes), every one enveloped otherwise (the encoding stays uniform per list).
+  // `lossyMember`'s per-member rule — bare where a member's class is what its storage says (the common
+  // `[1, 'a']` case keeps its bytes), enveloped where it is not.
   const mineType = memberTypeOf(of) ?? UNKNOWN, theirType = memberTypeOf(resolved.of) ?? UNKNOWN;
   const staticMeet = !isTypedList(of) && !isTypedList(resolved.of) && staticTypeOf(mineType) !== undefined
     && sameScalarType(mineType, theirType) ? mineType : undefined;
   const bareResult = bothElem || staticMeet !== undefined;
-  /** A member written back: bare where the list is bare, else its `{t,v}` node where the list is lossy. */
+  /** A member written back: bare where the list is bare, else its `{t,v}` node where ITS class is lossy. */
   const memberAt = (rows: Rel, value: string, cls: string): Expr => bareResult
     ? exactMember(col(rows.id, value))
-    : {
-      kind: 'case',
-      whens: [[and(col(rows.id, LOSSY_COL), { kind: 'binary', op: 'is not', left: col(rows.id, cls), right: compilerNull() }),
-        typedNode(col(rows.id, value), col(rows.id, cls))]],
-      else: exactMember(col(rows.id, value)),
-    };
-  /** The member rows back into ONE list, in `order` — the lossy flag asked of the WHOLE result relation,
-   *  which spans both sides. */
-  const collect = (rows: Rel, lossyClass: (r: Rel) => Expr, member: (r: Rel) => Expr, order: (r: Rel) => readonly SortTerm[]): Rel => {
-    const flagged = bareResult ? rows : withLossyFlag(rows, lossyClass(rows), fresh);
-    return withList(rel, listOfMembers(flagged, member(flagged), order(flagged), fresh), fresh);
-  };
+    : { kind: 'case', whens: [[lossyMember(col(rows.id, cls)), typedNode(col(rows.id, value), col(rows.id, cls))]], else: exactMember(col(rows.id, value)) };
+  /** The member rows back into ONE list, in `order`. */
+  const collect = (rows: Rel, member: (r: Rel) => Expr, order: (r: Rel) => readonly SortTerm[]): Rel =>
+    withList(rel, listOfMembers(rows, member(rows), order(rows), fresh), fresh);
 
   /**
    * A finished SET result: the members, deduped, back into one list — in VALUE order (then class, so two
@@ -1659,7 +1612,7 @@ export function listSetOp(
       groupBy: [col(rows.id, SIDE.value), col(rows.id, SIDE.fam)],
       aggs: [[SIDE.cls, { kind: 'agg', fn: 'min', args: [col(rows.id, SIDE.cls)] }]],
     });
-    return collect(deduped, (r) => col(r.id, SIDE.cls), (r) => memberAt(r, SIDE.value, SIDE.cls),
+    return collect(deduped, (r) => memberAt(r, SIDE.value, SIDE.cls),
       (r) => [{ expr: col(r.id, SIDE.value), dir: 'asc' }, { expr: col(r.id, SIDE.cls), dir: 'asc' }]);
   };
 
@@ -1683,7 +1636,7 @@ export function listSetOp(
         const both = make.union({
           id: fresh('cu'), inputs: [seg(mine, 0), seg(sideOf(resolved.expr, resolved.of), 1)], all: true, channels: [], type: typeOf(...segCols),
         });
-        return collect(both, (r) => col(r.id, SIDE.cls), (r) => memberAt(r, SIDE.value, SIDE.cls),
+        return collect(both, (r) => memberAt(r, SIDE.value, SIDE.cls),
           (r) => [{ expr: col(r.id, 'seg'), dir: 'asc' }, { expr: col(r.id, SIDE.ord), dir: 'asc' }]);
       }
       // MEMBERSHIP: mine that are (not) theirs, deduped.
@@ -1703,8 +1656,7 @@ export function listSetOp(
       // CARTESIAN product → a list of PAIR-lists, so the result's members are lists and no further
       // member op reads it (`isBareList` names the scalar encodings only). The second `json_each`
       // takes the first side as its INPUT, which is exactly a cross join; its member is read through the
-      // same `payloadOf`/`ownTagOf` as a side's. Every PAIR is one inner list under ONE descriptor, so the
-      // lossy question spans both members of every pair: the class asked is a pair's lossy one, if any.
+      // same `payloadOf`/`ownTagOf` as a side's. Each member of a pair envelopes on its own class.
       case 'product': {
         const paired = make.explode({
           id: fresh('px'), input: mine, expr: resolved.expr, channels: [], as: OPERAND,
@@ -1722,10 +1674,7 @@ export function listSetOp(
           exprs: [...sideCols.map((column) => [column.name, col(read.id, column.name)] as const),
             ['pv', col(read.id, 'pv')], ['pg', classOf(col(read.id, 'pg'), col(read.id, 'pv'))], [OPERAND.ord, col(read.id, OPERAND.ord)]],
         });
-        const losslessAt = (r: Rel): Expr =>
-          ({ kind: 'in-list', expr: coalesce(col(r.id, SIDE.cls), compilerText('string')), values: LOSSLESS_VTYPES.map(compilerText) });
         return collect(pairs,
-          (r) => ({ kind: 'case', whens: [[losslessAt(r), col(r.id, 'pg')]], else: col(r.id, SIDE.cls) }),
           (r) => ({ kind: 'json-array', items: [memberAt(r, SIDE.value, SIDE.cls), memberAt(r, 'pv', 'pg')], binary: true }),
           (r) => [{ expr: col(r.id, SIDE.ord), dir: 'asc' }, { expr: col(r.id, OPERAND.ord), dir: 'asc' }]);
       }

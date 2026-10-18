@@ -40,10 +40,9 @@ import type { Channel } from '../../channels.ts';
  * This module used to fold at the aggregate and store the folded list, and argued for it at length.
  * That argument is sound **for one site** and does not survive a second: a label filled at two chain
  * positions is then N-1 list concatenations, each re-exploding JSON, instead of a `UNION ALL` of
- * member relations — the algebra's own node. Holding MEMBER ROWS also puts `withLossyFlag`'s
- * whole-relation question (`list.ts:769-789`) over every site's members rather than per site, which
- * is the difference between one member encoding and an inconsistent one, and makes `cap().unfold()`
- * cancel rather than fold-then-explode. Full rationale + phases:
+ * member relations — the algebra's own node. Holding MEMBER ROWS also makes `cap().unfold()`
+ * cancel rather than fold-then-explode; each member's encoding is decided per member, as
+ * `listLiteralBlob` does (`list.ts lossyMember`). Full rationale + phases:
  * `docs/archive/2026-08-09-named-collections-are-bindings-plan.md`.
  *
  * ## What declines, and why each is the honest answer
@@ -579,8 +578,8 @@ function projectedMembers(
  * THE REDUCTION — a collection's retained rows as the ONE traverser `cap("a")` emits.
  *
  * The one place a named collection's fold is chosen, off `Members`, instead of three call sites
- * inside two register functions. `withLossyFlag`'s whole-relation question therefore runs over every
- * site's members at once, which is what makes the member encoding uniform (`list.ts:769-789`).
+ * inside two register functions. Each member envelopes per member, as `listLiteralBlob` does
+ * (`list.ts lossyMember`).
  *
  * A cap emits a single fresh traverser, so what comes back carries NO channels: both folds are
  * `Aggregate`s with `channels: []`, which is what drops the layout at the barrier.
