@@ -114,6 +114,21 @@ export const aliasValueAt = (column: Expr, end: 'first' | 'last'): Expr => field
 export const aliasTypeAt = (column: Expr, end: 'first' | 'last'): Expr => fieldAt(column, end, 't');
 
 /**
+ * A VALUE label's history entry AS a `{t,v}` member node — the entry minus its shape `k`. The `as()` site
+ * already wrote `v` in its exact JSON spelling (`exactRealEntry`), so re-reading it through `json_extract`
+ * and repairing it again would only spell the same digits twice per row. `null` for an expression that is
+ * not an `aliasValueAt` read (a record field's column).
+ */
+export const aliasEntryNode = (value: Expr): Expr | null => {
+  if (value.kind !== 'call' || value.fn !== 'json_extract' || value.args.length !== 2) return null;
+  const [column, path] = value.args;
+  const end = (['first', 'last'] as const).find((e) => path?.kind === 'lit' && path.source === 'compiler-text' && path.value === endPath(e, 'v'));
+  if (!end) return null;
+  const entry: Expr = { kind: 'call', fn: 'json_extract', args: [column!, compilerText(end === 'first' ? '$[0]' : '$[#-1]')] };
+  return { kind: 'call', fn: 'json_remove', args: [entry, compilerText('$.k')] };
+};
+
+/**
  * A VALUE label as a `HashSet` KEY (`dedup('a')` — `DedupGlobalStep.java:80-88` adds the `List` of each
  * label's object to its duplicate set): the entry's `v` plus the family its recorded `t` names
  * (`familyKey`, exactly as a merge key is), so `3` and `3L` are one key and `true` and `1` two.

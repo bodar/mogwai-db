@@ -10,7 +10,7 @@ import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runSteps } from './program.ts';
-import { untyped, UnspellableJson } from './untyped.ts';
+import { untyped } from './untyped.ts';
 import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
@@ -921,14 +921,10 @@ function runResultNodes(store: GraphStore, plan: Executable): { node: FrameNode 
 }
 
 /** Render a plan's result as an untyped-JSON ARRAY string (the negotiated `application/json` response),
- *  or `null` when the shape is not covered (the router falls back to GraphBinary). The bulk-N multiplicity
- *  is EXPANDED — a collapsed `(value, N)` row emits N copies — so the array matches what a client sees when
- *  it expands the bulked GraphBinary response.
- *
- *  `null` too when a VALUE in the result has no exact untyped spelling (`UnspellableJson` — a list-keyed
- *  map, a NaN, …), which is only known once the plan has run. A read is simply run again by the
- *  GraphBinary fallback. A WRITE must not be: its run and its rendering are ONE atomic unit
- *  (`GraphStore.atomically`), so a decline rolls the write back and the fallback performs it exactly once. */
+ *  or `null` when the shape is not covered (the router falls back to GraphBinary, decided before the plan
+ *  runs). The bulk-N multiplicity is EXPANDED — a collapsed `(value, N)` row emits N copies — so the array
+ *  matches what a client sees when it expands the bulked GraphBinary response. The rendering is TOTAL
+ *  (`untyped`), and a write's run and its rendering are ONE atomic unit (`GraphStore.atomically`). */
 export function resolveJson(store: GraphStore, plan: Executable): string | null {
   if (!JSON_COVERED.has(plan.shape.kind)) return null;
   const render = (): string => {
@@ -938,9 +934,6 @@ export function resolveJson(store: GraphStore, plan: Executable): string | null 
   };
   try {
     return plan.kind === 'program' ? store.atomically(render) : render();
-  } catch (e) {
-    if (e instanceof UnspellableJson) return null;
-    throw e;
   } finally {
     if (plan.cleanup) for (const run of plan.cleanup) store.dropBarrierRun(run);
   }

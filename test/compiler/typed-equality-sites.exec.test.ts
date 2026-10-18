@@ -210,7 +210,7 @@ describe('a map key keeps its class at every key position; a signed zero is one 
     ] as const) expect(at(q), q).toEqual([want]);
   });
   test('the label key keeps its 17 digits, and merges equal numbers', () => {
-    expect(at("g.inject(0.30000000000000004d, 0.3d).as('a').groupCount().by(select('a'))")).toEqual(['{0.30000000000000004d:1L,0.3d:1L}']);
+    expect(at("g.inject(0.30000000000000004d, 0.3d).as('a').groupCount().by(select('a'))")).toEqual(['{0.3d:1L,0.30000000000000004d:1L}']);
     expect(at("g.inject(1, 1.0d, 1L).as('a').groupCount().by(select('a'))")).toEqual(['{1d:3L}']);
   });
 });

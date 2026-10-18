@@ -850,80 +850,24 @@ const READONLY_CHILD_HOSTS: Record<string, (args: readonly any[]) => readonly nu
 };
 
 /** Every nested traversal sitting in a VALUE-argument slot of `s` — the operand slots shared with
- *  the constant fold, plus the id/property hosts above, plus operands nested inside a P — each with WHEN
- *  the reference validates it (`ReadOnlyCheck`). */
-function valueArgTraversals(s: Step): { readonly nested: any; readonly check: ReadOnlyCheck }[] {
+ *  the constant fold, plus the id/property hosts above, plus operands nested inside a P. */
+function valueArgTraversals(s: Step): unknown[] {
   const slots = [
     ...(VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? []),
     ...(READONLY_CHILD_HOSTS[s.name]?.(s.args ?? []) ?? []),
   ];
-  const out: { readonly nested: any; readonly check: ReadOnlyCheck }[] = [];
-  // A predicate operand is checked inside `P`'s own constructor (`P.java`) wherever it stands.
-  const direct: ReadOnlyCheck = s.name === 'property' ? 'verification' : 'construction';
+  const out: unknown[] = [];
   (s.args ?? []).forEach((arg, i) => {
     const a = arg.value;
-    if (slots.includes(i) && isNested(a)) out.push({ nested: a.nested, check: direct });
+    if (slots.includes(i) && isNested(a)) out.push(a.nested);
     // …and operands wrapped in a predicate, at any depth: has("name", P.eq(__.addV(…))).
-    if (isPred(a)) for (const n of valueNodes(a)) if (isNested(n)) out.push({ nested: n.nested, check: 'construction' });
+    if (isPred(a)) for (const n of valueNodes(a)) if (isNested(n)) out.push(n.nested);
   });
   return out;
 }
 
-/**
- * WHEN THE REFERENCE CHECKS A VALUE CHILD IS READ-ONLY, which decides both the exception and the class
- * name it prints. `has(k, <traversal>)`/`P.eq(<traversal>)`/`V(<traversal>)` run `ReadOnlyChildValidator`
- * at CONSTRUCTION and throw its `IllegalArgumentException` while the child still holds its `GValueHolder`
- * PLACEHOLDER steps. `property(k, <traversal>)` and a traversal KEY are NOT validated at construction
- * (`GraphTraversal.property` has no validator call): only `StandardVerificationStrategy` checks them
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/verification/StandardVerificationStrategy.java:87-101`),
- * re-thrown as a `VerificationException`. Strategies run one at a time over the WHOLE tree
- * (`TraversalHelper.applyTraversalRecursively` per strategy, `util/DefaultTraversal.applyStrategies`), so
- * the optimization `GValueReductionStrategy` has already reduced every placeholder in the child to its
- * concrete step (`AddVertexStepPlaceholder.asConcreteStep` → `AddVertexStep`) by then.
- */
-type ReadOnlyCheck = 'construction' | 'verification';
-
-/**
- * TinkerPop's `StandardVerificationStrategy`, as much of it as our language surface can violate.
- *
- * ONE walk, because the reference is one strategy: every clause below is a `throw` in
- * `StandardVerificationStrategy.apply` (`vendor/tinkerpop/gremlin-core/.../verification/
- * StandardVerificationStrategy.java:68-84`), and each message is that throw's, verbatim. The clauses
- * it has that we cannot violate are absent rather than stubbed — lambdas have no production in our
- * string grammar (locked decision #2), and `VertexComputing` steps have no execution surface.
- *
- * **Read-only children.** A child traversal evaluated for a VALUE must not mutate: TinkerPop rejects
- * `has("name", __.addV("x").values("name"))`, `is(P.gt(__.addV("x").values("age")))`,
- * `V(__.addV("x").id())`, `property(__.addV("t")…)`. Deliberately scoped to VALUE-argument
- * positions, NOT "every child traversal": a write is perfectly legal in a branch/side-effect body
- * (`union(__.addV("person"), …)`, `choose(p, __.addV(…), …)`), and rejecting those would break
- * working write traversals. That is why the slot list is shared with the constant fold — one
- * declaration of "this slot holds a value".
- *
- * **No `inject()` under a `repeat()`.** `hasRepeatStepParent` walks EVERY ancestor, so the rule is
- * "anywhere below a repeat", not "a direct body step" — `repeat(__.union(__.inject('y'), …))`
- * violates it too. Without this clause the body simply misses our row-local vocabulary and reports
- * "not yet supported", which is false: no lowering will ever accept it.
- *
- * ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
- * `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied).
- */
-/**
- * The class name the reference's `Mutating` step for each of our write steps carries WHEN THE CHILD IS
- * VALIDATED AT CONSTRUCTION — the `%s` `ReadOnlyChildValidator` prints for `has(k, <traversal>)`/
- * `P.eq(<traversal>)`/`V(<traversal>)` (`GraphTraversal.has`/`V`, `P.java`), where the write is still its
- * `GValueHolder` PLACEHOLDER (`GraphTraversal.addV` adds `AddVertexStepPlaceholder`). A `property()`'s
- * child is checked later, at verification, under its REDUCED class (`ReadOnlyCheck`, `reducedClass`).
- */
-const MUTATING_STEP_CLASS: Readonly<Record<string, string>> = {
-  addV: 'AddVertexStepPlaceholder', addE: 'AddEdgeStepPlaceholder', property: 'AddPropertyStepPlaceholder',
-  mergeV: 'MergeVertexStepPlaceholder', mergeE: 'MergeEdgeStepPlaceholder', drop: 'DropStep',
-  addLabel: 'AddLabelStep', dropLabel: 'DropLabelsStep', dropLabels: 'DropLabelsStep',
-};
-
-/** The FIRST mutating step in `chain` at any depth, in the reference's order — a step before its own
- *  children, the children before the next step (`TraversalHelper.getStepsOfAssignableClassRecursively`).
- *  An unreadable body is skipped, as the caller always has. */
+/** The FIRST mutating step in `chain` at any depth, pre-order — a step before its own children, the
+ *  children before the next step. An unreadable body is skipped, as the caller always has. */
 function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | undefined {
   for (const s of chain) {
     if (MUTATING_STEPS.has(s.name)) return s;
@@ -934,40 +878,44 @@ function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | und
   return undefined;
 }
 
-/** `ReadOnlyChildValidator.validate`'s `IllegalArgumentException`, verbatim in its fixed text
- *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/ReadOnlyChildValidator.java:47`).
- *  A `ValueParseError` because it is the traversal's ANSWER, not a deferral. The child is printed as its
- *  Gremlin source — the reference prints its `StringFactory.traversalString`, a Java step-object
- *  rendering this compiler has no counterpart of. */
-function readOnlyChildViolation(step: Step, nested: unknown, check: ReadOnlyCheck): ValueParseError {
-  const text = typeof (nested as { getText?: unknown })?.getText === 'function' ? (nested as { getText(): string }).getText() : '';
-  const placeholder = MUTATING_STEP_CLASS[step.name] ?? step.name;
-  const message = `Child traversal contains a mutating step '${check === 'verification' ? reducedClass(placeholder) : placeholder}' in '${text}'. `
-    + 'Mutating steps are not allowed in child traversals.';
-  return check === 'verification' ? new VerificationException(message) : new ValueParseError(message);
-}
-
-/** The concrete step a `GValueHolder` placeholder reduces to — `AddVertexStepPlaceholder` → `AddVertexStep`
- *  (each `*Placeholder.asConcreteStep`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/{map,sideEffect}/`). */
-const reducedClass = (placeholder: string): string => placeholder.replace(/Placeholder$/, '');
-
+/**
+ * TinkerPop's `StandardVerificationStrategy`, as much of it as our language surface can violate.
+ *
+ * ONE pre-order walk. The clauses the reference has that we cannot violate are absent rather than
+ * stubbed — lambdas have no production in our string grammar (locked decision #2), and
+ * `VertexComputing` steps have no execution surface.
+ *
+ * **Read-only children.** A child traversal evaluated for a VALUE must not mutate: TinkerPop rejects
+ * `has("name", __.addV("x").values("name"))`, `is(P.gt(__.addV("x").values("age")))`,
+ * `V(__.addV("x").id())`, `property(__.addV("t")…)`. Deliberately scoped to VALUE-argument
+ * positions, NOT "every child traversal": a write is perfectly legal in a branch/side-effect body
+ * (`union(__.addV("person"), …)`, `choose(p, __.addV(…), …)`), and rejecting those would break
+ * working write traversals. That is why the slot list is shared with the constant fold — one
+ * declaration of "this slot holds a value". The answer is a `ValueParseError` naming OUR step and the
+ * child's source; the reference's Java class names and its construction-vs-verification timing (which
+ * offender a doubly-bad traversal names) are deliberately not reproduced — the corpus asserts only the
+ * text "mutating step".
+ *
+ * **No `inject()` under a `repeat()`.** `hasRepeatStepParent` walks EVERY ancestor, so the rule is
+ * "anywhere below a repeat", not "a direct body step" — `repeat(__.union(__.inject('y'), …))`
+ * violates it too. Without this clause the body simply misses our row-local vocabulary and reports
+ * "not yet supported", which is false: no lowering will ever accept it.
+ *
+ * ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
+ * `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied).
+ */
 export function verifyStandard(steps: IRStep[], params: Record<string, any>): void {
-  // TWO walks, in the reference's order: every check made while the traversal is CONSTRUCTED has run,
-  // at any depth, before the first strategy does — so `property('k', is(gt(__.addV())))` is the inner
-  // `P`'s construction-time error, not the property child's verification one (`ReadOnlyCheck`).
-  // A construction check is POST-order: a step's argument traversals (and the `P` around one) are built
-  // before the step that takes them, so the innermost offender is the one named.
-  const scan = (chain: readonly Step[], underRepeat: boolean, phase: ReadOnlyCheck) => {
+  const scan = (chain: readonly Step[], underRepeat: boolean) => {
     for (const s of chain) {
-      if (phase === 'verification' && underRepeat && s.name === 'inject')
+      if (underRepeat && s.name === 'inject')
         throw new VerificationException('The parent of inject()-step can not be repeat()-step');
-      if (phase === 'construction') eachChildChain(s, read, (body) => scan(body, false, phase));
-      for (const { nested, check } of valueArgTraversals(s)) {
-        if (check !== phase) continue;
+      for (const nested of valueArgTraversals(s)) {
         const body = read(nested);
         if (body === null) continue;
         const m = firstMutatingStep(body, read);
-        if (m) throw readOnlyChildViolation(m, nested, check);
+        if (!m) continue;
+        const text = typeof (nested as { getText?: unknown })?.getText === 'function' ? (nested as { getText(): string }).getText() : '';
+        throw new ValueParseError(`Child traversal contains a mutating step (${m.name}) in '${text}'. Mutating steps are not allowed in child traversals.`);
       }
       // recurse into every OTHER nested body so a bad operand nested deep still trips. The flag is
       // STICKY once set, mirroring the ancestor walk: a body two branches inside a repeat is still
@@ -975,12 +923,11 @@ export function verifyStandard(steps: IRStep[], params: Record<string, any>): vo
       // parent walk, and they are arguments of the same cluster here.
       const repeatHost = underRepeat || REPEAT_CLUSTER.has(s.name);
       // Every child position (`eachChildChain`); a body unparseable without params is skipped.
-      if (phase === 'verification') eachChildChain(s, read, (body) => scan(body, repeatHost, phase));
+      eachChildChain(s, read, (body) => scan(body, repeatHost));
     }
   };
   const read = rawBodies(params);
-  scan(steps as Step[], false, 'construction');
-  scan(steps as Step[], false, 'verification');
+  scan(steps as Step[], false);
 }
 
 /**

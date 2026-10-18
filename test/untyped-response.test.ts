@@ -172,16 +172,14 @@ describe('the GET data plane negotiates the same way', () => {
 });
 
 // THE SAME ANSWER IN BOTH RESPONSE FORMATS, at every depth a map KEY reaches. A JSON object key is a
-// string, so the untyped tail spells each key the way the reference does (`GraphSONKeySerializer.ser`,
-// vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/io/graphson/
-// GraphSONSerializersV4.java:371-376: an Element by `id().toString()`, anything else by `toString()`), and
-// a key it cannot spell exactly — a list, a map, an edge Property — DECLINES to GraphBinary rather than
-// print `[object Object]`, under which distinct groups merged into ONE entry. Each query runs through
-// both formats: a JSON answer must equal the GraphBinary one; a declined one must BE the GraphBinary one.
+// string, so the untyped tail spells each key by one total rule: an Element by its id (as the reference's
+// `GraphSONKeySerializer` does), a scalar by `String(v)` (a whole Double with `.0`), a list, a map or an edge
+// Property by the JSON text of its rendering — never `[object Object]`, under which distinct groups merged
+// into ONE entry. A scalar/element-keyed query runs through both formats and must agree.
 describe('every map key reads the same through untyped JSON and GraphBinary', () => {
   const isElement = (v: any): boolean => v instanceof Vertex || v instanceof Edge || v instanceof VertexProperty;
   /** A key's spelling up to number layout (`1.0` and `1` are one Double key; the GraphBinary client decodes it as `1`). */
-  const keyOf = (k: string): string => (/^-?\d+(\.\d+)?(E-?\d+)?$/.test(k) ? String(Number(k)) : k);
+  const keyOf = (k: string): string => (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(k) ? String(Number(k)) : k);
   /** A decoded GraphBinary key as the reference spells it — an Element by its id, a `T`/`Direction` token
    *  by its name; any other object (a collection: the declined keys) by its structure, so distinct keys stay distinct. */
   const binaryKey = (k: any): string =>
@@ -249,32 +247,37 @@ describe('every map key reads the same through untyped JSON and GraphBinary', ()
     'g.inject(1.0d, 2.5d, 1e21d, 1e-5d).groupCount()', 'g.V().values("age").groupCount()',
   ]) test(`${q} → JSON, the same answer`, async () => expect(await bothFormats(q)).toBe('json'));
 
-  // Keys no untyped spelling carries exactly (Java's `toString()` of a collection or an edge Property) —
-  // each DECLINES, and the fallback is the GraphBinary answer, every group intact.
+  // A collection or edge-Property key is spelled as the JSON TEXT of its untyped rendering (Java's
+  // `toString()` is not reproduced) — never `[object Object]`, never a fallback: every group stays its own
+  // entry. Two keys that spell alike (Int 1, String "1") merge into one entry, JSON's limitation.
   for (const [q, groups] of [
     ['g.V().group().by(out().limit(1).fold()).by(count())', 3],
     ['g.V().groupCount().by(outE().limit(1).fold())', 4],
-    ['g.E().properties().groupCount()', 6],
+    ['g.E().properties().groupCount()', 4], // two weight=0.4 and two weight=1.0 edge properties spell alike and merge
     ['g.V().group().by(project("a").by(identity())).by(count())', 6],
-    ['g.E().properties().group().by(identity()).by(count())', 6],
+    ['g.E().properties().group().by(identity()).by(count())', 4],
     ['g.V().where(out()).groupCount().by(out().fold())', 3],
     ['g.V().groupCount().by(valueMap())', 6],
-    ['g.inject(1, "1").groupCount()', 2],
-  ] as const) test(`${q} → declined to GraphBinary, ${groups} groups`, async () => {
-    expect(await bothFormats(q)).toBe('declined');
-    const [first] = await binaryResults(await post(q, GRAPHBINARY_MT));
-    expect((first as Map<unknown, unknown>).size).toBe(groups);
+    ['g.inject(1, "1").groupCount()', 1],
+  ] as const) test(`${q} → JSON, ${groups} keys spelled as JSON text`, async () => {
+    const res = await post(q, JSON_MT);
+    expect(res.headers.get('Content-Type')).not.toBe(GRAPHBINARY_MT);
+    const [first] = await jsonResults(res);
+    expect(Object.keys(first as object).length).toBe(groups);
+    expect(Object.keys(first as object).some((k) => k.includes('[object Object]'))).toBe(false);
   });
-  test('a key declines at depth too: inside local()', async () =>
-    expect(await bothFormats('g.V().local(out().groupCount().by(outE().limit(1).fold()))')).toBe('declined'));
+  test('a whole Double key keeps its .0; a list key is its JSON text', async () => {
+    expect(await jsonResults(await post('g.inject(1.0d, 2.5d, 3).groupCount()', JSON_MT))).toEqual([{ '1.0': 1, '2.5': 1, '3': 1 }]);
+    expect(await jsonResults(await post('g.V().has("name", "marko").groupCount().by(values("name").fold())', JSON_MT))).toEqual([{ '["marko"]': 1 }]);
+  });
 
-  // A WRITE whose result declines is rolled back with the decline, so the GraphBinary fallback performs it
-  // exactly once.
-  test('a write whose JSON result declines runs exactly once', async () => {
+  // A WRITE renders in ONE atomic unit with its run, and runs exactly once.
+  test('a write with a collection-keyed JSON result runs exactly once', async () => {
     const count = async () => Number((await binaryResults(await post('g.V().count()', GRAPHBINARY_MT)))[0]);
     const before = await count();
     const res = await post("g.addV('w').property('k', 1).groupCount().by(valueMap())", JSON_MT);
-    expect(res.headers.get('Content-Type')).toBe(GRAPHBINARY_MT);
+    expect(res.headers.get('Content-Type')).not.toBe(GRAPHBINARY_MT);
+    expect(await jsonResults(res)).toEqual([{ '{"k":[1]}': 1 }]);
     expect(await count()).toBe(before + 1);
     await post("g.V().hasLabel('w').drop()", GRAPHBINARY_MT);
   });

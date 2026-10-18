@@ -11,10 +11,13 @@ import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
-import { aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
+import { aliasEntryNode, aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './receiver.ts';
+
+/** The floating tags whose by(select(label)) key reuses the label's exactly-spelled entry (`aliasEntryNode`). */
+const FLOATING_TAGS: ReadonlySet<string> = new Set(['double', 'float', 'real']);
 
 /**
  * `by()` AS ONE VOCABULARY — the modulator seam.
@@ -666,11 +669,13 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row
     // `vtype` COLUMN survives becoming JSON.
     // A STATIC recorded type rides on the framing, not a payload column, and is the node's tag: dropped to
-    // NULL ("infer"), the value reached `json_object` bare, whose writer keeps only 15 digits. Tagged, the
-    // ONE JSON-entry authority (`jsonMember`) carries the 17 digits and the range refusal.
+    // NULL ("infer"), the value reached `json_object` bare, whose writer keeps only 15 digits. A FLOATING
+    // one reuses the entry the `as()` site already spelled exactly (`aliasEntryNode`) rather than reading
+    // the REAL back and repairing it a second time.
     const value = scoped.payload[0]![1], tag = scoped.payload[1]?.[1];
     const recorded = staticTypeOf(scoped.framing.type);
-    return gatedOn(scoped.present, value, typedNode(value, tag ?? (recorded ? compilerText(recorded) : compilerNull('text'))));
+    const entryNode = !tag && recorded && FLOATING_TAGS.has(recorded) ? aliasEntryNode(value) : null;
+    return gatedOn(scoped.present, value, entryNode ?? typedNode(value, tag ?? (recorded ? compilerText(recorded) : compilerNull('text'))));
   }
 
   if (host.kind === 'scalar') {
