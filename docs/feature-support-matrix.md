@@ -217,7 +217,7 @@ A write chain is a SEQUENCE of statements, O(write steps) and never O(rows).
 |---|:--:|---|
 | `aggregate(k)`, `cap(k)`, `group(k)`, `groupCount(k)` | ✅ | |
 | `withSideEffect(k, v)`, `withSideEffect(k, seed, Operator)` | ✅ | |
-| `withSack(seed)`, `sack()`, `sack(op).by(…)` | ✅ | ❌ `withSack(seed, Operator.x)` |
+| `withSack(seed)`, `sack()`, `sack(op).by(…)` | ✅ | ❌ `withSack(seed, Operator.x)`; a BigInteger/BigDecimal sack or operand (raises a deferral) |
 | `store(k)` | 🚫 | removed from the language upstream |
 
 ## 13. Traversal strategies
@@ -319,6 +319,7 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | Unordered-stream order | the order of a stream the query does not `order()` — and so which rows an unordered `limit()`/`range()` keeps — is arrival order, one row per traverser (no TraverserSet/LazyBarrier merge-order emulation): `g.V().both().both().limit(4)` keeps the first four arrivals |
 | `barrier()` | a pass-through, as is `barrier(n)`: `inject(1,2,1,3).barrier()` is `[1,2,1,3]`, not Java's regrouped `[1,1,2,3]`; ties in `order()` keep arrival order |
 | Seeded fold over repeats | `fold(seed, Operator)` folds every traverser: `inject(1,1,2).fold(0, sum)` is `4` and `g.V().both().values('age').fold(0, sum)` is `245`, where Java folds a merged slot once |
+| Sack number class | a fold's class is a simple meet — floating if either side is (Double, or Float where neither side is a Long/Double), else Long if either side is or the value leaves 32 bits, else Integer: `withSack(127b).inject(1b).sack(sum)` is the Integer 128 (Java: Short), a Byte/Short fold is an Integer, a Float result past `Float.MAX_VALUE` frames as an infinity; `sack(min/max)` of a pair Java refuses (`ClassCastException`, e.g. a String and a Number) answers SQLite's comparison |
 | Group value pools | a group value body's slice or nested sort reads the key's pooled members one row per traverser — `by(union(out().order()).values('name').fold())` sorts a key's members together, not per member |
 | Per-start sorted bodies | `flatMap`/`local` keep each start's sorted run (start-major); a bare terminal `coalesce()`/`optional()` emission over a sorted arm is unordered |
 | Branch emission order | a `union`/`choose`/`coalesce`/`optional` emits each start's arms in turn, in written order, each arm in its own order — whatever the arms hold (no arm-major switch when an arm holds a barrier, no `Pick`-options-first drain); an arm's `order()` sorts that start's output, so `g.V().union(values('name').order())` is not sorted — put `order()` after the branch. An arm that reduces (`count()`/`fold()`) still reduces over every start and is emitted in its arm's place |

@@ -473,27 +473,6 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
     When iterated to list
     Then the traversal will raise an error with message containing text of "an operand that is not a Number"
 
-  # min/max compare two Numbers through their common class and anything else with `compareTo`
-  # (NumberHelper.min(Comparable, Comparable), vendor/tinkerpop/gremlin-core/.../util/NumberHelper.java:582-598),
-  # a ClassCastException for an Integer against a String or a Boolean. SQLite's MIN answered 1.
-  Scenario: g_withSackX1X_V_sackXminX_byXnameX
-    Given the modern graph
-    And the traversal of
-      """
-      g.withSack(1).V().sack(Operator.min).by("name")
-      """
-    When iterated to list
-    Then the traversal will raise an error with message containing text of "not mutually Comparable"
-
-  Scenario: g_withSackX1X_V_sackXminX_byXconstantXtrueXX_count
-    Given the modern graph
-    And the traversal of
-      """
-      g.withSack(1).V().sack(Operator.min).by(__.constant(true)).count()
-      """
-    When iterated to list
-    Then the traversal will raise an error with message containing text of "not mutually Comparable"
-
   Scenario: g_withSackXzX_V_hasLabelXsoftwareX_sackXminX_byXnameX_sack
     Given the modern graph
     And the traversal of

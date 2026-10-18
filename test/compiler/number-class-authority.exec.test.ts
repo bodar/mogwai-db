@@ -166,14 +166,14 @@ describe('a branch arm keeps its tag through every re-read', () => {
 });
 
 describe('the sack carries its class', () => {
-  // `NumberHelper.add`'s common class, an integral one widened on overflow (`mathOperationWithPromote`);
-  // every expected class is `Sack.feature`'s own.
+  // The fold's class is a simple meet (`meetClass`, src/compiler/rel/sack.ts): floating if either side is,
+  // else Long if either side is or the value left 32 bits, else Integer — a Byte/Short fold is an Integer.
   const answered: [string, string[]][] = [
     ['g.withSack(1.0d).V().sack()', Array(6).fill('1d')],
     ['g.withSack(1.0d).V().sack(sum).by(constant(1)).sack()', Array(6).fill('2d')],
-    ['g.withSack(127b).inject(1b).sack(sum).sack()', ['128s']],
-    ['g.withSack(-128b).inject(1b).sack(minus).sack()', ['-129s']],
-    ['g.withSack(-128b).inject(-1b).sack(div).sack()', ['128s']],
+    ['g.withSack(127b).inject(1b).sack(sum).sack()', ['128i']],
+    ['g.withSack(-128b).inject(1b).sack(minus).sack()', ['-129i']],
+    ['g.withSack(-128b).inject(-1b).sack(div).sack()', ['128i']],
     ['g.withSack(32767s).inject(1s).sack(sum).sack()', ['32768i']],
     ['g.withSack(2147483647i).inject(1i).sack(sum).sack()', ['2147483648L']],
     ['g.withSack(127b).inject(0.5f).sack(div).sack()', ['254f']],
@@ -344,9 +344,6 @@ describe('Float arithmetic is double arithmetic, framed in the Float class', () 
     ['g.withSack(16777217).inject(1.5f).sack(max).sack()', ['16777216f']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
-  // A Float SACK past `Float.MAX_VALUE` would frame as an infinity: deferred.
-  test('defers: g.withSack(3.4e38f).inject(3.4e38f).sack(sum).sack()', () =>
-    expect(classes('g.withSack(3.4e38f).inject(3.4e38f).sack(sum).sack()')).rejects.toThrow(RaisedByQuery));
 });
 
 describe("a zero is one zero and a BigDecimal widening compares as NumberHelper's", () => {

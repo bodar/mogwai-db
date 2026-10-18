@@ -2,22 +2,19 @@ import type { Channel } from '../../channels.ts';
 import { withChannel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerReal, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { INTEGER_OVERFLOW } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
-import type { ValueType } from '../../gremlin/types.ts';
 import { MERGED_VTYPE, PER_ROW, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { SACK_OPS } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
-import { FLOAT_MAX } from './float.ts';
-import { extremumKeepingFirst, inferredVtype } from './reducer.ts';
+import { inferredVtype } from './reducer.ts';
 import { hostTag, type ChildHost, type ChildSeam } from './child.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import type { FramedRel } from './framing.ts';
 import { byProjection, byTyped, modulations, productivityFilter } from './modulator.ts';
-import { deferral, evidenceOf, NUMBER_TAGS, numericOperandOffences, raisingRows, type ValueEvidence } from './receiver.ts';
+import { deferral, evidenceOf, numericOperandOffences, raisingRows, type ValueEvidence } from './receiver.ts';
 import type { GraphSource } from './source.ts';
 
 /**
@@ -180,35 +177,36 @@ export function sackMutate(
   // subquery, and a filter that re-inlined it would spell the whole thing twice. The by()'s TYPE TAG is
   // named beside it for the same scope reason: a per-row tag reads the input relation, and the fold sits
   // two nodes above it — TOTAL, completed from the storage class where the by()'s evidence is partial —
-  // and so is the operands' COMMON CLASS (`commonClass`), which every class-dependent test reads.
+  // and so is the two sides' class MEET (`classCode`), which every class-dependent test reads.
   const held = 'skv';
   const heldTag = 'skt';
-  const heldClass = 'skc';
+  const heldMeet = 'skc';
   const operandTotal = evidence.kind === 'static' ? compilerText(evidence.tag)
     : evidence.kind === 'tag' && evidence.nullOnlyForNull ? evidence.tag : totalTag(tagOf(evidence), value);
-  const common = carried ? commonClass(col(rel.id, SACK_TYPE_COL), operandTotal) : compilerNull();
+  const meet = carried ? bin('+', classCode(col(rel.id, SACK_TYPE_COL)), classCode(operandTotal)) : compilerNull();
   const payload = payloadCols(rel);
   // A MINTING `assign` adds the channel here, in the same projection that names the value — so the
   // fold below reads a column that exists whether or not a `withSack()` seeded one.
   const channels = carried ? rel.channels : withSack(rel.channels);
   const named = make.project({
     id: fresh('skb'), input: rel, channels,
-    type: typeOf(...payload, meta(held, 'any', true), meta(heldTag, 'text', true), meta(heldClass, 'int', true), ...carriedCols(channels)),
+    type: typeOf(...payload, meta(held, 'any', true), meta(heldTag, 'text', true), meta(heldMeet, 'int', true), ...carriedCols(channels)),
     exprs: [
       ...payload.map((column) => [column.name, col(rel.id, column.name)] as const),
       [held, value],
       [heldTag, operandTotal],
-      [heldClass, common],
+      [heldMeet, meet],
       ...channels.map((channel) => [channel.col,
         sackColumn(channel.col) && !carried ? compilerNull() : col(rel.id, channel.col)] as const),
     ],
   });
   // A FENCE where the relation is self-contained: the assembler otherwise re-inlines every column read as
-  // the expression that computes it, and a fold spells its sack, its operand and both tags several times
-  // (the value, the tag, the raise test), so a CHAIN of folds grew geometrically in statement text. Behind
-  // the fence each is a plain column. Not over a correlated or recursive input — a fence hoists to a CTE,
-  // where an outer reference resolves to nothing (`freeRelIds`, as `record.ts` gates it) and a walk's own
-  // reference is refused (`containsSelfRef`).
+  // the expression that computes it, and a fold reads the meet (and so the previous fold's tag) several
+  // times — the tag, each raise test, a `div`'s value — so a CHAIN of folds grows geometrically in statement
+  // text (measured, four `div` folds inside `local()`: 12 KB fenced, 127 KB not). Behind the fence each is
+  // a plain column. Not over a correlated or recursive input — a fence hoists to a CTE, where an outer
+  // reference resolves to nothing (`freeRelIds`, as `record.ts` gates it) and a walk's own reference is
+  // refused (`containsSelfRef`).
   const base = freeRelIds(named).size === 0 && !containsSelfRef(named)
     ? make.materialize({ id: fresh('skz'), input: named, channels: named.channels, type: named.type })
     : named;
@@ -219,15 +217,15 @@ export function sackMutate(
   // traverser, or a by() that always produces.
   const nullable = !drop.keep;
   const facts = (at: Rel): FoldFacts => ({
-    sack: col(at.id, SACK_COL), sackTag: col(at.id, SACK_TYPE_COL), operand: col(at.id, held),
+    sack: col(at.id, SACK_COL), operand: col(at.id, held),
     operandTag: evidence.kind === 'static' ? compilerText(evidence.tag) : col(at.id, heldTag),
-    common: col(at.id, heldClass), nullable,
+    meet: col(at.id, heldMeet), nullable,
   });
   // THE RAISE IS A ROW PREDICATE (`raisingRows`), never a CASE inside the folded value: a sack nobody
   // reads afterwards (`count()`, `fold()`, `path()`, a bare element stream) is a select-list column
   // SQLite prunes, and the raise inside it went with it — `withSack(1).V().sack(sum).by('name')` answered
   // six vertices where `Operator.sum`'s `(Number)` cast raises on every one.
-  const offences = foldOffences(operator, facts(kept), evidence);
+  const offences = foldOffences(operator, facts(kept), col(kept.id, SACK_TYPE_COL), evidence);
   if (!offences) return null;
   const guarded = raisingRows(kept, offences, fresh);
   const at = facts(guarded);
@@ -243,15 +241,14 @@ export function sackMutate(
   });
 }
 
-/** The columns one fold reads: the sack and the operand, each with its TOTAL tag, and their common class
- *  code. `nullable` says whether the operand can be NULL at all — only where no productivity filter dropped
- *  the row (a by()-less fold of a null traverser). */
+/** The columns one fold reads: the sack, the operand with its TOTAL tag, and the two sides' class MEET
+ *  (`classCode`). `nullable` says whether the operand can be NULL at all — only where no productivity
+ *  filter dropped the row (a by()-less fold of a null traverser). */
 interface FoldFacts {
   readonly sack: Expr;
-  readonly sackTag: Expr;
   readonly operand: Expr;
   readonly operandTag: Expr;
-  readonly common: Expr;
+  readonly meet: Expr;
   readonly nullable: boolean;
 }
 
@@ -260,128 +257,81 @@ const sackColumn = (name: string): boolean => name === SACK_COL || name === SACK
 
 const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 const isNull = (e: Expr): Expr => bin('is', e, compilerNull());
-const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
 const caseOf = (whens: readonly (readonly [Expr, Expr])[], otherwise: Expr): Expr => ({ kind: 'case', whens, else: otherwise });
-const path = (...parts: Expr[]): Expr => parts.reduce((left, right) => bin('||', left, right));
 
 /**
- * `NumberHelper`'s CLASS LATTICE, one small integer per class — Byte, Short, Integer, Long, BigInteger,
- * Float, Double, BigDecimal as 0..7 — and the highest common class of every pair as a TABLE, built here
- * from `getHighestCommonNumberInfo`'s own rule (the wider bit count, floating if either side is:
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390`,
- * classes per `determineNumberClass`, `:861-873`), so Long with Float is Double and BigInteger with Float
- * BigDecimal, exactly as there.
+ * THE NUMBER CLASS OF A FOLD — a simple MEET, not `NumberHelper`'s width lattice: the result is floating
+ * if either side is (a Double, or a Float meeting a Long, is a Double; a Float otherwise), else a Long if
+ * either side is a Long or the value left 32 bits, else an Integer — so a Byte/Short result is an Integer,
+ * an accepted divergence (`docs/feature-support-matrix.md`). A BigInteger/BigDecimal side defers; a
+ * non-Number side has no code and makes the meet NULL; a NULL side (a NULL value) adds nothing.
  *
- * Lookups rather than arithmetic or a CASE, and that is load-bearing: each tag is SPELLED ONCE. Where the
- * fold cannot be fenced (a correlated or recursive input) the assembler re-inlines the previous fold's
- * tag at every read, so a tag read k times makes a chain of n folds k^n long — measured 110 KB for three
- * folds inside `local()` with a per-read formula.
- *
- * The integral classes are numbered BELOW every floating one and below BigInteger, which is what lets the
- * overflow widening be one `max(common, needed)`: a floating or BigInteger common class is never widened.
+ * Each side is a CODE and the meet is their SUM, looked up — chosen so every pair's sum is distinct where
+ * the classes differ — because each tag must be SPELLED ONCE: the assembler re-inlines the previous fold's
+ * tag at every read, so a tag read k times makes a chain of n folds k^n long.
  */
-const CLASSES = ['byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal'] as const;
-const BITS = [8, 16, 32, 64, 128, 32, 64, 128];
-const FLOATING = (code: number): boolean => code >= 5;
-const classOf = (bits: number, fp: boolean): number =>
-  fp ? (bits <= 32 ? 5 : bits <= 64 ? 6 : 7) : [8, 16, 32, 64, 128].indexOf(Math.max(bits, 8)) ;
-const COMMON_TABLE = JSON.stringify(CLASSES.map((_, a) => CLASSES.map((_, b) =>
-  classOf(Math.max(BITS[a]!, BITS[b]!), FLOATING(a) || FLOATING(b)))));
-const LONG_CODE = 3;
-const BIGINT_CODE = 4;
-const BIGDECIMAL_CODE = 7;
-const CLASS_CODES = JSON.stringify(Object.fromEntries(CLASSES.map((tag, code) => [tag, code])));
-/** A tag's class code, NULL for a non-Number (or NULL) tag. */
-const classCode = (tag: Expr): Expr => call('json_extract', compilerText(CLASS_CODES), path(compilerText('$.'), tag));
-const classTag = (code: Expr): Expr => call('json_extract', compilerText(JSON.stringify(CLASSES)), path(compilerText('$['), code, compilerText(']')));
-/** The two operands' highest common class code — NULL where either is not a Number. */
-const commonClass = (sackTag: Expr, operandTag: Expr): Expr => call('json_extract', compilerText(COMMON_TABLE),
-  path(compilerText('$['), classCode(sackTag), compilerText(']['), classCode(operandTag), compilerText(']')));
+const NUMBER_CODES = { int: 0, long: 1, float: 3, double: 9 } as const;
+type NumberClass = keyof typeof NUMBER_CODES;
+const CODES = { null: 0, byte: 0, short: 0, ...NUMBER_CODES, bigint: 32, bigdecimal: 32 };
+const LONG = NUMBER_CODES.long;
+const FLOATING = NUMBER_CODES.float;
+const BIG = 32;
+const meetOf = (a: NumberClass, b: NumberClass): NumberClass =>
+  a === 'double' || b === 'double' || (a === 'float' || b === 'float') && (a === 'long' || b === 'long') ? 'double'
+    : a === 'float' || b === 'float' ? 'float' : a === 'long' || b === 'long' ? 'long' : 'int';
+const MEET_CLASS: (NumberClass | null)[] = Array(2 * NUMBER_CODES.double + 1).fill(null);
+for (const a of Object.keys(NUMBER_CODES) as NumberClass[])
+  for (const b of Object.keys(NUMBER_CODES) as NumberClass[]) MEET_CLASS[NUMBER_CODES[a] + NUMBER_CODES[b]] = meetOf(a, b);
+/** A tag's class code — 0 for a NULL tag (a NULL value), NULL for a tag that is not a Number. */
+const classCode = (tag: Expr): Expr =>
+  call('json_extract', compilerText(JSON.stringify(CODES)), bin('||', compilerText('$.'), call('COALESCE', tag, compilerText('null'))));
 
-/**
- * The integral class an integer result NEEDS — the narrowest of Byte/Short/Integer/Long that holds it,
- * which is where `mathOperationWithPromote`'s overflow loop lands (`NumberHelper.java:401-428`: the
- * operation is retried one width up until it fits, so `127b + 1b` is the Short 128 and `-128b / -1b` the
- * Short 128). Read off the hex length of `|2r + 1|` (≤ 2 digits: r ∈ [-128, 127]; ≤ 4: a Short; ≤ 8: an
- * Integer) so the result is spelled once. A floating result's answer is never above Long, so `max` with a
- * floating common class leaves the common class.
- */
-const neededClass = (result: Expr): Expr => {
-  const span = call('abs', bin('+', bin('*', compilerInt(2), result), compilerInt(1)));
-  const digits = call('min', call('length', call('printf', compilerText('%x'), span)), compilerInt(16));
-  return call('json_extract', compilerText('[0,0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3]'), path(compilerText('$['), digits, compilerText(']')));
+/** The class a fold's `result` takes from the meet: an integral meet whose result left 32 bits is a Long
+ *  (`max` with the Long code — the overflow test is NULL for a NULL result, and so is the class). */
+const meetClass = (meet: Expr, result: Expr): Expr => {
+  const past32 = bin('*', bin('>', call('abs', bin('+', bin('*', compilerInt(2), result), compilerInt(1))), compilerInt(4294967295)), compilerInt(LONG));
+  return call('json_extract', compilerText(JSON.stringify(MEET_CLASS)), bin('||', bin('||', compilerText('$['), call('max', meet, past32)), compilerText(']')));
 };
 
-const FLOAT_CODE = 5;
-
 /**
- * WHAT A FOLD OWES, per row — the offences `raisingRows` raises, in the order the reference meets them.
- * `null` declines (an operand proven, at compile time, to be of a type the operator refuses).
+ * WHAT A FOLD OWES, per row — the offences `raisingRows` raises. `null` declines (an operand proven, at
+ * compile time, not to be a Number for an arithmetic operator).
  *
  * - **arithmetic** (`sum`/`minus`/`mult`/`div`): `Operator`'s `(Number)` cast
  *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Operator.java:40-80`)
- *   refuses a non-Number (`numericOperandOffences`); an integral `/ 0` is `ArithmeticException("/ by zero")`
- *   (BigInteger's own message for a BigInteger); a Long result past 64 bits is `Math.addExact`'s
- *   `long overflow`, which `mathOperationWithPromote` rethrows at 64 bits (`NumberHelper.java:420-421`) —
- *   SQLite instead turns the overflowing integer into a REAL, which is the per-row test. A floating `/ 0`
- *   is an Infinity or a NaN, which SQLite answers NULL; a Float past `Float.MAX_VALUE` is retried as a
- *   Double, whose value SQLite holds but whose class the tag would have to re-derive per row; BigDecimal
- *   arithmetic has no SQL spelling. All three are deferrals.
- * - **`min`/`max`**: `NumberHelper.min(Comparable, Comparable)` compares two Numbers through their common
- *   class and anything else with `a.compareTo(b)` (`NumberHelper.java:582-598`), which is a
- *   ClassCastException unless both are of one Comparable class — of the classes SQLite orders as Java
- *   does, a String or a Boolean.
- * - **every numeric operator**: a Number stored as TEXT (a BigInteger past 64 bits) would be compared or
- *   added as a string — a deferral, as is a BigDecimal operand.
+ *   refuses a non-Number (`numericOperandOffences`); an integral `/ 0` is `/ by zero`; an integral result
+ *   SQLite turned into a REAL overflowed 64 bits, which is `long overflow`. A floating `/ 0` (an Infinity)
+ *   and a NaN result have no SQLite carrier (it answers NULL) and defer.
+ * - **every operator**: a BigInteger/BigDecimal side defers — SQLite's arithmetic and comparison are not
+ *   theirs.
  *
  * A NULL on either side owes nothing: `mathOperationWithPromote` returns the sack, and `min`/`max` the
  * other side (`NumberHelper.java:402,558-559`). Every test below is NULL-false over a NULL operand.
  */
-function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidence): (readonly [Expr, string])[] | null {
+function foldOffences(operator: string, facts: FoldFacts, sackTag: Expr, evidence: ValueEvidence): (readonly [Expr, string])[] | null {
   if (operator === 'assign') return [];
-  const { sack, operand, sackTag, operandTag, common } = facts;
+  const { sack, operand, meet } = facts;
   const what = `sack(${operator})`;
-  const numericTail: (readonly [Expr, string])[] = [
-    [bin('=', common, compilerInt(BIGDECIMAL_CODE)), deferral(`${what}: a BigDecimal operand`)],
-    [bin('and', bin('>=', common, compilerInt(0)),
-      call('max', bin('=', call('typeof', sack), compilerText('text')), bin('=', call('typeof', operand), compilerText('text')))),
-    deferral(`${what}: a Number past 64 bits`)],
-  ];
-  if (operator === 'min' || operator === 'max') {
-    // A static by() of a class no SQL comparison orders as Java does declines; per row it raises.
-    if (evidence.kind === 'static' && !COMPARABLE_TAGS.has(evidence.tag) && !NUMBER_TAGS.has(evidence.tag)) return null;
-    // Neither side NULL, not two Numbers, and not one Comparable class on both sides.
-    const comparable = bin('or', bin('is not', common, compilerNull()),
-      bin('and', bin('=', sackTag, operandTag), { kind: 'in-list', expr: sackTag, values: [...COMPARABLE_TAGS].map(compilerText) }));
-    const offends = bin('and', bin('and', bin('is not', sack, compilerNull()), bin('is not', operand, compilerNull())), not(comparable));
-    return [[offends, deferral(`${what}: operands that are not mutually Comparable`)], ...numericTail];
-  }
+  const big: readonly [Expr, string] = [bin('>=', meet, compilerInt(BIG)), deferral(`${what}: a BigInteger or BigDecimal operand`)];
+  if (operator === 'min' || operator === 'max') return [big];
   if (!ARITHMETIC.has(operator)) return null;
   const typed = numericOperandOffences([
     [sack, evidenceOf(UNKNOWN, sackTag)],
-    [operand, evidence.kind === 'static' ? evidence : { kind: 'tag', tag: operandTag }],
+    [operand, evidence.kind === 'static' ? evidence : { kind: 'tag', tag: facts.operandTag }],
   ], what);
   if (typed === false) return null;
   const result = arithmetic(operator, facts);
-  // ONE per-row key for the class-dependent errors, so the common class is spelled once more rather than
-  // once per test: the common class where the result left its range, else -1.
-  const overflowed = caseOf([[bin('=', call('typeof', result), compilerText('real')), common]], compilerInt(-1));
+  const integral = bin('<', meet, compilerInt(FLOATING));
   const zero = bin('=', operand, compilerInt(0));
   const divByZero: (readonly [Expr, string])[] = operator === 'div' ? [
-    [bin('and', zero, bin('=', common, compilerInt(BIGINT_CODE))), 'BigInteger divide by zero'],
-    [bin('and', zero, bin('<', common, compilerInt(BIGINT_CODE))), '/ by zero'],
-    [bin('and', zero, bin('>', common, compilerInt(BIGINT_CODE))), deferral(`${what}: a floating-point division by zero`)],
+    [bin('and', zero, integral), '/ by zero'],
+    [bin('and', zero, bin('>=', meet, compilerInt(FLOATING))), deferral(`${what}: a floating-point division by zero`)],
   ] : [];
   return [
     ...typed,
-    ...numericTail,
+    big,
     ...divByZero,
-    [bin('=', overflowed, compilerInt(BIGINT_CODE)), INTEGER_OVERFLOW],
-    [bin('and', bin('>=', overflowed, compilerInt(0)), bin('<=', overflowed, compilerInt(LONG_CODE))), 'long overflow'],
-    // A Float result past `Float.MAX_VALUE` is one the reference retries as a Double; it would frame as an
-    // infinity here.
-    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('>', call('abs', result), compilerReal(FLOAT_MAX))),
-      deferral(`${what}: a Float result past Float.MAX_VALUE`)],
+    [bin('and', integral, bin('=', call('typeof', result), compilerText('real'))), 'long overflow'],
     // A NULL result from two non-NULL operands is a NaN (`Infinity + -Infinity`, `Infinity * 0`), which the
     // reference carries as the Double NaN and SQLite cannot: it answered a `null` sack.
     [bin('and', bin('and', bin('is not', sack, compilerNull()), bin('is not', operand, compilerNull())), isNull(result)),
@@ -389,24 +339,20 @@ function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidenc
   ];
 }
 
-/** The non-Number classes `min`/`max` may compare: one class on both sides, ordered by SQLite as by
- *  `compareTo` (a String's code units, a Boolean's false < true). */
-const COMPARABLE_TAGS: ReadonlySet<ValueType> = new Set<ValueType>(['string', 'boolean']);
-
 /**
- * The folded value's TAG, total (see `SACK_TYPE_COL`) — the class `NumberHelper` gives the result
- * (`NumberHelper.java:401-428`): the operands' highest common class (`commonClass`), widened where an
- * integral result overflows it (`neededClass`). `assign` takes the by()'s tag; `min`/`max` the common class
- * of two Numbers and the shared tag of two Comparables. A NULL sack folds to NULL, and its tag is NULL with
- * it; a NULL operand leaves the sack, and its tag, as they were.
+ * The folded value's TAG, total (see `SACK_TYPE_COL`): the meet's class (`meetClass`) — for a NULL operand
+ * that is the sack's own class, since a NULL side adds nothing. `assign` takes the by()'s tag. A `min`/`max`
+ * of two values that are not both Numbers (two Strings, two Booleans) answers the operand's tag, the winner's
+ * class wherever the reference answers at all; where the winner's storage is not the operand's (a mixed
+ * pair the reference refuses) its storage class.
  */
 function foldedTag(operator: string, facts: FoldFacts, result: Expr): Expr {
-  const { sack, sackTag, operand, operandTag, nullable } = facts;
+  const { operand, operandTag, meet } = facts;
   if (operator === 'assign') return operandTag;
-  const keepSack = (tag: Expr): Expr => nullable ? caseOf([[isNull(operand), sackTag]], tag) : tag;
-  if (operator === 'min' || operator === 'max')
-    return keepSack(call('COALESCE', classTag(facts.common), caseOf([[isNull(sack), operandTag]], sackTag)));
-  return keepSack(classTag(call('max', facts.common, neededClass(result))));
+  const tag = meetClass(meet, result);
+  if (operator !== 'min' && operator !== 'max') return tag;
+  const sameStorage = bin('=', call('typeof', result), call('typeof', operand));
+  return call('COALESCE', tag, caseOf([[sameStorage, operandTag]], inferredVtype(result)));
 }
 
 /**
@@ -421,11 +367,9 @@ function combine(operator: string, facts: FoldFacts): Expr | null {
   const { sack, operand, nullable } = facts;
   switch (operator) {
     case 'assign': return operand;
-    // The sack is spelled ONCE where the operand cannot be NULL (see `CLASSES` for why a spelling counts).
-    // A TIE keeps the SACK — `SackValueStep` applies `Operator.max/min(sack, value)` — which is observable
-    // for a BigDecimal `1.0` against `1.00` (`reducer.ts` `extremumKeepingFirst`).
+    // The sack is spelled ONCE (see `NUMBER_CODES` for why a spelling counts).
     case 'min':
-    case 'max': return extremumKeepingFirst(operator, call('COALESCE', sack, operand), nullable ? call('COALESCE', operand, sack) : operand);
+    case 'max': return call(operator.toUpperCase(), call('COALESCE', sack, operand), nullable ? call('COALESCE', operand, sack) : operand);
     default: {
       if (!ARITHMETIC.has(operator)) return null;
       const folded = arithmetic(operator, facts);
@@ -435,11 +379,10 @@ function combine(operator: string, facts: FoldFacts): Expr | null {
 }
 
 /**
- * The arithmetic over two non-null Numbers. `div` is REAL division exactly where the common class is
- * floating, and SQLite's integer division otherwise — `NumberHelper`'s integral helpers truncate
- * (`a.intValue() / b.intValue()`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:137-142`),
- * so `withSack(1).sack(div).by(constant(2))` is 0. The TAG, not the storage class, decides, because a
- * whole Double can be STORED as an integer.
+ * The arithmetic over two non-null Numbers — SQLite's own. `div` is REAL division where the meet is
+ * floating and SQLite's integer division otherwise (`NumberHelper`'s integral helpers truncate too), so
+ * `withSack(1).sack(div).by(constant(2))` is 0. The meet, not the storage class, decides, because a whole
+ * Double can be STORED as an integer.
  */
 function arithmetic(operator: string, facts: FoldFacts): Expr {
   const { sack, operand } = facts;
@@ -448,7 +391,7 @@ function arithmetic(operator: string, facts: FoldFacts): Expr {
     case 'minus': return bin('-', sack, operand);
     case 'mult': return bin('*', sack, operand);
     // `× 1.0` makes the division REAL without spelling the sack twice.
-    default: return bin('/', bin('*', sack, caseOf([[bin('>', facts.common, compilerInt(BIGINT_CODE)), compilerReal(1)]], compilerInt(1))), operand);
+    default: return bin('/', bin('*', sack, caseOf([[bin('>=', facts.meet, compilerInt(FLOATING)), compilerReal(1)]], compilerInt(1))), operand);
   }
 }
 

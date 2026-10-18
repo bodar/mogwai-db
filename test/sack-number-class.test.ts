@@ -1,11 +1,10 @@
-// THE SACK'S NUMBER CLASS — what `NumberHelper` gives an arithmetic or min/max fold, asserted on the WIRE.
+// THE SACK'S NUMBER CLASS — what an arithmetic or min/max fold answers, asserted on the WIRE.
 //
 // L3 and L4 compare numbers loosely (`d[128].s` and `d[128].i` are both the number 128 to their
-// harnesses), so the class a fold produces is only visible in the GraphBinary type code. The reference:
-// the operands' highest common class (`getHighestCommonNumberInfo`,
-// vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390),
-// widened one width at a time on overflow (`mathOperationWithPromote`, :401-428), and the type-tag
-// authority that carries it is `foldedTag` (src/compiler/rel/sack.ts).
+// harnesses), so the class a fold produces is only visible in the GraphBinary type code. The rule is a
+// simple MEET (`meetClass`, src/compiler/rel/sack.ts), not NumberHelper's width lattice: floating if
+// either side is, else Long if either side is or the value left 32 bits, else Integer — so a Byte/Short
+// fold answers an Integer (an accepted divergence, docs/feature-support-matrix.md).
 import { describe, expect, test } from 'bun:test';
 import { seededStore } from './support/harness.ts';
 import { exec } from './support/executor.ts';
@@ -29,14 +28,13 @@ async function typed(gremlin: string): Promise<string[]> {
   return out;
 }
 
-describe('an arithmetic fold takes the operands\' highest common class', () => {
+describe('an arithmetic fold takes the meet of the operands\' classes', () => {
   test.each([
     ['g.withSack(1l).inject(2l).sack(sum).sack()', 'Long:3'],
     ['g.withSack(1).inject(2l).sack(sum).sack()', 'Long:3'],
     ['g.withSack(5l).inject(2).sack(div).sack()', 'Long:2'],
-    ['g.withSack(5n).inject(2).sack(div).sack()', 'BigInteger:2'],
-    ['g.withSack(5b).inject(2b).sack(sum).sack()', 'Byte:7'],
-    ['g.withSack(5s).inject(2b).sack(mult).sack()', 'Short:10'],
+    ['g.withSack(5b).inject(2b).sack(sum).sack()', 'Integer:7'],
+    ['g.withSack(5s).inject(2b).sack(mult).sack()', 'Integer:10'],
     ['g.withSack(1.0d).inject(2).sack(sum).sack()', 'Double:3'],
     ['g.withSack(1.5f).inject(2).sack(sum).sack()', 'Float:3.5'],
     ['g.withSack(1.5f).inject(2l).sack(sum).sack()', 'Double:3.5'],
@@ -46,14 +44,11 @@ describe('an arithmetic fold takes the operands\' highest common class', () => {
   });
 });
 
-describe('an integral result past its class widens one width at a time (Sack.feature)', () => {
+describe('an integral result past 32 bits is a Long (Sack.feature)', () => {
   test.each([
-    ['g.withSack(127b).inject(1b).sack(sum).sack()', 'Short:128'],
-    ['g.withSack(-128b).inject(1b).sack(minus).sack()', 'Short:-129'],
-    ['g.withSack(127b).inject(2b).sack(mult).sack()', 'Short:254'],
-    ['g.withSack(-128b).inject(-1b).sack(div).sack()', 'Short:128'],
-    ['g.withSack(32767s).inject(1s).sack(sum).sack()', 'Integer:32768'],
-    ['g.withSack(-32768s).inject(-1s).sack(div).sack()', 'Integer:32768'],
+    ['g.withSack(127b).inject(1b).sack(sum).sack()', 'Integer:128'],
+    ['g.withSack(-128b).inject(-1b).sack(div).sack()', 'Integer:128'],
+    ['g.withSack(-2147483648i).inject(-1i).sack(div).sack()', 'Long:2147483648'],
     ['g.withSack(2147483647i).inject(1i).sack(sum).sack()', 'Long:2147483648'],
     ['g.withSack(2147483647i).inject(2i).sack(mult).sack()', 'Long:4294967294'],
   ])('%s', async (gremlin, expected) => {
@@ -68,6 +63,9 @@ describe('min/max answer in the common class of two Numbers, and a NULL side yie
     ['g.withSack(1).inject(null).sack(max).sack()', ['Integer:1']],
     ['g.withSack(1).inject(null).sack(sum).sack()', ['Integer:1']],
     ["g.withSack('m').V().hasLabel('software').sack(min).by('name').sack()", ['String:lop', 'String:m']],
+    ['g.withSack(true).inject(false).sack(min).sack()', ['Boolean:false']],
+    // A pair Java refuses (ClassCastException) answers SQLite's comparison, framed by the winner's storage.
+    ["g.withSack('m').inject(1).sack(min).sack()", ['Integer:1']],
   ])('%s', async (gremlin, expected) => {
     expect((await typed(gremlin)).sort()).toEqual([...expected].sort());
   });
@@ -79,7 +77,7 @@ describe('integral div truncates, and a zero divisor raises the reference\'s mes
   });
   test.each([
     ['g.withSack(1).inject(1).sack(div).by(constant(0)).sack()', '/ by zero'],
-    ['g.withSack(5n).inject(0).sack(div).sack()', 'BigInteger divide by zero'],
+    ['g.withSack(5n).inject(2).sack(div).sack()', 'a BigInteger or BigDecimal operand is not supported yet'],
     ['g.withSack(1.0d).inject(0).sack(div).sack()', 'floating-point division by zero is not supported yet'],
     ['g.withSack(2147483647l).inject(2147483647l).sack(mult).sack(mult).by(constant(2147483647l)).sack()', 'long overflow'],
     ['g.withSack(2147483647l).inject(2147483647l).sack(mult).sack(mult).by(constant(2147483647l)).count()', 'long overflow'],
