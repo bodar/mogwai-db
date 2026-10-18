@@ -23,25 +23,28 @@ lowered.
   **map shape** (9 — `group*`), **list shape** (9 — `fold`/`unfold`), **row ops** (9 — `order`/`dedup`/`range`),
   **side effects** (8 — `group`/`aggregate`/`cap`). Start with
   [the RelIR build plan](./2026-08-01-relir-build-plan.md) (§10 is the live-gap home).
-- **A READ in the main chain of a write that ran over several traversers — still answered from one
-  statement per step (WRONG today, pre-existing).** The lazy pipeline hands traverser 1 through every later
-  step before traverser 2 reaches the write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`),
-  so a later read sees only EARLIER traversers' writes: `g.inject(1,2).addV('x').V().hasLabel('x').count()`
-  is 3 in the reference (we say 4), `g.V(1,2).addE('k').to(V(3)).V(3).inE('k').count()` 3 (we say 4),
-  `g.inject(1,2).as('a').V(1).property(single,'w',select('a')).values('w')` [1,2] (we say [2,2]),
-  `g.inject(1,2).as('a').addV('x').filter(select('a').is(1)).V().hasLabel('x').count()` 1 (we say 2); an EARLIER read interleaves the same
-  way from the other side. What is guarded today is only a value BODY that reads (`sequentialGuard`, with
-  the upstream stream count from `afterWrite`), a write over what an upstream write wrote
-  (`writeAfterWrite` — every writer, a merge's onMatch and its search included; a later write that only
-  reaches ANOTHER traverser's creation is this read class), and a merge's per-driver re-writes
-  (`guardMergeInterleaving`). The generic rule is
-  `afterWrite` refusing when the PROGRAM's reach (`ProgramWrites.reads`, a `BodyReach`) observes the writer's
-  effect over >1 traverser — measured as the coarse form (no per-element exemption): it costs 12 L3
-  scenarios and ~96 other tests, because a read of the traverser's OWN element after an idempotent constant
-  write (`g.V().property('x',1).values('x')`) is exact and must stay answered, and a `NoOpBarrierStep`
-  between write and read (a second flat-map, `g.V().property('w',1).out().property('w',2)`) orders every
-  write first. So it needs `sequentialGuard`'s per-element/per-stream split applied to the chain's own
-  reads, and the barrier positions `ir/bulk.ts` already models (`bulkingPositions`).
+- **The per-traverser write interleave — residue.** The lazy pipeline hands traverser 1 through every later
+  step before traverser 2 reaches a write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`).
+  ONE scan places every later step of a writer's chain (`interleaving`/`Placement`, `src/compiler/rel/write.ts`:
+  in the window, past a sized `NoOpBarrierStep(2500)` from `bulkingPositions`, past a drain; on the
+  traverser's own element or not), and every guard reads it: a later READ (`readAfterWrite` —
+  `g.inject(1,2).addV('x').V().hasLabel('x').count()` refuses, `g.V().property('x',1).values('x')` answers),
+  a later WRITE (`writeAfterWrite`, by kind/freshness/ownership as well as key), a value body
+  (`sequentialGuard` — a drain between now answers, `…addLabel('z').fold().unfold()…property('n', …)`), and a
+  write over traversers the reference MERGED (`mergedOnceAlike` — `g.V().out().addV('x')` makes 4 vertices,
+  not 6, and refuses where an element reaches it twice). What is left, all failing closed:
+  - an EARLIER read interleaves from the other side (a read UPSTREAM of a write, in its stream) — not
+    guarded by this scan (`g.inject(1,2).V().hasLabel('x').fold().coalesce(…, addV('x'))`-like forms that put
+    no drain between the read and the write);
+  - over-refusals by identity: a later write reached by a literal-id re-source
+    (`g.V(1,2).property(single,'w',5).V(3).property(single,'w',9)`), a vertex drop after a multi-traverser
+    write (`…V(3).drop()`), a merge `onMatch` of a key an earlier write wrote on a different element
+    (`…mergeV([name:'lop']).option(onMatch,[w:single(9)])`), a label read after a merge that appends one, and
+    the merge's own `mergeObservesOtherWrites` for a label mutation (it does not know whether the search
+    reads labels);
+  - an own-element read after a non-idempotent write on a `withBranchEffects` arm with more than one body,
+    and a sized barrier after a non-vertex flat-map (`values()`, `E()`), stay in the window;
+  - `g.V(1,1)` is one traverser here (a repeated literal id), two in the reference — independent of writes.
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed collections, member
   variants, maps, aliases, paths, and format adapters (also meta-property value typing) — the root of
   the 11-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's
@@ -157,14 +160,12 @@ lowered.
   to compute every guard's host from the pre-write snapshot (an `addV` host is one row per INPUT
   traverser, so its count is the input's) and emit all guards before the plan's first statement. The real
   feature behind the refusals is a per-traverser write driver, which is the general driver above.
-  **A barrier between an UPSTREAM write and the site over-refuses.** `afterWrite` keeps every mutating
-  step on `ProgramWrites.upstream` for its whole tail, so a body observing it refuses when >1 traverser
-  ran through the write — even where a full barrier in between (`fold().unfold()`, `barrier()`,
-  `order()`, `count()`) has drained the write before the site runs and one statement IS the reference:
-  `g.V(1,2).addLabel('z').fold().unfold().has('name','marko').property('n', __.V().hasLabel('z').count())`
-  (ref 2), and the single-arm source union `g.union(__.addV('x')).property('n', __.V().hasLabel('x').count())`
-  (ref 1). Both answered correctly before the upstream guard landed; the fix is a barrier lowering that
-  pops (resets) the upstream entries it drains.
+  **A branch's UNCOUNTABLE stream between an upstream write and the site over-refuses.** A drain between
+  the two is placed now (`Placement`, write.ts — `…addLabel('z').fold().unfold()…property('n', …)` answers 2),
+  but a write in a branch's arm has no relation counting the traversers through it (`withBranchEffects`,
+  `input` null), so an observing site after it always refuses even over one start:
+  `g.union(__.addV('x')).property('n', __.V().hasLabel('x').count())` (ref 1). The fix is a count of the
+  branch's input for a one-body branch whose body is one traverser per start.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP

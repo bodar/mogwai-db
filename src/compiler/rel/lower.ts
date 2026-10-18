@@ -48,7 +48,7 @@ import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOf
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { deferralExpr, raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { promotedExtremum, resultIsDecimal, widensDoubleToDecimal } from './float.ts';
-import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, terminalWrite, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
+import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, terminalWrite, withPreChecks, type Effects, type ProgramWrites, type WritePlace } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapIdentity, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
@@ -446,14 +446,21 @@ export const mintBranchOrder = (
  *  arm's own write over an arm-internal stream (`union(__.V(1,2).addLabel('z'))`) interleaves with it as
  *  well. Neither the branch's input nor its merged output counts the traversers through ITS writes. */
 const withBranchEffects = (
-  merged: BranchRel, step: IRStep, ctx: ChainCtx, fresh: Minter, tail: () => Tail | null,
-): Tail | null => (merged.effects?.length ? afterWrite(ctx.writes, null, [step], merged.effects, ctx.params, fresh, tail) : tail());
+  merged: BranchRel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter, tail: () => Tail | null,
+): Tail | null => (merged.effects?.length
+  ? afterWrite(ctx.writes, null, writePlace(ctx, steps, at, at + 1, merged.rel), merged.effects, ctx.params, fresh, tail) : tail());
 
 /** Does the stream reaching `steps[at]` hold exactly the reference's traversers — none merged by a
  *  bulking barrier before it? Answerable only where `steps` is KNOWN to begin a traversal
  *  (`ChainCtx.traversal`, compared by identity), and then by `referenceUnbulkedAt`'s conservative scan. */
 export const unbulkedAt = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
   mergesNothing(ctx) || (ctx.traversal?.steps === steps && referenceUnbulkedAt(steps, at, ctx.traversal.rooted, startsSingle(ctx.traversal)));
+
+/** Where a writer `steps[from, end)` sits, for `afterWrite`: its chain, the traversal that chain is known to
+ *  begin, whether the reference reaches it with every traverser unmerged (`unbulkedAt` — nothing at all
+ *  precedes a source write), and the relation it hands on. */
+const writePlace = (ctx: ChainCtx, steps: readonly IRStep[], from: number, end: number, output: Rel): WritePlace =>
+  ({ steps, from, end, traversal: ctx.traversal, unbulked: from === 0 || unbulkedAt(ctx, steps, from), output });
 
 /** Is a CHILD traversal fed one parent traverser at a time — not the root, and not a `BranchStep` arm
  *  handed every start at once (`ChainCtx.traversal.allStarts`)? The scan's `singleStart` (`ir/bulk.ts`). */
@@ -2052,7 +2059,7 @@ function scalarTail(
     if (BRANCH_HOSTS.has(step.name)) {
       const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels, { steps, at });
       if (!merged) return null;
-      return withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
+      return withBranchEffects(merged, steps, at, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
 
     // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
@@ -2674,7 +2681,7 @@ function scalarTail(
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
           : mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!written) return null;
-      return afterWrite(ctx.writes, rel, steps.slice(at, written.at), written.effects.bindings, ctx.params, fresh, () => elementTail(
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, written.at, written.effects.result), written.effects.bindings, ctx.params, fresh, () => elementTail(
         written.effects.result, step.name === 'addE' || step.name === 'mergeE' ? 'edge' : 'vertex',
         steps, written.at, false, ctx, fresh, labels,
       ));
@@ -3300,7 +3307,7 @@ function mapTail(
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       const merged = mergedFromMap(rel, valOf, steps, at, ctx, fresh);
       if (!merged) return null;
-      return afterWrite(ctx.writes, rel, steps.slice(at, merged.at), merged.effects.bindings, ctx.params, fresh,
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, merged.at, merged.effects.result), merged.effects.bindings, ctx.params, fresh,
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
     }
 
@@ -4751,7 +4758,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
     // A write in a source-union arm threads its effects out (`g.union(__.addV(…), __.addV(…))`) — arm-major
     // order makes the writes' own answer correct; a downstream body that OBSERVES them refuses
     // (`withBranchEffects`), since arm 2 writes only after arm 1 has run through the rest of the chain.
-    return withBranchEffects(merged, first, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES));
+    return withBranchEffects(merged, steps, 0, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES));
   }
 
   if (first.name === 'inject') {
@@ -4832,7 +4839,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const added = addedEdges(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
     if (!added) return null;
-    return afterWrite(ctx.writes, one, steps.slice(0, added.at), added.effects.bindings, ctx.params, fresh,
+    return afterWrite(ctx.writes, one, writePlace(ctx, steps, 0, added.at, added.effects.result), added.effects.bindings, ctx.params, fresh,
       () => elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES));
   }
 
@@ -4840,7 +4847,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const added = addedVertices(one, steps, 0, ctx, fresh);
     if (!added) return null;
-    return afterWrite(ctx.writes, one, steps.slice(0, added.at), added.effects.bindings, ctx.params, fresh,
+    return afterWrite(ctx.writes, one, writePlace(ctx, steps, 0, added.at, added.effects.result), added.effects.bindings, ctx.params, fresh,
       () => elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES));
   }
 
@@ -4850,7 +4857,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const merged = mergedElements(one, steps, 0, NO_ALIASES, ctx, fresh);
     if (!merged) return null;
-    return afterWrite(ctx.writes, one, steps.slice(0, merged.at), merged.effects.bindings, ctx.params, fresh,
+    return afterWrite(ctx.writes, one, writePlace(ctx, steps, 0, merged.at, merged.effects.result), merged.effects.bindings, ctx.params, fresh,
       () => elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES));
   }
 
@@ -5264,7 +5271,7 @@ function elementTail(
       // rows stand for exactly what the input rows stood for. Keeping the disjunction once the switch
       // stopped implying the chain verdict would make EVERY merge bulked, which is not merely the
       // heavier slice form — it trips `framed`'s backstop and declines the traversal.
-      return withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
+      return withBranchEffects(merged, steps, at, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
     }
     if (step.name === 'repeat') {
       // A SIDE EFFECT IN THE WALK'S BODY DECLINES. The body folds over the walk's `SelfRef`, so an
@@ -5324,7 +5331,7 @@ function elementTail(
       // to the incoming row that made them. Re-entering with `NO_ALIASES` is what made a SECOND `addE`
       // decline: the relation still carried the alias columns, so the next `from("a")` was looking for
       // a label the fold had just forgotten it had.
-      return afterWrite(ctx.writes, rel, steps.slice(at, added.at), added.effects.bindings, ctx.params, fresh,
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, added.at, added.effects.result), added.effects.bindings, ctx.params, fresh,
         () => elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, labels));
     }
     // THE PROJECTORS — a RETYPE from an element traverser to a value, exactly as `values()`/`count()`
@@ -5373,7 +5380,7 @@ function elementTail(
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
       // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
       // row produced any of them.
-      return afterWrite(ctx.writes, rel, steps.slice(at, merged.at), merged.effects.bindings, ctx.params, fresh,
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, merged.at, merged.effects.result), merged.effects.bindings, ctx.params, fresh,
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
     }
     if (step.name === 'addV') {
@@ -5384,7 +5391,7 @@ function elementTail(
       // back to the input row that made them, so a label bound before the creation is still bound
       // after it. Re-entering with `NO_ALIASES` here made the next `as()` mint a column the relation
       // already carried — a THROW from the lowering, which `rel-sweep`'s contract forbids.
-      return afterWrite(ctx.writes, rel, steps.slice(at, added.at), added.effects.bindings, ctx.params, fresh,
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, added.at, added.effects.result), added.effects.bindings, ctx.params, fresh,
         () => elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, labels));
     }
     if (step.name === 'property') {
@@ -5404,7 +5411,7 @@ function elementTail(
       if (!written) return null;
       // Effects run BEFORE anything the tail computes, and a tail of its own (a nested write) lands
       // after them — one flat list, in the order the fold produced it (`afterWrite`).
-      return afterWrite(ctx.writes, rel, steps.slice(at, end), written.bindings, ctx.params, fresh,
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, end, written.result), written.bindings, ctx.params, fresh,
         () => elementTail(written.result, elem, steps, end, bulked, ctx, fresh, labels), elem);
     }
     if (step.name === 'addLabel' || step.name === 'dropLabel' || step.name === 'dropLabels') {
@@ -5417,7 +5424,7 @@ function elementTail(
         ? elementAddLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh)
         : elementDropLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh);
       if (!mutated) return null;
-      return afterWrite(ctx.writes, rel, [step], mutated.bindings, ctx.params, fresh,
+      return afterWrite(ctx.writes, rel, writePlace(ctx, steps, at, at + 1, mutated.result), mutated.bindings, ctx.params, fresh,
         () => elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels));
     }
     if (step.name === 'drop') {
@@ -5678,7 +5685,7 @@ function propertyTail(
   // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
     const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels, { steps, at: from });
-    return merged && withBranchEffects(merged, step, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases));
+    return merged && withBranchEffects(merged, steps, from, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, merged.aliases));
   }
 
   // `constant(c)` DISCARDS the property and emits a literal — the shape-independent retype, shared with

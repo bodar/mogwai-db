@@ -530,6 +530,17 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
       distinct = false;
       single = false;
       from = 1;
+    } else if (!exact && (start?.name === 'addV' || start?.name === 'addE')) {
+      // A SOURCE creation is ONE traverser — the element it made — and no set holds it.
+      single = true;
+      from = 1;
+    } else if (!exact && (start?.name === 'mergeV' || start?.name === 'mergeE')) {
+      // A SOURCE merge is a `MergeElementStep`, a `FlatMapStep`
+      // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:60`):
+      // the strategy's first flat-map, emitting the distinct elements one search found.
+      foundFlatMap = true;
+      single = false;
+      from = 1;
     } else {
     if (!knownStartStep(start)) return 'unknown';
     const ids = start.args ?? [];
@@ -623,7 +634,11 @@ function scan(steps: readonly IRStep[], rooted: boolean, mode: Mode, upTo = step
     }
     // `properties()` of pairwise-distinct elements is pairwise distinct (a property has one owner); every
     // other flat-map may reach one traverser twice.
-    if (FLAT_MAPS.has(name)) { flatMap(distinct && name === 'properties'); return; }
+    // A mid-chain `V()`/`E()` for ONE traverser emits each element once.
+    if (FLAT_MAPS.has(name)) { flatMap((distinct && name === 'properties') || (single && (name === 'V' || name === 'E'))); return; }
+    // A merge is a `MergeElementStep`, a `FlatMapStep` (`…/step/map/MergeElementStep.java:60`); the exact
+    // scan refused it (`UNKNOWABLE_BEFORE`), the superset counts it, its one search's elements distinct.
+    if (name === 'mergeV' || name === 'mergeE') { flatMap(single); return; }
     if (EDGE_MOVES.has(name)) { distinct = false; return; }
     if (name === 'barrier') {
       const window = barrierWindow(s);

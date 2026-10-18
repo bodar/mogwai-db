@@ -47,7 +47,6 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     `g.V(1,2).addLabel('z').has('name','marko').property('n', __.project('a').by(__.V().hasLabel('z').count()).select('a'))`,
     `g.V(1,2).addLabel('z').has('name','marko').property('n', __.constant(1).where(__.V().hasLabel('z').count().is(1)).constant(7))`,
     `g.V(1,2).as('a').addLabel('z').select('a').has('name','marko').property('n', __.V().hasLabel('z').count())`,
-    `g.V(1,2).addLabel('z').tail(1).property('n', __.V().hasLabel('z').count())`,
     // writes in a UNION's arms: `BranchStep` drains each arm lazily and only then the next
     // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:123-153),
     // so arm 2's writes run after arm 1's traversers passed the site, and an arm's own write over an
@@ -128,6 +127,12 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     [`g.V(1,2).property('a',1).limit(1).property('n', __.V().values('a').count())`, `g.V().has('a').values('n')`, 1],
     [`g.V(1,2).addLabel('z').range(0,1).property('n', __.V().hasLabel('z').count())`, `g.V().hasLabel('z').values('n')`, 1],
     [`g.V(1).union(__.addLabel('z')).property('n', __.values('name'))`, `g.V(1).values('n')`, 'marko'],
+    // a DRAIN between the upstream write and the site — `TailGlobalStep` pulls every start before it emits
+    // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/TailGlobalStep.java:56-66),
+    // as does a `fold()` — so every traverser has run the write first and one statement IS the reference
+    // (`Placement`, write.ts): vadas, the last, sees both labels.
+    [`g.V(1,2).addLabel('z').tail(1).property('n', __.V().hasLabel('z').count())`, `g.V().has('n').values('n')`, 2],
+    [`g.V(1,2).addLabel('z').fold().unfold().has('name','marko').property('n', __.V().hasLabel('z').count())`, `g.V().has('n').values('n')`, 2],
   ];
   for (const [traversal, check, expected] of answered) test(traversal, () => {
     const store = seededStore();

@@ -294,6 +294,8 @@ export function floatLiteralValue(text: string): { value: number | BigDecimal; t
 export const flattenListArgs = (args: any[]): any[] =>
   args.flatMap((a) => (Array.isArray(a) ? a : [a]));
 
+/** The parse-tree class of the root query's `iterate()` terminal method (`stepChain`, `unansweredTerminalMethod`). */
+const ITERATE_TERMINAL = 'TraversalTerminalMethod_iterateContext';
 export const stepName = (cls: string, prefix: string) =>
   cls.startsWith(prefix) && cls.endsWith('Context')
     ? cls.slice(prefix.length, -'Context'.length).split('_')[0]
@@ -321,7 +323,13 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
     // NOT harvest steps from it, or the criterion's has()/out() would leak into the
     // main chain as bogus source steps.
     if (cls.startsWith('TraversalSourceSelfMethod')) return;
-    const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
+    // `iterate()` — the root query's terminal method — IS a trailing `discard()`: `Traversal.iterate()`
+    // appends one before it applies the strategies and drains the end step
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Traversal.java:201-217`,
+    // reached from `TraversalTerminalMethodVisitor.visitTraversalTerminalMethod_iterate`). The grammar puts
+    // it after the root traversal, so the depth-first walk reaches it last.
+    if (cls === ITERATE_TERMINAL && !insideNested) { steps.push({ name: 'discard', args: [], ctx: node }); return; }
+    const name =stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
       const args = extractArgs(node, params, paramTypes);
       // The grammar deliberately exposes the named repeat overload as
@@ -426,17 +434,19 @@ export interface MergePolicy { readonly seed: Arg; readonly operator?: string; }
  * `vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4:29-36`) and the reference EXECUTES it
  * (`TraversalTerminalMethodVisitor`): `next()` is ONE result, `hasNext()` a Boolean, `toSet()` a deduplicated
  * set. The step walk never sees it, so `g.V().values('name').next()` answered the whole stream. `toList()` is
- * the stream itself and is the one this front end answers; the caller declines the rest.
+ * the stream itself and `iterate()` is a trailing `discard()` step (`stepChain`), the two this front end
+ * answers; the caller declines the rest.
  */
 export function unansweredTerminalMethod(tree: any): string | null {
   for (const query of descendants(tree, 'QueryContext')) {
     if (query.K_TOSTRING?.()) return 'toString()';
     const terminal = query.traversalTerminalMethod?.();
     // The rule wraps one labelled alternative (`TraversalTerminalMethod_<name>Context`).
-    if (terminal && descendants(terminal, 'TraversalTerminalMethod_toListContext').length === 0) return terminal.getText();
+    if (terminal && !ANSWERED_TERMINALS.some((name) => descendants(terminal, name).length > 0)) return terminal.getText();
   }
   return null;
 }
+const ANSWERED_TERMINALS = ['TraversalTerminalMethod_toListContext', ITERATE_TERMINAL];
 
 /** Pull withSack(seed[, Operator.x]) out of the parse tree, or null if none. */
 export function extractSack(tree: any, params: Record<string, any>): MergePolicy | null {

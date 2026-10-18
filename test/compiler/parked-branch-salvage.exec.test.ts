@@ -49,11 +49,23 @@ describe('a terminal method other than toList() declines (unansweredTerminalMeth
   for (const q of [
     "g.V().values('name').next()", "g.V().values('name').next(2)", "g.V().values('name').tryNext()",
     "g.V().values('name').hasNext()", "g.V().values('name').toSet()", "g.V().values('name').toBulkSet()",
-    "g.V().values('name').iterate()", "g.V().values('name').explain()",
+    "g.V().values('name').explain()",
   ]) test(q, () => declines(q));
 
   test('toList() is the stream', async () => {
     expect(await answer("g.V().values('name').toList()")).toHaveLength(6);
+  });
+
+  // `Traversal.iterate()` appends a `discard()` and drains the traversal
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Traversal.java:201-217):
+  // it runs for effect and answers nothing — a read and a write alike.
+  test('iterate() is a trailing discard(): it runs for effect and answers nothing', async () => {
+    expect(await answer("g.V().values('name').iterate()")).toEqual([]);
+    const store = seededStore();
+    expect(await decodeAll(executeQuery(store, "g.V(1).property(single,'w',5).iterate()"))).toEqual([]);
+    expect(await decodeAll(executeQuery(store, "g.V(1).values('w')"))).toEqual([5]);
+    expect(await decodeAll(executeQuery(store, "g.V().addV('x').iterate()"))).toEqual([]);
+    expect(await decodeAll(executeQuery(store, "g.V().hasLabel('x').count()"))).toEqual([6]);
   });
 });
 
