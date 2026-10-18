@@ -10,8 +10,8 @@ import type { SqlType } from '../../rel/types.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { byExpr, byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
-import { mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
+import { byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
+import { asStringOf, evidenceOf, mathVariableMessage, raisingWhen, receiverOffence, type ValueEvidence } from './receiver.ts';
 import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import { keepingRaise, pendingRaise, RAISE, raiseMessage } from './raise-channel.ts';
 import { withChannel } from '../../channels.ts';
@@ -32,7 +32,7 @@ import { boundBeyondMap } from './alias.ts';
  * ## The resolver is the by() vocabulary, not machinery of theirs
  *
  * A variable NAMES A HOST and a modulator PROJECTS a value out of it, so the whole resolver is
- * `scopedHost` (`modulator.ts`) composed with an unchanged `byExpr`. Three consequences, none of
+ * `scopedHost` (`modulator.ts`) composed with an unchanged `byTyped`. Three consequences, none of
  * them built: every host works (element, VALUE and RECORD, the last resolving against the
  * traverser's own map because that is what `Scoping.getScopeValue` tries first); a projector works
  * as a CHILD BODY wherever a child body is legal; and the `by()` vocabulary grows both at once.
@@ -229,12 +229,40 @@ const nanDeferred = (value: Expr, variables: readonly Expr[]): Expr => {
  */
 function formatValue(
   step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
-): { readonly expr: Expr; readonly tokens: number } | null {
+): { readonly expr: Expr; readonly tokens: number; readonly keep?: Expr } | null {
   const template = step.args[0]?.value, extra = step.args[1]?.value;
   if (typeof template !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
   if (!ring) return null;
+  // EVERY TOKEN IS `String.valueOf` of its value — `FormatStep` appends it with `StringBuilder.append(Object)`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FormatStep.java:100,114`),
+  // which is `asString()`'s question exactly, so it is answered by `asString()`'s ONE authority
+  // (`asStringOf`, `receiver.ts`) from what is known of the token's type: a Double `1.0` is `1.0`, not
+  // SQLite's `1`; a Boolean `true`, not `1`; a Float its shortest decimal. A token it cannot spell (a
+  // list, a map, a Double outside the plain form) declines statically or raises a deferral per row —
+  // never a raw `||` of SQLite's text. A NULL stays NULL, which is the productivity drop below.
+  //
+  // The rendering mentions its value and tag once per arm, so a CORRELATED READ (a stored property and
+  // its `vtype`, a child body) is evaluated ONCE as the one row of a `VALUES` the rendering is projected
+  // over — `typedNodeOnce`'s spelling (`build.ts`). Inline, one property token took a statement past
+  // 20 KB, and a handful of them past the platform's 100 KB statement-text limit.
+  const token = (value: Expr, evidence: ValueEvidence): Expr | null => {
+    const tag = evidence.kind === 'tag' ? evidence.tag : undefined;
+    if (value.kind !== 'scalar' && tag?.kind !== 'scalar') return asStringOf(value, evidence, fresh, 'format()');
+    const one = make.values({
+      id: fresh('fto'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)),
+      rows: [[value, tag ?? compilerNull('text')]],
+    });
+    const rendered = asStringOf(col(one.id, 'v'), evidence.kind === 'tag' ? { ...evidence, tag: col(one.id, 't') } : evidence, fresh, 'format()');
+    return rendered && { kind: 'scalar', plan: make.project({
+      id: fresh('ftp'), input: one, channels: [], type: typeOf(meta('s', 'text', true)), exprs: [['s', rendered]],
+    }) };
+  };
   const pieces: Expr[] = [];
+  // Each token's RAW value: its rendering is NULL exactly where the value is (`asStringOf` maps NULL to
+  // NULL and nothing else to it), so the productivity drop reads these rather than the rendered result —
+  // a filter over the rendered column is inlined by the emitter and spells the whole rendering twice.
+  const raws: Expr[] = [];
   let tokens = 0;
   let fromBy = 0;
   for (const part of formatTemplate(template)) {
@@ -246,9 +274,12 @@ function formatValue(
       // A bare `%{_}` over an ELEMENT appends the element's own `toString()` (`v[1]`), which is a
       // Java rendering no SQL expression reproduces — decline rather than emit a rowid.
       if (host.kind !== 'scalar' && modulation.key.kind === 'identity') return null;
-      const value = byExpr(modulation, host, source, fresh, false, child);
-      if (!value) return null;
-      pieces.push(value);
+      const typed = byTyped(modulation, host, source, fresh, child);
+      if (!typed) return null;
+      const shown = token(typed.value, typed.evidence);
+      if (!shown) return null;
+      pieces.push(shown);
+      raws.push(typed.value);
       continue;
     }
     // A MAP host (`elementMap()`/`valueMap()`/`group()`) resolves a named token against its OWN entries
@@ -262,21 +293,43 @@ function formatValue(
       if (host.keys && !host.keys.includes(part.name)) return null;
       // An ABSENT key falls through to a same-named side effect or path label, not to a null token.
       if (!host.row || boundBeyondMap(part.name, host.row)) return null;
-      pieces.push(jsonField(correlatedMapKey(host.map, part.name, fresh).node, 'v'));
+      // Rendered INSIDE the correlated read (`over`), so the per-row type test spells the matched pair's
+      // column rather than re-running the read once per mention. A per-row tag never declines, but the
+      // authority's `null` is honoured all the same.
+      let renderable = true;
+      const shown = correlatedMapKey(host.map, part.name, fresh, (node) => {
+        const rendered = token(jsonField(node, 'v'), { kind: 'tag', tag: jsonField(node, 't') });
+        if (!rendered) renderable = false;
+        return rendered ?? node;
+      }).node;
+      if (!renderable) return null;
+      pieces.push(shown);
+      raws.push(jsonField(correlatedMapKey(host.map, part.name, fresh).node, 'v'));
       continue;
     }
     const scoped = scopedHost(part.name, host);
     // A scope key holding an ELEMENT has the same `toString()` problem; only a value concatenates.
-    const scopedValue = scoped?.kind === 'scalar' ? scoped.value : null;
+    const scopedRaw = scoped?.kind === 'scalar' ? scoped.value : null;
+    const scopedValue = scoped?.kind === 'scalar' ? token(scoped.value, evidenceOf(undefined, scoped.vtype)) : null;
+    if (scopedRaw && !scopedValue) return null;
     if (host.kind === 'element') {
-      const property = byExpr({ key: { kind: 'property', key: part.name } }, host, source, fresh, false, child);
+      // The fallthrough is the reference's only where the property is ABSENT, so a scope key this cannot
+      // render (an ELEMENT, whose `toString()` is `v[1]`) or a name bound only as a SIDE EFFECT (`Scoping`
+      // reads those too; this resolver does not) would have an absent property DROP the traverser where
+      // the reference appends the scoped value — a row silently missing. Decline both.
+      if ((scoped && !scopedValue) || (!scoped && child.sideEffects.has(part.name))) return null;
+      const typed = byTyped({ key: { kind: 'property', key: part.name } }, host, source, fresh, child);
+      if (!typed) return null;
+      const property = token(typed.value, typed.evidence);
       if (!property) return null;
       // The reference falls through only when the property is ABSENT, which is what COALESCE says.
       pieces.push(scopedValue ? { kind: 'call', fn: 'COALESCE', args: [property, scopedValue] } : property);
+      raws.push(scopedRaw ? { kind: 'call', fn: 'COALESCE', args: [typed.value, scopedRaw] } : typed.value);
       continue;
     }
-    if (!scopedValue) return null;
+    if (!scopedValue || !scopedRaw) return null;
     pieces.push(scopedValue);
+    raws.push(scopedRaw);
   }
   // `concat_ws` SKIPS nulls, so it cannot be used here — a null token must poison the whole result,
   // which is precisely what `||` does and what the reference's `productive` flag means.
@@ -284,7 +337,9 @@ function formatValue(
     ? pieces.reduce((left, right) => ({ kind: 'binary', op: '||', left, right }))
     : compilerText('');
   // CAST so a lone value token frames as a string rather than as whatever it was stored as.
-  return { expr: { kind: 'cast', arg: joined, to: 'text' }, tokens };
+  const present = raws.map((raw): Expr => ({ kind: 'binary', op: 'is not', left: raw, right: compilerNull() }));
+  const keep = present.length ? present.reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })) : undefined;
+  return { expr: { kind: 'cast', arg: joined, to: 'text' }, tokens, ...(keep ? { keep } : {}) };
 }
 
 /** The step names this module owns — the set a fold checks membership in BEFORE asking for a
@@ -307,7 +362,12 @@ export const REL_PROJECTORS: ReadonlySet<string> = new Set(['math', 'format']);
  */
 export function projectorValue(
   step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
-): { readonly value: Expr; readonly drop: boolean; readonly sqlType: SqlType; readonly framing: RelFraming } | null {
+): {
+  readonly value: Expr; readonly drop: boolean; readonly sqlType: SqlType; readonly framing: RelFraming;
+  /** The drop's predicate over the HOST's scope where it is cheaper than `value IS NOT NULL` (`format()`'s
+   *  raw token values), so the filter does not spell the value a second time. */
+  readonly keep?: Expr;
+} | null {
   if (step.name === 'math') {
     const value = mathValue(step, host, child, source, fresh);
     // `math()` is ALWAYS a Double (`MathStep extends MapStep<S, Double>`), whatever the leaves held.
@@ -320,6 +380,7 @@ export function projectorValue(
   return produced && {
     value: produced.expr, drop: produced.tokens > 0, sqlType: 'text',
     framing: { kind: 'scalar', type: STATIC('string') },
+    ...(produced.keep ? { keep: produced.keep } : {}),
   };
 }
 
@@ -354,18 +415,26 @@ export function projectorTail(
   const carried = raised && !prior ? withChannel(input.channels, RAISE) : input.channels;
   const carriedExpr = (name: string): Expr => !raised || name !== RAISE.col ? col(input.id, name)
     : prior ? { kind: 'call', fn: 'COALESCE', args: [col(input.id, prior.col), raised] } : raised;
+  // A projector-supplied `keep` rides as its own column for the filter to read: the emitter inlines a
+  // projected column into the filter that reads it, so filtering on `v` would spell the value twice.
+  const keep = drop && !parts?.offences.length ? produced?.keep : undefined;
+  const channelExprs = carried.map((channel) => [channel.col, carriedExpr(channel.col)] as const);
   const projected = make.project({
     id: fresh('pv'), input, channels: carried,
-    type: typeOf(meta('v', sqlType, true), ...carriedCols(carried)),
-    exprs: [['v', value], ...carried.map((channel) => [channel.col, carriedExpr(channel.col)] as const)],
+    type: keep ? typeOf(meta('v', sqlType, true), meta(KEEP_COL, 'int', true), ...carriedCols(carried))
+      : typeOf(meta('v', sqlType, true), ...carriedCols(carried)),
+    exprs: [['v', value], ...(keep ? [[KEEP_COL, keep] as const] : []), ...channelExprs],
   });
-  const kept: Expr = { kind: 'binary', op: 'is not', left: col(projected.id, 'v'), right: compilerNull() };
+  const kept: Expr = keep ? col(projected.id, KEEP_COL) : { kind: 'binary', op: 'is not', left: col(projected.id, 'v'), right: compilerNull() };
   // A raising row's value is no value at all, so the drop filter must not decide it: it is KEPT.
   const rel = !drop ? projected
     : pendingRaise(projected) ? keepingRaise(projected, kept, fresh('pf'))
       : make.filter({ id: fresh('pf'), input: projected, channels: carried, type: projected.type, pred: kept });
   return { rel, framing };
 }
+
+/** The column a projector's own drop predicate rides in between its `Project` and its `Filter`. */
+const KEEP_COL = 'pkeep';
 
 /** `math()`'s relation facts (`projectorValue`'s), for the deferred form that builds its value apart. */
 const MATH_SHAPE = { drop: true, sqlType: 'real', framing: { kind: 'scalar', type: STATIC('double') } } as const;

@@ -33,15 +33,34 @@ const WHITESPACE_RUN = new RegExp(`[${JAVA_WHITESPACE}]+`);
 /** Split one traverser value into a list — `SplitGlobalStep.map` composed with `StringUtil.split`:
  *  null passes through unchanged; a non-string traverser is an error the reference throws; an EMPTY
  *  separator splits into characters (`"ab cd"` → `["a","b"," ","c","d"]`); a NULL separator splits on
- *  whitespace; any other separator is a whole-separator split with the empty tokens adjacent separators
- *  would produce removed (`StringUtils.splitByWholeSeparator`). */
+ *  whitespace; any other separator is a whole-separator split with the leading and adjacent empty tokens
+ *  removed and a trailing one kept (`wholeSeparatorSplit`). */
 const splitValue = (value: unknown, separator: string | null): unknown => {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'string')
     throw new RaisedByQuery(`The split() step can only take string as argument, encountered ${value}.`);
-  if (separator === '') return value.split('');
+  // Java's `"".split("")` is `[""]` (an input with no match is itself), where JS answers `[]`.
+  if (separator === '') return value === '' ? [''] : value.split('');
   if (separator === null) return value.split(WHITESPACE_RUN).filter((t) => t !== '');
-  return value.split(separator).filter((t) => t !== '');
+  return wholeSeparatorSplit(value, separator);
+};
+
+/**
+ * Commons-lang3 `StringUtils.splitByWholeSeparator(str, sep)` for a non-empty `sep` (reached through
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/StringUtil.java:51`;
+ * commons-lang3 is not vendored, so this is its `splitByWholeSeparatorWorker` with
+ * `preserveAllTokens = false`, read from the library source). The worker walks `indexOf(sep, beg)`: a
+ * token BETWEEN two separators is added only when non-empty (`end > beg`), so leading and adjacent empties
+ * vanish — but once no separator remains it adds `str.substring(beg)` UNCONDITIONALLY, so a string that
+ * ends with the separator keeps one trailing empty token (`"a,"` → `["a", ""]`, `","` → `[""]`). An empty
+ * string is the empty array (`len == 0`). JS `split` cuts at the same non-overlapping left-to-right
+ * matches, so this is its pieces with the empties dropped from every position but the last.
+ */
+const wholeSeparatorSplit = (value: string, separator: string): string[] => {
+  if (value === '') return [];
+  const pieces = value.split(separator);
+  const last = pieces.length - 1;
+  return pieces.filter((t, at) => at === last || t !== '');
 };
 
 /** THE FIRST GLOBAL `split()` in the chain with its separator, or `null`. The local form

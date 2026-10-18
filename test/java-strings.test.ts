@@ -193,3 +193,57 @@ describe('a stored NUL never lets the trigram seek or tinker.search drop a match
     expect(answer(nulStore(), "g.call('tinker.search', [search:'osh']).element().values('age')")).toEqual(['32i']);
   });
 });
+
+// FORMAT. `FormatStep` appends each token with `StringBuilder.append(Object)` — `String.valueOf`
+// (`vendor/tinkerpop/gremlin-core/.../step/map/FormatStep.java:100,114`) — so every token is rendered by
+// `asString()`'s one authority (`asStringOf`, `src/compiler/rel/receiver.ts`), never SQLite's text.
+describe('format() renders every token as String.valueOf, or defers', () => {
+  test.each([
+    ["g.E().hasId(8).format('w=%{weight}')", 'w=1.0'],
+    ["g.E().hasId(8).values('weight').format('%{_}')", '1.0'],
+    ["g.E().hasId(8).format('%{_}').by(values('weight'))", '1.0'],
+    ["g.E().hasId(8).project('w').by('weight').format('%{w}')", '1.0'],
+    ["g.E().hasId(8).values('weight').as('w').V(1).format('%{name} %{w}')", 'marko 1.0'],
+    ["g.V(1).local(__.outE().hasId(8).values('weight').format('%{_}'))", '1.0'],
+    ["g.V(1).union(__.outE().hasId(8).format('%{weight}'))", '1.0'],
+    ["g.inject(['a':true]).format('%{a}')", 'true'],
+    ["g.inject(true).format('%{_}')", 'true'],
+    ["g.inject(['a':0.1f]).format('%{a}')", '0.1'],
+    ["g.inject(['a':-0.0d]).format('%{a}')", '-0.0'],
+    ["g.inject(['a':1.0d]).format('%{a}')", '1.0'],
+    ["g.inject(1.5d).format('%{_}')", '1.5'],
+    ["g.inject(2).format('%{_}')", '2'],
+  ])('%s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual([str(expected)]);
+  });
+
+  // `1.0E20`, `[x, y]` and `{x=1}` are Java renderings SQL does not reproduce: the token defers.
+  test.each([
+    ["g.inject(1e20d).format('%{_}')"], ["g.inject(['a':1e20d]).format('%{a}')"],
+    ["g.inject(['a':['x','y']]).format('%{a}')"], ["g.inject(['a':['x':1]]).format('%{a}')"],
+  ])('a token SQL cannot spell defers: %s', (gremlin) => {
+    expect(() => runP(gremlin)).toThrow(/not supported/);
+  });
+
+  // An ELEMENT-valued scope key (`v[1]`) or a side-effect key is read where the property is ABSENT, so
+  // an absent property must not drop the traverser — the reference appends the scoped value instead.
+  test.each([
+    ["g.V().as('a').out().format('%{a}')"], ["g.V().as('n').format('%{n}')"], ["g.withSideEffect('w',1).V().format('%{w}')"],
+  ])('a named token this cannot read declines rather than drop the traverser: %s', (gremlin) => {
+    expect(() => runP(gremlin)).toThrow(/not supported/);
+  });
+});
+
+// SPLIT. `StringUtil.split` (`vendor/tinkerpop/gremlin-core/.../util/StringUtil.java:49,51`): an EMPTY
+// separator is Java's `String.split("")`, any other Commons `splitByWholeSeparator`, which drops leading
+// and adjacent empty tokens but keeps a TRAILING one.
+describe("split() keeps the reference's empty tokens", () => {
+  test.each([
+    ["g.inject('a,').split(',')", ['a', '']], ["g.inject('a,,').split(',')", ['a', '']],
+    ["g.inject(',').split(',')", ['']], ["g.inject('xaa').split('aa')", ['x', '']],
+    ["g.inject(',a,,b').split(',')", ['a', 'b']], ["g.inject('').split(',')", []],
+    ["g.inject('').split('')", ['']], ["g.inject('ab').split('')", ['a', 'b']],
+  ] as const)('%s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual([`[${expected.map(str).join(',')}]`]);
+  });
+});

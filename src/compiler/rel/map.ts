@@ -2012,14 +2012,21 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter, abs
  * `scopeValue`'s map arm decode the node per `valOf` (the same `$.v`/`$.t` split `sideOf` makes). A
  * missing key is a productive-absent — `present` false drops the traverser (`Scoping`/`Select.feature`),
  * never a productive null.
+ *
+ * `over` reads the node INSIDE the subquery, so a reader that spells the node several times (a type test
+ * per arm, `asStringOf`) spells a column of the matched pair rather than re-running the correlated read
+ * once per mention — which is how a five-token `format()` over an `elementMap()` grew past the platform's
+ * statement-text limit.
  */
-export function correlatedMapKey(map: Expr, key: string, fresh: Minter): { node: Expr; present: Expr } {
+export function correlatedMapKey(
+  map: Expr, key: string, fresh: Minter, over: (node: Expr) => Expr = (node) => node,
+): { node: Expr; present: Expr } {
   const probe = pairsOf(map, fresh);
   const present: Expr = { kind: 'exists', negated: false,
     plan: make.filter({ id: fresh('cmf'), input: probe, channels: [], type: probe.type, pred: keyMatches(col(probe.id, PAIR.value), key) }) };
   const valuePairs = pairsOf(map, fresh);
   const matched = make.filter({ id: fresh('cmv'), input: valuePairs, channels: [], type: valuePairs.type, pred: keyMatches(col(valuePairs.id, PAIR.value), key) });
-  const node = firstOf(matched, pairSide(col(matched.id, PAIR.value), 'values'), col(matched.id, PAIR.ord), fresh);
+  const node = firstOf(matched, over(pairSide(col(matched.id, PAIR.value), 'values')), col(matched.id, PAIR.ord), fresh);
   return { node, present };
 }
 

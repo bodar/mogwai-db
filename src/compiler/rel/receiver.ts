@@ -328,7 +328,7 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, step = 
     const printed: Expr = { kind: 'call', fn: 'printf', args: [text('%!.17g'),
       float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: real }] };
     return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, signedZero], ...infinite],
-      else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh), fresh) };
+      else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh, step), fresh) };
   }
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
   const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
