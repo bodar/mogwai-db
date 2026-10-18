@@ -1151,6 +1151,16 @@ A root merge position downstream of a sorted host (LazyBarrierStrategy's NoOpBar
 slice drops the group-pool guard (`sum()` keeps it). Pinned in `test/L4-addendum/sorted-host-merge.feature` and
 `group-value-traverser-set.feature`. Baseline moved: sql-hygiene `choose` 7158 -> 8141 (reason in `90758e2c`). CI green.
 
+✅ **Java String semantics LANDED ON TRUNK 2026-10-18 (`c163ae3d`, `4debd0ce`, ff-unicode-strings).** Every
+ordering the emitter spells (compare, ORDER BY, MIN/MAX at every depth) is keyed to UTF-16 unit order
+(`src/rel/emit.ts`; `orderNeutral` leaves numeric/rowid positions unwrapped); Unicode `toUpper`/`toLower` defer
+on non-ASCII cased text (`casedText`, `text-units.ts`); `split(null)` shares `JAVA_WHITESPACE`; a stored NUL no
+longer drops a row out of the trigram seek. Follow-ups: `trigramSeek` reads only a NECESSARY atom
+(`necessaryTextAtom`, so an OR'd TextP falls to the exact indexSeek); TextP is case-exact per `Text.java`
+(`likePattern` conjoins an exact test beside LIKE); run-time `asDate()` is exact only on the AsDateStep shapes and
+defers otherwise. Pinned in `test/java-strings.test.ts`. Baseline moved: sql-hygiene re-recorded on trunk's
+(reasons in both commits). CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
