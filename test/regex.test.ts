@@ -6,7 +6,7 @@ import { decode } from './support/decode.ts';
 import { seeded } from './support/graph.ts';
 import { exec } from './support/executor.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
-import { extractMandatoryLiteral, javaPatternAsJs } from '../src/compiler/rel/regex.ts';
+import { compileRegex, extractMandatoryLiteral } from '../src/compiler/rel/regex.ts';
 
 // End-to-end for the REGEX BARRIER (`has(key, TextP.regex(...))`), on the real stack. `regex` cannot
 // lower to SQL (DO SQLite has no regex function and we do not filter the traversal row-at-a-time), so
@@ -82,11 +82,12 @@ describe('regex barrier — at depth (the resume is the ordinary tail)', () => {
       .toEqual(['lop', 'lop', 'ripple']);
   });
   test('a NUL in the pattern is matched by the regex, never inlined into the prefilter SQL', async () => {
-    // `\x00` decodes to a NUL the prefilter literal used to carry into `containing(...)`, whose SQL text
-    // SQLite truncates at the NUL — a raw `unrecognized token` reached the user.
-    expect(extractMandatoryLiteral('mar\\x00ko')).toBe('mar');
+    // A NUL in the prefilter literal reached `containing(...)`, whose SQL text SQLite truncates at the
+    // NUL — a raw `unrecognized token` reached the user.
+    expect(extractMandatoryLiteral('mar\\x00ko')).toBeNull();
     expect(extractMandatoryLiteral('ab\\u0000cd')).toBeNull();
     expect(extractMandatoryLiteral('abc\u0000de')).toBe('abc');
+    expect(extractMandatoryLiteral('abc\\\u0000de')).toBe('abc');
     expect(await run("g.V().has('name', regex('mar\\\\x00')).values('name')")).toEqual([]);
     expect(await run("g.V().has('name', regex('ab\\\\u0000cd')).values('name')")).toEqual([]);
     expect((await run("g.V().has('name', regex('mar\\\\x00ko')).count()")).map(Number)).toEqual([0]);
@@ -110,35 +111,30 @@ describe('regex barrier — trigram prefilter', () => {
     expect(extractMandatoryLiteral('ab+cd')).toBeNull();     // no >=3 contiguous run
   });
 
-  test('every Java escape is ONE atom — its hex digits are never a literal run', () => {
-    // `\xhh`/`\uhhhh` spell one character (`Pattern`'s escape table); reading `\x` as the escape and `61`
-    // as text prefiltered `m\x61rko` on "61rko" and dropped marko.
-    expect(extractMandatoryLiteral('m\\x61rko')).toBe('marko');
-    expect(extractMandatoryLiteral('ma\\u0072ko')).toBe('marko');
-    expect(extractMandatoryLiteral('\\u0061')).toBeNull();
-    expect(extractMandatoryLiteral('ab\\x63?d')).toBeNull();          // the optional atom is the WHOLE escape
+  test('an escape is consumed WHOLE; any alphanumeric escape but a class/control/anchor bails', () => {
+    // Reading `\x` as the escape and `61` as text prefiltered `m\x61rko` on "61rko" and dropped marko.
+    // The scanner does not decode `\x`/`\u` at all — it extracts nothing rather than risk a wrong run.
+    expect(extractMandatoryLiteral('m\\x61rko')).toBeNull();
+    expect(extractMandatoryLiteral('ma\\u0072ko')).toBeNull();
     expect(extractMandatoryLiteral('ab\\.cd')).toBe('ab.cd');
     expect(extractMandatoryLiteral('abc\\tdef')).toBe('abc');          // a control escape ends the run
-    expect(extractMandatoryLiteral('\\uD83D\\uDE00abc')).toBe('abc');  // a surrogate escape is not vouched for
+    expect(extractMandatoryLiteral('\\Babc')).toBe('abc');             // so does an anchor escape
     expect(extractMandatoryLiteral('ab😀?cd')).toBeNull();              // an astral char is ONE optional atom
     // An ESCAPED astral char is one code point too — never a lone low surrogate left behind as a run.
     expect(extractMandatoryLiteral('\\😀abc')).toBe('😀abc');
     expect(extractMandatoryLiteral('ab\\😀?cd')).toBeNull();
-    expect(javaPatternAsJs('\\😀')).toBe('\\u{1f600}');
-    expect(javaPatternAsJs('[\\😀-\\😃]')).toBe('[\\u{1f600}-\\u{1f603}]');
-    expect(extractMandatoryLiteral('[\\x5d]abc')).toBe('abc');        // a class's escapes are consumed whole
-    expect(extractMandatoryLiteral('(\\x29)abc')).toBe('abc');        // so are a group's
-    // Every form Java reads and this dialect subset declines extracts NOTHING — never its body as text.
-    for (const p of ['\\x{61}abc', '\\0141abc', '\\cAabc', '\\Qabc\\E', '\\p{L}abc', 'abc\\', '\\Babc', '\\1abc'])
+    expect(extractMandatoryLiteral('[\\]]abc')).toBe('abc');           // a class's escapes are consumed whole
+    expect(extractMandatoryLiteral('(\\))abc')).toBe('abc');           // so are a group's
+    for (const p of ['\\x{61}abc', '\\0141abc', '\\cAabc', '\\Qabc\\E', '\\p{L}abc', 'abc\\', '\\1abc', '\\k<n>abc', '[\\x5d]abc'])
       expect(extractMandatoryLiteral(p)).toBeNull();
   });
 
   test('DIFFERENTIAL: every string the pattern finds contains the extracted literal (randomized)', () => {
     // The extractor's whole contract: a match MUST contain the run, or the prefilter drops a true match.
-    // A deterministic PRNG builds patterns from atoms that reach every escape form (the declined ones
+    // A deterministic PRNG builds patterns from atoms that reach every escape form (the bailing ones
     // too), quantifier, group, lookaround and class, and subjects two ways: random noise, and a string
     // SAMPLED from the pattern's own atoms (so long literal runs match and the run is really exercised).
-    // The oracle is a direct regex match of the JS spelling `javaPatternAsJs` gives the barrier.
+    // The oracle is the barrier's own matcher, `compileRegex` — whichever reading (`u` or not) it picks.
     let state = 0x9e3779b9;
     const rand = (n: number) => { // mulberry32
       state = (state + 0x6d2b79f5) >>> 0;
@@ -150,63 +146,38 @@ describe('regex barrier — trigram prefilter', () => {
     // [pattern atom, strings it may match]
     const atoms: readonly (readonly [string, readonly string[]])[] = [
       ['a', ['a']], ['b', ['b']], ['c', ['c']], ['m', ['m']], ['a', ['a']], ['b', ['b']], ['😀', ['😀']], ['.', ['a', '😀', '-']],
-      ['\\x61', ['a']], ['\\x62', ['b']], ['\\u0063', ['c']], ['\\u006d', ['m']], ['\\.', ['.']], ['\\-', ['-']],
-      ['\\d', ['1']], ['\\s', [' ', '\t']], ['\\t', ['\t']], ['\\uD83D\\uDE00', ['😀']],
-      // An ESCAPED astral character — one code point, both halves consumed by the escape.
+      ['\\.', ['.']], ['\\-', ['-']], ['{', ['{']], ['}', ['}']], [']', [']']],
+      ['\\d', ['1']], ['\\s', [' ', '\t']], ['\\t', ['\t']], ['\\b', ['']],
       ['\\😀', ['😀']], ['\\🙂', ['🙂']], ['[\\😀b]', ['😀', 'b']], ['[😀-🙂]', ['😀', '🙂']],
-      ['[ab]', ['a', 'b']], ['[^a]', ['b', 'm']], ['[\\x61c]', ['a', 'c']], ['(ab)', ['ab']], ['(?:a\\x62)', ['ab']],
-      ['(?=a)', ['']], ['(?!b)', ['']], ['(?<n>c)', ['c']], ['^', ['']], ['$', ['']],
+      ['[ab]', ['a', 'b']], ['[^a]', ['b', 'm']], ['[\\]c]', [']', 'c']], ['(ab)', ['ab']], ['(?:a\\.)', ['a.']],
+      ['(?=a)', ['']], ['(?!b)', ['']], ['(?<n>c)', ['c']], ['(?<=a)', ['']], ['^', ['']], ['$', ['']],
     ];
-    // Java escapes the translated subset declines — rarer, or almost no pattern would extract anything.
-    const declined: readonly (readonly [string, readonly string[]])[] = [
-      ['\\x{61}', ['a']], ['\\0141', ['a']], ['\\cA', ['\u0001']], ['\\Qa\\E', ['a']], ['\\p{L}', ['a']], ['\\b', ['']],
+    // Escapes the scanner bails on — rarer, or almost no pattern would extract anything.
+    const rare: readonly (readonly [string, readonly string[]])[] = [
+      ['\\x61', ['a']], ['\\u0063', ['c']], ['\\uD83D\\uDE00', ['😀']], ['\\x{61}', ['a']], ['\\0', ['\0']], ['\\cA', ['\u0001']], ['\\p{L}', ['a']], ['\\k<n>', ['']], ['\\1', ['']],
     ];
-    // [quantifier, how many times the atom's sample repeats] — mostly none, so literal runs form.
     const quantifiers: readonly (readonly [string, readonly number[]])[] = [
-      ['*', [0, 1, 2]], ['+', [1, 2]], ['?', [0, 1]], ['{2}', [2]], ['{0,1}', [0, 1]], ['+?', [1, 2]], ['*+', [0, 1]], ['??', [0, 1]],
+      ['*', [0, 1, 2]], ['+', [1, 2]], ['?', [0, 1]], ['{2}', [2]], ['{0,1}', [0, 1]], ['+?', [1, 2]], ['??', [0, 1]],
     ];
-    const noise = ['a', 'b', 'c', 'm', '.', '-', '1', ' ', '\t', '😀', '🙂', '\ud83d', '\ude00', 'A'];
+    const noise = ['a', 'b', 'c', 'm', '.', '-', '1', ' ', '\t', '{', '}', ']', '😀', '🙂', '\ud83d', '\ude00', 'A'];
     const randomNoise = () => { let s = ''; for (let k = rand(5); k > 0; k--) s += pick(noise); return s; };
     let extracted = 0;
     let matched = 0;
-    let translatedSamples = 0;
-    // An atom that consumes nothing (anchor, lookaround) constrains WHERE its sample may sit, so only a
-    // pattern of consuming atoms is certain to match the sample built from its own atoms.
-    const zeroWidth = new Set(['(?=a)', '(?!b)', '^', '$', '\\b']);
     for (let n = 0; n < 20000; n++) {
       let pattern = '';
       let sample = '';
-      let consuming = true;
       for (let k = 1 + rand(8); k > 0; k--) {
-        const [atom, spells] = rand(20) === 0 ? pick(declined) : pick(atoms);
+        const [atom, spells] = rand(20) === 0 ? pick(rare) : pick(atoms);
         const [quantifier, counts] = rand(3) === 0 ? pick(quantifiers) : ['', [1]] as const;
         pattern += atom + quantifier;
-        if (zeroWidth.has(atom)) consuming = false;
-        // A LAZY quantifier never changes WHETHER a pattern matches, only where — but Bun's engine (JSC,
-        // 1.3.11) misses a true match for `c🙂??[😀-🙂]{2}[^a]m` on "c🙂😀🙂bm" (V8, the DO runtime,
-        // finds it). An engine defect on raw astral text, not a translation one, so it is kept out of this oracle.
-        if (quantifier.endsWith('?') && quantifier !== '?') consuming = false;
         for (let r = pick(counts); r > 0; r--) sample += pick(spells);
       }
       if (rand(12) === 0) pattern += '|' + pick(atoms)[0];
-      // The TRANSLATION's half of the oracle: the JS spelling must find the sample the Java pattern's own
-      // atoms spell — an escaped astral char spelt as a lone high-surrogate escape matched nothing.
-      const spelt = consuming ? javaPatternAsJs(pattern) : null;
-      if (spelt != null) {
-        let sampleRe: RegExp | null = null;
-        try { sampleRe = new RegExp(spelt, 'u'); } catch { /* invalid in JS (possessive, duplicate group) — the barrier declines */ }
-        if (sampleRe) {
-          translatedSamples++;
-          expect({ pattern, spelt, sample, found: sampleRe.test(sample) }).toEqual({ pattern, spelt, sample, found: true });
-        }
-      }
       const literal = extractMandatoryLiteral(pattern);
       if (literal == null) continue;
-      extracted++;
-      const translated = javaPatternAsJs(pattern);
-      expect({ pattern, translated: translated != null }).toEqual({ pattern, translated: true });   // a declined pattern extracts nothing
       let re: RegExp;
-      try { re = new RegExp(translated!, 'u'); } catch { continue; }
+      try { re = compileRegex(pattern); } catch { continue; }
+      extracted++;
       const subjects = [sample, randomNoise() + sample + randomNoise()];
       for (let s = 0; s < 20; s++) subjects.push(randomNoise() + randomNoise());
       for (const subject of subjects) {
@@ -217,7 +188,6 @@ describe('regex barrier — trigram prefilter', () => {
     }
     expect(extracted).toBeGreaterThan(500);
     expect(matched).toBeGreaterThan(500);
-    expect(translatedSamples).toBeGreaterThan(500);
   });
 
   test('answer-invariant under the trigram toggle (containing() falls back to LIKE)', async () => {

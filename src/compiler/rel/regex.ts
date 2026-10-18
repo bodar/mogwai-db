@@ -40,13 +40,11 @@ import { compilerParamName } from '../../rel/expr.ts';
 // (no `g` flag → stateless). The predicate is `P<String>`, so a non-string value is not a match at
 // all, mirroring the LIKE path's `textSubject` type gate (`predicate.ts`).
 //
-// The matcher is JS `RegExp`, but the PATTERN is Java's: `javaPatternAsJs` reads it as Java does and
-// spells that in JS (`.`/`\s`/`$` translated to Java's meaning, `u` flag for code points), and DECLINES
-// every construct the two dialects read differently — `\p{...}`, `\Q…\E`, `\A`/`\z`, lookbehind,
-// class set algebra, inline flags, back-references, … — rather than answer JS's reading of a Java
-// pattern. It covers every construct the conformance corpus exercises (`^`, `.*`, literal runs,
-// `\uXXXX` — `Has.feature` `g_V_hasXname_regexX…X`). Bringing a Java-faithful engine would be a new
-// dependency (root working rules); declining the rest is what keeps the subset exact.
+// The PATTERN is read in JS's dialect too (`compileRegex`), not translated from Java's: where the two
+// differ (`$` before a final newline, `\s`'s Unicode spaces, `\p{…}`, `\Q…\E`, …) the answer is the
+// JS reading — an accepted divergence (`docs/feature-support-matrix.md`, Deliberate divergences). Every
+// construct the conformance corpus exercises (`^`, `.*`, literal runs, `\uXXXX` — `Has.feature`
+// `g_V_hasXname_regexX…X`) reads the same in both.
 
 /** The reserved bind name the resume's re-injected `within(<survivors>)` at chain position `at` carries.
  *  Minted by `compilerParamName`, so no user parameter can spell it (`rel/expr.ts`). It names the
@@ -108,124 +106,31 @@ function reinject(steps: readonly Step[], at: number, key: string, survivors: re
   return steps.map((s, i) => (i === at ? has : s));
 }
 
-/** A CODE POINT as a `\u{…}` escape — valid in a `u`-flag pattern wherever it sits, so a Java literal
- *  (an escaped punctuator, a stray `}`/`]`) never meets the `u` flag's stricter identity-escape rules. A whole
- *  code point, never a code unit: Java's `Pattern` reads its pattern as code points, so `\😀` is the ONE
- *  character U+1F600, while a `\ud83d` escape followed by a raw low surrogate never pairs under `u` and
- *  matches nothing. */
-const unit = (c: string): string => `\\u{${c.codePointAt(0)!.toString(16)}}`;
-/** The whole code point starting at `pattern[at]` — both halves of a surrogate pair, as `Pattern` reads it. */
-const codePointAt = (pattern: string, at: number): string => String.fromCodePoint(pattern.codePointAt(at)!);
-/** Java's `\s` WITHOUT `UNICODE_CHARACTER_CLASS`: `[ \t\n\x0B\f\r]` — JS's `\s` adds every Unicode space. */
-const JAVA_SPACE = ' \\t\\n\\x0B\\f\\r';
-/** Java's line terminators — what `.` excludes and what `$` may precede (`Pattern` "Line terminators"). */
-const JAVA_LINE_END = '\\n\\r\\u0085\\u2028\\u2029';
-/** Java's non-MULTILINE `$`: at the end of input, or before ONE final line terminator — never between a
- *  final `\r\n` (`Pattern.Dollar.match`). JS's `$` is the end of input only. */
-const JAVA_DOLLAR = '(?:$|(?=\\r\\n$)|(?<!\\r)(?=\\n$)|(?=[\\r\\u0085\\u2028\\u2029]$))';
+/** A backslash (not itself escaped) before a high surrogate. */
+const ESCAPED_ASTRAL = /(?:^|[^\\])(?:\\\\)*\\[\ud800-\udbff]/;
 
-/**
- * A Java `Pattern` as a JS `RegExp` (`u` flag) that FINDS exactly what `Pattern.compile(p).matcher(v).find()`
- * finds (`Text.java`'s `RegexPredicate`), or `null` when the pattern uses a construct the two dialects read
- * differently — the caller DECLINES then, never answering JS's reading of a Java pattern. Translated, not
- * passed through, where the meaning differs but has an exact JS spelling: `.` (Java excludes `\u0085`),
- * `\s`/`\S` (Java's is ASCII), `$` (Java matches before a final line terminator), and every escaped
- * punctuator (a `\uXXXX`, legal under `u`). The `u` flag makes `.`/a class match a CODE POINT, as Java does
- * (non-`u` JS matches half a surrogate pair). Declined: `\Q…\E`, `\p{…}`, `\A`/`\z`/`\Z`/`\G`/`\R`/`\h`/
- * `\v`/`\b`/`\B` (Java's word boundary is not ASCII before JDK 19), back-references, octal, `\x{…}`, inline
- * flags, atomic groups, lookbehind (Java demands a bound JS does not), a nested class or `&&` intersection
- * (Java set algebra, a literal in JS), a `[]`-leading class, and a `{` that is not a quantifier (a Java
- * syntax error, a literal in JS).
- */
-export function javaPatternAsJs(pattern: string): string | null {
-  let out = '';
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]!;
-    if (c === '\\') {
-      const escape = javaEscape(pattern, i, false);
-      if (!escape) return null;
-      out += escape.js;
-      i = escape.end;
-    } else if (c === '[') {
-      let j = i + 1;
-      let cls = '[';
-      if (pattern[j] === '^') { cls += '^'; j++; }
-      if (pattern[j] === ']') return null;
-      for (; j < pattern.length && pattern[j] !== ']'; j++) {
-        const k = pattern[j]!;
-        if (k === '[' || (k === '&' && pattern[j + 1] === '&')) return null;
-        if (k === '\\') {
-          const escape = javaEscape(pattern, j, true);
-          if (!escape) return null;
-          cls += escape.js;
-          j = escape.end;
-        } else if (k === '-' || /[A-Za-z0-9 ]/.test(k)) cls += k;
-        else { const point = codePointAt(pattern, j); cls += unit(point); j += point.length - 1; }
-      }
-      if (j >= pattern.length) return null;
-      out += `${cls}]`;
-      i = j;
-    } else if (c === '(') {
-      if (pattern[i + 1] !== '?') out += '(';
-      else {
-        const named = /^\(\?<([A-Za-z][A-Za-z0-9]*)>/.exec(pattern.slice(i));
-        const kind = pattern.slice(i, i + 3);
-        if (named) { out += named[0]; i += named[0].length - 1; }
-        else if (kind === '(?:' || kind === '(?=' || kind === '(?!') { out += kind; i += 2; }
-        else return null;
-      }
-    } else if (c === '{') {
-      const quantifier = /^\{\d+(,\d*)?\}/.exec(pattern.slice(i));
-      if (!quantifier) return null;
-      out += quantifier[0];
-      i += quantifier[0].length - 1;
-    } else if (c === '.') out += `[^${JAVA_LINE_END}]`;
-    else if (c === '$') out += JAVA_DOLLAR;
-    else if (c === '}' || c === ']') out += unit(c);
-    else { const point = codePointAt(pattern, i); out += point; i += point.length - 1; }
+/** The pattern as a JS `RegExp`: the `u` flag first (code-point matching, the modern dialect), then no
+ *  flag (Annex B's lenient reading — `\-`, a literal `{`, an escaped astral half, …), and ONE
+ *  `UnsupportedTraversal` when neither compiles, never the raw JS `SyntaxError`. No `g` flag, so `test`
+ *  is a stateless partial SEARCH — Java's `matcher.find()`. The dialect is JS's, an accepted divergence
+ *  (`docs/feature-support-matrix.md`, Deliberate divergences). */
+export function compileRegex(pattern: string): RegExp {
+  // An escaped ASTRAL character is a `u`-mode SyntaxError by the spec (V8, the DO runtime), but JSC (Bun)
+  // accepts it as an escaped lone high surrogate that never matches — so skip `u` and let both runtimes
+  // take the non-`u` reading, where `\😀` is the two halves in sequence, i.e. the character.
+  if (!ESCAPED_ASTRAL.test(pattern))
+    try { return new RegExp(pattern, 'u'); } catch { /* fall through to the non-`u` reading */ }
+  try { return new RegExp(pattern); } catch (error) {
+    throw UnsupportedTraversal.because(`regex(${JSON.stringify(pattern)}): not a valid JavaScript regular expression (${error instanceof Error ? error.message : String(error)})`);
   }
-  return out;
 }
 
-/** One Java escape at `pattern[at] === '\\'`, as its JS spelling (a class MEMBER spelling when `inClass`)
- *  and the index of its last character — or `null` for an escape the dialects read differently. */
-function javaEscape(pattern: string, at: number, inClass: boolean): { js: string; end: number } | null {
-  if (at + 1 >= pattern.length) return null;
-  const n = codePointAt(pattern, at + 1);   // a CODE POINT: `\😀` escapes the whole astral character
-  if ('dDwW'.includes(n) || 'tnrf'.includes(n)) return { js: `\\${n}`, end: at + 1 };
-  if (n === 's') return { js: inClass ? JAVA_SPACE : `[${JAVA_SPACE}]`, end: at + 1 };
-  if (n === 'S') return inClass ? null : { js: `[^${JAVA_SPACE}]`, end: at + 1 };
-  if (n === 'u') return /^[0-9a-fA-F]{4}$/.test(pattern.slice(at + 2, at + 6)) ? { js: pattern.slice(at, at + 6), end: at + 5 } : null;
-  if (n === 'x') return /^[0-9a-fA-F]{2}$/.test(pattern.slice(at + 2, at + 4)) ? { js: pattern.slice(at, at + 4), end: at + 3 } : null;
-  // A non-alphanumeric escape is that character, literally, in both dialects — the WHOLE code point, so an
-  // escaped astral character ends at its low surrogate (`Pattern` reads its pattern as code points).
-  if (!/[A-Za-z0-9]/.test(n)) return { js: unit(n), end: at + n.length };
-  return null;
-}
-
-/** The ONE character a Java escape at `pattern[at] === '\\'` certainly denotes, or `null` when it denotes
- *  a class, an anchor, a control character, or anything else this prefilter will not vouch for — with
- *  the index of the escape's LAST character either way. The escape's extent comes from `javaEscape`, the
- *  same tokenizer `javaPatternAsJs` reads the pattern with, so the two can never disagree about where an
- *  escape ends: `\x61` is ONE atom (`a`), never `\x` followed by the literal run `61`. Decoded, all from
- *  `Pattern`'s escape table: an escaped non-alphanumeric is itself, a whole CODE POINT (`\.` → `.`, `\😀` →
- *  `😀`, never a lone low surrogate left behind as a run), `\xhh` and `\uhhhh` are the code unit they
- *  spell — except a SURROGATE, which Java pairs across escapes and this code-point run could split, so it
- *  ends the run. Every other escape `javaEscape` admits (`\d`, `\s`, `\t`, …) ends the
- *  run; the forms it declines (`\x{h..h}`, `\0ooo`, `\cX`, `\Q..\E`, `\p{..}`, …) never get here, because
- *  `extractMandatoryLiteral` extracts nothing from a pattern `javaPatternAsJs` declines. */
-function escapedLiteral(pattern: string, at: number, inClass: boolean): { char: string | null; end: number } | null {
-  const escape = javaEscape(pattern, at, inClass);
-  if (!escape) return null;
-  const n = codePointAt(pattern, at + 1);
-  let code: number | null = null;
-  if (n === 'x' || n === 'u') code = parseInt(pattern.slice(at + 2, escape.end + 1), 16);
-  else if (!/[A-Za-z0-9]/.test(n)) code = n.codePointAt(0)!;   // the whole code point, astral included
-  // A NUL is a real character of every match, but SQL text cannot carry it (`textLiteral` declines it), so
-  // it ends the run like an uncertain escape: the prefilter only NARROWS, so a shorter run stays exact.
-  const certain = code != null && code !== 0 && !(code >= 0xd800 && code <= 0xdfff);
-  return { char: certain ? String.fromCodePoint(code!) : null, end: escape.end };
-}
+/** Escapes whose letter is safe to read: a class (`\d\D\w\W\s\S`), a control character (`\t\n\r\f`) or an
+ *  anchor (`\b\B`) — each just ENDS a literal run. Any other alphanumeric escape (`\x41`, `A`, `\cA`,
+ *  `\0`, a back-reference, `\p{…}`, `\k<n>`, …) makes the scanner extract nothing. */
+const RUN_BREAKING_ESCAPES = new Set('dDwWsStnrfbB');
+/** A lone surrogate half: SQL text cannot carry one faithfully, so it ends a run like a NUL does. */
+const isSurrogate = (c: string): boolean => c.length === 1 && c >= '\ud800' && c <= '\udfff';
 
 /**
  * The longest LITERAL RUN a match must contain (>= 3 code points), or `null`. Used to PREFILTER the
@@ -234,44 +139,34 @@ function escapedLiteral(pattern: string, at: number, inClass: boolean): { char: 
  * Index* / Google Code Search).
  *
  * It NARROWS, never decides: over-selecting is corrected by the exact regex in the barrier, but MISSING
- * a true match would be a WRONG ANSWER — so extraction is CONSERVATIVE. It emits a run only when every
- * match provably contains it, and emits nothing (an honest full scan) whenever unsure — in particular for
- * every pattern `javaPatternAsJs` declines, so the extractor only ever reads the dialect subset whose
- * tokens it shares (`escapedLiteral`). A run is a maximal sequence of EXACTLY-ONCE literal CODE POINTS
- * (an astral character is one atom, so a quantifier after it drops all of it, never half a surrogate
- * pair); a quantifier, a metacharacter (`.`/anchor), a class or a group ENDS it, alternation (`|`) BAILS
- * the whole pattern, and an escape contributes the one character it certainly spells or ends the run.
- * `*`/`?` make the PRECEDING atom optional (drop it); `+` keeps it (>= 1) but ends the run; `{…}` is
- * treated as optional (dropped) — safe under-extraction rather than counting the guaranteed minimum.
+ * a true match would be a WRONG ANSWER — so the scan is CONSERVATIVE, over the RAW pattern, and holds
+ * under both readings `compileRegex` may pick (`u` and non-`u`). A run is a maximal sequence of
+ * exactly-once literal CODE POINTS. A quantifier, `.`, an anchor, a class, a group or a safe escape ENDS
+ * it; a top-level `|` or any other alphanumeric escape BAILS the whole pattern; an escaped
+ * non-alphanumeric is that character. `*`/`?`/`{…}` drop the preceding atom; `+` keeps it and ends the
+ * run. A NUL or a lone surrogate also ends it (SQL text cannot carry either — `textLiteral`).
  */
 export function extractMandatoryLiteral(pattern: string): string | null {
-  if (javaPatternAsJs(pattern) == null) return null;
   let best: string[] = [];
   let cur: string[] = [];
   let inClass = false;
-  // A GROUP contributes no mandatory literal: it may be optional (`(abc)?`), a lookaround (`(?!abc)`), or
-  // open with `?:`/`?<n>` syntax that is no literal at all — reading its text as a run made `(?<n>a)`
-  // prefilter on `<n>a` and drop every true match.
-  let depth = 0;
+  let depth = 0;   // a group contributes nothing: it may be optional, a lookaround, or `(?<n>…)` syntax
   const flush = () => { if (cur.length > best.length) best = cur; cur = []; };
   for (let i = 0; i < pattern.length; i++) {
     const c = String.fromCodePoint(pattern.codePointAt(i)!);
+    i += c.length - 1;
     if (c === '\\') {
-      // Every escape, in a class, a group or the top level, is consumed WHOLE — its extent is the
-      // tokenizer's, never one character.
-      const escape = escapedLiteral(pattern, i, inClass);
-      if (!escape) return null;
-      i = escape.end;
+      if (i + 1 >= pattern.length) return null;
+      const next = String.fromCodePoint(pattern.codePointAt(i + 1)!);
+      i += next.length;
+      const alnum = /^[A-Za-z0-9]$/.test(next);
+      if (alnum && !RUN_BREAKING_ESCAPES.has(next)) return null;
       if (inClass || depth > 0) continue;
-      if (escape.char == null) flush();
-      else cur.push(escape.char);
+      if (alnum || next === '\0' || isSurrogate(next)) flush();
+      else cur.push(next);
       continue;
     }
-    i += c.length - 1;
-    if (inClass) {
-      if (c === ']') inClass = false;
-      continue;                            // a class contributes no mandatory literal
-    }
+    if (inClass) { if (c === ']') inClass = false; continue; }
     if (depth > 0) {
       if (c === '[') inClass = true;
       else if (c === '(') depth++;
@@ -282,12 +177,16 @@ export function extractMandatoryLiteral(pattern: string): string | null {
       case '|': return null;                                  // alternation — bail
       case '[': flush(); inClass = true; break;
       case '(': flush(); depth++; break;
-      case ')': case '.': case '^': case '$': flush(); break;
+      case ')': case '.': case '^': case '$': case '\0': flush(); break;
       case '*': case '?': cur.pop(); flush(); break;          // preceding atom optional
       case '+': flush(); break;                               // preceding atom mandatory, run ends
-      case '{': cur.pop(); flush(); while (i < pattern.length && pattern[i] !== '}') i++; break;
-      case '\0': flush(); break;                              // unsayable in SQL text (`textLiteral`)
-      default: cur.push(c);                                   // a literal character
+      case '{': {                                             // a quantifier drops its atom; else a run-breaker
+        const quantifier = /^\{\d+(?:,\d*)?\}/.exec(pattern.slice(i));
+        if (quantifier) { cur.pop(); i += quantifier[0].length - 1; }
+        flush();
+        break;
+      }
+      default: if (isSurrogate(c)) flush(); else cur.push(c);
     }
   }
   flush();
@@ -329,19 +228,7 @@ export function buildRegexSegment(
   const head = valueHead(lowered);
   if (!head) return null;
 
-  // JS-`RegExp`, no `g` flag → `test` is a stateless partial SEARCH (Java `matcher.find()`). A pattern JS
-  // cannot compile DECLINES: it is either invalid in Java too — whose answer is `Pattern.compile`'s
-  // `PatternSyntaxException` (`Text.java`'s `RegexPredicate` compiles in its constructor), a message this
-  // engine cannot reproduce — or valid only in Java's dialect. Either way not the JS `SyntaxError`, which
-  // used to reach the user raw. A pattern JS CAN compile is first read as the JAVA pattern it is
-  // (`javaPatternAsJs`): passed through raw, `(?<n>a)`/`\Qa\E`/`\p{L}+` silently answered JS's reading.
-  const translated = javaPatternAsJs(barrier.pattern);
-  if (translated == null)
-    throw UnsupportedTraversal.because(`regex(${JSON.stringify(barrier.pattern)}): a construct Java's Pattern and JavaScript read differently`);
-  let re: RegExp;
-  try { re = new RegExp(translated, 'u'); } catch (error) {
-    throw UnsupportedTraversal.because(`regex(${JSON.stringify(barrier.pattern)}): a pattern the JavaScript engine cannot compile (${error instanceof Error ? error.message : String(error)})`);
-  }
+  const re = compileRegex(barrier.pattern);
 
   // A regex barrier is SYNCHRONOUS (`compiler/segment.ts`) — no `apply`, no `residency`. There is NO
   // async transform: the head is read synchronously, `resume` filters those rows with the regex and

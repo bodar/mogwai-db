@@ -294,23 +294,26 @@ describe('Double.toString spells an infinity `Infinity`, at the one asString() a
   });
 });
 
-describe("regex() reads its pattern as Java's Pattern does, or declines", () => {
+describe('regex() reads its pattern as a JavaScript RegExp (`u` flag, then none)', () => {
   test.each([
     ['(?<n>a)', ['"marko"', '"vadas"']], ['(?:mar)ko', ['"marko"']], ['(?!mar)ko', ['"marko"']],
     ['(mar)?ko$', ['"marko"']], ['\\\\s', []], ['jo.*h', ['"josh"']],
-    // A hex escape is ONE character to Pattern; the trigram prefilter read its digits as a literal run
+    // A hex escape is ONE character; the trigram prefilter read its digits as a literal run
     // (`containing("61rko")`) and dropped every true match.
     ['ma\\\\u0072ko', ['"marko"']], ['m\\\\x61rko', ['"marko"']], ['[m]\\\\x61rko', ['"marko"']],
     ['\\\\u0061', ['"marko"', '"vadas"']], ['\\\\x6aosh', ['"josh"']],
+    // JS's reading where it differs from Java's — the accepted regex-dialect divergence.
+    ['(?<=m)a', ['"marko"']], ['\\\\bm', ['"marko"']], ['\\\\p{Lu}', []],
+    // Not valid under `u`, read by the lenient non-`u` dialect: `\Q` is `Q`, `a{2` a literal brace.
+    ['\\\\Qa\\\\E', []], ['a{2', []],
   ] as const)('regex(%s)', async (pattern, want) => {
     expect(await run(`g.V().has('name', regex('${pattern}')).values('name')`)).toEqual([...want]);
   });
-  test.each(['(?<=m)a', '\\\\Qa\\\\E', '\\\\p{L}+', '[\\\\w&&[^a]]', 'a{2', '\\\\bm', '['])('regex(%s) declines', async (pattern) => {
+  test.each(['[', '(?<n>a)\\\\k<m>', 'a**'])('regex(%s) — no JS reading — declines', async (pattern) => {
     expect(await failure(`g.V().has('name', regex('${pattern}')).values('name')`)).toBeInstanceOf(UnsupportedTraversal);
   });
-  // `Pattern` reads its pattern as CODE POINTS: `\😀` is the one character U+1F600. Escaping its high
-  // surrogate alone (`\ud83d`, then a raw low surrogate) never pairs under the `u` flag — every true match
-  // was dropped and `notRegex` kept the row; the prefilter then read the orphaned low surrogate as a run.
+  // An escaped astral character is the character on BOTH runtimes: V8 rejects it under `u` and JSC accepts
+  // it there as a lone high surrogate that never matches, so `compileRegex` reads it without `u`.
   test.each([
     ["regex('\\\\😀')", ['"😀abc"']], ["regex('x?\\\\😀')", ['"😀abc"']], ["regex('\\\\😀abc')", ['"😀abc"']],
     ["regex('[\\\\😀]a')", ['"😀abc"']], ["regex('\\\\😀?abc')", ['"😀abc"']], ["regex('a\\\\😀')", []],
@@ -318,8 +321,8 @@ describe("regex() reads its pattern as Java's Pattern does, or declines", () => 
   ] as const)('an escaped astral character is ONE code point: %s', async (predicate, want) => {
     expect(await run(`g.V().has('t', ${predicate}).values('t')`, ["g.V(1).property('t','😀abc')"])).toEqual([...want]);
   });
-  test("Java's `$` matches before a final line terminator", async () => {
-    expect(await run("g.V().has('t', regex('a$')).values('name')", ["g.V(1).property('t','a\\n')"])).toEqual(['"marko"']);
+  test("`$` is JS's end of input — not Java's before-a-final-newline (accepted divergence)", async () => {
+    expect(await run("g.V().has('t', regex('a$')).values('name')", ["g.V(1).property('t','a\\n')"])).toEqual([]);
   });
 });
 

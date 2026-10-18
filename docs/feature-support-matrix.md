@@ -68,7 +68,7 @@ JS/SQLite semantics rather than Java's (regex dialect, string order, write visib
 | Predicate | | Notes |
 |---|:--:|---|
 | `containing`, `startingWith`, `endingWith` + negations | ✅ | |
-| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY (a batched barrier; the pattern is read as Java's `Pattern` reads it and a construct the two dialects read differently — `\p{…}`, `\Q…\E`, lookbehind, `\b`, class set algebra, … — declines, `src/compiler/rel/regex.ts` `javaPatternAsJs`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) — a fail-closed deferral, `docs/2026-08-12-regex-as-a-barrier-research.md` |
+| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY (a batched barrier; the pattern is a JavaScript `RegExp` — see Deliberate divergences — `src/compiler/rel/regex.ts` `compileRegex`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) — a fail-closed deferral, `docs/2026-08-12-regex-as-a-barrier-research.md` |
 
 ## 3. Projections & element data
 
@@ -300,7 +300,7 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 
 | Divergence | What you get |
 |---|---|
-| Regex dialect | JavaScript `RegExp` (tried with the `u` flag, then without), not `java.util.regex`; a pattern neither reads raises `UnsupportedTraversal` |
+| Regex dialect | JavaScript `RegExp` (tried with the `u` flag, then without), not `java.util.regex` — e.g. `$` is end of input only, `\s` includes Unicode spaces, `\Q…\E` is not quoting; a pattern neither reads raises `UnsupportedTraversal` |
 | String order | SQLite code-point order, not Java's UTF-16 code-unit order (they differ only for astral characters vs U+E000–U+FFFF) |
 | Case mapping | `toUpper`/`toLower` follow SQLite's ASCII mapping; non-ASCII letters may be left as written |
 | Write visibility | SNAPSHOT: a write step sees a snapshot of its input; steps after it see all of its writes (Java's lazy pipeline interleaves per traverser unless a `barrier()` is added) |
