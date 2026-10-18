@@ -190,35 +190,34 @@ describe('a constant inside a body keeps its declared type', () => {
 // Review round 3. Each case below is a value a probe found wrong (or an internal error) at the parent.
 const X = "g.V(1).property('x', 9007199254740993L) ;; ";
 
-describe('a number compares in the reference common class, at every depth', () => {
-  // NumberHelper.compare converts both sides to getHighestCommonNumberClass first: a Long against a Double
-  // is a DOUBLE compare (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-398,670-681;
-  // Compare.java:66-69), where SQLite compares an INTEGER and a REAL exactly.
+describe('a number compares by value, at every depth', () => {
+  // SQLite compares an INTEGER and a REAL EXACTLY; Java's NumberHelper first rounds a Long to a Double. We keep
+  // the exact answer — a deliberate divergence past 2^53 (docs/feature-support-matrix.md).
   test.each([
-    // 9007199254741021 is 9007199254741020.0 as a double, so it is not greater.
-    ['g.inject(9007199254740992L,29L).sum().is(P.gt(9007199254741020.0d))', []],
-    ['g.inject(9007199254740992L,29L).sum().is(P.gt(9007199254741020.5d))', []],
-    ['g.inject(9007199254740992L,29L).fold().sum(local).is(P.gt(9007199254741020.0d))', []],
-    ['g.inject(9007199254740993L,1L).max().is(P.gt(9007199254740992.0d))', []],
-    ['g.inject(9007199254741021L).is(P.gt(9007199254741020.0d))', []],
+    // 9007199254741021 is greater than 9007199254741020.0, exactly (Java rounds the Long and says no).
+    ['g.inject(9007199254740992L,29L).sum().is(P.gt(9007199254741020.0d))', [[9007199254741021n, T.long]]],
+    ['g.inject(9007199254740992L,29L).sum().is(P.gt(9007199254741020.5d))', [[9007199254741021n, T.long]]],
+    ['g.inject(9007199254740992L,29L).fold().sum(local).is(P.gt(9007199254741020.0d))', [[9007199254741021n, T.long]]],
+    ['g.inject(9007199254740993L,1L).max().is(P.gt(9007199254740992.0d))', [[9007199254740993n, T.long]]],
+    ['g.inject(9007199254741021L).is(P.gt(9007199254741020.0d))', [[9007199254741021n, T.long]]],
     ['g.inject(9007199254740992L,2L).sum().is(P.eq(9007199254740994.0d))', [[9007199254740994n, T.long]]],
-    ['g.inject(9007199254740993L).is(P.eq(9007199254740992.0d))', [[9007199254740993n, T.long]]],
-    ['g.inject(9007199254740993L).is(P.within(9007199254740992.0d, 1.5d))', [[9007199254740993n, T.long]]],
-    ['g.inject(9007199254740993L).is(P.neq(9007199254740992.0d))', []],
-    ['g.inject(9007199254740992.0d).is(P.eq(9007199254740993L))', [[9007199254740992, T.double]]],
-    ['g.inject(9007199254740992.0d).is(P.gte(9007199254740993L))', [[9007199254740992, T.double]]],
+    ['g.inject(9007199254740993L).is(P.eq(9007199254740992.0d))', []],
+    ['g.inject(9007199254740993L).is(P.within(9007199254740992.0d, 1.5d))', []],
+    ['g.inject(9007199254740993L).is(P.neq(9007199254740992.0d))', [[9007199254740993n, T.long]]],
+    ['g.inject(9007199254740992.0d).is(P.eq(9007199254740993L))', []],
+    ['g.inject(9007199254740992.0d).is(P.gte(9007199254740993L))', []],
     ['g.inject(9007199254740992L,29L).sum().is(P.gt(28.5d))', [[9007199254741021n, T.long]]],
     // A Long is never equal to a String, however it is spelled (GremlinValueComparator.java:71-74).
     ["g.inject(9007199254740992L,2L).sum().is(P.eq('9007199254740994'))", []],
     ["g.inject(9007199254740994L).is(P.eq('9007199254740994'))", []],
     // A Boolean is not a Number, so a numeric bound never matches it.
     ['g.inject(true, 1).is(P.gt(0))', [[1, T.int]]],
-    [`${X}g.V().has('x', 9007199254740992.0d).values('name')`, [['marko', T.string]]],
-    [`${X}g.V().has('x', P.gt(9007199254740992.0d)).values('name')`, []],
+    [`${X}g.V().has('x', 9007199254740992.0d).values('name')`, []],
+    [`${X}g.V().has('x', P.gt(9007199254740992.0d)).values('name')`, [['marko', T.string]]],
     [`${X}g.V().has('x', '9007199254740993').values('name')`, []],
-    [`${X}g.V().where(__.values('x').is(P.eq(9007199254740992.0d))).values('name')`, [['marko', T.string]]],
-    [`${X}g.V().values('x').as('a').select('a').is(P.gt(9007199254740992.0d))`, []],
-    [`${X}g.V().union(__.values('x'), __.values('age')).is(P.eq(9007199254740992.0d))`, [[9007199254740993n, T.long]]],
+    [`${X}g.V().where(__.values('x').is(P.eq(9007199254740992.0d))).values('name')`, []],
+    [`${X}g.V().values('x').as('a').select('a').is(P.gt(9007199254740992.0d))`, [[9007199254740993n, T.long]]],
+    [`${X}g.V().union(__.values('x'), __.values('age')).is(P.eq(9007199254740992.0d))`, []],
     ["g.V().has('age', 29.0d).values('name')", [['marko', T.string]]],
   ])('%s', async (q, want) => {
     expect(await typed(q)).toEqual(want as [unknown, number][]);

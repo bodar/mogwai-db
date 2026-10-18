@@ -86,10 +86,10 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       // `value > ?` matches neither alternative.
       expect(gt.sql).toMatch(/(END\)? > (?:\?|\d+)|CAST\([^)]+ AS (INT|REAL)\) > (?:\?|\d+))/);
       expect(carries(gt, 30)).toBe(true);   // inlined as a literal
-      // bare literal → equality, with no compareKey (equality on canonical text is exact)
+      // bare literal → a raw equality, with no compareKey; only a decimal-TEXT BigDecimal row reads as its REAL
       const eq = read('g.V().values("age").is(29)');
       expect(eq.sql).toMatch(/\bv = (?:\?|29)/);
-      expect(eq.sql).not.toContain('CAST');
+      expect(eq.sql).not.toContain('AS INT');
     });
 
     test(`count().is(P) wraps the count in a value filter (0/1 rows)`, () => {

@@ -6,9 +6,8 @@ import { inferredVtype, MIXED_COMPARABLES } from './reducer.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
-import { BigDecimal, Duration, flatType, normalizeTypeName, numberClassOf, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
+import { BigDecimal, Duration, flatType, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
-import { adjacent, decimalCompare, decimalOf, doubleText, floatingDecimal } from '../../gremlin/float.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -93,18 +92,29 @@ const operand = (value: unknown, type: TypeNode | null = null, paramName: string
 };
 
 /** The numeric tail stored as decimal TEXT — a bigint, a BigDecimal, or a Duration (total-nanos). Its
- *  ordering comparison casts to the column's numeric class (`compareBound`): BigDecimal → REAL, the two
- *  integrals → INTEGER. */
+ *  comparison casts it to a numeric class (`compareBound`): the two integrals, and a BigDecimal holding a whole
+ *  value inside int64 (`9007199254740993.0m` equals its Long), → INTEGER; any other BigDecimal → REAL. */
 const isExactTail = (value: unknown): boolean =>
   typeof value === 'bigint' || value instanceof BigDecimal || value instanceof Duration;
+const wholeInt64 = (d: BigDecimal): boolean => {
+  if (d.scale > 0 && d.unscaled % 10n ** BigInt(d.scale) !== 0n) return false;
+  const whole = d.scale > 0 ? d.unscaled / 10n ** BigInt(d.scale) : d.unscaled * 10n ** BigInt(-d.scale);
+  return whole >= -(2n ** 63n) && whole < 2n ** 63n;
+};
 const exactTailCast = (value: unknown): SqlType | null =>
-  value instanceof BigDecimal ? 'real' : (typeof value === 'bigint' || value instanceof Duration) ? 'int' : null;
+  value instanceof BigDecimal ? (wholeInt64(value) ? 'int' : 'real') : (typeof value === 'bigint' || value instanceof Duration) ? 'int' : null;
 
 /** The numeric class a TEXT-stored static SUBJECT casts to in an ordering compare, keyed by canonical
  *  type (`normalizeTypeName` output). The cast is IDENTITY on the native form of the same tag (a native
  *  `long` is already INTEGER, an `asNumber(BIGDECIMAL)` REAL) and the conversion on the decimal/nanos-TEXT
  *  form (`inject(9.99m)` → REAL), so it is correct once `type.text` says which storage class is in hand. */
 const STATIC_SUBJECT_CAST: Record<string, SqlType> = { bigdecimal: 'real', long: 'int', bigint: 'int', duration: 'int' };
+/** A static subject keyed to its numeric class where it may ride as TEXT — flagged `text`, or a BigDecimal (whose
+ *  carrier is decimal TEXT however it was produced); `null` where the subject compares as it is. */
+const staticKey = (subject: Expr, canonical: string, text: boolean | undefined): Expr | null => {
+  const to = text || canonical === 'bigdecimal' ? STATIC_SUBJECT_CAST[canonical] : undefined;
+  return to ? { kind: 'cast', arg: subject, to } : null;
+};
 
 /** Storage classes `compareKey` casts to, as `plan.ts` measured them. A fixed compile-time
  *  vocabulary — never user input — so there is no injection surface in the names themselves. */
@@ -168,337 +178,64 @@ export const perRowSubject = (vtype: Expr, value: Expr): SubjectType =>
   ({ kind: 'perRow', vtype: { kind: 'call', fn: 'coalesce', args: [vtype, inferredVtype(value)] } });
 
 /**
- * A Gremlin `Number` class as `NumberHelper.getHighestCommonNumberInfo` reads it — bit width and
- * floating-ness — collapsed to the distinctions a comparison can observe. `int32` is byte/short/int; a Float
- * rides as the Double of its value, so it compares as a `double`.
- */
-type NumClass = 'int32' | 'long' | 'bigint' | 'double' | 'bigdecimal';
-const NUM_CLASS: Readonly<Record<string, NumClass>> = {
-  byte: 'int32', short: 'int32', int: 'int32', long: 'long', bigint: 'bigint', float: 'double', double: 'double', bigdecimal: 'bigdecimal',
-};
-const TWO_53 = 2 ** 53;
-
-/** The bound's class: its declared type, else its value's own shape. */
-function boundClass(value: unknown, boundType: TypeNode | null): NumClass | null {
-  const declared = flatType(boundType);
-  if (declared !== null && NUM_CLASS[declared]) return NUM_CLASS[declared]!;
-  if (typeof value === 'bigint') return value >= -(2n ** 63n) && value < 2n ** 63n ? 'long' : 'bigint';
-  if (value instanceof BigDecimal) return 'bigdecimal';
-  if (typeof value === 'number') { const cls = numberClassOf(value); return cls === 'int' ? 'int32' : cls; }
-  return null;
-}
-const magnitude = (value: unknown): number =>
-  typeof value === 'bigint' ? Math.abs(Number(value)) : typeof value === 'number' ? Math.abs(value) : Math.abs(Number(String(value)));
-
-/**
- * HOW A SUBJECT OF CLASS `subject` MEETS THIS BOUND so SQLite's comparison is the reference's.
+ * NUMBERS COMPARE BY VALUE — SQLite's own INTEGER/REAL comparison, which is exact, with each side keyed to
+ * its numeric class (`compareKey`'s cast: a decimal-TEXT BigDecimal reads as its REAL, a TEXT long or
+ * BigInteger as its INTEGER). `NumberHelper`'s widening (a long past 2^53 rounded to a double, a Double
+ * widened through `BigDecimal.valueOf`'s printed decimal) is deliberately NOT reproduced: the two differ only
+ * in the last ulp (`docs/feature-support-matrix.md`, Deliberate divergences).
  *
- * SQLite compares an INTEGER and a REAL EXACTLY. `NumberHelper.compare` does not: it converts both sides
- * to their highest common class first (`getHighestCommonNumberClass`), so a Long against a Double is
- * `Double.compare(a.doubleValue(), b.doubleValue())`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-398,670-681`;
- * `Compare.java:66-69` routes every ordering and `eq` through it). The two agree except where the
- * conversion ROUNDS: a `long` past 2^53 against a `double` — the long rounds to a double. Only a bound at
- * or past 2^53 can tell (rounding is monotone, and every long below 2^53 converts exactly), so the subject
- * is compared as `CAST(… AS REAL)` — which IS `Long.doubleValue()`, round-to-nearest — only then. The
- * other direction, a `double` subject against a `long` bound past 2^53, rounds the BOUND, which the
- * compiler holds, so it is converted here (`Number(bigint)` is round-to-nearest too). (A Float rides as the
- * Double of its value, so Java's float compare is not reproduced — a deliberate divergence.)
- *
- * A `BigInteger`/`BigDecimal` against anything widens to an EXACT class (`BigDecimal`), which is SQLite's
- * own compare.
+ * The one place SQLite's comparison is not the value's: `CAST(… AS INTEGER)` SATURATES at int64, so a
+ * BigInteger past it reads as ±(2^63 - 1). That is harmless for an ORDERING against a bound strictly inside
+ * int64 (the saturated subject stays on its side of it), so only a bound AT or past int64's edge orders both
+ * sides as REAL — `wideBound`, that bound as a REAL, or `null` where the INTEGER comparison stands. (Equality
+ * uses it for a floating bound only: a BigInteger past int64 equals its own canonical text, `sameSpaceEquality`.)
  */
-interface NumericPair {
-  readonly real: boolean; readonly bound: Expr;
-  /** An INTEGRAL pair one side of which is a BigInteger: compared EXACTLY against this bound
-   *  (`integralCompare`), because a `CAST(… AS INTEGER)` SATURATES at int64 on both sides. */
-  readonly exact?: bigint;
-  /** A BigInteger subject against a NON-FINITE floating bound — `BigDecimal.valueOf(Infinity)` throws — so a
-   *  subject past int64 raises (inside int64 SQLite's compare with an infinity is the only answer). */
-  readonly wideUndecided?: true;
-  /**
-   * THE CELLS where the reference's widening and SQLite's exact compare disagree, each with the reference's
-   * own compare result there; every other row compares exactly against `bound`, as a REAL (`real`).
-   *
-   * A widening that ROUNDS (a Double to `BigDecimal.valueOf`'s decimal, `NumberHelper.java:851-859`) moves
-   * a value only within its own rounding interval, so it can change an order only for a subject whose
-   * interval holds the bound — a carrier the compiler names in advance (the bound's nearest double, and
-   * each of its neighbours, so an interval-edge tie cannot slip past).
-   * Each such carrier's answer is decided HERE, from the two exact decimals; no other row can differ.
-   * (A zero has no sign: `-0.0` and `0.0` compare equal, as in SQLite — a deliberate divergence.)
-   */
-  readonly cells?: readonly Cell[];
-}
-type Cell = { readonly at: number; readonly cmp: number };
-const INTEGRAL: ReadonlySet<NumClass> = new Set(['int32', 'long', 'bigint']);
 const LONG_MIN = -(2n ** 63n);
 const LONG_MAX = 2n ** 63n - 1n;
-const LONG_RANGE = (n: bigint): boolean => n >= LONG_MIN && n <= LONG_MAX;
-const BIG: ReadonlySet<NumClass> = new Set(['bigint', 'bigdecimal']);
-
-/** A bound's exact decimal value, for a widening to `BigDecimal` to compare against. */
-function boundDecimal(value: unknown): BigDecimal | null {
-  if (typeof value === 'bigint') return new BigDecimal(value, 0);
-  if (value instanceof BigDecimal) return value;
-  return typeof value === 'number' && Number.isFinite(value) ? decimalOf(String(value)) : null;
+const TWO_63 = 2 ** 63;
+function wideBound(value: unknown): Expr | null {
+  if (typeof value === 'bigint') return value >= LONG_MAX || value <= LONG_MIN ? compilerReal(Number(value)) : null;
+  const n = typeof value === 'number' ? value : value instanceof BigDecimal ? Number(String(value)) : NaN;
+  return n >= TWO_63 || n <= -TWO_63 ? compilerReal(n) : null;
 }
+const pastInt64 = (value: unknown): boolean => typeof value === 'bigint' && (value > LONG_MAX || value < LONG_MIN);
 
-/** `NumberHelper.bigDecimalValue` of a bound (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:850-859`):
- *  a BigDecimal as is, an integral class exactly, a Float (riding as its Double) or a Double through
- *  `BigDecimal.valueOf` (`Double.toString`) — the PRINTED decimal, never the binary value. `'nan'`/`'infinite'`
- *  for the two a `BigDecimal` cannot hold; `null` for a bound that is not a number. */
-function bigDecimalWidening(value: unknown, boundCls: NumClass): BigDecimal | 'nan' | 'infinite' | null {
-  if (value instanceof BigDecimal) return value;
-  if (typeof value === 'bigint') return new BigDecimal(value, 0);
-  if (typeof value !== 'number') return null;
-  if (Number.isNaN(value)) return 'nan';
-  if (!Number.isFinite(value)) return 'infinite';
-  if (boundCls === 'double' || !Number.isInteger(value)) return floatingDecimal(value);
-  return new BigDecimal(BigInt(value), 0);
-}
-
-/** A BigDecimal's VALUE as canonical plain text — trailing fractional zeros dropped, so two scales of one
- *  value spell alike (`BigDecimal.compareTo` ignores scale; `1.0` and `1` are one value). */
-function canonicalDecimal(d: BigDecimal): string {
-  let { unscaled, scale } = d;
-  if (unscaled === 0n) return '0';
-  while (scale > 0 && unscaled % 10n === 0n) { unscaled /= 10n; scale--; }
-  return new BigDecimal(unscaled, scale).toString();
-}
-/**
- * Does a decimal-TEXT carrier (`storedScalar` writes `BigDecimal`'s PLAIN form — no exponent, a '.' only with
- * a fraction) hold one of these canonical values, whatever its scale? A FRACTIONAL canonical (it holds a '.'
- * and no trailing zero) is the carrier with its trailing zeros trimmed — only a fraction's zeros can trim
- * down to a text holding a '.'. An INTEGRAL one is the carrier itself, or the carrier trimmed to `c.` (`29.000`;
- * `290` trims to `29`, which never carries the '.').
- */
-const decimalTextMatch = (text: Expr, canonicals: readonly string[]): Expr => {
-  const trimmed: Expr = { kind: 'call', fn: 'rtrim', args: [text, compilerText('0')] };
-  const among = (e: Expr, values: readonly string[]): Expr =>
-    values.length === 1 ? binary('=', e, compilerText(values[0]!)) : { kind: 'in-list', expr: e, values: values.map(compilerText) };
-  const integral = canonicals.filter((c) => !c.includes('.'));
-  const trims = canonicals.map((c) => (c.includes('.') ? c : `${c}.`));
-  return integral.length ? binary('or', among(text, integral), among(trimmed, trims)) : among(trimmed, trims);
-};
-const isText = (subject: Expr): Expr => binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text'));
-
-/** The deferral an equality raises where the reference throws: `BigDecimal.valueOf(±Infinity)`. */
-const INFINITE_DECIMAL = 'comparing a BigDecimal with an infinity is not supported';
-
-/** A number bound's BigDecimal widening, as the one thing the decimal forms below need: its canonical text
- *  and the double that alone can equal it (`null` where no double prints as it — `Double.toString(r)` reads
- *  back as `r`, so the one candidate is the bound's nearest double, and only if THAT prints as the bound). */
-type DecimalBound = { readonly canonical: string; readonly double: number | null } | 'nan' | 'infinite';
-function decimalBound(value: unknown, boundCls: NumClass): DecimalBound | null {
-  const bound = bigDecimalWidening(value, boundCls);
-  if (bound === null || bound === 'nan' || bound === 'infinite') return bound;
-  const canonical = canonicalDecimal(bound);
-  const nearest = Number(canonical);
-  const prints = Number.isFinite(nearest) && decimalCompare(decimalOf(doubleText(nearest))!, bound) === 0;
-  return { canonical, double: prints ? nearest : null };
+/** `subject op against` over a per-row or untyped subject: each number row keyed to its class (REAL
+ *  throughout against a `wideBound`), and `otherwise` for a row outside the vocabulary. */
+function byValue(
+  op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, type: Exclude<SubjectType, { kind: 'static' }>,
+  against: Expr, wide: boolean, otherwise: Expr,
+  intVtypes: readonly string[] = NUMERIC_CAST_TO_INT, realVtypes: readonly string[] = CAST_TO_REAL,
+): Expr {
+  const cast = (to: SqlType): Expr => ({ kind: 'cast', arg: subject, to: wide ? 'real' : to });
+  if (type.kind === 'perRow') {
+    const among = (names: readonly string[]): Expr => ({ kind: 'in-list', expr: type.vtype, values: names.map(compilerText) });
+    return { kind: 'case', whens: [
+      [among(intVtypes), binary(op, cast('int'), against)],
+      ...(realVtypes.length ? [[among(realVtypes), binary(op, cast('real'), against)] as const] : []),
+    ], else: otherwise };
+  }
+  const storage: Expr = { kind: 'call', fn: 'typeof', args: [subject] };
+  return { kind: 'case', whens: [[
+    { kind: 'in-list', expr: storage, values: [compilerText('integer'), compilerText('real')] }, binary(op, wide ? cast('real') : subject, against),
+  ]], else: otherwise };
 }
 
 /**
- * EQUALITY WHERE THE COMMON CLASS IS BIGDECIMAL — `NumberHelper.compare` widens both sides to `BigDecimal`
- * whenever either is one (`getHighestCommonNumberClass`, `NumberHelper.java:362-398`) and compares by
- * `compareTo`, which ignores SCALE (`NumberHelper.java:301`). A raw SQLite `=` sees neither rule: a BigDecimal
- * rides as decimal TEXT, which never equals a REAL or an INTEGER (`inject(1m).is(1)` was empty), and two
- * scales of one value are two texts (`inject(1.0m).is(1m)` was empty). So the row's STORAGE decides the exact
- * form, per row, at whatever depth the subject was produced:
- *
- * - a decimal-TEXT row (a BigDecimal, or an integral class past 2^53 against a BigDecimal bound) compares its
- *   canonical text with the bound's canonical widening;
- * - an INTEGER row is an integral value (`BigDecimal.valueOf(long)`), equal only to an integral bound;
- * - a REAL row is a Double's widening (`BigDecimal.valueOf`, `Double.toString`), equal only to the one double
- *   that prints as the bound (`DecimalBound.double`).
- *
- * Used for a subject whose class is STATIC and for any subject against a BigDecimal BOUND (both rare, and
- * one compile each); a stored row's BigDecimal against a plain number bound is the cheaper
- * `decimalTextArm`, beside the raw compare that already answers every other row. `null` where the common
- * class is not BigDecimal, or the subject class floats (`numericPair` already widens a Float/Double subject
- * against a BigDecimal bound exactly).
+ * THE ONE ROW A RAW `=` MISSES against a plain NUMBER bound: a BigDecimal riding as decimal TEXT under a
+ * per-row type (`inject(1m).is(1)`). It reads as its REAL — OR-ed beside the raw compare rather than
+ * replacing it, which keeps the value index and the `IN`-list form usable. `bounds` are the plain-number
+ * bounds of one `eq` or one `within`; `null` where none needs the arm.
  */
-function decimalEquality(subject: Expr, cls: NumClass, value: unknown, boundCls: NumClass): Expr | null {
-  if (cls !== 'bigdecimal' && boundCls !== 'bigdecimal') return null;
-  if (cls === 'double') return null;
-  const bound = decimalBound(value, boundCls);
-  if (bound === null) return null;
-  // `NumberHelper.compare` settles a NaN before widening: never equal (`NumberHelper.java:676-677`).
-  if (bound === 'nan') return CONSTANT.false;
-  if (bound === 'infinite') return raiseExpr(INFINITE_DECIMAL, subject);
-  const integral = bound.canonical.includes('.') ? null : BigInt(bound.canonical);
-  const integerArm = integral !== null && LONG_RANGE(integral)
-    ? binary('=', subject, { kind: 'cast', arg: compilerText(bound.canonical), to: 'int' }) : CONSTANT.false;
-  const realArm = bound.double !== null ? binary('=', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(bound.double)) : CONSTANT.false;
-  return { kind: 'case', whens: [
-    [isText(subject), decimalTextMatch(subject, [bound.canonical])],
-    [binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('integer')), integerArm],
-  ], else: realArm };
+function decimalTextArm(subject: Expr, type: SubjectType, bounds: readonly Expr[]): Expr | null {
+  if (type.kind !== 'perRow' || !bounds.length) return null;
+  const real: Expr = { kind: 'cast', arg: subject, to: 'real' };
+  return and(binary('=', type.vtype, compilerText('bigdecimal')),
+    bounds.length === 1 ? binary('=', real, bounds[0]!) : { kind: 'in-list', expr: real, values: bounds });
 }
-
-/**
- * THE ONE ROW A RAW COMPARE MISSES against a plain NUMBER bound: a BigDecimal riding as decimal TEXT under a
- * per-row type. Every other row — and a BigDecimal held natively as REAL/INTEGER — the raw `=` already
- * answers exactly (`BigDecimal.valueOf(r)` equals the bound's widening exactly where `r` equals the bound), so
- * this is OR-ed beside it rather than replacing it, which keeps the value index and the `IN`-list form usable.
- * `members` are the bounds of one `eq` or one `within`; `null` where none needs the arm.
- */
-function decimalTextArm(subject: Expr, type: SubjectType, members: readonly { value: unknown; type: TypeNode | null }[]): Expr | null {
-  if (type.kind !== 'perRow') return null;
-  const canonicals: string[] = [];
-  let infinite = false;
-  for (const member of members) {
-    const numeric = typeof member.value === 'number' || typeof member.value === 'bigint';
-    const cls = numeric && !isTemporal(member.type) ? boundClass(member.value, member.type) : null;
-    if (!cls || cls === 'bigdecimal') continue;
-    const bound = decimalBound(member.value, cls);
-    if (bound === 'infinite') infinite = true;
-    else if (bound && bound !== 'nan') canonicals.push(bound.canonical);
-  }
-  if (!canonicals.length && !infinite) return null;
-  const isDecimal = binary('=', type.vtype, compilerText('bigdecimal'));
-  if (infinite) return { kind: 'case', whens: [[isDecimal, raiseExpr(INFINITE_DECIMAL, subject)]], else: CONSTANT.false };
-  return and(and(isDecimal, isText(subject)), decimalTextMatch(subject, canonicals));
-}
-const isTemporal = (type: TypeNode | null): boolean => flatType(type) === 'datetime' || flatType(type) === 'duration';
-
-
-/** The cells around `nearest` (`NumericPair.cells`): it and its double neighbours, each with the
- *  reference's compare of its printed decimal against the bound's. */
-function cellsAround(nearest: number, bound: BigDecimal): Cell[] {
-  if (!Number.isFinite(nearest)) return [];
-  const [below, above] = adjacent(nearest);
-  return [below, nearest, above].filter(Number.isFinite).map((at) => ({ at, cmp: decimalCompare(decimalOf(String(at))!, bound) }));
-}
-
-function numericPair(subject: NumClass, bound: NumClass, value: unknown, castBound: Expr): NumericPair {
-  // A BigInteger meets an INTEGRAL other side exactly — `NumberHelper.compare` widens both to BigInteger.
-  // SQLite's `CAST(… AS INTEGER)` saturates past int64, so `'99999999999999999999' > Long.MAX` read 'no'.
-  // The SATURATION is harmless wherever the bound lies strictly inside it: a subject past int64 casts to
-  // ±(2^63 - 1) / -2^63, which still lies on the subject's side of every such bound — so only a bound AT
-  // the edge (`P.gt(Long.MAX_VALUE)`) or past it needs the exact form.
-  const integralValue = typeof value === 'bigint' ? value : typeof value === 'number' && Number.isInteger(value) ? BigInt(value) : null;
-  if ((subject === 'bigint' || bound === 'bigint') && INTEGRAL.has(subject) && INTEGRAL.has(bound) && integralValue !== null)
-    return integralValue > LONG_MIN && integralValue < LONG_MAX ? { real: false, bound: castBound } : { real: false, bound: castBound, exact: integralValue };
-  // A BigInteger subject against a DOUBLE bound widens it to `BigDecimal.valueOf(d)` — the decimal of
-  // `Double.toString(d)`, NOT d's binary value (`NumberHelper.java:856-858`): `4611686018427387903` is
-  // below `4.611686018427388E18d`, whose decimal is 4611686018427388000. An INTEGRAL double is that exact
-  // integer (`integralCompare`, past int64 as well); a fractional one lies strictly between two integers,
-  // where the binary value and the decimal order every integer subject alike, so SQLite's own INTEGER-vs-REAL
-  // compare holds (a subject past int64 saturates within ±2^63, still on its side of the bound).
-  if (subject === 'bigint' && typeof value === 'number') {
-    if (!Number.isFinite(value)) return { real: false, bound: castBound, wideUndecided: true };
-    // Below 2^53 an integral double's decimal IS its value, so SQLite's own compare is that one too.
-    if (!Number.isInteger(value) || Math.abs(value) < TWO_53) return { real: false, bound: castBound };
-    const exact = decimalOf(String(value))!;
-    const integral = exact.scale >= 0 ? exact.unscaled / 10n ** BigInt(exact.scale) : exact.unscaled * 10n ** BigInt(-exact.scale);
-    return { real: false, bound: { kind: 'cast', arg: compilerText(String(integral)), to: 'int' }, exact: integral };
-  }
-  // A DOUBLE subject against a BIG bound widens to `BigDecimal.valueOf(d)` — its shortest decimal, which
-  // disagrees with the exact carrier only in the cells around the bound (`NumericPair.cells`). Everywhere
-  // else the REAL compare against the bound's nearest double is exact: the subject lies outside the bound's
-  // rounding interval.
-  const decimal = BIG.has(bound) && subject === 'double' ? boundDecimal(value) : null;
-  if (decimal) {
-    const nearest = Number(decimal.toString());
-    return { real: true, bound: compilerReal(nearest), cells: cellsAround(nearest, decimal) };
-  }
-  const big = subject === 'bigdecimal' || bound === 'bigint' || bound === 'bigdecimal';
-  if (big) return { real: false, bound: castBound };
-  const m = magnitude(value);
-  if (subject === 'long' && bound === 'double' && m >= TWO_53) return { real: true, bound: castBound };
-  if (subject === 'double' && bound === 'long' && m >= TWO_53)
-    return { real: false, bound: compilerReal(Number(value as bigint | number)) };
-  return { real: false, bound: castBound };
-}
-
-/** The deferral a BigInteger compare raises where no exact SQL form decides it (`numericPair`). */
-const WIDE_UNDECIDED = 'comparing a number past int64 with a floating-point number past 2^63 is not supported';
-
-/** An integral subject past int64 — carried as canonical decimal TEXT that a cast to INTEGER does not
- *  round-trip (it saturates). */
-const wideInteger = (subject: Expr): Expr => and(
-  binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')),
-  binary('!=', { kind: 'cast', arg: { kind: 'cast', arg: subject, to: 'int' }, to: 'text' }, subject));
-
-const negativeText = (text: Expr): Expr =>
-  binary('=', { kind: 'call', fn: 'substr', args: [text, compilerInt(1), compilerInt(1)] }, compilerText('-'));
-/** `op`'s answer for a subject known to lie strictly ABOVE (`above`) or below the bound. */
-const outcome = (op: Extract<Expr, { kind: 'binary' }>['op'], above: boolean): Expr =>
-  (above ? op === '>' || op === '>=' : op === '<' || op === '<=') ? CONSTANT.true : CONSTANT.false;
-/** A wide subject against a bound inside int64: its SIGN places it. */
-const bySign = (op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr): Expr =>
-  ({ kind: 'case', whens: [[negativeText(subject), outcome(op, false)]], else: outcome(op, true) });
-/** `a op b` over two canonical decimal integers of the SAME sign: the longer magnitude is larger, and equal
- *  lengths order as text. */
-const lexicalCompare = (op: Extract<Expr, { kind: 'binary' }>['op'], a: Expr, b: Expr): Expr => {
-  const length = (e: Expr): Expr => ({ kind: 'call', fn: 'length', args: [e] });
-  return { kind: 'case', whens: [[binary('!=', length(a), length(b)), binary(op, length(a), length(b))]], else: binary(op, a, b) };
-};
-
-/**
- * `subject op bound` EXACTLY over integers — the subject an INTEGER or a canonical decimal TEXT past int64,
- * the bound the compiler's own value (`NumberHelper.compare` widens a BigInteger pair to BigInteger,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-398`).
- * Inside int64 both sides are SQLite integers; past it the sign and then the digits decide.
- */
-function integralCompare(op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: bigint, castBound: Expr): Expr {
-  const wide = wideInteger(subject);
-  if (LONG_RANGE(bound))
-    return { kind: 'case', whens: [[wide, bySign(op, subject)]], else: binary(op, { kind: 'cast', arg: subject, to: 'int' }, castBound) };
-  const text = compilerText(String(bound));
-  return bound > 0n
-    ? { kind: 'case', whens: [[and(wide, { kind: 'unary', op: 'not', arg: negativeText(subject) }), lexicalCompare(op, subject, text)]], else: outcome(op, false) }
-    // Both negative: the larger magnitude is the SMALLER number, so the operands swap.
-    : { kind: 'case', whens: [[and(wide, negativeText(subject)), lexicalCompare(op, text, subject)]], else: outcome(op, true) };
-}
-
-/** `op` over the pair, keyed as it says (`real`). */
-function guardedCompare(op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, keyed: Expr, pair: NumericPair): Expr {
-  if (pair.exact !== undefined) return integralCompare(op, subject, pair.exact, pair.bound);
-  if (pair.wideUndecided) {
-    const compared = binary(op, keyed, pair.bound);
-    return { kind: 'case', whens: [[wideInteger(subject), raiseExpr(WIDE_UNDECIDED, subject)]], else: compared };
-  }
-  const key: Expr = pair.real ? { kind: 'cast', arg: subject, to: 'real' } : keyed;
-  const compared = binary(op, key, pair.bound);
-  const cells = pair.cells;
-  if (cells?.length) {
-    const holds = (cmp: number): Expr => (cmpHolds(op, cmp) ? CONSTANT.true : CONSTANT.false);
-    return { kind: 'case', whens: cells.map((cell): readonly [Expr, Expr] => [binary('=', key, compilerReal(cell.at)), holds(cell.cmp)]),
-    else: compared };
-  }
-  return compared;
-}
-
-/** Does `op` hold for a three-way compare result `cmp` (negative, zero, positive)? */
-function cmpHolds(op: Extract<Expr, { kind: 'binary' }>['op'], cmp: number): boolean {
-  switch (op) {
-    case '=': return cmp === 0;
-    case '!=': return cmp !== 0;
-    case '<': return cmp < 0;
-    case '<=': return cmp <= 0;
-    case '>': return cmp > 0;
-    case '>=': return cmp >= 0;
-    default: throw new Error(`RelIR: a numeric compare has no three-way reading for '${op}'`);
-  }
-}
-
-/** The vtype names of each class, in the order the per-row CASE has always listed them. */
-const CLASS_VTYPES: readonly (readonly [NumClass, string])[] =
-  [['int32', 'byte'], ['int32', 'short'], ['int32', 'int'], ['long', 'long'], ['bigint', 'bigint'], ['double', 'float'], ['double', 'double'], ['bigdecimal', 'bigdecimal']];
-
-/** A CASE's arms grouped by identical outcome, in first-seen order — so a comparison with no rounding
- *  hazard renders the two arms it always has, and a hazard splits off only the class it touches. */
-function groupedArms(entries: readonly (readonly [string, Expr])[]): [string[], Expr][] {
-  const arms: [string[], Expr, string][] = [];
-  for (const [vtype, outcome] of entries) {
-    const key = JSON.stringify(outcome);
-    const arm = arms.find((a) => a[2] === key);
-    if (arm) arm[0].push(vtype); else arms.push([[vtype], outcome, key]);
-  }
-  return arms.map(([vtypes, outcome]) => [vtypes, outcome]);
-}
+/** A bound `decimalTextArm` serves: a plain (non-temporal) JS number. */
+const plainNumber = (value: unknown, type: TypeNode | null): boolean =>
+  typeof value === 'number' && flatType(type) !== 'datetime' && flatType(type) !== 'duration';
 
 /** Does a STRING operand spell something a number may be carried as (decimal or total-nanos TEXT)? Only
  *  then can raw TEXT equality confuse a String with a Number. */
@@ -546,25 +283,19 @@ const ordered = (
     // int as if it were comparable.
     return compilerFalse;
   }
-  const boundCls = numericBound && !temporal ? boundClass(value, boundType) : null;
+  const wide = numericBound && !temporal ? wideBound(value) : null;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
-    // A NUMBER subject against a NUMBER bound: the common-class rule (`numericPair`).
-    const subjectCls = canonical !== null ? NUM_CLASS[canonical] : undefined;
-    if (boundCls && subjectCls) {
-      const subjectCast = STATIC_SUBJECT_CAST[canonical!];
-      const keyed: Expr = type.text && subjectCast ? { kind: 'cast', arg: subject, to: subjectCast } : subject;
-      return guardedCompare(op, subject, keyed, numericPair(subjectCls, boundCls, value, castBound));
-    }
+    if (wide && canonical !== null && NUMERIC_VTYPES.includes(canonical))
+      return binary(op, { kind: 'cast', arg: subject, to: 'real' }, wide);
     // A TEXT-stored exact-tail subject (`inject(9.99m)`, a bound big long/Duration — `type.text`) rides as
     // decimal/total-nanos TEXT, so ordering casts it to its numeric class. The SAME cast is identity on the
     // NATIVE form of the same tag (`count()`→INTEGER, `asNumber(BIGDECIMAL)`→REAL), which is why the flag —
     // set only where the value is stored as TEXT (`injectSource`) — is what disambiguates the two and lets
     // `inject(9.99m)`/`inject(9…L)`/`inject(Duration(…))` order instead of declining
     // (docs/archive/2026-08-05-parameters-are-the-only-binds.md C1).
-    const subjectCast = canonical !== null ? STATIC_SUBJECT_CAST[canonical] : undefined;
-    if (numericBound && type.text && subjectCast)
-      return binary(op, { kind: 'cast', arg: subject, to: subjectCast }, castBound);
+    const keyed = canonical !== null ? staticKey(subject, canonical, type.text) : null;
+    if (numericBound && keyed) return binary(op, keyed, castBound);
     // A NATIVE temporal (`datetime`, or a `duration` that did not arrive as a TEXT tail) cannot be ordered
     // by this arm: it rides as a raw epoch/nanos with no per-row `vtype` to drive `compareKey`'s cast, so
     // comparing it raw is not what TinkerPop's temporal ordering means. DECLINE (a coverage gap, never a
@@ -576,41 +307,10 @@ const ordered = (
       : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
-  if (type.kind === 'perRow') {
-    if (boundCls) {
-      // One arm per class whose comparison differs — normally the two (cast INTEGER, cast REAL) it has
-      // always had; a rounding hazard (`numericPair`) splits off only the class it touches.
-      const entries: [string, Expr][] = [];
-      for (const [cls, vtype] of CLASS_VTYPES) {
-        const to: SqlType = CAST_TO_REAL.includes(vtype) ? 'real' : 'int';
-        entries.push([vtype, guardedCompare(op, subject, { kind: 'cast', arg: subject, to }, numericPair(cls, boundCls, value, castBound))]);
-      }
-      return { kind: 'case', whens: groupedArms(entries).map(([vtypes, outcome]) =>
-        [{ kind: 'in-list', expr: type.vtype, values: vtypes.map(compilerText) }, outcome] as const), else: compilerFalse };
-    }
-    return numericBound
-      ? { kind: 'case', whens: [
-        [{ kind: 'in-list', expr: type.vtype, values: intVtypes.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, castBound)],
-        ...(realVtypes.length
-          ? [[{ kind: 'in-list', expr: type.vtype, values: realVtypes.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, castBound)] as const]
-          : []),
-      ], else: compilerFalse }
-      : { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse };
-  }
-  const storage = { kind: 'call', fn: 'typeof', args: [subject] } as const;
-  if (boundCls) {
-    // No vtype: a REAL is a `double`, and an INTEGER a `long` (a native int64) or an `int`, which compare alike.
-    const entries: [string, Expr][] = [];
-    for (const [cls, storageClass] of [['long', 'integer'], ['double', 'real']] as const)
-      entries.push([storageClass, guardedCompare(op, subject, subject, numericPair(cls, boundCls, value, castBound))]);
-    return { kind: 'case', whens: groupedArms(entries).map(([classes, outcome]) =>
-      [{ kind: 'in-list', expr: storage, values: classes.map(compilerText) }, outcome] as const), else: compilerFalse };
-  }
-  return numericBound
-    ? { kind: 'case', whens: [[
-      { kind: 'in-list', expr: storage, values: [compilerText('integer'), compilerText('real')] }, binary(op, subject, castBound),
-    ]], else: compilerFalse }
-    : { kind: 'case', whens: [[binary('=', storage, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
+  if (numericBound) return byValue(op, subject, type, wide ?? castBound, wide !== null, compilerFalse, intVtypes, realVtypes);
+  return type.kind === 'perRow'
+    ? { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse }
+    : { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
 };
 
 /**
@@ -619,15 +319,16 @@ const ordered = (
  * `Compare.eq` (`NumberHelper.compare` for two numbers, `false` across type spaces — `Compare.java:66-69`,
  * `GremlinValueComparator.java:71-74`) disagree:
  *
- * - a NUMBER bound whose comparison ROUNDS for some class (`numericPair`): the raw compare stays (an exact
- *   match is also a rounded one) and the rounded form is OR-ed in for the class it touches;
+ * - a NUMBER bound carried as TEXT (a BigInteger/BigDecimal literal) or outside int64: compared by value,
+ *   the subject keyed by its class (`byValue`); a per-row BigDecimal TEXT row against a plain number reads as
+ *   its REAL beside the raw compare (`decimalTextArm`);
  * - a STRING bound that spells a number, against a subject that may be a number carried as decimal TEXT:
  *   raw TEXT equality would call `'9007199254740994'` equal to the Long — restrict it to String rows;
  * - a NUMBER, BOOLEAN or DATE bound against a subject of ANOTHER type space (`typeSpaced`).
  */
 const equality = (subject: Expr, bound: Expr, value: unknown, type: SubjectType, boundType: TypeNode | null): Expr | null => {
   const same = sameSpaceEquality(subject, bound, value, type, boundType);
-  const arm = same && decimalTextArm(subject, type, [{ value, type: boundType }]);
+  const arm = same && decimalTextArm(subject, type, plainNumber(value, boundType) ? [bound] : []);
   const equal = same && arm ? binary('or', same, arm) : same;
   return equal && typeSpaced(equal, value, type, boundType);
 };
@@ -641,7 +342,7 @@ function boundSpace(value: unknown, boundType: TypeNode | null): string | null {
   return typeof value === 'number' || isExactTail(value) ? 'number' : null;
 }
 const spaceOf = (tag: string | null): string | null =>
-  tag === null ? null : NUM_CLASS[tag] ? 'number' : tag === 'boolean' || tag === 'datetime' || tag === 'duration' ? tag : null;
+  tag === null ? null : NUMERIC_VTYPES.includes(tag) ? 'number' : tag === 'boolean' || tag === 'datetime' || tag === 'duration' ? tag : null;
 /** Every vtype of the four spaces a non-string bound can sit in. */
 const SPACED_VTYPES: readonly string[] = [...NUMERIC_VTYPES, 'boolean', 'datetime', 'duration'];
 
@@ -689,7 +390,7 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   if (typeof value === 'string') {
     if (type.kind === 'static') {
       const canonical = normalizeTypeName(type.type);
-      return canonical !== null && (NUM_CLASS[canonical] || canonical === 'duration') ? CONSTANT.false : raw;
+      return canonical !== null && (NUMERIC_VTYPES.includes(canonical) || canonical === 'duration') ? CONSTANT.false : raw;
     }
     // A NULL vtype is "read the value", and a TEXT value read that way is a String.
     if (type.kind === 'perRow' && numberSpelling(value))
@@ -706,38 +407,25 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
     return raw;
   }
   const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
-  const boundCls = typeof value === 'number' || isExactTail(value) ? temporal ? null : boundClass(value, boundType) : null;
-  if (!boundCls) return raw;
+  if (temporal || !(typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal)) return raw;
+  // A NUMBER bound compares BY VALUE: the raw `=` already is that answer for a plain number against a natively
+  // stored row; a TEXT bound (a BigInteger/BigDecimal literal) is cast to its numeric class and met by the
+  // subject keyed by its own (`byValue`), so a decimal-TEXT carrier reads as the number it is. A floating
+  // bound outside int64 is met as a REAL (`wideBound`) — a saturating INTEGER cast never equals it.
+  const wideAt = typeof value === 'bigint' ? null : wideBound(value);
+  // A BigInteger past int64: a TEXT-carried integer equals only its own canonical text (exactly); a native
+  // INTEGER/REAL row meets it as a REAL.
+  if (pastInt64(value)) return { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), raw]],
+    else: binary('=', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(Number(value))) };
   const tailCast = exactTailCast(value);
-  const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
-  // A class whose compare WIDENS (`numericPair`) answers by the widened form INSTEAD of the raw `=` — not
-  // beside it: a raw match is not always a reference match (a Double against its BigDecimal decimal), and
-  // the widened form is exact wherever the raw one is.
-  // The widened form compares the subject KEYED by its class (`ordered`'s rule): a decimal-TEXT carrier
-  // reads as the number it is.
-  const widened = (cls: NumClass, keyed: Expr): Expr | undefined => {
-    const pair = numericPair(cls, boundCls, value, castBound);
-    return pair.real || pair.cells || pair.exact !== undefined || pair.bound !== castBound ? guardedCompare('=', subject, keyed, pair) : undefined;
-  };
+  if (!tailCast && !wideAt && type.kind !== 'static') return raw;
+  const against: Expr = wideAt ?? (tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound);
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
-    const cls = canonical !== null ? NUM_CLASS[canonical] : undefined;
-    const subjectCast = canonical !== null ? STATIC_SUBJECT_CAST[canonical] : undefined;
-    return (cls && (decimalEquality(subject, cls, value, boundCls) ?? widened(cls, type.text && subjectCast ? { kind: 'cast', arg: subject, to: subjectCast } : subject))) ?? raw;
+    if (canonical === null || !NUMERIC_VTYPES.includes(canonical)) return raw;
+    return binary('=', wideAt ? { kind: 'cast', arg: subject, to: 'real' } : staticKey(subject, canonical, type.text) ?? subject, against);
   }
-  const classes: readonly (readonly [NumClass, string])[] = type.kind === 'perRow'
-    ? CLASS_VTYPES : [['long', 'integer'], ['double', 'real']];
-  const tag: Expr = type.kind === 'perRow' ? type.vtype : { kind: 'call', fn: 'typeof', args: [subject] };
-  const entries: [string, Expr][] = [];
-  for (const [cls, name] of classes) {
-    const keyed: Expr = type.kind === 'perRow' ? { kind: 'cast', arg: subject, to: CAST_TO_REAL.includes(name) ? 'real' : 'int' } : subject;
-    // A per-row BigDecimal against a plain number bound is `decimalTextArm`'s, beside the raw compare.
-    const form = (type.kind !== 'perRow' || boundCls === 'bigdecimal' ? decimalEquality(subject, cls, value, boundCls) : null) ?? widened(cls, keyed);
-    if (form) entries.push([name, form]);
-  }
-  return entries.length
-    ? { kind: 'case', whens: groupedArms(entries).map(([names, outcome]) => [{ kind: 'in-list', expr: tag, values: names.map(compilerText) }, outcome] as const), else: raw }
-    : raw;
+  return byValue('=', subject, type, against, wideAt !== null, raw);
 };
 
 /**
@@ -1190,14 +878,14 @@ export function predicateExpr(
       isNested(o.value) ? (resolveScalar ? resolveScalar(o.value) : null) : operand(o.value, o.type, o.name));
     if (members.some((m) => !m)) return null;
     // Membership is `eq` per member (`Contains.within`), so a literal member whose equality is not the
-    // raw compare (`equality` — a rounding class, a String spelling a number) cannot ride an `IN` list.
+    // raw compare (`equality` — a TEXT-carried number, a String spelling a number) cannot ride an `IN` list.
     // Such a set is the disjunction of its members' equalities instead.
     // The type-space confinement (`typeSpaced`) is per member too, but a set whose members share ONE
     // space confines the whole `IN` list once, so the index-friendly list form survives it.
     const same = memberArgs.map((o, i) => isNested(o.value) ? binary('=', subject, members[i]!) : sameSpaceEquality(subject, members[i]!, o.value, type, o.type));
     if (same.some((e) => !e)) return null;
     // A stored BigDecimal riding as TEXT is the one row neither form sees (`decimalTextArm`): ONE arm for the set.
-    const decimalArm = decimalTextArm(subject, type, memberArgs.filter((o) => !isNested(o.value)).map((o) => ({ value: o.value, type: o.type })));
+    const decimalArm = decimalTextArm(subject, type, members.filter((_, i) => plainNumber(memberArgs[i]!.value, memberArgs[i]!.type)) as Expr[]);
     const withArm = (e: Expr): Expr => (decimalArm ? binary('or', e, decimalArm) : e);
     const spaces = new Set(memberArgs.map((o) => isNested(o.value) ? null : boundSpace(o.value, o.type)));
     if (spaces.size > 1 || same.some((e, i) => JSON.stringify(e) !== JSON.stringify(binary('=', subject, members[i]!)))) {

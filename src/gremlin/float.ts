@@ -150,16 +150,3 @@ const realDecimal = (d: number): BigDecimal => {
   if (decimal === null) throw UnsupportedTraversal.because(`a non-finite number (${d}) cannot be framed as a BigDecimal`);
   return decimal;
 };
-
-/** The double adjacent to a FINITE `x` on each side — `Math.nextDown`/`nextUp`. */
-export function adjacent(x: number): readonly [number, number] {
-  const step = (v: number, up: boolean): number => {
-    if (v === 0) return up ? Number.MIN_VALUE : -Number.MIN_VALUE;
-    const view = new DataView(new ArrayBuffer(8));
-    view.setFloat64(0, v);
-    const raw = view.getBigInt64(0);
-    view.setBigInt64(0, (v > 0) === up ? raw + 1n : raw - 1n);
-    return view.getFloat64(0);
-  };
-  return [step(x, false), step(x, true)];
-}
