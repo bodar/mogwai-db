@@ -1,12 +1,12 @@
 import type { Executor as ExecutorApi, ForeignResult, ForeignRow, ForeignTerminal } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
-import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
+import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type Executable, type FastPathConfig, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
-import { direction, ioc, Property, t, VertexProperty } from './io.ts';
+import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runSteps } from './program.ts';
@@ -110,13 +110,6 @@ function propertyFrame(key: string, valueBuf: Buffer): Buffer {
   ]);
 }
 
-// properties(): a standalone VertexProperty element per (owner, key, value) row.
-// Synthetic id (owner:key) — used by the group/select element paths that don't carry
-// a real vpid or meta.
-function propertyBuffer(owner: number, key: string, value: any): Buffer {
-  return ioc.anySerializer.serialize(new VertexProperty(`${owner}:${key}`, key, value, []));
-}
-
 // A VertexProperty WITH its meta-properties, hand-framed — the client's
 // VertexPropertySerializer.serialize() hardcodes an empty {properties} list (same bug
 // as Vertex/Edge), so routing through anySerializer would drop the meta. Layout mirrors
@@ -134,14 +127,6 @@ function vertexPropertyBuffer(id: any, key: string, valueBuf: Buffer, meta: Reco
   ]);
 }
 
-// valueMap()/valueMap(true)/valueMap(keys...): Map<key, [values]>; with tokens,
-// prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
-// props is {key:[values]} (multi-valued). valueMap → Map<key, [values]>; with tokens,
-// prepend the T.id/T.label entries (T tokens ride as GraphBinary DataType.T).
-// props is {key: [{t,v}, …]}. Hand-roll the MAP so each property value's List frames
-// through frameTypedNode (exact element types) instead of the client's MapSerializer →
-// listSerializer inferring them. Token entries (T.id/T.label) frame via anySerializer
-// (an EnumValue rides as DataType.T; id/label are plain int/string).
 // A GraphBinary container header — its DataType tag, the 0x00 value-present byte, and the bare int32
 // element COUNT — followed by the already-fully-qualified member buffers (mirrors the client's
 // List/Set/Map serializers). LIST/SET carry one buffer per element; a MAP carries two per entry (key
@@ -151,109 +136,6 @@ function sizedContainer(tag: number, count: number, members: readonly Buffer[]):
   return Buffer.concat([Buffer.from([tag, 0x00]), ioc.intSerializer.serialize(count, false), ...members]);
 }
 
-function mapFromEntries(pairs: [Buffer, Buffer][]): Buffer {
-  return sizedContainer(ioc.DataType.MAP, pairs.length, pairs.flat());
-}
-/** The `T.label` value of a map shape. Under the MULTI-LABEL regime the `label` column carries a
- *  JSON array of every name and frames as a GraphBinary SET (`s[animal,bird,…]`); under the
- *  single-label regime it is one name and frames as a plain string. The regime rides on the Shape
- *  because SQL and framer must agree and the framer cannot re-derive it. */
-function labelTokenBuffer(label: string, labelSet: boolean): Buffer {
-  if (!labelSet) return ioc.anySerializer.serialize(label);
-  return setBuffer((JSON.parse(label) as string[]).map((n) => ioc.anySerializer.serialize(n)));
-}
-
-function valueMapBuffer(id: number, label: string, props: Record<string, ValueNode[]>,
-                        keys: string[] | null, tokens: boolean, labelSet = false): Buffer {
-  const pairs: [Buffer, Buffer][] = [];
-  if (tokens) { pairs.push([ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)]); pairs.push([ioc.anySerializer.serialize(t.label), labelTokenBuffer(label, labelSet)]); }
-  for (const key of keys ?? Object.keys(props)) if (key in props)
-    pairs.push([ioc.anySerializer.serialize(key), listBuffer(props[key].map(frameTypedNode))]);
-  return mapFromEntries(pairs);
-}
-
-// elementMap(): flat Map with ONE value per key (first under multi); id/label tokens
-// are ALWAYS present. The single value frames typed via frameTypedNode.
-function elementMapBuffer(id: number, label: string, props: Record<string, ValueNode[]>,
-                          keys: string[] | null, labelSet = false): Buffer {
-  const pairs: [Buffer, Buffer][] = [
-    [ioc.anySerializer.serialize(t.id), ioc.anySerializer.serialize(id)],
-    [ioc.anySerializer.serialize(t.label), labelTokenBuffer(label, labelSet)],
-  ];
-  for (const key of keys ?? Object.keys(props)) if (key in props)
-    pairs.push([ioc.anySerializer.serialize(key), frameTypedNode(props[key][0])]);
-  return mapFromEntries(pairs);
-}
-
-// select(labels…)/project(keys…): one GraphBinary Map per row. Framed by hand
-// (not via anySerializer on a JS Map) because vertex-valued entries must go
-// through vertexBuffer — routing a Vertex through anySerializer drops its props
-// (the same client-serializer bug vertexBuffer exists to work around). Layout
-// mirrors MapSerializer: [MAP, 0x00], bare int32 count, then key/value pairs
-// where each value is an already-fully-qualified buffer.
-function mapBuffer(row: any, entries: MapEntry[]): Buffer {
-  const members: Buffer[] = [];
-  for (const e of entries) {
-    members.push(ioc.anySerializer.serialize(e.key));
-    members.push(e.sub === 'value'
-      ? recordValueBuffer(row, e.prefix, e.type)
-      : e.sub === 'list'
-        ? listFieldBuffer(row[`${e.prefix}_list`], e.of)
-        : e.nullable && row[`${e.prefix}_id`] === null
-          ? frameValue(null, undefined)
-          : elementBuffer(row, e.prefix, e.sub));
-  }
-  return sizedContainer(ioc.DataType.MAP, entries.length, members);
-}
-
-/** Frame a scalar field from its declared record channel. Unlike a bare JS value,
- * a stored UUID/date/long needs its sibling vtype to avoid storage-class inference. */
-function recordValueBuffer(row: any, prefix: string, type: ScalarType): Buffer {
-  return scalarCellBuffer(row[`${prefix}_v`], row, type, 'recordValueBuffer');
-}
-
-/** ONE scalar cell framed by its declared type channel — the one rule a scalar ROW (`value`), a record
- *  field and a variant's scalar arm all follow: a static tag applies as is, a column-carried per-row
- *  type reads its sibling column (a collection vtype frames the stored `{t,v}` tree, a NULL tag infers
- *  from the value), and an unknown type infers. */
-function scalarCellBuffer(v: any, row: any, type: ScalarType, at: string): Buffer {
-  if (type.kind !== 'perRow') return frameValue(v, staticTypeOf(type));
-  const vtype = row[perRowColumn(type, at)];
-  // A `T`/`Direction` TOKEN is a GraphBinary enum, not the string it prints as — an `elementMap()` key
-  // reached as a bare value (`elementMap().unfold().select(keys)`) frames by `frameTypedNode`'s token arm,
-  // exactly as the same key does inside a list or a map.
-  if ((vtype === 'T' || vtype === 'D') && typeof v === 'string') return frameTypedNode({ t: vtype, v } as FrameNode);
-  return isCollectionType(vtype) ? frameStoredValue(v, vtype) : frameValue(v, vtypeToValueType(vtype));
-}
-
-// One side (key/value) of a Map.Entry row → a fully-qualified GraphBinary buffer, per
-// its MapOf shape. A TYPED scalar arrives as a self-describing {t,v} node (JSON text) and
-// frames via frameTypedNode (each entry its own exact type — stored heterogeneous maps); a
-// bare scalar frames by its uniform tag (or infers); an element arrives as a JSON object
-// string (SQL elementValueResult) → vertexBuffer/edgeBuffer to keep props; a list via frameListOf.
-function mapSideBuffer(raw: any, of: MapOf): Buffer {
-  if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(JSON.parse(raw));
-  if (of.kind === 'list') return frameListOf(raw, of.of);
-  // scalar: always a self-describing {t,v} node (JSON text) → frame each its own exact type.
-  return frameTypedNode(raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw));
-}
-
-// A Map.Entry (group()/valueMap()/is(typeOf(MAP)).unfold()) frames as a one-entry MAP —
-// the settled GraphBinary v4 wire form (TinkerPop MapEntrySerializer transforms an entry
-// into a size-1 Map; TINKERPOP-3104). key/value each frame by their MapOf.
-function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
-  return mapFromEntries([[mapSideBuffer(row.mk, keyOf), mapSideBuffer(row.mv, valOf)]]);
-}
-
-function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').ListOf): Buffer {
-  const items = JSON.parse(json);
-  if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
-  if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
-  // A MIXED-member list frames each member by its own {t,v} tag, exactly as listItemBuffers does.
-  // (Parsed EXACTLY, as every `{t,v}` tree is: a BigDecimal's REAL carrier spells its scale.)
-  if (of.kind === 'mixed') return listBuffer(parseExactJson(json).map(frameTypedNode));
-  return ioc.listSerializer.serialize(items);
-}
 
 // A GraphBinary LIST framed by hand (mirrors ArraySerializer) so element items
 // go through vertexBuffer/edgeBuffer — routing them via listSerializer→
@@ -309,6 +191,8 @@ function frameTypedNode(node: FrameNode): Buffer {
   // arm and not a payload vocabulary: `g.V().properties().group().by(…).by(__.tail())` puts a
   // VertexProperty in a map value, and it frames by the rule that already framed it in a list.
   if (node.t === 'property') return framePropertyRow(node.v);
+  // A PATH — its positions, each framed by this same rule, so an element position keeps its properties.
+  if (node.t === 'path') return framePath(node.v.map(frameTypedNode));
   // A `T` TOKEN, which is a GraphBinary type of its own rather than the string it prints as — a
   // `valueMap(true)`/`elementMap()` key. One arm here, so a token composes at every depth the tree
   // reaches (a map key today; a list member or a nested map's key the day one produces it) exactly
@@ -319,7 +203,7 @@ function frameTypedNode(node: FrameNode): Buffer {
   if (node.t === 'D') return ioc.anySerializer.serialize(direction[node.v === 'IN' ? 'in' : 'out']);
   // A scalar leaf's tag is EITHER a Gremlin vtype (`int`/`double`/`datetime` — a stored value, or
   // min/max's winner) OR a numeric reducer's SQLite storage class (`integer`/`real` from sum/mean's
-  // `typeof`). The two are disjoint, so this mirrors the top-level `scalar` Shape (frameValues): resolve
+  // `typeof`). The two are disjoint, so this mirrors the top-level `scalar` Shape: resolve
   // a Gremlin vtype exactly, and route a storage class through `sumBuffer` — which forces DOUBLE for
   // `real` so a whole-number mean (`30.0`) frames as a Double rather than the Int magnitude inference
   // would pick. A null tag infers, unchanged.
@@ -336,7 +220,7 @@ function frameTypedNode(node: FrameNode): Buffer {
 
 // A GraphBinary MAP from ordered typed [key, value] node pairs — keys AND values framed
 // by the typed framer (so a non-string / typed key rides its true type). Layout mirrors
-// mapBuffer: [MAP, 0x00], bare int32 count, then key/value fully-qualified buffers.
+// the client's MapSerializer: [MAP, 0x00], bare int32 count, then key/value fully-qualified buffers.
 function typedMapBuffer(pairs: [FrameNode, FrameNode][]): Buffer {
   return sizedContainer(ioc.DataType.MAP, pairs.length,
     pairs.flatMap(([k, v]) => [frameTypedNode(k), frameTypedNode(v)]));
@@ -362,13 +246,6 @@ const propsOf = (props: any): Record<string, any> => typeof props === 'string' ?
 const rowVertex = (r: any): Buffer => vertexBuffer(r.id, labelsOf(r.label), propsOf(r.props));
 const rowEdge = (r: any): Buffer => edgeBuffer(r.id, r.label, r.src, r.tgt, propsOf(r.props));
 
-// Frame one element (vertex/edge/property) from prefixed columns (k_* / v_*).
-function elementBuffer(r: any, prefix: string, elem: ElemShape): Buffer {
-  if (elem === 'edge') return edgeBuffer(r[`${prefix}_id`], r[`${prefix}_label`], r[`${prefix}_src`], r[`${prefix}_tgt`], propsOf(r[`${prefix}_props`]));
-  if (elem === 'property') return propertyBuffer(r[`${prefix}_owner`], r[`${prefix}_pk`], r[`${prefix}_pv`]);
-  return vertexBuffer(r[`${prefix}_id`], labelsOf(r[`${prefix}_label`]), propsOf(r[`${prefix}_props`]));
-}
-
 // path(): one GraphBinary Path per row (mirrors PathSerializer). {objects} is
 // hand-framed via listBuffer so element positions go through vertexBuffer/edgeBuffer
 // (routing them via anySerializer would drop props — the same client bug). {labels}
@@ -381,43 +258,6 @@ function framePath(objects: Buffer[]): Buffer {
     ioc.listSerializer.serialize(labels), // {labels}: List<Set<String>>
     listBuffer(objects),                  // {objects}: List of framed, fully-qualified values
   ]);
-}
-
-// Linear path(): one row → one Path, positions framed from per-position columns. A
-// branch-padded position (a shorter arm's trailing NULL) has a null id column → omit it,
-// so a short-arm path is genuinely shorter (a pure-linear path is never null here, so
-// this skip is a no-op there).
-function pathBuffer(r: any, positions: PathPos[]): Buffer {
-  const objs: Buffer[] = [];
-  for (const pos of positions) {
-    if (pos.render === 'element') {
-      if (r[`${pos.prefix}_id`] == null) continue;
-      objs.push(elementBuffer(r, pos.prefix, pos.elem));
-    } else {
-      // A padded position of a branched path is ABSENT, not null-valued — its presence column
-      // says so (a by() value that is genuinely missing dropped the whole path back in SQL).
-      if (pos.optional && r[`${pos.prefix}_at`] == null) continue;
-      objs.push(ioc.anySerializer.serialize(r[`${pos.prefix}_v`]));
-    }
-  }
-  return framePath(objs);
-}
-
-// Recursive repeat().path(): rows arrive ORDER BY (pk, ord) — one row per path
-// element, runs of equal pk being one path. Fold each pk-run into a Path.
-function pathGroupedBuffers(rows: any[], elem: ElemShape, byKey?: boolean): Buffer[] {
-  // by(key) projects each position to a scalar value (column `v`); otherwise each
-  // position is the whole element framed from its row.
-  const frame = byKey ? (r: any) => ioc.anySerializer.serialize(r.v) : elem === 'edge' ? rowEdge : rowVertex;
-  const out: Buffer[] = [];
-  let objs: Buffer[] = [];
-  let curPk: any;
-  for (const r of rows) {
-    if (r.pk !== curPk) { if (objs.length) out.push(framePath(objs)); objs = []; curPk = r.pk; }
-    objs.push(frame(r));
-  }
-  if (objs.length) out.push(framePath(objs));
-  return out;
 }
 
 // A summed numeric, framed to match SQLite's storage class of the SUM (passed as
@@ -512,192 +352,142 @@ function exactNumberBuffer(x: ExactNumber): Buffer {
   return integral ? ioc.longSerializer.serialize(BigInt(text), true) : ioc.doubleSerializer.serialize(Number(text), true);
 }
 
-// Frame one JSON list value by its item shape — shared by the list-VALUE shapes and a
-// variant's list (vk=4) arm. Element items arrive as {id,label,props[,src,tgt]} objects
-// (rowids already expanded to public payloads in SQL); scalars frame by their tag or infer.
-function listItemBuffers(json: string, of: ListOf): Buffer[] {
-  return parsedItemBuffers(parseExactJson(json), of);
-}
-
-// The PARSED members — a nested list recurses on its parsed members rather than re-stringifying them, which
-// wrote a member `±Infinity` as `null` (`JSON.stringify` has no spelling for it), so
-// `inject([Infinity,2]).product([1])` framed `[[null,1],[2,1]]`.
-function parsedItemBuffers(items: any[], of: ListOf): Buffer[] {
-  if (of.kind === 'elem') return items.map(of.elem === 'edge' ? rowEdge : rowVertex);
-  if (of.kind === 'property') return items.map(framePropertyRow);
-  if (of.kind === 'scalar') {
-    // The member type channel, read exactly as a scalar ROW's is: an envelope-carried per-row type
-    // means each member is a self-describing {t,v} node, a static tag applies to every member, and
-    // an unknown type infers from the JS value (correct for the storage-class-determined three).
-    const as = staticTypeOf(of.type);
-    return hasTypedMembers(of) ? items.map(frameTypedNode)
-      : as ? items.map((x: any) => frameValue(isExactNumber(x) && as !== 'bigdecimal' ? x.rawJSON : x, as))
-        : items.map((x: any) => (isExactNumber(x) ? exactNumberBuffer(x) : ioc.anySerializer.serialize(x)));
-  }
-  // A MIXED list: every member is a self-describing {t,v} envelope (a vertex, an edge, a scalar leaf),
-  // so the ONE typed-node rule frames each by its own tag — the same rule a typed scalar list's members
-  // already take. `arms` is not read here; it exists for `unfold()`'s variant.
-  if (of.kind === 'mixed') return items.map(frameTypedNode);
-  // A list of MAPS (project().fold(), valueMap().fold()): each member is the SAME [[key,valueNode],…]
-  // pairs array a `map`/`mapValue` column carries, so it frames by the one `{t:'map'}` rule
-  // frameTypedNode already applies at any depth — the mixed arm's rule with the tag known statically
-  // rather than read per member. `of` is not read here for the reason `mixed`'s `arms` is not: the pairs
-  // tree self-describes; the descriptor exists for unfold().
-  if (of.kind === 'map') return items.map((pairs: any) => frameTypedNode({ t: 'map', v: pairs }));
-  // A list of PATHS (path().fold(), a Path in a group value): each member is a path's own positions
-  // array, so it frames as a PATH (labels + objects) rather than a bare list — the SAME `framePath` the
-  // top-level path uses, over the member's positions decoded by the position descriptor `of.of`.
-  if (of.kind === 'path') return items.map((inner: any) => framePath(parsedItemBuffers(inner, of.of)));
-  // A list-of-lists: frame each inner member by its own descriptor so an element leaf
-  // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
-  // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the
-  // leaf rowids into element payload objects (materialize.nestedListResult); recursing
-  // here descends the same nesting the descriptor records.
-  return items.map((inner: any) => (inner == null ? frameValue(null, undefined) : listBuffer(parsedItemBuffers(inner, of.of))));
-}
-
-function frameListOf(json: string, of: ListOf): Buffer {
-  // A NULL list column is a genuine null traverser, not a list (e.g. split() of a null value)
-  // — frame it as null rather than mapping over a non-array.
-  if (json == null) return frameValue(null, undefined);
-  return listBuffer(listItemBuffers(json, of));
-}
-
-// A generator over the result value buffers: per-row shapes `yield` one buffer per
-// row (framed over the already-materialized row array — never a live cursor); barrier
-// shapes (group/list) drain the array then yield their one value. `executeQuery`
-// spreads it into the returned array — the generator form is retained only because it
-// expresses per-row vs barrier shapes cleanly, not for laziness (there is none: the
-// row array is fully drained up front by store.query(), a DO SQLite cursor being
-// unable to cross awaits). Any compile/SQL/framing error throws straight out of
-// executeQuery to the edge's one try/catch — there is no partial/streamed state.
 // A stored per-row multiplicity: the movementCollapse `bulk` column merged N convergent walks
-// into one (value, N) row. bulk is ORTHOGONAL to shape — the framer reads a `bulk` column
-// wherever a leaf carries one (only vertex/edge today), 1 otherwise; no Shape variant knows it.
+// into one (value, N) row. bulk is ORTHOGONAL to shape — only the element leaves (vertex/edge) carry
+// the column; every other shape is a single-multiplicity value.
 const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 
-// Element leaves may carry that per-row bulk; every other shape is a single-multiplicity value.
-// The write path and all non-element value shapes frame through frameValues (bulk 1); only the
-// element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
-export function* frameResolved(store: GraphStore, plan: Executable): Generator<Framed> {
-  // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
-  // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
-  // effects change WHERE the rows come from and nothing about how they are framed.
+/** One result value as a self-describing `FrameNode`, paired with its traverser multiplicity. */
+type ResultNode = { node: FrameNode; bulk: bigint };
+
+// ---- result rows → NODE TREE: the ONE projection every result tail reads ----
+//
+// `rowsToNodes` turns a plan's rows into the self-describing `FrameNode` tree, per its `Shape` — TOTAL
+// over the Shape union. Every tail is a projection of those nodes and nothing else: GraphBinary frames
+// each through `frameTypedNode` (`frameResolved`), the readable JSON response renders each through
+// `untyped` (`resolveJson`), and a federated hop ships them as its value stream (`runForeign`). One reader
+// per row shape is what keeps the three from framing one value three ways.
+
+/** One element row's public payload as a `{t,v}` element node — the `{id,label,props[,src,tgt]}` tuple
+ *  `rowVertex`/`rowEdge` consume. A vertex's `label` is the labels array; an edge carries `src`/`tgt`. */
+const elementNode = (raw: any, elem: Elem): FrameNode =>
+  elem === 'edge'
+    ? { t: 'edge', v: { id: raw.id, label: raw.label, src: raw.src, tgt: raw.tgt, props: propsOf(raw.props) } }
+    : { t: 'vertex', v: { id: raw.id, label: labelsOf(raw.label), props: propsOf(raw.props) } };
+
+/** ONE scalar cell by its declared type channel — the rule a scalar ROW (`value`), a record field and a
+ *  variant's scalar arm all follow: a static tag applies as is, a column-carried per-row type reads its
+ *  sibling column (a collection vtype nests the stored `{t,v}` tree, a `T`/`Direction` token is a
+ *  GraphBinary enum rather than the string it prints as, an unrecognized tag infers), and an unknown type
+ *  infers. */
+function scalarCellNode(v: any, row: any, type: ScalarType, at: string): FrameNode {
+  if (type.kind !== 'perRow') return { t: staticTypeOf(type) ?? null, v };
+  const vtype = row[perRowColumn(type, at)] ?? null;
+  if ((vtype === 'T' || vtype === 'D') && typeof v === 'string') return { t: vtype, v } as FrameNode;
+  return isCollectionType(vtype) ? valueNodeFromStored(v, vtype) : { t: vtypeToValueType(vtype) ?? null, v };
+}
+
+/** A JSON list's PARSED members as nodes, per its `ListOf`. Element members ride the element arm, a
+ *  property member the property arm; a scalar member carries its static tag, is already a `{t,v}` node
+ *  (envelope-typed), or is bare (inferred — a non-primitive wrapped as an untagged leaf so it is not
+ *  mistaken for a node); a mixed/map member self-describes; a path member is a path; a nested list
+ *  recurses, a null inner list is a null member. */
+function listMemberNodes(items: any[], of: ListOf): FrameNode[] {
+  switch (of.kind) {
+    case 'elem': return items.map((it) => elementNode(it, of.elem));
+    case 'property': return items.map((it) => ({ t: 'property' as const, v: it }));
+    case 'scalar': {
+      if (hasTypedMembers(of)) return items;
+      const as = staticTypeOf(of.type);
+      if (as !== undefined) return items.map((x) => ({ t: as, v: x }));
+      return items.map((x) => (x !== null && typeof x === 'object' && !isExactNumber(x) ? { t: null, v: x } : x));
+    }
+    case 'mixed': return items;
+    case 'map': return items.map((pairs) => ({ t: 'map' as const, v: pairs }));
+    case 'path': return items.map((inner) => ({ t: 'path' as const, v: listMemberNodes(inner, of.of) }));
+    case 'list': return items.map((inner) => (inner == null ? null : { t: 'list' as const, v: listMemberNodes(inner, of.of) }));
+  }
+}
+
+/** A JSON list COLUMN as one node of the given container tag — parsed EXACTLY (a member past 2^53 keeps
+ *  its digits). A NULL column is a genuine null traverser (`split()` of a null), not a list. */
+const listColumnNode = (json: string | null, of: ListOf, t: 'list' | 'set' | 'path' = 'list'): FrameNode =>
+  json == null ? null : ({ t, v: listMemberNodes(parseExactJson(json), of) } as FrameNode);
+
+/** One side (key/value) of a Map.Entry row, per its `MapOf`: an element (JSON object text), a list, else
+ *  a self-describing `{t,v}` node (already parsed, or JSON text). */
+function mapSideNode(raw: any, of: MapOf): FrameNode {
+  if (raw == null) return null;
+  if (of.kind === 'elem') return elementNode(JSON.parse(raw), of.elem);
+  if (of.kind === 'list') return listColumnNode(raw, of.of);
+  return typeof raw === 'string' ? parseExactJson(raw) : raw;
+}
+
+/** A variant row by its own `vk` tag — null / scalar / vertex / edge / list. The scalar arm's type is the
+ *  MEET of every scalar arm (`variantVocabulary`). */
+function variantNodes(rows: any[], shape: Extract<Shape, { kind: 'variant' }>): FrameNode[] {
+  const scalar = shape.arms.find((arm) => arm.kind === 'scalar');
+  const list = shape.arms.find((arm): arm is Extract<typeof arm, { kind: 'list' }> => arm.kind === 'list');
+  const has = (kind: 'vertex' | 'edge') => shape.arms.some((arm) => arm.kind === kind);
+  return rows.map((r): FrameNode => {
+    if (r.vk === 0) return null;
+    if (r.vk === 1 && scalar) return scalarCellNode(r.v, r, scalar.type, "Shape 'variant'");
+    if (r.vk === 2 && has('vertex')) return elementNode(r, 'vertex');
+    if (r.vk === 3 && has('edge')) return elementNode(r, 'edge');
+    if (r.vk === 4 && list) return listColumnNode(r.list, list.of);
+    throw new Error(`invalid variant result tag ${r.vk}`);
+  });
+}
+
+/** The value nodes of a non-element shape, one per result (bulk 1). */
+function valueNodes(shape: Shape, rows: any[]): FrameNode[] {
+  switch (shape.kind) {
+    case 'vertex': case 'edge': return rows.map((r) => elementNode(r, shape.kind));
+    case 'value': return rows.map((r) => scalarCellNode(r.v, r, shape.type, "Shape 'value'"));
+    case 'variant': return variantNodes(rows, shape);
+    // A numeric reducer: `vt` is EITHER a Gremlin vtype (min/max's winner) OR a SQLite storage class
+    // (sum/mean's `typeof`) — `frameTypedNode`'s leaf resolves both. SUM of an empty stream is NULL → no
+    // result (TinkerPop yields nothing), unless the null is productive.
+    case 'scalar': return rows.filter((r) => r.v !== null || shape.productiveNull).map((r) => (r.v === null ? null : { t: r.vt ?? null, v: r.v }));
+    case 'mapValue': return rows.map((r) => ({ t: 'map', v: parseExactJson(r.map) }));
+    // A Map.Entry frames as a size-1 map (TINKERPOP-3104: a remote Map.Entry is a one-entry Map).
+    case 'mapEntry': return rows.map((r) => ({ t: 'map', v: [[mapSideNode(r.mk, shape.keyOf), mapSideNode(r.mv, shape.valOf)]] }));
+    case 'typedNode': return rows.map((r) => (r.node == null ? null : parseExactJson(r.node)));
+    // A VertexProperty with its real id + meta-properties (vpid null on edges → synthetic).
+    case 'property': return rows.map((r) => ({ t: 'property', v: r }));
+    case 'jsonbList': return rows.map((r) => listColumnNode(r.list, shape.items));
+    case 'jsonbSet': return rows.map((r) => listColumnNode(r.list, shape.items, 'set'));
+    case 'jsonbPath': return rows.map((r) => listColumnNode(r.list, shape.items, 'path'));
+    case 'discard': return [];
+  }
+}
+
+/** A plan's result rows as `(node, bulk)` pairs — TOTAL over `Shape`. Only an element leaf reads a
+ *  per-row `bulk`; every other shape is single-multiplicity. */
+function rowsToNodes(shape: Shape, rows: any[]): ResultNode[] {
+  if (shape.kind === 'vertex' || shape.kind === 'edge')
+    return rows.map((r) => ({ node: elementNode(r, shape.kind as Elem), bulk: bulkOf(r) }));
+  return valueNodes(shape, rows).map((node) => ({ node, bulk: 1n }));
+}
+
+/** Run a plan and project its rows to nodes. A PROGRAM's rows come from the executor rather than one
+ *  `query`, and its effects get their gid (the §6·1 post-write refresh — keyed on `gid IS NULL`, so a
+ *  write that created nothing is a no-op). An OLAP DECORATE barrier's scratch is dropped once the rows are
+ *  materialized, whether or not that succeeded. */
+function resolveNodes(store: GraphStore, plan: Executable): ResultNode[] {
   try {
     const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
-    // A WRITE (a `program`) may have created elements; mint a gid for each (and, later, recompute rev)
-    // now that its effects have committed — the post-write refresh (§6·1). Keyed on `gid IS NULL`, so a
-    // write that created nothing is a no-op. Pure side-effect: gid/rev are not framed, so this never
-    // touches the rows above. This is the ONE seam both runtimes cross (Bun's Executor and the DO's
-    // runFramed both frame here), so a compiled write gets its gid wherever it runs.
     if (plan.kind === 'program') refreshElements(store);
-    const shape = plan.shape;
-    if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
-    if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
-    for (const buf of frameValues(rows, shape)) yield { buf, bulk: 1n };
+    return rowsToNodes(plan.shape, rows);
   } finally {
-    // Precise post-frame GC: the rows are materialized above, so an OLAP DECORATE barrier's scratch is
-    // now free to reclaim. Runs whether framing completed or threw (or the consumer stopped early).
     if (plan.cleanup) for (const run of plan.cleanup) store.dropBarrierRun(run);
   }
 }
 
-// Every non-element value shape → one Buffer per result, single multiplicity. Unchanged framing;
-// element leaves (vertex/edge) are handled in framedResults so they can carry a per-row bulk.
-function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape): Generator<Buffer> {
-  switch (shape.kind) {
-    case 'vertex': case 'edge': return; // framed in framedResults with per-row bulk
-    case 'valueMap': for (const r of rows) yield valueMapBuffer(r.id, r.label, propsOf(r.props), shape.keys, shape.tokens, shape.labelSet); return;
-    case 'elementMap': for (const r of rows) yield elementMapBuffer(r.id, r.label, propsOf(r.props), shape.keys, shape.labelSet); return;
-    // Per-row framing: values() of a typed prop frames each row by its own stored vtype
-    // (like variant frames by vk); a collection vtype frames the stored {t,v} tree via
-    // frameStoredValue (fixes bare values(collectionProp)); otherwise the single `as` applies.
-    case 'value': {
-      // A collection vtype names the OUTER shape, so `scalarCellBuffer` frames the stored {t,v} tree.
-      for (const r of rows) yield scalarCellBuffer(r.v, r, shape.type, "Shape 'value'");
-      return;
-    }
-    // P4 dynamic-tag row: dispatch each row by its own `vk` — null / scalar / node /
-    // edge / list — mirroring the per-row `vtype` dispatch of `case 'value'`.
-    case 'variant': {
-      const scalar = shape.arms.find((arm) => arm.kind === 'scalar');
-      const vertex = shape.arms.some((arm) => arm.kind === 'vertex');
-      const edge = shape.arms.some((arm) => arm.kind === 'edge');
-      const list = shape.arms.find((arm): arm is Extract<typeof arm, { kind: 'list' }> => arm.kind === 'list');
-      const framed = rows.map((r) => {
-        if (r.vk === 0) return frameValue(null, undefined);
-        // The scalar arm's type is the MEET of every scalar arm (`variantVocabulary`): one static tag, or
-        // a per-row tag column each arm filled with its own — never the first arm's tag applied to all.
-        if (r.vk === 1 && scalar) return scalarCellBuffer(r.v, r, scalar.type, "Shape 'variant'");
-        if (r.vk === 2 && vertex) return rowVertex(r);
-        if (r.vk === 3 && edge) return rowEdge(r);
-        if (r.vk === 4 && list) return frameListOf(r.list, list.of);
-        throw new Error(`invalid variant result tag ${r.vk}`);
-      });
-      if (shape.wholeResult) yield listBuffer(framed);
-      else yield* framed;
-      return;
-    }
-    // A numeric reducer result. `vt` carries EITHER a Gremlin vtype (`min`/`max` emit the winning
-    // row's own — `int`/`long`/`string`) OR a SQLite storage class (`sum`/`mean` emit `typeof` —
-    // `integer`/`real`/`text`); the two vocabularies are disjoint, so `vtypeToValueType` resolves the
-    // former and returns undefined for the latter. Framing a Gremlin vtype through the same path
-    // `values()` uses is what lets a text-carried long come back a `long` rather than a String;
-    // storage class falls to `sumBuffer` (Int/Long/Double by magnitude). SUM of an empty stream is
-    // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
-    case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull) {
-      if (r.v === null) yield frameValue(null, undefined);
-      else { const as = vtypeToValueType(r.vt); yield as !== undefined ? frameValue(r.v, as) : sumBuffer(r.v, r.vt); }
-    } return;
-    case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
-    // A whole-map VALUE per row: the `map` blob is [[keyNode,valNode],…] of self-describing
-    // {t,v} nodes → frame the reconstructed map tree (each key/value its own exact type).
-    case 'mapValue': for (const r of rows) yield frameTypedNode({ t: 'map', v: parseExactJson(r.map) }); return;
-    // A Map.Entry stream (map unfold): one size-1 MAP per row.
-    case 'mapEntry': for (const r of rows) yield mapEntryBuffer(r, shape.keyOf, shape.valOf); return;
-    // A per-row self-describing TYPED NODE (unfold() over a mixed-member collection): each row's
-    // `node` column is a `{t,v}` envelope (JSON text) → the ONE frameTypedNode rule frames a vertex,
-    // an edge or a scalar leaf by its own tag, preserving a per-member type the variant arm cannot.
-    case 'typedNode': for (const r of rows) yield frameTypedNode(r.node == null ? null : parseExactJson(r.node)); return;
-    case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
-    // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
-    case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;
-    // A VertexProperty with its real id + meta-properties framed (vpid null on edges → synthetic).
-    case 'property': for (const r of rows) yield framePropertyRow(r); return;
-    // properties().properties(): meta-properties as Property elements.
-    case 'metaProperty': for (const r of rows) yield ioc.anySerializer.serialize(new Property(r.mk, r.mv)); return;
-    // properties(k).valueMap(): a VertexProperty's meta as a flat Map.
-    case 'metaMap': for (const r of rows) yield ioc.anySerializer.serialize(new Map(Object.entries(r.meta ? JSON.parse(r.meta) : {}))); return;
-    // Barriers: the whole stream collapses to ONE value (a List).
-    case 'list':
-      // fold() reuses the plain vertex/edge projection (unprefixed id/label/…),
-      // unlike group's v_-prefixed element columns. ELEMENTS ONLY — the scalar item branch this used
-      // to carry was unreachable (its producer throws for a non-element projection), and an
-      // unreachable branch in a framer is a claim nothing tests.
-      yield listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex));
-      return;
-    // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
-    // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
-    // A list-VALUE stream: frame each row's list by its item descriptor (shared with the
-    // variant list arm + record list fields) — typed {t,v} items, a uniform `as` tag, or infer.
-    case 'jsonbList': for (const r of rows) yield frameListOf(r.list, shape.items); return;
-    case 'jsonbPath': for (const r of rows) yield framePath(listItemBuffers(r.list, shape.items)); return;
-    // Relational element-list values materialize as ordered JSON object arrays in
-    // SQL, then frame each member through the same property-preserving element
-    // encoders as ordinary vertex/edge rows.
-    case 'jsonbElementList': for (const r of rows) {
-      const items = JSON.parse(r.list) as any[];
-      yield listBuffer(items.map(shape.elem === 'edge' ? rowEdge : rowVertex));
-    } return;
-    // A set-VALUE stream (intersect/difference/disjunct, or a stored typed set): frame each
-    // list column as a Set — typed items via frameTypedNode (exact element types), else the
-    // client's element-inferring SetSerializer over the computed scalars.
-    // A SET frames exactly as a list does, member for member — only the outer buffer differs. It used
-    // to have its own two-branch reader keyed on a `typed` boolean, which meant a set of `long`s or
-    // `datetime`s carrying ONE static tag had no way to say so and framed by JS inference.
-    case 'jsonbSet': for (const r of rows) yield setBuffer(listItemBuffers(r.list, shape.items)); return;
-    case 'discard': return;
-  }
+/** Run a plan and frame each result as GraphBinary, with its multiplicity. This is the ONE seam both
+ *  runtimes cross (Bun's Executor and the DO's runFramed), so a compiled write gets its gid wherever it runs. */
+export function frameResolved(store: GraphStore, plan: Executable): Framed[] {
+  return resolveNodes(store, plan).map(({ node, bulk }) => ({ buf: frameTypedNode(node), bulk }));
 }
 
 /** One framed result value paired with its traverser multiplicity (the GraphBinary V4
@@ -706,237 +496,17 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
  *  N copies. bigint carries the full i64 range (SQLite raises `integer overflow` past it). */
 export type Framed = { buf: Buffer; bulk: bigint };
 
-// ---- federated value-stream transport: a sibling's per-row result as a {t,v} node ----
-//
-// A pushed-down VALUE terminal (`values(k)`, `unfold()`, `fold()`, `cap('a')`, a project/select record,
-// …) returns a STREAM of values, one per sibling row, that must cross the federated hop LOSSLESSLY and
-// re-frame EXACTLY on the caller side. The transport is the SAME self-describing `{t,v}` FrameNode tree
-// the local framer already consumes (`frameTypedNode`): a scalar leaf, a detached vertex/edge (a pushed
-// `fold()` of elements), a nested list/map — each rides its own tag, so the resume frames every member
-// by the ONE rule with no per-shape wire arm. `foreignValueNodes` is the PRODUCER twin of the framer's
-// per-row arms: where `frameValues` turns a row into a Buffer, this turns the SAME row into the node the
-// Buffer would have encoded, so the two cannot frame a value two different ways.
-
-/** A stored (value, vtype) pair as a leaf ValueNode — the same `valueNodeFromStored` rule the read
- *  framer uses, so a collection value nests its parsed tree and a scalar rides raw. */
-const foreignLeaf = (v: any, vtype: string | null): ValueNode => valueNodeFromStored(v, vtype);
-
-/** One element row's public payload as a `{t,v}` element FrameNode — the SAME `{id,label,props}` tuple
- *  `rowVertex`/`rowEdge` consume, so a landed element re-frames byte-identically. A vertex's `label` is
- *  the JSON labels array; an edge carries `src`/`tgt`. */
-const foreignElementNode = (raw: any, elem: Elem): FrameNode =>
-  elem === 'edge'
-    ? { t: 'edge', v: { id: raw.id, label: raw.label, src: raw.src, tgt: raw.tgt, props: propsOf(raw.props) } }
-    : { t: 'vertex', v: { id: raw.id, label: labelsOf(raw.label), props: propsOf(raw.props) } };
-
-/** A JSON list column's members as FrameNodes, per its `ListOf` — the node twin of `listItemBuffers`.
- *  Element members ride the element arm; a scalar member with a static tag carries it, an
- *  envelope-typed member is already a `{t,v}` node, a mixed/map member self-describes; a nested list
- *  recurses. */
-function foreignListNodes(json: string, of: ListOf): FrameNode[] {
-  return foreignItemNodes(JSON.parse(json), of);
-}
-
-function foreignItemNodes(items: any[], of: ListOf): FrameNode[] {
-  if (of.kind === 'elem') return items.map((it: any) => foreignElementNode(it, of.elem));
-  if (of.kind === 'property') return items.map((it: any) => ({ t: 'property' as const, v: it }));
-  if (of.kind === 'scalar') {
-    if (hasTypedMembers(of)) return items; // already self-describing {t,v} nodes
-    const as = staticTypeOf(of.type);
-    return items.map((x: any) => (as !== undefined ? { t: as, v: x } : x));
-  }
-  if (of.kind === 'mixed') return items;   // each member a self-describing {t,v} envelope
-  if (of.kind === 'map') return items.map((pairs: any) => ({ t: 'map' as const, v: pairs }));
-  // list-of-lists: recurse per inner descriptor.
-  return items.map((inner: any) => ({ t: 'list' as const, v: foreignItemNodes(inner, of.of) }));
-}
-
-/** A sibling's VALUE-shaped result as one `{t,v}` node per row, or `null` if the shape is not a value
- *  stream this transport carries (fail closed — the caller names the shape). Mirrors `frameValues`'
- *  per-row arms, producing the node each would frame rather than the Buffer, so a federated value and a
- *  local one are one encoding. */
-function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: any[]): FrameNode[] | null {
-  switch (shape.kind) {
-    // A per-row scalar: each row its own stored vtype (a per-row column) or the one static tag.
-    case 'value': {
-      const t = shape.type;
-      if (t.kind === 'perRow') {
-        const colName = perRowColumn(t, 'foreignValueNodes');
-        return rows.map((r) => foreignLeaf(r.v, r[colName] ?? null));
-      }
-      return rows.map((r) => ({ t: staticTypeOf(t) ?? null, v: r.v }));
-    }
-    // A numeric reducer stream that was NOT flagged 'reduce' (e.g. a local-scope reducer terminal): each
-    // row's `vt` is a Gremlin vtype or a storage class, exactly as the scalar framer resolves.
-    case 'scalar': return rows.map((r) => ({ t: (r.vt ?? null) as ValueNode['t'], v: r.v }));
-    // A list/set VALUE per row (`values(k).fold()`, `cap('a')`, intersect/…): the members convert per the
-    // item descriptor.
-    case 'jsonbList': return rows.map((r) => ({ t: 'list', v: foreignListNodes(r.list, shape.items) }));
-    case 'jsonbSet': return rows.map((r) => ({ t: 'set', v: foreignListNodes(r.list, shape.items) }));
-    // The whole-stream element fold (`fold()` over vertices/edges) — ONE list of element nodes.
-    case 'list': return [{ t: 'list', v: rows.map((r) => foreignElementNode(r, shape.elem)) }];
-    // A relational element-list value per row (element members already expanded to payload objects).
-    case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: (JSON.parse(r.list) as any[]).map((it: any) => foreignElementNode(it, shape.elem)) }));
-    // A per-row self-describing node already (`unfold()` over a mixed collection): pass through.
-    case 'typedNode': return rows.map((r) => (r.node == null ? { t: null, v: null } : parseExactJson(r.node)));
-    // A whole-map VALUE per row (`project`/`valueMap`/`group` folded to a map value).
-    case 'mapValue': return rows.map((r) => ({ t: 'map', v: parseExactJson(r.map) }));
-    default: return null;
-  }
-}
-
-// ---- result → NODE TREE: the untyped-JSON tail (content-negotiated, `Accept: application/json`) ----
-//
-// A PARALLEL projection to `frameResolved`: where that turns a plan's rows into GraphBinary value
-// BUFFERS, `runResultNodes` turns the SAME rows into the DECODED NODE TREE (`FrameNode`, which keeps
-// element properties) that `src/untyped.ts` renders to readable JSON. It exists BESIDE the framers and
-// reuses their private producers so the two cannot diverge; the GraphBinary framing path is byte-for-byte
-// untouched (which is why L2/L3/L5 and the census, all of which exercise that path, cannot move).
-//
-// It is INCREMENTALLY EXTENDABLE and FAIL-CLOSED. It COVERS the common result shapes below; every OTHER
-// shape (`path`, `pathGrouped`, `group`, `property`, `metaProperty`, `metaMap`, `variant`, `discard`,
-// `jsonbPath`) returns `{ unsupported: true }` so the router falls back to the (unreadable-but-correct)
-// GraphBinary response — never a wrong JSON. Adding a shape is a new `COVERED` entry + a node twin.
-
-/** The result shapes `resolveJson` can render as untyped JSON. Kept as ONE set because it is the
- *  PRE-RUN gate: the decision is made from `plan.shape.kind` BEFORE the plan executes, so a write whose
- *  shape is not covered never fires its effects here (the router then runs it for real on the GraphBinary
- *  fallback — see `resolveJson`). vertex/edge/valueMap/elementMap/map/mapEntry have node twins
- *  below; the rest reuse `foreignValueNodes`, the framer's own per-row producer twin. */
-const JSON_COVERED = new Set<Shape['kind']>([
-  'vertex', 'edge', 'valueMap', 'elementMap', 'map', 'mapEntry',
-  'value', 'scalar', 'jsonbList', 'jsonbSet', 'list', 'jsonbElementList', 'typedNode', 'mapValue',
-]);
-
-// The `T.id` / `T.label` token KEY nodes — the node twin of the `DataType.T` the valueMap/elementMap
-// framers emit via `anySerializer.serialize(t.id/t.label)`.
-const ID_TOKEN: FrameNode = { t: 'T', v: 'id' };
-const LABEL_TOKEN: FrameNode = { t: 'T', v: 'label' };
-
-/** The `T.label` VALUE node — the node twin of `labelTokenBuffer`: a SET of every name under the
- *  multi-label regime (the `label` column is a JSON array), else the single name (a bare string). */
-const labelTokenNode = (label: string, labelSet: boolean): FrameNode =>
-  labelSet ? { t: 'set', v: (JSON.parse(label) as string[]) } : label;
-
-/** valueMap()/valueMap(true) as a `{t:'map'}` node — the node twin of `valueMapBuffer`. Values are a
- *  LIST node (multi-valued property); token entries (T.id/T.label) prepend when `tokens`. */
-function valueMapNode(r: any, keys: string[] | null, tokens: boolean, labelSet: boolean): FrameNode {
-  const pairs: [FrameNode, FrameNode][] = [];
-  if (tokens) { pairs.push([ID_TOKEN, { t: null, v: r.id }]); pairs.push([LABEL_TOKEN, labelTokenNode(r.label, labelSet)]); }
-  const props = propsOf(r.props) as Record<string, ValueNode[]>;
-  for (const key of keys ?? Object.keys(props)) if (key in props) pairs.push([key, { t: 'list', v: props[key] }]);
-  return { t: 'map', v: pairs };
-}
-
-/** elementMap() as a `{t:'map'}` node — the node twin of `elementMapBuffer`: a flat map, ONE value per
- *  key, with the id/label tokens ALWAYS present. */
-function elementMapNode(r: any, keys: string[] | null, labelSet: boolean): FrameNode {
-  const pairs: [FrameNode, FrameNode][] = [[ID_TOKEN, { t: null, v: r.id }], [LABEL_TOKEN, labelTokenNode(r.label, labelSet)]];
-  const props = propsOf(r.props) as Record<string, ValueNode[]>;
-  for (const key of keys ?? Object.keys(props)) if (key in props) pairs.push([key, props[key][0]]);
-  return { t: 'map', v: pairs };
-}
-
-/** One element from PREFIXED (`<prefix>_*`) columns as a `{t,v}` element node — the node twin of
- *  `elementBuffer` (a map entry's element side; map entries are only ever vertex/edge, never property). */
-function prefixElementNode(r: any, prefix: string, elem: 'vertex' | 'edge'): FrameNode {
-  if (elem === 'edge')
-    return { t: 'edge', v: { id: r[`${prefix}_id`], label: r[`${prefix}_label`], src: r[`${prefix}_src`], tgt: r[`${prefix}_tgt`], props: propsOf(r[`${prefix}_props`]) } };
-  return { t: 'vertex', v: { id: r[`${prefix}_id`], label: labelsOf(r[`${prefix}_label`]), props: propsOf(r[`${prefix}_props`]) } };
-}
-
-/** A record/map scalar entry as a leaf node — the node twin of `recordValueBuffer`: a static tag applies
- *  to every row; a perRow type reads its stored `vtype` column (a collection nests its parsed tree). */
-function recordValueNode(r: any, prefix: string, type: ScalarType): FrameNode {
-  const v = r[`${prefix}_v`];
-  if (type.kind !== 'perRow') return { t: staticTypeOf(type) ?? null, v };
-  return valueNodeFromStored(v, r[perRowColumn(type, 'recordValueNode')] ?? null);
-}
-
-/** select(labels…)/project(keys…) as a `{t:'map'}` node — the node twin of `mapBuffer`: each entry's
- *  value side follows its `MapEntry` (a scalar via `recordValueNode`, a list via `foreignListNodes`, an
- *  element via `prefixElementNode`; a nullable-absent element is a null member). */
-function mapNode(r: any, entries: MapEntry[]): FrameNode {
-  const pairs: [FrameNode, FrameNode][] = entries.map((e): [FrameNode, FrameNode] => {
-    if (e.sub === 'value') return [e.key, recordValueNode(r, e.prefix, e.type)];
-    if (e.sub === 'list') { const j = r[`${e.prefix}_list`]; return [e.key, j == null ? null : { t: 'list', v: foreignListNodes(j, e.of) }]; }
-    return [e.key, e.nullable && r[`${e.prefix}_id`] === null ? null : prefixElementNode(r, e.prefix, e.sub)];
-  });
-  return { t: 'map', v: pairs };
-}
-
-/** One side (key/value) of a Map.Entry row as a node — the node twin of `mapSideBuffer`: an element
- *  arm, a list arm, else a self-describing `{t,v}` scalar node (already parsed, or JSON text). */
-function mapSideNode(raw: any, of: MapOf): FrameNode {
-  if (of.kind === 'elem') return raw == null ? null : foreignElementNode(JSON.parse(raw), of.elem);
-  if (of.kind === 'list') return raw == null ? null : { t: 'list', v: foreignListNodes(raw, of.of) };
-  return raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw);
-}
-
-/** A Map.Entry (a MapStream unfold) as a size-1 `{t:'map'}` node — the node twin of `mapEntryBuffer`
- *  (TINKERPOP-3104: a remote Map.Entry is a one-entry Map). */
-const mapEntryNode = (r: any, keyOf: MapOf, valOf: MapOf): FrameNode =>
-  ({ t: 'map', v: [[mapSideNode(r.mk, keyOf), mapSideNode(r.mv, valOf)]] });
-
-/**
- * Run `plan` and project its rows to `(node, bulk)` pairs — the untyped-JSON twin of `frameResolved`.
- * Runs the plan the SAME way `frameResolved` does (a `program` write through `runSteps` +
- * `refreshElements`, a read through `store.query`); the caller (`resolveJson`) owns the shape check and
- * `plan.cleanup`.
- *
- * The support decision is made from `plan.shape.kind` BEFORE running (`JSON_COVERED`): a write whose
- * shape falls back must not fire its effects here, because the GraphBinary fallback runs the plan for
- * real — otherwise a write would execute TWICE. Compiling/driving a program is side-effect-free (effects
- * run only in `runSteps`, which is gated behind the shape check).
- *
- * `bulk` carries the multiset multiplicity exactly as `frameResolved` does — only the element leaves
- * read a `bulk` column (`bulkOf`); every other shape is single-multiplicity. `resolveJson` expands it.
- */
-function runResultNodes(store: GraphStore, plan: Executable): { node: FrameNode | null; bulk: bigint }[] {
-  const shape = plan.shape;
-  const rows = (plan.kind === 'program' ? runSteps(store, plan) : store.query(plan.sql, plan.binds)) as any[];
-  if (plan.kind === 'program') refreshElements(store); // §6·1 post-write refresh, exactly as frameResolved
-  const nodes: { node: FrameNode | null; bulk: bigint }[] = [];
-  switch (shape.kind) {
-    // Element leaves carry a per-row bulk (movementCollapse); every other shape is bulk 1.
-    case 'vertex': for (const r of rows) nodes.push({ node: foreignElementNode(r, 'vertex'), bulk: bulkOf(r) }); break;
-    case 'edge': for (const r of rows) nodes.push({ node: foreignElementNode(r, 'edge'), bulk: bulkOf(r) }); break;
-    case 'valueMap': for (const r of rows) nodes.push({ node: valueMapNode(r, shape.keys, shape.tokens, shape.labelSet), bulk: 1n }); break;
-    case 'elementMap': for (const r of rows) nodes.push({ node: elementMapNode(r, shape.keys, shape.labelSet), bulk: 1n }); break;
-    case 'map': for (const r of rows) nodes.push({ node: mapNode(r, shape.entries), bulk: 1n }); break;
-    case 'mapEntry': for (const r of rows) nodes.push({ node: mapEntryNode(r, shape.keyOf, shape.valOf), bulk: 1n }); break;
-    default: {
-      // value/scalar/jsonbList/jsonbSet/list/jsonbElementList/typedNode/mapValue reuse the framer's own
-      // producer twin. A numeric-reducer `scalar` over an empty stream is SQL NULL and yields NOTHING
-      // (matching `frameValues`' `if (r.v !== null || productiveNull)` filter), never a spurious null.
-      const src = shape.kind === 'scalar' ? rows.filter((r) => r.v !== null || shape.productiveNull) : rows;
-      const produced = foreignValueNodes(shape, src);
-      // Unreachable — `JSON_COVERED` admits only shapes `foreignValueNodes` handles; a null here is a
-      // coverage-drift bug in one of the two lists, surfaced rather than silently emptied.
-      if (produced === null) throw new Error(`runResultNodes: covered shape '${shape.kind}' has no node producer`);
-      for (const node of produced) nodes.push({ node, bulk: 1n });
-    }
-  }
-  return nodes;
-}
-
-/** Render a plan's result as an untyped-JSON ARRAY string (the negotiated `application/json` response),
- *  or `null` when the shape is not covered (the router falls back to GraphBinary, decided before the plan
- *  runs). The bulk-N multiplicity is EXPANDED — a collapsed `(value, N)` row emits N copies — so the array
- *  matches what a client sees when it expands the bulked GraphBinary response. The rendering is TOTAL
- *  (`untyped`), and a write's run and its rendering are ONE atomic unit (`GraphStore.atomically`). */
-export function resolveJson(store: GraphStore, plan: Executable): string | null {
-  if (!JSON_COVERED.has(plan.shape.kind)) return null;
+/** Render a plan's result as an untyped-JSON ARRAY string (the negotiated `application/json` response).
+ *  The bulk-N multiplicity is EXPANDED — a collapsed `(value, N)` row emits N copies — so the array
+ *  matches what a client sees when it expands the bulked GraphBinary response. A write's run and its
+ *  rendering are ONE atomic unit (`GraphStore.atomically`). */
+function resolveJson(store: GraphStore, plan: Executable): string {
   const render = (): string => {
     const out: unknown[] = [];
-    for (const { node, bulk } of runResultNodes(store, plan)) for (let k = bulk; k > 0n; k--) out.push(untyped(node));
+    for (const { node, bulk } of resolveNodes(store, plan)) for (let k = bulk; k > 0n; k--) out.push(untyped(node));
     return JSON.stringify(out);
   };
-  try {
-    return plan.kind === 'program' ? store.atomically(render) : render();
-  } finally {
-    if (plan.cleanup) for (const run of plan.cleanup) store.dropBarrierRun(run);
-  }
+  return plan.kind === 'program' ? store.atomically(render) : render();
 }
 
 /**
@@ -980,7 +550,7 @@ export class Executor implements ExecutorApi {
    *  non-federated traversal compiles to ONE SQL statement and never suspends, so this pays no
    *  async tax. THROWS if the traversal contains a federated call() (use framedAsync). */
   framed(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Framed[] {
-    return [...frameResolved(this.store, this.runSync(gremlin, params, paramTypes))];
+    return frameResolved(this.store, this.runSync(gremlin, params, paramTypes));
   }
 
   /** SYNC flat Buffer[] (bulk expanded to the full multiset) — `framed` for callers that want
@@ -1012,15 +582,13 @@ export class Executor implements ExecutorApi {
    *  async work. A top-level query is federation depth 0. */
   async framedAsync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
     const plan = await this.drive(gremlin, params, paramTypes, 0);
-    return [...frameResolved(this.store, plan)];
+    return frameResolved(this.store, plan);
   }
 
-  /** ASYNC untyped-JSON string — the content-negotiated (`Accept: application/json`) readable response,
-   *  or `null` when the result shape is not yet renderable (the router falls back to GraphBinary). Same
-   *  compile+drive as `framedAsync`; only the tail projection differs (`resolveJson` instead of
-   *  `frameResolved`). For an unsupported shape the plan is NOT executed here (the shape check precedes the
-   *  run), so the GraphBinary fallback runs it exactly once — a write never fires twice. */
-  async jsonAsync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<string | null> {
+  /** ASYNC untyped-JSON string — the content-negotiated (`Accept: application/json`) readable response.
+   *  Same compile+drive as `framedAsync`; only the tail projection differs (`resolveJson` instead of
+   *  `frameResolved`), and both read the same result nodes, so every shape renders. */
+  async jsonAsync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<string> {
     const plan = await this.drive(gremlin, params, paramTypes, 0);
     return resolveJson(this.store, plan);
   }
@@ -1034,7 +602,7 @@ export class Executor implements ExecutorApi {
    *  (count/sum/max/min/mean). A scalar crosses as a `{t,v}` `ValueNode` so its Gremlin type survives the
    *  JSON transfer (a Long stays a Long) — `count`'s type is the plan's static `ScalarType`, the numeric
    *  reducers' is the per-row `vt` column (a Gremlin vtype or a SQLite storage class, the same two the
-   *  local `scalar` framer resolves). Any OTHER terminal still fails closed — a clear query failure. */
+   *  local `scalar` framer resolves), or a VALUE stream of the same result nodes every local tail reads. */
   async runForeign(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}, terminal?: ForeignTerminal): Promise<ForeignResult> {
     // DETACHED compile: a federated fetch lands the subgraph, so its element props carry the extra
     // facts a landed element needs to reconstruct a full detached form — property ids and meta-properties.
@@ -1043,7 +611,7 @@ export class Executor implements ExecutorApi {
       throw new UnsupportedTraversal('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
     // An element row may carry a COLLAPSED multiplicity (`bulk`, the movementCollapse `SUM(bulk)` — the
-    // same column `framedResults` reads via `bulkOf`). The transfer is a FLAT traverser stream, exactly
+    // same column `frameResolved` reads via `bulkOf`). The transfer is a FLAT traverser stream, exactly
     // what an HTTP peer receives (`foreign-decode.ts` requests `bulkResults=false`), so each row lands
     // `bulk` times. Dropping it landed the DISTINCT elements, and a local `fold().count(local)` counted those.
     const flat = (one: (r: any) => ForeignRow): ForeignRow[] => rows.flatMap((r) => {
@@ -1089,12 +657,9 @@ export class Executor implements ExecutorApi {
     // A pushed-down VALUE-PRODUCING terminal (`values(k)`, `unfold()`, `fold()`, `cap('a')`, …): the whole
     // tail ran on the sibling and returned a STREAM of N values, each re-framed by its own Gremlin type. It
     // rides the SAME `{t,v}` envelope the scalar arm uses — one node per member — so the resume unfolds each
-    // into its own traverser (`lowerTypedNodeStream`), the scalar reducer's framing one cardinality up. Every
-    // value-shaped terminal a maximal pushable prefix can end in maps here; a shape not yet covered fails
-    // closed naming itself rather than silently mis-framing.
-    const nodes = foreignValueNodes(plan.shape, rows);
-    if (nodes) return { kind: 'values', values: nodes };
-    throw new UnsupportedTraversal(`federated traversal must yield vertices, edges, a reduced scalar, a keyed map, or a value stream, not a ${plan.shape.kind} result`);
+    // into its own traverser (`lowerTypedNodeStream`), the scalar reducer's framing one cardinality up. They
+    // are the SAME result nodes the local tails frame (`valueNodes`), so every shape crosses.
+    return { kind: 'values', values: valueNodes(plan.shape, rows) };
   }
 
   /** Compile SYNCHRONOUSLY and reject a barrier. A non-federated traversal is ONE SQL statement —

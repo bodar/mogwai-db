@@ -35,7 +35,7 @@ export type ListOf =
   // bare list. `of` is the POSITION member shape (a path's positions are self-describing `{t,v}` nodes,
   // `TYPED_MEMBERS`), the same slot the `list` arm's `of` fills one level down. The member value stored
   // in the outer list is a path's own positions array (its `LIST_COL`), exactly what `framePath`'s
-  // `listItemBuffers` reads.
+  // `listMemberNodes` reads.
   | { kind: 'path'; of: ListOf }
   // A list whose members are MAPS — `project(k…).by(…).fold()`, `valueMap().fold()`,
   // `group().by().by().fold()`: every GraphQL to-many object field at depth ≥ 2. Each member is a
@@ -66,7 +66,7 @@ export type MixedArm =
 // How a map stream's key/value column is shaped — kept at the render boundary (like
 // ListOf/MapEntry) so a MapStream's mapEntry Shape can name it. A key/value is a bare
 // scalar (mk/mv hold the value, `as` its GraphBinary tag), an element rowid (rejoined to
-// nodes/edges when framed out), or a JSONB list (framed via frameListOf).
+// nodes/edges when framed out), or a JSONB list (framed via listColumnNode).
 export type MapOf =
   // The scalar side of a map is ALWAYS a self-describing {t,v} ValueNode (framed via
   // frameTypedNode → each entry its own exact type; heterogeneous maps round-trip). Every
@@ -87,39 +87,11 @@ export type MapOf =
   // scalar one: a `project('a','b').by(identity()).by('name')` record collapsed to its map. The
   // `ListOf` `mixed` arm one container across, with the same arms, so collecting the side
   // (`select(Column.values)`) is the identity translation. The framer reads every node by its own tag
-  // (the scalar arm of `mapSideBuffer`); a reader that would DECODE a value into one stream shape
+  // (the scalar arm of `mapSideNode`); a reader that would DECODE a value into one stream shape
   // (`select(k)`, an entry's value) has no single shape to decode into and declines, which is the whole
   // reason this is not `scalar` — claiming `scalar` decoded an element node into a per-row scalar the
   // wire framed as a JSON string.
   | { kind: 'mixed'; arms: readonly MixedArm[] };
-
-// select(labels…)/project(keys…): a Map per row. Each entry names its result
-// key plus the SQL column prefix carrying its typed payload.
-export type MapEntry =
-  | { key: string; prefix: string; sub: 'vertex' | 'edge'; nullable: boolean }
-  // A record/map scalar has the same total type channel as ScalarStream. Its per-row
-  // member names the prefixed sibling column in the wide record relation.
-  | { key: string; prefix: string; sub: 'value'; type: ScalarType }
-  | { key: string; prefix: string; sub: 'list'; of: ListOf };
-
-// The element kind an element-shaped column carries, and the columns that frame
-// it. `node`→vertexBuffer(v_id,v_label,v_props); `edge`→edgeBuffer(+v_src,v_tgt);
-// `property`→propertyBuffer(v_owner,v_pk,v_pv). Prefix lets a group key AND value
-// each carry their own element columns (k_* / v_*).
-export type ElemShape = Elem | 'property';
-
-// path(): one Path per row. Each position frames either a whole element
-// (prefix_id/_label/_props[/_src/_tgt]) or, under a by(key) modulator, a scalar
-// (prefix_v). Positions are in traversal order; labels ride empty (labels-on-path
-// deferred). See docs/2026-07-12-path-tracking-prior-art.md.
-export type PathPos =
-  | { render: 'element'; elem: ElemShape; prefix: string }
-  // `optional` = a PADDED position of a branched path (a shorter arm left it NULL). The value
-  // column alone cannot say whether the position is absent or its by() value is missing, so an
-  // optional position carries a sibling `<prefix>_at` presence column (the raw position id) and
-  // the handler omits the position when it is NULL. An element position needs no such column —
-  // its own `_id` already answers it.
-  | { render: 'value'; prefix: string; optional: boolean };
 
 // A compile-time type tag on a scalar value stream — the value's GraphBinary type
 // is known from the producing step (a typed literal, or an as*() cast's target), NOT
@@ -334,8 +306,6 @@ export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
   | { kind: 'property' } // properties(): VertexProperty elements (vpid/owner/pk/pv/pmeta cols)
-  | { kind: 'metaProperty' } // properties().properties(): meta-properties as Property elements (mk/mv cols)
-  | { kind: 'metaMap' } // properties(k).valueMap(): a VertexProperty's meta as a flat Map (meta col, JSON text)
   // The ONE type channel at the render boundary (`type`), replacing the former `as?` xor
   // `perRowType?` pair — the same two-optionals-plus-implicit-third trap ScalarStream had.
   // perRow → frame each row by its own stored `vtype` column (values() of typed props; a
@@ -343,32 +313,19 @@ export type Shape =
   // for every row; unknown → infer from the JS value.
   | { kind: 'value'; type: ScalarType }
   // A per-row tag: null/scalar/vertex/edge/list. `arms` is the complete declared
-  // framing vocabulary; `wholeResult` makes cap() wrap all framed rows in one List.
-  | { kind: 'variant'; arms: readonly VariantShapeArm[]; wholeResult: boolean }
+  // framing vocabulary.
+  | { kind: 'variant'; arms: readonly VariantShapeArm[] }
   | { kind: 'scalar'; productiveNull: boolean } // numeric reducer; productive NULL may be a real result
-  // The legacy ROW-fold: one List per result, built from the RESULT ROWS rather than from a JSON
-  // column (that is `jsonbList`). Elements only — its single producer (`projection.ts` `compileFold`)
-  // throws for every other projection shape, so the `'scalar'` item arm and the `as?` tag it carried
-  // were UNREACHABLE, and with them a whole framer branch. A fifth encoding that looked like optional
-  // metadata, which is exactly what `ListOf` was made total to stop.
-  | { kind: 'list'; elem: Exclude<ElemShape, 'property'> }
   // One JSON list value per row. `items` is total: the former `as`/`typed`/`of`
   // flag bag made four encodings look like optional metadata and forced the framer
   // to reconstruct a fifth. `ListOf` already owns the item question.
   | { kind: 'jsonbList'; items: ListOf }
   | { kind: 'jsonbPath'; items: ListOf } // one JSONB array of positions per row → one GraphBinary Path
-  | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
   // A set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from
   // a JSONB `list` column. `items` is the SAME total member descriptor `jsonbList` carries — it was a
   // `typed?: boolean`, which is the last of the four flag-bag spellings and the only one that could
   // not say a set's members share one STATIC type.
   | { kind: 'jsonbSet'; items: ListOf }
-  // `labelSet` says the `label` column holds a JSON ARRAY of names (the multi-label regime)
-  // rather than one name. Carried on the shape because the SQL and the framer must agree, and the
-  // regime is a per-traversal decision the framer cannot re-derive.
-  | { kind: 'valueMap'; keys: string[] | null; tokens: boolean; labelSet: boolean }
-  | { kind: 'elementMap'; keys: string[] | null; labelSet: boolean }
-  | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'mapValue' } // one whole map VALUE per row: a `map` JSONB column [[keyNode,valNode],…] with self-describing {t,v} scalar sides → one GraphBinary MAP (frameTypedNode)
   // A per-row SELF-DESCRIBING TYPED NODE: each row's `node` column is one `{t,v}` envelope (JSON text),
   // framed by the ONE `frameTypedNode` rule — a vertex, an edge, a scalar leaf, each by its own tag.
@@ -378,8 +335,6 @@ export type Shape =
   // would infer away. Terminal, exactly as `variant` is.
   | { kind: 'typedNode' }
   | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (a MapStream unfold) → each frames as a size-1 GraphBinary MAP
-  | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
-  | { kind: 'pathGrouped'; elem: ElemShape; byKey: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
   | { kind: 'discard' };
 
 export interface Compiled {

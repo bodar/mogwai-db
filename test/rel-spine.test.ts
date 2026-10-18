@@ -2049,9 +2049,6 @@ describe('the RelIR spine', () => {
         'g.V().union(__.values("name"), __.out())',
       ]) {
         expect(read(gremlin).kind, gremlin).toBe('read');
-        // `wholeResult` may be omitted or explicitly undefined; the framer reads `shape.wholeResult`
-        // either way, so the arm LIST is the claim and this normalizes the spelling rather than
-        // pinning it.
         expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
       }
       // NOT a variant, and the contrast is the point: `choose(pred, values(k), constant(c))` has two

@@ -347,7 +347,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
     // the {t,v} tree; wrap those in json() so they NEST as JSON rather than a quoted TEXT string
     // (frameTypedNode reads a string otherwise), exactly as valueMapPairs does. An edge's label is a bare
     // name and needs no wrap. `elementNode` adds the `{t,v}` envelope the typed-tree framer reads;
-    // `elementObject` returns the bare payload the `listItemBuffers` `elem` arm maps `rowVertex` over —
+    // `elementObject` returns the bare payload the `listMemberNodes` `elem` arm maps `rowVertex` over —
     // the same `elementNode`/`elementObject` split the base graph draws in `element.ts`.
     elementNode(kind, id, fresh) {
       const { row, payload } = boundPayload(kind, id, fresh);

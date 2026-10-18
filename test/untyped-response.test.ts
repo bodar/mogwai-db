@@ -10,7 +10,7 @@
 //      connection.ts:286, our federation http-federation.ts:98), so nothing that wanted binary is broken.
 //
 // The router path is exercised end to end (`makeRouter` over a `BunGraphManager`), so negotiation,
-// fallback, and both verbs (POST + GET) are covered, not just the renderer in isolation.
+// and both verbs (POST + GET) are covered, not just the renderer in isolation.
 import { test, expect, describe, beforeAll } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
@@ -151,12 +151,34 @@ describe('JSON is now the default; GraphBinary is the explicit opt-in and stays 
     expect(res.headers.get('Content-Type')).toBe(GRAPHBINARY_MT);
   });
 
-  test('a deferred result shape (path) on the JSON default FALLS BACK to GraphBinary', async () => {
-    // `path` is not yet renderable as untyped JSON → resolveJson returns null → the router serves the
-    // (unreadable-but-correct) GraphBinary response rather than a wrong JSON. Fail-closed. Exercised via the
-    // default (no-Accept) request, which is now the JSON path.
-    const res = await post('g.V().out().path()');
-    expect(res.headers.get('Content-Type')).toBe(GRAPHBINARY_MT);
+});
+
+// EVERY result shape renders as JSON — the JSON tail reads the same result nodes GraphBinary frames
+// (`rowsToNodes`), so there is no shape it falls back on and no request that compiles and runs twice.
+describe('every result shape renders as JSON', () => {
+  test('path() → { labels, objects }, an element position keeping its properties', async () => {
+    const paths = await jsonResults(await post('g.V().has("name","marko").out("created").path()'));
+    expect(paths).toEqual([{
+      labels: [[], []],
+      objects: [
+        expect.objectContaining({ label: ['person'], properties: expect.objectContaining({ name: [{ value: 'marko' }] }) }),
+        expect.objectContaining({ label: ['software'], properties: expect.objectContaining({ name: [{ value: 'lop' }] }) }),
+      ],
+    }]);
+    const byName = await jsonResults(await post('g.V().has("name","marko").out("created").path().by("name")'));
+    expect(byName).toEqual([{ labels: [[], []], objects: ['marko', 'lop'] }]);
+  });
+
+  test('properties() → one { id, key, value } per VertexProperty', async () => {
+    const props = await jsonResults(await post('g.V().has("name","marko").properties()'));
+    expect(props.map((p) => [p.key, p.value]).sort()).toEqual([['age', 29], ['name', 'marko']]);
+    for (const p of props) expect(p.id).toBeDefined();
+  });
+
+  test('iterate() → an empty array, and the write runs exactly ONCE', async () => {
+    expect(await jsonResults(await post('g.addV("probe").property("name","once").iterate()'))).toEqual([]);
+    expect(await jsonResults(await post('g.V().has("probe","name","once").count()'))).toEqual([1]);
+    await post('g.V().hasLabel("probe").drop()', GRAPHBINARY_MT);
   });
 });
 

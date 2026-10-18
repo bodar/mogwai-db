@@ -20,11 +20,9 @@ import type { ForeignResult } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 
 /** The untyped-JSON data-plane result crossing a DO RPC (`GraphDatabase.json`) — the readable
- *  `Accept: application/json` response rendered inside the DO. A WRAPPER rather than a bare `string |
- *  null`, because the RPC payload bound forbids `null`: `{ json }` carries the rendered array string,
- *  `{ unsupported: true }` says the shape is not renderable so the edge falls back to GraphBinary. Neither
- *  arm carries `__rpcError`, so `rpcUnwrap`'s brand discriminant still separates success from failure. */
-export type JsonResult = { readonly json: string } | { readonly unsupported: true };
+ *  `Accept: application/json` response rendered inside the DO. A WRAPPER rather than a bare string,
+ *  because `rpcUnwrap` discriminates success from failure with an `in` test, which needs an object. */
+export type JsonResult = { readonly json: string };
 
 /** The data-plane payloads that may cross a data-plane RPC boundary (a DO RPC or a browser Worker
  *  postMessage). `Framed[]` (framed()/runFramed()), `ForeignResult`

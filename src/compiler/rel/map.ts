@@ -1500,7 +1500,7 @@ const vertexLabelName = (rowid: Expr, source: GraphSource, fresh: Minter): Expr 
 // the key a string and lost the order — the two reasons the encoding is a pairs array in the first
 // place, now paying for themselves a second time.
 
-/** The two columns a MAP.ENTRY relation carries. The names are `execute.ts`'s (`mapEntryBuffer` reads
+/** The two columns a MAP.ENTRY relation carries. The names are `execute.ts`'s (`rowsToNodes` reads
  *  `mk`/`mv`), declared once here for `LIST_COL`/`MAP_COL`'s reason: the framing layer reads them too. */
 export const ENTRY = { key: 'mk', val: 'mv' } as const;
 
@@ -1557,7 +1557,7 @@ export const pairsOf = (map: Expr, fresh: Minter): Rel => make.explode({
 });
 
 /** One SIDE of a pair — `json_extract(<pair>, '$[0]')` for the key, `'$[1]'` for the value. A `{t,v}`
- *  envelope comes back as JSON TEXT, which is exactly what `mapSideBuffer` and `frameTypedNode` read.
+ *  envelope comes back as JSON TEXT, which is exactly what `mapSideNode` and `frameTypedNode` read.
  *  Exported for the map-VALUED merge driver (`write.ts`). */
 export const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
   ({ kind: 'call', fn: 'json_extract', args: [pair, compilerText(side === 'keys' ? '$[0]' : '$[1]')] });
@@ -1959,7 +1959,7 @@ export function mapSelect(
  * tree, so `{t:'vertex', v:{…}}` is walked by the one rule `frameTypedNode` already has, at whatever
  * depth it appears. The `elem` tag on the side is therefore an ALGEBRA fact — it tells the side READS
  * (`sideList`, `entrySide`) that decoding into the scalar vocabulary would be lossy — and not a wire
- * one, which is why the `Shape` below says `scalar` for it (`mapSideBuffer`'s own `elem` arm expects a
+ * one, which is why the `Shape` below says `scalar` for it (`mapSideNode`'s own `elem` arm expects a
  * BARE payload object, and this blob carries the envelope).
  *
  * It therefore takes NO side descriptors and cannot decline: `mapValue` is one blob whatever the sides
@@ -1995,7 +1995,7 @@ function mapNodePayload(map: Expr, valOf: MapOf, source: GraphSource, fresh: Min
 }
 
 /**
- * THE MAP.ENTRY PAYLOAD — the two side columns, as the JSON `mapEntryBuffer` frames.
+ * THE MAP.ENTRY PAYLOAD — the two side columns, as the JSON `rowsToNodes` frames.
  *
  * `json()` per side rather than over a whole blob, and that is the only difference from `mapPayload`:
  * a side is already the exact subtree the framer wants, so the projection's whole job is to make
@@ -2013,7 +2013,7 @@ export function mapEntryPayload(
       exprs: [[ENTRY.key, jsonOf(col(ordered.id, ENTRY.key))], [ENTRY.val, jsonOf(col(ordered.id, ENTRY.val))]],
     }),
     // An `elem` side crosses as `scalar`: the column holds a `{t,v}` node, which is what
-    // `mapSideBuffer`'s scalar arm frames, while its own `elem` arm expects a bare payload object. The
+    // `mapSideNode`'s scalar arm frames, while its own `elem` arm expects a bare payload object. The
     // two vocabularies answer two questions (`framing.ts`'s note), and this is that split paying off.
     shape: { kind: 'mapEntry', keyOf: framed(keyOf), valOf: framed(valOf) },
   };
@@ -2021,7 +2021,7 @@ export function mapEntryPayload(
 
 /** A side AS THE WIRE sees it — an `elem` side is a typed node here, so it frames like any other. */
 // A Map.Entry's key and value columns each hold a self-describing `{t,v}` NODE (the in-map encoding),
-// which `mapSideBuffer`'s scalar arm frames by walking its own `t` — so EVERY value shape crosses as
+// which `mapSideNode`'s scalar arm frames by walking its own `t` — so EVERY value shape crosses as
 // `scalar` here, not just `elem`. A `list` valOf (a `Map<K,List>` entry) must collapse too: the value
 // column is the `{t:'list', v}` node, not the root-encoded raw array, so framing it as a list would
 // `items.map` over the node object. The list precision is for CONSUMERS (`select`/`unfold`-then-op),

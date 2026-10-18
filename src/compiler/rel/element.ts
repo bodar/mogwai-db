@@ -241,7 +241,7 @@ export function elementNode(rowid: Expr, elem: Elem, fresh: Minter): Expr {
  * `elementNode`'s twin, and the pair is deliberate rather than a duplication: the two encodings serve
  * two different framers and the framer decides which. A member of a TYPED tree (a map side, a
  * `TYPED_LIST` member) is read by `frameTypedNode`, which needs the tag; an ELEMENT-membered list is
- * read by `listItemBuffers`' `of.kind === 'elem'` arm (`execute.ts`), which maps `rowVertex`/`rowEdge`
+ * read by `listMemberNodes`' `of.kind === 'elem'` arm (`execute.ts`), which maps `rowVertex`/`rowEdge`
  * straight over the items and whose own comment states the contract — *"element items arrive as
  * `{id,label,props[,src,tgt]}` objects (rowids already expanded to public payloads in SQL)"*. A tag
  * there would be an extra level the framer does not unwrap, and the wrapper's absence is not a

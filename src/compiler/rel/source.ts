@@ -184,7 +184,7 @@ export interface GraphSource {
 
   /** AN ELEMENT AS A BARE PAYLOAD OBJECT — `{id, label, props[, src, tgt]}` with NO `{t,v}` envelope,
    *  correlated on an id. `elementNode`'s twin (the two serve different framers — see `element.ts`): this
-   *  targets the top-level `listItemBuffers` `elem` arm (`execute.ts`), which maps `rowVertex`/`rowEdge`
+   *  targets the top-level `listMemberNodes` `elem` arm (`execute.ts`), which maps `rowVertex`/`rowEdge`
    *  straight over bare objects. `BaseGraph` reads the base tables by rowid (`elementObject`); a bound
    *  graph REJOINS the landed relation by id to reconstitute the same object. */
   elementObject(kind: Elem, id: Expr, fresh: Minter): Expr;

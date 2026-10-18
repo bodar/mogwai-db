@@ -480,6 +480,9 @@ export type FrameNode =
   // VertexProperty IS an Element and an edge `Property` is not, but they frame identically here (the
   // synthetic `owner:pk` id is the framer's, not the tree's), so one arm serves both.
   | { t: 'vertex' | 'edge' | 'property'; v: Record<string, any> }
+  // A PATH — its positions in traversal order (labels-on-path deferred). A first-class GraphBinary type,
+  // distinct from a list.
+  | { t: 'path'; v: FrameNode[] }
   | { t: 'T'; v: TokenName }
   | { t: 'D'; v: DirectionName }
   | null | string | number | boolean | FrameNode[];

@@ -101,14 +101,14 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
     const { gremlin, params, paramTypes, g, batchSize, bulked } = await parseRequest(raw);
     const id = pathId ?? g ?? 'g';
     const exec = mgr.executor(id);
-    // Content negotiation: readable untyped-JSON is now the DEFAULT — a request that does NOT explicitly
-    // ask for GraphBinary gets it, UNLESS the executor can't render it (no `jsonAsync`) or the result shape
-    // isn't covered yet (`resolveJson` → null), in which case we fall through to the byte-identical
-    // GraphBinary path (fail closed on shapes JSON can't render). An explicit GraphBinary Accept — what the
-    // GLV clients (connection.ts:286) and federation (http-federation.ts:98) send — skips straight to binary.
+    // Content negotiation: readable untyped-JSON is the DEFAULT — a request that does NOT explicitly ask
+    // for GraphBinary gets it, unless the executor cannot render it (no `jsonAsync`). An explicit
+    // GraphBinary Accept — what the GLV clients (connection.ts:286) and federation (http-federation.ts:98)
+    // send — goes straight to binary.
     if (!prefersBinary(req.headers.get('Accept')) && exec.jsonAsync) {
       const json = await exec.jsonAsync(gremlin, params, paramTypes);
-      if (json !== null) { log({ id, gremlin, ok: true }); return jsonResultResponse(json); }
+      log({ id, gremlin, ok: true });
+      return jsonResultResponse(json);
     }
     const framed = await exec.framedAsync(gremlin, params, paramTypes);
     log({ id, gremlin, ok: true, results: framed.length });
@@ -138,10 +138,11 @@ async function runGetQuery(mgr: GraphManager, id: string, searchParams: URLSearc
       bulkResults: searchParams.get('bulk') === 'true',
     });
     const exec = mgr.executor(id);
-    // Same content negotiation as POST (JSON default + fail-closed binary fallback; explicit binary opt-in).
+    // Same content negotiation as POST (JSON default; explicit binary opt-in).
     if (!prefersBinary(accept) && exec.jsonAsync) {
       const json = await exec.jsonAsync(gremlin, params, paramTypes);
-      if (json !== null) { log({ id, gremlin, ok: true }); return jsonResultResponse(json); }
+      log({ id, gremlin, ok: true });
+      return jsonResultResponse(json);
     }
     const framed = await exec.framedAsync(gremlin, params, paramTypes);
     log({ id, gremlin, ok: true, results: framed.length });

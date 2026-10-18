@@ -112,9 +112,8 @@ export class GraphWorkerHost extends RpcTarget {
   }
 
   /** Compile + run + render the readable UNTYPED-JSON response (content negotiation, `Accept:
-   *  application/json`) — the JSON array string, or `null` when the result shape is not yet renderable so
-   *  the manager falls back to GraphBinary. The browser twin of the DO `json` RPC. */
-  json(gremlin: string, params: Record<string, unknown>, paramTypes?: Record<string, TypeNode>): Promise<string | null> {
+   *  application/json`) — the JSON array string. The browser twin of the DO `json` RPC. */
+  json(gremlin: string, params: Record<string, unknown>, paramTypes?: Record<string, TypeNode>): Promise<string> {
     return this.executor.jsonAsync(gremlin, params, paramTypes);
   }
 

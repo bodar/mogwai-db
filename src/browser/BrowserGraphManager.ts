@@ -70,9 +70,9 @@ export class BrowserGraphManager implements GraphManager {
       framedAsync: (gremlin, params, paramTypes) =>
         this.call(id, ((s) => s.framed(gremlin, params, paramTypes)) as Awaited$<Framed[]>).then(rewrap),
       // The readable untyped-JSON path (content negotiation) — a JSON string needs no `rewrap` (unlike the
-      // `Framed` buffers, it survives the port unchanged). `null` → the router falls back to GraphBinary.
+      // `Framed` buffers, it survives the port unchanged).
       jsonAsync: (gremlin, params, paramTypes) =>
-        this.call(id, ((s) => s.json(gremlin, params, paramTypes)) as Awaited$<string | null>),
+        this.call(id, ((s) => s.json(gremlin, params, paramTypes)) as Awaited$<string>),
       runForeign: (gremlin, params, depth, paramTypes, terminal) =>
         this.call(id, ((s) => s.runForeign(gremlin, params, depth, paramTypes, terminal)) as Awaited$<ForeignResult>),
     };

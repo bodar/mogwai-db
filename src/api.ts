@@ -228,12 +228,10 @@ export interface RemoteExecutor {
   /** Async GraphBinary buffers — the client wire path; handles a federated top-level call(). */
   framedAsync(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<Framed[]>;
   /** Async UNTYPED-JSON string — the content-negotiated (`Accept: application/json`) readable response
-   *  the browser docs panel uses; `null` when the result shape is not yet renderable (caller falls back
-   *  to GraphBinary). OPTIONAL: a runtime that cannot reach a store to build the node tree (a bare
-   *  cross-boundary adapter, a remote-URI peer) simply omits it and the router serves GraphBinary — the
-   *  same "can offer no more than framedAsync" latitude the sync methods have. GraphBinary stays the
-   *  default the real GLV clients get; this is opt-in. */
-  jsonAsync?(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<string | null>;
+   *  the browser docs panel uses. OPTIONAL: a runtime that cannot reach a store to build the node tree (a
+   *  bare cross-boundary adapter) simply omits it and the router serves GraphBinary — the same "can offer
+   *  no more than framedAsync" latitude the sync methods have. */
+  jsonAsync?(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<string>;
   /** Async detached rows — the internal federated-transfer hop. `depth` (MANDATORY) is this hop's
    *  federation depth, so a federated call can never forget to thread it. `terminal` disambiguates a
    *  reducer from a value stream (see `ForeignTerminal`); absent → the sibling shape is authoritative. */
@@ -248,8 +246,8 @@ export interface RemoteExecutor {
 export interface Executor extends RemoteExecutor {
   /** A LOCAL-store executor ALWAYS renders the untyped-JSON response (it can reach the store to build the
    *  node tree), so it strengthens the optional `RemoteExecutor.jsonAsync` to REQUIRED — the router and
-   *  the DO/browser hosts can call it unconditionally. Still `null` for an unrenderable shape. */
-  jsonAsync(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<string | null>;
+   *  the DO/browser hosts can call it unconditionally. */
+  jsonAsync(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Promise<string>;
   framed(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Framed[];
   buffers(gremlin: string, params: Record<string, any>, paramTypes?: Record<string, TypeNode>): Buffer[];
   /** Run a captured replication FILTER (a vertex-selector traversal) and return the matched vertices'

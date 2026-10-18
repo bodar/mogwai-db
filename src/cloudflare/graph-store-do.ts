@@ -93,16 +93,11 @@ export class GraphDatabase extends DurableObject<Env> {
   }
 
   /** Data-plane RPC: compile + run + render the UNTYPED-JSON response inside the DO (the readable
-   *  `Accept: application/json` form), returning the JSON array string — or `null` when the result shape
-   *  is not yet renderable, so the edge falls back to GraphBinary. The node tree must be built where the
-   *  store lives (element properties come from the rows), and a JSON string crosses the RPC boundary
-   *  trivially. GraphBinary stays the default the real GLV clients get. */
+   *  `Accept: application/json` form), returning the JSON array string. The node tree must be built where
+   *  the store lives (element properties come from the rows), and a JSON string crosses the RPC boundary
+   *  trivially. */
   async json(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<RpcResult<JsonResult>> {
-    return rpcTry(async () => {
-      const rendered = await this.executor().jsonAsync(gremlin, params, paramTypes);
-      // `null` (an unsupported shape) can't cross as an RPC payload — wrap it so the edge can fall back.
-      return rendered === null ? { unsupported: true } : { json: rendered };
-    });
+    return rpcTry(async () => ({ json: await this.executor().jsonAsync(gremlin, params, paramTypes) }));
   }
 
   /** Data-plane RPC: run + FRAME an ALREADY-COMPILED plan — a `read` Compiled or a `program` write,
@@ -119,7 +114,7 @@ export class GraphDatabase extends DurableObject<Env> {
   async runFramed(plan: Executable): Promise<RpcResult<Framed[]>> {
     return rpcTry(async () => {
       this.ensureLive();
-      return [...frameResolved(this.store, plan)];
+      return frameResolved(this.store, plan);
     });
   }
 

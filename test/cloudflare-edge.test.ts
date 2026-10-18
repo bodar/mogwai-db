@@ -26,7 +26,7 @@ function fakeManager(store: GraphStore, siblingRows: ForeignRow[] = []) {
   const stub = {
     runFramed: async (plan: Executable): Promise<Framed[]> => {
       calls.runFramed++; calls.lastPlan = plan;
-      return [...frameResolved(store, plan)];
+      return frameResolved(store, plan);
     },
     readHead: async (head: any) => { calls.readHead++; return readSegmentHead(store, head); },
     framed: async (gremlin: string): Promise<Framed[]> => {

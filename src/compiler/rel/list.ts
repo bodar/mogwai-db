@@ -1186,7 +1186,7 @@ function foldPerOrigin(
  *
  * It is also why there is no type question here and a long one in `foldScalars`: every member of an
  * element list IS an element, so `of` says it once and no member needs a tag. `{kind:'elem'}` was
- * already a `ListOf` arm the framer read (`listItemBuffers`,
+ * already a `ListOf` arm the framer read (`listMemberNodes`,
  * `execute.ts`); this is the increment that first PRODUCES one on this spine, which is exactly what
  * `listPayloadExpr`'s decline comment said it was waiting for.
  *
@@ -1764,7 +1764,7 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
  * An ELEMENT-membered list is REBUILT the same way a nested one is, and for the same reason: the members
  * are ROWIDS (what `foldElements` collected) and the wire wants public payload objects, so each one is
  * expanded here — at the ROOT, once per surviving member — rather than inside the barrier that made the
- * list. The framer contract is `listItemBuffers`' own comment: element
+ * list. The framer contract is `listMemberNodes`' own comment: element
  * items arrive as `{id,label,props[,src,tgt]}` objects, rowids already expanded in SQL. That is
  * `elementObject` and NOT `elementNode` — a `{t,v}` envelope here would be a level the `of.kind === 'elem'`
  * framer does not unwrap, and `of` has already said every member is an element.
@@ -1779,7 +1779,7 @@ export function listPayloadExpr(list: Expr, of: ListOf, source: GraphSource, fre
   // so the column holds the wire tree and there are no rowids to expand.
   // A PATH member's positions were already materialized into self-describing nodes at `path()` time
   // (`pathPositions` expanded each via `source.elementNode`), so the outer list already holds the wire
-  // tree — nothing to expand at the root, exactly as scalar/mixed/map. The framer (`listItemBuffers`'
+  // tree — nothing to expand at the root, exactly as scalar/mixed/map. The framer (`listMemberNodes`'
   // `path` arm) wraps each member's positions array in `framePath`.
   if (of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'map' || of.kind === 'path') return jsonOf(list);
   if (of.kind === 'elem') {
@@ -1821,7 +1821,7 @@ function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
  * A list's members as a SELF-DESCRIBING wire array — `listPayloadExpr`'s twin for the tree framer.
  *
  * The distinction is which framer reads the result, exactly the `elementNode`/`elementObject` split
- * (`element.ts`): `listPayloadExpr` targets the top-level `listItemBuffers` framer, whose `elem` arm
+ * (`element.ts`): `listPayloadExpr` targets the top-level `listMemberNodes` framer, whose `elem` arm
  * takes BARE `{id,label,props}` objects; this targets `frameTypedNode`, which walks a `{t,v}` tree and
  * needs every member tagged. So a list nested inside a MAP or RECORD field value (`project('ks').by(
  * __.out().fold())`, `group().by().by(__.out().fold())`) comes through here — its members are framed by

@@ -6,7 +6,7 @@
 // then `JSON.stringify`. It must render from the node tree and NOT by decoding our GraphBinary back,
 // because the client's vertex/edge deserializers hardcode empty properties (`.claude/rules/
 // wire-protocol.md`) — decoding the binary would LOSE every element property. This is the same node
-// tree the federation transport already produces (`foreignValueNodes`/`foreignElementNode`).
+// tree the federation transport already produces (`rowsToNodes`).
 //
 // The shape follows TinkerPop 4's UNTYPED GraphSON element form (`TypeInfo.NO_TYPES`), from
 // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/io/graphson/
@@ -82,6 +82,10 @@ export function untyped(node: FrameNode): unknown {
       return untypedEdge(node.v as Record<string, any>);
     case 'property':
       return untypedProperty(node.v as Record<string, any>);
+    // A PATH (`PathJacksonSerializer`) → `{ labels, objects }`, one label set per position (empty —
+    // labels-on-path deferred), as the GraphBinary path frames.
+    case 'path':
+      return { labels: node.v.map(() => []), objects: node.v.map(untyped) };
     // A `T`/`Direction` token as a VALUE renders as its name — a bare string (as a map KEY it is
     // stringified the same way, `untypedMapKey`).
     case 'T':
@@ -136,6 +140,7 @@ function untypedMapKey(k: FrameNode): string {
     case 'list':
     case 'set':
     case 'map':
+    case 'path':
       return JSON.stringify(untyped(k));
     default:
       return scalarKey(k.t, k.v);
@@ -157,7 +162,7 @@ function scalarKey(tag: string | null, v: unknown): string {
   return String(v);
 }
 
-/** A vertex payload (`{ id, label, props }`, as `foreignElementNode` builds it — `label` already the
+/** A vertex payload (`{ id, label, props }`, as `elementNode` builds it — `label` already the
  *  labels array, `props` the `{ key: [valueNode] }` object) → the untyped GraphSON vertex. Both fields
  *  are re-normalised defensively (a map-blob-carried element may arrive as JSON text). */
 function untypedVertex(v: Record<string, any>): unknown {
@@ -188,11 +193,11 @@ function untypedProperty(v: Record<string, any>): unknown {
   return out;
 }
 
-/** A vertex's label field → a labels ARRAY. Already an array from `foreignElementNode`; a raw
+/** A vertex's label field → a labels ARRAY. Already an array from `elementNode`; a raw
  *  JSON-text form (a map-blob-carried element) is parsed; anything else yields no labels. */
 const asLabels = (label: any): string[] =>
   Array.isArray(label) ? label : typeof label === 'string' ? (JSON.parse(label) as string[]) : [];
 
 /** An element's props field → the `{ key: [valueNode] }` object. Already an object from
- *  `foreignElementNode`/`propsOf`; a raw JSON-text form is parsed. */
+ *  `elementNode`/`propsOf`; a raw JSON-text form is parsed. */
 const asProps = (props: any): Record<string, any> => (typeof props === 'string' ? JSON.parse(props) : props);

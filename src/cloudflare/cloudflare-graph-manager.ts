@@ -60,11 +60,9 @@ class EdgeExecutor implements RemoteExecutor {
   /** The readable untyped-JSON path (content-negotiated). Unlike `framedAsync`, this does NOT edge-compile:
    *  the readable form is a docs convenience, not a hot path, so it ships the string to the DO, whose own
    *  executor compiles + runs + renders the node tree (where the store — and thus element properties —
-   *  lives) and returns the JSON array string. `null` (an unsupported shape) makes the router fall back to
-   *  `framedAsync` (GraphBinary); the DO then runs the plan for real exactly once. */
-  async jsonAsync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<string | null> {
-    const r = rpcUnwrap(await this.stub.json(gremlin, params, paramTypes) as RpcResult<JsonResult>);
-    return 'unsupported' in r ? null : r.json;
+   *  lives) and returns the JSON array string. */
+  async jsonAsync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<string> {
+    return rpcUnwrap(await this.stub.json(gremlin, params, paramTypes) as RpcResult<JsonResult>).json;
   }
 
   async runForeign(gremlin: string, params: Record<string, any>, depth: number, _paramTypes?: Record<string, TypeNode>, terminal?: ForeignTerminal): Promise<ForeignResult> {

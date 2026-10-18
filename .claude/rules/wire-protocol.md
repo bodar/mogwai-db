@@ -45,7 +45,7 @@ paths:
   docs, "A Note on Maps": *returned to the application as a Map with one entry*). Java's
   `MapEntrySerializer` is a `TransformSerializer` — direct read/write THROW; it turns the entry into a
   1-element `HashMap` before type dispatch. We frame each entry row as a size-1 MAP via
-  `mapFromEntries`/`typedMapBuffer` (`execute.ts`); the `map` (whole map) vs `mapEntry` (one entry,
+  `typedMapBuffer` (`execute.ts`); the `map` (whole map) vs `mapEntry` (one entry,
   key and value as their own columns) split is the two framing arms in `compiler/rel/framing.ts`, and
   the conversion to an entry happens at `unfold()`, never earlier.
 - **`count()`/`groupCount()` are Java Longs → frame as Int64 (`longSerializer`), NOT via

@@ -11,7 +11,7 @@
 // for us: a federated element's props and a pushed reducer's scalar must keep their exact Gremlin type
 // so a LOCAL tail over the detached result (`has("age", gt(30))`, `order().by("age")`) is correct at
 // depth. So we walk the frame ourselves and capture each value's wire DataType as the node's `t` tag
-// (`WIRE_TYPE_TO_NAME`) — the exact twin of `execute.ts`'s `foreignElementNode` / `foreignValueNodes` /
+// (`WIRE_TYPE_TO_NAME`) — the exact twin of `execute.ts`'s `elementNode` / `rowsToNodes` /
 // the `{t,v}` scalar. Elements decode at ANY depth (a `fold()` of vertices is a LIST of VERTEX values),
 // so the whole `ForeignResult` vocabulary composes rather than only the top level.
 //
@@ -134,7 +134,7 @@ const decodeBareLabels = (r: Reader): Promise<string[] | null> =>
   ioc.listSerializer.deserializeValue(r as any, 0x00, D.LIST) as Promise<string[] | null>;
 
 /** `{id} {label bare-list} {properties fq-LIST<VertexProperty>}` — `vertexBuffer`'s layout. The payload's
- *  `label` is the labels ARRAY (as `foreignElementNode` carries it); the top-level→`ForeignRow` adapter
+ *  `label` is the labels ARRAY (as `elementNode` carries it); the top-level→`ForeignRow` adapter
  *  derives the scalar `.label` from it. */
 async function decodeVertexPayload(r: Reader): Promise<Record<string, any>> {
   const id = await decodeOpaque(r);
@@ -220,7 +220,7 @@ async function decodeMeta(r: Reader): Promise<Record<string, ValueNode> | null> 
 }
 
 /** A decoded top-level VERTEX/EDGE `FrameNode` → a detached `ForeignRow`. A vertex payload's `label` is
- *  the labels array (`foreignElementNode`), so the scalar `.label` is its first (`Element.label()`'s
+ *  the labels array (`elementNode`), so the scalar `.label` is its first (`Element.label()`'s
  *  "arbitrary label when multiple exist") with the labelless fallback. */
 function frameNodeToForeignRow(n: { t: string; v: any }): ForeignRow {
   if (n.t === 'edge') return { kind: 'edge', id: n.v.id, label: n.v.label, src: n.v.src, tgt: n.v.tgt, props: n.v.props };

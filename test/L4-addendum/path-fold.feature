@@ -4,7 +4,7 @@ Feature: mogwai addendum — fold() over a path stream is a List<Path> (Path is 
   # collects the stream of paths into ONE List<Path> — each member serializes as a PATH (labels +
   # objects, execute.ts framePath), NOT a bare list. `pathTail` used to decline every collecting barrier;
   # it now folds through a `path` member arm in the collection vocabulary (render.ts ListOf,
-  # listItemBuffers/frameTypedNode, listPayloadExpr/listNodeExpr, foldPaths). This is the keystone that
+  # listMemberNodes/frameTypedNode, listPayloadExpr/listNodeExpr, foldPaths). This is the keystone that
   # makes a Path flow through downstream steps like any collection (per TinkerPop: a Path is just a value)
   # and, over a federated source, unblocks the path+encounter async seed.
 
