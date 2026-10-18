@@ -1172,6 +1172,15 @@ empty-collection key declines; a label not live at its position declines (`where
 side-effect key (the corpus `..._whereXwithinXaXX` scenario now declines instead of answering `[]`). No baseline
 moves. CI green.
 
+✅ **Child-traversal merge positions LANDED ON TRUNK 2026-10-18 (`c3b02497`, `17132471`, ff-child-merge-positions).**
+`sortedHostMergeAt` (`ir/bulk.ts`) now weighs EVERY child traversal, not only the root: LazyBarrierStrategy runs
+per child (`vendor/tinkerpop/gremlin-core/.../DefaultTraversal.java`) and a group value child is reset per member
+(`.../step/map/GroupStep.java`); the caller states `orderRead`, and the child fallback honours `foundFlatMap`. New
+authority `sortsStartBatch` (`ir/bulk.ts`): a global `order()` scoped to ONE member's batch (a union/choose/repeat
+child at any depth through per-start hosts) makes the pooled group value (`groupCollected`, `rel/map.ts`) decline;
+`groupReduced` declines only under a row-selecting slice/sample. Decline-only. Pinned in
+`test/L4-addendum/sorted-host-merge.feature` and `group-value-barrier-scope.feature`. No baseline moves. CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
