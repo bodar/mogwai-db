@@ -11,7 +11,7 @@ import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
-import { asStringOf, evidenceOf, FORMAT_STRING, mathVariableMessage, raisingWhen, receiverOffence, type ValueEvidence } from './receiver.ts';
+import { asStringOf, evidenceOf, mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
 import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
@@ -203,19 +203,6 @@ export const FORMAT_UNSEEN_SCOPE = 'format() of an absent property whose name a 
 const mayScope = (name: string, child: ChildSeam): boolean =>
   child.sideEffects.has(name) || child.scopeNames.sideEffects.has(name) || child.scopeNames.labels.has(name);
 
-/** The reference's message for `Vertex.property(key)` over a key holding several values
- *  (`Vertex.Exceptions.multiplePropertiesExistForProvidedKey`, `.../gremlin/structure/Vertex.java:178-180`). */
-export const multiplePropertiesMessage = (key: string): string =>
-  `Multiple properties exist for the provided key, use Vertex.properties(${key})`;
-
-/**
- * A VERTEX'S SINGLE-PROPERTY READ, raising where the key holds several values — `value` (the first value,
- * `by(key)`'s read) wherever the vertex has at most one. The count is the graph source's own
- * (`propertyHasSeveral`), so a bound or decorated graph answers it as the base tables do.
- */
-const multiValueRaises = (several: Expr, key: string, value: Expr): Expr =>
-  ({ kind: 'case', whens: [[several, raiseInRow(multiplePropertiesMessage(key))]], else: value });
-
 /**
  * `format("…%{token}…")` — the template's tokens resolved and concatenated, or `null` to decline.
  *
@@ -229,7 +216,8 @@ const multiValueRaises = (several: Expr, key: string, value: Expr): Expr =>
  *   `getNullableScopeValue(Pop.last, varName, traverser)` with a NULL traversal — so a named token
  *   takes no `by()` at all, and `COALESCE(property, scoped)` is that fallthrough exactly. Over a
  *   non-element traverser the property branch is skipped (`current instanceof Element`), which is
- *   why a VALUE host reads the scope key directly.
+ *   why a VALUE host reads the scope key directly. A multi-valued property token answers its FIRST
+ *   value, as `by(key)` does (the reference throws there — a deliberate divergence).
  *
  * PRODUCTIVITY is the same one rule as `math()`'s and for a stronger reason here: the reference
  * filters on `!product.isProductive() || product.get() == null`, i.e. a productive-but-NULL token
@@ -244,34 +232,13 @@ function formatValue(
   if (typeof template !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
   if (!ring) return null;
-  // EVERY TOKEN IS `String.valueOf` of its value — `FormatStep` appends it with `StringBuilder.append(Object)`
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FormatStep.java:100,114`),
-  // which is `asString()`'s question exactly, so it is answered by `asString()`'s ONE authority
-  // (`asStringOf`, `receiver.ts`) from what is known of the token's type: a Double `1.0` is `1.0`, not
-  // SQLite's `1`; a Boolean `true`, not `1`; a Float as its Double. A token it cannot spell (a
-  // list, a map, a Double outside the plain form) declines statically or raises a deferral per row —
-  // never a raw `||` of SQLite's text. A NULL stays NULL, which is the productivity drop below.
-  //
-  // The rendering mentions its value and tag once per arm, so a CORRELATED READ (a stored property and
-  // its `vtype`, a child body) is evaluated ONCE as the one row of a `VALUES` the rendering is projected
-  // over — `typedNodeOnce`'s spelling (`build.ts`). Inline, one property token took a statement past
-  // 20 KB, and a handful of them past the platform's 100 KB statement-text limit.
-  const token = (value: Expr, evidence: ValueEvidence): Expr | null => {
-    const tag = evidence.kind === 'tag' ? evidence.tag : undefined;
-    if (value.kind !== 'scalar' && tag?.kind !== 'scalar') return asStringOf(value, evidence, FORMAT_STRING);
-    const one = make.values({
-      id: fresh('fto'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)),
-      rows: [[value, tag ?? compilerNull('text')]],
-    });
-    const rendered = asStringOf(col(one.id, 'v'), evidence.kind === 'tag' ? { ...evidence, tag: col(one.id, 't') } : evidence, FORMAT_STRING);
-    return rendered && { kind: 'scalar', plan: make.project({
-      id: fresh('ftp'), input: one, channels: [], type: typeOf(meta('s', 'text', true)), exprs: [['s', rendered]],
-    }) };
-  };
+  // Every token is its value as a String — `asString()`'s one per-tag CASE (`asStringOf`, `receiver.ts`):
+  // a Boolean `true` rather than SQLite's `1`, a whole Double `1.0` rather than `1`. A NULL stays NULL,
+  // which is the productivity drop below.
   const pieces: Expr[] = [];
-  // Each token's RAW value: its rendering is NULL exactly where the value is (`asStringOf` maps NULL to
-  // NULL and nothing else to it), so the productivity drop reads these rather than the rendered result —
-  // a filter over the rendered column is inlined by the emitter and spells the whole rendering twice.
+  // Each token's RAW value: its rendering is NULL exactly where the value is, so the productivity drop
+  // reads these (over the HOST's row, before the projection) rather than the rendering — whose deferral
+  // arms must never fire on a row an earlier filter of the same statement drops.
   const raws: Expr[] = [];
   let tokens = 0;
   let fromBy = 0;
@@ -285,8 +252,7 @@ function formatValue(
       // Java rendering no SQL expression reproduces — decline rather than emit a rowid.
       if (host.kind !== 'scalar' && modulation.key.kind === 'identity') return null;
       const typed = byTyped(modulation, host, source, fresh, child);
-      if (!typed) return null;
-      const shown = token(typed.value, typed.evidence);
+      const shown = typed && asStringOf(typed.value, typed.evidence);
       if (!shown) return null;
       pieces.push(shown);
       raws.push(typed.value);
@@ -304,36 +270,20 @@ function formatValue(
       // An ABSENT key falls through to a same-named side effect or path label, not to a null token.
       if (!host.row || boundBeyondMap(part.name, host.row)) return null;
       // Rendered INSIDE the correlated read (`over`), so the per-row type test spells the matched pair's
-      // column rather than re-running the read once per mention. A per-row tag never declines, but the
-      // authority's `null` is honoured all the same.
-      let renderable = true;
-      const shown = correlatedMapKey(host.map, part.name, fresh, (node) => {
-        const rendered = token(jsonField(node, 'v'), { kind: 'tag', tag: jsonField(node, 't') });
-        if (!rendered) renderable = false;
-        return rendered ?? node;
-      }).node;
-      if (!renderable) return null;
-      pieces.push(shown);
+      // column rather than re-running the read once per mention. A per-row tag never declines.
+      pieces.push(correlatedMapKey(host.map, part.name, fresh,
+        (node) => asStringOf(jsonField(node, 'v'), { kind: 'tag', tag: jsonField(node, 't') }) ?? node).node);
       raws.push(jsonField(correlatedMapKey(host.map, part.name, fresh).node, 'v'));
       continue;
     }
     const scoped = scopedHost(part.name, host);
     // A scope key holding an ELEMENT has the same `toString()` problem; only a value concatenates.
     const scopedRaw = scoped?.kind === 'scalar' ? scoped.value : null;
-    const scopedValue = scoped?.kind === 'scalar' ? token(scoped.value, evidenceOf(undefined, scoped.vtype)) : null;
+    const scopedValue = scoped?.kind === 'scalar' ? asStringOf(scoped.value, evidenceOf(undefined, scoped.vtype)) : null;
     if (scopedRaw && !scopedValue) return null;
     if (host.kind === 'element') {
-      // A raise message cannot carry the sentinel's closing mark, so such a key is not spelled at all.
-      if (part.name.includes('!$')) return null;
       const typed = byTyped({ key: { kind: 'property', key: part.name } }, host, source, fresh, child);
-      if (!typed) return null;
-      // `((Element) current).property(varName)` THROWS over a vertex holding SEVERAL values for the key
-      // (`Vertex.property`'s `multiplePropertiesExistForProvidedKey`,
-      // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Vertex.java:69-79`)
-      // — so the token raises the reference's own message there, rather than appending the first value.
-      const several = host.elem === 'vertex' ? source.propertyHasSeveral('vertex', host.id, part.name, fresh) : null;
-      const value = several ? multiValueRaises(several, part.name, typed.value) : typed.value;
-      const property = token(value, typed.evidence);
+      const property = typed && asStringOf(typed.value, typed.evidence);
       if (!property) return null;
       // The reference falls through to the SCOPE only where the property is ABSENT, which is what COALESCE
       // says. Where the scope holds a value this cannot render (an ELEMENT, whose `toString()` is `v[1]`),
@@ -341,15 +291,12 @@ function formatValue(
       // first; any keyed writer anywhere in the program registers one), a path label bound where the row
       // carries no channel for it — an absent property would DROP the traverser where the reference
       // appends the scoped value: a row silently missing. That fallthrough raises a deferral instead, and
-      // a present property still answers exactly. The token is then never NULL, so it owes the
-      // productivity drop nothing, but its raws still read the value: a multi-valued key raises wherever
-      // the drop is evaluated, the reference's raise being unconditional.
+      // a present property still answers exactly. The token is then never NULL, so it owes the drop nothing.
       const unseen = !scopedValue && (scoped !== null || mayScope(part.name, child));
       const fallthrough = scopedValue ?? (unseen ? deferralExpr(FORMAT_UNSEEN_SCOPE, { kind: 'call', fn: 'random', args: [] }) : null);
       pieces.push(fallthrough ? { kind: 'call', fn: 'COALESCE', args: [property, fallthrough] } : property);
-      if (scopedRaw) raws.push({ kind: 'call', fn: 'COALESCE', args: [value, scopedRaw] });
-      else if (!unseen) raws.push(value);
-      else if (value !== typed.value) raws.push({ kind: 'call', fn: 'COALESCE', args: [value, compilerText('')] });
+      if (scopedRaw) raws.push({ kind: 'call', fn: 'COALESCE', args: [typed.value, scopedRaw] });
+      else if (!unseen) raws.push(typed.value);
       continue;
     }
     if (!scopedValue || !scopedRaw) return null;
@@ -362,11 +309,10 @@ function formatValue(
     ? pieces.reduce((left, right) => ({ kind: 'binary', op: '||', left, right }))
     : compilerText('');
   // CAST so a lone value token frames as a string rather than as whatever it was stored as.
-  const present = raws.map((raw): Expr => ({ kind: 'binary', op: 'is not', left: raw, right: compilerNull() }));
-  const keep = present.length ? present.reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })) : undefined;
+  const keep = raws.map((raw): Expr => ({ kind: 'binary', op: 'is not', left: raw, right: compilerNull() }))
+    .reduce<Expr | undefined>((left, right) => left ? { kind: 'binary', op: 'and', left, right } : right, undefined);
   return { expr: { kind: 'cast', arg: joined, to: 'text' }, tokens, ...(keep ? { keep } : {}) };
 }
-
 /** The step names this module owns — the set a fold checks membership in BEFORE asking for a
  *  lowering, so an unlowerable member ends the run rather than falling through to some other arm's
  *  reading of it (`REL_TRANSFORMS`' rule, one family over). */
@@ -389,8 +335,8 @@ export function projectorValue(
   step: IRStep, host: ChildHost, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): {
   readonly value: Expr; readonly drop: boolean; readonly sqlType: SqlType; readonly framing: RelFraming;
-  /** The drop's predicate over the HOST's scope where it is cheaper than `value IS NOT NULL` (`format()`'s
-   *  raw token values), so the filter does not spell the value a second time. */
+  /** `format()`'s drop as a predicate over the HOST's row (its raw token values), applied BEFORE the
+   *  projection, so neither the rendering nor its deferral arms run on a row the drop removes. */
   readonly keep?: Expr;
 } | null {
   if (step.name === 'math') {
@@ -402,8 +348,10 @@ export function projectorValue(
   const produced = formatValue(step, host, child, source, fresh);
   // `format()` is ALWAYS a String (`FormatStep extends MapStep<S, String>`) — the reference's own
   // declared type, and the `CAST(… AS TEXT)` above is what makes the relation agree with it.
+  // A token that is never NULL (an absent property's deferring fallthrough) owes the drop nothing, so a
+  // template whose every token is such owes no filter at all.
   return produced && {
-    value: produced.expr, drop: produced.tokens > 0, sqlType: 'text',
+    value: produced.expr, drop: produced.keep !== undefined, sqlType: 'text',
     framing: { kind: 'scalar', type: STATIC('string') },
     ...(produced.keep ? { keep: produced.keep } : {}),
   };
@@ -431,7 +379,8 @@ export function projectorTail(
   const { value, drop, sqlType, framing } = produced;
   const carried = input.channels;
   // A projector-supplied `keep` rides as its own column for the filter to read: the emitter inlines a
-  // projected column into the filter that reads it, so filtering on `v` would spell the value twice.
+  // projected column into the filter that reads it, so filtering on `v` would spell the value twice —
+  // and would evaluate its deferral arms in the WHERE, beside (not after) the host's own filters.
   const keep = drop ? produced.keep : undefined;
   const projected = make.project({
     id: fresh('pv'), input, channels: carried,

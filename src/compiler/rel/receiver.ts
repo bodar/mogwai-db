@@ -1,8 +1,8 @@
-import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { deferralExpr, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { type Minter } from './build.ts';
+import type { Minter } from './build.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
@@ -214,133 +214,46 @@ export function numericOperandOffences(
   return offences;
 }
 
-/** The integral Number tags — `String.valueOf` of each is its decimal digits, exactly SQLite's text. */
-const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bigint'];
+/** The tags whose value `CAST(v AS TEXT)` already spells: a String is itself, an integral Number its
+ *  digits, a UUID/char its text, a BigDecimal its carried decimal text. */
+const CAST_TAGS: readonly ValueType[] = ['string', 'uuid', 'char', 'byte', 'short', 'int', 'long', 'bigint', 'bigdecimal'];
 
 /**
- * `asString()`'s VALUE — `String.valueOf` of the receiver (`AsStringGlobalStep.java:46`,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsStringGlobalStep.java`),
- * which is a function of the receiver's JAVA TYPE, not of its storage class: a Boolean is stored as
- * SQLite's integer 1/0, so `CAST(v AS TEXT)` answered `'1'` where the reference answers `'true'`. So the
- * rendering is decided by the same evidence the receiver checks read, at this one authority, for every
- * host (the root scalar fold, a child value run at any depth, a list member under `asString(local)`):
+ * `asString()`'s VALUE — the receiver as a String (`AsStringGlobalStep.java:46`), one CASE on its tag, shared
+ * by every step that stringifies a value (`asString()` at any host, a `format()` token, a `conjoin()` member):
  *
- * - a String is itself, an integral Number its digits, a Boolean `true`/`false`;
- * - a Double is SQLite's text only where the two agree — `Double.toString` is the SHORTEST decimal that
- *   round-trips, in plain notation inside `[1e-3, 1e7)`; SQLite's `CAST` prints 15 significant digits.
- *   Inside that range a value whose 15-digit text round-trips IS the shortest form (DBL_DIG = 15), so it
- *   answers there and RAISES a deferral elsewhere (`1.0/3`, `1.0e7`) rather than print a different string;
- * - a Float prints as the Double it rides as;
- * - anything else (a BigDecimal; a Date; a UUID) has a `toString` SQL does not reproduce — refuted statically it DECLINES (`null`), per row it
- *   raises the deferral.
+ * - a Boolean is `true`/`false` — it is STORED as SQLite's 1/0, so a bare `CAST` would answer `'1'`;
+ * - a Double/Float is SQLite's own text of the REAL (`CAST(CAST(v AS REAL) AS TEXT)`) — a whole value
+ *   keeps its `.0` (`1.0`, not `1`, even where the store keeps it as an INTEGER), so the number class
+ *   stays visible. Beyond that the spelling is SQLite's (15 significant digits, `1.0e+20`, `Inf`), not
+ *   Java's `Double.toString` — a deliberate divergence (`docs/feature-support-matrix.md`);
+ * - a String, an integral Number, a UUID, a BigDecimal (and a `T`/`Direction` token, whose text is its
+ *   name) is `CAST(v AS TEXT)`.
  *
- * A NULL renders NULL here; whether a null RAISES is `transformOffences`' question, not this one's.
- *
- * `spelling` says how the caller's step meets what this cannot render (`StringSpelling`).
+ * Anything else — a date or a duration (which ride as numbers), a collection (a JSON tree) — has no
+ * spelling here: refuted statically it DECLINES (`null`), per row it defers. A NULL renders NULL; whether
+ * a null RAISES is `transformOffences`' question.
  */
-export function asStringOf(value: Expr, evidence: ValueEvidence, spelling: StringSpelling = AS_STRING): Expr | null {
-  const { step } = spelling;
+export function asStringOf(value: Expr, evidence: ValueEvidence): Expr | null {
   const cast: Expr = { kind: 'cast', arg: value, to: 'text' };
-  const bool: Expr = { kind: 'case', whens: [[value, text('true')]], else: text('false') };
-  const nullable = (rendered: Expr): Expr => ({ kind: 'case', whens: [[isNull(value), compilerNull()]], else: rendered });
+  // `NOT NULL` is NULL, so a NULL matches neither arm and renders NULL.
+  const bool: Expr = { kind: 'case', whens: [[value, text('true')], [{ kind: 'unary', op: 'not', arg: value }, text('false')]] };
+  const floating: Expr = { kind: 'cast', arg: { kind: 'cast', arg: value, to: 'real' }, to: 'text' };
   if (evidence.kind === 'static') {
     const tag = evidence.tag;
     if (tag === 'string') return value;
-    if (INTEGRAL_TAGS.includes(tag)) return cast;
-    if (tag === 'boolean') return nullable(bool);
-    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, spelling));
-    if (tag === 'bigdecimal' && spelling.decimal) return nullable(decimalText(value, spelling));
+    if (CAST_TAGS.includes(tag)) return cast;
+    if (tag === 'boolean') return bool;
+    if (tag === 'double' || tag === 'float') return floating;
     return null;
   }
-  // Per row: a NULL, a String and an integral Number are all `CAST(v AS TEXT)` (identity over text, NULL
-  // over NULL), so they share one arm — the statement spells the type test once per arm.
   // Over STORAGE evidence the name is a storage class, so no Gremlin tag (a Boolean) can occur.
   const type = typeName(value, evidence);
-  const tagged = evidence.kind === 'tag';
   return { kind: 'case', whens: [
-    [inList(type, ['null', 'text', 'integer', ...(tagged ? ['string', ...INTEGRAL_TAGS] : [])]), cast],
-    ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
-    // ONE floating arm for a Double and a Float (which rides as its Double).
-    [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]), floatingText(value, spelling)],
-    ...(tagged && spelling.decimal ? [[inList(type, ['bigdecimal']), decimalText(value, spelling)] as const] : []),
-  ], else: spelling.arm(deferral(`${step}: rendering this value at run time`)) };
-}
-
-/**
- * HOW A STEP THAT RENDERS `String.valueOf` MEETS A VALUE `asStringOf` CANNOT SPELL — the step's name for
- * the message, the ARM the deferral is spelled with, and whether a BigDecimal's carried text is spelled.
- *
- * `asString()` raises its deferral in-row (`raiseInRow`). `format()` spells it as a READ-only deferral
- * (`deferralExpr`): a token's rendering never decides whether the traverser exists (the productivity drop
- * reads the raw token values), so the deferral belongs to the value's READ.
- */
-export interface StringSpelling {
-  readonly step: string;
-  readonly arm: (message: string) => Expr;
-  /** Spell a BigDecimal from its carried decimal TEXT where that text is its `toString` (`decimalText`). */
-  readonly decimal: boolean;
-}
-
-/** `asString()`'s spelling — see `StringSpelling`. */
-export const AS_STRING: StringSpelling = { step: 'asString()', arm: raise, decimal: false };
-
-/** `format()`'s spelling — see `StringSpelling`. */
-export const FORMAT_STRING: StringSpelling = {
-  step: 'format()', arm: (message) => deferralExpr(message, { kind: 'call', fn: 'random', args: [] }), decimal: true,
-};
-
-/**
- * `BigDecimal.toString()` of a BigDecimal carried as its DECIMAL TEXT (the literal's digits and scale, which the
- * BigDecimal serializer reads back) — that text itself exactly where `toString` prints the plain form,
- * else the deferral. `toString` is plain iff the scale is non-negative and the adjusted exponent
- * (`precision - 1 - scale`) is at least -6
- * (`java.math.BigDecimal#toString`, the JDK's `layoutChars`; the JDK is not vendored). Over the text that
- * is: no exponent, no leading zero, and either a non-zero integer part, a first non-zero digit within six
- * places of the point, or a ZERO of scale six or less (`0.000000`; `0.0000000` is `0E-7`). A negative zero
- * defers (`-0.0` prints `0.0`), as does a BigDecimal carried as anything but TEXT.
- */
-function decimalText(value: Expr, spelling: StringSpelling): Expr {
-  const glob = (pattern: string, of: Expr): Expr => ({ kind: 'call', fn: 'glob', args: [text(pattern), of] });
-  const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
-  // The unsigned digits: a carried decimal has at most one leading `-`, and anything else fails `plain`.
-  const digits: Expr = { kind: 'call', fn: 'ltrim', args: [value, text('-')] };
-  // Digits with at most one point, starting and ending with a digit, with no leading zero but a lone `0`.
-  const plain = and(and(glob('[0-9]*', digits), not(glob('*[^0-9.]*', digits))),
-    and(not(glob('*.*.*', digits)), and(not(glob('*.', digits)), not(glob('0[0-9]*', digits)))));
-  // A zero integer part leaves `0.<fraction>`, so the first six fraction digits start at the third character.
-  const firstSix: Expr = { kind: 'call', fn: 'substr', args: [digits, int(3), int(6)] };
-  const zero = and(not(glob('-*', value)), and(not(glob('*[1-9]*', digits)), { kind: 'binary', op: '<=', left: { kind: 'call', fn: 'length', args: [digits] }, right: int(8) }));
-  const shown = and(plain, or(or(glob('[1-9]*', digits), glob('*[1-9]*', firstSix)), zero));
-  const carried: Expr = { kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: text('text') };
-  return { kind: 'case', whens: [[and(carried, shown), value]],
-    else: spelling.arm(deferral(`${spelling.step}: a BigDecimal whose toString is not its plain decimal text`)) };
-}
-
-/**
- * A non-null floating Number's `toString` where SQLite's 15-digit text is that string — else the deferral.
- * Read as REAL first: a whole Double can be STORED as an integer (a `1.0d` reads back `1`).
- *
- * A DOUBLE's `Double.toString` is the shortest decimal that round-trips, and inside the plain range a
- * 15-digit text that round-trips IS that (DBL_DIG = 15). A FLOAT rides as the Double of its decimal
- * (`src/gremlin/float.ts`), so it prints by the same rule (`0.1f` is `0.1`).
- */
-function floatingText(value: Expr, spelling: StringSpelling): Expr {
-  const real: Expr = { kind: 'cast', arg: value, to: 'real' };
-  const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
-  // A ZERO is `0.0`, sign and all (`-0.0` prints `0.0`, as SQLite's text does — a deliberate divergence).
-  const zeroText = text('0.0');
-  // `Double.toString` of an infinity is `Infinity`/`-Infinity`; SQLite prints `Inf`.
-  const infinite: [Expr, Expr][] = [
-    [{ kind: 'binary', op: '>', left: real, right: compilerReal(Number.MAX_VALUE) }, text('Infinity')],
-    [{ kind: 'binary', op: '<', left: real, right: compilerReal(-Number.MAX_VALUE) }, text('-Infinity')],
-  ];
-  const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
-  const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
-  const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },
-    { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
-  const exact: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
-  return { kind: 'case', whens: [[zero, zeroText], ...infinite, [and(plain, exact), shown]],
-    else: spelling.arm(deferral(`${spelling.step}: a floating-point Number outside the plain shortest form`)) };
+    [inList(type, ['null', 'text', 'integer', ...CAST_TAGS, 'T', 'D']), cast],
+    [inList(type, ['boolean']), bool],
+    [inList(type, ['real', 'double', 'float']), floating],
+  ], else: deferralExpr(deferral('rendering this value as a String'), { kind: 'call', fn: 'random', args: [] }) };
 }
 
 /** `MathStep`'s message for a variable that does not resolve to a Number (`MathStep.java:86-87`), up to

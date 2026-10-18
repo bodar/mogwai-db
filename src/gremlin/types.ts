@@ -44,20 +44,6 @@ export class BigDecimal {
     }
     return neg ? '-' + out : out;
   }
-  /**
-   * `BigDecimal.toString()` — the PRINTED form `asString()` shows, which is not the storage form above:
-   * plain when the scale is non-negative and the adjusted exponent is at least −6, else scientific with
-   * the exponent always signed (`1.0E+7`, `1.0E-7`, `1E+3`)
-   * (`java.math.BigDecimal#toString` — the `layoutChars(true)` rule).
-   */
-  toJavaString(): string {
-    const neg = this.unscaled < 0n;
-    const digits = (neg ? -this.unscaled : this.unscaled).toString();
-    const adjusted = -this.scale + (digits.length - 1);
-    if (this.scale >= 0 && adjusted >= -6) return this.toString();
-    const mantissa = digits.length > 1 ? `${digits[0]}.${digits.slice(1)}` : digits;
-    return `${neg ? '-' : ''}${mantissa}E${adjusted >= 0 ? '+' : ''}${adjusted}`;
-  }
   /** Parse a plain decimal string into {unscaled, scale}. No exponent notation
    *  (neither our stored form nor a `m`-suffixed literal ever uses it). */
   static fromText(str: string): BigDecimal {

@@ -17,8 +17,26 @@
 
 import { exactNumberOf, isExactNumber } from '../../json-exact.ts';
 import { RaisedByQuery } from '../../rel/raise.ts';
-import { javaFloatingString } from '../../gremlin/coerce.ts';
 import { bigDecimalOfCarrier } from '../../gremlin/float.ts';
+
+/** A Double/Float as text — SQLite's own text of the REAL (`CAST(r AS TEXT)`, i.e. `printf('%!.15g')`), so
+ *  a value inside a list prints exactly as the same value does alone (`asStringOf`, `receiver.ts`): 15
+ *  significant digits, trailing zeros dropped but a `.0` kept, exponent form below 1e-4 or from 1e15
+ *  (`1.0e-05`, `1.0e+20`), `Inf` for an infinity. Not Java's `Double.toString` — a deliberate divergence. */
+const floatingString = (d: number): string => {
+  if (!Number.isFinite(d)) return Number.isNaN(d) ? 'NaN' : d > 0 ? 'Inf' : '-Inf';
+  if (d === 0) return '0.0';
+  const [mantissa, e] = d.toExponential(14).split('e') as [string, string];
+  const exp = Number(e);
+  const sign = d < 0 ? '-' : '';
+  const digits = mantissa.replace(/[-.]/g, '').replace(/0+$/, '');
+  if (exp < -4 || exp > 14)
+    return `${sign}${digits[0]}.${digits.slice(1) || '0'}e${exp < 0 ? '-' : '+'}${String(Math.abs(exp)).padStart(2, '0')}`;
+  const point = exp + 1;
+  const whole = point <= 0 ? '0' : digits.slice(0, point).padEnd(point, '0');
+  const fraction = point < 0 ? '0'.repeat(-point) + digits : digits.slice(point);
+  return `${sign}${whole}.${fraction || '0'}`;
+};
 
 /** A vertex `v[<id>]`, an edge `e[<id>][<src>-<label>-><tgt>]` — `StringFactory.vertexString`/`edgeString`,
  *  off an expanded element object whose ids are already the OUTWARD ids. An edge is the one carrying
@@ -53,14 +71,14 @@ function mapString(pairs: readonly unknown[]): string {
 export function gremlinString(node: unknown): string {
   if (node === null || node === undefined) return 'null';
   if (typeof node === 'string') return node;
-  // A bare number that is not whole can only be a Double — `Double.toString` (`1.0E-5`, not `0.00001`).
-  if (typeof node === 'number') return Number.isInteger(node) ? String(node) : javaFloatingString(node);
+  // A bare number that is not whole can only be a Double.
+  if (typeof node === 'number') return Number.isInteger(node) ? String(node) : floatingString(node);
   if (typeof node === 'bigint' || typeof node === 'boolean') return String(node);
   // A number past 2^53 the barrier read exactly (`parseExactJson`, `json-exact.ts`): a `Long` prints its
-  // exact decimal text, a `Double` as `Double.toString` spells it.
+  // exact decimal text, a `Double` its floating text.
   if (isExactNumber(node)) {
     const { integral, text } = exactNumberOf(node);
-    return integral ? text : javaFloatingString(Number(text));
+    return integral ? text : floatingString(Number(text));
   }
   if (Array.isArray(node)) return `[${node.map(gremlinString).join(', ')}]`;
   if (typeof node === 'object') {
@@ -76,12 +94,12 @@ export function gremlinString(node: unknown): string {
       if (t === 'boolean') return o.v === null ? 'null' : o.v === 0 || o.v === false ? 'false' : 'true';
       if ((t === 'datetime' || t === 'duration') && o.v !== null)
         throw new RaisedByQuery('asString() of a Date or Duration value is not supported yet');
-      // A Double or Float (riding as its Double) is `Double.toString` whatever it was stored as — a Double held
+      // A Double or Float is its floating text whatever it was stored as — a Double held
       // whole (the INTEGER 1) is `1.0`.
-      // A BigDecimal is `BigDecimal.toString` of the value its carrier IS — scale included, so an integral
-      // source's 1000 is `1000` and `BigDecimal.valueOf(1.0E-7)` is `1.0E-7` (`bigDecimalOfCarrier`).
-      if (t === 'bigdecimal' && o.v !== null) return bigDecimalOfCarrier(o.v as string).toJavaString();
-      if ((t === 'double' || t === 'float') && o.v !== null) return javaFloatingString(Number(isExactNumber(o.v) ? exactNumberOf(o.v).text : o.v));
+      // A BigDecimal is the plain decimal text of the value its carrier IS, scale included
+      // (`bigDecimalOfCarrier`) — as the SQL rendering prints a carried decimal, never Java's `1.0E-7`.
+      if (t === 'bigdecimal' && o.v !== null) return bigDecimalOfCarrier(o.v as string).toString();
+      if ((t === 'double' || t === 'float') && o.v !== null) return floatingString(Number(isExactNumber(o.v) ? exactNumberOf(o.v).text : o.v));
       return gremlinString(o.v); // a scalar leaf (string/number/datetime/…) — its own value string
     }
     // An expanded ELEMENT (`{id,label,props[,src,tgt]}`) — a folded vertex/edge member.

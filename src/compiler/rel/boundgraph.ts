@@ -238,14 +238,6 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       return { kind: 'scalar', plan: make.project({ id: fresh('bps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
     },
 
-    // A vertex key holds an ARRAY of `{t,v}` nodes; an edge key one node, so never several.
-    propertyHasSeveral(kind, id, key, fresh) {
-      if (kind === 'edge') return compilerInt(0);
-      const row = rowById(cteOf(kind, fresh), id, fresh);
-      const several: Expr = { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [col(row.id, 'props'), compilerText(jsonKeyPath(key))] }, right: compilerInt(1) };
-      return existsOf(make.filter({ id: fresh('bsv'), input: row, channels: [], type: row.type, pred: several }), fresh);
-    },
-
     // ---- properties(): the property-row stream, exploded from the landed {t,v} tree ----
     propertyStream(input, kind, keys, fresh) {
       return boundPropertyRelation(input, cteOf(kind, fresh), kind, keys, fresh);

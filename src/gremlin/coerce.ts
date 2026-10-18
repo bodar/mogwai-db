@@ -2,7 +2,7 @@ import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
 import { BigDecimal, flatType, numberClassOf, type CanonicalType } from './types.ts';
-import { decimalCompare, decimalOf, doubleText, floatCanonical, floatingDecimal, javaNumberText } from './float.ts';
+import { decimalCompare, decimalOf, doubleText, floatCanonical, floatingDecimal } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
@@ -279,14 +279,6 @@ function createNumber(v: string): JavaNumber {
   const decimal = exact.toString();
   return { cls: 'BigDecimal', real: d, int: truncatedDecimal(decimal), decimal };
 }
-
-/**
- * `Double.toString(d)` — the SHORTEST digits that read back as the value (JS's own number spelling), laid
- * out as Java lays them out — PLAIN for a magnitude in [10^-3, 10^7), always with a fractional digit
- * (`1.0`), and computerized scientific notation outside it (`1.0E10`, `1.0E-5`). A Float prints as the
- * Double it rides as.
- */
-export const javaFloatingString = (d: number): string => javaNumberText(d);
 
 const exactInteger = (n: bigint): number | bigint => (n >= -(2n ** 53n) + 1n && n <= 2n ** 53n - 1n ? Number(n) : n);
 

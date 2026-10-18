@@ -115,10 +115,10 @@ describe('asDate() of a run-time String answers only where both date grammars ag
   });
 });
 
-// FORMAT. `FormatStep` appends each token with `StringBuilder.append(Object)` — `String.valueOf`
-// (`vendor/tinkerpop/gremlin-core/.../step/map/FormatStep.java:100,114`) — so every token is rendered by
-// `asString()`'s one authority (`asStringOf`, `src/compiler/rel/receiver.ts`), never SQLite's text.
-describe('format() renders every token as String.valueOf, or defers', () => {
+// FORMAT. Every token is rendered by `asString()`'s one per-tag CASE (`asStringOf`,
+// `src/compiler/rel/receiver.ts`): a Boolean is `true`, a whole Double keeps its `.0`, and any other number
+// is SQLite's own text of it (`1.0e+20`, not Java's `1.0E20` — a deliberate divergence).
+describe('format() renders every token as its asString() text', () => {
   test.each([
     ["g.E().hasId(8).format('w=%{weight}')", 'w=1.0'],
     ["g.E().hasId(8).values('weight').format('%{_}')", '1.0'],
@@ -129,18 +129,21 @@ describe('format() renders every token as String.valueOf, or defers', () => {
     ["g.V(1).union(__.outE().hasId(8).format('%{weight}'))", '1.0'],
     ["g.inject(['a':true]).format('%{a}')", 'true'],
     ["g.inject(true).format('%{_}')", 'true'],
-    ["g.inject(['a':0.1f]).format('%{a}')", '0.1'],
     ["g.inject(['a':-0.0d]).format('%{a}')", '0.0'],
     ["g.inject(['a':1.0d]).format('%{a}')", '1.0'],
     ["g.inject(1.5d).format('%{_}')", '1.5'],
     ["g.inject(2).format('%{_}')", '2'],
+    ["g.inject(1e20d).format('%{_}')", '1.0e+20'],
+    ["g.inject(['a':1e20d]).format('%{a}')", '1.0e+20'],
+    ["g.inject(3.5m).format('%{_}')", '3.5'],
+    ["g.inject(-3.50m).format('%{_}')", '-3.50'],
+    ["g.inject(0.0000001m).format('%{_}')", '0.0000001'],
   ])('%s', (gremlin, expected) => {
     expect(runP(gremlin)).toEqual([str(expected)]);
   });
 
-  // `1.0E20`, `[x, y]` and `{x=1}` are Java renderings SQL does not reproduce: the token defers.
+  // A collection token (`[x, y]`, `{x=1}`) is a JSON tree SQL does not spell: the token defers.
   test.each([
-    ["g.inject(1e20d).format('%{_}')"], ["g.inject(['a':1e20d]).format('%{a}')"],
     ["g.inject(['a':['x','y']]).format('%{a}')"], ["g.inject(['a':['x':1]]).format('%{a}')"],
   ])('a token SQL cannot spell defers: %s', (gremlin) => {
     expect(() => runP(gremlin)).toThrow(/not supported/);
@@ -184,39 +187,34 @@ describe('format() renders every token as String.valueOf, or defers', () => {
     expect(runP(gremlin)).toEqual([]);
   });
 
-  // `Vertex.property(key)` THROWS over a key with several values (`.../gremlin/structure/Vertex.java:69-79`)
-  // — the reference's own message, wherever the token is evaluated, existence-only positions included.
+  // A USER property that happens to be named `label`/`id`/`IN`/`OUT` sits beside the token entry of the
+  // same text, and the String key is the one a String name finds — never the token's value.
+  test('a user property named like a token is found by its name, not the token entry', () => {
+    const store = seededStore();
+    answer(store, "g.V(1).property('label','x').property('id','y')");
+    answer(store, "g.E(7).property('IN','i').property('OUT','o')");
+    expect(answer(store, "g.V(1).elementMap().select('label')")).toEqual([str('x')]);
+    expect(answer(store, "g.V(1).elementMap().select('id')")).toEqual([str('y')]);
+    expect(answer(store, "g.V(1).elementMap().format('%{label}%{id}')")).toEqual([str('xy')]);
+    expect(answer(store, "g.E(7).elementMap().select('IN')")).toEqual([str('i')]);
+    expect(answer(store, "g.E(7).elementMap().format('%{IN}%{OUT}')")).toEqual([str('io')]);
+  });
+
+  // A named token over a MULTI-valued vertex property answers its FIRST value, as `by(key)` does (the
+  // reference's `Vertex.property(key)` throws there — a deliberate divergence).
   const multi = (): Store => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     executeQuery(store, "g.addV('p').property('name','a').property(list,'x',1).property(list,'x',2)", {});
     executeQuery(store, "g.addV('p').property('name','b').property('x',3)", {});
     return store;
   };
-  test.each([
-    ["g.V().format('%{x}')"], ["g.V().format('%{x}').count()"], ["g.V().where(__.format('%{x}'))"],
-    ["g.V().local(__.format('%{x}'))"], ["g.V().project('f').by(__.format('%{x}'))"], ["g.V().union(__.format('%{x}'))"],
-  ])('a multi-valued property token raises the reference error: %s', (gremlin) => {
-    expect(() => answer(multi(), gremlin)).toThrow('Multiple properties exist for the provided key, use Vertex.properties(x)');
-  });
-  test('a single-valued vertex still answers, and elementMap keeps the last value', () => {
-    expect(answer(multi(), "g.V().has('name','b').format('%{x}')")).toEqual([str('3')]);
-    expect(answer(multi(), "g.V().elementMap().format('%{x}')")).toEqual([str('2'), str('3')]);
-  });
-
-  // UNDER A SLICE the raise is the slice's to settle over the traversers the reference PULLS: it rides the
-  // row and is met only where pulled. Where the statement may evaluate a traverser the reference never
-  // pulls (past a `dedup()`), the token DEFERS rather than raise an error the reference may not.
-  test('a multi-valued token under a slice raises exactly where pulled, or defers', () => {
-    expect(() => answer(multi(), "g.V().format('%{x}').limit(1)")).toThrow('Multiple properties exist for the provided key, use Vertex.properties(x)');
-    expect(answer(multi(), "g.V().has('name','b').format('%{x}').limit(1)")).toEqual([str('3')]);
-    // The first token is unproductive on `b`... and `a`'s `y` is absent, so `x` is never read.
+  test('a multi-valued property token answers its first value', () => {
+    expect(answer(multi(), "g.V().format('%{x}')")).toEqual([str('1'), str('3')]);
+    expect(answer(multi(), "g.V().format('%{x}').count()")).toEqual(['2L']);
     expect(answer(multi(), "g.V().format('%{y}%{x}').limit(1)")).toEqual([]);
-    expect(() => answer(multi(), "g.V().format('%{x}').dedup().limit(1)")).toThrow(/not supported|Multiple properties/);
   });
 
-  // A slice after `format()` is a plain slice: every token kind above answers through it (the rendering's
-  // deferral belongs to the value's READ, `FORMAT_STRING`), and a zero-width slice — whose input the
-  // reference still pulls — declines over a token that may raise.
+  // A slice after `format()` is a plain slice.
   test.each([
     ["g.V().format('%{name}').limit(2)", ['marko', 'vadas']],
     ["g.E().hasId(8).format('%{weight}').limit(1)", ['1.0']],
@@ -230,20 +228,27 @@ describe('format() renders every token as String.valueOf, or defers', () => {
     expect(runP(gremlin)).toEqual(expected.map(str));
   });
 
-  // `BigDecimal.toString()` is its carried decimal text exactly where that is the plain form — a scale of
-  // zero or more and an adjusted exponent of -6 or more; `0.0000001m` is `1E-7` and `0.0000000m` `0E-7`.
+  // A BigDecimal is its carried decimal text, scale and all.
   test.each([
-    ["g.inject(3.5m).format('%{_}')", '3.5'], ["g.inject(1.0m).format('%{_}')", '1.0'],
-    ["g.inject(['a':3.5m]).format('%{a}')", '3.5'], ["g.inject(100m).format('%{_}')", '100'],
-    ["g.inject(-3.50m).format('%{_}')", '-3.50'], ["g.inject(0.000001m).format('%{_}')", '0.000001'],
-    ["g.inject(0.000000m).format('%{_}')", '0.000000'],
+    ["g.inject(1.0m).format('%{_}')", '1.0'], ["g.inject(['a':3.5m]).format('%{a}')", '3.5'],
+    ["g.inject(100m).format('%{_}')", '100'], ["g.inject(0.000000m).format('%{_}')", '0.000000'],
   ])('%s', (gremlin, expected) => {
     expect(runP(gremlin)).toEqual([str(expected)]);
   });
-  test.each([["g.inject(0.0000001m).format('%{_}')"], ["g.inject(0.0000000m).format('%{_}')"]])(
-    'a BigDecimal whose toString is not its text defers: %s', (gremlin) => {
-      expect(() => runP(gremlin)).toThrow(/not supported/);
-    });
+});
+
+// ONE number spelling: a value inside a list (printed in JS, `gremlin-string.ts`) reads exactly as the same
+// value alone (printed by SQL, `asStringOf`) — SQLite's text of the REAL, a BigDecimal's plain text.
+describe('asString() spells a number the same alone and inside a list', () => {
+  test.each([
+    [['1e-5d', '1e20d', '0.1f', '1.0e7d', '1e14d', '1e15d', '-2.5d', '0.001d', '123.456d'],
+      ['1.0e-05', '1.0e+20', '0.1', '10000000.0', '100000000000000.0', '1.0e+15', '-2.5', '0.001', '123.456']],
+    [['1.5m', '100m', '0.0000001m'], ['1.5', '100', '0.0000001']],
+  ])('every member matches its scalar spelling: %j', (values, expected) => {
+    const alone = runP(`g.inject(${values.join(',')}).asString()`).map((s) => JSON.parse(s) as string);
+    expect(alone).toEqual(expected);
+    expect(runP(`g.inject(${values.join(',')}).fold().asString()`)).toEqual([str(`[${alone.join(', ')}]`)]);
+  });
 });
 
 // A `T`/`Direction` TOKEN reached as a bare value (an `elementMap()` key) is the enum, not its name: it

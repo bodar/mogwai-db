@@ -88,7 +88,7 @@ describe('integral div truncates, and a zero divisor raises the reference\'s mes
   });
 });
 
-describe('asString of a Float prints its shortest float32 decimal', () => {
+describe('asString of a Float is the text of its value — a whole value keeps its .0', () => {
   test.each([
     ['g.withSack(1.5f).inject(1).sack().asString()', 'String:1.5'],
     ['g.withSack(1.5f).inject(1).sack(sum).by(constant(1.5f)).sack().asString()', 'String:3.0'],

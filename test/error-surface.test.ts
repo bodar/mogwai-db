@@ -68,16 +68,14 @@ describe('±Infinity survives every collection carrier', () => {
     ["g.inject(['a':Infinity,'b':1]).order(local).by(keys)", '{"a":Infinityd,"b":1i}'],
     ["g.inject(['b':-Infinity,'a':1]).order(local).by(keys,desc)", '{"b":-Infinityd,"a":1i}'],
     ['g.inject([Infinity,2]).product([1])', '[[Infinityd,1i],[2i,1i]]'],
-    // `ConjoinStep` appends each member's `toString`: `Double.toString` spells `Infinity`, and a whole
-    // Double keeps its `.0` (the modern graph's weight 1.0 is stored as INTEGER 1).
-    ["g.inject([Infinity,2]).conjoin(',')", '"Infinity,2"'],
-    ["g.inject([-Infinity,2.5d]).conjoin('-')", '"-Infinity-2.5"'],
+    // `conjoin()` prints each member as `asString()` does: an infinity is SQLite's `Inf` (not Java's
+    // `Infinity`, a deliberate divergence), and a whole Double keeps its `.0` (the modern graph's weight
+    // 1.0 is stored as INTEGER 1).
+    ["g.inject([Infinity,2]).conjoin(',')", '"Inf,2"'],
+    ["g.inject([-Infinity,2.5d]).conjoin('-')", '"-Inf-2.5"'],
     ["g.E().values('weight').fold().conjoin(';')", '"0.5;1.0;0.4;1.0;0.4;0.2"'],
   ])('%s', async (q, want) => {
     expect(await run(q)).toEqual([want]);
-  });
-  test("conjoin() of a Double SQLite cannot print as Java does raises a deferral", async () => {
-    expect(await failure("g.inject([0.30000000000000004d,2]).conjoin(',')")).toBeInstanceOf(RaisedByQuery);
   });
 });
 
@@ -267,16 +265,15 @@ describe("a per-row bare asNumber() answers the value's own class", () => {
   });
 });
 
-describe('Double.toString spells an infinity `Infinity`, at the one asString() authority', () => {
+describe('an infinity prints as SQLite spells it, `Inf`, at the one asString() authority', () => {
   test.each([
-    ["g.inject([Infinity,2]).conjoin(',')", '"Infinity,2"'], ["g.inject([-Infinity,2.5d]).conjoin('-')", '"-Infinity-2.5"'],
-    ['g.inject(Infinity).asString()', '"Infinity"'], ['g.inject(-Infinity).asString()', '"-Infinity"'],
-    ["g.inject([Infinity,2.5f]).conjoin(',')", '"Infinity,2.5"'], ["g.inject(1).local(__.constant(Infinity).asString())", '"Infinity"'],
+    ['g.inject(Infinity).asString()', '"Inf"'], ['g.inject(-Infinity).asString()', '"-Inf"'],
+    ["g.inject(1).local(__.constant(Infinity).asString())", '"Inf"'],
   ])('%s', async (q, want) => {
     expect(await run(q)).toEqual([want]);
   });
   test('a stored infinity', async () => {
-    expect(await run("g.V(1).values('s').asString()", ["g.V(1).property('s',-Infinity)"])).toEqual(['"-Infinity"']);
+    expect(await run("g.V(1).values('s').asString()", ["g.V(1).property('s',-Infinity)"])).toEqual(['"-Inf"']);
   });
 });
 

@@ -204,9 +204,8 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
       | result |
       | l[true,1] |
 
-  # Double.toString leaves plain notation at 1e7 ("1.0E7"); SQLite prints "10000000.0". The rendering
-  # raises a deferral there rather than answer the other string.
-  @Unsupported
+  # A Double prints SQLite's text of the REAL, not Java's Double.toString layout ("1.0E7") — a
+  # deliberate divergence (docs/feature-support-matrix.md); a whole value keeps its ".0".
   Scenario: g_injectX1e7dX_asString
     Given the empty graph
     And the traversal of
@@ -216,7 +215,7 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
     When iterated to list
     Then the result should be unordered
       | result |
-      | 1.0E7 |
+      | 10000000.0 |
 
   # The per-row VALUE raises that were separate guard STATEMENTS (`Binding.guard`) are one in-statement
   # WHERE now (`raisingRows`/`projectRaising` in lower.ts, `raisingMembers` in list.ts). A consumer that

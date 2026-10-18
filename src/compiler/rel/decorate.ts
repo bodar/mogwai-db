@@ -107,11 +107,6 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
       return { kind: 'scalar', plan: make.project({ id: fresh('dps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(row.id, 'cval')]] }) };
     },
 
-    // The decorated value is single-cardinality (`cval`), so its key never holds several.
-    propertyHasSeveral(kind, id, k, fresh) {
-      return k === key ? compilerInt(0) : base.propertyHasSeveral(kind, id, k, fresh);
-    },
-
     // has('key') — EVERY element the algorithm ran over is decorated, so presence is an EXISTS over the
     // landed relation. has('key', value) filters that EXISTS by the value comparison, exactly as
     // `BaseGraph` does over a stored property's row: the value is single-cardinality (`cval`), so

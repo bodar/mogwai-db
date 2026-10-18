@@ -55,14 +55,14 @@
   },
   "asNumber": {
     "binds": 0,
-    "bytes": 6337,
-    "compiler": 169,
+    "bytes": 4501,
+    "compiler": 121,
     "bound": 0
   },
   "asString": {
     "binds": 0,
-    "bytes": 9058,
-    "compiler": 179,
+    "bytes": 3642,
+    "compiler": 85,
     "bound": 0
   },
   "both": {
@@ -103,14 +103,14 @@
   },
   "concat": {
     "binds": 0,
-    "bytes": 10820,
-    "compiler": 151,
+    "bytes": 7994,
+    "compiler": 73,
     "bound": 0
   },
   "conjoin": {
     "binds": 0,
-    "bytes": 9742,
-    "compiler": 194,
+    "bytes": 4326,
+    "compiler": 100,
     "bound": 0
   },
   "constant": {
@@ -211,8 +211,8 @@
   },
   "format": {
     "binds": 0,
-    "bytes": 23195,
-    "compiler": 454,
+    "bytes": 11343,
+    "compiler": 162,
     "bound": 0
   },
   "group": {

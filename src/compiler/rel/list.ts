@@ -706,7 +706,7 @@ export function listRetype(
       pred: { kind: 'binary', op: 'is not', left: memberPayload(of, members), right: compilerNull() },
     });
     // Each member is `StringBuilder.append(Object)` — `String.valueOf`, the `asString()` printing authority
-    // (`receiver.ts` `asStringOf`) keyed by the member's own class: a Float prints `0.1`, a Boolean `true`,
+    // (`receiver.ts` `asStringOf`) keyed by the member's own class: a Boolean prints `true`, a whole Double `1.0`,
     // where SQLite's text of the carrier is neither
     // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ConjoinStep.java:62`).
     const printed = asStringOf(memberPayload(of, present), memberEvidence(of, present));
