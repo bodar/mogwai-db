@@ -327,6 +327,58 @@ describe('drop() after EVERY hop kind, at depth and under local()/union(): the r
     expect(graph('g.V().outE().range(1,3).drop()')).toEqual([[1, 2, 3, 4, 5, 6], [7, 10, 11, 12]]);
     expect(graph("g.V().hasLabel('person').inE().limit(2).drop()")).toEqual([[1, 2, 3, 4, 5, 6], [9, 10, 11, 12]]);
   });
+
+  // `g.V(1,1)` is ONE traverser here and two in the reference (docs/outstanding-work.md): a count after it is
+  // never lifted (`streamDistinctAt` vouches for distinct literal ids only). Reference: E=[10,11,12] — the first
+  // marko skips two and drops one, the second drops the remaining two.
+  for (const q of ['g.V(1,1).outE().skip(2).drop()', 'g.V(1,1).bothE().skip(2).drop()', 'g.V(1,1).outE().range(2,-1).drop()',
+    'g.V(1,1).outE().skip(1).drop()', 'g.V(1,1).outE().dedup().skip(2).drop()', 'g.V(1,1).outE().limit(4).drop()']) {
+    test(q, () => refuses(q));
+  }
+});
+
+/** A store seeded by running `seed` (each its own traversal) — the graphs the modern one cannot draw. */
+const storeOf = (seed: readonly string[]) => { const store = seededStore(); run(store, 'g.V().drop()'); for (const q of seed) run(store, q); return store; };
+const vertices = (...ids: number[]) => ids.map((id) => `g.addV('v').property(T.id,${id})`);
+const edgeOf = (id: number, from: number, to: number) => `g.V(${from}).as('a').V(${to}).addE('e').from('a').property(T.id,${id})`;
+/** 1→2 twice (10, 11), 2→3 (12): a parallel edge, no self-loop. */
+const PARALLEL = [...vertices(1, 2, 3), edgeOf(10, 1, 2), edgeOf(11, 1, 2), edgeOf(12, 2, 3)];
+/** 1→1 (10), 1→2 (11), 2→3 (12): a self-loop. */
+const LOOPED = [...vertices(1, 2, 3), edgeOf(10, 1, 1), edgeOf(11, 1, 2), edgeOf(12, 2, 3)];
+
+describe('a read BEFORE the final hop of an edge drop observes it: the outer traverser on a dropped edge reaches nothing', () => {
+  // `TinkerEdge.vertices` of a removed edge is empty, so an earlier traverser's drop can empty a later outer one.
+  // Idempotence hides that only when what goes missing was already dropped: not after a count (what goes missing is
+  // the reference's window), and not where the outer edge leads somewhere the earlier drop never reached.
+  const refusesOn = (seed: readonly string[], q: string): void => {
+    const store = storeOf(seed);
+    const before = [values(store, 'g.V().id()'), values(store, 'g.E().id()')];
+    expect(() => run(store, q), q).toThrow(NOT_YET);
+    expect([values(store, 'g.V().id()'), values(store, 'g.E().id()')], q).toEqual(before);
+  };
+  for (const [name, seed, q] of [
+    // reference E=[11]: bothE(2) = 10 skipped, 11 and 12 dropped; marko's outer 11 is gone, so inV() is empty
+    ['parallel', PARALLEL, 'g.V(1).outE().inV().bothE().skip(1).drop()'],
+    ['parallel', PARALLEL, 'g.V(1).outE().inV().inE().skip(1).drop()'], // reference E=[10,12] or [11,12]
+    ['parallel', PARALLEL, 'g.V(1).outE().inV().outE().limit(1).drop()'],
+    ['parallel', PARALLEL, 'g.V(2).inE().outV().bothE().skip(1).drop()'], // reference E=[10,12]
+    // …and with no count: reference E=[12] — the loop's inV() is marko, his outE() drops 10 and 11, so the outer
+    // 11 reaches nothing and 12 stands. The plan's 11 → vadas → 12.
+    ['looped', LOOPED, 'g.V(1).outE().inV().outE().drop()'],
+    ['looped', LOOPED, 'g.V(1).outE().inV().bothE().drop()'],
+    ['looped', LOOPED, 'g.V(1).bothE().otherV().bothE().drop()'],
+  ] as const) test(`${name}: ${q}`, () => refusesOn(seed, q));
+
+  test('an own read of the dropped edge itself stays exact: no other traverser drops it', () => {
+    const graph = (q: string): [unknown[], unknown[]] => { const store = seededStore(); run(store, q); return [values(store, 'g.V().id()'), values(store, 'g.E().id()')]; };
+    expect(graph("g.E().where(__.inV().hasLabel('person')).drop()")).toEqual([[1, 2, 3, 4, 5, 6], [9, 10, 11, 12]]);
+    expect(graph("g.V(1).outE().where(__.inV().hasLabel('software')).drop()")).toEqual([[1, 2, 3, 4, 5, 6], [7, 8, 10, 11, 12]]);
+    // the lifted counts, on graphs with a parallel edge and a self-loop: nothing before the hop reads an edge
+    const on = (seed: readonly string[], q: string): unknown[] => { const store = storeOf(seed); run(store, q); return values(store, 'g.E().id()'); };
+    expect(on(PARALLEL, 'g.V().bothE().skip(3).drop()')).toEqual([10]);
+    expect(on(LOOPED, 'g.V().bothE().skip(3).drop()')).toEqual([10]);
+    expect(on(PARALLEL, 'g.V().outE().limit(2).drop()')).toEqual([12]);
+  });
 });
 
 describe('a step ONE traverser reaches, whose body hands the drop several (handsOnWithoutRereading)', () => {

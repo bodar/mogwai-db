@@ -1066,6 +1066,9 @@ export interface ProgramWrites {
    * (`MergeWriteFacts.onMatchShareable`). `keys: 'all'` for an unreadable body.
    */
   readonly reads: { readonly keys: KeySet; readonly labels: boolean };
+  /** Set only by `bySites`: the write REMOVES an edge, so a step standing on an edge — an endpoint move
+   *  (`EdgeVertexStep`, `otherV`), which reaches no edge but its own — sees it go (`observes`). */
+  readonly edgeDrops?: boolean;
 }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
 interface PreCheck { readonly name: string; readonly ids: readonly (number | string)[] }
@@ -1943,7 +1946,15 @@ function readBeforeWrite(
   }
   // A `drop()` lands on the traverser's own element too — a property drop on a property only its element owns.
   const ownElement = own !== null && (OWN_ELEMENT_WRITERS.has(own[0]!.name) || own[0]!.name === 'drop');
-  const anchor = edgeAnchor(steps, from, (at) => rooted && streamDistinctAt(steps, at, traversal));
+  // A collector at or after the writer may hold what the write made for an earlier traverser, which a
+  // side-effect or label read before it then hands back; with none, such a read reaches nothing (`bodyReach`'s `bound`).
+  const bound = !someStepDeep(steps.slice(from), read, (s) => collectsSideEffect(s as IRStep), true);
+  const observedBy = (chain: readonly IRStep[]): boolean => !!chainObserves(bodyReach(chain, read, true, bound), bySites(entry.effect, 'unknown'));
+  // `finalHop`'s premise for a COUNTED hop: the stream entering `at` is pairwise distinct (`streamDistinctAt`)
+  // AND no step before it reads what the write changes, so each traverser reaches the hop exactly as it would
+  // on the unwritten graph — `g.V(1).outE().inV().bothE().skip(1).drop()` drops edge 11 from vadas, after
+  // which marko's outer traverser on 11 (now removed) reaches nothing (`TinkerEdge.vertices`).
+  const anchor = edgeAnchor(steps, from, (at) => rooted && streamDistinctAt(steps, at, traversal) && !observedBy(steps.slice(1, at)));
   const sites = entry.effect.sites;
   const site = sites !== 'unknown' && sites.length === 1 && steps[from]?.name === 'drop' ? sites[0]! : null;
   // The final hop before a VERTEX drop (`droppingHop`) and whether the guard it owes is taken.
@@ -1955,10 +1966,6 @@ function readBeforeWrite(
   // second traverser on it is one the reference never has there once it is gone (its edge went with it).
   const reachedBy = site?.target === 'vertex' ? hop : site?.target === 'edge' && anchor ? anchor.at : -1;
   const idempotentAt = (i: number): boolean => site !== null && (site.target === 'property' || (reachedBy >= 0 && i > reachedBy));
-  // A collector at or after the writer may hold what the write made for an earlier traverser, which a
-  // side-effect or label read before it then hands back; with none, such a read reaches nothing (`bodyReach`'s `bound`).
-  const bound = !someStepDeep(steps.slice(from), read, (s) => collectsSideEffect(s as IRStep), true);
-  const observedBy = (chain: readonly IRStep[]): boolean => !!chainObserves(bodyReach(chain, read, true, bound), bySites(entry.effect, 'unknown'));
   let owed: 'none' | 'sized' | 'window' = 'none';
   let ownOwed = false;
   const ids = new Set<number | string>();
@@ -1976,7 +1983,7 @@ function readBeforeWrite(
     const reach = bodyReach([step], read, true, bound);
     // A step reading only the traverser's own element reads an element of the kind the chain says it is.
     const ownRead = OWN_READS.has(step.name) && !hasBody(step);
-    const effect = bySites(entry.effect, ownRead ? kindBefore(steps, i).kind : 'unknown');
+    const effect = bySites(entry.effect, ownRead ? kindBefore(steps, i).kind : 'unknown', onOwn && site?.target === 'edge');
     const seen = chainObserves(reach, effect);
     if (!seen) continue;
     if (onOwn && ownRead) {
@@ -2086,25 +2093,33 @@ function droppingHop(steps: readonly IRStep[], from: number): number {
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/`)
  * spends its budget on the plan's extra duplicates the reference never makes:
  * `g.V().bothE().limit(4).drop()` drops 9, 7, 8 and 11 in the reference (vadas's 7 is gone before his own
- * start is read), but the plan's fourth traverser is 7 again. So there, no hop is final — but for two
- * counts that by construction meet no duplicate:
+ * start is read), but the plan's fourth traverser is 7 again. So there, no hop is final — unless
+ * `distinctAt(hop)` vouches that the stream ENTERING the hop is pairwise distinct and is read off a graph no
+ * write has changed (nothing before the hop observes it). Without that, an upstream read loses a traverser
+ * the write removed, which idempotence hides only while nothing counts: with a slice, the lost traverser was
+ * the reference's window (`g.V(1).outE().inV().bothE().skip(1).drop()` — vadas's drop of edge 11 empties
+ * marko's second outer traverser), and `g.V(1,1)` is ONE traverser in the plan but two in the reference.
+ * Given it, two counts by construction meet no duplicate:
  *  - a slice with no upper bound (`skip(n)`, `range(n, -1)`) spends its whole budget on the first `n`
  *    traversers, which reach it before any reaches the write — the plan's prefix is the reference's — and
  *    keeps every traverser after them by itself alone: `g.V().bothE().skip(3).drop()`;
- *  - an `outE()`/`inE()` hop out of a pairwise-distinct stream (`distinctAt`, the vertex entering it) reaches
- *    each edge ONCE, and an edge drop removes that edge alone, so no later traverser of the reference's stream
- *    differs from the plan's: `g.V().outE().limit(4).drop()`.
+ *  - an `outE()`/`inE()` hop out of that stream reaches each edge ONCE, and an edge drop removes that edge
+ *    alone, so no later traverser of the reference's stream differs from the plan's:
+ *    `g.V().outE().limit(4).drop()`.
+ * A vertex drop (`droppingHop`) vouches for nothing: its hop's own read observes the drop.
  */
 function finalHop(steps: readonly IRStep[], from: number, moves: ReadonlySet<string>, distinctAt: (at: number) => boolean): number {
   let m = from - 1;
-  let counted = false;
+  let counted = 'none' as 'none' | 'skip' | 'window';
   while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) {
-    if (STREAM_COUNTING.has(steps[m]!.name) && !unboundedSkip(steps[m]!)) counted = true;
+    if (STREAM_COUNTING.has(steps[m]!.name)) counted = unboundedSkip(steps[m]!) && counted !== 'window' ? 'skip' : 'window';
     m--;
   }
   const move = steps[m];
   if (!move || !moves.has(move.name) || hasBody(move)) return -1;
-  return !counted || ((move.name === 'outE' || move.name === 'inE') && distinctAt(m)) ? m : -1;
+  if (counted === 'none') return m;
+  if (!distinctAt(m)) return -1;
+  return counted === 'skip' || move.name === 'outE' || move.name === 'inE' ? m : -1;
 }
 /** A GLOBAL slice with no upper bound — `skip(n)`, `range(n, -1)` (`finalHop`). */
 const unboundedSkip = (step: IRStep): boolean =>
@@ -2147,12 +2162,18 @@ function dropTargetsLinked(targets: Rel, fresh: Minter): Binding[] {
  *    edge's, which is fixed at creation;
  *  - removals (`drops`): an ELEMENT drop alone — a property drop leaves every element standing, so no move
  *    and no source reaches anything it removed;
+ *  - an EDGE removal (`edgeDrops`) is seen by a step standing on an edge too — an endpoint move, which crosses
+ *    no edge but its own: a removed `TinkerEdge` has no vertices
+ *    (`tinkergraph-gremlin/…/structure/TinkerEdge.java`, `vertices()`), so in `g.V(1).outE().inV().outE().drop()`
+ *    over a self-loop, the loop's own `outE()` drops marko's second edge before that outer traverser's `inV()`
+ *    runs, and it reaches nothing. Not by a step on an edge only its OWN traverser drops (`ownDropped`): an
+ *    equal traverser before it removed it, and the plan's second drop of it is a no-op;
  *  - a new EDGE (`edges`), which any move over a label it can carry crosses (`seesNewEdges`): a later
  *    traverser's move re-run after an earlier traverser's `addE` crosses the new edge
  *    (`g.V(1,4).out().addE('k').to(V(3))` makes 6 edges in the reference, not 5). Where the move is the
  *    FIRST hop off the vertex the write's edge is pinned to, `readBeforeWrite` lifts it (`edgeAnchor`).
  */
-function bySites(effect: ProgramWrites, kind: TargetKind): ProgramWrites {
+function bySites(effect: ProgramWrites, kind: TargetKind, ownDropped = false): ProgramWrites {
   const sites = effect.sites;
   if (sites === 'unknown') return effect;
   const apart = (site: WriteSite): boolean =>
@@ -2161,16 +2182,19 @@ function bySites(effect: ProgramWrites, kind: TargetKind): ProgramWrites {
   const labels = effect.labels && kind !== 'edge' && sites.some((site) => site.op === 'label' || (site.op === 'mergeV' && site.appendsLabel !== false));
   // An EDGE drop removes no vertex: only what reaches an edge — a move across one, an `E()` source — sees it go.
   const edgeDrops = sites.some((site) => elementDrop(site) && site.target === 'edge');
+  // …and one on an edge only ITS OWN traverser drops (`ownDropped`) sees no other's drop: an equal traverser
+  // before it finds it gone, where the plan's re-drop is a no-op.
+  const standing = edgeDrops && !ownDropped;
   const drops = effect.drops && sites.some((site) => elementDrop(site) && site.target !== 'edge');
   const edges = effect.edges || edgeDrops;
   const edgeLabels: KeySet = edgeDrops ? 'all' : effect.edgeLabels;
   // `writers` are the `property()` sites, in the order the walk met them.
   const properties = sites.filter((site) => site.op === 'property');
   const writers = properties.length === effect.writers.length ? effect.writers.filter((_, at) => !apart(properties[at]!)) : effect.writers;
-  if (!effect.anyKey || sites.some((site) => elementDrop(site) && !apart(site))) return { ...effect, writers, labels, drops, edges, edgeLabels };
+  if (!effect.anyKey || sites.some((site) => elementDrop(site) && !apart(site))) return { ...effect, writers, labels, drops, edges, edgeLabels, edgeDrops: standing };
   let keys: KeySet = new Set<string>();
   for (const site of sites) if ((site.op === 'mergeV' || site.op === 'mergeE' || site.op === 'drop') && !apart(site) && !elementDrop(site)) keys = unite(keys, site.keys);
-  return { ...effect, anyKey: false, labels, drops, edges, edgeLabels, writers: [...writers, { run: -1, keys, fresh: false }] };
+  return { ...effect, anyKey: false, labels, drops, edges, edgeLabels, edgeDrops: standing, writers: [...writers, { run: -1, keys, fresh: false }] };
 }
 
 /**
@@ -2551,7 +2575,7 @@ const observes = (reach: BodyReach, effect: ProgramWrites): boolean | 'fresh-ids
   for (const writer of effect.writers) keys = unite(keys, writer.keys);
   if (meets(reach.keys, keys) || (effect.labels && reach.labels)
     || (reach.sources && effect.drops) || (effect.creates && reach.vertexSources)
-    || seesNewEdges(reach, effect) || (reach.leaves && effect.drops)) return true;
+    || seesNewEdges(reach, effect) || (reach.leaves && effect.drops) || (reach.edges && effect.edgeDrops === true)) return true;
   return effect.creates && reach.vertexIds.size > 0 ? 'fresh-ids' : false;
 };
 

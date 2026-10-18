@@ -51,10 +51,23 @@ lowered.
     traversal's own) is refused rather than placed: only the root chain says "one traverser" or "distinct";
   - over-refusals of a step ONE traverser reaches whose body fans it out (`handsOnWithoutRereading`): a later
     `union()` arm, any `repeat()`, a folded option cluster must read nothing the write changes AT ALL, so
-    `g.V(1).union(__.out(), __.in()).drop()` refuses although marko has no in-edges for the drop to touch; and a
-    stream-counting slice after a final hop that meets duplicates (`g.V().bothE().range(1,3).drop()`,
-    `g.V().local(__.bothE().limit(1)).drop()` — lop's first edge may be the one marko dropped) refuses, where an
-    exact answer needs a run-time "no element twice in the window" guard;
+    `g.V(1).union(__.out(), __.in()).drop()` refuses although marko has no in-edges for the drop to touch. The
+    body walk's "after a fan-out nothing may observe the write" is coarser than the root chain's weighing (which
+    lifts a bare final hop, an own read, a pinned edge hop): measured over a lazy-reference sweep, ~6.6k forms
+    trunk answered right now refuse, all inside a host — `g.V(1).local(__.bothE().otherV()).drop()`,
+    `local(__.outE().inV())`, `local(__.out().limit(1).both())`, `local(__.out().properties())`,
+    `union(__.out(), __.out())`, `union(__.identity(), __.out().hasNot('x')).property('x',1)`,
+    `repeat(out()).until(outE().count().is(0)).drop()`. Recovering them means weighing a body chain with the
+    root chain's own authority (`readBeforeWrite` over the body), not widening the walker;
+  - a stream-counting slice after a final hop refuses unless the stream ENTERING the hop is pairwise distinct
+    and nothing before the hop reads the write (`finalHop`'s `distinctAt`): `g.V().bothE().range(1,3).drop()`,
+    `g.V().local(__.bothE().limit(1)).drop()` (lop's first edge may be the one marko dropped) and any count after
+    an upstream move (`g.V(1).outE().inV().bothE().skip(1).drop()`) refuse, where an exact answer needs a
+    run-time "no element twice in the window" guard;
+  - a step standing on an EDGE (`inV`/`outV`/`otherV`) before an edge drop's final hop observes the drop (a
+    removed `TinkerEdge` has no vertices), so `g.V(1).outE().inV().outE().drop()` refuses — wrong on trunk over a
+    self-loop, exact on the modern graph, which has none; a run-time "no dropped edge is an outer traverser"
+    guard would answer it;
   - a `where(__.as('a')…)` start label no `as()` before it binds declines: `WhereStartStep` resolves it per
     traverser through a map key, a side effect, then the path (`Scoping.getSafeScopeValue`), raising only for a
     reached traverser (`test/L4-addendum/where-start-label.feature`);
