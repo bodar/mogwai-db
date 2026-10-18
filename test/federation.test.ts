@@ -1031,6 +1031,17 @@ describe('federate — nested in union arms (multi-graph merge)', () => {
       .toBe(crew + home + crew);
   });
 
+  // Under a PARENT stream the arm's `graph` tag does not reach the merged stream, so the post-merge
+  // element rejoin (`unifiedBoundGraph`, boundgraph.ts) has no graph to join by. It DECLINES — it used to
+  // raise a bare internal `Error: unifiedBoundGraph: …` at the user — and a count tail still answers.
+  test('a merge under a parent stream that reads its elements declines, never an internal error', async () => {
+    const F = '__.call("federate").with("graph","crew").with("traversal", __.V())';
+    for (const q of [`g.inject(1).union(${F})`, `g.inject(1).union(${F}, ${F})`, `g.inject(1).union(${F}).values("name")`,
+      `g.V().union(${F})`, `g.inject(1).union(${F}).limit(1)`])
+      await expect(mgr.executor('home').framedAsync(q, {}), q).rejects.toMatchObject({ name: 'UnsupportedTraversal' });
+    expect(await count(`g.inject(1).union(${F}).count()`)).toBe(await onGraph('crew', 'g.V().count()'));
+  });
+
   test('post-merge limit(n).count() bounds the merged stream', async () => {
     expect(await count('g.union(__.call("federate").with("graph","crew").V(), __.call("federate").with("graph","home").V()).limit(3).count()')).toBe(3);
   });

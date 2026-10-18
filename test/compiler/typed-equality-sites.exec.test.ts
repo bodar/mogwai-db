@@ -199,6 +199,38 @@ describe('a label keeps a negative zero — the history entry is the JSON writer
   });
 });
 
+// A map KEY is a HashMap key, and `Double.equals(0.0, -0.0)` is false (it compares `doubleToLongBits`):
+// `GroupCountStep`/`GroupStep` keep `0.0` and `-0.0` as two groups
+// (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupCountStep.java).
+// A label read as a key (`by(select('a'))`) used to drop its STATIC recorded type and hand `json_object` the
+// bare REAL, whose writer spells `-0.0` as `0.0`, so the two keys merged into one `{0d:2L}`.
+describe('a signed zero is its own map key at every key position', () => {
+  const zeros = seededStore();
+  executeQuery(zeros, "g.addV('z').property('x', 0.0d).addV('z').property('x', -0.0d).addV('z').property('x', 1.0d)", {});
+  const at = (q: string) => typedAll(executeQuery(zeros, q, {}));
+  test('groupCount/group over the traverser, a by(), a side effect and a label', () => {
+    for (const [q, want] of [
+      ['g.inject(0.0d, -0.0d).groupCount()', '{-0d:1L,0d:1L}'],
+      ['g.inject(0.0d, -0.0d, 0.0d).groupCount()', '{-0d:1L,0d:2L}'],
+      ['g.inject(1.0d, 1.0d, -0.0d).groupCount()', '{-0d:1L,1d:2L}'],
+      ['g.inject(0.0d, -0.0d).group().by(identity())', '{-0d:[-0d],0d:[0d]}'],
+      ['g.inject(0.0d, -0.0d).group().by().by(count())', '{-0d:1L,0d:1L}'],
+      ["g.inject(0.0d, -0.0d).groupCount('m').cap('m')", '{-0d:1L,0d:1L}'],
+      ["g.V().hasLabel('z').groupCount().by('x')", '{-0d:1L,0d:1L,1d:1L}'],
+      ["g.V().hasLabel('z').group().by('x').by(count())", '{-0d:1L,0d:1L,1d:1L}'],
+      ["g.inject(0.0d, -0.0d).as('a').groupCount().by(select('a'))", '{-0d:1L,0d:1L}'],
+      ["g.inject(0.0d, -0.0d).as('a').group().by(select('a'))", '{-0d:[-0d],0d:[0d]}'],
+      ["g.inject(0.0d, -0.0d).as('a').map(constant(1)).groupCount().by(select('a'))", '{-0d:1L,0d:1L}'],
+      ["g.inject(0.0f, -0.0f).as('a').groupCount().by(select('a'))", '{-0f:1L,0f:1L}'],
+      ["g.V().hasLabel('z').values('x').as('a').groupCount().by(select('a'))", '{-0d:1L,0d:1L,1d:1L}'],
+    ] as const) expect(at(q), q).toEqual([want]);
+  });
+  test('the label key keeps its class and its 17 digits too', () => {
+    expect(at("g.inject(0.30000000000000004d, 0.3d).as('a').groupCount().by(select('a'))")).toEqual(['{0.30000000000000004d:1L,0.3d:1L}']);
+    expect(at("g.inject(1, 1.0d, 1L).as('a').groupCount().by(select('a'))")).toEqual(['{1d:1L,1i:1L,1L:1L}']);
+  });
+});
+
 describe('a child inject WITH injections answers only where the first result is read', () => {
   test('a first-result consumer reads the host', () => {
     expect(typed("g.inject('a', 'b').concat(__.inject('c'))")).toEqual(['"aa"', '"bb"']);

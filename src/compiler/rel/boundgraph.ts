@@ -9,6 +9,7 @@ import { foreignPayloadCols, landedCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
 import { storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
+import { UnsupportedTraversal } from '../unsupported.ts';
 
 // ---------- BoundGraph — a GraphSource over an INJECTED graph, id-carry + rejoin ----------
 //
@@ -426,7 +427,12 @@ export function unifiedBoundGraph(mergedGraphs: readonly MergedGraph[]): GraphSo
   /** The value of the stream row's `graph` channel — the graph half of the composite identity. */
   const graphColOf = (input: Rel): Expr => {
     const channel = input.channels.find((c) => c.role === 'graph');
-    if (!channel) throw new Error('unifiedBoundGraph: the merged stream carries no graph channel to rejoin by');
+    // A merge under a PARENT stream (`inject(1).union(federate(…))`, `V().union(…)`) lowers its arms as
+    // correlated children, and the arm's `graph` tag does not survive back onto the merged stream — so
+    // the composite `(graph, id)` rejoin has nothing to read the graph from. A rejoin by id alone would
+    // read the wrong graph's payload, so this DECLINES rather than answer (and rather than raise an
+    // internal error at the user).
+    if (!channel) throw UnsupportedTraversal.because('a federate inside a branch arm under a parent stream cannot rejoin its landed elements by graph yet');
     return col(input.id, channel.col);
   };
 
@@ -444,7 +450,7 @@ export function unifiedBoundGraph(mergedGraphs: readonly MergedGraph[]): GraphSo
         exprs: [['graph', compilerText(g.graph)], ...landedCols(kind).map((c) => [c.name, col(ref.id, c.name)] as const)],
       }));
     }
-    if (arms.length === 0) throw new Error(`unifiedBoundGraph: no landed ${kind} relation across the merged graphs`);
+    if (arms.length === 0) throw UnsupportedTraversal.because(`a read of a merged federate stream asked for ${kind}s, and no merged graph landed any`);
     return arms.length === 1 ? arms[0]! : make.union({ id: fresh('uunion'), inputs: arms, all: true, channels: [], type: arms[0]!.type });
   };
 

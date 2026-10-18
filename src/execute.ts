@@ -566,13 +566,20 @@ function frameListOf(json: string, of: ListOf): Buffer {
   return listBuffer(listItemBuffers(json, of));
 }
 
+// One key VALUE's canonical text for the JS Map below — `JSON.stringify` spells `-0` as `0` and `NaN` as
+// `null`, which merged the `0.0d` and `-0.0d` groups (and a NaN with a null key) where `GroupCountStep`'s
+// HashMap keeps them apart: `Double.equals` compares `doubleToLongBits`, so `-0.0` is not `0.0` and `NaN`
+// is `NaN` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupCountStep.java`).
+const keyCanon = (x: unknown): string =>
+  typeof x === 'number' ? (Object.is(x, -0) ? '-0' : String(x)) : typeof x === 'bigint' ? `${x}n` : JSON.stringify(x);
+
 // The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
 function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   if (key.kind === 'element') return { buf: elementBuffer(r, 'k', key.elem), canon: `e:${r[key.elem === 'property' ? 'k_pk' : 'k_id']}` };
   if (key.kind === 'map') {
     const m = new Map<any, any>();
     key.parts.forEach((p, i) => m.set(p.key, r[`k${i}_v`]));
-    return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => JSON.stringify(r[`k${i}_v`])).join('\x00') };
+    return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => keyCanon(r[`k${i}_v`])).join('\x00') };
   }
   // The key's type, from the best channel available: a per-row stored vtype column (the
   // truth channel — a datetime/uuid key keeps its exact type) beats the compile-time tag
@@ -582,11 +589,11 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   const perRow = keyCol ? r[keyCol] as string | null : null;
   if (perRow) {
     // Distinct stored types are distinct keys, so the type joins the canonical dedup key.
-    return { buf: frameStoredValue(r.gk, perRow), canon: `s:${perRow}:` + JSON.stringify(r.gk) };
+    return { buf: frameStoredValue(r.gk, perRow), canon: `s:${perRow}:` + keyCanon(r.gk) };
   }
   const staticAs = staticTypeOf(key.type);
   const buf = staticAs ? frameValue(r.gk, staticAs) : ioc.anySerializer.serialize(r.gk);
-  return { buf, canon: `s:${staticAs ?? ''}:` + JSON.stringify(r.gk) };
+  return { buf, canon: `s:${staticAs ?? ''}:` + keyCanon(r.gk) };
 }
 
 // group()/groupCount(): fold ALL rows into ONE GraphBinary Map. Element-valued
