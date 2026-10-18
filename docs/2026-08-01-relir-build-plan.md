@@ -846,6 +846,14 @@ authorities.
   `Double.equals(0.0,-0.0)` false) and keeps 17 digits; a federate in a union arm under a parent stream
   (`unifiedBoundGraph`, `rel/boundgraph.ts`) declines as `UnsupportedTraversal` instead of a bare `Error`.
   No baselines moved. CI green.
+  ✅ **Projected-zero ordering LANDED ON TRUNK 2026-10-18 (`feaa0656`, `91f45e78`, `32a0940a`,
+  ff-order-projected-zero).** A projected by() key orders/compares `-0.0` below `0.0` at every position, by
+  each key's NUMBER CLASS (`ZeroCarrier`, `orderingKey`, `orderedBy`, `signedCompare` in `rel/predicate.ts`):
+  a big zero ties `-0.0d` (`NumberHelper.java:278-310` promotes to BigDecimal), an intransitive mix DEFERS; a
+  value-stream tie between distinct equal numbers (`0m`/`0.0d`, `1m`/`1.0d`) DEFERS via `unstableTieGuard`
+  rather than ordering by representation (`OrderGlobalStep.java:78` keeps arrival order). Pinned in
+  `test/compiler/signed-zero-ordering.exec.test.ts`. Baseline moved: sql-hygiene (zero-class flags; recorded
+  in `91f45e78`). CI green.
   ✅ **Fix-forward LANDED ON TRUNK 2026-10-17 (`2c602783`, `6e027a28`, `6fd4a7dc`, ff-double-carrier-json).**
   `parseElementJson` is total (every framer parse of an element-bearing payload, so the untyped-JSON tail no
   longer leaks the `<w>p<n>` carrier); `asNumber` over an untyped JS number asks `numberClassOf`; a bulk
