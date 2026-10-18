@@ -306,3 +306,60 @@ Feature: mogwai addendum — a merge downstream of a host that emits a sorted or
       | lop |
       | vadas |
       | ripple |
+
+  # The SAME question at a CHILD traversal: `LazyBarrierStrategy` runs on every child too
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/DefaultTraversal.java:144-148),
+  # and a group value child is reset and run once per member traverser, its runs concatenated by the fold
+  # (.../step/map/GroupStep.java:111-139). In `out().optional(sorted).values("name").is(…)` the child's `out()`
+  # is its first FlatMapStep, so `values()` gets a NoOpBarrierStep and each member's two `lop`s merge at the
+  # first one's slot: v1 gives `[vadas,lop,lop,ripple]`. The pooled value (`groupCollected`,
+  # src/compiler/rel/map.ts) asks `placedMergeBefore` -> `sortedHostMergeAt` (src/compiler/ir/bulk.ts) and declines.
+  @Unsupported
+  Scenario: g_V_group_byXlabelX_byXout_optionalXout_order_byXname_descXX_valuesXnameX_isXneqXxXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label).by(__.out().optional(__.out().order().by("name",Order.desc)).values("name").is(P.neq("x")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"l[vadas,lop,lop,ripple,lop,ripple,lop]","software":"l[]"}] |
+
+  @Unsupported
+  Scenario: g_V_groupXmX_byXlabelX_byXout_optionalXout_order_byXname_descXX_propertiesXnameX_value_foldX_capXmX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group("m").by(T.label).by(__.out().optional(__.out().order().by("name",Order.desc)).properties("name").value().fold()).cap("m")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"l[vadas,lop,lop,ripple,lop,ripple,lop]","software":"l[]"}] |
+
+  @Unsupported
+  Scenario: g_V_hasXname_markoX_group_byXlabelX_byXout_optionalXout_order_byXname_descXX_valuesXnameX_asXnX_selectXnX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").group().by(T.label).by(__.out().optional(__.out().order().by("name",Order.desc)).values("name").as("n").select("n").fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"l[vadas,lop,lop,ripple]"}] |
+
+  # A child with NO flat-map before `values()` (the `optional()` host is an `AbstractStep`,
+  # .../step/branch/OptionalStep.java:37) takes no barrier there: `values()` is its FIRST FlatMapStep
+  # (LazyBarrierStrategy.java:111-127), so nothing merges and the member's sorted order is the answer.
+  Scenario: g_V_hasXname_markoX_group_byXlabelX_byXoptionalXout_order_byXname_descXX_valuesXnameX_isXneqXxXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").group().by(T.label).by(__.optional(__.out().order().by("name",Order.desc)).values("name").is(P.neq("x")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"l[vadas,lop,josh]"}] |

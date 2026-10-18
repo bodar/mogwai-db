@@ -650,8 +650,9 @@ export function mergedAt(
   // order, the order this stream carries cannot be vouched for, so the traversal declines rather than
   // answer the unmerged order.
   if (positions === 'unknown') {
-    // A merge after a host that emits a SORTED order is read even at a bare root terminal (`sortedHostMergeAt`).
-    if (sortedHostMergeAt(traversal.steps, at, rooted, single)) return null;
+    // A merge after a host that emits a SORTED order is read even at a bare root terminal, and in a child
+    // wherever its order is read (`sortedHostMergeAt`).
+    if (sortedHostMergeAt(traversal.steps, at, rooted, single, rooted || ctx.ordered)) return null;
     return referenceUnbulkedAt(traversal.steps, at, rooted, single) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered, single) ? rel : null;
   }
   const merge = positions.find((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind));

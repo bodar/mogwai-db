@@ -761,7 +761,12 @@ function sortedAdjacent(steps: readonly IRStep[], at: number): boolean {
  */
 export function placedMergeBefore(steps: readonly IRStep[], at: number): boolean | 'unknown' {
   const positions = scan(steps, false, 'exact', at);
-  if (positions === 'unknown') return 'unknown';
+  if (positions === 'unknown') {
+    // Where the exact scan cannot see, a merge downstream of a SORTED host is still placed — the one
+    // authority every traversal asks (`sortedHostMergeAt`), here for a child whose output order is read.
+    for (let p = 1; p <= at; p++) if (sortedHostMergeAt(steps, p, false, true, true)) return true;
+    return 'unknown';
+  }
   return positions.some((p) => p.after < at && !p.distinct && p.kind === 'lazy' && !sortedAdjacent(steps, p.after));
 }
 
@@ -843,7 +848,7 @@ export function orderReadAfter(steps: readonly IRStep[], from: number, inherited
 }
 
 /**
- * DOES AN IMPLICIT MERGE LAND AT `at` OF A ROOT TRAVERSAL, DOWNSTREAM OF A HOST THAT EMITS A SORTED ORDER,
+ * DOES AN IMPLICIT MERGE LAND AT `at` OF A TRAVERSAL, DOWNSTREAM OF A HOST THAT EMITS A SORTED ORDER,
  * WHILE THAT ORDER IS READ? A host whose body sorts (`hostSortsBody`, `localSortsBody`) states an emission
  * order the client reads even at a bare terminal (the terminal seed, `ir/analyze.ts`), so a merge after it
  * is observable there too: `g.V().optional(out().order().by('name')).values('name').is(neq('x'))` gets
@@ -853,11 +858,20 @@ export function orderReadAfter(steps: readonly IRStep[], from: number, inherited
  * (`…/traverser/util/TraverserSet.java:88-96`): `[josh, lop×4, vadas×2, ripple×2]`, not the per-start order.
  * `mergedAt` (`rel/lower.ts`) asks this where the EXACT scan cannot place the merge, and declines. The
  * superset's position after a bulk-forwarding host is its BODY's forwarded merge (`bodiesMayBulk`), the body's
- * own to reproduce — no strategy barrier, so it is left out. A root reached by an order-free reduction
+ * own to reproduce — no strategy barrier, so it is left out. A traversal reached by an order-free reduction
  * (`orderReadAfter`) reads no order.
+ *
+ * The question is the SAME at every traversal the strategy runs over, root or CHILD at any depth:
+ * `LazyBarrierStrategy` is applied to every child traversal too (`DefaultTraversal.applyStrategies` →
+ * `TraversalHelper.applyTraversalRecursively`, `…/traversal/util/DefaultTraversal.java:144-148`). A group
+ * value child is reset and run once per member traverser (`…/step/map/GroupStep.java:111-139`), so
+ * `group().by(label()).by(out().optional(out().order().by('name',desc)).values('name').is(neq('x')).fold())`
+ * merges each member's two `lop`s at the first one's slot (`person:[vadas,lop,lop,ripple,…]`). `orderRead`
+ * is whether the traversal's own output order is observed: a root's is (the terminal seed); a child says so
+ * through its caller (`placedMergeBefore`, for a pooled group value whose list keeps the arrival order).
  */
-export function sortedHostMergeAt(steps: readonly IRStep[], at: number, rooted: boolean, singleStart = !rooted): boolean {
-  if (!rooted || at <= 0 || !orderReadAfter(steps, at, true)) return false;
+export function sortedHostMergeAt(steps: readonly IRStep[], at: number, rooted: boolean, singleStart = !rooted, orderRead = rooted): boolean {
+  if (at <= 0 || !orderReadAfter(steps, at, orderRead)) return false;
   if (!steps.slice(0, at).some((s) => hostSortsBody(s) || localSortsBody(s) || armHoldsSortedLocal(s))) return false;
   const positions = scan(steps, rooted, 'superset', at, singleStart);
   if (positions !== 'unknown')
@@ -867,9 +881,26 @@ export function sortedHostMergeAt(steps: readonly IRStep[], at: number, rooted: 
   const before = steps[at - 1]!;
   const next = nextReferenceStep(steps, at - 1);
   if (!next || isReferenceBarrier(next)) return false;
+  if (SUPERSET_PATH_PROCESSORS.has(before.name)) return true;
+  // A strategy barrier goes after a flat-map only once an EARLIER one set `foundFlatMap`
+  // (`LazyBarrierStrategy.java:111-127`). A root's start step usually is that one; a CHILD has no start, so
+  // its first `FlatMapStep` takes no barrier (`group().by(label()).by(optional(sorted).values('name').is(…).fold())`
+  // merges nothing). Whatever this list cannot rule out a `FlatMapStep` counts as one.
+  if (!rooted && !steps.slice(0, at - 1).some(mayBeFlatMapStep)) return false;
   if (before.perTraverser) return before.splicedHost === 'flatMap';
-  return FLAT_MAPS.has(before.name) || OTHER_V.has(before.name) || SUPERSET_PATH_PROCESSORS.has(before.name);
+  return FLAT_MAPS.has(before.name) || OTHER_V.has(before.name);
 }
+
+/** Can this step be a `FlatMapStep` the strategy counts (`LazyBarrierStrategy.java:111-112`)? `false` only
+ *  for the steps known NOT to be one — filters, one-to-one maps and branch hosts (`OptionalStep`, `LocalStep`
+ *  are `AbstractStep`s, `UnionStep`/`ChooseStep` `BranchStep`s), edge moves (excluded by `returnsEdge`),
+ *  slices, reductions and the explicit barriers. */
+function mayBeFlatMapStep(s: IRStep): boolean {
+  if (s.perTraverser) return s.splicedHost === 'flatMap';
+  return !(FILTERS.has(s.name) || MAPS.has(s.name) || EDGE_MOVES.has(s.name) || SLICES.has(s.name) || REDUCING.has(s.name)
+    || NOT_FLAT_MAP.has(s.name));
+}
+const NOT_FLAT_MAP: ReadonlySet<string> = new Set(['as', 'by', 'with', 'dedup', 'order', 'sample', 'barrier']);
 
 export function mayMergeUnplaced(steps: readonly IRStep[], at: number): boolean {
   // A `call()` start (a barrier service's resume) is the superset scan's own rooted case.
