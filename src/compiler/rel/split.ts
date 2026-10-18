@@ -4,6 +4,7 @@ import type { SegmentPlan } from '../segment.ts';
 import { lowerListResume, lowerToRel, type Lowering } from './lower.ts';
 import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
 import { RaisedByQuery } from '../../rel/raise.ts';
+import { JAVA_WHITESPACE } from './text-units.ts';
 
 // ---------- split() as a value-transform BARRIER — substrate A ----------
 //
@@ -24,10 +25,10 @@ import { RaisedByQuery } from '../../rel/raise.ts';
 // non-string throw) both DECLINE here and fail closed, no regression.
 
 /** The reference whitespace split: Commons `StringUtils.splitByWholeSeparator(s, null)` splits on runs
- *  of whitespace. Committed to JS `\s+` (as the regex barrier commits to JS `RegExp`) — it agrees with
- *  Java on every construct the corpus exercises and diverges only on exotic code points no scenario
- *  uses (Java `Character.isWhitespace` excludes ` `, JS `\s` includes it). */
-const JAVA_WHITESPACE = /\s+/;
+ *  of `Character.isWhitespace` chars — Java's set, the one `trim()` strips (`JAVA_WHITESPACE`,
+ *  `text-units.ts`), NOT JS `\s`, which also holds U+00A0/U+2007/U+202F/U+FEFF and lacks U+001C..U+001F.
+ *  Every member is a single BMP unit with no meaning inside a class, so the class is the list itself. */
+const WHITESPACE_RUN = new RegExp(`[${JAVA_WHITESPACE}]+`);
 
 /** Split one traverser value into a list — `SplitGlobalStep.map` composed with `StringUtil.split`:
  *  null passes through unchanged; a non-string traverser is an error the reference throws; an EMPTY
@@ -39,7 +40,7 @@ const splitValue = (value: unknown, separator: string | null): unknown => {
   if (typeof value !== 'string')
     throw new RaisedByQuery(`The split() step can only take string as argument, encountered ${value}.`);
   if (separator === '') return value.split('');
-  if (separator === null) return value.split(JAVA_WHITESPACE).filter((t) => t !== '');
+  if (separator === null) return value.split(WHITESPACE_RUN).filter((t) => t !== '');
   return value.split(separator).filter((t) => t !== '');
 };
 

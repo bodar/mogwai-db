@@ -8,7 +8,7 @@ import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
+import { EXCLUDED, type FrameBound, type SortTerm, type SqlType, type WindowSpec } from './types.ts';
 import { exprChildren, forEachExpr, rewriteExpr } from './walk.ts';
 import { blockRaiseTest, deferralExpr, RAISE_SENTINEL } from './raise.ts';
 
@@ -203,7 +203,38 @@ const JSON_WRITERS: ReadonlySet<string> = new Set([
   'json_insert', 'jsonb_insert', 'json_replace', 'jsonb_replace', 'json_set', 'jsonb_set',
 ]);
 
+/** The compare operators that ORDER (equality does not depend on a collation's order). */
+const ORDERING_OPS: ReadonlySet<string> = new Set(['<', '<=', '>', '>=']);
+/** The extremum functions — scalar, aggregate and window alike. */
+const EXTREMA: ReadonlySet<string> = new Set(['min', 'max']);
+/** A UTF-16 unit at or above U+D800: a surrogate (an astral character) or U+E000..U+FFFF. */
+const HIGH_UNIT = /[\uD800-\uFFFF]/;
+/** Functions whose result is never text (or is ASCII-only text, `typeof`). */
+const NUMERIC_FNS: ReadonlySet<string> = new Set([
+  'abs', 'atan2', 'length', 'octet_length', 'instr', 'random', 'unicode', 'round', 'floor', 'ceil', 'ceiling',
+  'sign', 'typeof', 'json_array_length', 'json_valid', 'count', 'total', 'sum', 'avg',
+]);
+/** Functions whose result is one of their arguments — neutral exactly when every argument is. */
+const PASS_THROUGH_FNS: ReadonlySet<string> = new Set(['coalesce', 'ifnull', 'nullif', 'iif', 'min', 'max']);
+/** The derived table `utf16Key` reads a scalar subquery's one column from. Not a minted alias's form. */
+const UTF16_KEY_ALIAS = 'utf16_key';
+/** A base table's columns that are INTEGER by the schema whatever a scan declares them as — every
+ *  `INTEGER PRIMARY KEY` rowid and the row-id references our writes fill (`src/storage.ts`). */
+const INTEGER_COLUMNS: Partial<Record<string, ReadonlySet<string>>> = {
+  nodes: new Set(['id']), edges: new Set(['id', 'src', 'tgt', 'label']), labels: new Set(['id']),
+  vertex_labels: new Set(['node', 'label']), vertex_properties: new Set(['id', 'node']), edge_properties: new Set(['id', 'edge']),
+};
+/** A rendered operand that may hold an aggregate or window call — which must stay in the query it reduces
+ *  over, so `once` spells it inline rather than moving it into a derived table. Over-matching a SCALAR
+ *  `min`/`max` only costs text. */
+const REDUCING_SQL = /\b(?:count|sum|total|avg|min|max|group_concat|jsonb?_group_(?:array|object)|row_number|rank|dense_rank|lag|lead)\s*\(|\bOVER\s*\(/i;
+/** A rendered operand that is a bare (qualified) column — spelled three times for nothing. */
+const BARE_COLUMN = /^(?:"[^"]*"|\w+)\.(?:"[^"]*"|\w+)$/;
+
 function assembler(bindings: ReadonlyMap<string, Binding>) {
+  /** Every relation's declared column types, by id — what lets `orderNeutral` leave an INTEGER column
+   *  (a rowid, an encounter rank) unkeyed. Ids are unique within a plan (`checkPlan`). */
+  const colTypes = new Map<string, ReadonlyMap<string, SqlType>>();
 
   const expr = (e: Expr, scope: Scope): Expression => {
     const self = (x: Expr): Expression => expr(x, scope);
@@ -264,18 +295,36 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           case 'compiler-null': return raw('NULL');
         }
       case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : q`-(${self(e.arg)})`;
-      case 'binary': return q`(${self(e.left)} ${raw(e.op.toUpperCase())} ${self(e.right)})`;
+      case 'binary':
+        // An ORDERING compare of two values either of which may be text compares in UTF-16 order (`utf16Key`).
+        if (ORDERING_OPS.has(e.op) && !orderNeutral(e.left) && !orderNeutral(e.right))
+          return q`(${utf16Key(e.left, scope)} ${raw(e.op.toUpperCase())} ${utf16Key(e.right, scope)})`;
+        return q`(${self(e.left)} ${raw(e.op.toUpperCase())} ${self(e.right)})`;
       case 'case': return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${self(when)} THEN ${self(then)}`), ' ')}${e.else ? q` ELSE ${self(e.else)}` : empty} END`;
       case 'cast': return q`CAST(${self(e.arg)} AS ${raw(e.to.toUpperCase())})`;
-      case 'call': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${list(e.args.map(JSON_WRITERS.has(e.fn) ? jsonEntry : self))})`;
+      case 'call':
+        // A scalar `MIN(a, b, …)`/`MAX(a, b, …)` picks by the same text order as a compare — and, like a
+        // compare, can only disagree when at least TWO of its arguments may be text.
+        if (EXTREMA.has(e.fn.toLowerCase()) && e.args.filter((arg) => !orderNeutral(arg)).length > 1)
+          return once(q`${raw(e.fn)}(${list(e.args.map((arg) => utf16Key(arg, scope)))})`, utf16Restored);
+        return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${list(e.args.map(JSON_WRITERS.has(e.fn) ? jsonEntry : self))})`;
       // An `Agg` with no arguments means "over all rows", and SQL spells that `count(*)` — not
       // `count()`, which is SQLite LENIENCY rather than syntax. Emitting the lenient form would be
       // the exact species `src/cf-limits.ts` exists to catch: valid on the dev runtime, unproven on
       // the one we ship to. The star is a SPELLING, so it belongs here and not as a node field.
       // `FILTER (WHERE …)` follows the closing paren, not the argument list — it qualifies WHICH ROWS the
       // aggregate takes, while the group stays whatever `GROUP BY` decided (see `Agg.filter`).
-      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(JSON_WRITERS.has(e.fn) ? jsonEntry : self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})${e.filter ? q` FILTER (WHERE ${self(e.filter)})` : empty}`;
-      case 'window-expr': return q`${raw(e.fn)}(${list(e.args.map(self))}) OVER (${windowSpec(e.spec, scope)})`;
+      case 'agg': {
+        const keyed = EXTREMA.has(e.fn) && !e.args.every(orderNeutral);
+        const args = keyed ? e.args.map((arg) => utf16Key(arg, scope)) : e.args.map(JSON_WRITERS.has(e.fn) ? jsonEntry : self);
+        const agg = q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(args) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})${e.filter ? q` FILTER (WHERE ${self(e.filter)})` : empty}`;
+        return keyed ? utf16Restored(agg) : agg;
+      }
+      case 'window-expr': {
+        const keyed = EXTREMA.has(e.fn) && !e.args.every(orderNeutral);
+        const window = q`${raw(e.fn)}(${list(e.args.map((arg) => (keyed ? utf16Key(arg, scope) : self(arg))))}) OVER (${windowSpec(e.spec, scope)})`;
+        return keyed ? utf16Restored(window) : window;
+      }
       // A json object's KEYS are compile-time strings in the node, not `Expr`s — so they render as
       // LITERALS, never as binds. `value(key)` here spent one of the platform's 100 parameters per
       // key: a `{t,v}` member node cost two and one `as()` cost two, which is a plan the seam declines
@@ -290,7 +339,96 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   };
 
   const sortTerm = (term: SortTerm, scope: Scope): Expression =>
-    q`${expr(term.expr, scope)} ${raw(term.dir.toUpperCase())}${term.nulls ? q` NULLS ${raw(term.nulls.toUpperCase())}` : empty}`;
+    q`${utf16Key(term.expr, scope)} ${raw(term.dir.toUpperCase())}${term.nulls ? q` NULLS ${raw(term.nulls.toUpperCase())}` : empty}`;
+
+  // ---------- TEXT ORDER: Java compares UTF-16 units, SQLite compares UTF-8 bytes ----------
+  //
+  // `String.compareTo` — what `Compare.gt/lt/…` and `Order` reach through `GremlinValueComparator`
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`,
+  // `Type.String`'s `naturalOrder`) — compares UTF-16 CODE UNITS, where SQLite's BINARY collation compares
+  // UTF-8 bytes, which is CODE-POINT order. The two disagree on exactly one pair of ranges: an astral
+  // character (U+10000.., a surrogate pair D800..DFFF in UTF-16) sorts BELOW U+E000..U+FFFF in Java and
+  // ABOVE it in SQLite — `g.inject('\uFFFF','😀').order()` answered `['\uFFFF','😀']` for the reference's
+  // `['😀','\uFFFF']`. DO SQLite registers no collation and no function of ours, so the order is restored
+  // with a KEY: in UTF-8 the lead byte of U+E000..U+EFFF is 0xEE and of U+F000..U+FFFF is 0xEF, a byte no
+  // continuation (0x80..0xBF) and no other lead can be; rewriting them to 0xF5/0xF6 — above every astral
+  // lead (0xF0..0xF4), and bytes valid UTF-8 never holds — makes byte order UTF-16 order, the rest intact.
+  // The key is a COMPARISON operand only: an extremum, which must hand back the value it picked, maps the
+  // two bytes back (`utf16Restored`), exactly, because valid UTF-8 holds neither 0xF5 nor 0xF6.
+  //
+  // ONE authority, here at the emitter, because every ordering SQLite does is spelled here — a compare,
+  // an `ORDER BY` (a sort, a window, an ordered aggregate) and a `MIN`/`MAX` — so no lowering, at any
+  // depth, can produce a text order this does not see. A position that cannot reach a text value
+  // compares as before (`orderNeutral`): that keeps an index-served range or `ORDER BY id` unwrapped.
+
+  /** The key of an operand that may be text — `utf16Key`'s whole transform over an already-rendered value. */
+  const utf16Bytes = (x: Expression): Expression =>
+    q`CASE typeof(${x}) WHEN 'text' THEN replace(replace(${x}, x'EE', x'F5'), x'EF', x'F6') ELSE ${x} END`;
+  /** `utf16Bytes` undone over an extremum of keys — the value the extremum picked, as it was. */
+  const utf16Restored = (x: Expression): Expression =>
+    q`CASE typeof(${x}) WHEN 'text' THEN replace(replace(${x}, x'F5', x'EE'), x'F6', x'EF') ELSE ${x} END`;
+
+  /**
+   * `body` over `x` SPELLED ONCE — `(SELECT body(k) FROM (SELECT x AS k))`, a correlated derived table —
+   * where `x` holds no aggregate or window function (those must stay in the query they reduce over), else
+   * `body` over `x` spelled inline. Both transforms read their operand three times (`typeof`, the rewrite,
+   * the passthrough), and inline that is three copies of statement TEXT per level: a nested `MAX(…)`
+   * (a sack's running extremum, a reducer's class widening) grew a 100 KB statement to 475 KB.
+   */
+  const once = (rendered: Expression, body: (ref: Expression) => Expression): Expression => {
+    const { sql, binds } = render(rendered);
+    // A short operand costs less spelled three times than the derived table's own ~150 bytes.
+    if (BARE_COLUMN.test(sql) || REDUCING_SQL.test(sql) || (sql.length <= 40 && !binds.length)) return body(rendered);
+    return q`(SELECT ${body(qualified(UTF16_KEY_ALIAS, 'k'))} FROM (SELECT ${rendered} AS k) ${ident(UTF16_KEY_ALIAS)})`;
+  };
+
+  /** `e` as an ordering key in UTF-16 text order. A `CASE` keys its arms (its tests are untouched), so a
+   *  typed compare key (`storedCompareOn`) keys only its text arm; a scalar subquery keys its one column
+   *  inside a derived table, so the subquery is spelled ONCE rather than three times. */
+  const utf16Key = (e: Expr, scope: Scope): Expression => {
+    if (orderNeutral(e)) return expr(e, scope);
+    if (e.kind === 'case')
+      return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${expr(when, scope)} THEN ${utf16Key(then, scope)}`), ' ')}${e.else ? q` ELSE ${utf16Key(e.else, scope)}` : empty} END`;
+    const only = e.kind === 'scalar' ? e.plan.type.cols[0]?.name : undefined;
+    if (e.kind === 'scalar' && only !== undefined && e.plan.type.cols.length === 1)
+      return q`(SELECT ${utf16Bytes(qualified(UTF16_KEY_ALIAS, only))} FROM (${renderRel(e.plan, scope)}) ${ident(UTF16_KEY_ALIAS)} LIMIT 1)`;
+    return once(expr(e, scope), utf16Bytes);
+  };
+
+  /** Can `e` NOT be a text value whose order `utf16Key` would change? Conservative: `false` is always safe.
+   *  A text literal is neutral when it holds no unit >= U+D800 — the two orders then place it identically
+   *  against ANY string, since the first differing unit of the pair is below both disputed ranges on its
+   *  side. A user PARAMETER is never neutral: it is a variable, and a plan does not depend on its value. */
+  function orderNeutral(e: Expr): boolean {
+    switch (e.kind) {
+      case 'lit':
+        if (e.source === 'compiler-int' || e.source === 'compiler-real' || e.source === 'compiler-null') return true;
+        if (e.source === 'compiler-text') return !HIGH_UNIT.test(e.value);
+        if (e.source === 'bound') return typeof e.value === 'string' ? !HIGH_UNIT.test(e.value) : e.value === null || typeof e.value === 'number';
+        return false;
+      case 'col': {
+        const type = colTypes.get(e.rel)?.get(e.name);
+        return type === 'int' || type === 'real' || type === 'blob';
+      }
+      case 'unary': case 'exists': case 'in-list': case 'in-query': return true;
+      case 'binary': return e.op !== '||';
+      case 'cast': return e.to === 'int' || e.to === 'real' || e.to === 'blob';
+      case 'case': return e.whens.every(([, then]) => orderNeutral(then)) && (e.else === undefined || orderNeutral(e.else));
+      case 'call': {
+        const fn = e.fn.toLowerCase();
+        // `json_extract` of a compiler-written JSON document (a lookup table) can only return a piece of it,
+        // so it is neutral when the document's text — escapes included — names no high unit.
+        if (fn === 'json_extract' && e.args[0]?.kind === 'lit' && e.args[0].source === 'compiler-text')
+          return !HIGH_UNIT.test(e.args[0].value) && !/\\u[dDeEfF]/.test(e.args[0].value);
+        return NUMERIC_FNS.has(fn) || (PASS_THROUGH_FNS.has(fn) && e.args.every(orderNeutral));
+      }
+      case 'agg': return e.fn === 'count' || e.fn === 'sum' || e.fn === 'total' || e.fn === 'avg' || (EXTREMA.has(e.fn) && e.args.every(orderNeutral));
+      case 'window-expr': return e.fn === 'row_number' || e.fn === 'rank' || e.fn === 'dense_rank' || e.fn === 'count' || e.fn === 'sum'
+        || ((EXTREMA.has(e.fn) || e.fn === 'lag' || e.fn === 'lead') && e.args.length > 0 && orderNeutral(e.args[0]!));
+      case 'scalar': { const only = e.plan.type.cols; return only.length === 1 && (only[0]!.type === 'int' || only[0]!.type === 'real'); }
+      case 'json-object': case 'json-array': return false;
+    }
+  }
   const frameBound = (bound: FrameBound, scope: Scope): Expression =>
     bound.kind === 'preceding' || bound.kind === 'following'
       ? q`${expr(bound.count, scope)} ${raw(bound.kind.toUpperCase())}`
@@ -473,7 +611,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    * mechanisms: a re-derivable `Rel` binding is a CTE name, and a RETAINED one — a `Stmt`, or a
    * relation the plan marked `snapshot` — is its rows arriving as one JSON bind. Positional `$[i]`
    * because a retained result is a RELATION: the binding's declared type is the authority for every
-   * column, so there is nothing to infer here.
+   * column, so there is nothing to infer here. The `$[i]` path is a constant the compiler holds, so it
+   * inlines as a literal and spends none of the DO's 100 parameters (root CLAUDE.md, the bind rule) — as a
+   * bind it was one `?` per column READ, so an operand spelled more than once (a keyed extremum,
+   * `utf16Restored`) multiplied them.
    */
   const refSource = (r: Extract<Rel, { readonly kind: 'ref' }>): { item: FromItem; cols: Cols } => {
     const bound = bindings.get(r.name);
@@ -483,11 +624,13 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const rows: RowsBind = { rowsOf: r.name };
     return {
       item: { text: q`json_each(${value(rows)})`, alias },
-      cols: new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${value(`$[${i}]`)})`])),
+      cols: new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${textLiteral(`$[${i}]`)})`])),
     };
   };
 
   function build(r: Rel, outer: Scope): Built {
+    const physical = r.kind === 'scan' ? INTEGER_COLUMNS[r.table] : undefined;
+    colTypes.set(r.id, new Map(r.type.cols.map((column) => [column.name, physical?.has(column.name) ? 'int' : column.type])));
     switch (r.kind) {
       case 'scan': case 'self-ref': case 'values': case 'ref': {
         const source = directSource(r, outer)!;

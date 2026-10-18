@@ -120,7 +120,9 @@ describe('RelIR statements', () => {
     }));
 
     const membership = steps[1]!.emitted;
-    expect(membership.sql).toBe("DELETE FROM nodes WHERE nodes.id IN (SELECT json_extract(prior.value, ?) AS id FROM json_each(?) prior)");
+    // The column PATH is a compiler constant and inlines; only the rows themselves bind.
+    expect(membership.sql).toBe("DELETE FROM nodes WHERE nodes.id IN (SELECT json_extract(prior.value, '$[0]') AS id FROM json_each(?) prior)");
+    expect(membership.binds).toEqual([{ rowsOf: 'added' }]);
     expect(membership.binds.filter(isRowsBind)).toEqual([{ rowsOf: 'added' }]);
   });
 

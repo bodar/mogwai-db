@@ -2,7 +2,7 @@ import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from
 import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
 import { raiseExpr } from '../../rel/raise.ts';
-import { countedText } from './text-units.ts';
+import { casedText, countedText, JAVA_WHITESPACE } from './text-units.ts';
 import { SAFE_INT } from './reducer.ts';
 import type { Minter } from './build.ts';
 import { doubleDecimalText, FLOAT_MAX, floatRoundedOf, floatShortest } from './float.ts';
@@ -20,16 +20,6 @@ const NUMBER_FAMILY: ReadonlySet<ValueType> = new Set<ValueType>([
   'byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal',
 ]);
 
-// Java's whitespace set — the exact code points `String.trim()`/`strip()`/the Gremlin `trim` family
-// remove. Excludes the non-breaking spaces (U+00A0 NBSP, U+2007 figure, U+202F narrow NBSP), which
-// Java also excludes; includes U+3000 ideographic space (the suite's fullwidth-space case). SQLite
-// trim(x, set) removes any char in `set`. Built from explicit code points so the source carries no
-// literal control/space chars. Lives here because `VALUE_TX`'s trim family is its only consumer.
-const JAVA_WHITESPACE = [
-  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x1680,
-  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2008, 0x2009, 0x200a,
-  0x2028, 0x2029, 0x205f, 0x3000,
-].map((c) => String.fromCharCode(c)).join("");
 
 /**
  * THE SCALAR TRANSFORM VOCABULARY — `v -> v'`, as RelIR expressions.
@@ -49,7 +39,7 @@ const JAVA_WHITESPACE = [
  * ## What is shared rather than re-derived
  *
  * `numericSpec` and `dtFactor` are imported (a GType's numeric range, a DT unit's millisecond factor);
- * `JAVA_WHITESPACE` is defined just below. They are DATA and pure computation — not SQL — so there is
+ * `JAVA_WHITESPACE` is imported from `text-units.ts` (`split(null)` shares it). They are DATA and pure computation — not SQL — so there is
  * nothing to re-express and a second copy would be a second thing to keep in step. Only the EMISSION is
  * re-expressed here, which is the boundary the whole migration draws (§2). The whitespace list is the
  * clearest case: `trim()` in Gremlin trims Java's whitespace set, not SQLite's space, and a re-derived
@@ -263,8 +253,10 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step
   // `length`/`substring` COUNT, in UTF-16 units over the whole string (`String.length()`); SQLite counts
   // code points up to a NUL — so a subject holding either defers (`countedText`, `text-units.ts`).
   length: (v) => countedText(v, call('length', v)),
-  toUpper: (v) => call('upper', v),
-  toLower: (v) => call('lower', v),
+  // Java's Unicode case mapping, which SQLite's ASCII-only fold agrees with only on a string holding no
+  // non-ASCII cased character — any other defers (`casedText`, `text-units.ts`).
+  toUpper: (v) => casedText(v, call('upper', v)),
+  toLower: (v) => casedText(v, call('lower', v)),
   // Gremlin's `trim()` trims JAVA's whitespace set, not SQLite's default space — hence the explicit
   // second argument, and hence importing the list rather than restating it.
   trim: (v) => call('trim', v, held(JAVA_WHITESPACE)),

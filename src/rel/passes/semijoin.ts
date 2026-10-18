@@ -1,4 +1,4 @@
-import { type Expr, and, col, compilerText, conjoin, eq, isNot, or } from '../expr.ts';
+import { type Expr, and, col, compilerInt, compilerText, conjoin, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { minter, type Minter } from '../mint.ts';
@@ -250,16 +250,29 @@ export const trigramSeek: OwnerSeek = (term, element, elementTable, mint) => {
   const pattern = likePattern(free, props.id);
   if (key == null || pattern == null || literalTerm(pattern).length < 3) return null;
   if (hasNegativeText(free)) return negativeOwners(props, properties, key, pattern, mint);
-  return positiveOwners(properties, key, pattern, mint);
+  return positiveOwners(properties, key, pattern, literalTerm(pattern), mint);
 };
 
-/** Positive TextP can start directly from matching FTS rows. */
-function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, pattern: Expr, mint: Minter): Rel {
+/**
+ * Positive TextP can start directly from matching FTS rows.
+ *
+ * A NUL-bearing row that CONTAINS the term stays a candidate even where `like` misses it: SQLite's `like`
+ * reads its subject as a C string and stops at the NUL, so `'ab\0cdef'` fails `'%cdef%'` here, and dropping
+ * the row let this narrowing answer `[]` before the generic EXISTS above — whose `containedText`
+ * (`compiler/rel/text-units.ts`) is the authority that defers on exactly that row — ever saw it. `instr`
+ * reads the whole text and is an exact, case-sensitive containment, which every positive TextP match
+ * (`containing`, `startingWith`, `endingWith` alike) implies; so a NUL row WITHOUT the term is still
+ * correctly dropped. The term needs no NUL test: `trigramSeek` takes a compiler-literal pattern only,
+ * which `textLiteral` already proved NUL-free.
+ */
+function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, pattern: Expr, term: string, mint: Minter): Rel {
   const scan = make.scan({ id: mint.id('fs'), table: 'property_fts', alias: mint.alias('rfs'), channels: [], type: FTS_TYPE });
+  const instr = (needle: Expr): Expr => ({ kind: 'binary', op: '>', left: { kind: 'call', fn: 'instr', args: [col(scan.id, 'text'), needle] }, right: compilerInt(0) });
   const pred = andAll([
     eq(col(scan.id, 'owner_elem'), compilerText(properties.ownerElem)), eq(col(scan.id, 'pk'), compilerText(key)),
     eq(col(scan.id, 'kind'), compilerText('value')),
-    { kind: 'call', fn: 'like', args: [pattern, col(scan.id, 'text'), compilerText('\\')] },
+    or({ kind: 'call', fn: 'like', args: [pattern, col(scan.id, 'text'), compilerText('\\')] },
+      and(instr({ kind: 'call', fn: 'char', args: [compilerInt(0)] }), instr(compilerText(term)))),
   ]);
   const filtered = make.filter({ id: mint.id('ff'), input: scan, channels: [], type: scan.type, pred });
   const owners = make.project({ id: mint.id('fp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(filtered.id, 'owner')]] });

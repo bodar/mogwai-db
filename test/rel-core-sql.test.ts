@@ -77,7 +77,8 @@ describe('RelIR relational-core SQL', () => {
       'SELECT n.id AS id, n.name AS name FROM nodes n',
       'SELECT n.id AS id, n.name AS name FROM nodes n WHERE (n.name = ?)',
       'SELECT count(*) AS n FROM nodes n',
-      'SELECT n.id AS id, n.name AS name FROM nodes n ORDER BY n.name ASC',
+      // A TEXT sort key orders in Java's UTF-16 unit order, not SQLite's code-point order (`utf16Key`, emit.ts).
+      "SELECT n.id AS id, n.name AS name FROM nodes n ORDER BY CASE typeof(n.name) WHEN 'text' THEN replace(replace(n.name, x'EE', x'F5'), x'EF', x'F6') ELSE n.name END ASC",
       'SELECT n.id AS id, n.name AS name FROM nodes n LIMIT ?',
       'SELECT DISTINCT n.id AS id, n.name AS name FROM nodes n',
       'SELECT n.id AS id, n.name AS name, m.id AS id_r, m.name AS name_r FROM nodes n INNER JOIN nodes m ON (n.id = m.id)',
