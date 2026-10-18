@@ -74,3 +74,18 @@ Feature: mogwai addendum — a GENERAL map-producing TRAVERSAL as the merge argu
       | result |
       | marko |
     And the graph should return 6 for count of "g.V()"
+
+  # The body is keyed to its driver by a per-row ORIGIN, not the driver's id: a driver that does not sit at
+  # its own id's position (vadas, id 2, is the first and only driver) still finds its map.
+  @gap:merge-search-map-traversal
+  Scenario: g_V_hasXname_vadasX_mergeVXin_knows_project_name_by_nameX_matches
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","vadas").mergeV(__.in("knows").project("name").by(__.values("name"))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+    And the graph should return 6 for count of "g.V()"

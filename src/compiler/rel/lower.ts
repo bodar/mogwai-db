@@ -68,11 +68,11 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
-import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter, type RaiseSink } from './lower/filter.ts';
-import { childRows, childSeam, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild, selfCollapses } from './lower/reduction.ts';
+import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild, selfCollapses } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 import { defersRaise, filterRankingMoves, keepingRaise, pendingRaise, pullAt, pullExtent, raiseContained, raiseOrdered, RAISE, raisesWherePulled, settlesExactly, type PullPosition } from './raise-channel.ts';
 
@@ -335,7 +335,7 @@ const atMostOneRow = (rel: Rel): boolean => {
 const isRowOriginSeed = (rel: Rel): boolean => {
   const origin = originOf(rel.channels);
   return !!origin && rel.kind === 'project' && rel.input.kind === 'window'
-    && rel.input.specs.some(([name, spec]) => name === origin.col && spec.fn === 'row_number');
+    && isMintedRowOrigin(rel.input);
 };
 
 /**
@@ -6319,7 +6319,13 @@ function mergeFromTraversal(
   // nested body is normalized; a bare `stepChain` would leave `project('k').by(…)` as two steps.
   const body = child.body(maps.matchTraversal, 'child');
   if (!body) return null;
-  const resolved = childRows(body, input, driverElem, aliases, ctx, fresh, true);
+  // The body is keyed to its driver by a per-ROW origin, which is a NUMBER, not the driver's element id:
+  // mint it on the driver stream itself (`childRows` reuses an origin already there) so the first-map join
+  // below reads the same number back. Joining the driver's `id` to the origin matched only where a driver
+  // happened to sit at its own id's position (`V().has('name','vadas').mergeV(__.in('knows').project(…))`
+  // raised "does not map to a value" for vadas, id 2, origin 1).
+  const driver = mintRowOrigin(input, fresh);
+  const resolved = childRows(body, driver, driverElem, aliases, ctx, fresh, true);
   if (!resolved) return null;
   // A `project(…)` body produces a RECORD (fields as columns), which is a MAP once collapsed — the same
   // boundary `fold()`/`select`/`as()` cross (`recordToMap`). A body that already produces a MAP
@@ -6355,8 +6361,8 @@ function mergeFromTraversal(
   // driver's channel check refuses).
   const keep = input.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias');
   const joined = make.join({
-    id: fresh('j'), left: input, right: fm, join: 'left', on: eq(col(input.id, 'id'), col(fm.id, 'morigin')), channels: [],
-    type: typeOf(...input.type.cols, meta('morigin', 'int', true), meta(MAP_COL, 'json', true)),
+    id: fresh('j'), left: driver, right: fm, join: 'left', on: eq(col(driver.id, ORIGIN.col), col(fm.id, 'morigin')), channels: [],
+    type: typeOf(...driver.type.cols, meta('morigin', 'int', true), meta(MAP_COL, 'json', true)),
   });
   // `json()` the map, not `jsonb`: the stream is SNAPSHOTTED below and a retained binding travels as JSON
   // (`src/program.ts`), which a raw `jsonb` blob cannot (the root `CLAUDE.md` bind rule). `mergeVFromMap`'s

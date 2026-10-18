@@ -416,7 +416,7 @@ export function flatMapRejoin(
       exprs: elementCols(outChannels).map((column) => [column.name, col(joined.id, column.name)] as const),
     });
     const extended = extendPath(withEnteringPath, { kind: 'element', elem: rows.framing.elem, id: col(withEnteringPath.id, 'id') }, fresh, ctx.demandsPathLabels);
-    const rejoined = shedBodyAliases(dropOrigin(originMajor(extended, body, ctx.params, fresh), fresh), labels, fresh);
+    const rejoined = shedBodyAliases(dropOrigin(originMajor(extended, step, body, ctx.params, fresh), fresh), labels, fresh);
     return continueAs(rejoined, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
   // A LABEL BOUND INSIDE THE BODY escapes to parent scope for `local` (the full-traverser forward above,
@@ -441,7 +441,7 @@ export function flatMapRejoin(
   if (!rows) return null;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
-  const shed = dropOrigin(originMajor(rows.rel, body, ctx.params, fresh), fresh);
+  const shed = dropOrigin(originMajor(rows.rel, step, body, ctx.params, fresh), fresh);
   // `local` carries the body's outbound labels to parent scope (the full-traverser forward); plain
   // `flatMap` sheds the body-bound alias CHANNELS (`shedBodyAliases`) and continues with the pre-body map
   // only — so the channel never rides into a downstream `dedup`/merge as a spurious distinguishing column,
@@ -527,17 +527,43 @@ export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
   if (originOf(rel.channels)) return rel;
   const channels = withChannel(rel.channels, ORIGIN);
   // Numbered in ARRIVAL order where the stream carries one, so the origin is also the entering
-  // traverser's position — what `originMajor` re-reads after a per-traverser body.
+  // traverser's position — what `originMajor` re-reads after a per-traverser body. Unique per ROW (a
+  // per-origin slice counts every copy), and it also KEEPS THE SLOT: the copies of one merged traverser
+  // share a position (`regroupFirstOccurrence`), so the origin is `slot * ORIGIN_SLOT + copy` — the high
+  // part is the merged traverser, the low part the copy of it (`originSlot`).
   const enc = encounterOf(rel.channels);
-  const numbered = rowNumberWindow(rel, ORIGIN.col, rel.channels, {
-    partitionBy: [], orderBy: enc ? [{ expr: col(rel.id, enc.col), dir: 'asc' }] : [],
-  }, fresh);
+  const SLOT = ORIGIN_SLOT_COL, COPY = 'om_copy';
+  const numbered = make.window({
+    id: fresh('rn'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(SLOT, 'int'), meta(COPY, 'int')),
+    specs: [
+      [SLOT, { kind: 'window-expr', fn: enc ? 'dense_rank' : 'row_number', args: [], spec: { partitionBy: [], orderBy: enc ? [{ expr: col(rel.id, enc.col), dir: 'asc' }] : [] } }],
+      [COPY, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: enc ? [col(rel.id, enc.col)] : [], orderBy: [] } }],
+    ],
+  });
+  const slotted: Expr = {
+    kind: 'binary', op: '+',
+    left: { kind: 'binary', op: '*', left: col(numbered.id, SLOT), right: compilerInt(ORIGIN_SLOT) },
+    right: enc ? col(numbered.id, COPY) : compilerInt(0),
+  };
   const cols = [...payloadCols(rel), ...carriedCols(channels)];
   return make.project({
     id: fresh('om'), input: numbered, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(numbered.id, column.name)] as const),
+    exprs: cols.map((column) => [column.name, column.name === ORIGIN.col ? slotted : col(numbered.id, column.name)] as const),
   });
 }
+
+/** The radix of a minted origin (`mintRowOrigin`): `origin / ORIGIN_SLOT` is the merged traverser a row
+ *  descended from, `origin % ORIGIN_SLOT` the copy of it. 2^32 copies of one traverser is far past any
+ *  stream one statement holds, and the product stays well inside SQLite's 64-bit INTEGER. */
+const ORIGIN_SLOT = 4294967296;
+/** The window column `mintRowOrigin` numbers the slot into — its signature (`isMintedRowOrigin`). */
+const ORIGIN_SLOT_COL = 'om_slot';
+/** Is `window` the numbering `mintRowOrigin` mints a per-ROW origin from — one origin per row? */
+export const isMintedRowOrigin = (window: Rel): boolean =>
+  window.kind === 'window' && window.specs.some(([name]) => name === ORIGIN_SLOT_COL);
+/** The merged traverser a minted origin descends from — INTEGER division of two INTEGERs. */
+const originSlot = (rel: Rel, origin: string): Expr =>
+  ({ kind: 'binary', op: '/', left: col(rel.id, origin), right: compilerInt(ORIGIN_SLOT) });
 
 /**
  * A PER-TRAVERSER BODY'S RESULTS IN THE HOST'S ORDER — start-major, then the body's own order within one
@@ -551,12 +577,28 @@ export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
  * step that re-mints the position over the whole stream (a global `order()`, a branch merge) can interleave
  * starts; any other body keeps the origin-major position its movements already numbered.
  */
-function originMajor(rel: Rel, body: readonly IRStep[], params: Record<string, any>, fresh: Minter): Rel {
+function originMajor(rel: Rel, step: IRStep, body: readonly IRStep[], params: Record<string, any>, fresh: Minter): Rel {
   const origin = originOf(rel.channels), enc = encounterOf(rel.channels);
   if (!origin || !enc) return rel;
   if (!someStepDeep(body, params, (s) => (s.name === 'order' && !isLocalScope(s as IRStep)) || BATCHING_BRANCHES.has(s.name), true)) return rel;
-  return renumber(rel, [{ expr: col(rel.id, origin.col), dir: 'asc' }, { expr: col(rel.id, enc.col), dir: 'asc' }],
-    [...payloadCols(rel), ...carriedCols(rel.channels)], rel.channels, fresh, 'dense_rank');
+  const cols = [...payloadCols(rel), ...carriedCols(rel.channels)];
+  // A MERGED start (a `LazyBarrierStrategy` `NoOpBarrierStep` before the step, reproduced by `mergedAt`)
+  // reaches the two steps differently. `local` SPLITS it into bulk-1 copies and runs its body once per
+  // copy (`…/step/branch/LocalStep.java:80-88`): copy-major, which is the origin's own order. `flatMap`
+  // runs its body ONCE for the merged traverser (the child start is set to bulk 1,
+  // `…/util/TraversalUtil.java:185-191`) and emits each result with the HEAD's bulk (`head.split`,
+  // `…/step/map/FlatMapStep.java:42-52`): slot-major, then the body's order, the copies of one result
+  // sharing ONE position — so a later `limit` trims that result's bulk (`RangeGlobalStep`) instead of
+  // taking a second copy's next result. Every copy runs the same body over the same element, so a copy's
+  // k-th result is the slot's k-th result.
+  if (step.name !== 'flatMap')
+    return renumber(rel, [{ expr: col(rel.id, origin.col), dir: 'asc' }, { expr: col(rel.id, enc.col), dir: 'asc' }], cols, rel.channels, fresh, 'dense_rank');
+  const POS = 'om_pos';
+  const positioned = make.window({
+    id: fresh('op'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(POS, 'int')),
+    specs: [[POS, { kind: 'window-expr', fn: 'dense_rank', args: [], spec: { partitionBy: [col(rel.id, origin.col)], orderBy: [{ expr: col(rel.id, enc.col), dir: 'asc' }] } }]],
+  });
+  return renumber(positioned, [{ expr: originSlot(positioned, origin.col), dir: 'asc' }, { expr: col(positioned.id, POS), dir: 'asc' }], cols, rel.channels, fresh, 'dense_rank');
 }
 
 /** DROP the `origin` channel and its column — the counterpart of `mintRowOrigin`/`childRows`' mint,
