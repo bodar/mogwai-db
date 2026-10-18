@@ -5,7 +5,8 @@ the CROSS-CUTTING rules; subsystem detail lives next to the code (below) and loa
 a subsystem fact changes, edit it in its own file — don't pull it back here. Prefer high-level
 direction over mechanism: if a detail is re-derivable from the code, cite the code instead.
 
-- **Step support / edges** → `docs/feature-support-matrix.md` (keep in sync per step).
+- **Step support / edges** → `docs/feature-support-matrix.md` (keep in sync per step); its §17
+  *Deliberate divergences* lists every accepted JS/SQLite-vs-Java difference (one line each).
 - **Future work** → `docs/outstanding-work.md`. Dated `docs/` are design
   rationale — consult, but this file must not depend on an in-flight plan.
 
@@ -258,8 +259,28 @@ property.
   natural fixpoint. A cyclic body without `simplePath()` is infinite *per the spec*; we compile it
   faithfully and let the DO's per-request limit be the backstop. Do NOT reintroduce a cap.
 - Element ids are integer rowids, externally faced as `COALESCE(uid, id)` — don't invent string ids.
-- **Correct by design, fail closed:** never reject a valid input to keep scope small, and never
-  silently answer a different question — throw a clear deferral or fall through, never mis-execute.
+- **A FAITHFUL port, mechanically sympathetic to SQLite and JS — not a port of Java's execution.**
+  The target is the SEMANTICALLY EQUIVALENT answer a user would call right, not Java's exact output.
+  An answer that is sensible under documented JavaScript/SQLite semantics — number spelling, string
+  order, regex dialect, the order of a stream the query does not order, error timing, signed zero — is
+  NOT a different question: prefer that natural answer to a decline AND to emulating Java. Each
+  accepted divergence is one line in `docs/feature-support-matrix.md` §17 *Deliberate divergences*;
+  the rationale and the work order that removes the old emulation are in
+  `docs/2026-10-18-simplification-plan.md`.
+- **Correct by design, fail closed — on what is GENUINELY wrong.** Never reject a valid input to keep
+  scope small; never mis-count, lose or duplicate rows or writes, write or drop the wrong element, or
+  give a wrong number class where the user sees it (`3` vs `3.0`); never crash or let an internal or
+  bare `Error` reach a user — throw a clear deferral or fall through, never mis-execute. **A decline
+  costs the user something:** never add one only to protect an emulation; if exactness would need a
+  decline, prefer the natural answer.
+- **NEVER DECLINE ON DATA SIZE.** A refusal that depends on the graph's size or contents (a traverser
+  count, a row count, a window capacity) is a production outage, not failing closed — it passes every
+  test graph and fires only in production, like the 100-bind wall below. A decline is a property of
+  the QUERY TEXT, or it is a bug.
+- **Every new per-row SQL term needs a user-visible reason.** Raising the `sql-hygiene` baseline
+  (`mise run sql-hygiene-record`) requires the commit message to name the answer a user would have
+  called wrong without it. An expression referenced N times is computed ONCE (projected or
+  `MATERIALIZED`), never re-inlined at each use.
 - **IN DOUBT ABOUT A SEMANTICS QUESTION, READ THE VENDORED REFERENCE — do not reason it out.** The
   `.feature` corpus says WHAT the answer is; **`vendor/tinkerpop/gremlin-core` says WHY and covers the
   cases no scenario names** (e.g. what a reducing barrier emits over ZERO rows is per-step and decided by
@@ -268,7 +289,12 @@ property.
   footing. **Cite the path at the pin** so the claim is checkable by CI and by anyone else. Measured cost
   of not doing this: a correct guard was deleted on a plausible-sounding inference that one line of
   `Group.feature` refuted. **When two comments in this repo cite one feature file for opposite behaviours,
-  the resolution is IN the file, not in the argument.**
+  the resolution is IN the file, not in the argument.** **The reference is the authority on WHAT a
+  query means — which rows and values it returns — not on HOW Java executes it.** `LazyBarrierStrategy`
+  placement, `NoOpBarrierStep`'s 2500 capacity, `TraverserSet` merge order, pull-based laziness (when a
+  side effect is read, when an error fires, how reads and writes interleave), UTF-16 code units,
+  `java.util.regex` and Java number formatting are implementation details, not semantics — do not
+  emulate them.
 
 ## Environment notes
 

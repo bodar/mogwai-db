@@ -81,6 +81,14 @@
   RUNNER is ours because upstream's `Given('the traversal of')` ignores the docstring and looks the
   scenario NAME up in a pre-generated map, which our names are not in. Each scenario is its own
   `bun test`, so a failure reports under its name with a diff.
+  **An L4 scenario pins WHAT a query answers, never HOW Java executes it.** A scenario whose only point
+  is Java's merge order, raise extent/order, write interleave, lazy side-effect reads, signed zero,
+  UTF-16 order or number spelling is DELETED or rewritten to the natural answer (see
+  `docs/feature-support-matrix.md` §17) — not kept as `@Unsupported`. Order is asserted only where the
+  query imposes one. The features that still pin Java execution on trunk (`traverser-set-merge`,
+  `raise-extent`, `raise-order`, `write-interleave`, `side-effect-lazy-read`, `by-productive-null`, …) are
+  deleted or rewritten by the simplification work item that removes the code they pin
+  (`docs/2026-10-18-simplification-plan.md`), in the same commit — not before.
 - **L5** (`test/L5-properties/`) — property-based, the only level whose inputs nobody wrote down.
   Generates well-typed Gremlin by walking a shape lattice (state = stream shape, transition = step,
   so `count().out()` is unreachable by construction) and asserts the fast-path differential:

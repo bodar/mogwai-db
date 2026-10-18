@@ -2,7 +2,8 @@
 
 What you can rely on. A ✅ step works **anywhere in a traversal**, however deeply nested — not just at
 the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
-step works. Anything unsupported throws a clear error and never mis-executes.
+step works. Anything unsupported throws a clear error and never mis-executes. Where we answer under
+JS/SQLite semantics rather than Java's (regex dialect, string order, write visibility, …), §17 lists it.
 
 **L3 conformance: <!-- L3:passing -->1,873<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
@@ -288,3 +289,26 @@ under a synthetic key, and every property read works on it: `has(key)` (presence
 `has(key, P.gt(x))` (a vtype-aware compare — numeric for a REAL score, text for a component id),
 `order().by(key)`, `project().by(key)`, `values(key)`, `values(key, storedKey)` (a UNION of the
 decorated value with stored ones), and `valueMap()`. All live in `src/compiler/rel/decorate.ts`.
+
+## 17. Deliberate divergences
+
+mogwai-db targets the SEMANTICALLY EQUIVALENT answer — which rows and values a query returns — under
+JavaScript/SQLite semantics, not Java's exact execution (`CLAUDE.md`, Semantics traps). Each line below is
+an accepted difference from the Java reference, not a defect — never a lost or duplicated row, a wrong
+count or a wrong number class. Some sites still emulate Java on trunk until their item in
+[the simplification plan](./2026-10-18-simplification-plan.md) lands; the answer here is the one we keep.
+
+| Divergence | What you get |
+|---|---|
+| Regex dialect | JavaScript `RegExp` (tried with the `u` flag, then without), not `java.util.regex`; a pattern neither reads raises `UnsupportedTraversal` |
+| String order | SQLite code-point order, not Java's UTF-16 code-unit order (they differ only for astral characters vs U+E000–U+FFFF) |
+| Case mapping | `toUpper`/`toLower` follow SQLite's ASCII mapping; non-ASCII letters may be left as written |
+| Write visibility | SNAPSHOT: a write step sees a snapshot of its input; steps after it see all of its writes (Java's lazy pipeline interleaves per traverser unless a `barrier()` is added) |
+| Error timing | eager and in-statement: a query containing a type error may raise even where Java's lazy pull would have stopped before reaching the bad value |
+| Number equality | by VALUE across Int/Long/Double/Float/BigDecimal — `1`, `1L` and `1.0` compare, dedup and group alike; `true` and `1` stay distinct. The result CLASS is still kept on output |
+| Signed zero | none: `-0.0` is `0.0` (as in SQLite) in compare, order, dedup, group keys and output |
+| Float | stored and computed as the Double of its literal, rounded to 32 bits (`Math.fround`) only when framed |
+| Extreme-magnitude Doubles | outside roughly [1e-80, 1e116] a value crossing SQLite's decimal text may lose its last ulp |
+| Writes over a bulked slot | one element per traverser: `g.V().both().addV('x')` creates 12 vertices on the modern graph, where Java's `LazyBarrierStrategy` bulks equal traversers first and creates 6 |
+| Unordered-stream order | the order of a stream the query does not `order()` — and so which rows an unordered `limit()`/`range()` keeps — is unspecified (no TraverserSet/LazyBarrier merge-order emulation) |
+| Number spelling | `asString()`/`format()` render JS/SQLite number text (a whole Double still gets `.0`), not `Double.toString`'s exponent bands |

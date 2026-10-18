@@ -23,112 +23,55 @@ lowered.
   **map shape** (9 — `group*`), **list shape** (9 — `fold`/`unfold`), **row ops** (9 — `order`/`dedup`/`range`),
   **side effects** (8 — `group`/`aggregate`/`cap`). Start with
   [the RelIR build plan](./2026-08-01-relir-build-plan.md) (§10 is the live-gap home).
-- **The per-traverser write interleave — residue.** The lazy pipeline hands traverser 1 through every later
-  step before traverser 2 reaches a write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`).
-  ONE scan places every later step of a writer's chain (`interleaving`/`Placement`, `src/compiler/rel/write.ts`:
-  in the window, past a sized `NoOpBarrierStep(2500)` from `bulkingPositions`, past a drain; on the
-  traverser's own element or not), and every guard reads it: a later READ (`readAfterWrite` —
-  `g.inject(1,2).addV('x').V().hasLabel('x').count()` refuses, `g.V().property('x',1).values('x')` answers),
-  a later WRITE (`writeAfterWrite`, by kind/freshness/ownership as well as key), a value body
-  (`sequentialGuard` — a drain between now answers, `…addLabel('z').fold().unfold()…property('n', …)`), and a
-  write over traversers the reference MERGED (`mergedOnceAlike` — `g.V().out().addV('x')` makes 4 vertices,
-  not 6, and refuses where an element reaches it twice), and an EARLIER read of the writer's chain
-  (`readBeforeWrite` — `g.V(4,5).where(__.in().hasNot('w')).property(single,'w',2)` and
-  `g.inject(1,2).V().addV('x')` refuse; an own-element read over a distinct stream answers). It weighs a NEW
-  EDGE crossed by a move (`g.V(1,4).out().addE('k').to(V(3))` refuses — josh's own `out()` crosses the edge
-  marko's traverser made), lifting only a first hop off the vertex the edge is PINNED to (`edgeAnchor`:
-  replication's `where(__.not(__.inE('l'))).addE('l').from(…)` answers); and a terminal `drop()`
-  (`terminalWrite`, `g.V().not(__.out()).drop()` refuses), where a drop's idempotence lifts own reads, an edge
-  drop's pinned hop, and a vertex drop's final hop under `dropTargetsLinked`. What is left:
-  - over-refusals of read-before-write: `dropTargetsLinked` ignores the hop's labels and direction
-    (`g.V().in('created').drop()` refuses over the `knows` edge between marko and josh); an earlier move
-    whose new-edge crossing no pin lifts, even where the edges it could cross are its own traverser's
-    (`g.V(1,2,3,4).where(__.not(__.outE('l'))).addE('l')` answers, `…from(V(2))` refuses as it must, but so
-    would a `from()` naming a vertex outside the stream); the exact barrier scan answers `unknown` for a chain
-    holding an `addE`'s `from()`/`to()` steps, so `readAfterWrite`/`interleaving` keep those later steps in the
-    window (the read-before scan stops at the writer and is not affected);
-  - an earlier read in a body run per traverser (a writer inside `local()`/`sideEffect()` whose chain is not the
-    traversal's own) is refused rather than placed: only the root chain says "one traverser" or "distinct";
-  - over-refusals of a step ONE traverser reaches whose body fans it out (`handsOnWithoutRereading`): a later
-    `union()` arm, any `repeat()`, a folded option cluster must read nothing the write changes AT ALL, so
-    `g.V(1).union(__.out(), __.in()).drop()` refuses although marko has no in-edges for the drop to touch. The
-    body walk's "after a fan-out nothing may observe the write" is coarser than the root chain's weighing (which
-    lifts a bare final hop, an own read, a pinned edge hop): measured over a lazy-reference sweep, ~6.6k forms
-    trunk answered right now refuse, all inside a host — `g.V(1).local(__.bothE().otherV()).drop()`,
-    `local(__.outE().inV())`, `local(__.out().limit(1).both())`, `local(__.out().properties())`,
-    `union(__.out(), __.out())`, `union(__.identity(), __.out().hasNot('x')).property('x',1)`,
-    `repeat(out()).until(outE().count().is(0)).drop()`. Recovering them means weighing a body chain with the
-    root chain's own authority (`readBeforeWrite` over the body), not widening the walker;
-  - a stream-counting slice after a final hop refuses unless the stream ENTERING the hop is pairwise distinct
-    and nothing before the hop reads the write (`finalHop`'s `distinctAt`): `g.V().bothE().range(1,3).drop()`,
-    `g.V().local(__.bothE().limit(1)).drop()` (lop's first edge may be the one marko dropped) and any count after
-    an upstream move (`g.V(1).outE().inV().bothE().skip(1).drop()`) refuse, where an exact answer needs a
-    run-time "no element twice in the window" guard;
-  - a step standing on an EDGE (`inV`/`outV`/`otherV`) before an edge drop's final hop observes the drop (a
-    removed `TinkerEdge` has no vertices), so `g.V(1).outE().inV().outE().drop()` refuses — wrong on trunk over a
-    self-loop, exact on the modern graph, which has none; a run-time "no dropped edge is an outer traverser"
-    guard would answer it;
-  - a `where(__.as('a')…)` start label no `as()` before it binds declines: `WhereStartStep` resolves it per
-    traverser through a map key, a side effect, then the path (`Scoping.getSafeScopeValue`), raising only for a
-    reached traverser (`test/L4-addendum/where-start-label.feature`);
-  - over-refusals by identity: a later write reached by a literal-id re-source
-    (`g.V(1,2).property(single,'w',5).V(3).property(single,'w',9)`), a vertex drop after a multi-traverser
-    write (`…V(3).drop()`), a merge `onMatch` of a key an earlier write wrote on a different element
-    (`…mergeV([name:'lop']).option(onMatch,[w:single(9)])`), a label read after a merge that appends one, and
-    the merge's own `mergeObservesOtherWrites` for a label mutation (it does not know whether the search
-    reads labels);
-  - an own-element read after a non-idempotent write on a `withBranchEffects` arm with more than one body,
-    and a sized barrier after a non-vertex flat-map (`values()`, `E()`), stay in the window;
-  - `g.V(1,1)` is one traverser here (a repeated literal id), two in the reference — independent of writes.
+- **The simplification — the current priority.** [The simplification plan](./2026-10-18-simplification-plan.md)
+  removes the Java-execution emulation (merge order, raise extent, write interleave, signed zero, UTF-16,
+  Java regex, Float/out-of-range carriers) in 24 independently-landing items, and lists the sensible
+  queries still declined that deserve the effort instead. Its accepted answers are feature matrix §17.
+- **Write semantics — SNAPSHOT, decided 2026-10-18; the interleave guards are to be REMOVED.** A write step
+  sees a snapshot of its input; every step after it sees all of its writes (what an explicit `barrier()`
+  gives in Java, and what TinkerPop's docs tell users to add). The per-traverser interleave emulation
+  (`readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`/`barrierHoldsAll`, `sequentialGuard`'s
+  race refusals, `mergeObservesOtherWrites`) is NOT a residue to extend: it refuses everyday writes
+  (`g.V().out().drop()`, `g.V().not(out()).drop()`, `g.V().out().property('visited',true)`) and one of its
+  guards depends on graph size. Removal is work item 7 of
+  [the simplification plan](./2026-10-18-simplification-plan.md); the divergence is §17 of the feature
+  matrix. Kept: the side-effect-under-slice decline, `iterate()` → `discard()`, the `where(as(unbound))`
+  decline (`test/L4-addendum/where-start-label.feature`).
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed collections, member
   variants, maps, aliases, paths, and format adapters (also meta-property value typing) — the root of
   the 11-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's
   reducer **type** (`produced.vtype`) and **productivity** (empty-child NULL-ness) as two carried facts,
   so `by(sum/mean/…)` lands uniformly across `project`/`aggregate`/`store`/`where` (`group().by(k).by(__.…sum())`
   already works; the sibling hosts drop the fact). Rules RelIR §6·7; live gaps §10.
-  **Numeric RESULT CLASS** — ✅ authority LANDED 2026-10-17 (`6415964a`); only the "Still open" residue below remains. The class is exact (§6·7, decided 2026-10-17), named by ONE authority
-  (`reducer.ts` `numberWidth`/`numberFloating` → `commonNumberClass`, `NumberHelper.getHighestCommonNumberInfo`
-  + `determineNumberClass`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-390,861-874`)
-  that every `sum`, every `min`/`max` (top-level, `local`, correlated, grouped), and the sack's folds read;
-  a reducer states that class PER ROW in `vt` as a Gremlin type name (`REDUCED_TYPE`), so every consumer
-  at every depth reads it, and the sack's class rides through `sackOf`. List literals envelope
-  Byte/Short/Long/Float members, `asNumber()` is `createNumber`'s Float/Double/BigDecimal ladder, and a whole
-  Double stringifies `1.0` (pinned: `test/compiler/number-class-authority.exec.test.ts`). A FLOAT is carried
-  as its EXACT value (`src/gremlin/float.ts`, `src/compiler/rel/float.ts`): every compare widens it as
-  `NumberHelper` does, a sack fold is float arithmetic, and a `sum`/`mean` over Floats is exact on the
-  2^-10 grid below 2^14 and DEFERS elsewhere (per-step float rounding is not a SQL `SUM`).
-  Still open: `mean()` of BigInteger Double (ref BigDecimal); an intermediate overflow the final total cannot
-  show is not widened; `fold(seed, Operator.x)` (`operator.ts`) keeps its own int/long/double lattice and
-  declines the other classes; an Integer whose class only its storage class states, compared with a Float
-  past 2^24, DEFERS; an UNTAGGED whole REAL a value-transform barrier re-injects UNKNOWN (`lowerValueResume`)
-  frames as an Int (the framer sees a JS number); `asString()` of a Double outside [10^-3, 10^7) or past 15
-  digits DEFERS (SQLite's text is not `Double.toString`'s there); a Float STORED before the exact-carrier
-  rule (its shortest decimal, not its value) reads as that decimal until rewritten. A `sum`/`mean` of three
-  or more Float traversers off the grid DEFERS: the reference's total is order- AND bulking-dependent
-  (`SumGlobalStep.projectTraverser` multiplies a bulk once, then adds in stream order), and an aggregate holds
-  neither; two Floats overflowing a float promote to a Double (`mathOperationWithPromote`, `NumberHelper.java:400-425`),
-  not to `Infinityf`. A BigDecimal widening of an INTEGRAL Double at or past 10^7 has a NEGATIVE scale
-  (`BigDecimal.valueOf(1.0E7)` is (10, −6)), which no carrier keeps apart from an integral source's scale-0
-  INTEGER below 10^21: it DECLINES at compile time and DEFERS at run time (an E-notation decimal-TEXT carrier
-  would answer it; so would a `1e7m` literal, which declines likewise — `ir/uncarried-literal.ts`). A `sum`/`mean` whose summands are all
-  `-0.0` answers `0.0` (SQL `SUM` starts at +0; the reference seeds with the first value). A set-op literal
-  operand (`combine([1.0d])`) is a BARE list, so a whole Double/Float member reads back by storage class.
-  An EXACT-TAIL value held as decimal TEXT (a BigDecimal — `1.5m` is stored `'1.5'` — a BigInteger, or a
-  Long past 2^53) cannot be added by a SQL `sum`. Every `sum`/`mean` over such a row now DEFERS in-statement
-  (`reducer.ts` `arithmeticArg`, a raising arm of the aggregate inside the read, so a nested body carries it). The answer it
-  owes is exact decimal arithmetic, which remains open: `values('p').sum()` over `1.5m` and `2` is a
-  deferral, where the reference gives BigDecimal 3.5. A sum over a KNOWN `long`/`bigint` stream is exact
-  (`sumTower`). **A Double outside [1e-80, 1e116] DEFERS wherever it would cross SQLite's decimal text**
-  (`src/rel/exact-decimal.ts`): SQLite's own decimal↔binary64 conversion is exact only in [1e-82, 1e118) on
-  Bun's 3.51.2 and 10-45% off by a few ulps beyond, in `printf`, `CAST`, a SQL literal and the JSON
-  reader/writer alike — including its own round-trip test, so no SQL-side test can pick out the survivors.
-  A compiler literal is spelled as an exact product (`exactRealSpelling`, `rel/emit.ts`), so a top-level
-  value is exact; every JSON entry (`asExactReal`), the BigDecimal digits (`doubleDecimalText`) and the JS
-  writer of a tree headed into SQLite (`stringifyExact`) defer. Open: an EXACT carrier there instead of the
-  deferral — an element payload and a bulk load now carry it exactly (ff-double-range,
-  ff-double-carrier-json, 2026-10-17), but `valueMap()`/`elementMap()`/`values().fold()` of one still defer. Also open: a
-  BigDecimal's decimal TEXT carrier is still `CAST` to REAL where it compares against a Double, which is the
-  same reader at a magnitude outside the range. DO's SQLite build is unmeasured.
+  **Numeric RESULT CLASS** — ✅ authority LANDED 2026-10-17 (`6415964a`): the CLASS is kept (1 stays an
+  Int, 1.0 a Double, `count()` a Long, a Boolean a Boolean), named by ONE authority (`reducer.ts`
+  `numberWidth`/`numberFloating` → `commonNumberClass`) that every `sum`, `min`/`max` and the sack read,
+  stated PER ROW in `vt` (`REDUCED_TYPE`). The 2026-10-18 simplification REVERSES the Java-exact extras —
+  the Float authority (a Float is the Double of its literal, `Math.fround` at the framer), the
+  out-of-range Double carrier and its [1e-80, 1e116] deferrals (a last-ulp loss at extreme magnitude is
+  accepted), signed zero, the Float sum/mean deferrals, min/max class promotion (the winner keeps its own
+  class) — so none of that residue is open work. Still open, as real answers: `mean()` of BigInteger
+  Double (ref BigDecimal); `fold(seed, Operator.x)` (`operator.ts`) declines classes outside its
+  int/long/double lattice; an EXACT-TAIL value held as decimal TEXT (a BigDecimal, a BigInteger, a Long
+  past 2^53) cannot be added by a SQL `sum`, so `values('p').sum()` over `1.5m` and `2` defers where the
+  reference gives 3.5 — exact decimal arithmetic would answer it.
+- **Still open — genuine answers (not emulation; they survive the simplification).** Each is a lost or
+  duplicated row, a wrong number class or a wrong value, so it stays open work whatever §17 accepts:
+  - `g.V(1,1)` is ONE traverser here (a repeated literal id), two in the reference — a lost row,
+    independent of writes.
+  - `dedup()` keeps `[a:1,b:2]` and `[b:2,a:1]` apart — one map by value, so a duplicated row:
+    `mapIdentity` (`map.ts`) is not behind every identity a step groups on. Under value+family equality
+    (simplification plan, cluster 1) a map's identity is its entries in no order; fold that into the one
+    equality the dedup/group/set-op sites read.
+  - an UNTAGGED whole REAL that a value-transform barrier re-injects as UNKNOWN (`lowerValueResume`) frames
+    as an Int (the framer sees a JS number) — a wrong number class.
+  - a set-op literal operand (`combine([1.0d])`) is a BARE list, so a whole Double member reads back by
+    storage class (as an Int) — a wrong number class; the member's class must be carried (value+family
+    equality decides membership, the class decides output).
+  - a bare-list `[1L]`/`[1.0f]` member declines at `listLiteralBlob` (its encoding infers the class back
+    from the storage class) — a sensible literal declined.
+  - an intermediate overflow that the final total cannot show is not widened (a `sum` whose running total
+    leaves the Long range and comes back) — a wrong value.
   See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Encounter and order — the fan-out rejoin authority DONE; a path-consumer tail remains.** The
   substrate that threads a per-traverser-spliced body's channels/labels out to parent scope LANDED in full
@@ -139,54 +82,17 @@ lowered.
   fail-closed today), and **`path().fold().unfold()`** member re-entry. The barrier-in-body slice-2
   (union-arm/bounded-`repeat` variants) and per-origin-in-arm stay owned by the branch/arm-major substrate
   (Graph capabilities, below).
-- **TraverserSet merge — residue of the bulking-position authority (Cluster A, RelIR plan §10).** The merge
-  itself is lowered (`bulkingPositions`, `src/compiler/ir/bulk.ts`; `regroupFirstOccurrence`,
-  `src/compiler/rel/build.ts`). What remains: (1) **positions the exact scan cannot place** — a labelled path
-  (`as()`, or a label `retractUnreadAlias` dropped), a `repeat` the unroll widened past `RepeatUnrollStrategy`
-  (the reference's `RepeatStep` re-entry merges as evaluation interleaves), a merge step/service before the
-  position, a sack anywhere. There the order is left unmerged unless the superset places a merge under an
-  order reader, which declines (`mayMergeAt`). (2) **lists `mergedAt` cannot place**: a child traversal is
-  placed (`ChainCtx.traversal`, a sliced prefix of it, a nested rooted read's `mergeScope`) and merges at its
-  own positions; a body the seam hands over unplaced (a `group()` value body, a non-distinct `union` arm)
-  declines only where a reader IN it observes a possible merge — a reader in its host is the host's to judge;
-  and a REWRITTEN list (a barrier service's resume, a federated arm — `ChainCtx.rewritten`) is not scanned at
-  all. A per-traverser child with no emission order folds in a canonical VALUE order (merge-invariant) and
-  only a slice in it declines (`slicedAfter`).
-  (3) **writes after a merge**: `AddVertexStep` creates ONE element for a merged slot of k
-  (`g.V().both().addV('x')` makes 6 vertices in the reference, 12 here) — the write lowering has no bulk notion.
-  (4) the 2500-slot drain is reproduced only for ONE drain; a merging stream past it raises a deferral.
-  (5) a merge over a BRANCH's emission order is no longer refused: the branch emission key (cluster B,
-  `BranchKeys`/`mintBranchOrder`, `lower.ts`) presents the reference's order wherever a reader owes it, and
-  declines only where the branch input's own order is unknown under a slice (`positioned`).
-  (5b) **a merge downstream of a host that emits a sorted order** — a sorted `local()` inside a batching arm
-  now OWES its (start, body order) (`armHoldsSortedLocal`, `ir/bulk.ts`, read by `branchOrderOwed` and the
-  terminal seed), so `g.V().union(local(out().values('name').order()))` is `[josh, lop, vadas, lop, ripple, lop]`.
-  Over a MERGED slot the per-arrival interleave is the reference's too: `LocalStep` splits a slot into bulk-1
-  units and runs the body once per unit (`vendor/tinkerpop/…/step/branch/LocalStep.java:80-88`), so only the
-  slot's POSITION moves — the arm-start merge (`armStartMerge`, now also on a single-arm `union` and positioned
-  first where the owed order has none yet) places it. Still DECLINING as a decline-only stopgap: a READER past the
-  branch of that order (`union(local(…sorted)).fold()`/`.limit(n)`, `choose(…).fold()` — `armEndMerges`'
-  `readPast`); the same keys answer it exactly, so lifting it is verification, not substrate.
-  What remains DECLINES (`sortedHostMergeAt`): a `LazyBarrierStrategy` NoOp after a flat-map downstream of a
-  sorted `optional`/`local`/`union`/`choose` host (`…optional(out().order().by('name')).values('name').is(neq('x'))`,
-  ref merged at first arrival), because the exact scan cannot place merges past a bulk-forwarding host
-  (`bodiesMayBulk`/`branchHoldsBarrier` → `'unknown'`). Reproducing it needs the exact scan to see through the
-  forwarding host (its forwarded merge is the body's own), after which `mergeEqual` applies as it does after
-  `flatMap`/`coalesce`. The decline is positional, not data-dependent, so it also refuses a merge that happens to move nothing on
-  the modern graph (`…optional(…).out().values('name')`, answered before).
-  `local()` itself stays out of `hostSortsBody` (owing it regressed
-  g_V_chooseXvaluesXageX_isXlteX30XX_localXout_order_byXnameX_limitX1XX_…).
-  (6) ✅ **LANDED 2026-10-17 (`03eefba2`..`e56e9352`)** for dedup/dedup(local)/set ops/label- and by()-keyed
-  dedup/group keys (one authority, `typedEquality`/`classedKey`, build.ts); re-probe the remainder below.
-  **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map
-  on its entries in no order (`mapIdentity`, map.ts; a NESTED map raises at a merge). Siblings that read their
-  own key and still equate what `equals` keeps apart: `dedup()` collapses `-0.0` into `0.0`
-  (`inject(-0.0,0.0).dedup()` = `[-0.0]`, ref both) and keeps `[a:1,b:2]`/`[b:2,a:1]` apart (ref one);
-  `dedup(local)` over a bare list merges `1` and `1.0` (`inject([1,2,1.0]).dedup(local)` = `{1,2}`, ref
-  `{1,2,1.0}`); a `groupCount()` key of a whole Double frames as an Int (`inject(1,1.0).groupCount()` =
-  `{1:1,1:1}`). One authority would be `typedEquality` + `mapIdentity` behind every identity a step groups on
-  (`RowShape.identity`, the member ops), not only `mergeEqual`. A bare-list `[1L]`/`[1.0f]` member still
-  declines at `listLiteralBlob` (its encoding infers the class back from the storage class).
+- **TraverserSet merge emulation — SUPERSEDED 2026-10-18, to be REMOVED (not extended).** The order an
+  unordered stream emits, and which rows an unordered `limit()` keeps, is not a semantic the reference
+  pins: `bulkingPositions`/`regroupFirstOccurrence`/`mergedAt`, the 2500-slot merge-window raise (a decline
+  that depends on DATA SIZE), `barrier()` merging, the sorted-host merge declines (`sortedHostMergeAt`)
+  and the bulk-forwarding declines are work items 1 and 9 of
+  [the simplification plan](./2026-10-18-simplification-plan.md). Equality for dedup/group/set ops becomes
+  the SQLite value plus a coarse family (boolean, number, string, other) — `1`, `1.0` and `1L` merge,
+  `true` and `1` stay apart, `-0.0` is `0.0`. `cap()`'s BulkSet member order is likewise unspecified (the
+  multiset is right). A write after a slot Java would have bulked creates one element per traverser
+  (`g.V().both().addV('x')` makes 12 vertices here, 6 in the reference) — an accepted divergence, feature
+  matrix §17.
 - **Correlated write-argument resolver — merge SEARCH map-driver + map-valued `mergeV`/`mergeE` LANDED; the
   general driver remains.** The per-traverser correlated write surface (`property(k, __.trav)` values, the
   property MAP form, `addV`/`mergeV` tails, `mergeV` onMatch/onCreate arms, the correlated `mergeV`/`mergeE`
@@ -197,22 +103,6 @@ lowered.
   whole-map **0-result RAISE**, and an **edge runtime property value** (`option(onMatch,[k:__.trav])` on a
   mergeE, which declines the whole merge today). The map-LITERAL `[k:__.trav]` stays permanently declined
   (Superseded). Ties to PartitionStrategy partition-aware upsert (Strategies, below).
-- **`property(k, __.trav)` sequential-read refusals — hoist the guard to the PROGRAM's first statement.**
-  `sequentialGuard` (`src/compiler/rel/write.ts`) refuses at RUN time a body that could read what another
-  traverser writes (the reference runs one traverser through every mutating step before the next,
-  `AddPropertyStep.java:93-121` + `LazyBarrierStrategy.java:93-125`). It runs ahead of its own
-  `property()` run, but not ahead of an EARLIER write step, so
-  `g.V(1,2).addV('x').property(single,'n', __.V().hasLabel('x').count())` raises the "not supported yet"
-  error AFTER the `addV` has created its vertices. Not a wrong answer, but a refusal that mutates. The fix is
-  to compute every guard's host from the pre-write snapshot (an `addV` host is one row per INPUT
-  traverser, so its count is the input's) and emit all guards before the plan's first statement. The real
-  feature behind the refusals is a per-traverser write driver, which is the general driver above.
-  **A branch's UNCOUNTABLE stream between an upstream write and the site over-refuses.** A drain between
-  the two is placed now (`Placement`, write.ts — `…addLabel('z').fold().unfold()…property('n', …)` answers 2),
-  but a write in a branch's arm has no relation counting the traversers through it (`withBranchEffects`,
-  `input` null), so an observing site after it always refuses even over one start:
-  `g.union(__.addV('x')).property('n', __.V().hasLabel('x').count())` (ref 1). The fix is a count of the
-  branch's input for a one-body branch whose body is one traverser per start.
 - **Set-based writes — LANDED; one wire tail.** The runtime write path is one relational
   `Insert`/`Delete` over `json_each` (`src/setwrite.ts`); the bulk loader, IO drains, and the dependent
   UPSERT (`onCollision:'replace'`, `src/bulk.ts`) ride it. Remaining: a `g.io(...).with(...)` STEP
@@ -224,17 +114,6 @@ lowered.
   `GroupBiOperator` per-key merge + a mixed group-VALUE list, fail-closed today
   (`src/compiler/rel/collection.ts` `registerGrouping`). Its downstream gaps
   (path/`simplePath`/`sample`/`within` operand) are owned by their respective substrates.
-  **`cap()` does not group its members by BulkSet.** `AggregateStep` adds each traverser to a `BulkSet`
-  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AggregateStep.java:125-148`;
-  `BulkSet` is a `LinkedHashMap` keyed by value, `…/step/util/BulkSet.java:43`), so `cap('a')` iterates each DISTINCT
-  member once, in first-arrival order, repeated by its count: `g.inject([2,9,1,9]).unfold().aggregate('a').cap('a')`
-  is `[2,9,9,1]` in the reference and `[2,9,1,9]` here; `g.V().out().aggregate('a').by('name').cap('a')`
-  interleaves `lop` likewise. The pass-through `aggregate('a').fold()` is already right (it is a fold of the
-  stream, not of the set). A list consumer that reads the order (`cap('a').unfold().limit(n)`, a `limit(local)`)
-  sees a different answer; the multiset is right. The fix belongs in `readCollection`'s member order
-  (`accumulated`, `collection.ts`): rank each member by the first arrival of an equal one (`typedEquality`,
-  build.ts — Java `equals`, so `1` and `1L` are distinct keys), then by its own arrival, across every site
-  (`Operator.addAll` merges one site's BulkSet into the running one by the same key).
 
 ## Product capabilities
 
@@ -409,19 +288,15 @@ lowered.
   arm holding a slice declines because TinkerPop resets the arm per start
   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:52-60`,
   `.../step/branch/OptionalStep.java:47-57`); pinned in `test/L4-addendum/branch-arm-decline.feature`.
-- **`property(k, <traversal>)` over an UNCOUNTABLE upstream write stream** — decline (`4899a9d6`,
-  `047df68b`): a body observing an upstream write that >1 traverser ran through (or a branch's arm
-  writes) refuses rather than answering from one statement's snapshot, since the reference re-evaluates
-  the child per traverser after each write (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java`);
-  a numeric reducer's `vt` is a Gremlin type name (`reducer.ts` `REDUCED_TYPE`; `fb3b4703`, exact —
-  `mean()` is a Double, `.../step/map/MeanGlobalStep.java:175-177`). Pinned in `test/property-traversal-sequencing.test.ts`.
-- **A merge over several traversers beside ANOTHER write its search could observe** — decline
-  (`guardMergeInterleaving` rule (0) via `mergeObservesOtherWrites`, plus the onMatch/tail per-traverser
-  rules): `g.inject(1,2,3).mergeV([name:'zz']).properties('name').drop()`, an earlier/later `addV`/`addE`,
-  a union-arm drop all answered from one snapshot; the reference runs the lazy pipeline one traverser at a
-  time (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java`,
-  `.../step/map/MergeVertexStep.java`). Pinned in `test/L4-addendum/merge-one-traverser-at-a-time.feature`
-  and `test/merge-other-writes.test.ts`.
+- **Per-traverser write interleave** (a write's later/earlier reads, a merge beside another write, a
+  `property(k, <traversal>)` body over an upstream write stream) — SUPERSEDED by snapshot write semantics
+  (2026-10-18, feature matrix §17): every write step reads a snapshot of its input, later steps see all
+  its writes. Do not rebuild the interleave guards or a per-traverser write driver to emulate Java's lazy
+  pipeline.
+- **Java-execution emulation in general** — LazyBarrier/TraverserSet merge order, raise extent/order
+  (FilterRankingStrategy, pull-level spans), signed zero, UTF-16 order, `java.util.regex`, Java number
+  spelling, Float32 arithmetic, out-of-range Double carriers. Decided 2026-10-18
+  ([simplification plan](./2026-10-18-simplification-plan.md)); the accepted answers are feature matrix §17.
 - **A slice the reference stops pulling at, behind a side effect** — `EarlyLimitStrategy` is PERFORMED where
   a slice crosses a `SideEffectStep`/always-bound map (`src/compiler/ir/early-limit.ts`;
   `vendor/tinkerpop/gremlin-core/.../strategy/optimization/EarlyLimitStrategy.java`), so
