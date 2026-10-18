@@ -18,15 +18,13 @@ import { Duration } from '../src/gremlin/types.ts';
 // query-path and this compares the two stores table by table, which is what makes the loader's
 // "reuse, never reimplement" invariant enforced rather than aspirational.
 //
-// The measured trap it guards: a probe's simplified FTS re-derivation produced 9,023 rows for
-// grateful-dead where the real walk produces 8,936 — it skipped empty-text rows and the nested
-// collection walk. Both paths now call `propertyFtsRows`, and this is what says so.
+// The trap it guards: a loader that re-derives its own FTS text is a silent index divergence. Both
+// paths call `propertyFtsRows`, and this is what says so.
 
 /** Every table's contents, in a comparable form. Regular tables are ordered by their integer id, so
  *  the comparison covers the MINTED IDS too — the loader must assign what the write path assigns.
- *  `property_fts` is ordered by its content instead: its rowid is not referenced by anything (the
- *  logical key is (owner_elem, pid, kind, text)), so insertion order is not part of the contract and
- *  sorting is the honest form of "identical contents". */
+ *  `property_fts` is ordered by its rowid, which is the signed property id — so the comparison covers
+ *  that key too. */
 const DUMP: Array<[string, string]> = [
   ['labels', 'SELECT id, name FROM labels ORDER BY id'],
   ['nodes', 'SELECT id, uid FROM nodes ORDER BY id'],
@@ -38,8 +36,7 @@ const DUMP: Array<[string, string]> = [
   ['edges', 'SELECT id, uid, src, label, tgt FROM edges ORDER BY id'],
   ['edge_properties', 'SELECT id, edge, key, value, typeof(value) AS storage, vtype FROM edge_properties ORDER BY id'],
   ['property_fts',
-    `SELECT owner_elem, pid, owner, pk, kind, text FROM property_fts
-     ORDER BY owner_elem, owner, pid, kind, text`],
+    'SELECT rowid, owner_elem, pid, owner, pk, text FROM property_fts ORDER BY rowid'],
 ];
 
 /** A collection value is a JSONB blob; compare its json() TEXT so a mismatch reads as a diff rather
@@ -145,9 +142,9 @@ describe('the bulk loader lands what the write path lands', () => {
       [{ t: 'int', v: 1 }, { t: 'string', v: 'one' }],
       [{ t: 'long', v: 2 }, { t: 'string', v: 'two' }],
     ]);
-    // And the FTS walk indexed both keys, so a search over a typed key still matches.
-    expect(store.query<{ text: string }>("SELECT text FROM property_fts WHERE kind='jsonkey' ORDER BY text").map((r) => r.text))
-      .toEqual(['1', '2']);
+    // And the FTS text carries both keys, so a search over a typed key still matches.
+    expect(store.query<{ text: string }>("SELECT text FROM property_fts WHERE pk='scores'").map((r) => r.text))
+      .toEqual(['{1=one, 2=two}']);
   });
 });
 
@@ -391,7 +388,7 @@ describe('onCollision: replace', () => {
     loadBulk(store, [V('a', { name: 'marko' })]);
     loadBulk(store, [V('a', { name: 'stephen' })], [], { onCollision: 'replace' });
     // Exactly one name value row, now 'stephen'; nothing indexes 'marko' any more.
-    expect(store.query<{ text: string }>(`SELECT text FROM property_fts WHERE pk='name' AND kind='value'`)).toEqual([{ text: 'stephen' }]);
+    expect(store.query<{ text: string }>(`SELECT text FROM property_fts WHERE pk='name'`)).toEqual([{ text: 'stephen' }]);
     expect(store.query<{ n: number }>(`SELECT count(*) AS n FROM property_fts WHERE text LIKE '%marko%'`)[0].n).toBe(0);
   });
 

@@ -232,7 +232,7 @@ const FTS_PROPERTIES: Partial<Record<Table, { readonly owner: string; readonly o
 const FTS_TYPE = { cols: [
   { name: 'owner_elem', type: 'text', nullable: false }, { name: 'pid', type: 'int', nullable: false },
   { name: 'owner', type: 'int', nullable: false }, { name: 'pk', type: 'text', nullable: false },
-  { name: 'kind', type: 'text', nullable: false }, { name: 'text', type: 'text', nullable: false },
+  { name: 'text', type: 'text', nullable: false }, { name: 'rowid', type: 'int', nullable: false },
 ] } as const;
 
 export const trigramSeek: OwnerSeek = (term, element, elementTable, mint) => {
@@ -302,7 +302,6 @@ function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key
   const scan = make.scan({ id: mint.id('fs'), table: 'property_fts', alias: mint.alias('rfs'), channels: [], type: FTS_TYPE });
   const pred = andAll([
     eq(col(scan.id, 'owner_elem'), compilerText(properties.ownerElem)), eq(col(scan.id, 'pk'), compilerText(key)),
-    eq(col(scan.id, 'kind'), compilerText('value')),
     { kind: 'call', fn: 'like', args: [pattern, col(scan.id, 'text'), compilerText('\\')] },
   ]);
   const filtered = make.filter({ id: mint.id('ff'), input: scan, channels: [], type: scan.type, pred });
@@ -325,15 +324,14 @@ function negativeOwners(
   key: string, matches: Expr, mint: Minter,
 ): Rel {
   // `hasPropertyClause` needs only owner/key/value/vtype and intentionally leaves the physical
-  // property rowid out of its local schema. This pass joins FTS by `pid`, so its independent scan
-  // declares that real storage column explicitly rather than pretending the generic probe carried it.
+  // property rowid out of its local schema. This pass correlates the FTS row by it (the FTS rowid is the
+  // property id, negated for an edge), so its independent scan declares that real storage column
+  // explicitly rather than pretending the generic probe carried it.
   const rows = make.scan({ id: mint.id('ns'), table: props.table, alias: mint.alias('rns'), channels: [],
     type: { cols: [{ name: 'id', type: 'int', nullable: false }, ...props.type.cols] } });
   const fts = make.scan({ id: mint.id('nfs'), table: 'property_fts', alias: mint.alias('rnfs'), channels: [], type: FTS_TYPE });
   const matchingFts = make.filter({ id: mint.id('nff'), input: fts, channels: [], type: fts.type, pred: andAll([
-    eq(col(fts.id, 'owner_elem'), compilerText(properties.ownerElem)),
-    eq(col(fts.id, 'pid'), col(rows.id, 'id')), eq(col(fts.id, 'pk'), compilerText(key)),
-    eq(col(fts.id, 'kind'), compilerText('value')),
+    eq(col(fts.id, 'rowid'), properties.ownerElem === 'edge' ? { kind: 'unary', op: 'neg', arg: col(rows.id, 'id') } : col(rows.id, 'id')),
     // The atom's OWN match body re-asked of the FTS text — LIKE (which keeps the trigram index) AND its
     // exact case test — so the probe drops exactly the rows the negative TextP rejects.
     rewriteExpr(matches, (n) => (n.kind === 'col' && n.rel === props.id && n.name === 'value' ? col(fts.id, 'text') : n)),

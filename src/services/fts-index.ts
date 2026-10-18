@@ -8,29 +8,26 @@
 // that encoding. A SQL trigger over the raw JSONB blob would index tag noise
 // ("t"/"v"/"map"/"str") and an indirected shape.
 //
-// The indexer is therefore ValueNode-aware: it walks the IN-MEMORY {t,v} tree (a plain JS
-// object at write time, before serialization — no json_tree, no tag noise) and emits:
-//   - one kind='value' row  = the value's LOGICAL toString() (faithful to
-//     p.value().toString(), so a collection ["a","brave"] matches search "brave" via its
-//     "[a, brave]" toString — this is exactly what tinker.search matches on), plus
-//   - kind='jsonkey' / kind='jsonleaf' rows from walking the logical tree, so nested map
-//     keys and typed leaves inside a collection are INDIVIDUALLY searchable (the "handle
-//     JSON properly" capability, beyond bare tinker.search).
+// The indexer is therefore ValueNode-aware: it renders the IN-MEMORY {t,v} tree (a plain JS
+// object at write time, before serialization — no json_tree, no tag noise) as ONE row per
+// property: the value's LOGICAL toString() (faithful to p.value().toString(), so a collection
+// ["a","brave"] matches search "brave" via its "[a, brave]" toString — exactly what
+// tinker.search matches on). An empty text indexes as no row (nothing to match).
+//
+// The FTS5 ROWID is the property row's id, SIGNED by owner kind (`ftsRowid`): +vertex_properties.id,
+// -edge_properties.id. One row per property is what makes that a key, and it turns every delete and
+// probe into a rowid seek — every other column is UNINDEXED, so a predicate on one scans the table.
 //
 // See docs/archive/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
 import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin/types.ts';
 
 /** Which normalized property table `pid` keys into — 'node' for vertex_properties,
- *  'edge' for edge_properties. Stored UNINDEXED so search can scope by element kind and
- *  so delete-by-column can target one property's rows. */
+ *  'edge' for edge_properties. Stored UNINDEXED so search can scope by element kind. */
 export type OwnerElem = 'node' | 'edge';
 
-/** A row to write into property_fts. `text` is the only indexed (searchable) column;
- *  everything else is UNINDEXED (stored + filterable, not tokenized). */
-export interface FtsRow {
-  kind: 'value' | 'jsonkey' | 'jsonleaf';
-  text: string;
-}
+/** The FTS5 rowid of a property's index row: its property id, negated for an edge property (a vertex
+ *  property and an edge property may share an id; the sign keeps the two apart). */
+export const ftsRowid = (ownerElem: OwnerElem, pid: number): number => (ownerElem === 'edge' ? -pid : pid);
 
 /** A ValueNode leaf's logical string form — what p.value().toString() yields for that
  *  scalar. Numbers/booleans stringify directly; a stored datetime leaf is epoch-ms
@@ -40,7 +37,7 @@ const leafText = (v: unknown): string => (v == null ? '' : String(v));
 
 /** The LOGICAL toString() of a whole ValueNode, mirroring Java's collection toString:
  *  a scalar is its value; a list/set is `[a, b, c]`; a map is `{k=v, k2=v2}`. This is the
- *  kind='value' text — the faithful `p.value().toString()` a `.*(term).*` search matches. */
+ *  text a `.*(term).*` search matches. */
 function valueToString(node: ValueNode): string {
   if (node == null) return '';
   if (node.t === 'list' || node.t === 'set')
@@ -50,49 +47,22 @@ function valueToString(node: ValueNode): string {
   return leafText(node.v);
 }
 
-/** Walk a ValueNode tree, emitting jsonkey rows for every map key and jsonleaf rows for
- *  every scalar leaf reached inside a collection. Scalars at the TOP level produce no
- *  jsonleaf (the kind='value' row already covers them); only nested content is walked, so
- *  a plain string property yields exactly one (value) row. */
-function walkTree(node: ValueNode, rows: FtsRow[], nested: boolean): void {
-  if (node == null) return;
-  if (node.t === 'list' || node.t === 'set') {
-    for (const el of node.v as ValueNode[]) walkTree(el, rows, true);
-    return;
-  }
-  if (node.t === 'map') {
-    for (const [k, v] of node.v as [ValueNode, ValueNode][]) {
-      rows.push({ kind: 'jsonkey', text: valueToString(k) });
-      walkTree(v, rows, true);
-    }
-    return;
-  }
-  // A scalar leaf: only index it as a jsonleaf when it sits INSIDE a collection (nested);
-  // a top-level scalar is already the kind='value' row.
-  if (nested) rows.push({ kind: 'jsonleaf', text: leafText(node.v) });
-}
-
-/** The full set of FTS rows for one property instance: the kind='value' toString plus the
- *  nested jsonkey/jsonleaf rows. Empty-text rows are dropped (nothing to match). */
-function ftsRowsFor(node: ValueNode): FtsRow[] {
-  const rows: FtsRow[] = [{ kind: 'value', text: valueToString(node) }];
-  walkTree(node, rows, false);
-  return rows.filter((r) => r.text.length > 0);
+/** The text ONE property indexes as, or `null` when it is empty (nothing to match, so no row). */
+function ftsTextOf(node: ValueNode): string | null {
+  const text = valueToString(node);
+  return text.length ? text : null;
 }
 
 /** `property_fts`'s columns, in the order `propertyFtsRows` emits cells. */
-export const PROPERTY_FTS_COLUMNS = ['owner_elem', 'pid', 'owner', 'pk', 'kind', 'text'] as const;
+export const PROPERTY_FTS_COLUMNS = ['rowid', 'owner_elem', 'pid', 'owner', 'pk', 'text'] as const;
 
 /**
- * The `property_fts` rows for ONE property instance, as cell arrays in `PROPERTY_FTS_COLUMNS`
- * order — row CONSTRUCTION, separated from row INSERTION.
+ * The `property_fts` row for ONE property instance (none for an empty text), as cell arrays in
+ * `PROPERTY_FTS_COLUMNS` order — row CONSTRUCTION, separated from row INSERTION.
  *
- * The separation is what lets the bulk loader (`src/bulk.ts`) land FTS rows through the same walk
- * the per-element write path uses, and it is not a nicety: a probe's simplified re-derivation
- * produced 9,023 rows for grateful-dead where this walk produces 8,936, because it skipped
- * empty-text rows and the nested collection walk. **A bulk loader that writes its own FTS rows is a
- * silent index divergence** (plan doc §2, invariant 3), so there is exactly one walk and both paths
- * call it.
+ * The separation is what lets the bulk loader (`src/bulk.ts`) land FTS rows through the same text
+ * the per-element write path uses: **a bulk loader that writes its own FTS rows is a silent index
+ * divergence** (plan doc §2, invariant 3), so there is exactly one rendering and every path calls it.
  *
  * `pid` is the property row's id (vertex_properties.id / edge_properties.id), `owner` the owning
  * nodes.id/edges.id. The value is tagged into a ValueNode via the SAME `valueNodeOf` the write path
@@ -101,24 +71,20 @@ export const PROPERTY_FTS_COLUMNS = ['owner_elem', 'pid', 'owner', 'pk', 'kind',
 export function propertyFtsRows(
   ownerElem: OwnerElem, pid: number, owner: number, key: string, val: unknown, typeNode: TypeNode | null,
 ): unknown[][] {
-  return propertyFtsEntries(val, typeNode).map((r) => [ownerElem, pid, owner, key, r.kind, r.text]);
+  const text = propertyFtsText(val, typeNode);
+  return text === null ? [] : [[ftsRowid(ownerElem, pid), ownerElem, pid, owner, key, text]];
 }
 
-/** The (kind, text) pairs ONE value indexes as — the walk, without the owner columns.
+/** The text ONE value indexes as (or `null`) — without the owner columns.
  *
  *  Split out for the caller that knows the TEXT at compile time and the PID only at run time: a
- *  RelIR `property(k, <literal>)` lands its FTS rows as an `INSERT … SELECT` over the property
- *  insert's own `RETURNING`, so it needs the walk's output as data rather than as a store call.
- *  Both callers go through the SAME walk, which is the invariant `propertyFtsRows`' own comment
- *  states: a re-derivation that skipped empty-text rows produced 9,023 rows where this produces
- *  8,936, and a divergent index is silent. */
-export const propertyFtsEntries = (val: unknown, typeNode: TypeNode | null): readonly FtsRow[] =>
-  ftsRowsFor(valueNodeOf(val, typeNode));
+ *  RelIR `property(k, <literal>)` lands its FTS row as an `INSERT … SELECT` over the property
+ *  insert's own `RETURNING`, so it needs the text as data rather than as a store call. */
+export const propertyFtsText = (val: unknown, typeNode: TypeNode | null): string | null =>
+  ftsTextOf(valueNodeOf(val, typeNode));
 
-/** The (kind, text) pairs a STORED value indexes as — the SAME walk as `propertyFtsEntries`, but from
- *  a `ValueNode` already reconstructed from storage (`valueNodeFromStored`) rather than from a logical
- *  value + typeNode. The post-write refresh (`src/refresh.ts`) indexes a `property(k, __.trav)` value
- *  this way: a runtime value's text is not known until it is stored, so it is not indexed in the
- *  compiled plan and the refresh derives it from the stored self-describing `{t,v}` tree. ONE walk,
- *  which is the invariant `propertyFtsRows` guards — a re-derivation would silently diverge. */
-export const propertyFtsEntriesOfNode = (node: ValueNode): readonly FtsRow[] => ftsRowsFor(node);
+/** The text a STORED value indexes as — the SAME rendering as `propertyFtsText`, but from a
+ *  `ValueNode` already reconstructed from storage (`valueNodeFromStored`). The post-write refresh
+ *  (`src/refresh.ts`) indexes a `property(k, __.trav)` value this way: a runtime value's text is not
+ *  known until it is stored, so it is not indexed in the compiled plan. */
+export const propertyFtsTextOfNode = (node: ValueNode): string | null => ftsTextOf(node);

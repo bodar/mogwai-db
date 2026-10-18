@@ -12,11 +12,9 @@ import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 // g.call("tinker.search", {search: "term"}).element() finds every property whose VALUE
 // contains `term` (case-insensitively) and yields it as a PropertyStream — .element()
 // then walks each match to its owner element (reusing the existing propertyElement tail).
-// Backed by the property_fts trigram index (Step 6): the kind='value' rows hold each
-// property's logical toString(), which is exactly what TinkerPop's `.*(term).*` matches
-// (a collection ["a","brave"] matches "brave" via its "[a, brave]" toString). Matching only
-// kind='value' (not jsonkey/jsonleaf) keeps one row per matched property — the nested rows
-// exist for the finer-grained JSON search capability, not for tinker.search's owner walk.
+// Backed by the property_fts trigram index (Step 6): one row per property holding its logical
+// toString(), which is exactly what TinkerPop's `.*(term).*` matches (a collection ["a","brave"]
+// matches "brave" via its "[a, brave]" toString).
 //
 // Divergences, both documented + consistent with the TextP predicates:
 //   - CASE-INSENSITIVE (TinkerPop's is case-sensitive) — that is what lets the trigram
@@ -66,10 +64,9 @@ const likeContaining = (term: string): string => `%${term.replace(/[\\%_]/g, (c)
  * element input and matches the property's own id against the hit, where `properties()` matches the
  * owner. Both go through the one join so neither grows its own opinion of what a property row is.
  *
- * The scope predicate is `owner_elem` + `kind='value'` + the LIKE. Only `kind='value'` rows are
- * matched: they hold each property's logical toString(), which is exactly what TinkerPop's
- * `.*(term).*` matches, and the finer jsonkey/jsonleaf rows exist for a different capability — one
- * row per matched property is the contract `element()` walks.
+ * The scope predicate is `owner_elem` + the LIKE. Each index row holds one property's logical
+ * toString(), which is exactly what TinkerPop's `.*(term).*` matches — one row per matched property
+ * is the contract `element()` walks.
  *
  * The term is a parsed LITERAL, so it inlines as a typed SQL literal and spends none of the DO's 100
  * parameters. A bind serves a user PARAMETER; this is a constant the compiler already holds.
@@ -78,13 +75,12 @@ function searchProperties(site: RelCallSite, ownerElem: Elem, term: string, empt
   const pattern = likeContaining(term);
   const fts = make.scan({
     id: site.fresh('fts'), table: 'property_fts', alias: site.fresh('rf'), channels: [],
-    type: typeOf(meta('owner_elem', 'text'), meta('pid', 'int'), meta('kind', 'text'), meta('text', 'text', true)),
+    type: typeOf(meta('owner_elem', 'text'), meta('pid', 'int'), meta('text', 'text', true)),
   });
   const scoped = make.filter({
     id: site.fresh('ffl'), input: fts, channels: [], type: fts.type,
     pred: and(
-      and(eq(col(fts.id, 'owner_elem'), compilerText(sqlElem(ownerElem))),
-        eq(col(fts.id, 'kind'), compilerText('value'))),
+      eq(col(fts.id, 'owner_elem'), compilerText(sqlElem(ownerElem))),
       // SQLite's `like(pattern, subject, escape)` FUNCTION, not the infix operator — the algebra has
       // no node for an ESCAPE clause and §7 keeps the node set closed, so the function says it
       // instead. The same form `predicate.ts` emits for every TextP substring op.

@@ -116,10 +116,10 @@ describe('property(k, __.trav) — correlated per-row value', () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     for (const w of ["g.addV('p').property('name', 'marko')", "g.addV('p').property('name', 'josh')"]) executeQuery(store, w, {});
     executeQuery(store, "g.V().property('copy', __.values('name'))", {});
-    const copyRows = store.query<{ text: string }>("SELECT text FROM property_fts WHERE pk='copy' AND kind='value' ORDER BY text");
+    const copyRows = store.query<{ text: string }>("SELECT text FROM property_fts WHERE pk='copy' ORDER BY text");
     expect(copyRows.map((r) => r.text)).toEqual(['josh', 'marko']);
     // and it did not double-index the constant 'name' rows (one each, not two).
-    const nameRows = store.query<{ n: number }>("SELECT count(*) AS n FROM property_fts WHERE pk='name' AND kind='value'");
+    const nameRows = store.query<{ n: number }>("SELECT count(*) AS n FROM property_fts WHERE pk='name'");
     expect(nameRows[0]!.n).toBe(2);
   });
 });

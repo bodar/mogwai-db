@@ -40,8 +40,10 @@ TextP predicates are Java's exact `startsWith`/`endsWith`/`contains` (`Text.java
 contract (`describeParams`). `regex` is a barrier segment prefiltered by the trigram index
 (`docs/2026-08-12-regex-as-a-barrier-research.md`).
 
-- **PERF TRAP: an FTS5 `DELETE` by an `UNINDEXED` column is an O(n) scan.** An unconditional
-  per-write delete makes bulk writes O(n²). Delete FTS rows ONLY on a genuine overwrite.
+- **One row per property, keyed by the SIGNED property id** (`rowid` = +vertex_properties.id,
+  −edge_properties.id — `ftsRowid`). Every delete and probe is a rowid seek (`rowid IN (SELECT ±id …)`),
+  so an FTS delete runs BEFORE the property rows it is found through. **PERF TRAP: a predicate on any
+  `UNINDEXED` column (`owner`, `pid`, `owner_elem`) is an O(n) scan** — never address rows by one.
 - The `ftsSubstringPredicate` rewrite routes ≥3-char positive substring predicates over stored
   properties through the index; generic `LIKE` stays the authority + fallback for everything else. It
   is a PHYSICAL rewrite over the finished algebra (`src/rel/passes/semijoin.ts`'s `trigramSeek`

@@ -2,9 +2,9 @@ Feature: mogwai addendum — tinker.search over collection + nested-JSON propert
 
   # The official Call.feature only searches SCALAR string properties on the modern graph. These
   # scenarios prove the ValueNode-aware write-path indexer (Step 6) handles COLLECTION and
-  # NESTED-JSON values end-to-end: a list value is searchable both via its logical toString
-  # (kind='value') and via an individual element (kind='jsonleaf'); a nested map value is
-  # searchable via its keys (kind='jsonkey') and leaf values (kind='jsonleaf'). Matching is
+  # NESTED-JSON values end-to-end: each property indexes as ONE row, its logical toString
+  # (`[a, b]`, `{k=v}`), so a list value is searchable by any element's text and a nested map
+  # value by its keys and leaf values — each a substring of that toString. Matching is
   # case-insensitive (a documented divergence — what lets the trigram index serve LIKE). We walk
   # each matched property to its owner and read a stable scalar ("title") so results compare.
   # @gap:search marks the family for an upstream gremlin-test give-back (no official coverage).

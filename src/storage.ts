@@ -11,6 +11,11 @@ import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery } from './rel/raise.ts';
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
 
+/** The `property_fts` DDL — its own constant because `upgradePropertyFts` re-creates the table. */
+const PROPERTY_FTS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
+     owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED,
+     text, tokenize="trigram case_sensitive 0")`;
+
 // One statement per entry: DO `ctx.storage.sql.exec` runs a single statement,
 // so we never rely on multi-statement exec.
 const SCHEMA = [
@@ -178,16 +183,13 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS ep_key_value ON edge_properties(key, value)`,
   // A single FTS5 trigram index over property TEXT, maintained in the write path (see
   // services/fts-index.ts) — the shared substrate for tinker.search and the TextP substring
-  // predicates. `text` is the ONLY tokenized column; the rest are UNINDEXED (stored +
-  // filterable so search can scope by owner/kind and delete-by-column works). trigram +
-  // case_sensitive 0 (the default) makes `text LIKE '%sub%'` index-served AND matches
+  // predicates. `text` is the ONLY tokenized column; the rest are UNINDEXED (stored, not tokenized).
+  // trigram + case_sensitive 0 (the default) makes `text LIKE '%sub%'` index-served AND matches
   // TinkerPop's single-case reference graphs; the tokenizer options live INSIDE the tokenize
   // string (a separate `case_sensitive 0` column option errors — see fts5-trigram-runtime).
-  // `pid` is a plain data column, NOT the rowid: a collection property emits one 'value' row
-  // plus N 'jsonkey'/'jsonleaf' rows sharing one pid, which would collide on rowid.
-  `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
-     owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED, kind UNINDEXED,
-     text, tokenize="trigram case_sensitive 0")`,
+  // One row per property, and its ROWID is the property id SIGNED by owner kind (+vertex, -edge —
+  // `ftsRowid`), so every delete and probe is a rowid seek: a predicate on an UNINDEXED column scans.
+  PROPERTY_FTS_DDL,
   // OLAP barrier scratch — the SQL-resident per-node iteration state for the graph-algorithm barriers
   // (pageRank/wcc/peerPressure, and the Tier-2 families landing on the reshape). The vector lives HERE,
   // in SQL, never in JS — each round is one INSERT..SELECT that reads the prior round and writes the
@@ -252,10 +254,10 @@ export class GraphStore {
     const journaled = (kind: 'node' | 'edge') => `SELECT id FROM bulk_journal WHERE kind = '${kind}'${scope}`;
     const binds = (n: number): unknown[] => (load === null ? [] : new Array<unknown>(n).fill(load));
     const touches = `id IN (${journaled('edge')}) OR src IN (${journaled('node')}) OR tgt IN (${journaled('node')})`;
-    this.query(`DELETE FROM property_fts WHERE owner_elem = 'edge' AND owner IN (SELECT id FROM edges WHERE ${touches})`, binds(3));
+    this.query(`DELETE FROM property_fts WHERE rowid IN (SELECT -id FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE ${touches}))`, binds(3));
     this.query(`DELETE FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE ${touches})`, binds(3));
     this.query(`DELETE FROM edges WHERE ${touches}`, binds(3));
-    this.query(`DELETE FROM property_fts WHERE owner_elem = 'node' AND owner IN (${journaled('node')})`, binds(1));
+    this.query(`DELETE FROM property_fts WHERE rowid IN (SELECT id FROM vertex_properties WHERE node IN (${journaled('node')}))`, binds(1));
     for (const table of ['vertex_properties', 'vertex_labels', 'vertex_property_cardinality'])
       this.query(`DELETE FROM ${table} WHERE node IN (${journaled('node')})`, binds(1));
     this.query(`DELETE FROM nodes WHERE id IN (${journaled('node')})`, binds(1));
@@ -273,6 +275,22 @@ export class GraphStore {
    *  empty graph. */
   initSchema(): void {
     for (const statement of SCHEMA) this.sql.exec(statement);
+    this.upgradePropertyFts();
+  }
+
+  /** A graph indexed before `property_fts` was keyed by signed property id carries a `kind` column and
+   *  auto-assigned rowids, which the rowid inserts would collide with. Rebuild it once from its own
+   *  'value' rows (the only kind any reader used) — set-based, nothing held in memory. */
+  private upgradePropertyFts(): void {
+    if (!this.query("SELECT 1 FROM pragma_table_info('property_fts') WHERE name = 'kind'").length) return;
+    this.atomically(() => {
+      this.sql.exec('ALTER TABLE property_fts RENAME TO property_fts_v1');
+      this.sql.exec(PROPERTY_FTS_DDL);
+      this.sql.exec(`INSERT INTO property_fts(rowid, owner_elem, pid, owner, pk, text)
+        SELECT CASE owner_elem WHEN 'edge' THEN -pid ELSE pid END, owner_elem, pid, owner, pk, text
+        FROM property_fts_v1 WHERE kind = 'value' GROUP BY owner_elem, pid`);
+      this.sql.exec('DROP TABLE property_fts_v1');
+    });
   }
 
   /** Run `fn` as one atomic unit on the driver (`Sql.atomically`) — or bare, on a driver without one. */

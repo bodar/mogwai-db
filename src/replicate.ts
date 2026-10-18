@@ -258,16 +258,17 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
     [JSON.stringify(removeV), JSON.stringify(removeV)]) : [];
   for (const w of weakCascade) removeE.push(w.id);
 
+  // Each FTS delete runs BEFORE the property rows it is found through (its rowid is the signed property id).
   if (removeV.length) {
+    store.query('DELETE FROM property_fts WHERE rowid IN (SELECT id FROM vertex_properties WHERE node IN (SELECT value FROM json_each(?)))', [JSON.stringify(removeV)]);
     deleteMembers(store, 'vertex_properties', 'node', removeV);
     deleteMembers(store, 'vertex_labels', 'node', removeV);
     deleteMembers(store, 'vertex_property_cardinality', 'node', removeV);
-    store.query("DELETE FROM property_fts WHERE owner_elem = 'node' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(removeV)]);
     deleteMembers(store, 'nodes', 'id', removeV);
   }
   if (removeE.length) {
+    store.query('DELETE FROM property_fts WHERE rowid IN (SELECT -id FROM edge_properties WHERE edge IN (SELECT value FROM json_each(?)))', [JSON.stringify(removeE)]);
     deleteMembers(store, 'edge_properties', 'edge', removeE);
-    store.query("DELETE FROM property_fts WHERE owner_elem = 'edge' AND owner IN (SELECT value FROM json_each(?))", [JSON.stringify(removeE)]);
     deleteMembers(store, 'edges', 'id', removeE);
   }
 

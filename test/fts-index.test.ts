@@ -1,15 +1,15 @@
 // Step 6 in isolation: the property_fts FTS5 schema + write-path indexer. Verified BEFORE
 // tinker.search / TextP consume it, so the index maintenance is proven correct on its own.
 // Writes go through the normal traversal path (executeQuery); assertions query property_fts
-// directly. Covers: schema creation, kind='value' toString, nested jsonkey/jsonleaf, single
-// replace + set + list cardinalities, edge props, drop() cascade, and that LIKE/MATCH over
-// the trigram index are index-served (EXPLAIN QUERY PLAN).
+// directly. Covers: schema creation, one toString row per property keyed by its signed id,
+// single replace + set + list cardinalities, edge props, drop() cascade, and that LIKE/MATCH
+// over the trigram index and the rowid deletes are index-served (EXPLAIN QUERY PLAN).
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { executeQuery } from './support/executor.ts';
 
-interface Row { owner_elem: string; pid: number; owner: number; pk: string; kind: string; text: string; }
+interface Row { rowid: number; owner_elem: string; pid: number; owner: number; pk: string; text: string; }
 
 function freshStore(writes: string[] = []): GraphStore {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -18,7 +18,7 @@ function freshStore(writes: string[] = []): GraphStore {
 }
 
 const fts = (store: GraphStore, where = '', binds: any[] = []): Row[] =>
-  store.query<Row>(`SELECT owner_elem, pid, owner, pk, kind, text FROM property_fts ${where} ORDER BY rowid`, binds);
+  store.query<Row>(`SELECT rowid, owner_elem, pid, owner, pk, text FROM property_fts ${where} ORDER BY rowid`, binds);
 
 describe('property_fts schema', () => {
   test('the virtual table exists on a fresh store (part of initSchema)', () => {
@@ -30,42 +30,42 @@ describe('property_fts schema', () => {
   test('re-running initSchema is idempotent (IF NOT EXISTS on the vtable)', () => {
     const store = freshStore(["g.addV('p').property('name', 'marko')"]);
     store.initSchema();
-    expect(fts(store, "WHERE kind='value'").map((r) => r.text)).toEqual(['marko']);
+    expect(fts(store).map((r) => r.text)).toEqual(['marko']);
   });
 });
 
 describe('scalar property indexing', () => {
-  test('a string property emits exactly one kind=value row (the toString)', () => {
+  test('a string property emits exactly one row (the toString), keyed by its property id', () => {
     const store = freshStore(["g.addV('person').property('name', 'marko')"]);
     const rows = fts(store);
     expect(rows.length).toBe(1);
-    expect(rows[0]).toMatchObject({ owner_elem: 'node', pk: 'name', kind: 'value', text: 'marko' });
+    expect(rows[0]).toMatchObject({ owner_elem: 'node', pk: 'name', text: 'marko' });
+    expect(rows[0]!.rowid).toBe(rows[0]!.pid);
   });
 
-  test('a numeric property stringifies its value; no jsonleaf for a top-level scalar', () => {
+  test('a numeric property stringifies its value', () => {
     const store = freshStore(["g.addV('person').property('age', 29)"]);
-    const rows = fts(store);
-    expect(rows.map((r) => [r.kind, r.text])).toEqual([['value', '29']]);
+    expect(fts(store).map((r) => r.text)).toEqual(['29']);
+  });
+
+  test('an empty string indexes as no row', () => {
+    const store = freshStore(["g.addV('person').property('name', '')"]);
+    expect(fts(store)).toEqual([]);
   });
 });
 
 describe('collection property indexing (ValueNode-aware)', () => {
-  test('a list property: kind=value is the [a, b] toString; each element is a jsonleaf', () => {
+  test('a list property is ONE row: the [a, b] toString', () => {
     const store = freshStore(["g.addV('t').property('tags', ['abrave', 'coward'])"]);
-    const byKind = (k: string) => fts(store, 'WHERE kind=?', [k]).map((r) => r.text);
-    expect(byKind('value')).toEqual(['[abrave, coward]']);
-    expect(byKind('jsonleaf').sort()).toEqual(['abrave', 'coward']);
-    // A "brave" substring search hits the value toString ("[abrave, coward]") AND the leaf.
+    expect(fts(store).map((r) => r.text)).toEqual(['[abrave, coward]']);
+    // A "brave" substring search hits the toString.
     const brave = store.query<{ n: number }>("SELECT count(*) AS n FROM property_fts WHERE text LIKE '%brave%'");
-    expect(brave[0].n).toBeGreaterThan(0);
+    expect(brave[0].n).toBe(1);
   });
 
-  test('a map property: kind=value is {k=v}; keys→jsonkey, values→jsonleaf', () => {
+  test('a map property is ONE row: the {k=v} toString', () => {
     const store = freshStore(["g.addV('t').property('addr', [city: 'london', zone: 'central'])"]);
-    const byKind = (k: string) => fts(store, 'WHERE kind=?', [k]).map((r) => r.text).sort();
-    expect(byKind('jsonkey')).toEqual(['city', 'zone']);
-    expect(byKind('jsonleaf')).toEqual(['central', 'london']);
-    expect(byKind('value')[0]).toContain('city=london');
+    expect(fts(store).map((r) => r.text)).toEqual(['{city=london, zone=central}']);
   });
 });
 
@@ -106,7 +106,7 @@ describe('cardinality maintenance', () => {
       "g.addV('person').property(list, 'nick', 'okram')",
       "g.V().property(list, 'nick', 'aurelius')",
     ]);
-    expect(fts(store, "WHERE pk='nick' AND kind='value'").map((r) => r.text).sort()).toEqual(['aurelius', 'okram']);
+    expect(fts(store, "WHERE pk='nick'").map((r) => r.text).sort()).toEqual(['aurelius', 'okram']);
   });
 
   test('set cardinality does not duplicate an equal value', () => {
@@ -114,17 +114,18 @@ describe('cardinality maintenance', () => {
       "g.addV('person').property(set, 'tag', 'a')",
       "g.V().property(set, 'tag', 'a')",
     ]);
-    expect(fts(store, "WHERE pk='tag' AND kind='value'").length).toBe(1);
+    expect(fts(store, "WHERE pk='tag'").length).toBe(1);
   });
 });
 
 describe('edge property indexing', () => {
-  test('an edge property indexes with owner_elem=edge', () => {
+  test('an edge property indexes with owner_elem=edge, keyed by its NEGATED property id', () => {
     const store = freshStore([
       "g.addV('person').as('a').addV('person').as('b').addE('knows').from('a').to('b').property('note', 'longtimefriend')",
     ]);
     const rows = fts(store, "WHERE owner_elem='edge'");
     expect(rows.map((r) => [r.pk, r.text])).toEqual([['note', 'longtimefriend']]);
+    expect(rows[0]!.rowid).toBe(-rows[0]!.pid);
   });
 
   test('overwriting an edge property (UPSERT) replaces its FTS text', () => {
@@ -171,8 +172,17 @@ describe('index is trigram-served', () => {
     const plan = store.query<{ detail: string }>("EXPLAIN QUERY PLAN SELECT * FROM property_fts WHERE text LIKE '%ark%'")
       .map((r) => r.detail).join(' | ');
     // idxStr Ln = trigram LIKE served from the index (n = the text column's offset among
-    // the UNINDEXED columns; not 0 here since text is preceded by owner_elem/pid/owner/pk/kind).
+    // the UNINDEXED columns; not 0 here since text is preceded by owner_elem/pid/owner/pk).
     expect(plan).toMatch(/VIRTUAL TABLE INDEX 0:L\d/);
+  });
+
+  test('a delete through the property rows is a rowid seek, not a table scan', () => {
+    const store = freshStore(["g.addV('t').property('name', 'marko')"]);
+    const plan = store.query<{ detail: string }>(
+      'EXPLAIN QUERY PLAN DELETE FROM property_fts WHERE rowid IN (SELECT id FROM vertex_properties WHERE node IN (SELECT value FROM json_each(?)))', ['[1]'])
+      .map((r) => r.detail).join(' | ');
+    // FTS5's idxStr for a rowid equality is `=`; a full scan has none.
+    expect(plan).toMatch(/VIRTUAL TABLE INDEX 0:=/);
   });
 
   test('MATCH over property_fts.text uses the trigram index', () => {
@@ -215,5 +225,21 @@ describe('property_fts.owner_elem stores the SQL spelling, permanently', () => {
     executeQuery(store, "g.addV('person').property(T.id, 2).property('name', 'markus')", {});
     expect(fts(store, "WHERE owner_elem='node'").length).toBeGreaterThan(before);
     expect(fts(store, "WHERE owner_elem='vertex'")).toEqual([]);
+  });
+});
+
+describe('an index written before the signed-rowid key is upgraded in place', () => {
+  test('the old kind-column table is rebuilt from its value rows, keyed by signed property id', () => {
+    const sql = new BunSqlite(':memory:');
+    sql.exec(`CREATE VIRTUAL TABLE property_fts USING fts5(
+      owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED, kind UNINDEXED,
+      text, tokenize="trigram case_sensitive 0")`);
+    sql.exec(`INSERT INTO property_fts(owner_elem, pid, owner, pk, kind, text) VALUES
+      ('node', 7, 1, 'tags', 'value', '[abrave, coward]'), ('node', 7, 1, 'tags', 'jsonleaf', 'abrave'),
+      ('edge', 7, 3, 'note', 'value', 'pals')`);
+    const store = new GraphStore(sql);
+    expect(fts(store).map((r) => [r.rowid, r.owner_elem, r.pid, r.text])).toEqual([
+      [-7, 'edge', 7, 'pals'], [7, 'node', 7, '[abrave, coward]'],
+    ]);
   });
 });

@@ -29,7 +29,7 @@ import { computeRev, edgeContent, parseRev, vertexContent, type Rev } from './re
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners, type PropRow } from './formats/drain.ts';
 import { insertSet, updateSet, type SetColumn } from './setwrite.ts';
 import { valueNodeFromStored } from './gremlin/types.ts';
-import { PROPERTY_FTS_COLUMNS, propertyFtsEntriesOfNode, type OwnerElem } from './services/fts-index.ts';
+import { PROPERTY_FTS_COLUMNS, ftsRowid, propertyFtsTextOfNode, type OwnerElem } from './services/fts-index.ts';
 
 const GID: SetColumn = { name: 'gid', type: 'blob', blob: true };
 const REV: SetColumn = { name: 'rev', type: 'blob', jsonb: true };
@@ -93,31 +93,32 @@ function refreshTombstones(store: GraphStore): void {
 }
 
 /** The `property_fts` columns as `insertSet` typing — the same list as `PROPERTY_FTS_COLUMNS`, in the
- *  same order the row tuples below emit. `pid`/`owner` bind as plain integers. */
+ *  same order the row tuples below emit. `rowid`/`pid`/`owner` bind as plain integers. */
 const FTS_SET_COLS: readonly SetColumn[] = PROPERTY_FTS_COLUMNS.map((name) =>
-  ({ name, type: name === 'pid' || name === 'owner' ? 'any' : 'text' }));
+  ({ name, type: name === 'rowid' || name === 'pid' || name === 'owner' ? 'any' : 'text' }));
 
 /** The `property_fts` rows a set of dirty owners' STILL-UNINDEXED properties should carry.
  *
  *  A `property(k, __.trav)` value is not indexed in the compiled plan — its text is not known until it
  *  is stored — so the post-write refresh derives it from the STORED self-describing `{t,v}` tree
- *  (`valueNodeFromStored`) through the ONE authoritative walk (`propertyFtsEntriesOfNode`), the same
- *  one the constant write path and the bulk loader use, so the index cannot diverge. A property whose
- *  pid is ALREADY in `property_fts` was indexed in-plan (a constant value) and is skipped; a
- *  stale-on-overwrite delete stayed in the plan (`dropStaleIndex`), so this only ever INSERTS and never
- *  pays the O(n) FTS-delete trap. The `pid IN property_fts` probe scans the FTS table once per refresh
- *  (its columns are UNINDEXED) — a cost carried only when a write leaves dirty rows, and the seam where
- *  a per-write gate would land if it ever bites. */
-function ftsRowsForDirty(store: GraphStore, ownerElem: OwnerElem, ids: readonly number[], props: Map<number, PropRow[]>): unknown[][] {
-  const indexed = new Set(store.query<{ pid: number }>(
-    'SELECT DISTINCT pid FROM property_fts WHERE owner_elem = ? AND owner IN (SELECT value FROM json_each(?))',
-    [ownerElem, JSON.stringify([...ids])]).map((r) => r.pid));
+ *  (`valueNodeFromStored`) through the ONE rendering (`propertyFtsTextOfNode`), the same one the
+ *  constant write path and the bulk loader use, so the index cannot diverge. A property whose row is
+ *  ALREADY in `property_fts` was indexed in-plan (a constant value) and is skipped — a rowid seek per
+ *  property, since the FTS rowid is the signed property id; a stale-on-overwrite delete stayed in the
+ *  plan (`dropStaleIndex`), so this only ever INSERTS. */
+function ftsRowsForDirty(store: GraphStore, ownerElem: OwnerElem, props: Map<number, PropRow[]>): unknown[][] {
+  const candidates = [...props.values()].flatMap((ps) => ps.map((p) => ftsRowid(ownerElem, p.id)));
+  if (!candidates.length) return [];
+  const indexed = new Set(store.query<{ rowid: number }>(
+    'SELECT rowid FROM property_fts WHERE rowid IN (SELECT value FROM json_each(?))',
+    [JSON.stringify(candidates)]).map((r) => r.rowid));
   const rows: unknown[][] = [];
   for (const [owner, ps] of props)
     for (const p of ps) {
-      if (indexed.has(p.id)) continue;
-      for (const e of propertyFtsEntriesOfNode(valueNodeFromStored(p.value, p.vtype)))
-        rows.push([ownerElem, p.id, owner, p.key, e.kind, e.text]);
+      const rowid = ftsRowid(ownerElem, p.id);
+      if (indexed.has(rowid)) continue;
+      const text = propertyFtsTextOfNode(valueNodeFromStored(p.value, p.vtype));
+      if (text !== null) rows.push([rowid, ownerElem, p.id, owner, p.key, text]);
     }
   return rows;
 }
@@ -131,8 +132,8 @@ function refreshFts(store: GraphStore): void {
   const edgeIds = store.query<{ id: number }>('SELECT id FROM edges WHERE dirty').map((r) => r.id);
   if (!nodeIds.length && !edgeIds.length) return;
   const rows: unknown[][] = [];
-  if (nodeIds.length) rows.push(...ftsRowsForDirty(store, 'node', nodeIds, vertexPropsForOwners(store, nodeIds, true)));
-  if (edgeIds.length) rows.push(...ftsRowsForDirty(store, 'edge', edgeIds, edgePropsForOwners(store, edgeIds, true)));
+  if (nodeIds.length) rows.push(...ftsRowsForDirty(store, 'node', vertexPropsForOwners(store, nodeIds, true)));
+  if (edgeIds.length) rows.push(...ftsRowsForDirty(store, 'edge', edgePropsForOwners(store, edgeIds, true)));
   insertSet(store, 'property_fts', FTS_SET_COLS, rows);
 }
 

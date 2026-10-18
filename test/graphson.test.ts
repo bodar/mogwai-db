@@ -207,8 +207,8 @@ const CANONICAL: Array<[string, string]> = [
      FROM edges e JOIN labels l ON l.id = e.label ORDER BY e.id`],
   ['edge_properties', 'SELECT edge, key, value, typeof(value) AS storage, vtype FROM edge_properties ORDER BY edge, key'],
   ['property_fts',
-    `SELECT owner_elem, owner, pk, kind, text FROM property_fts
-     ORDER BY owner_elem, owner, pk, kind, text`],
+    `SELECT owner_elem, owner, pk, text FROM property_fts
+     ORDER BY owner_elem, owner, pk, text`],
 ];
 
 const canonical = (store: GraphStore) =>

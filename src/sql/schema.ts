@@ -22,5 +22,5 @@ export const labels = relation('labels', ['id', 'name']);
 export const vertexLabels = relation('vertex_labels', ['node', 'label']);
 // The FTS5 trigram index over property text (maintained in the write path — see
 // services/fts-index.ts). `text` is the tokenized column; the rest are UNINDEXED but
-// stored + filterable (owner_elem/pid/owner/pk/kind scope a search).
-export const propertyFts = relation('property_fts', ['owner_elem', 'pid', 'owner', 'pk', 'kind', 'text']);
+// stored + filterable (owner_elem/pid/owner/pk scope a search); the rowid is the signed property id.
+export const propertyFts = relation('property_fts', ['owner_elem', 'pid', 'owner', 'pk', 'text']);

@@ -13,7 +13,7 @@ import { arg, isMergeArg, isNested, isTokenArg } from '../../gremlin/frontend.ts
 import { childSteps } from '../ir/passes.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
-import { propertyFtsEntries } from '../../services/fts-index.ts';
+import { propertyFtsText } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
@@ -93,9 +93,11 @@ const OWNED_BY = {
   edges: { table: 'edges', owner: 'id', cols: [meta('id', 'int')] },
 } as const satisfies Readonly<Record<string, { readonly table: Table; readonly owner: string; readonly cols: readonly ColMeta[] }>>;
 
-/** `property_fts` is scoped by the OWNER ELEMENT KIND as well as by the owner id — one virtual table
- *  serves both element kinds, which is why the delete carries the extra equality. */
-const FTS_COLS: readonly ColMeta[] = [meta('owner_elem', 'text'), meta('owner', 'int')];
+/** `property_fts`'s ROWID is the property row's id SIGNED by owner kind (+vertex, -edge — `ftsRowid` in
+ *  `services/fts-index.ts`), so every statement here addresses an index row by a rowid seek: every other
+ *  FTS5 column is UNINDEXED, and a predicate on one scans the whole table. */
+const FTS_ROWID: readonly ColMeta[] = [meta('rowid', 'int')];
+const ftsRowidOf = (elem: Elem, id: Expr): Expr => (elem === 'edge' ? { kind: 'unary', op: 'neg', arg: id } : id);
 
 const ID_TYPE: RelType = typeOf(meta('id', 'int'));
 
@@ -173,19 +175,16 @@ function recordTombstones(elem: Elem, owners: Rel, fresh: Minter): Stmt {
   return insert({ target, cols: ['gid', 'rev', 'kind'], source: rows, channels: [], type: typeOf(), returning: [] });
 }
 
-/** The FTS rows owned by a set of elements. Its own function because the owner column is `owner` on
- *  a virtual table with no `id`, and because the element-kind equality rides with it. */
+/** The FTS rows owned by a set of elements — `rowid IN (SELECT ±id FROM <property table> WHERE <owner> IN
+ *  owners)`. Found THROUGH the property rows, so it must run before they are deleted. */
 function deleteFts(elem: Elem, owners: Rel, fresh: Minter): Stmt {
-  const target = make.scan({ id: fresh('t'), table: 'property_fts', alias: fresh('wt'), channels: [], type: typeOf(...FTS_COLS) });
-  return remove({
-    target, channels: [], type: typeOf(),
-    where: {
-      kind: 'binary', op: 'and',
-      left: { kind: 'binary', op: '=', left: col(target.id, 'owner_elem'), right: compilerText(elem === 'edge' ? 'edge' : 'node') },
-      right: { kind: 'in-query', expr: col(target.id, 'owner'), plan: owners, negated: false },
-    },
-    returning: [],
+  const spec = OWNED_BY[elem === 'edge' ? 'edgeProps' : 'vertexProps'];
+  const props = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const owned = make.filter({
+    id: fresh('f'), input: props, channels: [], type: props.type,
+    pred: { kind: 'in-query', expr: col(props.id, spec.owner), plan: owners, negated: false },
   });
+  return dropStaleIndex(elem, make.project({ id: fresh('w'), input: owned, channels: [], type: ID_TYPE, exprs: [['id', col(owned.id, 'id')]] }), fresh);
 }
 
 /** The edges INCIDENT to a set of vertices, either direction. Snapshotted for the same reason the
@@ -270,7 +269,7 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * chunk at all (§6·2). The physical row has an id either way, so addressing it is both simpler and
  * O(plan size): one statement, one `InQuery` against the retained rows.
  *
- * The FTS sweep is `dropStaleIndex` unchanged — it already deletes by `pid`, which is that same row id.
+ * The FTS sweep is `dropStaleIndex` unchanged — it already deletes by the property row id (its rowid).
  */
 export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   // Snapshot first, for `elementDrop`'s reason: the rows to delete must be decided before the first
@@ -320,7 +319,7 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  *
  * A LITERAL scalar value is: its stored form, its `vtype` and the FTS text it indexes as are all
  * decided at compile time, so the index rows are an `INSERT … SELECT` over the property insert's own
- * `RETURNING` — the walk that produces them is `propertyFtsEntries`, the one authority for it,
+ * `RETURNING` — the text it indexes as is `propertyFtsText`, the one authority for it,
  * because a re-derived index is a SILENT divergence (`fts-index.ts` measured 9,023 rows against
  * 8,936). A COLLECTION value is expressible too and by the same route — it stores as a
  * self-describing typed `{t,v}` tree, so the only difference is that its JSON text crosses as
@@ -371,8 +370,8 @@ export interface PropertySet {
   /** The META-PROPERTY object as JSON TEXT, or `null` where the step named none. It crosses as
    *  `jsonb(<text>)` for `stored`'s reason and lands in the property row's own `meta` column. */
   readonly meta: readonly MetaPropSpec[] | null;
-  /** What this value indexes as: (kind, text) pairs from the ONE shared walk. */
-  readonly fts: readonly { readonly kind: string; readonly text: string }[];
+  /** The text this value indexes as (the ONE shared rendering), or `null` when it is empty. */
+  readonly ftsText: string | null;
   /** The DECLARED cardinality, or `null` for "the traversal named none" — a real state, since only
    *  the element's own declaration may resolve it. Always `null` for an edge (single by spec). */
   readonly cardinality: VertexCardinality | null;
@@ -500,7 +499,7 @@ const PROPERTY_TABLE = {
 } as const;
 
 const CARDINALITY_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('key', 'text'), meta('cardinality', 'text')];
-const FTS_ROW_COLS: readonly ColMeta[] = [meta('owner_elem', 'text'), meta('pid', 'int'), meta('owner', 'int'), meta('pk', 'text'), meta('kind', 'text'), meta('text', 'text')];
+const FTS_ROW_COLS: readonly ColMeta[] = [meta('rowid', 'int'), meta('owner_elem', 'text'), meta('pid', 'int'), meta('owner', 'int'), meta('pk', 'text'), meta('text', 'text')];
 
 /** `(id, owner)` — what a property write's `RETURNING` hands the FTS insert. */
 const WRITTEN_TYPE: RelType = typeOf(meta('id', 'int'), meta('owner', 'int'));
@@ -522,52 +521,41 @@ function cardinalityOf(owner: Expr, key: Expr, declared: VertexCardinality | nul
   return { kind: 'call', fn: 'coalesce', args: [{ kind: 'scalar', plan: only }, text(DEFAULT_VERTEX_CARDINALITY)] };
 }
 
-/** `INSERT INTO property_fts … SELECT … FROM <the rows just written> CROSS JOIN <the walk's rows>`.
- *
- *  The pid is known only at run time and the (kind, text) pairs only at compile time, so the two
- *  meet as a cross join — one row per written property per index entry. `Values` is exactly the
- *  right node for a compile-time row set. The CALLER checks that there is at least one entry —
- *  `ftsRowsFor` drops empty text, so `property(k, "")` indexes as none and an empty `Values` is not
- *  a relation this algebra can express. */
-function indexWritten(written: Rel, elem: Elem, write: PropertySet, fresh: Minter): Stmt {
-  const entries = make.values({
-    id: fresh('fv'), channels: [], type: typeOf(meta('kind', 'text'), meta('text', 'text')),
-    rows: write.fts.map((entry) => [text(entry.kind), text(entry.text)]),
-  });
-  const paired = make.join({
-    id: fresh('j'), left: written, right: entries, join: 'cross', channels: [],
-    type: typeOf(meta('id', 'int'), meta('owner', 'int'), meta('kind', 'text'), meta('text', 'text')),
-  });
+/** `INSERT INTO property_fts … SELECT … FROM <the rows just written>` — one index row per written
+ *  property, keyed by its signed id. The pid is known only at run time and the text only at compile
+ *  time, so the text rides as a constant. The CALLER checks there is a text: an empty one indexes as
+ *  no row. */
+function indexWritten(written: Rel, elem: Elem, write: PropertySet, ftsText: string, fresh: Minter): Stmt {
   const row = make.project({
-    id: fresh('p'), input: paired, channels: [], type: typeOf(...FTS_ROW_COLS),
+    id: fresh('p'), input: written, channels: [], type: typeOf(...FTS_ROW_COLS),
     exprs: [
+      ['rowid', ftsRowidOf(elem, col(written.id, 'id'))],
       // `compilerText`, not `text`: the OWNER KIND is a compile-time fact off `elem` and can never be
-      // user data, so binding it spent one of the 100 on a constant the compiler already holds. Its
-      // twin in `deleteFts` always inlined; these two did not, and the sql-hygiene `bound` ratchet is
-      // what surfaced the disagreement (the drop family reached this path for the first time).
+      // user data, so binding it would spend one of the 100 on a constant the compiler already holds.
       ['owner_elem', compilerText(elem === 'edge' ? 'edge' : 'node')],
-      ['pid', col(paired.id, 'id')], ['owner', col(paired.id, 'owner')], ['pk', propertyKeyExpr(write.key, write.keyName)],
-      ['kind', col(paired.id, 'kind')], ['text', col(paired.id, 'text')],
+      ['pid', col(written.id, 'id')], ['owner', col(written.id, 'owner')], ['pk', propertyKeyExpr(write.key, write.keyName)],
+      ['text', text(ftsText)],
     ],
   });
+  // An edge write is an UPSERT on `(edge, key)`, so several traversers onto one edge return the SAME
+  // property id — one index row each would collide on the rowid that keys it.
+  const source = elem === 'edge' ? make.distinct({ id: fresh('d'), input: row, channels: [], type: row.type }) : row;
   const target = make.scan({ id: fresh('t'), table: 'property_fts', alias: fresh('wt'), channels: [], type: typeOf(...FTS_ROW_COLS) });
   return insert({
-    target, cols: FTS_ROW_COLS.map((column) => column.name), source: row,
+    target, cols: FTS_ROW_COLS.map((column) => column.name), source,
     channels: [], type: typeOf(), returning: [],
   });
 }
 
-/** The FTS text a set of property rows owns — `pid IN (SELECT id FROM <property table> WHERE …)`.
- *  Written as a membership predicate over the same relation the delete beside it narrows, so the
- *  two cannot drift apart into naming different rows. */
+/** The FTS rows of a set of property rows — `rowid IN (SELECT ±id FROM <rows>)`, a rowid seek. Written
+ *  as a membership predicate over the same relation the delete beside it narrows, so the two cannot
+ *  drift apart into naming different rows. */
 function dropStaleIndex(elem: Elem, rows: Rel, fresh: Minter): Stmt {
-  const target = make.scan({ id: fresh('t'), table: 'property_fts', alias: fresh('wt'), channels: [], type: typeOf(...FTS_COLS, meta('pid', 'int')) });
+  const target = make.scan({ id: fresh('t'), table: 'property_fts', alias: fresh('wt'), channels: [], type: typeOf(...FTS_ROWID) });
+  const rowids = make.project({ id: fresh('w'), input: rows, channels: [], type: typeOf(...FTS_ROWID), exprs: [['rowid', ftsRowidOf(elem, col(rows.id, 'id'))]] });
   return remove({
     target, channels: [], type: typeOf(),
-    where: and(
-      eq(col(target.id, 'owner_elem'), compilerText(elem === 'edge' ? 'edge' : 'node')),
-      { kind: 'in-query', expr: col(target.id, 'pid'), plan: rows, negated: false },
-    ),
+    where: { kind: 'in-query', expr: col(target.id, 'rowid'), plan: rowids, negated: false },
     returning: [],
   });
 }
@@ -728,14 +716,9 @@ function propertyStatements(
   // The insert's `RETURNING` is RETAINED by construction (a statement binding always is), which is
   // what lets the index rows join against pids that did not exist a statement ago.
   //
-  // A value indexing as NO entries writes no index statement, and that is a real state rather than a
-  // guard: `ftsRowsFor` drops empty text, so `property(k, "")` has nothing to index and the `Values`
-  // of (kind, text) pairs would be EMPTY — a relation §3.3 records `Values` as refusing to express,
-  // i.e. a throw out of a lowering whose contract is `null`. It only became REACHABLE when
-  // `property(T.id, …)` let `addV("p").property(T.id,1).property("name","")` route here at all,
-  // which is what the CSV round-trip corpus caught.
+  // An empty text (`property(k, "")`) indexes as no row, so it writes no index statement.
   const written = bind(rowsWritten);
-  if (write.fts.length) bind(indexWritten(written, elem, write, fresh));
+  if (write.ftsText !== null) bind(indexWritten(written, elem, write, write.ftsText, fresh));
   return true;
 }
 
@@ -2689,7 +2672,7 @@ function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam, step = false): Pr
   if (!collection && !constLit(arg(stored, vtype, spec.valueName))) return null;
   return {
     kind: 'set', key, keyName: spec.keyName, stored, valueName: spec.valueName, typeNode, collection, meta, vtype, cardinality: spec.cardinality,
-    fts: propertyFtsEntries(value, typeNode),
+    ftsText: propertyFtsText(value, typeNode),
   };
 }
 
@@ -2714,7 +2697,7 @@ function runtimeKeyedWrite(spec: PropSpec, keyBody: readonly IRStep[], elem: Ele
   const { stored, collection } = propertyValueBind(value, vtype, typeNode);
   if (!collection && !constLit(arg(stored, vtype, spec.valueName))) return null;
   const expr = storedExpr({
-    kind: 'set', key: '', keyName: null, stored, valueName: spec.valueName, typeNode, collection, meta: null, vtype, cardinality: spec.cardinality, fts: [],
+    kind: 'set', key: '', keyName: null, stored, valueName: spec.valueName, typeNode, collection, meta: null, vtype, cardinality: spec.cardinality, ftsText: null,
   });
   return { ...base, value: { expr, vtype } };
 }

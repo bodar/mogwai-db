@@ -51,7 +51,7 @@ describe('call / search service SQL', () => {
     // itself is asserted in `services.test.ts`.
     const withReg: CompileOptions = { registry: standardRegistry };
     // g.call("tinker.search",{search:"mar"}).element() → the matched properties' owner vertices.
-    // The SQL selects from property_fts (kind='value', a case-insensitive LIKE %term%) and joins
+    // The SQL selects from property_fts (a case-insensitive LIKE %term%) and joins
     // back to vertex_properties + nodes + labels for the full PropertyStream payload.
     const sql = read('g.call("tinker.search", ["search": "mar"]).element()', withReg).sql;
     expect(sql).toContain('property_fts');

@@ -19,7 +19,7 @@
 //     `propertyValueBind` and the FTS rows are `propertyFtsRows` — the same functions
 //     `applyVertexProperty` calls. A loader that re-derives either is a silent storage/index
 //     divergence, and `test/bulk.test.ts` pins the equivalence table-by-table.
-//  4. **The loader mints ids.** Landing a property row and its `property_fts` rows in one pass needs
+//  4. **The loader mints ids.** Landing a property row and its `property_fts` row in one pass needs
 //     `pid` BEFORE the insert, and multi-row `RETURNING` has no defined row order — so ids come from
 //     one `SELECT max(id)` per table, not from a statement per row.
 //
@@ -316,7 +316,7 @@ export class BulkLoader {
     this.counts.edges++;
   }
 
-  /** One property row plus its FTS rows, both through the shared write-path helpers (invariant 3). */
+  /** One property row plus its FTS row, both through the shared write-path helpers (invariant 3). */
   private property(
     into: PropertyRows, ownerElem: OwnerElem, owner: number,
     p: BulkProperty, mintId: () => number, kind: 'vertex' | 'edge',
@@ -521,12 +521,13 @@ export class BulkLoader {
       + deleteMembers(this.store, 'edges', 'id', ids);
   }
 
-  /** The FTS sweep is scoped by owner ELEMENT KIND as well as owner id (a node rowid and an edge rowid
-   *  can numerically coincide), so it carries the `owner_elem` predicate `deleteMembers` cannot. */
+  /** The FTS rows of these owners' properties, as a rowid seek through the property table (the FTS rowid
+   *  is the signed property id) — so it runs BEFORE the property rows are deleted. */
   private wipeFts(ownerElem: OwnerElem, ids: readonly number[]): void {
+    const props = ownerElem === 'edge' ? 'SELECT -id FROM edge_properties WHERE edge' : 'SELECT id FROM vertex_properties WHERE node';
     this.store.query(
-      `DELETE FROM property_fts WHERE owner_elem=? AND owner IN (SELECT value FROM json_each(?))`,
-      [ownerElem, JSON.stringify([...ids])]);
+      `DELETE FROM property_fts WHERE rowid IN (${props} IN (SELECT value FROM json_each(?)))`,
+      [JSON.stringify([...ids])]);
     this.counts.statements++;
   }
 
