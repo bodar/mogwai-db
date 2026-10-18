@@ -136,12 +136,18 @@ lowered.
   (5) a merge over a BRANCH's emission order is no longer refused: the branch emission key (cluster B,
   `BranchKeys`/`mintBranchOrder`, `lower.ts`) presents the reference's order wherever a reader owes it, and
   declines only where the branch input's own order is unknown under a slice (`positioned`).
-  (5b) **a sorted `local()` inside a batching arm, at a bare terminal** — `hostSortsBody` (`ir/bulk.ts`, the
-  one "this host emits a sorted order" authority) leaves `local` out, because owing that order declines
-  wherever `LocalStep` forwards merged slots the exact scan cannot place (`bodiesMayBulk`;
-  `g.V().local(out().order().by('name')).fold()` declines). So `g.V().union(local(out().values('name').order()))`
-  still emits positionless (whatever order the plan happens to produce; ref `[josh, lop, vadas, lop, ripple, lop]`). Placing the forwarded
-  merge (an `order()` already reproduces its own, `orderRows`) would let `local` join the set.
+  (5b) **a merge downstream of a host that emits a sorted order** — a sorted `local()` inside a batching arm
+  now OWES its (start, body order) (`armHoldsSortedLocal`, `ir/bulk.ts`, read by `branchOrderOwed` and the
+  terminal seed), so `g.V().union(local(out().values('name').order()))` is `[josh, lop, vadas, lop, ripple, lop]`.
+  What remains DECLINES (`sortedHostMergeAt`): a `LazyBarrierStrategy` NoOp after a flat-map downstream of a
+  sorted `optional`/`local`/`union`/`choose` host (`…optional(out().order().by('name')).values('name').is(neq('x'))`,
+  ref merged at first arrival), because the exact scan cannot place merges past a bulk-forwarding host
+  (`bodiesMayBulk`/`branchHoldsBarrier` → `'unknown'`). Reproducing it needs the exact scan to see through the
+  forwarding host (its forwarded merge is the body's own), after which `mergeEqual` applies as it does after
+  `flatMap`/`coalesce`. The decline is positional, not data-dependent, so it also refuses a merge that happens to move nothing on
+  the modern graph (`…optional(…).out().values('name')`, answered before).
+  `local()` itself stays out of `hostSortsBody` (owing it regressed
+  g_V_chooseXvaluesXageX_isXlteX30XX_localXout_order_byXnameX_limitX1XX_…).
   (6) ✅ **LANDED 2026-10-17 (`03eefba2`..`e56e9352`)** for dedup/dedup(local)/set ops/label- and by()-keyed
   dedup/group keys (one authority, `typedEquality`/`classedKey`, build.ts); re-probe the remainder below.
   **typed equality OUTSIDE the merge** — the merge keys on `typedEquality` (build.ts) and a top-level map

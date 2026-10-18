@@ -165,3 +165,43 @@ Feature: mogwai addendum — a group value's FilteringBarrier reads a merged Tra
     Then the result should be unordered
       | result |
       | m[{"v[marko]":"d[2].l"}] |
+
+  # SEVERAL traversers of one key (`lop` is reached three times): `RangeBiOperator`
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:220-238)
+  # adds a later set only while the seed holds fewer than `high` distinct slots, and a seed it stops at already
+  # holds `high` units, so a `count()` after the cut is `clamp(total - low, 0, high - low)` either way:
+  # limit(3) keeps 3, skip(1) keeps 3 x 4 - 1 = 11.
+  Scenario: g_V_out_group_by_byXconstantXl1_2_1_3X_unfold_limitX3X_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().group().by().by(__.constant([1,2,1,3]).unfold().limit(3).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"v[vadas]":"d[3].l","v[lop]":"d[3].l","v[josh]":"d[3].l","v[ripple]":"d[3].l"}] |
+
+  Scenario: g_V_out_group_by_byXconstantXl1_2_1_3X_unfold_skipX1X_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().group().by().by(__.constant([1,2,1,3]).unfold().skip(1).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"v[vadas]":"d[3].l","v[lop]":"d[11].l","v[josh]":"d[3].l","v[ripple]":"d[3].l"}] |
+
+  # A `sum()` reads WHICH units survive the cut, so it keeps the merge guard (a run-time deferral here).
+  @Unsupported
+  Scenario: g_V_out_group_by_byXconstantXl1_2_1_3X_unfold_limitX3X_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().group().by().by(__.constant([1,2,1,3]).unfold().limit(3).sum())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"v[vadas]":"d[4].i","v[lop]":"d[4].i","v[josh]":"d[4].i","v[ripple]":"d[4].i"}] |

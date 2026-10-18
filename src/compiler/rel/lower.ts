@@ -13,7 +13,7 @@ import { isRel, type Rel } from '../../rel/rel.ts';
 import { freeRelIds, rewriteExpr, stmtChildren } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
-import { beginsWithSource, hostSortsBody, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
+import { armHoldsSortedLocal, beginsWithSource, hostSortsBody, orderReadAfter, bulkingPositions, bulkNonlinear, bulkObservedFrom, MAX_BARRIER_SIZE, mayMergeAt, mayMergeUnplaced, slicedAfter, sortedHostMergeAt, referenceUnbulkedAt, unorderedBarrierMergeObservable, type BulkingKind } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
@@ -271,8 +271,9 @@ export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined): b
   // left positionless emitted the names in start order. The client reads that order as surely as a
   // `fold()` would, so the merge owes it wherever nothing order-free consumes the branch (above).
   // One authority answers it at every depth — a per-start host (`local`/`flatMap`/`coalesce`/`optional`)
-  // inside the arm emits `(start, body order)`, which the arm drains just as whole (`hostSortsBody`).
-  if (position && hostSortsBody(position.steps[position.at])) return true;
+  // inside the arm emits `(start, body order)`, which the arm drains just as whole (`hostSortsBody`; a
+  // sorted `local()` in an arm, which that set leaves out, by `armHoldsSortedLocal`).
+  if (position && (hostSortsBody(position.steps[position.at]) || armHoldsSortedLocal(position.steps[position.at]))) return true;
   return ctx.bodyOrder ? ctx.bodyOrder === 'read' : ctx.ordered || ctx.sliced;
 };
 
@@ -638,7 +639,11 @@ export function mergedAt(
   // step…), the SUPERSET scan still says whether one MAY land here; if it may and a reader observes the
   // order, the order this stream carries cannot be vouched for, so the traversal declines rather than
   // answer the unmerged order.
-  if (positions === 'unknown') return referenceUnbulkedAt(traversal.steps, at, rooted, single) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered, single) ? rel : null;
+  if (positions === 'unknown') {
+    // A merge after a host that emits a SORTED order is read even at a bare root terminal (`sortedHostMergeAt`).
+    if (sortedHostMergeAt(traversal.steps, at, rooted, single)) return null;
+    return referenceUnbulkedAt(traversal.steps, at, rooted, single) || !mayMergeAt(traversal.steps, at, rooted, !rooted && ctx.ordered, single) ? rel : null;
+  }
   const merge = positions.find((p) => p.after === at - 1 && IMPLICIT_MERGES.has(p.kind));
   if (!merge || merge.distinct) return rel;
   // A child's traversers are the ROOT's class (`DefaultTraversal.getTraverserGenerator`, `…/util/DefaultTraversal.java:130-136`):

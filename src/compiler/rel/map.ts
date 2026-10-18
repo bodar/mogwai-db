@@ -351,8 +351,10 @@ interface PoolMerge { readonly guard: Expr | true; readonly firstArrival: boolea
  * WITHIN one traverser's set. `RangeGlobalStep.filter` trims a merged slot's BULK
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:73-120`),
  * so the units it keeps number `clamp(total - low, 0, high - low)` however equal traversers were merged
- * or ordered, and `CountGlobalStep` sums exactly those units. Only a key fed by SEVERAL traversers still
- * defers: `RangeBiOperator` combines their sets by DISTINCT size, which the arrival pool does not state.
+ * or ordered, and `CountGlobalStep` sums exactly those units. A key fed by SEVERAL traversers is no
+ * exception: `RangeBiOperator` (`RangeGlobalStep.java:220-238`) adds a later set only while the seed holds
+ * fewer than `high` DISTINCT slots, and a seed it stops at already holds `high` units — so the clamp is
+ * `high - low` whether or not the rest were added, and the pool's total gives the same count. No guard.
  * (A `sum()`/`min()`/`max()` reads WHICH units survive, so it keeps the whole guard.)
  */
 function poolMergeGuard(
@@ -362,6 +364,11 @@ function poolMergeGuard(
   const cut = pre.findIndex((bodyStep) => isReferenceBarrier(bodyStep));
   if (cut < 0 || mergeInvariantPoolCut(pre[cut]!) || !(SLICE_STEPS.has(pre[cut]!.name) || pre[cut]!.name === 'tail')) return { guard: true, firstArrival: false };
   if (pre.some((bodyStep) => bodyStep.name === 'as')) return null;
+  // A `count()` straight after the cut needs no guard at all — see `counted` above: the units kept are
+  // `clamp(total - low, 0, high - low)`, and that holds across SEVERAL traversers of one key too, because
+  // `RangeBiOperator` skips a later set only once the seed holds `high` distinct slots, i.e. at least `high`
+  // units already, where the clamp is `high - low` either way (`TailGlobalStep`'s `RangeBiOperator(limit)` alike).
+  if (counted && cut === pre.length - 1) return { guard: true, firstArrival: false };
   const pooled = child.rows(pre.slice(0, cut), input, host.elem, host.row?.aliases ?? NO_LABELS);
   const identity = pooled && framingCols(pooled.framing);
   const enc = pooled?.rel.channels.find((channel) => channel.role === 'encounter');
@@ -422,7 +429,7 @@ function poolMergeGuard(
     pred: { kind: 'binary', op: '>', left: col(members.id, 'n'), right: compilerInt(1) },
   });
   const several: Expr = { kind: 'exists', negated: false, plan: repeated };
-  const merges: Expr = counted && cut === pre.length - 1 ? several : {
+  const merges: Expr = {
     kind: 'binary', op: 'or', left: { kind: 'exists', negated: false, plan: scattered }, right: several,
   };
   return {

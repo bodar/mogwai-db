@@ -1,0 +1,280 @@
+Feature: mogwai addendum — a merge downstream of a host that emits a sorted order
+
+  # A host whose body sorts (`hostSortsBody`/`localSortsBody`/`armHoldsSortedLocal`, src/compiler/ir/bulk.ts)
+  # states an emission order the client reads even at a bare terminal. A FlatMapStep after it (values/
+  # properties/unfold/out) followed by no Barrier gets LazyBarrierStrategy's NoOpBarrierStep
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:113-127),
+  # whose TraverserSet folds equal traversers into the FIRST arrival's slot
+  # (.../traverser/util/TraverserSet.java:88-96). Where the exact scan cannot place that merge
+  # (optional/local/union/choose forward their body's own merged traversers), the traversal declines
+  # (`sortedHostMergeAt`) rather than answer the unmerged per-start order. The expectations are the
+  # reference's, kept for the day the merge is reproduced.
+
+  @Unsupported
+  Scenario: g_V_optionalXout_order_byXnameXX_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().order().by("name")).values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | vadas |
+      | ripple |
+      | ripple |
+
+  @Unsupported
+  Scenario: g_V_optionalXout_order_byXnameXX_valuesXnameX_asXnX_selectXnX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().order().by("name")).values("name").as("n").select("n")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | vadas |
+      | ripple |
+      | ripple |
+
+  @Unsupported
+  Scenario: g_V_optionalXout_order_byXnameXX_unfold_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().order().by("name")).unfold().values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | vadas |
+      | ripple |
+      | ripple |
+
+  @Unsupported
+  Scenario: g_V_localXout_order_byXnameXX_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.out().order().by("name")).values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | ripple |
+
+  @Unsupported
+  Scenario: g_V_unionXout_order_byXnameX_identityX_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.out().order().by("name"), __.identity()).values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | ripple |
+      | ripple |
+      | vadas |
+      | vadas |
+      | marko |
+      | peter |
+
+  @Unsupported
+  Scenario: g_V_chooseXhasLabelXpersonX_out_order_byXnameX_identityX_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(__.hasLabel("person"), __.out().order().by("name"), __.identity()).values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | ripple |
+      | ripple |
+      | vadas |
+
+  @Unsupported
+  Scenario: g_V_localXunionXout_order_byXnameX_identityXX_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.union(__.out().order().by("name"), __.identity())).values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | vadas |
+      | marko |
+      | ripple |
+      | ripple |
+      | peter |
+
+  @Unsupported
+  Scenario: g_V_unionXlocalXout_order_byXnameXX_outX_valuesXnameX_isXneqXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.local(__.out().order().by("name")), __.out()).values("name").is(P.neq("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | vadas |
+      | ripple |
+      | ripple |
+
+  # An order-free reduction reads no order, so the merge is unobservable and the traversal still answers.
+  Scenario: g_V_optionalXout_order_byXnameXX_valuesXnameX_isXneqXxXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().order().by("name")).values("name").is(P.neq("x")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[9].l |
+
+  # A sorted `local()` inside a batching arm (residue 5b): `LocalStep` runs its body once per start
+  # (.../step/branch/LocalStep.java:80-88), so the arm emits (start, body order) and the BranchStep drains
+  # it whole (.../step/branch/BranchStep.java:85-88,123-153). The merge owes that order
+  # (`branchOrderOwed`, src/compiler/rel/lower.ts, via `armHoldsSortedLocal`) rather than emitting the
+  # plan's — which was the GLOBAL sort, [josh,lop,lop,lop,ripple,vadas].
+  Scenario: g_V_unionXlocalXout_valuesXnameX_orderXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.local(__.out().values("name").order()))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | lop |
+      | ripple |
+      | lop |
+
+  Scenario: g_V_unionXlocalXout_order_byXnameXX_identityX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.local(__.out().order().by("name")), __.identity()).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | lop |
+      | ripple |
+      | lop |
+      | marko |
+      | vadas |
+      | lop |
+      | josh |
+      | ripple |
+      | peter |
+
+  Scenario: g_V_chooseXhasLabelXpersonX_localXout_valuesXnameX_orderX_constantXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(__.hasLabel("person"), __.local(__.out().values("name").order()), __.constant("x"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | vadas |
+      | lop |
+      | ripple |
+      | lop |
+      | x |
+      | x |
+
+  Scenario: g_V_unionXlocalXout_valuesXnameX_orderXX_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.local(__.out().values("name").order())).limit(2)
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+
+  # The option's EndStep merge (`armEndMerges`, src/compiler/ir/bulk.ts) follows the arm's LAST flat-map:
+  # `values()` here, so the arm's names merge at their first arrival — not reproduced, so it declines.
+  @Unsupported
+  Scenario: g_V_unionXlocalXout_order_byXnameXX_valuesXnameXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.local(__.out().order().by("name")).values("name"))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | vadas |
+      | ripple |

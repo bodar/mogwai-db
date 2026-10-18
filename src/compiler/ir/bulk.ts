@@ -729,6 +729,10 @@ export function armEndMerges(body: readonly IRStep[]): boolean {
   if (positions === 'unknown') return true;
   // Only `LazyBarrierStrategy`'s merge is the EndStep's doing; a side-effect barrier at the end merges with or
   // without it, and that merge is its own step's to reproduce.
+  // A sorted `local()` closing the option is no `FlatMapStep`, so the strategy puts no `NoOpBarrierStep` after
+  // it (`LazyBarrierStrategy.java:116-127`); the superset's position there is the merge its body FORWARDS
+  // (`bodiesMayBulk`), which the body's own lowering reproduces — not the EndStep's doing.
+  if (localSortsBody(body[body.length - 1])) return false;
   return positions.some((p) => p.after === body.length - 1 && !p.distinct && p.kind === 'lazy') && !sortedAdjacent(body, body.length - 1);
 }
 
@@ -833,6 +837,35 @@ const ORDER_FREE: ReadonlySet<string> = new Set(['count', 'sum', 'min', 'max', '
 export function orderReadAfter(steps: readonly IRStep[], from: number, inherited = true): boolean {
   for (let i = from; i < steps.length; i++) if (ORDER_FREE.has(steps[i]!.name) && !isLocalScope(steps[i]!)) return false;
   return inherited;
+}
+
+/**
+ * DOES AN IMPLICIT MERGE LAND AT `at` OF A ROOT TRAVERSAL, DOWNSTREAM OF A HOST THAT EMITS A SORTED ORDER,
+ * WHILE THAT ORDER IS READ? A host whose body sorts (`hostSortsBody`, `localSortsBody`) states an emission
+ * order the client reads even at a bare terminal (the terminal seed, `ir/analyze.ts`), so a merge after it
+ * is observable there too: `g.V().optional(out().order().by('name')).values('name').is(neq('x'))` gets
+ * `LazyBarrierStrategy`'s `NoOpBarrierStep` after `values()` — a `FlatMapStep` whose next step is no
+ * `Barrier` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:113-127`)
+ * — whose `TraverserSet` folds every equal name into its FIRST arrival's slot
+ * (`…/traverser/util/TraverserSet.java:88-96`): `[josh, lop×4, vadas×2, ripple×2]`, not the per-start order.
+ * `mergedAt` (`rel/lower.ts`) asks this where the EXACT scan cannot place the merge, and declines. The
+ * superset's position after a bulk-forwarding host is its BODY's forwarded merge (`bodiesMayBulk`), the body's
+ * own to reproduce — no strategy barrier, so it is left out. A root reached by an order-free reduction
+ * (`orderReadAfter`) reads no order.
+ */
+export function sortedHostMergeAt(steps: readonly IRStep[], at: number, rooted: boolean, singleStart = !rooted): boolean {
+  if (!rooted || at <= 0 || !orderReadAfter(steps, at, true)) return false;
+  if (!steps.slice(0, at).some((s) => hostSortsBody(s) || localSortsBody(s) || armHoldsSortedLocal(s))) return false;
+  const positions = scan(steps, rooted, 'superset', at, singleStart);
+  if (positions !== 'unknown')
+    return positions.some((p) => p.after === at - 1 && !p.distinct && IMPLICIT.has(p.kind) && !BULK_FORWARDING.has(steps[p.after]!.name));
+  // The superset cannot see the prefix (a batching branch holding a barrier): judge the step before `at` on
+  // its own, as `mayMergeAt` does — a flat-map or path processor whose next step is no `Barrier`.
+  const before = steps[at - 1]!;
+  const next = nextReferenceStep(steps, at - 1);
+  if (!next || isReferenceBarrier(next)) return false;
+  if (before.perTraverser) return before.splicedHost === 'flatMap';
+  return FLAT_MAPS.has(before.name) || OTHER_V.has(before.name) || SUPERSET_PATH_PROCESSORS.has(before.name);
 }
 
 export function mayMergeUnplaced(steps: readonly IRStep[], at: number): boolean {
@@ -950,8 +983,9 @@ export function bulkNonlinear(body: readonly IRStep[]): boolean {
  *  `g.V().local(out().order().by('name')).fold()` declines on trunk. Owing an order through it would turn
  *  every sorted `local()` arm into that decline, `g_V_chooseXvaluesXageX_isXlteX30XX_localXout_order_byXnameX_limitX1XX_…`
  *  among them, which the corpus answers by count. The bare `local()` at a ROOT keeps its exact per-start
- *  order on its own (`originMajor`, `rel/lower/reduction.ts`); the one inside a batching arm stays the
- *  open residue `docs/outstanding-work.md` names. */
+ *  order on its own (`originMajor`, `rel/lower/reduction.ts`); the one inside a batching arm is owed by its
+ *  own question (`armHoldsSortedLocal`), which closes the option's end without the EndStep merge a sorted
+ *  `local()` never gets (`armEndMerges`). */
 const EMITTING_HOSTS: ReadonlySet<string> = new Set(['flatMap', 'coalesce', 'optional', 'union', 'choose']);
 
 /**
@@ -981,4 +1015,35 @@ export function hostSortsBody(step: IRStep | undefined): boolean {
     else arm(chain as IRStep[]);
   }, unreadable);
   return sorts;
+}
+
+/** A `local()` whose body sorts (a global `order()`, or an emitting host that sorts, at any depth). */
+export function localSortsBody(step: IRStep | undefined): boolean {
+  if (!step || step.name !== 'local') return false;
+  const read = rawBodies({});
+  let sorts = false;
+  eachChildChain(step, read, (chain) => {
+    const body = chain as IRStep[];
+    // A global reduction after the sort (`local(out().order().fold())`) emits ONE traverser per start: the
+    // order is that value's, not the stream's.
+    const sortsAt = body.findLastIndex((s) => (s.name === 'order' && !isLocalScope(s)) || hostSortsBody(s) || localSortsBody(s));
+    if (sortsAt >= 0 && !body.slice(sortsAt + 1).some((s) => REDUCING.has(s.name) && !isLocalScope(s))) sorts = true;
+  }, () => { sorts = true; });
+  return sorts;
+}
+
+/** Does an emitting host hold, in an arm at any depth through further emitting hosts, a sorted `local()`? */
+export function armHoldsSortedLocal(step: IRStep | undefined): boolean {
+  if (!step || !EMITTING_HOSTS.has(step.name)) return false;
+  const read = rawBodies({});
+  let holds = false;
+  const unreadable = (): void => { holds = true; };
+  const arm = (body: readonly IRStep[]): void => {
+    if (body.some((s) => localSortsBody(s) || armHoldsSortedLocal(s))) holds = true;
+  };
+  eachChildChain(step, read, (chain) => {
+    if (chain === step.optionArms) for (const option of chain) eachChildChain(option, read, (body) => arm(body as IRStep[]), unreadable);
+    else arm(chain as IRStep[]);
+  }, unreadable);
+  return holds;
 }
