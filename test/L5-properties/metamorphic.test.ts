@@ -60,7 +60,11 @@ describe('L5 — metamorphic laws', () => {
           // — multiset equality implies it — so the count still catches the defects this oracle exists
           // for (a silent [], a dropped or duplicated traverser) while tolerating the one thing that
           // is genuinely undetermined: WHICH members the window took.
-          const window = orderIndeterminacy(p.src);
+          // Judged on the COMPOSED sides, not the bare prefix: a law appends a suffix after the prefix
+          // (`…limit(2)` + `.both('knows')`), and a step consuming an unordered window's picked members
+          // makes even the count undetermined.
+          const sides = [orderIndeterminacy(law.lhs(p.src)), orderIndeterminacy(law.rhs(p.src))];
+          const window = sides.includes('cardinality') ? 'cardinality' : sides.includes('members') ? 'members' : null;
           if (window === 'cardinality') { undetermined++; return true; }
           if (window === 'members' && a.kind === 'rows' && b.kind === 'rows') {
             countOnly++;
