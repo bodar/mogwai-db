@@ -309,7 +309,7 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | Unread erroneous values | a type error inside a value nothing reads is not evaluated: `project('x').by(values('age').toUpper()).count()` answers the row count, `where(<…>.fold())` keeps the row |
 | Implicit barrier window | the `NoOpBarrierStep(2500)` Java puts after a vertex flat-map is a full drain for a write before or after it, on any graph — `g.V(1,4).out().out().addE('k').to(V(3))` answers alike at 6 or 6,000 vertices, where Java interleaves past 2,500 distinct vertices |
 | Number equality | by VALUE across Int/Long/Double/Float/BigDecimal — `1`, `1L` and `1.0` compare, dedup and group alike; `true` and `1` stay distinct. The result CLASS is still kept on output |
-| Signed zero | none: `-0.0` is `0.0` (as in SQLite) in compare, order, dedup, group keys and output |
+| Signed zero | none: `-0.0` is `0.0` (as in SQLite) in compare, order, dedup, set ops, group keys, `sum`/`mean`/`min`/`max`, labels, stored collections and output (`asString()` prints `0.0`); its class (Double/Float) is kept |
 | Ties in `order()` | values equal by value (`1m`/`1.0d`; `0m`/`-0.0d`/`0.0d`) tie and fall to the existing tie-break, not Java's class-aware order; such a sort always answers, never defers |
 | Float | stored and computed as the Double of its literal, rounded to 32 bits (`Math.fround`) only when framed |
 | Extreme-magnitude Doubles | outside roughly [1e-80, 1e116] a value crossing SQLite's decimal text may lose its last ulp |

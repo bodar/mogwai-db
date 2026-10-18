@@ -191,11 +191,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
 
   const expr = (e: Expr, scope: Scope): Expression => {
     const self = (x: Expr): Expression => expr(x, scope);
-    // An ENTRY of a JSON writer: a compiler NEGATIVE ZERO crosses as the JSON number `-0.0`, because
-    // SQLite's JSON writer prints a REAL −0.0 as `0.0` — the sign every reader then loses. The one
-    // spelling for a literal, at every JSON-constructing position; a run-time zero takes the same
-    // repair at its own authority (`jsonMember`'s `asExactReal`, `compiler/rel/build.ts`).
-    // A literal OUTSIDE the range SQLite's decimal conversion is exact in DEFERS where it would enter, as a
+    // An ENTRY of a JSON writer: a literal OUTSIDE the range SQLite's decimal conversion is exact in DEFERS where it would enter, as a
     // run-time one does (`asExactReal`): the writer would print SQLite's own digits of it (`exact-decimal.ts`).
     // And a literal whose 15-significant-digit form is ANOTHER Double — SQLite's JSON writer prints a REAL at
     // 15 digits, so `json_array(1.2345678901234568E16)` is `[1.23456789012346e+16]` and `0.30000000000000004`
@@ -205,7 +201,6 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const jsonEntry = (x: Expr): Expression => {
       if (x.kind !== 'lit' || x.source !== 'compiler-real' || !Number.isFinite(x.value as number)) return self(x);
       const v = x.value as number;
-      if (Object.is(v, -0)) return raw("json('-0.0')");
       if (!hasExactDecimal(v)) return self(deferralExpr(INEXACT_DECIMAL, { kind: 'call', fn: 'random', args: [] }));
       if (Number(v.toPrecision(15)) === v) return self(x);
       const shortest = String(v);
@@ -236,9 +231,6 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           // this arm — `constLit` renders it `9e999 - 9e999`, since SQLite has no NaN at all.)
           case 'compiler-real': {
             if (!Number.isFinite(e.value as number)) return raw((e.value as number) > 0 ? '9e999' : '-9e999');
-            // A NEGATIVE ZERO is a distinct Double (`Double.toString` prints `-0.0`, `Double.compare` orders
-            // it below `0.0`), and `String(-0)` is `"0"` — so its sign is spelled, which SQLite keeps.
-            if (Object.is(e.value, -0)) return raw('-0.0');
             // Outside the range SQLite's decimal reader is exact in, a literal is spelled as an exact product
             // (`exactRealSpelling`, `exact-decimal.ts`): `1.5e-300` typed as itself reads back 1.4999999999999998E-300.
             const exact = exactRealSpelling(e.value as number);

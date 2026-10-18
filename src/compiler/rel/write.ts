@@ -453,9 +453,7 @@ const storedExpr = (write: PropertySet): Expr => {
   // materialized value's class, which is why an integral Double continues to land INTEGER
   // (the JSON set writer has the same representation). This keeps writes and bulk imports
   // byte-identical while `vtype: double` still frames the property as a Double on read.
-  // A NEGATIVE ZERO is the exception: it is not integral to SQLite (an INTEGER has no −0), so it stays
-  // the REAL −0.0 the untyped `value` column keeps — `Double.toString(-0.0)` is `-0.0` on read.
-  const storageType = typeof write.stored === 'number' && Number.isInteger(write.stored) && !Object.is(write.stored, -0) ? 'int' : write.vtype;
+  const storageType = typeof write.stored === 'number' && Number.isInteger(write.stored) ? 'int' : write.vtype;
   return constLit(arg(write.stored, storageType, write.valueName))!;
 };
 

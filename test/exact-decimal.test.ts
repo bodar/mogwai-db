@@ -54,6 +54,6 @@ describe('a JSON tree headed into SQLite refuses a number outside the range', ()
   });
   test('keeps everything else', () => {
     expect(stringifyExact([1e116, 1e-80, 0, -0, Infinity, 0.30000000000000004, 12345678901234567890])).toBe(
-      '[1e+116,1e-80,0,-0.0,9.0e+999,0.30000000000000004,12345678901234567000]');
+      '[1e+116,1e-80,0,0,9.0e+999,0.30000000000000004,12345678901234567000]');
   });
 });

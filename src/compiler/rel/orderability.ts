@@ -198,12 +198,9 @@ const lostInteger = (value: number): UnsupportedTraversal =>
 
 const asDouble = (value: number | bigint | string): number => (typeof value === 'number' ? value : Number(value));
 
-/** `Double.compare` / `Float.compare` — a TOTAL order where `-0.0 < 0.0` (NaN is settled before this). */
+/** A floating compare (NaN is settled before this). A zero has no sign: `-0.0` ties `0.0`, as in SQLite. */
 function cmpFloating(x: number, y: number): number {
-  if (x < y) return -1;
-  if (x > y) return 1;
-  if (x === 0 && y === 0) return Object.is(x, -0) === Object.is(y, -0) ? 0 : Object.is(x, -0) ? -1 : 1;
-  return 0;
+  return x < y ? -1 : x > y ? 1 : 0;
 }
 
 /** A floating member's `BigDecimal` — `BigDecimal.valueOf(double)` for a double (its shortest decimal,

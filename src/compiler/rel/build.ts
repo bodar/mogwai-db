@@ -1,8 +1,8 @@
-import { stringifyExactOrRefuse } from '../../json-exact.ts';
+import { stringifyExact } from '../../json-exact.ts';
 import { CARRIER_BANDS, INEXACT_DECIMAL, outsideExactDecimal } from '../../rel/exact-decimal.ts';
 import { deferralExpr } from '../../rel/raise.ts';
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerReal, compilerText, param, signBit, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerReal, compilerText, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import { inferredVtype, SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
@@ -310,7 +310,7 @@ export const notProduced = (pred: Expr): Expr =>
  * exclusive with `jsonTypes` (a membership set has no meaningful order) — the resume path never uses both.
  */
 export function jsonEachSet(name: string, value: readonly unknown[], fresh: Minter, jsonTypes?: readonly string[], ordCol?: string): Rel {
-  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(stringifyExactOrRefuse(value), name)] };
+  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(stringifyExact(value), name)] };
   const exploded = make.explode(jsonTypes
     ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', type: 'st' }, type: typeOf(meta('sv', 'any', true), meta('st', 'text', true)) }
     : ordCol
@@ -550,15 +550,6 @@ const asExactReal = (value: Expr, realOnly = true, ranged = true, carry: OutOfRa
   return {
     kind: 'case',
     whens: [
-      // A NEGATIVE ZERO, which SQLite's JSON writer (and `printf`) spells `0.0`: `Double.equals(-0.0, 0.0)` is
-      // false, so a member that lost its sign is another member. `json('-0.0')` is kept as written, and the
-      // reader parses it back as the Double it is (`parseExactJson`, `json-exact.ts`). `atan2(±0, -1)` is ±π,
-      // the one comparison that reads the sign bit (`signBit`, `rel/expr.ts`). A NULL makes both
-      // comparisons NULL — no arm — so it reaches the ELSE as itself. (TEXT never equals the integer 0.)
-      [{ kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '=', left: value, right: compilerInt(0) },
-        right: signBit(value) },
-      jsonCall(compilerText('-0.0'))],
       // OUTSIDE the range SQLite's decimal conversion is exact in (`exact-decimal.ts`), no spelling it writes is
       // known to be the value — `printf('%!.17g')` is off by ulps, the 15-digit writer is right only where 15
       // digits suffice, and the `lossy` test that would say so is itself wrong there — and SQLite's own reader
@@ -1014,14 +1005,12 @@ export function regroupFirstOccurrence(
 /**
  * THE TRAVERSER EQUALITY a merge partitions on — `Objects.equals(t, other.t)`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`),
- * which is TYPED: `Integer(1).equals(Double(1.0))` and `Double.equals(-0.0, 0.0)` (it compares
- * `doubleToLongBits`) are both false. SQLite's `PARTITION BY` compares by VALUE across storage classes
- * (INTEGER 1 = REAL 1.0) and cannot see a zero's sign, so every key term a value can sit in is widened
- * here, ONCE, for every merge and tie guard: by its storage class (`typeof`, which tells an Integer from
- * a Double where no type tag does — a per-row tag, where carried, is normalized into that class below) and, for a
- * zero, by its sign (`atan2(±0, -1)` is ±π, the comparison `receiver.ts`'s `floatingText` reads the sign
- * bit with). A term declared `text`/`int`/`json`/`blob` has one storage class and no signed zero, so it
- * keys as itself: a JSONB collection compares by its BYTES, which carry each member's numeric form
+ * which is TYPED: `Integer(1).equals(Double(1.0))` is false. SQLite's `PARTITION BY` compares by VALUE
+ * across storage classes (INTEGER 1 = REAL 1.0), so every key term a value can sit in is widened here, ONCE,
+ * for every merge and tie guard, by its storage class (`typeof`, which tells an Integer from a Double where
+ * no type tag does — a per-row tag, where carried, is normalized into that class below). A zero has no
+ * sign: `-0.0` and `0.0` are one key, as in SQLite (a deliberate divergence, `feature-support-matrix.md`).
+ * A term declared `text`/`int`/`real`/`json`/`blob` has one storage class, so it keys as itself: a JSONB collection compares by its BYTES, which carry each member's numeric form
  * (`1` vs `1.0`) — a member type the bare encoding cannot carry is refused where the list is BUILT
  * (`listLiteralBlob`), so equal bytes are equal typed lists.
  */
@@ -1056,8 +1045,7 @@ export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
     const name = ownName(term);
     if (name && subsumedTags.has(name)) return [];
     const type = declared(term);
-    if (type !== 'any' && type !== 'real') return [term];
-    if (type === 'real') return [term, signOfZero(term)];
+    if (type !== 'any') return [term];
     // Only the value column a tag rides beside is described by it; any other term keys by its own class.
     const tag = name && tagOf.get(name);
     return tag ? typedKeyAs(term, valueClass(col(rel.id, tag), term)) : typedKey(term);
@@ -1077,23 +1065,16 @@ const TAG_SUFFIXES: readonly string[] = [MERGED_VTYPE, 'vt'];
 export const valueClass = (tag: Expr, value: Expr): Expr =>
   ({ kind: 'call', fn: 'coalesce', args: [reducedVtype(tag), inferredVtype(value)] });
 
-/** A zero's sign as a key term — `atan2(±0, -1)` is ±π — and NULL for every other value. */
-const signOfZero = (term: Expr): Expr => ({
-  kind: 'case',
-  whens: [[{ kind: 'binary', op: '=', left: term, right: compilerInt(0) }, { kind: 'call', fn: 'atan2', args: [term, compilerInt(-1)] }]],
-  else: compilerNull(),
-});
-
 /**
- * `typedEquality`'s key for ONE value of unknown storage class (an `any` term): the value, its storage
- * class and a zero's sign. Two values are `Objects.equals` iff every term agrees under `IS` — the form a
+ * `typedEquality`'s key for ONE value of unknown storage class (an `any` term): the value and its
+ * storage class. Two values are `Objects.equals` iff every term agrees under `IS` — the form a
  * caller that compares (a set op's membership) rather than partitions spends, through `typedSame`.
  */
 export const typedKey = (term: Expr): Expr[] => typedKeyAs(term, { kind: 'call', fn: 'typeof', args: [term] });
 
 /** `typedKey` where the caller already knows a sharper CLASS term than the storage class — a list
  *  member's own Gremlin tag, which tells a `{t:'int'}` from a `{t:'long'}` that share an INTEGER. */
-export const typedKeyAs = (term: Expr, cls: Expr): Expr[] => [term, cls, signOfZero(term)];
+export const typedKeyAs = (term: Expr, cls: Expr): Expr[] => [term, cls];
 
 /**
  * `typedEquality`'s key for ONE value OUTSIDE a relation's own columns — a `by()` projection, a label's

@@ -60,11 +60,10 @@ const INTEGRAL_TAGS: ReadonlySet<unknown> = new Set(['byte', 'short', 'int', 'lo
 const DECIMAL_INTEGER = /^-?\d+$/;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A JS number as JSON, exactly: a negative zero keeps its sign (`JSON.stringify(-0)` is `0`), and a NaN
- *  or an infinity — which `JSON.stringify` writes as `null` — declines. */
+/** A JS number as JSON, exactly: a NaN or an infinity — which `JSON.stringify` writes as `null` — declines. */
 function untypedNumber(x: number): unknown {
   if (!Number.isFinite(x)) throw new UnspellableJson(`the Double ${x}`);
-  return Object.is(x, -0) ? rawNumber('-0.0') : x;
+  return x;
 }
 
 /** A Long/BigInteger as JSON: a JS number within ±2^53, else its exact digits (a JSON number has no
@@ -85,7 +84,7 @@ function untypedLeaf(tag: string | null, v: unknown): unknown {
  * One `FrameNode` → plain JS (a `JSON.stringify`-able value). Total over the FrameNode union: a
  * container recurses, an element renders to its untyped GraphSON object, a token renders to its name,
  * and a scalar leaf renders to its bare value — EXACTLY, or not at all (`UnspellableJson`): a Long past
- * 2^53 as its exact digits (`JSON.rawJSON`), a negative zero as `-0.0`.
+ * 2^53 as its exact digits (`JSON.rawJSON`).
  */
 export function untyped(node: FrameNode): unknown {
   if (node === null || node === undefined) return null;
@@ -192,7 +191,7 @@ function scalarKey(tag: string | null, v: unknown): string {
   } else if (tag === 'boolean') {
     if (typeof v === 'boolean') return String(v);
   } else if (INTEGRAL_TAGS.has(tag)) {
-    if (typeof v === 'bigint' || (typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0))) return String(v);
+    if (typeof v === 'bigint' || (typeof v === 'number' && Number.isSafeInteger(v))) return String(v);
     if (typeof v === 'string' && DECIMAL_INTEGER.test(v)) return String(BigInt(v));
   } else if (tag === 'double' || tag === 'real' || tag === 'float') {
     if (typeof v === 'number') return javaDecimal(v, tag === 'float' ? 'float' : 'double');
@@ -206,13 +205,13 @@ function scalarKey(tag: string | null, v: unknown): string {
  * `Double.toString` / `Float.toString` (`java.lang.Double#toString(double)`, JDK 19+): the SHORTEST decimal
  * that reads back as the value (for a Float, back through `float` rounding — `Math.fround`), laid out
  * plainly with at least one fraction digit when 10^-3 <= |x| < 10^7 (`1.0`, `0.001`), otherwise as
- * `<d.ddd>E<n>` (`1.5E300`, `1.0E-5`); `NaN`, `Infinity`, `-0.0` by name. JS's `Number#toString` picks the
+ * `<d.ddd>E<n>` (`1.5E300`, `1.0E-5`); `NaN` and `Infinity` by name (a zero is `0.0`, sign and all). JS's `Number#toString` picks the
  * same shortest digits for a double; only the layout differs.
  */
 function javaDecimal(x: number, cls: 'double' | 'float'): string {
   if (Number.isNaN(x)) return 'NaN';
   if (!Number.isFinite(x)) return x > 0 ? 'Infinity' : '-Infinity';
-  if (x === 0) return Object.is(x, -0) ? '-0.0' : '0.0';
+  if (x === 0) return '0.0';
   let d = x;
   if (cls === 'float') {
     if (Math.fround(x) !== x) throw new UnspellableJson(`the Float ${x}`);

@@ -194,20 +194,6 @@ describe('dateAdd() never leaks a JS RangeError', () => {
   });
 });
 
-describe('a negative zero keeps its sign through every set op', () => {
-  test.each([
-    ['g.inject([-0.0d,2]).product([1])', '[[-0d,1i],[2i,1i]]'],
-    ['g.inject([2]).product([-0.0d])', '[[2i,-0d]]'],
-    ['g.inject([-0.0d,2]).combine([1])', '[-0d,2i,1i]'],
-    ['g.inject(-0.0d,1).fold().combine([1])', '[-0d,1i,1i]'],
-    ['g.inject(-0.0d,1).fold().merge([1])', 'set[-0d,1i]'],
-    ['g.inject(-0.0d,1).fold().difference([0.0d])', 'set[-0d,1i]'],
-    ["g.inject(-0.0d,'a').fold().product([1])", '[[-0d,1i],["a",1i]]'],
-  ])('%s', async (q, want) => {
-    expect(await run(q)).toEqual([want]);
-  });
-});
-
 // `log(0)`/`log10(0)`/`log2(0)` are the VALUE -Infinity in exp4j (Math.log), which `math.ts`'s `logAt` computes
 // rather than leave SQLite's NULL to the deferral; a genuine NaN (`sqrt(-1)`) still defers.
 test("math(): log(0) is -Infinity, a NaN result defers", async () => {

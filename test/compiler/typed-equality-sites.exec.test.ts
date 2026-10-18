@@ -75,14 +75,12 @@ describe('within/without agree with eq on a null — Contains.within is Compare.
 });
 
 describe('dedup and the set ops key on typed equality — HashSet is Objects.equals', () => {
-  test('dedup() keeps a signed zero and an Integer beside a Double, at every arm', () => {
-    expect(typed('g.inject(-0.0, 0.0).dedup().fold()')).toEqual(['[-0d,0d]']);
-    expect(typed('g.inject(-0.0, 0.0, -0.0).dedup()')).toEqual(['-0d', '0d']);
-    expect(typed('g.inject(-0.0, 0.0).order().dedup().fold()')).toEqual(['[-0d,0d]']);
-    expect(typed('g.inject(-0.0, 0.0).union(__.identity(), __.identity()).dedup().fold()')).toEqual(['[-0d,0d]']);
-    expect(typed('g.inject(-0.0, 0.0).dedup().by(identity()).fold()')).toEqual(['[-0d,0d]']);
+  test('dedup() keeps an Integer beside a Double; a signed zero is one zero', () => {
     expect(typed('g.inject(1, 1.0, 1).dedup().fold()')).toEqual(['[1i,1d]']);
-    expect(typed('g.V(1).local(__.constant([-0.0, 0.0]).unfold().dedup().fold())')).toEqual(['[-0d,0d]']);
+    // No signed zero: `-0.0` and `0.0` are one value, as in SQLite (a deliberate divergence).
+    expect(typed('g.inject(-0.0, 0.0).dedup().count()')).toEqual(['1L']);
+    expect(typed('g.inject(-0.0, 0.0).union(__.identity(), __.identity()).dedup().count()')).toEqual(['1L']);
+    expect(typed('g.V(1).local(__.constant([-0.0, 0.0]).unfold().dedup().count())')).toEqual(['1L']);
   });
 
   test('one Double stored INTEGER beside the same Double computed REAL is still one value', () => {
@@ -91,17 +89,12 @@ describe('dedup and the set ops key on typed equality — HashSet is Objects.equ
       .toEqual(['[0.2d,0.4d,0.5d,1d]']);
   });
 
-  test('dedup(local) keys on the member class and a zero sign', () => {
+  test('dedup(local) keys on the member class', () => {
     // `DedupLocalStep` yields a `LinkedHashSet`, which frames as a SET in insertion order.
     expect(typed('g.inject([1, 1.0]).dedup(local)')).toEqual(['set[1i,1d]']);
-    expect(typed('g.inject(-0.0, 0.0).fold().dedup(local)')).toEqual(['set[-0d,0d]']);
+    expect(typed('g.inject(-0.0, 0.0).fold().dedup(local).count(local)')).toEqual(['1L']);
     expect(typed('g.inject(1, 1L, 1.0, 1).fold().dedup(local)')).toEqual(['set[1i,1L,1d]']);
     expect(typed("g.E().values('weight').fold().dedup(local)")).toEqual(['set[0.5d,1d,0.4d,0.2d]']);
-  });
-
-  test('a list member op keeps a negative zero', () => {
-    expect(typed('g.inject(-0.0, 0.0).fold().order(local)')).toEqual(['[-0d,0d]']);
-    expect(typed('g.inject(-0.0, 0.0).fold().range(local, 0, 2)')).toEqual(['[-0d,0d]']);
   });
 
   test('intersect/difference/disjunct/merge compare an Integer and a Double as two values', () => {
@@ -184,45 +177,32 @@ describe('a stored whole Double and a computed one are one value at every JSON-t
     expect(typed(`${W}.union(identity(), constant(1.0)).fold().unfold().groupCount()`)).toEqual(KEYS);
   });
 
-  test('a negative zero and an Integer stay apart', () => {
-    expect(typed("g.inject(-0.0, 0.0).groupCount()")).toEqual(['{-0d:1L,0d:1L}']);
+  test('an Integer and a Double stay apart; a signed zero is one zero', () => {
     expect(typed("g.inject(1, 1.0).as('a').dedup('a').fold()")).toEqual(['[1i,1d]']);
-  });
-});
-
-describe('a label keeps a negative zero — the history entry is the JSON writer\'s, repaired', () => {
-  test('select/dedup(label) read the signed zero back', () => {
-    expect(typed("g.inject(-0.0, 0.0).as('a').select('a').fold()")).toEqual(['[-0d,0d]']);
-    expect(typed("g.inject(-0.0, 0.0).as('a').dedup('a').fold()")).toEqual(['[-0d,0d]']);
-    expect(typed("g.inject(-0.0, 0.0).as('a', 'b').dedup('a', 'b').fold()")).toEqual(['[-0d,0d]']);
     expect(typed("g.inject(1, 1.0).as('a').select('a').fold()")).toEqual(['[1i,1d]']);
+    expect(typed("g.inject(-0.0, 0.0).groupCount()")).toEqual(['{0d:2L}']);
+    expect(typed("g.inject(-0.0, 0.0).as('a').dedup('a').count()")).toEqual(['1L']);
   });
 });
 
-// A map KEY is a HashMap key, and `Double.equals(0.0, -0.0)` is false (it compares `doubleToLongBits`):
-// `GroupCountStep`/`GroupStep` keep `0.0` and `-0.0` as two groups
-// (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupCountStep.java).
 // A label read as a key (`by(select('a'))`) used to drop its STATIC recorded type and hand `json_object` the
-// bare REAL, whose writer spells `-0.0` as `0.0`, so the two keys merged into one `{0d:2L}`.
-describe('a signed zero is its own map key at every key position', () => {
+// bare REAL, whose writer keeps 15 digits. A zero has no sign (a deliberate divergence): `0.0` and `-0.0`
+// are ONE key at every key position, as SQLite compares them.
+describe('a map key keeps its class at every key position; a signed zero is one key', () => {
   const zeros = seededStore();
   executeQuery(zeros, "g.addV('z').property('x', 0.0d).addV('z').property('x', -0.0d).addV('z').property('x', 1.0d)", {});
   const at = (q: string) => typedAll(executeQuery(zeros, q, {}));
   test('groupCount/group over the traverser, a by(), a side effect and a label', () => {
     for (const [q, want] of [
-      ['g.inject(0.0d, -0.0d).groupCount()', '{-0d:1L,0d:1L}'],
-      ['g.inject(0.0d, -0.0d, 0.0d).groupCount()', '{-0d:1L,0d:2L}'],
-      ['g.inject(1.0d, 1.0d, -0.0d).groupCount()', '{-0d:1L,1d:2L}'],
-      ['g.inject(0.0d, -0.0d).group().by(identity())', '{-0d:[-0d],0d:[0d]}'],
-      ['g.inject(0.0d, -0.0d).group().by().by(count())', '{-0d:1L,0d:1L}'],
-      ["g.inject(0.0d, -0.0d).groupCount('m').cap('m')", '{-0d:1L,0d:1L}'],
-      ["g.V().hasLabel('z').groupCount().by('x')", '{-0d:1L,0d:1L,1d:1L}'],
-      ["g.V().hasLabel('z').group().by('x').by(count())", '{-0d:1L,0d:1L,1d:1L}'],
-      ["g.inject(0.0d, -0.0d).as('a').groupCount().by(select('a'))", '{-0d:1L,0d:1L}'],
-      ["g.inject(0.0d, -0.0d).as('a').group().by(select('a'))", '{-0d:[-0d],0d:[0d]}'],
-      ["g.inject(0.0d, -0.0d).as('a').map(constant(1)).groupCount().by(select('a'))", '{-0d:1L,0d:1L}'],
-      ["g.inject(0.0f, -0.0f).as('a').groupCount().by(select('a'))", '{-0f:1L,0f:1L}'],
-      ["g.V().hasLabel('z').values('x').as('a').groupCount().by(select('a'))", '{-0d:1L,0d:1L,1d:1L}'],
+      ['g.inject(0.0d, -0.0d).groupCount()', '{0d:2L}'],
+      ['g.inject(1.0d, 1.0d, -0.0d).groupCount()', '{0d:1L,1d:2L}'],
+      ['g.inject(0.0d, -0.0d).group().by().by(count())', '{0d:2L}'],
+      ["g.inject(0.0d, -0.0d).groupCount('m').cap('m')", '{0d:2L}'],
+      ["g.V().hasLabel('z').groupCount().by('x')", '{0d:2L,1d:1L}'],
+      ["g.V().hasLabel('z').group().by('x').by(count())", '{0d:2L,1d:1L}'],
+      ["g.inject(0.0d, -0.0d).as('a').groupCount().by(select('a'))", '{0d:2L}'],
+      ["g.inject(0.0d, -0.0d).as('a').map(constant(1)).groupCount().by(select('a'))", '{0d:2L}'],
+      ["g.V().hasLabel('z').values('x').as('a').groupCount().by(select('a'))", '{0d:2L,1d:1L}'],
     ] as const) expect(at(q), q).toEqual([want]);
   });
   test('the label key keeps its class and its 17 digits too', () => {

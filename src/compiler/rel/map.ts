@@ -1392,12 +1392,8 @@ export function mapLiteralBlob(value: unknown, type: TypeNode | null, paramName:
     try { valNode = valueNodeOf(vv, entries[String(k)]?.value ?? null); } catch { return null; }
     pairs.push([keyNode, valNode]);
   }
-  // `stringifyExact`: `JSON.stringify(-0)` is `0`, so `[a:-0.0]` framed `{a:0.0}` and its bytes — the map's
-  // merge key (`typedEquality`, build.ts) — equalled `[a:0.0]`'s, where `Map.equals` compares values with
-  // `Double.equals` and keeps them apart. Spelled `-0.0`, SQLite's JSON keeps the sign and the bytes differ.
-  let json: string | null;
+  let json: string;
   try { json = stringifyExact(pairs); } catch { return null; }
-  if (json == null) return null;
   // `MAP_COL` is JSONB, exactly what `mapPayload` reads back through `json()`. A bound map uses the
   // same pairs encoding, but the whole data-sized document is one user bind before `json_each` reads it.
   return { kind: 'call', fn: 'jsonb', args: [paramName == null ? compilerText(json) : param(json, paramName)] };

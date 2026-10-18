@@ -442,7 +442,7 @@ function combine(operator: string, facts: FoldFacts, fresh: Minter): Expr | null
     case 'assign': return operand;
     // The sack is spelled ONCE where the operand cannot be NULL (see `CLASSES` for why a spelling counts).
     // A TIE keeps the SACK — `SackValueStep` applies `Operator.max/min(sack, value)` — which is observable
-    // for `-0.0` against `0.0` (`reducer.ts` `extremumKeepingFirst`).
+    // for a BigDecimal `1.0` against `1.00` (`reducer.ts` `extremumKeepingFirst`).
     case 'min':
     case 'max': return extremumKeepingFirst(operator, call('COALESCE', sack, operand), nullable ? call('COALESCE', operand, sack) : operand);
     default: {

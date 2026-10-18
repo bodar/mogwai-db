@@ -1,4 +1,4 @@
-import { stringifyExactOrRefuse } from '../../json-exact.ts';
+import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, compilerParamName, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
@@ -4206,7 +4206,7 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
   // `count` is the ONE monoid — it installs an explicit `ConstantSupplier(0L)`, so empty count is `0`
   // (arriving here as `v:0`, emitted), while an empty semigroup fold arrives as `v:null` and is dropped.
   const empty = value != null && typeof value === 'object' && 't' in value && (value as { v?: unknown }).v == null;
-  const node: Expr = compilerText(stringifyExactOrRefuse(value));
+  const node: Expr = compilerText(stringifyExact(value));
   const one = make.values({
     id: fresh('scv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
     rows: [[jsonOf(node)]],
@@ -4237,7 +4237,7 @@ export function lowerTypedNodeStream(nodes: readonly FrameNode[], parents?: numb
   // `Values` REFUSES an empty relation (`checkValuesShape`), so an empty stream is a one-row `Values`
   // FILTERED to nothing — the same honest `Filter(false)` `lowerScalarResume` uses for the empty aggregate
   // (§3.3). A non-empty stream is one `Values` row per node.
-  const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(stringifyExactOrRefuse(node)))]);
+  const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(stringifyExact(node)))]);
   const one = make.values({ id: fresh('tnv'), channels: [], type, rows: nodes.length > 0 ? rowsOf(nodes) : [[jsonOf(compilerText('null'))]] });
   // MID-TRAVERSAL CONSTANT SCATTER: a `V().call(federate, <constant sub>)` runs the sibling ONCE and each
   // of the P parents re-emits the WHOLE pool — the value-stream analogue of the element rejoin's CROSS join
@@ -4302,7 +4302,7 @@ export function lowerReduceCombine(
     : reduce.combine === 'sum' ? contribs.reduce((a, b) => a + b, 0)
     : reduce.combine === 'min' ? Math.min(...contribs)
     : Math.max(...contribs);
-  const node: Expr = compilerText(stringifyExactOrRefuse({ t: partialT, v: folded } as ValueNode));
+  const node: Expr = compilerText(stringifyExact({ t: partialT, v: folded } as ValueNode));
   const one = make.values({ id: fresh('rcv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)), rows: [[jsonOf(node)]] });
   // A null fold (an all-empty semigroup) frames as NO traverser — `Values` refuses the empty relation, so
   // it is the honest `Filter(false)` (§3.3), matching `lowerScalarResume`'s empty-aggregate spelling.

@@ -40,7 +40,7 @@ import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
 import { refreshElements } from './refresh.ts';
 import { binary64Cell, deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
-import { stringifyExactOrRefuse } from './json-exact.ts';
+import { stringifyExact } from './json-exact.ts';
 import { execute, identifier, q, value } from './sql/kernel/q.ts';
 
 /** Landing a PRESERVED rev on a matched vertex during `'replace'` (replication apply): the rev crosses
@@ -331,7 +331,7 @@ export class BulkLoader {
       if (pid >= this.nextVertexProp) this.nextVertexProp = pid + 1;
       // The meta bag is JSON text SQLite reads (`jsonb`), so it goes through the ONE writer of such a text,
       // which refuses a Double no decimal spelling crosses exactly rather than land another number.
-      const meta = p.meta ? stringifyExactOrRefuse(p.meta) : null;
+      const meta = p.meta ? stringifyExact(p.meta) : null;
       (collection ? into.collection : into.scalar).push([pid, owner, p.key, stored, vtype, meta]);
     } else {
       if (pid >= this.nextEdgeProp) this.nextEdgeProp = pid + 1;

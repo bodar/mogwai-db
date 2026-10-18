@@ -92,7 +92,7 @@ describe('asString of a Float renders Float.toString where SQLite can say it', (
   test.each([
     ['g.withSack(1.5f).inject(1).sack().asString()', 'String:1.5'],
     ['g.withSack(1.5f).inject(1).sack(sum).by(constant(1.5f)).sack().asString()', 'String:3.0'],
-    ['g.inject(-0.0f).asString()', 'String:-0.0'],
+    ['g.inject(-0.0f).asString()', 'String:0.0'],
     ['g.inject(0.1f).asString()', 'String:0.1'],
   ])('%s', async (gremlin, expected) => {
     expect(await typed(gremlin)).toEqual([expected]);

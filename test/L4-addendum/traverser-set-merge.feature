@@ -652,61 +652,6 @@ Feature: mogwai addendum — equal traversers merge into the first arrival's slo
       | result |
       | l[d[1].i,d[2].i,d[1.0].d] |
 
-  # `Double.equals(-0.0, 0.0)` is false (it compares doubleToLongBits), so a signed zero keeps its slot.
-  @gap:traverser-set-merge
-  Scenario: g_injectXneg0d_2_0dX_limitX2X
-    Given the empty graph
-    And the traversal of
-      """
-      g.inject(-0.0, 2, 0.0).limit(2)
-      """
-    When iterated to list
-    Then the result should be ordered
-      | result |
-      | d[-0.0].d |
-      | d[2].i |
-
-  # The same holds INSIDE a collection: `Map.equals` compares values, and `List.equals` members, with
-  # `equals`. SQLite's JSON spells a negative zero `0.0`, so the literal tree and the JSON-entry authority
-  # spell it `-0.0` (`stringifyExact`, src/json-exact.ts; `asExactReal`, src/compiler/rel/build.ts).
-  @gap:traverser-set-merge
-  Scenario: g_injectXmapXa_neg0dX_mapXa_2X_mapXa_0dXX_limitX2X
-    Given the empty graph
-    And the traversal of
-      """
-      g.inject([a:-0.0], [a:2], [a:0.0]).limit(2)
-      """
-    When iterated to list
-    Then the result should be ordered
-      | result |
-      | m[{"a":"d[-0.0].d"}] |
-      | m[{"a":"d[2].i"}] |
-
-  @gap:traverser-set-merge
-  Scenario: g_injectXmapXa_neg0dX_mapXa_2X_mapXa_0dXX_barrier_fold
-    Given the empty graph
-    And the traversal of
-      """
-      g.inject([a:-0.0], [a:2], [a:0.0]).barrier().fold()
-      """
-    When iterated to list
-    Then the result should be ordered
-      | result |
-      | l[m[{"a":"d[-0.0].d"}],m[{"a":"d[2].i"}],m[{"a":"d[0.0].d"}]] |
-
-  @gap:traverser-set-merge
-  Scenario: g_injectXlXneg0dX_lX2X_lX0dXX_limitX2X
-    Given the empty graph
-    And the traversal of
-      """
-      g.inject([-0.0], [2], [0.0]).limit(2)
-      """
-    When iterated to list
-    Then the result should be ordered
-      | result |
-      | l[d[-0.0].d] |
-      | l[d[2].i] |
-
   # `AbstractMap.equals` compares entries in NO order, so `[a:1,b:2]` and `[b:2,a:1]` share a slot.
   @gap:traverser-set-merge
   Scenario: g_injectXmapXa_1_b_2X_mapXc_3X_mapXb_2_a_1XX_fold

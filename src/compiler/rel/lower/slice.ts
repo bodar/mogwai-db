@@ -418,8 +418,7 @@ export function rowOp(
   if (originOf(input.channels)) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
   // A payload a VALUE can sit in keys on the reference's TYPED equality (`typedEquality`, the one authority
   // a merge partitions on too): `DedupGlobalStep` collects into a `HashSet`, whose `equals` keeps
-  // `Integer(1)` from `Double(1.0)` and `Double.equals(-0.0, 0.0)` false, where SQL's `=` (and so a
-  // `DISTINCT`/`GROUP BY`) folds both pairs. The set arms below cannot key on a term they do not keep as a
+  // `Integer(1)` from `Double(1.0)`, where SQL's `=` (and so a `DISTINCT`/`GROUP BY`) folds them. The set arms below cannot key on a term they do not keep as a
   // column, so such a payload takes the window arm, whose partition carries the widened key.
   const identity = shape.identity(input);
   const typedKey = typedEquality(input, identity);
@@ -468,7 +467,7 @@ export function rowOp(
     // a list's `list` JSON, a record's fields); for an element `payloadCols` IS `[id]`, byte-unchanged.
     //
     // The payload's TYPED key (`typedKeys`) rides as extra columns the `Distinct` sees and the result
-    // then drops, so `1`/`1.0` and `-0.0`/`0.0` stay two traversers.
+    // then drops, so `1`/`1.0` stay two traversers.
     const graph = graphOf(input.channels);
     const chans = graph ? withChannel(BULK, graph) : BULK;
     const pcols = payloadCols(input);
@@ -555,11 +554,11 @@ export function rowOp(
 }
 
 /**
- * THE TYPED KEY a collapsing `dedup()` adds to its payload — `typedEquality`'s extra terms (a storage
- * class, a zero's sign) as named columns. `DedupGlobalStep` collapses on a `HashSet`
+ * THE TYPED KEY a collapsing `dedup()` adds to its payload — `typedEquality`'s extra term (a storage
+ * class) as named columns. `DedupGlobalStep` collapses on a `HashSet`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:59,78`),
- * which is `Objects.equals`: `Integer(1)` is not `Double(1.0)`, and `Double.equals(-0.0, 0.0)` is false.
- * SQLite's `DISTINCT`/`GROUP BY` equate both, exactly as its `PARTITION BY` does at a merge — so the
+ * which is `Objects.equals`: `Integer(1)` is not `Double(1.0)`.
+ * SQLite's `DISTINCT`/`GROUP BY` equate them, exactly as its `PARTITION BY` does at a merge — so the
  * dedup keys on the merges' ONE authority rather than a rule of its own. An element's `id` (an `int`)
  * needs nothing, and costs nothing.
  */

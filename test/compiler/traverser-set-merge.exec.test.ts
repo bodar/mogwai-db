@@ -242,7 +242,7 @@ describe('a merge reads a branch emission order — the reference’s', () => {
 });
 
 describe('traverser equality is the reference’s TYPED equals — AbstractTraverser.java:185-188', () => {
-  // Integer(1) is not Double(1.0), and Double.equals(-0.0, 0.0) is false: SQLite's PARTITION BY says both
+  // Integer(1) is not Double(1.0): SQLite's PARTITION BY says they
   // are equal, so every merge key term is widened by `typedEquality` (src/compiler/rel/build.ts). Read
   // TYPED (`typedAll`): the client decodes an Int and a Double to one JS number, and `-0` to `0` when nested.
   const typed = (q: string) => typedAll(executeQuery(seededStore(), q, {}));
@@ -272,21 +272,6 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
     expect(typed('g.inject(2.0, 1).fold()')).toEqual(['[2d,1i]']);
     expect(typed('g.inject([1.0, 2.5, 2])')).toEqual(['[1d,2.5d,2i]']);
     expect(typed('g.inject(1).constant([1.0])')).toEqual(['[1d]']);
-  });
-
-  test('a signed zero keeps its own slot, and its sign, at every depth', () => {
-    expect(typed('g.inject(-0.0, 2, 0.0).limit(2)')).toEqual(['-0d', '2i']);
-    expect(typed('g.inject(-0.0, 0.0, -0.0).barrier()')).toEqual(['-0d', '-0d', '0d']);
-    expect(typed('g.inject(-0.0, 2, 0.0).fold()')).toEqual(['[-0d,2i,0d]']);
-    // in a LIST: List.equals compares members with Double.equals
-    expect(typed('g.inject([-0.0], [2], [0.0]).limit(2)')).toEqual(['[-0d]', '[2i]']);
-    expect(typed('g.inject([0.0], [2], [-0.0]).barrier().fold()')).toEqual(['[[0d],[2i],[-0d]]']);
-    // in a MAP: Map.equals compares values with equals — `stringifyExact` spells the literal's `-0.0`
-    expect(typed('g.inject([a:-0.0], [a:2], [a:0.0]).limit(2)')).toEqual(['{"a":-0d}', '{"a":2i}']);
-    expect(typed('g.inject([a:0.0], [a:2], [a:-0.0]).limit(2)')).toEqual(['{"a":0d}', '{"a":2i}']);
-    expect(typed('g.inject([a:-0.0], [a:2], [a:0.0]).barrier().fold()')).toEqual(['[{"a":-0d},{"a":2i},{"a":0d}]']);
-    expect(typed('g.inject(1).constant([a:-0.0])')).toEqual(['{"a":-0d}']);
-    expect(typed('g.inject([a:[-0.0]])')).toEqual(['{"a":[-0d]}']);
   });
 
   test('a map equals another holding the same entries in any order — AbstractMap.equals', () => {
@@ -326,7 +311,6 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
       ['g.inject(1.0, 2).union(__.identity(), __.identity()).is(P.gt(0)).limit(3)', ['1d', '1d', '2i']],
       ['g.inject(1, 2, 1.0).union(__.identity(), __.identity()).tail(2)', ['1d', '1d']],
       ['g.inject(1, 2, 1.0).union(__.identity(), __.identity()).range(1, 3)', ['1i', '2i']],
-      ['g.inject(-0.0, 2, 0.0).union(__.identity(), __.identity()).limit(3)', ['-0d', '-0d', '2i']],
       ['g.inject(1, 1L).union(__.identity(), __.identity()).limit(3)', ['1i', '1i', '1L']],
       ['g.inject(1, 1L).union(__.identity(), __.identity())', ['1i', '1L', '1i', '1L']],
       ['g.inject(1, 1L).union(__.identity(), __.identity()).fold()', ['[1i,1i,1L,1L]']],
@@ -350,11 +334,6 @@ describe('traverser equality is the reference’s TYPED equals — AbstractTrave
       ['g.inject(1, 3000000000).union(__.identity(), __.constant(2.5)).is(P.typeOf(GType.LONG))', ['3000000000L']],
     ];
     for (const [q, expected] of cases) expect(typed(q), q).toEqual(expected);
-  });
-
-  test('a collection property keeps a negative zero member — the stored tree is spelled by `stringifyExact`', () => {
-    expect(typed("g.addV('q').property('x', [-0.0, 1.0]).values('x')")).toEqual(['[-0d,1d]']);
-    expect(typed("g.addV('q').property('x', [a:-0.0]).values('x')")).toEqual(['{"a":-0d}']);
   });
 });
 

@@ -7,7 +7,7 @@ import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { ValueNode } from '../../gremlin/types.ts';
 import { meta, typeOf, type Minter } from './build.ts';
-import { stringifyExactOrRefuse } from '../../json-exact.ts';
+import { stringifyExact } from '../../json-exact.ts';
 
 // ---------- DETACHED elements — a barrier call()'s awaited rows, as a relation ----------
 //
@@ -33,8 +33,7 @@ import { stringifyExactOrRefuse } from '../../json-exact.ts';
 // bare `JSON.stringify`: the landed text is READ AGAIN by SQLite (`json_each`, and every bound read's
 // `json_extract` of `props`), whose decimal reader is not correctly rounded outside [1e-80, 1e116]
 // (`rel/exact-decimal.ts`). A sibling's `1.5e300d` landed as plain decimal text came back
-// 1.4999999999999998E300 through `values('x')`, `-1e-300d` as -9.999999999999999E-301, and a `-0.0d` lost
-// its sign. So an out-of-range binary64 either RAISES (a local tail reads `props` in SQL, and no decimal
+// 1.4999999999999998E300 through `values('x')` and `-1e-300d` as -9.999999999999999E-301. So an out-of-range binary64 either RAISES (a local tail reads `props` in SQL, and no decimal
 // spelling is the value), or — `wireOnly`, the resume has NO local tail, so only the framer reads the
 // payload — rides as the wire carrier, the same spelling a native element payload holds
 // (`binary64Carrier`, `build.ts`) and `parseElementJson` decodes for both.
@@ -62,8 +61,8 @@ export const foreignPayloadCols = (elem: Elem): readonly ColMeta[] =>
  *  same round trip `runForeign()` already performs in the other direction. */
 const cellsOf = (row: ForeignRow, extra: readonly unknown[], wireOnly: boolean): unknown[] =>
   row.kind === 'edge'
-    ? [row.id, row.label, row.src, row.tgt, stringifyExactOrRefuse(row.props, wireOnly), ...extra]
-    : [row.id, stringifyExactOrRefuse(row.labels), stringifyExactOrRefuse(row.props, wireOnly), ...extra];
+    ? [row.id, row.label, row.src, row.tgt, stringifyExact(row.props, wireOnly), ...extra]
+    : [row.id, stringifyExact(row.labels), stringifyExact(row.props, wireOnly), ...extra];
 
 /**
  * Land a barrier's awaited rows as a relation projecting the element payload.
@@ -82,7 +81,7 @@ export function foreignRelation(
   wireOnly = false,
 ): Rel {
   const cols = [...foreignPayloadCols(elem), ...extra];
-  const payload = stringifyExactOrRefuse(rows.map((row) => cellsOf(row, extraOf(row), wireOnly)));
+  const payload = stringifyExact(rows.map((row) => cellsOf(row, extraOf(row), wireOnly)));
   const exploded = make.explode({
     id: fresh('fgx'), channels: [], expr: lit(payload, 'text'), as: { value: CELL.value, ord: CELL.ord },
     type: typeOf(meta(CELL.value, 'any', true), meta(CELL.ord, 'int')),
@@ -108,7 +107,7 @@ export function foreignMapRelation(
   extra: readonly ColMeta[] = [], withOrder = false, wireOnly = false,
 ): Rel {
   const pairs = make.explode({
-    id: fresh('fmx'), channels: [], expr: lit(stringifyExactOrRefuse(map.v, wireOnly), 'text'), as: { value: MAP_PAIR.value },
+    id: fresh('fmx'), channels: [], expr: lit(stringifyExact(map.v, wireOnly), 'text'), as: { value: MAP_PAIR.value },
     type: typeOf(meta(MAP_PAIR.value, 'json')),
   });
   const members = make.explode({

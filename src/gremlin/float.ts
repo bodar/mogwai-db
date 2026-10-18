@@ -122,7 +122,7 @@ export function javaNumberText(d: number, float = false): string {
   if (Number.isNaN(d)) return 'NaN';
   const value = float ? Math.fround(d) : d;
   if (!Number.isFinite(value)) return value > 0 ? 'Infinity' : '-Infinity';
-  if (value === 0) return Object.is(value, -0) ? '-0.0' : '0.0';
+  if (value === 0) return '0.0';
   const decimal = decimalOf(float ? floatText(value) : doubleText(value))!;
   const negative = decimal.unscaled < 0n;
   let digits = (negative ? -decimal.unscaled : decimal.unscaled).toString();

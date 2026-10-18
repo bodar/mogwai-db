@@ -1572,7 +1572,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // THAT IS A FIRST-RESULT FACT ONLY. The latch is set by the FIRST application, and that application
   // does add the injections — behind the host (`StartStep.processNextStart` appends them to `starts` after
   // the `addStart(host)`), so a first-result consumer reads the host either way, but a consumer that sees
-  // EVERY result (`local`/`flatMap`) or a barrier after the inject (`local(__.inject(-0.0, 0.0).dedup()
+  // EVERY result (`local`/`flatMap`) or a barrier after the inject (`local(__.inject(1, 2).dedup()
   // .fold())`) sees the injections for the first host and not for the rest — an arrival-order answer
   // this per-row value cannot give. So an inject WITH injections answers only bare and only as
   // `yields: 'first'` (every all-results consumer refuses that), and declines with a body after it;

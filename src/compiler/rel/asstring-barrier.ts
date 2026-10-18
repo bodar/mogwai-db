@@ -48,7 +48,7 @@ const asStringMember = (member: unknown): string => {
  *
  * A scalar member under a STATIC member tag rides BARE — its class is the list's, not its own — so it is
  * re-wrapped in that tag: the renderer prints by class (`Float.toString` of the exact float `0.1f` is
- * `0.1`, a whole Double is `1.0`, a Boolean `true`, a negative zero `-0.0`), where a bare number would read
+ * `0.1`, a whole Double is `1.0`, a Boolean `true`), where a bare number would read
  * as a Double and a bare 0/1 as a number. A NESTED list member re-attaches its own members' shape one level
  * down. A MAP member arrives as its BARE pairs array (`[[keyNode,valNode],…]`, ambiguous with a plain list),
  * so it is wrapped back into the `{t:'map'}` node the renderer frames as `{k=v}` (its pairs are

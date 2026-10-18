@@ -186,7 +186,7 @@ describe('format() renders every token as String.valueOf, or defers', () => {
     ["g.inject(['a':true]).format('%{a}')", 'true'],
     ["g.inject(true).format('%{_}')", 'true'],
     ["g.inject(['a':0.1f]).format('%{a}')", '0.1'],
-    ["g.inject(['a':-0.0d]).format('%{a}')", '-0.0'],
+    ["g.inject(['a':-0.0d]).format('%{a}')", '0.0'],
     ["g.inject(['a':1.0d]).format('%{a}')", '1.0'],
     ["g.inject(1.5d).format('%{_}')", '1.5'],
     ["g.inject(2).format('%{_}')", '2'],

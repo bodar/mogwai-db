@@ -280,9 +280,9 @@ describe('every map key reads the same through untyped JSON and GraphBinary', ()
   });
 
   // A NUMBER renders exactly: a Long past 2^53 as its digits (not `"9223372036854775807"` the string, nor
-  // the rounded `9223372036854775808`), a negative zero with its sign.
+  // the rounded `9223372036854775808`); a zero has no sign (`-0.0` is `0`, a deliberate divergence).
   test('a wide Long and a negative zero render as the numbers they are', async () => {
     expect(await (await post('g.inject(9223372036854775807L).fold()', JSON_MT)).text()).toBe('[[9223372036854775807]]');
-    expect(await (await post('g.inject(-0.0d)', JSON_MT)).text()).toBe('[-0.0]');
+    expect(await (await post('g.inject(-0.0d)', JSON_MT)).text()).toBe('[0]');
   });
 });

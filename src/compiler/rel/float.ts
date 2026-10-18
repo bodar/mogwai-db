@@ -241,7 +241,7 @@ export function doubleDecimalText(x: Expr, fresh: Minter, float: boolean | Expr 
     }, fresh);
     return { kind: 'case', whens: [
       [bin('and', bin('>=', magnitude, compilerReal(1e21)), bin('=', r, call('floor', r))), r],
-      // `Double.toString(±0.0)` is `0.0`/`-0.0`, and `new BigDecimal("-0.0")` is the zero of scale 1.
+      // A zero is `0.0` (sign and all), the zero of scale 1.
       [bin('=', r, compilerReal(0)), compilerText('0.0')],
       [bin('<', magnitude, compilerReal(DOUBLE_MIN_NORMAL)), raiseInRow(SUBNORMAL_DECIMAL)],
       // Below the range SQLite's `printf` spells exactly (`exact-decimal.ts`) the digits above are not the

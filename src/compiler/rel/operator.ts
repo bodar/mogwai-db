@@ -317,7 +317,7 @@ function foldStep(operator: string, acc: Expr, value: Expr, kind: Expr): Expr | 
     };
   };
   // The ACCUMULATOR keeps a tie — `FoldStep` applies `operator.apply(seed, value)` — observable for a
-  // `-0.0` against a `0.0` (`reducer.ts` `extremumKeepingFirst`).
+  // BigDecimal `1.0` against a `1.00` (`reducer.ts` `extremumKeepingFirst`).
   const extremum = (fn: 'min' | 'max'): Expr => ({
     kind: 'case',
     whens: [

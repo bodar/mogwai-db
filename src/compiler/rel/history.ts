@@ -67,9 +67,8 @@ export const objectEntry = (object: TraverserObject, withLabels = false): Expr =
   // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column. An
   // unknown type has nothing honest to record, so the entry carries no tag and readers infer it.
   const tag = object.type.kind === 'static' ? compilerText(object.type.type) : object.vtype;
-  // The value crosses SQLite's JSON writer, which spells a negative zero `0.0` and a binary64 at 15
-  // digits, so `inject(-0.0, 0.0).as('a').select('a')` read back two `0.0`s and `dedup('a')` kept one
-  // (`Double.equals(-0.0, 0.0)` is false — `DedupGlobalStep.java:80-88` keys on the label's value).
+  // The value crosses SQLite's JSON writer, which spells a binary64 at 15 digits, so it takes the
+  // exact-REAL entry (`exactRealEntry`).
   return {
     kind: 'json-object', binary: true,
     entries: [['k', k], ['v', exactRealEntry(object.value, tag)], ...(tag ? [['t', tag] as const] : []), ...labels],

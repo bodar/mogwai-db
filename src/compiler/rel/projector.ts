@@ -71,9 +71,7 @@ const relMathOps = (resolve: (name: string) => Expr): MathOps<Expr> => ({
   binary: (op, left, right) => op === '/'
     ? nonZeroDivisor(right, { kind: 'binary', op, left, right })
     : { kind: 'binary', op, left, right },
-  // A multiply by −1.0, not SQLite's unary minus, which drops a ZERO's sign: exp4j negates a double, so
-  // `math('-_')` of 0.0 is −0.0 (`Double.toString` prints `-0.0`, `Double.compare` orders it below 0.0).
-  negate: (a) => ({ kind: 'binary', op: '*', left: a, right: compilerReal(-1) }),
+  negate: (a) => ({ kind: 'unary', op: 'neg', arg: a }),
   call: (fn, args) => fn === 'MOD' && args.length === 2
     ? nonZeroDivisor(args[1]!, { kind: 'call', fn, args })
     : { kind: 'call', fn, args },

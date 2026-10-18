@@ -376,11 +376,7 @@ export function propertyValueBind(
 ): { stored: any; collection: boolean } {
   const collection = isCollectionType(vtype);
   if (!collection) return { collection, stored: storedScalar(val, vtype) };
-  // `stringifyExact` (`json-exact.ts`): a member `-0.0` spelled by `JSON.stringify` is `0`, a stored zero
-  // that lost its sign. A runtime that cannot spell it refuses the write rather than store the other value.
-  const stored = stringifyExact(valueNodeOf(val, typeNode ?? null).v);
-  if (stored == null) throw new UnsupportedTraversal('storing a collection holding a NaN, or a -0.0 this runtime\'s JSON would drop the sign of');
-  return { collection, stored };
+  return { collection, stored: stringifyExact(valueNodeOf(val, typeNode ?? null).v) };
 }
 
 /** Types without a bidirectional GraphBinary serializer. Formerly {bigdecimal, char,

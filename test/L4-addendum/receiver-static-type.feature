@@ -401,7 +401,7 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
     When iterated to list
     Then the traversal will raise an error
 
-  # Double.toString keeps a zero's sign; SQLite's text does not (and `String(-0)` spelled the literal `0.0`).
+  # A zero has no sign (a deliberate divergence, docs/feature-support-matrix.md): `-0.0` prints `0.0`, as SQLite does.
   Scenario: g_injectX_0_0dX_asString
     Given the empty graph
     And the traversal of
@@ -411,7 +411,7 @@ Feature: mogwai addendum — a receiver's STATIC type reaches the receiver autho
     When iterated to list
     Then the result should be unordered
       | result |
-      | str[-0.0] |
+      | str[0.0] |
 
   # The sack operator's raise is a ROW PREDICATE (`raisingRows`, src/compiler/rel/receiver.ts), not a CASE
   # inside the folded value: a sack nobody reads afterwards is a select-list column SQLite prunes, and the

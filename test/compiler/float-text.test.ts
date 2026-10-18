@@ -24,7 +24,7 @@ const cases: [number, boolean, string][] = [
   [0.001, false, '0.001'],
   [-1.5e-5, false, '-1.5E-5'],
   [1 / 3, false, '0.3333333333333333'],
-  [-0, false, '-0.0'],
+  [-0, false, '0.0'],
 ];
 for (const [value, float, text] of cases)
   test(`${float ? 'Float' : 'Double'}.toString(${value}) is ${text}`, () => expect(javaNumberText(value, float)).toBe(text));

@@ -1,7 +1,7 @@
 import type { Executor as ExecutorApi, ForeignResult, ForeignRow, ForeignTerminal } from './api.ts';
 import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
-import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
+import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from './compiler/compiler.ts';
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
@@ -437,14 +437,6 @@ function sumBuffer(v: number | string | null, storageClass: string): Buffer {
   return ioc.anySerializer.serialize(v);
 }
 
-// count()/groupCount() results are Java Longs → GraphBinary Int64 (0x02), which the client decodes
-// to a JS Number for safe-range values (what TinkerPop emits and the conformance harness's
-// parseFloat expects). Passing a JS bigint to anySerializer instead selects BigInteger (0x23 →
-// decodes to a JS BigInt), which mismatches every `d[n].l` count assertion — so frame counts
-// explicitly as Int64. (sumBuffer passes a plain Number, so anySerializer already picks Int/Long
-// by magnitude there; only the BigInt-carrying count sites need this.)
-const countBuffer = (v: any): Buffer => ioc.longSerializer.serialize(BigInt(v), true);
-
 // A scalar value(), framed by its compile-time type tag (Shape `as`) when set — the
 // GraphBinary type comes from the producing step, not the SQLite storage class. No
 // tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
@@ -570,92 +562,6 @@ function frameListOf(json: string, of: ListOf): Buffer {
   return listBuffer(listItemBuffers(json, of));
 }
 
-// One key VALUE's canonical text for the JS Map below — `JSON.stringify` spells `-0` as `0` and `NaN` as
-// `null`, which merged the `0.0d` and `-0.0d` groups (and a NaN with a null key) where `GroupCountStep`'s
-// HashMap keeps them apart: `Double.equals` compares `doubleToLongBits`, so `-0.0` is not `0.0` and `NaN`
-// is `NaN` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupCountStep.java`).
-const keyCanon = (x: unknown): string =>
-  typeof x === 'number' ? (Object.is(x, -0) ? '-0' : String(x)) : typeof x === 'bigint' ? `${x}n` : JSON.stringify(x);
-
-// The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
-function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
-  if (key.kind === 'element') return { buf: elementBuffer(r, 'k', key.elem), canon: `e:${r[key.elem === 'property' ? 'k_pk' : 'k_id']}` };
-  if (key.kind === 'map') {
-    const m = new Map<any, any>();
-    key.parts.forEach((p, i) => m.set(p.key, r[`k${i}_v`]));
-    return { buf: ioc.anySerializer.serialize(m), canon: 'm:' + key.parts.map((_, i) => keyCanon(r[`k${i}_v`])).join('\x00') };
-  }
-  // The key's type, from the best channel available: a per-row stored vtype column (the
-  // truth channel — a datetime/uuid key keeps its exact type) beats the compile-time tag
-  // (asNumber(BYTE).groupCount()), and an untagged key infers from the JS value (correct
-  // for string/int/double, where the storage class already determines the type).
-  const keyCol = perRowColumnOf(key.type);
-  const perRow = keyCol ? r[keyCol] as string | null : null;
-  if (perRow) {
-    // Distinct stored types are distinct keys, so the type joins the canonical dedup key.
-    return { buf: frameStoredValue(r.gk, perRow), canon: `s:${perRow}:` + keyCanon(r.gk) };
-  }
-  const staticAs = staticTypeOf(key.type);
-  const buf = staticAs ? frameValue(r.gk, staticAs) : ioc.anySerializer.serialize(r.gk);
-  return { buf, canon: `s:${staticAs ?? ''}:` + keyCanon(r.gk) };
-}
-
-// group()/groupCount(): fold ALL rows into ONE GraphBinary Map. Element-valued
-// groups arrive one row per MEMBER, in the parent's EMISSION order — so same-key rows are
-// interleaved, not contiguous, and that is deliberate (a group's value list is a `fold` and keeps
-// arrival order). The accumulator below is keyed on the canonical key precisely so a run is never
-// required; do NOT "optimize" it into a run-detecting loop. Scalar-reducer groups arrive one row
-// per group (GROUP BY). One loop keyed on GroupVal handles both.
-function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
-  const groups = new Map<string, { buf: Buffer; members: Buffer[]; gv: any; gvt: string }>();
-  for (const r of rows) {
-    // A scalar key over a missing property is SQL NULL — TinkerPop's by(key) uses
-    // values(key), which yields nothing, so such elements form NO group (not a
-    // spurious null-keyed one). Drop them here (covers both GROUP BY and ORDER BY paths).
-    if (key.kind === 'scalar' && !key.productive && r.gk == null) continue;
-    const k = groupKey(r, key);
-    let g = groups.get(k.canon);
-    if (!g) { g = { buf: k.buf, members: [], gv: undefined, gvt: '' }; groups.set(k.canon, g); }
-    if (val.kind === 'elementList' || val.kind === 'elementLast') {
-      // A LEFT-joined group-scoped element fold emits one null payload row so an
-      // empty key still exists and frames as []; it is domain, not a member.
-      if (r.v_id != null || val.elem === 'property' && r.v_pk != null)
-        g.members.push(elementBuffer(r, 'v', val.elem));
-    }
-    else { g.gv = r.gv; g.gvt = r.gvt; } // count/sum/scalarList: precomputed, one row per group
-  }
-  const valueBuf = (g: { members: Buffer[]; gv: any; gvt: string }): Buffer => {
-    switch (val.kind) {
-      case 'elementList': return listBuffer(g.members);
-      case 'elementLast': return g.members[g.members.length - 1];
-      case 'count': return countBuffer(g.gv);
-      case 'sum': return sumBuffer(g.gv, g.gvt);
-      case 'list': return ioc.listSerializer.serialize(JSON.parse(g.gv));
-      // The DIRECT by('age') projection only: it reads the property inline, so an element
-      // missing it contributes a SQL NULL that must be dropped (values semantics). A
-      // by(__.traversal) value no longer arrives here — it goes through the child seam, whose
-      // rows are marked and filtered in SQL ('list'), so it can distinguish an unproductive
-      // child from a productive NULL member instead of blanket-stripping both.
-      case 'scalarList': return ioc.listSerializer.serialize(JSON.parse(g.gv).filter((x: any) => x !== null));
-      // A nested groupCount/group value: gv is a JSON object {innerKey: innerVal}
-      // framed as a Map. count values are Java Longs → Int64 (countBuffer), so they decode to a
-      // Number like every other count (an anySerializer.serialize(BigInt) would pick BigInteger —
-      // the same fidelity bug fixed for top-level counts); a numeric reducer value infers its type
-      // via anySerializer. Built as a MAP buffer directly so the count values keep the Int64 type.
-      case 'nestedMap': {
-        const entries = Object.entries(JSON.parse(g.gv) as Record<string, any>);
-        const isCount = val.innerVal === 'count';
-        const members = entries.flatMap(([k, v]) =>
-          [ioc.anySerializer.serialize(k), isCount ? countBuffer(v) : ioc.anySerializer.serialize(v)]);
-        return sizedContainer(ioc.DataType.MAP, entries.length, members);
-      }
-    }
-  };
-  const members: Buffer[] = [];
-  for (const g of groups.values()) { members.push(g.buf, valueBuf(g)); }
-  return sizedContainer(ioc.DataType.MAP, groups.size, members);
-}
-
 // A generator over the result value buffers: per-row shapes `yield` one buffer per
 // row (framed over the already-materialized row array — never a live cursor); barrier
 // shapes (group/list) drain the array then yield their one value. `executeQuery`
@@ -761,8 +667,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     case 'metaProperty': for (const r of rows) yield ioc.anySerializer.serialize(new Property(r.mk, r.mv)); return;
     // properties(k).valueMap(): a VertexProperty's meta as a flat Map.
     case 'metaMap': for (const r of rows) yield ioc.anySerializer.serialize(new Map(Object.entries(r.meta ? JSON.parse(r.meta) : {}))); return;
-    // Barriers: the whole stream collapses to ONE value (Map / List).
-    case 'group': yield groupBuffer(rows, shape.key, shape.val); return;
+    // Barriers: the whole stream collapses to ONE value (a List).
     case 'list':
       // fold() reuses the plain vertex/edge projection (unprefixed id/label/…),
       // unlike group's v_-prefixed element columns. ELEMENTS ONLY — the scalar item branch this used

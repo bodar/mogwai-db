@@ -337,12 +337,12 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
     // A constant 'real' tag on that NULL told every `vt` reader it held a number: `math()`'s number
     // check passed it and `CAST(NULL) + 1` dropped the row where `MathStep` raises.
     const numerator = bulk ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk }) : agg('sum', arg);
-    if (!bulk) return { value: negativeZeroTotal(value, tag, guarded(agg('avg', arg))) };
+    if (!bulk) return { value: guarded(agg('avg', arg)) };
     const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: compilerNull() }, bulk]] });
     // A `Cast` and NOT a `* 1.0`: it declares the required REAL arithmetic rather than relying
     // on a spelling-level token. Measured: the mean of the reference graph's ages was 30 rather than
     // 30.75 without it.
-    return { value: negativeZeroTotal(value, tag, guarded({ kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator })) };
+    return { value: guarded({ kind: 'binary', op: '/', left: { kind: 'cast', arg: numerator, to: 'real' }, right: denominator }) };
   }
 
   // `min`/`max` are bulk-INVARIANT — the smallest of N identical copies is the smallest — so the
@@ -350,7 +350,7 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
   const reduced = reducer === 'sum' && bulk
     ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk })
     : agg(reducer, arg);
-  return { value: reducer === 'sum' ? negativeZeroTotal(value, tag, guarded(reduced)) : mixedRefused(reduced, value) };
+  return { value: reducer === 'sum' ? guarded(reduced) : mixedRefused(reduced, value) };
 }
 
 /**
@@ -386,28 +386,10 @@ function decimalWidened(value: Expr, tag: ReducerRowTag): Expr | null {
 }
 
 /**
- * A `sum`/`mean` total of NEGATIVE ZEROS is a negative zero. `SumGlobalStep` and `MeanGlobalStep` SEED the
- * total from the first traverser (`mul(value, bulk)` — `-0.0 × n` is `-0.0`) and add the rest
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SumGlobalStep.java:71-78`,
- * `MeanGlobalStep.java:117-125`), and an IEEE sum is `-0.0` exactly when every addend is; a SQL `SUM`/`AVG`
- * starts from `+0.0` and answers `0.0`. So where every counted value is a negative zero, the total is one of
- * them (their `MIN`). A stream statically integral cannot hold one, and is left as it was.
- */
-function negativeZeroTotal(value: Expr, tag: ReducerRowTag, total: Expr): Expr {
-  if (tag !== null && tag !== SCREENED && tag.kind === 'lit' && tag.source === 'compiler-text'
-    && typeof tag.value === 'string' && !['float', 'double', 'bigdecimal', 'real'].includes(tag.value)) return total;
-  // ONE aggregate, the value spelled twice inside it: `atan2(v, -1)` is −π for a negative zero and +π for a
-  // positive one, and every other row votes 4 — so the MAX is negative exactly where every counted row is
-  // a negative zero (a NULL votes 4 too; an all-NULL stream keeps its own total).
-  const vote: Expr = { kind: 'case', whens: [[bin('=', value, compilerInt(0)), { kind: 'call', fn: 'atan2', args: [value, compilerReal(-1)] }]], else: compilerInt(4) };
-  return { kind: 'case', whens: [[bin('<', agg('max', vote), compilerInt(0)), compilerReal(-0)]], else: total };
-}
-
-/**
  * THE TIE AUTHORITY of a `min`/`max` — which of two members that COMPARE EQUAL is the answer, and that is
- * observable only where the two differ in REPRESENTATION: a negative and a positive zero (`-0.0` is not
- * `0.0`, though `Double.compare`-free `x >= y` calls them equal), or two BigDecimals of one value and two
- * scales (`1.0` and `1.00`; `compareTo` ignores the scale). The reference's NumberHelper helpers break a
+ * observable only where the two differ in REPRESENTATION: two BigDecimals of one value and two scales
+ * (`1.0` and `1.00`; `compareTo` ignores the scale). A zero has no sign (`-0.0` is `0.0`, as in SQLite — a
+ * deliberate divergence), so no other Number has a second representation of a value. The reference's NumberHelper helpers break a
  * tie by ARGUMENT POSITION — `max` is `x >= y ? x : y`, `min` `x <= y ? x : y`, for every number helper
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:252-277,279-310`)
  * — and the two step families pass the arguments in OPPOSITE orders:
@@ -422,23 +404,18 @@ function negativeZeroTotal(value: Expr, tag: ReducerRowTag, total: Expr): Expr {
  *   the global and correlated reducers DEFER (`TIED_REPRESENTATIONS`) rather than pick one.
  *
  * This is the per-row REPRESENTATION a tie is observable through: equal across two members of one compare
- * key exactly where their promoted values cannot be told apart. A Number that is not a BigDecimal states
- * only its zero's sign (an Int `0` and a Double `-0.0` promote to two different Doubles; an Int `1` and a
- * Double `1.0` to one), a BigDecimal its carrier verbatim (conservative: an Int `1` beside a BigDecimal `1`
- * of scale 0 reads as a tie it is not, and defers). `null` where the rows' class is statically one that has
- * no second representation of a value — an integral class or a String — so no site pays for the test.
+ * key exactly where their promoted values cannot be told apart. A Number that is not a BigDecimal is one
+ * constant, a BigDecimal its carrier verbatim (conservative: an Int `1` beside a BigDecimal `1` of scale 0
+ * reads as a tie it is not, and defers). `null` where the rows cannot hold a BigDecimal — a static class
+ * other than `bigdecimal`, or no per-row tag — so no site pays for the test.
  */
 export function tieRepresentation(value: Expr, tag: Expr | null): Expr | null {
   const staticTag = tag !== null && tag.kind === 'lit' && tag.source === 'compiler-text' ? String(tag.value) : undefined;
-  if (staticTag !== undefined && !FLOATING_TAGS.includes(staticTag)) return null;
-  // `atan2(v, −1)` is the sign-reading form (`signBit`): within one compare key it is one value for every
-  // peer but a zero, where it is −π for a negative one and +π otherwise (a String's is its numeric
-  // reading's, equal across equal strings). A BigDecimal is its `quote()` — storage class and digits.
-  const signed: Expr = { kind: 'call', fn: 'atan2', args: [value, compilerReal(-1)] };
+  // A BigDecimal is its `quote()` — storage class and digits.
   const verbatim: Expr = call('quote', value);
   if (staticTag === 'bigdecimal') return verbatim;
-  if (tag === null || staticTag !== undefined) return signed;
-  return { kind: 'case', whens: [[bin('=', tag, compilerText('bigdecimal')), verbatim]], else: signed };
+  if (tag === null || staticTag !== undefined) return null;
+  return { kind: 'case', whens: [[bin('=', tag, compilerText('bigdecimal')), verbatim]], else: compilerInt(0) };
 }
 
 /**
@@ -447,15 +424,14 @@ export function tieRepresentation(value: Expr, tag: Expr | null): Expr | null {
  * (`SackValueStep`'s `apply(sack, value)`, `FoldStep`'s `apply(seed, value)`: the ACCUMULATOR is first).
  * SQLite's scalar `MAX` keeps its FIRST tied argument and `MIN` its LAST (`minmaxFunc`: an argument
  * replaces the best when `compare(best, it) ^ mask >= 0`, the mask inverting the compare for `MAX`), so
- * `first` leads a `MAX` and closes a `MIN`. Pinned both ways for `-0.0`/`0.0` in
- * `number-class-authority.exec.test.ts`.
+ * `first` leads a `MAX` and closes a `MIN`.
  */
 export const extremumKeepingFirst = (fn: 'min' | 'max', first: Expr, second: Expr): Expr =>
   ({ kind: 'call', fn: fn.toUpperCase(), args: fn === 'max' ? [first, second] : [second, first] });
 
 /** The deferral a global/correlated `min`/`max` raises where its winner ties a member of another
  *  representation (`tieRepresentation`). */
-export const TIED_REPRESENTATIONS = 'min/max whose winner ties an equal value of another representation (a signed zero or a BigDecimal scale) is not supported';
+export const TIED_REPRESENTATIONS = 'min/max whose winner ties an equal value of another representation (a BigDecimal scale) is not supported';
 
 /** The deferral a FLOAT running total raises where its per-step rounding is not decidable here. */
 export const FLOAT_SUM_INEXACT = 'sum/mean over Float values that float arithmetic would round is not supported';

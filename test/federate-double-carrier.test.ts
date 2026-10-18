@@ -3,9 +3,9 @@
 // A barrier `call("federate")` lands the sibling's detached elements as ONE JSON text SQLite reads back
 // (`src/compiler/rel/foreign.ts`). That text used to be a bare `JSON.stringify`, and SQLite's decimal reader is
 // not correctly rounded outside [1e-80, 1e116] (`src/rel/exact-decimal.ts`): a sibling storing `1.5e300d`
-// answered 1.4999999999999998E300 through `….values("x")`, an edge's `-1e-300d` -9.999999999999999E-301,
-// a `-0.0d` lost its sign and an `Infinity` became null. The landing now goes through the one exact JSON
-// writer (`stringifyExact`, `src/json-exact.ts`), so:
+// answered 1.4999999999999998E300 through `….values("x")`, an edge's `-1e-300d` -9.999999999999999E-301
+// and an `Infinity` became null. The landing now goes through the one exact JSON writer (`stringifyExact`,
+// `src/json-exact.ts`), so (a `-0.0d` reads back `0.0` everywhere — a zero has no sign, as in SQLite):
 //
 // 1. a resume with NO local tail (only the framer reads the landed payload) carries every binary64 exactly,
 //    an out-of-range one as the wire carrier a native element payload holds (`binary64Carrier`);
@@ -43,7 +43,7 @@ function bitPatternDoubles(n: number, seed: number): number[] {
 const NAMED: readonly number[] = [
   1.5e300, 4.9e-324, 3.7430242338180544e203, -1e-300, Number.MAX_VALUE, -Number.MIN_VALUE,
   2.2250738585072014e-308, 2 ** -1000, 2 ** 1000, 1e-190, 2 ** 640, 2 ** -500, 1e-81, 2e116,
-  // exact everywhere, and each lost by a bare `JSON.stringify` (`-0` → `0`, `Infinity` → `null`)
+  // exact everywhere (`Infinity` is lost by a bare `JSON.stringify`; `-0` reads back `0`, as SQLite's)
   -0, Infinity, -Infinity, 0.5, 1e-80, 1e116,
 ];
 const VALUES = [...NAMED, ...bitPatternDoubles(300, 0xfed5)];
@@ -60,8 +60,8 @@ const TRANSPORTS = [
 const run = async (ex: { framedAsync: (g: string, p: Record<string, unknown>, t?: Record<string, any>) => Promise<{ buf: Buffer }[]> }, g: string, p: Record<string, unknown> = {}, t: Record<string, any> = {}) =>
   Promise.all((await ex.framedAsync(g, p, t)).map((f) => decode(f.buf)));
 const fed = (graph: string, sub: string, tail = '') => `g.call("federate").with("graph","${graph}").with("traversal", ${sub})${tail}`;
-/** Compare doubles by bit pattern, order-free: `Object.is` per member of the two sorted spellings. */
-const bits = (xs: readonly number[]): string[] => xs.map((x) => (Object.is(x, -0) ? '-0' : String(x))).sort();
+/** Compare doubles exactly, order-free, over the two sorted spellings (a zero has no sign: `String(-0)` is `0`). */
+const bits = (xs: readonly number[]): string[] => xs.map((x) => String(x)).sort();
 
 beforeAll(async () => {
   for (const { sibling } of TRANSPORTS) {

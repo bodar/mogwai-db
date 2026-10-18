@@ -15,21 +15,17 @@
 // text with no 16-digit run and no exponent cannot hold such a number, so it parses exactly as before.
 //
 // The same spelling says which CLASS a WHOLE number is, which `JSON.parse` also throws away: SQLite writes a
-// whole REAL as `1.0`, and a negative zero as `-0.0` where the JSON-entry authority spells it
-// (`asExactReal`, `compiler/rel/build.ts`), and both parse to a JS integer an untagged reader then frames as
-// an Int with the sign gone. Traverser equality is `Objects.equals` — `Integer(1)` is not `Double(1.0)` and
-// `Double.equals(-0.0, 0.0)` is false
-// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`)
-// — so an integral-valued number spelled with a point or an exponent is kept raw too, and reads back as the
-// Double it is. `stringifyExact` is the writing half: `JSON.stringify(-0)` is `0`, so a compile-time tree
-// spells a negative zero `-0.0`, the spelling SQLite's JSON keeps (and keys apart from `0.0`).
+// whole REAL as `1.0`, which parses to a JS integer an untagged reader then frames as an Int. `Integer(1)` is
+// not `Double(1.0)`, so an integral-valued number spelled with a point or an exponent is kept raw too, and
+// reads back as the Double it is. (A zero has no sign here: `-0.0` is `0.0`, as in SQLite — a deliberate
+// divergence, `docs/feature-support-matrix.md`.)
 //
 // A raw value is a frozen null-prototype object, so it must be produced on the side of an RPC boundary
 // that consumes it: a DO-side head read ships the TEXT (`BarrierInput.injectedText`), and the Worker-side
 // transform parses it.
 
 // A number past 2^53 is spelled with a run of 16+ digits, or with an exponent (`2.7e+19`); a whole Double
-// with a point (`1.0`, `-0.0`).
+// with a point (`1.0`).
 import { binary64CarrierText, binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
 import { RaisedByQuery } from './rel/raise.ts';
 import { assertCarriable } from './sql/kernel/q.ts';
@@ -144,10 +140,9 @@ function carrierLeaf(member: unknown): unknown {
   return text === null ? undefined : { ...node, v: text };
 }
 
-/** `JSON.stringify`, spelling a negative zero `-0.0` — the writing half of the module rule, for a
- *  compile-time tree headed into SQLite's JSON (a literal map, a stored collection). `null` where the
- *  runtime lacks `JSON.rawJSON` and the tree holds a negative zero: the caller declines rather than write
- *  a zero that lost its sign.
+/** `JSON.stringify` for a compile-time tree headed into SQLite's JSON (a literal map, a stored collection,
+ *  a bound set), spelling `±Infinity` as SQLite does (`exactSpelling`). A runtime without `JSON.rawJSON`
+ *  cannot spell an infinity and refuses it (`UnsupportedTraversal`) rather than write `null`.
  *
  *  A finite number OUTSIDE the range SQLite reads decimal text exactly in (`rel/exact-decimal.ts`) RAISES the
  *  in-row deferral's own `RaisedByQuery`: JS spells it exactly, but SQLite's JSON reader turns `1.5e-300` into
@@ -160,9 +155,8 @@ function carrierLeaf(member: unknown): unknown {
  *  under a binary64 `{t,v}` tag rides as the wire carrier (`binary64CarrierText`), the spelling a native
  *  element payload holds (`binary64Carrier`, `compiler/rel/build.ts`), so `parseElementJson` reads both back
  *  by one rule. Any other out-of-range number still raises. */
-export function stringifyExact(value: unknown, wireCarrier = false): string | null {
-  let lost = false;
-  const text = JSON.stringify(value, (key, member: unknown) => {
+export function stringifyExact(value: unknown, wireCarrier = false): string {
+  return JSON.stringify(value, (key, member: unknown) => {
     // EVERY STRING LEAF — a member and an object key alike — obeys the carrier rule (`assertCarriable`):
     // JSON spells a lone surrogate as an ASCII `\ud83d` escape, so the statement-text check never sees it,
     // and SQLite's JSON reader turns it into `''` (`g.inject(['k':'\ud83d']).select('k')` answered `""`).
@@ -181,29 +175,16 @@ export function stringifyExact(value: unknown, wireCarrier = false): string | nu
     const spelled = typeof member === 'number' ? exactSpelling(member) : undefined;
     if (spelled === undefined) return member;
     if (rawJson.rawJSON) return rawJson.rawJSON(spelled);
-    lost = true;
-    return member;
+    throw UnsupportedTraversal.because('an infinity cannot cross as JSON on this runtime (no JSON.rawJSON)');
   });
-  return lost ? null : text;
 }
 
-/** The JSON spelling of a number `JSON.stringify` cannot write — a negative zero (`0`, the sign lost) and
- *  `±Infinity` (`null`, the value lost) — as SQLite's own JSON writer spells it: `-0.0`, and the overflow
- *  literal `9.0e+999` that SQLite's JSON parser reads back as `+Inf` and `json_array(9e999)` itself
+/** The JSON spelling of a number `JSON.stringify` cannot write — `±Infinity` (`null`, the value lost) — as
+ *  SQLite's own JSON writer spells it: the overflow literal `9.0e+999` that SQLite's JSON parser reads back as `+Inf` and `json_array(9e999)` itself
  *  writes, so a compile-time tree and a SQL-built one compare equal. A NaN has no JSON spelling at all
  *  (SQLite carries it as NULL — `compiler/rel/const.ts`), so it stays `JSON.stringify`'s. */
 function exactSpelling(member: number): string | undefined {
-  if (Object.is(member, -0)) return '-0.0';
   if (member === Infinity) return '9.0e+999';
   if (member === -Infinity) return '-9.0e+999';
   return undefined;
-}
-
-/** `stringifyExact` for a caller with no decline of its own to fall back on (a bound JSON set, a
- *  retained binding's transport, a compile-time literal blob): a runtime that cannot spell a negative
- *  zero or an infinity REFUSES rather than write another value. Both runtimes we ship on have `JSON.rawJSON`. */
-export function stringifyExactOrRefuse(value: unknown, wireCarrier = false): string {
-  const text = stringifyExact(value, wireCarrier);
-  if (text == null) throw new Error('a value holding -0.0 or an infinity cannot cross as JSON on this runtime: its text would change the value');
-  return text;
 }

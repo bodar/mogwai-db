@@ -108,28 +108,6 @@ export type MapEntry =
 // each carry their own element columns (k_* / v_*).
 export type ElemShape = Elem | 'property';
 
-// group()/groupCount(): the whole stream collapses into ONE Map (a barrier).
-// The key is a scalar (gk), a token (label/id), an element (framed like a value),
-// or a composite Map from project() (k0_,k1_,… parts). The value is reduced per
-// group: a list of elements, a single element (tail/last), a list of scalars
-// (json_group_array), or a scalar aggregate (count/sum).
-export type GroupKey =
-  // by('name')/by(T.label)/by(__.scalar)/scalar-group → gk, its type in the ONE channel.
-  // A perRow type names a SIBLING column (gkt) rather than a {t,v} envelope: the key is a
-  // GROUP BY term (an envelope would group by JSON text), and a bare groupCount() never
-  // becomes a MapStream, so there is no blob for it to ride inside.
-  | { kind: 'scalar'; productive: boolean; type: ScalarType }
-  | { kind: 'element'; elem: ElemShape }                 // bare by() → the element itself, columns k_*
-  | { kind: 'map'; parts: { key: string }[] };           // by(__.project(...)) → columns k0_,k1_,…
-export type GroupVal =
-  | { kind: 'elementList'; elem: ElemShape }             // default/by(__.fold()) → [elements]
-  | { kind: 'elementLast'; elem: ElemShape }             // by(__.tail()) → last element
-  | { kind: 'scalarList' }                               // by('age') → json_group_array → parsed list
-  | { kind: 'list' }                                     // one JSON list value per group key
-  | { kind: 'count' }                                    // by(__.count())/groupCount → Long
-  | { kind: 'sum' }                                      // by(__.…sum()) → numeric
-  | { kind: 'nestedMap'; innerVal: 'count' | 'number' }; // by(__.<move>.groupCount()/group().by().by(reduce)) → a Map per key (json_group_object)
-
 // path(): one Path per row. Each position frames either a whole element
 // (prefix_id/_label/_props[/_src/_tgt]) or, under a by(key) modulator, a scalar
 // (prefix_v). Positions are in traversal order; labels ride empty (labels-on-path
@@ -400,7 +378,6 @@ export type Shape =
   // would infer away. Terminal, exactly as `variant` is.
   | { kind: 'typedNode' }
   | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (a MapStream unfold) → each frames as a size-1 GraphBinary MAP
-  | { kind: 'group'; key: GroupKey; val: GroupVal }
   | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
   | { kind: 'pathGrouped'; elem: ElemShape; byKey: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
   | { kind: 'discard' };

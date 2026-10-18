@@ -1,4 +1,4 @@
-import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, signBit, type Expr } from '../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { raiseExpr } from '../../rel/raise.ts';
@@ -236,28 +236,15 @@ interface NumericPair {
    * order only for a subject whose interval holds the bound — a carrier the compiler names in advance (the
    * bound's nearest float or double, and each of its neighbours, so an interval-edge tie cannot slip past).
    * Each such carrier's answer is decided HERE, from the two exact decimals; no other row can differ.
-   * A ZERO cell is `Double.compare`'s signed zero: `-0.0` orders below `0.0` (`NumberHelper.java:277`), which
-   * SQLite's `=` cannot see, so its outcome reads the subject's sign (`atan2`).
+   * (A zero has no sign: `-0.0` and `0.0` compare equal, as in SQLite — a deliberate divergence.)
    */
   readonly cells?: readonly Cell[];
 }
-type Cell = { readonly at: number; readonly cmp: number } | { readonly at: 0; readonly negative: number; readonly positive: number };
+type Cell = { readonly at: number; readonly cmp: number };
 const INTEGRAL: ReadonlySet<NumClass> = new Set(['int32', 'long', 'bigint']);
 const LONG_MIN = -(2n ** 63n);
 const LONG_MAX = 2n ** 63n - 1n;
 const LONG_RANGE = (n: bigint): boolean => n >= LONG_MIN && n <= LONG_MAX;
-function numericPair(subject: NumClass, bound: NumClass, value: unknown, castBound: Expr): NumericPair {
-  const pair = widenedPair(subject, bound, value, castBound);
-  // `Double.compare`'s SIGNED ZERO, wherever the common class floats (a BigDecimal has no negative zero):
-  // `inject(0.0d).is(-0.0d)` is false and `inject(-0.0d).is(P.lt(0.0d))` true. Only a REAL subject can be
-  // a negative zero, so an integral subject needs the cell only against a `-0.0` bound.
-  const floating = (cls: NumClass): boolean => cls === 'float' || cls === 'double';
-  const zero = typeof value === 'number' && value === 0;
-  const negativeBound = zero && Object.is(value, -0);
-  if (zero && !pair.cells && (floating(subject) ? !BIG.has(bound) : floating(bound) && negativeBound))
-    return { ...pair, cells: [{ at: 0, negative: negativeBound ? 0 : -1, positive: negativeBound ? 1 : 0 }] };
-  return pair;
-}
 const BIG: ReadonlySet<NumClass> = new Set(['bigint', 'bigdecimal']);
 
 /** A bound's exact decimal value, for a widening to `BigDecimal` to compare against. */
@@ -395,12 +382,12 @@ function cellsAround(nearest: number, bits: 32 | 64, bound: BigDecimal, printed:
   return [below, nearest, above].filter(Number.isFinite).map((at) => ({ at, cmp: decimalCompare(decimalOf(printed(at))!, bound) }));
 }
 
-function widenedPair(subject: NumClass, bound: NumClass, value: unknown, castBound: Expr): NumericPair {
+function numericPair(subject: NumClass, bound: NumClass, value: unknown, castBound: Expr): NumericPair {
   // A BIG subject against a FLOAT bound widens the bound to `BigDecimal(Float.toString(f))`
   // (`NumberHelper.java:855`) — its SHORTEST decimal, which is then the Double of that spelling.
   if (BIG.has(subject) && bound === 'float' && typeof value === 'number' && Number.isFinite(value)) {
     const printed = Number(floatText(Math.fround(value)));
-    return widenedPair(subject, 'double', printed, compilerReal(printed));
+    return numericPair(subject, 'double', printed, compilerReal(printed));
   }
   // A BigInteger meets an INTEGRAL other side exactly — `NumberHelper.compare` widens both to BigInteger.
   // SQLite's `CAST(… AS INTEGER)` saturates past int64, so `'99999999999999999999' > Long.MAX` read 'no'.
@@ -504,14 +491,10 @@ function guardedCompare(op: Extract<Expr, { kind: 'binary' }>['op'], subject: Ex
   }
   const key: Expr = pair.real ? { kind: 'cast', arg: subject, to: 'real' } : keyed;
   const compared = binary(op, key, pair.bound);
-  // A signed-zero cell whose two outcomes are SQLite's own (`P.gt(0)`: neither zero is above zero) needs
-  // no arm.
-  const cells = pair.cells?.filter((cell) => 'cmp' in cell || cmpHolds(op, cell.negative) !== cmpHolds(op, 0) || cmpHolds(op, cell.positive) !== cmpHolds(op, 0));
+  const cells = pair.cells;
   if (cells?.length) {
     const holds = (cmp: number): Expr => (cmpHolds(op, cmp) ? CONSTANT.true : CONSTANT.false);
-    return { kind: 'case', whens: cells.map((cell): readonly [Expr, Expr] => [binary('=', key, compilerReal(cell.at)), 'cmp' in cell
-      ? holds(cell.cmp)
-      : { kind: 'case', whens: [[signBit({ kind: 'cast', arg: subject, to: 'real' }), holds(cell.negative)]], else: holds(cell.positive) }]),
+    return { kind: 'case', whens: cells.map((cell): readonly [Expr, Expr] => [binary('=', key, compilerReal(cell.at)), holds(cell.cmp)]),
     else: compared };
   }
   if (pair.guarded && pair.asFloat) return binary(op, floatValueOf({ kind: 'cast', arg: subject, to: 'real' }), pair.bound);
@@ -764,8 +747,8 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   const tailCast = exactTailCast(value);
   const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
   // A class whose compare WIDENS (`numericPair`) answers by the widened form INSTEAD of the raw `=` — not
-  // beside it: a raw match is not always a reference match (`0.0 = -0.0`, a Float's exact carrier against
-  // its BigDecimal decimal), and the widened form is exact wherever the raw one is.
+  // beside it: a raw match is not always a reference match (a Float's exact carrier against its
+  // BigDecimal decimal), and the widened form is exact wherever the raw one is.
   // The widened form compares the subject KEYED by its class (`ordered`'s rule): a decimal-TEXT carrier
   // reads as the number it is.
   const widened = (cls: NumClass, keyed: Expr, intToo = false): Expr | undefined => {

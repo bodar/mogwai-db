@@ -592,7 +592,7 @@ export function injectValueTypes(steps: readonly Step[], count: number): (ValueT
   return Array.from({ length: count }, (_, i) => {
     const name = flatType(args[i]?.type);
     if (name && DECLARED_TYPE_REQUIRED.has(name)) return name as ValueType;
-    // A WHOLE Double (`1.0`, `1.0d`, `-0.0`) reads back from SQLite as a JS integer, which inference frames
+    // A WHOLE Double (`1.0`, `1.0d`) reads back from SQLite as a JS integer, which inference frames
     // as an Int — `Integer(1)` is not `Double(1.0)` (`AbstractTraverser.java:185-188`). Only a fractional
     // Double is recoverable from its value.
     return name === 'double' && Number.isInteger(args[i]?.value) ? 'double' : null;

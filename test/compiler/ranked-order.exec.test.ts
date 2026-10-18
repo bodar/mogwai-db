@@ -240,7 +240,6 @@ describe('orderability: numbers compare in their HIGHEST COMMON CLASS', () => {
     ['bigdecimal vs double uses the double\'s shortest decimal', { t: 'bigdecimal', v: '0.1' }, { t: 'double', v: 0.1 }, 0],
     ['bigdecimal vs float uses the float\'s shortest decimal', { t: 'bigdecimal', v: '0.1' }, { t: 'float', v: Math.fround(0.1) }, 0],
     ['bigdecimal ignores scale', { t: 'bigdecimal', v: '1.50' }, { t: 'bigdecimal', v: '1.5' }, 0],
-    ['Double.compare puts -0.0 before 0.0', { t: 'double', v: -0 }, { t: 'double', v: 0 }, -1],
     ['NaN sorts after every number', Number.NaN, { t: 'double', v: Infinity }, 1],
   ] as const)('%s', (_name, a, b, sign) => {
     expect(Math.sign(orderabilityCompare(a, b))).toBe(sign);

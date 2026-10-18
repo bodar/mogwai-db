@@ -1,4 +1,4 @@
-import { compilerInt, compilerNull, compilerReal, compilerText, signBit, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { deferralExpr, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -333,11 +333,8 @@ function decimalText(value: Expr, spelling: StringSpelling): Expr {
 function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, spelling: StringSpelling): Expr {
   const real: Expr = { kind: 'cast', arg: value, to: 'real' };
   const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
-  // A ZERO keeps its sign — `Double.toString(-0.0)` is `-0.0` — and SQLite's text drops it (`-0.0`
-  // renders `0.0`, and `-0.0 < 0` is false). `atan2(±0, -1)` is ±π, the one comparison that reads the
-  // sign bit. `printf` drops it too, so it is read before the Float's LET.
-  const negative = signBit(real);
-  const signedZero: Expr = { kind: 'case', whens: [[negative, text('-0.0')]], else: text('0.0') };
+  // A ZERO is `0.0`, sign and all (`-0.0` prints `0.0`, as SQLite's text does — a deliberate divergence).
+  const zeroText = text('0.0');
   // `Double.toString`/`Float.toString` of an infinity is `Infinity`/`-Infinity`; SQLite prints `Inf`.
   // Read before the Float's LET, whose `printf` would spell it `Inf` too.
   const infinite: [Expr, Expr][] = [
@@ -348,7 +345,7 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, spellin
     const shortest = floatShortest(real, fresh, spelling.arm);
     const printed: Expr = { kind: 'call', fn: 'printf', args: [text('%!.17g'),
       float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: real }] };
-    return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, signedZero], ...infinite],
+    return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, zeroText], ...infinite],
       else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh, spelling), fresh) };
   }
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
@@ -356,7 +353,7 @@ function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, spellin
   const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },
     { kind: 'binary', op: '<', left: abs, right: compilerReal(1e7) });
   const exact: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: shown, to: 'real' }, right: real };
-  return { kind: 'case', whens: [[zero, signedZero], ...infinite, [and(plain, exact), shown]],
+  return { kind: 'case', whens: [[zero, zeroText], ...infinite, [and(plain, exact), shown]],
     else: spelling.arm(deferral(`${spelling.step}: a floating-point Number outside the plain shortest form`)) };
 }
 

@@ -200,9 +200,8 @@ describe("asString() of a Double is Double.toString", () => {
     ['g.inject([1.0d, 2.5d]).asString()', ['"[1.0, 2.5]"']],
     // A Float prints its SHORTEST decimal (`Float.toString`), read off its exact carrier.
     ['g.inject(0.123456789f).asString()', ['"0.12345679"']],
-    // A negative zero is `-0.0` — SQLite's own text drops the sign.
-    ['g.inject(-0.0d).asString()', ['"-0.0"']],
-    ["g.inject(-0.0d).project('a').by(identity()).select('a').asString()", ['"-0.0"']],
+    // A zero has no sign (a deliberate divergence): `-0.0` prints `0.0`, as SQLite's text does.
+    ['g.inject(-0.0d).asString()', ['"0.0"']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   // Scientific notation and a 16/17-digit Double are not SQLite's spelling: deferred.
@@ -317,16 +316,14 @@ describe('Float arithmetic is float arithmetic, or it defers', () => {
     test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow(RaisedByQuery));
 });
 
-describe("a signed zero and a BigDecimal widening compare as NumberHelper's", () => {
+describe("a zero is one zero and a BigDecimal widening compares as NumberHelper's", () => {
   const answered: [string, string[]][] = [
-    // `Double.compare(0.0, -0.0)` is 1 (`NumberHelper.java:277`).
-    ['g.inject(0.0d).is(-0.0d)', []],
-    ['g.inject(0).is(-0.0d)', []],
-    ['g.inject(-0.0d).is(0)', []],
-    ['g.inject(0.0d).is(P.gt(-0.0d))', ['0d']],
-    ['g.inject(-0.0d).is(P.lt(0.0d)).asString()', ['"-0.0"']],
-    ['g.inject(-0.0d).is(P.within(0.0d))', []],
-    ["g.inject(0.0d).math('-_').asString()", ['"-0.0"']],
+    // No signed zero (a deliberate divergence): `-0.0` and `0.0` compare equal, as in SQLite.
+    ['g.inject(0.0d).is(-0.0d)', ['0d']],
+    ['g.inject(0).is(-0.0d)', ['0i']],
+    ['g.inject(0.0d).is(P.gt(-0.0d))', []],
+    ['g.inject(-0.0d).is(P.within(0.0d))', ['0d']],
+    ["g.inject(0.0d).math('-_').asString()", ['"0.0"']],
     // A BigInteger against a Double widens to `BigDecimal.valueOf(d)`, the decimal of `Double.toString`.
     ['g.inject(99999999999999999999n).is(P.lt(1e30d))', ['99999999999999999999N']],
     ['g.inject(1e30d).is(P.gt(99999999999999999998n))', ['1e+30d']],
@@ -488,41 +485,16 @@ describe("createNumber's Float rung reads the JDK 19+ Float.toString (the pinned
   test("g.inject('1.17549435E-38').asNumber()", async () => expect(await classes("g.inject('1.17549435E-38').asNumber()")).toEqual(['1.17549435e-38d']));
 });
 
-describe('a negative zero keeps its sign at every depth — a list member, a map value, a slice, a stored property', () => {
-  // `Double.toString(-0.0)` is `-0.0` and `Double.equals` tells it from `0.0`; SQLite's JSON writer, `printf`
-  // and `CAST AS TEXT` all print it `0.0`, and `JSON.stringify(-0)` is `0`. So the sign is kept where a value
-  // ENTERS JSON — a run-time REAL (`jsonMember`'s `asExactReal`), a compiler literal (`emit.ts` `jsonEntry`), a
-  // JS value tree bound for SQLite (`stringifyExact`) and a `json_each` member re-collected (`list.ts`
-  // `exactMember`) — and every printer reads it back.
+describe('a zero has no sign at any depth — a list member, a map value, a slice, a stored property', () => {
+  // A deliberate divergence (`docs/feature-support-matrix.md`): `-0.0` is `0.0`, as SQLite's JSON writer,
+  // `printf` and `CAST AS TEXT` print it. Its CLASS is kept: it is still a Double (a Float), never an Int.
   const answered: [string, string[]][] = [
-    ['g.inject(-0.0d).fold()', ['[-0d]']],
-    ['g.inject(-0.0f).fold()', ['[-0f]']],
-    ['g.inject(-0.0d).fold().asString()', ['"[-0.0]"']],
-    ['g.inject(-0.0f).fold().asString()', ['"[-0.0]"']],
-    ['g.inject(-0.0d).fold().fold().asString()', ['"[[-0.0]]"']],
-    ['g.inject([-0.0d])', ['[-0d]']],
-    ['g.inject([-0.0d]).asString()', ['"[-0.0]"']],
-    ['g.inject(1).constant([-0.0d]).asString()', ['"[-0.0]"']],
-    ['g.inject([a:-0.0d])', ['{"a":-0d}']],
-    ['g.inject([a:-0.0d]).asString()', ['"{a=-0.0}"']],
-    ["g.inject(-0.0d).aggregate('x').cap('x').asString()", ['"[-0.0]"']],
-    ["g.inject(-0.0d).group().by(constant('k')).asString()", ['"{k=[-0.0]}"']],
-    ['g.inject(-0.0d).groupCount().asString()', ['"{-0.0=1}"']],
-    ["g.inject(0.0d).math('-_').fold().asString()", ['"[-0.0]"']],
-    ['g.inject(-0.0d).fold().unfold()', ['-0d']],
-    ['g.inject(-0.0d).fold().unfold().asString()', ['"-0.0"']],
-    ['g.inject(-0.0d).fold().asString(Scope.local)', ['["-0.0"]']],
-    ['g.inject(-0.0d,1.0d).fold().order(Scope.local)', ['[-0d,1d]']],
-    ['g.inject(-0.0d).fold().tail(Scope.local)', ['[-0d]']],
-    ['g.inject(-0.0d).fold().range(Scope.local,0,1)', ['[-0d]']],
-    ['g.inject(-0.0d).fold().min(Scope.local)', ['-0d']],
-    ['g.withSack(-0.0d).inject(1).sack().fold()', ['[-0d]']],
-    ["g.V(1).property('z', -0.0d) ;; g.V(1).values('z')", ['-0d']],
-    ["g.V(1).property('z', -0.0d) ;; g.V(1).valueMap('z')", ['{"z":[-0d]}']],
-    // A set op's literal operand and a typed list's re-collected payloads keep it too.
-    ['g.inject(-0.0d).fold().combine([-0.0d])', ['[-0d,-0d]']],
-    ['g.inject([-0.0d]).combine([1])', ['[-0d,1i]']],
-    // A 17-digit Double re-collected from a list keeps its digits the same way.
+    ['g.inject(-0.0d).fold()', ['[0d]']],
+    ['g.inject(-0.0f).fold()', ['[0f]']],
+    ['g.inject([a:-0.0d])', ['{"a":0d}']],
+    ['g.inject(-0.0d).fold().unfold()', ['0d']],
+    ["g.V(1).property('z', -0.0d) ;; g.V(1).values('z')", ['0d']],
+    // A 17-digit Double re-collected from a list keeps its digits.
     ["g.inject(1).math('1/3').fold().tail(Scope.local)", ['[0.3333333333333333d]']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
@@ -534,7 +506,7 @@ describe('conjoin() prints each member as String.valueOf — the asString() auth
   const answered: [string, string[]][] = [
     ["g.inject(0.1f).fold().conjoin('-')", ['"0.1"']],
     ["g.inject(1.0d).fold().conjoin('-')", ['"1.0"']],
-    ["g.inject(-0.0d).fold().conjoin('-')", ['"-0.0"']],
+    ["g.inject(-0.0d).fold().conjoin('-')", ['"0.0"']],
     ["g.inject(true).fold().conjoin('-')", ['"true"']],
     ["g.inject(1, 2.5d).fold().conjoin('-')", ['"1-2.5"']],
     ["g.V().values('name').fold().conjoin(',')", ['"marko,vadas,lop,josh,ripple,peter"']],
@@ -610,8 +582,8 @@ describe('a run-time BigDecimal widening of a Double has the scale of BigDecimal
 
 describe('the set-op family keeps every member class — combine/product/merge/intersect/difference/disjunct', () => {
   // A set op's members re-enter a list under the fold's runtime rule (`withLossyFlag`), each with its own
-  // class, and compare by `equals` — `Integer(1)` is not `Long(1)`, a Float not the Double of its value,
-  // `Double.equals(-0.0, 0.0)` false (`…/step/map/IntersectStep.java:68-80`, `MergeStep.java:100-110`).
+  // class, and compare by `equals` — `Integer(1)` is not `Long(1)`, a Float not the Double of its value
+  // (`…/step/map/IntersectStep.java:68-80`, `MergeStep.java:100-110`). A zero has no sign.
   const answered: [string, string[]][] = [
     ['g.inject(0.1f).fold().combine([1]).asString()', ['"[0.1, 1]"']],
     ['g.inject([0.1f]).combine([4L]).asString()', ['"[0.1, 4]"']],
@@ -628,25 +600,21 @@ describe('the set-op family keeps every member class — combine/product/merge/i
     ['g.inject([1,2]).intersect([1L,2])', ['set[2i]']],
     ['g.inject([1,2,1L]).merge([1])', ['set[1i,1L,2i]']],
     ["g.inject([1,'a']).disjunct([1L,'a'])", ['set[1i,1L]']],
-    ['g.inject([-0.0d, 0.0d]).merge([0.0d])', ['set[-0d,0d]']],
+    ['g.inject([-0.0d, 0.0d]).merge([0.0d])', ['set[0d]']],
     ['g.inject([1,2]).product([1L])', ['[[1i,1L],[2i,1L]]']],
     ['g.inject([1,2]).combine([3])', ['[1i,2i,3i]']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
 
-describe('a negative zero at every reduction and every dedup', () => {
-  // `SumGlobalStep`/`MeanGlobalStep` seed from the first traverser (`-0.0 × 1` is `-0.0`) and IEEE adds keep
-  // it only while every addend is one; `DedupGlobalStep`/`DedupLocalStep` key on `equals`.
+describe('a zero is one zero at every reduction and every dedup', () => {
+  // A zero has no sign (a deliberate divergence): a sum of `-0.0`s is `0.0` and `-0.0`/`0.0` dedup to one.
+  // `DedupGlobalStep`/`DedupLocalStep` still key on the class: `1` and `1.0` are two.
   const answered: [string, string[]][] = [
-    ['g.inject(-0.0d).sum()', ['-0d']],
-    ['g.inject(-0.0d,-0.0d).sum()', ['-0d']],
-    ['g.inject(-0.0d,0.0d).sum()', ['0d']],
-    ['g.inject(-0.0f).sum()', ['-0f']],
-    ['g.inject(-0.0d).mean()', ['-0d']],
-    ['g.inject(-0.0d).fold().sum(local)', ['-0d']],
-    ['g.inject(-0.0d,0.0d).dedup().count()', ['2L']],
-    ['g.inject(-0.0d,0.0d).fold().dedup(local)', ['set[-0d,0d]']],
+    ['g.inject(-0.0d,-0.0d).sum()', ['0d']],
+    ['g.inject(-0.0f).sum()', ['0f']],
+    ['g.inject(-0.0d).mean()', ['0d']],
+    ['g.inject(-0.0d,0.0d).dedup().count()', ['1L']],
     ['g.inject(1, 1.0).dedup().count()', ['2L']],
     ['g.inject([1, 1L, 1]).dedup(local)', ['set[1i,1L]']],
   ];
@@ -685,21 +653,19 @@ describe('a BigDecimal member keeps its SCALE at every depth — one carrier aut
 });
 
 describe('the substrate-A audit forms keep their class — a by() fold, a map key, a stored -0.0d, dedup', () => {
-  // `AbstractTraverser.equals` keeps 1.0 a Double and -0.0 apart from 0.0
+  // `AbstractTraverser.equals` keeps 1.0 a Double (a zero has no sign: `-0.0` is `0.0`)
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`);
   // `DedupGlobalStep`'s HashSet is `Double.equals`; a group KEY is the value itself.
   const answered: [string, string[]][] = [
     ["g.V(1).project('a').by(constant([1,2,1.0]).unfold().barrier().fold())", ['{"a":[1i,2i,1d]}']],
     ["g.V(1).project('a').by(constant([1.0]).unfold().fold())", ['{"a":[1d]}']],
-    ["g.V(1).project('a').by(constant([-0.0,2,0.0]).unfold().barrier().fold())", ['{"a":[-0d,2i,0d]}']],
     ['g.V(1).group().by(label).by(constant([1.0]).unfold().fold())', ['{"person":[1d]}']],
     ['g.inject(1,2,1.0).groupCount()', ['{1d:1L,1i:1L,2i:1L}']],
     ['g.inject(1,2,1.0).group().by().by(count())', ['{1d:1L,1i:1L,2i:1L}']],
     ["g.inject(1,2,1.0).groupCount('g').cap('g')", ['{1d:1L,1i:1L,2i:1L}']],
-    ["g.addV('n').property('x',-0.0d).values('x')", ['-0d']],
-    ["g.addV('n').property('x',-0.0d) ;; g.V().has('x').values('x')", ['-0d']],
-    ["g.addV('n').property('x',-0.0d) ;; g.addV('n').property('x',0.0d) ;; g.V().values('x').barrier().fold()", ['[-0d,0d]']],
-    ['g.inject(-0.0, 0.0).dedup().fold()', ['[-0d,0d]']],
+    ["g.addV('n').property('x',-0.0d).values('x')", ['0d']],
+    ["g.addV('n').property('x',-0.0d) ;; g.addV('n').property('x',0.0d) ;; g.V().values('x').barrier().fold()", ['[0d,0d]']],
+    ['g.inject(-0.0, 0.0).dedup().fold()', ['[0d]']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
@@ -741,44 +707,26 @@ describe('a min/max TIE goes where the reference sends it', () => {
   // FIRST argument keeps a tie. `MaxLocalStep`/`MinLocalStep` fold `max(next, result)` (`MaxLocalStep.java:52`),
   // so a LOCAL reducer's later member wins; a sack/fold applies `(accumulator, value)`, so the accumulator
   // wins; a GLOBAL reducer's first traverser wins (`ReducingBarrierStep.java:110`) — an arrival order the
-  // stream does not carry, so where the tie is observable (a signed zero, a BigDecimal scale) it DEFERS.
+  // stream does not carry, so where the tie is observable (a BigDecimal scale) it DEFERS. A zero has no
+  // sign (a deliberate divergence), so `-0.0` beside `0.0` is no observable tie and answers `0.0`.
   const answered: [string, string[]][] = [
-    ['g.inject([-0.0d,0.0d]).max(local)', ['0d']],
-    ['g.inject([-0.0d,0.0d]).min(local)', ['0d']],
-    ['g.inject([0.0d,-0.0d]).max(local)', ['-0d']],
-    ['g.inject([0.0d,-0.0d]).min(local)', ['-0d']],
-    ['g.inject(-0.0d,0.0d).fold().max(local)', ['0d']],
-    ['g.inject(-0.0d,0.0d).fold().min(local)', ['0d']],
     ['g.inject(1.0m,1.00m).fold().max(local)', ['100e-2M']],
     ['g.inject(1.0m,1.00m).fold().min(local)', ['100e-2M']],
     ['g.inject(1.00m,1.0m).fold().max(local)', ['10e-1M']],
-    ['g.inject(-0.0d,0.0d,1.0d).max()', ['1d']],
+    ['g.inject(-0.0d,0.0d).max()', ['0d']],
+    ['g.inject(0, -0.0d).max()', ['0d']],
+    ['g.inject([0.0d,-0.0d]).min(local)', ['0d']],
+    ['g.withSack(-0.0d).inject(1).sack(max).by(constant(0.0d)).sack()', ['0d']],
     // A tie only in a LOSING group is no tie of the winner's, at every depth.
-    ['g.inject(5.0d,-0.0d,0.0d).max()', ['5d']],
-    ['g.inject(-5.0d,-0.0d,0.0d).min()', ['-5d']],
     ['g.inject(1.0m,1.00m,0.5m).min()', ['5e-1M']],
-    ["g.E(7).property('weight',-0.0d) ;; g.E(8).property('weight',0.0d) ;; g.V(1).project('m').by(outE().values('weight').max())", ['{"m":0.4d}']],
-    ["g.E(7).property('weight',-0.0d) ;; g.E(8).property('weight',0.0d) ;; g.V(1).local(outE().values('weight').max())", ['0.4d']],
+    ["g.E(7).property('weight',-0.0d) ;; g.E(8).property('weight',0.0d) ;; g.E(9).property('weight',-1.0d) ;; g.V(1).project('m').by(outE().values('weight').max())", ['{"m":0d}']],
     ['g.inject(1, 1.0d).max()', ['1d']],
-    ['g.withSack(-0.0d).inject(1).sack(max).by(constant(0.0d)).sack()', ['-0d']],
-    ['g.withSack(0.0d).inject(1).sack(max).by(constant(-0.0d)).sack()', ['0d']],
-    ['g.withSack(-0.0d).inject(1).sack(min).by(constant(0.0d)).sack()', ['-0d']],
-    ['g.withSack(0.0d).inject(1).sack(min).by(constant(-0.0d)).sack()', ['0d']],
-    ['g.inject(-0.0d).fold(0.0d, Operator.min)', ['0d']],
-    ['g.inject(0.0d).fold(-0.0d, Operator.min)', ['-0d']],
-    ['g.inject(-0.0d).fold(0.0d, Operator.max)', ['0d']],
-    ['g.inject(0.0d).fold(-0.0d, Operator.max)', ['-0d']],
-    ['g.inject(-0.0d,0.0d).fold(5.0d, Operator.min)', ['-0d']],
-    ['g.inject(0.0d,-0.0d).fold(5.0d, Operator.min)', ['0d']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   for (const q of [
-    'g.inject(-0.0d,0.0d).max()', 'g.inject(0.0d,-0.0d).max()', 'g.inject(-0.0d,0.0d).min()', 'g.inject(0, -0.0d).max()',
-    'g.inject(1.0m, 1.00m).max()', 'g.inject(1.00m, 1.0m).min()', 'g.inject(-0.0d,0.0d).fold().unfold().max()',
+    'g.inject(1.0m, 1.00m).max()', 'g.inject(1.00m, 1.0m).min()',
     "g.V().values('age').is(29).union(asNumber(GType.BIGDECIMAL), math('_*1').asNumber(GType.BIGDECIMAL)).max()",
     "g.V().values('age').is(29).union(math('_*1').asNumber(GType.BIGDECIMAL), asNumber(GType.BIGDECIMAL)).min()",
-    "g.E(7).property('weight',-0.0d) ;; g.E(8).property('weight',0.0d) ;; g.E(9).property('weight',-1.0d) ;; g.V(1).project('m').by(outE().values('weight').max())",
-    "g.E(7).property('weight',-0.0d) ;; g.E(8).property('weight',0.0d) ;; g.V(1).local(outE().values('weight').min())",
   ])
     test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow('winner ties'));
   // A BigDecimal SUM/MEAN is BigDecimal scale arithmetic — named as such, not as a 2^53 tail.
@@ -997,7 +945,7 @@ describe('a 16- or 17-digit Double LITERAL inside a container is exact — whole
     ['g.inject([1.2345678901234567E30d]).unfold().is(1.2345678901234567E30d)', ['1.2345678901234567e+30d']],
     ['g.inject([1.0000000000000002E20d]).unfold().is(gt(1.0E20d))', ['100000000000000020000d']],
     ['g.inject(1).constant([1.2345678901234567E16d]).unfold().is(1.2345678901234567E16d)', ['12345678901234568d']],
-    ['g.inject([0.30000000000000004d, -0.0d, 2.0d, 1.0E7d]).unfold()', ['0.30000000000000004d', '-0d', '2d', '10000000d']],
+    ['g.inject([0.30000000000000004d, -0.0d, 2.0d, 1.0E7d]).unfold()', ['0.30000000000000004d', '0d', '2d', '10000000d']],
     ['g.inject([0.30000000000000004, 3, 1L]).unfold()', ['0.30000000000000004d', '3i', '1L']],
     ['g.inject(1).constant([1.2345678901234567E16d, 1L, 2b, 3.5f]).unfold()', ['12345678901234568d', '1L', '2b', '3.5f']],
     ["g.inject(['k':1.0000000000000002E20d]).select('k')", ['100000000000000020000d']],

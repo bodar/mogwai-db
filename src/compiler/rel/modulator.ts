@@ -714,11 +714,8 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // The recorded `t` may be absent on one entry and named on another for one class (a merged arm), so
     // it is written NORMALIZED (`valueClass`), as the identity arm below writes a per-row tag.
     // A STATIC recorded type rides on the framing, not a payload column, and is the node's tag: dropped to
-    // NULL ("infer"), the value reached `json_object` bare, whose writer spells a REAL `-0.0` as `0.0` and
-    // keeps 15 digits — so `inject(0.0d,-0.0d).as('a').groupCount().by(select('a'))` keyed ONE group where
-    // `GroupCountStep`'s HashMap keeps two (`Double.equals(0.0,-0.0)` is false;
-    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupCountStep.java`).
-    // Tagged, the ONE JSON-entry authority (`jsonMember`) carries the sign, the 17 digits and the range refusal.
+    // NULL ("infer"), the value reached `json_object` bare, whose writer keeps only 15 digits. Tagged, the
+    // ONE JSON-entry authority (`jsonMember`) carries the 17 digits and the range refusal.
     const value = scoped.payload[0]![1], tag = scoped.payload[1]?.[1];
     const recorded = staticTypeOf(scoped.framing.type);
     return gatedOn(scoped.present, !tag ? typedNode(value, recorded ? compilerText(recorded) : compilerNull('text'))
