@@ -1,7 +1,7 @@
 import { stringifyExact } from '../../json-exact.ts';
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { inferredVtype, SAFE_INT } from './reducer.ts';
+import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -667,32 +667,16 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
 });
 
 /**
- * `typedNode` under a PER-ROW tag that may be NULL ("infer"), for a node compared by its JSON TEXT — a
- * map key. Its `t` is the NORMALIZED class (`valueClass`), so a tagged and an untagged row of one class
- * write one key; its `v` is gated on the raw tag exactly as `typedNode`'s, spelling the class once.
- */
-export const classedNode = (value: Expr, vtype: Expr): Expr => ({
-  kind: 'json-object',
-  entries: [['t', valueClass(vtype, value)], ['v', jsonMember(value, vtype)]],
-  binary: false,
-});
-
-/**
- * `classedNode` for a value or tag that is EXPENSIVE to spell — a correlated read, which `classedNode`'s
- * class term and `jsonMember`'s per-tag `CASE` would repeat once per mention (measured, spelling the
- * full node inline took `group().by(values('name'))` from 1,700 to 5,540 statement bytes). So each is
- * evaluated ONCE, as the one row of a `VALUES` the node is projected over, and the node itself is the
- * full NORMALIZED one. The earlier one-mention spelling dropped a collection, floating or wide-integer
- * tag to "infer", and that was not neutral for a map KEY compared by its JSON text: `Integer(3)`,
- * `Long(3)` and a whole `Float`/`Double` all wrote an Int key, so
- * `g.V().groupCount().by(values('p'))` over p = 3, 3L, 3.0f, 3.0d answered `{3:1, 3:3}` where
- * `GroupCountStep` keys four classes apart (`Integer.equals(Long)` is false).
+ * `typedNode` for a value or tag that is EXPENSIVE to spell — a correlated read, which `jsonMember`'s
+ * per-tag `CASE` would repeat once per mention (measured, spelling the full node inline took
+ * `group().by(values('name'))` from 1,700 to 5,540 statement bytes). So each is evaluated ONCE, as the one
+ * row of a `VALUES` the node is projected over.
  */
 export const typedNodeOnce = (value: Expr, vtype: Expr, fresh: Minter): Expr => {
   const one = make.values({ id: fresh('tno'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)), rows: [[value, vtype]] });
   return { kind: 'scalar', plan: make.project({
     id: fresh('tnp'), input: one, channels: [], type: typeOf(meta('n', 'json', true)),
-    exprs: [['n', classedNode(col(one.id, 'v'), col(one.id, 't'))]],
+    exprs: [['n', typedNode(col(one.id, 'v'), col(one.id, 't'))]],
   }) };
 };
 
@@ -877,39 +861,30 @@ export const originOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'origin');
 
 /**
- * THE TRAVERSER EQUALITY a merge partitions on — `Objects.equals(t, other.t)`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`),
- * which is TYPED: `Integer(1).equals(Double(1.0))` is false. SQLite's `PARTITION BY` compares by VALUE
- * across storage classes (INTEGER 1 = REAL 1.0), so every key term a value can sit in is widened here, ONCE,
- * for every merge and tie guard, by its storage class (`typeof`, which tells an Integer from a Double where
- * no type tag does — a per-row tag, where carried, is normalized into that class below). A zero has no
- * sign: `-0.0` and `0.0` are one key, as in SQLite (a deliberate divergence, `feature-support-matrix.md`).
- * A term declared `text`/`int`/`real`/`json`/`blob` has one storage class, so it keys as itself: a JSONB collection compares by its BYTES, which carry each member's numeric form
- * (`1` vs `1.0`) — a member type the bare encoding cannot carry is refused where the list is BUILT
- * (`listLiteralBlob`), so equal bytes are equal typed lists.
+ * THE TRAVERSER EQUALITY a merge, a dedup and a group key partition on — the SQLite VALUE plus a coarse
+ * FAMILY (`valueFamily`). SQLite's own comparison already equates `1`, `1.0` and `-0.0`/`0.0` and keeps a
+ * number apart from a TEXT or a BLOB, so the value IS the key wherever its storage class says what it is;
+ * the family term is spent only where a per-row tag names a type the storage class cannot (a Boolean
+ * stored as INTEGER `1`, a UUID or a Char stored as TEXT). So `1`, `1.0` and `1L` are ONE traverser and
+ * `true` and `1` are two — a deliberate divergence from Java's class-typed `Objects.equals`
+ * (`feature-support-matrix.md`): the surviving traverser keeps its own class for framing.
+ * A term declared `text`/`int`/`real`/`json`/`blob` keys as itself: a JSONB collection compares by its BYTES.
+ * A per-row tag column is not a key of its own beside its value: it is subsumed by the family, so a tagged
+ * `constant(1)` and an untagged `identity()` 1 are one value. A record carries one such pair per field
+ * (`f0_v`/`f0_vtype`), so the pairing is by NAME.
  */
 export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
   const declared = (term: Expr): SqlType =>
     term.kind === 'col' && term.rel === rel.id ? rel.type.cols.find((column) => column.name === term.name)?.type ?? 'any'
       // A one-column scalar subquery is that column's type.
       : term.kind === 'scalar' && term.plan.type.cols.length === 1 ? term.plan.type.cols[0]!.type : 'any';
-  // A PER-ROW TAG, where the relation carries one beside its value column, names that value's class —
-  // and names it better than the storage class does: a stored Double may sit as INTEGER `1` beside a
-  // computed REAL `1.0` under one `double` tag. But a NULL tag means "read the value" (`perRowSubject`,
-  // predicate.ts — the framer's own reading), so neither the raw tag nor `typeof` is the class: a
-  // `constant(1)` tagged `int` and an `identity()` arm's untagged INTEGER 1 are ONE Integer. The class
-  // term is therefore NORMALIZED — the tag in the Gremlin vocabulary (`reducedVtype`: a reducer's
-  // storage-class `real` is a Double, `integer`/`text`/`null` say nothing), else the value's own
-  // inference — the reading `memberClass` (list.ts) gives a list member. The tag column itself is then
-  // NOT a key: it is subsumed by that class, and keying it raw split a tagged row from an untagged one.
-  // A record carries one such pair per field (`f0_v`/`f0_vtype`), so the pairing is by NAME, not one column.
   const names = new Set(rel.type.cols.map((column) => column.name));
   const tagOf = new Map<string, string>();
   for (const name of names) {
     const suffix = TAG_SUFFIXES.find((s) => name.endsWith(s));
     const value = suffix && name.slice(0, -suffix.length) + 'v';
-    // Only a value of UNKNOWN storage (`any`) keys by a class term at all; a declared one keeps its tag
-    // as a key of its own (a `text` value under `string` and under `uuid` are two classes).
+    // Only a value of UNKNOWN storage (`any`) is described by its tag; a declared one keeps its tag as a
+    // key of its own (a `text` value under `string` and under `uuid` are two classes).
     if (value && names.has(value) && !tagOf.has(value) && declared(col(rel.id, value)) === 'any') tagOf.set(value, name);
   }
   const ownName = (term: Expr): string | undefined => term.kind === 'col' && term.rel === rel.id ? term.name : undefined;
@@ -918,11 +893,8 @@ export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
   return terms.flatMap((term): Expr[] => {
     const name = ownName(term);
     if (name && subsumedTags.has(name)) return [];
-    const type = declared(term);
-    if (type !== 'any') return [term];
-    // Only the value column a tag rides beside is described by it; any other term keys by its own class.
     const tag = name && tagOf.get(name);
-    return tag ? typedKeyAs(term, valueClass(col(rel.id, tag), term)) : typedKey(term);
+    return tag ? [term, valueFamily(col(rel.id, tag))] : [term];
   });
 }
 
@@ -930,45 +902,53 @@ export function typedEquality(rel: Rel, terms: readonly Expr[]): Expr[] {
  *  inject's, a reducer's), and it describes the value column `<p>v` beside it. */
 const TAG_SUFFIXES: readonly string[] = [MERGED_VTYPE, 'vt'];
 
-/**
- * A VALUE'S GREMLIN CLASS from its per-row tag — the tag where it names a Gremlin type (a reducer's
- * storage-class `real` named `double`, by `reducedVtype`), else the value's own inference
- * (`inferredVtype`, the framer's). Equal for a tagged and an untagged row of one class, which is what
- * makes it a KEY: NULL never stands for "tagged".
- */
-export const valueClass = (tag: Expr, value: Expr): Expr =>
-  ({ kind: 'call', fn: 'coalesce', args: [reducedVtype(tag), inferredVtype(value)] });
+/** The tags whose value's STORAGE CLASS already says its family — a number (INTEGER/REAL, or a wide
+ *  integer's TEXT), a String (TEXT), a null — in the Gremlin vocabulary and a reducer's storage-class one. */
+const STORAGE_FAMILY_TAGS: readonly string[] = [
+  'byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'real', 'integer', 'string', 'text', 'null', 'blob',
+];
 
 /**
- * `typedEquality`'s key for ONE value of unknown storage class (an `any` term): the value and its
- * storage class. Two values are `Objects.equals` iff every term agrees under `IS` — the form a
- * caller that compares (a set op's membership) rather than partitions spends, through `typedSame`.
+ * A VALUE'S EQUALITY FAMILY from its per-row tag — NULL where the storage class already says it (every
+ * number, a String, an untagged value), else the tag itself (`boolean`, `uuid`, `char`, a collection).
+ * One mention of the tag and none of the value, so it is cheap beside any value expression.
  */
-export const typedKey = (term: Expr): Expr[] => typedKeyAs(term, { kind: 'call', fn: 'typeof', args: [term] });
-
-/** `typedKey` where the caller already knows a sharper CLASS term than the storage class — a list
- *  member's own Gremlin tag, which tells a `{t:'int'}` from a `{t:'long'}` that share an INTEGER. */
-export const typedKeyAs = (term: Expr, cls: Expr): Expr[] => [term, cls];
+export const valueFamily = (tag: Expr): Expr => ({
+  kind: 'case',
+  whens: [[{ kind: 'in-list', expr: tag, values: STORAGE_FAMILY_TAGS.map(compilerText) }, compilerNull('text')]],
+  else: tag,
+});
 
 /**
  * `typedEquality`'s key for ONE value OUTSIDE a relation's own columns — a `by()` projection, a label's
- * history entry — where what is known of its class is handed in rather than read off a sibling column:
- * a STATIC Gremlin type, a PER-ROW tag (normalized by `valueClass`, so a NULL "infer" tag and a named one
- * of one class key together), or nothing (the storage class, `typedKey`). The SAME three terms a merge
+ * history entry — where what is known of its type is handed in rather than read off a sibling column: a
+ * STATIC Gremlin type, a PER-ROW tag, or nothing (the storage class says it all). The SAME terms a merge
  * partitions on, so a `dedup('a')` and a `group().by(select('a'))` key one value one way.
  */
-export const classedKey = (term: Expr, known: { readonly static: string } | { readonly tag: Expr } | undefined): Expr[] =>
-  !known ? typedKey(term)
-    : 'static' in known ? typedKeyAs(term, compilerText(known.static))
-      : typedKeyAs(term, valueClass(known.tag, term));
+export const familyKey = (term: Expr, known: { readonly static: string } | { readonly tag: Expr } | undefined): Expr[] =>
+  !known ? [term]
+    : 'static' in known ? (STORAGE_FAMILY_TAGS.includes(known.static) ? [term] : [term, compilerText(known.static)])
+      : [term, valueFamily(known.tag)];
 
-/** `a` and `b` are the same value by the reference's TYPED equality (`typedKey`), null-safe (`IS`). */
-export const typedSame = (a: Expr, b: Expr): Expr => {
-  const right = typedKey(b);
-  return typedKey(a)
-    .map((term, i): Expr => ({ kind: 'binary', op: 'is', left: term, right: right[i]! }))
-    .reduce((acc, term) => ({ kind: 'binary', op: 'and', left: acc, right: term }));
+/**
+ * THE FIRST ARRIVAL's `value` within a group, as ONE aggregate — the member a merged key or a deduped
+ * traverser frames by. `order` is the arrival order (an encounter, a member position); with none, the
+ * least value stands in (deterministic, and the group's members are equal values anyway). Each position
+ * is packed as a fixed-width decimal ahead of the value, so `min` over the packed text is the first
+ * arrival's and one `substr` unpacks it; a NULL value packs as '' so the arrival is still counted.
+ */
+export const firstArrival = (value: Expr, order: readonly Expr[]): Expr => {
+  if (!order.length) return { kind: 'agg', fn: 'min', args: [value] };
+  const width = ORDER_WIDTH * order.length;
+  const packed: Expr = {
+    kind: 'binary', op: '||',
+    left: { kind: 'call', fn: 'printf', args: [compilerText('%020d'.repeat(order.length)), ...order] },
+    right: { kind: 'call', fn: 'coalesce', args: [value, compilerText('')] },
+  };
+  const unpacked: Expr = { kind: 'call', fn: 'substr', args: [{ kind: 'agg', fn: 'min', args: [packed] }, compilerInt(width + 1)] };
+  return { kind: 'call', fn: 'nullif', args: [unpacked, compilerText('')] };
 };
+const ORDER_WIDTH = 20;
 
 /**
  * A `ROW_NUMBER()` WINDOW — mint one integer rank column `colName` over `(PARTITION BY … ORDER BY …)`,

@@ -8,7 +8,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { freshTraverserRow, hostTag, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, classedKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
@@ -392,25 +392,22 @@ export function byTyped(
 }
 
 /**
- * A `by()` projection as a `HashSet` KEY — the object it produced, compared by `Objects.equals`
- * (`DedupGlobalStep.java:77-88`: `duplicateSet.add(product.get())`, or a `List` of one per label), so
- * `Integer(3)` is not `Long(3)` and `Float(3.0)` is not `Double(3.0)`. SQLite's `PARTITION BY` equates each
- * pair, and a projection is a bare value whose storage class cannot tell them apart; what CAN is what
- * `byTyped` knows of its type — a static tag, a per-row tag (a label's history `t`, a stored `vtype`), or
- * nothing, the storage class — and `classedKey` (build.ts) turns that into the same terms a merge keys
- * on. Where `byTyped` has no answer the projection is an element's rowid or the value of a host
- * `typedArm` does not describe, and keys as itself under the storage class.
+ * A `by()` projection as a dedup KEY — the object it produced (`DedupGlobalStep.java:77-88`), keyed by
+ * VALUE plus family (`familyKey`, build.ts — the same terms a merge keys on), so a Boolean `true` is not
+ * the Integer `1` while `3` and `3L` are one key. What `byTyped` knows of the type — a static tag, a
+ * per-row tag (a label's history `t`, a stored `vtype`), or nothing — names the family. Where `byTyped`
+ * has no answer the projection is an element's rowid or a value its storage class describes.
  */
 export function byEqualityKey(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam,
 ): { readonly terms: readonly Expr[]; readonly value: Expr; readonly present: Presence } | null {
   const typed = byTyped(modulation, host, source, fresh, child);
-  if (typed) return { terms: classedKey(typed.value, knownClass(typed.evidence)), value: typed.value, present: typed.present };
+  if (typed) return { terms: familyKey(typed.value, knownClass(typed.evidence)), value: typed.value, present: typed.present };
   const projected = byProjection(modulation, host, source, fresh, false, child);
-  return projected && { terms: classedKey(projected.value, undefined), value: projected.value, present: projected.present };
+  return projected && { terms: [projected.value], value: projected.value, present: projected.present };
 }
 
-/** What `classedKey` is told of a value's class, from the evidence `byTyped` gathered. */
+/** What `familyKey` is told of a value's type, from the evidence `byTyped` gathered. */
 export const knownClass = (evidence: ValueEvidence): { readonly static: string } | { readonly tag: Expr } | undefined =>
   evidence.kind === 'static' ? { static: evidence.tag } : evidence.kind === 'tag' ? { tag: evidence.tag } : undefined;
 
@@ -587,17 +584,12 @@ export const memberNodeOf = (produced: ChildValue, source: GraphSource, fresh: M
  * A SCALAR whose producer cannot say (`'unknown'`) DECLINES.
  */
 /** A scalar's `{t,v}` node: its STATIC class where the type names one (a literal, no read duplicated), else its
- *  per-row tag where it has one, else untagged.
- *
- *  A per-row tag is always written as its NORMALIZED class (`classedNode`): this node may be a map KEY,
- *  compared by its JSON text, and a NULL tag ("infer") or a dropped `long` keyed `Integer(3)` and
- *  `Long(3)` as one — `inject(3, 3L).groupCount().by(is(gt(0)))` answered `{3:2}` where `GroupCountStep`
- *  keys the two apart (`Integer.equals(Long)` is false). Inline where value and tag are free of a
- *  correlated read (cheap to repeat), else `typedNodeOnce`, which evaluates each ONCE. */
+ *  per-row tag where it has one (a NULL tag frames by inference), else untagged. Inline where value and tag
+ *  are free of a correlated read (cheap to repeat), else `typedNodeOnce`, which evaluates each ONCE. A map
+ *  KEY node is grouped by its value and family, not its text (`groupKeyed`, map.ts). */
 const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType, fresh: Minter): Expr => {
   if (staticTypeOf(type) || !vtype) return typedNode(value, staticTagExpr(type));
-  if (vtype.kind === 'lit') return typedNode(value, vtype);
-  return exprHasSubquery(value) || exprHasSubquery(vtype) ? typedNodeOnce(value, vtype, fresh) : classedNode(value, vtype);
+  return vtype.kind !== 'lit' && (exprHasSubquery(value) || exprHasSubquery(vtype)) ? typedNodeOnce(value, vtype, fresh) : typedNode(value, vtype);
 };
 
 export function producedMemberNode(value: Expr, framing: RelFraming, source: GraphSource, fresh: Minter, present: Presence, vtype?: Expr): Expr | null {
@@ -673,26 +665,19 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     if (scoped.framing.kind !== 'scalar') return null;
     // A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row
     // `vtype` COLUMN survives becoming JSON.
-    // The recorded `t` may be absent on one entry and named on another for one class (a merged arm), so
-    // it is written NORMALIZED (`valueClass`), as the identity arm below writes a per-row tag.
     // A STATIC recorded type rides on the framing, not a payload column, and is the node's tag: dropped to
     // NULL ("infer"), the value reached `json_object` bare, whose writer keeps only 15 digits. Tagged, the
     // ONE JSON-entry authority (`jsonMember`) carries the 17 digits and the range refusal.
     const value = scoped.payload[0]![1], tag = scoped.payload[1]?.[1];
     const recorded = staticTypeOf(scoped.framing.type);
-    return gatedOn(scoped.present, value, !tag ? typedNode(value, recorded ? compilerText(recorded) : compilerNull('text'))
-      : tag.kind === 'lit' ? typedNode(value, tag) : classedNode(value, tag));
+    return gatedOn(scoped.present, value, typedNode(value, tag ?? (recorded ? compilerText(recorded) : compilerNull('text'))));
   }
 
   if (host.kind === 'scalar') {
     if (key.kind !== 'identity') return null;
     // A scalar stream carries its own tag where it has one; without one the framer infers from the JS
-    // value, which is what an untagged node means. A PER-ROW tag is written as its NORMALIZED class
-    // (`valueClass`, the one `typedEquality` keys on): this node is a map KEY, compared by its JSON text,
-    // so a NULL tag ("infer") beside an `int` tag split one Integer into two keys —
-    // `inject(1,2,1).union(identity(), constant(1)).groupCount()` answered `{1:3, 1:2, 2:1}`.
-    if (!host.vtype) return typedNode(host.value, compilerNull('text'));
-    return host.vtype.kind === 'lit' ? typedNode(host.value, host.vtype) : classedNode(host.value, host.vtype);
+    // value, which is what an untagged node means.
+    return typedNode(host.value, host.vtype ?? compilerNull('text'));
   }
 
   // A RECORD as a `{t:'map', v:[…]}` node is `recordValue`'s (`record.ts`) and reachable only through

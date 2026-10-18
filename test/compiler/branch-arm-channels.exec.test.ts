@@ -153,8 +153,8 @@ describe('a variant frames every scalar arm by ITS OWN type — the arms\' meet,
     expect(rows).toContain('6L');
     expect(rows).toContain('"marko"');
   });
-  test("union(out(), constant(1L), constant(1)).dedup() — a Long 1 and an Int 1 are distinct (Java equals)", async () =>
-    expect(bag((await typed("g.V().union(out(), constant(1L), constant(1)).dedup()")).filter((row) => !row.startsWith('v[')))).toEqual(['1L', '1i']));
+  test("union(out(), constant(1L), constant(1)).dedup() — a Long 1 and an Int 1 are one value (value plus family)", async () =>
+    expect((await typed("g.V().union(out(), constant(1L), constant(1)).dedup()")).filter((row) => !row.startsWith('v['))).toHaveLength(1));
   test("union(out().fold(), values('age'), count()) — a list arm beside a met scalar arm", async () => {
     const rows = await typed("g.V().union(out().fold(), values('age'), count())");
     expect(rows).toContain('6L');

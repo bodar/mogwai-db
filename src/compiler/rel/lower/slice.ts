@@ -3,10 +3,9 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, classedKey, eq, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
+import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
-import type { ColMeta } from '../../../rel/types.ts';
 import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { countOf, isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
@@ -401,14 +400,6 @@ export function rowOp(
   //    parent, and the set arms cannot carry `origin` (its group policy is `undefined`).
   if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
   if (originOf(input.channels)) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
-  // A payload a VALUE can sit in keys on the reference's TYPED equality (`typedEquality`, the one authority
-  // a merge partitions on too): `DedupGlobalStep` collects into a `HashSet`, whose `equals` keeps
-  // `Integer(1)` from `Double(1.0)`, where SQL's `=` (and so a `DISTINCT`/`GROUP BY`) folds them. The set arms below cannot key on a term they do not keep as a
-  // column, so such a payload takes the window arm, whose partition carries the widened key.
-  const identity = shape.identity(input);
-  const typedKey = typedEquality(input, identity);
-  if (typedKey.length !== identity.length) return dedupOnTyped(typedKey, input, shape.tie(input), fresh);
-
   // THE COLLAPSING ARMS (`Distinct`/`Aggregate`) reduce the row to `(payload, bulk[, encounter])`, so
   // they may carry ONLY the channels with a defined N→1 answer — `bulk`/`encounter`; an ALIAS/`sack`
   // binding belongs to ONE of the merged rows and a collapse has no answer for it. But that is a reason
@@ -419,19 +410,27 @@ export function rowOp(
   // dropping it. This is the same honest lowering the `!identifiedByPayload`/`origin` cases already take;
   // the collapse below is the pure SQL optimization for the case with nothing but identity to keep.
   // `graph` (a multi-graph merge) is part of the identity KEY, not a passenger: it is spliced into the
-  // partition (`dedupOn` via the keys, the `Distinct`/group-by below directly) so A's id 5 and B's id 5
-  // stay distinct, and its `undefined` group policy must not veto the dedup.
-  //
-  // A payload whose per-row TAG its typed key subsumes (`typedKeys`) takes the window arm too: a collapse
-  // keys on its payload COLUMNS, so on the raw tag, which split a tagged `constant(1)` from an untagged
-  // `identity()` 1 — one Integer. `dedupOn` keys on `typedEquality`'s normalized class instead and keeps
-  // the first arrival whole, tag and all.
-  if (typedKeys(input).subsumed
-    || !groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) {
+  // partition (`dedupOn` via the keys, the `Distinct` below directly) so A's id 5 and B's id 5 stay
+  // distinct, and its `undefined` group policy must not veto the dedup.
+  if (!groupableChannels(input.channels.filter((channel) => channel.role !== 'origin' && channel.role !== 'graph'))) {
     const g = graphOf(input.channels);
     const keys = g ? [...shape.identity(input), col(input.id, g.col)] : shape.identity(input);
     return dedupOn(keys, input, shape.tie(input), fresh);
   }
+
+  // THE KEY is the payload under the merges' one equality (`typedEquality`): the VALUE plus its family, so
+  // a tagged and an untagged `1`, and `1`/`1.0`/`1L`, are one traverser while `true` and `1` are two. A
+  // per-row tag the family subsumes is no key: it rides as a PASSENGER, the first arrival's
+  // (`firstArrival`), so the survivor frames as the traverser it is. A payload whose every column is its
+  // own key (an element's `id`, an untagged value, a declared column) needs neither.
+  const pcols = payloadCols(input);
+  const own = pcols.map((column) => col(input.id, column.name));
+  const keys = typedEquality(input, own);
+  const ownKey = (term: Expr): number => own.indexOf(term as typeof own[number]);
+  const extra = keys.filter((term) => ownKey(term) < 0);
+  const passengers = pcols.filter((_, i) => !keys.includes(own[i]!));
+  const plain = !extra.length && !passengers.length;
+  const graph = graphOf(input.channels);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -442,123 +441,76 @@ export function rowOp(
   // the channel core's third policy table (`CHANNEL_GROUP_POLICY`) exists to permit — a grouping
   // may carry a role only where N-rows-into-one has a defined answer, which `bulk` and `encounter`
   // have and an alias, a path or a sack do not.
-  if (!ordered) {
+  if (!ordered && plain) {
     // A `graph` channel (a multi-graph merge) is part of element IDENTITY: dedup on `(payload, graph)`,
     // not the payload alone, so A's id 5 and B's id 5 do not collapse. `bulk` stays the constant 1 (the
     // survivor stands for itself), so a `Distinct` over `(payload, graph, 1)` collapses exactly the
     // duplicate `(payload, graph)` rows. Absent a graph channel this is the ordinary `(payload, 1)`
     // dedup. **The payload is `payloadCols`, not a hard-coded `id`** — that is what makes this ONE arm
-    // serve every shape whose identity IS its whole payload (an element's `id`, a scalar's `(v, vtype)`,
-    // a list's `list` JSON, a record's fields); for an element `payloadCols` IS `[id]`, byte-unchanged.
-    //
-    // The payload's TYPED key (`typedKeys`) rides as extra columns the `Distinct` sees and the result
-    // then drops, so `1`/`1.0` stay two traversers.
-    const graph = graphOf(input.channels);
+    // serve every shape whose identity IS its whole payload (an element's `id`, a scalar's `v`, a list's
+    // `list` JSON, a record's fields); for an element `payloadCols` IS `[id]`, byte-unchanged.
     const chans = graph ? withChannel(BULK, graph) : BULK;
-    const pcols = payloadCols(input);
-    const typed = typedKeys(input);
     const projected = make.project({
-      id: fresh('dd'), input, channels: chans, type: typeOf(...pcols, ...typed.cols, ...carriedCols(chans)),
-      exprs: [...pcols.map((c) => [c.name, col(input.id, c.name)] as const), ...typed.exprs,
+      id: fresh('dd'), input, channels: chans, type: typeOf(...pcols, ...carriedCols(chans)),
+      exprs: [...pcols.map((c) => [c.name, col(input.id, c.name)] as const),
         ...chans.map((c) => [c.col, c.role === 'graph' ? col(input.id, c.col) : compilerInt(1)] as const)],
     });
-    const distinct = make.distinct({ id: fresh('d'), input: projected, channels: chans, type: projected.type });
-    return typed.cols.length ? make.project({
-      id: fresh('dt'), input: distinct, channels: chans, type: typeOf(...pcols, ...carriedCols(chans)),
-      exprs: [...pcols, ...carriedCols(chans)].map((c) => [c.name, col(distinct.id, c.name)] as const),
-    }) : distinct;
+    return make.distinct({ id: fresh('d'), input: projected, channels: chans, type: projected.type });
   }
-  // THE AGGREGATES ARE DERIVED FROM THE CHANNELS THE INPUT ACTUALLY CARRIES, never named — §12's rule,
-  // and this line broke it. The pair `['bulk', 'encounter']` was hardcoded while every ordered element
-  // relation carried both, and the first one that did not was a `fold().unfold()`: a fold collapses the
-  // stream to ONE traverser, so the list relation has no multiplicity to carry and the unfolded members
-  // arrive with an emission order and no `bulk`. The declared type then said two columns while the node
-  // emitted three, which the factory catches — a THROW out of a lowering whose contract is `null`, i.e.
-  // a compile error where the traversal must answer.
+  // A keyed collapse over a multi-graph merge, or over a CORRELATED stream (a child's host row,
+  // `freeRelIds`) whose payload may BE an outer column — SQLite resolves no outer column in a `GROUP BY`
+  // (measured: `SELECT (SELECT x FROM (SELECT t.a AS x FROM (VALUES(1)) u GROUP BY t.a)) FROM t` is
+  // `no such column: t.a`), while a window's `PARTITION BY` resolves it — is the ranked window (`dedupOn`),
+  // the same survivor rule.
+  if (graph) return dedupOn([...own, col(input.id, graph.col)], input, shape.tie(input), fresh);
+  if (freeRelIds(input).size) return dedupOn(own, input, shape.tie(input), fresh);
+  // THE AGGREGATES ARE DERIVED FROM THE CHANNELS THE INPUT ACTUALLY CARRIES, never named — §12's rule.
+  // `groupableChannels` above has already refused every role without a defined N→1 answer, so the arms
+  // below are total over what can reach here. `bulk` is the constant 1 because a dedup survivor stands
+  // for ITSELF (`DedupGlobalStep.filter`'s unconditional `setBulk(1L)`), and `encounter` is the FIRST
+  // occurrence's position, which is what makes the survivor the one TinkerPop keeps.
   //
-  // `groupableChannels` above has already refused every role without a defined N→1 answer, so the two
-  // arms below are total over what can reach here; anything else declines rather than being averaged
-  // into a plausible value. `bulk` is the constant 1 because a dedup survivor stands for ITSELF
-  // (`DedupGlobalStep.filter`'s unconditional `setBulk(1L)`), and `encounter` is the FIRST occurrence's
-  // position, which is what makes the survivor the one TinkerPop keeps.
-  // MATERIALISE the payload into named columns BEFORE grouping: an aggregate names its group keys once
-  // in `GROUP BY` and again in `SELECT`, so grouping by a payload EXPRESSION re-evaluates it twice per
-  // row — and a scalar's payload can be a correlated subquery (`label()`/`values(k)` read `v` as a
-  // per-row `SELECT … LIMIT 1`). For an element the payload is the physical `id`, so this projection is
-  // fused away and the SQL is byte-unchanged; for a subquery payload it becomes a derived table the
-  // GROUP BY references by name, evaluating it once. (The `Distinct` arm above already projects first,
-  // which is why the unordered dedup never had this cost.)
-  // A CORRELATED stream (a child's host row, `freeRelIds`) may carry a payload that IS an outer column,
-  // and SQLite resolves no outer column in a `GROUP BY` (measured: `SELECT (SELECT x FROM (SELECT t.a AS x
-  // FROM (VALUES(1)) u GROUP BY t.a)) FROM t` is `no such column: t.a`), while a window's `PARTITION BY`
-  // resolves it — so there the ranked window (`dedupOn`) is the ordered dedup, the same survivor rule.
-  if (freeRelIds(input).size) return dedupOn(shape.identity(input), input, shape.tie(input), fresh);
-  const pcols = payloadCols(input);
+  // MATERIALISE the payload into named columns BEFORE grouping when it is COMPUTED (a family term, or a
+  // scalar's correlated `SELECT … LIMIT 1` payload): an aggregate names its group keys once in `GROUP BY`
+  // and again in `SELECT`, so grouping by an expression re-evaluates it twice per row. For an element the
+  // payload is the physical `id`, so the SQL groups directly on the input, byte-unchanged.
   const carried = carriedCols(input.channels);
-  // An aggregate names its group keys TWICE (in `GROUP BY` and in `SELECT`), so grouping directly by a
-  // payload EXPRESSION re-evaluates it per row twice over. That is free for a PHYSICAL payload (an
-  // element's `id` is a bare column) but pathological for a COMPUTED one — a scalar `label()`/`values(k)`
-  // reads `v` as a correlated `SELECT … LIMIT 1`. So when the payload is computed, FENCE a projection of
-  // it (`AS MATERIALIZED`) first, evaluating each value once and letting `GROUP BY` name a column; when
-  // it is physical, group directly on the input exactly as the element dedup always has (byte-unchanged).
-  //
-  // The payload's TYPED key (`typedKeys`) is grouped on as extra columns of that same fence, which the
-  // result then drops — so a payload that needs one always takes the fenced form.
-  const typed = typedKeys(input);
-  const computed = typed.cols.length > 0 || (input.kind === 'project'
+  const extraCols = extra.map((_, i) => meta(`dq${i}`, 'any', true));
+  const computed = !plain || (input.kind === 'project'
     && pcols.some((column) => input.exprs.find(([name]) => name === column.name)?.[1]?.kind !== 'col'));
   const grouped = computed
     ? make.materialize({
-      id: fresh('df'), channels: input.channels, type: typeOf(...pcols, ...typed.cols, ...carried),
+      id: fresh('df'), channels: input.channels, type: typeOf(...pcols, ...extraCols, ...carried),
       input: make.project({
-        id: fresh('dm'), input, channels: input.channels, type: typeOf(...pcols, ...typed.cols, ...carried),
-        exprs: [...pcols.map((column) => [column.name, col(input.id, column.name)] as const), ...typed.exprs,
+        id: fresh('dm'), input, channels: input.channels, type: typeOf(...pcols, ...extraCols, ...carried),
+        exprs: [...pcols.map((column) => [column.name, col(input.id, column.name)] as const),
+          ...extra.map((term, i) => [extraCols[i]!.name, term] as const),
           ...carried.map((column) => [column.name, col(input.id, column.name)] as const)],
       }),
     })
     : input;
-  const reductions: (readonly [string, Expr])[] = [];
+  const keyCols = keys.map((term) => ownKey(term) >= 0 ? pcols[ownKey(term)]! : extraCols[extra.indexOf(term)]!);
+  const encounter = encounterOf(grouped.channels);
+  const arrival = encounter ? [col(grouped.id, encounter.col)] : [];
+  const reductions: (readonly [string, Expr])[] = passengers.map((column) => [column.name, firstArrival(col(grouped.id, column.name), arrival)] as const);
   for (const channel of grouped.channels) {
     if (channel.role === 'bulk') reductions.push([channel.col, compilerInt(1)]);
     else if (channel.role === 'encounter') reductions.push([channel.col, { kind: 'agg', fn: 'min', args: [col(grouped.id, channel.col)] }]);
     else return null;
   }
   const aggregated = make.aggregate({
-    // The group keys are the whole payload (`payloadCols`, matching `shape.identity` for an
-    // identity-IS-payload shape), then the aggregates — so this ordered dedup serves every such shape,
-    // not just an element's `id`. The declared type names the keys positionally (`factory.aggregate`).
+    // The group keys are the payload's equality terms (`keys`), then the aggregates — so this ordered
+    // dedup serves every identity-IS-payload shape, not just an element's `id`. The declared type names
+    // the keys positionally (`factory.aggregate`).
     id: fresh('dd'), input: grouped, channels: grouped.channels,
-    type: typeOf(...pcols, ...typed.cols, ...carried),
-    groupBy: computed ? [...pcols, ...typed.cols].map((column) => col(grouped.id, column.name)) : shape.identity(input),
+    type: typeOf(...keyCols, ...passengers, ...carried),
+    groupBy: computed ? keyCols.map((column) => col(grouped.id, column.name)) : shape.identity(input),
     aggs: reductions,
   });
-  return typed.cols.length ? make.project({
+  return plain ? aggregated : make.project({
     id: fresh('dt'), input: aggregated, channels: aggregated.channels, type: typeOf(...pcols, ...carried),
     exprs: [...pcols, ...carried].map((column) => [column.name, col(aggregated.id, column.name)] as const),
-  }) : aggregated;
-}
-
-/**
- * THE TYPED KEY a collapsing `dedup()` adds to its payload — `typedEquality`'s extra term (a storage
- * class) as named columns. `DedupGlobalStep` collapses on a `HashSet`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:59,78`),
- * which is `Objects.equals`: `Integer(1)` is not `Double(1.0)`.
- * SQLite's `DISTINCT`/`GROUP BY` equate them, exactly as its `PARTITION BY` does at a merge — so the
- * dedup keys on the merges' ONE authority rather than a rule of its own. An element's `id` (an `int`)
- * needs nothing, and costs nothing.
- */
-function typedKeys(input: Rel): {
-  readonly cols: readonly ColMeta[]; readonly exprs: readonly (readonly [string, Expr])[]; readonly subsumed: boolean;
-} {
-  const own = payloadCols(input).map((column) => col(input.id, column.name));
-  const typed = typedEquality(input, own);
-  const extra = typed.filter((term) => !own.includes(term as typeof own[number]));
-  const names = extra.map((_, i) => `dq${i}`);
-  return {
-    cols: names.map((name) => meta(name, 'any', true)), exprs: extra.map((term, i) => [names[i]!, term] as const),
-    // A payload column the typed key does not hold — a per-row tag its value's class subsumes — is no key.
-    subsumed: own.some((term) => !typed.includes(term)),
-  };
+  });
 }
 
 /**
@@ -575,8 +527,8 @@ function dedupBy(
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  // The key is the projected OBJECT under `Objects.equals` (`byEqualityKey`) — its value AND its class, so
-  // `dedup().by('p')` keeps a vertex whose `p` is `3` apart from one whose `p` is `3L`.
+  // The key is the projected OBJECT (`byEqualityKey`) — its value plus its family, so `dedup().by('p')`
+  // keeps a vertex whose `p` is `true` apart from one whose `p` is `1`.
   const key = byEqualityKey(modulation, shape.host, ctx.source, fresh, childSeam(ctx, fresh));
   if (!key) return null;
   // An unproductive `by()` drops the traverser (`DedupGlobalStep.java:77-78`); a NULL key is an absent one.
@@ -621,13 +573,12 @@ function dedupBy(
 export function dedupOn(
   keys: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter,
 ): Rel | null {
-  // The keys partition by the reference's TYPED equality (`typedEquality`, build.ts) — the traverser's
-  // own columns are `HashSet` members like the traverser itself (`DedupGlobalStep.java:78`).
+  // The keys partition by the merges' one equality (`typedEquality`, build.ts) — value plus family.
   return dedupOnTyped(typedEquality(domain, keys), domain, tie, fresh);
 }
 
 /** `dedupOn` over a key ALREADY spelled as typed-equality terms — a `by()` projection or a label's
- *  value, whose class the caller knows better than `typedEquality` can read off a bare expression
+ *  value, whose type the caller knows better than `typedEquality` can read off a bare expression
  *  (`byEqualityKey`, `aliasKeyAt`). */
 function dedupOnTyped(
   typedKeysOf: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter,
@@ -681,8 +632,8 @@ export function dedupByLabels(
   by: Modulation | undefined, ctx: ChainCtx, fresh: Minter,
 ): Rel | null {
   const seam = childSeam(ctx, fresh);
-  // Each label's OBJECT keys by `Objects.equals` (`DedupGlobalStep.java:80-88`): an element by its rowid,
-  // a value by its `v` AND its recorded class (`aliasKeyAt`), a `by()` by `byEqualityKey`.
+  // Each label's OBJECT keys by value plus family (`DedupGlobalStep.java:80-88`): an element by its rowid,
+  // a value by its `v` and its recorded family (`aliasKeyAt`), a `by()` by `byEqualityKey`.
   const keyTerms: Expr[] = [];
   const productive: Expr[] = [];
   for (const k of keys) {
@@ -708,7 +659,7 @@ export function dedupByLabels(
     // canonical `json()` text of two identical arrays compares equal under `=`/GROUP BY — the faithful
     // lowering. A MAP label stays declined: `json()` object text is key-ORDER sensitive, but a Java
     // `LinkedHashMap` compares by ENTRY set regardless of order, so text equality is not faithful.
-    else if (proj.read.kind === 'list') keyTerms.push(...classedKey(aliasListAt(column, 'last'), undefined));
+    else if (proj.read.kind === 'list') keyTerms.push(aliasListAt(column, 'last'));
     else return null; // a MAP-valued alias key — order-sensitive JSON text vs entry-equality, a later phase.
   }
   const domain = productive.length

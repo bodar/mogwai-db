@@ -2,6 +2,7 @@ import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
+import type { ColMeta } from '../../rel/types.ts';
 import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
@@ -10,7 +11,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, meta, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { withChannel } from '../../channels.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
@@ -109,6 +110,30 @@ const MEMBER_COL = 'gt';
  *  otherwise — total either way, and a SEPARATE column from the member because a projected VALUE is not
  *  an order (two traversers can share one). */
 export const ORD_COL = 'go';
+
+/** A `{t,v}` NODE's equality terms — its `v` plus the family its `t` names (`valueFamily`), the merges'
+ *  one equality (`typedEquality`, build.ts) applied to a node, where its JSON TEXT split each class (and
+ *  each spelling) into a value of its own. */
+const nodeEquality = (node: Expr): Expr[] => [jsonField(node, 'v'), valueFamily(jsonField(node, 't'))];
+
+/**
+ * HOW A GROUPING KEYS ITS ROWS — a key NODE by `nodeEquality`, so `1`, `1.0` and `1L` are one key and
+ * `true` and `1` two. The key the map then writes is the FIRST ARRIVAL's node (`firstArrival`, by
+ * `arrival` where the rows state one, else the least), so it frames as one traverser that reached the
+ * group. An element key is its rowid, as is. The leading `groupBy` columns are `cols`; `key` is the
+ * aggregate naming `KEY_COL`.
+ */
+function groupKeyed(rows: Rel, elementKey: ColMeta | undefined, arrival: readonly Expr[]): {
+  readonly groupBy: readonly Expr[]; readonly cols: readonly ColMeta[]; readonly key: readonly (readonly [string, Expr])[];
+} {
+  const gk = col(rows.id, KEY_COL);
+  if (elementKey) return { groupBy: [gk], cols: [elementKey], key: [] };
+  return {
+    groupBy: nodeEquality(gk),
+    cols: [meta('gkv', 'any', true), meta('gkf', 'text', true)],
+    key: [[KEY_COL, firstArrival(gk, arrival)]],
+  };
+}
 
 /**
  * `group()`/`groupCount()` with NO side-effect label — the barrier, as a map value, or `null` to
@@ -673,13 +698,18 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
       ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulkCol)] }
       : { kind: 'agg', fn: 'count', args: [compilerInt(1)] })
     : collectedValue(rows, recipe, source, fresh, order);
+  // The key's ARRIVAL order is the member order, where the rows carry one — a count's rows do not (its
+  // stream's encounter would be a window computed for nothing else), so its merged key is the least node.
+  const arrival = order.filter((name) => rows.type.cols.some((column) => column.name === name)).map((name) => col(rows.id, name));
+  const keyed = groupKeyed(rows, keyElem ? meta(KEY_COL, 'json', true) : undefined, arrival);
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,
     // `origin` is CONSULTED as the first GROUP BY key (emitted as a plain column, first — the emitter reads
     // the leading `groupBy.length` cols as keys), so each origin's keys pool separately.
-    channels: [], type: typeOf(...(originCol ? [meta(originCol, 'int')] : []), meta(KEY_COL, 'json', true), meta(VAL_COL, counting ? 'int' : 'json')),
-    groupBy: [...(originCol ? [col(rows.id, originCol)] : []), col(rows.id, KEY_COL)],
-    aggs: [[VAL_COL, value]],
+    channels: [], type: typeOf(...(originCol ? [meta(originCol, 'int')] : []), ...keyed.cols,
+      ...(keyed.key.length ? [meta(KEY_COL, 'json', true)] : []), meta(VAL_COL, counting ? 'int' : 'json')),
+    groupBy: [...(originCol ? [col(rows.id, originCol)] : []), ...keyed.groupBy],
+    aggs: [...keyed.key, [VAL_COL, value]],
   });
 
   // A COUNT is a Gremlin `long`, and the tag is what makes the wire emit an explicit Int64
@@ -949,12 +979,13 @@ function groupReduced(
     ? { value: coalesce({ kind: 'agg' as const, fn: 'sum' as const, args: [col(rowsIn.id, VAL_COL)] }, compilerInt(0)), type: compilerText('long') }
     : reducerAggregate(col(rowsIn.id, VAL_COL), reducer, SCREENED, undefined, rowTag ? col(rowsIn.id, TAG_COL) : undefined);
   if (!reduced) return null;
+  const keyedBy = groupKeyed(rowsIn, elementKey ? meta(KEY_COL, 'int', true) : undefined, []);
   const productive = make.aggregate({
     id: fresh('rb'), input: rowsIn, channels: [],
-    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true),
+    type: typeOf(...keyedBy.cols, ...(keyedBy.key.length ? [meta(KEY_COL, 'json', true)] : []), meta(VAL_COL, 'any', true),
       ...(tag ? [meta(CLASS_WIDTH_COL, 'int', true), meta(CLASS_FLOATING_COL, 'int', true)] : [])),
-    groupBy: [col(rowsIn.id, KEY_COL)],
-    aggs: [[VAL_COL, reduced.value], ...(tag ? numberClassAggs(col(rowsIn.id, VAL_COL), col(rowsIn.id, TAG_COL), reducer === 'sum' ? 'not-a-number' : 'number') : [])],
+    groupBy: keyedBy.groupBy,
+    aggs: [...keyedBy.key, [VAL_COL, reduced.value], ...(tag ? numberClassAggs(col(rowsIn.id, VAL_COL), col(rowsIn.id, TAG_COL), reducer === 'sum' ? 'not-a-number' : 'number') : [])],
   });
   // The class is NAMED ONCE, as a column FENCED on both sides: `typedNode` reads its tag at every arm of
   // its value encoding, and the assembler fuses an unfenced projection into its neighbour — into the
@@ -1097,7 +1128,9 @@ function groupCollected(
   // DISTINCT ON (group key, child value), retaining the first row in the child encounter order.  This
   // is deliberately after the key projection: using the child's `origin` would dedup per parent
   // traverser, while the GroupStep barrier's map scopes the set per GROUP KEY.
-  const members = dedups.length ? dedupGroupMembers(real, cols, fresh) : real;
+  const members = dedups.length
+    ? dedupGroupMembers(real, cols, { key: !elementKey, member: rows.framing.kind !== 'elements' && !mapMember }, fresh)
+    : real;
   const seed = make.project({
     id: fresh('cz'), input, channels: [], type: cols,
     exprs: [[KEY_COL, seedKey], [MEMBER_COL, compilerNull()], [ORD_COL, compilerInt(0)]],
@@ -1119,11 +1152,13 @@ function groupCollected(
   return groupMap(rowsIn, recipe, source, fresh);
 }
 
-/** The pooled `dedup().fold()` barrier: one first member per `(KEY_COL, MEMBER_COL)`.  It is a window
- * rather than an aggregate because the fold needs the surviving member's encounter position intact. */
-function dedupGroupMembers(input: Rel, cols: ReturnType<typeof typeOf>, fresh: Minter): Rel {
+/** The pooled `dedup().fold()` barrier: one first member per `(KEY_COL, MEMBER_COL)`, each a node keyed
+ * by `nodeEquality` (a rowid as itself).  It is a window rather than an aggregate because the fold needs
+ * the surviving member's encounter position intact. */
+function dedupGroupMembers(input: Rel, cols: ReturnType<typeof typeOf>, nodes: { readonly key: boolean; readonly member: boolean }, fresh: Minter): Rel {
+  const keyed = (name: string, node: boolean): Expr[] => node ? nodeEquality(col(input.id, name)) : [col(input.id, name)];
   const ranked = rowNumberWindow(input, 'gr', [], {
-    partitionBy: [col(input.id, KEY_COL), col(input.id, MEMBER_COL)],
+    partitionBy: [...keyed(KEY_COL, nodes.key), ...keyed(MEMBER_COL, nodes.member)],
     orderBy: [{ expr: col(input.id, ORD_COL), dir: 'asc' }],
   }, fresh);
   const first = make.filter({

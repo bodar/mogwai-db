@@ -88,7 +88,7 @@ export const aliasScalarTypeOf = (type: ScalarType): ScalarType =>
  * which every reader (`select` first/last/all/mixed, a `by()` slot, a `where`/`order`/`groupCount` key)
  * already honours. An entry with NO tag (an `unknown` binding) is read the way a lone `unknown` binding
  * is — its class inferred from its own value, by the framer (`execute.ts` `vtypeToValueType(null)`) and by
- * every key alike (`valueClass`, `rel/build.ts`) — so the per-entry read never asks an entry to speak
+ * every key alike (`familyKey`, `rel/build.ts`) — so the per-entry read never asks an entry to speak
  * for another.
  *
  * THE INVARIANT readers rely on: a shape the label holds whose descriptor is absent (`list` without

@@ -12,7 +12,7 @@ import { asStringOf, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
 import { promotedExtremum, resultIsDecimal } from './float.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
@@ -188,19 +188,6 @@ const memberTypeTag = (of: ListOf, members: Rel): Expr => {
   return memberVtype(of, members) ?? inferredVtype(col(members.id, MEMBER.value));
 };
 
-/**
- * A MEMBER'S CLASS AS AN EQUALITY KEY — `memberTypeTag`, with the two readings that tag can leave open
- * closed: an envelope whose `t` is NULL means "infer from the value" (as everywhere else in this
- * channel), and a reducer's storage-class tag (`real`/`integer`) names the class its value infers to.
- * So `{t:'real',v:1.5}` and a bare `1.5` are one Double, and `{t:'int',v:1}` and `{t:'long',v:1}` two.
- */
-const memberClass = (of: ListOf, members: Rel, payload: Expr): Expr => ({
-  kind: 'call', fn: 'coalesce', args: [{
-    kind: 'case',
-    whens: [[{ kind: 'in-list', expr: memberTypeTag(of, members), values: [compilerText('real'), compilerText('integer')] }, compilerNull()]],
-    else: memberTypeTag(of, members),
-  }, inferredVtype(payload)],
-});
 
 /**
  * A MEMBER'S TYPE AS RECEIVER EVIDENCE (`receiver.ts`) — the member read the type-demanding transforms
@@ -509,14 +496,12 @@ export function listMemberOp(
       // right, because it named only two of the three member columns: a TYPED list's member is a value
       // AND a tag, and `memberNode` reads the tag.
       //
-      // ⚠️ THE KEY IS THE PAYLOAD **AND** ITS CLASS, which is the same lesson the property identity key
-      // records: `{t:'byte',v:1}` and `{t:'int',v:1}` share a payload and are `Byte(1)` and `Integer(1)`
-      // — not equal in Java, so not one member. The class is `memberClass` (the tag where one is carried, else
-      // the storage class's inference), so an untagged `1` and `1.0` are two members. An ELEMENT member's identity is its ROWID and nothing else
-      // (`ElementHelper.hashCode(Element)` is `element.id().hashCode()`), which the payload already is.
+      // THE KEY IS THE PAYLOAD plus its FAMILY — the merges' one equality (`valueFamily`, build.ts), so `1`,
+      // `1.0` and `1L` are one member and `true` and `1` two. An ELEMENT member's identity is its ROWID and
+      // nothing else (`ElementHelper.hashCode(Element)` is `element.id().hashCode()`), which the payload already is.
       const rank = 'mdr';
       const ranked = rowNumberWindow(members, rank, [], {
-        partitionBy: elemOf ? [payload] : [payload, memberClass(of, members, payload)],
+        partitionBy: elemOf ? [payload] : [payload, valueFamily(memberOwnTag(of, members))],
         orderBy: [{ expr: col(members.id, MEMBER.ord), dir: 'asc' }],
       }, fresh);
       const survivors = make.filter({
@@ -1585,10 +1570,9 @@ export function listSetOp(
 
   // BOTH SIDES IN ONE VOCABULARY: each member as its PAYLOAD (the comparable SQL value), its CLASS (a
   // Gremlin type name — an envelope's `t`, a static list's tag, a bare JSON Boolean's `boolean`, else the
-  // class its storage names back, `inferredVtype`). Membership is both, because the reference's is `equals`
-  // over a `HashSet` — `Integer(1)` is not `Long(1)`, a Float is not the Double of its value
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/IntersectStep.java:68-80`,
-  // `MergeStep.java:100-110`, `DisjunctStep.java:67-80`, `DifferenceStep.java:68-80`).
+  // class its storage names back, `inferredVtype`). Membership is the value plus the family its class
+  // names (`valueFamily`) — the merges' one equality, so `1`, `1.0` and `1L` are one member and `true` and
+  // `1` two (a deliberate divergence from the reference's class-typed `HashSet`, `IntersectStep.java:68-80`).
   //
   // The CLASS then rides into the result (`collect`): a set op's members re-enter a list under the same
   // runtime rule a `fold()` spends (`withLossyFlag` — envelope the whole list iff some member's class does
@@ -1597,8 +1581,10 @@ export function listSetOp(
   // Float's exact Double carrier and dropped the tag that says it is a Float, so `combine` printed
   // `0.10000000149011612` and framed `[0.1f, 4L]` as `[0.1d, 4i]`. An ELEMENT list's members are rowids
   // whose identity is the rowid alone; they carry no class.
-  const SIDE = { value: MEMBER.value, ord: MEMBER.ord, cls: 'mg' } as const;
-  const sideCols = [meta(SIDE.value, 'any', true), meta(SIDE.ord, 'int'), meta(SIDE.cls, 'text', true)];
+  // `fam` is the member's equality family (`valueFamily`), read once off its OWN tag: an inferred class
+  // names a storage family, so the family of the full class is the family of the own tag.
+  const SIDE = { value: MEMBER.value, ord: MEMBER.ord, cls: 'mg', fam: 'mf' } as const;
+  const sideCols = [meta(SIDE.value, 'any', true), meta(SIDE.ord, 'int'), meta(SIDE.cls, 'text', true), meta(SIDE.fam, 'text', true)];
   /** The class column's expression, given the member's payload COLUMN and its own tag (NULL = infer). */
   const classOf = (ownTag: Expr, payload: Expr): Expr => (bothElem ? compilerNull() : coalesce(ownTag, inferredVtype(payload)));
   /** One side's members as `(mv payload, mo position, mg class)` — correlated to the list row. */
@@ -1612,26 +1598,28 @@ export function listSetOp(
     const value = col(read.id, SIDE.value);
     return make.project({
       id: fresh('sc'), input: read, channels: [], type: typeOf(...sideCols),
-      exprs: [[SIDE.value, value], [SIDE.ord, col(read.id, SIDE.ord)], [SIDE.cls, classOf(col(read.id, SIDE.cls), value)]],
+      exprs: [[SIDE.value, value], [SIDE.ord, col(read.id, SIDE.ord)], [SIDE.cls, classOf(col(read.id, SIDE.cls), value)],
+        [SIDE.fam, valueFamily(col(read.id, SIDE.cls))]],
     });
   };
   const selfList = col(rel.id, LIST_COL);
   const mine = sideOf(selfList, of);
-  /** The `equals` of two member rows — `IS`, not `=`, so a null member matches a null member. */
+  /** The equality of two member rows — the value plus its family (`valueFamily`, the merges' one
+   *  equality), `IS` rather than `=`, so a null member matches a null member. */
   const same = (a: Rel, b: Rel): Expr => and(
     { kind: 'binary', op: 'is', left: col(a.id, SIDE.value), right: col(b.id, SIDE.value) },
-    { kind: 'binary', op: 'is', left: col(a.id, SIDE.cls), right: col(b.id, SIDE.cls) });
+    { kind: 'binary', op: 'is', left: col(a.id, SIDE.fam), right: col(b.id, SIDE.fam) });
 
   /** One side's `(mv, mg)` member rows, optionally filtered — the filter BEFORE the projection, so the
    *  projection addresses the FILTER, not the explode (the emitter's one scope rule). */
-  const SET_COLS = [meta(SIDE.value, 'any', true), meta(SIDE.cls, 'text', true)];
+  const SET_COLS = [meta(SIDE.value, 'any', true), meta(SIDE.cls, 'text', true), meta(SIDE.fam, 'text', true)];
   const valuesOf = (members: Rel, pred?: (side: Rel) => Expr): Rel => {
     const filtered = pred
       ? make.filter({ id: fresh('sf'), input: members, channels: [], type: members.type, pred: pred(members) })
       : members;
     return make.project({
       id: fresh('sp'), input: filtered, channels: [], type: typeOf(...SET_COLS),
-      exprs: [SIDE.value, SIDE.cls].map((column) => [column, col(filtered.id, column)] as const),
+      exprs: [SIDE.value, SIDE.cls, SIDE.fam].map((column) => [column, col(filtered.id, column)] as const),
     });
   };
 
@@ -1683,7 +1671,13 @@ export function listSetOp(
    * was inheriting a dedup implementation detail as a contract.
    */
   const setOf = (rows: Rel): Rel => {
-    const deduped = make.distinct({ id: fresh('sd'), input: rows, channels: [], type: rows.type });
+    // One member per value and family; the class it frames as is the least of the merged ones.
+    const deduped = make.aggregate({
+      id: fresh('sd'), input: rows, channels: [],
+      type: typeOf(meta(SIDE.value, 'any', true), meta(SIDE.fam, 'text', true), meta(SIDE.cls, 'text', true)),
+      groupBy: [col(rows.id, SIDE.value), col(rows.id, SIDE.fam)],
+      aggs: [[SIDE.cls, { kind: 'agg', fn: 'min', args: [col(rows.id, SIDE.cls)] }]],
+    });
     return collect(deduped, (r) => col(r.id, SIDE.cls), (r) => memberAt(r, SIDE.value, SIDE.cls),
       (r) => [{ expr: col(r.id, SIDE.value), dir: 'asc' }, { expr: col(r.id, SIDE.cls), dir: 'asc' }]);
   };

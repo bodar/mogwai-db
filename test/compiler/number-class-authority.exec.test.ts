@@ -573,8 +573,8 @@ describe('a run-time BigDecimal widening of a Double has the scale of BigDecimal
 
 describe('the set-op family keeps every member class — combine/product/merge/intersect/difference/disjunct', () => {
   // A set op's members re-enter a list under the fold's runtime rule (`withLossyFlag`), each with its own
-  // class, and compare by `equals` — `Integer(1)` is not `Long(1)`, a Float not the Double of its value
-  // (`…/step/map/IntersectStep.java:68-80`, `MergeStep.java:100-110`). A zero has no sign.
+  // class, and compare by value plus family — `1` and `1L` are one member (a deliberate divergence from
+  // `IntersectStep.java:68-80`'s class-typed `equals`). A zero has no sign.
   const answered: [string, string[]][] = [
     ['g.inject(1.5f).fold().combine([1]).asString()', ['"[1.5, 1]"']],
     ['g.inject([1.5f]).combine([4L]).asString()', ['"[1.5, 4]"']],
@@ -588,9 +588,9 @@ describe('the set-op family keeps every member class — combine/product/merge/i
     ["g.E().values('weight').fold().combine([7L])", ['[0.5d,1d,0.4d,1d,0.4d,0.2d,7L]']],
     ["g.E().values('weight').fold().merge([7L])", ['set[0.2d,0.4d,0.5d,1d,7L]']],
     ['g.inject([0.1f,2.0d]).intersect([0.1f]).unfold()', ['0.10000000149011612f']],
-    ['g.inject([1,2]).intersect([1L,2])', ['set[2i]']],
-    ['g.inject([1,2,1L]).merge([1])', ['set[1i,1L,2i]']],
-    ["g.inject([1,'a']).disjunct([1L,'a'])", ['set[1i,1L]']],
+    ['g.inject([1,2]).intersect([1L,2])', ['set[1i,2i]']],
+    ['g.inject([1,2,1L]).merge([1])', ['set[1i,2i]']],
+    ["g.inject([1,'a']).disjunct([1L,'a'])", ['set[]']],
     ['g.inject([-0.0d, 0.0d]).merge([0.0d])', ['set[0d]']],
     ['g.inject([1,2]).product([1L])', ['[[1i,1L],[2i,1L]]']],
     ['g.inject([1,2]).combine([3])', ['[1i,2i,3i]']],
@@ -600,14 +600,14 @@ describe('the set-op family keeps every member class — combine/product/merge/i
 
 describe('a zero is one zero at every reduction and every dedup', () => {
   // A zero has no sign (a deliberate divergence): a sum of `-0.0`s is `0.0` and `-0.0`/`0.0` dedup to one.
-  // `DedupGlobalStep`/`DedupLocalStep` still key on the class: `1` and `1.0` are two.
+  // Equal numbers of any class are one value too: `1` and `1.0` dedup to one.
   const answered: [string, string[]][] = [
     ['g.inject(-0.0d,-0.0d).sum()', ['0d']],
     ['g.inject(-0.0f).sum()', ['0f']],
     ['g.inject(-0.0d).mean()', ['0d']],
     ['g.inject(-0.0d,0.0d).dedup().count()', ['1L']],
-    ['g.inject(1, 1.0).dedup().count()', ['2L']],
-    ['g.inject([1, 1L, 1]).dedup(local)', ['set[1i,1L]']],
+    ['g.inject(1, 1.0).dedup().count()', ['1L']],
+    ['g.inject([1, 1L, 1]).dedup(local)', ['set[1i]']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
@@ -644,16 +644,15 @@ describe('a BigDecimal member keeps its SCALE at every depth — one carrier aut
 });
 
 describe('the substrate-A audit forms keep their class — a by() fold, a map key, a stored -0.0d, dedup', () => {
-  // `AbstractTraverser.equals` keeps 1.0 a Double (a zero has no sign: `-0.0` is `0.0`)
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/util/AbstractTraverser.java:185-188`);
-  // `DedupGlobalStep`'s HashSet is `Double.equals`; a group KEY is the value itself.
+  // A member keeps its class (1.0 stays a Double); a group KEY merges equal numbers by value plus family,
+  // framed as one of the merged arrivals (a zero has no sign: `-0.0` is `0.0`).
   const answered: [string, string[]][] = [
     ["g.V(1).project('a').by(constant([1,2,1.0]).unfold().barrier().fold())", ['{"a":[1i,2i,1d]}']],
     ["g.V(1).project('a').by(constant([1.0]).unfold().fold())", ['{"a":[1d]}']],
     ['g.V(1).group().by(label).by(constant([1.0]).unfold().fold())', ['{"person":[1d]}']],
-    ['g.inject(1,2,1.0).groupCount()', ['{1d:1L,1i:1L,2i:1L}']],
-    ['g.inject(1,2,1.0).group().by().by(count())', ['{1d:1L,1i:1L,2i:1L}']],
-    ["g.inject(1,2,1.0).groupCount('g').cap('g')", ['{1d:1L,1i:1L,2i:1L}']],
+    ['g.inject(1,2,1.0).groupCount()', ['{1d:2L,2i:1L}']],
+    ['g.inject(1,2,1.0).group().by().by(count())', ['{1d:2L,2i:1L}']],
+    ["g.inject(1,2,1.0).groupCount('g').cap('g')", ['{1d:2L,2i:1L}']],
     ["g.addV('n').property('x',-0.0d).values('x')", ['0d']],
     ["g.addV('n').property('x',-0.0d) ;; g.addV('n').property('x',0.0d) ;; g.V().values('x').barrier().fold()", ['[0d,0d]']],
     ['g.inject(-0.0, 0.0).dedup().fold()', ['[0d]']],

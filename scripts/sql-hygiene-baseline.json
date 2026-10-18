@@ -79,8 +79,8 @@
   },
   "cap": {
     "binds": 0,
-    "bytes": 9476,
-    "compiler": 235,
+    "bytes": 9708,
+    "compiler": 269,
     "bound": 0
   },
   "choose": {
@@ -98,7 +98,7 @@
   "combine": {
     "binds": 0,
     "bytes": 5440,
-    "compiler": 131,
+    "compiler": 159,
     "bound": 0
   },
   "concat": {
@@ -139,20 +139,20 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 6091,
-    "compiler": 65,
+    "bytes": 6071,
+    "compiler": 63,
     "bound": 0
   },
   "difference": {
     "binds": 0,
-    "bytes": 5276,
-    "compiler": 110,
+    "bytes": 6913,
+    "compiler": 138,
     "bound": 0
   },
   "disjunct": {
     "binds": 0,
-    "bytes": 7323,
-    "compiler": 149,
+    "bytes": 7714,
+    "compiler": 205,
     "bound": 0
   },
   "drop": {
@@ -217,14 +217,14 @@
   },
   "group": {
     "binds": 0,
-    "bytes": 4734,
-    "compiler": 116,
+    "bytes": 5216,
+    "compiler": 133,
     "bound": 0
   },
   "groupCount": {
     "binds": 0,
-    "bytes": 3512,
-    "compiler": 68,
+    "bytes": 3994,
+    "compiler": 67,
     "bound": 0
   },
   "has": {
@@ -283,8 +283,8 @@
   },
   "intersect": {
     "binds": 0,
-    "bytes": 5272,
-    "compiler": 110,
+    "bytes": 6909,
+    "compiler": 138,
     "bound": 0
   },
   "inV": {
@@ -373,8 +373,8 @@
   },
   "merge": {
     "binds": 0,
-    "bytes": 4706,
-    "compiler": 109,
+    "bytes": 5513,
+    "compiler": 137,
     "bound": 0
   },
   "mergeE": {
@@ -445,8 +445,8 @@
   },
   "product": {
     "binds": 0,
-    "bytes": 8608,
-    "compiler": 132,
+    "bytes": 9012,
+    "compiler": 146,
     "bound": 0
   },
   "project": {
@@ -559,8 +559,8 @@
   },
   "unfold": {
     "binds": 0,
-    "bytes": 9622,
-    "compiler": 154,
+    "bytes": 10026,
+    "compiler": 168,
     "bound": 0
   },
   "union": {
@@ -578,7 +578,7 @@
   "value": {
     "binds": 0,
     "bytes": 2064,
-    "compiler": 29,
+    "compiler": 26,
     "bound": 0
   },
   "valueMap": {

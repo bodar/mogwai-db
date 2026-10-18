@@ -310,14 +310,16 @@ describe('regex() reads its pattern as a JavaScript RegExp (`u` flag, then none)
 });
 
 describe('a set op keeps each member its class', () => {
-  // `HashSet.contains` keeps Long(1) apart from Integer(1) (`DifferenceStep`).
+  // A member keeps its class; membership is value plus family, so Long(1) IS Integer(1) (a deliberate
+  // divergence from `DifferenceStep`'s class-typed `HashSet.contains`).
   test.each([
-    ['g.inject(1L,2L).fold().combine([1])', '[1L,2L,1i]'], ['g.inject(1L,2L).fold().difference([1])', 'set[1L,2L]'],
+    ['g.inject(1L,2L).fold().combine([1])', '[1L,2L,1i]'], ['g.inject(1L,2L).fold().difference([1])', 'set[2L]'],
     ['g.inject(1L,2L).fold().product([1])', '[[1L,1i],[2L,1i]]'], ['g.inject(1.5f).fold().combine([1])', '[1.5f,1i]'],
   ])('%s', async (q, want) => {
     expect(await run(q)).toEqual([want]);
   });
   test('a stored Long member', async () => {
-    expect(await run("g.V().values('x').fold().difference([1])", ["g.V(1).property('x',1L)"])).toEqual(['set[1L]']);
+    expect(await run("g.V().values('x').fold().difference([1])", ["g.V(1).property('x',1L)"])).toEqual(['set[]']);
+    expect(await run("g.V().values('x').fold().difference([2])", ["g.V(1).property('x',1L)"])).toEqual(['set[1L]']);
   });
 });

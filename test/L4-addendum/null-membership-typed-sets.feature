@@ -67,8 +67,9 @@ Feature: mogwai addendum — a null is a value to within/without and to math(), 
       | null |
       | d[2].i |
 
-  # Every list set op builds a HashSet, which is Objects.equals: Integer(1) is not Double(1.0)
-  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/IntersectStep.java:68-80).
+  # Every list set op, dedup and group key compares by VALUE plus a coarse family (boolean / number /
+  # string / other) — a deliberate divergence from Java's class-typed HashSet (IntersectStep.java:68-80):
+  # Integer 1 and Double 1.0 are one member, a Boolean true and an Integer 1 are two.
   Scenario: g_injectXlist_1_2X_intersectXlist_1dXX
     Given the empty graph
     And the traversal of
@@ -78,11 +79,19 @@ Feature: mogwai addendum — a null is a value to within/without and to math(), 
     When iterated to list
     Then the result should be unordered
       | result |
-      | s[] |
+      | s[d[1].i] |
 
-  # merge/disjunct/dedup(local) keeping `1` and `1.0` apart is pinned TYPED in
-  # test/compiler/typed-equality-sites.exec.test.ts: the JS client decodes an Int and a Double to one number,
-  # so a set holding both reads back here as one member.
+  Scenario: g_injectXtrue_1_trueX_dedup
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(true, 1, true).dedup()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | true |
+      | d[1].i |
 
   # A per-row tag is not a key of its own: an untagged identity() 1 and a constant(1) tagged int are ONE
   # Integer, so dedup()/dedup().by()/groupCount() collapse them (DedupGlobalStep.java:59,78 is a HashSet;
@@ -136,40 +145,37 @@ Feature: mogwai addendum — a null is a value to within/without and to math(), 
       | result |
       | v[lop] |
 
-  # A label-keyed dedup keys on each label's OBJECT (DedupGlobalStep.java:74-88 — a HashSet over a
-  # List<Object>), and Integer.equals(Long) and Float.equals(Double) are both false.
+  # A label-keyed dedup keys on each label's value plus family, as every merge does: 3 and 3L are one
+  # value (a deliberate divergence from Integer.equals(Long) being false, DedupGlobalStep.java:74-88).
   Scenario: g_injectX3_3LX_asXaX_dedupXaX
     Given the empty graph
     And the traversal of
       """
-      g.inject(3, 3L).as("a").dedup("a")
+      g.inject(3, 3L).as("a").dedup("a").count()
       """
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[3].i |
-      | d[3].l |
+      | d[1].l |
 
   Scenario: g_injectX3_3LX_asXaX_dedup_byXselectXaXX
     Given the empty graph
     And the traversal of
       """
-      g.inject(3, 3L).as("a").dedup().by(__.select("a"))
+      g.inject(3, 3L).as("a").dedup().by(__.select("a")).count()
       """
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[3].i |
-      | d[3].l |
+      | d[1].l |
 
-  Scenario: g_injectX3f_3dX_asXaX_dedupXaX
+  Scenario: g_injectXtrue_1X_asXaX_dedupXaX
     Given the empty graph
     And the traversal of
       """
-      g.inject(3.0f, 3.0d).as("a").dedup("a")
+      g.inject(true, 1).as("a").dedup("a").count()
       """
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[3.0].f |
-      | d[3.0].d |
+      | d[2].l |

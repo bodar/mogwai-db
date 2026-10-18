@@ -7,9 +7,10 @@
 // - `Contains.within` is `Compare.eq` per member, and `comparable(null, null)` is true
 //   (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:314-316),
 //   so a null subject is within a set holding null and `without` is its complement (predicate.ts).
-// - `dedup()`, `dedup(local)` and intersect/difference/disjunct/merge key on `typedEquality`
-//   (src/compiler/rel/build.ts): `Integer(1)` is not `Double(1.0)` and `Double.equals(-0.0, 0.0)` is false
-//   (DedupGlobalStep.java:59,78; IntersectStep.java:68-80).
+// - `dedup()`, `dedup(local)`, group keys and intersect/difference/disjunct/merge key on `typedEquality`
+//   (src/compiler/rel/build.ts): the SQLite VALUE plus a coarse family (`valueFamily`), so `1`, `1.0` and
+//   `1L` are one value and `true` and `1` two — a deliberate divergence from Java's class-typed
+//   `Objects.equals` (DedupGlobalStep.java:59,78; IntersectStep.java:68-80). A survivor frames as itself.
 import { test, expect, describe } from 'bun:test';
 import { seededStore, storeSeededWith } from '../support/harness.ts';
 import { executeQuery } from '../support/executor.ts';
@@ -74,9 +75,10 @@ describe('within/without agree with eq on a null — Contains.within is Compare.
   });
 });
 
-describe('dedup and the set ops key on typed equality — HashSet is Objects.equals', () => {
-  test('dedup() keeps an Integer beside a Double; a signed zero is one zero', () => {
-    expect(typed('g.inject(1, 1.0, 1).dedup().fold()')).toEqual(['[1i,1d]']);
+describe('dedup and the set ops key on value plus family', () => {
+  test('dedup() merges equal numbers of any class, keeps a Boolean apart; a signed zero is one zero', () => {
+    expect(typed('g.inject(1, 1.0, 1).dedup().fold()')).toEqual(['[1i]']);
+    expect(typed('g.inject(true, 1, 1.0, true).dedup().fold()')).toEqual(['[true,1i]']);
     // No signed zero: `-0.0` and `0.0` are one value, as in SQLite (a deliberate divergence).
     expect(typed('g.inject(-0.0, 0.0).dedup().count()')).toEqual(['1L']);
     expect(typed('g.inject(-0.0, 0.0).union(__.identity(), __.identity()).dedup().count()')).toEqual(['1L']);
@@ -89,40 +91,41 @@ describe('dedup and the set ops key on typed equality — HashSet is Objects.equ
       .toEqual(['[0.2d,0.4d,0.5d,1d]']);
   });
 
-  test('dedup(local) keys on the member class', () => {
+  test('dedup(local) keys on the member value plus family', () => {
     // `DedupLocalStep` yields a `LinkedHashSet`, which frames as a SET in insertion order.
-    expect(typed('g.inject([1, 1.0]).dedup(local)')).toEqual(['set[1i,1d]']);
+    expect(typed('g.inject([1, 1.0]).dedup(local)')).toEqual(['set[1i]']);
     expect(typed('g.inject(-0.0, 0.0).fold().dedup(local).count(local)')).toEqual(['1L']);
-    expect(typed('g.inject(1, 1L, 1.0, 1).fold().dedup(local)')).toEqual(['set[1i,1L,1d]']);
+    expect(typed('g.inject(1, 1L, 1.0, 1).fold().dedup(local)')).toEqual(['set[1i]']);
+    expect(typed('g.inject(true, 1).fold().dedup(local)')).toEqual(['set[true,1i]']);
     expect(typed("g.E().values('weight').fold().dedup(local)")).toEqual(['set[0.5d,1d,0.4d,0.2d]']);
   });
 
-  test('intersect/difference/disjunct/merge compare an Integer and a Double as two values', () => {
-    // A terminal set op frames as a SET (value order, then class name — a set has none of its own).
-    expect(typed('g.inject([1, 2]).intersect([1.0])')).toEqual(['set[]']);
-    expect(typed('g.inject([1, 2]).difference([1.0])')).toEqual(['set[1i,2i]']);
-    expect(typed('g.inject([1, 2]).disjunct([1.0])')).toEqual(['set[1d,1i,2i]']);
-    expect(typed('g.inject([1, 2]).merge([1.0])')).toEqual(['set[1d,1i,2i]']);
+  test('intersect/difference/disjunct/merge compare an Integer and a Double as one value', () => {
+    // A terminal set op frames as a SET (value order — a set has none of its own); a merged member frames
+    // as one of the classes it merged.
+    expect(typed('g.inject([1, 2]).intersect([1.0])')).toEqual(['set[1i]']);
+    expect(typed('g.inject([1, 2]).difference([1.0])')).toEqual(['set[2i]']);
+    expect(typed('g.inject([1, 2]).disjunct([1.0])')).toEqual(['set[2i]']);
+    expect(typed('g.inject([1, 2]).merge([1.0])')).toEqual(['set[1d,2i]']);
     expect(typed('g.inject([1, 2]).intersect([1])')).toEqual(['set[1i]']);
-    // a stored whole Double (`{t:'double',v:1}`) is a Double on either side
+    // a stored whole Double (`{t:'double',v:1}`) keeps its class on the side it came from
     expect(typed("g.E().values('weight').fold().intersect([1.0])")).toEqual(['set[1d]']);
-    expect(typed("g.E().values('weight').fold().intersect([1])")).toEqual(['set[]']);
+    expect(typed("g.E().values('weight').fold().intersect([1])")).toEqual(['set[1d]']);
   });
 
-  test('an operand member the bare encoding cannot name back rides as its {t,v} node and compares by its class', () => {
-    // `[1L]` is a Long member (`literalMemberEnvelopes`): `Integer(1).equals(Long(1))` is false.
-    expect(typed('g.inject([1, 2]).intersect([1L])')).toEqual(['set[]']);
+  test('an operand member the bare encoding cannot name back rides as its {t,v} node and keeps its class', () => {
+    // `[1L]` is a Long member (`literalMemberEnvelopes`); it is the same number as `1`.
+    expect(typed('g.inject([1, 2]).intersect([1L])')).toEqual(['set[1i]']);
     expect(typed('g.inject([1L, 2]).intersect([1L])')).toEqual(['set[1L]']);
   });
 });
 
 // A per-row tag is NOT a key of its own: a NULL tag means "infer from the value", so a tagged `constant(1)`
-// and an untagged `identity()` 1 are ONE Integer. Every typed-equality site keys on the NORMALIZED class
-// (`valueClass`, build.ts — the tag in the Gremlin vocabulary, else the value's inference), never on the raw
-// tag column (`typedEquality` subsumes it) and never on NULL-means-tagged.
+// and an untagged `identity()` 1 are ONE value. Every equality site keys on the value plus the family the tag
+// names (`valueFamily`, build.ts), never on the raw tag column (`typedEquality` subsumes it).
 describe('a tagged and an untagged row of one class are one value at every typed-equality site', () => {
   const MERGED = 'union(identity(), constant(1))';
-  test('dedup().by(identity()) — the window arm keys the by() key on the normalized class', () => {
+  test('dedup().by(identity()) — the window arm keys the by() key on value plus family', () => {
     expect(typed(`g.inject(1, 2, 1).${MERGED}.dedup().by(identity()).fold()`)).toEqual(['[1i,2i]']);
     expect(typed(`g.inject(1).${MERGED}.dedup().by(identity()).fold()`)).toEqual(['[1i]']);
     expect(typed(`g.inject(1, 2).${MERGED}.dedup().by(identity()).count()`)).toEqual(['2L']);
@@ -130,28 +133,28 @@ describe('a tagged and an untagged row of one class are one value at every typed
     expect(typed('g.inject(1.5).union(identity(), constant(1.5)).dedup().by(identity()).count()')).toEqual(['1L']);
   });
 
-  test('plain dedup() — a payload whose tag is subsumed takes the window arm', () => {
+  test('plain dedup() — a payload whose tag is subsumed groups on value plus family, the tag a passenger', () => {
     expect(typed(`g.inject(1, 2, 1).${MERGED}.dedup()`)).toEqual(['1i', '2i']);
     expect(typed('g.inject(1.5).union(identity(), constant(1.5)).dedup().count()')).toEqual(['1L']);
     expect(typed(`g.inject(1, 2, 1).${MERGED}.as('a').dedup('a').fold()`)).toEqual(['[1i,2i]']);
     // a record's field pairs `f0_v`/`f0_vtype` the same way
     expect(typed(`g.inject(1, 2, 1).${MERGED}.project('a').by(identity()).dedup().count()`)).toEqual(['2L']);
-    // ...while an Integer and a Double stay two
-    expect(typed('g.inject(1, 1.0).union(identity(), constant(1)).dedup().fold()')).toEqual(['[1i,1d]']);
+    // ...and an Integer and a Double are one too
+    expect(typed('g.inject(1, 1.0).union(identity(), constant(1)).dedup().fold()')).toEqual(['[1i]']);
   });
 
-  test('groupCount()/group() keys — the key node is written with the normalized class', () => {
+  test('groupCount()/group() keys — the key node groups on value plus family', () => {
     // inject(1,2,1) → 1,2,1 and three constant(1)s: five Integer 1s and one 2.
     expect(typed(`g.inject(1, 2, 1).${MERGED}.groupCount()`)).toEqual(['{1i:5L,2i:1L}']);
     expect(typed(`g.inject(1, 2, 1).${MERGED}.group().by(identity()).by(count())`)).toEqual(['{1i:5L,2i:1L}']);
     expect(typed(`g.inject(1, 2, 1).${MERGED}.as('a').groupCount().by(select('a'))`)).toEqual(['{1i:5L,2i:1L}']);
   });
 
-  test('a mixed inject keys a Double apart from an Integer, framed as itself', () => {
-    // The host's tag is the inject's own per-row `vt` (`relHostTag`), not "infer" — `GroupCountStep`
-    // keys `Integer(1)` and `Double(1.0)` apart.
-    expect(typed('g.inject(1, 1.0).groupCount()')).toEqual(['{1d:1L,1i:1L}']);
-    expect(typed('g.inject(1, 1.0).group().by(identity()).by(count())')).toEqual(['{1d:1L,1i:1L}']);
+  test('a mixed inject keys a Double with an Integer, a Boolean apart', () => {
+    // One key per value plus family, framed as one of the merged arrivals.
+    expect(typed('g.inject(1, 1.0).groupCount()')).toEqual(['{1d:2L}']);
+    expect(typed('g.inject(1, 1.0).group().by(identity()).by(count())')).toEqual(['{1d:2L}']);
+    expect(typed('g.inject(true, 1, true).groupCount()')).toEqual(['{true:2L,1i:1L}']);
   });
 });
 
@@ -177,8 +180,9 @@ describe('a stored whole Double and a computed one are one value at every JSON-t
     expect(typed(`${W}.union(identity(), constant(1.0)).fold().unfold().groupCount()`)).toEqual(KEYS);
   });
 
-  test('an Integer and a Double stay apart; a signed zero is one zero', () => {
-    expect(typed("g.inject(1, 1.0).as('a').dedup('a').fold()")).toEqual(['[1i,1d]']);
+  test('an Integer and a Double are one label value, a Boolean another; a signed zero is one zero', () => {
+    expect(typed("g.inject(1, 1.0).as('a').dedup('a').fold()")).toEqual(['[1i]']);
+    expect(typed("g.inject(true, 1).as('a').dedup('a').count()")).toEqual(['2L']);
     expect(typed("g.inject(1, 1.0).as('a').select('a').fold()")).toEqual(['[1i,1d]']);
     expect(typed("g.inject(-0.0, 0.0).groupCount()")).toEqual(['{0d:2L}']);
     expect(typed("g.inject(-0.0, 0.0).as('a').dedup('a').count()")).toEqual(['1L']);
@@ -205,9 +209,9 @@ describe('a map key keeps its class at every key position; a signed zero is one 
       ["g.V().hasLabel('z').values('x').as('a').groupCount().by(select('a'))", '{0d:2L,1d:1L}'],
     ] as const) expect(at(q), q).toEqual([want]);
   });
-  test('the label key keeps its class and its 17 digits too', () => {
+  test('the label key keeps its 17 digits, and merges equal numbers', () => {
     expect(at("g.inject(0.30000000000000004d, 0.3d).as('a').groupCount().by(select('a'))")).toEqual(['{0.30000000000000004d:1L,0.3d:1L}']);
-    expect(at("g.inject(1, 1.0d, 1L).as('a').groupCount().by(select('a'))")).toEqual(['{1d:1L,1i:1L,1L:1L}']);
+    expect(at("g.inject(1, 1.0d, 1L).as('a').groupCount().by(select('a'))")).toEqual(['{1d:3L}']);
   });
 });
 
@@ -227,54 +231,51 @@ describe('a child inject WITH injections answers only where the first result is 
   });
 });
 
-// A dedup KEY is the projected OBJECT under `Objects.equals` — a label's object, a `by()`'s product, or a
-// `List` of one per label (DedupGlobalStep.java:74-88, a HashSet). The label's history entry `v` and a
-// bare projected value are one number for `Integer(3)`/`Long(3)` and `Float(3.0)`/`Double(3.0)`, so every
-// such key carries the CLASS beside the value — the entry's `t` (`aliasKeyAt`, alias.ts) or what `byTyped`
-// knows of the projection (`byEqualityKey`, modulator.ts) — through `classedKey` (build.ts), the same
-// terms a merge keys on.
-describe('a label- or by()-keyed dedup keeps Integer/Long and Float/Double apart', () => {
+// A dedup KEY is the projected OBJECT — a label's object, a `by()`'s product, or a `List` of one per label
+// (DedupGlobalStep.java:74-88) — keyed by value plus family: the entry's `t` (`aliasKeyAt`, alias.ts) or what
+// `byTyped` knows of the projection (`byEqualityKey`, modulator.ts) names the family through `familyKey`
+// (build.ts), the same terms a merge keys on. So `3`/`3L` and `3.0f`/`3.0d` are one key and a Boolean another.
+describe('a label- or by()-keyed dedup merges equal numbers of any class', () => {
   const classes = seededStore();
   for (const q of [
     "g.addV('n').property('f', 3.0f).property('d', 3.0d).property('i', 3).property('l', 3L)",
-    "g.addV('m').property('p', 3).property('q', 3.0f)",
-    "g.addV('m').property('p', 3L).property('q', 3.0d)",
+    "g.addV('m').property('p', 3).property('q', 3.0f).property('b', true)",
+    "g.addV('m').property('p', 3L).property('q', 3.0d).property('b', 1)",
   ]) executeQuery(classes, q, {});
   const at = (q: string) => typedAll(executeQuery(classes, q, {}));
 
   test('dedup(label) and dedup().by(select(label))', () => {
-    expect(at("g.inject(3, 3L).as('a').dedup('a').fold()")).toEqual(['[3i,3L]']);
-    expect(at("g.inject(3, 3L, 3).as('a').dedup('a').fold()")).toEqual(['[3i,3L]']);
-    expect(at("g.inject(3.0f, 3.0d).as('a').dedup('a').fold()")).toEqual(['[3f,3d]']);
-    expect(at("g.inject(3, 3L).as('a').dedup().by(select('a')).fold()")).toEqual(['[3i,3L]']);
-    expect(at("g.inject(3, 3L).as('a').union(identity(), constant(1)).as('b').dedup('a', 'b').count()")).toEqual(['4L']);
-    expect(at("g.V().hasLabel('n').values('f', 'd', 'i', 'l').as('a').dedup('a').fold()")).toEqual(['[3f,3d,3i,3L]']);
-    expect(at("g.V().hasLabel('m').values('p').as('a').dedup('a').count()")).toEqual(['2L']);
+    expect(at("g.inject(3, 3L).as('a').dedup('a').fold()")).toEqual(['[3i]']);
+    expect(at("g.inject(3, 3L, 3).as('a').dedup('a').fold()")).toEqual(['[3i]']);
+    expect(at("g.inject(3, 3L).as('a').dedup().by(select('a')).fold()")).toEqual(['[3i]']);
+    expect(at("g.inject(3, 3L).as('a').union(identity(), constant(1)).as('b').dedup('a', 'b').count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('n').values('f', 'd', 'i', 'l').as('a').dedup('a').count()")).toEqual(['1L']);
+    expect(at("g.V().hasLabel('m').values('p').as('a').dedup('a').count()")).toEqual(['1L']);
+    expect(at("g.V().hasLabel('m').values('b').as('a').dedup('a').count()")).toEqual(['2L']);
   });
 
   test('at depth — a union arm', () => {
-    expect(at("g.inject(3, 3L).as('a').union(dedup('a')).count()")).toEqual(['2L']);
+    expect(at("g.inject(3, 3L).as('a').union(dedup('a')).count()")).toEqual(['1L']);
   });
 
   test('dedup().by(<projection>) over a stored property, a child, a property value', () => {
-    expect(at("g.V().hasLabel('m').dedup().by('p').count()")).toEqual(['2L']);
-    expect(at("g.V().hasLabel('m').dedup().by('q').count()")).toEqual(['2L']);
-    expect(at("g.V().hasLabel('m').dedup().by(values('p')).count()")).toEqual(['2L']);
-    expect(at("g.V().hasLabel('m').dedup().by(values('q')).count()")).toEqual(['2L']);
-    expect(at("g.V().hasLabel('m').properties('p').dedup().by(value).count()")).toEqual(['2L']);
-    expect(at("g.V().hasLabel('m').as('x').dedup('x').by('p').count()")).toEqual(['2L']);
-    expect(at("g.V().hasLabel('m').as('x').dedup('x').by(values('q')).count()")).toEqual(['2L']);
-  });
-
-  test('equal objects still collapse', () => {
-    expect(at("g.V().hasLabel('m', 'n').dedup().by(label).count()")).toEqual(['2L']);
-    expect(at("g.inject(3, 3L).dedup().by(constant(1)).count()")).toEqual(['1L']);
-    expect(at("g.V().hasLabel('m').values('p').as('a').union(identity(), identity()).dedup('a').count()")).toEqual(['2L']);
+    for (const q of [
+      "g.V().hasLabel('m').dedup().by('p').count()",
+      "g.V().hasLabel('m').dedup().by('q').count()",
+      "g.V().hasLabel('m').dedup().by(values('p')).count()",
+      "g.V().hasLabel('m').dedup().by(values('q')).count()",
+      "g.V().hasLabel('m').properties('p').dedup().by(value).count()",
+      "g.V().hasLabel('m').as('x').dedup('x').by('p').count()",
+      "g.V().hasLabel('m').as('x').dedup('x').by(values('q')).count()",
+    ]) expect(at(q), q).toEqual(['1L']);
+    // a Boolean `true` and an Integer `1` are two keys
+    expect(at("g.V().hasLabel('m').dedup().by('b').count()")).toEqual(['2L']);
+    expect(at("g.V().hasLabel('m').dedup().by(values('b')).count()")).toEqual(['2L']);
   });
 
   test('dedup().by(keys/values) over a map-entry stream keys on the entry side, not an internal error', () => {
-    expect(at("g.inject(3, 3L).groupCount().unfold().dedup().by(keys)")).toEqual(['{3i:1L}', '{3L:1L}']);
-    expect(at("g.inject(3, 3L, 3).groupCount().unfold().dedup().by(values)")).toEqual(['{3i:2L}', '{3L:1L}']);
+    expect(at("g.inject(3, 3L).groupCount().unfold().dedup().by(keys).count()")).toEqual(['1L']);
+    expect(at("g.inject(3, 3L, 4).groupCount().unfold().dedup().by(values).count()")).toEqual(['2L']);
     expect(at("g.V().hasLabel('m', 'n').group().by(label).unfold().dedup().by(keys).count()")).toEqual(['2L']);
   });
 });
@@ -290,8 +291,8 @@ describe('a child predicate over a mixed inject reads a NULL tag as the value\'s
     expect(typed('g.inject(3, 3L, 4).local(is(gt(0))).fold()')).toEqual(['[3i,3L,4i]']);
     expect(typed("g.inject(3, 3L, 4).project('x').by(is(gt(0))).fold()")).toEqual(['[{"x":3i},{"x":3L},{"x":4i}]']);
     expect(typed('g.inject(1, 1.0d, 2).map(is(gt(0))).fold()')).toEqual(['[1i,1d,2i]']);
-    expect(typed('g.inject(3, 3L, 4).dedup().by(is(gt(0))).fold()')).toEqual(['[3i,3L,4i]']);
-    expect(typed('g.inject(3, 3L).union(dedup().by(is(gt(0)))).fold()')).toEqual(['[3i,3L]']);
+    expect(typed('g.inject(3, 3L, 4).dedup().by(is(gt(0))).fold()')).toEqual(['[3i,4i]']);
+    expect(typed('g.inject(3, 3L).union(dedup().by(is(gt(0)))).fold()')).toEqual(['[3i]']);
     expect(typed('g.inject(3, 3L, 4).map(is(gt(0)).is(lt(4))).fold()')).toEqual(['[3i,3L]']);
     expect(typed("g.inject(3, 3L, 4).as('a').map(select('a').is(gt(0))).fold()")).toEqual(['[3i,3L,4i]']);
     expect(typed("g.inject(3, 3L, 4).as('a').project('x').by(select('a').is(gt(0))).fold()")).toEqual(['[{"x":3i},{"x":3L},{"x":4i}]']);
@@ -299,23 +300,23 @@ describe('a child predicate over a mixed inject reads a NULL tag as the value\'s
   });
 });
 
-// A by() child's MEMBER NODE (`scalarNode`, modulator.ts) is a map KEY compared by its JSON text, so its
-// `t` must be the normalized class: GroupCountStep/GroupStep key on `Objects.equals`, under which
-// `Integer(3)`, `Long(3)`, `Float(3.0)` and `Double(3.0)` are four keys. A NULL tag, or a correlated
-// read's tag dropped to "infer" (`typedNodeOnce`), wrote them all as an Int. The same node is a pooled
-// group VALUE member (`by(values('p').fold())`), which read no tag at all.
-describe('a by() child keeps a value\'s class as a group key and as a pooled group member', () => {
+// A by() child's MEMBER NODE (`scalarNode`, modulator.ts) keeps its value's class — a correlated read's tag
+// is evaluated once (`typedNodeOnce`) — and as a map KEY it groups on value plus family (`groupKeyed`,
+// map.ts), so `3`, `3L`, `3.0f` and `3.0d` are ONE key framed as one of them. A pooled group VALUE member
+// (`by(values('p').fold())`) keeps every member's own class.
+describe('a by() child keys a group on value plus family and keeps each pooled member its class', () => {
   const classes = storeSeededWith([
     "g.addV('x').property('p', 3)", "g.addV('x').property('p', 3L)",
     "g.addV('x').property('p', 3.0f)", "g.addV('x').property('p', 3.0d)",
   ]);
   const at = (q: string) => typedAll(executeQuery(classes, q, {}));
-  const FOUR = '{3d:1L,3f:1L,3i:1L,3L:1L}';
+  const ONE = '{3d:4L}';
 
   test('an inject key', () => {
-    expect(typed('g.inject(3, 3L, 4).groupCount().by(is(gt(0)))')).toEqual(['{3i:1L,4i:1L,3L:1L}']);
-    expect(typed('g.inject(3, 3L, 4).group().by(is(gt(0))).by(fold())')).toEqual(['{3i:[3i],4i:[4i],3L:[3L]}']);
-    expect(typed("g.inject(3, 3L, 4).as('a').groupCount().by(select('a').is(gt(0)))")).toEqual(['{3i:1L,4i:1L,3L:1L}']);
+    expect(typed('g.inject(3, 3L, 4).groupCount().by(is(gt(0)))')).toEqual(['{3L:2L,4i:1L}']);
+    // a collecting group's key is its FIRST arrival's
+    expect(typed('g.inject(3, 3L, 4).group().by(is(gt(0))).by(fold())')).toEqual(['{3i:[3i,3L],4i:[4i]}']);
+    expect(typed("g.inject(3, 3L, 4).as('a').groupCount().by(select('a').is(gt(0)))")).toEqual(['{3L:2L,4i:1L}']);
   });
 
   test('a stored key read through a child', () => {
@@ -325,13 +326,13 @@ describe('a by() child keeps a value\'s class as a group key and as a pooled gro
       "g.V().groupCount().by(coalesce(values('p'), constant(0)))",
       "g.V().groupCount().by(choose(has('p'), values('p'), constant(0)))",
       "g.V().properties('p').groupCount().by(value())",
-    ]) expect(at(q), q).toEqual([FOUR]);
-    expect(at("g.V().group().by(values('p').is(gt(0))).by(count())")).toEqual([FOUR]);
+    ]) expect(at(q), q).toEqual([ONE]);
+    expect(at("g.V().group().by(values('p').is(gt(0))).by(count())")).toEqual([ONE]);
   });
 
   test('a pooled group value member', () => {
     expect(at("g.V().group().by(label()).by(values('p').fold())")).toEqual(['{"x":[3i,3L,3f,3d]}']);
-    expect(at("g.V().group().by(label()).by(values('p').dedup().fold())")).toEqual(['{"x":[3i,3L,3f,3d]}']);
+    expect(at("g.V().group().by(label()).by(values('p').dedup().fold())")).toEqual(['{"x":[3i]}']);
     expect(at("g.V().group().by(constant(1)).by(values('p').order().fold())")).toEqual(['{1i:[3i,3L,3f,3d]}']);
   });
 });

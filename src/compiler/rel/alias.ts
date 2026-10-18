@@ -9,7 +9,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../elem.ts';
 import { aliasScalarTypeOf, joinAliasEntry, type AliasEntry, type AliasMap } from '../alias.ts';
 import { MAP_COL } from './map.ts';
-import { carriedCols, classedKey, collectedOf, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import { carriedCols, collectedOf, familyKey, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 
@@ -115,13 +115,11 @@ export const aliasTypeAt = (column: Expr, end: 'first' | 'last'): Expr => fieldA
 
 /**
  * A VALUE label as a `HashSet` KEY (`dedup('a')` — `DedupGlobalStep.java:80-88` adds the `List` of each
- * label's object to its duplicate set): the entry's `v` AND its recorded class. The `v` text alone is one
- * number for `Integer(3)` and `Long(3)`, or `Float(3.0)` and `Double(3.0)`, which `Objects.equals` keeps
- * apart; the entry's `t` (`objectEntry`, history.ts) is the class `select('a')` frames by, normalized by
- * `classedKey` exactly as a merge key is.
+ * label's object to its duplicate set): the entry's `v` plus the family its recorded `t` names
+ * (`familyKey`, exactly as a merge key is), so `3` and `3L` are one key and `true` and `1` two.
  */
 export const aliasKeyAt = (column: Expr, end: 'first' | 'last'): Expr[] =>
-  classedKey(aliasValueAt(column, end), { tag: aliasTypeAt(column, end) });
+  familyKey(aliasValueAt(column, end), { tag: aliasTypeAt(column, end) });
 
 /** The JSON a LIST label holds, back as a list payload. `json()` around it is what makes the value a
  *  collection again rather than the TEXT of one — the symptom that made `fold().as('b').select('b')

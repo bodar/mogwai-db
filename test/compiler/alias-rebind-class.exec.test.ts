@@ -74,12 +74,12 @@ describe('every reader of a rebound label agrees — by(), keys, dedup, at depth
     expect(typed("g.inject(3L).as('a').constant(1).as('a').groupCount().by(select(first,'a'))")).toEqual(['{3L:1L}']);
   });
 
-  test('a key never merges two classes the reference keeps apart', () => {
-    expect(typed(`${FOUR}.constant(1).as('a').groupCount().by(select(first,'a'))`)).toEqual(['{3d:1L,3f:1L,3i:1L,3L:1L}']);
-    expect(typed(`${FOUR}.constant(1).as('a').dedup().by(select(first,'a')).count()`)).toEqual(['4L']);
-    expect(typed(`${FOUR}.constant(1).as('a').select(first,'a').dedup().count()`)).toEqual(['4L']);
+  test('equal numbers of every class are one key (value plus family), framed as one of them', () => {
+    expect(typed(`${FOUR}.constant(1).as('a').groupCount().by(select(first,'a'))`)).toEqual(['{3d:4L}']);
+    expect(typed(`${FOUR}.constant(1).as('a').dedup().by(select(first,'a')).count()`)).toEqual(['1L']);
+    expect(typed(`${FOUR}.constant(1).as('a').select(first,'a').dedup().count()`)).toEqual(['1L']);
     expect(typed(`${FOUR}.constant(1).as('a').select(all,'a').dedup().count()`)).toEqual(['4L']);
-    expect(typed(`${FOUR}.constant(1).as('a').select(all,'a').unfold().dedup().count()`)).toEqual(['5L']);
+    expect(typed(`${FOUR}.constant(1).as('a').select(all,'a').unfold().dedup().count()`)).toEqual(['2L']);
     expect(typed(`${FOUR}.constant(1).as('a').order().by(select(first,'a')).select(first,'a').fold()`)).toEqual(['[3f,3d,3i,3L]']);
   });
 });

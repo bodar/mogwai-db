@@ -42,7 +42,8 @@ describe('a list arm beside a scalar arm', () => {
   });
 
   test('dedup and a slice over the variant see the class', () => {
-    expect(typed("g.inject(3L).union(fold(), identity(), constant(3)).dedup()")).toEqual(['[3L]', '3L', '3i']);
+    // `3L` and `3` are one value (value plus family); the first arrival survives.
+    expect(typed("g.inject(3L).union(fold(), identity(), constant(3)).dedup()")).toEqual(['[3L]', '3L']);
     expect(typed("g.inject(3L).union(fold(), identity(), constant(3)).limit(2)")).toEqual(['[3L]', '3L']);
     expect(typed(`${N}.union(values('f','d','i','l').fold(), values('l')).range(1,2)`)).toEqual(['3L']);
   });
@@ -62,7 +63,8 @@ describe('an element arm beside a scalar arm', () => {
       [`${N}.union(identity(), values('f').mean())`, '3d'],
     ];
     for (const [q, want] of cases) expect(typed(q).filter((x: string) => !x.startsWith('<')), q).toEqual([want]);
-    expect(typed(`${N}.union(values('f','d','i','l'), identity()).dedup().count()`)).toEqual(['5L']);
+    // The four equal 3s of four classes are one value (value plus family), beside the vertex.
+    expect(typed(`${N}.union(values('f','d','i','l'), identity()).dedup().count()`)).toEqual(['2L']);
   });
 });
 
