@@ -1054,9 +1054,7 @@ export function orderedBy(
     const k = exprs[i]!;
     const head: SortTerm = { expr: k, dir: key.dir, ...(key.nulls ? { nulls: key.nulls } : {}) };
     if (!signTermOwed(key.carrier)) return [head];
-    // A deferral arm is wrapped in `abs()` so the term stays NUMERIC to the emitter, which otherwise keys a
-    // possibly-text sort term for UTF-16 order (`utf16Key`, `src/rel/emit.ts`) — the arm never yields a value.
-    const defer = (message: string): Expr => ({ kind: 'call', fn: 'abs', args: [deferralExpr(message, k)] });
+    const defer = (message: string): Expr => deferralExpr(message, k);
     const iif = (test: Expr, then: Expr, otherwise: Expr): Expr => ({ kind: 'call', fn: 'iif', args: [test, then, otherwise] });
     // A big zero beside BOTH signed Double zeros is unordered whether or not the sort is stable: a value
     // stream's tie guard reads SQLite equality, under which INTEGER `0` and REAL `±0.0` are one value, so it

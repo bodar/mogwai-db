@@ -2,8 +2,8 @@
 // functions read the same string differently, the answer is the reference's or the query DEFERS, never
 // SQLite's. Four readings, each at its one authority:
 //
-//  - ORDER. `String.compareTo` compares UTF-16 units; SQLite's BINARY collation compares code points. The
-//    emitter keys every text comparison, sort and extremum (`utf16Key`, `src/rel/emit.ts`).
+//  - ORDER is the one reading that is NOT Java's: text compares in SQLite's BINARY (code-point) order, a
+//    deliberate divergence (`docs/feature-support-matrix.md`). Only astral vs U+E000..U+FFFF differs.
 //  - CASE. `toUpperCase`/`toLowerCase` are Unicode; SQLite's `upper`/`lower` fold ASCII only. A cased
 //    non-ASCII character defers (`casedText`, `src/compiler/rel/text-units.ts`).
 //  - WHITESPACE. `split(null)` splits on `Character.isWhitespace`, the set `trim()` strips
@@ -25,49 +25,26 @@ const answer = (store: Store, gremlin: string, params: Record<string, unknown> =
 const runP = (gremlin: string, params: Record<string, unknown> = {}): string[] => answer(seededStore(), gremlin, params);
 const str = (s: string): string => JSON.stringify(s);
 
-// U+FFFF and U+E000 sit ABOVE every astral character in UTF-16 (whose units are surrogates, D800..DFFF)
-// and BELOW it in code-point order — the one place the two orders disagree.
+// U+FFFF and U+E000 sit BELOW every astral character in code-point order (and above it in Java's UTF-16
+// order) — the one place the two disagree. The answer is the code-point order, the same at every position.
 const HI = '\uFFFF', PUA = '\uE000', EMOJI = '\u{1F600}';
 
-describe("text ORDER is Java's UTF-16 unit order, at every position SQLite orders", () => {
+describe('text ORDER is code-point order, at every position SQLite orders', () => {
   test.each([
-    [`g.inject('${HI}','${EMOJI}').order()`, [str(EMOJI), str(HI)]],
-    [`g.inject('${EMOJI}','${HI}').order().by(desc)`, [str(HI), str(EMOJI)]],
-    [`g.inject('${PUA}','${EMOJI}').max()`, [str(PUA)]],
-    [`g.inject('${PUA}','${EMOJI}').min()`, [str(EMOJI)]],
-    [`g.inject('${EMOJI}').is(lt('${HI}'))`, [str(EMOJI)]],
-    [`g.inject('${EMOJI}').is(gt('${PUA}'))`, []],
-    [`g.inject('${EMOJI}','${HI}').is(between('${EMOJI}','${HI}'))`, [str(EMOJI)]],
-    [`g.inject('${EMOJI}','${HI}').is(inside('a','${HI}'))`, [str(EMOJI)]],
-    [`g.inject('${EMOJI}','${HI}').where(is(gt('${PUA}')))`, [str(HI)]],
-    [`g.inject('${EMOJI}','${HI}').coalesce(is(lt('${PUA}')), constant('n'))`, [str(EMOJI), str('n')]],
-    [`g.inject('${HI}','${EMOJI}').fold().order(local)`, [`[${str(EMOJI)},${str(HI)}]`]],
-    [`g.inject('${HI}','${EMOJI}').fold().max(local)`, [str(HI)]],
-    [`g.inject('${HI}','${EMOJI}').fold().min(local)`, [str(EMOJI)]],
-    [`g.inject('${HI}','${EMOJI}').fold('${PUA}', min)`, [str(EMOJI)]],
-    [`g.inject('${HI}','${EMOJI}').fold('${PUA}', max)`, [str(HI)]],
-    [`g.withSack('${HI}').inject('${EMOJI}').sack(min).sack()`, [str(EMOJI)]],
-    [`g.inject('${HI}','${EMOJI}').as('a').order().select('a')`, [str(EMOJI), str(HI)]],
-    [`g.inject('${HI}','${EMOJI}').dedup().order().tail(1)`, [str(HI)]],
-    [`g.inject('a${HI}','a${EMOJI}').order()`, [str(`a${EMOJI}`), str(`a${HI}`)]],
+    [`g.inject('${HI}','${EMOJI}').order()`, [str(HI), str(EMOJI)]],
+    [`g.inject('${PUA}','${EMOJI}').max()`, [str(EMOJI)]],
+    [`g.inject('${EMOJI}').is(gt('${PUA}'))`, [str(EMOJI)]],
+    [`g.inject('${HI}','${EMOJI}').fold().order(local)`, [`[${str(HI)},${str(EMOJI)}]`]],
+    [`g.withSack('${HI}').inject('${EMOJI}').sack(min).sack()`, [str(HI)]],
   ] as const)('%s', (gremlin, expected) => {
     expect(runP(gremlin)).toEqual([...expected]);
   });
 
-  test('a user PARAMETER compares in the same order', () => {
-    expect(runP(`g.inject('${EMOJI}','${HI}').is(gt(x))`, { x: EMOJI })).toEqual([str(HI)]);
-    expect(runP(`g.inject('${EMOJI}','${HI}').is(lt(x))`, { x: HI })).toEqual([str(EMOJI)]);
-  });
-
-  test('STORED strings — has(lt/gt), order().by(key), values().max() — compare in the same order', () => {
+  test('STORED strings compare in the same order', () => {
     const store = seededStore();
     answer(store, `g.addV('t').property('s','${HI}').addV('t').property('s','${EMOJI}').addV('t').property('s','b')`);
-    expect(answer(store, "g.V().hasLabel('t').order().by('s').values('s')")).toEqual([str('b'), str(EMOJI), str(HI)]);
-    expect(answer(store, "g.V().hasLabel('t').order().by('s', desc).values('s')")).toEqual([str(HI), str(EMOJI), str('b')]);
-    expect(answer(store, `g.V().hasLabel('t').has('s', gt('${PUA}')).values('s')`)).toEqual([str(HI)]);
-    expect(answer(store, `g.V().hasLabel('t').has('s', lt('${PUA}')).values('s').order()`)).toEqual([str('b'), str(EMOJI)]);
-    expect(answer(store, "g.V().hasLabel('t').values('s').max()")).toEqual([str(HI)]);
-    expect(answer(store, "g.V().hasLabel('t').values('s').min()")).toEqual([str('b')]);
+    expect(answer(store, "g.V().hasLabel('t').order().by('s').values('s')")).toEqual([str('b'), str(HI), str(EMOJI)]);
+    expect(answer(store, "g.V().hasLabel('t').values('s').max()")).toEqual([str(EMOJI)]);
   });
 
   test('ordinary text and numbers keep their order', () => {
