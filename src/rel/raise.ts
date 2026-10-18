@@ -61,6 +61,11 @@ const CLOSE = '!$';
 const OPEN_DEFERRAL = '$!defer:';
 const RAISED = /\$!(?:raise|defer):(.*?)!\$/;
 
+/** Does rendered SQL spell a DEFERRAL arm anywhere — for the emitter, which decides over the text SQLite
+ *  will actually evaluate. The sentinel is a compiler literal, rendered inline, so the test is exact up to
+ *  arms a guard keeps off every row. */
+export const sqlMayDefer = (sql: string): boolean => sql.includes(OPEN_DEFERRAL);
+
 /** The message a `raiseExpr` arm aborted a statement with, or `null` for any other failure. */
 export function raisedMessage(error: unknown): string | null {
   const text = error instanceof Error ? error.message : typeof error === 'string' ? error : null;
@@ -106,6 +111,26 @@ export function exprMayRaise(e: Expr): boolean {
   let found = false;
   forEachExpr(e, (node) => {
     if (!found && (isRaise(node) || exprRels(node).some(mayRaise))) found = true;
+  });
+  return found;
+}
+
+/** Is `e` a `raiseExpr` OR a `deferralExpr` arm. */
+const isAbort = (e: Expr): boolean =>
+  e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
+  && typeof e.args[1].value === 'string' && (e.args[1].value.startsWith(OPEN) || e.args[1].value.startsWith(OPEN_DEFERRAL));
+
+/** CAN EVALUATING THIS EXPRESSION ABORT THE STATEMENT — a raise OR a deferral arm in it, correlated
+ *  subplans included. A rewrite that moves an expression to where it is evaluated for MORE rows asks
+ *  this, not `exprMayRaise`: a deferral fired for a row the query never reads declines a query that
+ *  has an answer. */
+export function exprMayAbort(e: Expr): boolean {
+  let found = false;
+  const inPlan = (plan: Rel): void => forEachRel(plan, (r) => relExprs(r).forEach((x) => forEachExpr(x, (node) => { if (isAbort(node)) found = true; })));
+  forEachExpr(e, (node) => {
+    if (found) return;
+    if (isAbort(node)) found = true;
+    else exprRels(node).forEach(inPlan);
   });
   return found;
 }

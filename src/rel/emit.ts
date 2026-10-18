@@ -9,7 +9,7 @@ import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
 import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, relChildren, relExprs, rewriteExpr } from './walk.ts';
-import { exprMayRaise } from './raise.ts';
+import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
@@ -497,8 +497,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    * occurrence reads that column.
    *
    * "The same" is one `plan` under one wrapper: a lowering that reuses a subquery reuses its `Rel`.
-   * A subquery that may RAISE moves only when one of its spellings already runs for every row — else a
-   * `CASE` may be what keeps it off the rows it would raise for. `fenced` re-projects every column the
+   * A subquery that may RAISE or DEFER moves only when one of its spellings already runs for every row —
+   * else a `CASE` may be what keeps it off the rows it would raise for. `fenced` re-projects every column the
    * node reads, by whatever relation it is spelled under, so its expressions resolve as they did.
    */
   const once = (r: Rel & { readonly input: Rel }, b: Block, outer: Scope, exprs: readonly Expr[]): { readonly b: Block; readonly rewrite: (e: Expr) => Expr } | undefined => {
@@ -518,7 +518,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     // subquery once for the sorter and once more for the row (measured, bun:sqlite 3.51) — so for it a
     // single use is already a repeat.
     const twice = r.kind === 'window' ? 1 : 2;
-    // A RAISING subquery moves only when some spelling of it already runs for every row (`forEachUnconditional`).
+    // A subquery that may RAISE or DEFER moves only when some spelling of it already runs for every row
+    // (`forEachUnconditional`).
     const always = new Set<Rel>();
     for (const e of exprs) forEachUnconditional(e, (node) => { if (wrapper(node)) always.add((node as Extract<Expr, { readonly plan: Rel }>).plan); });
     const outflows = new Set<Rel>();
@@ -531,7 +532,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       const w = wrapper(node);
       if (!w) return;
       const plan = (node as Extract<Expr, { readonly plan: Rel }>).plan;
-      if ((uses.get(plan)?.get(w) ?? 0) < twice || hoisted.get(plan)?.has(w) || (!always.has(plan) && exprMayRaise(node))
+      if ((uses.get(plan)?.get(w) ?? 0) < twice || hoisted.get(plan)?.has(w) || (!always.has(plan) && exprMayAbort(node))
         // Its JSON subtype would not survive the fence (`mayCarryJsonSubtype`) — which matters only
         // where the value flows OUT, not where it is a predicate or a sort key.
         || (outflows.has(plan) && carriesJson(node, b.scope))) return;
@@ -580,6 +581,19 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     }
     for (const [rel, cols] of remapped) scope.set(rel, cols);
     if (computed.length) scope.set(alias, new Map(computed.map(([name]) => [name, qualified(alias, name)])));
+    // A fence computes every column it carries for EVERY row of `b`, where an open block under a FILTER
+    // computed a column its predicate does not read only for the rows the WHERE kept. A DEFERRAL in one
+    // would then fire for a row the filter drops — a decline where there is an answer — so under a
+    // filter such a block stays open. A reference RAISE may move: the step that computes the column is
+    // eager in the reference too, and which row an error fires on is not part of the answer.
+    if (reader.kind === 'filter') {
+      const tested = new Set([...ownReads(reader).keys()].map((key) => {
+        const [rel, name] = key.split('\0') as [string, string];
+        return b.scope.get(rel)?.get(name);
+      }));
+      const lazy = [...b.select, ...carried].filter(([, spelled]) => !tested.has(spelled));
+      if (sqlMayDefer(render(renderBlock({ ...b, select: lazy.length ? lazy : [['one', raw('1')]] })).sql)) return undefined;
+    }
     const body = renderBlock({ ...b, select: [...b.select, ...carried, ...computed], offset: b.offset ?? raw('0') });
     return { kind: 'block', select: passed, from: { text: q`(${body})`, alias }, joins: [], distinct: false, windowed: false, scope };
   };

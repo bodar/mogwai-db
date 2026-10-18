@@ -3,8 +3,7 @@ import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { RelId } from '../../rel/types.ts';
-import { containsSelfRef, mapRelChildren, mapRelExprs, rewriteExpr } from '../../rel/walk.ts';
+import { containsSelfRef, substRelId } from '../../rel/walk.ts';
 import type { IRStep } from '../ir/step.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import type { AliasMap } from '../alias.ts';
@@ -56,16 +55,6 @@ interface WalkRead {
  * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/RelNode.java`), it is state declared at
  * the relational position where it is live.
  */
-/** Substitute one relation id for another throughout an expression, INCLUDING correlated subplans —
- *  a `simplePath()` filter's `COUNT(DISTINCT)` reads the body's path column through a scalar subquery,
- *  so distributing (below) that reparents the filter must follow the reference into that subquery, or
- *  the pushed-down copy still reads a column from the relation it was lifted off of. */
-function substRelId(e: Expr, from: RelId, to: RelId): Expr {
-  const inSubplan = (plan: Rel): Rel =>
-    mapRelExprs(mapRelChildren(plan, inSubplan), (x) => substRelId(x, from, to));
-  return rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node), inSubplan);
-}
-
 /** Rebuild a unary `Project`/`Filter` over a NEW input, remapping every reference to its OLD input's
  *  id onto the new one. The new input carries the same columns (it is one arm of the UNION ALL the
  *  node sat over), so the remap is total. A fresh node id keeps the two distributed copies distinct. */

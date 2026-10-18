@@ -3,7 +3,7 @@ import { recursiveSelf } from './factory.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
+import type { FrameBound, RelId, SortTerm, WindowSpec } from './types.ts';
 
 /** The structure of a node is declared ONCE, here. Every analysis and every rewrite folds over
  * these functions instead of re-deriving the shape of the union, so a new kind is a compile error
@@ -204,6 +204,16 @@ export function mapExprChildren(e: Expr, f: (child: Expr) => Expr, rel: (plan: R
 export function rewriteExpr(e: Expr, f: (node: Expr) => Expr, rel: (plan: Rel) => Rel = (plan) => plan): Expr {
   const go = (node: Expr): Expr => f(mapExprChildren(node, go, rel));
   return go(e);
+}
+
+/** Substitute one relation id for another throughout an expression, INCLUDING correlated subplans —
+ *  a `simplePath()` filter's `COUNT(DISTINCT)` reads the body's path column through a scalar subquery,
+ *  so a rewrite that reparents the expression must follow the reference into that subquery, or the
+ *  moved copy still reads a column from the relation it was lifted off of. */
+export function substRelId(e: Expr, from: RelId, to: RelId): Expr {
+  const inSubplan = (plan: Rel): Rel =>
+    mapRelExprs(mapRelChildren(plan, inSubplan), (x) => substRelId(x, from, to));
+  return rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node), inSubplan);
 }
 
 /**
