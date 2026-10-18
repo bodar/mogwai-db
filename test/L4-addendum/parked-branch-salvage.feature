@@ -305,6 +305,35 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
       | result |
       | d[5].l |
 
+  # local()/flatMap() emit EVERY result, so a first-survivor scalar is not their answer: the body runs
+  # as rows instead, every value transformed and tested.
+  Scenario: g_V_localXvaluesXlocX_toUpper_isXneqXAXXX_multi
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("m").property(Cardinality.list, "loc", "a").property(Cardinality.list, "loc", "b").property(Cardinality.list, "loc", "c")
+      """
+    And the traversal of
+      """
+      g.V().local(__.values("loc").toUpper().is(P.neq("A")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | B |
+      | C |
+
+  Scenario: g_V_hasLabelXpersonX_localXvaluesXnameX_toUpper_isXMARKOXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").local(__.values("name").toUpper().is("MARKO"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | MARKO |
+
   # ---- a by() on a SCOPE value runs on a NEW traverser ----
   # TraversalUtil.produce(S start, …) generates a fresh traverser (TraversalUtil.java:125-130;
   # SelectOneStep.java:64, SelectStep.java:70, WherePredicateStep.java:98,135, DedupGlobalStep.java:82,

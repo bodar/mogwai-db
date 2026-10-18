@@ -269,7 +269,8 @@ export function perTraverserChild(
   // `map` takes the first by definition. The seam states which (`ChildValue.yields`) rather than this
   // reading it off the framing — a reducing `result` marker implies one, but so does an endpoint
   // re-root that is not a reducer at all, and inferring it here made `local(__.outV())` decline.
-  if (step.name !== 'map' && produced.yields !== 'one') return null;
+  // A body with more to give falls to the row-producing rejoin, exactly as an unanswered scalar does.
+  if (step.name !== 'map' && produced.yields !== 'one') return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // An unproductive body DROPS the traverser at all three hosts (`map` by the citation above;
   // `local`/`flatMap` because a body with no results contributes none), so the signal is required
   // rather than assumed — `ChildValue.present`'s own contract.
@@ -1708,8 +1709,9 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
       for (let j = 1; j < body.length && (REL_TRANSFORMS.has(body[j]!.name) || body[j]!.name === 'is'); j++)
         if (body[j]!.name === 'is') runEnd = j;
     }
-    if (runEnd) {
-      if (ctx.source !== BaseGraph) return null;
+    // Where the filtered read cannot be built (another source, a host it cannot name), the run falls
+    // through to the general value run below, exactly as it did before this arm.
+    if (runEnd && ctx.source === BaseGraph) {
       const testRun = body.slice(0, runEnd + 1);
       const runOver = (stored: Expr, storedType: Expr) => valueRun(testRun, 1,
         { value: stored, type: UNKNOWN, vtype: storedType, present: 'value-nullness', yields: 'one' },
@@ -1723,12 +1725,12 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
         if (ran?.framing.kind === 'scalar' && !ran.vtype) runType = ran.framing.type;
         return ran?.framing.kind === 'scalar' && !ran.vtype ? ran.expr : null;
       });
-      if (!passing) return null;
-      value = passing.value;
-      type = runType;
-      vtype = undefined;
-      present = 'value-nullness';
-      at = runEnd + 1;
+      if (passing) {
+        value = passing.value;
+        type = runType;
+        vtype = undefined;
+        at = runEnd + 1;
+      }
     }
     const tests: { readonly pred: unknown; readonly arg: IRStep['args'][number] }[] = [];
     while (!runEnd && body[at]?.name === 'is' && !body[at]!.modulators?.length) {

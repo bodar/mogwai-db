@@ -161,7 +161,6 @@ describe('a compiler-minted bind name is one no user parameter can spell', () =>
 describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never an internal error', () => {
   test.each([
     ["g.V().has('name', regex('m')).sideEffect(out()).values('name')"],
-    ["g.V().has('name', regex('m')).out().has('name', regex('l')).local(values('name'))"],
     ["g.V().has('name', regex('m')).local(out().has('name', regex('l'))).values('name')"],
     ["g.V().has('name', regex('m')).repeat(out()).until(has('name', regex('l'))).values('name')"],
     ["g.V().has('name', regex('m')).sideEffect(out().has('name', regex('l'))).values('name')"],
@@ -171,5 +170,9 @@ describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never 
     expect(thrown).toBeInstanceOf(UnsupportedTraversal);
     expect((thrown as Error).message).toStartWith('this traversal is not supported yet: ');
     expect((thrown as Error).name).toBe('UnsupportedTraversal');
+  });
+  test('a resumed local(values(k)) answers every value', () => {
+    expect(typedAll(executeQuery(seededStore(), "g.V().has('name', regex('m')).out().has('name', regex('l')).local(values('name'))")))
+      .toEqual(['"lop"']);
   });
 });

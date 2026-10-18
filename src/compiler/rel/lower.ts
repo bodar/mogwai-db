@@ -26,8 +26,9 @@ import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type Merge
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
-import { whereHasScopeKey } from '../ir/labels.ts';
+import { asLabelsOf, whereHasScopeKey } from '../ir/labels.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
+import { someStepDeep } from '../ir/walk.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
 import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
@@ -3996,7 +3997,11 @@ function valueResume(
   // A label bound BEFORE the barrier is on the traverser's path, but only the value crossed: it rides in
   // as an ENCLOSING label, so a tail that reads it (`as('x').split(',').select('x')`) declines instead of
   // answering the unbound key's empty result.
-  const bound = steps.slice(0, from).flatMap((s) => s.name === 'as' ? s.args.map((a) => a.value).filter((v): v is string => typeof v === 'string') : []);
+  const bound = steps.slice(0, from).flatMap(asLabelsOf);
+  // A tail that REBINDS one would shadow it: the read finds the post-barrier binding, so
+  // `as('x').split(',').as('x').select(first,'x')` would answer the split list, not `'a,b'`. Decline.
+  // (An unreadable nested body counts as a rebind: fail closed.)
+  if (bound.length && someStepDeep(steps.slice(from), opts.params ?? {}, (s) => asLabelsOf(s).some((l) => bound.includes(l)), true)) return null;
   const ctx: ChainCtx = bound.length ? { ...tailCtx, enclosingLabels: new Set([...(tailCtx.enclosingLabels ?? []), ...bound]) } : tailCtx;
   // A tail that tracks a PATH cannot be seeded from a bare value list (no path history crossed the
   // barrier), so it declines rather than compile a plan with the column silently missing. An

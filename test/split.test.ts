@@ -82,6 +82,11 @@ describe('split() — a label bound before the barrier', () => {
       "g.V(1).values('name').as('x').split('r').select('x')",
       "g.inject('a,b').as('x').split(',').as('y').select('x','y')",
       "g.V(1).as('a').values('name').split('r').select('a')",
+      // A tail that REBINDS the label would shadow the pre-barrier binding: Pop.first/all would read
+      // the split list (`[a,b]`), not `'a,b'`.
+      "g.inject('a,b').as('x').split(',').as('x').select(first,'x')",
+      "g.inject('a,b').as('x').split(',').as('x').select(all,'x')",
+      "g.inject('a,b').as('x').split(',').local(__.as('x')).select(first,'x')",
     ]) await expect(mgr.executor('home').framedAsync(g, {})).rejects.toThrow(/not supported/);
   });
   test('a label bound AFTER split() still reads', async () => {
