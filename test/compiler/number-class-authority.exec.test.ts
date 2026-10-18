@@ -63,8 +63,10 @@ const DATE = "datetime('2020-01-01T00:00:00Z')";
 
 describe('a BigInteger past int64 orders by value, never by a saturated cast', () => {
   // SQLite's `CAST(… AS INTEGER)` saturates past int64, so a bound AT the edge used to read every wider subject as
-  // equal to it. A bound at or past the edge orders as REAL (`wideBound`): values within an ulp of each other
-  // there tie — a deliberate divergence (`docs/feature-support-matrix.md`).
+  // equal to it. A bound PAST the edge orders as REAL (`wideBound`): values within an ulp of each other there tie —
+  // a deliberate divergence (`docs/feature-support-matrix.md`). A bound of EXACTLY Long.MAX_VALUE/MIN_VALUE keeps
+  // the exact INTEGER compare (an in-range Long an ulp away must not tie it), with only a SATURATED subject read as
+  // its REAL (`intKey`).
   const answered: [string, string[]][] = [
     ["g.inject('99999999999999999999').asNumber().is(P.gt(9223372036854775807L))", ['99999999999999999999N']],
     ['g.inject(99999999999999999999n).is(P.lt(99999999999999999998n))', []],
@@ -75,11 +77,32 @@ describe('a BigInteger past int64 orders by value, never by a saturated cast', (
     ['g.inject(1.5d).is(P.lt(99999999999999999999n))', ['1.5d']],
     ["g.V(1).property('b', 99999999999999999999n) ;; g.V(1).values('b').is(P.gt(9223372036854775807L))", ['99999999999999999999N']],
     ["g.V(1).property('s', '99999999999999999999') ;; g.V(1).values('s').asNumber().is(P.gt(9223372036854775807L))", ['99999999999999999999N']],
+    ["g.inject('9223372036854775808').asNumber().where(is(P.gt(9223372036854775807L)))", ['9223372036854775808N']],
+    ['g.inject(9223372036854775808n).is(P.lte(9223372036854775807L))', []],
+    ['g.inject(9223372036854775808n).is(P.eq(9223372036854775807n))', []],
+    ['g.inject(-99999999999999999999n).is(P.lt(-9223372036854775808L))', ['-99999999999999999999N']],
+    ['g.inject(-99999999999999999999n).is(P.gte(-9223372036854775808L))', []],
+    // An in-range Long an ulp from the edge keeps its exact INTEGER compare against an edge bound.
+    ['g.inject(9223372036854775806L).is(P.lt(9223372036854775807L))', ['9223372036854775806L']],
+    ['g.inject(9223372036854775806L, 5L).is(P.gte(9223372036854775807n))', []],
+    ['g.inject(-9223372036854775807L).is(P.gt(-9223372036854775808L))', ['-9223372036854775807L']],
+    ["g.V(1).property('x', 9223372036854775806L) ;; g.V().has('x', P.lt(9223372036854775807L)).values('x')", ['9223372036854775806L']],
+    ["g.V(1).property('x', 9223372036854775806L) ;; g.V().has('x', P.gte(9223372036854775807L)).values('x')", []],
+    ["g.V(1).property('x', -9223372036854775807L) ;; g.V().has('x', P.gt(-9223372036854775808L)).values('x')", ['-9223372036854775807L']],
+    ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.gt(9223372036854775807L)).values('x')", ['99999999999999999999N']],
+    ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.lte(9223372036854775807L)).values('x')", []],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   // A floating bound at or past ±2^63 against a subject past int64 orders as REAL.
   test('g.inject(9223372036854775808n).is(P.lt(1e300d))', async () => expect(await classes('g.inject(9223372036854775808n).is(P.lt(1e300d))')).toEqual(['9223372036854775808N']));
   test('g.inject(1e300d).is(P.lt(99999999999999999999n))', async () => expect(await classes('g.inject(1e300d).is(P.lt(99999999999999999999n))')).toEqual([]));
+});
+
+describe('a BigInteger past int64 equals only a NUMBER spelled with its digits', () => {
+  test('a stored String with the same digits is not equal', async () => {
+    const q = "g.V(1).property('x', '100000000000000000000') ;; g.V(2).property('x', 100000000000000000000n) ;; g.V().has('x', 100000000000000000000n).values('x')";
+    expect(await classes(q)).toEqual(['100000000000000000000N']);
+  });
 });
 
 describe("asNumber() is createNumber's class — Float, Double or BigDecimal — and a Date's epoch Long", () => {

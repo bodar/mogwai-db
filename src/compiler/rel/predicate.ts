@@ -111,9 +111,9 @@ const exactTailCast = (value: unknown): SqlType | null =>
 const STATIC_SUBJECT_CAST: Record<string, SqlType> = { bigdecimal: 'real', long: 'int', bigint: 'int', duration: 'int' };
 /** A static subject keyed to its numeric class where it may ride as TEXT — flagged `text`, or a BigDecimal (whose
  *  carrier is decimal TEXT however it was produced); `null` where the subject compares as it is. */
-const staticKey = (subject: Expr, canonical: string, text: boolean | undefined): Expr | null => {
+const staticKey = (subject: Expr, canonical: string, text: boolean | undefined, edge: boolean): Expr | null => {
   const to = text || canonical === 'bigdecimal' ? STATIC_SUBJECT_CAST[canonical] : undefined;
-  return to ? { kind: 'cast', arg: subject, to } : null;
+  return to === 'int' ? intKey(subject, edge) : to ? { kind: 'cast', arg: subject, to } : null;
 };
 
 /** Storage classes `compareKey` casts to, as `plan.ts` measured them. A fixed compile-time
@@ -185,29 +185,44 @@ export const perRowSubject = (vtype: Expr, value: Expr): SubjectType =>
  * in the last ulp (`docs/feature-support-matrix.md`, Deliberate divergences).
  *
  * The one place SQLite's comparison is not the value's: `CAST(… AS INTEGER)` SATURATES at int64, so a
- * BigInteger past it reads as ±(2^63 - 1). That is harmless for an ORDERING against a bound strictly inside
- * int64 (the saturated subject stays on its side of it), so only a bound AT or past int64's edge orders both
- * sides as REAL — `wideBound`, that bound as a REAL, or `null` where the INTEGER comparison stands. (Equality
- * uses it for a floating bound only: a BigInteger past int64 equals its own canonical text, `sameSpaceEquality`.)
+ * BigInteger past it reads as ±(2^63 - 1). That is harmless against a bound strictly inside int64 (the
+ * saturated subject stays on its side of it), so only a bound PAST int64 orders both sides as REAL —
+ * `wideBound`, that bound as a REAL, or `null` where the exact INTEGER comparison stands. A bound of EXACTLY
+ * `Long.MAX_VALUE`/`MIN_VALUE` (a common sentinel) fits int64 and keeps the exact INTEGER compare — as a REAL
+ * it would tie every Long within an ulp of it — and only a subject whose cast saturated reads as its REAL
+ * (`intKey`), which SQLite compares with the INTEGER bound exactly. (Equality uses `wideBound` for a floating
+ * bound only: a BigInteger past int64 equals its own canonical text, `sameSpaceEquality`.)
  */
 const LONG_MIN = -(2n ** 63n);
 const LONG_MAX = 2n ** 63n - 1n;
 const TWO_63 = 2 ** 63;
+const pastInt64 = (value: unknown): boolean => typeof value === 'bigint' && (value > LONG_MAX || value < LONG_MIN);
+/** A bound of exactly int64's edge — the one INTEGER bound a saturated subject can tie. */
+const atInt64Edge = (value: unknown): boolean => value === LONG_MAX || value === LONG_MIN;
+/** A subject's INTEGER key. Against an `atInt64Edge` bound, a TEXT subject whose cast does not round-trip
+ *  (a BigInteger past int64, which the cast saturates onto the edge) reads as its REAL instead. */
+function intKey(subject: Expr, edge: boolean): Expr {
+  const cast: Expr = { kind: 'cast', arg: subject, to: 'int' };
+  if (!edge) return cast;
+  const saturated = and(binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')),
+    binary('!=', { kind: 'cast', arg: cast, to: 'text' }, subject));
+  return { kind: 'case', whens: [[saturated, { kind: 'cast', arg: subject, to: 'real' }]], else: cast };
+}
 function wideBound(value: unknown): Expr | null {
-  if (typeof value === 'bigint') return value >= LONG_MAX || value <= LONG_MIN ? compilerReal(Number(value)) : null;
+  if (typeof value === 'bigint') return pastInt64(value) ? compilerReal(Number(value)) : null;
   const n = typeof value === 'number' ? value : value instanceof BigDecimal ? Number(String(value)) : NaN;
   return n >= TWO_63 || n <= -TWO_63 ? compilerReal(n) : null;
 }
-const pastInt64 = (value: unknown): boolean => typeof value === 'bigint' && (value > LONG_MAX || value < LONG_MIN);
 
 /** `subject op against` over a per-row or untyped subject: each number row keyed to its class (REAL
- *  throughout against a `wideBound`), and `otherwise` for a row outside the vocabulary. */
+ *  throughout against a `wideBound`, saturation-aware against an `atInt64Edge` one), and `otherwise` for a
+ *  row outside the vocabulary. */
 function byValue(
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, type: Exclude<SubjectType, { kind: 'static' }>,
-  against: Expr, wide: boolean, otherwise: Expr,
+  against: Expr, wide: boolean, edge: boolean, otherwise: Expr,
   intVtypes: readonly string[] = NUMERIC_CAST_TO_INT, realVtypes: readonly string[] = CAST_TO_REAL,
 ): Expr {
-  const cast = (to: SqlType): Expr => ({ kind: 'cast', arg: subject, to: wide ? 'real' : to });
+  const cast = (to: SqlType): Expr => wide || to !== 'int' ? { kind: 'cast', arg: subject, to: wide ? 'real' : to } : intKey(subject, edge);
   if (type.kind === 'perRow') {
     const among = (names: readonly string[]): Expr => ({ kind: 'in-list', expr: type.vtype, values: names.map(compilerText) });
     return { kind: 'case', whens: [
@@ -294,7 +309,7 @@ const ordered = (
     // set only where the value is stored as TEXT (`injectSource`) — is what disambiguates the two and lets
     // `inject(9.99m)`/`inject(9…L)`/`inject(Duration(…))` order instead of declining
     // (docs/archive/2026-08-05-parameters-are-the-only-binds.md C1).
-    const keyed = canonical !== null ? staticKey(subject, canonical, type.text) : null;
+    const keyed = canonical !== null ? staticKey(subject, canonical, type.text, atInt64Edge(value)) : null;
     if (numericBound && keyed) return binary(op, keyed, castBound);
     // A NATIVE temporal (`datetime`, or a `duration` that did not arrive as a TEXT tail) cannot be ordered
     // by this arm: it rides as a raw epoch/nanos with no per-row `vtype` to drive `compareKey`'s cast, so
@@ -307,7 +322,7 @@ const ordered = (
       : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
-  if (numericBound) return byValue(op, subject, type, wide ?? castBound, wide !== null, compilerFalse, intVtypes, realVtypes);
+  if (numericBound) return byValue(op, subject, type, wide ?? castBound, wide !== null, atInt64Edge(value), compilerFalse, intVtypes, realVtypes);
   return type.kind === 'perRow'
     ? { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse }
     : { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
@@ -413,19 +428,25 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   // subject keyed by its own (`byValue`), so a decimal-TEXT carrier reads as the number it is. A floating
   // bound outside int64 is met as a REAL (`wideBound`) — a saturating INTEGER cast never equals it.
   const wideAt = typeof value === 'bigint' ? null : wideBound(value);
-  // A BigInteger past int64: a TEXT-carried integer equals only its own canonical text (exactly); a native
-  // INTEGER/REAL row meets it as a REAL.
-  if (pastInt64(value)) return { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), raw]],
-    else: binary('=', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(Number(value))) };
+  // A BigInteger past int64: a TEXT-carried NUMBER equals only its own canonical text (exactly); a native
+  // INTEGER/REAL row meets it as a REAL. A String spelled with the same digits is TEXT too, so a typed
+  // subject must name a number class for the text arm to hold.
+  if (pastInt64(value)) {
+    const canonical = type.kind === 'static' ? normalizeTypeName(type.type) : null;
+    const text = type.kind === 'perRow' ? and({ kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) }, raw)
+      : canonical !== null && !NUMERIC_VTYPES.includes(canonical) ? CONSTANT.false : raw;
+    return { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), text]],
+      else: binary('=', { kind: 'cast', arg: subject, to: 'real' }, compilerReal(Number(value))) };
+  }
   const tailCast = exactTailCast(value);
   if (!tailCast && !wideAt && type.kind !== 'static') return raw;
   const against: Expr = wideAt ?? (tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound);
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
     if (canonical === null || !NUMERIC_VTYPES.includes(canonical)) return raw;
-    return binary('=', wideAt ? { kind: 'cast', arg: subject, to: 'real' } : staticKey(subject, canonical, type.text) ?? subject, against);
+    return binary('=', wideAt ? { kind: 'cast', arg: subject, to: 'real' } : staticKey(subject, canonical, type.text, atInt64Edge(value)) ?? subject, against);
   }
-  return byValue('=', subject, type, against, wideAt !== null, raw);
+  return byValue('=', subject, type, against, wideAt !== null, atInt64Edge(value), raw);
 };
 
 /**
