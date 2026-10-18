@@ -33,10 +33,12 @@ through the ordinary fold — no new orchestrator, and nothing here builds SQL b
 
 One FTS5 **trigram** virtual table backs both `tinker.search` and the TextP substring predicates,
 maintained in the write path (the stored typed tree needs app awareness, so no triggers).
-Substring matching is **case-insensitive** — a deliberate divergence that lets the trigram index
-serve `LIKE`; `regex` fails closed today, never JS-filtered — INTENDED work, not a permanent wall
-(`docs/2026-08-12-regex-as-a-barrier-research.md`, which is also why the trigram index matters beyond
-substrings).
+The index's `LIKE` is **case-insensitive** (ASCII), so it is only ever a SUPERSET access path: the
+TextP predicates are Java's exact `startsWith`/`endsWith`/`contains` (`Text.java`), spelled as the
+`LIKE` (which the seek reads) CONJOINED with an exact `instr`/`substr` test (`likePattern`,
+`src/compiler/rel/predicate.ts`). `tinker.search` keeps its own documented case-insensitive literal
+contract (`describeParams`). `regex` is a barrier segment prefiltered by the trigram index
+(`docs/2026-08-12-regex-as-a-barrier-research.md`).
 
 - **PERF TRAP: an FTS5 `DELETE` by an `UNINDEXED` column is an O(n) scan.** An unconditional
   per-write delete makes bulk writes O(n²). Delete FTS rows ONLY on a genuine overwrite.

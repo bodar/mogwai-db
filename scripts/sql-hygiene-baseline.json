@@ -49,8 +49,8 @@
   },
   "asDate": {
     "binds": 0,
-    "bytes": 1662,
-    "compiler": 36,
+    "bytes": 2143,
+    "compiler": 66,
     "bound": 0
   },
   "asNumber": {
@@ -133,7 +133,7 @@
   },
   "dateDiff": {
     "binds": 0,
-    "bytes": 1811,
+    "bytes": 2468,
     "compiler": 59,
     "bound": 0
   },
@@ -193,8 +193,8 @@
   },
   "filter": {
     "binds": 0,
-    "bytes": 4002,
-    "compiler": 105,
+    "bytes": 4140,
+    "compiler": 113,
     "bound": 0
   },
   "flatMap": {

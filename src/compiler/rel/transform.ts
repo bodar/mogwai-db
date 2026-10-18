@@ -1,7 +1,7 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
-import { raiseExpr } from '../../rel/raise.ts';
+import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
 import { casedText, countedText, JAVA_WHITESPACE } from './text-units.ts';
 import { SAFE_INT } from './reducer.ts';
 import type { Minter } from './build.ts';
@@ -475,14 +475,32 @@ export function transformExpr(
   }
 
   if (step.name === 'asDate') {
-    // Internal datetime IS epoch-millis: an integer/real value already is, a text value is ISO-8601
-    // and `unixepoch` resolves any offset into the instant.
+    // `AsDateStep.map` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsDateStep.java:48-77`)
+    // is EXACT here only where it is the identity on our epoch-millis datetime: a Date/OffsetDateTime
+    // is itself, and a Byte/Short/Integer/Long is its milliseconds. Every other run-time input is a
+    // parse or a raise SQL cannot reproduce — a String goes through `DatetimeHelper.parse`'s formatter
+    // grammar (SQLite's `unixepoch` reads a different one, and answered NULL where the reference
+    // raises), a null / Double / Float / BigDecimal / Boolean RAISES `Can't parse …`, and a BigInteger
+    // raises past a long — so such a row DEFERS rather than casting to a plausible instant. The two
+    // String shapes kept are the ones both grammars read alike: `YYYY-MM-DD` (`ISO_LOCAL_DATE`, midnight
+    // UTC) and `YYYY-MM-DDTHH:MM:SSZ`, each only when SQLite formats the instant back to the very same
+    // text — which refuses every out-of-range field SQLite would otherwise NORMALIZE (`02-30` → `03-01`).
+    // A row's type is its tag when the caller has one, else its static type; with neither, it declines.
+    const exact: ReadonlySet<ValueType> = new Set<ValueType>(['datetime', 'byte', 'short', 'int', 'long']);
+    const known = staticTypeOf(incoming) ?? (evidence?.kind === 'static' ? evidence.tag : undefined);
+    if (known) return exact.has(known as ValueType) && !staticIsText(incoming) ? { expr: v, type: STATIC('datetime') } : null;
+    if (evidence?.kind !== 'tag') return null;
+    const isText = bin('and', bin('=', evidence.tag, held('string')), bin('=', call('typeof', v), held('text')));
+    const roundTrips = (format: string): Expr => bin('=', call('strftime', held(format), v), v);
     return {
       expr: {
         kind: 'case',
-        whens: [[{ kind: 'in-list', expr: call('typeof', v), values: [held('integer'), held('real')] },
-          { kind: 'cast', arg: v, to: 'int' }]],
-        else: { kind: 'binary', op: '*', left: call('unixepoch', v), right: heldInt(1000) },
+        whens: [
+          [bin('and', { kind: 'in-list', expr: evidence.tag, values: [...exact].map(held) }, bin('=', call('typeof', v), held('integer'))), v],
+          [bin('and', isText, bin('or', roundTrips('%Y-%m-%d'), roundTrips('%Y-%m-%dT%H:%M:%SZ'))),
+            bin('*', call('unixepoch', v), heldInt(1000))],
+        ],
+        else: deferralExpr('asDate() of a value that is not a Date, an integral Number below BigInteger or an ISO-8601 date is not supported yet', v),
       },
       type: STATIC('datetime'),
     };

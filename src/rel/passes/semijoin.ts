@@ -3,6 +3,7 @@ import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { minter, type Minter } from '../mint.ts';
 import type { RelId } from '../types.ts';
+import { alwaysRaises } from '../raise.ts';
 import { exprRels, forEachExpr, mapRelExprs, rewrite, rewriteExpr } from '../walk.ts';
 
 /**
@@ -247,11 +248,59 @@ export const trigramSeek: OwnerSeek = (term, element, elementTable, mint) => {
   if (corr.length !== 1) return null;
   const free = all.filter((e) => !corr.includes(e));
   const key = literalEq(free, props.id, 'key');
-  const pattern = likePattern(free, props.id);
-  if (key == null || pattern == null || literalTerm(pattern).length < 3) return null;
-  if (hasNegativeText(free)) return negativeOwners(props, properties, key, pattern, mint);
-  return positiveOwners(properties, key, pattern, literalTerm(pattern), mint);
+  if (key == null) return null;
+  const atom = necessaryTextAtom(free, props.id);
+  if (atom == null || literalTerm(atom.pattern).length < 3) return null;
+  if (atom.kind === 'negative') return negativeOwners(props, properties, key, atom.matches, mint);
+  return positiveOwners(properties, key, atom.pattern, literalTerm(atom.pattern), mint);
 };
+
+/**
+ * A TextP atom the WHOLE predicate implies, or `null` — the one soundness question a seek answers.
+ *
+ * The seek's owner set must CONTAIN every owner the predicate admits, so the atom it reads has to be
+ * NECESSARY: reached from the conjunct roots through `and` alone, and through a `case` only into its
+ * `else` when every `when` arm is a raise (`containedText`'s NUL deferral, `compiler/rel/text-units.ts`:
+ * a row taking that arm errors rather than answers, and the positive seek keeps such rows by `instr`).
+ * Anything else — an `or` (TextP's `or`, `P.or`, `outside`), a `not`, a comparison — STOPS the walk,
+ * because an atom under it is one way of being admitted, not a requirement: seeking the last `like` in
+ * `containing('ark').or(containing('osh'))` read the FTS for `'osh'` alone and dropped marko. A
+ * positive atom is the `like` itself; a negative one is `<matches> is not 1` (`negated`,
+ * `compiler/rel/predicate.ts`), whose `<matches>` the anti-probe re-asks of the FTS text. Several
+ * necessary atoms are each sound; a positive one is preferred, because it seeks rather than scans.
+ */
+function necessaryTextAtom(parts: readonly Expr[], rel: RelId):
+  | { readonly kind: 'positive'; readonly pattern: Expr }
+  | { readonly kind: 'negative'; readonly pattern: Expr; readonly matches: Expr }
+  | null {
+  const positive: Expr[] = [];
+  const negative: { pattern: Expr; matches: Expr }[] = [];
+  const onValue = (e: Expr): e is Extract<Expr, { kind: 'call' }> =>
+    e.kind === 'call' && e.fn.toLowerCase() === 'like' && e.args[1]?.kind === 'col' && e.args[1].rel === rel && e.args[1].name === 'value';
+  const visit = (e: Expr): void => {
+    if (onValue(e)) { positive.push(e.args[0]!); return; }
+    if (e.kind === 'binary' && e.op === 'and') { visit(e.left); visit(e.right); return; }
+    if (e.kind === 'case' && e.else && e.whens.every(([, then]) => alwaysRaises(then))) { visit(e.else); return; }
+    if (e.kind === 'binary' && e.op === 'is not' && e.right.kind === 'lit' && e.right.value === 1) {
+      // The anti-probe drops a row exactly when `<matches>` holds of its FTS text — the very rows this
+      // atom rejects — so ANY body is sound provided it reads the value alone and so can be re-asked there.
+      const likes: Expr[] = [];
+      forEachExpr(e.left, (x) => { if (onValue(x)) likes.push(x.args[0]!); });
+      if (likes.length && readsOnlyValue(e.left, rel)) negative.push({ pattern: likes[0]!, matches: e.left });
+    }
+  };
+  parts.forEach(visit);
+  if (positive.length) return { kind: 'positive', pattern: positive[0]! };
+  if (negative.length) return { kind: 'negative', ...negative[0]! };
+  return null;
+}
+/** Does `e` read nothing but the property value — no other column, no subplan? Such a body can be re-asked
+ *  of the FTS copy of that value (`retarget`) and give the same answer. */
+function readsOnlyValue(e: Expr, rel: RelId): boolean {
+  let only = true;
+  forEachExpr(e, (x) => { if ((x.kind === 'col' && !(x.rel === rel && x.name === 'value')) || exprRels(x).length) only = false; });
+  return only;
+}
 
 /**
  * Positive TextP can start directly from matching FTS rows.
@@ -291,7 +340,7 @@ function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key
  */
 function negativeOwners(
   props: Extract<Rel, { readonly kind: 'scan' }>, properties: { readonly owner: string; readonly ownerElem: 'node' | 'edge' },
-  key: string, pattern: Expr, mint: Minter,
+  key: string, matches: Expr, mint: Minter,
 ): Rel {
   // `hasPropertyClause` needs only owner/key/value/vtype and intentionally leaves the physical
   // property rowid out of its local schema. This pass joins FTS by `pid`, so its independent scan
@@ -303,7 +352,12 @@ function negativeOwners(
     eq(col(fts.id, 'owner_elem'), compilerText(properties.ownerElem)),
     eq(col(fts.id, 'pid'), col(rows.id, 'id')), eq(col(fts.id, 'pk'), compilerText(key)),
     eq(col(fts.id, 'kind'), compilerText('value')),
-    { kind: 'call', fn: 'like', args: [pattern, col(fts.id, 'text'), compilerText('\\')] },
+    // The atom's OWN match body re-asked of the FTS text — LIKE (which keeps the trigram index) AND its
+    // exact case test — so the probe drops exactly the rows the negative TextP rejects. A NUL-bearing text
+    // is never dropped (LIKE reads it as a C string): it stays a candidate for the generic EXISTS, whose
+    // `containedText` defers on it.
+    rewriteExpr(matches, (n) => (n.kind === 'col' && n.rel === props.id && n.name === 'value' ? col(fts.id, 'text') : n)),
+    eq({ kind: 'call', fn: 'instr', args: [col(fts.id, 'text'), { kind: 'call', fn: 'char', args: [compilerInt(0)] }] }, compilerInt(0)),
   ]) });
   const probe = make.project({ id: mint.id('nfp'), input: matchingFts, channels: [], type: { cols: [{ name: 'one', type: 'int', nullable: false }] }, exprs: [['one', compilerText('1')] ] });
   const candidates = make.filter({ id: mint.id('nf'), input: rows, channels: [], type: rows.type, pred: andAll([
@@ -329,18 +383,6 @@ function literalEq(parts: readonly Expr[], rel: RelId, name: string): string | n
     }
   }
   return null;
-}
-function likePattern(parts: readonly Expr[], rel: RelId): Expr | null {
-  let found: Expr | null = null;
-  for (const part of parts) forEachExpr(part, (e) => {
-    if (e.kind === 'call' && e.fn.toLowerCase() === 'like' && e.args[1]?.kind === 'col' && e.args[1].rel === rel && e.args[1].name === 'value') found = e.args[0];
-  });
-  return found;
-}
-function hasNegativeText(parts: readonly Expr[]): boolean {
-  let found = false;
-  for (const part of parts) forEachExpr(part, (e) => { found ||= e.kind === 'binary' && e.op === 'is not'; });
-  return found;
 }
 /** Literal-only: parameters deliberately use the generic plan, preserving the old fast-path scope. */
 function literalTerm(pattern: Expr): string {

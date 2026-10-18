@@ -93,6 +93,12 @@ const isRaise = (e: Expr): boolean => {
   return head?.kind === 'lit' && head.value === OPEN;
 };
 
+/** Is `e` ITSELF an arm that never yields a value — a `raiseExpr` or a `deferralExpr`? Syntactic, like
+ *  `isRaise`: a physical rewrite that may drop a row taking this arm (it errors rather than answers) asks it. */
+export const alwaysRaises = (e: Expr): boolean =>
+  isRaise(e) || (e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
+    && typeof e.args[1].value === 'string' && e.args[1].value.startsWith(OPEN_DEFERRAL));
+
 /**
  * `raiseExpr` FOR A MESSAGE THE DATA CARRIES — a pending raise's column (`src/compiler/rel/raise-channel.ts`)
  * holds the reference's message as TEXT, NULL on a clean row, and the step that settles it raises THAT

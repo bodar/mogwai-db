@@ -2,18 +2,28 @@ Feature: mogwai addendum — TextP substring predicates
 
   # containing/startingWith/endingWith and their negations over a stored property use a
   # property_fts trigram access path for literal terms of three or more characters. The generic
-  # typed LIKE predicate stays above the physical rewrite as the semantic authority.
-  # These scenarios pin two mogwai characteristics the official corpus does not cover:
-  #   1. Matching is CASE-INSENSITIVE (a documented divergence from TinkerPop's case-sensitive
-  #      String.contains), and
+  # typed predicate stays above the physical rewrite as the semantic authority.
+  # These scenarios pin two things the official corpus does not cover:
+  #   1. Matching is CASE-SENSITIVE, as Java's String.contains/startsWith/endsWith are
+  #      (vendor/tinkerpop/gremlin-core/.../traversal/Text.java) — the index's case-blind LIKE is only
+  #      a superset access path, never the answer; and
   #   2. an anchored op (startingWith) confirms POSITION, excluding a mid-string hit.
   # A <3-char term is the same correct generic LIKE check — never fail-closed.
 
-  Scenario: containing matches case-insensitively (documented divergence)
+  Scenario: containing is case-sensitive, as String.contains is
     Given the search graph
     And the traversal of
       """
       g.V().has("title", TextP.containing("CHAPTER")).values("title")
+      """
+    When iterated to list
+    Then the result should be empty
+
+  Scenario: a TextP or is seeked by no single disjunct
+    Given the search graph
+    And the traversal of
+      """
+      g.V().has("title", TextP.containing("chapter").or(TextP.containing("zzz"))).values("title")
       """
     When iterated to list
     Then the result should be unordered

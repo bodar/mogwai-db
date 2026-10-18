@@ -10,9 +10,9 @@ export interface FastPathConfig {
   /** For a substring predicate (containing/startingWith/endingWith + not*) whose term is
    *  >= 3 chars over a STORED property, route through the property_fts trigram index instead
    *  of a base-table LIKE scan. Disabling routes through the generic (semantically identical,
-   *  case-insensitive) LIKE path — the equivalence-test fallback. A < 3-char term, or a
+   *  case-exact) LIKE-and-instr path — the equivalence-test fallback. A < 3-char term, or a
    *  substring over a COMPUTED scalar / injected list (no stored property to index), ALWAYS
-   *  uses the LIKE path regardless of this flag: same case-insensitive result, an unindexed
+   *  uses the LIKE path regardless of this flag: the same exact result, an unindexed
    *  (documented) scan. */
   readonly ftsSubstringPredicate: boolean;
   /** Inline a scalar predicate body (and/or/not/filter/where over a scalar) to one boolean

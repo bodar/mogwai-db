@@ -314,8 +314,8 @@ export function buildRegexSegment(
   // TRIGRAM PREFILTER: a regex match must contain the pattern's mandatory literal run, so narrow the
   // head to elements whose key value CONTAINS it — a >=3-char literal reaches the `property_fts` trigram
   // index through the existing `trigramSeek` fast path (`rel/passes/semijoin.ts`), turning the worst case
-  // (regex-only, whole graph) from all rows into trigram candidates. `containing` is a case-insensitive
-  // SUPERSET, so it can only OVER-select candidates the JS regex then rejects — never drop a true match.
+  // (regex-only, whole graph) from all rows into trigram candidates. Every match contains that run exactly,
+  // so `containing` (exact too) is a SUPERSET: it can only OVER-select candidates the JS regex then rejects — never drop a true match.
   // Head-only (the resume's `within(<survivors>)` is the semantic authority), and best-effort: if the
   // prefiltered head does not lower, fall back to the bare head, so the prefilter can never turn a
   // working regex into a decline. POSITIVE regex ONLY: a `notRegex` survivor is a NON-match, which need

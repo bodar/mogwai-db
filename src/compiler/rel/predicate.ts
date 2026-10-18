@@ -912,7 +912,7 @@ export const typedValueEq = (aValue: Expr, aVtype: Expr, bValue: Expr, bVtype: E
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped. A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
  * compiler constant. */
-function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolean; nullOperand: boolean } | null {
+function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolean; nullOperand: boolean; cased: (subject: Expr) => Expr } | null {
   // TOTAL over every op, including `P.not(…)`, whose name starts with `not` but is not a TextP op.
   const negated = op.startsWith('not') && op.length > 3;
   const base = negated ? op[3].toLowerCase() + op.slice(4) : op;
@@ -920,7 +920,7 @@ function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolea
   // TextP is P<String>. Do not let SQLite stringify a number (`123` would otherwise satisfy
   // containing('2')); null is the separately-defined Text.isNull case.
   if (operand.value !== null && typeof operand.value !== 'string') return null;
-  if (operand.value === null) return { pattern: compilerText(''), negated, nullOperand: true };
+  if (operand.value === null) return { pattern: compilerText(''), negated, nullOperand: true, cased: () => CONSTANT.false };
   const raw = operand.name == null ? compilerText(operand.value) : param(operand.value, operand.name);
   const escaped: Expr = { kind: 'call', fn: 'replace', args: [
     { kind: 'call', fn: 'replace', args: [
@@ -930,9 +930,23 @@ function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolea
     compilerText('_'), compilerText('\\_'),
   ] };
   const join = (...parts: readonly Expr[]): Expr => parts.reduce((left, right) => binary('||', left, right));
-  if (base === 'startingWith') return { pattern: join(escaped, compilerText('%')), negated, nullOperand: false };
-  if (base === 'endingWith') return { pattern: join(compilerText('%'), escaped), negated, nullOperand: false };
-  if (base === 'containing') return { pattern: join(compilerText('%'), escaped, compilerText('%')), negated, nullOperand: false };
+  // SQLite's LIKE folds ASCII case (`'MARKO' LIKE '%ark%'` is true), where Java's `startsWith`/`endsWith`/
+  // `contains` are exact (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Text.java:44,126`
+  // and the `endingWith` arm between them). So the LIKE is only a case-blind SUPERSET — kept because it is
+  // the atom the `property_fts` trigram seek reads (`rel/passes/semijoin.ts`) — and this `cased` test,
+  // CONJOINED with it, is the exact answer. `instr` is the 1-based position of the FIRST occurrence (1 for
+  // an empty term), so `= 1` is a prefix test; a suffix is a `substr` compare guarded by length, because a
+  // non-positive `substr` start counts from the RIGHT. Both compare BINARY — no collation folds case.
+  const instr = (subject: Expr): Expr => ({ kind: 'call', fn: 'instr', args: [subject, raw] });
+  const length = (x: Expr): Expr => ({ kind: 'call', fn: 'length', args: [x] });
+  const cased = (subject: Expr): Expr =>
+    base === 'containing' ? binary('>', instr(subject), compilerInt(0))
+    : base === 'startingWith' ? binary('=', instr(subject), compilerInt(1))
+    : binary('or', binary('=', length(raw), compilerInt(0)), binary('and', binary('>=', length(subject), length(raw)),
+        binary('=', { kind: 'call', fn: 'substr', args: [subject, binary('+', binary('-', length(subject), length(raw)), compilerInt(1))] }, raw)));
+  if (base === 'startingWith') return { pattern: join(escaped, compilerText('%')), negated, nullOperand: false, cased };
+  if (base === 'endingWith') return { pattern: join(compilerText('%'), escaped), negated, nullOperand: false, cased };
+  if (base === 'containing') return { pattern: join(compilerText('%'), escaped, compilerText('%')), negated, nullOperand: false, cased };
   return null;
 }
 
@@ -1264,7 +1278,7 @@ export function predicateExpr(
     // says. Nothing is lost: SQLite disables its LIKE index optimization whenever ESCAPE is
     // present, which this LIKE-function form always is, so it is a residual filter either way.
     const call: Expr = like.nullOperand ? CONSTANT.false
-      : { kind: 'call', fn: 'like', args: [like.pattern, subject, compilerText('\\')] };
+      : binary('and', { kind: 'call', fn: 'like', args: [like.pattern, subject, compilerText('\\')] }, like.cased(subject));
     // The type gate stays outside the negative form: null is a legal String reference and the
     // negative TextP variants return true for it, but a non-String is not a TextP match at all.
     // `like` reads its text as a C string, so a NUL in either side defers (`containedText`, `text-units.ts`).

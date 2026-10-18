@@ -88,7 +88,7 @@ function carriesData(e: Expr): boolean {
 // this stopgap only refuses what it would mis-case.
 //
 // `CASED` is every code point >= U+0080 that JavaScript's own Unicode case mapping changes, upper or lower
-// (`test/compiler/text-units.test.ts` re-derives it from the running engine and fails on any character it
+// (`test/java-strings.test.ts` re-derives it from the running engine and fails on any character it
 // misses). Java's tables are an older Unicode version than the engine's, so the set is a SUPERSET of Java's:
 // it can only over-defer. The GLOB reads the subject through `json_quote`, because `GLOB` reads a C string
 // and would stop at the first NUL (so would `replace`, which takes a NUL pattern for an empty one):

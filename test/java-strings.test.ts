@@ -121,6 +121,45 @@ describe("split(null) splits on Java's whitespace — Character.isWhitespace, th
   });
 });
 
+// TextP is Java's EXACT `startsWith`/`endsWith`/`contains` (`Text.java`), where SQLite's LIKE folds ASCII
+// case; and a TextP combined by `or` is a disjunction the trigram seek must not narrow to one arm.
+describe('TextP is case-exact and a combined TextP is seeked only by a necessary atom', () => {
+  test.each([
+    ["g.V().has('name', containing('ARK')).values('name')", []],
+    ["g.V().values('name').is(startingWith('MA'))", []],
+    ["g.V().has('name', endingWith('KO')).values('name')", []],
+    ["g.V().has('name', endingWith('ko')).values('name')", ['"marko"']],
+    ["g.V().has('name', notContaining('ARK')).count()", ['6L']],
+    ["g.V().has('name', notEndingWith('rko')).count()", ['5L']],
+    ["g.V().has('name', endingWith('')).count()", ['6L']],
+    ["g.V().has('name', notStartingWith('')).count()", ['0L']],
+    ["g.V().has('name', TextP.containing('ark').or(TextP.containing('osh'))).values('name')", ['"marko"', '"josh"']],
+    ["g.V().has('name', TextP.containing('ark').or(P.eq('josh'))).values('name')", ['"marko"', '"josh"']],
+    ["g.V().has('name', TextP.notContaining('ark').or(TextP.containing('osh'))).values('name')", ['"vadas"', '"lop"', '"josh"', '"ripple"', '"peter"']],
+    ["g.V().has('name', TextP.notContaining('ark').and(TextP.containing('osh'))).values('name')", ['"josh"']],
+    ["g.V().has('name', TextP.containing('ark').and(TextP.containing('mar'))).values('name')", ['"marko"']],
+    ["g.E().outV().has('name', TextP.containing('ark').or(TextP.containing('osh'))).dedup().values('name')", ['"marko"', '"josh"']],
+  ] as const)('%s', (gremlin, expected) => {
+    expect(runP(gremlin).sort()).toEqual([...expected].sort());
+  });
+});
+
+// asDate() of a run-time String is `DatetimeHelper.parse`, not SQLite's `unixepoch`: the shapes both read
+// alike answer, everything else defers (SQLite answered NULL for a name, and normalized `02-30`).
+describe('asDate() of a run-time String answers only where both date grammars agree', () => {
+  const dated = (value: string): Store => {
+    const store = seededStore();
+    executeQuery(store, `g.addV('d').property('s', ${str(value)})`, {});
+    return store;
+  };
+  test.each([['2020-08-02'], ['2020-08-02T10:11:12Z']])('%s answers', (value) => {
+    expect(answer(dated(value), "g.V().hasLabel('d').values('s').asDate().asNumber()")).toEqual([`${Date.parse(value)}L`]);
+  });
+  test.each([['marko'], ['2020-02-30'], ['2020-08-02 10:11:12'], ['now']])('%s defers', (value) => {
+    expect(() => answer(dated(value), "g.V().hasLabel('d').values('s').asDate()")).toThrow(/asDate\(\) of a value/);
+  });
+});
+
 describe('a stored NUL never lets the trigram seek or tinker.search drop a match', () => {
   /** The modern graph with marko's name replaced by a NUL-bearing string, loaded through GraphSON — the
    *  reader `io()` uses, and the one way a NUL reaches storage (a Gremlin write declines it). */
@@ -136,8 +175,17 @@ describe('a stored NUL never lets the trigram seek or tinker.search drop a match
     ["g.V().has('name', endingWith('def')).values('age')"], ["g.V().has('person','name', containing('cdef')).values('age')"],
     ["g.V().filter(has('name', containing('cdef'))).values('age')"], ["g.V().has('name', regex('cdef')).values('age')"],
     ["g.call('tinker.search', [search:'cdef']).element().values('age')"],
+    // An OR'd TextP: the seek may read only a NECESSARY atom, and neither disjunct is one.
+    ["g.V().has('name', TextP.containing('cdef').or(TextP.containing('zzz'))).values('age')"],
+    ["g.V().has('name', TextP.endingWith('def').or(TextP.startingWith('zzz'))).values('age')"],
+    ["g.V().has('name', TextP.notContaining('zzz').and(TextP.notEndingWith('ab'))).values('age')"],
   ])('a NUL-bearing value that may match defers: %s', (gremlin) => {
     expect(() => answer(nulStore(), gremlin)).toThrow(UNREADABLE_TEXT);
+  });
+
+  test('an OR\'d TextP over a parameter defers on the NUL-bearing value too', () => {
+    expect(() => answer(nulStore(), "g.V().has('name', TextP.containing(x).or(TextP.containing('zzz'))).values('age')", { x: 'cdef' }))
+      .toThrow(UNREADABLE_TEXT);
   });
 
   test('a term the NUL-bearing value does not contain still answers exactly', () => {
