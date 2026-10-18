@@ -736,7 +736,7 @@ describe('a literal VALUE with no carrier declines — a NaN, a negative-scale B
     test(`declines: ${q}`, () => expect(classes(q)).rejects.toThrow(UnsupportedTraversal));
 });
 
-describe('a min/max TIE goes where the reference sends it — and a sort orders the sign of a zero', () => {
+describe('a min/max TIE goes where the reference sends it', () => {
   // NumberHelper's `max` is `x >= y ? x : y` and `min` `x <= y ? x : y` (`NumberHelper.java:252-310`): the
   // FIRST argument keeps a tie. `MaxLocalStep`/`MinLocalStep` fold `max(next, result)` (`MaxLocalStep.java:52`),
   // so a LOCAL reducer's later member wins; a sack/fold applies `(accumulator, value)`, so the accumulator
@@ -770,13 +770,6 @@ describe('a min/max TIE goes where the reference sends it — and a sort orders 
     ['g.inject(0.0d).fold(-0.0d, Operator.max)', ['-0d']],
     ['g.inject(-0.0d,0.0d).fold(5.0d, Operator.min)', ['-0d']],
     ['g.inject(0.0d,-0.0d).fold(5.0d, Operator.min)', ['0d']],
-    // `Double.compare` orders -0.0 below 0.0 (and below an Int 0) — `NumberHelper.compare`, `:670-680`.
-    ['g.inject(0.0d,-0.0d).fold().order(local)', ['[-0d,0d]']],
-    ['g.inject(0.0d,-0.0d).fold().order(local).by(desc)', ['[0d,-0d]']],
-    ['g.inject(0.0d,-0.0d).order().fold()', ['[-0d,0d]']],
-    ['g.inject(-0.0d,0.0d).order().by(desc).fold()', ['[0d,-0d]']],
-    ['g.inject(0, -0.0d, -1).order().fold()', ['[-1i,-0d,0i]']],
-    ['g.inject([0.0d,-0.0d,1,-1]).order(local)', ['[-1i,-0d,0d,1i]']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   for (const q of [

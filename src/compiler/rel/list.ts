@@ -14,7 +14,7 @@ import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { promotedExtremum, resultIsDecimal } from './float.ts';
-import { comparabilityClass, mixedClassesRefused, orderedBy, orderingKey, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type CarriedKey } from './predicate.ts';
+import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
@@ -242,28 +242,6 @@ const memberCompareKey = (of: ListOf, members: Rel): Expr => {
     whens: [[eqText(col(members.id, MEMBER.type), 'object'),
       storedCompareOn(jsonField(value, 't'))(jsonField(value, 'v'))]],
     else: value,
-  };
-};
-
-/**
- * A member's ORDERING key — `memberCompareKey` with the zero's number class carried (`orderingKey`), for
- * `order(Scope.local)`'s signed-zero rule (`orderedBy`). A static member type names its class; an untagged
- * list's members are their storage class's type (`natural`); a self-describing list's members are each
- * keyed by their own tag, a BARE member as the untagged value it is — so the key is `encoded` throughout.
- * Kept apart from `memberCompareKey` because the local reducers return that key's VALUE.
- */
-const memberOrderingKey = (of: ListOf, members: Rel): CarriedKey => {
-  const value = col(members.id, MEMBER.value);
-  const type = memberTypeOf(of);
-  if (type?.kind === 'static') return orderingKey(compilerText(type.type), value);
-  if (!isTypedList(of)) return { key: value, carrier: 'natural' };
-  return {
-    key: {
-      kind: 'case',
-      whens: [[eqText(col(members.id, MEMBER.type), 'object'), orderingKey(jsonField(value, 't'), jsonField(value, 'v')).key]],
-      else: orderingKey(compilerNull('text'), value).key,
-    },
-    carrier: 'encoded',
   };
 };
 
@@ -587,9 +565,7 @@ export function listMemberOp(
     // A scalar member IS the traverser, so its identity key is always present.
     const keyOn = (m: Rel): ByProjection | null => (elemOf
       ? byProjection(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, source, fresh, true, child)
-      : only.key.kind === 'identity'
-        ? ((ordered) => ({ value: ordered.key, present: ALWAYS_PRODUCTIVE, carrier: ordered.carrier }))(memberOrderingKey(of, m))
-        : null);
+      : only.key.kind === 'identity' ? { value: memberCompareKey(of, m), present: ALWAYS_PRODUCTIVE } : null);
     const probe = keyOn(members);
     if (!probe) return null;
     // AN UNPRODUCTIVE `by()` DROPS THE MEMBER, and the reference pins it rather than us inferring it:
@@ -602,19 +578,15 @@ export function listMemberOp(
     const kept = drop.keep
       ? make.filter({ id: fresh('mof'), input: members, channels: [], type: members.type, pred: drop.keep })
       : members;
-    const key = drop.keep ? keyOn(kept) : probe;
+    const key = drop.keep ? keyOn(kept)?.value : probe.value;
     if (!key) return null;
-    // The member's key goes through THE ordering authority (`orderedBy`) — the signed-zero rule over the
-    // key's number class, scalar member or an element member's projected `by()` key alike — and the
-    // relation it hands back carries every member column under its own name.
-    const ordered = orderedBy(kept, [{ expr: key.value, dir: only.order === 'desc' ? 'desc' : 'asc', carrier: key.carrier }], fresh);
     return {
-      rel: withList(rel, listOfMembers(ordered.rel, memberNode(of, ordered.rel), [
-        ...ordered.terms,
+      rel: withList(rel, listOfMembers(kept, memberNode(of, kept), [
+        { expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' },
         // THE ORIGINAL POSITION BREAKS TIES, and it is not tidiness: `json_group_array` takes rows in
         // whatever order SQLite produced, so equal keys would land in an arbitrary one — the defect
         // `mise run test:perturbed` exists to find and that no assertion in the ladder can see.
-        memberOrder(ordered.rel),
+        memberOrder(kept),
       ], fresh), fresh),
       of,
     };

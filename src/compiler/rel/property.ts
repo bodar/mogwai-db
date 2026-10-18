@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
 import { and, byEncounter, carriedCols, eq, jsonExtract, jsonOf, keyMembership, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
-import { orderingKey, valueSet, type CarriedKey } from './predicate.ts';
+import { storedCompareOn, valueSet } from './predicate.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RelFraming } from './framing.ts';
 import type { Elem } from '../elem.ts';
@@ -215,14 +215,13 @@ export function propertyHasClause(
 
 /** A property traverser's natural sort key(s), in term order — `GremlinValueComparator`'s per-type
  *  comparator, spelled over the join's own columns. */
-export function propertyOrderTerms(props: Rel, ownerElem: Elem): readonly CarriedKey[] {
+export function propertyOrderTerms(props: Rel, ownerElem: Elem): readonly Expr[] {
   const own = (name: string): Expr => col(props.id, PROP(name));
   // A VertexProperty sorts by its id, which for us IS the stored rowid — the same thing `id()` frames.
-  if (ownerElem === 'vertex') return [{ key: own('id'), carrier: 'integral' }];
-  // An edge Property sorts by KEY then VALUE, and the value goes through the one ORDERING key authority
-  // (`orderingKey`) so a number carried as decimal TEXT sorts numerically (the reason `order().by('age')`
-  // spends it too) and its zero carries its number class for `orderedBy`'s signed-zero rule.
-  return [{ key: own('key'), carrier: 'integral' }, orderingKey(own('vtype'), storedValueOn(own('value'), own('vtype')))];
+  if (ownerElem === 'vertex') return [own('id')];
+  // An edge Property sorts by KEY then VALUE, and the value goes through the one compare authority so a
+  // number carried as decimal TEXT sorts numerically (the reason `order().by('age')` spends it too).
+  return [own('key'), storedCompareOn(own('vtype'))(storedValueOn(own('value'), own('vtype')))];
 }
 
 /** A property traverser's IDENTITY columns — what a bare `dedup()` groups by. */

@@ -31,7 +31,7 @@ import { whereHasScopeKey } from '../ir/labels.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
-import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, orderedBy, orderingKey, perRowSubject, predicateExpr, signedCompare, signTermOwed, storedCompareOn, SUBJECT_UNKNOWN, unstableTieGuard, type CarriedKey, type OrderKey, type SubjectType, type ZeroCarrier } from './predicate.ts';
+import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
@@ -42,7 +42,7 @@ import {
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
-import { byExpr, byProjection, keepOnNamed, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
+import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
 import { ALWAYS_PRODUCTIVE, freshTraverserRow, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingTag, REL_TRANSFORMS, transformExpr, type DecimalSource, type FloatSource } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
@@ -340,16 +340,8 @@ export const positioned = (input: Rel, fresh: Minter, slicing: boolean): Rel | n
   const payload = payloadCols(input);
   if (!position) {
     if (slicing) return null;
-    // A VALUE stream realized by content orders two values the comparator calls EQUAL by their
-    // representation (`0.0d` before `0m`, `1i` before `1L`), which is no arrival order a consumer of the
-    // branch's order (a stable `order()`'s ties) may read — those rows DEFER (`unstableTieGuard`).
-    const typed = payload.some((column) => column.name === 'v') && payload.some((column) => column.name === 'vtype');
-    const guard = typed
-      ? unstableTieGuard(input, [orderingKey(col(input.id, 'vtype'), col(input.id, 'v')).key], [col(input.id, 'v'), col(input.id, 'vtype')], fresh)
-      : null;
-    const at = guard?.rel ?? input;
-    const terms = [...input.type.cols.map((column) => ({ expr: col(at.id, column.name), dir: 'asc' as const })), ...(guard ? [guard.term] : [])];
-    return renumber(at, terms, [...payload, ...carriedCols(channels)], channels, fresh);
+    const terms = input.type.cols.map((column) => ({ expr: col(input.id, column.name), dir: 'asc' as const }));
+    return renumber(input, terms, [...payload, ...carriedCols(channels)], channels, fresh);
   }
   return make.project({
     id: fresh('bq'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
@@ -1229,18 +1221,9 @@ const BY_READERS = BY_HOSTS;
  * is the one term with no subject at all: `RANDOM()` re-evaluates per row and that IS the semantics,
  * so it is a `Call` rather than a projection, and the census sees it through the multiset digest only.
  */
-/** A sort term as `sortTerms` builds it — the key, its direction and how its zero's class is known
- *  (`ZeroCarrier`); `orderedBy` turns them into SQL sort terms at whichever position the order lands. A
- *  term with no carrier (`RANDOM()`, a host's natural key) is a plain term. */
-type OrderTerm = SortTerm & { readonly carrier?: ZeroCarrier };
-
-/** `terms` as `orderedBy` keys — the one hand-off every `orderRows` arm shares. */
-const orderKeys = (terms: readonly OrderTerm[], at: (term: OrderTerm, index: number) => Expr = (term) => term.expr): OrderKey[] =>
-  terms.map((term, index) => ({ expr: at(term, index), dir: term.dir, carrier: term.carrier ?? 'integral', ...(term.nulls ? { nulls: term.nulls } : {}) }));
-
 function sortTerms(
   step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter,
-): { readonly terms: readonly OrderTerm[]; readonly drop?: Expr } | null {
+): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
   if (isLocalScope(step) || (step.args ?? []).length) return null;
   // EVERY slot: TinkerPop's `order()` takes a comparator per key, so `by('performances',desc).by('name')`
   // is a two-term sort and the number of slots is whatever the chain wrote. `SortTerm[]` was always a
@@ -1255,7 +1238,7 @@ function sortTerms(
   if (parsed.some((modulation) => modulation.order === 'shuffle'))
     return parsed.length === 1 ? { terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] } : null;
 
-  const terms: OrderTerm[] = [];
+  const terms: SortTerm[] = [];
   // PRODUCTIVITY rides with the terms rather than being each host's to remember: a traverser whose
   // `by('age')` yielded nothing is DROPPED, so `g.V().order().by('age')` is four rows on the modern
   // graph and not six. A forgotten drop is a wrong answer with the right arity, and it sorts the
@@ -1266,10 +1249,7 @@ function sortTerms(
     const key = byProjection(modulation, host, ctx.source, fresh, true, childSeam(ctx, fresh));
     if (!key) return null;
     const dir = modulation.order === 'desc' ? 'desc' : 'asc';
-    // EVERY key carries how its zero's number class is known (`ZeroCarrier`) — ORDERABILITY compares the
-    // PROJECTED key under `NumberHelper.compare`, so a `by('x')`/`by(select('a'))`/`by(math(…))` key owes
-    // the signed-zero rule exactly as the traverser ordered by itself does, and `orderedBy` applies it.
-    terms.push({ expr: key.value, dir, carrier: key.carrier });
+    terms.push({ expr: key.value, dir });
     // "only add the traverser if the comparator traversal was productive" — a productive NULL sorts
     // (`OrderGlobalStep.java:82-85,183-184`), so the drop reads PRESENCE, not the key's nullness.
     const drop = productivityFilter(step, key.present);
@@ -1317,12 +1297,10 @@ function sortTerms(
 export function orderRows(
   step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter,
   opts: {
-    readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly CarriedKey[];
+    readonly tie?: (input: Rel) => readonly Expr[]; readonly natural?: (input: Rel) => readonly Expr[];
     /** Does the step's `TraverserSet` merge equal traversers (`mergeEqual`) — false where the stream is
      *  provably pairwise distinct or the step is `Scope.local`. */
     readonly merge?: boolean; readonly mergeKey?: (input: Rel) => readonly Expr[] | null;
-    /** Does `tie` reproduce arrival order (`RowShape.stableTie`)? */
-    readonly stableTie?: true;
   } = {},
 ): Rel | null {
   const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
@@ -1342,81 +1320,16 @@ export function orderRows(
     : rel;
   const carried = encounterOf(domain.channels);
   const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
-  // A key that owes the signed-zero rule (`orderedBy`) and is a correlated read is projected as a COLUMN
-  // first (`keyedSort`), so the sign term and the zero-class flags read the column rather than spelling the
-  // read again — `mergedOrder`'s keyed relation, for the same spelling economy. It is FENCED where it can
-  // be; a stream correlated to an enclosing row cannot be (a CTE cannot reference that row), so there the
-  // projection is left OPEN and `orderedBy` closes the block above it itself.
-  const costly = sort.terms.some((term) => signTermOwed(term.carrier ?? 'integral') && term.expr.kind !== 'col' && term.expr.kind !== 'lit');
-  const fence = !freeRelIds(domain).size;
-  const keyed = costly ? keyedSort(rel, sort.terms, sort.drop, fence, fresh) : undefined;
-  const { rel: input, terms } = orderedBy(keyed?.rel ?? domain, keyed?.keys ?? orderKeys(sort.terms), fresh,
-    { stable: !!carried || opts.stableTie === true, open: !!keyed && !fence, ...(opts.tie ? { tie: opts.tie } : {}) });
   // The deterministic tie-break: the carried emission position where there is one (a STABLE re-mint), else
   // the shape's own last resort — an element's id, a scalar's value, a record's whole field tuple. A shape
   // that mints fresh has nothing to be stable against, so a MULTI-column tie is spelled here in full.
-  const tie: readonly Expr[] = carried ? [col(input.id, carried.col)] : (opts.tie?.(input) ?? []);
+  const tie: readonly Expr[] = carried ? [col(domain.id, carried.col)] : (opts.tie?.(domain) ?? []);
   return renumber(
-    input,
-    tie.length ? [...terms, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))] : terms,
+    domain,
+    tie.length ? [...sort.terms, ...tie.map((expr) => ({ expr, dir: 'asc' as const }))] : sort.terms,
     [...payloadCols(domain), ...carriedCols(channels)],
     channels, fresh,
   );
-}
-
-/** `rel` with every sort key projected as a column (`ok<i>`), the productivity `drop` applied, and FENCED where
- *  `fence` asks (`keyedRows`), and the `orderedBy` keys over those columns — `mergedOrder`'s keyed relation without
- *  the merge. The input's columns ride through under their own names, so a tie-break or payload read addresses
- *  the keyed relation exactly as it did `rel`. */
-function keyedSort(rel: Rel, terms: readonly OrderTerm[], drop: Expr | undefined, fence: boolean, fresh: Minter): { readonly rel: Rel; readonly keys: readonly OrderKey[] } {
-  const keyed = keyedRows(rel, terms, drop, fence, fresh);
-  return { rel: keyed.rel, keys: orderKeys(terms, (_, i) => keyed.key(i)) };
-}
-
-/**
- * `rel` with every sort key projected as a column (`ok<i>`) and the productivity `drop` applied — FENCED
- * where `fence` asks (a fence is a named CTE, so never over a stream correlated to an enclosing row), so a
- * window or sort above reads each key as a column instead of re-spelling a correlated read per mention.
- *
- * The DROP is applied ABOVE the fence, and a drop conjunct that is a key's own presence (`value IS NOT
- * NULL` — a stored property's) is re-read over that key's column (`keepOnNamed`): a filter fused into the
- * projection's block would inline the key's read once more for the WHERE, and once more for a drop column.
- */
-function keyedRows(
-  rel: Rel, terms: readonly SortTerm[], drop: Expr | undefined, fence: boolean, fresh: Minter,
-): { readonly rel: Rel; readonly key: (i: number) => Expr } {
-  const name = (i: number): string => `ok${i}`;
-  const conjuncts = (e: Expr | undefined): readonly Expr[] =>
-    !e ? [] : e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e];
-  const named = (keep: Expr, at: Rel): Expr | undefined => {
-    for (const [i, term] of terms.entries()) {
-      const reread = keepOnNamed(keep, term.expr, col(at.id, name(i)));
-      if (reread) return reread;
-    }
-    return undefined;
-  };
-  // Only a fence keeps a drop conjunct from re-spelling its read; unfenced, the drop is projected as before.
-  const parts = conjuncts(drop);
-  const residual = fence ? parts.filter((keep) => !named(keep, rel)) : parts;
-  const dropCol = (j: number): string => `okd${j}`;
-  const projected = make.project({
-    id: fresh('okc'), input: rel, channels: rel.channels,
-    type: typeOf(...rel.type.cols, ...terms.map((_, i) => meta(name(i), 'any', true)), ...residual.map((_, j) => meta(dropCol(j), 'int', true))),
-    exprs: [
-      ...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const),
-      ...terms.map((term, i) => [name(i), term.expr] as const),
-      ...residual.map((keep, j) => [dropCol(j), keep] as const),
-    ],
-  });
-  const base = fence ? fenced(projected, fresh) : projected;
-  const kept = [
-    ...(fence ? parts.map((keep) => named(keep, base)).filter((e): e is Expr => !!e) : []),
-    ...residual.map((_, j) => col(base.id, dropCol(j))),
-  ];
-  const filtered = kept.length
-    ? make.filter({ id: fresh('f'), input: base, channels: base.channels, type: base.type, pred: kept.reduce((a, b) => and(a, b)) })
-    : base;
-  return { rel: filtered, key: (i) => col(filtered.id, name(i)) };
 }
 
 /**
@@ -1484,18 +1397,32 @@ function rankedRows(
  * whose merge the rows cannot state) declines.
  */
 function mergedOrder(
-  rel: Rel, sort: { readonly terms: readonly OrderTerm[]; readonly drop?: Expr },
+  rel: Rel, sort: { readonly terms: readonly SortTerm[]; readonly drop?: Expr },
   mergeKey: ((input: Rel) => readonly Expr[] | null) | undefined, ctx: ChainCtx, fresh: Minter,
 ): Rel | null {
   const { terms, drop } = sort;
+  const name = (i: number): string => `ok${i}`;
+  const DROP = 'okd';
+  const projected = make.project({
+    id: fresh('okc'), input: rel, channels: rel.channels,
+    type: typeOf(...rel.type.cols, ...terms.map((_, i) => meta(name(i), 'any', true)), ...(drop ? [meta(DROP, 'int', true)] : [])),
+    exprs: [
+      ...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+      ...terms.map((term, i) => [name(i), term.expr] as const),
+      ...(drop ? [[DROP, drop] as const] : []),
+    ],
+  });
   // An unproductive key DROPS its traverser (`orderProductivity`) before the set ever sees it. The keyed
-  // rows are FENCED (`keyedRows`): the merge's window and the sort's window then read the keys and the
-  // identity as columns, where a fused projection would re-spell every correlated key read in each of them.
-  // The fence is a SPELLING economy, never a meaning, so a stream correlated to an enclosing row (a
-  // per-start body's rows, `freeRelIds`) goes unfenced: a fence is a named CTE, which cannot reference that
-  // row, and a correlated child declines on any Materialize below it (`correlatedReduce`) —
-  // `local(union(out().order(), identity()).fold())` would lose its answer to a re-spelling it never needed.
-  const { rel: keyed, key: keyCol } = keyedRows(rel, terms, drop, !freeRelIds(rel).size, fresh);
+  // rows are FENCED: the merge's window and the sort's window then read the keys and the identity as
+  // columns, where a fused projection would re-spell every correlated key read in each of them. The fence
+  // is a SPELLING economy, never a meaning, so a stream correlated to an enclosing row (a per-start body's
+  // rows, `freeRelIds`) goes unfenced: a fence is a named CTE, which cannot reference that row, and a
+  // correlated child declines on any Materialize below it (`correlatedReduce`) — `local(union(out().order(),
+  // identity()).fold())` would lose its answer to a re-spelling it never needed.
+  const filtered = drop
+    ? make.filter({ id: fresh('f'), input: projected, channels: projected.channels, type: projected.type, pred: col(projected.id, DROP) })
+    : projected;
+  const keyed = freeRelIds(filtered).size ? filtered : fenced(filtered, fresh);
   // The traverser's identity is the INPUT's, re-addressed to the keyed relation that carries the input's
   // columns under their own names — never the projected sort keys, which a fused window would re-spell.
   const identity = mergeKey?.(rel);
@@ -1505,11 +1432,9 @@ function mergedOrder(
   const merged = mergeEqual(keyed, key, Infinity, ctx, fresh);
   const encounter = merged && encounterOf(merged.channels);
   if (!merged || !encounter) return null;
-  const named = (i: number): Expr => { const at = keyCol(i); return at.kind === 'col' ? col(merged.id, at.name) : at; };
-  const ordered = orderedBy(merged, orderKeys(terms, (_, i) => named(i)), fresh);
   return renumber(
-    ordered.rel,
-    [...ordered.terms, { expr: col(ordered.rel.id, encounter.col), dir: 'asc' as const }],
+    merged,
+    [...terms.map((term, i) => ({ ...term, expr: col(merged.id, name(i)) })), { expr: col(merged.id, encounter.col), dir: 'asc' as const }],
     [...payloadCols(rel), ...carriedCols(rel.channels)],
     rel.channels, fresh, 'dense_rank',
   );
@@ -1557,15 +1482,15 @@ export function lowerRankHead(
  * has no subject at all.
  */
 function naturalSort(
-  step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter, natural?: (input: Rel) => readonly CarriedKey[],
-): { readonly terms: readonly OrderTerm[]; readonly drop?: Expr } | null {
+  step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter, natural?: (input: Rel) => readonly Expr[],
+): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
   if (!natural || isLocalScope(step) || (step.args ?? []).length) return null;
   const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
   const only = bys[0];
   if (only && (only.key.kind !== 'identity' || only.order === 'shuffle')) return null;
   const dir = only?.order === 'desc' ? 'desc' : 'asc';
-  return { terms: natural(rel).map(({ key, carrier }) => ({ expr: key, dir, carrier })) };
+  return { terms: natural(rel).map((expr) => ({ expr, dir })) };
 }
 
 /**
@@ -5885,14 +5810,10 @@ const ALIAS_CMP: Record<string, BinaryOp | undefined> = { eq: '=', neq: '!=', gt
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`).
  * Where neither side can be null this is the plain binary, unchanged.
  */
-function comparabilityCompare(
-  op: string, left: Expr, right: Expr, nullable: boolean, fresh: Minter, classes: readonly [ZeroCarrier, ZeroCarrier],
-): Expr | null {
+function comparabilityCompare(op: string, left: Expr, right: Expr, nullable: boolean): Expr | null {
   const sql = ALIAS_CMP[op];
   if (!sql) return null;
-  // Two NUMBERS compare under `NumberHelper.compare` (`signedCompare`): two Double zeros by SIGN (`-0.0 < 0.0`,
-  // and `-0.0 = 0.0` is false), a BigInteger/BigDecimal zero equal to either — SQLite calls every zero equal.
-  const plain: Expr = signedCompare(sql, left, right, fresh, classes);
+  const plain: Expr = { kind: 'binary', op: sql, left, right };
   if (!nullable) return plain;
   const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
   const bothNull = and(isNull(left), isNull(right));
@@ -5980,7 +5901,7 @@ function aliasValueWhere(
     const p2 = productivityFilter(step, val.present);
     if (!p2) return null;
     if (p2.keep) prod.push(p2.keep);
-    return comparabilityCompare(p.op, lhs, val.value, lhsNullable || valueMayBeNull(by, valHost), fresh, [lhsBy.carrier, val.carrier]);
+    return comparabilityCompare(p.op, lhs, val.value, lhsNullable || valueMayBeNull(by, valHost));
   };
   const clause = build(pred);
   if (!clause) return 'decline';
@@ -6059,7 +5980,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         // nulls are equal (`WherePredicateStep` tests `TraversalProduct.isProductive`, not the value).
         const [prodA, prodB] = [productivityFilter(step, aVal.present), productivityFilter(step, bVal.present)];
         if (!prodA || !prodB) return 'decline';
-        const cmp = comparabilityCompare(pred.op, aVal.value, bVal.value, valueMayBeNull(bys[0]!, hostA) || valueMayBeNull(bys[0]!, hostB), fresh, [aVal.carrier, bVal.carrier]);
+        const cmp = comparabilityCompare(pred.op, aVal.value, bVal.value, valueMayBeNull(bys[0]!, hostA) || valueMayBeNull(bys[0]!, hostB));
         if (!cmp) return 'decline';
         const kept = [prodA.keep, prodB.keep].filter((e): e is Expr => !!e);
         const guard = kept.length ? and(kept.reduce((a, b) => and(a, b)), cmp) : cmp;

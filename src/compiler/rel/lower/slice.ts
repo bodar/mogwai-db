@@ -22,7 +22,6 @@ import { BY_HOSTS as BY_READERS } from '../../ir/strategies.ts';
 import { freshTraverserRow, type ChildHost } from '../child.ts';
 import { elementHost } from '../map.ts';
 import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../property.ts';
-import type { CarriedKey } from '../predicate.ts';
 import { pathCarried } from '../path.ts';
 import { mayRaise } from '../../../rel/raise.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
@@ -367,11 +366,7 @@ export type RowShape = {
    *  slot is the FIRST arrival's property: re-positioning the rows states that for every read but the
    *  owning element, which `element()` therefore declines after a possible merge (`propertyTail`). */
   readonly mergeKey: (input: Rel) => readonly Expr[];
-  readonly natural?: (input: Rel) => readonly CarriedKey[];
-  /** Does `tie` reproduce ARRIVAL order — a row's own rowid (an element's, a property's)? A value or
-   *  payload tie orders equal-comparing rows by their bytes instead, which is no order the reference
-   *  states between two DISTINCT values that compare equal (`orderedBy`'s `stable`). */
-  readonly stableTie?: true;
+  readonly natural?: (input: Rel) => readonly Expr[];
 };
 
 /** The ELEMENT shape — `id` is at once the payload, the identity and the tie-break. */
@@ -381,7 +376,6 @@ export const elementRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowS
   identity: (rel) => [col(rel.id, 'id')],
   identifiedByPayload: true,
   mergeKey: (rel) => [col(rel.id, 'id')],
-  stableTie: true,
 });
 
 /** The PROPERTY shape. Both its order and its identity split on the owner kind, and both citations live
@@ -395,7 +389,6 @@ export const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): Row
   identifiedByPayload: false,
   mergeKey: (rel) => propertyIdentityKey(rel, elem),
   natural: (rel) => propertyOrderTerms(rel, elem),
-  stableTie: true,
 });
 
 /** The SCALAR shape — a value stream. Identity IS the whole payload (the value, plus a `vtype` column

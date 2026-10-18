@@ -307,6 +307,7 @@ count or a wrong number class. Some sites still emulate Java on trunk until thei
 | Error timing | eager and in-statement: a query containing a type error may raise even where Java's lazy pull would have stopped before reaching the bad value |
 | Number equality | by VALUE across Int/Long/Double/Float/BigDecimal — `1`, `1L` and `1.0` compare, dedup and group alike; `true` and `1` stay distinct. The result CLASS is still kept on output |
 | Signed zero | none: `-0.0` is `0.0` (as in SQLite) in compare, order, dedup, group keys and output |
+| Ties in `order()` | values equal by value (`1m`/`1.0d`; `0m`/`-0.0d`/`0.0d`) tie and fall to the existing tie-break, not Java's class-aware order; such a sort always answers, never defers |
 | Float | stored and computed as the Double of its literal, rounded to 32 bits (`Math.fround`) only when framed |
 | Extreme-magnitude Doubles | outside roughly [1e-80, 1e116] a value crossing SQLite's decimal text may lose its last ulp |
 | Writes over a bulked slot | one element per traverser: `g.V().both().addV('x')` creates 12 vertices on the modern graph, where Java's `LazyBarrierStrategy` bulks equal traversers first and creates 6 |

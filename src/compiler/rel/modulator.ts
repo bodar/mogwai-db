@@ -10,7 +10,7 @@ import { ALWAYS_PRODUCTIVE, freshTraverserRow, hostTag, knownPresence, type Chil
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, classedNode, classedKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
-import { orderingKey, typedOrderingKey, type CarriedKey, type ZeroCarrier } from './predicate.ts';
+import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasGuard, aliasProjection, boundBeyondMap, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
@@ -224,19 +224,13 @@ export const isProductiveBy = (step: IRStep): boolean => step.productiveBy === t
 export interface ByProjection {
   readonly value: Expr;
   readonly present: Presence;
-  /** How the value's ZERO says its number class (`ZeroCarrier`) — what an ordering or a compare over an
-   *  `ordering` key needs for `NumberHelper.compare`'s signed-zero rule. Each arm states it where it builds
-   *  the key (`orderingKey`), because only that arm still holds the type the key was read with. */
-  readonly carrier: ZeroCarrier;
 }
 
 export function byProjection(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
 ): ByProjection | null {
   const { key } = modulation;
-  const always = (value: Expr | null, carrier: ZeroCarrier = 'integral'): ByProjection | null => value && { value, present: ALWAYS_PRODUCTIVE, carrier };
-  const keyed = (ordered: CarriedKey, present: Presence): ByProjection =>
-    ({ value: ordered.key, present, carrier: ordered.carrier });
+  const always = (value: Expr | null): ByProjection | null => value && { value, present: ALWAYS_PRODUCTIVE };
 
   if (key.kind === 'column') {
     // `by(Column.keys)`/`by(Column.values)` over a Map.Entry host — the entry's key or value
@@ -251,13 +245,13 @@ export function byProjection(
     const of = key.column === 'keys' ? host.entry.keyOf : host.entry.valOf;
     if (of.kind !== 'scalar') return null;
     const value = jsonField(node, 'v');
-    return ordering ? keyed(orderingKey(jsonField(node, 't'), value, fresh), ALWAYS_PRODUCTIVE) : always(value, 'natural');
+    return always(ordering ? storedCompareOn(jsonField(node, 't'))(value) : value);
   }
 
   if (key.kind === 'child') {
     if (!child) return null;
-    // A child projection has no `vtype` column, so an ordering key cannot honestly use the stored-value
-    // comparison wrapper. Its expression passes through unchanged and frames by value inference.
+    // An ORDERING key reads the body's type tag (`ChildValue.vtype`, else its static type): a stored
+    // BigDecimal is decimal TEXT, so the raw value would sort lexically and after every number.
     // The seam's framing is the FIELD vocabulary's business (`byField`); a bare ordering/grouping key
     // only ever needed the value.
     //
@@ -266,12 +260,10 @@ export function byProjection(
     // result is an ELEMENT hands back a rowid and one that is a RECORD hands back a map node — neither
     // is a comparable value, and ordering by either would be a plausible-looking answer to a traversal
     // TinkerPop rejects. The body's own PRESENCE rides out — the seam's claim, never re-derived here.
-    // An ORDERING key reads the body's per-row type where the body carries one (`ChildValue.vtype`): a
-    // stored BigDecimal is decimal TEXT, so the raw value would sort lexically and after every number.
     const produced = child.scalar(key.body, host);
     if (!produced || produced.framing.kind !== 'scalar') return null;
-    return ordering ? keyed(typedOrderingKey(produced.expr, produced.framing.type, produced.vtype, fresh), produced.present)
-      : { value: produced.expr, present: produced.present, carrier: 'unknown' };
+    const tag = ordering ? hostTag(produced.framing.type, produced.vtype) : undefined;
+    return { value: tag ? storedCompareOnce(tag, produced.expr, fresh) : produced.expr, present: produced.present };
   }
 
   if (key.kind === 'alias') {
@@ -282,8 +274,7 @@ export function byProjection(
     const scoped = scopeValue(key, host);
     if (!scoped || scoped.framing.kind !== 'scalar') return null;
     const [value, type] = [scoped.payload[0]![1], scoped.payload[1]?.[1]];
-    return ordering ? keyed(typedOrderingKey(value, scoped.framing.type, type, fresh), scoped.present)
-      : { value, present: scoped.present, carrier: 'unknown' };
+    return { value: ordering && type ? storedCompareOn(type)(value) : value, present: scoped.present };
   }
 
   if (host.kind === 'scalar') {
@@ -291,8 +282,10 @@ export function byProjection(
     // not supported (no properties); this declines rather than inventing an answer off the wrong row.
     // The traverser IS the value, so it is present wherever the host is.
     if (key.kind !== 'identity') return null;
-    return ordering ? keyed(orderingKey(host.vtype, host.value, fresh), host.present ?? ALWAYS_PRODUCTIVE)
-      : { value: host.value, present: host.present ?? ALWAYS_PRODUCTIVE, carrier: 'unknown' };
+    return {
+      value: ordering && host.vtype ? storedCompareOn(host.vtype)(host.value) : host.value,
+      present: host.present ?? ALWAYS_PRODUCTIVE,
+    };
   }
 
   // A RECORD's only projections are its FIELDS, which the alias arm above answered. A bare `by()` over
@@ -314,9 +307,9 @@ export function byProjection(
     // lexically and after every numeric row.
     if (key.kind === 'token' && PROPERTY_TOKENS.has(key.token)) {
       const read = propertyReadOf(host.id, host.ownerElem, key.token === 'key' ? 'key' : 'value', fresh);
-      return ordering && key.token === 'value'
-        ? keyed(orderingKey(propertyReadOf(host.id, host.ownerElem, 'vtype', fresh), read, fresh), ALWAYS_PRODUCTIVE)
-        : always(read, key.token === 'value' ? 'unknown' : 'integral');
+      return always(ordering && key.token === 'value'
+        ? storedCompareOn(propertyReadOf(host.id, host.ownerElem, 'vtype', fresh))(read)
+        : read);
     }
     // What is left is the vocabulary an ELEMENT has and a property does not: a bare `by()` over one is
     // the VertexProperty itself (not a comparable value), `by('x')` would be a meta-property read, and
@@ -347,11 +340,9 @@ export function byProjection(
   // `group().by(k)`/`order().by(k)` compose over either graph. INSERTION ORDER names the first value
   // (`PropertyValueStep`); `ordering` wraps it in the vtype-aware compare. Present iff the row exists,
   // which is the value's non-nullness (no null-valued property — see above).
-  // Every source's `ordering` read is an `orderingKey` over the stored row's own tag (`GraphSource`), so
-  // the key carries its zero's class (`encoded`).
   if (key.kind !== 'property') return null;
   const value = source.propertyScalar(host.elem, host.id, key.key, ordering, fresh);
-  return value && { value, present: isNotNull(value), carrier: ordering ? 'encoded' : 'unknown' };
+  return value && { value, present: isNotNull(value) };
 }
 
 const isNotNull = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: value, right: compilerNull() });

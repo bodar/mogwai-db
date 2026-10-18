@@ -7,7 +7,7 @@ import { and, eq, jsonExtract, meta, rowNumberWindow, typeOf, VALUEMAP_PAIR, typ
 import type { Binding } from '../../rel/plan.ts';
 import { foreignPayloadCols, landedCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
-import { orderingKey } from './predicate.ts';
+import { storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 
@@ -234,7 +234,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       // A vertex key holds an ARRAY of `{t,v}` nodes (first = insertion order); an edge key holds one.
       const node = jsonExtract(col(row.id, 'props'), kind === 'edge' ? jsonKeyPath(key) : `${jsonKeyPath(key)}[0]`);
       const raw = jsonExtract(node, '$.v');
-      const value = ordering ? orderingKey(jsonExtract(node, '$.t'), raw).key : raw;
+      const value = ordering ? storedCompareOn(jsonExtract(node, '$.t'))(raw) : raw;
       return { kind: 'scalar', plan: make.project({ id: fresh('bps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
     },
 

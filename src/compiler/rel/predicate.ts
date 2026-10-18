@@ -1,11 +1,10 @@
 import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, signBit, type Expr } from '../../rel/expr.ts';
 import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
-import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
+import { raiseExpr } from '../../rel/raise.ts';
 import { inferredVtype, MIXED_COMPARABLES } from './reducer.ts';
-import type { RelId, SortTerm, SqlType } from '../../rel/types.ts';
+import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ScalarType } from '../../sql/kernel/render.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, normalizeTypeName, numberClassOf, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
@@ -251,16 +250,11 @@ function numericPair(subject: NumClass, bound: NumClass, value: unknown, castBou
   const pair = widenedPair(subject, bound, value, castBound);
   // `Double.compare`'s SIGNED ZERO, wherever the common class floats (a BigDecimal has no negative zero):
   // `inject(0.0d).is(-0.0d)` is false and `inject(-0.0d).is(P.lt(0.0d))` true. Only a REAL subject can be
-  // a negative zero, so an integral subject needs the cell only against a `-0.0` bound — and only a SMALL
-  // integral one: a BigInteger/BigDecimal subject against a Double widens BOTH sides to BigDecimal, where
-  // `BigDecimal.valueOf(-0.0)` is an UNSIGNED zero, so `0n` EQUALS `-0.0d` — SQLite's own `0 = -0.0`
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-399,850-859`).
-  // Every compare site (`ordered`, `equality`, and so has/is/where/within/between/inside/outside at any
-  // depth) reaches this one rule, per class arm.
+  // a negative zero, so an integral subject needs the cell only against a `-0.0` bound.
   const floating = (cls: NumClass): boolean => cls === 'float' || cls === 'double';
   const zero = typeof value === 'number' && value === 0;
   const negativeBound = zero && Object.is(value, -0);
-  if (zero && !pair.cells && (floating(subject) ? !BIG.has(bound) : !BIG.has(subject) && floating(bound) && negativeBound))
+  if (zero && !pair.cells && (floating(subject) ? !BIG.has(bound) : floating(bound) && negativeBound))
     return { ...pair, cells: [{ at: 0, negative: negativeBound ? 0 : -1, positive: negativeBound ? 1 : 0 }] };
   return pair;
 }
@@ -832,333 +826,20 @@ export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
   };
 };
 
-
 /**
- * WHICH NUMBER CLASS A COMPARE KEY'S ZERO IS — the carrier `Double.compare`'s signed zero needs, and the
- * fact a bare SQL value loses.
- *
- * ORDERABILITY and COMPARABILITY both reach `NumberHelper.compare` for two Numbers, which first PROMOTES
- * the pair to their highest common class (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:362-399,670-680,861-873`).
- * So `-0.0d` vs `0.0d`, vs `0i` or vs `0L` is `Double.compare` — `-0.0` is the SMALLER — but `-0.0d` vs a
- * `BigInteger`/`BigDecimal` zero is `BigDecimal.compareTo` over `BigDecimal.valueOf(-0.0)`, an UNSIGNED
- * zero: the two are EQUAL (`NumberHelper.java:278-310`). The answer for two zeros is therefore a function
- * of BOTH classes, never of the value alone, and every key below says how its class is known:
- *
- * - `integral` — no negative zero can occur and no big one either (a static `long`, a non-number):
- *   SQLite's own compare is the answer.
- * - `big` — every zero is a BigInteger/BigDecimal (a static big type): it ties every other zero.
- * - `natural` — every zero is a Float/Double/small integral, so the SIGN is the whole story: a value whose
- *   type its storage class infers (`inferredVtype` — INTEGER is `int`/`long`, REAL is `double`), or a
- *   static floating type.
- * - `encoded` — a per-row type was folded INTO the key by `orderingKey`: a BigInteger/BigDecimal zero is
- *   INTEGER `0`, every other zero a REAL `±0.0`.
- * - `unknown` — a per-row type the key does not carry: a non-negative zero may be either class.
+ * `storedCompareOn` for a value or tag that is EXPENSIVE to spell — a correlated read (a child body's
+ * value and tag), which the key's per-tag `CASE` would repeat once per arm. Each is evaluated ONCE, as the
+ * one row of a `VALUES` the key is projected over (`typedNodeOnce`'s shape).
  */
-export type ZeroCarrier = 'integral' | 'big' | 'natural' | 'encoded' | 'unknown';
-
-/** An ordering key with how its zero's class is known — what every key builder (`orderingKey`) hands back. */
-export interface CarriedKey { readonly key: Expr; readonly carrier: ZeroCarrier }
-
-/** The integral vtypes `NumberHelper` keeps below BigInteger — their zero promotes to `0.0` against a Double. */
-const BIG_VTYPES = ['bigint', 'bigdecimal'];
-const FLOATING_VTYPES = ['float', 'double'];
-
-/** The `ZeroCarrier` of a key whose type is ONE static tag for every row. */
-export const staticZeroCarrier = (type: string): ZeroCarrier =>
-  BIG_VTYPES.includes(type) ? 'big' : FLOATING_VTYPES.includes(type) ? 'natural' : 'integral';
-
-/**
- * The ordering key of a VALUE whose type is known as a `ScalarType` (a child body's result, an alias's)
- * rather than as a vtype expression — `orderingKey` over the tag where one rides (`vtype`, a TEXT-stored
- * static), else the value itself under the carrier its type states: one static tag names its class, a
- * per-row type the key does not carry is `unknown`, and an untyped value is its storage class's
- * (`natural`).
- */
-export function typedOrderingKey(value: Expr, type: ScalarType | undefined, vtype?: Expr, fresh?: Minter): CarriedKey {
-  if (vtype) return orderingKey(vtype, value, fresh);
-  if (type?.kind === 'static') return type.text ? orderingKey(compilerText(type.type), value) : { key: value, carrier: staticZeroCarrier(type.type) };
-  return { key: value, carrier: type?.kind === 'perRow' ? 'unknown' : 'natural' };
-}
-
-/**
- * THE ORDERING KEY of a value whose type rides beside it — `storedCompareOn`'s compare key, with the
- * zero's NUMBER CLASS folded into its storage class wherever the type is per-row (`ZeroCarrier`
- * `encoded`): a BigInteger/BigDecimal zero becomes INTEGER `0`, a small integral one REAL `0.0`, a
- * Float/Double one keeps its signed REAL. The key compares exactly as `storedCompareOn`'s (`0 = 0.0` in
- * SQLite), so every consumer that only compares is unaffected; only the signed-zero rule reads the
- * class back (`orderedBy`, `signedCompare`). A STATIC type folds to `storedCompareOn`'s cast and names
- * its carrier instead. Every `by()` ordering key and the scalar traverser's own key go through here, so
- * no key can drop the class it was read with.
- */
-export function orderingKey(vtype: Expr | undefined, subject: Expr, fresh?: Minter): CarriedKey {
-  if (!vtype) return { key: subject, carrier: 'natural' };
-  const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? String(vtype.value) : undefined;
-  if (staticVtype !== undefined) return { key: storedCompareOn(vtype)(subject), carrier: staticZeroCarrier(staticVtype) };
-  // The key spells `subject` and `vtype` once per arm, and either may be a correlated read (a child body's value
-  // and tag): with a `fresh` minter such a pair is evaluated ONCE, as the one row of a `VALUES` the key is
-  // projected over — `signedCompare`'s shape.
+export const storedCompareOnce = (vtype: Expr, subject: Expr, fresh: Minter): Expr => {
   const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
-  if (fresh && !(cheap(subject) && cheap(vtype))) {
-    const one = make.values({ id: fresh('oko'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)), rows: [[subject, vtype]] });
-    const inner = orderingKey(col(one.id, 't'), col(one.id, 'v'));
-    return { key: { kind: 'scalar', plan: make.project({ id: fresh('okv'), input: one, channels: [], type: typeOf(meta('k', 'any', true)), exprs: [['k', inner.key]] }) }, carrier: inner.carrier };
-  }
-  // `storedCompareOn`'s key, its ZERO (of either sign — `nullif`) respelled by class: a BigInteger/BigDecimal
-  // zero as INTEGER `0`, every other as `subject * 1.0` — REAL, and a REAL zero's sign kept. An UNTAGGED
-  // value is its storage class's type (`inferredVtype`), so its INTEGER zero is a small integral's.
-  const untagged = vtype.kind === 'lit' && vtype.value === null;
-  const signed: Expr = { kind: 'binary', op: '*', left: subject, right: compilerReal(1) };
-  const zero: Expr = untagged ? signed
-    : { kind: 'call', fn: 'iif', args: [{ kind: 'in-list', expr: vtype, values: BIG_VTYPES.map(compilerText) }, compilerInt(0), signed] };
-  const key = untagged ? subject : storedCompareOn(vtype)(subject);
-  return { key: { kind: 'call', fn: 'coalesce', args: [{ kind: 'call', fn: 'nullif', args: [key, compilerInt(0)] }, zero] }, carrier: 'encoded' };
-}
-
-/** A sort key as `orderedBy` takes it — the key, its direction, and how its zero's class is known. */
-export interface OrderKey {
-  readonly expr: Expr;
-  readonly dir: 'asc' | 'desc';
-  readonly nulls?: 'first' | 'last';
-  readonly carrier: ZeroCarrier;
-}
-
-/** Does an ordering over this key owe a second, SIGN term at all? */
-export const signTermOwed = (carrier: ZeroCarrier): boolean => carrier === 'natural' || carrier === 'encoded' || carrier === 'unknown';
-
-/** Does it need the WHOLE SORT's zeros in view (`orderedBy`'s flags) — a key whose zeros are not all one kind? */
-const zeroesMixed = (carrier: ZeroCarrier): boolean => carrier === 'encoded' || carrier === 'unknown';
-
-const zeroOf = (k: Expr): Expr => binary('=', k, compilerInt(0));
-const atan2 = (k: Expr): Expr => ({ kind: 'call', fn: 'atan2', args: [k, compilerReal(-1)] });
-const isInteger = (k: Expr): Expr => binary('=', { kind: 'call', fn: 'typeof', args: [k] }, compilerText('integer'));
-
-/** The deferral an ordering raises where `NumberHelper.compare` is not a total order over the sort's zeros. */
-export const ZERO_CLASSES_UNORDERED = 'ordering a big-number zero among both signed Double zeros is not supported';
-/** The deferral where the sort's zeros tie but the stream carries no arrival order to keep them in. */
-const ZERO_TIE_UNSTABLE = 'ordering a big-number zero beside another zero of a value stream is not supported';
-/** The deferral where two DISTINCT values tie under the comparator and the stream's tie-break (its value's
- *  representation — there is no arrival order) would order them: `0m` beside `0.0d`, `1m` beside `1.0d`. */
-export const EQUAL_TIE_UNSTABLE = 'ordering distinct values that compare equal, in a stream with no arrival order, is not supported';
-/** The deferral where a key's zero class is not carried and a negative zero meets it. */
-const ZERO_CLASS_UNKNOWN = 'ordering -0.0 beside a zero of unknown number class is not supported';
-
-/**
- * AN ORDERING over `keys` — THE ONE AUTHORITY for `order()`'s comparator over a value, at every position
- * (the row-level sort, a merged `TraverserSet` sort, `order(Scope.local)`), for the traverser ordered by
- * itself and for every `by()`-projected key alike. Returns the sort terms, and the relation they read
- * (`rel` itself, or `rel` widened by the columns the terms need — every `rel` column rides through under
- * its own name, so a payload or tie-break read addresses it exactly as it did `rel`).
- *
- * ORDERABILITY is `NumberHelper.compare` (`ZeroCarrier`): two zeros are ordered by SIGN when neither is a
- * BigInteger/BigDecimal, and tie when either is. Each key is followed by a sign term `atan2(key, -1)` —
- * −π for a negative zero, +π for every other value, so it reorders exactly the two zeros a key ties.
- * Where the key's zeros can be of BOTH kinds (`encoded`/`unknown`) the sort must see them all, because
- * the comparator is then NOT a total order: `-0.0d < 0.0d`, yet each equals `0m`. So the WHOLE sort's
- * zero classes are read as window flags first, and:
- *
- * - no big zero in the sort → the sign term, exactly as above;
- * - a big zero and NOT both signed Double zeros → every zero ties (the sign term is a constant), which
- *   is the one order `NumberHelper.compare` gives a set of pairwise-equal values: the stable arrival order.
- *   That needs a tie-break that IS arrival order (`stable` — a carried encounter, an element's or a
- *   property's rowid, a list member's position); a value stream ties on its value's BYTES, which orders
- *   `0m` and `0.0d` by representation, so there a tie group whose tie values differ DEFERS
- *   (`EQUAL_TIE_UNSTABLE` — the rule is the tie's, not the zero's: `1m` beside `1.0d` is the same tie), and
- *   without a caller tie at all a big zero beside `-0.0` DEFERS (`ZERO_TIE_UNSTABLE`);
- * - a big zero beside BOTH signed zeros → no order is the reference's (it depends on the sort algorithm
- *   meeting an intransitive comparator), so the row DEFERS (`ZERO_CLASSES_UNORDERED`);
- * - an `unknown` key whose negative zero meets a non-negative one → DEFERS: its class is not carried.
- *
- * A key that is not a bare column is projected as one first, and a block boundary is put above the
- * projection (`ROW_NUMBER() OVER ()`, a window, closes the SELECT — `src/rel/block.ts` `NEEDS_SUBQUERY`),
- * so the flags and the sign term read the column rather than re-spelling a correlated read per mention.
- * NaN never reaches a key — SQLite has no NaN (a NaN literal or parameter declines, a NaN-producing
- * `math()` raises), so `Double.compare`'s NaN-last arm has nothing to order here; the ranked path's JS
- * comparator (`orderability.ts`) carries it.
- */
-export function orderedBy(
-  rel: Rel, keys: readonly OrderKey[], fresh: Minter,
-  { stable = true, open = false, tie }: {
-    readonly stable?: boolean; readonly open?: boolean;
-    /** An UNSTABLE sort's own tie-break (the payload), read off the relation it is handed — `orderRows`'. */
-    readonly tie?: (input: Rel) => readonly Expr[];
-  } = {},
-): { readonly rel: Rel; readonly terms: readonly SortTerm[] } {
-  const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
-  const flagged = keys.some((key) => zeroesMixed(key.carrier));
-  // Does the sort owe the unstable-tie guard (below)?
-  const guarded = !stable && tie !== undefined && keys.some((key) => zeroesMixed(key.carrier) || key.carrier === 'big');
-  const respelled = keys.some((key) => signTermOwed(key.carrier) && !cheap(key.expr));
-  let input = rel;
-  let exprs = keys.map((key) => key.expr);
-  const name = (i: number): string => `sk${i}`;
-  const project = respelled || ((flagged || guarded) && keys.some((key) => !cheap(key.expr)));
-  if (project) {
-    input = make.project({
-      id: fresh('skp'), input: rel, channels: rel.channels,
-      type: typeOf(...rel.type.cols, ...keys.map((_, i) => meta(name(i), 'any', true))),
-      exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), ...keys.map((key, i) => [name(i), key.expr] as const)],
-    });
-  }
-  // `open`: the caller's keys are columns of a projection it could not fence — the same re-spelling hazard.
-  if (project || (open && keys.some((key) => signTermOwed(key.carrier)))) {
-    const at = input;
-    input = make.window({
-      id: fresh('skb'), input: at, channels: at.channels, type: typeOf(...at.type.cols, meta('skb', 'int')),
-      specs: [['skb', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [] } }]],
-    });
-    exprs = project ? keys.map((_, i) => col(input.id, name(i)))
-      : exprs.map((e) => (e.kind === 'col' && e.rel === at.id ? col(input.id, e.name) : e));
-  }
-  if (flagged) {
-    const at = input;
-    const whole = { partitionBy: [], orderBy: [] };
-    const flag = (i: number, which: string, test: Expr) =>
-      [`sz${i}${which}`, { kind: 'window-expr', fn: 'max', args: [and(zeroOf(exprs[i]!), test)], spec: whole }] as const;
-    const specs = keys.flatMap((key, i) => {
-      const k = exprs[i]!;
-      const negative = binary('<', atan2(k), compilerInt(0));
-      if (key.carrier === 'encoded')
-        return [flag(i, 'f', negative), flag(i, 'b', isInteger(k)),
-          flag(i, 'p', and(binary('>', atan2(k), compilerInt(0)), { kind: 'unary', op: 'not', arg: isInteger(k) }))];
-      if (key.carrier === 'unknown') return [flag(i, 'f', negative), flag(i, 'u', binary('>', atan2(k), compilerInt(0)))];
-      return [];
-    });
-    input = make.window({
-      id: fresh('szw'), input: at, channels: at.channels,
-      type: typeOf(...at.type.cols, ...specs.map(([name]) => meta(name, 'int', true))), specs,
-    });
-    exprs = exprs.map((e) => (e.kind === 'col' && e.rel === at.id ? col(input.id, e.name) : e));
-  }
-  // AN UNSTABLE TIE. A sort with no arrival order breaks a key tie by the caller's `tie` — the value's own
-  // bytes. Where a key's type rides per row or is a BigInteger/BigDecimal, the key is a CAST of the stored
-  // value (`storedCompareOn`; a BigDecimal is stored as decimal TEXT), so two rows the comparator calls EQUAL
-  // can hold tie values SQLite does not (`0m` is TEXT `'0'`, `0.0d` INTEGER `0`, `1n` INTEGER `1`): the
-  // tie-break would order them by representation, where the reference keeps ARRIVAL order — `OrderGlobalStep`
-  // stable-sorts its `TraverserSet` over `NumberHelper.compare`
-  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:78`,
-  // `.../util/NumberHelper.java:278-310`). So each key-tie group is read for a tie value that differs from
-  // another's (`min IS NOT max` over the group), and such a row DEFERS (`EQUAL_TIE_UNSTABLE`). Tie values
-  // SQLite calls equal (`1i` beside `1L`, `0n` beside `-0.0d`) keep the order the rows reached the sort.
-  let tieDiffers: SortTerm | undefined;
-  if (guarded && tie) {
-    const at = input;
-    const guard = unstableTieGuard(at, exprs, tie(at), fresh);
-    if (guard) {
-      input = guard.rel;
-      exprs = exprs.map((e) => (e.kind === 'col' && e.rel === at.id ? col(input.id, e.name) : e));
-      tieDiffers = guard.term;
-    }
-  }
-  const flagOf = (i: number, which: string): Expr => col(input.id, `sz${i}${which}`);
-  const terms = keys.flatMap((key, i): readonly SortTerm[] => {
-    const k = exprs[i]!;
-    const head: SortTerm = { expr: k, dir: key.dir, ...(key.nulls ? { nulls: key.nulls } : {}) };
-    if (!signTermOwed(key.carrier)) return [head];
-    const defer = (message: string): Expr => deferralExpr(message, k);
-    const iif = (test: Expr, then: Expr, otherwise: Expr): Expr => ({ kind: 'call', fn: 'iif', args: [test, then, otherwise] });
-    // A big zero beside BOTH signed Double zeros is unordered whether or not the sort is stable: a value
-    // stream's tie guard reads SQLite equality, under which INTEGER `0` and REAL `±0.0` are one value, so it
-    // cannot see that tie group at all — the class flags must decide it, as they do for a stable sort.
-    const sign: Expr = key.carrier === 'encoded'
-      ? iif(and(flagOf(i, 'b'), zeroOf(k)), iif(and(flagOf(i, 'f'), flagOf(i, 'p')), defer(ZERO_CLASSES_UNORDERED), stable || tieDiffers
-        ? compilerInt(0)
-        : iif(flagOf(i, 'f'), defer(ZERO_TIE_UNSTABLE), compilerInt(0))), atan2(k))
-      : key.carrier === 'unknown'
-        ? iif(and(and(flagOf(i, 'f'), flagOf(i, 'u')), zeroOf(k)), defer(ZERO_CLASS_UNKNOWN), atan2(k))
-        : atan2(k);
-    return [head, { expr: sign, dir: key.dir }];
-  });
-  return { rel: input, terms: tieDiffers ? [...terms, tieDiffers] : terms };
-}
-
-/**
- * THE UNSTABLE-TIE GUARD — `rel` widened by, per `ties` expression, its `min` and `max` over each group of
- * rows equal on `group` (a window), and the sort term that DEFERS (`EQUAL_TIE_UNSTABLE`) a row whose group
- * holds two tie values SQLite does not call equal (`min IS NOT max`) — else a constant `0`. It is how a sort
- * whose last resort is a row's own CONTENT, not its arrival, refuses to order two values the comparator
- * calls equal by their representation: `orderedBy` over a value stream, and `positioned`'s content
- * realization (`lower.ts`). `null` where there is no tie to read. Every `rel` column rides through by name.
- */
-export function unstableTieGuard(
-  rel: Rel, group: readonly Expr[], ties: readonly Expr[], fresh: Minter,
-): { readonly rel: Rel; readonly term: SortTerm } | null {
-  if (!ties.length || !group.length) return null;
-  const spec = { partitionBy: group, orderBy: [] };
-  const specs = ties.flatMap((t, j) => [
-    [`stn${j}`, { kind: 'window-expr', fn: 'min', args: [t], spec }] as const,
-    [`stx${j}`, { kind: 'window-expr', fn: 'max', args: [t], spec }] as const,
-  ]);
-  const guarded = make.window({
-    id: fresh('stw'), input: rel, channels: rel.channels,
-    type: typeOf(...rel.type.cols, ...specs.map(([name]) => meta(name, 'any', true))), specs,
-  });
-  const differs = ties.map((_, j): Expr => ({ kind: 'binary', op: 'is not', left: col(guarded.id, `stn${j}`), right: col(guarded.id, `stx${j}`) }))
-    .reduce((a, b) => binary('or', a, b));
-  // `abs()` keeps the term NUMERIC to the emitter (see `orderedBy`'s deferral arm); the arm never yields a value.
-  const deferred: Expr = { kind: 'call', fn: 'abs', args: [deferralExpr(EQUAL_TIE_UNSTABLE, col(guarded.id, 'stn0'))] };
-  return { rel: guarded, term: { expr: { kind: 'call', fn: 'iif', args: [differs, deferred, compilerInt(0)] }, dir: 'asc' } };
-}
-
-/** How one side of a compare knows its zero's class — a `ZeroCarrier`, or a per-row test of the side's
- *  own type tag (`comparableTheta`, where the tag is in hand) for "this side is a BigInteger/BigDecimal". */
-export type ZeroClassOf = ZeroCarrier | { readonly big: Expr };
-
-/** `type IN ('bigint','bigdecimal')` — the `ZeroClassOf` of a side whose tag is in hand. */
-export const bigTagged = (type: Expr): ZeroClassOf => ({ big: { kind: 'in-list', expr: type, values: BIG_VTYPES.map(compilerText) } });
-
-/** The deferral a compare raises where one side's zero class is not carried and the other side is `-0.0`. */
-const ZERO_COMPARE_UNKNOWN = 'comparing a negative zero with a zero of unknown number class is not supported';
-
-/**
- * `left <op> right` over two per-row compare keys, under `NumberHelper.compare` — the comparison twin of
- * `orderedBy`. `Compare.lt/lte/gt/gte` and `eq`/`neq` all reach `NumberHelper.compare` for two Numbers
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`
- * → `.../util/GremlinValueComparator.java:97-139` → `.../util/NumberHelper.java:670-680`), so where BOTH
- * keys are a zero the answer is their classes' (`ZeroCarrier`): if either is a BigInteger/BigDecimal they
- * are EQUAL (the plain compare — SQLite calls every zero equal), otherwise `Double.compare` orders them by
- * SIGN — `-0.0 < 0.0` holds and `-0.0 = 0.0` does not — which compares their SIGN BITS (`signBit`) with
- * the sides SWAPPED, a set sign bit being the smaller zero. A side whose class is `unknown` facing a
- * negative zero DEFERS. Every other pair is the plain compare.
- *
- * The rule reads each operand several times, and an operand is typically a correlated read (a `by()`
- * key's subquery). So with a `fresh` minter an operand that is not a bare column or literal is evaluated
- * ONCE, as the one row of a `VALUES` the compare is projected over — `typedNodeOnce`'s shape (`build.ts`)
- * — rather than re-spelling the read per mention (measured: a three-leaf `where(…).by(…)` ring went from
- * 55 KB to 88 KB of statement text inline, against DO's 100 KB cap).
- */
-export function signedCompare(
-  op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr, fresh?: Minter,
-  classes: readonly [ZeroClassOf, ZeroClassOf] = ['natural', 'natural'],
-): Expr {
-  const plain: Expr = { kind: 'binary', op, left, right };
-  const [lc, rc] = classes;
-  // A side that is statically big ties every zero; two sides that cannot hold a negative zero compare plainly.
-  if (lc === 'big' || rc === 'big' || (lc === 'integral' && rc === 'integral')) return plain;
-  const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
-  if (fresh && !(cheap(left) && cheap(right))) {
-    const one = make.values({ id: fresh('sco'), channels: [], type: typeOf(meta('l', 'any', true), meta('r', 'any', true)), rows: [[left, right]] });
-    return { kind: 'scalar', plan: make.project({
-      id: fresh('scp'), input: one, channels: [], type: typeOf(meta('c', 'int', true)),
-      exprs: [['c', signedCompare(op, col(one.id, 'l'), col(one.id, 'r'), undefined, classes)]],
-    }) };
-  }
-  const big = (e: Expr, c: ZeroClassOf): Expr | null =>
-    typeof c === 'object' ? c.big : c === 'encoded' ? isInteger(e) : null;
-  const bigs = [big(left, lc), big(right, rc)].filter((e): e is Expr => e !== null);
-  const unknown = [
-    ...(lc === 'unknown' ? [and({ kind: 'unary', op: 'not', arg: signBit(left) }, signBit(right))] : []),
-    ...(rc === 'unknown' ? [and({ kind: 'unary', op: 'not', arg: signBit(right) }, signBit(left))] : []),
-  ];
-  const either = (es: readonly Expr[]): Expr => es.reduce((a, b) => binary('or', a, b));
-  const signed: Expr = { kind: 'binary', op, left: signBit(right), right: signBit(left) };
-  const zeros: Expr = bigs.length || unknown.length
-    ? { kind: 'case', whens: [
-      ...(bigs.length ? [[either(bigs), plain] as const] : []),
-      ...(unknown.length ? [[either(unknown), raiseExpr(ZERO_COMPARE_UNKNOWN, left)] as const] : []),
-    ], else: signed }
-    : signed;
-  return { kind: 'case', whens: [[and(zeroOf(left), zeroOf(right)), zeros]], else: plain };
-}
+  if (cheap(vtype) && cheap(subject)) return storedCompareOn(vtype)(subject);
+  const one = make.values({ id: fresh('sco'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)), rows: [[subject, vtype]] });
+  return { kind: 'scalar', plan: make.project({
+    id: fresh('scp'), input: one, channels: [], type: typeOf(meta('k', 'any', true)),
+    exprs: [['k', storedCompareOn(col(one.id, 't'))(col(one.id, 'v'))]],
+  }) };
+};
 
 /** The common case: the `vtype` is a COLUMN of a relation in scope. Derived from the general form
  *  rather than a second copy of the type lists — `modulator.ts` builds the key inside a scalar
@@ -1196,9 +877,8 @@ export const comparableTheta = (
   return {
     kind: 'case',
     whens: [
-      // Number: ONE bucket across int/real — cast each side by its own storage class, then compare under
-      // `NumberHelper.compare` (`signedCompare`): two zeros by SIGN unless either side is a big class.
-      [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), signedCompare(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB), undefined, [bigTagged(typeA), bigTagged(typeB)])],
+      // Number: ONE bucket across int/real — cast each side by its own storage class, then compare.
+      [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), binary(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB))],
       // Date (epoch) and Duration (total nanos) each ride as an integer → chronological order.
       [bothEq('datetime'), binary(op, asInt(valA), asInt(valB))],
       [bothEq('duration'), binary(op, asInt(valA), asInt(valB))],
