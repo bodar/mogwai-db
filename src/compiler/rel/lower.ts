@@ -30,6 +30,7 @@ import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { whereHasScopeKey } from '../ir/labels.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { contentDemand } from '../ir/content-demand.ts';
+import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
 import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, orderingTerms, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
 import {
@@ -3491,7 +3492,10 @@ function mapTail(
  * the two facts stay where they are owned.
  */
 const namedElsewhere = (ctx: ChainCtx) => (label: string): boolean =>
-  ctx.sideEffects.has(label) || ctx.sideEffectPolicies.has(label) || ctx.collections.has(label);
+  ctx.sideEffects.has(label) || ctx.sideEffectPolicies.has(label) || ctx.collections.has(label)
+  // A keyed writer ANYWHERE in the program — after this read, or in another branch — registered its key
+  // when it was constructed, so the side effect exists here too (`programScopeNames`).
+  || ctx.scopeNames.sideEffects.has(label);
 
 /**
  * THE SCOPES `selectKeys` CANNOT SEE, as the record builder's `host` asks for them: `named` (a side
@@ -3757,6 +3761,13 @@ export interface Lowering {
    */
   readonly writes?: ProgramWrites | null;
   /**
+   * EVERY SIDE-EFFECT KEY AND PATH LABEL THE WHOLE PROGRAM DECLARES (`programScopeNames`) — handed down
+   * for `writes`' reason: a side effect is the ROOT traversal's (`AggregateStep.java:57` registers it at
+   * construction), so a rooted body or a resume's tail sees every key the head declared. Absent
+   * (`null`), the chain being lowered is taken as the whole program.
+   */
+  readonly scopeNames?: ProgramScopeNames | null;
+  /**
    * The GLOBAL `order()` steps this lowering RANKS through JS rather than sorts in SQL — the two
    * statements of a ranked-order barrier (`ranked-order.ts`). Absent everywhere but that barrier's head
    * (`keys`) and resume (`ranks`); an `order()` it does not name keeps declining where SQL has no
@@ -3797,6 +3808,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   seed: opts.seed ?? null,
   rawListElements: opts.rawListElements ?? false,
   writes: opts.writes ?? null,
+  scopeNames: opts.scopeNames ?? null,
   rankedOrders: opts.rankedOrders ?? NO_RANKED_ORDERS,
   pull: opts.pull ?? null,
 });
@@ -4690,7 +4702,7 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, rankedOrders } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders } = settle(opts);
   const facts = analyzeChain(steps as IRStep[]);
   return {
     facts,
@@ -4700,6 +4712,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
       labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
       writes: writes ?? programWrites(steps, params),
+      scopeNames: scopeNames ?? programScopeNames(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]),
       rankedOrders,
       ...(opts.pull ? { pull: opts.pull } : {}),
     },

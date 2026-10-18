@@ -1663,12 +1663,27 @@ export const PAIR = { value: 'ev', ord: 'eo' } as const;
  * reads `$[0].v` (the enveloped key) and falls back to `$[0]` (a bare key) — one comparison that both
  * encodings satisfy, rather than a producer-specific reader.
  */
-const keyMatches = (pair: Expr, key: string): Expr => eq(
-  { kind: 'call', fn: 'COALESCE', args: [
-    { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0].v')] },
-    { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0]')] },
-  ] },
-  compilerText(key));
+const keyMatches = (pair: Expr, key: string): Expr => ({
+  kind: 'binary', op: 'and',
+  left: eq(
+    { kind: 'call', fn: 'COALESCE', args: [
+      { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0].v')] },
+      { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0]')] },
+    ] },
+    compilerText(key)),
+  // ONLY A STRING KEY IS THE STRING `key`. `Scoping.getScopeValue` asks `map.containsKey(key)` with the
+  // String (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:121`),
+  // and `elementMap()`/`valueMap(true)` key their token entries by `T.id`/`T.label` and an edge's ends by
+  // `Direction.IN`/`OUT` (`ElementMapStep`), whose node carries the SAME text under a `T`/`D` tag — so
+  // `elementMap().select('label')` is a missing key, not the label. An untagged key (a bare-string blob,
+  // or a node whose class is not static) is the string the JSON holds.
+  right: eq(
+    { kind: 'call', fn: 'COALESCE', args: [
+      { kind: 'call', fn: 'json_extract', args: [pair, compilerText('$[0].t')] },
+      compilerText('string'),
+    ] },
+    compilerText('string')),
+});
 
 /** The map's pairs as a relation — `FROM json_each(<map>)`. No `input`, which is what makes it a
  *  correlated subquery over ONE traverser's map (`rel.ts`); the row-multiplying form is `unfoldMap`.

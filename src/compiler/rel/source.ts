@@ -121,6 +121,13 @@ export interface GraphSource {
    *  composes in `group().by(k)`/`order().by(k)`/`project().by(k)` over either graph. */
   propertyScalar(kind: Elem, id: Expr, key: string, ordering: boolean, fresh: Minter): Expr;
 
+  /** Does the element at `id` hold MORE THAN ONE value at `key`? — the case in which the reference's
+   *  `Vertex.property(key)` throws rather than answering (`multiplePropertiesExistForProvidedKey`,
+   *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Vertex.java:69-79`).
+   *  A BOOLEAN correlated on `id`; `BaseGraph` counts the key's stored rows, a bound graph the landed
+   *  node array's length. */
+  propertyHasSeveral(kind: Elem, id: Expr, key: string, fresh: Minter): Expr;
+
   /** `valueMap(keys…)` / `elementMap()` — one row per property KEY of the element at `id`, carrying the
    *  key name, the ordered ARRAY of its `{t,v}` value nodes, and a per-key ordinal (`VALUEMAP_PAIR`).
    *  Correlated on `id`. `BaseGraph` groups `vertex_properties`/`edge_properties` by key; a bound graph
@@ -487,6 +494,23 @@ export const BaseGraph: GraphSource = {
     });
     const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
     return firstOf(mine, value, col(mine.id, 'id'), fresh);
+  },
+
+  propertyHasSeveral: (kind, id, key, fresh) => {
+    const { table, owner } = PROPERTIES[kind];
+    const scan = make.scan({
+      id: fresh('vs'), table, alias: fresh('rs'), channels: [],
+      type: typeOf(meta(owner, 'int'), meta('key', 'text')),
+    });
+    const mine = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
+    });
+    const counted = make.aggregate({
+      id: fresh('vc'), input: mine, channels: [], type: typeOf(meta('n', 'int')),
+      groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
+    });
+    return { kind: 'binary', op: '>', left: { kind: 'scalar', plan: counted }, right: compilerInt(1) };
   },
 
   valueMapPairs: (kind, id, keys, fresh) => {

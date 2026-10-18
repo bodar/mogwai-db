@@ -6,6 +6,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
 import type { MergePolicy } from '../../gremlin/frontend.ts';
+import type { ProgramScopeNames } from '../ir/labels.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
 /**
@@ -49,6 +50,9 @@ export interface RelRequest {
    *  without this the lowering cannot tell a seeded, operator-merged collection from a fresh one —
    *  and a fact a lowering cannot SEE is one it can neither fold nor decline on. */
   readonly sideEffectPolicies: ReadonlyMap<string, MergePolicy>;
+  /** Every side-effect key and path label of the WHOLE traversal (`programScopeNames`), settled before
+   *  the lowering so a resume's tail sees the keys its head declared. Absent: derived from the chain. */
+  readonly scopeNames?: ProgramScopeNames;
 }
 
 /**
@@ -141,6 +145,7 @@ export function loweringOptions(
     services: request.services,
     sack: request.sack,
     sideEffectPolicies: request.sideEffectPolicies,
+    ...(request.scopeNames ? { scopeNames: request.scopeNames } : {}),
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that this value was not handed to the lowering when one was declared, so the whole

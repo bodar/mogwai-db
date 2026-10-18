@@ -12,6 +12,7 @@ import type { LabelRegime } from '../../../api.ts';
 import type { ChainRead, Subject } from '../child.ts';
 import type { ProgramWrites } from '../write.ts';
 import type { PullPosition } from '../raise-channel.ts';
+import type { ProgramScopeNames } from '../../ir/labels.ts';
 
 // THE SHARED VOCABULARY OF THE CHAIN FOLD — the types every tail returns, the context every tail
 // threads, and the carried-channel constants the whole lowering mints and reads. It lives in its own
@@ -150,6 +151,8 @@ export interface ChainCtx extends FilterCtx {
   readonly sideEffects: Map<string, any>;
   /** The merge POLICY declared with the REDUCER form of `withSideEffect`, by label. See `Lowering`. */
   readonly sideEffectPolicies: ReadonlyMap<string, MergePolicy>;
+  /** Every side-effect key and path label the whole PROGRAM declares. See `Lowering.scopeNames`. */
+  readonly scopeNames: ProgramScopeNames;
   /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
   readonly services: ReadonlyMap<string, Service>;
   /** `withSack(seed[, Operator.x])`'s policy, or `null`. See `Lowering.sack`. */

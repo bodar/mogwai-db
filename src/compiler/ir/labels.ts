@@ -255,28 +255,43 @@ const SIDE_EFFECT_KEYED: ReadonlySet<string> = new Set(['aggregate', 'store', 'g
  * scope reader the side-effect scope, which is a feature, not this guard's job.
  */
 export function sideEffectShadowedLabel(
-  steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
+  { sideEffects, labels }: ProgramScopeNames,
 ): string | null {
-  const { named, bound } = scopeNamespaces(steps, params, declared);
-  for (const label of bound) if (named.has(label)) return label;
+  for (const label of labels) if (sideEffects.has(label)) return label;
   return null;
 }
 
-/** The two namespaces `Scoping.getScopeValue` resolves a string key against, whole-tree: the names the
- *  traversal registers as SIDE EFFECTS (`declared` — `withSideEffect` — plus every keyed writer's key)
- *  and the PATH LABELS it binds (`as()`, a `match()` pattern's ends). Syntactic, every depth. */
-function scopeNamespaces(
+/**
+ * EVERY NAME A `Scoping` READ CAN RESOLVE PAST THE TRAVERSER'S OWN MAP, program-wide — the side-effect
+ * keys (`declared`, i.e. `withSideEffect`, plus every keyed writer at any depth: each registers its key
+ * when it is CONSTRUCTED, so the key exists at every step, before the writer as much as after it —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AggregateStep.java:57`)
+ * and every path label an `as()`/`match()` binds somewhere.
+ *
+ * A whole-tree fact, because the scope a reader falls through to is the TRAVERSAL's, not its chain
+ * position's: `Scoping.getScopeValue` asks `traverser.getSideEffects().exists(k)` and then
+ * `path.hasLabel(k)` (`.../traversal/step/Scoping.java:119-131`). A reader that cannot SEE one of those
+ * scopes (a side effect is never on the alias map; a label bound before a re-rooting `V()` is not on the
+ * row) asks this whether the name MAY be bound there, and fails closed where it may.
+ */
+export function programScopeNames(
   steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
-): { named: Set<string>; bound: Set<string> } {
-  const named = new Set(declared);
-  const bound = new Set<string>();
+): ProgramScopeNames {
+  const sideEffects = new Set(declared);
+  const labels = new Set<string>();
   eachStepDeep(steps, rawBodies(params), (s) => {
-    for (const l of asLabelsOf(s)) bound.add(l);
-    for (const l of matchLabelsOf(s, params)) bound.add(l);
+    for (const l of asLabelsOf(s)) labels.add(l);
+    for (const l of matchLabelsOf(s, params)) labels.add(l);
     if (SIDE_EFFECT_KEYED.has(s.name))
-      for (const a of s.args ?? []) if (typeof a.value === 'string') named.add(a.value);
+      for (const a of s.args ?? []) if (typeof a.value === 'string') sideEffects.add(a.value);
   });
-  return { named, bound };
+  return { sideEffects, labels };
+}
+
+/** `programScopeNames`'s answer: the program's side-effect keys, and the path labels it binds. */
+export interface ProgramScopeNames {
+  readonly sideEffects: ReadonlySet<string>;
+  readonly labels: ReadonlySet<string>;
 }
 
 /** The Java class `getSelectKey` names for a non-String scope key, by the literal's canonical type —
@@ -320,7 +335,7 @@ interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unn
  * compare the string (`whereHasScopeKey`, read by the scalar `where(P)` arm in `rel/lower.ts`).
  */
 export function unresolvableWhereKey(
-  steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
+  steps: readonly Step[], params: Record<string, any>, { sideEffects, labels }: ProgramScopeNames,
 ): string | null {
   const keys: WhereKey[] = [];
   eachStepDeep(steps, rawBodies(params), (s) => {
@@ -339,8 +354,7 @@ export function unresolvableWhereKey(
     if (!cls) return String(k.key);
     throw new ValueParseError(`where(P) requires a String scope key but encountered ${cls}; use is(P) to compare values`);
   }
-  const { named, bound } = scopeNamespaces(steps, params, declared);
-  for (const k of keys) if (named.has(k.key as string) || !bound.has(k.key as string)) return k.key as string;
+  for (const k of keys) if (sideEffects.has(k.key as string) || !labels.has(k.key as string)) return k.key as string;
   return null;
 }
 

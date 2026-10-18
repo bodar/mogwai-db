@@ -225,12 +225,61 @@ describe('format() renders every token as String.valueOf, or defers', () => {
     expect(() => runP(gremlin)).toThrow(/not supported/);
   });
 
-  // An ELEMENT-valued scope key (`v[1]`) or a side-effect key is read where the property is ABSENT, so
-  // an absent property must not drop the traverser — the reference appends the scoped value instead.
+  // An ELEMENT-valued scope key (`v[1]`), a side-effect key — a `withSideEffect` constant OR any keyed
+  // writer's, wherever it stands — or a label bound past a re-rooting `V()` is read where the property is
+  // ABSENT (`Scoping.getScopeValue`, `.../traversal/step/Scoping.java:119-131`), so an absent property must
+  // not drop the traverser: the reference appends the scoped value. It defers, at every depth.
   test.each([
     ["g.V().as('a').out().format('%{a}')"], ["g.V().as('n').format('%{n}')"], ["g.withSideEffect('w',1).V().format('%{w}')"],
-  ])('a named token this cannot read declines rather than drop the traverser: %s', (gremlin) => {
+    ["g.V().aggregate('w').format('%{w}')"], ["g.V().aggregate('w').format('%{name}%{w}')"],
+    ["g.V().groupCount('w').format('%{w}')"], ["g.V().group('w').by('name').format('%{w}')"],
+    ["g.V().format('%{w}').aggregate('w')"], ["g.V().local(__.format('%{w}')).aggregate('w')"],
+    ["g.V().aggregate('w').union(__.format('%{w}'))"], ["g.V().aggregate('w').project('f').by(__.format('%{w}'))"],
+    ["g.V().values('age').as('x').project('a').by(__.V().has('name','marko').format('%{name}%{x}'))"],
+  ])('a named token this cannot read defers rather than drop the traverser: %s', (gremlin) => {
     expect(() => runP(gremlin)).toThrow(/not supported/);
+  });
+
+  // ...but where the PROPERTY is present the scope is never read, so those answer exactly.
+  test.each([
+    ["g.V(1).as('name').format('%{name}')", ['marko']],
+    ["g.V().has('age').as('age').format('%{age}')", ['29', '27', '32', '35']],
+    ["g.V(1).aggregate('w').format('%{name}')", ['marko']],
+    ["g.withSideEffect('w',1).V(1).format('%{name}')", ['marko']],
+    // Existence alone: the token is productive either way, so nothing is read and nothing defers.
+    ["g.V().union(__.format('%{w}'), __.aggregate('w')).count()", [12]],
+  ] as const)('%s', (gremlin, expected) => {
+    expect(runP(gremlin)).toEqual(expected.map((e) => typeof e === 'string' ? str(e) : `${e}L`));
+  });
+
+  // A MAP's token keys are `T.id`/`T.label` (and an edge's `Direction.IN`/`OUT`), never the strings
+  // `"id"`/`"label"`: `containsKey("label")` is false (`Scoping.java:121`), nothing else binds the name,
+  // and the token is unproductive — the traverser drops. The same one key match serves `select(k)`.
+  test.each([
+    ["g.V().elementMap().format('%{label}')"], ["g.V().elementMap().format('%{id}')"],
+    ["g.V().valueMap(true).format('%{label}')"], ["g.E().elementMap().format('%{IN}')"],
+    ["g.V().elementMap().select('label')"], ["g.V().elementMap().select('id')"], ["g.E().elementMap().select('OUT')"],
+  ])('a T/Direction map key is not its string name: %s', (gremlin) => {
+    expect(runP(gremlin)).toEqual([]);
+  });
+
+  // `Vertex.property(key)` THROWS over a key with several values (`.../gremlin/structure/Vertex.java:69-79`)
+  // — the reference's own message, wherever the token is evaluated, existence-only positions included.
+  const multi = (): Store => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    executeQuery(store, "g.addV('p').property('name','a').property(list,'x',1).property(list,'x',2)", {});
+    executeQuery(store, "g.addV('p').property('name','b').property('x',3)", {});
+    return store;
+  };
+  test.each([
+    ["g.V().format('%{x}')"], ["g.V().format('%{x}').count()"], ["g.V().where(__.format('%{x}'))"],
+    ["g.V().local(__.format('%{x}'))"], ["g.V().project('f').by(__.format('%{x}'))"], ["g.V().union(__.format('%{x}'))"],
+  ])('a multi-valued property token raises the reference error: %s', (gremlin) => {
+    expect(() => answer(multi(), gremlin)).toThrow('Multiple properties exist for the provided key, use Vertex.properties(x)');
+  });
+  test('a single-valued vertex still answers, and elementMap keeps the last value', () => {
+    expect(answer(multi(), "g.V().has('name','b').format('%{x}')")).toEqual([str('3')]);
+    expect(answer(multi(), "g.V().elementMap().format('%{x}')")).toEqual([str('2'), str('3')]);
   });
 });
 

@@ -206,6 +206,29 @@ const nanDeferred = (value: Expr, variables: readonly Expr[]): Expr => {
 };
 
 
+/** The deferral a named `format()` token raises where its property is absent and the scope it falls
+ *  through to may hold the name in a form, or a place, this lowering cannot read. */
+export const FORMAT_UNSEEN_SCOPE = 'format() of an absent property whose name a side effect or an unreachable path label may bind is not supported';
+
+/** MAY A SCOPE THE ROW CANNOT SHOW BIND THIS NAME? — a side effect (a `withSideEffect` constant, a reducer
+ *  policy or any keyed writer in the program) or a path label bound anywhere in it (`programScopeNames`).
+ *  Asked only after `scopedHost` missed, so a label bound ON this row has already answered. */
+const mayScope = (name: string, child: ChildSeam): boolean =>
+  child.sideEffects.has(name) || child.scopeNames.sideEffects.has(name) || child.scopeNames.labels.has(name);
+
+/** The reference's message for `Vertex.property(key)` over a key holding several values
+ *  (`Vertex.Exceptions.multiplePropertiesExistForProvidedKey`, `.../gremlin/structure/Vertex.java:178-180`). */
+export const multiplePropertiesMessage = (key: string): string =>
+  `Multiple properties exist for the provided key, use Vertex.properties(${key})`;
+
+/**
+ * A VERTEX'S SINGLE-PROPERTY READ, raising where the key holds several values — `value` (the first value,
+ * `by(key)`'s read) wherever the vertex has at most one. The count is the graph source's own
+ * (`propertyHasSeveral`), so a bound or decorated graph answers it as the base tables do.
+ */
+const multiValueRaises = (id: Expr, key: string, value: Expr, source: GraphSource, fresh: Minter): Expr =>
+  ({ kind: 'case', whens: [[source.propertyHasSeveral('vertex', id, key, fresh), raiseInRow(multiplePropertiesMessage(key))]], else: value });
+
 /**
  * `format("…%{token}…")` — the template's tokens resolved and concatenated, or `null` to decline.
  *
@@ -313,18 +336,32 @@ function formatValue(
     const scopedValue = scoped?.kind === 'scalar' ? token(scoped.value, evidenceOf(undefined, scoped.vtype)) : null;
     if (scopedRaw && !scopedValue) return null;
     if (host.kind === 'element') {
-      // The fallthrough is the reference's only where the property is ABSENT, so a scope key this cannot
-      // render (an ELEMENT, whose `toString()` is `v[1]`) or a name bound only as a SIDE EFFECT (`Scoping`
-      // reads those too; this resolver does not) would have an absent property DROP the traverser where
-      // the reference appends the scoped value — a row silently missing. Decline both.
-      if ((scoped && !scopedValue) || (!scoped && child.sideEffects.has(part.name))) return null;
+      // A raise message cannot carry the sentinel's closing mark, so such a key is not spelled at all.
+      if (part.name.includes('!$')) return null;
       const typed = byTyped({ key: { kind: 'property', key: part.name } }, host, source, fresh, child);
       if (!typed) return null;
-      const property = token(typed.value, typed.evidence);
+      // `((Element) current).property(varName)` THROWS over a vertex holding SEVERAL values for the key
+      // (`Vertex.property`'s `multiplePropertiesExistForProvidedKey`,
+      // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Vertex.java:69-79`)
+      // — so the token raises the reference's own message there, rather than appending the first value.
+      const value = host.elem === 'vertex' ? multiValueRaises(host.id, part.name, typed.value, source, fresh) : typed.value;
+      const property = token(value, typed.evidence);
       if (!property) return null;
-      // The reference falls through only when the property is ABSENT, which is what COALESCE says.
-      pieces.push(scopedValue ? { kind: 'call', fn: 'COALESCE', args: [property, scopedValue] } : property);
-      raws.push(scopedRaw ? { kind: 'call', fn: 'COALESCE', args: [typed.value, scopedRaw] } : typed.value);
+      // The reference falls through to the SCOPE only where the property is ABSENT, which is what COALESCE
+      // says. Where the scope holds a value this cannot render (an ELEMENT, whose `toString()` is `v[1]`),
+      // or MAY hold the name in a scope this resolver cannot see — a SIDE EFFECT (`Scoping` reads those
+      // first; any keyed writer anywhere in the program registers one), a path label bound where the row
+      // carries no channel for it — an absent property would DROP the traverser where the reference
+      // appends the scoped value: a row silently missing. That fallthrough raises a deferral instead, and
+      // a present property still answers exactly. The token is then never NULL, so it owes the
+      // productivity drop nothing, but its raws still read the value: a multi-valued key raises wherever
+      // the drop is evaluated, the reference's raise being unconditional.
+      const unseen = !scopedValue && (scoped !== null || mayScope(part.name, child));
+      const fallthrough = scopedValue ?? (unseen ? deferralExpr(FORMAT_UNSEEN_SCOPE, { kind: 'call', fn: 'random', args: [] }) : null);
+      pieces.push(fallthrough ? { kind: 'call', fn: 'COALESCE', args: [property, fallthrough] } : property);
+      if (scopedRaw) raws.push({ kind: 'call', fn: 'COALESCE', args: [value, scopedRaw] });
+      else if (!unseen) raws.push(value);
+      else if (value !== typed.value) raws.push({ kind: 'call', fn: 'COALESCE', args: [value, compilerText('')] });
       continue;
     }
     if (!scopedValue || !scopedRaw) return null;

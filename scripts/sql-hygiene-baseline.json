@@ -211,8 +211,8 @@
   },
   "format": {
     "binds": 0,
-    "bytes": 21931,
-    "compiler": 360,
+    "bytes": 22227,
+    "compiler": 372,
     "bound": 0
   },
   "group": {
@@ -355,7 +355,7 @@
   },
   "math": {
     "binds": 0,
-    "bytes": 31069,
+    "bytes": 32253,
     "compiler": 265,
     "bound": 0
   },

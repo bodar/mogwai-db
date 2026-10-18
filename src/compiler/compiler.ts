@@ -1,7 +1,7 @@
 import { parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
-import { sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
+import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
 import { perTraverserMutableFold } from './ir/fold-seed.ts';
 import { ambiguousEntryBind, erasedPathEntry } from './ir/strategies.ts';
 import { sackFoldsNaN } from './ir/sack-nan.ts';
@@ -62,17 +62,22 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const sideEffectPolicies = extractSideEffectPolicies(tree, params);
   const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
   if (steps.length === 0) throw new UnsupportedTraversal('a traversal source with no steps');
+  // The ONE whole-tree scan of the two namespaces a `Scoping` read resolves past the traverser's own Map
+  // (side-effect keys, path labels) — `programScopeNames`. Every scope-key authority below, and the
+  // lowering's scope readers that cannot SEE a scope (a keyed writer's side effect, a label bound before
+  // a re-rooting step), consult this one answer.
+  const scopeNames = programScopeNames(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]);
   // A `where(P)` operand is a SCOPE KEY, not a value (`unresolvableWhereKey`): a non-String key is the
   // reference's construction-time refusal, raised here; a key the lowering's alias readers cannot
   // resolve as the reference does declines — once, at every depth. After the Passes, so a GQL `match()`'s
   // variables are the `as()` labels its desugar binds; the operand fold leaves every key-holding
   // `where(P)` as written (`foldConstantPredicateOperands`).
-  if (unresolvableWhereKey(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]) !== null)
+  if (unresolvableWhereKey(steps, params, scopeNames) !== null)
     throw new UnsupportedTraversal(gremlin);
   // A path label a SIDE EFFECT shadows is read as the side effect by every `Scoping` step, and every
   // label reader the lowering has reads the alias map instead — so the traversal declines here, once,
   // for all of them (`sideEffectShadowedLabel`).
-  if (sideEffectShadowedLabel(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]) !== null)
+  if (sideEffectShadowedLabel(scopeNames) !== null)
     throw new UnsupportedTraversal(gremlin);
   // A `from()`/`to()` sub-path the reference may THROW on (an absent or misordered label) declines here,
   // once, for every path-family host (`unlocatableSubPath`) — the lowering's sub-path would answer an
@@ -115,6 +120,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
     services: servicesNamedBy(steps, request.params, request.registry),
     sack: sackInit,
     sideEffectPolicies,
+    scopeNames,
   } as const;
 
   // A BARRIER `call()` IS ASKED FIRST, because it is not a lowering question. Its rows arrive on a

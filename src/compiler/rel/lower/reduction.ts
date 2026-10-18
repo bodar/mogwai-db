@@ -61,6 +61,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   ...(ctx.pull ? { pull: ctx.pull } : {}),
   params: ctx.params,
   sideEffects: ctx.sideEffects,
+  scopeNames: ctx.scopeNames,
   writes: ctx.writes,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
   predicate: (body, subject, negated) => (negated
@@ -878,7 +879,7 @@ export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minte
     // lesson at a second seam — coverage must measure what the algebra can express, never what the
     // caller remembered to pass.
     services: ctx.services, sack: ctx.sack, sideEffectPolicies: ctx.sideEffectPolicies, collections: ctx.collections,
-    writes: ctx.writes,
+    writes: ctx.writes, scopeNames: ctx.scopeNames,
     // Its host's position, so a raise in the rooted body knows how fully the reference pulls it.
     ...(ctx.pull ? { pull: ctx.pull } : {}),
   }, fresh);
