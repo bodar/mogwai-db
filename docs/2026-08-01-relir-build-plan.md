@@ -1181,6 +1181,19 @@ child at any depth through per-start hosts) makes the pooled group value (`group
 `groupReduced` declines only under a row-selecting slice/sample. Decline-only. Pinned in
 `test/L4-addendum/sorted-host-merge.feature` and `group-value-barrier-scope.feature`. No baseline moves. CI green.
 
+✅ **format() token rendering LANDED ON TRUNK 2026-10-18 (`9e83f2b4`, `de552fcc`, `48bdb7b8`, ff-format-split).**
+Every `format()` token renders as `String.valueOf` (`vendor/tinkerpop/gremlin-core/.../step/map/FormatStep.java`)
+through asString()'s one authority `asStringOf` (`rel/receiver.ts`), from the token's own type evidence, at every
+host/depth (all reach `formatValue`); an unspellable token defers per row (`FORMAT_STRING`, read-only so a slice
+after format() stays a slice). An element token's absent property falls through to the scope
+(`.../step/Scoping.java`) via ONE whole-tree authority `programScopeNames` (`ir/labels.ts`, shared with
+`unresolvableWhereKey`/`sideEffectShadowedLabel`): side-effect keys and unseen labels defer. A multi-valued vertex
+property token raises `Vertex.property`'s error (`GraphSource.propertyHasSeveral`, sited by `raiseSiteAt`).
+`keyMatches` (`rel/map.ts`) requires a string-tagged key, so T/Direction map keys are not strings; bare T/Direction
+values frame as the enum. `split()` keeps the trailing empty token (commons `splitByWholeSeparator`). Pinned in
+`test/java-strings.test.ts`. Baseline move: sql-hygiene `format` bytes 10328 -> 24807 (per-row rendering arms),
+compiler 360 -> 372, `math` bytes 31069 -> 32253 — reasons in the commits. CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
