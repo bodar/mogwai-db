@@ -22,26 +22,27 @@ const raises = (q: string): string => {
   return 'no error';
 };
 
-describe('an all-null mean() is a productive null that math() refuses — MathStep.java:72-88', () => {
+describe('an all-null mean() is NULL — math() refuses a null traverser, a child body drops it', () => {
   const ALL_NULL_MEAN = '__.constant([null]).unfold().mean()';
-  test('at every depth the sum/max variants already raise at', () => {
+  test('math() over a null TRAVERSER or an unbound scope key raises (MathStep.java:72-88)', () => {
     for (const q of [
       `g.V(1).project('x').by(${ALL_NULL_MEAN}).math('x + 1')`,
-      `g.V(1).out().map(${ALL_NULL_MEAN}).math('_ + 1')`,
-      `g.V(1).out().local(${ALL_NULL_MEAN}).math('_ + 1')`,
-      `g.V(1).repeat(__.out()).times(1).map(${ALL_NULL_MEAN}).math('_ + 1')`,
-      `g.V(1).out().map(${ALL_NULL_MEAN}).math('_ * 2').by(identity())`,
-      `g.V(1).out().map(${ALL_NULL_MEAN}).fold().unfold().math('_ + 1')`,
-      `g.V(1).out().map(${ALL_NULL_MEAN}).where(__.math('_ + 1'))`,
-      `g.withSack(1).V(1).out().sack(assign).by(${ALL_NULL_MEAN}).sack().math('_ + 1')`,
       `g.inject([null]).mean(local).math('_ + 1')`,
     ]) expect(raises(q), q).toContain('must resolve to a Number');
+  });
+
+  test('a child body whose value is NULL produced nothing (presence is value nullness), so nothing reaches math()', () => {
+    for (const q of [
+      `g.V(1).out().map(${ALL_NULL_MEAN}).math('_ + 1')`,
+      `g.V(1).out().local(${ALL_NULL_MEAN}).math('_ + 1')`,
+      `g.V(1).out().map(${ALL_NULL_MEAN}).where(__.math('_ + 1'))`,
+      `g.withSack(1).V(1).out().sack(assign).by(${ALL_NULL_MEAN}).sack().math('_ + 1')`,
+    ]) expect(typed(q), q).toEqual([]);
   });
 
   test('a non-null mean is still a Double, and an all-null one still a null', () => {
     expect(typed("g.V().values('age').mean()")).toEqual(['30.75d']);
     expect(typed('g.inject(1, 3).mean()')).toEqual(['2d']);
-    expect(typed(`g.V(1).out().map(${ALL_NULL_MEAN})`)).toEqual(['null', 'null', 'null']);
     expect(typed('g.inject([null]).mean(local)')).toEqual(['null']);
   });
 });
@@ -51,7 +52,6 @@ describe('within/without agree with eq on a null — Contains.within is Compare.
     for (const q of ['g.inject(null).is(within(0, null))', 'g.inject(null).is(within(null))', 'g.inject(null).is(within([null]))'])
       expect(typed(q), q).toEqual(['null']);
     expect(typed('g.inject(null).is(within(0))')).toEqual([]);
-    expect(typed(`g.V(1).out().map(__.constant([null]).unfold().mean()).is(within(0, null))`)).toEqual(['null', 'null', 'null']);
   });
 
   test('without is the complement — a null subject survives a set without null, and only that', () => {

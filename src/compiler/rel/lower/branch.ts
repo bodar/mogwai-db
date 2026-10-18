@@ -14,7 +14,7 @@ import { alwaysProduces } from '../../ir/productivity.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
-import { ALWAYS_PRODUCTIVE, knownPresence } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, presenceOf } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
@@ -765,7 +765,7 @@ export function chooseOptions(
       : null;
   // A choice that cannot report its own productivity cannot serve the two `Pick` arms, and cannot be
   // told apart from a productive NULL — decline rather than answer one of them for the other.
-  const present = produced && knownPresence(produced.present);
+  const present = produced && presenceOf(produced.present, produced.expr);
   if (!produced || !present) return null;
 
   // THE CHOICE IS PROJECTED TO COLUMNS FIRST, and this is a plan-quality requirement rather than a
@@ -1331,5 +1331,5 @@ export const sameRecordFields = (left: readonly RecordField[], right: readonly R
   left.length === right.length && left.every((field, i) => {
     const other = right[i]!;
     return field.key === other.key && field.prefix === other.prefix
-      && field.optional === other.optional && field.presentCol === other.presentCol && sameFraming(field.framing, other.framing);
+      && field.optional === other.optional && sameFraming(field.framing, other.framing);
   });

@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
@@ -216,57 +216,43 @@ export interface ChildValue {
    */
   readonly node?: Expr;
   /**
-   * DID THIS BODY PRODUCE ANYTHING for this host row — the productivity signal, carried rather than
-   * guessed back from the value.
+   * DID THIS BODY PRODUCE ANYTHING for this host row — the productivity signal, stated by the arm that
+   * built the expression.
    *
-   * `TraversalProduct` is explicit that a productive NULL is a value (`util/TraversalProduct.java`),
-   * so `expr IS NULL` answers a DIFFERENT question from "the body was unproductive" and a consumer
-   * that conflates them is wrong in exactly the case it was reaching for. The option-map `choose` is
-   * that consumer: `Pick.none` claims a productive choice that matched no key and `Pick.unproductive`
-   * claims a choice that produced nothing, and TinkerPop routes them to different arms. This is the
-   * same signal a modulation's `present` column carries, so it is carriage rather than semantics —
-   * §6·7's rule at a third seam.
+   * PRESENCE IS VALUE NULLNESS: a NULL value is an ABSENT one. That is SQL's natural reading and a
+   * deliberate divergence from `TraversalProduct`, which keeps a PRODUCTIVE null (`constant([null])
+   * .unfold().sum()`) as a value — here it is treated as "nothing came", so a `project()` omits the key,
+   * a `select()`/`order()`/`dedup()`/`sack()` drops the traverser, an `aggregate()` collects nothing.
+   *
+   * - `'always'` — the body cannot be unproductive (a `fold()`/`count()` seeds, a token, the traverser
+   *   itself), so a consumer owes no drop; a NULL it yields is kept as a null.
+   * - `'value-nullness'` — the body produced exactly where `expr IS NOT NULL` (`presenceOf`).
+   * - `'unknown'` — the arm cannot say; a consumer that needs presence DECLINES on it.
    *
    * REQUIRED, as `yields` and `framing` are: only the arm that built the expression knows, and an
-   * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence (§6·7's
-   * defect generator). `'unknown'` is that second answer stated — a consumer that needs presence
-   * DECLINES on it, because an unknown productivity is neither "always productive" nor "a NULL means
-   * nothing came". A body that is always productive says so with `ALWAYS_PRODUCTIVE`, a claim rather
-   * than a silence. Presence is carried APART from the value (a `COUNT(*) > 0`/row-exists, never
-   * `expr IS NOT NULL`), so a NULL first result is PRODUCTIVE exactly where `TraversalUtil.produce`
-   * makes it one (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:108-123`;
-   * `ProjectStep.java:66` reads `TraversalProduct.isProductive`, not the value's nullness).
+   * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence.
    */
   readonly present: Presence;
 }
 
-/** A child body's PRODUCTIVITY — a per-row boolean expression (`ALWAYS_PRODUCTIVE` for "always"), or
- *  `'unknown'` where the producing arm cannot say. Never absent: see `ChildValue.present`. */
-export type Presence = Expr | 'unknown';
+/** A child body's PRODUCTIVITY — see `ChildValue.present`. Never absent. */
+export type Presence = 'always' | 'value-nullness' | 'unknown';
 
-/** The presence a consumer that NEEDS one reads — the expression, or `null` to DECLINE on `'unknown'`.
- *  One function so "decline on unknown" is spelled once rather than as a truthiness test per consumer
- *  (the optional field's `!produced.present` was exactly that, and it conflated `undefined` with every
- *  other falsy thing a refactor could put there). */
-export const knownPresence = (present: Presence): Expr | null => (present === 'unknown' ? null : present);
-
-/** The presence of a CASE over arms — the chosen arm's presence. Every arm always productive ⟹ always;
- *  any arm `'unknown'` ⟹ `'unknown'` (the CASE cannot say for the rows that arm answers); otherwise the
- *  CASE of the arms' presences, following the SAME conditions as the value's CASE. */
-export function casePresence(whens: readonly (readonly [Expr, Presence])[], otherwise: Presence): Presence {
-  const all = [...whens.map(([, p]) => p), otherwise];
-  if (all.every((p) => p === ALWAYS_PRODUCTIVE)) return ALWAYS_PRODUCTIVE;
-  if (all.some((p) => p === 'unknown')) return 'unknown';
-  return { kind: 'case', whens: whens.map(([when, p]) => [when, p as Expr] as const), else: otherwise as Expr };
-}
-
-/** A body that CANNOT be unproductive, as an expression — the claim `ChildValue.present` wants where
- *  the answer is "always", since its absence means "cannot say" and the two must stay distinguishable.
- *  A constant true; SQLite folds it and the emitter never sees a branch on it. It lives HERE, beside the
- *  `present` field it fills, so every producer (`lower.ts`) and every consumer (`modulator.ts`'s
- *  `optional` decision) reads the SAME object — the productivity test is a reference-equality check, and
- *  a second copy would silently answer "cannot say" where one meant "always". */
+/** A constant TRUE, the per-row predicate `presenceOf` answers for `'always'` — ONE shared object, so a
+ *  consumer can test it by reference and spend no `CASE`/filter on it. SQLite folds it. */
 export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
+
+/** The presence as a per-row predicate over the body's VALUE — `ALWAYS_PRODUCTIVE` for `'always'`,
+ *  `value IS NOT NULL` for `'value-nullness'`, or `null` to DECLINE on `'unknown'`. One function so
+ *  "decline on unknown" is spelled once. */
+export const presenceOf = (present: Presence, value: Expr): Expr | null =>
+  present === 'unknown' ? null : present === 'always' ? ALWAYS_PRODUCTIVE
+    : { kind: 'binary', op: 'is not', left: value, right: compilerNull() };
+
+/** The presence of a CASE (or any choice) over arms: every arm `'always'` ⟹ `'always'`; any arm
+ *  `'unknown'` ⟹ `'unknown'`; otherwise the chosen value's nullness. */
+export const meetPresence = (arms: readonly Presence[]): Presence =>
+  arms.every((p) => p === 'always') ? 'always' : arms.some((p) => p === 'unknown') ? 'unknown' : 'value-nullness';
 
 /**
  * WHICH normalization a nested argument gets, and the two are not interchangeable.
@@ -315,14 +301,12 @@ export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undef
 export type ChildHost =
   | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
   | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow;
-      /** WHETHER A NULL `value` IS A VALUE (`TraversalProduct`'s distinction, as `ChildValue.present`).
-       *  ABSENT where the host is a TRAVERSER — a traverser's NULL is a productive null. Set where the
-       *  host is an INTERMEDIATE value that can be an unproductive NULL: a child value run's value past an
-       *  `is()` filter or over an absent property (`valueRun`), a `select(k)` of an absent map key. A
-       *  type-demanding consumer (`math()`'s variables, `receiver.ts`) raises on a NULL only where this
-       *  holds. (A scope value `math()` reads by name is NOT one: `getNullableScopeValue` hands the
-       *  reference an unbound key as a null, and it raises.) */
-      readonly present?: Expr;
+      /** WHETHER A NULL `value` IS A VALUE (as `ChildValue.present`). ABSENT (`'always'`) where the host
+       *  is a TRAVERSER — a traverser's NULL is a null value. `'value-nullness'` where the host is an
+       *  INTERMEDIATE value whose NULL means "nothing": a child value run's value past an `is()` filter or
+       *  over an absent property (`valueRun`), a `select(k)` of an absent map key. A type-demanding
+       *  consumer (`math()`'s variables, `receiver.ts`) raises on a NULL only where it is a value. */
+      readonly present?: Presence;
       /** Present only for a child rooted at an unfolded Map.Entry. */
       readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf } }
   /** A PROPERTY traverser — `properties()`, addressed by the stored row's own rowid exactly as an

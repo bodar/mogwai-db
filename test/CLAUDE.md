@@ -86,7 +86,7 @@
   UTF-16 order or number spelling is DELETED or rewritten to the natural answer (see
   `docs/feature-support-matrix.md` §17) — not kept as `@Unsupported`. Order is asserted only where the
   query imposes one. The features that still pin Java execution on trunk (`raise-extent`, `raise-order`,
-  `write-interleave`, `side-effect-lazy-read`, `by-productive-null`, …) are
+  `write-interleave`, `side-effect-lazy-read`, …) are
   deleted or rewritten by the simplification work item that removes the code they pin
   (`docs/2026-10-18-simplification-plan.md`), in the same commit — not before.
 - **L5** (`test/L5-properties/`) — property-based, the only level whose inputs nobody wrote down.

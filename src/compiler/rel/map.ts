@@ -14,10 +14,10 @@ import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, EMPT
 import { withChannel } from '../../channels.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
-import { byExpr, byNode, memberNodeOf, modulations, nodeProductivityFilter, producedMemberNode, type Modulation } from './modulator.ts';
+import { byExpr, byNode, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
-import { ALWAYS_PRODUCTIVE, relHostTag, type ChildHost, type ChildSeam } from './child.ts';
+import { relHostTag, type ChildHost, type ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
 import { raiseInRow } from '../../rel/raise.ts';
@@ -218,7 +218,7 @@ export interface GroupRecipe {
    *  `local`/`flatMap` body's group is scoped to the entering traverser, then re-declared as the origin
    *  channel and its empty origins SEEDED `{}` off the domain. Absent for an ordinary/keyed group. */
   readonly origin?: string;
-  /** The step whose `nodeProductivityFilter` policy the drop reads — carried so the recipe stays data the
+  /** The step whose `productivityFilter` policy the drop reads — carried so the recipe stays data the
    *  aggregation can act on without re-deriving `ProductiveByStrategy`. Two sites of one label are two
    *  positions of one traversal, so they cannot disagree about the strategy. */
   readonly step: IRStep;
@@ -562,7 +562,7 @@ export function groupRows(
   // preference.
   const keyed = make.materialize({ id: fresh('gm'), input: projected, channels: projected.channels, type: projected.type });
   // TinkerPop drops an unproductive key rather than grouping under null — UNLESS `ProductiveByStrategy`
-  // asked for the null-keeping behaviour, which is why this asks `nodeProductivityFilter` rather than
+  // asked for the null-keeping behaviour, which is why this asks `productivityFilter` rather than
   // spelling the test. Hardcoding `IS NOT NULL` changed the answer for
   // `withStrategies(ProductiveByStrategy).V().groupCount().by('age')`; the census caught it against the
   // reference, which a byte-level comparison of two equally-wrong answers could not.
@@ -579,7 +579,7 @@ export function groupRows(
   // over the whole graph drops the two software vertices and takes their KEYS with them where no other
   // traverser landed there. `ProductiveByStrategy` turns both off together, which is why this asks the
   // same function twice rather than spelling either test.
-  const drop = nodeProductivityFilter(step, col(keyed.id, KEY_COL));
+  const drop = productivityFilter(step, 'value-nullness', col(keyed.id, KEY_COL))?.keep;
   /**
    * A CHILD value `by()` DOES filter the traverser, and a property `by(key)` does NOT — the same slot,
    * two rules, and the reference pins both on the modern graph. It reads like an inconsistency and is
@@ -600,7 +600,7 @@ export function groupRows(
    * sugar for `by(__.values('age'))`; the second scenario above is what refutes that.
    */
   const childValueDrop = member && !lastOnly && valueBy?.key.kind === 'child'
-    ? nodeProductivityFilter(step, col(keyed.id, MEMBER_COL))
+    ? productivityFilter(step, 'value-nullness', col(keyed.id, MEMBER_COL))?.keep
     : undefined;
   const domainDrop = drop && childValueDrop ? and(drop, childValueDrop) : drop ?? childValueDrop;
   // The aggregate's own DIRECT input, because a `Col` names a relation in SCOPE and scope is a node's
@@ -789,11 +789,11 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
   // wrong, and indistinguishable from a productive null under `ProductiveByStrategy`).
   //
   // So the drop is the aggregate's own `FILTER (WHERE …)`: the group is still whatever `GROUP BY` decided.
-  // `nodeProductivityFilter` is asked here for the same reason it is asked for the key — `ProductiveByStrategy`
+  // `productivityFilter` is asked here for the same reason it is asked for the key — `ProductiveByStrategy`
   // turns both off, and then a genuinely null value IS a member.
   // A `tail()` value drops nothing: the traverser IS the member, so there is no `by()` that could have
   // been unproductive — the drop belongs to a PROJECTED value only.
-  const memberDrop = dropMembers ? nodeProductivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
+  const memberDrop = dropMembers ? productivityFilter(step, 'value-nullness', col(rows.id, MEMBER_COL))?.keep : undefined;
   const memberAggregate: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [collected],
     orderBy: order.map((name) => ({ expr: col(rows.id, name), dir: 'asc' as const })),
@@ -937,7 +937,7 @@ function groupReduced(
     })
     : projected;
   const keyed = make.materialize({ id: fresh('rm'), input: arms, channels: [], type: arms.type });
-  const drop = nodeProductivityFilter(step, col(keyed.id, KEY_COL));
+  const drop = productivityFilter(step, 'value-nullness', col(keyed.id, KEY_COL))?.keep;
   const rowsIn = drop
     ? make.filter({ id: fresh('rf'), input: keyed, channels: [], type: keyed.type, pred: drop })
     : keyed;
@@ -1073,7 +1073,7 @@ function groupCollected(
   const mapMember = rows.framing.kind === 'map' ? { kind: 'map', of: rows.framing.valOf } as const : undefined;
   const member = rows.framing.kind === 'elements' || mapMember
     ? valueCol
-    : producedMemberNode(valueCol, rows.framing, source, fresh, ALWAYS_PRODUCTIVE,
+    : producedMemberNode(valueCol, rows.framing, source, fresh, 'always',
       rows.framing.kind === 'scalar' ? relHostTag(rows.rel, rows.framing.type) : undefined);
   if (!member) return null;
 
@@ -1107,7 +1107,7 @@ function groupCollected(
   // TinkerPop drops an unproductive KEY rather than grouping under null, the same rule (and the same
   // `ProductiveByStrategy` exception) the barrier's own key obeys — asked here because the seed can
   // introduce a null key a real member never would.
-  const drop = nodeProductivityFilter(step, col(keyed.id, KEY_COL));
+  const drop = productivityFilter(step, 'value-nullness', col(keyed.id, KEY_COL))?.keep;
   const rowsIn = drop ? make.filter({ id: fresh('cf'), input: keyed, channels: [], type: cols, pred: drop }) : keyed;
   // The COLLECTING arm frames the list, drops the seed (`memberDrop`), orders by encounter and wraps the
   // members in a `{t:'list', v}` node — a `by(<pre>.fold())` is that arm over a pooled row set.
@@ -1832,8 +1832,7 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter, abs
  * of maps). Returns the first matching entry's VALUE-SIDE node and the key's presence, both as correlated
  * subqueries over the one host `map` value (`pairsOf` is correlated — no `input`). `mapHostChild` /
  * `scopeValue`'s map arm decode the node per `valOf` (the same `$.v`/`$.t` split `sideOf` makes). A
- * missing key is a productive-absent — `present` false drops the traverser (`Scoping`/`Select.feature`),
- * never a productive null.
+ * missing key is a NULL node — absent, which drops the traverser (`Scoping`/`Select.feature`).
  *
  * `over` reads the node INSIDE the subquery, so a reader that spells the node several times (a type test
  * per arm, `asStringOf`) spells a column of the matched pair rather than re-running the correlated read
@@ -1842,14 +1841,11 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter, abs
  */
 export function correlatedMapKey(
   map: Expr, key: string, fresh: Minter, over: (node: Expr) => Expr = (node) => node,
-): { node: Expr; present: Expr } {
-  const probe = pairsOf(map, fresh);
-  const present: Expr = { kind: 'exists', negated: false,
-    plan: make.filter({ id: fresh('cmf'), input: probe, channels: [], type: probe.type, pred: keyMatches(col(probe.id, PAIR.value), key) }) };
+): { node: Expr } {
   const valuePairs = pairsOf(map, fresh);
   const matched = make.filter({ id: fresh('cmv'), input: valuePairs, channels: [], type: valuePairs.type, pred: keyMatches(col(valuePairs.id, PAIR.value), key) });
   const node = firstOf(matched, over(pairSide(col(matched.id, PAIR.value), 'values')), col(matched.id, PAIR.ord), fresh);
-  return { node, present };
+  return { node };
 }
 
 /**

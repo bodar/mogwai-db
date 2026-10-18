@@ -1,8 +1,7 @@
 Feature: mogwai addendum — a null is a value to within/without and to math(), and a set op keeps typed members apart
 
-  # An all-null mean() is a productive null (MeanGlobalStep.java:50-58,80-84) tagged as one at its producer,
-  # so math() refuses it exactly as it refuses the all-null sum()
-  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:72-88).
+  # An all-null mean() is NULL, and a map() body whose value is NULL produced nothing (presence is value
+  # nullness — a documented divergence from the reference's productive null, which math() then refuses).
   Scenario: g_VX1X_out_mapXconstantXlist_nullX_unfold_meanX_mathX___plus_1X
     Given the modern graph
     And the traversal of
@@ -10,7 +9,7 @@ Feature: mogwai addendum — a null is a value to within/without and to math(), 
       g.V(1).out().map(__.constant([null]).unfold().mean()).math("_ + 1")
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "The variable _ for math() step must resolve to a Number"
+    Then the result should be empty
 
   Scenario: g_VX1X_projectXxX_byXconstantXlist_nullX_unfold_meanX_mathXx_plus_1X
     Given the modern graph

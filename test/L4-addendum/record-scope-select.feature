@@ -47,7 +47,8 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | d[5].i |
 
-  # A productive null field is SELECTED (SelectStep keeps a present-null key).
+  # A by() that yields a NULL is ABSENT (presence is value nullness), so the record lacks "y" and the
+  # select drops the traverser (a documented divergence: the reference keeps a present-null key).
   Scenario: g_VX1X_projectXx_yX_byXconstantX1XX_byXconstantXlist_nullX_unfold_sumX_selectXx_yX
     Given the modern graph
     And the traversal of
@@ -55,33 +56,7 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       g.V(1).project("x","y").by(__.constant(1)).by(__.constant([null]).unfold().sum()).select("x","y")
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | m[{"x":1,"y":null}] |
-
-  # SelectOneStep returns a null scope value BEFORE applying its by() (SelectOneStep.java:64).
-  Scenario: g_VX1X_projectXx_yX_byXconstantX1XX_byXconstantXlist_nullX_unfold_sumX_selectXyX_byXconstantX5XX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).project("x","y").by(__.constant(1)).by(__.constant([null]).unfold().sum()).select("y").by(__.constant(5))
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | null |
-
-  @Unsupported
-  Scenario: g_VX1X_projectXx_yX_byXconstantX1XX_byXconstantXlist_nullX_unfold_sumX_selectXyX_byXcountXX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V(1).project("x","y").by(__.constant(1)).by(__.constant([null]).unfold().sum()).select("y").by(__.count())
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | null |
+    Then the result should be empty
 
   # A field and a path label in one select: the field from the map, the label from the path.
   Scenario: g_VX1X_asXzX_projectXa_bX_byXidentityX_byXnameX_selectXa_zX

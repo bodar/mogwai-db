@@ -7,7 +7,7 @@ import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, knownPresence, type ChildHost, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, presenceOf, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
@@ -186,7 +186,7 @@ function projectionProductive(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES,
 ): Expr | null {
   const produced = scalarChild(body, childHostOf(subject, aliases), ctx, fresh);
-  const present = produced && knownPresence(produced.present);
+  const present = produced && presenceOf(produced.present, produced.expr);
   if (!present) return null;
   return present === ALWAYS_PRODUCTIVE ? CONSTANT.true : present;
 }
@@ -371,7 +371,7 @@ export function valuePredicate(
    * `g.V().not(__.values('age').is(P.neq(29)))` dropped them. So the fix is not another null-safe
    * predicate — it is asking the question the seam already answers.
    */
-  const present = knownPresence(produced.present);
+  const present = presenceOf(produced.present, produced.expr);
   if (!present) {
     // The seam CANNOT SAY, and `ChildValue.present` is explicit that this is not "always productive".
     // It is safe to proceed only where the value cannot be absent-but-non-null: a numeric REDUCER over

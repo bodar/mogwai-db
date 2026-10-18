@@ -161,32 +161,17 @@ export interface RecordField {
   readonly prefix: string;
   readonly framing: RelFraming;
   readonly optional: boolean;
-  /**
-   * The field's PRESENCE rides in its own column (`<prefix>_p`, `PRESENT_COL`) rather than being read
-   * off its first payload column's nullness.
-   *
-   * Set where an OPTIONAL field's payload can be a PRODUCTIVE NULL — a `by()` child whose result is a
-   * value, `by(__.constant([null]).unfold().sum())` — so "the key is absent" and "the key maps to null"
-   * are two different rows. `ProjectStep.map` puts the null (`ProjectStep.java:66` reads
-   * `TraversalProduct.isProductive`, not the value), so reading presence as `v IS NOT NULL` silently
-   * omitted the key. Required rather than optional for §6·7's reason: a field that forgot to say and one
-   * that has no flag must not read alike.
-   */
-  readonly presentCol: boolean;
 }
 
-/** The column a `presentCol` field's presence rides in, under the field's prefix. */
-export const PRESENT_COL = 'p';
-
 /**
- * IS THIS FIELD PRESENT on a row — its own presence column where it carries one, else its FIRST payload
- * column's non-nullness (a rowid for an element, `v` for a value, `list`/`map` for a collection), or
- * `null` where the framing has no payload to read. `read` names a column under the field's prefix
- * already applied. The one spelling every reader of an optional field shares — the map assembly, the
- * field re-entry, a `by(__.select(<field>))` — so they cannot disagree about which rows have the key.
+ * IS THIS FIELD PRESENT on a row — its FIRST payload column's non-nullness (a rowid for an element, `v`
+ * for a value, `list`/`map` for a collection), or `null` where the framing has no payload to read. A
+ * NULL value is an ABSENT one: presence is value nullness (a deliberate divergence — the reference keeps a
+ * by() that produced a literal null as a key mapping to null). `read` names a column under the field's
+ * prefix already applied. The one spelling every reader of an optional field shares — the map assembly,
+ * the field re-entry, a `by(__.select(<field>))` — so they cannot disagree about which rows have the key.
  */
 export function fieldPresence(field: RecordField, read: (column: string) => Expr): Expr | null {
-  if (field.presentCol) return read(fieldCol(field.prefix, PRESENT_COL));
   const first = framingCols(field.framing)?.[0];
   return first ? { kind: 'binary', op: 'is not', left: read(fieldCol(field.prefix, first.name)), right: compilerNull() } : null;
 }
@@ -242,7 +227,6 @@ export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
         const cols = framingCols(field.framing);
         if (!cols) return null;
         for (const column of cols) nested.push({ ...column, name: fieldCol(field.prefix, column.name), nullable: true });
-        if (field.presentCol) nested.push({ name: fieldCol(field.prefix, PRESENT_COL), type: 'int', nullable: true });
       }
       return nested;
     }

@@ -10,7 +10,7 @@ import type { Elem } from '../elem.ts';
 import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { byField, isProductiveBy, modulations, valueMayBeNull } from './modulator.ts';
+import { byField, isProductiveBy, modulations } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { foldElements, foldScalars, LIST_COL, NODE_COL } from './list.ts';
 import { inferredVtype } from './reducer.ts';
@@ -512,9 +512,6 @@ function traverserMembers(
  * collects ages. The one exception the vocabulary can express — an alias `by(__.select('v'))` whose
  * label holds an ELEMENT — declines rather than collecting a rowid it has no framing arm for here.
  */
-/** The column a projected member's PRESENCE rides in between the projection and its drop. */
-const AGG_PRESENT = 'ap';
-
 function projectedMembers(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming,
   modulation: import('./modulator.ts').Modulation, encounter: Channel | undefined,
@@ -539,33 +536,19 @@ function projectedMembers(
   // members as Strings. `framingCols` is the authority on which columns a framing owes, so asking it
   // rather than naming `v` is also what makes the child-body and property arms carry their tags for
   // free.
-  // An unproductive projection contributes no member and a PRODUCTIVE null is collected
-  // (`AggregateStep.java:139` — `ifProductive`), so the drop reads the field's PRESENCE: its own
-  // `present` where its value can be a productive null (projected as a column beside the value, then
-  // dropped by the filter's reader), else the value's non-nullness, which is presence for a stored
-  // property. Asked through `productivityFilter`'s own `ProductiveByStrategy` rule via `byField`.
-  const presentCol = field.optional && field.present ? AGG_PRESENT : undefined;
+  // An unproductive projection contributes no member (`AggregateStep.java:139` — `ifProductive`), and
+  // a NULL value is no value: the drop is the value's non-nullness, asked through `byField`'s
+  // `optional` (which already reads `ProductiveByStrategy`).
   const projected = make.project({
     id: fresh('ag'), input, channels: carried,
-    type: typeOf(...cols, ...(presentCol ? [meta(presentCol, 'int', true)] : []), ...carriedCols(carried)),
+    type: typeOf(...cols, ...carriedCols(carried)),
     exprs: [...projections as readonly (readonly [string, Expr])[],
-      ...(presentCol ? [[presentCol, field.present!] as const] : []),
       ...carried.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
   });
-  const drop: Expr | undefined = !field.optional ? undefined
-    : presentCol ? col(projected.id, presentCol)
-      : { kind: 'binary', op: 'is not', left: col(projected.id, 'v'), right: compilerNull() };
-  const filtered = drop
-    ? make.filter({ id: fresh('af'), input: projected, channels: carried, type: projected.type, pred: drop })
+  const rows = field.optional
+    ? make.filter({ id: fresh('af'), input: projected, channels: carried, type: projected.type,
+      pred: { kind: 'binary', op: 'is not', left: col(projected.id, 'v'), right: compilerNull() } })
     : projected;
-  // The presence column has done its work; the site's rows are the framing's columns again.
-  const rows = presentCol
-    ? make.project({
-      id: fresh('ap'), input: filtered, channels: carried, type: typeOf(...cols, ...carriedCols(carried)),
-      exprs: [...cols.map((column) => [column.name, col(filtered.id, column.name)] as const),
-        ...carried.map((channel) => [channel.col, col(filtered.id, channel.col)] as const)],
-    })
-    : filtered;
   // **`productiveNull` rides with the type.** Under `ProductiveByStrategy` nothing is dropped, so an
   // unproductive projection leaves an explicit NULL member — and a local reducer over an all-null
   // collection must then emit that NULL as a REAL result rather than being read as "no result".
@@ -585,9 +568,8 @@ function projectedMembers(
     of: {
       kind: 'scalars',
       type: typeColumn ? PER_ROW(typeColumn.name) : field.framing.type,
-      // A NULL member is a REAL one wherever a null can survive the drop: under `ProductiveByStrategy`
-      // (nothing dropped), and wherever the value itself can be a productive null (`valueMayBeNull`).
-      productiveNull: isProductiveBy(step) || valueMayBeNull(modulation, host),
+      // A NULL member is a REAL one only where nothing is dropped: under `ProductiveByStrategy`.
+      productiveNull: isProductiveBy(step),
     },
     merge: undefined,
   };

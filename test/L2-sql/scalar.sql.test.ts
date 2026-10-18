@@ -345,11 +345,11 @@ describe('scalar coalesce — monoid completion (a semigroup reducer + a constan
     for (const sink of ['vadas', 'lop', 'ripple']) expect(got[sink]).toBe(0); // no out-edges → identity
   });
 
-  test('a min/max coalesce arm fails closed — produced ≠ non-null there (Gremlin coalesce ≠ SQL COALESCE)', () => {
-    // min/max emit a null RESULT over an all-null (non-empty) candidate set, so COALESCE would wrongly
-    // fall through — the one divergence, refused rather than mis-executed.
-    expect(() => read('g.V().project("name","d").by("name").by(__.coalesce(__.outE().values("weight").max(), __.constant(0)))'))
-      .toThrow(UnsupportedTraversal);
+  test('a min/max coalesce arm is SQL COALESCE too — presence is value nullness', () => {
+    // A NULL arm is an ABSENT arm (`ChildValue.present`), so a min/max over nothing falls through to the
+    // constant exactly as SQL's COALESCE does.
+    expect(read('g.V().project("name","d").by("name").by(__.coalesce(__.outE().values("weight").max(), __.constant(0)))').sql)
+      .toMatch(/COALESCE\(/i);
   });
 });
 

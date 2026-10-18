@@ -42,8 +42,8 @@ import {
 } from './build.ts';
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, boundBeyondMap, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
-import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, valueMayBeNull, type Modulation } from './modulator.ts';
-import { ALWAYS_PRODUCTIVE, freshTraverserRow, hostTag, knownPresence, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
+import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, type Modulation } from './modulator.ts';
+import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingTag, REL_TRANSFORMS, transformExpr, type DecimalSource, type FloatSource } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
@@ -1040,9 +1040,9 @@ function sortTerms(
     if (!key) return null;
     const dir = modulation.order === 'desc' ? 'desc' : 'asc';
     terms.push({ expr: key.value, dir });
-    // "only add the traverser if the comparator traversal was productive" — a productive NULL sorts
-    // (`OrderGlobalStep.java:82-85,183-184`), so the drop reads PRESENCE, not the key's nullness.
-    const drop = productivityFilter(step, key.present);
+    // "only add the traverser if the comparator traversal was productive" (`OrderGlobalStep.java:82-85`);
+    // a NULL key is an absent one.
+    const drop = productivityFilter(step, key.present, key.raw ?? key.value);
     if (!drop) return null;
     if (drop.keep) drops.push(drop.keep);
   }
@@ -1267,10 +1267,10 @@ function projectRaising(rel: Rel, value: Expr, offences: readonly (readonly [Exp
  * may be empty; `null` — the seam cannot say whether it produced, so the caller declines.
  */
 function emptyOperand(cv: ChildValue): readonly [Expr, string] | false | null {
-  if (cv.present === ALWAYS_PRODUCTIVE) return false;
-  const present = knownPresence(cv.present);
+  if (cv.present === 'always') return false;
+  const present = presenceOf(cv.present, cv.expr);
   if (!present) return null;
-  return [{ kind: 'unary', op: 'not', arg: present }, 'The provided traverser does not map to a value'];
+  return [{ kind: 'unary', op: 'not', arg: present },'The provided traverser does not map to a value'];
 }
 
 /** `asNumber(GType.X)` over a RUNTIME value NARROWS to a bounded integer type and must RAISE on overflow —
@@ -5340,26 +5340,11 @@ function propertyTail(
  *  and, under a `by(key)`, the orderings. `within`/`between`/text ops are not two-single-alias shapes. */
 const ALIAS_CMP: Record<string, BinaryOp | undefined> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
-/**
- * `left <op> right` for two `by()` VALUES, where either may be a PRODUCTIVE NULL (`valueMayBeNull`).
- *
- * SQL's comparison reads a NULL as unknown and drops the row; Gremlin's COMPARABILITY puts null in its
- * own type: `comparable(null, null)` and they compare 0, a null and a non-null are not comparable
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:313-316`).
- * So `eq`/`gte`/`lte` hold for two nulls, `gt`/`lt` never hold with a null, and `neq` is `!eq`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`).
- * Where neither side can be null this is the plain binary, unchanged.
- */
-function comparabilityCompare(op: string, left: Expr, right: Expr, nullable: boolean): Expr | null {
+/** `left <op> right` for two `by()` VALUES — SQL's three-valued compare, so a NULL (an absent value)
+ *  never matches. */
+function aliasCompare(op: string, left: Expr, right: Expr): Expr | null {
   const sql = ALIAS_CMP[op];
-  if (!sql) return null;
-  const plain: Expr = { kind: 'binary', op: sql, left, right };
-  if (!nullable) return plain;
-  const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
-  const bothNull = and(isNull(left), isNull(right));
-  const nullArm: Expr = op === 'eq' || op === 'gte' || op === 'lte' ? bothNull
-    : op === 'neq' ? { kind: 'unary', op: 'not', arg: bothNull } : compilerInt(0);
-  return { kind: 'case', whens: [[{ kind: 'binary', op: 'or', left: isNull(left), right: isNull(right) }, nullArm]], else: plain };
+  return sql ? { kind: 'binary', op: sql, left, right } : null;
 }
 
 /**
@@ -5419,8 +5404,7 @@ function aliasValueWhere(
   const lhsBy = byProjection(ring[0]!, startHost, ctx.source, fresh, true, seam);
   if (!lhsBy) return 'decline';
   const lhs = lhsBy.value;
-  const lhsNullable = valueMayBeNull(ring[0]!, startHost);
-  const lhsProd = productivityFilter(step, lhsBy.present);
+  const lhsProd = productivityFilter(step, lhsBy.present, lhs);
   if (!lhsProd) return 'decline';
   const prod: Expr[] = lhsProd.keep ? [lhsProd.keep] : [];
   let ringIdx = 1; // startKey took ring[0]; leaves cycle from ring[1] in tree-walk order
@@ -5438,10 +5422,10 @@ function aliasValueWhere(
     const valHost = hostOf(proj);
     const val = byProjection(by, valHost, ctx.source, fresh, true, seam);
     if (!val) return null;
-    const p2 = productivityFilter(step, val.present);
+    const p2 = productivityFilter(step, val.present, val.value);
     if (!p2) return null;
     if (p2.keep) prod.push(p2.keep);
-    return comparabilityCompare(p.op, lhs, val.value, lhsNullable || valueMayBeNull(by, valHost));
+    return aliasCompare(p.op, lhs, val.value);
   };
   const clause = build(pred);
   if (!clause) return 'decline';
@@ -5515,12 +5499,11 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         const [hostA, hostB] = [hostOf(projA), hostOf(projB)];
         const [aVal, bVal] = [byProjection(bys[0]!, hostA, ctx.source, fresh, true, seam), byProjection(bys[0]!, hostB, ctx.source, fresh, true, seam)];
         if (!aVal || !bVal) return 'decline';
-        // A non-productive `by()` DROPS the row — by its PRESENCE (`productivityFilter`), so a PRODUCTIVE
-        // null stays and is compared under Gremlin's comparability (`comparabilityCompare`), where two
-        // nulls are equal (`WherePredicateStep` tests `TraversalProduct.isProductive`, not the value).
-        const [prodA, prodB] = [productivityFilter(step, aVal.present), productivityFilter(step, bVal.present)];
+        // A non-productive `by()` DROPS the row (`productivityFilter`); a NULL value is an absent one, and
+        // SQL's three-valued compare never matches it either.
+        const [prodA, prodB] = [productivityFilter(step, aVal.present, aVal.value), productivityFilter(step, bVal.present, bVal.value)];
         if (!prodA || !prodB) return 'decline';
-        const cmp = comparabilityCompare(pred.op, aVal.value, bVal.value, valueMayBeNull(bys[0]!, hostA) || valueMayBeNull(bys[0]!, hostB));
+        const cmp = aliasCompare(pred.op, aVal.value, bVal.value);
         if (!cmp) return 'decline';
         const kept = [prodA.keep, prodB.keep].filter((e): e is Expr => !!e);
         const guard = kept.length ? and(kept.reduce((a, b) => and(a, b)), cmp) : cmp;
@@ -5733,7 +5716,7 @@ function recordTail(
  * `byExpr` already knows every host's tokens (an element's `id`/`label`, a property's `key`/`value`), so
  * this is carriage and not a second projection: the only things it adds are the two facts a `ChildValue`
  * carries beyond the expression. `yields: 'one'` because a token is single-valued by construction, and
- * `present: ALWAYS_PRODUCTIVE` because a token cannot be absent — which is the claim `chooseOptions`
+ * `present: 'always'` because a token cannot be absent — which is the claim `chooseOptions`
  * reads to prove the `Pick.unproductive` arm dead rather than emitting a shape the traversal never has.
  */
 export function tokenChoice(token: string, subject: Subject, source: GraphSource, fresh: Minter): ChildValue | null {
@@ -5744,7 +5727,7 @@ export function tokenChoice(token: string, subject: Subject, source: GraphSource
   // stays UNKNOWN and the framer infers — the same split `byField` draws for the same tokens.
   const named = token.toLowerCase();
   return {
-    expr, yields: 'one', present: ALWAYS_PRODUCTIVE,
+    expr, yields: 'one', present: 'always',
     framing: { kind: 'scalar', type: named === 'label' || named === 'key' ? STATIC('string') : UNKNOWN },
   };
 }

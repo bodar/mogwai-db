@@ -579,9 +579,8 @@ function dedupBy(
   // `dedup().by('p')` keeps a vertex whose `p` is `3` apart from one whose `p` is `3L`.
   const key = byEqualityKey(modulation, shape.host, ctx.source, fresh, childSeam(ctx, fresh));
   if (!key) return null;
-  // By PRESENCE: a productive null is a dedup key like any other (`DedupGlobalStep.java:77-78` adds it to
-  // the duplicate set), and every NULL key partitions together, which is `null.equals(null)`.
-  const productive = productivityFilter(step, key.present);
+  // An unproductive `by()` drops the traverser (`DedupGlobalStep.java:77-78`); a NULL key is an absent one.
+  const productive = productivityFilter(step, key.present, key.value);
   if (!productive) return null;
   const domain = productive.keep
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive.keep })
@@ -699,7 +698,7 @@ export function dedupByLabels(
       const key = byEqualityKey(by, host, ctx.source, fresh, seam);
       if (!key) return null;
       keyTerms.push(...key.terms);
-      const prod = productivityFilter(step, key.present);
+      const prod = productivityFilter(step, key.present, key.value);
       if (!prod) return null;
       if (prod.keep) productive.push(prod.keep);
     } else if (proj.read.kind === 'element') keyTerms.push(aliasIdAt(column, 'last'));

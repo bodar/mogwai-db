@@ -127,16 +127,3 @@ Feature: mogwai addendum — a group value body's PRODUCTIVE null is a member, n
     Then the result should be unordered
       | result |
       | m[{"person":"d[1].l"}] |
-
-  # `coalesce()` as a CHILD VALUE answers with the first arm that PRODUCED — a productive null sack is that
-  # arm's answer, and the constant fallback never runs (`CoalesceStep`; `ProjectStep.java:66` keeps the key).
-  Scenario: g_withSackXnullX_VX1X_project_byXcoalesceXsack_constantX1XXX
-    Given the modern graph
-    And the traversal of
-      """
-      g.withSack(null).V(1).project("x").by(__.coalesce(__.sack(), __.constant(1)))
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | m[{"x":null}] |

@@ -10,7 +10,7 @@ import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/fr
 import { countOf, GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import { asStringOf, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { ALWAYS_PRODUCTIVE, type ChildSeam } from './child.ts';
+import type { ChildSeam } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, jsonOf, listNode, mapNode, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { promotedExtremum, resultIsDecimal } from './float.ts';
@@ -561,15 +561,15 @@ export function listMemberOp(
     // A scalar member IS the traverser, so its identity key is always present.
     const keyOn = (m: Rel): ByProjection | null => (elemOf
       ? byProjection(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, source, fresh, true, child)
-      : only.key.kind === 'identity' ? { value: memberCompareKey(of, m), present: ALWAYS_PRODUCTIVE } : null);
+      : only.key.kind === 'identity' ? { value: memberCompareKey(of, m), present: 'always' } : null);
     const probe = keyOn(members);
     if (!probe) return null;
     // AN UNPRODUCTIVE `by()` DROPS THE MEMBER, and the reference pins it rather than us inferring it:
     // `g.V().fold().order(local).by('age')` answers FOUR vertices on the modern graph, not six — `lop`
-    // and `ripple` have no age (`Order.feature:281-289`). It is a member FILTER on the projection's
-    // PRESENCE, which is the same predicate `productivityFilter` returns for a row and the reason it takes
-    // the step: with `ProductiveByStrategy` on, nothing is dropped at all.
-    const drop = productivityFilter(step, probe.present);
+    // and `ripple` have no age (`Order.feature:281-289`). It is a member FILTER, which is the same
+    // predicate `productivityFilter` returns for a row and the reason it takes the step: with
+    // `ProductiveByStrategy` on, nothing is dropped at all.
+    const drop = productivityFilter(step, probe.present, probe.value);
     if (!drop) return null;
     const kept = drop.keep
       ? make.filter({ id: fresh('mof'), input: members, channels: [], type: members.type, pred: drop.keep })
@@ -1069,17 +1069,16 @@ export function correlatedListMembers(
  * The FIRST member of a list, as a scalar child value's parts — `by(__.<list>.unfold())` where a bare
  * trailing `unfold()` is `TraversalUtil.produce`'s `.next()` (the first result). Only a SCALAR member is a
  * value a scalar `ChildValue` can carry; an element / map / nested-list member is a different consumer's
- * and declines. `present` is the list's non-emptiness (a productive-absent empty list drops the
- * traverser). Lives here because it reads the private `MEMBER` columns `correlatedListMembers` projects.
+ * and declines. Its presence is its value's nullness (an empty list is NULL). Lives here because it reads the private `MEMBER` columns `correlatedListMembers` projects.
  */
-export function firstScalarMember(list: Expr, of: ListOf, fresh: Minter): { value: Expr; vtype?: Expr; present: Expr } | null {
+export function firstScalarMember(list: Expr, of: ListOf, fresh: Minter): { value: Expr; vtype?: Expr } | null {
   const members = correlatedListMembers(list, of, fresh);
   if (!members || members.framing.kind !== 'scalar') return null;
   const order = col(members.rel.id, MEMBER.ord);
   const value = firstOf(members.rel, col(members.rel.id, 'v'), order, fresh);
   const vt = perRowColumnOf(members.framing.type);
   const vtype = vt ? firstOf(members.rel, col(members.rel.id, vt), order, fresh) : undefined;
-  return { value, ...(vtype ? { vtype } : {}), present: { kind: 'exists', negated: false, plan: members.rel } };
+  return { value, ...(vtype ? { vtype } : {}) };
 }
 
 /**

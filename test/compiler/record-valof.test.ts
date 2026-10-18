@@ -9,7 +9,7 @@ import type { RecordField, RelFraming } from '../../src/compiler/rel/framing.ts'
 import { STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 
 const field = (key: string, framing: RelFraming): RecordField =>
-  ({ key, prefix: `f_${key}`, framing, optional: false, presentCol: false });
+  ({ key, prefix: `f_${key}`, framing, optional: false });
 const vertex: RelFraming = { kind: 'elements', elem: 'vertex' };
 const edge: RelFraming = { kind: 'elements', elem: 'edge' };
 const name: RelFraming = { kind: 'scalar', type: STATIC('string') };

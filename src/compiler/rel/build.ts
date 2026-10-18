@@ -10,6 +10,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType, type WindowSpec } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RootedRead } from './child.ts';
+import { containsSelfRef, exprHasSubquery, freeRelIds } from '../../rel/walk.ts';
 
 /**
  * THE CONSTRUCTION LEAF every RelIR lowering module sits on — the physical schema as the algebra sees
@@ -179,6 +180,16 @@ export const collectedOf = (
 
 export const fenced = (rel: Rel, fresh: Minter): Rel =>
   (rel.kind === 'materialize' ? rel : make.materialize({ id: fresh('fm'), input: rel, channels: rel.channels, type: rel.type }));
+
+/**
+ * A projection whose COMPUTED value a presence filter will read (`value IS NOT NULL` — presence is value
+ * nullness, `ChildValue.present`), FENCED where the value is a correlated read and the relation is
+ * self-contained — the assembler otherwise re-inlines the column as the expression that computes it, and
+ * the filter would spell the whole read a second time. Not over a correlated or recursive input, where a
+ * fence would hoist to a CTE that cannot see the outer row (`freeRelIds`) or the walk (`containsSelfRef`).
+ */
+export const presenceFenced = (rel: Rel, value: Expr, fresh: Minter): Rel =>
+  (exprHasSubquery(value) && freeRelIds(rel).size === 0 && !containsSelfRef(rel) ? fenced(rel, fresh) : rel);
 
 /** Physical columns of the two element tables, as `Scan` must declare them. `Scan` is the one node
  *  that names the physical schema (§3.3), so this list IS the algebra's view of storage. */

@@ -18,16 +18,16 @@ import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, t
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, meta, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
 import { typedValueEq } from './predicate.ts';
-import { knownPresence, type ChildValue } from './child.ts';
+import { presenceOf, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
-import { fieldCol, framingCols, PRESENT_COL, type RelFraming } from './framing.ts';
+import { fieldCol, framingCols, type RelFraming } from './framing.ts';
 import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
@@ -35,9 +35,10 @@ import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
-const presenceOf = (cv: ChildValue): Expr => {
-  if (cv.present === 'unknown') throw new Error('RelIR lowering: a merge value reached its carrier with an unknown presence');
-  return cv.present;
+const admittedPresence = (cv: ChildValue): Expr => {
+  const present = presenceOf(cv.present, cv.expr);
+  if (!present) throw new Error('RelIR lowering: a merge value reached its carrier with an unknown presence');
+  return present;
 };
 
 /**
@@ -1675,7 +1676,7 @@ const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes t
  */
 function resolveValueRows(
   body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, fresh: Minter, asKey = false,
-): { readonly rel: Rel; readonly mayBeMulti: boolean; readonly framing: RelFraming } | null {
+): { readonly rel: Rel; readonly mayBeMulti: boolean; readonly framing: RelFraming; readonly nullFree?: true } | null {
   const rows = child.rows(body, site.host, site.hostElem, site.aliases, site.origin);
   if (rows && rows.framing.kind === 'scalar') {
     const typed = rows.rel.type.cols.some((column) => column.name === 'vtype');
@@ -1696,22 +1697,24 @@ function resolveValueRows(
   }
   const host: ChildHost = { kind: 'element', id: col(site.host.id, 'id'), elem: site.hostElem, row: { rel: site.host, aliases: site.aliases } };
   const produced = child.scalar(body, host);
-  const present = produced && knownPresence(produced.present);
-  if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || !present) return null;
+  if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || produced.present === 'unknown') return null;
   // A NUMERIC reducer's `vt` is a Gremlin type name like any other tag (`REDUCED_TYPE`).
   const vt = produced.vtype
     ?? scalarVtype(produced.framing, asKey);
   if (!vt) return null;
-  const valued = make.project({
-    id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('present', 'int', true)),
-    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt],
-      ['sq', compilerInt(0)], ['present', present]],
+  const projected = make.project({
+    id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS),
+    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt], ['sq', compilerInt(0)]],
   });
-  const kept = make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type, pred: col(valued.id, 'present') });
+  const valued = produced.present === 'always' ? projected : presenceFenced(projected, produced.expr, fresh);
+  const kept = produced.present === 'always' ? valued
+    : make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type, pred: presenceOf('value-nullness', col(valued.id, 'v'))! });
   return {
     rel: make.project({ id: fresh('rv'), input: kept, channels: [], type: typeOf(...VALUE_ROW_COLS), exprs: VALUE_ROW_COLS.map((column) => [column.name, col(kept.id, column.name)] as const) }),
     mayBeMulti: false,
     framing: produced.framing,
+    // A value-nullness body's NULL was filtered as absent, so no NULL row is left to refuse.
+    ...(produced.present === 'always' ? {} : { nullFree: true as const }),
   };
 }
 
@@ -2048,8 +2051,8 @@ function prepareRuntimeWrite(
   if (site.resolve === 'first') absentGuard(site, resolved.rel, guard, fresh);
   const values = first ? firstPerTraverser(resolved.rel, guard, fresh) : resolved.rel;
   // Only the values the write APPLIES are asked: a null behind the first result of a folded parameter or
-  // an edge value is never applied by the reference either.
-  nullValueGuard(values, guard, fresh);
+  // an edge value is never applied by the reference either. A body whose NULL is ABSENT left none.
+  if (!resolved.nullFree) nullValueGuard(values, guard, fresh);
   const taken = bind ? bind(transportableValues(values, fresh), true) : values;
   return (targets, bindLater) => runtimeWriteRows(
     elem, keyedRows(taken, targets, key, fresh), resolved.mayBeMulti && !first, write.cardinality, write.meta, bindLater, guard, fresh,
@@ -2101,35 +2104,28 @@ function mapFormStatements(
   // `sq` carries for the writer's per-traverser ordering, there being one map per traverser.
   const perField: Rel[] = [];
   for (const [index, field] of rows.framing.fields.entries()) {
-    // A productive NULL would be `property(k, null)` — a REMOVAL, which this writer does not emit. For a
-    // REQUIRED field the row says whether one arrived, so `nullValueGuard` below refuses it at run time
-    // exactly as the step form does (`resolveValueRows`). An OPTIONAL field whose value can be a
-    // productive null carries its presence in its own column (`RecordField.presentCol`), so an absent
-    // entry is no row and a present null is a row the same run-time guard refuses. One that could be a
-    // productive null WITHOUT that column cannot tell the two apart, and declines.
-    if (field.framing.kind !== 'scalar' || (field.optional && field.framing.productiveNull && !field.presentCol)) return false;
+    // A NULL would be `property(k, null)` — a REMOVAL, which this writer does not emit. For a REQUIRED
+    // field the row says whether one arrived, so `nullValueGuard` below refuses it at run time exactly as
+    // the step form does (`resolveValueRows`). An OPTIONAL field's NULL is an ABSENT entry (presence is
+    // value nullness, `fieldPresence`), so it is simply not a row.
+    if (field.framing.kind !== 'scalar') return false;
     try { validatePropertyKey(field.key); } catch { return false; }
     const cols = framingCols(field.framing);
     if (!cols) return false;
-    // A presence-column field is filtered on that column BEFORE the entry projection (it is not an entry
-    // column); its surviving NULL is a productive null the run-time guard refuses.
-    const source = field.optional && field.presentCol
-      ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: col(rel.id, fieldCol(field.prefix, PRESENT_COL)) })
-      : rel;
     const typeCol = cols.find((column) => column.name !== 'v');
-    const value = col(source.id, fieldCol(field.prefix, 'v'));
-    const vt = typeCol && typeCol.name === 'vtype' ? col(source.id, fieldCol(field.prefix, 'vtype'))
-      : typeCol && typeCol.name === 'vt' ? col(source.id, fieldCol(field.prefix, 'vt')) : scalarVtype(field.framing);
+    const value = col(rel.id, fieldCol(field.prefix, 'v'));
+    const vt = typeCol && typeCol.name === 'vtype' ? col(rel.id, fieldCol(field.prefix, 'vtype'))
+      : typeCol && typeCol.name === 'vt' ? col(rel.id, fieldCol(field.prefix, 'vt')) : scalarVtype(field.framing);
     if (!vt) return false;
     const entry = make.project({
-      id: fresh('mf'), input: source, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
-      exprs: [['o', col(source.id, rows.origin)], ['v', value], ['vt', vt],
+      id: fresh('mf'), input: rel, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
+      exprs: [['o', col(rel.id, rows.origin)], ['v', value], ['vt', vt],
         ['sq', compilerInt(index)], ['k', text(field.key)]],
     });
     // An OPTIONAL field is an entry the map may not HAVE — `ProjectStep` omits an unproductive `by()`'s
-    // key (`ProjectStep.java:66`) — and, without a presence column, its absence is the record's own
-    // presence test (`fieldPresence`: the field's first column is NULL), so the entry is simply not a row.
-    perField.push(field.optional && !field.presentCol
+    // key (`ProjectStep.java:66`) — and its absence is the record's own presence test (`fieldPresence`:
+    // the field's first column is NULL), so the entry is simply not a row.
+    perField.push(field.optional
       ? make.filter({ id: fresh('f'), input: entry, channels: [], type: entry.type, pred: { kind: 'binary', op: 'is not', left: col(entry.id, 'v'), right: compilerNull() } })
       : entry);
   }
@@ -2252,16 +2248,17 @@ function armValueWriteCorrelated(
   const key = propertyKeyExpr(write.key, write.keyName);
   const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases } };
   const produced = child.scalar(write.value.body, host);
-  const present = produced && knownPresence(produced.present);
-  if (!produced || produced.framing.kind !== 'scalar' || !present) return false;
+  if (!produced || produced.framing.kind !== 'scalar' || produced.present === 'unknown') return false;
   // The value AT the driver, carrying the driver's `ord` so it lands on the right merged element. An
-  // unproductive driver is filtered out (the reference's 0-result skip), the same shape the carrier uses.
-  const valsAll = make.project({
+  // unproductive driver (a NULL value) is filtered out (the reference's 0-result skip).
+  const projectedVals = make.project({
     id: fresh('av'), input: incoming, channels: [],
-    type: typeOf(...(hasOrd ? [meta('vord', 'int')] : []), meta('v', 'any', true), meta('vtype', 'text', true), meta('present', 'int', true)),
-    exprs: [...(hasOrd ? [['vord', col(incoming.id, ORD)] as const] : []), ['v', produced.expr], ['vtype', produced.vtype ?? compilerNull('text')], ['present', present]],
+    type: typeOf(...(hasOrd ? [meta('vord', 'int')] : []), meta('v', 'any', true), meta('vtype', 'text', true)),
+    exprs: [...(hasOrd ? [['vord', col(incoming.id, ORD)] as const] : []), ['v', produced.expr], ['vtype', produced.vtype ?? compilerNull('text')]],
   });
-  const vals = make.filter({ id: fresh('af'), input: valsAll, channels: [], type: valsAll.type, pred: col(valsAll.id, 'present') });
+  const valsAll = produced.present === 'always' ? projectedVals : presenceFenced(projectedVals, produced.expr, fresh);
+  const vals = produced.present === 'always' ? valsAll
+    : make.filter({ id: fresh('af'), input: valsAll, channels: [], type: valsAll.type, pred: presenceOf('value-nullness', col(valsAll.id, 'v'))! });
   const joined = make.join({
     id: fresh('j'), left: target, right: vals, channels: [],
     ...(hasOrd ? { join: 'inner' as const, on: eq(col(target.id, ORD), col(vals.id, 'vord')) } : { join: 'cross' as const }),
@@ -4203,9 +4200,9 @@ function mergeVComputed(
     exprs: [
       ...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []),
       ...cKeys.flatMap((_, i) => [
-        [ppCol(i), { kind: 'case', whens: [[presenceOf(values[i]!), compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
-        [cvCol(i), gate(presenceOf(values[i]!), values[i]!.expr)] as const,
-        [ptCol(i), gate(presenceOf(values[i]!), pts[i]!)] as const,
+        [ppCol(i), { kind: 'case', whens: [[admittedPresence(values[i]!), compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
+        [cvCol(i), gate(admittedPresence(values[i]!), values[i]!.expr)] as const,
+        [ptCol(i), gate(admittedPresence(values[i]!), pts[i]!)] as const,
       ]),
     ],
   }), true);
@@ -5100,9 +5097,9 @@ function mergeEComputed(
       ...(src ? [['src', src] as const] : []),
       ...(tgt ? [['tgt', tgt] as const] : []),
       ...cKeys.flatMap((_, i) => [
-        [ppCol(i), { kind: 'case', whens: [[presenceOf(values[i]!), compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
-        [cvCol(i), gate(presenceOf(values[i]!), values[i]!.expr)] as const,
-        [ptCol(i), gate(presenceOf(values[i]!), pts[i]!)] as const,
+        [ppCol(i), { kind: 'case', whens: [[admittedPresence(values[i]!), compilerInt(1)]], else: compilerInt(0) } as Expr] as const,
+        [cvCol(i), gate(admittedPresence(values[i]!), values[i]!.expr)] as const,
+        [ptCol(i), gate(admittedPresence(values[i]!), pts[i]!)] as const,
       ]),
     ],
   }), true);

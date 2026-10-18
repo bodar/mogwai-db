@@ -16,7 +16,7 @@ import { floatValueOf } from './float.ts';
 import { hostTag, type ChildHost, type ChildSeam } from './child.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import type { FramedRel } from './framing.ts';
-import { byProjection, byTyped, keepOnNamed, modulations, productivityFilter, valueMayBeNull } from './modulator.ts';
+import { byProjection, byTyped, modulations, productivityFilter } from './modulator.ts';
 import { deferral, evidenceOf, NUMBER_TAGS, numericOperandOffences, raisingRows, type ValueEvidence } from './receiver.ts';
 import type { GraphSource } from './source.ts';
 
@@ -167,10 +167,9 @@ export function sackMutate(
   const evidence: ValueEvidence = typed?.evidence ?? { kind: 'storage' };
   // A sack step WITHOUT a by() folds the traverser itself, and `SackValueStep` drops nothing then — a null
   // traverser is folded as a null (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/SackValueStep.java:73-76`).
-  // With one, an UNPRODUCTIVE `by()` FILTERS the traverser and a productive null is APPLIED (`:78-80`
-  // tests `TraversalProduct.isProductive`, never the value), so the drop reads PRESENCE — and declines
-  // where the producer cannot say.
-  const drop = bys[0] ? productivityFilter(step, projected.present) : {};
+  // With one, an UNPRODUCTIVE `by()` FILTERS the traverser (`:78-80`), and a NULL value is no value —
+  // the drop is the named value's non-nullness; a producer that cannot say declines.
+  const drop = bys[0] ? productivityFilter(step, projected.present, value) : {};
   if (!drop) return null;
 
   // THREE NODES, and the middle one is why: the by() value has to be FILTERED on before it is folded
@@ -188,24 +187,18 @@ export function sackMutate(
   const operandTotal = evidence.kind === 'static' ? compilerText(evidence.tag)
     : evidence.kind === 'tag' && evidence.nullOnlyForNull ? evidence.tag : totalTag(tagOf(evidence), value);
   const common = carried ? commonClass(col(rel.id, SACK_TYPE_COL), operandTotal) : compilerNull();
-  // The presence rides as its own column only where it is NOT the value's non-nullness (a child's
-  // EXISTS, an alias guard) — the stored-property case keeps reading the named value.
-  const heldPresent = 'skp';
-  const presentCol = drop.keep && !keepOnNamed(drop.keep, value, value) ? drop.keep : undefined;
   const payload = payloadCols(rel);
   // A MINTING `assign` adds the channel here, in the same projection that names the value — so the
   // fold below reads a column that exists whether or not a `withSack()` seeded one.
   const channels = carried ? rel.channels : withSack(rel.channels);
   const named = make.project({
     id: fresh('skb'), input: rel, channels,
-    type: typeOf(...payload, meta(held, 'any', true), meta(heldTag, 'text', true), meta(heldClass, 'int', true),
-      ...(presentCol ? [meta(heldPresent, 'int', true)] : []), ...carriedCols(channels)),
+    type: typeOf(...payload, meta(held, 'any', true), meta(heldTag, 'text', true), meta(heldClass, 'int', true), ...carriedCols(channels)),
     exprs: [
       ...payload.map((column) => [column.name, col(rel.id, column.name)] as const),
       [held, value],
       [heldTag, operandTotal],
       [heldClass, common],
-      ...(presentCol ? [[heldPresent, presentCol] as const] : []),
       ...channels.map((channel) => [channel.col,
         sackColumn(channel.col) && !carried ? compilerNull() : col(rel.id, channel.col)] as const),
     ],
@@ -219,14 +212,12 @@ export function sackMutate(
   const base = freeRelIds(named).size === 0 && !containsSelfRef(named)
     ? make.materialize({ id: fresh('skz'), input: named, channels: named.channels, type: named.type })
     : named;
-  const onValue = drop.keep && !presentCol ? keepOnNamed(drop.keep, value, col(base.id, held)) : undefined;
-  const keep = presentCol ? col(base.id, heldPresent) : onValue;
-  const kept = keep
-    ? make.filter({ id: fresh('skf'), input: base, channels: base.channels, type: base.type, pred: keep })
+  const kept = drop.keep
+    ? make.filter({ id: fresh('skf'), input: base, channels: base.channels, type: base.type, pred: productivityFilter(step, 'value-nullness', col(base.id, held))!.keep! })
     : base;
-  // The operand can still be NULL wherever the drop did not test its nullness: a by()-less fold of a null
-  // traverser, and a by() whose PRODUCTIVE null survived its presence drop (`valueMayBeNull`).
-  const nullable = !bys[0] || (!onValue && valueMayBeNull(by, host));
+  // The operand can still be NULL wherever no drop tested its nullness: a by()-less fold of a null
+  // traverser, or a by() that always produces.
+  const nullable = !drop.keep;
   const facts = (at: Rel): FoldFacts => ({
     sack: col(at.id, SACK_COL), sackTag: col(at.id, SACK_TYPE_COL), operand: col(at.id, held),
     operandTag: evidence.kind === 'static' ? compilerText(evidence.tag) : col(at.id, heldTag),
