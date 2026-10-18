@@ -34,16 +34,19 @@ lowered.
   write over traversers the reference MERGED (`mergedOnceAlike` — `g.V().out().addV('x')` makes 4 vertices,
   not 6, and refuses where an element reaches it twice), and an EARLIER read of the writer's chain
   (`readBeforeWrite` — `g.V(4,5).where(__.in().hasNot('w')).property(single,'w',2)` and
-  `g.inject(1,2).V().addV('x')` refuse; an own-element read over a distinct stream answers). What is left:
-  - **read-before-write through a NEW EDGE crossed by a move — still answers wrong, pre-existing**: a move
-    upstream of an `addE`/`mergeE` that a later traverser re-runs can cross an edge an earlier traverser just
-    made (`g.V(1,4).out().addE('k').to(V(1))` makes 5 edges where the reference makes 6: josh's `out()` crosses
-    the `k` edge marko's traverser at josh made, and reaches marko).
-    `readBeforeWrite` does not weigh it (`bySites` drops `edges`) because the common exact form —
-    `g.V(ids).where(__.not(__.inE('l'))).addE('l').from(…)`, replication's placement — reads only edges incident to
-    its own vertex, and telling the two apart needs the written edge's endpoints against the stream at the read;
-  - **read-before-DROP** — a terminal `drop()` has no `afterWrite`, so a read upstream of it is unweighed:
-    `g.V().not(__.out()).drop()` drops peter in the reference (lop is gone by the time peter is read), not here;
+  `g.inject(1,2).V().addV('x')` refuse; an own-element read over a distinct stream answers). It weighs a NEW
+  EDGE crossed by a move (`g.V(1,4).out().addE('k').to(V(3))` refuses — josh's own `out()` crosses the edge
+  marko's traverser made), lifting only a first hop off the vertex the edge is PINNED to (`edgeAnchor`:
+  replication's `where(__.not(__.inE('l'))).addE('l').from(…)` answers); and a terminal `drop()`
+  (`terminalWrite`, `g.V().not(__.out()).drop()` refuses), where a drop's idempotence lifts own reads, an edge
+  drop's pinned hop, and a vertex drop's final hop under `dropTargetsLinked`. What is left:
+  - over-refusals of read-before-write: `dropTargetsLinked` ignores the hop's labels and direction
+    (`g.V().in('created').drop()` refuses over the `knows` edge between marko and josh); an earlier move
+    whose new-edge crossing no pin lifts, even where the edges it could cross are its own traverser's
+    (`g.V(1,2,3,4).where(__.not(__.outE('l'))).addE('l')` answers, `…from(V(2))` refuses as it must, but so
+    would a `from()` naming a vertex outside the stream); the exact barrier scan answers `unknown` for a chain
+    holding an `addE`'s `from()`/`to()` steps, so `readAfterWrite`/`interleaving` keep those later steps in the
+    window (the read-before scan stops at the writer and is not affected);
   - an earlier read in a body run per traverser (a writer inside `local()`/`sideEffect()` whose chain is not the
     traversal's own) is refused rather than placed: only the root chain says "one traverser" or "distinct";
   - over-refusals by identity: a later write reached by a literal-id re-source

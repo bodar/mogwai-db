@@ -907,8 +907,11 @@ const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'at
 const WRITES_READING_NOTHING: ReadonlySet<string> = new Set(['addV', 'addE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
 
 /** `program` — the reach of a whole PROGRAM (`ProgramWrites.reads`) rather than of a runtime body: a write
- *  step is read through its bodies, and a merge reads what its SEARCH reads. */
-function bodyReach(steps: readonly IRStep[], read: BodyReader, program = false): BodyReach {
+ *  step is read through its bodies, and a merge reads what its SEARCH reads.
+ *  `bound` — a label or side-effect read hands back only what the traverser's path or a side effect ALREADY
+ *  holds, bound by a step weighed on its own (`readBeforeWrite`, where no collector can yet hold what the
+ *  write made): it reaches no element and crosses no edge by itself; its `by()` keys it still reads. */
+function bodyReach(steps: readonly IRStep[], read: BodyReader, program = false, bound = false): BodyReach {
   const keys = new Set<string>();
   const vertexIds = new Set<number | string>();
   const edgeLabels = new Set<string>();
@@ -938,7 +941,7 @@ function bodyReach(steps: readonly IRStep[], read: BodyReader, program = false):
         if (!literal) vertexSources = true;
         else if (VERTEX_SOURCE.has(step.name)) for (const id of args as (number | string)[]) vertexIds.add(id);
       }
-      if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) {
+      if (ELEMENT_MOVES.has(step.name) || (LABEL_READING_STEPS.has(step.name) && !bound)) {
         leaves = true;
         // A move ACROSS edges reaches only those of the labels it names (`VertexStep.edgeLabels`); one from an
         // edge to its endpoints (`EdgeVertexStep`, `otherV`) reaches no edge but the one it stands on.
@@ -952,15 +955,15 @@ function bodyReach(steps: readonly IRStep[], read: BodyReader, program = false):
         || readsLabelToken([...args, ...(step.modulators ?? []).flat()])) labels = true;
       // A label spelled as an argument — `where('a', P)`, `where(P.eq('a'))`, `dedup('a')` — or inside
       // `math()`'s expression.
-      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) { leaves = true; edge(); }
-      if (step.name === 'math') strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) { leaves = true; edge(); } });
+      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a)) && !bound) { leaves = true; edge(); }
+      if (step.name === 'math' && !bound) strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) { leaves = true; edge(); } });
       if (KEY_READING_STEPS.has(step.name)) {
         let named = false;
         strings(args, (s) => { keys.add(s); named = true; });
         if (!named || step.name === 'hasKey' || step.name === 'hasValue') all = true;
       }
       // `format('%{name}')` reads a property OR a label by that name.
-      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); leaves = true; edge(); } });
+      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); if (!bound) { leaves = true; edge(); } } });
       for (const modulator of step.modulators ?? []) for (const value of modulator) strings(value, (s) => keys.add(s));
       eachChildChain(step, read, (c) => walk(c as IRStep[]), opaque);
     }
@@ -1142,6 +1145,11 @@ interface WriteSite {
   readonly searchesId?: boolean;
   /** A `mergeV` whose `onMatch` APPENDS a `T.label` to what it finds (`MergeVertexStep.java:106-113`). */
   readonly appendsLabel?: boolean;
+  /** A `mergeE`'s label for the edge it creates — its search's `T.label`, which `option(onCreate)` may not
+   *  override (`MergeElementStep.validateNoOverrides`,
+   *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:323-335`),
+   *  else onCreate's, else `edge`; absent = any label. */
+  readonly createsLabels?: KeySet;
   /** A label mutation that only APPENDS (`addLabel`): two appends commute, whichever traverser runs first. */
   readonly appends?: boolean;
   /**
@@ -1215,7 +1223,9 @@ function mergeSiteOf(step: IRStep, chain: readonly IRStep[] | undefined, at: num
     && (op === 'mergeE' || Object.keys(spec.props).every((slot) => spec.propCardinalities[slot] === 'single' || spec.propCardinalities[slot] === 'set')));
   // A search from the driver or a traversal is unknown; what `onMatch` writes is still its own map's.
   if (maps.matchFromDriver || maps.matchTraversal) return { ...unknown, keys: keysOf(maps.onMatch), onMatchAlike: alike(maps.onMatch) };
+  const label = maps.match.label ?? maps.onCreate?.label ?? ['edge'];
   return {
+    ...(op === 'mergeE' && Array.isArray(label) && label.every((l) => typeof l === 'string') ? { createsLabels: new Set(label) } : {}),
     op, target, keys: keysOf(maps.onMatch), searched: keysOf(maps.match), onMatchAlike: alike(maps.onMatch),
     searchesLabel: op === 'mergeV' && maps.match.label !== null, searchesId: maps.match.id != null,
     appendsLabel: op === 'mergeV' && maps.onMatch !== null && maps.onMatch.label !== null,
@@ -1344,7 +1354,8 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
         // A merge's onMatch map APPENDS a `T.label` to the found vertex (`MergeVertexStep.java:106-113`,
         // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java`).
         case 'mergeV': creates = true; anyKey = true; labels = true; break;
-        case 'mergeE': edges = true; edgeLabels = 'all'; anyKey = true; labels = true; break;
+        // A merge creates an edge of the label its site names (`WriteSite.createsLabels`).
+        case 'mergeE': edges = true; edgeLabels = unite(edgeLabels, site?.createsLabels ?? 'all'); anyKey = true; labels = true; break;
         case 'drop': drops = true; anyKey = true; break;
         case 'addLabel': case 'dropLabel': case 'dropLabels': labels = true; break;
         // `io()` survives as itself only in a nested body read afresh; the top-level chain has been
@@ -1914,7 +1925,9 @@ function readBeforeWrite(
   // The sized barriers before the writer: one stands right after `steps[i]` for each `i` here.
   const barriers = new Set<number>();
   if (known) {
-    const positions = bulkingPositions(steps, traversal!.rooted, steps.length, !traversal!.rooted && !traversal!.allStarts);
+    // Scanned only up to the writer: what follows it (its own endpoint bodies, its tail) places nothing before
+    // it, while what the scan reads of the WHOLE traversal (a path requirement, a `drop()`) it still reads.
+    const positions = bulkingPositions(steps, traversal!.rooted, from, !traversal!.rooted && !traversal!.allStarts);
     if (positions !== 'unknown') {
       for (const p of positions) if (p.kind === 'lazy' && p.after < from && VERTEX_FLAT_MAPS.has(steps[p.after]!.name)) barriers.add(p.after);
     }
@@ -1926,7 +1939,23 @@ function readBeforeWrite(
     single[i] = one;
     one &&= KEEPS_ONE.has(steps[i]!.name);
   }
-  const ownElement = own !== null && OWN_ELEMENT_WRITERS.has(own[0]!.name);
+  // A `drop()` lands on the traverser's own element too — a property drop on a property only its element owns.
+  const ownElement = own !== null && (OWN_ELEMENT_WRITERS.has(own[0]!.name) || own[0]!.name === 'drop');
+  const anchor = edgeAnchor(steps, from);
+  const sites = entry.effect.sites;
+  const site = sites !== 'unknown' && sites.length === 1 && steps[from]?.name === 'drop' ? sites[0]! : null;
+  // The final hop before a VERTEX drop (`droppingHop`) and whether the guard it owes is taken.
+  const hop = site?.target === 'vertex' ? droppingHop(steps, from) : -1;
+  let linked = false;
+  // A DROP every traverser on one element makes alike — the second removes what the first already did — so
+  // an own read before it needs no element reached once: a property drop always; an element drop where the
+  // element was reached by the hop the drop's own guard weighs (`droppingHop`, an edge `edgeAnchor`), so a
+  // second traverser on it is one the reference never has there once it is gone (its edge went with it).
+  const reachedBy = site?.target === 'vertex' ? hop : site?.target === 'edge' && anchor ? anchor.at : -1;
+  const idempotentAt = (i: number): boolean => site !== null && (site.target === 'property' || (reachedBy >= 0 && i > reachedBy));
+  // A collector at or after the writer may hold what the write made for an earlier traverser, which a
+  // side-effect or label read before it then hands back; with none, such a read reaches nothing (`bodyReach`'s `bound`).
+  const bound = !someStepDeep(steps.slice(from), read, (s) => collectsSideEffect(s as IRStep), true);
   let owed: 'none' | 'sized' | 'window' = 'none';
   let ownOwed = false;
   const ids = new Set<number | string>();
@@ -1937,22 +1966,36 @@ function readBeforeWrite(
     if (drains(step)) break;
     if (barriers.has(i)) when = 'sized';
     const onOwn = mine;
-    mine &&= KIND_PRESERVING.has(step.name);
+    // A `properties()` step hands on a property only its element owns: that element still owns what is written.
+    mine &&= KIND_PRESERVING.has(step.name) || (step.name === 'properties' && !hasBody(step));
     if (single[i]) continue;
     if (writeSiteOf(step) !== null || (WRITE_MODULATORS.has(step.name) && modulatesWrite(steps, i))) continue;
-    const reach = bodyReach([step], read, true);
+    const reach = bodyReach([step], read, true, bound);
     // A step reading only the traverser's own element reads an element of the kind the chain says it is.
     const ownRead = OWN_READS.has(step.name) && !hasBody(step);
-    const seen = chainObserves(reach, bySites(entry.effect, ownRead ? kindBefore(steps, i).kind : 'unknown'));
+    const effect = bySites(entry.effect, ownRead ? kindBefore(steps, i).kind : 'unknown');
+    const seen = chainObserves(reach, effect);
     if (!seen) continue;
     if (onOwn && ownRead) {
-      if (!(rooted && streamDistinctAt(steps, i, traversal, OWN_ELEMENT_WRITERS))) ownOwed = true;
+      if (!idempotentAt(i) && !(rooted && streamDistinctAt(steps, i, traversal, OWN_ELEMENT_WRITERS))) ownOwed = true;
       continue;
-    } else if (seen === 'fresh-ids' && when === 'window') { for (const id of reach.vertexIds) ids.add(id); continue; }
+    }
+    if (i === hop) { linked = true; continue; }
+    // On the anchor's vertex, a first hop in a PINNED direction crosses no edge another traverser wrote.
+    const anchored = anchor !== null && i <= anchor.at && steps.slice(i, anchor.at).every((s) => KIND_PRESERVING.has(s.name));
+    const residue = anchored ? anchoredResidue(step, anchor.pinned, read) : null;
+    if (residue && !chainObserves(bodyReach(residue, read, true, bound), effect)) {
+      // A drop is idempotent: a later traverser on the same vertex removes, if anything, the very edges an
+      // earlier one there already removed — what it reads of that vertex's edges before it changes nothing.
+      if (!anchor!.keyed || (rooted && streamDistinctAt(steps, i, traversal, OWN_ELEMENT_WRITERS))) continue;
+      ownOwed = true;
+      continue;
+    }
+    if (seen === 'fresh-ids' && when === 'window') { for (const id of reach.vertexIds) ids.add(id); continue; }
     owed = when === 'window' ? 'window' : owed === 'none' ? 'sized' : owed;
   }
   const keyed = input && streamKey(input) ? input : null;
-  if (ownOwed && !keyed) owed = 'window';
+  if ((ownOwed && !keyed) || (linked && !(input && streamKey(input) === 'id'))) owed = 'window';
   if (owed === 'window' || ids.size) {
     const also = owed === 'window' ? undefined : freshIdsAtStart(writes, ids, fresh);
     return [{ name: fresh('gq'), ...upstreamManyGuard(entry, also, SEQUENTIAL_READ_BEFORE, fresh, 1) }];
@@ -1960,6 +2003,47 @@ function readBeforeWrite(
   return [
     ...(owed === 'sized' ? [barrierHoldsAll(fresh)] : []),
     ...(ownOwed && keyed ? [repeatedGuard(keyed, 'object', SEQUENTIAL_READ_BEFORE, fresh)] : []),
+    ...(linked && input ? dropTargetsLinked(input, fresh) : []),
+  ];
+}
+
+/**
+ * THE FINAL HOP BEFORE A VERTEX `drop()` — a bare `out`/`in`/`both` with nothing but kind-preserving steps
+ * after it — or `-1`. A `DropStep` switches `LazyBarrierStrategy` off (`LazyBarrierStrategy.java:80-86`), so a
+ * later traverser re-runs the hop after an earlier one dropped. What it then reaches differs only where the
+ * hop leaves from, or lands on, a vertex already dropped: landing on one, the drop it would make is already
+ * made; leaving from one `u` that the plan's hop takes to some `v` — both being dropped, `u ≠ v` — the plan
+ * drops `v` where the reference may not. So the hop is exact when no edge joins two distinct dropped vertices
+ * (`dropTargetsLinked`): `g.V().hasLabel('person').aggregate('a').out('created').drop()` drops lop and ripple
+ * either way, and `g.V().out().drop()` refuses (josh is dropped from marko, then reached from his own start).
+ */
+function droppingHop(steps: readonly IRStep[], from: number): number {
+  let m = from - 1;
+  while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) m--;
+  const move = steps[m];
+  return move && VERTEX_MOVES.has(move.name) && !hasBody(move) ? m : -1;
+}
+
+/** The guard `droppingHop` owes: raise when an edge joins two distinct vertices of `targets` (bulk-free ids). */
+function dropTargetsLinked(targets: Rel, fresh: Minter): Binding[] {
+  const plan = nameBindings(idsOf(targets, fresh));
+  const name = fresh('dt');
+  const dropped = (): Rel => make.ref({ id: fresh('r'), name, channels: [], type: ID_TYPE });
+  const scan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')) });
+  const joins: Expr = {
+    kind: 'binary', op: 'and',
+    left: { kind: 'binary', op: 'and',
+      left: { kind: 'in-query', expr: col(scan.id, 'src'), plan: dropped(), negated: false },
+      right: { kind: 'in-query', expr: col(scan.id, 'tgt'), plan: dropped(), negated: false } },
+    right: { kind: 'binary', op: '!=', left: col(scan.id, 'src'), right: col(scan.id, 'tgt') },
+  };
+  const linking = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: joins });
+  return [
+    ...plan.bindings, { name, node: plan.result, snapshot: true },
+    {
+      name: fresh('gl'), guard: { message: SEQUENTIAL_READ_BEFORE, raiseWhen: 'rows' },
+      node: make.project({ id: fresh('p'), input: linking, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(linking.id, 'id')]] }),
+    },
   ];
 }
 
@@ -1969,26 +2053,108 @@ function readBeforeWrite(
  *  - keys: a `property()` write's own, a merge's `onMatch` keys alone on an element it FINDS
  *    (`WriteSite.keys`, `MergeVertexStep.java:78-116`), a property `drop()`'s named keys — each only on an
  *    element of its own kind (`WriteSite.target`); what it writes onto a NEW element only a source reaches
- *    (`creates`), and an element drop is `drops`', its element losing every key (`anyKey` stays);
+ *    (`creates`), and an element drop is `drops`', its element losing every key (`anyKey` stays, unless that
+ *    element is of the other kind);
  *  - labels: a label mutation or a `mergeV` `onMatch` append (`MergeVertexStep.java:106-113`) — never an
- *    edge's, which is fixed at creation.
- * A new EDGE crossed by a move (`edges`) is not weighed here: an earlier step's move reaches one only where
- * it leaves an element the write's edge is incident to — the traverser's own, or the other endpoint — which
- * no static fact here places (`docs/outstanding-work.md`, the read-before-write residue).
+ *    edge's, which is fixed at creation;
+ *  - removals (`drops`): an ELEMENT drop alone — a property drop leaves every element standing, so no move
+ *    and no source reaches anything it removed;
+ *  - a new EDGE (`edges`), which any move over a label it can carry crosses (`seesNewEdges`): a later
+ *    traverser's move re-run after an earlier traverser's `addE` crosses the new edge
+ *    (`g.V(1,4).out().addE('k').to(V(3))` makes 6 edges in the reference, not 5). Where the move is the
+ *    FIRST hop off the vertex the write's edge is pinned to, `readBeforeWrite` lifts it (`edgeAnchor`).
  */
 function bySites(effect: ProgramWrites, kind: TargetKind): ProgramWrites {
   const sites = effect.sites;
-  if (sites === 'unknown') return { ...effect, edges: false };
+  if (sites === 'unknown') return effect;
   const apart = (site: WriteSite): boolean =>
     (kind === 'vertex' || kind === 'edge') && (site.target === 'vertex' || site.target === 'edge') && site.target !== kind;
+  const elementDrop = (site: WriteSite): boolean => site.op === 'drop' && site.target !== 'property';
   const labels = effect.labels && kind !== 'edge' && sites.some((site) => site.op === 'label' || (site.op === 'mergeV' && site.appendsLabel !== false));
+  // An EDGE drop removes no vertex: only what reaches an edge — a move across one, an `E()` source — sees it go.
+  const edgeDrops = sites.some((site) => elementDrop(site) && site.target === 'edge');
+  const drops = effect.drops && sites.some((site) => elementDrop(site) && site.target !== 'edge');
+  const edges = effect.edges || edgeDrops;
+  const edgeLabels: KeySet = edgeDrops ? 'all' : effect.edgeLabels;
   // `writers` are the `property()` sites, in the order the walk met them.
   const properties = sites.filter((site) => site.op === 'property');
   const writers = properties.length === effect.writers.length ? effect.writers.filter((_, at) => !apart(properties[at]!)) : effect.writers;
-  if (!effect.anyKey || sites.some((site) => site.op === 'drop' && site.target !== 'property')) return { ...effect, writers, labels, edges: false };
+  if (!effect.anyKey || sites.some((site) => elementDrop(site) && !apart(site))) return { ...effect, writers, labels, drops, edges, edgeLabels };
   let keys: KeySet = new Set<string>();
-  for (const site of sites) if ((site.op === 'mergeV' || site.op === 'mergeE' || site.op === 'drop') && !apart(site)) keys = unite(keys, site.keys);
-  return { ...effect, anyKey: false, labels, edges: false, writers: [...writers, { run: -1, keys, fresh: false }] };
+  for (const site of sites) if ((site.op === 'mergeV' || site.op === 'mergeE' || site.op === 'drop') && !apart(site) && !elementDrop(site)) keys = unite(keys, site.keys);
+  return { ...effect, anyKey: false, labels, drops, edges, edgeLabels, writers: [...writers, { run: -1, keys, fresh: false }] };
+}
+
+/**
+ * WHERE A WRITE'S EDGES ARE PINNED TO ONE TRAVERSER'S VERTEX — the vertex entering `steps[at]` — and in which
+ * direction, or `null`:
+ *  - an `addE` with no `from()` makes an edge OUT of the traverser's vertex, with no `to()` one INTO it
+ *    (`AddEdgeStep`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AddEdgeStep.java`:
+ *    an unset endpoint is the traverser); `at` is the `addE` itself, and the write's input is those vertices
+ *    (`keyed`, so a run-time guard can say no vertex reached it twice);
+ *  - an edge `drop()` reached by `outE()`/`inE()` (then kind-preserving steps) removes an edge out of / into
+ *    the vertex entering that move, which stands at `at`. Not `keyed`, and owing nothing even over a stream
+ *    that reaches one vertex twice: a drop is idempotent, and every traverser on one vertex removes the same
+ *    edges of it, so a later one's read of them changes nothing it removes.
+ * Another traverser's edge is then pinned to ITS vertex, so a hop in a pinned direction off a different
+ * vertex never crosses it: `where(__.not(__.inE('l'))).addE('l').from(…)` (replication's placement) reads
+ * only edges INTO its own vertex, and another traverser's new edge goes into that one's.
+ */
+function edgeAnchor(steps: readonly IRStep[], from: number): { readonly at: number; readonly pinned: ReadonlySet<string>; readonly keyed: boolean } | null {
+  const writer = steps[from];
+  if (writer?.name === 'addE') {
+    let named = new Set<string>();
+    for (let j = from + 1; j < steps.length && ADD_E_CLUSTER.has(steps[j]!.name); j++) named = new Set([...named, steps[j]!.name]);
+    const pinned = new Set([...(named.has('from') ? [] : ['out']), ...(named.has('to') ? [] : ['in'])]);
+    return pinned.size ? { at: from, pinned, keyed: true } : null;
+  }
+  if (writer?.name !== 'drop') return null;
+  let m = from - 1;
+  while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) m--;
+  const move = steps[m];
+  if (!move || hasBody(move) || (move.name !== 'outE' && move.name !== 'inE')) return null;
+  return { at: m, pinned: new Set([move.name === 'outE' ? 'out' : 'in']), keyed: false };
+}
+/** The steps an `addE`'s own cluster holds after it: its endpoints, its properties, a label. */
+const ADD_E_CLUSTER: ReadonlySet<string> = new Set(['from', 'to', 'property', 'as']);
+/** The filters whose bodies start from the traverser itself and hand it on unchanged. */
+const FILTER_WRAPPERS: ReadonlySet<string> = new Set(['where', 'not', 'filter', 'and', 'or']);
+
+/** Is `step` a bare move off its vertex in a `pinned` direction — `out`/`outE` over `out`, `in`/`inE` over
+ *  `in`, `both`/`bothE` over both? */
+function pinnedHop(step: IRStep, pinned: ReadonlySet<string>): boolean {
+  if ((!VERTEX_MOVES.has(step.name) && !EDGE_MOVES.has(step.name)) || hasBody(step)) return false;
+  if (!step.args.every((a) => typeof a.value === 'string')) return false;
+  const dir = step.name.replace(/E$/, '');
+  return dir === 'both' ? pinned.has('out') && pinned.has('in') : pinned.has(dir);
+}
+
+/**
+ * WHAT `step`, ON THE ANCHOR'S VERTEX (`edgeAnchor`), READS BESIDES A FIRST HOP IN A PINNED DIRECTION — the
+ * steps left to weigh, or `null` where it cannot say. A pinned hop leaves nothing; a filter wrapper
+ * (`where`/`not`/`filter`/`and`/`or`) whose every body is read: its leading own-vertex steps, each weighed
+ * the same way, and everything AFTER the body's first pinned hop whole (it stands on what the hop reached).
+ * Any other step stands as it is.
+ */
+function anchoredResidue(step: IRStep, pinned: ReadonlySet<string>, read: BodyReader): IRStep[] | null {
+  if (pinnedHop(step, pinned)) return [];
+  if (!FILTER_WRAPPERS.has(step.name)) return [step];
+  if (step.modulators?.length || step.optionArms || step.repeatRegion || step.withArgs?.length || !step.args.length) return null;
+  const residue: IRStep[] = [];
+  for (const arg of step.args) {
+    if (!isNested(arg.value)) return null;
+    const body = read((arg.value as { nested: unknown }).nested) as readonly IRStep[] | null;
+    if (!body) return null;
+    for (let j = 0; j < body.length; j++) {
+      const inner = body[j]!;
+      if (pinnedHop(inner, pinned)) { residue.push(...body.slice(j + 1)); break; }
+      if (!KIND_PRESERVING.has(inner.name)) { residue.push(...body.slice(j)); break; }
+      const own = anchoredResidue(inner, pinned, read);
+      if (!own) return null;
+      residue.push(...own);
+    }
+  }
+  return residue;
 }
 
 /** Is the `from`/`to`/`option` modulator at `steps[at]` one of a WRITE step's (the nearest step before it
@@ -2142,16 +2308,30 @@ export function writeAfterWrite(writes: ProgramWrites, writer: readonly WriteSit
   }).filter((guard): guard is GuardBinding => guard !== null);
 }
 
-/** `writeAfterWrite` for a TERMINAL `drop()`, which composes no continuation: its guards ahead of its own
- *  statements. `target` is what the lowering drops — an element of a known kind, or (`'property'`) the
- *  property rows of the stream ending at `steps[at]`, whose keys the chain's `properties(k…)` names. */
+/** `writeAfterWrite` and `readBeforeWrite` for a TERMINAL `drop()`, which composes no continuation: its
+ *  guards ahead of its own statements. `target` is what the lowering drops — an element of a known kind, or
+ *  (`'property'`) the property rows of the stream ending at `place.from`, whose keys the chain's
+ *  `properties(k…)` names; `input` is the stream reaching it. A read upstream of the drop that a later
+ *  traverser re-runs sees what it removed for an earlier one — a `DropStep` switches `LazyBarrierStrategy`
+ *  off altogether (`LazyBarrierStrategy.java:80-86`), so nothing is pulled ahead: `g.V().not(__.out()).drop()`
+ *  drops peter too in the reference (lop is gone before peter is read). */
 export function terminalWrite(
-  writes: ProgramWrites, target: Elem | 'property', steps: readonly IRStep[], at: number, bindings: readonly Binding[], fresh: Minter,
+  writes: ProgramWrites, target: Elem | 'property', place: WritePlace, input: Rel, bindings: readonly Binding[],
+  params: Record<string, any>, fresh: Minter,
 ): Binding[] {
+  const { steps, from: at } = place;
   const kind: ChainKind = target === 'property'
     ? (() => { const before = kindBefore(steps, at); return before.kind === 'property' ? before : { kind: 'property', keys: 'all' }; })()
     : { kind: target, keys: 'all' };
-  return [...writeAfterWrite(writes, [writeSiteOf(steps[at]!, steps, at, {}, kind)!], fresh, steps[at]), ...bindings];
+  const site = writeSiteOf(steps[at]!, steps, at, {}, kind)!;
+  const entry: UpstreamWrite = {
+    effect: { ...programWrites([steps[at]!], params), sites: [site] }, count: writes.draws ? null : fresh('wn'), used: false,
+    placed: new Map(), output: null, own: false, ownDistinct: false, stream: null,
+  };
+  // A property drop's input is its property rows, not the element that owns them: no guard keyed on it.
+  const before = readBeforeWrite(writes, entry, place, [steps[at]!], target === 'property' ? null : input, params, fresh);
+  const counted = entry.count !== null && entry.used ? [streamCount(input, entry.count, fresh)] : [];
+  return [...counted, ...writeAfterWrite(writes, [site], fresh, steps[at]), ...before, ...bindings];
 }
 
 

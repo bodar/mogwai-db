@@ -186,3 +186,59 @@ Feature: mogwai addendum — a write runs ONE TRAVERSER AT A TIME through every 
       | result |
       | d[6].l |
     And the graph should return 6 for count of "g.V().has(\"w\",1)"
+
+  # READ BEFORE an addE: no barrier follows the first flat-map, so josh's own out() crosses the k edge
+  # marko's traverser at josh made — 6 edges, not 5.
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_VX1_4X_out_addEXkX_toXVX3XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,4).out().addE("k").to(__.V(3)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+    And the graph should return 6 for count of "g.E().hasLabel(\"k\")"
+
+  # READ BEFORE a drop(): a DropStep switches LazyBarrierStrategy off, and lop is gone before peter is read.
+  @gap:write-interleave
+  @Unsupported
+  Scenario: g_V_notXoutX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().not(__.out()).drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 2 for count of "g.V()"
+
+  # Replication's placement: each new edge goes INTO its own traverser's vertex, so no other traverser's
+  # inE("l") can see it (`edgeAnchor`).
+  @gap:write-interleave
+  Scenario: g_VX1_2_3_4X_whereXnotXinEXlXXX_addEXlX_fromXVX6XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1,2,3,4).where(__.not(__.inE("l"))).addE("l").from(__.V(6)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+    And the graph should return 4 for count of "g.E().hasLabel(\"l\")"
+
+  # The final hop before a vertex drop: no edge joins the two dropped vertices, so nobody's hop changes.
+  @gap:write-interleave
+  Scenario: g_V_outXknowsX_drop
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out("knows").drop()
+      """
+    When iterated to list
+    Then the result should be empty
+    And the graph should return 4 for count of "g.V()"

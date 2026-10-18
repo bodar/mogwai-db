@@ -187,3 +187,82 @@ describe('a write over traversers the reference MERGED runs once per merged trav
     expect(values(seededStore(), "g.V(1,4,6).out().out().property('w',2).values('w')")).toEqual([2, 2]);
   });
 });
+
+describe('a READ BEFORE an addE, crossing an edge an earlier traverser just made (readBeforeWrite, `edges`)', () => {
+  // No barrier follows the FIRST flat-map, and V(1,4) (fewer than five ids) is none
+  // (LazyBarrierStrategy.java:109-130): traverser 2's out() crosses the edges traverser 1 made. The
+  // reference's answers: 8, 6, 7, 8, 8, 8, 8, four `created` edges, 8, 9 — each one or more short here before.
+  for (const q of [
+    "g.V(1,4).out().addE('k').from(V(4)).to(V(3)).count()",
+    "g.V(1,4).out().addE('k').to(V(3)).count()",
+    "g.V(1,4).both().addE('k').to(V(3)).count()",
+    "g.V(1,4).outE().inV().addE('k').from(V(4)).to(V(3)).count()",
+    "g.V(1,4).outE().addE('k').from(V(4)).to(V(3)).count()",
+    "g.V(1,4).local(out()).addE('k').from(V(4)).to(V(3)).count()",
+    "g.V(1,4).union(out()).addE('k').from(V(4)).to(V(3)).count()",
+    "g.V(1,4).out('created').addE('created').from(V(4)).to(V(3))",
+    "g.V().hasLabel('person').out().addE('k').to(V(1)).count()",
+    // a labelled path suppresses every barrier
+    "g.inject(1,2).as('i').V(1).out().addE('k').from(V(1)).to(V(2)).count()",
+    "g.V(1,4).out().union(addE('k').to(V(3))).count()",
+    // a merge's new edge, crossed by a later traverser's unlabelled both()
+    "g.V(1).both().both().as('v').mergeE([(T.label):'dup',(Direction.OUT):Merge.outV,(Direction.IN):Merge.inV]).option(Merge.outV,select('v')).option(Merge.inV,select('v'))",
+    // an own-vertex read whose direction is NOT pinned to the traverser's vertex: from(V(2)) makes edges out
+    // of vadas, which vadas's own outE('l') then sees; to(V(2)) makes edges into her
+    "g.V(1,2,3,4).where(__.not(__.outE('l'))).addE('l').from(V(2))",
+    "g.V(1,2,3,4).where(__.not(__.inE('l'))).addE('l').to(V(2))",
+    // past the pinned hop the body stands on another vertex, whose edges are anyone's
+    "g.V(1,2,3).where(__.not(__.inE('l').outV().outE('l'))).addE('l').from(V(6))",
+  ]) test(q, () => refuses(q));
+
+  const edges = (q: string): unknown[] => { const store = seededStore(); run(store, q); return values(store, "g.E().hasLabel('l').count()"); };
+
+  test('a first hop off the traverser\'s own vertex in the direction the new edge is pinned to (edgeAnchor)', () => {
+    // replication's placement: the new edge goes INTO each traverser's own vertex, so another's inE('l') never sees it
+    expect(edges("g.V(1,2,3,4).where(__.not(__.inE('l'))).addE('l').from(V(6))")).toEqual([4]);
+    expect(edges("g.V(1,2,3).has('name').where(__.not(__.inE('l'))).has('name').addE('l').from(V(6))")).toEqual([3]);
+    expect(edges("g.V(1,2,3).where(__.not(__.in('l').has('name'))).addE('l').from(V(6))")).toEqual([3]);
+    // a self-loop is pinned both ways
+    expect(edges("g.V(1,2,3).where(__.not(__.both('l'))).addE('l')")).toEqual([3]);
+  });
+
+  test('a sized barrier between the reads and the addE: every traverser read first', () => {
+    // out() is the second flat-map, so a NoOpBarrierStep follows it; to(V(3))'s own body places nothing before it
+    for (const q of ["g.V(1,4).out().out().addE('k').to(V(3))", "g.V().out().out().addE('k').from(V(3))"]) {
+      const store = seededStore();
+      run(store, q);
+      expect(values(store, "g.E().hasLabel('k').count()"), q).toEqual([2]);
+    }
+  });
+
+  test('a label read reaches no edge by itself', () => {
+    // the corpus's codeveloper form: where(neq('a')) compares path objects
+    expect(values(seededStore(), "g.V().as('a').out('created').in('created').where(neq('a')).as('b').addE('codeveloper').from('a').to('b').count()")).toEqual([6]);
+  });
+});
+
+describe('a READ BEFORE a terminal drop(), which switches LazyBarrierStrategy off (LazyBarrierStrategy.java:80-86)', () => {
+  // The reference's answers: [1,4] (lop is gone before peter is read), the same, [1,5,6] (josh is dropped from
+  // marko before his own start reaches him, so ripple survives), and 5 edges (edge 11 survives: josh has one left).
+  for (const q of [
+    'g.V().not(__.out()).drop()',
+    'g.V().where(__.out().count().is(0)).drop()',
+    'g.V().out().drop()',
+    'g.V().out().out().drop()',
+    'g.E().where(__.outV().outE().count().is(2)).drop()',
+  ]) test(q, () => refuses(q));
+
+  const after = (q: string, read: string): unknown[] => { const store = seededStore(); run(store, q); return values(store, read); };
+
+  test('own-element reads, a drain between, and a final hop no edge joins two dropped vertices across', () => {
+    expect(after("g.V().has('age',gt(30)).drop()", 'g.V().id()')).toEqual([1, 2, 3, 5]);
+    expect(after('g.V().not(__.out()).barrier().drop()', 'g.V().id()')).toEqual([1, 4, 6]);
+    expect(after("g.V().out('knows').drop()", 'g.V().id()')).toEqual([1, 3, 5, 6]);
+    expect(after("g.V().hasLabel('person').aggregate('a').out('created').drop()", 'g.V().id()')).toEqual([1, 2, 4, 6]);
+    // a target reached twice behind the hop: dropped again, it is a no-op
+    expect(after("g.V().out('created').has('lang','java').drop()", 'g.V().id()')).toEqual([1, 2, 4, 6]);
+    // an edge drop pinned to the vertex the read stands on
+    expect(after('g.V().where(__.out()).outE().drop()', 'g.E().count()')).toEqual([0]);
+    expect(after("g.V().properties('name').hasValue('marko').drop()", "g.V(1).values('name')")).toEqual([]);
+  });
+});

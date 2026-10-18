@@ -1381,8 +1381,10 @@ describe('the RelIR spine', () => {
         { xx1: new Map<any, any>([[T('label'), 'knows'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
       // DUPLICATE incoming rows must get ONE edge and two traversers — upstream's second loop
       // iteration matching what its first created, which here is `Distinct` over the endpoint pair
-      // rather than a re-read. `both().both()` revisits vertices, which is what makes it a witness.
-      [`g.V(1).both().both().as("v").mergeE(xx1)${opts}`,
+      // rather than a re-read. `both().both()` revisits vertices, which is what makes it a witness. Its
+      // moves name their labels: an unlabelled `both()` re-run by a later traverser would cross the `dup`
+      // self-loops an earlier one made (no barrier follows the first flat-map), which refuses.
+      [`g.V(1).both('knows','created').both('knows','created').as("v").mergeE(xx1)${opts}`,
         { xx1: new Map<any, any>([[T('label'), 'dup'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
     ];
     for (const [gremlin, params] of cases) {

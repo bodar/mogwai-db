@@ -5434,7 +5434,7 @@ function elementTail(
       // have rejected is to decline it, not to lower the prefix and forget the rest.
       if (at !== steps.length - 1 || step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
       const dropped = elementDrop(rel, elem, fresh);
-      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: terminalWrite(ctx.writes, elem, steps, at, dropped.bindings, fresh), bulked: false };
+      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: terminalWrite(ctx.writes, elem, writePlace(ctx, steps, at, at + 1, dropped.result), rel, dropped.bindings, ctx.params, fresh), bulked: false };
     }
     // `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the bound alias tuple, on the ELEMENT stream
     // BEFORE any `select`. The traverser stays the current element; only the first per-tuple survives.
@@ -5702,7 +5702,7 @@ function propertyTail(
   if (step.name === 'drop') {
     if (from !== steps.length - 1) return null;
     const dropped = propertyDrop(rel, elem, fresh);
-    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: terminalWrite(ctx.writes, 'property', steps, from, dropped.bindings, fresh), bulked: false };
+    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: terminalWrite(ctx.writes, 'property', writePlace(ctx, steps, from, from + 1, dropped.result), rel, dropped.bindings, ctx.params, fresh), bulked: false };
   }
   // A bound VertexProperty NOW carries its landed identity: the detached compile lands `vpid`, which
   // `boundPropertyRelation` reads into `p_id`, so `properties().id()` over a bound vertex frames the
