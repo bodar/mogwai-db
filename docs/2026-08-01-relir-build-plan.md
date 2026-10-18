@@ -1143,6 +1143,14 @@ in `docs/outstanding-work.md`). Pinned in new L4 addenda (`branch-arm-sorted-str
 `identity-removal-suppressed`, `path-by-value-position`, `raise-past-sorted-slice`, `per-traverser-body-order`).
 Baseline moved: sql-hygiene (r1–r3, reasons in those commits). CI green.
 
+✅ **Merge after a sorted host LANDED ON TRUNK 2026-10-18 (`90758e2c`, `43e61c78`, ff-order-merge-after-host).**
+A root merge position downstream of a sorted host (LazyBarrierStrategy's NoOpBarrierStep after a FlatMapStep,
+`TraverserSet` merging at first arrival) declines where the exact scan is `unknown` (`sortedHostMergeAt`,
+`ir/bulk.ts`, asked by `mergedAt`); a sorted `local()` in a batching union/choose arm owes its order
+(`armHoldsSortedLocal`, closing residue 5b); a single-arm union merges its starts; `count()` after a pooled
+slice drops the group-pool guard (`sum()` keeps it). Pinned in `test/L4-addendum/sorted-host-merge.feature` and
+`group-value-traverser-set.feature`. Baseline moved: sql-hygiene `choose` 7158 -> 8141 (reason in `90758e2c`). CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
