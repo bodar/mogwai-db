@@ -30,7 +30,7 @@
 
 // A number past 2^53 is spelled with a run of 16+ digits, or with an exponent (`2.7e+19`); a whole Double
 // with a point (`1.0`, `-0.0`).
-import { binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
+import { binary64CarrierText, binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
 import { RaisedByQuery } from './rel/raise.ts';
 import { assertCarriable } from './sql/kernel/q.ts';
 
@@ -125,6 +125,18 @@ export function decodeCarriers(value: unknown): any {
   return out ?? value;
 }
 
+/** The writing twin of `carriedLeaf`: a binary64 `{t,v}` leaf whose number SQLite's decimal text cannot
+ *  carry, with `v` re-spelled as the wire carrier; `undefined` for any other value. */
+function carrierLeaf(member: unknown): unknown {
+  if (member === null || typeof member !== 'object' || Array.isArray(member) || isExactNumber(member)) return undefined;
+  const node = member as { t?: unknown; v?: unknown };
+  if (!BINARY64_TAGS.has(node.t)) return undefined;
+  const raw = isExactNumber(node.v) ? exactNumberOf(node.v) : null;
+  const x = typeof node.v === 'number' ? node.v : raw && !raw.integral ? Number(raw.text) : null;
+  const text = x === null ? null : binary64CarrierText(x);
+  return text === null ? undefined : { ...node, v: text };
+}
+
 /** `JSON.stringify`, spelling a negative zero `-0.0` — the writing half of the module rule, for a
  *  compile-time tree headed into SQLite's JSON (a literal map, a stored collection). `null` where the
  *  runtime lacks `JSON.rawJSON` and the tree holds a negative zero: the caller declines rather than write
@@ -134,8 +146,14 @@ export function decodeCarriers(value: unknown): any {
  *  in-row deferral's own `RaisedByQuery`: JS spells it exactly, but SQLite's JSON reader turns `1.5e-300` into
  *  1.4999999999999998E-300, so the tree would hand every SQL reader of it another number. This is the ONE
  *  writer of a JSON text headed into SQLite, so the rule holds for a literal, a bound set, a barrier's
- *  re-injected values and a retained binding alike. */
-export function stringifyExact(value: unknown): string | null {
+ *  re-injected values and a retained binding alike.
+ *
+ *  `wireCarrier` is for a JSON text built in JS that NO SQL reader looks inside — a landed federated element
+ *  payload whose relation only the framer reads (`compiler/rel/foreign.ts`). There an out-of-range binary64
+ *  under a binary64 `{t,v}` tag rides as the wire carrier (`binary64CarrierText`), the spelling a native
+ *  element payload holds (`binary64Carrier`, `compiler/rel/build.ts`), so `parseElementJson` reads both back
+ *  by one rule. Any other out-of-range number still raises. */
+export function stringifyExact(value: unknown, wireCarrier = false): string | null {
   let lost = false;
   const text = JSON.stringify(value, (key, member: unknown) => {
     // EVERY STRING LEAF — a member and an object key alike — obeys the carrier rule (`assertCarriable`):
@@ -143,6 +161,8 @@ export function stringifyExact(value: unknown): string | null {
     // and SQLite's JSON reader turns it into `''` (`g.inject(['k':'\ud83d']).select('k')` answered `""`).
     assertCarriable(key);
     if (typeof member === 'string') assertCarriable(member);
+    const carried = wireCarrier ? carrierLeaf(member) : undefined;
+    if (carried !== undefined) return carried;
     // A raw exact number is a Double only when spelled with a point or exponent (`exactNumberOf`).
     const raw = isExactNumber(member) ? exactNumberOf(member) : null;
     const number = typeof member === 'number' ? member : raw && !raw.integral ? Number(raw.text) : null;
@@ -171,8 +191,8 @@ function exactSpelling(member: number): string | undefined {
 /** `stringifyExact` for a caller with no decline of its own to fall back on (a bound JSON set, a
  *  retained binding's transport, a compile-time literal blob): a runtime that cannot spell a negative
  *  zero or an infinity REFUSES rather than write another value. Both runtimes we ship on have `JSON.rawJSON`. */
-export function stringifyExactOrRefuse(value: unknown): string {
-  const text = stringifyExact(value);
+export function stringifyExactOrRefuse(value: unknown, wireCarrier = false): string {
+  const text = stringifyExact(value, wireCarrier);
   if (text == null) throw new Error('a value holding -0.0 or an infinity cannot cross as JSON on this runtime: its text would change the value');
   return text;
 }

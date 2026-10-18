@@ -4180,7 +4180,10 @@ export function lowerForeignResume(
   const mapValues = rejoin && 'mapValues' in rejoin ? rejoin.mapValues : null;
   // Land the awaited rows as the `fenced` CTE bindings a `BoundGraph` reads through (`landForeignRows`) —
   // split by kind (a subgraph's edges + its incident vertices), each declared once as a `Ref` target.
-  const { vertexBinding, edgeBinding, streamElem, isSubgraph, bindings } = landForeignRows(rows, elem, fresh, mapValues);
+  // NO local tail: the framer is the landed payload's only reader, so an out-of-range binary64 rides as the
+  // wire carrier; any tail may read `props` in SQL, so there it refuses (`foreign.ts`).
+  const wireOnly = from >= steps.length;
+  const { vertexBinding, edgeBinding, streamElem, isSubgraph, bindings } = landForeignRows(rows, elem, fresh, mapValues, '', wireOnly);
   // A landed relation carries no channels by default — the rows crossed a segment boundary as detached
   // references. But a SUBGRAPH source-form seed CAN carry an `encounter` minted from the landed array
   // order (the sibling's emission order — see the seed below), so a chain that DEMANDS an encounter
@@ -4212,7 +4215,7 @@ export function lowerForeignResume(
   // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
   // rejoin the relation is the same landed shape a source-form call produces.
   const pool = mapValues
-    ? foreignMapRelation(mapValues, streamElem, fresh, [meta('parentId', 'text')])
+    ? foreignMapRelation(mapValues, streamElem, fresh, [meta('parentId', 'text')], false, wireOnly)
     : landed;
   const rejoined = mapValues
     ? foreignMapRejoin(pool, streamElem, rejoin!.parentCount, fresh)

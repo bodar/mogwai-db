@@ -109,6 +109,15 @@ export function binary64OfCarrier(v: unknown): number | null {
   return Number(m[1]) * 2 ** Number(m[2]);
 }
 
+/** The JS writing half of the wire carrier: `x` spelled `<w>p<n>` as `binary64Carrier` (`compiler/rel/build.ts`)
+ *  spells it in SQL, over the SAME bands (`binary64Pair`), so `binary64OfCarrier` reads it back bit for bit
+ *  (`w` is `String`'s round-trip spelling, and `w × 2^n` is one exact multiplication). `null` for a value
+ *  SQLite's decimal text already carries exactly. The writer for a JSON text built in JS that only the wire
+ *  reads — a landed federated element's payload (`stringifyExact`'s `wireCarrier`). */
+export function binary64CarrierText(x: number): string | null {
+  const pair = binary64Pair(x);
+  return pair && `${String(pair[0])}p${pair[1]}`;
+}
 
 /** Can this JSON text hold a wire carrier? The cheap pre-test a reader skips its reviver on. */
 export const mayHoldCarrier = (text: string): boolean => /\dp-?\d/.test(text);

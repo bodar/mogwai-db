@@ -7,6 +7,7 @@ import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { ValueNode } from '../../gremlin/types.ts';
 import { meta, typeOf, type Minter } from './build.ts';
+import { stringifyExactOrRefuse } from '../../json-exact.ts';
 
 // ---------- DETACHED elements — a barrier call()'s awaited rows, as a relation ----------
 //
@@ -27,6 +28,16 @@ import { meta, typeOf, type Minter } from './build.ts';
 // exploded by `json_each`, never N parameters. A federated hop returning 26 vertices was a hard DO
 // failure while this was a `VALUES (?,?,…)` list, and nothing on Bun could see it (65 535 vs 100).
 // The empty case needs no branch — `json_each('[]')` is a zero-row relation with these columns.
+//
+// **That one value is written by the ONE exact JSON writer** (`stringifyExact`, `json-exact.ts`), never a
+// bare `JSON.stringify`: the landed text is READ AGAIN by SQLite (`json_each`, and every bound read's
+// `json_extract` of `props`), whose decimal reader is not correctly rounded outside [1e-80, 1e116]
+// (`rel/exact-decimal.ts`). A sibling's `1.5e300d` landed as plain decimal text came back
+// 1.4999999999999998E300 through `values('x')`, `-1e-300d` as -9.999999999999999E-301, and a `-0.0d` lost
+// its sign. So an out-of-range binary64 either RAISES (a local tail reads `props` in SQL, and no decimal
+// spelling is the value), or — `wireOnly`, the resume has NO local tail, so only the framer reads the
+// payload — rides as the wire carrier, the same spelling a native element payload holds
+// (`binary64Carrier`, `build.ts`) and `parseElementJson` decodes for both.
 //
 // What a detached element does NOT support is live adjacency: `out()`/`both()`/`properties()` have no
 // table to reach. Those decline in `lower.ts`'s detached tail rather than silently joining this
@@ -49,16 +60,17 @@ export const foreignPayloadCols = (elem: Elem): readonly ColMeta[] =>
 /** One landed row's cells, in `foreignPayloadCols` order. `props` (and a vertex's label set) are
  *  stringified so each lands as one scalar cell; the framing layer parses them back, which is the
  *  same round trip `runForeign()` already performs in the other direction. */
-const cellsOf = (row: ForeignRow, extra: readonly unknown[]): unknown[] =>
+const cellsOf = (row: ForeignRow, extra: readonly unknown[], wireOnly: boolean): unknown[] =>
   row.kind === 'edge'
-    ? [row.id, row.label, row.src, row.tgt, JSON.stringify(row.props), ...extra]
-    : [row.id, JSON.stringify(row.labels), JSON.stringify(row.props), ...extra];
+    ? [row.id, row.label, row.src, row.tgt, stringifyExactOrRefuse(row.props, wireOnly), ...extra]
+    : [row.id, stringifyExactOrRefuse(row.labels), stringifyExactOrRefuse(row.props, wireOnly), ...extra];
 
 /**
  * Land a barrier's awaited rows as a relation projecting the element payload.
  *
  * `extra` names columns beyond the payload that each row carries — the mid-traversal rejoin's parent
- * key — and `extraOf` supplies the matching cell per row.
+ * key — and `extraOf` supplies the matching cell per row. `wireOnly`: nothing but the framer reads the
+ * landed payload, so an out-of-range binary64 rides as the wire carrier rather than raising (module comment).
  */
 export function foreignRelation(
   rows: readonly ForeignRow[],
@@ -67,9 +79,10 @@ export function foreignRelation(
   extra: readonly ColMeta[] = [],
   extraOf: (row: ForeignRow) => readonly unknown[] = () => [],
   withOrder = false,
+  wireOnly = false,
 ): Rel {
   const cols = [...foreignPayloadCols(elem), ...extra];
-  const payload = JSON.stringify(rows.map((row) => cellsOf(row, extraOf(row))));
+  const payload = stringifyExactOrRefuse(rows.map((row) => cellsOf(row, extraOf(row), wireOnly)));
   const exploded = make.explode({
     id: fresh('fgx'), channels: [], expr: lit(payload, 'text'), as: { value: CELL.value, ord: CELL.ord },
     type: typeOf(meta(CELL.value, 'any', true), meta(CELL.ord, 'int')),
@@ -92,10 +105,10 @@ export function foreignRelation(
  * retaining the key as the correlation column until the ordinary parent join consumes it. */
 export function foreignMapRelation(
   map: Extract<ValueNode, { readonly t: 'map' }>, elem: Elem, fresh: Minter,
-  extra: readonly ColMeta[] = [], withOrder = false,
+  extra: readonly ColMeta[] = [], withOrder = false, wireOnly = false,
 ): Rel {
   const pairs = make.explode({
-    id: fresh('fmx'), channels: [], expr: lit(JSON.stringify(map.v), 'text'), as: { value: MAP_PAIR.value },
+    id: fresh('fmx'), channels: [], expr: lit(stringifyExactOrRefuse(map.v, wireOnly), 'text'), as: { value: MAP_PAIR.value },
     type: typeOf(meta(MAP_PAIR.value, 'json')),
   });
   const members = make.explode({
@@ -243,11 +256,17 @@ export function landedStream(rows: readonly ForeignRow[], elem: Elem, landed: Re
  * coexist in one plan (two federate arms of a `union`, each landed by its own resume with its own fresh
  * minter that restarts at 0) cannot mint the same `bgv0`/`bge0` name and collide. The top-level resume
  * lands once per compile, so its default `''` is safe.
+ *
+ * `wireOnly` says the landed payload is read by the framer ALONE (no local tail reads `props`), the one
+ * case an out-of-range binary64 may ride as the wire carrier rather than raise (module comment). It
+ * defaults to the refusal, so a caller that cannot prove it — a branch arm, whose suffix and post-merge
+ * tail read the landing — never hands SQL a carrier to read.
  */
 export function landForeignRows(
   rows: readonly ForeignRow[], elem: Elem, fresh: Minter,
   mapValues: Extract<ValueNode, { readonly t: 'map' }> | null = null,
   salt = '',
+  wireOnly = false,
 ): { vertexBinding: string | null; edgeBinding: string | null; streamElem: Elem; isSubgraph: boolean; bindings: Binding[] } {
   const dedupById = (rs: readonly ForeignRow[]): ForeignRow[] => [...new Map(rs.map((r) => [r.id, r])).values()];
   const vertexRows = dedupById(rows.filter((r) => r.kind === 'vertex'));
@@ -260,8 +279,8 @@ export function landForeignRows(
     // `withOrder`: the binding carries the landed emission order (`ord`) beside the payload, so the seed
     // and a `.V()`/`.E()` re-root mint the `encounter` channel from it — channels over a bound graph.
     const raw = mapValues
-      ? foreignMapRelation(mapValues, kind, fresh)
-      : foreignRelation(landedRows, kind, fresh, [], undefined, true);
+      ? foreignMapRelation(mapValues, kind, fresh, [], false, wireOnly)
+      : foreignRelation(landedRows, kind, fresh, [], undefined, true, wireOnly);
     // The bound payload is one row per element. A mapValues result may carry the same sibling
     // element under several parent keys; parent multiplicity belongs to the rejoin pool.
     const landedRelation = mapValues
