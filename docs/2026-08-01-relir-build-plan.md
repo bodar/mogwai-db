@@ -1161,6 +1161,17 @@ longer drops a row out of the trigram seek. Follow-ups: `trigramSeek` reads only
 defers otherwise. Pinned in `test/java-strings.test.ts`. Baseline moved: sql-hygiene re-recorded on trunk's
 (reasons in both commits). CI green.
 
+✅ **`where(P)` operands are SCOPE KEYS — LANDED ON TRUNK 2026-10-18 (`ccbeaf2d`, ff-where-scope-keys).** A
+non-traversal leaf of a `where(P)` is a select key resolved via `Scoping.getSafeScopeValue`
+(`vendor/tinkerpop/gremlin-core/.../step/filter/WherePredicateStep.java`, `.../step/Scoping.java`), never an
+`is(P)` literal. Decline-only stopgap at one whole-tree authority (`unresolvableWhereKey`, `ir/labels.ts`): a
+non-String key raises the reference's construction error; a side-effect-named, unbound, parameterized or
+empty-collection key declines; a label not live at its position declines (`whereHasScopeKey`, `rel/lower.ts`).
+`foldConstantPredicateOperands` no longer folds a key-holding `where(P)`; an all-traversal-leaf `where(P)` becomes
+`is(P)`. Pinned in `test/L4-addendum/where-predicate-scope-keys.feature`. Residue: actually RESOLVING a
+side-effect key (the corpus `..._whereXwithinXaXX` scenario now declines instead of answering `[]`). No baseline
+moves. CI green.
+
 | Item (tip) | Clusters | Verdict |
 |---|---|---|
 | `write-property-guard` (`79e8dfbb`) | H, F | **RESUME now** — drop KEYED from `movable`/`SIDE_EFFECTS` in `ir/early-limit.ts`, restore `writes.exec.test.ts` and `L4-addendum/property-traversal-site.feature` to the trunk answer, accept `fold` as a drain in `ProgramWrites.truncated` |
