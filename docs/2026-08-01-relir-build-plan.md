@@ -831,6 +831,15 @@ authorities.
   `test/compiler/double-range.exec.test.ts`. Baseline moved: sql-hygiene (+389 bytes per element payload, the
   carrier CASE; re-recorded on trunk). Residue: valueMap()/elementMap()/values().fold() of an out-of-range
   Double still defer.
+  ✅ **Federate carrier LANDED ON TRUNK 2026-10-18 (`af2157a1`, `d00dd26c`, ff-federate-carrier).** A federated
+  sibling's detached rows land through the ONE exact JSON writer (`stringifyExact`, `src/json-exact.ts`, with a
+  `wireCarrier` mode re-spelling an out-of-range double/float leaf as the binary64 carrier), so a wide/tiny
+  Double, -0.0 and ±Infinity survive both transports instead of rounding through SQLite's decimal reader; the
+  HTTP decoder (`src/foreign-decode.ts`) lands every leaf through `leafStore` (`src/gremlin/types.ts`, THE
+  leaf-form authority), so HTTP federate over a BigInteger/BigDecimal/wide Long/datetime/Duration no longer
+  raises a raw `TypeError` and agrees with the in-process hop; an undecodable GraphBinary type and a leaked raw
+  `bigint` decline as `UnsupportedTraversal`. Pinned in `test/federate-double-carrier.test.ts`. No baselines
+  moved. CI green.
   ✅ **Fix-forward LANDED ON TRUNK 2026-10-17 (`2c602783`, `6e027a28`, `6fd4a7dc`, ff-double-carrier-json).**
   `parseElementJson` is total (every framer parse of an element-bearing payload, so the untyped-JSON tail no
   longer leaks the `<w>p<n>` carrier); `asNumber` over an untyped JS number asks `numberClassOf`; a bulk
