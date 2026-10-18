@@ -197,7 +197,7 @@ describe("asString() of a Double is Double.toString", () => {
     ["g.E().values('weight').order().asString()", ['"0.2"', '"0.4"', '"0.4"', '"0.5"', '"1.0"', '"1.0"']],
     ["g.E().values('weight').fold().asString(local)", ['["0.5","1.0","0.4","1.0","0.4","0.2"]']],
     ['g.inject([1.0d, 2.5d]).asString()', ['"[1.0, 2.5]"']],
-    // A Float prints its SHORTEST decimal (`Float.toString`), read off its exact carrier.
+    // A Float literal lands on its shortest float32 decimal (`floatCanonical`), so it prints `Float.toString`'s.
     ['g.inject(0.123456789f).asString()', ['"0.12345679"']],
     // A zero has no sign (a deliberate divergence): `-0.0` prints `0.0`, as SQLite's text does.
     ['g.inject(-0.0d).asString()', ['"0.0"']],
@@ -249,49 +249,73 @@ describe("the sack's class rides to every consumer — a group key, a project me
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
 
-describe('a Float is carried as its EXACT value, so every compare widens it as NumberHelper does', () => {
-  // `NumberHelper.compare(Float, Double)` is `Double.compare(a.doubleValue(), b.doubleValue())`
-  // (`NumberHelper.java:252-277,670-681`): 0.1f is 0.10000000149011612, above the Double 0.1. A Float against a
-  // BigDecimal widens through `Float.toString` (`:855`), so 0.1f IS 0.1m.
+describe('a Float rides as the Double of its literal, rounded to float32 only at the wire', () => {
+  // A deliberate divergence (`docs/feature-support-matrix.md`): Java widens 0.1f to 0.10000000149011612
+  // before a compare (`NumberHelper.java:252-277,670-681`); here 0.1f IS 0.1, so it equals 0.1d — the
+  // answer a user means. The WIRE still frames class Float as float32, so the rendered value is the float.
   const answered: [string, string[]][] = [
     ["g.inject('0.1').asNumber()", ['0.10000000149011612f']],
-    ["g.inject('0.1').asNumber().is(0.1d)", []],
-    ["g.inject('0.1').asNumber().where(is(0.1d))", []],
-    ["g.inject('0.1').asNumber().is(P.within(0.1d,5))", []],
-    ["g.inject('0.1').asNumber().choose(is(0.1d),constant('y'),constant('n'))", ['"n"']],
-    ["g.inject('0.1').asNumber().is(P.gt(0.1d))", ['0.10000000149011612f']],
-    ["g.inject('0.1').asNumber().project('a').by(identity()).select('a').is(0.1d).count()", ['0L']],
-    ["g.V(1).property('s','0.1') ;; g.V().values('s').asNumber().is(0.1d)", []],
-    ["g.V(1).property('s','0.1') ;; g.V().values('s').asNumber().is(P.gt(0.1d))", ['0.10000000149011612f']],
-    ["g.V(1).property('f',0.1f) ;; g.V().has('f', P.gt(0.1d)).values('name')", ['"marko"']],
+    ["g.inject('0.1').asNumber().is(0.1d)", ['0.10000000149011612f']],
+    ["g.inject('0.1').asNumber().where(is(0.1d))", ['0.10000000149011612f']],
+    ["g.inject('0.1').asNumber().is(P.within(0.1d,5))", ['0.10000000149011612f']],
+    ["g.inject('0.1').asNumber().choose(is(0.1d),constant('y'),constant('n'))", ['"y"']],
+    ["g.inject('0.1').asNumber().is(P.gt(0.1d))", []],
+    ["g.inject('0.1').asNumber().project('a').by(identity()).select('a').is(0.1d).count()", ['1L']],
+    ["g.V(1).property('s','0.1') ;; g.V().values('s').asNumber().is(0.1d)", ['0.10000000149011612f']],
+    ["g.V(1).property('s','0.1') ;; g.V().values('s').asNumber().is(P.gt(0.1d))", []],
+    ["g.V(1).property('f',0.1f) ;; g.V().has('f', P.gt(0.1d)).values('name')", []],
     ["g.V(1).property('f',0.1f) ;; g.V().has('f', 0.1f).values('name')", ['"marko"']],
-    ['g.inject(0.1f).is(0.1d)', []],
+    ['g.inject(0.1f).is(0.1d)', ['0.10000000149011612f']],
     ['g.inject(0.1f).is(0.1f)', ['0.10000000149011612f']],
-    ['g.inject(0.1d).is(0.1f)', []],
-    ['g.inject(0.1d).is(P.lt(0.1f))', ['0.1d']],
+    ['g.inject(0.1d).is(0.1f)', ['0.1d']],
+    ['g.inject(0.1d).is(P.lt(0.1f))', []],
     ['g.inject(0.1f).is(0.1m)', ['0.10000000149011612f']],
     ['g.inject(0.1m).is(0.1f)', ['1e-1M']],
     ['g.inject(0.1f).is(P.gt(0.1m))', []],
     ['g.inject(3.0f).is(3)', ['3f']],
-    ["g.inject(0.1f).math('_ * 2')", ['0.20000000298023224d']],
-    ['g.inject(0.1f, 0.1d).max()', ['0.10000000149011612d']],
-    // `Float.toString` prints the shortest decimal; a cast to Double is `Double.parseDouble(f.toString())`.
+    ["g.inject(0.1f).math('_ * 2')", ['0.2d']],
+    ['g.inject(0.1f, 0.1d).max()', ['0.1d']],
     ["g.inject('0.1').asNumber().asString()", ['"0.1"']],
     ["g.inject('0.1').asNumber().asNumber(GType.DOUBLE)", ['0.1d']],
     ["g.V(1).property('f',0.1f) ;; g.V().values('f').asNumber(GType.DOUBLE)", ['0.1d']],
     ["g.V(1).property('f',0.1f) ;; g.V().values('f').asNumber(GType.BIGDECIMAL)", ['1e-1M']],
     ["g.V(1).property('f',0.1f) ;; g.V().values('f').asString()", ['"0.1"']],
     ['g.inject(0.1d).asNumber(GType.FLOAT).is(0.1f)', ['0.10000000149011612f']],
-    // `Float.parseFloat` rounds the decimal ONCE; on a double-rounding tie the decimal decides.
     ["g.inject('16777217.0').asNumber()", ['16777217d']],
     ["g.inject('16777217.000000001').asNumber()", ['16777217000000001e-9M']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
 
-describe('Float arithmetic is float arithmetic, or it defers', () => {
-  // `FLOAT_NUMBER_HELPER.add` is `a.floatValue() + b.floatValue()` — a float at EVERY step, promoted to a
-  // Double on overflow (`NumberHelper.java:225-229,400-425`).
+describe('a Float is ONE value whichever carrier it came by — a literal, a typed wire parameter, asNumber(FLOAT)', () => {
+  // A GLV sends a Float parameter as its float32 (0.10000000149011612); it lands on the same carrier the
+  // literal `0.1f` does (`floatCanonical`), so has/dedup/group see one value, not two.
+  const p = { p: Math.fround(0.1) };
+  const t = { p: 'float' as const };
+  const seeded = () => {
+    const store = seededStore();
+    executeFramed(store, "g.V(1).property('f',0.1f)");
+    executeFramed(store, "g.V(2).property('f',p)", p, t);
+    return store;
+  };
+  const answer = (store: ReturnType<typeof seededStore>, q: string, params = {}, types = {}) =>
+    executeFramed(store, q, params, types).map((frame) => render(frame.buf, { i: 0 }));
+  test("has('f',0.1f) finds both", () => expect(answer(seeded(), "g.V().has('f',0.1f).values('name')")).toEqual(['"marko"', '"vadas"']));
+  test("has('f',p) finds both", () => expect(answer(seeded(), "g.V().has('f',p).values('name')", p, t)).toEqual(['"marko"', '"vadas"']));
+  test("has('f',eq(p)) finds both", () => expect(answer(seeded(), "g.V().has('f',eq(p)).values('name')", p, t)).toEqual(['"marko"', '"vadas"']));
+  test("has('f',within(p)) over a typed list parameter finds both", () => expect(answer(seeded(),
+    "g.V().has('f',within(p)).values('name')", { p: [Math.fround(0.1)] }, { p: { t: 'list', items: ['float'] } })).toEqual(['"marko"', '"vadas"']));
+  test('dedup sees one value', () => expect(answer(seeded(), "g.V().values('f').dedup().count()")).toEqual(['1L']));
+  test('group sees one key', () => expect(answer(seeded(), "g.V().group().by(values('f')).by(count())")).toEqual(['{0.10000000149011612f:2L}']));
+  // asNumber(GType.FLOAT) at compile time lands on the carrier too: 0.123456789d becomes the Float 0.12345679.
+  test('asNumber(FLOAT) equals the literal of its framed value', () =>
+    expect(answer(seededStore(), 'g.inject(0.123456789d).asNumber(GType.FLOAT).is(0.12345679f)')).toEqual(['0.12345679104328156f']));
+});
+
+describe('Float arithmetic is double arithmetic, framed in the Float class', () => {
+  // A deliberate divergence: `FLOAT_NUMBER_HELPER` rounds to a float at every step (`NumberHelper.java:225-229`);
+  // here a Float adds in double and the class stays Float, promoted to a Double past `Float.MAX_VALUE`.
+  const ten = Array.from({ length: 10 }, () => "'0.1'").join(',');
   const answered: [string, string[]][] = [
     ['g.inject(1.0f,2.0f,3.0f).sum()', ['6f']],
     ['g.inject(1f,2f,3f).fold().sum(local)', ['6f']],
@@ -301,18 +325,29 @@ describe('Float arithmetic is float arithmetic, or it defers', () => {
     ['g.withSack(2147483647i).inject(0.5f).sack(div).sack()', ['4294967296f']],
     ['g.withSack(0.1f).inject(0.2f).sack(sum).sack()', ['0.30000001192092896f']],
     ['g.withSack(1.0f).inject(3.0f).sack(div).sack()', ['0.3333333432674408f']],
-    // The fold's carrier is the Float's exact value, so a compare reads it widened.
-    ['g.withSack(1.0f).inject(3.0f).sack(div).sack().is(P.gt(0.3333333333333333d))', ['0.3333333432674408f']],
+    ['g.withSack(1.0f).inject(3.0f).sack(div).sack().is(P.gt(0.3333333333333333d))', []],
+    // Float sum/mean answer at any length — they declined before.
+    [`g.inject(${ten}).asNumber().sum()`, ['1f']],
+    [`g.inject(${ten}).asNumber().fold().sum(local)`, ['1f']],
+    ["g.inject('3.4e38','3.4e38').asNumber().sum()", ['6.8e+38d']],
+    ['g.inject(0.1f,0.2f).mean()', ['0.15000000000000002d']],
+    ['g.inject(0.1f,0.2f).sum()', ['0.30000001192092896f']],
+    ['g.inject(0.1f,0.1f,0.1f).sum()', ['0.30000001192092896f']],
+    ['g.inject(0.1f,0.2d).sum()', ['0.30000000000000004d']],
+    ['g.inject(3.0e38f,3.0e38f).sum()', ['6e+38d']],
+    ['g.inject(0.1f,0.2f).union(identity(), identity()).sum()', ['0.6000000238418579f']],
+    ['g.inject(0.1f,0.2f).fold().sum(local)', ['0.30000001192092896f']],
+    ['g.inject(0.1f,0.1f).sum()', ['0.20000000298023224f']],
+    ['g.inject(16777216f, 1.0f).sum()', ['16777216f']],
+    ["g.V(1).property('f',0.1f) ;; g.V().values('f').sum()", ['0.10000000149011612f']],
+    ["g.V(1).property('f',0.1f) ;; g.V(2).property('f',0.2f) ;; g.V().values('f').sum()", ['0.30000001192092896f']],
+    ["g.V(1).property('f',0.1f) ;; g.V(2).property('f',0.2f) ;; g.V().values('f').mean()", ['0.15000000000000002d']],
+    ['g.withSack(16777217).inject(1.5f).sack(max).sack()', ['16777216f']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
-  // A running Float total whose partial sums round (ten 0.1f are 1.0000001f), or overflow into a Double,
-  // is not the once-rounded double SQL adds; a Float sack overflow, and a Float min/max won by an Integer
-  // past 2^24, likewise: deferred.
-  const ten = Array.from({ length: 10 }, () => "'0.1'").join(',');
-  for (const q of [`g.inject(${ten}).asNumber().sum()`, `g.inject(${ten}).asNumber().fold().sum(local)`,
-    "g.inject('3.4e38','3.4e38').asNumber().sum()", 'g.inject(0.1f,0.2f).mean()',
-    'g.withSack(3.4e38f).inject(3.4e38f).sack(sum).sack()', 'g.withSack(16777217).inject(1.5f).sack(max).sack()'])
-    test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow(RaisedByQuery));
+  // A Float SACK past `Float.MAX_VALUE` would frame as an infinity: deferred.
+  test('defers: g.withSack(3.4e38f).inject(3.4e38f).sack(sum).sack()', () =>
+    expect(classes('g.withSack(3.4e38f).inject(3.4e38f).sack(sum).sack()')).rejects.toThrow(RaisedByQuery));
 });
 
 describe("a zero is one zero and a BigDecimal widening compares as NumberHelper's", () => {
@@ -336,19 +371,18 @@ describe("a zero is one zero and a BigDecimal widening compares as NumberHelper'
 });
 
 
-describe('a Float PRINTS Float.toString wherever it is printed — a folded list, a label re-read, a subnormal', () => {
-  // ONE printing authority (`src/gremlin/float.ts` `javaNumberText`/`floatText`, run time `floatShortest`):
-  // the shortest decimal that reads back as the float, at least TWO digits (`Float.MIN_VALUE` is `1.4E-45`,
-  // the JDK 19+ `Float.toString` rule), never the exact carrier's own digits. A Float that crosses a JSON
-  // entry (a fold member, an `as()` history) keeps its exact bits (`jsonExactFloating`), so its re-read
-  // compares and prints as the float it is.
+describe('a Float PRINTS as the Double it rides as wherever it is printed — a folded list, a label re-read, a subnormal', () => {
+  // ONE printing authority (`src/gremlin/float.ts` `javaNumberText`): a Float rides as the Double of its
+  // literal, so it prints that Double's `Double.toString` (a deliberate divergence from `Float.toString` for
+  // a computed Float — `9.666666666666666`, not `9.666667`). A Float that crosses a JSON entry (a fold
+  // member, an `as()` history) keeps its 17 digits, so its re-read compares and prints as it was.
   const answered: [string, string[]][] = [
     ['g.inject(0.1f).fold().asString()', ['"[0.1]"']],
     ['g.inject(0.1f,0.2f).fold().asString()', ['"[0.1, 0.2]"']],
     ["g.inject('0.1').asNumber().fold().asString()", ['"[0.1]"']],
     ['g.V(1).local(constant(0.1f).fold()).asString()', ['"[0.1]"']],
     ["g.inject(0.1f).aggregate('x').cap('x').asString()", ['"[0.1]"']],
-    ["g.V().values('age').is(29).math('_/3').asNumber(GType.FLOAT).fold().asString()", ['"[9.666667]"']],
+    ["g.V().values('age').is(29).math('_/3').asNumber(GType.FLOAT).fold().asString()", ['"[9.666666666666666]"']],
     ['g.inject(1.4e-45f).fold().asString()', ['"[1.4E-45]"']],
     ['g.inject(1.0e10f).fold().asString()', ['"[1.0E10]"']],
     ['g.inject(1.0d).fold().asString()', ['"[1.0]"']],
@@ -358,29 +392,28 @@ describe('a Float PRINTS Float.toString wherever it is printed — a folded list
     ["g.inject(0.1f).as('a').select('a').where(is(eq(0.1f)))", ['0.10000000149011612f']],
     ["g.inject(0.1f).as('a').select('a').asString()", ['"0.1"']],
     ["g.inject(0.1f).as('a').select('a').asNumber(GType.DOUBLE)", ['0.1d']],
-    ["g.inject(0.1f).as('a').select('a').math('_*1')", ['0.10000000149011612d']],
+    ["g.inject(0.1f).as('a').select('a').math('_*1')", ['0.1d']],
     ["g.V(1).property('f',0.1f) ;; g.V(1).values('f').as('a').select('a').asString()", ['"0.1"']],
-    // A SUBNORMAL Float: `Double.parseDouble(Float.toString(f))` (`NumberHelper.java:742-745`) and
-    // `new BigDecimal(Float.toString(f))` (`:855`).
+    // A SUBNORMAL Float rides as the Double of its literal, so it widens as that Double does.
     ['g.inject(1.4e-45f).asNumber(GType.DOUBLE)', ['1.4e-45d']],
     ['g.inject(2.8e-45f).asNumber(GType.DOUBLE)', ['2.8e-45d']],
     ['g.inject(1.4e-45f).asNumber(GType.BIGDECIMAL)', ['14e-46M']],
     ["g.V(1).property('f',1.4e-45f) ;; g.V(1).values('f').asNumber(GType.DOUBLE)", ['1.4e-45d']],
     ["g.V(1).property('f',1.4e-45f) ;; g.V(1).values('f').asNumber(GType.BIGDECIMAL)", ['14e-46M']],
     ["g.V().values('age').is(29).math('_*1e-46').asNumber(GType.FLOAT)", ['2.802596928649634e-45f']],
-    ["g.V().values('age').is(29).math('_*1e-46').asNumber(GType.FLOAT).asNumber(GType.DOUBLE)", ['2.8e-45d']],
-    // createNumber's Float rung compares the two JAVA spellings: '1e-45' is `1.4E-45` as a float and
-    // `1.0E-45` as a double, so it is the Double; '1.4e-45' prints the same both ways, so it is the Float.
+    ["g.V().values('age').is(29).math('_*1e-46').asNumber(GType.FLOAT).asNumber(GType.DOUBLE)", ['2.9e-45d']],
+    // createNumber's Float rung: a decimal is a Float only in float's NORMAL range, with digits that survive
+    // float32 — so a subnormal spelling is a Double, and `Float.MIN_NORMAL`'s Double spelling
+    // `1.17549435E-38` (below the float it rounds to) is a Double too, as on the JDK 19+ reference.
     ["g.inject('1e-45').asNumber()", ['1e-45d']],
     ["g.inject('1e-45').asNumber().is(1.0e-45d)", ['1e-45d']],
-    ["g.inject('1.4e-45').asNumber()", ['1.401298464324817e-45f']],
+    ["g.inject('1.4e-45').asNumber()", ['1.4e-45d']],
+    ["g.inject('1.17549435E-38').asNumber()", ['1.17549435e-38d']],
     // A Double's BigDecimal is `BigDecimal.valueOf(d)`, of its `Double.toString` — never an exponent
     // spelling the BigDecimal framer cannot parse.
     ['g.inject(1.0e-7d).asNumber(GType.BIGDECIMAL)', ['10e-8M']],
     ['g.inject(1.0d).asNumber(GType.BIGDECIMAL)', ['10e-1M']],
     ["g.V().values('age').is(29).math('_*1e21').asNumber(GType.BIGDECIMAL)", ['29e--21M']],
-    // One Float traverser is its own sum.
-    ["g.V(1).property('f',0.1f) ;; g.V().values('f').sum()", ['0.10000000149011612f']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
   // A subnormal's `Float.toString` in computerized notation is not rendered in SQL: deferred, never `0.0`.
@@ -457,31 +490,6 @@ describe('a list member PRINTS by its class at every depth — one recursive aut
     ["g.V().values('age').math('_/3').fold().fold().asString()", ['"[[9.666666666666666, 9.0, 10.666666666666666, 11.666666666666666]]"']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
-});
-
-describe('a sum of TWO Float traversers is one float addition — exact', () => {
-  // `FLOAT_NUMBER_HELPER.add` is `a.floatValue() + b.floatValue()` (`NumberHelper.java:225-229`): one IEEE
-  // operation, the double sum rounded once to a float; an overflow promotes to a Double (`:400-425`).
-  const answered: [string, string[]][] = [
-    ['g.inject(0.1f,0.2f).sum()', ['0.30000001192092896f']],
-    ['g.inject(0.1f,0.1f).sum()', ['0.20000000298023224f']],
-    ['g.inject(0.1f).union(identity(), identity()).sum()', ['0.20000000298023224f']],
-    ['g.inject(0.1f,0.2f).fold().sum(local)', ['0.30000001192092896f']],
-    ['g.inject(0.1f,0.2f).sum().is(0.3f)', ['0.30000001192092896f']],
-    ['g.inject(16777216f, 1.0f).sum()', ['16777216f']],
-    ['g.inject(1.0e-45f, 1.0e-45f).sum()', ['2.802596928649634e-45f']],
-  ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
-  for (const q of ['g.inject(0.1f,0.1f,0.1f).sum()', 'g.inject(0.1f,0.2d).sum()', 'g.inject(3.0e38f,3.0e38f).sum()', 'g.inject(0.1f,0.2f).union(identity(), identity()).sum()'])
-    test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow(RaisedByQuery));
-});
-
-describe("createNumber's Float rung reads the JDK 19+ Float.toString (the pinned reference runtime)", () => {
-  // TinkerPop compiles `<release>17</release>` (`vendor/tinkerpop/pom.xml`), but `createNumber` compares
-  // `Float.toString` with `Double.toString` at RUN time, so the answer is the runtime JDK's. This repo pins
-  // JDK 19+ (the shortest `toString`, JDK-4511638): `Float.MIN_NORMAL` prints `1.1754944E-38` there, not the
-  // Double's `1.17549435E-38`, so the string is a Double. On a JDK 17 runtime it would be a Float.
-  test("g.inject('1.17549435E-38').asNumber()", async () => expect(await classes("g.inject('1.17549435E-38').asNumber()")).toEqual(['1.17549435e-38d']));
 });
 
 describe('a zero has no sign at any depth — a list member, a map value, a slice, a stored property', () => {
@@ -781,14 +789,14 @@ describe('a min/max winner PROMOTED to BigDecimal is its widening — the scale 
     ["g.V(1).union(union(constant(1.0d), constant(0.5m)).max(), constant(1.0m)).groupCount()", ['{10e-1M:2L}']],
     [`${M}.max().is(P.gt(0.9m))`, ['10e-1M']],
     [`${M}.max().is(1.0m)`, ['10e-1M']],
+    // A FLOAT winner rides as the Double of its literal, so it widens as a Double does, at every depth.
+    ["g.V(1).union(constant(0.1f), constant(0.5m)).min()", ['1e-1M']],
+    ["g.V(1).union(constant(0.1f), constant(0.5m)).min().fold()", ['[1e-1M]']],
+    ["g.V(1).project('a').by(union(constant(0.1f), constant(0.5m)).min())", ['{"a":1e-1M}']],
+    ["g.V(1).union(constant(0.1f), constant(0.5m)).fold().min(local)", ['1e-1M']],
+    ["g.V(1).local(union(constant(0.1f), constant(0.5m)).min())", ['1e-1M']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
-  // A FLOAT winner is `new BigDecimal(f.toString())`, whose printing is not spelled here: it DEFERS rather than
-  // frame the Float's exact binary value (`0.100000001490116…`), at every depth.
-  for (const q of ["g.V(1).union(constant(0.1f), constant(0.5m)).min()", "g.V(1).union(constant(0.1f), constant(0.5m)).min().fold()",
-    "g.V(1).project('a').by(union(constant(0.1f), constant(0.5m)).min())", "g.V(1).union(constant(0.1f), constant(0.5m)).fold().min(local)",
-    "g.V(1).local(union(constant(0.1f), constant(0.5m)).min())"])
-    test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow('promoting a Float to BigDecimal'));
 });
 
 describe('a REAL-carried BigDecimal keeps all 17 digits inside a container — the JSON entry is exact for its tag', () => {

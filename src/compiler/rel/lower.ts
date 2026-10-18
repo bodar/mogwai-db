@@ -44,7 +44,7 @@ import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, bou
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, type Modulation } from './modulator.ts';
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
-import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingTag, REL_TRANSFORMS, transformExpr, type DecimalSource, type FloatSource } from './transform.ts';
+import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, floatingTag, REL_TRANSFORMS, transformExpr, type DecimalSource } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, commonNumberClass, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, TIED_REPRESENTATIONS, tieRepresentation, numberClassAggs, numberFloating, numberWidth, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
@@ -1900,13 +1900,11 @@ function scalarTail(
       // `nativeNumber`: a min/max winner may be a String, and a wide `sumTower` result is TEXT. Both are
       // a WHERE for the reason the transform family's is (`raisingRows`): an existence position never
       // reads the value.
-      // A Float result PRINTS into a Double or BigDecimal target (`floatPrinted`), read off its class.
-      const isFloat = (tag: Expr | null): FloatSource => (tag === null ? false : { isFloat: { kind: 'binary', op: '=', left: tag, right: compilerText('float') }, fresh });
       const decimal = (tag: Expr | null): DecimalSource => ({ fresh, floating: tag === null ? false : floatingTag(tag) });
-      const { refuse } = asNumberParts(value, spec, true, false, isFloat(streamRowTag(rel, out)), decimal(streamRowTag(rel, out)));
+      const { refuse } = asNumberParts(value, spec, true, false, decimal(streamRowTag(rel, out)));
       const overflow = spec.min === undefined ? [] : [narrowingOverflow(value, spec.min, spec.max!, spec.disp)];
       const source = raisingRows(rel, overflow, fresh, refuse ? asNumberFilter(value, refuse) : undefined);
-      const cast = asNumberParts(col(source.id, 'v'), spec, true, false, isFloat(streamRowTag(source, out)), decimal(streamRowTag(source, out))).value;
+      const cast = asNumberParts(col(source.id, 'v'), spec, true, false, decimal(streamRowTag(source, out))).value;
       const carried = rel.channels;
       rel = make.project({
         id: fresh('an'), input: source, channels: carried,

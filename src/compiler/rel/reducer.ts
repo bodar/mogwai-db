@@ -4,7 +4,7 @@ import { INTEGER_OVERFLOW, raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { NUMBER_STORED_NON_NUMBERS, REDUCER_CLASSES } from '../../gremlin/types.ts';
 import { NUMERIC_VTYPES } from './predicate.ts';
 import { PER_ROW, type ScalarType } from '../../sql/kernel/render.ts';
-import { FLOAT_MIN_NORMAL, FLOAT_OVERFLOW, floatValueOf } from './float.ts';
+import { FLOAT_OVERFLOW } from './float.ts';
 
 /**
  * THE REDUCER VOCABULARY — `sum`/`min`/`max`/`mean` as one `Aggregate`, and Phase 4.3's named
@@ -314,16 +314,12 @@ const mixedRefused = (reduced: Expr, value: Expr): Expr => {
 export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowTag, bulk?: Expr, screenedTag?: Expr): { value: Expr } | null {
   if (nonNumberTag(tag) === true) return null;
   const arg = reducer === 'min' || reducer === 'max' ? eligible(value, tag) : arithmeticArg(value, tag, reducer);
-  // A Float row makes the running total FLOAT arithmetic (`floatInexact`); a `SCREENED` caller states the
-  // rows' tag apart, since the screen has already been applied.
-  const inexact = reducer === 'sum' || reducer === 'mean' ? floatInexact(value, tag === SCREENED ? screenedTag ?? null : tag, reducer, bulk) : null;
+  // A `SCREENED` caller states the rows' tag apart, since the screen has already been applied. A Float row
+  // adds in double (it rides as the Double of its value) — a deliberate divergence from Java's float steps.
   const widened = reducer === 'sum' ? decimalWidened(value, tag === SCREENED ? screenedTag ?? null : tag) : null;
   const guarded = (reduced: Expr): Expr => {
-    const total0 = nanRefused(reduced, value);
-    const exact = widened ? refusedWhen(widened, DECIMAL_SCALE, total0) : total0;
-    if (!inexact) return exact;
-    const total: Expr = inexact.rounds ? { kind: 'case', whens: [[inexact.rounds, floatValueOf(exact)]], else: exact } : exact;
-    return refusedWhen(inexact.refuse, FLOAT_SUM_INEXACT, total);
+    const total = nanRefused(reduced, value);
+    return widened ? refusedWhen(widened, DECIMAL_SCALE, total) : total;
   };
 
   if (reducer === 'mean') {
@@ -432,60 +428,6 @@ export const extremumKeepingFirst = (fn: 'min' | 'max', first: Expr, second: Exp
 /** The deferral a global/correlated `min`/`max` raises where its winner ties a member of another
  *  representation (`tieRepresentation`). */
 export const TIED_REPRESENTATIONS = 'min/max whose winner ties an equal value of another representation (a BigDecimal scale) is not supported';
-
-/** The deferral a FLOAT running total raises where its per-step rounding is not decidable here. */
-export const FLOAT_SUM_INEXACT = 'sum/mean over Float values that float arithmetic would round is not supported';
-/** The grid a Float running total is exact on: multiples of 2^-10 … */
-const FLOAT_GRID = 1024;
-/** … whose magnitudes total below 2^14, so every partial sum holds in a float's 24 bits. */
-const FLOAT_GRID_LIMIT = 16384;
-
-/**
- * A `sum`/`mean` whose rows hold a FLOAT runs a FLOAT total: `SumGlobalStep`/`MeanGlobalStep` add through
- * `NumberHelper.add`, and while the running class is a Float every step is `FLOAT_NUMBER_HELPER.add` —
- * rounded to a float at EACH step, and promoted to a Double only on overflow
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:225-229,400-425`).
- * A SQL `SUM` adds in double and rounds once, which is that answer exactly where no partial sum rounds: every
- * row on a 2^-10 grid with their magnitudes totalling below 2^14 (each partial sum then needs at most 24
- * bits, and no step overflows). Elsewhere — `ten × 0.1f` is 1.0000001f in float steps, two `3.4e38f` overflow
- * into a Double — the total DEFERS rather than answer the once-rounded double. An aggregate over the rows:
- * a Float row present and the grid bound exceeded; `null` where no row can be a Float.
- *
- * A `sum` of exactly TWO Float traversers is ONE IEEE operation and so exact anywhere below the overflow: it
- * adds as `a.floatValue() + b.floatValue()` — the exact sum rounded once to a float, which is the double sum
- * (exact for two floats within 2^29 of each other's exponent, and otherwise too far below the larger's
- * half-ulp to move its float) rounded to a float (`rounds`, `floatValueOf`). One traverser of bulk 2 is
- * `mul(value, 2f)`, exact the same way. Only a STATIC Float tag takes it. A pair that would overflow a float promotes to a Double
- * (`mathOperationWithPromote`, `NumberHelper.java:400-425`), so it still defers. A `mean` divides the
- * float-rounded total, which this does not spell, so it keeps the grid rule.
- */
-function floatInexact(value: Expr, tag: ReducerRowTag, reducer: Reducer, bulk?: Expr): { refuse: Expr; rounds?: Expr } | null {
-  if (tag === null || tag === SCREENED) return null;
-  const isFloat: Expr | boolean = tag.kind === 'lit' && tag.source === 'compiler-text' ? tag.value === 'float' : bin('=', tag, compilerText('float'));
-  if (isFloat === false) return null;
-  // Each row spends its magnitude, plus 1e300 off the grid; a NULL spends nothing (`SUM` skips it).
-  const scaled = bin('*', value, compilerInt(FLOAT_GRID));
-  const offGridCost: Expr = { kind: 'case', whens: [[bin('=', scaled, { kind: 'cast', arg: scaled, to: 'int' }), compilerInt(0)]], else: compilerReal(1e300) };
-  const magnitude = bulk ? bin('*', call('abs', value), bulk) : call('abs', value);
-  const spent = agg('sum', bin('+', magnitude, offGridCost));
-  // ONE traverser is never rounded: its total is `mul(value, coerceTo(1, Float))`, the value itself
-  // (`SumGlobalStep.projectTraverser`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SumGlobalStep.java:71-78`),
-  // and a mean divides that by one — so a lone stored `0.1f` sums to itself.
-  const traversers = agg('sum', { kind: 'case', whens: [[bin('is not', value, compilerNull()), bulk ?? compilerInt(1)]], else: compilerInt(0) });
-  const offGrid = bin('and', bin('>=', spent, compilerInt(FLOAT_GRID_LIMIT)), bin('>', traversers, compilerInt(1)));
-  const refuse = isFloat === true ? offGrid : bin('and', bin('=', agg('max', isFloat), compilerInt(1)), offGrid);
-  if (reducer !== 'sum' || isFloat !== true) return { refuse };
-  // The pair rule above, for a stream KNOWN to hold Floats only (a per-row tag would spell a class test into
-  // every reducer over a mixed stream, which defers as before): two traversers, the total inside the float
-  // range, rounded once to a float — below the float normal range the sum of two floats already is one
-  // (a multiple of 2^-149 in at most 24 bits).
-  const total = agg('sum', bulk ? bin('*', value, bulk) : value);
-  const pair = bin('and', bin('=', traversers, compilerInt(2)), bin('<', call('abs', total), compilerReal(FLOAT_OVERFLOW)));
-  return {
-    refuse: bin('and', refuse, { kind: 'unary', op: 'not', arg: pair }),
-    rounds: bin('and', pair, bin('>=', call('abs', total), compilerReal(FLOAT_MIN_NORMAL))),
-  };
-}
 
 const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 const storageIs = (value: Expr, storage: string): Expr => bin('=', call('typeof', value), compilerText(storage));

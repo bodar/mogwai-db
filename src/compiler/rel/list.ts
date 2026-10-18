@@ -709,7 +709,7 @@ export function listRetype(
     // (`receiver.ts` `asStringOf`) keyed by the member's own class: a Float prints `0.1`, a Boolean `true`,
     // where SQLite's text of the carrier is neither
     // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ConjoinStep.java:62`).
-    const printed = asStringOf(memberPayload(of, present), memberEvidence(of, present), fresh);
+    const printed = asStringOf(memberPayload(of, present), memberEvidence(of, present));
     if (!printed) return null;
     const joined: Expr = {
       kind: 'scalar',

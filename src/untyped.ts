@@ -136,7 +136,7 @@ function untypedMap(pairs: [FrameNode, FrameNode][]): Record<string, unknown> {
  * structure/io/graphson/GraphSONSerializersV4.java:371-376) writes an ELEMENT (a vertex, an edge, a
  * VertexProperty — `VertexProperty extends Element`) as `element.id().toString()` and anything else as
  * Jackson's `StdKeySerializer` does, i.e. its `toString()`. Spelled exactly here: a String/Character as
- * itself, a Boolean, an integral number in decimal, a Double/Float as `Double.toString`/`Float.toString`
+ * itself, a Boolean, an integral number in decimal, a Double/Float as `Double.toString` (a Float rides as its Double)
  * (`javaDecimal`), a uuid in its canonical lower-case form, a `T`/`Direction` token by its name. Every
  * other key DECLINES rather than print a near miss: a list/set/map (`AbstractCollection.toString` prints
  * each member's `toString` — `v[1]`, `e[7][1-knows->2]`, `[]` — not what a member renders as here), an
@@ -185,7 +185,7 @@ function scalarKey(tag: string | null, v: unknown): string {
   }
   if (tag === null) {
     if (typeof v === 'string' || typeof v === 'boolean' || typeof v === 'bigint') return String(v);
-    if (typeof v === 'number') return numberClassOf(v) === 'double' ? javaDecimal(v, 'double') : String(v);
+    if (typeof v === 'number') return numberClassOf(v) === 'double' ? javaDecimal(v) : String(v);
   } else if (tag === 'string' || tag === 'char') {
     if (typeof v === 'string') return v;
   } else if (tag === 'boolean') {
@@ -194,7 +194,7 @@ function scalarKey(tag: string | null, v: unknown): string {
     if (typeof v === 'bigint' || (typeof v === 'number' && Number.isSafeInteger(v))) return String(v);
     if (typeof v === 'string' && DECIMAL_INTEGER.test(v)) return String(BigInt(v));
   } else if (tag === 'double' || tag === 'real' || tag === 'float') {
-    if (typeof v === 'number') return javaDecimal(v, tag === 'float' ? 'float' : 'double');
+    if (typeof v === 'number') return javaDecimal(v);
   } else if (tag === 'uuid') {
     if (typeof v === 'string' && CANONICAL_UUID.test(v)) return v;
   }
@@ -202,24 +202,16 @@ function scalarKey(tag: string | null, v: unknown): string {
 }
 
 /**
- * `Double.toString` / `Float.toString` (`java.lang.Double#toString(double)`, JDK 19+): the SHORTEST decimal
- * that reads back as the value (for a Float, back through `float` rounding — `Math.fround`), laid out
+ * `Double.toString` (`java.lang.Double#toString(double)`, JDK 19+; a Float rides as its Double, so prints
+ * as it): the SHORTEST decimal that reads back as the value, laid out
  * plainly with at least one fraction digit when 10^-3 <= |x| < 10^7 (`1.0`, `0.001`), otherwise as
  * `<d.ddd>E<n>` (`1.5E300`, `1.0E-5`); `NaN` and `Infinity` by name (a zero is `0.0`, sign and all). JS's `Number#toString` picks the
  * same shortest digits for a double; only the layout differs.
  */
-function javaDecimal(x: number, cls: 'double' | 'float'): string {
-  if (Number.isNaN(x)) return 'NaN';
-  if (!Number.isFinite(x)) return x > 0 ? 'Infinity' : '-Infinity';
-  if (x === 0) return '0.0';
-  let d = x;
-  if (cls === 'float') {
-    if (Math.fround(x) !== x) throw new UnspellableJson(`the Float ${x}`);
-    for (let p = 1; p <= 9; p++) {
-      const candidate = Number(x.toPrecision(p));
-      if (Math.fround(candidate) === x) { d = candidate; break; }
-    }
-  }
+function javaDecimal(d: number): string {
+  if (Number.isNaN(d)) return 'NaN';
+  if (!Number.isFinite(d)) return d > 0 ? 'Infinity' : '-Infinity';
+  if (d === 0) return '0.0';
   const magnitude = Math.abs(d);
   if (magnitude >= 1e-3 && magnitude < 1e7) {
     const plain = String(d);

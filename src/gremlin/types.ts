@@ -14,6 +14,7 @@
 import { stringifyExact } from '../json-exact.ts';
 import { ioc } from '../io.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
+import { floatCanonical } from './float.ts';
 
 // ---------- exact big-value carriers (BigDecimal / Duration) ----------
 //
@@ -343,6 +344,9 @@ export function storedScalar(val: any, vtype: CanonicalType | null): any {
     case 'bigdecimal': return BigDecimal.from(val).toString();
     case 'duration': return Duration.from(val).toString();
     case 'char': return String(val);
+    // A Float lands on its carrier (`floatCanonical`) whichever reader produced it — CSV, GraphSON, a
+    // federated sibling's float32.
+    case 'float': return typeof val === 'number' ? floatCanonical(val) : val;
     case 'long': case 'bigint':
       if (typeof val === 'bigint') return fitsSafeInteger(val) ? Number(val) : val.toString();
       return val;

@@ -235,10 +235,10 @@ describe('orderability: numbers compare in their HIGHEST COMMON CLASS', () => {
   test.each([
     ['long vs long past 2^53 is exact', long('9007199254740993'), long('9007199254740992'), 1],
     ['long vs double widens the long to double (Java rounds it too)', long('9007199254740993'), { t: 'double', v: 9007199254740992 }, 0],
-    ['int vs float compares as float', { t: 'int', v: 16777217 }, { t: 'float', v: 16777216 }, 0],
+    ['int vs float compares as double (a Float rides as its Double)', { t: 'int', v: 16777217 }, { t: 'float', v: 16777216 }, 1],
     ['bigint vs double compares as BigDecimal', { t: 'bigint', v: '9007199254740993' }, { t: 'double', v: 9007199254740992 }, 1],
     ['bigdecimal vs double uses the double\'s shortest decimal', { t: 'bigdecimal', v: '0.1' }, { t: 'double', v: 0.1 }, 0],
-    ['bigdecimal vs float uses the float\'s shortest decimal', { t: 'bigdecimal', v: '0.1' }, { t: 'float', v: Math.fround(0.1) }, 0],
+    ['bigdecimal vs float uses the decimal of the Double it rides as', { t: 'bigdecimal', v: '0.1' }, { t: 'float', v: 0.1 }, 0],
     ['bigdecimal ignores scale', { t: 'bigdecimal', v: '1.50' }, { t: 'bigdecimal', v: '1.5' }, 0],
     ['NaN sorts after every number', Number.NaN, { t: 'double', v: Infinity }, 1],
   ] as const)('%s', (_name, a, b, sign) => {

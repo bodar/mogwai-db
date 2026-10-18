@@ -2,7 +2,7 @@ import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
 import { BigDecimal, flatType, numberClassOf, type CanonicalType } from './types.ts';
-import { decimalCompare, decimalOf, doubleText, floatingDecimal, floatText, javaFloatOf, javaNumberText } from './float.ts';
+import { decimalCompare, decimalOf, doubleText, floatCanonical, floatingDecimal, javaNumberText } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
@@ -142,6 +142,7 @@ const CLASS_NAME: Readonly<Record<string, JavaNumber['cls']>> = {
 const LONG_MIN = -(2n ** 63n);
 const LONG_MAX = 2n ** 63n - 1n;
 const FLOAT_MAX = 3.4028234663852886e38;
+const FLOAT_MIN_NORMAL = 1.1754943508222875e-38;
 const integralClass = (n: bigint): JavaNumber['cls'] =>
   n >= -2147483648n && n <= 2147483647n ? 'Integer' : n >= LONG_MIN && n <= LONG_MAX ? 'Long' : 'BigInteger';
 /** The integer part of a plain decimal string, exactly (`BigDecimal.setScale(0, DOWN)`). */
@@ -266,12 +267,10 @@ function createNumber(v: string): JavaNumber {
   // A Double that underflows to zero from a non-zero mantissa: whether `createNumber` lands on its
   // BigDecimal hangs on its `isZero` reading of the mantissa — decline rather than answer 0.0 for '1e-400'.
   if (d === 0 && /[1-9]/.test(t.split(/[eE]/)[0]!)) throw new CoercionDeferral(`asNumber() of a decimal string past Double's precision ('${t}')`);
-  // `Float.valueOf(s)` rounds the decimal ONCE (`javaFloatOf` resolves the one case two roundings differ
-  // on). The Float is carried as its EXACT value — the float authority's rule (`src/gremlin/float.ts`).
-  const f = javaFloatOf(t);
-  // `f.toString().equals(d.toString())` over the two JAVA spellings (`javaNumberText`), so a subnormal float
-  // ('1e-45' prints `1.4E-45` as a float and `1.0E-45` as a double) falls through to its Double.
-  if (Number.isFinite(f) && javaNumberText(f, true) === javaNumberText(d)) return { cls: 'Float', real: f };
+  // `f.toString().equals(d.toString())`: a normal float (or zero) whose shortest digits are the double's —
+  // i.e. `d` already IS its Float carrier (`floatCanonical`).
+  const normal = d === 0 || (Number.isFinite(Math.fround(d)) && Math.abs(d) >= FLOAT_MIN_NORMAL);
+  if (normal && floatCanonical(d) === d) return { cls: 'Float', real: d };
   const exact = decimalOf(t);
   if (Number.isFinite(d) && exact !== null && decimalCompare(exact, decimalOf(doubleText(d))!) === 0) return { cls: 'Double', real: d };
   // The exact BigDecimal: carried as its canonical plain TEXT (`BigDecimal.toString` for a non-negative
@@ -282,26 +281,12 @@ function createNumber(v: string): JavaNumber {
 }
 
 /**
- * `Double.toString(d)` — or, with `float`, `Float.toString((float) d)`: the SHORTEST digits that read back
- * as the value (JS's own number spelling for a double, `floatText` for a float), laid out as Java lays them
- * out — PLAIN for a magnitude in [10^-3, 10^7), always with a fractional digit (`1.0`), and computerized
- * scientific notation outside it (`1.0E10`, `1.0E-5`).
+ * `Double.toString(d)` — the SHORTEST digits that read back as the value (JS's own number spelling), laid
+ * out as Java lays them out — PLAIN for a magnitude in [10^-3, 10^7), always with a fractional digit
+ * (`1.0`), and computerized scientific notation outside it (`1.0E10`, `1.0E-5`). A Float prints as the
+ * Double it rides as.
  */
-export const javaFloatingString = (d: number, float = false): string => javaNumberText(d, float);
-
-/** `(float) n` for an exact integer, rounded ONCE (round-half-even), as Java's `long → float` is. */
-function integerToFloat(n: bigint): number {
-  const neg = n < 0n;
-  let m = neg ? -n : n;
-  if (m <= 2n ** 53n) return Math.fround(Number(n));
-  const shift = BigInt(m.toString(2).length - 24);
-  let q = m >> shift;
-  const r = m - (q << shift);
-  const half = 1n << (shift - 1n);
-  if (r > half || (r === half && (q & 1n) === 1n)) q += 1n;
-  m = q << shift;
-  return neg ? -Number(m) : Number(m);
-}
+export const javaFloatingString = (d: number): string => javaNumberText(d);
 
 const exactInteger = (n: bigint): number | bigint => (n >= -(2n ** 53n) + 1n && n <= 2n ** 53n - 1n ? Number(n) : n);
 
@@ -337,8 +322,8 @@ function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof nu
     if (!Number.isFinite(a.real) && a.decimal === undefined && a.int === undefined) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a non-finite number');
     // The exact decimal carrier for a wide integral source is a different encoding; decline it.
     if (a.int !== undefined && a.decimal === undefined && exactInteger(a.int) !== Number(a.int)) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a wide integer');
-    // `bigDecimalValue` widens a Float through `Float.toString` and a Double through `BigDecimal.valueOf`
-    // (`Double.toString`) — the PRINTED decimal, not the exact value — held as an exact BigDecimal carrier.
+    // `bigDecimalValue` widens a Float or Double through `BigDecimal.valueOf` (`Double.toString`) — the
+    // PRINTED decimal, not the exact value — held as an exact BigDecimal carrier.
     // A widening of scale ≤ 0 (an integral magnitude at or past 10^7, which `Double.toString` writes in
     // E-notation) has no plain decimal TEXT to ride as, so it rides as the number itself — the run-time
     // widening's carrier for the same value (`doubleDecimalText`, `src/compiler/rel/float.ts`) — which the
@@ -346,7 +331,7 @@ function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof nu
     // REAL past it `BigDecimal.valueOf`'s own. A NEGATIVE scale below 10^21 (`1.0E7` is (10, −6)) has no
     // carrier the framer can tell from an integral source's scale-0 INTEGER, so it declines.
     if (a.cls === 'Float' || a.cls === 'Double') {
-      const decimal = floatingDecimal(a.real, a.cls === 'Float');
+      const decimal = floatingDecimal(a.real);
       if (decimal === null) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a NaN or an infinity');
       if (decimal.scale > 0) return decimal;
       if (decimal.scale < 0 && Math.abs(a.real) < 1e21) throw new CoercionDeferral('asNumber(BIGDECIMAL) of a whole Double whose BigDecimal has a negative scale');
@@ -362,14 +347,9 @@ function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof nu
     return Number(n);
   }
   if (spec.as === 'bigint') {
-    // `bigIntegerValue`: a Double through its `toString` digits, any other non-integral through `longValue`.
+    // `bigIntegerValue`: a floating value (a Float rides as a Double) through its `toString` digits.
     if (a.int !== undefined) return exactInteger(a.int);
     if (!Number.isFinite(a.real)) throw new CoercionDeferral('asNumber(BIGINT) of a non-finite number');
-    if (a.cls === 'Float') {
-      // `BigInteger.valueOf(number.longValue())` — Java's own SATURATING float-to-long.
-      const t = BigInt(Math.trunc(a.real));
-      return exactInteger(t > LONG_MAX ? LONG_MAX : t < LONG_MIN ? LONG_MIN : t);
-    }
     // `BigDecimal.valueOf(d)` reads `Double.toString(d)`: the shortest digits, not the exact binary value.
     const [mantissa, exponent] = a.real.toExponential().split('e') as [string, string];
     const digits = mantissa.replace('.', '');
@@ -378,14 +358,14 @@ function performConversion(a: JavaNumber, spec: NonNullable<ReturnType<typeof nu
       `${digits.startsWith('-') ? '-' : ''}${digits.replace('-', '').padStart(-scale + 1, '0').slice(0, scale)}`));
   }
   if (spec.as === 'float') {
-    if (Number.isNaN(a.real) || (a.int === undefined && !Number.isFinite(a.real))) return Math.fround(a.real);
-    if (Math.abs(a.real) > FLOAT_MAX) overflow();
-    return a.int !== undefined && a.decimal === undefined ? integerToFloat(a.int) : Math.fround(a.real);
+    if (Number.isFinite(a.real) && Math.abs(a.real) > FLOAT_MAX) overflow();
+    // A Float lands on its carrier (`floatCanonical`); the wire framer rounds it to float32.
+    return floatCanonical(a.real);
   }
   // double
   if (a.int === undefined && !Number.isFinite(a.real)) return a.real;
   if (!Number.isFinite(a.real)) overflow();
-  return a.cls === 'Float' ? Number(floatText(a.real)) : a.real;
+  return a.real;
 }
 
 /** asNumber(GType.X) over a runtime scalar: a SQL CAST to the target's storage class

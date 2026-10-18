@@ -1,20 +1,53 @@
-import { BigDecimal } from './types.ts';
+import { BigDecimal, type TypeNode } from './types.ts';
 import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from '../json-exact.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
 /**
- * THE FLOAT AUTHORITY, compile-time half — what a Java `Float` IS, read from text or from a double.
- *
- * A Gremlin `Float` is carried as its EXACT value: the double `Math.fround` lands on, never the shorter
- * decimal it prints as (`0.1f` rides as 0.10000000149011612). That is the value `NumberHelper` computes
- * with — every compare, sum, `math()` and min/max widens a Float through `floatValue()`/`doubleValue()`,
- * both exact (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:225-275,670-681`)
- * — so a consumer that reads the carrier as a number reads the reference's number, at every depth, with
- * nothing to convert. Only the consumers that PRINT a Float (`Float.toString`: `asString`, a cast to
- * Double, a BigDecimal widening) need its shortest decimal, and they derive it (`floatText`). Carrying the
- * shortest decimal instead made `inject(0.1f).is(0.1d)` true where the reference widens 0.1f to
- * 0.10000000149011612 and answers false. The run-time half is `src/compiler/rel/float.ts`.
+ * Floating-number spelling, compile-time. A Gremlin `Float` rides as a Double (`floatCanonical`) and is
+ * rounded to float32 only by the wire framer, so every reader here treats it as a Double — a deliberate
+ * divergence from Java's float arithmetic (`docs/feature-support-matrix.md`).
  */
+
+/**
+ * THE FLOAT CARRIER — the one value every Float PRODUCER lands on (a literal, a wire parameter, CSV,
+ * GraphSON, a federated sibling, `asNumber(GType.FLOAT)` at compile time), so a Float equals itself
+ * whichever way it arrived: the Double of its SHORTEST float32 decimal (`Float.toString`'s digits). `0.1f`,
+ * a GLV's float32 `0.10000000149011612` and a CSV `0.1` are all the REAL 0.1; `0.123456789f` is 0.12345679
+ * — the value the wire framer's `Math.fround` frames each of them as. A value past Float's range (or not
+ * finite) is left as it is.
+ */
+export function floatCanonical(x: number): number {
+  const f = Math.fround(x);
+  if (f === 0) return 0;
+  if (!Number.isFinite(f)) return x;
+  // Under `Float.toString`'s two-digit minimum, as `doubleText`'s: `Float.MIN_VALUE` is 1.4e-45, not 1e-45.
+  for (let k = 2; k < 9; k++) {
+    const c = Number(f.toPrecision(k));
+    if (Math.fround(c) === f) return c;
+  }
+  return Number(f.toPrecision(9));
+}
+
+/** A request's parameters with every value the wire TYPED as a Float — at any depth of a collection —
+ *  landed on its carrier (`floatCanonical`). Every other value is returned as it came. */
+export function canonicalFloatParams(params: Record<string, any>, paramTypes: Record<string, TypeNode>): Record<string, any> {
+  const land = (v: any, t: TypeNode | null | undefined): any => {
+    if (v == null || t == null) return v;
+    if (t === 'float') return typeof v === 'number' ? floatCanonical(v) : v;
+    if (typeof t !== 'object') return v;
+    if (t.t === 'map') return v instanceof Map
+      ? new Map([...v].map(([k, x]) => [land(k, t.entries[String(k)]?.key), land(x, t.entries[String(k)]?.value)]))
+      : v;
+    if (Array.isArray(v)) return v.map((x, i) => land(x, t.items[i]));
+    if (v instanceof Set) return new Set([...v].map((x, i) => land(x, t.items[i])));
+    return v;
+  };
+  const typed = Object.keys(paramTypes).filter((k) => k in params);
+  if (typed.length === 0) return params;
+  const out = { ...params };
+  for (const k of typed) out[k] = land(params[k], paramTypes[k]);
+  return out;
+}
 
 /** `new BigDecimal(s)` over a decimal spelling (sign, digits, optional '.', optional exponent): its
  *  unscaled value and scale, exactly. `null` for anything else. */
@@ -34,74 +67,8 @@ export function decimalCompare(a: BigDecimal, b: BigDecimal): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/** A finite double's EXACT binary value as a decimal — `new BigDecimal(double)`, not `BigDecimal.valueOf`. */
-export function exactDecimalOf(d: number): BigDecimal {
-  const view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, d);
-  const bits = view.getBigUint64(0);
-  const negative = bits >> 63n === 1n;
-  const exponentBits = Number((bits >> 52n) & 0x7ffn);
-  const fraction = bits & ((1n << 52n) - 1n);
-  const mantissa = exponentBits === 0 ? fraction : fraction | (1n << 52n);
-  // d = mantissa · 2^exponent
-  const exponent = (exponentBits === 0 ? 1 : exponentBits) - 1075;
-  const signed = negative ? -mantissa : mantissa;
-  // 2^-k = 5^k / 10^k, so a negative exponent is an exact decimal of scale k.
-  return exponent >= 0 ? new BigDecimal(signed << BigInt(exponent), 0) : new BigDecimal(signed * 5n ** BigInt(-exponent), -exponent);
-}
-
-/**
- * `Float.parseFloat(text)` — the decimal rounded ONCE to a float. `Math.fround(Number(text))` rounds it
- * twice, and the two differ exactly when the double lands on the MIDPOINT of two floats without being the
- * decimal itself; there the exact decimal decides which side it lies on. A decimal that IS the midpoint is
- * a true tie, which `Math.fround` already breaks half-even, as Java does.
- */
-export function javaFloatOf(text: string): number {
-  const d = Number(text);
-  const f = Math.fround(d);
-  if (f === d || !Number.isFinite(f) || !Number.isFinite(d)) return f;
-  const other = 2 * d - f;
-  if (Math.fround(other) !== other || (f + other) / 2 !== d) return f;
-  const exact = decimalOf(text);
-  const side = exact === null ? 0 : decimalCompare(exact, exactDecimalOf(d));
-  return side === 0 ? f : side > 0 ? Math.max(f, other) : Math.min(f, other);
-}
-
-/**
- * `Float.toString`'s digits — the shortest decimal that reads back as the same float, and of those the
- * one CLOSEST to the float's exact value, an exact tie going to the EVEN last digit (`1.00390625f` is
- * `1.0039062`). So the exact value is rounded half-even at each precision; `toPrecision` cannot stand in,
- * because it breaks a tie upward.
- *
- * AT LEAST TWO DIGITS: where one digit already reads back, Java picks the closest decimal of length ONE OR
- * TWO (`Float.toString`/`Double.toString` javadoc, JDK 19+: "when m ≥ 2 let T be the decimals in R of
- * length m; otherwise let T be the decimals in R of length 1 or 2"). A normal float's rounding interval is
- * far narrower than a two-digit step, so this only changes a SUBNORMAL — `Float.MIN_VALUE` is `1.4E-45`,
- * not `1E-45`, and 2·MIN is `2.8E-45`, not `3E-45`. Starting the search at two digits IS that rule: the
- * closest two-digit decimal is at least as close as any one-digit one, and lies inside the interval.
- */
-export function floatText(f: number): string {
-  if (!Number.isFinite(f) || f === 0) return String(f);
-  const exact = exactDecimalOf(f);
-  const negative = exact.unscaled < 0n;
-  const digits = (negative ? -exact.unscaled : exact.unscaled).toString();
-  for (let p = 2; p <= 9; p++) {
-    let keep = digits.slice(0, p);
-    const rest = digits.slice(p);
-    if (rest !== '') {
-      const tail = rest.slice(1);
-      const up = rest[0]! > '5' || (rest[0] === '5' && (/[1-9]/.test(tail) || Number(keep.at(-1)) % 2 === 1));
-      if (up) keep = (BigInt(keep) + 1n).toString();
-    }
-    // `keep` stands for the first min(p, length) digits (a carry adds a digit, not a place).
-    const candidate = Number(`${negative ? '-' : ''}${keep}e${digits.length - Math.min(p, digits.length) - exact.scale}`);
-    if (Math.fround(candidate) === f) return String(candidate);
-  }
-  return String(f);
-}
-
 /** `Double.toString`'s digits as a JS number spelling — JS's own shortest-closest digits, under Java's
- *  two-digit minimum (`floatText` states the rule): only a SUBNORMAL double prints differently,
+ *  two-digit minimum (`Double.toString` javadoc, JDK 19+): only a SUBNORMAL double prints differently,
  *  `Double.MIN_VALUE` is `4.9E-324` where JS says `5e-324`. Returned as TEXT, because the two-digit
  *  spelling of such a double reads back as the SAME double and `String` would undo it. */
 export function doubleText(d: number): string {
@@ -114,16 +81,15 @@ export function doubleText(d: number): string {
 }
 
 /**
- * `Float.toString(f)` (with `float`) or `Double.toString(d)` — the printing authority. The digits are
- * `floatText`/`doubleText`'s; the LAYOUT is Java's: PLAIN for a magnitude in [10^-3, 10^7), always with a
- * fractional digit (`1.0`), and computerized scientific notation outside it (`1.0E10`, `1.4E-45`).
+ * `Double.toString(d)` — the printing authority (a Float prints as the Double it rides as). The digits are
+ * `doubleText`'s; the LAYOUT is Java's: PLAIN for a magnitude in [10^-3, 10^7), always with a
+ * fractional digit (`1.0`), and computerized scientific notation outside it (`1.0E10`, `4.9E-324`).
  */
-export function javaNumberText(d: number, float = false): string {
-  if (Number.isNaN(d)) return 'NaN';
-  const value = float ? Math.fround(d) : d;
+export function javaNumberText(value: number): string {
+  if (Number.isNaN(value)) return 'NaN';
   if (!Number.isFinite(value)) return value > 0 ? 'Infinity' : '-Infinity';
   if (value === 0) return '0.0';
-  const decimal = decimalOf(float ? floatText(value) : doubleText(value))!;
+  const decimal = decimalOf(doubleText(value))!;
   const negative = decimal.unscaled < 0n;
   let digits = (negative ? -decimal.unscaled : decimal.unscaled).toString();
   let scale = decimal.scale;
@@ -140,13 +106,12 @@ export function javaNumberText(d: number, float = false): string {
   return negative ? `-${body}` : body;
 }
 
-/** `new BigDecimal(Float.toString(f))` / `BigDecimal.valueOf(d)` — a floating Number's BigDecimal
- *  widening (`NumberHelper.bigDecimalValue`,
+/** `BigDecimal.valueOf(d)` — a floating Number's BigDecimal widening (`NumberHelper.bigDecimalValue`,
  *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:850-857`):
  *  the PRINTED decimal, never the exact binary value. `null` for a NaN or an infinity, which Java's
  *  `BigDecimal` cannot hold (`NumberFormatException`). */
-export function floatingDecimal(d: number, float = false): BigDecimal | null {
-  return Number.isFinite(d) ? decimalOf(javaNumberText(d, float)) : null;
+export function floatingDecimal(d: number): BigDecimal | null {
+  return Number.isFinite(d) ? decimalOf(javaNumberText(d)) : null;
 }
 
 /**
@@ -190,20 +155,10 @@ const realDecimal = (d: number): BigDecimal => {
   return decimal;
 };
 
-/** The float (`bits` 32) or double (64) adjacent to a FINITE `x` on each side — `Math.nextDown`/`nextUp`. */
-export function adjacent(x: number, bits: 32 | 64): readonly [number, number] {
+/** The double adjacent to a FINITE `x` on each side — `Math.nextDown`/`nextUp`. */
+export function adjacent(x: number): readonly [number, number] {
   const step = (v: number, up: boolean): number => {
-    if (v === 0) {
-      const tiny = bits === 32 ? 1.401298464324817e-45 : Number.MIN_VALUE;
-      return up ? tiny : -tiny;
-    }
-    if (bits === 32) {
-      const view = new DataView(new ArrayBuffer(4));
-      view.setFloat32(0, v);
-      const raw = view.getInt32(0);
-      view.setInt32(0, (v > 0) === up ? raw + 1 : raw - 1);
-      return view.getFloat32(0);
-    }
+    if (v === 0) return up ? Number.MIN_VALUE : -Number.MIN_VALUE;
     const view = new DataView(new ArrayBuffer(8));
     view.setFloat64(0, v);
     const raw = view.getBigInt64(0);

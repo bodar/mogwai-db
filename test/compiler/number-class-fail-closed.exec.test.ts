@@ -224,9 +224,10 @@ describe('a number compares in the reference common class, at every depth', () =
     expect(await typed(q)).toEqual(want as [unknown, number][]);
   });
 
-  // An Integer against a Float is a FLOAT compare; past 2^24 SQLite cannot round like one, so it defers.
-  test('an int past 2^24 against a float bound defers', () =>
-    expect(typed('g.inject(16777217).is(P.eq(16777216.0f))')).rejects.toThrow(RaisedByQuery));
+  // A Float rides as the Double of its literal, so an Integer against it compares as two doubles — a
+  // deliberate divergence from Java's float compare, which would round 16777217 to 16777216.
+  test('an int past 2^24 against a float bound compares as a double', async () =>
+    expect(await typed('g.inject(16777217).is(P.eq(16777216.0f))')).toEqual([]));
 });
 
 describe('a min/max winner off a stored vtype compares as its own type', () => {

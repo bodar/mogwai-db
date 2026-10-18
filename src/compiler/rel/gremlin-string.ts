@@ -76,12 +76,12 @@ export function gremlinString(node: unknown): string {
       if (t === 'boolean') return o.v === null ? 'null' : o.v === 0 || o.v === false ? 'false' : 'true';
       if ((t === 'datetime' || t === 'duration') && o.v !== null)
         throw new RaisedByQuery('asString() of a Date or Duration value is not supported yet');
-      // A Double or Float is `Double.toString`/`Float.toString` whatever it was stored as — a Double held
+      // A Double or Float (riding as its Double) is `Double.toString` whatever it was stored as — a Double held
       // whole (the INTEGER 1) is `1.0`.
       // A BigDecimal is `BigDecimal.toString` of the value its carrier IS — scale included, so an integral
       // source's 1000 is `1000` and `BigDecimal.valueOf(1.0E-7)` is `1.0E-7` (`bigDecimalOfCarrier`).
       if (t === 'bigdecimal' && o.v !== null) return bigDecimalOfCarrier(o.v as string).toJavaString();
-      if ((t === 'double' || t === 'float') && o.v !== null) return javaFloatingString(Number(isExactNumber(o.v) ? exactNumberOf(o.v).text : o.v), t === 'float');
+      if ((t === 'double' || t === 'float') && o.v !== null) return javaFloatingString(Number(isExactNumber(o.v) ? exactNumberOf(o.v).text : o.v));
       return gremlinString(o.v); // a scalar leaf (string/number/datetime/…) — its own value string
     }
     // An expanded ELEMENT (`{id,label,props[,src,tgt]}`) — a folded vertex/edge member.

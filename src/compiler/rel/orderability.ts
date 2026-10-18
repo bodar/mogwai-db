@@ -203,20 +203,13 @@ function cmpFloating(x: number, y: number): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/** A floating member's `BigDecimal` — `BigDecimal.valueOf(double)` for a double (its shortest decimal,
- *  which is JS's `String(number)`), `new BigDecimal(Float.toString(f))` for a float (the shortest decimal
- *  that rounds back to the same FLOAT — `NumberHelper.bigDecimalValue`). An infinity has no `BigDecimal`:
+/** A floating member's `BigDecimal` — `BigDecimal.valueOf(double)` (its shortest decimal, which is JS's
+ *  `String(number)`; a Float rides as its Double). An infinity has no `BigDecimal`:
  *  Java's `valueOf` parses `Double.toString` (`"Infinity"`/`"-Infinity"`) and its `NumberFormatException`
  *  names the first non-numeric character, `I` either way — this raises that same message rather than
  *  inventing an order. */
-function decimalOfFloating(value: number, bits: number): Decimal {
+function decimalOfFloating(value: number): Decimal {
   if (!Number.isFinite(value)) throw new RaisedByQuery('Character I is neither a decimal digit number, decimal point, nor "e" notation exponential mark.');
-  if (bits <= 32) {
-    for (let p = 1; p <= 9; p++) {
-      const text = value.toPrecision(p);
-      if (Math.fround(Number(text)) === value) return decimalOf(text);
-    }
-  }
   return decimalOf(String(value));
 }
 
@@ -243,7 +236,7 @@ function cmpNumber(f: unknown, s: unknown): number {
     const y = exactInteger(b.value);
     return x < y ? -1 : x > y ? 1 : 0;
   }
-  if (bits <= 32) return cmpFloating(Math.fround(asDouble(a.value)), Math.fround(asDouble(b.value)));
+  // A Float rides as the Double of its value, so a float compare is a double one.
   if (bits <= 64) {
     // A `long` widens to double by round-to-nearest — `Number(BigInt)` is that same rounding.
     const widen = (n: Numeric): number => (n.fp ? asDouble(n.value) : Number(exactInteger(n.value)));
@@ -252,7 +245,7 @@ function cmpNumber(f: unknown, s: unknown): number {
   const decimal = (n: Numeric): Decimal => {
     if (!n.fp) return { m: exactInteger(n.value), e: 0 };
     if (n.bits === 128) return decimalOf(String(n.value));
-    return decimalOfFloating(asDouble(n.value), n.bits);
+    return decimalOfFloating(asDouble(n.value));
   };
   return cmpDecimal(decimal(a), decimal(b));
 }

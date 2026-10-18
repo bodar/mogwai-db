@@ -1,5 +1,6 @@
 import { parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
+import { canonicalFloatParams } from '../gremlin/float.ts';
 import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
 import { perTraverserMutableFold } from './ir/fold-seed.ts';
@@ -45,7 +46,9 @@ function applyDiscard(plan: Executable): Executable {
  *  barrier call() at the source suspends into a SegmentPlan the executor resumes after an await
  *  (segment.ts runPlan). Every non-barrier caller keeps using compile() below, whose type never
  *  widened — only execute.ts's orchestrator consumes a Plan. */
-export function compilePlan(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
+export function compilePlan(gremlin: string, wireParams: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
+  // A Float parameter lands on the carrier every other Float rides as, before anything reads it.
+  const params = canonicalFloatParams(wireParams, paramTypes);
   const tree = parseGremlin(gremlin);
   // A terminal method the step walk cannot see (`next()`, `toSet()`, …) asks a different question than
   // the stream does — decline rather than answer the stream for it (`unansweredTerminalMethod`).

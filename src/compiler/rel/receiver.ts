@@ -2,8 +2,7 @@ import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from
 import * as make from '../../rel/factory.ts';
 import { deferralExpr, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { letValues, type Minter } from './build.ts';
-import { floatShortest } from './float.ts';
+import { type Minter } from './build.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
@@ -231,15 +230,15 @@ const INTEGRAL_TAGS: readonly ValueType[] = ['byte', 'short', 'int', 'long', 'bi
  *   round-trips, in plain notation inside `[1e-3, 1e7)`; SQLite's `CAST` prints 15 significant digits.
  *   Inside that range a value whose 15-digit text round-trips IS the shortest form (DBL_DIG = 15), so it
  *   answers there and RAISES a deferral elsewhere (`1.0/3`, `1.0e7`) rather than print a different string;
- * - anything else (a Float, whose shortest form is a float's not a double's; a BigDecimal; a Date; a
- *   UUID) has a `toString` SQL does not reproduce — refuted statically it DECLINES (`null`), per row it
+ * - a Float prints as the Double it rides as;
+ * - anything else (a BigDecimal; a Date; a UUID) has a `toString` SQL does not reproduce — refuted statically it DECLINES (`null`), per row it
  *   raises the deferral.
  *
  * A NULL renders NULL here; whether a null RAISES is `transformOffences`' question, not this one's.
  *
  * `spelling` says how the caller's step meets what this cannot render (`StringSpelling`).
  */
-export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, spelling: StringSpelling = AS_STRING): Expr | null {
+export function asStringOf(value: Expr, evidence: ValueEvidence, spelling: StringSpelling = AS_STRING): Expr | null {
   const { step } = spelling;
   const cast: Expr = { kind: 'cast', arg: value, to: 'text' };
   const bool: Expr = { kind: 'case', whens: [[value, text('true')]], else: text('false') };
@@ -249,7 +248,7 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, 
     if (tag === 'string') return value;
     if (INTEGRAL_TAGS.includes(tag)) return cast;
     if (tag === 'boolean') return nullable(bool);
-    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, tag === 'float', fresh, spelling));
+    if (tag === 'double' || tag === 'float') return nullable(floatingText(value, spelling));
     if (tag === 'bigdecimal' && spelling.decimal) return nullable(decimalText(value, spelling));
     return null;
   }
@@ -261,9 +260,8 @@ export function asStringOf(value: Expr, evidence: ValueEvidence, fresh: Minter, 
   return { kind: 'case', whens: [
     [inList(type, ['null', 'text', 'integer', ...(tagged ? ['string', ...INTEGRAL_TAGS] : [])]), cast],
     ...(tagged ? [[inList(type, ['boolean']), bool] as const] : []),
-    // ONE floating arm for a Double and a Float: a Float prints its shortest decimal, per row.
-    [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]),
-      floatingText(value, tagged ? inList(type, ['float']) : false, fresh, spelling)],
+    // ONE floating arm for a Double and a Float (which rides as its Double).
+    [inList(type, ['real', ...(tagged ? ['double', 'float'] : [])]), floatingText(value, spelling)],
     ...(tagged && spelling.decimal ? [[inList(type, ['bigdecimal']), decimalText(value, spelling)] as const] : []),
   ], else: spelling.arm(deferral(`${step}: rendering this value at run time`)) };
 }
@@ -323,31 +321,19 @@ function decimalText(value: Expr, spelling: StringSpelling): Expr {
  * Read as REAL first: a whole Double can be STORED as an integer (a `1.0d` reads back `1`).
  *
  * A DOUBLE's `Double.toString` is the shortest decimal that round-trips, and inside the plain range a
- * 15-digit text that round-trips IS that (DBL_DIG = 15). A FLOAT is carried as its EXACT value
- * (`src/gremlin/float.ts`), and `Float.toString` prints its SHORTEST decimal — `floatShortest`, at most nine
- * digits, which the same 15-digit text spells exactly; so a Float renders through the Double's rule over
- * that decimal (`0.1f` is `0.1`, `1.00390625f` is `1.0039062`). Its decimal is a correlated read the text
- * reads several times, so it is spelled once, in a one-row LET carrying its exact digits (`%!.17g`; JSON's
- * own REAL keeps only 15).
+ * 15-digit text that round-trips IS that (DBL_DIG = 15). A FLOAT rides as the Double of its decimal
+ * (`src/gremlin/float.ts`), so it prints by the same rule (`0.1f` is `0.1`).
  */
-function floatingText(value: Expr, float: boolean | Expr, fresh: Minter, spelling: StringSpelling): Expr {
+function floatingText(value: Expr, spelling: StringSpelling): Expr {
   const real: Expr = { kind: 'cast', arg: value, to: 'real' };
   const zero: Expr = { kind: 'binary', op: '=', left: real, right: int(0) };
   // A ZERO is `0.0`, sign and all (`-0.0` prints `0.0`, as SQLite's text does — a deliberate divergence).
   const zeroText = text('0.0');
-  // `Double.toString`/`Float.toString` of an infinity is `Infinity`/`-Infinity`; SQLite prints `Inf`.
-  // Read before the Float's LET, whose `printf` would spell it `Inf` too.
+  // `Double.toString` of an infinity is `Infinity`/`-Infinity`; SQLite prints `Inf`.
   const infinite: [Expr, Expr][] = [
     [{ kind: 'binary', op: '>', left: real, right: compilerReal(Number.MAX_VALUE) }, text('Infinity')],
     [{ kind: 'binary', op: '<', left: real, right: compilerReal(-Number.MAX_VALUE) }, text('-Infinity')],
   ];
-  if (float !== false) {
-    const shortest = floatShortest(real, fresh, spelling.arm);
-    const printed: Expr = { kind: 'call', fn: 'printf', args: [text('%!.17g'),
-      float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: real }] };
-    return { kind: 'case', whens: [[isNull(value), compilerNull()], [zero, zeroText], ...infinite],
-      else: letValues([printed], ([digits]) => floatingText({ kind: 'cast', arg: digits!, to: 'real' }, false, fresh, spelling), fresh) };
-  }
   const shown: Expr = { kind: 'cast', arg: real, to: 'text' };
   const abs: Expr = { kind: 'call', fn: 'abs', args: [real] };
   const plain = and({ kind: 'binary', op: '>=', left: abs, right: compilerReal(0.001) },

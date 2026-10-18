@@ -42,7 +42,6 @@ import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkPr
 import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
-import { floatText, javaFloatOf } from '../gremlin/float.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 import { execute, identifier, q, type Expression } from '../sql/kernel/q.ts';
@@ -288,8 +287,8 @@ function csvScalar(type: CanonicalType, text: string): unknown {
     case 'float': case 'double': {
       const n = Number(text);
       if (!Number.isFinite(n)) throw new Error(`CSV: "${text}" is not a ${type}`);
-      // A Float is carried as its EXACT value, rounded once from the decimal (`src/gremlin/float.ts`).
-      return type === 'float' ? javaFloatOf(text) : n;
+      // A Float lands on its carrier when stored (`storedScalar` → `floatCanonical`).
+      return n;
     }
     // A bigint keeps its bigint carrier whatever its magnitude, as the GraphSON reader does: it is
     // `coerceBindValue` that decides number-vs-decimal-TEXT at the bind, not the reader.
@@ -502,8 +501,6 @@ function csvText(vtype: CanonicalType | null, stored: unknown): string {
   switch (vtype) {
     // Stored as 1/0 (coerceBindValue — DO SQLite rejects a boolean bind).
     case 'boolean': return stored === 1 || stored === true ? 'true' : 'false';
-    // A Float is written as `Float.toString` writes it — its shortest decimal, not its exact carrier.
-    case 'float': return floatText(Math.fround(Number(stored)));
     case 'datetime': return dateOfMillis(stored).toISOString();
     // Stored as total nanos; every external format spells a duration ISO-8601.
     case 'duration': return Duration.from(String(stored)).toIso();

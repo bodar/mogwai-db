@@ -2,7 +2,7 @@ import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } f
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
 import { fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
-import { javaFloatOf } from './float.ts';
+import { floatCanonical } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 import { ValueParseError } from './coerce.ts';
 
@@ -280,9 +280,8 @@ export function integerLiteralValue(text: string): { value: number | bigint; typ
 export function floatLiteralValue(text: string): { value: number | BigDecimal; type: CanonicalType } {
   const type = floatLitType(text);
   if (type === 'bigdecimal') return { value: BigDecimal.fromText(text.replace(/[mM]$/, '')), type };
-  // A Float is carried as its EXACT value, rounded once from the decimal (`src/gremlin/float.ts`).
-  if (type === 'float') return { value: javaFloatOf(text.replace(/[fF]$/, '')), type };
-  return { value: parseFloat(text), type };
+  // A Float lands on the carrier every Float producer lands on (`floatCanonical`).
+  return { value: type === 'float' ? floatCanonical(parseFloat(text)) : parseFloat(text), type };
 }
 
 /** Flatten any bracketed-list arguments back to varargs (depth 1). Collection

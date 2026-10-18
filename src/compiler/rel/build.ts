@@ -549,13 +549,11 @@ export const binary64Carrier = (x: Expr): Expr => {
 };
 
 
-const asExactReal = (value: Expr, realOnly = true, ranged = true, carry: OutOfRangeCarrier = undefined): Expr => {
+const asExactReal = (value: Expr, realOnly = true, carry: OutOfRangeCarrier = undefined): Expr => {
   // Re-spelled where the 15-digit form does not round-trip — and, `realOnly`, only where the value IS a REAL:
   // a tag that admits a non-REAL carrier (a BigDecimal's decimal TEXT `12.50`) would otherwise have the test
   // read the text as a number and re-spell it `12.5`, losing the scale it carries. A Double/Float tag's value
   // is numeric storage, so its STATIC entry skips the storage-class test (no bytes where it cannot matter).
-  // `ranged` is false only for a static FLOAT tag: a Float's exact value lies inside the exact range
-  // (`Float.MAX_VALUE` 3.4E38, `Float.MIN_VALUE` 1.4E-45), so its entry skips that test the same way.
   const outside: Expr = realOnly ? { kind: 'binary', op: 'and', left: isReal(value), right: outsideExactDecimal(value) } : outsideExactDecimal(value);
   const lossy: Expr = { kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value };
   return {
@@ -566,8 +564,7 @@ const asExactReal = (value: Expr, realOnly = true, ranged = true, carry: OutOfRa
       // digits suffice, and the `lossy` test that would say so is itself wrong there — and SQLite's own reader
       // misreads the text even where it is right. So the member DEFERS rather than enter as another number.
       // A WIRE text carries it exactly instead (`binary64Carrier`): nothing in SQL reads it back.
-      ...(ranged ? [[outside, carry ? carry(value)
-        : deferralExpr(INEXACT_DECIMAL, { kind: 'call', fn: 'random', args: [] })] as [Expr, Expr]] : []),
+      [outside, carry ? carry(value) : deferralExpr(INEXACT_DECIMAL, { kind: 'call', fn: 'random', args: [] })],
       [realOnly ? { kind: 'binary', op: 'and', left: isReal(value), right: lossy } : lossy, jsonCall(printf('%!.17g', value))],
     ],
     // A WHOLE Double the store keeps as INTEGER (a stored `1.0` weight under 'double') is spelled as the REAL
@@ -609,7 +606,7 @@ const inList = (vtype: Expr, tags: readonly string[]): Expr => ({ kind: 'in-list
 export const jsonMember = (value: Expr, vtype: Expr, carry: OutOfRangeCarrier = undefined): Expr => {
   if (literalCollection(vtype) === true) return jsonCall(value);
   if (vtype.kind === 'lit') {
-    if (vtype.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(vtype.value)) return asExactReal(value, vtype.value === 'bigdecimal', vtype.value !== 'float', carry);
+    if (vtype.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(vtype.value)) return asExactReal(value, vtype.value === 'bigdecimal', carry);
     if (vtype.source === 'compiler-text' && WIDE_INT_VTYPES.includes(vtype.value)) return asExactWideInt(value);
     return value;
   }
@@ -617,7 +614,7 @@ export const jsonMember = (value: Expr, vtype: Expr, carry: OutOfRangeCarrier = 
     kind: 'case',
     whens: [
       [inList(vtype, COLLECTION_VTYPES), jsonCall(value)],
-      [binary64Under(vtype, value, false), asExactReal(value, false, true, carry)],
+      [binary64Under(vtype, value, false), asExactReal(value, false, carry)],
       [inList(vtype, WIDE_INT_VTYPES), asExactWideInt(value)],
     ],
     else: value,
@@ -664,15 +661,14 @@ export const scalarFramedValue = (value: Expr, decimal: Expr | null): Expr => de
  * class alone (`jsonMemberByTypeof`) for an untagged COLUMN, the one place `typeof` cannot splice a
  * subquery (§12 trap 2). An untagged expression is left as it was.
  *
- * A Float is carried as its EXACT value (`src/gremlin/float.ts`), which SQLite's 15-digit JSON writer does
- * not keep (`as('a').select('a')` read `0.1f` back as 0.100000001490116, which no float equals), and a
- * BigDecimal may ride as the REAL whose `valueOf` it is (`REAL_CARRYING_VTYPES`) — both take the repair.
+ * A Float rides as a Double (`src/gremlin/float.ts`), and a BigDecimal may ride as the REAL whose `valueOf`
+ * it is (`REAL_CARRYING_VTYPES`) — both take the repair.
  */
 export const exactRealEntry = (value: Expr, tag: Expr | undefined): Expr => {
   if (!tag) return value.kind === 'col' ? jsonMemberByTypeof(value) : value;
   if (tag.kind === 'lit') {
     return tag.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(tag.value)
-      ? asExactReal(value, tag.value === 'bigdecimal', tag.value !== 'float') : value;
+      ? asExactReal(value, tag.value === 'bigdecimal') : value;
   }
   return { kind: 'case', whens: [[binary64Under(tag, value, true), asExactReal(value, false)]], else: value };
 };

@@ -481,7 +481,8 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     // the reachable magnitudes — coerce through BigInt either way.
     case 'long': return ioc.longSerializer.serialize(BigInt(v), true);
     case 'bigint': return ioc.bigIntegerSerializer.serialize(BigInt(v), true);
-    case 'float': return ioc.floatSerializer.serialize(Number(v), true);
+    // A Float rides as a Double (`floatCanonical`); HERE, at the wire, it becomes float32.
+    case 'float': return ioc.floatSerializer.serialize(Math.fround(Number(v)), true);
     case 'double': return ioc.doubleSerializer.serialize(Number(v), true);
     // Datetime is carried as epoch-millis (INTEGER); the client's DateTimeSerializer
     // takes a JS Date (GraphBinary DATETIME 0x04, UTC wire), so reconstruct it here.

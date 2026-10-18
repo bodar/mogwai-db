@@ -248,7 +248,7 @@ function formatValue(
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FormatStep.java:100,114`),
   // which is `asString()`'s question exactly, so it is answered by `asString()`'s ONE authority
   // (`asStringOf`, `receiver.ts`) from what is known of the token's type: a Double `1.0` is `1.0`, not
-  // SQLite's `1`; a Boolean `true`, not `1`; a Float its shortest decimal. A token it cannot spell (a
+  // SQLite's `1`; a Boolean `true`, not `1`; a Float as its Double. A token it cannot spell (a
   // list, a map, a Double outside the plain form) declines statically or raises a deferral per row —
   // never a raw `||` of SQLite's text. A NULL stays NULL, which is the productivity drop below.
   //
@@ -258,12 +258,12 @@ function formatValue(
   // 20 KB, and a handful of them past the platform's 100 KB statement-text limit.
   const token = (value: Expr, evidence: ValueEvidence): Expr | null => {
     const tag = evidence.kind === 'tag' ? evidence.tag : undefined;
-    if (value.kind !== 'scalar' && tag?.kind !== 'scalar') return asStringOf(value, evidence, fresh, FORMAT_STRING);
+    if (value.kind !== 'scalar' && tag?.kind !== 'scalar') return asStringOf(value, evidence, FORMAT_STRING);
     const one = make.values({
       id: fresh('fto'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)),
       rows: [[value, tag ?? compilerNull('text')]],
     });
-    const rendered = asStringOf(col(one.id, 'v'), evidence.kind === 'tag' ? { ...evidence, tag: col(one.id, 't') } : evidence, fresh, FORMAT_STRING);
+    const rendered = asStringOf(col(one.id, 'v'), evidence.kind === 'tag' ? { ...evidence, tag: col(one.id, 't') } : evidence, FORMAT_STRING);
     return rendered && { kind: 'scalar', plan: make.project({
       id: fresh('ftp'), input: one, channels: [], type: typeOf(meta('s', 'text', true)), exprs: [['s', rendered]],
     }) };

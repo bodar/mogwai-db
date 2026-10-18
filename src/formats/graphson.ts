@@ -39,7 +39,6 @@ import {
 import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 import { q, type Expression } from '../sql/kernel/q.ts';
 import { edges } from '../sql/schema.ts';
-import { floatText, javaFloatOf } from '../gremlin/float.ts';
 
 /**
  * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).
@@ -173,8 +172,8 @@ function scalarOf(type: CanonicalType, raw: unknown): unknown {
     // `storedScalar` would produce anyway), a bigint only when the digits genuinely exceed it.
     case 'long': return typeof raw === 'string' ? exactInteger(raw) : raw;
     case 'bigdecimal': return BigDecimal.from(String(raw));
-    // A Float is carried as its EXACT value, rounded once from the decimal (`src/gremlin/float.ts`).
-    case 'float': return typeof raw === 'number' || typeof raw === 'string' ? javaFloatOf(String(raw)) : raw;
+    // A Float lands on its carrier when stored (`storedScalar` → `floatCanonical`).
+    case 'float': return typeof raw === 'string' ? Number(raw) : raw;
     case 'duration': return graphsonDuration(String(raw));
     // Internally a datetime is epoch-millis (gremlin/types leafStore, and the `datetime('…')` literal).
     case 'datetime': return typeof raw === 'number' ? raw : Date.parse(String(raw));
@@ -416,8 +415,6 @@ function leafJson(type: CanonicalType | null, stored: unknown): unknown {
     // to put the JSON boolean back or the reader reads a number and loses the type.
     case 'boolean': return stored === 1 || stored === true;
     case 'bigint': case 'bigdecimal': return String(stored);
-    // A Float is written as `Float.toString` writes it — its shortest decimal, not its exact carrier.
-    case 'float': return typeof stored === 'number' ? Number(floatText(Math.fround(stored))) : stored;
     // A long past 2^53 is stored as decimal TEXT (coerceBindValue); within range it is a number.
     case 'long': return typeof stored === 'string' ? stored : stored;
     // Stored as total nanos (TEXT) / epoch millis; GraphSON wants ISO-8601 for both.

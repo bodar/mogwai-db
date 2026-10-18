@@ -10,9 +10,9 @@ import { MERGED_VTYPE, PER_ROW, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { SACK_OPS } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
-import { carriedCols, letValues, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import { FLOAT_MAX } from './float.ts';
 import { extremumKeepingFirst, inferredVtype } from './reducer.ts';
-import { floatValueOf } from './float.ts';
 import { hostTag, type ChildHost, type ChildSeam } from './child.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import type { FramedRel } from './framing.ts';
@@ -231,7 +231,7 @@ export function sackMutate(
   if (!offences) return null;
   const guarded = raisingRows(kept, offences, fresh);
   const at = facts(guarded);
-  const combined = combine(operator, at, fresh);
+  const combined = combine(operator, at);
   if (!combined) return null;
   return make.project({
     id: fresh('skm'), input: guarded, channels: guarded.channels, type: typeOf(...payload, ...carriedCols(guarded.channels)),
@@ -312,9 +312,6 @@ const neededClass = (result: Expr): Expr => {
   return call('json_extract', compilerText('[0,0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3]'), path(compilerText('$['), digits, compilerText(']')));
 };
 
-/** `Float.MAX_VALUE` — a Float result past it is infinite in 32 bits, and `mathOperationWithPromote`
- *  retries it as a Double (`NumberHelper.java:414-425`). */
-const FLOAT_MAX = 3.4028234663852886e38;
 const FLOAT_CODE = 5;
 
 /**
@@ -357,12 +354,7 @@ function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidenc
     const comparable = bin('or', bin('is not', common, compilerNull()),
       bin('and', bin('=', sackTag, operandTag), { kind: 'in-list', expr: sackTag, values: [...COMPARABLE_TAGS].map(compilerText) }));
     const offends = bin('and', bin('and', bin('is not', sack, compilerNull()), bin('is not', operand, compilerNull())), not(comparable));
-    // In a FLOAT common class the winner is its `floatValue()` (`FLOAT_NUMBER_HELPER.min/max`), which an
-    // Integer past 2^24 is not — the carrier would no longer be the Float's exact value (`float.ts`).
-    const pastFloat: readonly [Expr, string] = [bin('and', bin('=', common, compilerInt(FLOAT_CODE)),
-      bin('>', call('max', call('abs', sack), call('abs', operand)), compilerInt(16777216))),
-    deferral(`${what}: a Float compared with an Integer past 2^24`)];
-    return [[offends, deferral(`${what}: operands that are not mutually Comparable`)], pastFloat, ...numericTail];
+    return [[offends, deferral(`${what}: operands that are not mutually Comparable`)], ...numericTail];
   }
   if (!ARITHMETIC.has(operator)) return null;
   const typed = numericOperandOffences([
@@ -386,12 +378,10 @@ function foldOffences(operator: string, facts: FoldFacts, evidence: ValueEvidenc
     ...divByZero,
     [bin('=', overflowed, compilerInt(BIGINT_CODE)), INTEGER_OVERFLOW],
     [bin('and', bin('>=', overflowed, compilerInt(0)), bin('<=', overflowed, compilerInt(LONG_CODE))), 'long overflow'],
-    // A Float result at the edge of `Float.MAX_VALUE` (within the error of reading it off the carriers
-    // rather than the floats) or SUBNORMAL is not one the float authority rounds (`inFloatClass`).
-    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('>', call('abs', result), compilerReal(FLOAT_MAX * (1 - 1e-6)))),
+    // A Float result past `Float.MAX_VALUE` is one the reference retries as a Double; it would frame as an
+    // infinity here.
+    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('>', call('abs', result), compilerReal(FLOAT_MAX))),
       deferral(`${what}: a Float result past Float.MAX_VALUE`)],
-    [bin('and', bin('=', common, compilerInt(FLOAT_CODE)), bin('and', bin('<', call('abs', result), compilerReal(1.2e-38)), bin('!=', result, compilerInt(0)))),
-      deferral(`${what}: a subnormal Float result`)],
     // A NULL result from two non-NULL operands is a NaN (`Infinity + -Infinity`, `Infinity * 0`), which the
     // reference carries as the Double NaN and SQLite cannot: it answered a `null` sack.
     [bin('and', bin('and', bin('is not', sack, compilerNull()), bin('is not', operand, compilerNull())), isNull(result)),
@@ -427,7 +417,7 @@ function foldedTag(operator: string, facts: FoldFacts, result: Expr): Expr {
  * the non-null side (`NumberHelper.java:402,558-559`), where SQLite's arithmetic and two-argument
  * `MIN`/`MAX` would answer NULL.
  */
-function combine(operator: string, facts: FoldFacts, fresh: Minter): Expr | null {
+function combine(operator: string, facts: FoldFacts): Expr | null {
   const { sack, operand, nullable } = facts;
   switch (operator) {
     case 'assign': return operand;
@@ -438,34 +428,10 @@ function combine(operator: string, facts: FoldFacts, fresh: Minter): Expr | null
     case 'max': return extremumKeepingFirst(operator, call('COALESCE', sack, operand), nullable ? call('COALESCE', operand, sack) : operand);
     default: {
       if (!ARITHMETIC.has(operator)) return null;
-      const folded = inFloatClass(operator, facts, fresh);
+      const folded = arithmetic(operator, facts);
       return nullable ? caseOf([[isNull(operand), sack]], folded) : folded;
     }
   }
-}
-
-/**
- * The arithmetic in its COMMON CLASS: in a Float class it is FLOAT arithmetic — `FLOAT_NUMBER_HELPER`'s
- * `a.floatValue() op b.floatValue()`, a float
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:225-229`):
- * the double operation over the two operands' exact floats (an Integer past 2^24 rounds to its float),
- * rounded once to a float by the float authority (`floatValueOf` — one IEEE operation over floats rounded
- * through a double IS the float operation, 53 ≥ 2·24 + 2). So the carrier stays the Float's EXACT value
- * (`src/gremlin/float.ts`), which every later compare, sum and `math()` reads. The operands are read once
- * each through a LET carrying their exact digits (`%!.17g`; JSON's own REAL keeps 15), so a chain of folds
- * does not re-spell them. Every other class is SQLite's own arithmetic (`arithmetic`). A Float result past
- * `Float.MAX_VALUE` or subnormal is `foldOffences`' deferral, so the split only meets the normal range.
- */
-function inFloatClass(operator: string, facts: FoldFacts, fresh: Minter): Expr {
-  const digits = (x: Expr): Expr => call('printf', compilerText('%!.17g'), { kind: 'cast', arg: x, to: 'real' });
-  const float = letValues([digits(facts.sack), digits(facts.operand)], ([s, o]) => {
-    const asFloat = (read: Expr): Expr => {
-      const real: Expr = { kind: 'cast', arg: read, to: 'real' };
-      return caseOf([[bin('>', call('abs', real), compilerInt(16777216)), floatValueOf(real)]], real);
-    };
-    return floatValueOf(arithmetic(operator, { ...facts, sack: asFloat(s!), operand: asFloat(o!) }));
-  }, fresh);
-  return caseOf([[bin('=', facts.common, compilerInt(FLOAT_CODE)), float]], arithmetic(operator, facts));
 }
 
 /**

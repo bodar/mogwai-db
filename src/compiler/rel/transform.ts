@@ -5,7 +5,7 @@ import { deferralExpr, raiseExpr } from '../../rel/raise.ts';
 import { JAVA_WHITESPACE } from './text-units.ts';
 import { SAFE_INT } from './reducer.ts';
 import type { Minter } from './build.ts';
-import { doubleDecimalText, FLOAT_MAX, floatRoundedOf, floatShortest } from './float.ts';
+import { doubleDecimalText, FLOAT_MAX } from './float.ts';
 import { dateAddDeltaMs, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
@@ -94,7 +94,7 @@ type NumericSpec = NonNullable<ReturnType<typeof numericSpec>>;
 const bin = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 /** 2^63 as a double — the first magnitude `CAST(… AS INTEGER)` CLAMPS rather than converts. */
 const LONG_EDGE = 9223372036854775808;
-/** `Double.MAX_VALUE` (`Float.MAX_VALUE` is the float authority's, `float.ts`). */
+/** `Double.MAX_VALUE` (`Float.MAX_VALUE` is in `float.ts`). */
 const DOUBLE_MAX = Number.MAX_VALUE;
 
 /**
@@ -144,8 +144,8 @@ const requiredDecimal = (decimal: DecimalSource | undefined): DecimalSource => {
   return decimal;
 };
 
-export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false, sourceFloat: FloatSource = false, decimal?: DecimalSource): Expr {
-  const { value, refuse } = asNumberParts(v, spec, integersGuarded, nativeNumber, sourceFloat, decimal);
+export function asNumberCast(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false, decimal?: DecimalSource): Expr {
+  const { value, refuse } = asNumberParts(v, spec, integersGuarded, nativeNumber, decimal);
   return refuse ? { kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: value } : value;
 }
 
@@ -157,46 +157,25 @@ export const asNumberFilter = (v: Expr, refuse: Expr): Expr =>
   ({ kind: 'case', whens: [[refuse, raiseExpr(AS_NUMBER_INEXACT, v)]], else: compilerInt(1) });
 
 /** The two halves of `asNumberCast`: the converted `value`, and the `refuse` condition (or null). */
-/** WHETHER a value is a Float — never (`false`), statically, or per row by its tag — with the minter its
- *  printing (`floatShortest`, a correlated read) is built with. */
-export type FloatSource = false | { readonly isFloat: true | Expr; readonly fresh: Minter };
-
-/** A value read as a Float PRINTS it — `Float.toString`'s value (`floatShortest`) — where it is one, and is
- *  itself otherwise. */
-export function floatPrinted(v: Expr, source: FloatSource): Expr {
-  if (source === false) return v;
-  const shortest = floatShortest({ kind: 'cast', arg: v, to: 'real' }, source.fresh);
-  return source.isFloat === true ? shortest : { kind: 'case', whens: [[source.isFloat, shortest]], else: v };
-}
-
-export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false, sourceFloat: FloatSource = false, decimal?: DecimalSource): { readonly value: Expr; readonly refuse: Expr | null } {
-  // A FLOAT source widens to a Double or a BigDecimal through `Float.toString` — its SHORTEST decimal,
-  // not its exact value (`NumberHelper.java:742-745,851-859`); every other target reads the exact value.
-  const read: Expr = sourceFloat !== false && (spec.as === 'double' || spec.as === 'bigdecimal')
-    ? floatPrinted(v, sourceFloat) : v;
-  const asReal: Expr = { kind: 'cast', arg: read, to: 'real' };
+export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = false, nativeNumber = false, decimal?: DecimalSource): { readonly value: Expr; readonly refuse: Expr | null } {
   const notInteger = bin('!=', call('typeof', v), held('integer'));
-  const notFloating = bin('!=', call('typeof', v), held('real'));
   const abs = call('abs', { kind: 'cast', arg: v, to: 'real' });
-  // A Float target is the value ROUNDED to a float (`floatRoundedOf`) — the exact carrier every Float rides
-  // as; an infinity passes through as itself (`:736-738`).
+  // A Float target is the value as a REAL, unrounded: a run-time Float is a Double (the shortest-float32
+  // carrier, `floatCanonical`, is compile-time only — `docs/feature-support-matrix.md`), framed as float32.
   // A BigDecimal target lands on the reference's SCALE (`NumberHelper.java:850-859`): a floating source — by
-  // its class tag, or a REAL — is `BigDecimal.valueOf(Double.toString(d))` (a Float's `Float.toString`), its
-  // decimal-TEXT carrier (`doubleDecimalText` — a bare REAL frames `100.0` as scale 0); an integral source
-  // is `BigDecimal.valueOf(long)`, scale 0, which the INTEGER itself already frames; a text carrier is one.
-  // The source `v` is read, not `read`: the Float's printing happens once inside the carrier.
+  // its class tag, or a REAL — is `BigDecimal.valueOf(Double.toString(d))`, its decimal-TEXT carrier
+  // (`doubleDecimalText` — a bare REAL frames `100.0` as scale 0); an integral source is
+  // `BigDecimal.valueOf(long)`, scale 0, which the INTEGER itself already frames; a text carrier is one.
   const cast: Expr = spec.as === 'bigdecimal'
     ? ((): Expr => {
       const { fresh, floating } = requiredDecimal(decimal);
-      const float = sourceFloat === false ? false : sourceFloat.isFloat;
-      const carrier = doubleDecimalText(v, fresh, float);
-      if (floating === true || float === true) return carrier;
+      const carrier = doubleDecimalText(v, fresh);
+      if (floating === true) return carrier;
       const isReal = bin('=', call('typeof', v), held('real'));
-      const when = [floating, float].reduce<Expr>((acc, c) => (c === false ? acc : bin('or', c as Expr, acc)), isReal);
+      const when = floating === false ? isReal : bin('or', floating, isReal);
       return { kind: 'case', whens: [[when, carrier]], else: v };
     })()
-    : spec.as === 'float' ? { kind: 'case', whens: [[bin('>', abs, compilerReal(DOUBLE_MAX)), asReal]], else: floatRoundedOf(asReal) }
-      : { kind: 'cast', arg: read, to: spec.int ? 'int' : 'real' };
+    : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' };
   const notANumber = bin('and',
     { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: call('typeof', v), values: [held('integer'), held('real'), held('null')] } },
     bin('is not', { kind: 'cast', arg: { kind: 'cast', arg: v, to: 'int' }, to: 'text' }, v));
@@ -207,11 +186,8 @@ export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = fals
       return integersGuarded ? bin('and', notInteger, out) : out;
     })()
     : spec.int ? bin('and', notInteger, bin('>=', abs, compilerReal(LONG_EDGE)))
-      // A float target past `Float.MAX_VALUE` and finite throws (`:736-741`); an integer past 2^53, which
-      // `CAST … AS REAL` would round once already before the float rounding, defers. A subnormal rounds on
-      // the float grid exactly (`floatRoundedOf`).
-      : spec.as === 'float' ? bin('or', bin('and', bin('>', abs, compilerReal(FLOAT_MAX)), bin('<=', abs, compilerReal(DOUBLE_MAX))),
-        bin('and', notFloating, bin('>=', abs, compilerReal(2 ** 53))))
+      // A float target past `Float.MAX_VALUE` and finite throws (`:736-741`).
+      : spec.as === 'float' ? bin('and', bin('>', abs, compilerReal(FLOAT_MAX)), bin('<=', abs, compilerReal(DOUBLE_MAX)))
         // `bigDecimalValue` of a non-finite Double is `BigDecimal.valueOf`'s NumberFormatException
         // (`NumberHelper.java`); the BigDecimal framer cannot spell one either (it leaked a JS SyntaxError).
         // Only a native REAL: an exact decimal TEXT carrier is returned unchanged, however wide.
@@ -398,7 +374,7 @@ export function transformExpr(
   // rendered by the receiver authority from the caller's evidence (`asStringOf`), declined without any.
   // No static type on the result: the framing `UNKNOWN` infers per VALUE, which for text is `string`.
   if (step.name === 'asString') {
-    const expr = evidence ? asStringOf(v, evidence, fresh) : null;
+    const expr = evidence ? asStringOf(v, evidence) : null;
     return expr && { expr };
   }
 
@@ -440,20 +416,15 @@ export function transformExpr(
     // target is fenced where the cast and the reference disagree (`asNumberCast`).
     const known = staticTypeOf(incoming);
     const native = !!known && NUMBER_FAMILY.has(known) && !staticIsText(incoming);
-    // A Float source PRINTS into a Double or BigDecimal target (`floatPrinted`): statically, or per row by
-    // its tag (the receiver evidence — `evidenceOf`).
-    const floatTag = evidence?.kind === 'static' ? evidence.tag === 'float' : known !== undefined ? known === 'float'
-      : evidence?.kind === 'tag' ? bin('=', evidence.tag, held('float')) : false;
-    const sourceFloat: FloatSource = floatTag === false ? false : { isFloat: floatTag, fresh };
     const floating = evidence?.kind === 'static' ? evidence.tag === 'double' || evidence.tag === 'float'
       : known !== undefined ? known === 'double' || known === 'float'
       : evidence?.kind === 'tag' ? floatingTag(evidence.tag) : false;
     const decimal: DecimalSource = { fresh, floating };
-    const { value, refuse } = asNumberParts(v, spec, false, native, sourceFloat, decimal);
+    const { value, refuse } = asNumberParts(v, spec, false, native, decimal);
     // A wide `long`/`bigint` result is decimal TEXT (`asNumberParts`), so its class is TEXT-carried.
     const type = asNumberType(spec);
     return refuse
-      ? { expr: asNumberCast(v, spec, false, native, sourceFloat, decimal), type, fenced: { value, filter: asNumberFilter(v, refuse) } }
+      ? { expr: asNumberCast(v, spec, false, native, decimal), type, fenced: { value, filter: asNumberFilter(v, refuse) } }
       : { expr: value, type };
   }
 

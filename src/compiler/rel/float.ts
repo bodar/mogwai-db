@@ -1,121 +1,25 @@
-import { col, compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
-import * as make from '../../rel/factory.ts';
-import { letValues, meta, typeOf, type Minter } from './build.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
+import { letValues, type Minter } from './build.ts';
 import { deferralExpr, raisedMessage, raiseInRow } from '../../rel/raise.ts';
 import { EXACT_DECIMAL_MIN, INEXACT_DECIMAL } from '../../rel/exact-decimal.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { forEachExpr, forEachRel, relExprs } from '../../rel/walk.ts';
 
-/** The deferral `floatShortest` raises where `printf` and `Float.toString` break an exact tie apart. */
-const FLOAT_TIE = 'printing a Float whose shortest decimal is an exact tie is not supported yet';
-
 /**
- * THE FLOAT AUTHORITY, run-time half — a Java `Float` in SQL, where there is no single precision.
- *
- * A Float is carried as its EXACT value (the compile-time half, `src/gremlin/float.ts`, states why), so a
- * consumer that reads it as a number — a compare, `math()`, a `min`/`max` across classes — reads the
- * reference's own `floatValue()`/`doubleValue()` with nothing to convert. Two things are left to SQL, and
- * both live here so no producer or consumer spells its own:
- *
- * - **ROUNDING TO A FLOAT** (`floatValueOf`) — what a producer of a NEW Float states its value through: a
- *   `Float` sack fold (`FLOAT_NUMBER_HELPER.add` is `a.floatValue() + b.floatValue()`, a float result,
- *   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:225-229`),
- *   a run-time `asNumber(GType.FLOAT)`. SQLite has no single-precision type, so it is Veltkamp's split:
- *   `c = x·(2^29 + 1); c − (c − x)` keeps the top 53 − 29 = 24 significant bits of a double, rounded to
- *   nearest — exactly `Math.fround` over the float NORMAL range, ties included (measured against
- *   `Math.fround` over 2·10^6 random doubles and 4·10^6 float midpoints). Outside that range (a subnormal,
- *   an overflow) it is not, so a caller fences those (`floatSubnormal`, `FLOAT_OVERFLOW`).
- * - **PRINTING A FLOAT** (`floatShortest`) — `Float.toString`, the shortest decimal that reads back as the
- *   float, which the consumers that print or re-parse a Float read (`asString`; a cast to Double is
- *   `Double.parseDouble(a.toString())`, `NumberHelper.java:742-745`).
+ * Floating-number widening at run time. A Gremlin `Float` rides as the Double of its decimal (`0.1f` is the
+ * REAL 0.1, `src/gremlin/float.ts`) and is rounded to float32 only by the wire framer, so nothing here
+ * spells single precision.
  */
 
 /** `Float.MAX_VALUE`. */
 export const FLOAT_MAX = 3.4028234663852886e38;
-/** The least magnitude `Math.fround` carries to an infinity: `Float.MAX_VALUE` plus half its ulp (a tie
- *  rounds to even, which is the infinity). */
+/** The least magnitude `Math.fround` carries to an infinity: `Float.MAX_VALUE` plus half its ulp. A Float
+ *  result at or past it frames as a Double (`commonNumberClass`), never as an infinity. */
 export const FLOAT_OVERFLOW = 3.4028235677973366e38;
-/** `Float.MIN_NORMAL` — below it a float is subnormal and `floatValueOf` is not `Math.fround`. */
-export const FLOAT_MIN_NORMAL = 1.1754943508222875e-38;
-/** Veltkamp's splitting constant for 24 kept bits: 2^(53−24) + 1. */
-const SPLIT = 536870913;
 
 const bin = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 const real = (x: Expr): Expr => ({ kind: 'cast', arg: x, to: 'real' });
 const abs = (x: Expr): Expr => ({ kind: 'call', fn: 'abs', args: [x] });
-
-/** `(float) x` for a REAL `x` in the float normal range or zero — `Math.fround`, by Veltkamp's split.
- *  `x` is spelled three times, so a caller hands it a column, never a correlated read. */
-export function floatValueOf(x: Expr): Expr {
-  const scaled = bin('*', x, compilerReal(SPLIT));
-  return bin('-', scaled, bin('-', scaled, x));
-}
-
-/** `x` is a non-zero magnitude below the float normal range, where `floatValueOf` is not `Math.fround`. */
-export const floatSubnormal = (x: Expr): Expr =>
-  bin('and', bin('<', abs(x), compilerReal(FLOAT_MIN_NORMAL)), bin('!=', x, compilerReal(0)));
-
-/** 2^149 — a float's least ulp is 2^-149, below `Float.MIN_NORMAL` and through the binade above it. */
-const FLOAT_ULP_SCALE = 2 ** 149;
-
-/**
- * `(float) x` for a REAL `x` ANYWHERE below the overflow — `floatValueOf` in the normal range, and below it
- * the float grid itself: every float under `Float.MIN_NORMAL` is a multiple of 2^-149, so `x·2^149` rounded
- * to an integer half-EVEN (`round` breaks a tie away from zero, so an exact `.5` halves first) and scaled
- * back is `Math.fround`, exactly — both scalings are exact powers of two. `x` is spelled several times,
- * so a caller hands it a column.
- */
-export function floatRoundedOf(x: Expr): Expr {
-  const scaled = bin('*', x, compilerReal(FLOAT_ULP_SCALE));
-  const floor: Expr = { kind: 'call', fn: 'floor', args: [scaled] };
-  const round = (e: Expr): Expr => ({ kind: 'call', fn: 'round', args: [e] });
-  const halfEven: Expr = { kind: 'case',
-    whens: [[bin('=', bin('-', scaled, floor), compilerReal(0.5)), bin('*', compilerReal(2), round(bin('/', scaled, compilerReal(2))))]],
-    else: round(scaled) };
-  return { kind: 'case', whens: [[bin('<', abs(x), compilerReal(FLOAT_MIN_NORMAL)), bin('/', halfEven, compilerReal(FLOAT_ULP_SCALE))]],
-    else: floatValueOf(x) };
-}
-
-/** The deferral `floatShortest` raises where its input is not a float at all (an infinity, or a value that
- *  lost its exact bits) — never a NULL a caller would print as `0.0`. */
-const NOT_A_FLOAT = 'printing a Float that is not carried as its exact value is not supported yet';
-
-/**
- * `Float.toString(f)`'s VALUE — the shortest decimal that reads back as the float, as the REAL nearest it —
- * for a float carried exactly (`x`, a REAL). Tried at 2…9 significant digits — at least TWO, Java's
- * minimum (`floatText` states it: `Float.MIN_VALUE` is `1.4E-45`, not `1E-45`) — the fewest that reads
- * back wins (nine always does): ONE correlated read over the eight precisions, so `x` is spelled a fixed
- * few times rather than once per precision. A subnormal reads back through the float grid
- * (`floatRoundedOf`). NULL only for a NULL; an `x` no candidate reads back as RAISES — through `arm`, a
- * reference-style raise unless the caller spells its deferral as a READ-only one (`asStringOf`).
- */
-export function floatShortest(x: Expr, fresh: Minter, arm: (message: string) => Expr = raiseInRow): Expr {
-  const precisions = make.explode({
-    id: fresh('fsp'), channels: [], type: typeOf(meta('p', 'int')), as: { value: 'p' },
-    expr: compilerText(JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8])),
-  });
-  const p = col(precisions.id, 'p');
-  const printed = (digits: Expr): Expr => ({ kind: 'call', fn: 'printf', args: [bin('||', bin('||', compilerText('%.'), digits), compilerText('e')), x] });
-  const lastDigit = (text: Expr): Expr => ({ kind: 'call', fn: 'substr', args: [text, bin('-', { kind: 'call', fn: 'instr', args: [text, compilerText('e')] }, compilerInt(1)), compilerInt(1)] });
-  // AN EXACT TIE — the float's exact value ends in a 5 one place past the candidate's — is broken toward
-  // the EVEN digit by `Float.toString` and upward by `printf`; such a candidate with an odd last digit is
-  // not Java's, so it is marked and the read defers (`floatText`, the compile-time half, breaks it exactly).
-  const next = printed(bin('+', p, compilerInt(1)));
-  const tie = bin('and', bin('=', real(next), x), bin('=', lastDigit(next), compilerText('5')));
-  const odd: Expr = { kind: 'in-list', expr: lastDigit(printed(p)), values: ['1', '3', '5', '7', '9'].map(compilerText) };
-  const candidates = make.project({
-    id: fresh('fsc'), input: precisions, channels: [], type: typeOf(meta('p', 'int'), meta('c', 'real', true), meta('t', 'int', true)),
-    exprs: [['p', p], ['c', real(printed(p))], ['t', bin('and', tie, odd)]],
-  });
-  const c = col(candidates.id, 'c');
-  const readsBack = make.filter({ id: fresh('fsr'), input: candidates, channels: [], type: candidates.type, pred: bin('=', floatRoundedOf(c), x) });
-  const fewest = make.sort({ id: fresh('fss'), input: readsBack, channels: [], type: readsBack.type, terms: [{ expr: col(readsBack.id, 'p'), dir: 'asc' }] });
-  const first = make.limit({ id: fresh('fsl'), input: fewest, channels: [], type: fewest.type, count: compilerInt(1) });
-  const chosen: Expr = { kind: 'case', whens: [[col(first.id, 't'), arm(FLOAT_TIE)]], else: col(first.id, 'c') };
-  const shortest: Expr = { kind: 'scalar', plan: make.project({ id: fresh('fsv'), input: first, channels: [], type: typeOf(meta('c', 'real', true)), exprs: [['c', chosen]] }) };
-  return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: x, right: compilerNull('real') }, compilerNull('real')]],
-    else: { kind: 'call', fn: 'coalesce', args: [shortest, arm(NOT_A_FLOAT)] } };
-}
 
 /**
  * Does this plan WIDEN a Double to a BigDecimal at run time (`doubleDecimalText`) — the one producer of a
@@ -142,28 +46,21 @@ export function widensDoubleToDecimal(plan: Rel): boolean {
  * so a Double winner of a stream whose class is BigDecimal IS `bigDecimalValue(winner)` = `BigDecimal.valueOf(d)`
  * (`:850-859`) — the SAME widening `asNumber(GType.BIGDECIMAL)` states (`doubleDecimalText`), so it goes
  * through it: the winner rides the scaled carrier every BigDecimal consumer reads, at every depth (`1.0` is
- * scale 1, `1.0E7` (10, −6)) — never a bare REAL a scalar framer would read as scale 0. A FLOAT winner is
- * `new BigDecimal(f.toString())`, whose printing (`floatShortest`) would more than double the statement of
- * every min/max that MIGHT meet one, so it DEFERS in-row rather than frame the Float's exact binary value.
- * `own` is the winner's own Gremlin class and `toDecimal` the test that the RESULT's class is BigDecimal
- * (`resultIsDecimal`); every other winner (an integral one is `valueOf(long)`, scale 0, which its INTEGER
- * already frames) is itself. `value` is spelled several times, so a caller hands it a column or a cheap read.
+ * scale 1, `1.0E7` (10, −6)) — never a bare REAL a scalar framer would read as scale 0. A FLOAT winner rides
+ * as the Double of its value, so it widens the same way. `own` is the winner's own Gremlin class and
+ * `toDecimal` the test that the RESULT's class is BigDecimal (`resultIsDecimal`); every other winner (an
+ * integral one is `valueOf(long)`, scale 0, which its INTEGER already frames) is itself. `value` is spelled
+ * several times, so a caller hands it a column or a cheap read.
  */
 export function promotedExtremum(value: Expr, own: Expr, toDecimal: Expr, fresh: Minter): Expr {
-  const isText = (e: Expr, t: string): Expr => bin('=', e, compilerText(t));
-  return { kind: 'case', whens: [
-    [bin('and', toDecimal, isText(own, 'double')), doubleDecimalText(value, fresh)],
-    [bin('and', toDecimal, isText(own, 'float')), raiseInRow(FLOAT_TO_DECIMAL)],
-  ], else: value };
+  const floating: Expr = { kind: 'in-list', expr: own, values: [compilerText('double'), compilerText('float')] };
+  return { kind: 'case', whens: [[bin('and', toDecimal, floating), doubleDecimalText(value, fresh)]], else: value };
 }
 
 /** A named result class IS BigDecimal — `promotedExtremum`'s `toDecimal` where the class is a column. (A
  *  FLOATING winner's result is BigDecimal exactly where the stream's widest width is 128 — `determineNumberClass`
  *  of `f128` — so a caller holding the width alone tests that instead.) */
 export const resultIsDecimal = (cls: Expr): Expr => bin('=', cls, compilerText('bigdecimal'));
-
-/** The deferral `promotedExtremum` raises for a Float winner promoted to BigDecimal. */
-export const FLOAT_TO_DECIMAL = 'min/max promoting a Float to BigDecimal is not supported yet';
 
 /** `Double.MIN_NORMAL` — below it a double is subnormal, where 15 digits no longer always round-trip. */
 const DOUBLE_MIN_NORMAL = 2.2250738585072014e-308;
@@ -199,7 +96,7 @@ const SUBNORMAL_DECIMAL = 'a BigDecimal widening of a subnormal Double is not su
  *   framer receives spelled as the raw JSON REAL it is (`scalarPayload`, `lower.ts`). A widening defers
  *   nothing a later step might never observe.
  */
-export function doubleDecimalText(x: Expr, fresh: Minter, float: boolean | Expr = false): Expr {
+export function doubleDecimalText(x: Expr, fresh: Minter): Expr {
   const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
   // `x` is a COLUMN (a caller materializes a computed one), so it is read as often as the text needs; each
   // DERIVED spelling below rides a one-row LET rather than being re-inlined at every read.
@@ -250,12 +147,5 @@ export function doubleDecimalText(x: Expr, fresh: Minter, float: boolean | Expr 
       [bin('<', magnitude, compilerReal(EXACT_DECIMAL_MIN)), deferralExpr(INEXACT_DECIMAL, call('random'))],
     ], else: plainText };
   };
-  // A FLOAT widens through `Float.toString` (`new BigDecimal(f.toString())`) — its shortest decimal, printed
-  // ONCE (a correlated read) into a one-row LET. That decimal has at most nine digits, so `%.15g` carries it
-  // exactly (DBL_DIG); a Double row carries nothing there and reads `x` itself.
-  const shortest = call('printf', compilerText('%.15g'), floatShortest(real(x), fresh));
-  const decimal = float === false ? body(real(x))
-    : letValues([float === true ? shortest : { kind: 'case', whens: [[float, shortest]], else: compilerNull('text') }],
-      ([printedFloat]) => body(call('coalesce', real(printedFloat!), real(x))), fresh);
-  return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: x, right: compilerNull('real') }, compilerNull('text')]], else: decimal };
+  return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: x, right: compilerNull('real') }, compilerNull('text')]], else: body(real(x)) };
 }
