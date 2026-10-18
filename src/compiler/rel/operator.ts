@@ -525,26 +525,13 @@ export const PLAIN_FOLD = 'plain';
  * a form this does not read (a decline).
  *
  * `fold(seed, foldFunction)` is the only other overload (`GraphTraversal.fold(E2, BiFunction)`), and in
- * the Gremlin string grammar its function is an `Operator`. **`fold([], Operator.addAll)` IS the plain
- * fold**, by the reference's own construction: the no-argument `FoldStep` constructor is
- * `this(traversal, ArrayListSupplier.instance(), Operator.addAll)` (`…/step/map/FoldStep.java:46-48`) —
- * an empty `ArrayList` seed, `addAll`, and `listFold` because that seed is a `Collection`. A `Set` seed is
- * NOT that (its `addAll` dedups), so only an empty LIST literal takes the identity.
- *
- * ⚠️ **The identity holds only where the fold runs ONCE.** The two differ in their SUPPLIER: the no-arg
- * form's `ArrayListSupplier` makes a fresh list per `get()`, while `fold(seed, f)` wraps the one parsed
- * literal in a `ConstantSupplier` (`…/dsl/graph/GraphTraversal.java:1300`) — so in a per-traverser child,
- * re-seeded after each reset, every parent `addAll`s into the SAME list. Every list/map seed is subject to
- * that, and the compile declines such a fold before lowering wherever it may run per parent
- * (`perTraverserMutableFold`, `ir/fold-seed.ts`); this identity is therefore only ever read at the root.
+ * the Gremlin string grammar its function is an `Operator`. `fold([], Operator.addAll)` never reaches
+ * here: the `plainFoldSpelling` Pass (`ir/strategies.ts`) rewrites it to `fold()` at every depth.
  */
 export function foldDeclared(step: IRStep): typeof PLAIN_FOLD | MergePolicy | null {
   const args = step.args ?? [];
   if (!args.length) return PLAIN_FOLD;
   const [seed, fn, extra] = args;
   if (!seed || !fn || extra || !isOperatorArg(fn.value)) return null;
-  const operator = fn.value.operator;
-  if (operator === ADD_ALL && seed.name == null && Array.isArray(seed.value) && !seed.value.length && flatType(seed.type) === 'list')
-    return PLAIN_FOLD;
-  return { seed, operator };
+  return { seed, operator: fn.value.operator };
 }

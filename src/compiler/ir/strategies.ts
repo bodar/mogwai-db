@@ -1,8 +1,8 @@
-import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
-import { mapEntryType } from '../../gremlin/types.ts';
+import { flatType, mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
@@ -1009,6 +1009,22 @@ export function absorbValueMapWith(steps: IRStep[]): IRStep[] {
     i += 1; // consume the with()
   }
   return out;
+}
+
+/** **`fold([], Operator.addAll)` IS `fold()`**, by the reference's own construction: the no-argument
+ *  `FoldStep` constructor is `this(traversal, ArrayListSupplier.instance(), Operator.addAll)`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FoldStep.java:46-48`).
+ *  A `Set` seed is NOT that (its `addAll` dedups), nor a parameter, so only an empty LIST literal is
+ *  rewritten. In a per-traverser child Java's `ConstantSupplier` aliases the one seed across parents;
+ *  that is object aliasing we deliberately do not emulate (`docs/feature-support-matrix.md` §17). */
+export function plainFoldSpelling(steps: IRStep[]): IRStep[] {
+  const isSpelling = (s: IRStep) => {
+    if (s.name !== 'fold' || s.args.length !== 2) return false;
+    const [seed, fn] = s.args as [Arg, Arg];
+    return isOperatorArg(fn.value) && fn.value.operator === 'addall' && seed.name == null
+      && Array.isArray(seed.value) && !seed.value.length && flatType(seed.type) === 'list';
+  };
+  return steps.some(isSpelling) ? steps.map((s) => (isSpelling(s) ? { ...s, args: [] } : s)) : steps;
 }
 
 /** `fold().count(Scope.local)` counts the one folded list's size = the number of upstream

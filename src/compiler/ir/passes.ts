@@ -4,7 +4,7 @@ import {
     stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markEarlyLimitSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
-    absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder, mergeStepLabels,
+    absorbValueMapWith, collapseFoldCountLocal, plainFoldSpelling, dropRedundantOrder, mergeStepLabels,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
     inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
@@ -121,6 +121,8 @@ const FOLD: Pass[] = group('canonicalize', [
   // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
   // folded operand still canonicalizes.
   { name: 'ConnectiveStrategy', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
+  // `fold([], Operator.addAll)` → `fold()`, so every fold site at every depth reads one spelling.
+  { name: 'plainFoldSpelling', applies: (steps) => steps.some((s) => s.name === 'fold'), run: (steps) => plainFoldSpelling(steps) },
   // `withoutStrategies(EarlyLimitStrategy)` marks every slice at every depth, on the RAW chain: before
   // `formRepeatRegions`/`absorbOptionArms` move a body out of the args it walks. Cost when the user named
   // nothing is zero (`applies` reads the strategy list, never the chain). ROOT-only by construction: only

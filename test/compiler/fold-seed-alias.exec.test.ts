@@ -1,61 +1,47 @@
-// A MUTABLE `fold(seed, Operator)` seed is ONE object across parent traversers in the reference —
-// `GraphTraversal.fold(E2, BiFunction)` wraps the literal in a `ConstantSupplier`
-// (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java:1300),
-// `ReducingBarrierStep` re-fetches that same object after each per-parent reset
-// (.../process/traversal/step/util/ReducingBarrierStep.java:88-111), and `Operator.addAll` mutates it
-// (.../process/traversal/Operator.java:187-194). Every lowering folds into a fresh accumulator, so a
-// per-traverser fold with a list/map seed must DECLINE at every depth (`perTraverserMutableFold`,
-// `src/compiler/ir/fold-seed.ts`); only a fold that runs once — a step of the root chain — answers.
+// `fold([], Operator.addAll)` IS the plain `fold()` at every depth: a per-traverser child folds into a
+// FRESH copy of the seed per parent. Java's `ConstantSupplier` aliases one seed list across parents
+// (GraphTraversal.java:1300) — object aliasing, not Gremlin semantics; the accepted divergence is
+// recorded in docs/feature-support-matrix.md §17 ("Seeded fold per parent").
 import { test, expect, describe } from 'bun:test';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { seededStore, run, bare } from '../support/harness.ts';
 
-const declines = (g: string) => expect(() => compile(g, {})).toThrow(UnsupportedTraversal);
+const s = seededStore();
+const names = (g: string) => bare(run(s, g)).map((r: any) => r.v);
 
-describe('a per-traverser fold with a mutable seed declines at every depth', () => {
-  // Each answered a per-parent FRESH list (or a count of one) on trunk; the reference aliases.
-  const perTraverser = [
-    // the audit's two: a where() body (reference keeps all four persons: 3,3,5,6 > 2) and a local() body
-    "g.V().hasLabel('person').where(__.out().values('name').fold([], Operator.addAll).count(local).is(gt(2))).values('name')",
-    "g.V().hasLabel('person').local(__.out().values('name').fold([], Operator.addAll))",
-    // the same body under every other per-traverser host
-    "g.V().hasLabel('person').map(__.out().values('name').fold([], Operator.addAll))",
-    "g.V().hasLabel('person').flatMap(__.out().values('name').fold([], Operator.addAll))",
-    "g.V().hasLabel('person').project('a').by(__.out().values('name').fold([], Operator.addAll))",
-    "g.V().hasLabel('person').as('p').select('p').by(__.out().values('name').fold([], Operator.addAll))",
-    "g.V().hasLabel('person').not(__.out().values('name').fold([], Operator.addAll).count(local).is(lt(2))).values('name')",
-    "g.V().hasLabel('person').choose(__.out().values('name').fold([], Operator.addAll).count(local).is(gt(2)), __.constant(1), __.constant(2))",
-    "g.V().hasLabel('person').coalesce(__.out().values('name').fold([], Operator.addAll), __.constant(2))",
-    "g.V().hasLabel('person').local(__.out().values('name').fold([], Operator.addAll).unfold())",
-    "g.V().hasLabel('person').local(__.out().values('name').fold([], Operator.addAll).count(local))",
-    "g.V().hasLabel('person').local(__.out().fold([], Operator.addAll))",
-    "g.V().hasLabel('person').map(__.out().valueMap().fold([], Operator.addAll))",
-    // nested: a union arm inside a per-traverser host, a fold of a fold, a two-hop where()
-    "g.V().hasLabel('person').local(__.union(__.out().values('name').fold([], Operator.addAll), __.constant(1)))",
-    "g.V().hasLabel('person').local(__.out().values('name').fold([], Operator.addAll).fold([], Operator.addAll))",
-    "g.V().hasLabel('person').where(__.out().out().values('name').fold([], Operator.addAll).count(local).is(gt(0))).values('name')",
-    // a non-empty list seed and a map seed, same rule
+describe('a per-traverser seeded fold answers a fresh list per parent', () => {
+  test('local(fold([], addAll)) equals local(fold())', () => {
+    const seeded = bare(run(s, "g.V().hasLabel('person').local(__.out().values('name').fold([], Operator.addAll))"));
+    const plain = bare(run(s, "g.V().hasLabel('person').local(__.out().values('name').fold())"));
+    expect(seeded).toEqual(plain);
+    expect(seeded.map((r: any) => JSON.parse(r.list).sort())).toEqual([['josh', 'lop', 'vadas'], [], ['lop', 'ripple'], ['lop']]);
+  });
+  test('where(size > 2) keeps marko', () => {
+    expect(names("g.V().hasLabel('person').where(__.out().values('name').fold([], Operator.addAll).count(local).is(gt(2))).values('name')"))
+      .toEqual(['marko']);
+  });
+  test('not(size < 2) keeps marko and josh', () => {
+    expect(names("g.V().hasLabel('person').not(__.out().values('name').fold([], Operator.addAll).count(local).is(lt(2))).values('name')").sort())
+      .toEqual(['josh', 'marko']);
+  });
+});
+
+describe('a seed other than [] in a child position still declines', () => {
+  for (const g of [
     "g.V().hasLabel('person').local(__.out().values('name').fold(['x'], Operator.addAll))",
     "g.V().hasLabel('person').local(__.out().group().by('name').fold([:], Operator.addAll).count(local))",
-    // an infix and() moves the authored top-level fold into a per-traverser operand (ConnectiveStrategy)
-    "g.V().hasLabel('person').values('name').fold([], Operator.addAll).count(local).is(gt(2)).and().count(local).is(gt(1))",
-  ];
-  for (const g of perTraverser) test(g, () => declines(g));
+  ]) test(g, () => expect(() => compile(g, {})).toThrow(UnsupportedTraversal));
 });
 
 describe('a fold that runs once keeps answering', () => {
-  const s = seededStore();
   test('root list identity', () => {
     expect(bare(run(s, "g.V().values('age').order().fold([], Operator.addAll)"))).toEqual([{ list: '[27,29,32,35]' }]);
   });
   test('root map seed', () => {
     expect(run(s, 'g.inject(["a":1],["b":2]).fold([:], Operator.addAll)')).toHaveLength(1);
   });
-  test('an immutable seed is unaffected per traverser', () => {
+  test('an immutable seed per traverser', () => {
     expect(bare(run(s, "g.V().hasLabel('person').local(__.out().values('age').fold(0, Operator.sum))")).map((r: any) => r.v).sort())
       .toEqual([0, 0, 0, 59]);
-  });
-  test('plain fold() per traverser is unaffected', () => {
-    expect(run(s, "g.V().hasLabel('person').local(__.out().values('name').fold())")).toHaveLength(4);
   });
 });
