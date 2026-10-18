@@ -21,6 +21,7 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import { RaisedByQuery } from '../src/rel/raise.ts';
+import { UnsupportedTraversal } from '../src/compiler/unsupported.ts';
 import { hasExactDecimal, INEXACT_DECIMAL } from '../src/rel/exact-decimal.ts';
 import { decode } from './support/decode.ts';
 
@@ -124,3 +125,56 @@ for (const t of TRANSPORTS) {
     });
   });
 }
+
+// THE TWO TRANSPORTS LAND ONE LEAF FORM. The HTTP decoder (`src/foreign-decode.ts`) used to hand back the
+// GraphBinary client's JS carriers — a `bigint` for every BigInteger and every Long past 2^53, a `BigDecimal`,
+// a `Date` — where the in-process `runForeign` hands back the stored leaf form (`leafStore`,
+// `src/gremlin/types.ts`). The landing writes ONE JSON text, so EVERY HTTP federate over a sibling holding
+// any such value raised the raw `TypeError: JSON.stringify cannot serialize BigInt.`. Each value-bearing
+// shape, at several depths, must equal the sibling's direct read — over both transports.
+describe('federate: a BigInteger / BigDecimal / wide Long / datetime / duration sibling reads as the direct one', () => {
+  const ADD = `g.addV('n').property('x', 5n).property('b', 12345678901234567890123n).property('y', 1.5m).property('z', 1.10m)
+    .property('l', 9007199254740993L).property('dt', datetime('2023-01-02T03:04:05.678Z')).property('du', Duration(5, 7))
+    .property('li', [3n, 1.5m, 9007199254740993L]).property('m', [a: 1n, (2L): 1.5m]).property('bo', true)`;
+  const EDGE = "g.V().addE('e').to(V()).property('w', 3n).property('d', 2.5m).property('l', 9007199254740993L)";
+  beforeAll(async () => {
+    for (const { sibling } of TRANSPORTS) { await sibling('wide').framedAsync(ADD, {}); await sibling('wide').framedAsync(EDGE, {}); }
+  });
+  // [the federated traversal, the local tail after it, the same question asked of the sibling directly]
+  const CASES: readonly [string, string, string][] = [
+    ['__.V()', '', 'g.V()'],
+    ['__.E()', '', 'g.E()'],
+    ['__.V().values("x")', '', 'g.V().values("x")'],
+    ['__.V().values()', '', 'g.V().values()'],
+    ['__.V().values("x").fold()', '', 'g.V().values("x").fold()'],
+    ['__.V().valueMap()', '', 'g.V().valueMap()'],
+    ['__.V().values("l").max()', '', 'g.V().values("l").max()'],
+    ['__.V()', '.values()', 'g.V().values()'],
+    ['__.V()', '.values("b")', 'g.V().values("b")'],
+    ['__.V()', '.values("y")', 'g.V().values("y")'],
+    ['__.V()', '.values("dt")', 'g.V().values("dt")'],
+    ['__.V()', '.values("du")', 'g.V().values("du")'],
+    ['__.V()', '.values("m")', 'g.V().values("m")'],
+    ['__.V()', '.values("l").max()', 'g.V().values("l").max()'],
+    ['__.V()', '.values("x").sum()', 'g.V().values("x").sum()'],
+    ['__.E()', '.values()', 'g.E().values()'],
+  ];
+  for (const t of TRANSPORTS) {
+    for (const [sub, tail, direct] of CASES) {
+      test(`${t.name}: ${sub}${tail}`, async () => {
+        const oracle = await run(t.sibling('wide'), direct);
+        expect(await run(local.executor('home'), fed(t.graph('wide'), sub, tail))).toEqual(oracle);
+      });
+    }
+    test(`${t.name}: the subgraph walk and the mid-traversal rejoin`, async () => {
+      const sub = `g.call("federate").with("graph","${t.graph('wide')}").with("subgraph", true).with("traversal", __.E()).outV().values("b")`;
+      expect(await run(local.executor('home'), sub)).toEqual([12345678901234567890123n]);
+      const mid = `g.V().call("federate").with("graph","${t.graph('wide')}").with("traversal", __.V())`;
+      expect(await run(local.executor('home'), mid)).toEqual(await run(t.sibling('wide'), 'g.V()'));
+    });
+  }
+  // What the HTTP decoder has no leaf form for is a DECLINE, never a defect.
+  test('HTTP: an undecodable peer type (elementMap\'s T keys) declines', async () => {
+    await expect(run(local.executor('home'), fed(TRANSPORTS[1].graph('wide'), '__.V().elementMap()'))).rejects.toThrow(UnsupportedTraversal);
+  });
+});

@@ -22,10 +22,11 @@
 // replication protocol (Phase 3+) reuses.
 
 import { ioc, StreamReader } from './io.ts';
-import { WIRE_TYPE_TO_NAME } from './gremlin/types.ts';
+import { leafStore, WIRE_TYPE_TO_NAME } from './gremlin/types.ts';
 import type { FrameNode, ValueNode } from './gremlin/types.ts';
 import type { ForeignResult, ForeignRow, ForeignTerminal } from './api.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
+import { UnsupportedTraversal } from './compiler/unsupported.ts';
 
 const D = ioc.DataType;
 
@@ -99,11 +100,20 @@ async function decodeNode(r: Reader, typeCode?: number): Promise<FrameNode> {
     case D.EDGE: return { t: 'edge', v: await decodeEdgePayload(r) };
     default: {
       const t = WIRE_TYPE_TO_NAME[tc];
+      // A type this decoder has no leaf form for (a `T` token key of `elementMap()`, a VertexProperty) is a
+      // DECLINE — the user's traversal outside what an HTTP hop carries — not a defect.
       if (t === undefined)
-        throw new Error(`federate(http): cannot decode GraphBinary type 0x${tc.toString(16)} over HTTP federation`);
+        throw UnsupportedTraversal.because(`federate(http): cannot decode GraphBinary type 0x${tc.toString(16)} over HTTP federation`);
       // Reuse the client's own leaf serializer for the value (reuse-first) — we only own the TYPE tag.
       const v = await (ioc.serializers as Record<number, { deserializeValue(r: Reader, flag: number, code: number): Promise<any> }>)[tc].deserializeValue(r, flag, tc);
-      return { t, v };
+      // …and then land it in the STORED leaf form (`leafStore`, the one authority), which is what the
+      // in-process `runForeign` hands back from the sibling's own props JSON. The client's carriers are NOT
+      // that form: a Long past 2^53 and every BigInteger arrive as a JS `bigint`, a BigDecimal as a
+      // `BigDecimal`, a datetime as a `Date`, a Duration as a `Duration` — and the landing writes the
+      // detached rows as ONE JSON text (`compiler/rel/foreign.ts`), where a bigint made `JSON.stringify`
+      // throw its raw TypeError for every HTTP federate over such a sibling, and a `Date` became ISO text
+      // a datetime reader does not read. One leaf form, so the two transports are one downstream.
+      return { t, v: leafStore(v, t) };
     }
   }
 }

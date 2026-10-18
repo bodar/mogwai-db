@@ -33,6 +33,7 @@
 import { binary64CarrierText, binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
 import { RaisedByQuery } from './rel/raise.ts';
 import { assertCarriable } from './sql/kernel/q.ts';
+import { UnsupportedTraversal } from './compiler/unsupported.ts';
 
 const WIDE_DIGITS =/\d{16}|\d[eE]|\d\.0/;
 const INTEGRAL = /^-?\d+$/;
@@ -125,12 +126,18 @@ export function decodeCarriers(value: unknown): any {
   return out ?? value;
 }
 
+/** The tags whose `{t,v}` leaf the WRITER may re-spell as a binary64 wire carrier: a value that IS a binary64.
+ *  Narrower than `BINARY64_TAGS` (the reader's set, which also admits a `bigdecimal` leaf SQL computed as a
+ *  REAL): a BigDecimal is decimal, so spelling one through a binary64 would lose its digits and scale — an
+ *  out-of-range number under that tag raises with the rest. */
+const BINARY64_WRITE_TAGS: ReadonlySet<unknown> = new Set(['double', 'float', 'real']);
+
 /** The writing twin of `carriedLeaf`: a binary64 `{t,v}` leaf whose number SQLite's decimal text cannot
  *  carry, with `v` re-spelled as the wire carrier; `undefined` for any other value. */
 function carrierLeaf(member: unknown): unknown {
   if (member === null || typeof member !== 'object' || Array.isArray(member) || isExactNumber(member)) return undefined;
   const node = member as { t?: unknown; v?: unknown };
-  if (!BINARY64_TAGS.has(node.t)) return undefined;
+  if (!BINARY64_WRITE_TAGS.has(node.t)) return undefined;
   const raw = isExactNumber(node.v) ? exactNumberOf(node.v) : null;
   const x = typeof node.v === 'number' ? node.v : raw && !raw.integral ? Number(raw.text) : null;
   const text = x === null ? null : binary64CarrierText(x);
@@ -163,6 +170,10 @@ export function stringifyExact(value: unknown, wireCarrier = false): string | nu
     if (typeof member === 'string') assertCarriable(member);
     const carried = wireCarrier ? carrierLeaf(member) : undefined;
     if (carried !== undefined) return carried;
+    // A JS `bigint` is not a leaf form any tree headed into SQLite holds (`leafStore`, `gremlin/types.ts`, spells
+    // one as a safe number or decimal TEXT), and no JSON spelling of it is safe: SQLite reads an integer past
+    // 2^63 as a REAL. `JSON.stringify` would throw its raw TypeError; a producer that leaked one declines here.
+    if (typeof member === 'bigint') throw UnsupportedTraversal.because('a value with no exact JSON leaf form (a raw bigint) cannot cross into SQLite');
     // A raw exact number is a Double only when spelled with a point or exponent (`exactNumberOf`).
     const raw = isExactNumber(member) ? exactNumberOf(member) : null;
     const number = typeof member === 'number' ? member : raw && !raw.integral ? Number(raw.text) : null;

@@ -511,8 +511,14 @@ export type DirectionName = 'IN' | 'OUT';
  *  Reuses storedScalar for the exact tail (long/bigint>2^53, bigdecimal, duration →
  *  decimal TEXT; char → 1-char string); datetime → epoch-millis (a Date carrier off the
  *  wire, or already-ms from a literal). storedScalar never returns a raw BigInt, so the
- *  result is always JSON.stringify-safe (number | string | boolean | null). */
-function leafStore(val: any, t: CanonicalType | null): any {
+ *  result is always JSON.stringify-safe (number | string | boolean | null).
+ *
+ *  THE ONE AUTHORITY for a scalar leaf's in-tree form, which is why it is exported: a value DECODED off
+ *  the wire (a GraphBinary peer's federated result, `foreign-decode.ts`) arrives as the client's JS
+ *  carriers (a `bigint`, a `BigDecimal`, a `Date`, a `Duration`) and must land in the SAME form a
+ *  stored tree holds, or a JSON writer downstream sees a value it cannot spell (`JSON.stringify` throws
+ *  on a bigint) or spells another one (a `Date` as ISO text). */
+export function leafStore(val: any, t: CanonicalType | null): any {
   if (t === 'datetime') return val instanceof Date ? val.getTime() : Number(val);
   return t == null ? val : storedScalar(val, t);
 }
