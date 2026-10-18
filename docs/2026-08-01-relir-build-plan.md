@@ -846,6 +846,11 @@ authorities.
   `Double.equals(0.0,-0.0)` false) and keeps 17 digits; a federate in a union arm under a parent stream
   (`unifiedBoundGraph`, `rel/boundgraph.ts`) declines as `UnsupportedTraversal` instead of a bare `Error`.
   No baselines moved. CI green.
+  ✅ **Big-zero literal compare LANDED ON TRUNK 2026-10-18 (`7e2bb240`, ff-big-zero-compare).** `numericPair`
+  (the one literal-compare widening every predicate site reaches, at any depth) treats a BigInteger/BigDecimal
+  zero as EQUAL to a `-0.0d` bound (BigDecimal widening is unsigned, `NumberHelper.java:362-399,850-859`); a
+  value-stream `order()` over a big zero beside both signed Double zeros DEFERS via `ZERO_CLASSES_UNORDERED`
+  (`OrderGlobalStep.java:78`, intransitive comparator). Decline-only for ordering. No baselines moved. CI green.
   ✅ **Projected-zero ordering LANDED ON TRUNK 2026-10-18 (`feaa0656`, `91f45e78`, `32a0940a`,
   ff-order-projected-zero).** A projected by() key orders/compares `-0.0` below `0.0` at every position, by
   each key's NUMBER CLASS (`ZeroCarrier`, `orderingKey`, `orderedBy`, `signedCompare` in `rel/predicate.ts`):
