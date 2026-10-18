@@ -39,7 +39,7 @@
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
 import { refreshElements } from './refresh.ts';
-import { binary64Cell, deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
+import { deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
 import { stringifyExact } from './json-exact.ts';
 import { execute, identifier, q, value } from './sql/kernel/q.ts';
 
@@ -322,15 +322,11 @@ export class BulkLoader {
     p: BulkProperty, mintId: () => number, kind: 'vertex' | 'edge',
   ): void {
     const vtype = p.vtype !== undefined ? p.vtype : gremlinTypeOf(p.value, p.typeNode ?? null);
-    const { stored: bound, collection } = propertyValueBind(p.value, vtype, p.typeNode ?? null);
-    // A scalar Double outside the range SQLite reads decimal text exactly in crosses the JSON row as its
-    // exact pair (`binary64Cell`, decoded by the `binary64` value column — `land`), never a rounded number.
-    const stored = collection ? bound : binary64Cell(bound);
+    const { stored, collection } = propertyValueBind(p.value, vtype, p.typeNode ?? null);
     const pid = mintId();
     if (kind === 'vertex') {
       if (pid >= this.nextVertexProp) this.nextVertexProp = pid + 1;
-      // The meta bag is JSON text SQLite reads (`jsonb`), so it goes through the ONE writer of such a text,
-      // which refuses a Double no decimal spelling crosses exactly rather than land another number.
+      // The meta bag is JSON text SQLite reads (`jsonb`), so it goes through the ONE writer of such a text.
       const meta = p.meta ? stringifyExact(p.meta) : null;
       (collection ? into.collection : into.scalar).push([pid, owner, p.key, stored, vtype, meta]);
     } else {
@@ -593,8 +589,6 @@ export class BulkLoader {
     const isBlob = (c: string) => c === 'gid'; // a raw BLOB, crossed as hex + unhex()'d (setwrite.ts)
     const spec: SetColumn[] = columns.map((c) => ({
       name: c, type: isJsonb(c) || isBlob(c) ? 'blob' : 'any', jsonb: isJsonb(c), blob: isBlob(c),
-      // A SCALAR property batch's value may be a `binary64Cell` pair (`property`); a collection's never is.
-      binary64: c === 'value' && !jsonbValue,
     }));
     this.counts.statements += insertSet(this.store, table, spec, rows);
   }

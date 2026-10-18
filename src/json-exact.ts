@@ -26,8 +26,6 @@
 
 // A number past 2^53 is spelled with a run of 16+ digits, or with an exponent (`2.7e+19`); a whole Double
 // with a point (`1.0`).
-import { binary64CarrierText, binary64OfCarrier, hasExactDecimal, INEXACT_DECIMAL, mayHoldCarrier } from './rel/exact-decimal.ts';
-import { RaisedByQuery } from './rel/raise.ts';
 import { UnsupportedTraversal } from './compiler/unsupported.ts';
 
 const WIDE_DIGITS =/\d{16}|\d[eE]|\d\.0/;
@@ -49,123 +47,25 @@ export const exactNumberOf = (value: ExactNumber): { readonly integral: boolean;
  *  runtime lacks source-text access the number stays `JSON.parse`'s — a reader that compares it then sees
  *  a bare unsafe integer, which ORDERABILITY declines rather than ranks (`orderability.ts`). */
 export function parseExactJson(text: string): any {
-  const carried = mayHoldCarrier(text);
-  if (!carried && (!rawJson.rawJSON || !WIDE_DIGITS.test(text))) return JSON.parse(text);
-  const reviver = (_key: string, value: unknown, context?: { source?: string }): unknown => {
-    if (carried) {
-      // A whole Double past 2^53 stays a raw exact number spelled with its exponent (every carried value
-      // is outside [1e-80, 1e116], so `String` spells a whole one `1e+300`), as SQLite's own `1.0e+300` would.
-      const leaf = carriedLeaf(value, (x) => rawJson.rawJSON && Number.isInteger(x) ? rawJson.rawJSON(String(x)) : x);
-      if (leaf !== undefined) return leaf;
-    }
-    return rawJson.rawJSON && typeof value === 'number' && Number.isInteger(value) && context?.source !== undefined
+  if (!rawJson.rawJSON || !WIDE_DIGITS.test(text)) return JSON.parse(text);
+  const reviver = (_key: string, value: unknown, context?: { source?: string }): unknown =>
+    typeof value === 'number' && Number.isInteger(value) && context?.source !== undefined
       && (!Number.isSafeInteger(value) || !INTEGRAL.test(context.source))
-      ? rawJson.rawJSON(context.source) : value;
-  };
+      ? rawJson.rawJSON!(context.source) : value;
   return JSON.parse(text, reviver as (key: string, value: unknown) => unknown);
 }
 
-/** The tags whose `{t,v}` leaf may hold a binary64 wire carrier (`binary64Carrier`, `compiler/rel/build.ts`). */
-const BINARY64_TAGS: ReadonlySet<unknown> = new Set(['double', 'float', 'real', 'bigdecimal']);
-
-/** A `{t,v}` leaf whose `v` is a binary64 wire carrier, with `v` read back as the number it carries
- *  (`as` picks that number's JS form); `undefined` for any other value. */
-function carriedLeaf(value: unknown, as: (x: number) => unknown): unknown {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const node = value as { t?: unknown; v?: unknown };
-  if (!BINARY64_TAGS.has(node.t)) return undefined;
-  const x = binary64OfCarrier(node.v);
-  return x === null ? undefined : { ...node, v: as(x) };
-}
-
-/**
- * AN ELEMENT PAYLOAD — one element, a list of them, or an element's property bag (`{key: [{t,v}, …]}`,
- * an edge's `{key: {t,v}}`) — as JSON text or already parsed: the one reader of the wire-only JSON
- * `compiler/rel/element.ts` builds. A binary64 no decimal spelling crosses SQLite exactly rides there as a
- * wire carrier (`binary64Carrier`, `compiler/rel/build.ts`), read back here to the number `JSON.parse`
- * would have produced from its exact spelling; everything else is `JSON.parse`'s own.
- */
-export function parseElementJson(json: unknown): any {
-  // An ALREADY-PARSED payload is decoded too, so a reader that parsed the text some other way (a list
-  // column holding element members, a federated node) can never hand a raw carrier on: the decode is a
-  // property of THIS reader, not of whichever parse happened to run first.
-  if (typeof json !== 'string') return decodeCarriers(json);
-  if (!mayHoldCarrier(json)) return JSON.parse(json);
-  return JSON.parse(json, (_key, value: unknown) => {
-    const leaf = carriedLeaf(value, (x) => x);
-    return leaf === undefined ? value : leaf;
-  });
-}
-
-/** An already-parsed JSON tree with every binary64 wire carrier leaf read back (`carriedLeaf`) — the
- *  object twin of `parseElementJson`'s reviver. Copy-on-write: a tree holding no carrier comes back as
- *  the SAME object, so the common case allocates nothing. A raw exact number (`parseExactJson`) is a
- *  leaf, never walked into. */
-export function decodeCarriers(value: unknown): any {
-  if (value === null || typeof value !== 'object' || isExactNumber(value)) return value;
-  const leaf = carriedLeaf(value, (x) => x);
-  if (leaf !== undefined) return leaf;
-  if (Array.isArray(value)) {
-    let out: unknown[] | null = null;
-    value.forEach((member, i) => {
-      const decoded = decodeCarriers(member);
-      if (decoded !== member) (out ??= value.slice())[i] = decoded;
-    });
-    return out ?? value;
-  }
-  let out: Record<string, unknown> | null = null;
-  for (const [key, member] of Object.entries(value)) {
-    const decoded = decodeCarriers(member);
-    if (decoded !== member) (out ??= { ...(value as Record<string, unknown>) })[key] = decoded;
-  }
-  return out ?? value;
-}
-
-/** The tags whose `{t,v}` leaf the WRITER may re-spell as a binary64 wire carrier: a value that IS a binary64.
- *  Narrower than `BINARY64_TAGS` (the reader's set, which also admits a `bigdecimal` leaf SQL computed as a
- *  REAL): a BigDecimal is decimal, so spelling one through a binary64 would lose its digits and scale — an
- *  out-of-range number under that tag raises with the rest. */
-const BINARY64_WRITE_TAGS: ReadonlySet<unknown> = new Set(['double', 'float', 'real']);
-
-/** The writing twin of `carriedLeaf`: a binary64 `{t,v}` leaf whose number SQLite's decimal text cannot
- *  carry, with `v` re-spelled as the wire carrier; `undefined` for any other value. */
-function carrierLeaf(member: unknown): unknown {
-  if (member === null || typeof member !== 'object' || Array.isArray(member) || isExactNumber(member)) return undefined;
-  const node = member as { t?: unknown; v?: unknown };
-  if (!BINARY64_WRITE_TAGS.has(node.t)) return undefined;
-  const raw = isExactNumber(node.v) ? exactNumberOf(node.v) : null;
-  const x = typeof node.v === 'number' ? node.v : raw && !raw.integral ? Number(raw.text) : null;
-  const text = x === null ? null : binary64CarrierText(x);
-  return text === null ? undefined : { ...node, v: text };
-}
-
-/** `JSON.stringify` for a compile-time tree headed into SQLite's JSON (a literal map, a stored collection,
- *  a bound set), spelling `±Infinity` as SQLite does (`exactSpelling`). A runtime without `JSON.rawJSON`
- *  cannot spell an infinity and refuses it (`UnsupportedTraversal`) rather than write `null`.
- *
- *  A finite number OUTSIDE the range SQLite reads decimal text exactly in (`rel/exact-decimal.ts`) RAISES the
- *  in-row deferral's own `RaisedByQuery`: JS spells it exactly, but SQLite's JSON reader turns `1.5e-300` into
- *  1.4999999999999998E-300, so the tree would hand every SQL reader of it another number. This is the ONE
- *  writer of a JSON text headed into SQLite, so the rule holds for a literal, a bound set, a barrier's
- *  re-injected values and a retained binding alike.
- *
- *  `wireCarrier` is for a JSON text built in JS that NO SQL reader looks inside — a landed federated element
- *  payload whose relation only the framer reads (`compiler/rel/foreign.ts`). There an out-of-range binary64
- *  under a binary64 `{t,v}` tag rides as the wire carrier (`binary64CarrierText`), the spelling a native
- *  element payload holds (`binary64Carrier`, `compiler/rel/build.ts`), so `parseElementJson` reads both back
- *  by one rule. Any other out-of-range number still raises. */
-export function stringifyExact(value: unknown, wireCarrier = false): string {
+/** `JSON.stringify` for a tree headed into SQLite's JSON (a literal map, a stored collection, a bound set,
+ *  a landed federated payload), spelling `±Infinity` as SQLite does (`exactSpelling`). A runtime without
+ *  `JSON.rawJSON` cannot spell an infinity and refuses it (`UnsupportedTraversal`) rather than write `null`.
+ *  A finite Double crosses as JS's shortest spelling; outside about [1e-80, 1e116] SQLite's decimal reader may
+ *  land it a last ulp away — an accepted divergence (`docs/feature-support-matrix.md`). */
+export function stringifyExact(value: unknown): string {
   return JSON.stringify(value, (_key, member: unknown) => {
-    const carried = wireCarrier ? carrierLeaf(member) : undefined;
-    if (carried !== undefined) return carried;
     // A JS `bigint` is not a leaf form any tree headed into SQLite holds (`leafStore`, `gremlin/types.ts`, spells
     // one as a safe number or decimal TEXT), and no JSON spelling of it is safe: SQLite reads an integer past
     // 2^63 as a REAL. `JSON.stringify` would throw its raw TypeError; a producer that leaked one declines here.
     if (typeof member === 'bigint') throw UnsupportedTraversal.because('a value with no exact JSON leaf form (a raw bigint) cannot cross into SQLite');
-    // A raw exact number is a Double only when spelled with a point or exponent (`exactNumberOf`).
-    const raw = isExactNumber(member) ? exactNumberOf(member) : null;
-    const number = typeof member === 'number' ? member : raw && !raw.integral ? Number(raw.text) : null;
-    if (number !== null && !hasExactDecimal(number)) throw new RaisedByQuery(INEXACT_DECIMAL);
     const spelled = typeof member === 'number' ? exactSpelling(member) : undefined;
     if (spelled === undefined) return member;
     if (rawJson.rawJSON) return rawJson.rawJSON(spelled);

@@ -28,7 +28,7 @@
 // different, response-shaped rendering.
 import type { FrameNode, ValueNode } from './gremlin/types.ts';
 import { numberClassOf, valueNodeFromStored } from './gremlin/types.ts';
-import { exactNumberOf, isExactNumber, parseElementJson, type ExactNumber } from './json-exact.ts';
+import { exactNumberOf, isExactNumber, type ExactNumber } from './json-exact.ts';
 
 /**
  * A result this readable rendering cannot SPELL as the value it is — a map key with no exact JSON spelling
@@ -259,4 +259,4 @@ const asLabels = (label: any): string[] =>
 
 /** An element's props field → the `{ key: [valueNode] }` object. Already an object from
  *  `foreignElementNode`/`propsOf`; a raw JSON-text form is parsed. */
-const asProps = (props: any): Record<string, any> => parseElementJson(props);
+const asProps = (props: any): Record<string, any> => (typeof props === 'string' ? JSON.parse(props) : props);

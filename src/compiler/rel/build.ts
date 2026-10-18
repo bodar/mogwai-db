@@ -1,8 +1,6 @@
 import { stringifyExact } from '../../json-exact.ts';
-import { CARRIER_BANDS, INEXACT_DECIMAL, outsideExactDecimal } from '../../rel/exact-decimal.ts';
-import { deferralExpr } from '../../rel/raise.ts';
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerReal, compilerText, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { inferredVtype, SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
@@ -518,54 +516,17 @@ const printf = (fmt: string, value: Expr): Expr => ({ kind: 'call', fn: 'printf'
  *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:50-58,80-84`)
  *  entered a map or list as `0.0`. */
 const isReal = (value: Expr): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [value] }, right: compilerText('real') });
-/** What a REAL OUTSIDE the exact range becomes where it enters a JSON text (`exact-decimal.ts`). A text SQL
- *  may READ AGAIN (a fold, a map, a history entry) has no decimal spelling that is the value, so the member
- *  DEFERS — the default, `undefined`. A text only the framer reads (an element's property bag, `element.ts`)
- *  passes the WIRE CARRIER (`binary64Carrier`), which spells the value exactly for the wire alone. */
-export type OutOfRangeCarrier = ((x: Expr) => Expr) | undefined;
-
-/**
- * THE WIRE CARRIER — a REAL outside the exact range as the JSON string `<w>p<n>` (`x = w × 2^n`), which
- * `binary64OfCarrier` (`rel/exact-decimal.ts`) reads back bit for bit. ONE multiplication by a power of two
- * (exact: it only moves the exponent, and `w` stays normal) lands `w` inside the range, where
- * `printf('%!.17g')` is exact; the three bands and why each fits are `CARRIER_BANDS`'. The band tests need not
- * be exact — any boundary inside the bands' overlap is correct — so they are spelled as in-range decimals.
- * A `CASE` rather than a correlated walk, so the payload stays one plain expression (no `WITH RECURSIVE`
- * inside every element payload, which the walk-shape assertions and the statement-size ratchet both read).
- */
-export const binary64Carrier = (x: Expr): Expr => {
-  const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
-  const magnitude: Expr = { kind: 'call', fn: 'abs', args: [x] };
-  const spelled = (n: number): Expr =>
-    bin('||', printf('%!.17g', bin('*', x, compilerReal(2 ** -n))), compilerText(`p${n}`));
-  return {
-    kind: 'case',
-    whens: [
-      [bin('>', magnitude, compilerReal(1)), spelled(CARRIER_BANDS.large)],
-      // |x| ≥ 1e-190, tested as |x|·1e110 ≥ 1e-80 so both decimals sit inside the range.
-      [bin('>=', bin('*', magnitude, compilerReal(1e110)), compilerReal(1e-80)), spelled(CARRIER_BANDS.small)],
-    ],
-    else: spelled(CARRIER_BANDS.tiny),
-  };
-};
-
-
-const asExactReal = (value: Expr, realOnly = true, carry: OutOfRangeCarrier = undefined): Expr => {
+const asExactReal = (value: Expr, realOnly = true): Expr => {
   // Re-spelled where the 15-digit form does not round-trip — and, `realOnly`, only where the value IS a REAL:
   // a tag that admits a non-REAL carrier (a BigDecimal's decimal TEXT `12.50`) would otherwise have the test
   // read the text as a number and re-spell it `12.5`, losing the scale it carries. A Double/Float tag's value
   // is numeric storage, so its STATIC entry skips the storage-class test (no bytes where it cannot matter).
-  const outside: Expr = realOnly ? { kind: 'binary', op: 'and', left: isReal(value), right: outsideExactDecimal(value) } : outsideExactDecimal(value);
+  // Outside about [1e-80, 1e116] SQLite's own decimal conversion is not correctly rounded, so a value there
+  // may land a last ulp away — an accepted divergence (`docs/feature-support-matrix.md`).
   const lossy: Expr = { kind: 'binary', op: '!=', left: { kind: 'cast', arg: printf('%.15g', value), to: 'real' }, right: value };
   return {
     kind: 'case',
     whens: [
-      // OUTSIDE the range SQLite's decimal conversion is exact in (`exact-decimal.ts`), no spelling it writes is
-      // known to be the value — `printf('%!.17g')` is off by ulps, the 15-digit writer is right only where 15
-      // digits suffice, and the `lossy` test that would say so is itself wrong there — and SQLite's own reader
-      // misreads the text even where it is right. So the member DEFERS rather than enter as another number.
-      // A WIRE text carries it exactly instead (`binary64Carrier`): nothing in SQL reads it back.
-      [outside, carry ? carry(value) : deferralExpr(INEXACT_DECIMAL, { kind: 'call', fn: 'random', args: [] })],
       [realOnly ? { kind: 'binary', op: 'and', left: isReal(value), right: lossy } : lossy, jsonCall(printf('%!.17g', value))],
     ],
     // A WHOLE Double the store keeps as INTEGER (a stored `1.0` weight under 'double') is spelled as the REAL
@@ -604,10 +565,10 @@ const inList = (vtype: Expr, tags: readonly string[]): Expr => ({ kind: 'in-list
  * at any nesting depth. It is NOT `storedValueOn` itself, which also feeds the ROW path where a
  * `json(printf(...))` becomes text a later `fold()` re-quotes (§12 trap 1); this lives at the entries.
  */
-export const jsonMember = (value: Expr, vtype: Expr, carry: OutOfRangeCarrier = undefined): Expr => {
+export const jsonMember = (value: Expr, vtype: Expr): Expr => {
   if (literalCollection(vtype) === true) return jsonCall(value);
   if (vtype.kind === 'lit') {
-    if (vtype.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(vtype.value)) return asExactReal(value, vtype.value === 'bigdecimal', carry);
+    if (vtype.source === 'compiler-text' && REAL_CARRYING_VTYPES.includes(vtype.value)) return asExactReal(value, vtype.value === 'bigdecimal');
     if (vtype.source === 'compiler-text' && WIDE_INT_VTYPES.includes(vtype.value)) return asExactWideInt(value);
     return value;
   }
@@ -615,7 +576,7 @@ export const jsonMember = (value: Expr, vtype: Expr, carry: OutOfRangeCarrier = 
     kind: 'case',
     whens: [
       [inList(vtype, COLLECTION_VTYPES), jsonCall(value)],
-      [binary64Under(vtype, value, false), asExactReal(value, false, carry)],
+      [binary64Under(vtype, value, false), asExactReal(value, false)],
       [inList(vtype, WIDE_INT_VTYPES), asExactWideInt(value)],
     ],
     else: value,
@@ -699,9 +660,9 @@ const binary64Under = (tag: Expr, value: Expr, inferred: boolean): Expr => {
  * embedded JSON and a numeric value survives SQLite's lossy JSON channel, at every depth a `{t,v}` node
  * reaches.
  */
-export const typedNode = (value: Expr, vtype: Expr, carry: OutOfRangeCarrier = undefined): Expr => ({
+export const typedNode = (value: Expr, vtype: Expr): Expr => ({
   kind: 'json-object',
-  entries: [['t', vtype], ['v', jsonMember(value, vtype, carry)]],
+  entries: [['t', vtype], ['v', jsonMember(value, vtype)]],
   binary: false,
 });
 
@@ -744,9 +705,9 @@ export const typedNodeOnce = (value: Expr, vtype: Expr, fresh: Minter): Expr => 
  * `meta` rides as `json(...)` — a BLOB cannot cross the JSON transport (root `CLAUDE.md`), and a null
  * meta column becomes JSON null, which the decoder reads as no meta-properties.
  */
-export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson: Expr, carry: OutOfRangeCarrier): Expr => ({
+export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson: Expr): Expr => ({
   kind: 'json-object',
-  entries: [['t', vtype], ['v', jsonMember(value, vtype, carry)], ['vpid', vpid], ['meta', metaJson]],
+  entries: [['t', vtype], ['v', jsonMember(value, vtype)], ['vpid', vpid], ['meta', metaJson]],
   binary: false,
 });
 

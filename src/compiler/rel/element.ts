@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SqlType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import {
-    and, binary64Carrier, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
+    and, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
     type Minter,
 } from './build.ts';
 
@@ -161,8 +161,8 @@ function vertexProps(node: Expr, fresh: Minter, detached = false): Expr {
   // The DETACHED path emits `{t,v,vpid,meta}` so a landed subgraph reconstructs a full
   // `DetachedVertexProperty` (its id + meta-properties); an ordinary read stays `{t,v}`.
   const memberNode = detached
-    ? typedNodeDetached(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'id'), jsonOf(col(mine.id, 'meta')), binary64Carrier)
-    : typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'), binary64Carrier);
+    ? typedNodeDetached(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'id'), jsonOf(col(mine.id, 'meta')))
+    : typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'));
   const perKey = make.aggregate({
     id: fresh('wpk'), input: mine, channels: [],
     type: typeOf(meta('key', 'text'), meta('vs', 'json'), meta('ord', 'int')),
@@ -205,7 +205,7 @@ function edgeProps(edge: Expr, fresh: Minter): Expr {
     groupBy: [],
     aggs: [['props', {
       kind: 'agg', fn: 'json_group_object',
-      args: [col(mine.id, 'key'), jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'), binary64Carrier))],
+      args: [col(mine.id, 'key'), jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')))],
       orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
     }]],
   });

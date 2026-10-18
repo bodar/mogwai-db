@@ -5,7 +5,6 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BatchingLoader, loadStreaming } from '../src/bulk.ts';
-import { INEXACT_DECIMAL } from '../src/rel/exact-decimal.ts';
 import { loadGraphsonStreaming, writeGraphson, writeGraphsonToSink } from '../src/formats/graphson.ts';
 import { loadCsvStreaming } from '../src/formats/csv.ts';
 import { linesOf } from '../src/formats/drain.ts';
@@ -215,7 +214,7 @@ describe('a streaming load is all or nothing across its batches', () => {
     expect(snapshot(store)).toEqual(before);
   });
 
-  test('loadGraphsonStreaming: a refused meta-property past the first batch undoes the batches before it', async () => {
+  test('loadGraphsonStreaming: an unparseable meta-property past the first batch undoes the batches before it', async () => {
     const store = preloaded();
     const before = snapshot(store);
     const line = (id: number, meta?: unknown) => JSON.stringify({
@@ -223,8 +222,8 @@ describe('a streaming load is all or nothing across its batches', () => {
       properties: { name: [{ id: gInt(id), value: `v${id}`, ...(meta === undefined ? {} : { properties: { m: meta } }) }] },
     });
     const lines = Array.from({ length: 5001 }, (_, i) => line(1000 + i));
-    lines.push(line(9999, { '@type': 'g:Double', '@value': 1.5e300 }));
-    await expect(loadGraphsonStreaming(store, async () => stringStream(lines.join('\n'), 1 << 16))).rejects.toThrow(INEXACT_DECIMAL);
+    lines.push(line(9999, { '@type': 'g:Duration', '@value': 'not-a-duration' }));
+    await expect(loadGraphsonStreaming(store, async () => stringStream(lines.join('\n'), 1 << 16))).rejects.toThrow('unparseable g:Duration');
     expect(snapshot(store)).toEqual(before);
   });
 

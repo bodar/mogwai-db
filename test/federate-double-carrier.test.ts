@@ -1,18 +1,11 @@
-// A FEDERATED READ OF A DOUBLE IS THE DIRECT READ OF IT — bit for bit, or a deferral, never another number.
+// A FEDERATED READ OF A DOUBLE IS THE DIRECT READ OF IT — exact inside [1e-80, 1e116], within an ulp per hop outside.
 //
 // A barrier `call("federate")` lands the sibling's detached elements as ONE JSON text SQLite reads back
-// (`src/compiler/rel/foreign.ts`). That text used to be a bare `JSON.stringify`, and SQLite's decimal reader is
-// not correctly rounded outside [1e-80, 1e116] (`src/rel/exact-decimal.ts`): a sibling storing `1.5e300d`
-// answered 1.4999999999999998E300 through `….values("x")`, an edge's `-1e-300d` -9.999999999999999E-301
-// and an `Infinity` became null. The landing now goes through the one exact JSON writer (`stringifyExact`,
-// `src/json-exact.ts`), so (a `-0.0d` reads back `0.0` everywhere — a zero has no sign, as in SQLite):
-//
-// 1. a resume with NO local tail (only the framer reads the landed payload) carries every binary64 exactly,
-//    an out-of-range one as the wire carrier a native element payload holds (`binary64Carrier`);
-// 2. a resume with a local tail answers exactly inside the range, and DEFERS (`RaisedByQuery`,
-//    `INEXACT_DECIMAL`) for a landing holding a Double outside it — never a rounding. The deferral is per
-//    LANDING, not per read: any tail may read `props` in SQL, so even a `label()` tail defers (a stopgap —
-//    carrying the value into the bound readers is the open item).
+// (`src/compiler/rel/foreign.ts`), written by the one JSON writer of a text headed into SQLite (`stringifyExact`,
+// `src/json-exact.ts`), so an `Infinity` lands as itself, never null (a `-0.0d` reads back `0.0` everywhere —
+// a zero has no sign, as in SQLite). SQLite's decimal reader is not correctly rounded outside [1e-80, 1e116],
+// so a value there may come back an ulp away per crossing — an accepted divergence (`docs/feature-support-matrix.md`):
+// every tail ANSWERS, none declines.
 //
 // Both transports land through that one seam: the in-process `runForeign` (a sibling graph of the same
 // manager) and the HTTP peer (`src/foreign-decode.ts`, the peer's own router as the client's transport).
@@ -20,9 +13,7 @@ import { test, expect, describe, beforeAll } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
-import { RaisedByQuery } from '../src/rel/raise.ts';
 import { UnsupportedTraversal } from '../src/compiler/unsupported.ts';
-import { hasExactDecimal, INEXACT_DECIMAL } from '../src/rel/exact-decimal.ts';
 import { decode } from './support/decode.ts';
 
 /** Finite non-zero doubles uniform over BIT PATTERNS, so every exponent (subnormals too) is as likely as any
@@ -47,6 +38,8 @@ const NAMED: readonly number[] = [
   -0, Infinity, -Infinity, 0.5, 1e-80, 1e116,
 ];
 const VALUES = [...NAMED, ...bitPatternDoubles(300, 0xfed5)];
+/** Inside [1e-80, 1e116] (and at zero and the infinities) SQLite's decimal text is exact. */
+const hasExactDecimal = (x: number): boolean => { const m = Math.abs(x); return m === 0 || !Number.isFinite(m) || (m >= 1e-80 && m <= 1e116); };
 const INSIDE = VALUES.filter(hasExactDecimal);
 
 const peer = new BunGraphManager(undefined, extendedRegistry);
@@ -62,6 +55,19 @@ const run = async (ex: { framedAsync: (g: string, p: Record<string, unknown>, t?
 const fed = (graph: string, sub: string, tail = '') => `g.call("federate").with("graph","${graph}").with("traversal", ${sub})${tail}`;
 /** Compare doubles exactly, order-free, over the two sorted spellings (a zero has no sign: `String(-0)` is `0`). */
 const bits = (xs: readonly number[]): string[] => xs.map((x) => String(x)).sort();
+const bitsOf = (x: number): bigint => { const v = new DataView(new ArrayBuffer(8)); v.setFloat64(0, Math.abs(x)); return v.getBigInt64(0); };
+/** Each value of `got` (sorted) is its `want` (sorted) — exactly inside the range, and outside it within one ulp
+ *  per SQLite decimal crossing: the sibling's payload, then the landing, so two. */
+const near = (got: readonly number[], want: readonly number[]): [number, number][] => {
+  const g = [...got].sort((a, b) => a - b), w = [...want].sort((a, b) => a - b);
+  if (g.length !== w.length) return [[g.length, w.length]];
+  return w.flatMap((x, i) => {
+    const y = g[i]!;
+    if (x === y) return [];
+    const d = Math.sign(x) === Math.sign(y) ? bitsOf(x) - bitsOf(y) : 1n << 62n;
+    return (d < 0n ? -d : d) > (hasExactDecimal(x) ? 0n : 2n) ? [[x, y] as [number, number]] : [];
+  });
+};
 
 beforeAll(async () => {
   for (const { sibling } of TRANSPORTS) {
@@ -81,16 +87,16 @@ const edgeWs = (es: any[]): number[] => es.map((e) => e.properties.find((p: any)
 
 for (const t of TRANSPORTS) {
   describe(`federate over ${t.name}: a federated Double is the direct one`, () => {
-    test('the direct read is exact (the oracle)', async () => {
-      expect(bits(vertexXs(await run(t.sibling('all'), 'g.V()')))).toEqual(bits(VALUES));
+    test('the direct read (the oracle)', async () => {
+      expect(near(vertexXs(await run(t.sibling('all'), 'g.V()')), VALUES)).toEqual([]);
     });
 
-    test('a bare resume carries EVERY value exactly — vertices and edges, source and mid-traversal form', async () => {
+    test('a bare resume carries EVERY value — vertices and edges, source and mid-traversal form', async () => {
       const graph = t.graph('all');
-      expect(bits(vertexXs(await run(local.executor('home'), fed(graph, '__.V()'))))).toEqual(bits(VALUES));
-      expect(bits(edgeWs(await run(local.executor('home'), fed(graph, '__.E()'))))).toEqual(bits(VALUES.slice(0, -1)));
+      expect(near(vertexXs(await run(local.executor('home'), fed(graph, '__.V()'))), VALUES)).toEqual([]);
+      expect(near(edgeWs(await run(local.executor('home'), fed(graph, '__.E()'))), VALUES.slice(0, -1))).toEqual([]);
       const mid = `g.V().call("federate").with("graph","${graph}").with("traversal", __.V())`;
-      expect(bits(vertexXs(await run(local.executor('home'), mid)))).toEqual(bits(VALUES));
+      expect(near(vertexXs(await run(local.executor('home'), mid)), VALUES)).toEqual([]);
     }, 30_000);
 
     test('a local tail over in-range values answers the direct values bit for bit', async () => {
@@ -103,26 +109,22 @@ for (const t of TRANSPORTS) {
       expect(bits(sum)).toEqual(bits(await run(t.sibling('inside'), 'g.V().has("i", 0).values("x").sum()')));
     }, 30_000);
 
-    // Every tail that reads the landing in SQL, at several depths: a deferral, never a rounded answer.
-    for (const tail of ['.values("x")', '.values()', '.values("x").sum()', '.values("x").fold()', '.label()',
-      '.local(__.values("x"))', '.union(__.values("x"), __.values("x"))', '.where(__.values("x").is(gt(0d)))']) {
-      test(`a local tail over an out-of-range landing defers: ${tail}`, async () => {
-        const settled = await run(local.executor('home'), fed(t.graph('all'), '__.V().has("i", 0)', tail)).then(
-          (answer) => ({ answer }), (error: unknown) => ({ error }));
-        if ('answer' in settled) throw new Error(`answered ${JSON.stringify(settled.answer)} over a landed 1.5e300d`);
-        expect(settled.error).toBeInstanceOf(Error);
-        // A step this resume has no lowering for declines on its own; any value read defers on the carrier.
-        if (settled.error instanceof RaisedByQuery) expect(settled.error.message).toBe(INEXACT_DECIMAL);
-        else expect((settled.error as Error).constructor.name).toBe('UnsupportedTraversal');
-      });
-    }
-
-    test('an edge tail and a subgraph walk over an out-of-range landing defer', async () => {
-      for (const q of [
-        fed(t.graph('all'), '__.E().limit(1)', '.values("w")'),
-        `g.call("federate").with("graph","${t.graph('all')}").with("subgraph", true).with("traversal", __.E().limit(1)).outV().values("x")`,
-      ]) await expect(run(local.executor('home'), q)).rejects.toThrow(INEXACT_DECIMAL);
-    });
+    // Every tail that reads the landing in SQL, at several depths, ANSWERS — within an ulp per crossing of the stored value.
+    test('a local tail over an out-of-range landing answers', async () => {
+      const graph = t.graph('all');
+      expect(near(await run(local.executor('home'), fed(graph, '__.V()', '.values("x")')), VALUES)).toEqual([]);
+      expect(near(await run(local.executor('home'), fed(graph, '__.E()', '.values("w")')), VALUES.slice(0, -1))).toEqual([]);
+      const one = await run(local.executor('home'), fed(graph, '__.V().has("i", 0)', '.values("x").sum()'));
+      expect(near(one, [VALUES[0]!])).toEqual([]);
+      for (const tail of ['.label()', '.count()', '.local(__.values("x"))', '.union(__.values("x"), __.values("x"))', '.where(__.values("x").is(gt(0d)))'])
+        // A step this resume has no lowering for declines on its own (structurally, whatever the data);
+        // every other tail answers.
+        await run(local.executor('home'), fed(graph, '__.V().has("i", 0)', tail)).then(
+          (answer) => expect(answer.length).toBeGreaterThan(0),
+          (error: unknown) => expect(error).toBeInstanceOf(UnsupportedTraversal));
+      const walk = `g.call("federate").with("graph","${graph}").with("subgraph", true).with("traversal", __.E().has("w", gt(1e300d))).outV().values("x")`;
+      expect((await run(local.executor('home'), walk)).length).toBeGreaterThan(0);
+    }, 30_000);
   });
 }
 

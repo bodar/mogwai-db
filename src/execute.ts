@@ -14,7 +14,7 @@ import { untyped, UnspellableJson } from './untyped.ts';
 import { refreshElements } from './refresh.ts';
 import { driveSegments, driveSegmentsSync, type SegmentHost } from './drive.ts';
 import type { GraphStore } from './storage.ts';
-import { exactNumberOf, isExactNumber, parseElementJson, parseExactJson, type ExactNumber } from './json-exact.ts';
+import { exactNumberOf, isExactNumber, parseExactJson, type ExactNumber } from './json-exact.ts';
 import { bigDecimalOfCarrier } from './gremlin/float.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -232,7 +232,7 @@ function scalarCellBuffer(v: any, row: any, type: ScalarType, at: string): Buffe
 // bare scalar frames by its uniform tag (or infers); an element arrives as a JSON object
 // string (SQL elementValueResult) → vertexBuffer/edgeBuffer to keep props; a list via frameListOf.
 function mapSideBuffer(raw: any, of: MapOf): Buffer {
-  if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(parseElementJson(raw));
+  if (of.kind === 'elem') return raw == null ? frameValue(null, undefined) : (of.elem === 'edge' ? rowEdge : rowVertex)(JSON.parse(raw));
   if (of.kind === 'list') return frameListOf(raw, of.of);
   // scalar: always a self-describing {t,v} node (JSON text) → frame each its own exact type.
   return frameTypedNode(raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw));
@@ -246,7 +246,7 @@ function mapEntryBuffer(row: any, keyOf: MapOf, valOf: MapOf): Buffer {
 }
 
 function listFieldBuffer(json: string, of: import('./sql/kernel/render.ts').ListOf): Buffer {
-  const items = parseElementJson(json);
+  const items = JSON.parse(json);
   if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
   if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
   // A MIXED-member list frames each member by its own {t,v} tag, exactly as listItemBuffers does.
@@ -358,7 +358,7 @@ const framePropertyRow = (x: any): Buffer =>
 
 // Frame a vertex/edge from a plain (unprefixed) result row — the id/label/props
 // (+ src/tgt) projection the vertex/edge/list shapes share.
-const propsOf = (props: any): Record<string, any> => parseElementJson(props);
+const propsOf = (props: any): Record<string, any> => typeof props === 'string' ? JSON.parse(props) : props;
 const rowVertex = (r: any): Buffer => vertexBuffer(r.id, labelsOf(r.label), propsOf(r.props));
 const rowEdge = (r: any): Buffer => edgeBuffer(r.id, r.label, r.src, r.tgt, propsOf(r.props));
 
@@ -686,7 +686,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // SQL, then frame each member through the same property-preserving element
     // encoders as ordinary vertex/edge rows.
     case 'jsonbElementList': for (const r of rows) {
-      const items = parseElementJson(r.list) as any[];
+      const items = JSON.parse(r.list) as any[];
       yield listBuffer(items.map(shape.elem === 'edge' ? rowEdge : rowVertex));
     } return;
     // A set-VALUE stream (intersect/difference/disjunct, or a stored typed set): frame each
@@ -740,7 +740,7 @@ const foreignElementNode = (raw: any, elem: Elem): FrameNode =>
  *  envelope-typed member is already a `{t,v}` node, a mixed/map member self-describes; a nested list
  *  recurses. */
 function foreignListNodes(json: string, of: ListOf): FrameNode[] {
-  return foreignItemNodes(parseElementJson(json), of);
+  return foreignItemNodes(JSON.parse(json), of);
 }
 
 function foreignItemNodes(items: any[], of: ListOf): FrameNode[] {
@@ -782,7 +782,7 @@ function foreignValueNodes(shape: import('./sql/kernel/render.ts').Shape, rows: 
     // The whole-stream element fold (`fold()` over vertices/edges) — ONE list of element nodes.
     case 'list': return [{ t: 'list', v: rows.map((r) => foreignElementNode(r, shape.elem)) }];
     // A relational element-list value per row (element members already expanded to payload objects).
-    case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: (parseElementJson(r.list) as any[]).map((it: any) => foreignElementNode(it, shape.elem)) }));
+    case 'jsonbElementList': return rows.map((r) => ({ t: 'list', v: (JSON.parse(r.list) as any[]).map((it: any) => foreignElementNode(it, shape.elem)) }));
     // A per-row self-describing node already (`unfold()` over a mixed collection): pass through.
     case 'typedNode': return rows.map((r) => (r.node == null ? { t: null, v: null } : parseExactJson(r.node)));
     // A whole-map VALUE per row (`project`/`valueMap`/`group` folded to a map value).
@@ -874,7 +874,7 @@ function mapNode(r: any, entries: MapEntry[]): FrameNode {
 /** One side (key/value) of a Map.Entry row as a node — the node twin of `mapSideBuffer`: an element
  *  arm, a list arm, else a self-describing `{t,v}` scalar node (already parsed, or JSON text). */
 function mapSideNode(raw: any, of: MapOf): FrameNode {
-  if (of.kind === 'elem') return raw == null ? null : foreignElementNode(parseElementJson(raw), of.elem);
+  if (of.kind === 'elem') return raw == null ? null : foreignElementNode(JSON.parse(raw), of.elem);
   if (of.kind === 'list') return raw == null ? null : { t: 'list', v: foreignListNodes(raw, of.of) };
   return raw == null ? null : (typeof raw === 'string' ? parseExactJson(raw) : raw);
 }
@@ -1169,10 +1169,10 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
     return rows.map((r) => (tagCol ? { injectedValue: decimalCarrier(r.v, r[tagCol]), injectedType: r[tagCol] ?? null }
       : { injectedValue: decimalCarrier(r.v, staticTag) }));
   }
-  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: parseElementJson(r.list), injectedText: r.list }));
+  if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list), injectedText: r.list }));
   // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same
   // encoding the `map` column carries (a global `order()` over a map stream reads it, `orderMapStreamValue`).
-  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: parseElementJson(r.map), injectedText: r.map }));
+  if (head.shape.kind === 'mapValue') return rows.map((r) => ({ injectedValue: JSON.parse(r.map), injectedText: r.map }));
   // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
   // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
   // not framed). `injVal` is absent on a source-form head (which never reaches this method).

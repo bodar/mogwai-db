@@ -1,28 +1,23 @@
-// EVERY FINITE DOUBLE, through every text seam it crosses — or a deferral that leaves the graph as it was.
+// EVERY FINITE DOUBLE, through every text seam it crosses — the value, or its neighbour a last ulp away.
 //
-// Outside [1e-80, 1e116] SQLite's decimal <-> binary64 conversion is not correctly rounded in either
-// direction (`src/rel/exact-decimal.ts`), so no decimal TEXT carries such a Double through a JSON text SQL
-// reads again. Three rules follow, each pinned here at more than one depth:
+// Outside about [1e-80, 1e116] SQLite's decimal <-> binary64 conversion is not correctly rounded, so a Double
+// there that crosses a JSON text inside SQLite (an element payload, a fold, a valueMap, a bulk load) may come
+// back ONE ulp away. That is an accepted divergence (`docs/feature-support-matrix.md`): a value at an extreme
+// magnitude a last ulp off is a sensible answer, a decline or a lost row is not. Pinned here:
 //
-// 1. An ELEMENT payload is read only by the framer, so a stored property rides there as the exact wire
-//    carrier (`binary64Carrier` → `binary64OfCarrier`): one `property('x', 1e300d)` no longer makes
-//    `g.V()`, `g.E()`, a write echo or any element-carrying shape raise for the whole graph.
-// 2. A JSON member SQL may re-read still DEFERS (`RaisedByQuery`) — and a write program that defers is ONE
-//    atomic unit (`runSteps`, `src/program.ts`), so the write it follows is rolled back, never committed
-//    behind a failure.
-// 3. An UNTYPED number (a JSON request, a typeless client) is classed as the reference GLV classes it
+// 1. every element-carrying and member-carrying shape ANSWERS beside such a value, within one ulp, and is
+//    exact inside the range;
+// 2. an UNTYPED number (a JSON request, a typeless client) is classed as the reference GLV classes it
 //    (`numberClassOf`, `src/gremlin/types.ts`): a whole number past 2^53 is a Double, never a Long
-//    (past 2^63 no Long exists, and every later read raised).
+//    (past 2^63 no Long exists, and every later read raised);
+// 3. a bulk load lands whole or not at all.
 import { test, expect, describe } from 'bun:test';
-import { RaisedByQuery } from '../../src/rel/raise.ts';
-import { binary64OfCarrier, INEXACT_DECIMAL } from '../../src/rel/exact-decimal.ts';
 import { numberClassOf } from '../../src/gremlin/types.ts';
-import { parseElementJson } from '../../src/json-exact.ts';
 import { loadGraphson, writeGraphson } from '../../src/formats/graphson.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { seededStore } from '../support/harness.ts';
-import { exec, executeFramed, executeQuery } from '../support/executor.ts';
+import { exec, executeQuery } from '../support/executor.ts';
 import { decodeAll, typedAll } from '../support/decode.ts';
 
 /** A deterministic stream of finite non-zero doubles, uniform over BIT PATTERNS — so every exponent, the
@@ -40,6 +35,19 @@ function bitPatternDoubles(n: number, seed: number): number[] {
   return out;
 }
 
+const bitsOf = (x: number): bigint => { const v = new DataView(new ArrayBuffer(8)); v.setFloat64(0, Math.abs(x)); return v.getBigInt64(0); };
+/** How many representable doubles apart two same-signed doubles are (`Infinity` across a sign). */
+const ulps = (a: number, b: number): number => {
+  if (Object.is(a, b) || a === b) return 0;
+  if (Math.sign(a) !== Math.sign(b)) return Infinity;
+  const d = bitsOf(a) - bitsOf(b);
+  return Number(d < 0n ? -d : d);
+};
+/** Inside [1e-80, 1e116] SQLite's decimal text is exact, so the value is; outside it, within one ulp. */
+const INSIDE = (x: number): boolean => { const m = Math.abs(x); return m >= 1e-80 && m <= 1e116; };
+const far = (got: readonly number[], want: readonly number[]): [number, number][] =>
+  want.flatMap((x, i) => (ulps(got[i]!, x) > (INSIDE(x) ? 0 : 1) ? [[x, got[i]!] as [number, number]] : []));
+
 const EDGES: readonly number[] = [
   Number.MIN_VALUE, -Number.MIN_VALUE, Number.MAX_VALUE, -Number.MAX_VALUE,
   2.2250738585072014e-308, 2.225073858507201e-308, // the smallest normal, the largest subnormal
@@ -49,24 +57,23 @@ const EDGES: readonly number[] = [
   1.5e300, 1.5e-300, 3.7430242338180544e203, -4.9406564584124654e-322,
 ];
 
-describe('a stored Double outside the exact range rides the element payload exactly', () => {
+describe('a stored Double outside the exact range reads back within one ulp', () => {
   const values = [...EDGES, ...bitPatternDoubles(400, 0x5eed)];
 
-  test('g.V() — every vertex property, every value, bit for bit', async () => {
+  test('g.V() — every vertex property, every value', async () => {
     const store = seededStore();
     const ids: number[] = [];
     for (const x of values) ids.push((await decodeAll(executeQuery(store, "g.addV('f').property('x', p).id()", { p: x }, { p: 'double' })))[0]);
     const byId = new Map<number, number>();
     for (const v of await decodeAll(executeQuery(store, "g.V().hasLabel('f')"))) byId.set(v.id, v.properties[0].value);
-    const wrong = values.filter((x, i) => !Object.is(byId.get(ids[i]!), x));
-    expect(wrong).toEqual([]);
+    expect(far(ids.map((id) => byId.get(id)!), values)).toEqual([]);
   }, 60_000); // ~425 sequential writes + a read: >5 s under the cored fan-out, so bun's 5 s default flakes
 
   test('g.E() — an edge property', async () => {
     const store = seededStore();
     for (const x of EDGES) executeQuery(store, "g.V(1).addE('f').to(V(2)).property('w', p)", { p: x }, { p: 'double' });
     const got = (await decodeAll(executeQuery(store, "g.E().hasLabel('f')"))).map((e) => e.properties[0].value);
-    expect(got.map(String)).toEqual(EDGES.map(String));
+    expect(far(got, EDGES)).toEqual([]);
   });
 
   // The write echo is an element payload too: the write commits AND reports what it wrote.
@@ -79,32 +86,20 @@ describe('a stored Double outside the exact range rides the element payload exac
     const store = seededStore();
     const [echo] = await decodeAll(executeQuery(store, q));
     const prop = echo.properties.find((p: { key: string }) => p.key === 'x');
-    expect(prop.value).toBe(Number(q.match(/'x', ([^)]+)d\)/)![1]));
+    expect(ulps(prop.value, Number(q.match(/'x', ([^)]+)d\)/)![1]))).toBeLessThanOrEqual(1);
   });
 
-  // One stored out-of-range property answers every element-carrying shape — a top-level element, a folded
-  // element, a grouped one, a path's, a projected one, a selected one — rather than raising for the graph.
+  // One stored out-of-range property answers every element- and member-carrying shape — a top-level element,
+  // a folded element, a grouped one, a path's, a projected one, a selected one, a folded value, a map.
   for (const q of [
     'g.V()', 'g.E()', 'g.V().fold()', 'g.V().group().by(label)', "g.V().has('x').path()",
     "g.V().has('x').project('a').by()", "g.V().has('x').as('a').select('a')", "g.V().has('x').values('x')",
-    "g.V().has('x').properties()", "g.V().valueMap('name')",
+    "g.V().has('x').properties()", "g.V().valueMap('name')", "g.V().has('x').values('x').fold()",
+    "g.V().has('x').valueMap()", "g.V().has('x').elementMap()", "g.V().has('x').project('a').by(values('x'))",
   ]) test(`answers beside a 1e300d property: ${q}`, async () => {
     const store = seededStore();
     executeQuery(store, "g.addV('n').property('x', 1e300d)");
     expect((await decodeAll(executeQuery(store, q))).length).toBeGreaterThan(0);
-  });
-});
-
-describe('a member SQL re-reads defers, and the write it follows is rolled back', () => {
-  for (const q of [
-    "g.addV('zz').property('x', 1e300d).values('x').fold()",
-    "g.addV('zz').property('x', 1e300d).valueMap()",
-    "g.addV('zz').property('x', 1e-300d).elementMap()",
-    "g.addV('zz').property('x', 1e300d).project('a').by(values('x'))",
-  ]) test(`defers and rolls back: ${q}`, () => {
-    const store = seededStore();
-    expect(() => executeQuery(store, q)).toThrow(RaisedByQuery);
-    expect(typedAll(executeQuery(store, "g.V().hasLabel('zz').count()"))).toEqual(['0L']);
   });
 });
 
@@ -132,35 +127,10 @@ describe('an untyped number is classed as the reference GLV classes it', () => {
   });
 });
 
-describe('the wire carrier', () => {
-  test('reads only its own spelling', () => {
-    expect(binary64OfCarrier('1.0p640')).toBe(2 ** 640);
-    expect(binary64OfCarrier('-1.5p-1000')).toBe(-1.5 * 2 ** -1000);
-    for (const other of ['12.50', '1e300', 'p640', '1.0p200', '1.0p641', 1e300, null]) expect(binary64OfCarrier(other)).toBeNull();
-  });
-
-  test('parseElementJson decodes a binary64 leaf and nothing else', () => {
-    const bag = parseElementJson('{"x":[{"t":"double","v":"1.0p640"}],"s":[{"t":"string","v":"1.0p640"}]}');
-    expect(bag.x[0].v).toBe(2 ** 640);
-    expect(bag.s[0].v).toBe('1.0p640');
-  });
-});
-
-// The executor's own framed path agrees with the buffer path (a smoke check that the shared reader is wired
-// at the framed entry as well).
-test('executeFramed frames a carried property', () => {
-  const store = seededStore();
-  executeQuery(store, "g.addV('n').property('x', 1e300d)");
-  expect(executeFramed(store, "g.V().hasLabel('n')").length).toBe(1);
-});
-
 // THE SAME ANSWER IN BOTH RESPONSE FORMATS. The untyped-JSON tail (`Accept: application/json`,
 // `resolveJson` → `untyped.ts`) reads the element payload by its own route — a list column parsed
-// whole — and once printed the raw wire carrier (`"3.28…e+107p640"`) where the GraphBinary path decoded
-// it. Every carrier now decodes in the ONE element-payload reader (`parseElementJson`, which also walks an
-// already-parsed tree), so each query below must read the same in both formats, at every depth an element
-// list reaches.
-describe('a carried property reads the same through GraphBinary and untyped JSON', () => {
+// whole — so each query below must read the same in both formats, at every depth an element list reaches.
+describe('an out-of-range property reads the same through GraphBinary and untyped JSON', () => {
   /** A GraphBinary-decoded result → the untyped JSON's shape (an element → `{id, props}`). */
   const fromBinary = (v: any): any => {
     if (v === null || v === undefined) return null;
@@ -206,19 +176,10 @@ describe('a carried property reads the same through GraphBinary and untyped JSON
     const binary = fromBinary(await decodeAll(executeQuery(store, q)));
     const text = await executor.jsonAsync(q, {});
     expect(text).not.toBeNull();
-    expect(text!).not.toMatch(/\dp-?\d/); // no wire carrier reaches a reader
     expect(fromJson(JSON.parse(text!))).toEqual(binary);
-    expect(JSON.stringify(binary)).toMatch(/1\.5e\+300|1e-300|5e-324/); // the comparison saw the values
+    expect(JSON.stringify(binary)).toMatch(/e\+300|e-30[01]|e-324/); // the comparison saw the values
   });
 
-  test('parseElementJson decodes an already-parsed tree, and returns a carrier-free one unchanged', () => {
-    const parsed = JSON.parse('[{"props":{"x":[{"t":"double","v":"1.0p640"}],"s":[{"t":"string","v":"1.0p640"}]}}]');
-    const decoded = parseElementJson(parsed);
-    expect(decoded[0].props.x[0].v).toBe(2 ** 640);
-    expect(decoded[0].props.s[0].v).toBe('1.0p640');
-    const plain = { x: [{ t: 'double', v: 1.5 }] };
-    expect(parseElementJson(plain)).toBe(plain);
-  });
 });
 
 // `asNumber()` over an UNTYPED number: its class is `numberClassOf`'s, as the reference GLV serializes it
@@ -238,28 +199,29 @@ describe('asNumber over an untyped number', () => {
     });
 });
 
-// The bulk loader (`io()` read, a backup restore) lands its rows as ONE JSON text SQLite reads, so a scalar
-// Double outside the exact range crosses as its exact pair (`binary64Cell`), and a load lands whole or not
-// at all (`BulkLoader.flush` is one atomic unit).
+// The bulk loader (`io()` read, a backup restore) lands its rows as ONE JSON text SQLite reads — within one
+// ulp outside the exact range — and a load lands whole or not at all (`BulkLoader.flush` is one atomic unit).
 describe('a GraphSON load carries every Double, or writes nothing', () => {
-  test('our own dump reloads bit for bit', async () => {
+  test('our own dump reloads every value', async () => {
     const source = seededStore();
     for (const x of EDGES) executeQuery(source, "g.addV('f').property('x', p)", { p: x }, { p: 'double' });
     executeQuery(source, "g.V(1).addE('f').to(V(2)).property('w', 1.5e-300d)");
     const target = new GraphStore(new BunSqlite(':memory:'));
     loadGraphson(target, writeGraphson(source));
     const values = (await decodeAll(executeQuery(target, "g.V().hasLabel('f').order().by(id)"))).map((v) => v.properties[0].value);
-    expect(values.map(String)).toEqual(EDGES.map(String));
-    expect((await decodeAll(executeQuery(target, "g.E().hasLabel('f')"))).map((e) => e.properties[0].value)).toEqual([1.5e-300]);
+    expect(far(values, EDGES)).toEqual([]);
+    const [w] = (await decodeAll(executeQuery(target, "g.E().hasLabel('f')"))).map((e) => e.properties[0].value);
+    expect(ulps(w, 1.5e-300)).toBeLessThanOrEqual(1);
     expect(typedAll(executeQuery(target, "g.V().has('x', gt(1e300d)).count()"))).toEqual([`${EDGES.filter((x) => x > 1e300).length}L`]);
   });
 
-  test('a collection holding one is refused before anything lands', () => {
+  test('a collection holding one loads', async () => {
     const doc = writeGraphson(seededStore()).replace('"name":[',
       '"zz":[{"id":{"@type":"g:Int64","@value":999},"value":{"@type":"g:List","@value":[{"@type":"g:Double","@value":1.5e300}]}}],"name":[');
     const target = new GraphStore(new BunSqlite(':memory:'));
-    expect(() => loadGraphson(target, doc)).toThrow(INEXACT_DECIMAL);
-    expect(typedAll(executeQuery(target, 'g.V().count()'))).toEqual(['0L']);
+    loadGraphson(target, doc);
+    const [list] = await decodeAll(executeQuery(target, "g.V().values('zz')"));
+    expect(ulps(list[0], 1.5e300)).toBeLessThanOrEqual(1);
   });
 
   test('a batch that fails part-way leaves the graph as it was', () => {

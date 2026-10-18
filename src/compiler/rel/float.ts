@@ -1,7 +1,6 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import { letValues, type Minter } from './build.ts';
-import { deferralExpr, raisedMessage, raiseInRow } from '../../rel/raise.ts';
-import { EXACT_DECIMAL_MIN, INEXACT_DECIMAL } from '../../rel/exact-decimal.ts';
+import { raisedMessage, raiseInRow } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { forEachExpr, forEachRel, relExprs } from '../../rel/walk.ts';
 
@@ -141,10 +140,6 @@ export function doubleDecimalText(x: Expr, fresh: Minter): Expr {
       // A zero is `0.0` (sign and all), the zero of scale 1.
       [bin('=', r, compilerReal(0)), compilerText('0.0')],
       [bin('<', magnitude, compilerReal(DOUBLE_MIN_NORMAL)), raiseInRow(SUBNORMAL_DECIMAL)],
-      // Below the range SQLite's `printf` spells exactly (`exact-decimal.ts`) the digits above are not the
-      // value's. (Past its top a value is whole and rides as the REAL, which every JSON entry and the scalar
-      // framer guard themselves — `asExactReal`, `build.ts`.)
-      [bin('<', magnitude, compilerReal(EXACT_DECIMAL_MIN)), deferralExpr(INEXACT_DECIMAL, call('random'))],
     ], else: plainText };
   };
   return { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: x, right: compilerNull('real') }, compilerNull('text')]], else: body(real(x)) };

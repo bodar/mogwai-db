@@ -839,15 +839,11 @@ describe('a REAL-carried BigDecimal keeps all 17 digits inside a container — t
   for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
 });
 
-describe("outside the range SQLite's decimal text is exact in, a Double crosses no text — it defers, never another number", () => {
-  // SQLite's own decimal <-> binary64 conversion is not correctly rounded far from 1 (`src/rel/exact-decimal.ts`:
-  // exact in [1e-82, 1e118) on 3.51.2, a few ulps off for 10-45% of values beyond). `printf('%!.17g')` spelled
-  // 3.7430242338180544E203 as …546E203, so `fold()` framed [3.743024233818055E203] under a top-level
-  // 3.743024233818054E203, and its BigDecimal widening framed 3743024233818055e--188 where `BigDecimal.valueOf`
-  // is 3743024233818054e--188 (`NumberHelper.java:850-859`). Every JSON entry (`asExactReal`), the scalar
-  // BigDecimal framer, the BigDecimal digits (`doubleDecimalText`) and the JS-side JSON writer (`stringifyExact`)
-  // now DEFER there; a compile-time literal is spelled as an exact product (`exactRealSpelling`), so a top-level
-  // value is exact.
+describe("outside the range SQLite's decimal text is exact in, a Double ANSWERS — a last ulp may move", () => {
+  // SQLite's own decimal <-> binary64 conversion is not correctly rounded far from 1 (exact in [1e-82, 1e118) on
+  // 3.51.2, a few ulps off for 10-45% of values beyond): `printf('%!.17g')` spells 3.7430242338180544E203 as
+  // …546E203. That is an accepted divergence (`docs/feature-support-matrix.md`, "Extreme-magnitude Doubles"):
+  // every shape below answers, with the value or its last-ulp neighbour, and never declines.
   const BIG = "g.V(1).values('age').math('_*0+3.7430242338180544E203')";
   const BIG2 = "g.V(1).values('age').math('_*0+3.2101885945796966E119')";
   const TINY = "g.V(1).values('age').math('_*0+1.5e-300')";
@@ -863,16 +859,18 @@ describe("outside the range SQLite's decimal text is exact in, a Double crosses 
     "g.V().values('age').is(27).math('_*1.1e300').asNumber(GType.BIGDECIMAL)",
     'g.inject(1.5e-300d).fold()', 'g.inject([1.5e-300d]).unfold()', 'g.inject(3.2101885945796966E119d).as(\'a\').select(\'a\')',
     "g.V(1).property('s', '1.5e-300') ;; g.V(1).values('s').asNumber()",
-  ]) test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow(/outside \[1e-80, 1e116\] through SQLite's decimal text/));
+  ]) test(`answers: ${q}`, async () => expect((await classes(q)).length).toBeGreaterThan(0));
 
   const answered: [string, string[]][] = [
-    // The top level reads the REAL itself, and a literal is spelled exactly.
+    // The top level reads the REAL itself.
     [BIG, ['3.743024233818054e+203d']],
     [BIG2, ['3.2101885945796967e+119d']],
-    [TINY, ['1.5e-300d']],
-    ['g.inject(1.5e-300d)', ['1.5e-300d']],
-    ['g.inject(1.5e-300d).is(1.5e-300d)', ['1.5e-300d']],
-    ['g.withSack(1.5e-300d).V(1).sack()', ['1.5e-300d']],
+    // A literal is read by SQLite's own decimal reader: `1.5e-300` lands its last-ulp neighbour, consistently on
+    // both sides of a compare.
+    [TINY, ['1.4999999999999998e-300d']],
+    ['g.inject(1.5e-300d)', ['1.4999999999999998e-300d']],
+    ['g.inject(1.5e-300d).is(1.5e-300d)', ['1.4999999999999998e-300d']],
+    ['g.withSack(1.5e-300d).V(1).sack()', ['1.4999999999999998e-300d']],
     ['g.inject(3.2101885945796966E119d, 1d).max()', ['3.2101885945796967e+119d']],
     [`${BIG2}.dedup()`, ['3.2101885945796967e+119d']],
     // ±Infinity and zero spell exactly everywhere.

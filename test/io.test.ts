@@ -190,10 +190,10 @@ describe('io() fails closed', () => {
     const dir = ioDir();
     const doc = readFileSync(join(dir, 'modern.json'), 'utf8');
     writeFileSync(join(dir, 'bad-edge-value.json'), doc.replace('"properties":{"weight"',
-      '"properties":{"zz":{"@type":"g:List","@value":[{"@type":"g:Double","@value":1.5e300}]},"weight"'));
+      '"properties":{"zz":{"@type":"g:Duration","@value":"not-a-duration"},"weight"'));
     writeFileSync(join(dir, 'bad-endpoint.json'), doc.replace('"inV":{"@type":"g:Int32","@value":2}', '"inV":{"@type":"g:Int32","@value":77}'));
     const ex = managerOn(dir).executor('g');
-    await expect(ex.framedAsync('g.io("bad-edge-value.json").read()', {})).rejects.toMatchObject({ name: 'RaisedByQuery' });
+    await expect(ex.framedAsync('g.io("bad-edge-value.json").read()', {})).rejects.toThrow('unparseable g:Duration');
     await expect(ex.framedAsync('g.io("bad-endpoint.json").read()', {})).rejects.toThrow('unknown vertex 77');
     for (const q of ['g.V().count()', 'g.E().count()']) {
       const [count] = await ex.framedAsync(q, {});
