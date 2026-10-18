@@ -994,6 +994,13 @@ authorities.
   (`src/gremlin/frontend.ts`, per `GenericLiteralVisitor.java`) incl. octal / `\u+XXXX` / line-join, the
   `'s'`-suffix and one-unit char literals; chained regex `within` barriers bind apart. Pinned in
   `test/text-literal.test.ts`. No baseline moved.
+  ✅ **Text-value residue LANDED ON TRUNK 2026-10-18 (`6961eab5`, ff-text-residue).** Every string VALUE is
+  exact or declines at each door into SQLite: `assertCarriable` (`src/sql/kernel/q.ts`) declines a lone surrogate in
+  every JSON leaf/key (`stringifyExact`) and every string bind; a data NUL or astral character under
+  length/substr/TextP `like` defers that row at the one call site (`src/compiler/rel/text-units.ts`, per
+  `LengthGlobalStep.java` UTF-16 units); compiler-minted bind names are spelled outside Gremlin.g4's Identifier
+  alphabet (`compilerParamName`, `rel/expr.ts`) so a user parameter cannot merge with one; `ResumeGap` is an
+  `UnsupportedTraversal`. CI green.
 - 🚧 **F — writes interleave one traverser at a time.** Authority: `step/map/MergeVertexStep.java` /
   `MergeEdgeStep.java` (one flatMap per traverser: search, then onMatch or add),
   `step/sideEffect/AddPropertyStep.java`, `AddLabelStep`, `LazyBarrierStrategy.java` (a small `V(ids)` gets no
