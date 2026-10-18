@@ -249,22 +249,35 @@ describe('every map key reads the same through untyped JSON and GraphBinary', ()
 
   // A collection or edge-Property key is spelled as the JSON TEXT of its untyped rendering (Java's
   // `toString()` is not reproduced) — never `[object Object]`, never a fallback: every group stays its own
-  // entry. Two keys that spell alike (Int 1, String "1") merge into one entry, JSON's limitation.
+  // entry. Two edge Properties with one key and value are ONE group key (a Property is equal by key and
+  // value, never by its edge — ElementHelper.areEqual), so their counts add rather than splitting.
   for (const [q, groups] of [
     ['g.V().group().by(out().limit(1).fold()).by(count())', 3],
     ['g.V().groupCount().by(outE().limit(1).fold())', 4],
-    ['g.E().properties().groupCount()', 4], // two weight=0.4 and two weight=1.0 edge properties spell alike and merge
+    ['g.E().properties().groupCount()', 4], // two weight=0.4 and two weight=1.0 edge properties are one key each
     ['g.V().group().by(project("a").by(identity())).by(count())', 6],
     ['g.E().properties().group().by(identity()).by(count())', 4],
     ['g.V().where(out()).groupCount().by(out().fold())', 3],
     ['g.V().groupCount().by(valueMap())', 6],
-    ['g.inject(1, "1").groupCount()', 1],
   ] as const) test(`${q} → JSON, ${groups} keys spelled as JSON text`, async () => {
     const res = await post(q, JSON_MT);
     expect(res.headers.get('Content-Type')).not.toBe(GRAPHBINARY_MT);
     const [first] = await jsonResults(res);
     expect(Object.keys(first as object).length).toBe(groups);
     expect(Object.keys(first as object).some((k) => k.includes('[object Object]'))).toBe(false);
+  });
+  test('an edge Property key groups by key and value, as dedup() does', async () => {
+    const [counts] = await jsonResults(await post('g.E().properties().groupCount()', JSON_MT));
+    expect(Object.values(counts as object).sort()).toEqual([1, 1, 2, 2]);
+    const [binary] = await binaryResults(await post('g.E().properties().groupCount()', GRAPHBINARY_MT));
+    expect([...(binary as Map<unknown, unknown>).values()].map(Number).sort()).toEqual([1, 1, 2, 2]);
+  });
+  // Two distinct keys that spell alike would keep only one entry as a JSON object; such a map renders as an
+  // array of [key, value] entries instead, so no entry (and no count) is lost.
+  test('keys that spell alike render as [key, value] entries, never losing one', async () => {
+    expect(await jsonResults(await post('g.inject(1, "1").groupCount()', JSON_MT))).toEqual([[['1', 1], [1, 1]]]);
+    expect(await jsonResults(await post('g.inject(null, "null").groupCount()', JSON_MT))).toEqual([[['null', 1], [null, 1]]]);
+    expect(await (await post('g.inject("__proto__", "x").groupCount()', JSON_MT)).text()).toBe('[{"__proto__":1,"x":1}]');
   });
   test('a whole Double key keeps its .0; a list key is its JSON text', async () => {
     expect(await jsonResults(await post('g.inject(1.0d, 2.5d, 3).groupCount()', JSON_MT))).toEqual([{ '1.0': 1, '2.5': 1, '3': 1 }]);

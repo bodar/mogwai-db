@@ -96,11 +96,18 @@ export function untyped(node: FrameNode): unknown {
 }
 
 /** A `{t:'map'}` node → a JS object. JSON object keys are strings, so each key is spelled by the one
- *  total rule (`untypedMapKey`); the value recurses. Two distinct keys that spell alike (the Int `1` and
- *  the String `"1"`) MERGE into one JSON entry, the later winning — JSON's limitation, not a decline. */
-function untypedMap(pairs: [FrameNode, FrameNode][]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of pairs) out[untypedMapKey(k)] = untyped(v);
+ *  total rule (`untypedMapKey`); the value recurses. Two distinct keys can spell alike (the Int `1` and
+ *  the String `"1"`, `null` and `"null"`) — and an object would keep only one of them, losing an entry.
+ *  So a map whose keys collide renders as an ARRAY of `[key, value]` entries instead, each key rendered
+ *  as a value (`untyped`), so every entry survives and `1` stays apart from `"1"`. The object has no
+ *  prototype, so a `"__proto__"` key is an ordinary entry rather than a prototype assignment. */
+function untypedMap(pairs: [FrameNode, FrameNode][]): Record<string, unknown> | unknown[] {
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [k, v] of pairs) {
+    const key = untypedMapKey(k);
+    if (Object.hasOwn(out, key)) return pairs.map(([pk, pv]) => [untyped(pk), untyped(pv)]);
+    out[key] = untyped(v);
+  }
   return out;
 }
 

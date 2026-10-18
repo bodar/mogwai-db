@@ -113,8 +113,15 @@ export const ORD_COL = 'go';
 
 /** A `{t,v}` NODE's equality terms — its `v` plus the family its `t` names (`valueFamily`), the merges'
  *  one equality (`typedEquality`, build.ts) applied to a node, where its JSON TEXT split each class (and
- *  each spelling) into a value of its own. */
-const nodeEquality = (node: Expr): Expr[] => [jsonField(node, 'v'), valueFamily(jsonField(node, 't'))];
+ *  each spelling) into a value of its own. A PROPERTY node's `owner` is dropped first: an edge `Property`
+ *  is equal by key and value, never by its edge (`ElementHelper.areEqual(Property, Object)`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:533-545`),
+ *  the same identity `dedup()` keys it by (`propertyIdentityKey`); a VertexProperty still keys apart by
+ *  its `vpid`. A no-op on every other node, which has no `$.v.owner`. */
+const nodeEquality = (node: Expr): Expr[] => [
+  jsonField({ kind: 'call', fn: 'json_remove', args: [node, compilerText('$.v.owner')] }, 'v'),
+  valueFamily(jsonField(node, 't')),
+];
 
 /**
  * HOW A GROUPING KEYS ITS ROWS — a key NODE by `nodeEquality`, so `1`, `1.0` and `1L` are one key and

@@ -80,7 +80,7 @@
   "cap": {
     "binds": 0,
     "bytes": 7488,
-    "compiler": 245,
+    "compiler": 247,
     "bound": 0
   },
   "choose": {
@@ -211,20 +211,20 @@
   },
   "format": {
     "binds": 0,
-    "bytes": 5193,
+    "bytes": 5075,
     "compiler": 157,
     "bound": 0
   },
   "group": {
     "binds": 0,
-    "bytes": 5259,
-    "compiler": 130,
+    "bytes": 5363,
+    "compiler": 131,
     "bound": 0
   },
   "groupCount": {
     "binds": 0,
-    "bytes": 3068,
-    "compiler": 67,
+    "bytes": 3120,
+    "compiler": 68,
     "bound": 0
   },
   "has": {
