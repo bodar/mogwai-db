@@ -1660,9 +1660,10 @@ export function mergeStepLabels(steps: IRStep[], params: Record<string, any> = {
   return mergeLabelsFrom(steps, new Set(), rawBodies(params));
 }
 
-/** The hosts whose bodies hand their traverser OUTWARD and start on the host's own path entry — the
- *  branch family plus `local`, the per-traverser scope (`LocalStep`/`BranchStep` emit the child's own
- *  traverser). A body under any other host is entered with an empty entry. */
+/** The hosts whose bodies START on the host's own path entry — the branch family, `local`, and
+ *  `coalesce`, whose arms each start on `innerTraverser.split()` (no extension). A body under any other
+ *  host is entered with an empty entry. Only the START is shared: the entry is not followed back out of
+ *  any of them (and `coalesce`, a `FlatMapStep`, opens a new entry on the way out anyway). */
 const ENTRY_SHARING_HOSTS: ReadonlySet<string> = new Set(['local', 'union', 'coalesce', 'optional', 'choose', 'branch']);
 
 function mergeLabelsFrom(steps: IRStep[], seed: ReadonlySet<string>, read: (nested: unknown) => readonly Step[] | null): IRStep[] {

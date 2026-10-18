@@ -121,6 +121,41 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
       | result |
       | d[1].l |
 
+  # elementMap(k)/valueMap(k) name the keys a map MAY hold, not ones every row holds: a software vertex's
+  # map omits "age", so it falls back to the live label — lop and ripple stay two rows.
+  Scenario: g_V_asXageX_elementMapXageX_dedupXageX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("age").elementMap("age").dedup("age").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_asXageX_valueMapXageX_dedupXageX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("age").valueMap("age").dedup("age").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_elementMapXageX_dedupXageX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().elementMap("age").dedup("age").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
   # A project() is a map too: a keyed dedup(k) naming a FIELD reads the field, and a field a by() may
   # leave absent falls back per row to the same-named path label, as a map's absent key does.
   Scenario: g_V_asXnameX_projectXnameX_byXageX_dedupXnameX_count

@@ -44,7 +44,7 @@ import {
 import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, type Modulation } from './modulator.ts';
-import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type HostRow, type Subject } from './child.ts';
+import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
@@ -2918,7 +2918,9 @@ function mapTail(
     const mapScope: MapScope = (k) => {
       if (keys && !keys.includes(k)) return undefined;
       const node = correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node;
-      return { terms: [node], absent: keys ? null : { kind: 'binary', op: 'is', left: node, right: compilerNull() } };
+      // `keys` are the keys a map MAY hold, never ones it must: `elementMap('age')`/`valueMap('age')`
+      // omit a property the element lacks, so the absence test is always per row.
+      return { terms: [node], absent: { kind: 'binary', op: 'is', left: node, right: compilerNull() } };
     };
     const kd = keyedDedup(step, scoped, labels, ctx, fresh, mapScope);
     if (kd === null) return null;
