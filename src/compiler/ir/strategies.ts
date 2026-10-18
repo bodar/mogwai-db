@@ -85,18 +85,13 @@ export const NO_OP_STRATEGIES = new Set([
   'EarlyLimitStrategy',
   'AdjacentToIncidentStrategy', 'IncidentToAdjacentStrategy', 'InlineFilterStrategy',
   // ⚠️ `PathRetractionStrategy` is the SECOND entry whose "no-op" claim is about the RESULT and not
-  // about the plan — same standing as `RepeatUnrollStrategy` below, and for the same reason: we now
-  // perform it (`retractUnreadAlias`), so `withStrategies` asks for what already happens while
+  // about the plan: we now perform it (`retractUnreadAlias`), so `withStrategies` asks for what already happens while
   // `withoutStrategies` genuinely suppresses the pass (`passes.ts`). Dropping a label nothing reads
   // cannot change an answer, which is why it stays in a set whose contract is result-preservation;
   // what a user disabling it is entitled to is the un-retracted PLAN.
   'PathRetractionStrategy', 'PathProcessorStrategy', 'ByModulatorOptimizationStrategy',
-  // ⚠️ `RepeatUnrollStrategy` is the THIRD such entry, and its suppression is the one that is
-  // PARTIAL. We perform the strategy (`unrollFixedRepeat`) and we also go past it, onto barrier
-  // bodies upstream's `ALLOWED_STEP_CLASSES` refuses — so `withoutStrategies` suppresses the half
-  // that is the strategy and leaves the widening alone, which is the only reading under which a
-  // traversal we can answer does not become a throw. The rule, the pin and the corpus scenario that
-  // measures it are on the decline in `tryUnroll`.
+  // `RepeatUnrollStrategy`: unrolling a bounded repeat is our only lowering of it (`unrollFixedRepeat`),
+  // and an unrolled repeat answers the same bag as the rolled one, so suppressing it is a no-op.
   'RepeatUnrollStrategy', 'MatchAlgorithmStrategy', 'MatchPredicateStrategy',
   // GValue/requirement planning: subsumed by our q-kernel bound-value model (locked
   // decision #1 — no bytecode) and the absence of a traverser-requirement scheduler.
@@ -1166,7 +1161,7 @@ function canonicalizeConnectivesLevel(steps: Step[]): Step[] {
  * parse tree that `traversal-param.ts` un-parses via `tree.accept`, and rebuilding it as `Step[]` breaks
  * that (see `canonicalizeConnectives`' note). `changed` is true iff at least one arg was rebuilt, so the
  * caller can likewise return the whole STEP by reference when nothing under it moved. Shared by the two
- * plain nested-arg recursions (`canonicalizeConnectives`, `markUnrollSuppressed`); each supplies its own
+ * plain nested-arg recursions (`canonicalizeConnectives`, `markEarlyLimitSuppressed`); each supplies its own
  * recursion and its own per-step wrapper. The scope walk's arg loop is deliberately NOT folded in — it
  * transforms the body before recursing (the where-variable rewrite) and signals "unchanged" with a null
  * return rather than reference identity, so sharing this contract would obscure its scope tracking. */
@@ -1292,31 +1287,12 @@ const ROW_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'i
 const valuePreservingBodyStep = (s: Step): boolean =>
   ROW_FILTERS.has(s.name) || (s.name in SIDE_EFFECT_FREE_BARRIERS && !isLocalScope(s as IRStep));
 
-/**
- * `withoutStrategies(RepeatUnrollStrategy)` — mark every `repeat` at EVERY depth, so `tryUnroll`
- * declines the half of its work that IS that strategy (see the decline in `tryUnroll` for which half
- * and why it is not all of it).
- *
- * The mark rides on the STEP rather than being read from `ctx.strategies` where the pass runs, and
- * that is forced rather than stylistic: a nested body (`union(__.repeat(__.out()).times(2))`) is
- * normalized LATER and in ISOLATION — `normalize` passes `EMPTY_STRATEGY_USE` by construction, since a
- * sub-chain carries no strategies of its own — so a root-only consult would honour the request at the
- * top level and silently ignore it one nesting level down. `withoutStrategies` is a property of the
- * traversal SOURCE, so it holds at every depth or it is a lie.
- *
- * IDENTITY-PRESERVING for `canonicalizeConnectives`' measured reason: a `{nested}` arg may still be a
- * raw PARSE TREE and one consumer needs it to stay that way (`services/params/traversal-param.ts`
- * un-parses a `call().with("traversal", __.V())` via the client's TranslateVisitor, which requires
- * `tree.accept`). So an arg — and a whole level — holding no `repeat` is returned BY REFERENCE, and
- * only a branch that genuinely marked something is rebuilt.
- */
-export function markUnrollSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
-  return markAtDepth(steps, params, (s) => s.name === 'repeat', (s) => { s.unrollSuppressed = true; });
-}
-
 /** `withoutStrategies(EarlyLimitStrategy)` — mark every slice at EVERY depth so `earlyLimit`
- *  (`ir/early-limit.ts`) leaves it where the user wrote it, for `markUnrollSuppressed`'s reason: a nested
- *  body is normalized later and in isolation, and `withoutStrategies` holds at every depth or not at all. */
+ *  (`ir/early-limit.ts`) leaves it where the user wrote it. The mark rides on the STEP rather than being
+ *  read from `ctx.strategies` where the pass runs: a nested body is normalized later and in isolation
+ *  (`normalize` passes `EMPTY_STRATEGY_USE`), and `withoutStrategies` holds at every depth or not at all.
+ *  IDENTITY-PRESERVING for `canonicalizeConnectives`' reason: an arg holding no slice keeps its raw parse
+ *  tree (`services/params/traversal-param.ts` un-parses a sub-traversal via `tree.accept`). */
 export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
   return markAtDepth(steps, params, (s) => SLICE_STEPS.has(s.name), (s) => { s.earlyLimitSuppressed = true; });
 }
@@ -1496,36 +1472,12 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
     if (!body.every(valuePreservingBodyStep)) return null;
     lastLevel = 1;
   }
-  // `withoutStrategies(RepeatUnrollStrategy)` — SCOPED TO THE TRANSFORMATION THAT STRATEGY PERFORMS,
-  // which is the barrier-free half of this pass and not all of it. Read at the vendored pin:
-  // `ALLOWED_STEP_CLASSES` is `VertexStepContract`/`EdgeVertexStep`/`EdgeOtherVertexStep`/`HasStep` +
-  // a nested `RepeatStep` (movement and `has()`, NO barrier), and the class comment says why —
-  // "intentionally conservative as there have been unintentional traversal semantics changes in the
-  // past when allowing a large variety of steps (especially barriers)"
-  // (vendor/tinkerpop/gremlin-core/.../strategy/optimization/RepeatUnrollStrategy.java:71-77).
-  //
-  // So a body with a barrier is NOT that strategy's business in either direction: upstream declines it
-  // (the corpus says so in its own words — "this traversal is not expected to be unrolled by the
-  // strategy but should have consistent semantics compared to traversal without the strategy applied",
-  // RepeatUnrollStrategy.feature) and for US the unroll is the only route that EXPRESSES such a body at
-  // all. Suppressing it there would turn a traversal we answer into a throw:
-  // `g.withoutStrategies(RepeatUnrollStrategy).V().repeat(both().limit(1)).times(2)` is a corpus
-  // scenario expecting a count of 1. Declining an input we can serve, to honour a request about a
-  // strategy that never touched this body, is the fail-closed rule read backwards.
-  //
-  // The set is stated as the DIFFERENCE rather than as a second vocabulary (step.ts's rule: derive with
-  // a named difference, never merge) — `unrollableBodyStep` minus (`UNROLLABLE_BARRIERS` ∪ `call`) IS
-  // upstream's admitted set (movement + `has()`), so the two cannot drift apart as either grows. A
-  // barrier `call()` is on the widening side too: it is a service boundary upstream's `ALLOWED_STEP_
-  // CLASSES` never contained, and the unroll is the only route that expresses such a body — so
-  // `withoutStrategies(RepeatUnrollStrategy)` must not suppress it any more than it suppresses a `dedup`.
-  const widensPastTheStrategy = body.some((s) => s.name in UNROLLABLE_BARRIERS || s.name === 'call');
-  if (rep.unrollSuppressed && !widensPastTheStrategy) return null;
   // Barrier-free bodies unroll too. A bounded frontier is a multiset, and only an ordinary phase can
   // collapse it with GROUP BY + SUM(bulk): SQLite forbids that aggregate in a recursive term. This is
   // Calcite's COUNT-over-partitions then SUM contract (`SqlSplittableAggFunction.CountSplitter`) at
-  // each phase boundary. TinkerPop's strategy remains suppressible above; its conservative admitted
-  // set and provider-independent concern do not define this compiler's physical regime split.
+  // each phase boundary. Unrolling is our ONLY lowering of a bounded repeat (the physical regime split,
+  // not TinkerPop's optional strategy), so `withoutStrategies(RepeatUnrollStrategy)` is a result-preserving
+  // no-op (`NO_OP_STRATEGIES`) rather than a request that could only turn an answer into a throw.
   // No ceiling here: the platform enforces its own statement limits, and the build asserts them.
   const phase = (): Step[] => body.map((s) => ({ ...s }));
 

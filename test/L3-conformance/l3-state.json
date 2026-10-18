@@ -1,5 +1,5 @@
 {
-  "passing": 1873,
+  "passing": 1878,
   "total": 2286,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1867,7 +1867,12 @@
     "g_withoutStrategiesXProfileStrategyX_V",
     "g_withoutStrategiesXReferenceElementStrategyX_V",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_order_byXnameX_repeatXboth_order_byXnameX_aggregateXxXX_timesX2X_limitX10X",
+    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_hasXage_ltX30XXX_timesX2X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_limitX1XX_timesX2X",
+    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXinX_timesX2X",
+    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXin_hasXage_gtX20XXX_timesX2X",
+    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXoutX_timesX2X",
+    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXout_hasXname_notStartingWithXzXXX_timesX2X",
     "g_withoutStrategiesXReservedKeysVerificationStrategyX_addVXpersonX_propertyXid_123X_propertyXname_markoX",
     "g_withoutStrategiesXSeedStrategyX_V",
     "g_withoutStrategiesXStandardVerificationStrategyX_V",
@@ -2283,12 +2288,7 @@
     "g_withXmultilabelX_E_elementMap",
     "g_withoutStrategiesXConnectiveStrategyX_V_hasXname_markoX_or_whereXinXknowsX_hasXname_markoXX",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXbothE_otherV_hasXage_ltX30XXX_timesX2X",
-    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_hasXage_ltX30XXX_timesX2X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_sampleX1XX_timesX2X",
-    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXinX_timesX2X",
-    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXin_hasXage_gtX20XXX_timesX2X",
-    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXoutX_timesX2X",
-    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXout_hasXname_notStartingWithXzXXX_timesX2X",
     "get_g_addVXpersonX_propertyXsingle_name_stephenX_propertyXsingle_name_stephenm_since_2010X"
   ],
   "_comment": "L3 conformance last-known run: the passing/failing scenario sets are the floor. A clean local run rewrites it (CI never does). It is a hard ratchet — the run fails on any scenario that regresses and on a lower count. `passing` = passed.length. Commit this file with every bump. Never hand-edit `passed` to hide a regression."

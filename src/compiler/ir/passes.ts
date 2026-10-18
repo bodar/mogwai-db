@@ -1,7 +1,7 @@
 import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, markEarlyLimitSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
+    stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markEarlyLimitSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder, mergeStepLabels,
@@ -121,18 +121,10 @@ const FOLD: Pass[] = group('canonicalize', [
   // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
   // folded operand still canonicalizes.
   { name: 'ConnectiveStrategy', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
-  // BEFORE the unroll, and it must run even when the top level holds no `times` at all — a nested
-  // `union(__.repeat(__.out()).times(2))` is the shape the mark exists for. Cost when the user named
-  // nothing is zero (`applies` reads the strategy list, never the chain); cost when they did is one
-  // identity-preserving walk. ROOT-only by construction rather than by an `!ctx.nested` test: only a
-  // root `runPasses` has a `without` list, so a nested re-entry finds the mark already on the step.
-  {
-    name: 'markUnrollSuppressed',
-    applies: (_steps, ctx) => ctx.strategies.without.includes('RepeatUnrollStrategy'),
-    run: (steps, ctx) => markUnrollSuppressed(steps, ctx.params),
-  },
-  // The same mark for `withoutStrategies(EarlyLimitStrategy)`, on the same RAW chain and for the same
-  // reason: before `formRepeatRegions`/`absorbOptionArms` move a body out of the args it walks.
+  // `withoutStrategies(EarlyLimitStrategy)` marks every slice at every depth, on the RAW chain: before
+  // `formRepeatRegions`/`absorbOptionArms` move a body out of the args it walks. Cost when the user named
+  // nothing is zero (`applies` reads the strategy list, never the chain). ROOT-only by construction: only
+  // a root `runPasses` has a `without` list, so a nested re-entry finds the mark already on the step.
   {
     name: 'markEarlyLimitSuppressed',
     applies: (_steps, ctx) => ctx.strategies.without.includes('EarlyLimitStrategy'),
