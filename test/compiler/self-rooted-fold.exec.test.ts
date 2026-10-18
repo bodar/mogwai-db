@@ -13,7 +13,7 @@
 // is the fixture for the same reason — it is the only one with multi-label vertices AND `Cardinality.list`
 // properties, so the modern graph (uniform per label, single-valued) cannot see either.
 import { test, expect, describe } from 'bun:test';
-import { seededStore, zooStore } from '../support/harness.ts';
+import { bagOf, seededStore, zooStore } from '../support/harness.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 import type { GraphStore } from '../../src/storage.ts';
@@ -66,8 +66,8 @@ describe('a self-rooted fold in a by() arm', () => {
   // A single-valued property still folds to a ONE-element list, not to the bare value — the fold is a
   // collect, not a coercion.
   test('a single-valued property folds to a one-element list', async () => {
-    expect(await rows(seededStore(), `g.V().hasLabel('person').project('n').by(__.values('name').fold())`))
-      .toEqual([{ n: ['marko'] }, { n: ['vadas'] }, { n: ['josh'] }, { n: ['peter'] }]);
+    expect(bagOf(await rows(seededStore(), `g.V().hasLabel('person').project('n').by(__.values('name').fold())`)))
+      .toEqual(bagOf([{ n: ['marko'] }, { n: ['vadas'] }, { n: ['josh'] }, { n: ['peter'] }]));
   });
 
   // AND IT COMPOSES with the nesting it has to live inside — a self-rooted fold as a field of a record

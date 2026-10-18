@@ -14,7 +14,7 @@
 // movement collapse, the bulk repeat-count, the two predicate inliners.
 import type { GraphStore } from '../../src/storage.ts';
 import { exec } from '../support/executor.ts';
-import { isWrite, type StoreFactory } from '../support/graph.ts';
+import { isWrite, orderIndeterminacy, type StoreFactory } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import { weigh } from '../support/multiset.ts';
 
@@ -136,8 +136,18 @@ export function differential(mint: StoreFactory, q: string, generic: FastPathCon
   const store = shared ?? mint();
   const slow = outcomeOf(store, q, generic);
   const d = diverge(fast, slow);
+  if (d?.kind === 'multiset' && fast.kind === 'rows' && slow.kind === 'rows') {
+    // An UNORDERED positional window is "some n" (`orderIndeterminacy`): two plans over the same rows
+    // may take different members, and that is an answer, not a defect. What still holds is the count
+    // when the window ends its scope; when something data-dependent follows it, not even that.
+    const window = orderIndeterminacy(q);
+    if (window === 'cardinality' || (window === 'members' && bulkOf(fast.weighed) === bulkOf(slow.weighed)))
+      return [{ kind: 'order', detail: `an unordered window took different members (${window})` }];
+  }
   return d ? [d] : [];
 }
+
+const bulkOf = (m: ReadonlyMap<string, bigint>): bigint => [...m.values()].reduce((a, b) => a + b, 0n);
 
 /** The divergences that fail a run — `differential` minus telemetry. */
 export const gatingDivergences = (mint: StoreFactory, q: string, generic?: FastPathConfig): Divergence[] =>

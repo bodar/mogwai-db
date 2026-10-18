@@ -49,25 +49,40 @@ describe('ChainFacts.tracksPath', () => {
 });
 
 describe('ChainFacts.demandsEncounter', () => {
-  test('true when a positional consumer follows a fan-out', () => {
-    expect(facts('g.V().out().limit(2)').demandsEncounter).toBe(true);
-    expect(facts('g.V().values("name").range(0,2)').demandsEncounter).toBe(true);
+  /** The ROOT single-statement read: its rows go to the wire, so an unordered terminal owes no order. */
+  const wire = (gremlin: string) =>
+    analyzeChain(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps, { wireTerminal: true });
+
+  test('an unordered limit/range/skip owes no order — it is "some n"', () => {
+    // These read `true` until 2026-10-18: a slice seeded an encounter so it took the SOURCE's first n,
+    // which made SQLite build and sort every walk before it could stop. Which n is now the plan's
+    // scan order — an accepted divergence (docs/feature-support-matrix.md).
+    expect(facts('g.V().out().limit(2)').demandsEncounter).toBe(false);
+    expect(facts('g.V().values("name").range(0,2)').demandsEncounter).toBe(false);
+    expect(facts('g.V().limit(2)').demandsEncounter).toBe(false);
+    expect(facts('g.V().hasLabel("person").range(0,2)').demandsEncounter).toBe(false);
+    expect(facts('g.inject(1, 2, 3).limit(2)').demandsEncounter).toBe(false);
+    expect(facts('g.V().union(__.out().limit(1), __.in().limit(1))').demandsEncounter).toBe(false);
+    expect(wire('g.V().out().out().limit(10)').demandsEncounter).toBe(false);
   });
-  test('true for a slice with NO fan-out too — the source order is still an order', () => {
-    // This read `false` until 2026-08-01, on the reasoning that SQLite's forward scan makes an
-    // unconstrained `LIMIT 2` the source's first two anyway. It does — by accident, and reversing
-    // the scan takes a different SUBSET, which `mise run test:perturbed` reports. A slice needs a
-    // column to slice by whatever precedes it; the source seeds `encounter = id`, so this costs a
-    // carried column and an ORDER BY the rowid order satisfies.
-    expect(facts('g.V().limit(2)').demandsEncounter).toBe(true);
-    expect(facts('g.V().hasLabel("person").range(0,2)').demandsEncounter).toBe(true);
+  test('tail reads from the far end, so it still demands one — fan-out or not', () => {
+    expect(facts('g.V().out().tail(2)').demandsEncounter).toBe(true);
+    expect(facts('g.V().tail(2)').demandsEncounter).toBe(true);
+    expect(wire('g.V().values("name").tail(2)').demandsEncounter).toBe(true);
   });
-  test('false with no slice at all', () => {
+  test('false with no order reader at all', () => {
     expect(facts('g.V().out().count()').demandsEncounter).toBe(false);
-    // A Scope.local slice addresses a VALUE's members rather than the stream's rows, so it does
-    // not demand one either — not assertable through `fold()`, which is a COLLECTING consumer and
-    // demands the encounter in its own right (a collection's member order is observable).
-    expect(facts('g.inject(1, 2, 3).limit(2)').demandsEncounter).toBe(true);
+  });
+  test('the terminal emission: owed to a resume (a split/barrier head), not to the wire', () => {
+    expect(facts('g.V().out().values("name")').demandsEncounter).toBe(true);
+    expect(wire('g.V().out().values("name")').demandsEncounter).toBe(false);
+    expect(wire('g.V().out().out().values("name")').demandsEncounter).toBe(false);
+  });
+  test('collections, writes and dedup(label) still demand one at the wire', () => {
+    expect(wire('g.V().out().values("name").fold()').demandsEncounter).toBe(true);
+    expect(wire('g.V().out().addE("x").to(V(1))').demandsEncounter).toBe(true);
+    expect(wire('g.V().as("a").out().dedup("a")').demandsEncounter).toBe(true);
+    expect(wire('g.V().union(__.values("name").fold(), __.values("age").fold())').demandsEncounter).toBe(true);
   });
   test('group() distinguishes an ordered member collection from a reducing value traversal', () => {
     expect(facts('g.V().group().by(T.label)').demandsEncounter).toBe(true);
@@ -77,11 +92,11 @@ describe('ChainFacts.demandsEncounter', () => {
     expect(facts('g.V().group().by(T.label).by(__.out().count())').demandsEncounter).toBe(false);
     expect(facts('g.V().group().by(T.label).by(__.outE().values("weight").sum())').demandsEncounter).toBe(false);
   });
-  test('a plain order() between the fan-out and the slice clears the demand', () => {
-    // order() re-establishes a total order, so the following limit needs no emission encounter.
-    expect(facts('g.V().out().order().by("name").limit(2)').demandsEncounter).toBe(false);
+  test('a plain order() between the fan-out and a tail clears the demand', () => {
+    // order() re-establishes a total order, so the following tail needs no emission encounter.
+    expect(facts('g.V().out().order().by("name").tail(2)').demandsEncounter).toBe(false);
     // order().by(traversal) is NOT plain — it does not clear the demand.
-    expect(facts('g.V().out().order().by(__.values("name")).limit(2)').demandsEncounter).toBe(true);
+    expect(facts('g.V().out().order().by(__.values("name")).tail(2)').demandsEncounter).toBe(true);
   });
 });
 
@@ -222,6 +237,6 @@ describe('demandsEncounter and the collapse answers agree on a plain order() (sh
   test('by(traversal) order() is not plain for either scan', () => {
     // Not plain → still demands encounter; and (were it in a collapse-eligible position) would
     // not be treated as a plain sort either. Both read the same isPlainOrder.
-    expect(facts('g.V().out().order().by(__.values("name")).limit(2)').demandsEncounter).toBe(true);
+    expect(facts('g.V().out().order().by(__.values("name")).tail(2)').demandsEncounter).toBe(true);
   });
 });

@@ -13,7 +13,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { read, run, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
+import { bagOf, read, run, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -94,7 +94,7 @@ describe('scalar-parent / projection SQL', () => {
     // AsBool.feature `g_VXX_localX_outE_countX_asBool` over the modern graph: outE().count() != 0 per
     // vertex → marko/josh/peter true, vadas/lop/ripple false.
     const bools = await decodeAll(executeQuery(seededStore(), 'g.V().local(__.outE().count()).asBool()', {}));
-    expect(bools).toEqual([true, false, false, true, false, true]);
+    expect(bagOf(bools)).toEqual(bagOf([true, false, false, true, false, true]));
   });
 
   test('dateDiff() over a constant(datetime|null) nested operand folds to a millis subtraction', async () => {
@@ -258,19 +258,19 @@ describe('scalar-parent / projection SQL', () => {
     // A bare multi-label select packages the ELEMENTS themselves — the field keeps the rowid, so the
     // record's value side is a `{t:'vertex', …}` member and not a re-derived payload.
     expect((runWith(store, "g.V(1).as('a').out('knows').as('b').select('a','b')") as any[])
-      .map(entries)).toEqual([[['a', 'marko'], ['b', 'vadas']], [['a', 'marko'], ['b', 'josh']]]);
+      .map(entries).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)))).toEqual([[['a', 'marko'], ['b', 'josh']], [['a', 'marko'], ['b', 'vadas']]]);
 
     // AN UNPRODUCTIVE by() DROPS THE TRAVERSER, which is `select()`'s rule and the exact OPPOSITE of
     // `project()`'s (which omits the key and keeps it). The reference expects FOUR rows, without lop
     // and ripple (Select.feature:844-847).
     expect((runWith(store, 'g.V().as("a","n").select("a","n").by("age").by("name")') as any[])
-      .map(entries)).toEqual([
-        [['a', 29], ['n', 'marko']], [['a', 27], ['n', 'vadas']],
+      .map(entries).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)))).toEqual([
+        [['a', 27], ['n', 'vadas']], [['a', 29], ['n', 'marko']],
         [['a', 32], ['n', 'josh']], [['a', 35], ['n', 'peter']],
       ]);
     // …and `ProductiveByStrategy` turns the drop off, at BOTH arities.
-    expect(runWith(store, 'g.withStrategies(ProductiveByStrategy).V().as("a").select("a").by("age")')
-      .map((r) => r.v)).toEqual([29, 27, null, 32, null, 35]);
+    expect(bagOf(runWith(store, 'g.withStrategies(ProductiveByStrategy).V().as("a").select("a").by("age")')
+      .map((r) => r.v))).toEqual(bagOf([29, 27, null, 32, null, 35]));
   });
 
   test('a record FIELD re-enters as a stream of its own shape — RelIR', () => {

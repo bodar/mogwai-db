@@ -11,6 +11,7 @@ import { ZOO_SEED } from './fixtures/seed-zoo.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { decode, decodeAll } from './support/decode.ts';
+import { bagOf } from './support/harness.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { makeRouter } from '../src/router.ts';
 
@@ -406,7 +407,7 @@ describe('response completion — every selected field has an ENTRY, null where 
 
   test('a property absent on SOME vertices of a label comes back as null, not missing', async () => {
     const body = await post(`{ reptile { name venomous } }`);
-    expect(body.data.reptile).toEqual([{ name: 'atlas', venomous: null }, { name: 'monty', venomous: false }]);
+    expect(bagOf(body.data.reptile)).toEqual([{ name: 'atlas', venomous: null }, { name: 'monty', venomous: false }]);
     // The KEY must exist — `toEqual` alone would accept a missing key against an explicit undefined, so
     // the presence is asserted directly. This is the assertion the bug would fail.
     expect(Object.keys(body.data.reptile[0])).toEqual(['name', 'venomous']);
@@ -432,7 +433,7 @@ describe('response completion — every selected field has an ENTRY, null where 
   // An ALIAS is the response key, so completion must key off the alias and not the field name.
   test('an alias is the response key that gets completed', async () => {
     const body = await post(`{ reptile { n: name v: venomous } }`);
-    expect(body.data.reptile).toEqual([{ n: 'atlas', v: null }, { n: 'monty', v: false }]);
+    expect(bagOf(body.data.reptile)).toEqual([{ n: 'atlas', v: null }, { n: 'monty', v: false }]);
   });
 });
 

@@ -1,8 +1,8 @@
 // EVERY ROW IS ONE TRAVERSER. No lowering regroups equal traversers into a bulked slot the way Java's
 // `TraverserSet` does at the barriers `LazyBarrierStrategy`/`PathRetractionStrategy` place — that is an
 // execution detail of the reference, not an answer (`docs/feature-support-matrix.md`, deliberate
-// divergences). The multiset of rows is the reference's; an unordered stream keeps its arrival order, an
-// explicit `barrier()` is a pass-through, and an unordered `limit()` takes the first arrivals. What this
+// divergences). The multiset of rows is the reference's; an explicit `barrier()` is a pass-through, and an
+// unordered `limit()` takes n of the stream in the plan's order. What this
 // file still pins is TYPED identity where it decides an answer (a value's class rides every container).
 import { test, expect, describe } from 'bun:test';
 import { seededStore } from '../support/harness.ts';
@@ -11,6 +11,14 @@ import { decodeAll, typedAll } from '../support/decode.ts';
 
 const run = async (q: string) => decodeAll(executeQuery(seededStore(), q, {}));
 const typed = (q: string) => typedAll(executeQuery(seededStore(), q, {}));
+/** Is `got` exactly `n` rows, each drawn from `pool` without reuse? */
+const isSubBag = (got: readonly unknown[], pool: readonly unknown[], n: number): boolean => {
+  const left = pool.map((x) => JSON.stringify(x));
+  return got.length === n && got.every((x) => {
+    const i = left.indexOf(JSON.stringify(x));
+    return i >= 0 && left.splice(i, 1).length === 1;
+  });
+};
 
 describe('no TraverserSet merge — each row is one traverser, in arrival order', () => {
   test('an explicit barrier() and barrier(n) pass the stream through', () => {
@@ -18,11 +26,12 @@ describe('no TraverserSet merge — each row is one traverser, in arrival order'
     expect(typed('g.inject(1, 2, 1, 3).barrier(2).fold()')).toEqual(['[1i,2i,1i,3i]']);
   });
 
-  test('an unordered limit() takes the first arrivals', async () => {
-    expect(await run('g.V().both().both().limit(4).id()')).toEqual([1, 1, 4, 6]);
+  test('an unordered limit() takes n of the stream', async () => {
+    // Which n is the plan's scan order (an accepted divergence); the count and membership are the answer.
+    expect(isSubBag(await run('g.V().both().both().limit(4).id()'), await run('g.V().both().both().id()'), 4)).toBe(true);
     expect(typed('g.inject(1, 2, 1).limit(2)')).toEqual(['1i', '2i']);
-    // ties under a constant key are unordered: the stable sort keeps arrival order
-    expect(typed('g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).sum()')).toEqual(['3i']);
+    // ties under a constant key are unordered: the slice takes any two of the tied rows
+    expect(['2i', '3i', '4i', '5i']).toContain(typed('g.inject(1, 2, 1, 3).order().by(__.constant(0)).limit(2).sum()')[0]);
   });
 
   test('a seeded fold folds every traverser', async () => {
@@ -89,7 +98,12 @@ describe('typed identity — a value keeps its class through every container', (
       ['g.inject(1, 1L).optional(__.identity())', ['1i', '1L']],
       ['g.inject(1, 1L).coalesce(__.identity(), __.identity())', ['1i', '1L']],
     ];
-    for (const [q, expected] of cases) expect(typed(q), q).toEqual(expected);
+    for (const [q, expected] of cases) {
+      // An unordered limit/range is "some n" of the merged stream — pinned by count and membership.
+      const sliceAt = q.search(/\.(?:limit|range)\([^)]*\)$/);
+      if (sliceAt < 0) expect(typed(q), q).toEqual(expected);
+      else expect(isSubBag(typed(q), typed(q.slice(0, sliceAt)), expected.length), q).toBe(true);
+    }
   });
 
   test('a NULL per-row tag reads the value at every predicate subject — perRowSubject', () => {

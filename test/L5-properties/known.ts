@@ -72,12 +72,10 @@ export interface KnownDivergence {
 }
 
 // EMPTY, and that is the state a ratchet is supposed to reach. The order-sensitive-slice-in-a-branch-arm
-// entry that sat here (commit ecc392f) was FIXED, not silenced: `computeDemandsEncounter` now seeds the
-// emission-order encounter when a drop-slice (limit/range/tail) appears inside a branch-merge arm
-// (`analyze.ts` BRANCH_MERGE_STEPS), so the stream feeding the branch is ordered and the arm's slice is
-// deterministic regardless of which scan order a fast path produces. Pinned in
-// `test/L4-addendum/branch-arm-slice-order.feature`. The next per-switch divergence L5 draws belongs
-// here, one entry per ROOT CAUSE with its diagnosis, never one per traversal.
+// entry that sat here (commit ecc392f) is no longer a defect: an unordered slice is "some n" in the
+// plan's scan order (docs/feature-support-matrix.md §17), so the differential compares such a window on
+// its count (`orderIndeterminacy`, `oracle.ts`). The next per-switch divergence L5 draws belongs here,
+// one entry per ROOT CAUSE with its diagnosis, never one per traversal.
 export const KNOWN: readonly KnownDivergence[] = [
 ];
 

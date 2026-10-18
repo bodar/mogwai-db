@@ -5,7 +5,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { idAlreadyExists, run, seededStore, written } from '../support/harness.ts';
+import { bagOf, idAlreadyExists, run, seededStore, written } from '../support/harness.ts';
 import { isRowsBind } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -588,7 +588,7 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
     // …while a body that reads only its own element's keys, written by its own RUN, is the loop exactly.
     const store = seededStore();
     run(store, "g.V(1,2).property('a', __.values('name')).property('b', __.values('a'))");
-    expect(run(store, "g.V(1,2).values('b')").map((r) => r.v)).toEqual(['marko', 'vadas']);
+    expect(bagOf(run(store, "g.V(1,2).values('b')").map((r) => r.v))).toEqual(['marko', 'vadas']);
     // …and one traverser has nobody to race.
     const one = seededStore();
     run(one, "g.V(1).property('a', __.out().values('b').count()).property('b', 1)");
@@ -615,7 +615,7 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
     expect(run(unlabelled, "g.E(7,8).values('n')").map((r) => r.v)).toEqual([1, 1]);
     const named = seededStore();
     run(named, "g.V(1,2).property('n', __.values('name')).addLabel('z')");
-    expect(run(named, "g.V(1,2).values('n')").map((r) => r.v)).toEqual(['marko', 'vadas']);
+    expect(bagOf(run(named, "g.V(1,2).values('n')").map((r) => r.v))).toEqual(['marko', 'vadas']);
   });
 
   test('a value that resolves to null', () => {
@@ -649,7 +649,7 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
     refuses("g.V(1).addE('e').to(__.V(99))", /addE\(e\) failed because the to\(\) traversal \(which should give a Vertex\) failed with: The provided traverser does not map to a value/, 'g.E().count()');
     refuses("g.addE('e').from(__.V(2).has('nope')).to(__.V(1))", /the from\(\) traversal .* does not map to a value/, 'g.E().count()');
     // One traverser races nobody; an endpoint that reaches no edge cannot see a new one.
-    expect(run(seededStore(), "g.V(1).addE('e').to(__.V().where(__.inE('e').count().is(0)).limit(1)).inV().id()").map((r) => r.v)).toEqual([1]);
+    expect(run(seededStore(), "g.V(1).addE('e').to(__.V().where(__.inE('e').count().is(0)).limit(1)).inV().id()")).toHaveLength(1);
     expect(run(seededStore(), "g.V(1,2).addE('e').to(__.V(4)).inV().id()").map((r) => r.v)).toEqual([4, 4]);
   });
 });

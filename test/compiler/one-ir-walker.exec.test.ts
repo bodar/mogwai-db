@@ -11,7 +11,7 @@ import { compilePlan, UnsupportedTraversal } from '../../src/compiler/compiler.t
 import { arg, type Step } from '../../src/gremlin/frontend.ts';
 import type { IRStep } from '../../src/compiler/ir/step.ts';
 import { eachChainDeep, someStepDeep } from '../../src/compiler/ir/walk.ts';
-import { seededStore } from '../support/harness.ts';
+import { bagOf, seededStore } from '../support/harness.ts';
 import { executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 
@@ -104,7 +104,7 @@ describe('the defects the walker closed, and their neighbours', () => {
   ])('one path entry binds a label once: %s', async (q) => expect(await ids(q)).toEqual([[1]]));
 
   test('…but a step that opens a new entry keeps both binds', async () => {
-    expect(await ids("g.V(1).as('a').out().as('a').select(Pop.all, 'a')")).toEqual([[1, 2], [1, 3], [1, 4]]);
+    expect(bagOf(await ids("g.V(1).as('a').out().as('a').select(Pop.all, 'a')"))).toEqual([[1, 2], [1, 3], [1, 4]]);
   });
 
   // A child traversal starts on its parent's traverser — the same last path entry — so a branch body's

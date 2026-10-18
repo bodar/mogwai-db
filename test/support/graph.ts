@@ -106,14 +106,12 @@ export const isNondeterministic = (q: string): boolean => NONDETERMINISTIC.test(
  * the same chain plus `.fold().unfold()` yields {2,2,3,3,4} — one arm took vadas+josh, the other
  * vadas+lop, both "the first two".
  *
- * TinkerPop, iterating lazily over a definite sequence, has one answer here, so this is a real
- * under-determination on our side and not a licence — it is `docs/outstanding-work.md` item 4 (the
- * missing emission-order primitive) surfacing where item 20 predicts. What it means for an ORACLE is
- * that a comparison between two different chains cannot evaluate anything over such a prefix: the
- * disagreement is the missing order channel, already filed, not the property under test. L5's
- * METAMORPHIC oracle therefore skips these (and reports the count); the fast-path DIFFERENTIAL does
- * not, because there both sides are the same chain — where a positional window does still diverge,
- * that is a diagnosed entry in `L5-properties/known.ts` rather than a whole class.
+ * TinkerPop, iterating lazily over a definite sequence, has one answer here; we deliberately do not:
+ * an unordered slice is "some n" in the plan's scan order (docs/feature-support-matrix.md §17), so
+ * seeding an order for it no longer happens. What it means for an ORACLE is that a comparison between
+ * two different plans cannot evaluate WHICH members such a window took. L5's METAMORPHIC oracle
+ * compares these on count (or skips them, for `'cardinality'`), the fast-path DIFFERENTIAL does the
+ * same (`oracle.ts`), and the census digests their count.
  *
  * An `order()` earlier in the chain supplies the missing channel, so a windowed chain that has one is
  * determinate and stays in scope.

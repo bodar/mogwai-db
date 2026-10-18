@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
 import { t } from '../../src/io.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
@@ -87,15 +87,15 @@ describe('group / properties SQL', () => {
     // A VERTEX key is MULTI-VALUED so its value is a LIST; an EDGE key's is the value itself
     // (`PropertyMapStep.addElementProperties` — `map.compute(key, …values.add(value))` for a Vertex,
     // `map.put(key, value)` otherwise). Same asymmetry the element payload's own bags carry.
-    expect(await dec("g.V().hasLabel('software').valueMap()"))
+    expect(bagOf(await dec("g.V().hasLabel('software').valueMap()")))
       .toEqual([new Map([['name', ['lop']], ['lang', ['java']]]), new Map([['name', ['ripple']], ['lang', ['java']]])]);
     // AN EDGE's value is FLAT, and the corpus pins it decisively though indirectly:
     // `integrated/SubgraphStrategy.feature:713-724` asserts `outE().valueMap().select(Column.values).
     // unfold()` yields `d[5].i`, which it could not if the value side were `[5]`.
-    expect(await dec("g.E().hasLabel('knows').valueMap()"))
+    expect(bagOf(await dec("g.E().hasLabel('knows').valueMap()")))
       .toEqual([new Map([['weight', 0.5]]), new Map([['weight', 1]])]);
     // A key SUBSET filters in SQL, and a key the element does not carry is simply absent — not null.
-    expect(await dec("g.V().hasLabel('software').valueMap('name','age')"))
+    expect(bagOf(await dec("g.V().hasLabel('software').valueMap('name','age')")))
       .toEqual([new Map([['name', ['lop']]]), new Map([['name', ['ripple']]])]);
 
     // `valueMap(true)` (and `with(WithOptions.tokens)`, which a Pass desugars to it) adds the id and
@@ -128,7 +128,7 @@ describe('group / properties SQL', () => {
     expect(await dec("g.V().has('name','lop').valueMap().select('name')")).toEqual([['lop']]);
     // `containsKey`, not "the value is not null": an ABSENT key drops the traverser (`SelectOneStep`'s
     // `ifProductive` emits nothing), so the two software vertices are gone rather than null.
-    expect(await dec("g.V().valueMap().select('age')")).toEqual([[29], [27], [32], [35]]);
+    expect(bagOf(await dec("g.V().valueMap().select('age')"))).toEqual(bagOf([[29], [27], [32], [35]]));
     // A key in NEITHER the map nor the labels is the empty result.
     expect(await dec("g.V().valueMap().select('nope')")).toEqual([]);
     // A groupCount map is a scope too — the key is a grouping VALUE, not a property name.
@@ -178,7 +178,7 @@ describe('group / properties SQL', () => {
     expect(await decodeAll(executeQuery(store,
       'g.V().as("a").out().as("b").select("a","b").by("name").count(local)'))).toEqual([2, 2, 2, 2, 2, 2]);
     // Range.feature: limit keeps the FIRST n entries; the `c` label is unbound over a 2-hop `in()`.
-    expect(await asMap('g.V().as("a").in().as("b").in().as("c").select("a","b","c").by("name").limit(Scope.local, 1)'))
+    expect(bagOf(await asMap('g.V().as("a").in().as("b").in().as("c").select("a","b","c").by("name").limit(Scope.local, 1)')))
       .toEqual([{ a: 'lop' }, { a: 'ripple' }]);
     // range(1,2) drops entry 0, keeps entry 1; tail(1) keeps the LAST entry — all in insertion order.
     expect(await asMap('g.V().as("a").out().as("b").out().as("c").select("a","b","c").by("name").range(Scope.local, 1, 2)'))
@@ -335,7 +335,7 @@ describe('group / properties SQL', () => {
     expect(runWith(store, 'g.withSack(2).V(1).sack(div).by(__.constant(4.0d)).sack()', rel).map((r) => r.v)).toEqual([0.5]);
     expect(runWith(store, 'g.withSack(1).V(1).sack(div).by(__.constant(2)).sack()', rel).map((r) => r.v)).toEqual([0]);
     // `assign` needs no prior value, so it MINTS the channel where no `withSack()` seeded one.
-    expect(runWith(store, 'g.V().sack(assign).by("age").sack()', rel).map((r) => r.v)).toEqual([29, 27, 32, 35]);
+    expect(bagOf(runWith(store, 'g.V().sack(assign).by("age").sack()', rel).map((r) => r.v))).toEqual(bagOf([29, 27, 32, 35]));
     // The by() is the ordinary modulator seam, so a CHILD body works here the day it works anywhere.
     expect(runWith(store, 'g.withSack(0).V().sack(assign).by(__.outE().count()).sack()', rel).map((r) => r.v).sort())
       .toEqual([0, 0, 0, 1, 2, 3]);

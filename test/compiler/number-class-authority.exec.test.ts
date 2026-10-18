@@ -14,8 +14,12 @@
 import { test, expect, describe } from 'bun:test';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
-import { seededStore } from '../support/harness.ts';
+import { bagOf, seededStore } from '../support/harness.ts';
 import { executeFramed } from '../support/executor.ts';
+
+/** These tables pin each row's CLASS, so an unordered stream compares as a multiset; a stream whose
+ *  order the query imposes (`order()`, `tail()`) compares as written. */
+const outer = (q: string, rows: readonly string[]): string[] => (/\b(?:order|tail)\(/.test(q) ? [...rows] : bagOf(rows));
 
 /** A floating value's spelling, its SIGN included — `${-0}` is `0`, which would hide a lost negative zero. */
 const signed = (v: number): string => (Object.is(v, -0) ? '-0' : String(v));
@@ -106,7 +110,7 @@ describe('a BigInteger past int64 orders by value, never by a saturated cast', (
     ["g.V(1).property('x', 9223372036854775807L) ;; g.V().has('x', P.eq(9223372036854775808n)).values('x')", []],
     ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.gt(9223372036854775808n)).values('x')", ['99999999999999999999N']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   // A floating bound at or past ±2^63 against a subject past int64 orders as REAL.
   test('g.inject(9223372036854775808n).is(P.lt(1e300d))', async () => expect(await classes('g.inject(9223372036854775808n).is(P.lt(1e300d))')).toEqual(['9223372036854775808N']));
   test('g.inject(1e300d).is(P.lt(99999999999999999999n))', async () => expect(await classes('g.inject(1e300d).is(P.lt(99999999999999999999n))')).toEqual([]));
@@ -155,7 +159,7 @@ describe("asNumber() is createNumber's class — Float, Double or BigDecimal —
     [`g.inject(${DATE}).asNumber().is(1577836800000L)`, ['1577836800000L']],
     [`g.V(1).property('d', ${DATE}) ;; g.V(1).values('d').asNumber()`, ['1577836800000L']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   // A BigDecimal with no plain spelling (a negative scale) declines rather than frame an infinity.
   test("declines: g.inject('1e400').asNumber()", () => expect(classes("g.inject('1e400').asNumber()")).rejects.toThrow(UnsupportedTraversal));
 });
@@ -177,7 +181,7 @@ describe('a min/max winner keeps its own class — no NumberHelper promotion', (
     ['g.V(5).bothE().values("weight").max()', ['1d']],
     ['g.V().local(union(values("age"), outE().values("weight")).fold()).max(local)', ['29i', '27i', '32i', '35i']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a sum and a list member keep their class', () => {
@@ -190,7 +194,7 @@ describe('a sum and a list member keep their class', () => {
     ['g.inject([1.0d, 2.5d])', ['[1d,2.5d]']],
     ['g.inject(1.0d, 2.5d).fold()', ['[1d,2.5d]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   test("constant(1L) keys stay Long: g.V().coalesce(values('age'), constant(1L)).groupCount()", async () =>
     expect(await classes("g.V().coalesce(values('age'), constant(1L)).groupCount()")).toEqual(['{27i:1L,29i:1L,32i:1L,35i:1L,1L:2L}']));
 });
@@ -208,7 +212,7 @@ describe('a branch arm keeps its tag through every re-read', () => {
     [`g.V().project('a').by(coalesce(values('age'), constant(${DATE}))).select('a').fold()`, ['[29i,27i,Date(2020),32i,Date(2020),35i]']],
     ["g.V().project('a').by(coalesce(values('age'), constant(1L))).select('a').fold()", ['[29i,27i,1L,32i,1L,35i]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('the sack carries its class', () => {
@@ -229,7 +233,7 @@ describe('the sack carries its class', () => {
     ['g.withSack(0.0d).V(4).outE("created").sack(sum).by("weight").sack()', ['1d', '0.4d']],
     ["g.withSack('a').inject('b').sack(min).sack()", ['"a"']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   for (const q of ["g.withSack('a').inject(1).sack(sum).sack()", 'g.withSack(1).inject(0).sack(div).sack()'])
     test(`defers: ${q}`, () => expect(classes(q)).rejects.toThrow(RaisedByQuery));
 });
@@ -251,7 +255,7 @@ describe("asString() of a Double is SQLite's text of it — a whole value keeps 
     ['g.inject(1.0e-5d).asString()', ['"1.0e-05"']],
     ["g.V().values('age').math('_/3').asString()", ['"9.66666666666667"', '"9.0"', '"10.6666666666667"', '"11.6666666666667"']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a reducer states its class per row (`REDUCED_TYPE`), so it survives every child depth and re-read', () => {
@@ -272,7 +276,7 @@ describe('a reducer states its class per row (`REDUCED_TYPE`), so it survives ev
     // A census row: the folded weights' `sum(local)` re-read through `as()`/`select()` is the Double 1.0.
     ["g.V().as('v').map(bothE().values('weight').fold()).sum(local).as('s').select('s').fold()", ['[1.9d,0.5d,1d,2.4d,1d,0.2d]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe("the sack's class rides to every consumer — a group key, a project member, a by() child", () => {
@@ -290,7 +294,7 @@ describe("the sack's class rides to every consumer — a group key, a project me
     ['g.withSack(1.0d).V().group().by(label).by(sack().sum())', ['{"person":4d,"software":2d}']],
     ['g.withSack(1.0d).V(1).repeat(out()).times(1).sack().groupCount()', ['{1d:3L}']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a Float rides as the Double of its literal, rounded to float32 only at the wire', () => {
@@ -327,7 +331,7 @@ describe('a Float rides as the Double of its literal, rounded to float32 only at
     ["g.inject('16777217.0').asNumber()", ['16777217d']],
     ["g.inject('16777217.000000001').asNumber()", ['16777217000000001e-9M']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a Float is ONE value whichever carrier it came by — a literal, a typed wire parameter, asNumber(FLOAT)', () => {
@@ -347,7 +351,7 @@ describe('a Float is ONE value whichever carrier it came by — a literal, a typ
   test("has('f',p) finds both", () => expect(answer(seeded(), "g.V().has('f',p).values('name')", p, t)).toEqual(['"marko"', '"vadas"']));
   test("has('f',eq(p)) finds both", () => expect(answer(seeded(), "g.V().has('f',eq(p)).values('name')", p, t)).toEqual(['"marko"', '"vadas"']));
   test("has('f',within(p)) over a typed list parameter finds both", () => expect(answer(seeded(),
-    "g.V().has('f',within(p)).values('name')", { p: [Math.fround(0.1)] }, { p: { t: 'list', items: ['float'] } })).toEqual(['"marko"', '"vadas"']));
+    "g.V().has('f',within(p)).values('name')", { p: [Math.fround(0.1)] }, { p: { t: 'list', items: ['float'] } }).sort()).toEqual(['"marko"', '"vadas"']));
   test('dedup sees one value', () => expect(answer(seeded(), "g.V().values('f').dedup().count()")).toEqual(['1L']));
   test('group sees one key', () => expect(answer(seeded(), "g.V().group().by(values('f')).by(count())")).toEqual(['{0.10000000149011612f:2L}']));
   // asNumber(GType.FLOAT) at compile time lands on the carrier too: 0.123456789d becomes the Float 0.12345679.
@@ -387,7 +391,7 @@ describe('Float arithmetic is double arithmetic, framed in the Float class', () 
     ["g.V(1).property('f',0.1f) ;; g.V(2).property('f',0.2f) ;; g.V().values('f').mean()", ['0.15000000000000002d']],
     ['g.withSack(16777217).inject(1.5f).sack(max).sack()', ['16777216f']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a zero is one zero and a BigInteger meets a Double by value', () => {
@@ -406,7 +410,7 @@ describe('a zero is one zero and a BigInteger meets a Double by value', () => {
     ['g.inject(4611686018427387903n).is(P.gt(4.611686018427388E18d))', []],
     ['g.inject(0.1d).is(0.1m)', ['0.1d']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 
@@ -453,7 +457,7 @@ describe('a Float PRINTS as the Double it rides as wherever it is printed — a 
     ['g.inject(1.0d).asNumber(GType.BIGDECIMAL)', ['10e-1M']],
     ["g.V().values('age').is(29).math('_*1e21').asNumber(GType.BIGDECIMAL)", ['29e--21M']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a BigDecimal is EQUAL by value — compareTo across every class, any scale, at every depth', () => {
@@ -503,7 +507,7 @@ describe('a BigDecimal is EQUAL by value — compareTo across every class, any s
     ["g.V().has('age', P.within(29.0m, 27m)).values('name')", ['"marko"', '"vadas"']],
     ["g.V().values('age').asNumber(GType.BIGDECIMAL).is(29.0m)", ['29e-0M']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   // No BigDecimal equals an infinity (Java throws in `BigDecimal.valueOf`; the natural answer is no match).
   test('g.inject(0.5m).is(Infinity)', async () => expect(await classes('g.inject(0.5m).is(Infinity)')).toEqual([]));
 });
@@ -520,7 +524,7 @@ describe('a list member PRINTS by its class at every depth — one recursive aut
     ['g.inject(1.0d).fold().fold().asString()', ['"[[1.0]]"']],
     ["g.V().values('age').math('_/3').fold().fold().asString()", ['"[[9.66666666666667, 9.0, 10.6666666666667, 11.6666666666667]]"']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a zero has no sign at any depth — a list member, a map value, a slice, a stored property', () => {
@@ -535,7 +539,7 @@ describe('a zero has no sign at any depth — a list member, a map value, a slic
     // A 17-digit Double re-collected from a list keeps its digits.
     ["g.inject(1).math('1/3').fold().tail(Scope.local)", ['[0.3333333333333333d]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('conjoin() prints each member as asString() does, keyed by the member class', () => {
@@ -548,7 +552,7 @@ describe('conjoin() prints each member as asString() does, keyed by the member c
     ["g.inject(1).math('1/3').fold().conjoin('-')", ['"0.333333333333333"']],
     ["g.inject(1.0e10d).fold().conjoin('-')", ['"10000000000.0"']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a run-time BigDecimal widening of a Double is its shortest digits — a whole Double at scale 0', () => {
@@ -596,7 +600,7 @@ describe('a run-time BigDecimal widening of a Double is its shortest digits — 
     ["g.V(1).property('d',1.0e7d) ;; g.V(1).values('d').asNumber(GType.BIGDECIMAL).math('_+1')", ['10000001d']],
     ["g.V(1).property('d',1.0e7d) ;; g.V(1).values('d').asNumber(GType.BIGDECIMAL).is(P.lt(0))", []],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   test("g.V(1).values('age').math('_*0+1e-310').asNumber(GType.BIGDECIMAL)", async () =>
     expect(await classes("g.V(1).values('age').math('_*0+1e-310').asNumber(GType.BIGDECIMAL)")).toEqual(['10e-311M']));
   // A BigDecimal SUM is exact BigDecimal arithmetic, not SQL's.
@@ -636,7 +640,7 @@ describe('the set-op family keeps every member class — combine/product/merge/i
     ['g.inject([1,2]).product([1L])', ['[[1i,1L],[2i,1L]]']],
     ['g.inject([1,2]).combine([3])', ['[1i,2i,3i]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a zero is one zero at every reduction and every dedup', () => {
@@ -650,7 +654,7 @@ describe('a zero is one zero at every reduction and every dedup', () => {
     ['g.inject(1, 1.0).dedup().count()', ['1L']],
     ['g.inject([1, 1L, 1]).dedup(local)', ['set[1i]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a BigDecimal member keeps its SCALE at every depth — one carrier authority', () => {
@@ -681,7 +685,7 @@ describe('a BigDecimal member keeps its SCALE at every depth — one carrier aut
     ['g.inject(-12345678.0d).asNumber(GType.BIGDECIMAL).fold().asString()', ['"[-12345678]"']],
     ['g.inject(1.5m).fold().asString()', ['"[1.5]"']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('the substrate-A audit forms keep their class — a by() fold, a map key, a stored -0.0d, dedup', () => {
@@ -698,7 +702,7 @@ describe('the substrate-A audit forms keep their class — a by() fold, a map ke
     ["g.addV('n').property('x',-0.0d) ;; g.addV('n').property('x',0.0d) ;; g.V().values('x').barrier().fold()", ['[0d,0d]']],
     ['g.inject(-0.0, 0.0).dedup().fold()', ['[0d]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a NaN literal VALUE declines; a negative-scale BigDecimal literal answers at scale 0', () => {
@@ -730,7 +734,7 @@ describe('a NaN literal VALUE declines; a negative-scale BigDecimal literal answ
     ['g.inject(NaN).where(is(P.eq(NaN)))', []],
     ['g.inject(NaN).filter(is(P.lt(1)))', []],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   // A filter that KEEPS a null or a NaN would observe the NaN as a null.
   for (const q of ['g.inject(NaN).is(P.within(1,null))', 'g.inject(NaN).is(P.not(P.eq(1)))'])
     test(`declines: ${q}`, () => expect(classes(q)).rejects.toThrow(UnsupportedTraversal));
@@ -756,7 +760,7 @@ describe('a min/max TIE is answered, never deferred', () => {
     ["g.E(7).property('weight',-0.0d) ;; g.E(8).property('weight',0.0d) ;; g.E(9).property('weight',-1.0d) ;; g.V(1).project('m').by(outE().values('weight').max())", ['{"m":0d}']],
     ['g.inject(1, 1.0d).max()', ['1i']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
   // A global tie of two representations answers ONE of them — the value is the same either way.
   for (const q of ['g.inject(1.0m, 1.00m).max()', 'g.inject(1.00m, 1.0m).min()'])
     test(q, async () => expect(['10e-1M', '100e-2M']).toContain((await classes(q))[0]!));
@@ -813,7 +817,7 @@ describe('a REAL-carried BigDecimal keeps all 17 digits inside a container — t
     ['g.inject(1.50m).groupCount()', ['{150e-2M:1L}']],
     ["g.V(1).values('age').math('_*0+100').asNumber(GType.BIGDECIMAL).fold()", ['[1000e-1M]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe("outside the range SQLite's decimal text is exact in, a Double ANSWERS — a last ulp may move", () => {
@@ -861,7 +865,7 @@ describe("outside the range SQLite's decimal text is exact in, a Double ANSWERS 
     ["g.V().values('age').is(27).math('_*1.1e110').groupCount()", ['{2.9699999999999997e+111d:1L}']],
     ["g.V().values('age').is(27).math('_*1.1e110').as('a').select('a')", ['2.9699999999999997e+111d']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe("a reducer's class is read through the ONE row-tag reading by every consumer — a branch condition, a local() host", () => {
@@ -878,7 +882,7 @@ describe("a reducer's class is read through the ONE row-tag reading by every con
     ["g.V(1).union(constant(5), constant(2.5d)).max().local(identity())", ['5i']],
     ["g.V(1).values('age').max().local(is(P.gt(3)))", ['29i']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a sum where a Double meets a 128-bit row adds in double, framed as their common class (BigDecimal)', () => {
@@ -895,7 +899,7 @@ describe('a sum where a Double meets a 128-bit row adds in double, framed as the
     ["g.V(1).union(constant(1), constant(5).asNumber(GType.BIGDECIMAL)).sum()", ['6e-0M']],
     ["g.V(1).union(constant(1.5d), constant(5L)).sum()", ['6.5d']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a 16- or 17-digit Double LITERAL inside a container is exact — whole or not, under unfold, fold and is()', () => {
@@ -932,7 +936,7 @@ describe('a 16- or 17-digit Double LITERAL inside a container is exact — whole
     ['g.withSack(1.0000000000000002E20d).V(1).sack().fold()', ['[100000000000000020000d]']],
     ["g.V(1).as('a').constant([1.2345678901234567E16d]).as('b').select('a','b').select('b')", ['[12345678901234568d]']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });
 
 describe('a COMPUTED 16- or 17-digit Double is exact inside every container — fold, project, select, groupCount, a min/max winner', () => {
@@ -949,5 +953,5 @@ describe('a COMPUTED 16- or 17-digit Double is exact inside every container — 
     ["g.V().values('age').is(35).math('_*0-1.0000000000000002E20').union(identity(), constant(0.5m)).min().fold()", ['[-100000000000000020000d]']],
     ["g.V().values('age').is(35).math('_*0+1.0000000000000002E20').asNumber(GType.BIGDECIMAL).groupCount()", ['{10000000000000002e--4M:1L}']],
   ];
-  for (const [q, expected] of answered) test(q, async () => expect(await classes(q)).toEqual(expected));
+  for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
 });

@@ -6,7 +6,7 @@
 // A key it cannot re-read through the projection keeps the unhoisted form. Before that, every
 // order().by(<math key>) answered a bare `RelIR emitter: column 'id' … is not in scope`.
 import { test, expect, describe } from 'bun:test';
-import { run, seededStore } from '../support/harness.ts';
+import { bagOf, run, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
 const names = (q: string): string[] => run(store, q).map((row: any) => row.v);
@@ -32,6 +32,6 @@ describe('order().by(<subquery key>) answers', () => {
 test('a deferral in a column a filter drops stays off the dropped rows', () => {
   const graph = seededStore();
   run(graph, "g.addV('x').property('name', datetime('2020-01-01T00:00:00Z'))");
-  expect(run(graph, 'g.V().elementMap().format("%{name} is %{age} years old")').map((row: any) => row.v))
-    .toEqual(['marko is 29 years old', 'vadas is 27 years old', 'josh is 32 years old', 'peter is 35 years old']);
+  expect(bagOf(run(graph, 'g.V().elementMap().format("%{name} is %{age} years old")').map((row: any) => row.v)))
+    .toEqual(bagOf(['marko is 29 years old', 'vadas is 27 years old', 'josh is 32 years old', 'peter is 35 years old']));
 });

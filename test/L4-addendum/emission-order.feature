@@ -1,10 +1,9 @@
 Feature: mogwai addendum — positional determinism (canonical emission order, Stage B)
 
-  # limit/range/skip/tail/fold after a fan-out pick or order a DETERMINISTIC subset. Without a
-  # threaded emission order they relied on incidental SQLite row order; a demand pre-pass now
-  # seeds a canonical `encounter` (rowid at the source, refined at each fan-out; superseded by
-  # order()), and these consumers ORDER BY it. The official corpus rarely pins the exact subset
-  # a bare slice returns, so these fix the composition. @gap:emission-order marks the family.
+  # A slice after order(), a tail, and a fold read a DETERMINISTIC order: a demand pre-pass seeds a
+  # canonical `encounter` (rowid at the source, refined at each fan-out; superseded by order()) where
+  # something the query says reads it, and these consumers ORDER BY it. An unordered limit/range/skip
+  # owes no order and only its count is pinned. @gap:emission-order marks the family.
 
   @gap:emission-order
   Scenario: g_V_valuesXageX_order_limitX2X
@@ -129,12 +128,9 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | l[] |
       | l[] |
 
-  # A slice with NO fan-out before it. `LIMIT n` over an unconstrained relation used to take
-  # whichever n SQLite scanned first — an accident that reads like the source's first n and stops
-  # doing so the moment the scan reverses, which is a wrong SUBSET rather than a reorder. Every row
-  # slice now demands the emission encounter, and the source seeds it as the element id, so these
-  # take the id order the reference iterates in. Ordered assertions, stable under
-  # `mise run test:perturbed`.
+  # An UNORDERED slice — no order() before it — is "some n": which rows come back is the plan's scan
+  # order (an accepted divergence, docs/feature-support-matrix.md). What these pin is the COUNT across
+  # every shape's slice (scalar, record, path), which a lost or duplicated row would break.
 
   @gap:emission-order
   Scenario: g_V_limitX2X_valuesXnameX
@@ -144,10 +140,7 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       g.V().limit(2).values("name")
       """
     When iterated to list
-    Then the result should be ordered
-      | result |
-      | marko |
-      | vadas |
+    Then the result should have a count of 2
 
   @gap:emission-order
   Scenario: g_V_hasLabelXpersonX_projectXnX_byXnameX_limitX2X_selectXnX
@@ -156,13 +149,8 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       """
       g.V().hasLabel("person").project("n").by("name").limit(2).select("n")
       """
-    # The RECORD shape's slice: `recordSlice` has always asked for `orderByEncounter`, and it was
-    # inert because a record stream carried none. The demand rule is what makes it live.
     When iterated to list
-    Then the result should be ordered
-      | result |
-      | marko |
-      | vadas |
+    Then the result should have a count of 2
 
   @gap:emission-order
   Scenario: g_V_out_path_limitX3X
@@ -171,14 +159,8 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       """
       g.V().out().path().limit(3)
       """
-    # The PATH shape's slice, and the last consumer that spelled `LIMIT` with no `ORDER BY` while a
-    # canonical `encounter` was live on its input — so it took whichever rows the scan yielded.
     When iterated to list
-    Then the result should be ordered
-      | result |
-      | p[v[marko],v[vadas]] |
-      | p[v[marko],v[lop]] |
-      | p[v[marko],v[josh]] |
+    Then the result should have a count of 3
 
   @gap:emission-order
   Scenario: g_E_identity_whereXvaluesXweightXX_path_limitX2X
@@ -187,13 +169,7 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       """
       g.E().identity().where(__.values("weight")).path().limit(2)
       """
-    # L5's witness for the above, verbatim — found on a HEAD-derived seed CI drew. It surfaced as a
-    # fast-path DIVERGENCE (the whereExists path drives the scan off `edges`, the generic filter off
-    # the carried relation, so the unordered LIMIT took different edges), but both routes were
-    # unordered: this is the defect-in-both class the differential is documented to be blind to, and
-    # the divergence was only how it became visible.
+    # L5's witness for a fast-path divergence once: the whereExists path and the generic filter scan
+    # different relations, so the unordered LIMIT may take different edges — still two of them.
     When iterated to list
-    Then the result should be ordered
-      | result |
-      | p[e[marko-knows->vadas]] |
-      | p[e[marko-knows->josh]] |
+    Then the result should have a count of 2

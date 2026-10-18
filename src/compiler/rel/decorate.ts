@@ -168,9 +168,10 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
       const arriving = input.channels.find((ch) => ch.role === 'encounter');
       if (!arriving) return make.union({ id: fresh('dvu'), inputs: [baseVals, dec], all: true, channels: input.channels, type: baseVals.type });
 
-      // A terminal `values()` DEMANDS an encounter (`computeDemandsEncounter`), and the base fan-out was
-      // renumbered into a fresh dense encounter while this 1:1 arm carries the parent's — so their
-      // encounters OVERLAP and a bare UNION is order-unstable (`test:perturbed`). Tag each side and
+      // An encounter is carried here when something reads this stream's order (a fold, a write, a
+      // split/barrier head's resume — `computeDemandsEncounter`; a wire-terminal `values()` no longer
+      // demands one). The base fan-out was renumbered into a fresh dense encounter while this 1:1 arm
+      // carries the parent's — so their encounters OVERLAP and a bare UNION is order-unstable (`test:perturbed`). Tag each side and
       // re-mint ONE total order: stored values first in their refined order (`dord` 0), the single
       // decorated value last (`dord` 1) — the `valueMapPairs` slot convention, one deterministic pick
       // among the order-free options. `(dord, encounter)` is unique per row, so the rank is total.

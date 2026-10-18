@@ -7,7 +7,7 @@
 //  - WHITESPACE. `split(null)` splits on `Character.isWhitespace`, the set `trim()` strips
 //    (`JAVA_WHITESPACE`), not JS `\s`.
 import { describe, expect, test } from 'bun:test';
-import { seededStore } from './support/harness.ts';
+import { bagOf, seededStore } from './support/harness.ts';
 import { executeQuery } from './support/executor.ts';
 import { typedAll } from './support/decode.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
@@ -43,7 +43,7 @@ describe('text ORDER is code-point order, at every position SQLite orders', () =
 
   test('ordinary text and numbers keep their order', () => {
     expect(runP("g.V().values('name').order()")).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas'].map(str));
-    expect(runP("g.V().has('name', gt('m')).values('name')")).toEqual(['marko', 'vadas', 'ripple', 'peter'].map(str));
+    expect(bagOf(runP("g.V().has('name', gt('m')).values('name')"))).toEqual(bagOf(['marko', 'vadas', 'ripple', 'peter'].map(str)));
     expect(runP("g.V().values('age').order().by(desc)")).toEqual(['35i', '32i', '29i', '27i']);
     expect(runP("g.V().order().by('name').limit(2).values('name')")).toEqual(['josh', 'lop'].map(str));
   });
@@ -173,7 +173,7 @@ describe('format() renders every token as its asString() text', () => {
     // Existence alone: the token is productive either way, so nothing is read and nothing defers.
     ["g.V().union(__.format('%{w}'), __.aggregate('w')).count()", [12]],
   ] as const)('%s', (gremlin, expected) => {
-    expect(runP(gremlin)).toEqual(expected.map((e) => typeof e === 'string' ? str(e) : `${e}L`));
+    expect(bagOf(runP(gremlin))).toEqual(bagOf(expected.map((e) => typeof e === 'string' ? str(e) : `${e}L`)));
   });
 
   // A MAP's token keys are `T.id`/`T.label` (and an edge's `Direction.IN`/`OUT`), never the strings
@@ -209,23 +209,25 @@ describe('format() renders every token as its asString() text', () => {
     return store;
   };
   test('a multi-valued property token answers its first value', () => {
-    expect(answer(multi(), "g.V().format('%{x}')")).toEqual([str('1'), str('3')]);
+    expect(bagOf(answer(multi(), "g.V().format('%{x}')"))).toEqual(bagOf([str('1'), str('3')]));
     expect(answer(multi(), "g.V().format('%{x}').count()")).toEqual(['2L']);
     expect(answer(multi(), "g.V().format('%{y}%{x}').limit(1)")).toEqual([]);
   });
 
-  // A slice after `format()` is a plain slice.
+  // A slice after `format()` is a plain slice (after an `order()`, so WHICH rows it keeps is the query's).
   test.each([
-    ["g.V().format('%{name}').limit(2)", ['marko', 'vadas']],
+    ["g.V().order().format('%{name}').limit(2)", ['marko', 'vadas']],
     ["g.E().hasId(8).format('%{weight}').limit(1)", ['1.0']],
-    ["g.V().values('name').format('%{_}').limit(1)", ['marko']],
-    ["g.V().format('%{_}').by('name').limit(1)", ['marko']],
-    ["g.V().elementMap().format('%{name}').limit(1)", ['marko']],
-    ["g.V().format('%{name}').range(1,3)", ['vadas', 'lop']],
-    ["g.V().format('%{name}').dedup().limit(2)", ['marko', 'vadas']],
-    ["g.V().union(__.format('%{name}').limit(1), __.format('%{age}'))", ['marko', '29', '27', '32', '35']],
+    ["g.V().order().values('name').format('%{_}').limit(1)", ['marko']],
+    ["g.V().order().format('%{_}').by('name').limit(1)", ['marko']],
+    ["g.V().order().elementMap().format('%{name}').limit(1)", ['marko']],
+    ["g.V().order().format('%{name}').range(1,3)", ['vadas', 'lop']],
+    ["g.V().order().format('%{name}').dedup().limit(2)", ['marko', 'vadas']],
+    ["g.V().order().union(__.format('%{name}').limit(1), __.format('%{age}'))", ['marko', '29', '27', '32', '35']],
   ] as const)('%s', (gremlin, expected) => {
-    expect(runP(gremlin)).toEqual(expected.map(str));
+    // A union's merged emission is unordered at the wire; its arm slice after the order() is not.
+    const bag = (xs: string[]) => (gremlin.includes('union(') ? bagOf(xs) : xs);
+    expect(bag(runP(gremlin))).toEqual(bag(expected.map(str)));
   });
 
   // A BigDecimal is its carried decimal text, scale and all.

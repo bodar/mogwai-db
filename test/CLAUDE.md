@@ -159,23 +159,20 @@ scan choice — and on a six-vertex fixture that choice is reliably the flatteri
 this class of defect cannot be found by reading or by any assertion in the ladder.
 
 It is an **instrument, not a gate** (the `orphans` standing) and is absent from `ci`, because it is
-still red. At first run: 20 failures, **13 of them L3 conformance scenarios** — ~0.8% of the
-conformance floor passing by luck, all one defect (`order().fold()`). Three rounds of fixes have
-taken the corpus view — the perturbed CENSUS, which names every order-fragile traversal in one place
-and is both the best worklist and the only fixed denominator — from 41 to 8. **The suite total is 2**
-(measured 2026-08-22; it was 15 before the terminal-emission lever below and the number DRIFTS, so
-re-measure rather than trusting this line). The lever that took it 15→2: a chain whose TERMINAL is a
-per-traverser map/retype (`values`/`valueMap`/`project`/`select`/`id`/`sack`) emits one row per
-traverser whose only order was the scan's, so `computeDemandsEncounter` (`src/compiler/ir/analyze.ts`)
-now seeds+threads the emission encounter for exactly those — the complement of `bulkObservedFrom`
-(`src/compiler/ir/bulk.ts`), which is what `movementCollapse` gates on, so the encounter demand and the
-collapse are mutually exclusive by construction and never both live. Multi-valued `values()` also refines
-that encounter by the property row's insertion id (`pord`, `source.ts`); `concat` inlines its parsed
-literals (they were `'bound'` binds, doubling a `select(Pop.all)` re-projection's cost). The 2 that
-remain are branch-order/federation-order substrate residue, both fail-loud-under-perturbation only: a
-bare `coalesce()`-over-record-arms emission (a branch-merge chain is excluded from the lever: the emission
-key, `mintBranchOrder`, is minted only where a reader owes it, and seeding a bare emission would add declines) and a federated `group().by(T.label).by(name-fold)` whose
-bound-graph member fold is not yet order-pinned (Fix was base-graph `pord` only). A failure here is a real
+still red. **What it checks changed on 2026-10-18, and that is the point of reading this paragraph:**
+it proves the order the QUERY imposes is pinned by the SQL — after `order()`, a `tail()`, fold/aggregate/
+group member lists, `path()`, `dedup(label)`, a branch's per-start arm order, write id assignment
+(`test/compiler/meaningful-order.exec.test.ts` is that keep-list, asserted exactly). It no longer expects
+an UNORDERED stream to hold its order: an unordered stream reaching the wire, and an unordered
+`limit`/`range`/`skip`, come back in SQLite's planner order (`computeDemandsEncounter`'s `wireTerminal`,
+a deliberate divergence in `docs/feature-support-matrix.md` §17), so the encounter that used to be seeded
+for them — and that made `out().out().limit(10)` sort the whole walk — is gone. A test over such a stream
+compares a MULTISET (`bagOf`, `test/support/harness.ts`), or a COUNT/sub-multiset for an unordered slice;
+the census digests an unordered window's COUNT, and L5's differential tolerates the members it picks
+(`orderIndeterminacy`, `test/support/graph.ts`). The 6 that remain (measured 2026-10-18; trunk had 8
+before that change) are order-substrate residue: federated member folds (`group().by(T.label).by(name-fold)`,
+`path().fold()`), a bare `coalesce()`-over-record-arms emission, `order().by(k).local(…fold())` (a
+`local` after the order re-enters per row), and two unit pins (an edge-Double read-back, `seq`). A failure here is a real
 under-specification, never a flake — the remainder are the "Encounter and order" item in
 `docs/outstanding-work.md`, and this becomes a gate when they are cleared. **Baseline it before blaming a
 diff**: re-run the instrument with the change set aside,

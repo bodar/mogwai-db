@@ -19,7 +19,7 @@
 import { test, expect, describe } from 'bun:test';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
-import { seededStore } from '../support/harness.ts';
+import { bagOf, seededStore } from '../support/harness.ts';
 import { executeFramed } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
@@ -141,7 +141,7 @@ describe('equality never crosses a type space', () => {
     ['g.inject(1).is(P.neq(true))', [1]],
     ['g.inject(1).is(P.without(true))', [1]],
   ];
-  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(await values(q)).toEqual(want));
+  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(bagOf(await values(q))).toEqual(bagOf(want)));
 });
 
 describe('a member keeps its class through a group key and a collected fold', () => {
@@ -198,7 +198,7 @@ describe('a sack never re-reads a Boolean, a Date or a wide long as another clas
     ["g.withSack('hello').V(1).sack()", ['hello']],
     ['g.withSack(1.5).V(1).sack().is(1.5)', [1.5]],
   ];
-  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(await values(q)).toEqual(want));
+  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(bagOf(await values(q))).toEqual(bagOf(want)));
 });
 
 // A sum over a BigInteger past int64: SQLite's CAST saturates at 2^63-1, so the sum answered
@@ -256,7 +256,7 @@ describe('a reducer never reads a Boolean, a Date or a wide long through its sto
     ["g.V().group().by(label).by(values('age').mean()).select(values).unfold()", [30.75]],
     [`${WIDE}g.V().values('x').max()`, [9007199254740993n]],
   ];
-  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(await values(q)).toEqual(want));
+  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(bagOf(await values(q))).toEqual(bagOf(want)));
 });
 
 // `asNumber()` converts BY TYPE (`AsNumberStep.map`, AsNumberStep.java:55-71): a Boolean raises, a Date is
@@ -289,7 +289,7 @@ describe('asString() reads the value\'s type, not its storage class', () => {
     ['g.inject(true, 1).fold().asString(local)', [['true', '1']]],
     ["g.V().values('age').asString()", ['29', '27', '32', '35']],
   ];
-  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(await values(q)).toEqual(want));
+  for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(bagOf(await values(q))).toEqual(bagOf(want)));
   test('a Date arm defers', () =>
     expect(typed(`g.V().coalesce(values('age'), constant(${DATE})).asString()`)).rejects.toThrow(RaisedByQuery));
   test('a Date fold member defers', () =>

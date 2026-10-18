@@ -52,8 +52,8 @@ describe('a fold that runs once keeps answering', () => {
     expect(run(s, 'g.inject(["a":1],["b":2]).fold([:], Operator.addAll)')).toHaveLength(1);
   });
   test('an immutable seed is unaffected per traverser', () => {
-    expect(bare(run(s, "g.V().hasLabel('person').local(__.out().values('age').fold(0, Operator.sum))")).map((r: any) => r.v))
-      .toEqual([59, 0, 0, 0]);
+    expect(bare(run(s, "g.V().hasLabel('person').local(__.out().values('age').fold(0, Operator.sum))")).map((r: any) => r.v).sort())
+      .toEqual([0, 0, 0, 59]);
   });
   test('plain fold() per traverser is unaffected', () => {
     expect(run(s, "g.V().hasLabel('person').local(__.out().values('name').fold())")).toHaveLength(4);

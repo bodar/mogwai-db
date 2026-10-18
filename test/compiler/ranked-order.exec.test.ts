@@ -9,7 +9,7 @@ import { compile, compilePlan, UnsupportedTraversal } from '../../src/compiler/c
 import { rankKeys, UNRANKED_KEY } from '../../src/compiler/rel/ranked-order.ts';
 import { orderMapLocalValue, orderabilityCompare } from '../../src/compiler/rel/orderability.ts';
 import { parseExactJson } from '../../src/json-exact.ts';
-import { seededStore, storeSeededWith } from '../support/harness.ts';
+import { bagOf, seededStore, storeSeededWith } from '../support/harness.ts';
 import { executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 
@@ -205,8 +205,8 @@ describe('a by() key whose fold reads only the HOST — the aggregate stays per 
 
   test('project() and groupCount() over the same fold are one list per host', async () => {
     const rows = await framed('g.V().project("n","k").by("name").by(__.label().fold())');
-    expect(rows.map((m: Map<string, unknown>) => [m.get('n'), m.get('k')]))
-      .toEqual([['marko', ['person']], ['vadas', ['person']], ['lop', ['software']], ['josh', ['person']], ['ripple', ['software']], ['peter', ['person']]]);
+    expect(bagOf(rows.map((m: Map<string, unknown>) => [m.get('n'), m.get('k')])))
+      .toEqual(bagOf([['marko', ['person']], ['vadas', ['person']], ['lop', ['software']], ['josh', ['person']], ['ripple', ['software']], ['peter', ['person']]]));
     const [counted] = await framed('g.V().groupCount().by(__.label().fold())');
     expect([...(counted as Map<unknown, number>).entries()]).toEqual([[['person'], 4], [['software'], 2]]);
   });
@@ -407,7 +407,8 @@ describe('a sub-path past a barrier that hands on the SAME traverser stays locat
   // `SampleGlobalStep` re-emit their TraverserSet (vendor/tinkerpop/gremlin-core/.../step/filter/,
   // .../step/util/CollectingBarrierStep.java) — the path, and the `as()` label on it, survive.
   test.each([
-    ['g.V().as("a").out().limit(2).path().from("a").by("name")', [['marko', 'lop'], ['marko', 'vadas']]],
+    // The slice keeps every row here (marko's two person neighbours), so WHICH rows is not in question.
+    ['g.V().as("a").out().hasLabel("person").limit(2).path().from("a").by("name")', [['marko', 'josh'], ['marko', 'vadas']]],
     ['g.V().as("a").out().order().by("name").limit(1).path().from("a").by("name")', [['marko', 'josh']]],
   ] as const)('%s', async (q, expected) => {
     const paths = (await framed(q)) as { objects: unknown[] }[];

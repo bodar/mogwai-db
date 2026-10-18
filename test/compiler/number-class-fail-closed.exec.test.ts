@@ -16,7 +16,7 @@ import { test, expect, describe } from 'bun:test';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { orderabilityCompare } from '../../src/compiler/rel/orderability.ts';
-import { seededStore } from '../support/harness.ts';
+import { bagOf, seededStore } from '../support/harness.ts';
 import { executeFramed } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
@@ -288,7 +288,7 @@ describe('a raising asNumber raises where only its existence is read', () => {
   test('a body the filter could drop as inert is not dropped', () =>
     expect(typed("g.V().where(__.values('age').math('_*10').asNumber(GType.BYTE).count())")).rejects.toThrow(UnsupportedTraversal));
   test('a converting body still filters', async () => {
-    expect(await values("g.V().where(__.values('age').asNumber(GType.BYTE)).values('name')")).toEqual(['marko', 'vadas', 'josh', 'peter']);
+    expect(bagOf(await values("g.V().where(__.values('age').asNumber(GType.BYTE)).values('name')"))).toEqual(bagOf(['marko', 'vadas', 'josh', 'peter']));
   });
 });
 

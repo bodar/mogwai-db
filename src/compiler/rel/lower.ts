@@ -3087,6 +3087,11 @@ export interface Lowering {
   /** DETACHED-transfer compile (set only by `runForeign()`): the element leaf emits a fuller property node
    *  `{t, v, vpid, meta?}`. Off for ordinary framing, so base props stay `{t, v}`. */
   readonly detached?: boolean;
+  /** This lowering's rows go straight to the WIRE — set only by `compilePlan` for its final
+   *  single-statement read, never for a split/barrier head, a federate push, a resume tail or a nested
+   *  read, whose rows something downstream reads by position. An unordered stream then owes no emission
+   *  order (`analyzeChain`'s `wireTerminal`). */
+  readonly wireTerminal?: boolean;
   /**
    * The GRAPH's declared vertex-label cardinality — a CAPABILITY, not a strategy, which is why it is
    * here rather than being read from a store at lowering time.
@@ -3228,6 +3233,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
   detached: opts.detached ?? false,
+  wireTerminal: opts.wireTerminal ?? false,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   sideEffectPolicies: opts.sideEffectPolicies ?? NO_SIDE_EFFECT_POLICIES,
@@ -4122,8 +4128,8 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders } = settle(opts);
-  const facts = analyzeChain(steps as IRStep[]);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, wireTerminal } = settle(opts);
+  const facts = analyzeChain(steps as IRStep[], { wireTerminal });
   return {
     facts,
     ctx: {

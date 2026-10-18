@@ -113,7 +113,7 @@ for (const query of corpus) {
   // A traversal whose ANSWER is an error (a literal that cannot parse — `asNumber('1,000')`) raises
   // out of the lowering by design, and is not a plan to sweep. `null` is the other exit: not covered.
   let lowered;
-  try { lowered = lowerToRel(steps, { correlatedChildren: true }); } catch { continue; }
+  try { lowered = lowerToRel(steps, { correlatedChildren: true, wireTerminal: true }); } catch { continue; }
   if (!lowered) continue;
   admitted++;
   const counts = { compiler: 0, bound: 0 };

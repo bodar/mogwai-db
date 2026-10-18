@@ -9,7 +9,7 @@
 // `listPayloadExpr` — the `elementNode`/`elementObject` split, one level up). These assert the DECODED
 // wire, because the whole point is the GraphBinary shape a client receives.
 import { test, expect, describe } from 'bun:test';
-import { seededStore } from '../support/harness.ts';
+import { bagOf, seededStore } from '../support/harness.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 
@@ -64,12 +64,12 @@ describe('a nested selection — a list of maps as a project() FIELD', () => {
     const r = await decoded(
       "g.V().hasLabel('person').project('name','knows').by('name')" +
       ".by(__.out('knows').project('name').by('name').fold())");
-    expect(r).toEqual([
+    expect(bagOf(r)).toEqual(bagOf([
       { name: 'marko', knows: [{ name: 'josh' }, { name: 'vadas' }] },
       { name: 'vadas', knows: [] },
       { name: 'josh', knows: [] },
       { name: 'peter', knows: [] },
-    ]);
+    ]));
   });
 
   test('a scalar-fold field — project().by(__.out().values().fold())', async () => {
@@ -132,7 +132,7 @@ describe('a by() body over a LIST host — the list ChildHost', () => {
     // re-collects the names, so every result is one list per traverser.
     const r = await decoded("g.V().as('a').out().as('a').out().as('a').select(Pop.all,'a').by(__.unfold().values('name').fold())");
     // Two length-3 paths from marko: [marko,josh,lop] and [marko,josh,ripple], names sorted per list.
-    expect(r).toEqual([['josh', 'lop', 'marko'], ['josh', 'marko', 'ripple']]);
+    expect(bagOf(r)).toEqual([['josh', 'lop', 'marko'], ['josh', 'marko', 'ripple']]);
   });
 
   test('select(Pop.all).by(__.unfold().count()) counts the collection', async () => {
@@ -144,6 +144,6 @@ describe('a by() body over a LIST host — the list ChildHost', () => {
     // marko is bound to 'a', then each knows-target appends: history [marko,vadas] and [marko,josh].
     // Two traversers, each unfolded and its names re-collected (sorted per list).
     const r = await decoded("g.V().has('name','marko').as('a').out('knows').as('a').select(Pop.all,'a').by(__.unfold().values('name').fold())");
-    expect(r).toEqual([['marko', 'vadas'], ['josh', 'marko']]);
+    expect(bagOf(r)).toEqual(bagOf([['marko', 'vadas'], ['josh', 'marko']]));
   });
 });

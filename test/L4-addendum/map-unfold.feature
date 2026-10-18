@@ -62,7 +62,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
     Given the modern graph
     And the traversal of
       """
-      g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold()
+      g.V().hasLabel("person").order().limit(1).project("n","a").by("name").by("age").unfold()
       """
     When iterated to list
     Then the result should be unordered
@@ -76,7 +76,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
     Given the modern graph
     And the traversal of
       """
-      g.V().hasLabel("person").limit(1).project("n","a").by("name").by("age").unfold().select(keys)
+      g.V().hasLabel("person").order().limit(1).project("n","a").by("name").by("age").unfold().select(keys)
       """
     When iterated to list
     Then the result should be unordered

@@ -11,7 +11,7 @@
 // Both now go through ONE join (`joinAliasEntry`, src/compiler/alias.ts): a disagreeing class becomes
 // the per-entry tag every reader honours.
 import { test, expect, describe } from 'bun:test';
-import { seededStore } from '../support/harness.ts';
+import { bagOf, seededStore } from '../support/harness.ts';
 import { executeQuery } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
 
@@ -58,7 +58,7 @@ describe('select(first/all/mixed) over a rebound label reads each entry by its o
 
   test('a per-row stream rebound to a constant keeps every row\'s class', () => {
     expect(typed(`${FOUR}.constant(1).as('a').select(first,'a').fold()`)).toEqual(['[3f,3d,3i,3L]']);
-    expect(typed(`${FOUR}.constant(1).as('a').select(all,'a')`)).toEqual(['[3f,1i]', '[3d,1i]', '[3i,1i]', '[3L,1i]']);
+    expect(bagOf(typed(`${FOUR}.constant(1).as('a').select(all,'a')`))).toEqual(bagOf(['[3f,1i]', '[3d,1i]', '[3i,1i]', '[3L,1i]']));
   });
 });
 

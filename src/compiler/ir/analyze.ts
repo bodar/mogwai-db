@@ -62,11 +62,12 @@ function repeatBodyTracksPath(step: IRStep): boolean {
   return false;
 }
 
-// ---------- demandsEncounter (moved verbatim from strategies.ts demandsEncounterOrder) ----------
+// ---------- demandsEncounter ----------
 //
-// A traversal needs a threaded emission-order `encounter` ONLY when it contains a positional
-// consumer (limit/range/skip/tail/root-fold) DOWNSTREAM of a fan-out — those pick/order a
-// deterministic subset. Order-free chains (reducers, existence gates, bare dedup) never seed
+// A traversal needs a threaded emission-order `encounter` ONLY when something the QUERY says reads
+// the order — a collection, a write, a `tail`, a `dedup(label)` — or its rows feed a resume that
+// reads them by position. An unordered limit/range/skip is "some n" and an unordered wire stream
+// owes no order. Order-free chains (reducers, existence gates, bare dedup) never seed
 // it, so the hot path (index-only movement, movementCollapse) stays untouched. This is the
 // COARSE chain-level flag: seed once at the source, and from there each site keys on the
 // carried encounter's presence (like trackPath → carried.path), never re-scanning.
@@ -81,7 +82,8 @@ const FANOUT_STEPS = new Set([
  *  upstream `order()` satisfies them because `LIMIT` reads the ordered relation in the same query.
  *  `fold` is deliberately NOT here — it is a collection, and both of those clauses are false for
  *  one (see `COLLECTING_CONSUMERS`). Listing it in both would be two answers to one question. */
-const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
+const DROP_SLICES = new Set(['limit', 'range', 'skip']);
+const POSITIONAL_CONSUMERS = new Set([...DROP_SLICES, 'tail']);
 /** The COLLECTING consumers — they fold N traversers into one whose members are the N, so member
  *  order is part of the answer rather than a property of how the rows arrived. Two consequences
  *  the slice steps above do not share: an upstream `order()` does not satisfy them (they read
@@ -100,13 +102,11 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
  *  order observable and it is always at the top level, so it is the one that cannot be missed. */
 const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap', 'group']);
 
-/** Branch-merge steps whose arms each run over the INCOMING stream — so a drop-slice inside an arm
- *  picks the first N in the incoming emission order and, exactly like a top-level slice, needs the
- *  encounter seeded and threaded to the branch. The FLAT scan in `computeDemandsEncounter` cannot see a
- *  nested slice, so `armChains` + `bodyDemandsEncounter` recurse their arm bodies. Without this, a chain
- *  like `V().has(k).union(__.has(k2).limit(1), __.identity())` seeds no order, and whichever scan order a
- *  fast path (propertySeek's `has()`→JOIN) happens to produce silently picks the surviving traverser —
- *  an order-dependent WRONG multiset, the defect `test/L5-properties/known.ts` recorded. */
+/** Branch-merge steps whose arms each run over the INCOMING stream. A COLLECTION inside an arm reads
+ *  that incoming order (`armCollectsInOrder`), which the FLAT scan in `computeDemandsEncounter` cannot
+ *  see, so `armChains` recurses the arm bodies. A drop-SLICE inside an arm is deliberately NOT a reason
+ *  to seed one: over an unordered stream it is "some n" (`Range.feature` asserts only a count), and
+ *  whichever n the plan's scan order picks is an answer. */
 const BRANCH_MERGE_STEPS = new Set(['union', 'choose', 'coalesce', 'optional']);
 
 /** The nested arm step-chains of a branch-merge step — union/coalesce's nested args and choose's
@@ -130,15 +130,6 @@ function armChains(step: IRStep): IRStep[][] {
  *  chain's flag cannot see. */
 export const chainDemandsSlice = (steps: readonly IRStep[]): boolean =>
   steps.some((s) => POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s));
-
-/** Does this step chain contain a drop-slice whose survivor depends on the incoming order — at its own
- *  top level, or inside a nested branch-merge arm (recursively)? `Scope.local` is exempt: it slices a
- *  value's members, not the stream's rows. */
-function bodyDemandsEncounter(steps: readonly IRStep[]): boolean {
-  return steps.some((s) =>
-    (POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s))
-    || (BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(bodyDemandsEncounter)));
-}
 
 /** Does this `group()` reduce each key's values to an order-insensitive scalar?
  * TinkerPop first makes the structural distinction in `Grouping.hasBarrierInValueTraversal`
@@ -199,21 +190,26 @@ const WRITE_STEPS = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'dr
 export const canCarryEncounter = (steps: readonly IRStep[]): boolean =>
   !steps.some((s) => s.name === 'repeat' || s.name === 'match');
 
-/** Does this chain need a threaded emission-order encounter? True iff a positional consumer
- *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
- *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
-function computeDemandsEncounter(steps: IRStep[]): boolean {
+/** Does this chain need a threaded emission-order encounter? True iff something the query says reads
+ *  the stream's order: a collection, a write, a `tail`, a `dedup(label)` after a fan-out — or, for a
+ *  chain whose rows feed a resume rather than the wire, its per-traverser terminal emission.
+ *  repeat()/match() are opaque boundaries this substrate doesn't cross yet — return false there. */
+function computeDemandsEncounter(steps: IRStep[], wireTerminal = false): boolean {
   let sawFanout = false;
   // A keyed/bare order() has already put the rows in a deterministic total order, so a slice after
   // it reads that order inside the SAME query and needs no emission encounter. Tracked separately
   // from `sawFanout` because the two answer different questions: this one is "is the order already
   // established", and a slice needs an encounter whenever it is NOT — fan-out or no fan-out.
   let ordered = false;
+  // Has the query imposed an order at ALL (a global `order()` anywhere)? A later fan-out clears `ordered`,
+  // but the order it established still runs downstream (`order().by(k).local(…fold())` emits in k order).
+  let sawOrder = false;
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
     // (Clearing `sawFanout` too keeps the dedup(labels) rule below reading as it always has: the
     // same predicate collapseSafe's sawOrder gate uses, so the two agree and movementCollapse stays
     // enabled for <movement>.order().by(key).limit().)
+    if (s.name === 'order' && !isLocalScope(s)) sawOrder = true;
     if (isPlainOrder(s)) { sawFanout = false; ordered = true; continue; }
     // …but that reasoning is about a SLICE, and it does not extend to a COLLECTION. `LIMIT` reads
     // the ordered relation inside the SAME query, so the ORDER BY genuinely satisfies it. A
@@ -230,28 +226,17 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     // Like a collection and unlike a slice, it needs the encounter with no fan-out at all: a bare
     // `g.V().addE(…)` observes the source's order exactly as much as `g.V().out().addE(…)` does.
     if (WRITE_STEPS.has(s.name)) return true;
-    // EVERY row slice needs a column to slice BY, whether or not a fan-out preceded it — this rule
-    // used to require one, and `tail` was carved out of it as "the one slice that needs the
-    // encounter with no fan-out at all". That carve-out had the right reasoning and the wrong
-    // scope. `limit(n)` over an unconstrained relation is "some n", and SQLite's forward scan
-    // quietly makes that the source's first n — an ACCIDENT, not an implementation, and reversing
-    // the scan takes a different subset: `g.V().limit(2)`, `project(…).limit(2)` and
-    // `valueMap(…).limit(2)` all changed their answer under `mise run test:perturbed`. A wrong
-    // SUBSET, not a reorder. `tail` merely had no accident available to hide behind, reading from
-    // the far end.
-    //
-    // The cost is a carried column on chains that had none, and it is small by construction: a
-    // chain with no fan-out is source + filters + a projection, where the source seeds
-    // `encounter = id` and SQLite reads that in rowid order. `movementCollapse` is untouched
-    // because a movement IS a fan-out, so those chains were already demanding.
+    // `tail` reads from the FAR end of the stream, so it needs a column to slice BY whether or not a
+    // fan-out preceded it. `limit`/`range`/`skip` over an UNORDERED stream are deliberately not here:
+    // they are "some n" (`Range.feature` asserts only a count), and seeding an order for them made
+    // SQLite build and sort every walk before it could stop at the first n — `out().out().limit(10)` on
+    // 200k edges went from ~1 s to ~0.3 ms when this rule was narrowed. Which n comes back is the plan's
+    // scan order; that is an accepted divergence (docs/feature-support-matrix.md), never a wrong count.
+    // After an `order()` every slice reads that order inside the same query (`ordered`).
     //
     // `Scope.local` is exempt throughout: that form slices a VALUE's members, not the stream's rows.
-    if (!ordered && POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)) return true;
-    // …and the same slice INSIDE a branch-merge arm is order-sensitive w.r.t. the incoming stream, but
-    // the flat scan above cannot see it. Seed the encounter so the stream feeding the branch is ordered
-    // and the arm's slice is deterministic. An upstream order() already satisfies it (`ordered`).
-    if (!ordered && BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(bodyDemandsEncounter)) return true;
-    // …and a COLLECTION inside an arm reads the incoming order as much as a top-level one does
+    if (!ordered && s.name === 'tail' && !isLocalScope(s)) return true;
+    // A COLLECTION inside an arm reads the incoming order as much as a top-level one does
     // (`armCollectsInOrder`) — with no `!ordered` exemption, for the reason `collectsInOrder` has none.
     if (BRANCH_MERGE_STEPS.has(s.name) && armChains(s).some(armCollectsInOrder)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
@@ -260,55 +245,56 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     if (FANOUT_STEPS.has(s.name)) { sawFanout = true; ordered = false; }
   }
   // THE TERMINAL EMISSION ORDER. Everything above answers "does a SLICE or COLLECT downstream read the
-  // order" — a mid-chain consumer. But the FINAL result rows are themselves emitted in an order, and a
-  // chain that ends in a per-traverser MAP/RETYPE (`values`/`valueMap`/`project`/`select`/`id`/a `sack`
-  // read/a branch merge over any of them) has one row per traverser whose ONLY order was the scan's.
-  // Left unseeded that order is SQLite's scan choice — flattering by luck on a six-vertex fixture,
-  // reversed under `PRAGMA reverse_unordered_selects` (`mise run test:perturbed`), and it is what a
-  // downstream `by()` fold or a federation stream/fold oracle observes.
+  // order" — a mid-chain consumer. The FINAL rows are also emitted in an order, but when they go
+  // straight to the WIRE (`wireTerminal`, set only for the single-statement root read) and no `order()`
+  // precedes them, nothing the query says imposes one: an unordered stream comes back in whatever order
+  // the plan produces, and seeding an encounter there only made SQLite number and sort every row before
+  // streaming the first (`out().out().values('name')` on 200k edges: ~2.8 s → ~0.6 s without it). That
+  // is an accepted divergence (docs/feature-support-matrix.md); the multiset is unchanged. An `order()`
+  // earlier in the chain DOES impose one, and the steps after it keep it (the rule below).
+  if (wireTerminal && !sawOrder) return false;
+  // A chain whose rows do NOT go to the wire — a split/barrier HEAD whose rows feed a resume tail, a
+  // federate push — keeps the seed, because the tail reads those rows by position; so does one whose
+  // order an earlier `order()` imposed, so that order survives the steps after it. Its per-traverser
+  // MAP/RETYPE terminal (`values`/`valueMap`/`project`/`select`/`id`/a `sack` read) has one row per
+  // traverser whose ONLY order was the scan's.
   //
   // The line between "seed it" and "leave it" is EXACTLY `ir/bulk.ts`'s: a terminal that OBSERVES the
   // bulk multiplicity — a global reducer (`count`/`sum`/…), a `groupCount`, or a raw `elements` stream
-  // reaching the wire — is the collapse's territory, where an emission order is both moot and mutually
-  // exclusive with the `SUM(bulk)` merge. A terminal that does NOT observe bulk is one the collapse was
-  // already declining (`movementCollapse` gates on this same `bulkObservedFrom`), so seeding an encounter
-  // there conflicts with nothing: the two are complementary by construction, never both live. `repeat`/
-  // `match` cannot carry an encounter (`canCarryEncounter`), and returned false at the top of the loop.
+  // — is the collapse's territory, where an emission order is both moot and mutually exclusive with
+  // the `SUM(bulk)` merge. A terminal that does NOT observe bulk is one the collapse was already
+  // declining (`movementCollapse` gates on this same `bulkObservedFrom`), so seeding an encounter there
+  // conflicts with nothing. `repeat`/`match` cannot carry an encounter (`canCarryEncounter`), and
+  // returned false at the top of the loop.
   //
   // `bulkObservedFrom` walks the SUFFIX (it assumes an element stream at its start — the source step's
   // own verdict is `reads-rows`), so it is asked from index 1, past the `V`/`E`/`inject` source. A
-  // scalar source (`inject`) with an empty suffix reads as bulk-observed and stays unseeded, which is
-  // both its prior behaviour and correct: its VALUES order is textual, not a scan.
+  // scalar source (`inject`) with an empty suffix reads as bulk-observed and stays unseeded: its VALUES
+  // order is textual, not a scan.
   //
-  // Terminals whose order is NOT an observable per-traverser emission are excluded, each because a rule
-  // above already governs it or because the order is moot:
-  //   - a MUTATING terminal: an id-assigning write (`addV`/`addE`/`property`/`drop`) already demanded
-  //     the encounter above (`WRITE_STEPS`); a pure label delete (`dropLabel`/`dropLabels`/`addLabel`)
-  //     emits no order-observable result — seeding one is a needless carried column (and, on the write
-  //     path, a needless bind).
+  // Terminals whose order is NOT an observable per-traverser emission are excluded:
+  //   - a MUTATING terminal: an id-assigning write already demanded the encounter above
+  //     (`WRITE_STEPS`); a pure label delete emits no order-observable result.
   //   - `group`/`groupCount`: a member-COLLECTING group already returned true (`collectsInOrder`); a
-  //     REDUCING-value group is order-moot. `bulkObservedFrom` is the wrong oracle here — it answers
-  //     "can this group bulk-COLLAPSE", which is false for a fan-out reducing value that is still
-  //     order-insensitive (`group().by(k).by(__.out().count())`).
-  //   - a bare global REDUCER (`count`/`sum`/…): one row out, order moot (this is also what
-  //     `bulkObservedFrom` says, stated directly so it does not depend on that agreement).
-  //   - a PATH chain: `path()` carries its own positional order, and an encounter alongside a path is a
-  //     combination the seed does not build (`tracksPath && demandsEncounter` declines) — so leave it as
-  //     it was rather than force the decline.
-  //   - a BRANCH-MERGE chain (`union`/`choose`/`coalesce`/`optional`): under `ctx.ordered` a merge
-  //     is numbered by the emission key (`mintBranchOrder`, lower.ts). A bare terminal emission the corpus
-  //     asserts unordered needs no numbering, so a branch chain keeps its positionless emission.
+  //     REDUCING-value group is order-moot (`bulkObservedFrom` answers "can it COLLAPSE", the wrong
+  //     question for `group().by(k).by(__.out().count())`).
+  //   - a bare global REDUCER (`count`/`sum`/…): one row out, order moot.
+  //   - a PATH chain: an encounter alongside a path is a combination the seed does not build.
+  //   - a BRANCH-MERGE chain: under `ctx.ordered` a merge is numbered by the emission key
+  //     (`mintBranchOrder`, lower.ts); a bare emission needs no numbering.
+  //   - an unordered row SLICE (`limit`/`range`/`skip`): "some n" owes no order (the rule above), and
+  //     `bulkObservedFrom` reading the slice as `reads-rows` must not re-seed one here.
   const terminal = steps.at(-1);
   if (terminal
     && (MUTATING_STEPS.has(terminal.name)
       || terminal.name === 'group' || terminal.name === 'groupCount'
       || (REDUCERS.has(terminal.name) && (terminal.args?.length ?? 0) === 0)))
     return false;
-  if (steps.some((s) => PATH_STEPS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name))) return false;
+  if (steps.some((s) => PATH_STEPS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name)
+    || (DROP_SLICES.has(s.name) && !isLocalScope(s)))) return false;
   // A trailing `order()` (the loop's `ordered`, not cleared by a later fan-out) has ALREADY pinned the
   // emission order as an `ORDER BY` in the SQL, so no encounter is owed — and forcing one changes how a
-  // reader of that ordered stream behaves (a `has(k, __…order())` child took a different value, an L3
-  // regression). The order the chain does specify survives a plan change on its own.
+  // reader of that ordered stream behaves (a `has(k, __…order())` child took a different value).
   if (ordered) return false;
   return steps.length > 1 && canCarryEncounter(steps) && !bulkObservedFrom(steps, 1);
 }
@@ -389,11 +375,14 @@ export function chainCollapseSafe(steps: IRStep[]): boolean {
  *  lowering needed the verdict, but the lowering answers collapse-safety positionally and discarded it
  *  on every compile. What is left is genuinely used — RelIR seeds its `encounter` and `path` channels
  *  off exactly these two (`lowerChain`).
- *  `isPlainOrder` still lives in `ir/step.ts` because three scans hinge on it and none may drift. */
-export function analyzeChain(steps: IRStep[]): ChainFacts {
+ *  `isPlainOrder` still lives in `ir/step.ts` because three scans hinge on it and none may drift.
+ *
+ *  `wireTerminal`: this chain's rows go straight to the wire (the root single-statement read), so its
+ *  terminal emission order is owed to nobody — see `computeDemandsEncounter`. */
+export function analyzeChain(steps: IRStep[], opts: { readonly wireTerminal?: boolean } = {}): ChainFacts {
   return {
     tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s)),
-    demandsEncounter: computeDemandsEncounter(steps),
+    demandsEncounter: computeDemandsEncounter(steps, opts.wireTerminal ?? false),
     demandsSlice: chainDemandsSlice(steps),
     demandsPathLabels: steps.some((s) => PATH_STEPS.has(s.name) && (s.from !== undefined || s.to !== undefined)),
   };

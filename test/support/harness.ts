@@ -149,8 +149,11 @@ export const written = (row: any): { id: unknown; labels: unknown[]; props: Reco
  * of any shape, including arrays of arrays.
  *
  * Use it ONLY after checking the traversal really is order-free. When the traversal DOES fix an
- * order — an `order()`, a slice, a branch's arm order — the exact assertion is the point and a
- * failure under perturbation is a defect, not fragility.
+ * order — an `order()`, a slice after one, a `tail`, a fold's members, a branch's arm order — the
+ * exact assertion is the point and a failure under perturbation is a defect, not fragility. A
+ * `bigint` (a wide Long / BigInteger) keys by its digits, which plain `JSON.stringify` refuses.
  */
-export const bagOf = <T>(xs: readonly T[]): T[] =>
-  [...xs].sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));
+export const bagOf = <T>(xs: readonly T[]): T[] => {
+  const key = (x: unknown) => JSON.stringify(x, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v instanceof Map ? { map: [...v] } : v)) ?? String(x);
+  return [...xs].sort((a, b) => (key(a) < key(b) ? -1 : 1));
+};

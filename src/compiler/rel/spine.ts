@@ -116,7 +116,10 @@ export function compileViaRel(
   // So the capability is no longer switched. `predicateInlining` still selects between its two forms,
   // which is what it is for, and L5's own `predicateInlining is equivalent to its generic fallback`
   // case still exercises it.
-  const lowered = lowerToRel(steps, loweringOptions(request, params, sideEffects));
+  // THE WIRE READ: `compilePlan`'s final single statement, whose rows nothing downstream reads by
+  // position — so an unordered stream owes no emission order (`Lowering.wireTerminal`). The only place
+  // it is set; every split/barrier head and federate push lowers through `loweringOptions` without it.
+  const lowered = lowerToRel(steps, { ...loweringOptions(request, params, sideEffects), wireTerminal: true });
   if (!lowered) return null;
   return finishLowering(lowered);
 }

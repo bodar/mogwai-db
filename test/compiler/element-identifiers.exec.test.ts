@@ -94,7 +94,7 @@ describe('T.id is the outward-facing id at every by() position', () => {
   test('group().by(T.id) keys on the user id, not the rowid', () => {
     const s = withIds();
     // The keys `id()` frames — anything else means the group key and the element disagree.
-    expect(vals(s, 'g.V().id()')).toEqual(['alice', 'bob', 'carol']);
+    expect(vals(s, 'g.V().id()').sort()).toEqual(['alice', 'bob', 'carol']);
     expect(pairs(s, 'g.V().group().by(T.id).by(__.count())'))
       .toEqual([['alice', 1], ['bob', 1], ['carol', 1]]);
   });

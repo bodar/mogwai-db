@@ -15,10 +15,10 @@ Feature: mogwai addendum — a skip/range OFFSET survives a correlated-EXISTS fi
   # `src/compiler/rel/lower.ts`. NOT EXISTS, an uncorrelated IN (SELECT …) and a scalar (SELECT …) > 0
   # do not trigger the SQLite bug and are left unfenced.
   #
-  # Modern graph: has-an-out-edge = {marko, josh, peter} (id order); has-an-in-edge =
-  # {vadas, lop, josh, ripple}. The OFFSET is pinned by the emission encounter, so the kept members
-  # are deterministic — asserted `unordered` because the DROP is a MULTISET change, which is exactly
-  # what an unordered assertion catches. @gap:offset-over-correlated-exists marks the family.
+  # Modern graph: has-an-out-edge = {marko, josh, peter}; has-an-in-edge = {vadas, lop, josh, ripple}.
+  # An unordered skip/range keeps SOME members (the plan's scan order decides which — an accepted
+  # divergence), so these assert the COUNT, which is exactly what the dropped OFFSET broke.
+  # @gap:offset-over-correlated-exists marks the family.
 
   @gap:offset-over-correlated-exists
   Scenario: g_V_whereXoutEX_skipX1X_valuesXnameX
@@ -27,12 +27,9 @@ Feature: mogwai addendum — a skip/range OFFSET survives a correlated-EXISTS fi
       """
       g.V().where(__.outE()).skip(1).values("name")
       """
-    # {marko, josh, peter} in id order; skip(1) drops marko.
+    # {marko, josh, peter}; skip(1) keeps two of them.
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | josh |
-      | peter |
+    Then the result should have a count of 2
 
   @gap:offset-over-correlated-exists
   Scenario: g_V_hasXage_gtX0XX_whereXoutEX_skipX1X_valuesXnameX
@@ -42,15 +39,12 @@ Feature: mogwai addendum — a skip/range OFFSET survives a correlated-EXISTS fi
       g.V().has("age", P.gt(0)).where(__.outE()).skip(1).values("name")
       """
     # age>0 gives {marko, vadas, josh, peter}; the child keeps those with an out-edge
-    # {marko, josh, peter}; skip(1) drops marko. This is the exact traversal `known.ts` recorded while
+    # {marko, josh, peter}; skip(1) keeps two. This is the exact traversal `known.ts` recorded while
     # the defect was still open — here it is the fixed floor. `propertySeek` lifts the age has() into a
     # join, which is why this one answered correctly in production while its where()-only siblings did
     # not; the fence makes both spine positions agree.
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | josh |
-      | peter |
+    Then the result should have a count of 2
 
   @gap:offset-over-correlated-exists
   Scenario: g_V_whereXinEX_rangeX1_3X_valuesXnameX
@@ -59,13 +53,10 @@ Feature: mogwai addendum — a skip/range OFFSET survives a correlated-EXISTS fi
       """
       g.V().where(__.inE()).range(1, 3).values("name")
       """
-    # A range's low bound is an OFFSET, so it hits the same bug. {vadas, lop, josh, ripple} in id
-    # order; range(1, 3) keeps the members at positions 1 and 2.
+    # A range's low bound is an OFFSET, so it hits the same bug. {vadas, lop, josh, ripple};
+    # range(1, 3) keeps two of them.
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | lop |
-      | josh |
+    Then the result should have a count of 2
 
   @gap:offset-over-correlated-exists
   Scenario: g_V_hasXage_gtX0XX_filterXoutEXcreatedXX_skipX2X_valuesXnameX
@@ -75,8 +66,6 @@ Feature: mogwai addendum — a skip/range OFFSET survives a correlated-EXISTS fi
       g.V().has("age", P.gt(0)).filter(__.outE("created")).skip(2).values("name")
       """
     # The filter() arity of the same cause: age>0 keeps {marko, josh, peter} after the created-edge
-    # child; skip(2) drops the first two.
+    # child; skip(2) keeps one.
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | peter |
+    Then the result should have a count of 1

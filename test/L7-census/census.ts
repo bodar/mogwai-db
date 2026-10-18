@@ -26,8 +26,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import type { Framed } from '../../src/execute.ts';
 import { exec } from '../support/executor.ts';
-import { isNondeterministic, isWrite, seeded } from '../support/graph.ts';
-import { multisetKey } from '../support/multiset.ts';
+import { isNondeterministic, isWrite, orderIndeterminacy, seeded } from '../support/graph.ts';
+import { multisetKey, weigh } from '../support/multiset.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
 /** What the engine did with one traversal.
@@ -135,12 +135,15 @@ const h16 = (s: string): string => createHash('sha256').update(s).digest('hex').
  * and are recorded normally; the point is that a legitimate lowering change can move them, and when
  * it does the re-record needs a written reason, not a shrug.
  */
-function digest(framed: readonly Framed[]): Pick<Row, 'n' | 'd' | 'ms' | 'ord'> {
+function digest(query: string, framed: readonly Framed[]): Pick<Row, 'n' | 'd' | 'ms' | 'ord'> {
   const hex = framed.map((f) => f.buf.toString('hex'));
   return {
     n: framed.length,
     d: new Set(hex).size,
-    ms: h16(multisetKey(framed)),
+    // An UNORDERED positional window (`orderIndeterminacy`) is "some n": which members it keeps is the
+    // plan's scan order, an accepted divergence a lowering change may legitimately move. So its answer
+    // is the traverser COUNT, which is what this digests.
+    ms: h16(orderIndeterminacy(query) ? `count:${[...weigh(framed).values()].reduce((a, b) => a + b, 0n)}` : multisetKey(framed)),
     ord: h16(hex.join('|')),
   };
 }
@@ -152,7 +155,7 @@ function runPosition(query: string, store: ReturnType<typeof seeded>): Position 
     const framed = exec(store).framed(query, {});
     return isNondeterministic(query)
       ? { status: 'nondet', n: framed.length }
-      : { status: 'ran', ...digest(framed) };
+      : { status: 'ran', ...digest(query, framed) };
   } catch (e) {
     return classify(e);
   }

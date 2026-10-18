@@ -138,7 +138,7 @@ describe('a string VALUE through SQLite', () => {
     expect(runP("g.inject('\\uffff').length()")).toEqual(['1i']);
     expect(runP("g.inject('a😀b').reverse()")).toEqual(['"b😀a"']);
     expect(runP("g.inject('a😀b').is(containing('😀'))")).toEqual(['"a😀b"']);
-    expect(runP("g.V().values('name').length()")).toEqual(['5i', '5i', '3i', '4i', '6i', '5i']);
+    expect(runP("g.V().values('name').length()").sort()).toEqual(['3i', '4i', '5i', '5i', '5i', '6i']);
     expect(runP("g.V().has('name', containing(x)).values('name')", { x: 'ar' })).toEqual(['"marko"']);
   });
 });

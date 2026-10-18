@@ -164,8 +164,10 @@ describe('federate: a BigInteger / BigDecimal / wide Long / datetime / duration 
   for (const t of TRANSPORTS) {
     for (const [sub, tail, direct] of CASES) {
       test(`${t.name}: ${sub}${tail}`, async () => {
-        const oracle = await run(t.sibling('wide'), direct);
-        expect(await run(local.executor('home'), fed(t.graph('wide'), sub, tail))).toEqual(oracle);
+        // A multiset: neither side orders its stream, so each comes back in its own plan's order.
+        const bag = (xs: unknown[]) => xs.map((x) => [Bun.inspect(x), x] as const).sort(([a], [b]) => (a < b ? -1 : 1)).map(([, x]) => x);
+        const oracle = bag(await run(t.sibling('wide'), direct));
+        expect(bag(await run(local.executor('home'), fed(t.graph('wide'), sub, tail)))).toEqual(oracle);
       });
     }
     test(`${t.name}: the subgraph walk and the mid-traversal rejoin`, async () => {
