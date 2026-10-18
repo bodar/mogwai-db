@@ -266,3 +266,49 @@ describe('a READ BEFORE a terminal drop(), which switches LazyBarrierStrategy of
     expect(after("g.V().properties('name').hasValue('marko').drop()", "g.V(1).values('name')")).toEqual([]);
   });
 });
+
+describe('drop() after EVERY hop kind, at depth and under local()/union(): the reference exactly, or a clean refusal', () => {
+  // A final `both()` before a vertex drop once reached the user as `RelIR: duplicate Plan binding 'r0'`: the
+  // drop's own target snapshot and the `dropTargetsLinked` guard over the same target were named by two
+  // separate `name()` calls, and both called their first shared node `r0`.
+  const prefixes = ['', "hasLabel('person').", "out('knows').", "in('created').", 'both().', 'outE().inV().', 'bothE().otherV().'];
+  const hops = ['out()', 'in()', 'both()', "both('knows')", 'outE()', 'inE()', 'bothE()', "bothE('created')",
+    'outE().inV()', 'inE().outV()', 'bothE().otherV()', 'outE().otherV()'];
+  const suffixes = ['', ".hasLabel('software')", '.dedup()', '.limit(2)'];
+  // Every prefix × hop × suffix at the top level; each hop at depth one and two under local()/union().
+  const forms = [
+    ...prefixes.flatMap((p) => hops.flatMap((h) => suffixes.map((s) => `g.V().${p}${h}${s}.drop()`))),
+    ...['local', 'union'].flatMap((w) => ['', 'both().'].flatMap((p) => hops.map((h) => `g.V().${w}(__.${p}${h}).drop()`))),
+  ];
+  test('no form raises anything but the refusal, and a refusal leaves the graph as it was', () => {
+    // One store until a form answers (a refusal rolls back, so the next form still starts on the modern graph).
+    let store = seededStore();
+    const state = (): unknown[] => [values(store, 'g.V().id()'), values(store, 'g.E().id()')];
+    const modern = state();
+    for (const q of forms) {
+      try { run(store, q); store = seededStore(); } catch (e) {
+        expect((e as Error).message, q).toMatch(NOT_YET);
+        expect(state(), q).toEqual(modern);
+      }
+    }
+  }, 30_000);
+
+  const graph = (q: string): [unknown[], unknown[]] => { const store = seededStore(); run(store, q); return [values(store, 'g.V().id()'), values(store, 'g.E().id()')]; };
+  test('the forms that answer are the reference', () => {
+    // both(): no edge joins two distinct dropped vertices across, so the hop is exact (`dropTargetsLinked`)
+    expect(graph("g.V().both().hasLabel('software').drop()")).toEqual([[1, 2, 4, 6], [7, 8]]);
+    expect(graph('g.V(4).both().drop()')).toEqual([[2, 4, 6], []]);
+    expect(graph("g.V().hasLabel('person').in().drop()")).toEqual([[2, 3, 4, 5, 6], [10, 11, 12]]);
+    // an EDGE drop is idempotent: bothE() reaches every edge from both ends, and the second drop is a no-op
+    expect(graph('g.V().bothE().drop()')).toEqual([[1, 2, 3, 4, 5, 6], []]);
+    expect(graph("g.V().bothE('created').dedup().drop()")).toEqual([[1, 2, 3, 4, 5, 6], [7, 8]]);
+    expect(graph("g.V().hasLabel('person').inE().drop()")).toEqual([[1, 2, 3, 4, 5, 6], [9, 10, 11, 12]]);
+    expect(graph("g.V().bothE().has('weight',gt(0.5)).drop()")).toEqual([[1, 2, 3, 4, 5, 6], [7, 9, 11, 12]]);
+  });
+
+  // A stream-counting step after the final hop spends its budget on the plan's duplicates (`finalHop`): the
+  // reference drops 9, 7, 8 and 11 (vadas's 7 is gone before his start is read); the plan's fourth is 7 again.
+  for (const q of ['g.V().bothE().limit(4).drop()', 'g.V().outE().limit(4).drop()', 'g.V().both().drop()', "g.V(1).out('knows').both().drop()"]) {
+    test(q, () => refuses(q));
+  }
+});

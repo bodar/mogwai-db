@@ -14,8 +14,13 @@ import { exprRels, forEachExpr, freeRelIds, hasFreeSelfRef, relChildren, relExpr
  * A node reached more than once is shared, which is only true if the passes upstream preserved
  * sharing — a rewrite that rebuilds per parent occurrence makes every count 1 and silently turns
  * this analysis off.
+ *
+ * ⚠️ **Generated names are unique within ONE call, not across calls.** A caller that splices the
+ * bindings of two separately named plans into one program — a write's target snapshot and a guard over
+ * the same target — passes `mint`, its program-wide fresh-name source; else both plans call their first
+ * shared node `r0` and `plan()` refuses the splice (`duplicate Plan binding`).
  */
-export function name(root: Rel): Plan {
+export function name(root: Rel, mint?: () => string): Plan {
   const counts = new Map<Rel, number>();
   const visit = (rel: Rel): void => {
     const seen = (counts.get(rel) ?? 0) + 1;
@@ -38,8 +43,9 @@ export function name(root: Rel): Plan {
     ((rel.kind === 'materialize' && rel.name) || rel.kind === 'recursive' ? [rel.name] : [])));
   let n = 0;
   const generate = (): string => {
-    let candidate = `r${n++}`;
-    while (taken.has(candidate)) candidate = `r${n++}`;
+    const next = mint ?? ((): string => `r${n++}`);
+    let candidate = next();
+    while (taken.has(candidate)) candidate = next();
     taken.add(candidate);
     return candidate;
   };

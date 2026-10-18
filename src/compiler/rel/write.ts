@@ -219,7 +219,7 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   // The target is lowered like any other relation — `name` binds its shared subexpressions as CTEs —
   // and only then snapshotted. Those CTEs are read by ONE step (the snapshot's own SELECT), which is
   // exactly the case `checkSnapshots` leaves alone.
-  const targetPlan = nameBindings(idsOf(target, fresh));
+  const targetPlan = nameBindings(idsOf(target, fresh), () => fresh('cte'));
   const ids = fresh('drop');
   const owners = make.ref({ id: fresh('r'), name: ids, channels: [], type: ID_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
@@ -281,7 +281,7 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   const targetPlan = nameBindings(make.project({
     id: fresh('w'), input: target, channels: [], type: PDROP_TYPE,
     exprs: [['id', propertyRowId(target)], ['owner', propertyOwnerId(target, elem)]],
-  }));
+  }), () => fresh('cte'));
   const ids = fresh('pdrop');
   const snap = make.ref({ id: fresh('r'), name: ids, channels: [], type: PDROP_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
@@ -1981,6 +1981,9 @@ function readBeforeWrite(
       continue;
     }
     if (i === hop) { linked = true; continue; }
+    // The final hop before an EDGE drop (`edgeAnchor`'s `at`) owes nothing: it leaves from a vertex no edge drop
+    // removes, and an edge it reaches that an earlier traverser already dropped is a second drop, a no-op.
+    if (site?.target === 'edge' && i === reachedBy) continue;
     // On the anchor's vertex, a first hop in a PINNED direction crosses no edge another traverser wrote.
     const anchored = anchor !== null && i <= anchor.at && steps.slice(i, anchor.at).every((s) => KIND_PRESERVING.has(s.name));
     const residue = anchored ? anchoredResidue(step, anchor.pinned, read) : null;
@@ -2018,15 +2021,36 @@ function readBeforeWrite(
  * either way, and `g.V().out().drop()` refuses (josh is dropped from marko, then reached from his own start).
  */
 function droppingHop(steps: readonly IRStep[], from: number): number {
-  let m = from - 1;
-  while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) m--;
-  const move = steps[m];
-  return move && VERTEX_MOVES.has(move.name) && !hasBody(move) ? m : -1;
+  return finalHop(steps, from, VERTEX_MOVES);
 }
+
+/**
+ * THE FINAL HOP BEFORE A `drop()` — the position of a bare move of `moves` with nothing but kind-preserving
+ * steps after it — or `-1`. The one authority `droppingHop` (a vertex drop) and `edgeAnchor` (an edge drop)
+ * both ask. Its idempotence argument — a later traverser re-running the hop reaches, beyond what the
+ * reference's does, only elements already dropped — holds while each traverser is dropped or kept by ITSELF
+ * alone. A step between that counts the stream (`STREAM_COUNTING`: `RangeGlobalStep`, `TailGlobalStep`,
+ * `CoinStep`, `SampleGlobalStep` under
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/`)
+ * spends its budget on the plan's extra duplicates the reference never makes:
+ * `g.V().bothE().limit(4).drop()` drops 9, 7, 8 and 11 in the reference (vadas's 7 is gone before his own
+ * start is read), but the plan's fourth traverser is 7 again. So there, no hop is final.
+ */
+function finalHop(steps: readonly IRStep[], from: number, moves: ReadonlySet<string>): number {
+  let m = from - 1;
+  while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) {
+    if (STREAM_COUNTING.has(steps[m]!.name)) return -1;
+    m--;
+  }
+  const move = steps[m];
+  return move && moves.has(move.name) && !hasBody(move) ? m : -1;
+}
+/** The filters whose verdict on a traverser depends on the traversers before it (`finalHop`). */
+const STREAM_COUNTING: ReadonlySet<string> = unionOf(SLICE_STEPS, new Set(['tail', 'coin', 'sample']));
 
 /** The guard `droppingHop` owes: raise when an edge joins two distinct vertices of `targets` (bulk-free ids). */
 function dropTargetsLinked(targets: Rel, fresh: Minter): Binding[] {
-  const plan = nameBindings(idsOf(targets, fresh));
+  const plan = nameBindings(idsOf(targets, fresh), () => fresh('cte'));
   const name = fresh('dt');
   const dropped = (): Rel => make.ref({ id: fresh('r'), name, channels: [], type: ID_TYPE });
   const scan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')) });
@@ -2092,7 +2116,7 @@ function bySites(effect: ProgramWrites, kind: TargetKind): ProgramWrites {
  *    (`AddEdgeStep`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AddEdgeStep.java`:
  *    an unset endpoint is the traverser); `at` is the `addE` itself, and the write's input is those vertices
  *    (`keyed`, so a run-time guard can say no vertex reached it twice);
- *  - an edge `drop()` reached by `outE()`/`inE()` (then kind-preserving steps) removes an edge out of / into
+ *  - an edge `drop()` reached by `outE()`/`inE()`/`bothE()` (`finalHop`) removes an edge out of / into (/ either way of)
  *    the vertex entering that move, which stands at `at`. Not `keyed`, and owing nothing even over a stream
  *    that reaches one vertex twice: a drop is idempotent, and every traverser on one vertex removes the same
  *    edges of it, so a later one's read of them changes nothing it removes.
@@ -2109,11 +2133,12 @@ function edgeAnchor(steps: readonly IRStep[], from: number): { readonly at: numb
     return pinned.size ? { at: from, pinned, keyed: true } : null;
   }
   if (writer?.name !== 'drop') return null;
-  let m = from - 1;
-  while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) m--;
-  const move = steps[m];
-  if (!move || hasBody(move) || (move.name !== 'outE' && move.name !== 'inE')) return null;
-  return { at: m, pinned: new Set([move.name === 'outE' ? 'out' : 'in']), keyed: false };
+  const m = finalHop(steps, from, EDGE_MOVES);
+  if (m < 0) return null;
+  // A `bothE()` drop removes an edge out of ONE vertex and into another, so it pins no direction: another
+  // traverser's drop may take an edge either way off this vertex. Only the hop itself is lifted (`readBeforeWrite`).
+  const move = steps[m]!.name;
+  return { at: m, pinned: new Set(move === 'outE' ? ['out'] : move === 'inE' ? ['in'] : []), keyed: false };
 }
 /** The steps an `addE`'s own cluster holds after it: its endpoints, its properties, a label. */
 const ADD_E_CLUSTER: ReadonlySet<string> = new Set(['from', 'to', 'property', 'as']);
@@ -5030,7 +5055,7 @@ function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { reado
   // still have ONE answer to "which input row is this created row".
   const positioned = rowNumberWindow(ordered, ORD, [], { partitionBy: [],
     orderBy: encounter && cols.some((column) => column.name === encounter.col) ? [{ expr: col(ordered.id, encounter.col), dir: 'asc' }] : [] }, fresh);
-  return nameBindings(positioned);
+  return nameBindings(positioned, () => fresh('cte'));
 }
 
 /** The column a write's input carries its POSITION in, and the created rows recover theirs into.
