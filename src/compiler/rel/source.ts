@@ -6,7 +6,7 @@ import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
-import { storedCompareOn } from './predicate.ts';
+import { orderingKey } from './predicate.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
@@ -492,7 +492,7 @@ export const BaseGraph: GraphSource = {
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
     });
-    const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
+    const value = ordering ? orderingKey(col(mine.id, 'vtype'), col(mine.id, 'value')).key : col(mine.id, 'value');
     return firstOf(mine, value, col(mine.id, 'id'), fresh);
   },
 

@@ -1,9 +1,10 @@
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { and, carriedCols, elementCols, eq, jsonOf, meta, renumber, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { type GraphSource } from './source.ts';
+import { orderingKey } from './predicate.ts';
 
 // ---------- DecorateGraph — a GraphSource that answers ONE synthetic property off a landed relation ----------
 //
@@ -93,18 +94,19 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
     },
 
     // by('key') / order().by('key') / project().by('key') — the decorated value as a correlated scalar.
-    // `ordering` is deliberately a NO-OP here, and correct without a wrap: `barrier_state.cval` is
-    // UNTYPED and keeps each value's NATIVE storage class (`src/storage.ts`), so a REAL score already
-    // sorts numerically and a TEXT component id lexically. This is the one place the decorate source
-    // diverges from `BaseGraph.propertyScalar`, which DOES wrap (its stored values are decimal-TEXT, so
-    // an ordered numeric key needs `storedCompareOn`'s CAST). The wrap would reopen only for an
+    // `ordering` needs no CAST here: `barrier_state.cval` is UNTYPED and keeps each value's NATIVE
+    // storage class (`src/storage.ts`), so a REAL score already sorts numerically and a TEXT component id
+    // lexically. It still goes through `orderingKey` as an UNTAGGED value, because every source's ordering
+    // read is an `encoded` key (`ZeroCarrier`): an untagged INTEGER zero must read as a small integral,
+    // not as the BigInteger zero the encoding spells as INTEGER `0`. A CAST would reopen only for an
     // algorithm decorating a decimal-TEXT bigdecimal (the long/bigint/bigdecimal tail — see
     // `SQLite runtime versions`); none does today, and `has(key, P.gt(x))` over the REAL score already
     // proves the comparison is numeric (`test/L2-sql/pagerank.exec.test.ts`).
     propertyScalar(kind, id, k, ordering, fresh) {
       if (k !== key) return base.propertyScalar(kind, id, k, ordering, fresh);
       const row = rowById(id, fresh);
-      return { kind: 'scalar', plan: make.project({ id: fresh('dps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', col(row.id, 'cval')]] }) };
+      const value = ordering ? orderingKey(compilerNull('text'), col(row.id, 'cval')).key : col(row.id, 'cval');
+      return { kind: 'scalar', plan: make.project({ id: fresh('dps'), input: row, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]] }) };
     },
 
     // The decorated value is single-cardinality (`cval`), so its key never holds several.
