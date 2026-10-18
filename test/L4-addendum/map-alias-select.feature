@@ -73,3 +73,50 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
     Then the result should be unordered
       | result |
       | marko |
+
+  # A keyed dedup(k) over a map whose keys are DATA reads, per row, the map's value where it holds k and
+  # the path label where it does not (`Scoping.getScopeValue`); a map lacking k with no label behind it
+  # keys on null, which is productive without a by() (`DedupGlobalStep.java:80-88`).
+  Scenario: g_V_asXaX_valueMap_dedupXaX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").valueMap().dedup("a").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_asXlangX_valueMap_dedupXlangX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("lang").valueMap().dedup("lang").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
+  Scenario: g_V_valueMap_dedupXlangX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().valueMap().dedup("lang").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  Scenario: g_V_group_byXlabelX_dedupXpersonX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label).dedup("person").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |

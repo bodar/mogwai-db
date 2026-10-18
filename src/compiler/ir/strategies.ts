@@ -698,24 +698,35 @@ function identityHostBody(s: Step, params: Record<string, any>): Step[] | null {
  * unconditional rather than only-for-`aggregate`, because "this step ran per traverser" is a property
  * of the position, not of who happens to read it today.
  */
-export function inlineIdentityHostBody(steps: Step[], params: Record<string, any>): Step[] {
-  return spliceIdentityHosts(steps, params, someStepDeep(steps, params, (s) => PATH_FAMILY.has(s.name)));
+export function inlineIdentityHostBody(steps: Step[], params: Record<string, any>, nested: boolean): Step[] {
+  const readsPath = someStepDeep(steps, params, (s) => PATH_FAMILY.has(s.name));
+  // A path read is a WHOLE-TRAVERSAL fact: the root's `.path()` observes the entry a `map(identity())`
+  // opens inside a `union`/`optional`/`repeat` body, and that body is normalized LATER and in isolation
+  // (`childSteps`), where it reads no path of its own. So the root marks every such host at every
+  // depth — `markUnrollSuppressed`'s mechanism, for its reason.
+  const marked = readsPath && !nested
+    ? markAtDepth(steps, params, (s) => OPENS_ENTRY_HOSTS.has(s.name) && identityHostBody(s, params) !== null, (s) => { s.keepsPathEntry = true; })
+    : steps;
+  return spliceIdentityHosts(marked, params, readsPath);
 }
 
 /**
- * `inlineIdentityHostBody` over one chain. `readsPath` — the chain reads the PATH somewhere: a
- * `map`/`flatMap` host then stays (`OPENS_ENTRY_HOSTS`), because the entry it opens is on that path.
+ * `inlineIdentityHostBody` over one chain. A `map`/`flatMap` host stays (`OPENS_ENTRY_HOSTS`) where the
+ * entry it opens may be on a path that is read: this chain reads the path (`readsPath`), or the root
+ * marked it (`keepsPathEntry`).
  */
 function spliceIdentityHosts(steps: Step[], params: Record<string, any>, readsPath: boolean): Step[] {
   const out: Step[] = [];
   for (const s of steps) {
+    const body = identityHostBody(s, params);
+    const keep = OPENS_ENTRY_HOSTS.has(s.name) && (readsPath || (s as IRStep).keepsPathEntry === true);
     // A kept `map` host over an identity body is its `flatMap`: the body emits exactly its one input.
-    if (readsPath && s.name === 'map' && identityHostBody(s, params)) { out.push({ ...s, name: 'flatMap' }); continue; }
-    const body = readsPath && OPENS_ENTRY_HOSTS.has(s.name) ? null : identityHostBody(s, params);
+    if (keep) out.push(body && s.name === 'map' ? { ...s, name: 'flatMap' } : s);
     // RECURSE INTO THE SPLICED BODY, because a body that is itself an identity host
     // (`local(__.local(__.aggregate("a")))`) splices to another one — and this pass has already
     // walked past the position it lands in. A single pass would unwrap exactly one layer.
-    if (body) out.push(...spliceIdentityHosts(body, params, readsPath).map(perTraverser)); else out.push(s);
+    else if (body) out.push(...spliceIdentityHosts(body, params, readsPath).map(perTraverser));
+    else out.push(s);
   }
   return out;
 }

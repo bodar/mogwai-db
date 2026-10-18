@@ -53,7 +53,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
+import { ENTRY, correlatedMapKey, elementHost,elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -71,7 +71,7 @@ import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
-import { dedupByLabels, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
+import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
@@ -1475,13 +1475,13 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
  * stream (the list/scalar/map tails used to never reach `dedupByLabels`, so a keyed dedup over a bound
  * LIST/scalar declined though the algebra was built).
  */
-function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | null | 'skip' {
+function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter, mapScope?: MapScope): Rel | null | 'skip' {
   if (step.name !== 'dedup' || isLocalScope(step) || step.optionArms || !(step.args ?? []).length) return 'skip';
   const keys = step.args.map((a) => a.value);
   if (!keys.every((k) => typeof k === 'string')) return 'skip';
   const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
-  return dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh);
+  return dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh, mapScope);
 }
 
 function scalarTail(
@@ -2910,10 +2910,14 @@ function mapTail(
     // canonical-key-order `LinkedHashMap` compares by entries). `order()` with no comparator DECLINES —
     // a Java `Map` is not `Comparable`, so the map host's `by()` arms return null and no total order is
     // invented, exactly as the reference refuses one. A LOCAL-scope op was handled above. A keyed
-    // `dedup(k)` the MAP may hold reads the map (its own scope wins), which `keyedDedup`'s path-label
-    // read is not — it declines there.
-    if (step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && (!keys || keys.includes(a.value)))) return null;
-    const kd = keyedDedup(step, rel, labels, ctx, fresh);
+    // `dedup(k)` the MAP may hold reads the map's own value first (its scope wins), keyed like the map's
+    // own identity, by the value node's JSON.
+    // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
+    const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && (!keys || keys.includes(a.value)))
+      ? fenced(rel, fresh) : rel;
+    const mapScope: MapScope = (k) => keys && !keys.includes(k) ? undefined
+      : { node: correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node, always: !!keys };
+    const kd = keyedDedup(step, scoped, labels, ctx, fresh, mapScope);
     if (kd === null) return null;
     if (kd !== 'skip') { rel = kd; continue; }
     const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, row: { rel, aliases: labels } };

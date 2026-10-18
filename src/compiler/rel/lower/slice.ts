@@ -2,7 +2,7 @@
 // (sliceOp/slice/bulkSlice), the barrier row ops order/dedup (rowOp), and the keyed-dedup builders
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -627,9 +627,14 @@ function dedupOnTyped(
  * could differ on), so this is `dedupOn`'s ranked window — a fully deterministic tie over every column,
  * since a keyed dedup carries no emission order of its own.
  */
+/** A MAP traverser's own value at a keyed `dedup(k)`'s key, read before the path label: the correlated
+ *  node (NULL where the map lacks `k`), and whether the map's KNOWN keys guarantee it is there. `undefined`
+ *  where the map cannot hold `k` at all. */
+export type MapScope = (key: string) => { readonly node: Expr; readonly always: boolean } | undefined;
+
 export function dedupByLabels(
   step: IRStep, rel: Rel, labels: AliasMap, keys: readonly string[],
-  by: Modulation | undefined, ctx: ChainCtx, fresh: Minter,
+  by: Modulation | undefined, ctx: ChainCtx, fresh: Minter, mapScope?: MapScope,
 ): Rel | null {
   const seam = childSeam(ctx, fresh);
   // Each label's OBJECT keys by value plus family (`DedupGlobalStep.java:80-88`): an element by its rowid,
@@ -637,8 +642,18 @@ export function dedupByLabels(
   const keyTerms: Expr[] = [];
   const productive: Expr[] = [];
   for (const k of keys) {
+    const scoped = mapScope?.(k);
+    if (scoped && by) return null; // a `by()` over the map's own value is a later phase
+    if (scoped?.always) { keyTerms.push(scoped.node); continue; }
     const proj = aliasProjection(rel, labels, k, 'last', fresh);
+    if (!proj && scoped) {
+      // No label behind it: the map's value, or a NULL every map lacking `k` shares — `getSafeScopeValue`
+      // answers null and, with no `by()`, a null is productive (`DedupGlobalStep.java:80-88`).
+      keyTerms.push(scoped.node);
+      continue;
+    }
     if (!proj) return null;
+    const before = keyTerms.length;
     const column = col(rel.id, proj.entry.col);
     if (by) {
       // A `by()` projection reads each label's ELEMENT as its host; a scalar/list alias under a `by()`
@@ -661,6 +676,13 @@ export function dedupByLabels(
     // `LinkedHashMap` compares by ENTRY set regardless of order, so text equality is not faithful.
     else if (proj.read.kind === 'list') keyTerms.push(aliasListAt(column, 'last'));
     else return null; // a MAP-valued alias key — order-sensitive JSON text vs entry-equality, a later phase.
+    if (scoped) {
+      // A map whose keys are DATA: per row, the MAP's value where it holds `k` (its own scope wins,
+      // `Scoping.getScopeValue`), the label's where it does not — never both, so the two cannot collide.
+      const absent: Expr = { kind: 'binary', op: 'is', left: scoped.node, right: compilerNull() };
+      const labelTerms = keyTerms.splice(before).map((t): Expr => ({ kind: 'case', whens: [[absent, t]] }));
+      keyTerms.push(scoped.node, ...labelTerms);
+    }
   }
   const domain = productive.length
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: productive.reduce((a, b) => and(a, b)) })

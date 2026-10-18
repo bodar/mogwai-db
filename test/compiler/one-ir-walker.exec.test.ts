@@ -154,6 +154,25 @@ describe('path entries: a map/flatMap identity host is kept where the path is re
     expect(await framed("g.V(1).map(identity()).simplePath().count()")).toEqual([0]);
   });
 
+  // A path read is a WHOLE-TRAVERSAL fact: a host inside a body normalized on its own (a branch arm, a
+  // repeat body) is kept when the ROOT reads the path, so it answers the entry or declines — never
+  // drops it.
+  test.each([
+    "g.V(1).union(map(identity())).path()",
+    "g.V(1).union(union(map(identity()))).path()",
+    "g.V(1).optional(flatMap(identity())).path()",
+    "g.V(1).union(local(map(identity()))).path()",
+  ])('a nested host under a root path read: %s', async (q) => expect((await framed(q)).map((p: any) => p.objects.map((v: any) => v.id))).toEqual([[1, 1]]));
+
+  test('a nested host under a root simplePath() is filtered', async () => {
+    expect(await framed("g.V(1).union(map(identity())).simplePath().count()")).toEqual([0]);
+  });
+
+  test.each([
+    "g.V(1).repeat(map(identity())).times(1).path()",
+    "g.V(1).coalesce(map(identity())).path()",
+  ])('a kept nested host the lowering does not cover declines: %s', (q) => declines(q));
+
   // A same-label re-bind across a branch host ANSWERS: the entry is not followed out of the host, so a
   // `Pop.all` read may list the element once more than the reference (a deliberate divergence).
   test.each([

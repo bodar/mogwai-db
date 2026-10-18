@@ -90,8 +90,9 @@ const EXTRACT: Pass[] = group('extract', [
   // `absorbModulators` for the modulator to land on the spliced step rather than on nothing.
   {
     name: 'inlineIdentityHostBody',
-    applies: (steps) => steps.some((s) => s.name === 'local' || s.name === 'map' || s.name === 'flatMap'),
-    run: (steps, ctx) => inlineIdentityHostBody(steps, ctx.params),
+    // The ROOT always runs: a path it reads marks a host at any depth (`inlineIdentityHostBody`).
+    applies: (steps, ctx) => !ctx.nested || steps.some((s) => s.name === 'local' || s.name === 'map' || s.name === 'flatMap'),
+    run: (steps, ctx) => inlineIdentityHostBody(steps, ctx.params, ctx.nested),
   },
 ]);
 
