@@ -30,10 +30,10 @@ lowered.
 - **Write semantics — SNAPSHOT, decided 2026-10-18; the interleave guards are to be REMOVED.** A write step
   sees a snapshot of its input; every step after it sees all of its writes (what an explicit `barrier()`
   gives in Java, and what TinkerPop's docs tell users to add). The per-traverser interleave emulation
-  (`readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`/`barrierHoldsAll`, `sequentialGuard`'s
+  (`readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`, `sequentialGuard`'s
   race refusals, `mergeObservesOtherWrites`) is NOT a residue to extend: it refuses everyday writes
-  (`g.V().out().drop()`, `g.V().not(out()).drop()`, `g.V().out().property('visited',true)`) and one of its
-  guards depends on graph size. Removal is work item 7 of
+  (`g.V().out().drop()`, `g.V().not(out()).drop()`, `g.V().out().property('visited',true)`).
+  Removal is work item 7 of
   [the simplification plan](./2026-10-18-simplification-plan.md); the divergence is §17 of the feature
   matrix. Kept: the side-effect-under-slice decline, `iterate()` → `discard()`, the `where(as(unbound))`
   decline (`test/L4-addendum/where-start-label.feature`).

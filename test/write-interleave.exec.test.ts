@@ -120,11 +120,12 @@ describe('a WRITE after a write — matched by element kind, freshness, ownershi
     expect(values(store, "g.V().order().by(id).values('w')")).toEqual([1, 2, 2, 2, 2, 1]);
   });
 
-  test('(d) …only while the barrier holds the whole stream: it stops pulling at 2500 distinct traversers', () => {
+  test('(d) …taken as a drain on ANY graph, not only one under its 2500-traverser window (a deliberate divergence)', () => {
     const store = seededStore();
     run(store, `g.inject(${Array.from({ length: 2500 }, (_, i) => i).join(',')}).addV('n')`);
-    expect(() => run(store, "g.V().property(single,'w',1).out().property(single,'w',2)")).toThrow(/holds at most 2500 distinct traversers/);
-    expect(values(store, "g.V().has('w').count()")).toEqual([0]);
+    run(store, "g.V().property(single,'w',1).out().property(single,'w',2)");
+    expect(values(store, "g.V().hasId(1,2,3,4,5,6).order().by(id).values('w')")).toEqual([1, 2, 2, 2, 2, 1]);
+    expect(values(store, "g.V().has('w').count()")).toEqual([2506]);
   });
 
   test('(e) a merge whose search cannot find what an earlier creation made', () => {

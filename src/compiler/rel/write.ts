@@ -32,7 +32,7 @@ import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerT
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
 import { eachChildChain, someStepDeep, valueNodes, type BodyReader } from '../ir/walk.ts';
-import { bulkingPositions, MAX_BARRIER_SIZE, streamDistinctAt } from '../ir/bulk.ts';
+import { bulkingPositions, streamDistinctAt } from '../ir/bulk.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
@@ -1105,18 +1105,17 @@ interface UpstreamWrite {
  *  - `window` — the reference may run it for one traverser before another reaches the write: the lazy
  *    pipeline hands traverser 1 through every later step first
  *    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`);
- *  - `sized` — past the `NoOpBarrierStep(2500)` `LazyBarrierStrategy` puts after a vertex flat-map
- *    (`bulkingPositions`, `ir/bulk.ts`): the barrier pulls until its upstream is exhausted or it holds
- *    2500 DISTINCT traversers (`…/step/map/NoOpBarrierStep.java` `processAllStarts`), so every traverser
- *    has run the write first exactly when fewer than 2500 distinct vertices reach it — at most the graph's
- *    vertices, the guard `barrierHoldsAll` raises on;
  *  - `free` — past a step that drains the whole stream before it emits (`drains`): every traverser ran the
- *    write before anything after it runs. The drain's OWN bodies stay in the window — a reducer's `by()`
+ *    write before anything after it runs. So does the `NoOpBarrierStep(2500)` `LazyBarrierStrategy` puts
+ *    after a vertex flat-map (`bulkingPositions`, `ir/bulk.ts`): it drains the whole stream in the reference
+ *    while fewer than 2500 distinct vertices reach it, and we take that answer on ANY graph — a deliberate
+ *    divergence (`docs/feature-support-matrix.md`) rather than a refusal that depends on graph size.
+ *    The drain's OWN bodies stay in the window — a reducer's `by()`
  *    runs per traverser as it pulls (`ReducingBarrierStep.processAllStarts`).
  * `own` — the traverser is still the writer's own element (`'element'`), or that element's properties
  * (`'properties'`, for a `drop()`): nothing between moved it.
  */
-interface Placement { readonly when: 'window' | 'sized' | 'free'; readonly own: false | 'element' | 'properties' }
+interface Placement { readonly when: 'window' | 'free'; readonly own: false | 'element' | 'properties' }
 
 const everythingWritten = (truncated: boolean): ProgramWrites =>
   ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, edgeLabels: 'all', drops: true, draws: true, upstream: [], preChecks: [], truncated, reads: { keys: 'all', labels: true } });
@@ -1751,8 +1750,8 @@ function repeatedGuard(rel: Rel, by: 'traverser' | 'object', message: string, fr
   };
 }
 
-/** The flat-maps whose stream is VERTICES — so the distinct traversers a barrier after one holds are at most
- *  the graph's vertices (`barrierHoldsAll`): `VertexStep` to vertices, `EdgeVertexStep`, a mid-chain `V()`. */
+/** The flat-maps whose stream is VERTICES, after which an implicit `NoOpBarrierStep` is taken as a drain
+ *  (`Placement`): `VertexStep` to vertices, `EdgeVertexStep`, a mid-chain `V()`. */
 const VERTEX_FLAT_MAPS: ReadonlySet<string> = unionOf(VERTEX_MOVES, ENDPOINT_MOVES, new Set(['V']));
 
 /** Writers that land on the traverser they are given — or, a creation or a merge, hand on the element
@@ -1792,11 +1791,11 @@ function ownWriter(writer: readonly IRStep[], effect: ProgramWrites, params: Rec
  */
 function interleaving(place: WritePlace, own: boolean): Map<IRStep, Placement> {
   const { steps, end, traversal } = place;
-  const sized = new Set<number>();
+  const barriers = new Set<number>();
   if (traversal?.steps === steps) {
     const positions = bulkingPositions(steps, traversal.rooted, steps.length, !traversal.rooted && !traversal.allStarts);
     if (positions !== 'unknown') {
-      for (const p of positions) if (p.kind === 'lazy' && p.after >= end && VERTEX_FLAT_MAPS.has(steps[p.after]!.name)) sized.add(p.after);
+      for (const p of positions) if (p.kind === 'lazy' && p.after >= end && VERTEX_FLAT_MAPS.has(steps[p.after]!.name)) barriers.add(p.after);
     }
   }
   const placed = new Map<IRStep, Placement>();
@@ -1805,8 +1804,7 @@ function interleaving(place: WritePlace, own: boolean): Map<IRStep, Placement> {
   for (let i = end; i < steps.length; i++) {
     const step = steps[i]!;
     placed.set(step, { when, own: mine });
-    if (drains(step)) when = 'free';
-    else if (sized.has(i) && when === 'window') when = 'sized';
+    if (drains(step) || barriers.has(i)) when = 'free';
     mine = mine === 'element' && step.name === 'properties' ? 'properties'
       : mine === 'element' && KIND_PRESERVING.has(step.name) ? 'element' : false;
   }
@@ -1839,7 +1837,7 @@ const WRITE_MODULATORS: ReadonlySet<string> = new Set(['from', 'to', 'option']);
  * sees only EARLIER traversers' writes, where the plan's read sees them all: `g.inject(1,2).addV('x').V()
  * .hasLabel('x').count()` is 3 in the reference. A step in the write's window that can observe what it writes
  * (`chainObserves`, at any depth of the step's bodies) owes the stream count's guard (`upstreamManyGuard` —
- * one traverser, or refuse); one past a sized barrier owes `barrierHoldsAll`; one past a drain owes nothing.
+ * one traverser, or refuse); one past a drain (or an implicit vertex barrier, `Placement`) owes nothing.
  * A later WRITE step's own read is that writer's question (`writeAfterWrite`), and its value and endpoint
  * bodies are `sequentialGuard`'s, so neither is weighed here.
  *
@@ -1853,11 +1851,11 @@ function readAfterWrite(
   params: Record<string, any>, fresh: Minter,
 ): { readonly before: Binding[]; readonly after: Binding[] } {
   const read: BodyReader = (body) => { try { return childSteps(body, params); } catch { return null; } };
-  let owed: 'none' | 'sized' | 'window' = 'none';
+  let owed = false;
   let ownOwed = false;
   const ids = new Set<number | string>();
   let inWrite = false;
-  for (let i = place.end; i < place.steps.length && owed !== 'window'; i++) {
+  for (let i = place.end; i < place.steps.length && !owed; i++) {
     const step = place.steps[i]!;
     const at = entry.placed.get(step)!;
     if (at.when === 'free') break;
@@ -1873,15 +1871,15 @@ function readAfterWrite(
       if (!ownReadExact(reach, entry, writer, elem)) ownOwed = true;
       continue;
     }
-    if (seen === 'fresh-ids' && at.when === 'window') { for (const id of reach.vertexIds) ids.add(id); continue; }
-    owed = at.when === 'window' ? 'window' : 'sized';
+    if (seen === 'fresh-ids') { for (const id of reach.vertexIds) ids.add(id); continue; }
+    owed = true;
   }
   const keyed = entry.output && streamKey(entry.output) ? entry.output : null;
   const after = ownOwed && keyed ? [repeatedGuard(keyed, 'object', SEQUENTIAL_READ_AFTER, fresh)] : [];
-  if (ownOwed && !keyed) owed = 'window';
-  const before: Binding[] = owed === 'sized' ? [barrierHoldsAll(fresh)] : [];
-  if (owed === 'window' || ids.size) {
-    const also = owed === 'window' ? undefined : freshIdsAtStart(writes, ids, fresh);
+  if (ownOwed && !keyed) owed = true;
+  const before: Binding[] = [];
+  if (owed || ids.size) {
+    const also = owed ? undefined : freshIdsAtStart(writes, ids, fresh);
     before.unshift({ name: fresh('gr'), ...upstreamManyGuard(entry, also, SEQUENTIAL_READ_AFTER, fresh) });
   }
   return { before, after };
@@ -1899,14 +1897,13 @@ const OWN_ELEMENT_WRITERS: ReadonlySet<string> = new Set(['property', 'addLabel'
  * `g.V(4,5).where(__.in().hasNot('w')).property(single,'w',2)` writes josh alone in the reference (ripple's
  * `in()` is josh, written by then), and `g.inject(1,2).V().addV('x')` makes 18 vertices (traverser 2's `V()`
  * re-reads traverser 1's six). Each step between the write and the nearest DRAIN before it (which ran for
- * every traverser before anything after it, `drains`) that can observe what the write writes
+ * every traverser before anything after it, `drains`, or an implicit vertex barrier, `Placement`) that can
+ * observe what the write writes
  * (`chainObserves`, any depth of its bodies) owes, by where it stands:
  *  - nothing, where at most ONE traverser reaches it (`singleSource`, then `KEEPS_ONE` steps) — no later
  *    traverser re-runs it — AND that one traverser's pass hands the writer nothing before the step's last
  *    read (`handsOnWithoutRereading`: a body that fans it out runs lazily, so the step's later outputs are
  *    read after the earlier ones were written) — or it is the traversal's own start;
- *  - before a sized `NoOpBarrierStep` (`bulkingPositions`): `barrierHoldsAll`, which makes every traverser
- *    pass the step before any reaches the write;
  *  - a read of the traverser's OWN element (nothing moving it between) before a write of that element:
  *    nothing where the stream reaching it is pairwise distinct (`streamDistinctAt`) — no other traverser
  *    writes that element — else the run-time guard that no element reaches the write twice
@@ -1927,7 +1924,7 @@ function readBeforeWrite(
   const known = traversal?.steps === steps;
   const rooted = known && !!traversal?.rooted;
   const read: BodyReader = (body) => { try { return childSteps(body, params); } catch { return null; } };
-  // The sized barriers before the writer: one stands right after `steps[i]` for each `i` here.
+  // The implicit vertex barriers before the writer, each a drain (`Placement`): one stands right after `steps[i]`.
   const barriers = new Set<number>();
   if (known) {
     // Scanned only up to the writer: what follows it (its own endpoint bodies, its tail) places nothing before
@@ -1966,15 +1963,13 @@ function readBeforeWrite(
   // second traverser on it is one the reference never has there once it is gone (its edge went with it).
   const reachedBy = site?.target === 'vertex' ? hop : site?.target === 'edge' && anchor ? anchor.at : -1;
   const idempotentAt = (i: number): boolean => site !== null && (site.target === 'property' || (reachedBy >= 0 && i > reachedBy));
-  let owed: 'none' | 'sized' | 'window' = 'none';
+  let owed = false;
   let ownOwed = false;
   const ids = new Set<number | string>();
-  let when: 'window' | 'sized' = 'window';
   let mine = ownElement;
-  for (let i = from - 1; i >= (rooted ? 1 : 0) && owed !== 'window'; i--) {
+  for (let i = from - 1; i >= (rooted ? 1 : 0) && !owed; i--) {
     const step = steps[i]!;
-    if (drains(step)) break;
-    if (barriers.has(i)) when = 'sized';
+    if (drains(step) || barriers.has(i)) break;
     const onOwn = mine;
     // A `properties()` step hands on a property only its element owns: that element still owns what is written.
     mine &&= KIND_PRESERVING.has(step.name) || (step.name === 'properties' && !hasBody(step));
@@ -2004,17 +1999,16 @@ function readBeforeWrite(
       ownOwed = true;
       continue;
     }
-    if (seen === 'fresh-ids' && when === 'window') { for (const id of reach.vertexIds) ids.add(id); continue; }
-    owed = when === 'window' ? 'window' : owed === 'none' ? 'sized' : owed;
+    if (seen === 'fresh-ids') { for (const id of reach.vertexIds) ids.add(id); continue; }
+    owed = true;
   }
   const keyed = input && streamKey(input) ? input : null;
-  if ((ownOwed && !keyed) || (linked && !(input && streamKey(input) === 'id'))) owed = 'window';
-  if (owed === 'window' || ids.size) {
-    const also = owed === 'window' ? undefined : freshIdsAtStart(writes, ids, fresh);
+  if ((ownOwed && !keyed) || (linked && !(input && streamKey(input) === 'id'))) owed = true;
+  if (owed || ids.size) {
+    const also = owed ? undefined : freshIdsAtStart(writes, ids, fresh);
     return [{ name: fresh('gq'), ...upstreamManyGuard(entry, also, SEQUENTIAL_READ_BEFORE, fresh, 1) }];
   }
   return [
-    ...(owed === 'sized' ? [barrierHoldsAll(fresh)] : []),
     ...(ownOwed && keyed ? [repeatedGuard(keyed, 'object', SEQUENTIAL_READ_BEFORE, fresh)] : []),
     ...(linked && input ? dropTargetsLinked(input, fresh) : []),
   ];
@@ -2349,39 +2343,16 @@ function ownReadExact(reach: BodyReach, entry: UpstreamWrite, writer: readonly I
   });
 }
 
-/**
- * THE GUARD A `sized` PLACEMENT OWES: raise unless the implicit `NoOpBarrierStep(2500)` holds the whole stream.
- * The stream there is vertices (`VERTEX_FLAT_MAPS`), and with no path, label or sack in play (the exact scan
- * placed nothing otherwise) equal traversers are equal vertices, so the graph's vertex count bounds its
- * distinct traversers; the barrier stops pulling once it holds 2500.
- */
-function barrierHoldsAll(fresh: Minter): GuardBinding {
-  const scan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wb'), channels: [], type: typeOf(meta('id', 'int'), meta('uid', 'text', true)) });
-  const counted = make.aggregate({
-    id: fresh('wc'), input: scan, channels: [], type: typeOf(meta('n', 'int')), groupBy: [],
-    aggs: [['n', { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
-  });
-  const over = make.filter({
-    id: fresh('rf'), input: counted, channels: [], type: counted.type,
-    pred: { kind: 'binary', op: '>=', left: col(counted.id, 'n'), right: compilerInt(MAX_BARRIER_SIZE) },
-  });
-  return {
-    name: fresh('gb'), guard: { message: SEQUENTIAL_BARRIER, raiseWhen: 'rows' },
-    node: make.project({ id: fresh('p'), input: over, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(over.id, 'n')]] }),
-  };
-}
-
 type GuardBinding = Binding & { readonly node: Rel; readonly guard: Guard };
 
 /**
  * THE GUARD `site` OWES ONE UPSTREAM WRITE, by where it stands (`Placement`): nothing past a drain, the
- * barrier's capacity past a sized barrier, the upstream stream's count in the window. `first` is the
+ * upstream stream's count in the window. `first` is the
  * site's own step, looked up by identity; one the upstream chain did not place stands in the window.
  */
 function upstreamGuard(upstream: UpstreamWrite, first: IRStep | undefined, also: Rel | undefined, message: string, fresh: Minter): GuardBinding | null {
   const at = first ? upstream.placed.get(first) : undefined;
   if (at?.when === 'free') return null;
-  if (at?.when === 'sized') return barrierHoldsAll(fresh);
   return { name: fresh('gw'), ...upstreamManyGuard(upstream, also, message, fresh) };
 }
 
@@ -2700,7 +2671,7 @@ function sequentialGuard(
     const ids = new Set<number | string>();
     if (!seen.includes(true)) reaches.forEach((reach, at) => { if (seen[at]) for (const id of reach.vertexIds) ids.add(id); });
     // An uncountable stream (a branch's arm writes) is taken to be many: the guard always raises. Where the
-    // site stands past a drain of the upstream write's stream, or a sized barrier, it owes that instead
+    // site stands past a drain of the upstream write's stream (or an implicit vertex barrier), it owes nothing
     // (`upstreamGuard`).
     const owed = upstreamGuard(upstream, step, ids.size ? freshIdsAtStart(program, ids, fresh) : undefined, message, fresh);
     if (owed) guard(owed.node, owed.guard);
@@ -2767,7 +2738,6 @@ const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() trave
 const SEQUENTIAL_WRITE = 'this traversal is not supported yet: a write here may land on what an earlier write step wrote for another traverser, and TinkerPop runs each traverser through every mutating step before the next one reaches the earlier step';
 const SEQUENTIAL_READ_AFTER = 'this traversal is not supported yet: a step here may read what another traverser writes at an earlier write step, and TinkerPop runs each traverser through every later step before the next one reaches that write';
 const SEQUENTIAL_READ_BEFORE = 'this traversal is not supported yet: a step here may read what a later write step writes for an earlier traverser, and TinkerPop runs each traverser through that write before the next one reaches this step';
-const SEQUENTIAL_BARRIER = 'this traversal is not supported yet: the barrier TinkerPop places between two steps here holds at most 2500 distinct traversers, and past that it runs the later step for some before the earlier write has run for all';
 const MERGED_WRITE = 'this traversal is not supported yet: an element reaches this write more than once where TinkerPop may have merged those traversers into one, which it writes once';
 const SEQUENTIAL_ENDPOINT ='this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
 const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
