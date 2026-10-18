@@ -20,9 +20,6 @@ import { bare, run, seededStore } from './support/harness.ts';
 import { executeQuery } from './support/executor.ts';
 
 const SEQUENTIAL = /may read what another traverser writes/;
-// A site whose KEY is only known at run time may also OVERWRITE the upstream key, which the write-after-write
-// guard (`writeAfterWrite`, write.ts) refuses first — either refusal is the reference's ordering problem.
-const SEQUENTIAL_OR_OVERWRITE = /may read what another traverser writes|may land on what an earlier write step wrote/;
 
 describe('property(k, <traversal>) refuses when an upstream write ran over more traversers than the site sees', () => {
   // [traversal, the reference's answer it used to get wrong]
@@ -61,7 +58,7 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     `g.V().sample(1).property('a',1).has('name').property('n', __.V().values('a').count())`,
   ];
   for (const traversal of refused) test(traversal, () => {
-    expect(() => run(seededStore(), traversal)).toThrow(/property\(__\./.test(traversal) ? SEQUENTIAL_OR_OVERWRITE : SEQUENTIAL);
+    expect(() => run(seededStore(), traversal)).toThrow(SEQUENTIAL);
   });
 
   // A SLICE between the upstream write and the site. Where `EarlyLimitStrategy` moves it before the write
@@ -130,7 +127,7 @@ describe('property(k, <traversal>) refuses when an upstream write ran over more 
     // a DRAIN between the upstream write and the site — `TailGlobalStep` pulls every start before it emits
     // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/TailGlobalStep.java:56-66),
     // as does a `fold()` — so every traverser has run the write first and one statement IS the reference
-    // (`Placement`, write.ts): vadas, the last, sees both labels.
+    // (`drainedAfter`, write.ts): vadas, the last, sees both labels.
     [`g.V(1,2).addLabel('z').tail(1).property('n', __.V().hasLabel('z').count())`, `g.V().has('n').values('n')`, 2],
     [`g.V(1,2).addLabel('z').fold().unfold().has('name','marko').property('n', __.V().hasLabel('z').count())`, `g.V().has('n').values('n')`, 2],
   ];

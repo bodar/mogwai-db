@@ -27,16 +27,14 @@ lowered.
   removes the Java-execution emulation (merge order, raise extent, write interleave, signed zero, UTF-16,
   Java regex, Float/out-of-range carriers) in 24 independently-landing items, and lists the sensible
   queries still declined that deserve the effort instead. Its accepted answers are feature matrix §17.
-- **Write semantics — SNAPSHOT, decided 2026-10-18; the interleave guards are to be REMOVED.** A write step
-  sees a snapshot of its input; every step after it sees all of its writes (what an explicit `barrier()`
-  gives in Java, and what TinkerPop's docs tell users to add). The per-traverser interleave emulation
-  (`readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`, `sequentialGuard`'s
-  race refusals, `mergeObservesOtherWrites`) is NOT a residue to extend: it refuses everyday writes
-  (`g.V().out().drop()`, `g.V().not(out()).drop()`, `g.V().out().property('visited',true)`).
-  Removal is work item 7 of
-  [the simplification plan](./2026-10-18-simplification-plan.md); the divergence is §17 of the feature
-  matrix. Kept: the side-effect-under-slice decline, `iterate()` → `discard()`, the `where(as(unbound))`
-  decline (`test/L4-addendum/where-start-label.feature`).
+- **Write semantics — SNAPSHOT (decided 2026-10-18; work item 7 landed).** A write step sees a snapshot
+  of its input; every step after it sees all of its writes (what an explicit `barrier()` gives in Java,
+  and what TinkerPop's docs tell users to add) — feature matrix §17. The interleave guards
+  (`readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`/`barrierHoldsAll`) are
+  deleted; `g.V().out().drop()`, `g.V().not(out()).drop()`, `g.V().out().property('visited',true)` answer
+  (`test/snapshot-writes.exec.test.ts`). Still on trunk and NOT a residue to extend: `sequentialGuard`
+  (a `property(k, <traversal>)` body over a multi-traverser write refuses; past a drain it owes nothing)
+  and `guardMergeInterleaving`/`mergeObservesOtherWrites` — candidates for the same simplification.
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed collections, member
   variants, maps, aliases, paths, and format adapters (also meta-property value typing) — the root of
   the 11-scenario scalar-transform composition gap above. One concrete unifier: thread the child-seam's

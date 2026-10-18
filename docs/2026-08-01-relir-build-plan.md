@@ -709,7 +709,7 @@ UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/featu
   consolidated into one raise, `hostTag`, every no-bare-`Error` fix, the per-value `dateAdd` message.
 - ⛔ **F — write interleave: SUPERSEDED (snapshot writes).** A write step sees a SNAPSHOT of its input;
   steps after it see all its writes (what `barrier()` gives in Java, and what TinkerPop's docs tell users
-  to add). `readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`/`barrierHoldsAll` go.
+  to add). `readBeforeWrite`/`readAfterWrite`/`writeAfterWrite`/`mergedOnceAlike`/`barrierHoldsAll` are DELETED (work item 7).
   Kept: the side-effect-under-slice decline, `iterate()` → `discard()`, the `where(as(unbound))` decline,
   shared-creation onMatch (without `ProgramWrites.reads`/`overwritten`).
 - ✅ **G — label scope into nested arms.** ONE total IR walker (`ir/walk.ts`), arm column decline,

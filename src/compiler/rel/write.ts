@@ -31,8 +31,7 @@ import { fieldCol, framingCols, PRESENT_COL, type RelFraming } from './framing.t
 import { EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
-import { eachChildChain, someStepDeep, valueNodes, type BodyReader } from '../ir/walk.ts';
-import { bulkingPositions, streamDistinctAt } from '../ir/bulk.ts';
+import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
@@ -219,7 +218,7 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   // The target is lowered like any other relation — `name` binds its shared subexpressions as CTEs —
   // and only then snapshotted. Those CTEs are read by ONE step (the snapshot's own SELECT), which is
   // exactly the case `checkSnapshots` leaves alone.
-  const targetPlan = nameBindings(idsOf(target, fresh), () => fresh('cte'));
+  const targetPlan = nameBindings(idsOf(target, fresh));
   const ids = fresh('drop');
   const owners = make.ref({ id: fresh('r'), name: ids, channels: [], type: ID_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
@@ -281,7 +280,7 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   const targetPlan = nameBindings(make.project({
     id: fresh('w'), input: target, channels: [], type: PDROP_TYPE,
     exprs: [['id', propertyRowId(target)], ['owner', propertyOwnerId(target, elem)]],
-  }), () => fresh('cte'));
+  }));
   const ids = fresh('pdrop');
   const snap = make.ref({ id: fresh('r'), name: ids, channels: [], type: PDROP_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
@@ -853,9 +852,6 @@ const targetsOf = (rows: Rel, origin: string, fresh: Minter): Rel => make.projec
 interface BodyReach {
   readonly keys: ReadonlySet<string> | 'all'; readonly leaves: boolean; readonly sources: boolean; readonly vertexSources: boolean; readonly vertexIds: ReadonlySet<number | string>;
   readonly labels: boolean; readonly edges: boolean;
-  /** The labels of the edges `edges` reaches — a labelled move's (`out('knows')`), `'all'` for any other
-   *  way; empty where the only edge reached is the traverser's own (`inV()` from it). */
-  readonly edgeLabels: KeySet;
 }
 
 const KEY_READING_STEPS: ReadonlySet<string> = new Set(['values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'has', 'hasNot', 'hasKey', 'hasValue']);
@@ -900,74 +896,45 @@ const KNOWN_READS: ReadonlySet<string> = unionOf(KEY_READING_STEPS, GRAPH_SOURCE
  *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:188-208`). */
 const MATH_WORDS: ReadonlySet<string> = new Set(['_', 'abs', 'acos', 'asin', 'atan', 'cbrt', 'ceil', 'cos', 'cosh', 'exp', 'floor', 'log', 'log10', 'log2', 'signum', 'sin', 'sinh', 'sqrt', 'tan', 'tanh']);
 
-/** The write steps a PROGRAM-level reach (`ProgramWrites.reads`) reads nothing through by themselves —
- *  their value/endpoint bodies are still walked. Inside a runtime BODY the same steps stay `OPAQUE_STEPS`. */
-const WRITES_READING_NOTHING: ReadonlySet<string> = new Set(['addV', 'addE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
-
-/** `program` — the reach of a whole PROGRAM (`ProgramWrites.reads`) rather than of a runtime body: a write
- *  step is read through its bodies, and a merge reads what its SEARCH reads.
- *  `bound` — a label or side-effect read hands back only what the traverser's path or a side effect ALREADY
- *  holds, bound by a step weighed on its own (`readBeforeWrite`, where no collector can yet hold what the
- *  write made): it reaches no element and crosses no edge by itself; its `by()` keys it still reads. */
-function bodyReach(steps: readonly IRStep[], read: BodyReader, program = false, bound = false): BodyReach {
+function bodyReach(steps: readonly IRStep[], read: BodyReader): BodyReach {
   const keys = new Set<string>();
   const vertexIds = new Set<number | string>();
-  const edgeLabels = new Set<string>();
-  let all = false, leaves = false, sources = false, vertexSources = false, labels = false, edges = false, anyEdge = false;
+  let all = false, leaves = false, sources = false, vertexSources = false, labels = false, edges = false;
   const strings = (value: unknown, into: (s: string) => void): void => {
     for (const n of valueNodes(value)) if (typeof n === 'string') into(n);
   };
-  // Reaches an edge of ANY label.
-  const edge = (): void => { edges = true; anyEdge = true; };
-  const opaque = (): void => { all = true; leaves = true; sources = true; vertexSources = true; labels = true; edge(); };
+  const opaque = (): void => { all = true; leaves = true; sources = true; vertexSources = true; labels = true; edges = true; };
   const walk = (body: readonly IRStep[]): void => {
     for (const step of body) {
       const args = step.args.map((a) => a.value);
-      if (program && WRITES_READING_NOTHING.has(step.name)) {
-        // A write reads nothing by itself; only its bodies (walked below) do.
-      } else if (program && (step.name === 'mergeV' || step.name === 'mergeE')) {
-        // A merge's SEARCH reads its map's keys and `T.label` and finds any element; a map that is not a
-        // literal (the driver's own map, a traversal) may name any key.
-        labels = true; leaves = true; sources = true; vertexSources = true; edge();
-        if (!args.length || args.some((a) => [...valueNodes(a)].some(isNested))) all = true;
-        else strings(args, (s) => keys.add(s));
-      } else if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) opaque();
+      if (OPAQUE_STEPS.has(step.name) || !KNOWN_READS.has(step.name)) opaque();
       if (GRAPH_SOURCES.has(step.name)) {
         sources = true; leaves = true;
-        if (!VERTEX_SOURCE.has(step.name)) edge();
+        if (!VERTEX_SOURCE.has(step.name)) edges = true;
         const literal = args.length > 0 && args.every((a) => typeof a === 'number' || typeof a === 'string');
         if (!literal) vertexSources = true;
         else if (VERTEX_SOURCE.has(step.name)) for (const id of args as (number | string)[]) vertexIds.add(id);
       }
-      if (ELEMENT_MOVES.has(step.name) || (LABEL_READING_STEPS.has(step.name) && !bound)) {
-        leaves = true;
-        // A move ACROSS edges reaches only those of the labels it names (`VertexStep.edgeLabels`); one from an
-        // edge to its endpoints (`EdgeVertexStep`, `otherV`) reaches no edge but the one it stands on.
-        if (VERTEX_MOVES.has(step.name) || EDGE_MOVES.has(step.name)) {
-          if (args.length && args.every((a) => typeof a === 'string')) { edges = true; for (const label of args as string[]) edgeLabels.add(label); }
-          else edge();
-        } else if (ENDPOINT_MOVES.has(step.name) || OTHER_V.has(step.name)) edges = true;
-        else edge();
-      }
+      if (ELEMENT_MOVES.has(step.name) || LABEL_READING_STEPS.has(step.name)) { leaves = true; edges = true; }
       if (LABEL_READS.has(step.name) || (step.name === 'has' && args.length >= 3)
         || readsLabelToken([...args, ...(step.modulators ?? []).flat()])) labels = true;
       // A label spelled as an argument — `where('a', P)`, `where(P.eq('a'))`, `dedup('a')` — or inside
       // `math()`'s expression.
-      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a)) && !bound) { leaves = true; edge(); }
-      if (step.name === 'math' && !bound) strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) { leaves = true; edge(); } });
+      if ((step.name === 'where' || step.name === 'dedup') && args.some((a) => !isNested(a))) { leaves = true; edges = true; }
+      if (step.name === 'math') strings(args, (s) => { if ((s.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some((w) => !MATH_WORDS.has(w))) { leaves = true; edges = true; } });
       if (KEY_READING_STEPS.has(step.name)) {
         let named = false;
         strings(args, (s) => { keys.add(s); named = true; });
         if (!named || step.name === 'hasKey' || step.name === 'hasValue') all = true;
       }
       // `format('%{name}')` reads a property OR a label by that name.
-      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); if (!bound) { leaves = true; edge(); } } });
+      if (step.name === 'format') strings(args, (s) => { for (const [, w] of s.matchAll(/%\{([^}]*)\}/g)) { keys.add(w!); leaves = true; edges = true; } });
       for (const modulator of step.modulators ?? []) for (const value of modulator) strings(value, (s) => keys.add(s));
       eachChildChain(step, read, (c) => walk(c as IRStep[]), opaque);
     }
   };
   walk(steps);
-  return { keys: all ? 'all' : keys, leaves, sources, vertexSources, vertexIds, labels, edges, edgeLabels: anyEdge ? 'all' : edgeLabels };
+  return { keys: all ? 'all' : keys, leaves, sources, vertexSources, vertexIds, labels, edges };
 }
 
 /** Does a `T.label` token sit anywhere in these argument values (a predicate's operands, a collection)? */
@@ -1019,9 +986,6 @@ export interface ProgramWrites {
   readonly labels: boolean;
   readonly creates: boolean;
   readonly edges: boolean;
-  /** The labels of the edges it creates — an `addE`'s literal label (`edge` by default), `'all'` for a
-   *  merge or a computed one — what a labelled move must name to reach one (`seesNewEdges`). */
-  readonly edgeLabels: KeySet;
   readonly drops: boolean;
   readonly draws: boolean;
   readonly upstream: UpstreamWrite[];
@@ -1056,17 +1020,6 @@ export interface ProgramWrites {
    * `by()` body, or spliced out of one (`ranPerTraverser`) — since a later `cap`/`select` observes it.
    */
   readonly truncated: boolean;
-  /**
-   * WHAT THE WHOLE PROGRAM CAN READ, at any depth (`bodyReach` in its `program` mode: a write step reads
-   * through its bodies only, a merge reads what its search reads). A write no step reads cannot be
-   * observed BETWEEN two traversers, so where the reference applies it once per traverser and the plan
-   * once per element, only the final state differs — and an idempotent write leaves one final state
-   * (`MergeWriteFacts.onMatchShareable`). `keys: 'all'` for an unreadable body.
-   */
-  readonly reads: { readonly keys: KeySet; readonly labels: boolean };
-  /** Set only by `bySites`: the write REMOVES an edge, so a step standing on an edge — an endpoint move
-   *  (`EdgeVertexStep`, `otherV`), which reaches no edge but its own — sees it go (`observes`). */
-  readonly edgeDrops?: boolean;
 }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
 interface PreCheck { readonly name: string; readonly ids: readonly (number | string)[] }
@@ -1077,207 +1030,54 @@ interface PreCheck { readonly name: string; readonly ids: readonly (number | str
  * only if a guard asks for it (`used`), so a program with no observing body pays no statement.
  */
 interface UpstreamWrite {
-  readonly effect: ProgramWrites;
-  readonly count: string | null;
-  used: boolean;
-  /** Where each LATER step of the writer's own chain stands relative to it (`interleaving`) — what a later
-   *  writer (`writeAfterWrite`) or value body (`sequentialGuard`) looks itself up in, by identity. A step
-   *  not in it (a nested body, normalized afresh) is taken to stand in the window. */
-  readonly placed: ReadonlyMap<IRStep, Placement>;
-  /** The relation the writer hands on (`WritePlace.output`), `null` where the caller has none. */
-  readonly output: Rel | null;
-  /** Does the write land only on each traverser's OWN element — a `property()` run, a label mutation, a
-   *  creation and its run (`ownWriter`, a merge excepted: its search reads what others wrote)? */
-  readonly own: boolean;
-  /** …and reach no element twice (`ownElementsDistinct`), so a later write or read on that same element
-   *  meets nothing another traverser wrote, with no run-time check? */
-  readonly ownDistinct: boolean;
-  /** What the steps FEEDING the writer read, past the traversal's own start (`feedReach`) — what a later
-   *  traverser re-runs after an earlier one went on to create, so whether this write can land on a new
-   *  element (`streamSeesCreation`). `null` where the chain is not known to begin its traversal. */
-  readonly stream: BodyReach | null;
+  readonly effect: ProgramWrites; readonly count: string | null; used: boolean;
+  /** The steps of the writer's own chain that stand past a DRAIN after it (`drains`) — every traverser
+   *  ran the write before any of them runs, so a site there owes the write nothing (`sequentialGuard`). */
+  readonly drained: ReadonlySet<IRStep>;
 }
 
-/**
- * WHERE A LATER STEP STANDS RELATIVE TO AN UPSTREAM WRITE, read off the chain between them (`interleaving`):
- *  - `window` — the reference may run it for one traverser before another reaches the write: the lazy
- *    pipeline hands traverser 1 through every later step first
- *    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`);
- *  - `free` — past a step that drains the whole stream before it emits (`drains`): every traverser ran the
- *    write before anything after it runs. So does the `NoOpBarrierStep(2500)` `LazyBarrierStrategy` puts
- *    after a vertex flat-map (`bulkingPositions`, `ir/bulk.ts`): it drains the whole stream in the reference
- *    while fewer than 2500 distinct vertices reach it, and we take that answer on ANY graph — a deliberate
- *    divergence (`docs/feature-support-matrix.md`) rather than a refusal that depends on graph size.
- *    The drain's OWN bodies stay in the window — a reducer's `by()`
- *    runs per traverser as it pulls (`ReducingBarrierStep.processAllStarts`).
- * `own` — the traverser is still the writer's own element (`'element'`), or that element's properties
- * (`'properties'`, for a `drop()`): nothing between moved it.
- */
-interface Placement { readonly when: 'window' | 'free'; readonly own: false | 'element' | 'properties' }
+/** The steps of `steps` past the first drain at or after `end` (the drain itself excluded: a reducer's
+ *  own `by()` runs per traverser as it pulls, `ReducingBarrierStep.processAllStarts`). */
+function drainedAfter(steps: readonly IRStep[], end: number): ReadonlySet<IRStep> {
+  const drain = steps.findIndex((step, i) => i >= end && drains(step));
+  return new Set(drain < 0 ? [] : steps.slice(drain + 1));
+}
 
 const everythingWritten = (truncated: boolean): ProgramWrites =>
-  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, edgeLabels: 'all', drops: true, draws: true, upstream: [], preChecks: [], truncated, reads: { keys: 'all', labels: true } });
+  ({ writers: [], sites: 'unknown', runOf: new Map(), anyKey: true, labels: true, creates: true, edges: true, drops: true, draws: true, upstream: [], preChecks: [], truncated });
 
-/** One write step of the program — WHAT it writes, at the grain a merge's search, and a later write
- *  (`overwrites`), can be observed by. */
+/** One write step of the program — WHAT it writes, at the grain a merge's search can be observed by. */
 interface WriteSite {
   readonly op: 'addV' | 'addE' | 'mergeV' | 'mergeE' | 'drop' | 'label' | 'property';
-  /**
-   * The property keys it writes onto an element that ALREADY EXISTS, `'all'` where only the run time
-   * knows: a `property()` write's key (or the map form); a merge's `onMatch` keys (empty without one); a
-   * property `drop()`'s keys (`properties(k…)`), and every key for an element drop.
-   */
-  readonly keys: KeySet;
-  /**
-   * The kind of element the write lands on, from the chain it sits in (`kindAfter`): a `property()`
-   * write's owner, a `drop()`'s target (`'property'` = property rows, the element stands). `'unknown'`
-   * where the chain does not say — every reader treats it as any kind.
-   */
-  readonly target: TargetKind;
-  /** A merge's SEARCH: the property keys it reads (`'all'` = data or a traversal decides). */
-  readonly searched?: KeySet;
-  /** A `mergeV` whose SEARCH reads a `T.label` — a label mutation changes what it finds. */
-  readonly searchesLabel?: boolean;
-  /** A merge whose `onMatch` is constant and of `single`/`set` keys — two drivers finding one element
-   *  write it alike. */
-  readonly onMatchAlike?: boolean;
-  /** A merge whose SEARCH names a `T.id` — which a creation's user-supplied id may equal. */
-  readonly searchesId?: boolean;
-  /** A `mergeV` whose `onMatch` APPENDS a `T.label` to what it finds (`MergeVertexStep.java:106-113`). */
-  readonly appendsLabel?: boolean;
-  /** A `mergeE`'s label for the edge it creates — its search's `T.label`, which `option(onCreate)` may not
-   *  override (`MergeElementStep.validateNoOverrides`,
-   *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:323-335`),
-   *  else onCreate's, else `edge`; absent = any label. */
-  readonly createsLabels?: KeySet;
-  /** A label mutation that only APPENDS (`addLabel`): two appends commute, whichever traverser runs first. */
-  readonly appends?: boolean;
-  /**
-   * A `property()`/label/`drop()` write onto the element a creation in the same chain JUST made — nothing
-   * but `KEEPS_FRESH` steps between (`freshAt`) — and which creation made it. Each traverser's creation is
-   * its own new element, so ANOTHER traverser's earlier write lands on it only where that write's stream
-   * can reach an element made after the stream began (`UpstreamWrite.stream`, `streamSeesCreation`).
-   */
-  readonly fresh?: 'addV' | 'addE' | undefined;
-  /** A creation's keys — what the `property()` run right after it writes onto the new element. Filled
-   *  by `programWrites`; absent = every key. */
-  readonly created?: KeySet;
+  /** A `property()` write's key; `'all'` when it is only known at run time (or the map form). */
+  readonly keys: ReadonlySet<string> | 'all';
 }
 
-/** What kind of element a chain's traverser is, as far as its own steps say (`kindAfter`). */
-type TargetKind = 'vertex' | 'edge' | 'property' | 'unknown';
-const VERTEX_TARGETS: ReadonlySet<string> = unionOf(VERTEX_SOURCE, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, new Set(['addV', 'mergeV', 'toV']));
-const EDGE_TARGETS: ReadonlySet<string> = unionOf(EDGE_SOURCE, EDGE_MOVES, new Set(['addE', 'mergeE', 'toE']));
-/** Steps that hand on the very traverser they were given (a filter, a side effect, a label, a slice). */
-const KIND_PRESERVING: ReadonlySet<string> = new Set([
-  'has', 'hasId', 'hasLabel', 'hasKey', 'hasValue', 'hasNot', 'is', 'where', 'filter', 'not', 'and', 'or', 'as',
-  'dedup', 'limit', 'range', 'skip', 'tail', 'coin', 'sample', 'identity', 'barrier', 'order', 'simplePath',
-  'cyclicPath', 'timeLimit', 'property', 'addLabel', 'dropLabel', 'dropLabels', 'sideEffect', 'aggregate', 'option', 'from', 'to',
-]);
-interface ChainKind { readonly kind: TargetKind; readonly keys: KeySet }
-const UNKNOWN_KIND: ChainKind = { kind: 'unknown', keys: 'all' };
-/** The traverser's kind after `step` — and, for a property stream, the keys `properties(k…)` named. */
-function kindAfter(step: IRStep, before: ChainKind): ChainKind {
-  if (VERTEX_TARGETS.has(step.name)) return { kind: 'vertex', keys: 'all' };
-  if (EDGE_TARGETS.has(step.name)) return { kind: 'edge', keys: 'all' };
-  if (step.name === 'properties') {
-    const args = step.args.map((a) => a.value);
-    return { kind: 'property', keys: args.length && args.every((key) => typeof key === 'string') ? new Set(args as string[]) : 'all' };
-  }
-  return KIND_PRESERVING.has(step.name) ? before : UNKNOWN_KIND;
-}
-
-/** The traverser's kind just BEFORE `chain[at]`, read off the chain's own steps. */
-function kindBefore(chain: readonly IRStep[], at: number): ChainKind {
-  let kind = UNKNOWN_KIND;
-  for (let i = 0; i < at; i++) kind = kindAfter(chain[i]!, kind);
-  return kind;
-}
-
-/**
- * A MERGE'S SITE — its `onMatch` keys (written onto a found element) and its search's keys and label,
- * read off the merge step and the `option()` steps after it in `chain` (`mergeMaps`, the parse the
- * lowering runs). Anything the parse cannot read statically — a traversal or data-valued map, a nested
- * key, a parse the lowering would refuse — is `'all'`, so every reader over-approximates.
- */
-function mergeSiteOf(step: IRStep, chain: readonly IRStep[] | undefined, at: number, params: Record<string, any>): WriteSite {
-  const op = step.name as 'mergeV' | 'mergeE';
-  const target: TargetKind = op === 'mergeV' ? 'vertex' : 'edge';
-  const unknown: WriteSite = { op, target, keys: 'all', searched: 'all', searchesLabel: op === 'mergeV', searchesId: true, appendsLabel: op === 'mergeV' };
-  if (!chain) return unknown;
-  let end = at + 1;
-  while (end < chain.length && chain[end]!.name === 'option') end++;
-  let maps: MergeMaps;
-  try { maps = mergeMaps(step, chain.slice(at + 1, end), op, undefined, params); } catch { return unknown; }
-  const keysOf = (spec: MergeSpec | null): KeySet => {
-    if (!spec) return new Set();
-    const keys = [...Object.values(spec.propKeys), ...Object.keys(spec.computed)];
-    return keys.every((key) => typeof key === 'string') ? new Set(keys as string[]) : 'all';
-  };
-  // A CONSTANT `onMatch` of `single`/`set` keys (an edge's are always single; a vertex key with no
-  // cardinality takes the graph's, `MergeVertexStep.java:119-126`) writes a found element alike whichever
-  // driver found it.
-  const alike = (spec: MergeSpec | null): boolean => !spec || (!Object.keys(spec.computed).length
-    && Object.values(spec.propKeys).every((key) => typeof key === 'string')
-    && Object.values(spec.props).every((value) => ![...valueNodes(value)].some(isNested))
-    && (op === 'mergeE' || Object.keys(spec.props).every((slot) => spec.propCardinalities[slot] === 'single' || spec.propCardinalities[slot] === 'set')));
-  // A search from the driver or a traversal is unknown; what `onMatch` writes is still its own map's.
-  if (maps.matchFromDriver || maps.matchTraversal) return { ...unknown, keys: keysOf(maps.onMatch), onMatchAlike: alike(maps.onMatch) };
-  const label = maps.match.label ?? maps.onCreate?.label ?? ['edge'];
-  return {
-    ...(op === 'mergeE' && Array.isArray(label) && label.every((l) => typeof l === 'string') ? { createsLabels: new Set(label) } : {}),
-    op, target, keys: keysOf(maps.onMatch), searched: keysOf(maps.match), onMatchAlike: alike(maps.onMatch),
-    searchesLabel: op === 'mergeV' && maps.match.label !== null, searchesId: maps.match.id != null,
-    appendsLabel: op === 'mergeV' && maps.onMatch !== null && maps.onMatch.label !== null,
-  };
-}
-
-/** THE ONE CLASSIFIER of a step as a write site — `programWrites`, a merge's own cluster
- *  (`mergeObservesOtherWrites`) and a terminal writer (`terminalWrite`) all read a step through it, so the
- *  merge's subtraction of itself cannot disagree with the program's count. `null` = not a write.
- *  `chain`/`at` place the step (a merge reads its `option()`s there); `kind` is the traverser it lands on. */
-function writeSiteOf(step: IRStep, chain?: readonly IRStep[], at = 0, params: Record<string, any> = {}, kind: ChainKind = UNKNOWN_KIND): WriteSite | null {
+/** THE ONE CLASSIFIER of a step as a write site — `programWrites` and a merge's own cluster
+ *  (`mergeObservesOtherWrites`) both read a step through it, so the merge's subtraction of itself cannot
+ *  disagree with the program's count. `null` = not a write. */
+function writeSiteOf(step: IRStep): WriteSite | null {
   switch (step.name) {
-    case 'addV': return { op: 'addV', keys: 'all', target: 'vertex' };
-    case 'addE': return { op: 'addE', keys: 'all', target: 'edge' };
-    case 'mergeV': case 'mergeE': return mergeSiteOf(step, chain, at, params);
-    // What a `drop()` removes is what reaches it: property rows of the keys `properties(k…)` named, or
-    // a whole element (every key, and a vertex's incident edges with it).
-    case 'drop': return { op: 'drop', target: kind.kind, keys: kind.kind === 'property' ? kind.keys : 'all', fresh: freshAt(chain, at) };
-    case 'addLabel': case 'dropLabel': case 'dropLabels':
-      return { op: 'label', keys: 'all', target: 'vertex', appends: step.name === 'addLabel', fresh: freshAt(chain, at) };
+    case 'addV': case 'addE': case 'mergeV': case 'mergeE': case 'drop': return { op: step.name, keys: 'all' };
+    case 'addLabel': case 'dropLabel': case 'dropLabels': return { op: 'label', keys: 'all' };
     case 'property': {
       const key = readCardinality(step.args.map((a) => a.value)).rest[0];
-      return { op: 'property', keys: typeof key === 'string' ? new Set([key]) : 'all', target: kind.kind, fresh: freshAt(chain, at) };
+      return { op: 'property', keys: typeof key === 'string' ? new Set([key]) : 'all' };
     }
     default: return null;
   }
 }
 
-/** Steps after which the traverser is still the element an `addV`/`addE` just made (an `addE`'s endpoint modulators among them). */
-const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as', 'from', 'to']);
+/** Steps after which the traverser is still the element an `addV`/`addE` just made. */
+const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as']);
 
-/** Is `chain[at]`'s traverser the element a creation earlier in `chain` just made — only steps that hand
- *  on the traverser they were given between (`KIND_PRESERVING`, `KEEPS_FRESH`)? The creation that made
- *  it, or `undefined` — as for a chain the caller did not place. */
-function freshAt(chain: readonly IRStep[] | undefined, at: number): 'addV' | 'addE' | undefined {
-  if (!chain) return undefined;
-  for (let i = at - 1; i >= 0; i--) {
-    const name = chain[i]!.name;
-    if (name === 'addV' || name === 'addE') return name;
-    if (!KEEPS_FRESH.has(name) && !KIND_PRESERVING.has(name)) return undefined;
-  }
-  return undefined;
-}
-
-export function programWrites(steps: readonly IRStep[], params: Record<string, any>, start: TargetKind = 'unknown'): ProgramWrites {
+export function programWrites(steps: readonly IRStep[], params: Record<string, any>): ProgramWrites {
   const writers: KeyWriter[] = [];
   const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
   // Keys a MAP-valued collector fills (keyed `group`/`groupCount`/`tree` — a `Tree` is a `HashMap`).
   const mapKeyed = new Set<string>();
   let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false, truncated = false;
-  let edgeLabels: KeySet = new Set<string>();
   // What one nested body contributes to its step: whether it has a side effect at all, and whether one of
   // them is `lazy` — made after the body's stream fanned out past one traverser, so a consumer that stops
   // pulling early cuts it short. Every node of the value is enumerated by the one IR walker (`valueNodes`);
@@ -1314,10 +1114,7 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
   // still filling where the chain is pulled (`GrowthScope`); `manyStarts` — a global child, which holds
   // every traverser its host is reached by even where `single` (per invocation) says one.
   const walk = (chain: readonly IRStep[], ownable: boolean, single: boolean, perInvocation = false, inherited: ReadonlySet<string> = new Set(), manyStarts = false): ChainEffects => {
-    let fresh = false, run = -1, pending = false, effects = false, lazy = false, creation = -1;
-    // The traverser's kind as the chain's own steps say it — the top-level chain from `start` (the
-    // element a writer slice runs over, `afterWrite`), a nested body from nothing.
-    let kind: ChainKind = ownable ? { kind: start, keys: 'all' } : UNKNOWN_KIND;
+    let fresh = false, run = -1, pending = false, effects = false, lazy = false;
     const growing = new Set(inherited), collects = new Set<string>();
     if (ownable) single = singleSource(chain);
     for (const [index, step] of chain.entries()) {
@@ -1332,30 +1129,17 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
       if (growing.size && readsSideEffect(step, growing) && !discardedRead(step, chain[index + 1], growing, mapKeyed)) truncated = true;
       const args = step.args.map((a) => a.value);
       if (step.name !== 'property') run = -1;
-      let site = writeSiteOf(step, chain, index, params, kind);
-      // A creation's site carries the keys of the run that writes onto its new element (`created`): what a
-      // later merge's search could find it by.
-      if (site && (site.op === 'addV' || site.op === 'addE')) { site = { ...site, created: new Set() }; creation = sites.length; }
-      else if (site && site.op === 'property' && site.fresh && creation >= 0) {
-        sites[creation] = { ...sites[creation]!, created: unite(sites[creation]!.created ?? 'all', site.keys) };
-      } else if (step.name !== 'as' && step.name !== 'property') creation = -1;
+      const site = writeSiteOf(step);
       if (site) sites.push(site);
-      kind = kindAfter(step, kind);
       switch (step.name) {
         case 'addV': creates = true; break;
         // An `addE` creates an EDGE and no vertex: a body re-sourcing `V()` cannot see it, only one that
         // reaches an edge (`BodyReach.edges`).
-        case 'addE': {
-          edges = true;
-          const label = args.length ? args[0] : 'edge';
-          edgeLabels = unite(edgeLabels, args.length <= 1 && typeof label === 'string' ? new Set([label]) : 'all');
-          break;
-        }
+        case 'addE': edges = true; break;
         // A merge's onMatch map APPENDS a `T.label` to the found vertex (`MergeVertexStep.java:106-113`,
         // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java`).
         case 'mergeV': creates = true; anyKey = true; labels = true; break;
-        // A merge creates an edge of the label its site names (`WriteSite.createsLabels`).
-        case 'mergeE': edges = true; edgeLabels = unite(edgeLabels, site?.createsLabels ?? 'all'); anyKey = true; labels = true; break;
+        case 'mergeE': edges = true; anyKey = true; labels = true; break;
         case 'drop': drops = true; anyKey = true; break;
         case 'addLabel': case 'dropLabel': case 'dropLabels': labels = true; break;
         // `io()` survives as itself only in a nested body read afresh; the top-level chain has been
@@ -1426,10 +1210,8 @@ export function programWrites(steps: readonly IRStep[], params: Record<string, a
     return { effects, lazy, growing, collects };
   };
   walk(steps, true, false);
-  if (unreadable) return everythingWritten(truncated);
-  const reach = bodyReach(steps, (body) => { try { return childSteps(body, params); } catch { return null; } }, true);
-  return { writers, sites, runOf, anyKey, labels, creates, edges, edgeLabels, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated,
-    reads: { keys: reach.keys, labels: reach.labels } };
+  return unreadable ? everythingWritten(truncated)
+    : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated };
 }
 
 /**
@@ -1612,12 +1394,9 @@ function createsOnce(step: IRStep, chain: readonly IRStep[], at: number): boolea
 
 /**
  * LOWER A WRITE'S TAIL WITH THE WRITE KNOWN TO BE UPSTREAM of it — the one place every mutating step's
- * continuation is composed (`place` says where the writer's steps sit, `bindings` are their statements,
- * `input` the stream they ran over), so a `property(k, <traversal>)` site anywhere in that tail, at any depth
- * that inherits this program's `ProgramWrites`, can ask how many traversers the write ran over. It is also
- * where the writer owes its own guards, all placed by ONE scan of the chain after it (`interleaving`): to the
- * upstream writes it meets (`writeAfterWrite`), to the later reads of its chain (`readAfterWrite`), and —
- * where the reference merged its traversers first — to the merge (`mergedOnceAlike`).
+ * continuation is composed (`steps[from, end)` is the step(s) it lowered, `bindings` their statements, `input` the
+ * stream they ran over), so a `property(k, <traversal>)` site anywhere in that tail, at any depth that
+ * inherits this program's `ProgramWrites`, can ask how many traversers the write ran over.
  *
  * That count is what the site's own host cannot say. The reference pulls traverser 2 through the
  * upstream write only after traverser 1 has gone all the way through the site, whatever FILTER sits in
@@ -1634,891 +1413,19 @@ function createsOnce(step: IRStep, chain: readonly IRStep[], at: number): boolea
  * `coin()`/`sample()` in it would draw afresh there, so it need not count the stream the write consumed.
  */
 export function afterWrite<T extends { readonly effects?: readonly Binding[] }>(
-  writes: ProgramWrites, input: Rel | null, place: WritePlace, bindings: readonly Binding[],
-  params: Record<string, any>, fresh: Minter, tail: () => T | null, elem?: Elem,
+  writes: ProgramWrites, input: Rel | null, steps: readonly IRStep[], from: number, end: number, bindings: readonly Binding[],
+  params: Record<string, any>, fresh: Minter, tail: () => T | null,
 ): T | null {
-  const writer = place.steps.slice(place.from, place.end);
-  // `elem` — the element the writer runs over, where its own steps do not say (a `property()` run, a
-  // label mutation): what `overwrites` reads to tell a vertex write from an edge drop.
-  const effect = programWrites(writer, params, elem ?? 'unknown');
-  // A write the reference runs ONCE for k merged traversers, where the plan runs it k times, is a different
-  // write unless running it once leaves what running it k times would (`mergedOnceAlike`) — or nothing
-  // reaches it twice, which a guard checks at run time (`repeatedGuard`).
-  const merged = !place.unbulked && !mergedOnceAlike(writer, effect, elem);
-  if (merged && !(input && streamKey(input))) return null;
-  const own = ownWriter(writer, effect, params);
   const entry: UpstreamWrite = {
-    effect, count: input && !writes.draws ? fresh('wn') : null, used: false,
-    placed: interleaving(place, own !== null), output: place.output ?? null,
-    own: own !== null && !own.some((step) => step.name === 'mergeV' || step.name === 'mergeE'),
-    ownDistinct: own !== null && ownElementsDistinct(place, own),
-    stream: feedReach(place, params),
+    effect: programWrites(steps.slice(from, end), params), count: input && !writes.draws ? fresh('wn') : null, used: false,
+    drained: drainedAfter(steps, end),
   };
-  const reads = readAfterWrite(writes, entry, place, own ?? writer, elem, params, fresh);
-  const ordered = [
-    ...(merged && input ? [repeatedGuard(input, 'traverser', MERGED_WRITE, fresh)] : []),
-    ...writeAfterWrite(writes, effect.sites, fresh, writer[0]), ...readBeforeWrite(writes, entry, place, own, input, params, fresh), ...reads.before,
-  ];
   writes.upstream.push(entry);
   let lowered: T | null;
   try { lowered = tail(); } finally { writes.upstream.splice(writes.upstream.indexOf(entry), 1); }
   if (!lowered) return null;
   const counted = input && entry.count !== null && entry.used ? [streamCount(input, entry.count, fresh)] : [];
-  return { ...lowered, effects: [...counted, ...ordered, ...bindings, ...reads.after, ...(lowered.effects ?? [])] };
-}
-
-/** WHERE A WRITER SITS: the chain it is part of (`steps`), its own steps `[from, end)`, the traversal that
- *  chain is known to begin (`ChainCtx.traversal`, which places the reference's barriers in it), and the
- *  relation the writer hands on (`output` — its elements, for a guard that no element reached it twice). */
-export interface WritePlace {
-  readonly steps: readonly IRStep[];
-  readonly from: number;
-  readonly end: number;
-  readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean; readonly allStarts?: true } | undefined;
-  /** Does the reference reach the writer with every traverser at bulk 1 — none merged (`unbulkedAt`)? */
-  readonly unbulked: boolean;
-  readonly output?: Rel | undefined;
-}
-
-/**
- * DOES RUNNING THE WRITE ONCE FOR A MERGED TRAVERSER LEAVE WHAT RUNNING IT ONCE PER TRAVERSER WOULD? A
- * `SideEffectStep` and a `ScalarMapStep` call `sideEffect`/`map` once per traverser OBJECT, whatever its bulk
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/SideEffectStep.java`,
- * `…/step/map/ScalarMapStep.java`), so where the reference merged k equal traversers before the write (an
- * inserted `NoOpBarrierStep`, a repeated `inject` literal — `ir/bulk.ts`) it writes ONCE where the plan
- * writes k times: `g.V().out().addV('x')` makes 4 vertices, not 6. Alike: a drop, a label mutation, a
- * `single`/`set` property (an edge's is always single). Not: a creation (one element, not k), a `list`
- * property (one value appended, not k), a write in a nested body (unread here). A merge is its own
- * lowering's question (`driversUnbulked`).
- */
-function mergedOnceAlike(writer: readonly IRStep[], effect: ProgramWrites, elem: Elem | undefined): boolean {
-  if (effect.sites === 'unknown') return false;
-  const own = writer.filter((step) => writeSiteOf(step) !== null);
-  if (own.some((step) => step.name === 'mergeV' || step.name === 'mergeE')) return true;
-  if (effect.sites.length !== own.length) return false;
-  return own.every((step) => {
-    if (step.name === 'addV' || step.name === 'addE') return false;
-    if (step.name !== 'property') return true;
-    return writesAlike(step, elem);
-  });
-}
-
-/** Is a `property()` write one a second run leaves as the first did — `single`/`set` cardinality, or an
- *  edge's (always single)? (Its VALUE is the caller's to judge.) */
-function writesAlike(step: IRStep, elem: Elem | undefined): boolean {
-  const { cardinality } = readCardinality(step.args.map((a) => a.value));
-  return cardinality === 'single' || cardinality === 'set' || (cardinality === null && elem === 'edge');
-}
-
-/** The column a stream's traverser OBJECTS are equal by — an element's id, a value's payload — or `null`
- *  where the relation names neither. Equal by it is at least as coarse as `Traverser.equals` on that
- *  object (SQLite's `1 = 1.0` merges what Java keeps apart), which only makes `repeatedGuard` raise more. */
-function streamKey(rel: Rel): 'id' | 'v' | null {
-  if (rel.type.cols.some((column) => column.name === 'id')) return 'id';
-  return rel.type.cols.some((column) => column.name === 'v') ? 'v' : null;
-}
-
-/**
- * A GUARD raising `message` when `rel` holds one thing twice (bulk-weighted). `by`:
- *  - `'traverser'` — what `mergedOnceAlike` owes where the reference may have MERGED equal traversers: a
- *    merged traverser of bulk k is k rows of one traverser here, so none twice means nothing merged. A
- *    traverser is its object AND the state it carries — its labelled path (`alias`, `path`), sack, loops,
- *    origin, graph (`B_LP_O_S_SE_SL_Traverser.equals`,
- *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_LP_O_S_SE_SL_Traverser.java:113-125`);
- *    order and bulk are not identity;
- *  - `'object'` — what a write or read on the traverser's OWN element owes where that element may be
- *    another traverser's too: two traversers on one element, whatever their paths (`streamKey`).
- */
-function repeatedGuard(rel: Rel, by: 'traverser' | 'object', message: string, fresh: Minter): GuardBinding {
-  const identity = new Set([streamKey(rel) ?? 'id', ...(by === 'object' ? [] : rel.channels
-    .filter((channel) => channel.role !== 'encounter' && channel.role !== 'bulk').map((channel) => channel.col))]);
-  const keys = rel.type.cols.filter((column) => identity.has(column.name));
-  const bulk = rel.channels.find((channel) => channel.role === 'bulk');
-  const counted = make.aggregate({
-    id: fresh('wc'), input: rel, channels: [], type: typeOf(...keys, meta('n', 'int')), groupBy: keys.map((column) => col(rel.id, column.name)),
-    aggs: [['n', bulk ? { kind: 'agg', fn: 'sum', args: [col(rel.id, bulk.col)] } : { kind: 'agg', fn: 'count', args: [compilerInt(1)] }]],
-  });
-  const repeated = make.filter({
-    id: fresh('rf'), input: counted, channels: [], type: counted.type,
-    pred: { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) },
-  });
-  return {
-    name: fresh('gm'), guard: { message, raiseWhen: 'rows' },
-    node: make.project({ id: fresh('p'), input: repeated, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(repeated.id, 'n')]] }),
-  };
-}
-
-/** The flat-maps whose stream is VERTICES, after which an implicit `NoOpBarrierStep` is taken as a drain
- *  (`Placement`): `VertexStep` to vertices, `EdgeVertexStep`, a mid-chain `V()`. */
-const VERTEX_FLAT_MAPS: ReadonlySet<string> = unionOf(VERTEX_MOVES, ENDPOINT_MOVES, new Set(['V']));
-
-/** Writers that land on the traverser they are given — or, a creation or a merge, hand on the element
- *  they made or found. */
-const OWNING_WRITERS: ReadonlySet<string> = new Set(['property', 'addLabel', 'dropLabel', 'dropLabels', 'addV', 'addE', 'mergeV', 'mergeE']);
-/** The steps a writer slice may hold besides its writes: a creation's endpoints and labels, a merge's options. */
-const WRITER_SLICE_STEPS: ReadonlySet<string> = new Set(['from', 'to', 'as', 'option']);
-/** Branch steps whose ONE body runs per traverser and hands on what it emits (`BranchStep` with one
- *  option, `OptionalStep`) — so a body that only writes hands on what its writer does. */
-const ONE_BODY_BRANCHES: ReadonlySet<string> = new Set(['union', 'optional']);
-
-/**
- * THE WRITER'S STEPS, WHERE IT WRITES ONLY WHAT IT HANDS ON — every traverser's own element (`property()`, a
- * label mutation), a new one (`addV`/`addE`), or what a merge found or made — and nothing in a nested body;
- * else `null`. A one-body branch whose body is such a writer is that writer (`union(__.property('k',1))`).
- */
-function ownWriter(writer: readonly IRStep[], effect: ProgramWrites, params: Record<string, any>): readonly IRStep[] | null {
-  if (effect.sites === 'unknown') return null;
-  let steps = writer;
-  const host = writer[0];
-  if (writer.length === 1 && host && ONE_BODY_BRANCHES.has(host.name) && host.args.length === 1 && isNested(host.args[0]!.value)
-    && !host.modulators?.length && !host.optionArms) {
-    try { steps = childSteps((host.args[0]!.value as { nested: unknown }).nested, params); } catch { return null; }
-  }
-  if (!steps.length || !OWNING_WRITERS.has(steps[0]!.name)) return null;
-  const writes = steps.filter((step) => writeSiteOf(step) !== null);
-  if (writes.length + steps.filter((step) => WRITER_SLICE_STEPS.has(step.name)).length !== steps.length) return null;
-  return effect.sites.length === writes.length ? steps : null;
-}
-
-/**
- * EVERY LATER STEP OF THE WRITER'S CHAIN, PLACED (`Placement`). One scan, the authority every interleaving
- * question asks — a later read (`readAfterWrite`), a later writer (`writeAfterWrite`), a later value body
- * (`sequentialGuard`). The implicit barriers are `ir/bulk.ts`'s (`bulkingPositions`, the exact scan), read
- * only where the chain is known to begin its traversal; anywhere it cannot place them none is assumed,
- * which only keeps a step in the window. `own` — the writer hands on what it wrote (`ownWriter`).
- */
-function interleaving(place: WritePlace, own: boolean): Map<IRStep, Placement> {
-  const { steps, end, traversal } = place;
-  const barriers = new Set<number>();
-  if (traversal?.steps === steps) {
-    const positions = bulkingPositions(steps, traversal.rooted, steps.length, !traversal.rooted && !traversal.allStarts);
-    if (positions !== 'unknown') {
-      for (const p of positions) if (p.kind === 'lazy' && p.after >= end && VERTEX_FLAT_MAPS.has(steps[p.after]!.name)) barriers.add(p.after);
-    }
-  }
-  const placed = new Map<IRStep, Placement>();
-  let when: Placement['when'] = 'window';
-  let mine: Placement['own'] = own ? 'element' : false;
-  for (let i = end; i < steps.length; i++) {
-    const step = steps[i]!;
-    placed.set(step, { when, own: mine });
-    if (drains(step) || barriers.has(i)) when = 'free';
-    mine = mine === 'element' && step.name === 'properties' ? 'properties'
-      : mine === 'element' && KIND_PRESERVING.has(step.name) ? 'element' : false;
-  }
-  return placed;
-}
-
-/**
- * Does the own writer (`ownWriter`) reach NO element twice? A creation makes a new element per traverser,
- * and so does a write right after one (`freshAt`); a `property()` run or a label mutation writes the element
- * it is given, so the stream reaching it must be pairwise distinct (`streamDistinctAt` — a ROOT start naming
- * distinct ids, then filters; a child's "one traverser" is one per INVOCATION, and the plan runs every
- * invocation at once, so a child never qualifies). A merge may find one element for many drivers.
- */
-function ownElementsDistinct(place: WritePlace, own: readonly IRStep[]): boolean {
-  const first = own[0]!.name;
-  if (first === 'mergeV' || first === 'mergeE') return false;
-  if (first === 'addV' || first === 'addE' || freshAt(place.steps, place.from)) return true;
-  const traversal = place.traversal;
-  return !!traversal?.rooted && traversal.steps === place.steps && streamDistinctAt(place.steps, place.from, traversal);
-}
-
-/** The steps that read the traverser's own element by themselves: its properties, its label, its id. */
-const OWN_READS: ReadonlySet<string> = unionOf(KEY_READING_STEPS, LABEL_READS, new Set(['id']));
-/** A later write's own modulator steps — their bodies are that write's own guards' (`sequentialGuard`). */
-const WRITE_MODULATORS: ReadonlySet<string> = new Set(['from', 'to', 'option']);
-
-/**
- * **READ AFTER WRITE — THE GUARDS A WRITE OWES THE LATER READS OF ITS OWN CHAIN.** The reference hands
- * traverser 1 through every later step before traverser 2 reaches the write (`Placement`), so a later read
- * sees only EARLIER traversers' writes, where the plan's read sees them all: `g.inject(1,2).addV('x').V()
- * .hasLabel('x').count()` is 3 in the reference. A step in the write's window that can observe what it writes
- * (`chainObserves`, at any depth of the step's bodies) owes the stream count's guard (`upstreamManyGuard` —
- * one traverser, or refuse); one past a drain (or an implicit vertex barrier, `Placement`) owes nothing.
- * A later WRITE step's own read is that writer's question (`writeAfterWrite`), and its value and endpoint
- * bodies are `sequentialGuard`'s, so neither is weighed here.
- *
- * A read of the traverser's OWN element — the step itself, nothing having moved it — after a writer that
- * hands on what it wrote, sees what another traverser wrote only on an element both reached: none, where
- * `ownReadExact` proves it, else the guard that no element left the writer twice (`repeatedGuard` over its
- * output, `after` its statements — a refusal there rolls the program back like any other).
- */
-function readAfterWrite(
-  writes: ProgramWrites, entry: UpstreamWrite, place: WritePlace, writer: readonly IRStep[], elem: Elem | undefined,
-  params: Record<string, any>, fresh: Minter,
-): { readonly before: Binding[]; readonly after: Binding[] } {
-  const read: BodyReader = (body) => { try { return childSteps(body, params); } catch { return null; } };
-  let owed = false;
-  let ownOwed = false;
-  const ids = new Set<number | string>();
-  let inWrite = false;
-  for (let i = place.end; i < place.steps.length && !owed; i++) {
-    const step = place.steps[i]!;
-    const at = entry.placed.get(step)!;
-    if (at.when === 'free') break;
-    if (writeSiteOf(step) !== null) { inWrite = true; continue; }
-    if (inWrite && WRITE_MODULATORS.has(step.name)) continue;
-    inWrite = false;
-    const reach = bodyReach([step], read, true);
-    const seen = chainObserves(reach, entry.effect);
-    if (!seen) continue;
-    // The endpoints of the traverser's own edge: no write changes an edge's endpoints.
-    if (at.own === 'element' && ENDPOINT_MOVES.has(step.name) && !hasBody(step)) continue;
-    if (at.own === 'element' && OWN_READS.has(step.name) && !hasBody(step)) {
-      if (!ownReadExact(reach, entry, writer, elem)) ownOwed = true;
-      continue;
-    }
-    if (seen === 'fresh-ids') { for (const id of reach.vertexIds) ids.add(id); continue; }
-    owed = true;
-  }
-  const keyed = entry.output && streamKey(entry.output) ? entry.output : null;
-  const after = ownOwed && keyed ? [repeatedGuard(keyed, 'object', SEQUENTIAL_READ_AFTER, fresh)] : [];
-  if (ownOwed && !keyed) owed = true;
-  const before: Binding[] = [];
-  if (owed || ids.size) {
-    const also = owed ? undefined : freshIdsAtStart(writes, ids, fresh);
-    before.unshift({ name: fresh('gr'), ...upstreamManyGuard(entry, also, SEQUENTIAL_READ_AFTER, fresh) });
-  }
-  return { before, after };
-}
-
-/** The own writers that land on the traverser's EXISTING element — not a creation's new one, not what a
- *  merge found. */
-const OWN_ELEMENT_WRITERS: ReadonlySet<string> = new Set(['property', 'addLabel', 'dropLabel', 'dropLabels']);
-
-/**
- * **READ BEFORE WRITE — THE GUARDS A WRITE OWES THE EARLIER READS OF ITS OWN CHAIN.** The mirror of
- * `readAfterWrite`: the lazy pipeline hands traverser 1 through the write before traverser 2 reaches an
- * EARLIER step (`LazyBarrierStrategy.java:93-130`, no barrier between), so that step, run for traverser 2,
- * sees what the write did for traverser 1 — where the plan runs the step for every traverser first.
- * `g.V(4,5).where(__.in().hasNot('w')).property(single,'w',2)` writes josh alone in the reference (ripple's
- * `in()` is josh, written by then), and `g.inject(1,2).V().addV('x')` makes 18 vertices (traverser 2's `V()`
- * re-reads traverser 1's six). Each step between the write and the nearest DRAIN before it (which ran for
- * every traverser before anything after it, `drains`, or an implicit vertex barrier, `Placement`) that can
- * observe what the write writes
- * (`chainObserves`, any depth of its bodies) owes, by where it stands:
- *  - nothing, where at most ONE traverser reaches it (`singleSource`, then `KEEPS_ONE` steps) — no later
- *    traverser re-runs it — AND that one traverser's pass hands the writer nothing before the step's last
- *    read (`handsOnWithoutRereading`: a body that fans it out runs lazily, so the step's later outputs are
- *    read after the earlier ones were written) — or it is the traversal's own start;
- *  - a read of the traverser's OWN element (nothing moving it between) before a write of that element:
- *    nothing where the stream reaching it is pairwise distinct (`streamDistinctAt`) — no other traverser
- *    writes that element — else the run-time guard that no element reaches the write twice
- *    (`repeatedGuard` over its input). That is enough: two traversers on one element read it alike
- *    before any write, so where the first passed to write, the second passed too in the plan, and reaches
- *    the write unless a later step (weighed on its own) drops it alike in both;
- *  - in the window: a refusal once ANY traverser reaches the write (`upstreamManyGuard` at one) — until
- *    the first one does, no step has seen it, so the plan's pre-write reads are the reference's; through
- *    literal vertex ids alone (`'fresh-ids'`), only while one of them named no vertex at the start.
- * A write step between is not weighed: its own value and endpoint bodies are `sequentialGuard`'s, and its
- * write is `writeAfterWrite`'s.
- */
-function readBeforeWrite(
-  writes: ProgramWrites, entry: UpstreamWrite, place: WritePlace, own: readonly IRStep[] | null, input: Rel | null,
-  params: Record<string, any>, fresh: Minter,
-): Binding[] {
-  const { steps, from, traversal } = place;
-  const known = traversal?.steps === steps;
-  const rooted = known && !!traversal?.rooted;
-  const read: BodyReader = (body) => { try { return childSteps(body, params); } catch { return null; } };
-  // The implicit vertex barriers before the writer, each a drain (`Placement`): one stands right after `steps[i]`.
-  const barriers = new Set<number>();
-  if (known) {
-    // Scanned only up to the writer: what follows it (its own endpoint bodies, its tail) places nothing before
-    // it, while what the scan reads of the WHOLE traversal (a path requirement, a `drop()`) it still reads.
-    const positions = bulkingPositions(steps, traversal!.rooted, from, !traversal!.rooted && !traversal!.allStarts);
-    if (positions !== 'unknown') {
-      for (const p of positions) if (p.kind === 'lazy' && p.after < from && VERTEX_FLAT_MAPS.has(steps[p.after]!.name)) barriers.add(p.after);
-    }
-  }
-  // At most one traverser reaches `steps[i]` (only the root chain can say so: a body runs once per invocation).
-  const single: boolean[] = [];
-  let one = rooted && singleSource(steps);
-  for (let i = 1; i < from; i++) {
-    single[i] = one;
-    one &&= KEEPS_ONE.has(steps[i]!.name);
-  }
-  // A `drop()` lands on the traverser's own element too — a property drop on a property only its element owns.
-  const ownElement = own !== null && (OWN_ELEMENT_WRITERS.has(own[0]!.name) || own[0]!.name === 'drop');
-  // A collector at or after the writer may hold what the write made for an earlier traverser, which a
-  // side-effect or label read before it then hands back; with none, such a read reaches nothing (`bodyReach`'s `bound`).
-  const bound = !someStepDeep(steps.slice(from), read, (s) => collectsSideEffect(s as IRStep), true);
-  const observedBy = (chain: readonly IRStep[]): boolean => !!chainObserves(bodyReach(chain, read, true, bound), bySites(entry.effect, 'unknown'));
-  // `finalHop`'s premise for a COUNTED hop: the stream entering `at` is pairwise distinct (`streamDistinctAt`)
-  // AND no step before it reads what the write changes, so each traverser reaches the hop exactly as it would
-  // on the unwritten graph — `g.V(1).outE().inV().bothE().skip(1).drop()` drops edge 11 from vadas, after
-  // which marko's outer traverser on 11 (now removed) reaches nothing (`TinkerEdge.vertices`).
-  const anchor = edgeAnchor(steps, from, (at) => rooted && streamDistinctAt(steps, at, traversal) && !observedBy(steps.slice(1, at)));
-  const sites = entry.effect.sites;
-  const site = sites !== 'unknown' && sites.length === 1 && steps[from]?.name === 'drop' ? sites[0]! : null;
-  // The final hop before a VERTEX drop (`droppingHop`) and whether the guard it owes is taken.
-  const hop = site?.target === 'vertex' ? droppingHop(steps, from) : -1;
-  let linked = false;
-  // A DROP every traverser on one element makes alike — the second removes what the first already did — so
-  // an own read before it needs no element reached once: a property drop always; an element drop where the
-  // element was reached by the hop the drop's own guard weighs (`droppingHop`, an edge `edgeAnchor`), so a
-  // second traverser on it is one the reference never has there once it is gone (its edge went with it).
-  const reachedBy = site?.target === 'vertex' ? hop : site?.target === 'edge' && anchor ? anchor.at : -1;
-  const idempotentAt = (i: number): boolean => site !== null && (site.target === 'property' || (reachedBy >= 0 && i > reachedBy));
-  let owed = false;
-  let ownOwed = false;
-  const ids = new Set<number | string>();
-  let mine = ownElement;
-  for (let i = from - 1; i >= (rooted ? 1 : 0) && !owed; i--) {
-    const step = steps[i]!;
-    if (drains(step) || barriers.has(i)) break;
-    const onOwn = mine;
-    // A `properties()` step hands on a property only its element owns: that element still owns what is written.
-    mine &&= KIND_PRESERVING.has(step.name) || (step.name === 'properties' && !hasBody(step));
-    if (single[i] && handsOnWithoutRereading(step, read, observedBy)) continue;
-    if (writeSiteOf(step) !== null || (WRITE_MODULATORS.has(step.name) && modulatesWrite(steps, i))) continue;
-    const reach = bodyReach([step], read, true, bound);
-    // A step reading only the traverser's own element reads an element of the kind the chain says it is.
-    const ownRead = OWN_READS.has(step.name) && !hasBody(step);
-    const effect = bySites(entry.effect, ownRead ? kindBefore(steps, i).kind : 'unknown', onOwn && site?.target === 'edge');
-    const seen = chainObserves(reach, effect);
-    if (!seen) continue;
-    if (onOwn && ownRead) {
-      if (!idempotentAt(i) && !(rooted && streamDistinctAt(steps, i, traversal, OWN_ELEMENT_WRITERS))) ownOwed = true;
-      continue;
-    }
-    if (i === hop) { linked = true; continue; }
-    // The final hop before an EDGE drop (`edgeAnchor`'s `at`) owes nothing: it leaves from a vertex no edge drop
-    // removes, and an edge it reaches that an earlier traverser already dropped is a second drop, a no-op.
-    if (site?.target === 'edge' && i === reachedBy) continue;
-    // On the anchor's vertex, a first hop in a PINNED direction crosses no edge another traverser wrote.
-    const anchored = anchor !== null && i <= anchor.at && steps.slice(i, anchor.at).every((s) => KIND_PRESERVING.has(s.name));
-    const residue = anchored ? anchoredResidue(step, anchor.pinned, read) : null;
-    if (residue && !chainObserves(bodyReach(residue, read, true, bound), effect)) {
-      // A drop is idempotent: a later traverser on the same vertex removes, if anything, the very edges an
-      // earlier one there already removed — what it reads of that vertex's edges before it changes nothing.
-      if (!anchor!.keyed || (rooted && streamDistinctAt(steps, i, traversal, OWN_ELEMENT_WRITERS))) continue;
-      ownOwed = true;
-      continue;
-    }
-    if (seen === 'fresh-ids') { for (const id of reach.vertexIds) ids.add(id); continue; }
-    owed = true;
-  }
-  const keyed = input && streamKey(input) ? input : null;
-  if ((ownOwed && !keyed) || (linked && !(input && streamKey(input) === 'id'))) owed = true;
-  if (owed || ids.size) {
-    const also = owed ? undefined : freshIdsAtStart(writes, ids, fresh);
-    return [{ name: fresh('gq'), ...upstreamManyGuard(entry, also, SEQUENTIAL_READ_BEFORE, fresh, 1) }];
-  }
-  return [
-    ...(ownOwed && keyed ? [repeatedGuard(keyed, 'object', SEQUENTIAL_READ_BEFORE, fresh)] : []),
-    ...(linked && input ? dropTargetsLinked(input, fresh) : []),
-  ];
-}
-
-/**
- * **DOES ONE TRAVERSER'S PASS THROUGH `step` HAND THE WRITER ITS OUTPUTS ONLY AFTER EVERY READ IT MAKES?**
- * The question `readBeforeWrite` owes a step only one traverser reaches: no LATER traverser re-runs the
- * step, but its body runs lazily, so where it fans that one traverser out, an output reaches the writer
- * while the body still has reads to make for the next one — `g.V(1).local(__.out().both()).drop()` drops
- * vadas, then runs `both()` for lop, then for josh, each after the drops before it, exactly as the root
- * chain `g.V(1).out().both().drop()` does (which `readBeforeWrite` refuses). Answered for the step's own
- * bodies, at any depth, by ONE walk (`chainHandsOnWithoutRereading`):
- *  - a step that hands on at most one traverser (`KEEPS_ONE`) completes every body read before it hands it
- *    on; a bare step reads its one traverser's adjacency at once (what the root chain lifts too);
- *  - `local()`/`flatMap()`/`optional()`/`coalesce()`/`choose()` (no folded option arms) run ONE body lazily
- *    for the traverser (`LocalStep`, `TraversalFlatMapStep`, `CoalesceStep.flatMap` — an arm it rejects
- *    handed nothing on — and `BranchStep.standardAlgorithm`, whose choice is tested before any option
- *    runs): each body is weighed as a chain of its own;
- *  - `union()` drains its arms one after another (`BranchStep.standardAlgorithm`,
- *    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java:123-153`),
- *    so a later arm runs after every output of the earlier ones was written: the first arm is weighed as a
- *    chain, every later one must observe nothing the write changes —
- *    `g.V(1).union(__.identity(), __.out()).drop()` drops marko before `out()` reads his edges;
- *  - anything else — a `repeat()`, whose emitted traverser reaches the writer before its loop-back is
- *    expanded (`RepeatStep.java:208-278`, `RepeatEndStep` 334-354), a folded option cluster, an unreadable
- *    body — must observe nothing the write changes at all.
- * `observed` is the writer's `chainObserves` over a chain.
- */
-function handsOnWithoutRereading(step: IRStep, read: BodyReader, observed: (chain: readonly IRStep[]) => boolean): boolean {
-  if (KEEPS_ONE.has(step.name) || !hasBody(step)) return true;
-  const arms: (readonly IRStep[])[] = [];
-  let unreadable = false;
-  eachChildChain(step, read, (chain) => arms.push(chain as readonly IRStep[]), () => { unreadable = true; });
-  const plain = !step.modulators?.length && !step.withArgs?.length && !step.repeatRegion && !step.optionArms;
-  if (!plain || unreadable || !LAZY_BODY_HOSTS.has(step.name)) return !observed([step]);
-  if (step.name === 'union') return arms.every((arm, k) => k === 0 ? chainHandsOnWithoutRereading(arm, read, observed) : !observed(arm));
-  return arms.every((arm) => chainHandsOnWithoutRereading(arm, read, observed));
-}
-/** The hosts that run a body LAZILY for the one traverser they are given (`handsOnWithoutRereading`). */
-const LAZY_BODY_HOSTS: ReadonlySet<string> = new Set(['local', 'flatMap', 'optional', 'coalesce', 'choose', 'union']);
-
-/** `handsOnWithoutRereading` for a CHAIN one traverser enters: while at most one traverser reaches a step
- *  (`KEEPS_ONE` before it) the step is weighed on its own; once one fans out, every step after it re-runs
- *  per traverser, after the writer took the earlier ones, so it must observe nothing the write changes. */
-function chainHandsOnWithoutRereading(chain: readonly IRStep[], read: BodyReader, observed: (chain: readonly IRStep[]) => boolean): boolean {
-  let one = true;
-  for (const step of chain) {
-    if (one ? !handsOnWithoutRereading(step, read, observed) : observed([step])) return false;
-    one &&= KEEPS_ONE.has(step.name);
-  }
-  return true;
-}
-
-/**
- * THE FINAL HOP BEFORE A VERTEX `drop()` — a bare `out`/`in`/`both` with nothing but kind-preserving steps
- * after it — or `-1`. A `DropStep` switches `LazyBarrierStrategy` off (`LazyBarrierStrategy.java:80-86`), so a
- * later traverser re-runs the hop after an earlier one dropped. What it then reaches differs only where the
- * hop leaves from, or lands on, a vertex already dropped: landing on one, the drop it would make is already
- * made; leaving from one `u` that the plan's hop takes to some `v` — both being dropped, `u ≠ v` — the plan
- * drops `v` where the reference may not. So the hop is exact when no edge joins two distinct dropped vertices
- * (`dropTargetsLinked`): `g.V().hasLabel('person').aggregate('a').out('created').drop()` drops lop and ripple
- * either way, and `g.V().out().drop()` refuses (josh is dropped from marko, then reached from his own start).
- */
-function droppingHop(steps: readonly IRStep[], from: number): number {
-  return finalHop(steps, from, VERTEX_MOVES, () => false);
-}
-
-/**
- * THE FINAL HOP BEFORE A `drop()` — the position of a bare move of `moves` with nothing but kind-preserving
- * steps after it — or `-1`. The one authority `droppingHop` (a vertex drop) and `edgeAnchor` (an edge drop)
- * both ask. Its idempotence argument — a later traverser re-running the hop reaches, beyond what the
- * reference's does, only elements already dropped — holds while each traverser is dropped or kept by ITSELF
- * alone. A step between that counts the stream (`STREAM_COUNTING`: `RangeGlobalStep`, `TailGlobalStep`,
- * `CoinStep`, `SampleGlobalStep` under
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/`)
- * spends its budget on the plan's extra duplicates the reference never makes:
- * `g.V().bothE().limit(4).drop()` drops 9, 7, 8 and 11 in the reference (vadas's 7 is gone before his own
- * start is read), but the plan's fourth traverser is 7 again. So there, no hop is final — unless
- * `distinctAt(hop)` vouches that the stream ENTERING the hop is pairwise distinct and is read off a graph no
- * write has changed (nothing before the hop observes it). Without that, an upstream read loses a traverser
- * the write removed, which idempotence hides only while nothing counts: with a slice, the lost traverser was
- * the reference's window (`g.V(1).outE().inV().bothE().skip(1).drop()` — vadas's drop of edge 11 empties
- * marko's second outer traverser), and `g.V(1,1)` is ONE traverser in the plan but two in the reference.
- * Given it, two counts by construction meet no duplicate:
- *  - a slice with no upper bound (`skip(n)`, `range(n, -1)`) spends its whole budget on the first `n`
- *    traversers, which reach it before any reaches the write — the plan's prefix is the reference's — and
- *    keeps every traverser after them by itself alone: `g.V().bothE().skip(3).drop()`;
- *  - an `outE()`/`inE()` hop out of that stream reaches each edge ONCE, and an edge drop removes that edge
- *    alone, so no later traverser of the reference's stream differs from the plan's:
- *    `g.V().outE().limit(4).drop()`.
- * A vertex drop (`droppingHop`) vouches for nothing: its hop's own read observes the drop.
- */
-function finalHop(steps: readonly IRStep[], from: number, moves: ReadonlySet<string>, distinctAt: (at: number) => boolean): number {
-  let m = from - 1;
-  let counted = 'none' as 'none' | 'skip' | 'window';
-  while (m >= 0 && KIND_PRESERVING.has(steps[m]!.name)) {
-    if (STREAM_COUNTING.has(steps[m]!.name)) counted = unboundedSkip(steps[m]!) && counted !== 'window' ? 'skip' : 'window';
-    m--;
-  }
-  const move = steps[m];
-  if (!move || !moves.has(move.name) || hasBody(move)) return -1;
-  if (counted === 'none') return m;
-  if (!distinctAt(m)) return -1;
-  return counted === 'skip' || move.name === 'outE' || move.name === 'inE' ? m : -1;
-}
-/** A GLOBAL slice with no upper bound — `skip(n)`, `range(n, -1)` (`finalHop`). */
-const unboundedSkip = (step: IRStep): boolean =>
-  !isLocalScope(step) && (step.name === 'skip' || (step.name === 'range' && step.args.length === 2 && Number(step.args[1]!.value) === -1));
-/** The filters whose verdict on a traverser depends on the traversers before it (`finalHop`). */
-const STREAM_COUNTING: ReadonlySet<string> = unionOf(SLICE_STEPS, new Set(['tail', 'coin', 'sample']));
-
-/** The guard `droppingHop` owes: raise when an edge joins two distinct vertices of `targets` (bulk-free ids). */
-function dropTargetsLinked(targets: Rel, fresh: Minter): Binding[] {
-  const plan = nameBindings(idsOf(targets, fresh), () => fresh('cte'));
-  const name = fresh('dt');
-  const dropped = (): Rel => make.ref({ id: fresh('r'), name, channels: [], type: ID_TYPE });
-  const scan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')) });
-  const joins: Expr = {
-    kind: 'binary', op: 'and',
-    left: { kind: 'binary', op: 'and',
-      left: { kind: 'in-query', expr: col(scan.id, 'src'), plan: dropped(), negated: false },
-      right: { kind: 'in-query', expr: col(scan.id, 'tgt'), plan: dropped(), negated: false } },
-    right: { kind: 'binary', op: '!=', left: col(scan.id, 'src'), right: col(scan.id, 'tgt') },
-  };
-  const linking = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: joins });
-  return [
-    ...plan.bindings, { name, node: plan.result, snapshot: true },
-    {
-      name: fresh('gl'), guard: { message: SEQUENTIAL_READ_BEFORE, raiseWhen: 'rows' },
-      node: make.project({ id: fresh('p'), input: linking, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(linking.id, 'id')]] }),
-    },
-  ];
-}
-
-/**
- * WHAT A WRITE CHANGES THAT AN EARLIER STEP READING ELEMENTS OF KIND `kind` CAN SEE (`readBeforeWrite`),
- * read off its SITES where it knows them:
- *  - keys: a `property()` write's own, a merge's `onMatch` keys alone on an element it FINDS
- *    (`WriteSite.keys`, `MergeVertexStep.java:78-116`), a property `drop()`'s named keys — each only on an
- *    element of its own kind (`WriteSite.target`); what it writes onto a NEW element only a source reaches
- *    (`creates`), and an element drop is `drops`', its element losing every key (`anyKey` stays, unless that
- *    element is of the other kind);
- *  - labels: a label mutation or a `mergeV` `onMatch` append (`MergeVertexStep.java:106-113`) — never an
- *    edge's, which is fixed at creation;
- *  - removals (`drops`): an ELEMENT drop alone — a property drop leaves every element standing, so no move
- *    and no source reaches anything it removed;
- *  - an EDGE removal (`edgeDrops`) is seen by a step standing on an edge too — an endpoint move, which crosses
- *    no edge but its own: a removed `TinkerEdge` has no vertices
- *    (`tinkergraph-gremlin/…/structure/TinkerEdge.java`, `vertices()`), so in `g.V(1).outE().inV().outE().drop()`
- *    over a self-loop, the loop's own `outE()` drops marko's second edge before that outer traverser's `inV()`
- *    runs, and it reaches nothing. Not by a step on an edge only its OWN traverser drops (`ownDropped`): an
- *    equal traverser before it removed it, and the plan's second drop of it is a no-op;
- *  - a new EDGE (`edges`), which any move over a label it can carry crosses (`seesNewEdges`): a later
- *    traverser's move re-run after an earlier traverser's `addE` crosses the new edge
- *    (`g.V(1,4).out().addE('k').to(V(3))` makes 6 edges in the reference, not 5). Where the move is the
- *    FIRST hop off the vertex the write's edge is pinned to, `readBeforeWrite` lifts it (`edgeAnchor`).
- */
-function bySites(effect: ProgramWrites, kind: TargetKind, ownDropped = false): ProgramWrites {
-  const sites = effect.sites;
-  if (sites === 'unknown') return effect;
-  const apart = (site: WriteSite): boolean =>
-    (kind === 'vertex' || kind === 'edge') && (site.target === 'vertex' || site.target === 'edge') && site.target !== kind;
-  const elementDrop = (site: WriteSite): boolean => site.op === 'drop' && site.target !== 'property';
-  const labels = effect.labels && kind !== 'edge' && sites.some((site) => site.op === 'label' || (site.op === 'mergeV' && site.appendsLabel !== false));
-  // An EDGE drop removes no vertex: only what reaches an edge — a move across one, an `E()` source — sees it go.
-  const edgeDrops = sites.some((site) => elementDrop(site) && site.target === 'edge');
-  // …and one on an edge only ITS OWN traverser drops (`ownDropped`) sees no other's drop: an equal traverser
-  // before it finds it gone, where the plan's re-drop is a no-op.
-  const standing = edgeDrops && !ownDropped;
-  const drops = effect.drops && sites.some((site) => elementDrop(site) && site.target !== 'edge');
-  const edges = effect.edges || edgeDrops;
-  const edgeLabels: KeySet = edgeDrops ? 'all' : effect.edgeLabels;
-  // `writers` are the `property()` sites, in the order the walk met them.
-  const properties = sites.filter((site) => site.op === 'property');
-  const writers = properties.length === effect.writers.length ? effect.writers.filter((_, at) => !apart(properties[at]!)) : effect.writers;
-  if (!effect.anyKey || sites.some((site) => elementDrop(site) && !apart(site))) return { ...effect, writers, labels, drops, edges, edgeLabels, edgeDrops: standing };
-  let keys: KeySet = new Set<string>();
-  for (const site of sites) if ((site.op === 'mergeV' || site.op === 'mergeE' || site.op === 'drop') && !apart(site) && !elementDrop(site)) keys = unite(keys, site.keys);
-  return { ...effect, anyKey: false, labels, drops, edges, edgeLabels, edgeDrops: standing, writers: [...writers, { run: -1, keys, fresh: false }] };
-}
-
-/**
- * WHERE A WRITE'S EDGES ARE PINNED TO ONE TRAVERSER'S VERTEX — the vertex entering `steps[at]` — and in which
- * direction, or `null`:
- *  - an `addE` with no `from()` makes an edge OUT of the traverser's vertex, with no `to()` one INTO it
- *    (`AddEdgeStep`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AddEdgeStep.java`:
- *    an unset endpoint is the traverser); `at` is the `addE` itself, and the write's input is those vertices
- *    (`keyed`, so a run-time guard can say no vertex reached it twice);
- *  - an edge `drop()` reached by `outE()`/`inE()`/`bothE()` (`finalHop`) removes an edge out of / into (/ either way of)
- *    the vertex entering that move, which stands at `at`. Not `keyed`, and owing nothing even over a stream
- *    that reaches one vertex twice: a drop is idempotent, and every traverser on one vertex removes the same
- *    edges of it, so a later one's read of them changes nothing it removes.
- * Another traverser's edge is then pinned to ITS vertex, so a hop in a pinned direction off a different
- * vertex never crosses it: `where(__.not(__.inE('l'))).addE('l').from(…)` (replication's placement) reads
- * only edges INTO its own vertex, and another traverser's new edge goes into that one's.
- */
-function edgeAnchor(steps: readonly IRStep[], from: number, distinctAt: (at: number) => boolean): { readonly at: number; readonly pinned: ReadonlySet<string>; readonly keyed: boolean } | null {
-  const writer = steps[from];
-  if (writer?.name === 'addE') {
-    let named = new Set<string>();
-    for (let j = from + 1; j < steps.length && ADD_E_CLUSTER.has(steps[j]!.name); j++) named = new Set([...named, steps[j]!.name]);
-    const pinned = new Set([...(named.has('from') ? [] : ['out']), ...(named.has('to') ? [] : ['in'])]);
-    return pinned.size ? { at: from, pinned, keyed: true } : null;
-  }
-  if (writer?.name !== 'drop') return null;
-  const m = finalHop(steps, from, EDGE_MOVES, distinctAt);
-  if (m < 0) return null;
-  // A `bothE()` drop removes an edge out of ONE vertex and into another, so it pins no direction: another
-  // traverser's drop may take an edge either way off this vertex. Only the hop itself is lifted (`readBeforeWrite`).
-  const move = steps[m]!.name;
-  return { at: m, pinned: new Set(move === 'outE' ? ['out'] : move === 'inE' ? ['in'] : []), keyed: false };
-}
-/** The steps an `addE`'s own cluster holds after it: its endpoints, its properties, a label. */
-const ADD_E_CLUSTER: ReadonlySet<string> = new Set(['from', 'to', 'property', 'as']);
-/** The filters whose bodies start from the traverser itself and hand it on unchanged. */
-const FILTER_WRAPPERS: ReadonlySet<string> = new Set(['where', 'not', 'filter', 'and', 'or']);
-
-/** Is `step` a bare move off its vertex in a `pinned` direction — `out`/`outE` over `out`, `in`/`inE` over
- *  `in`, `both`/`bothE` over both? */
-function pinnedHop(step: IRStep, pinned: ReadonlySet<string>): boolean {
-  if ((!VERTEX_MOVES.has(step.name) && !EDGE_MOVES.has(step.name)) || hasBody(step)) return false;
-  if (!step.args.every((a) => typeof a.value === 'string')) return false;
-  const dir = step.name.replace(/E$/, '');
-  return dir === 'both' ? pinned.has('out') && pinned.has('in') : pinned.has(dir);
-}
-
-/**
- * WHAT `step`, ON THE ANCHOR'S VERTEX (`edgeAnchor`), READS BESIDES A FIRST HOP IN A PINNED DIRECTION — the
- * steps left to weigh, or `null` where it cannot say. A pinned hop leaves nothing; a filter wrapper
- * (`where`/`not`/`filter`/`and`/`or`) whose every body is read: its leading own-vertex steps, each weighed
- * the same way, and everything AFTER the body's first pinned hop whole (it stands on what the hop reached).
- * Any other step stands as it is.
- */
-function anchoredResidue(step: IRStep, pinned: ReadonlySet<string>, read: BodyReader): IRStep[] | null {
-  if (pinnedHop(step, pinned)) return [];
-  if (!FILTER_WRAPPERS.has(step.name)) return [step];
-  if (step.modulators?.length || step.optionArms || step.repeatRegion || step.withArgs?.length || !step.args.length) return null;
-  const residue: IRStep[] = [];
-  for (const arg of step.args) {
-    if (!isNested(arg.value)) return null;
-    const body = read((arg.value as { nested: unknown }).nested) as readonly IRStep[] | null;
-    if (!body) return null;
-    for (let j = 0; j < body.length; j++) {
-      const inner = body[j]!;
-      if (pinnedHop(inner, pinned)) { residue.push(...body.slice(j + 1)); break; }
-      if (!KIND_PRESERVING.has(inner.name)) { residue.push(...body.slice(j)); break; }
-      const own = anchoredResidue(inner, pinned, read);
-      if (!own) return null;
-      residue.push(...own);
-    }
-  }
-  return residue;
-}
-
-/** Is the `from`/`to`/`option` modulator at `steps[at]` one of a WRITE step's (the nearest step before it
- *  that is no modulator writes)? */
-function modulatesWrite(steps: readonly IRStep[], at: number): boolean {
-  let i = at;
-  while (i >= 0 && WRITE_MODULATORS.has(steps[i]!.name)) i--;
-  return i >= 0 && writeSiteOf(steps[i]!) !== null;
-}
-
-/**
- * What the steps FEEDING a writer read, past its traversal's own start — the start runs once, before
- * anything is written, and every later step re-runs per traverser (`UpstreamWrite.stream`). `null` where
- * the chain is not known to begin its traversal (a nested body runs once per invocation, start and all),
- * or where a step reads a path label or a side effect, whose element another traverser may have put there.
- */
-function feedReach(place: WritePlace, params: Record<string, any>): BodyReach | null {
-  const { steps, from, traversal } = place;
-  if (traversal?.steps !== steps) return null;
-  const read: BodyReader = (body) => { try { return childSteps(body, params); } catch { return null; } };
-  const feed = steps.slice(traversal.rooted ? 1 : 0, from);
-  if (someStepDeep(feed, read, (step) => LABEL_READING_STEPS.has(step.name), true)) return null;
-  return bodyReach(feed, read, true);
-}
-
-/**
- * Can a write fed by `stream` (`feedReach`) land on an element `creation` made for an EARLIER traverser —
- * the traverser reaching the write having re-run its feed after that creation? An `addV`'s vertex is
- * reached by a `V()` source (`vertexSources`), over an edge the program also creates (`edges`), or by a
- * literal id that names no vertex yet (`'fresh-ids'`, the ids); an `addE`'s edge by any edge reach.
- */
-function streamSeesCreation(stream: BodyReach | null, creation: 'addV' | 'addE', program: ProgramWrites): boolean | ReadonlySet<number | string> {
-  if (!stream) return true;
-  if (creation === 'addE') return seesNewEdges(stream, program);
-  if (stream.vertexSources || seesNewEdges(stream, program)) return true;
-  return stream.vertexIds.size ? stream.vertexIds : false;
-}
-
-/** Does the step hold a nested body anywhere — an argument, a modulator, a `with()`? */
-const hasBody = (step: IRStep): boolean =>
-  [...step.args.map((a) => a.value), ...(step.modulators ?? []).flat(), ...[...(step.withArgs ?? [])].map(([, v]) => v)]
-    .some((value) => [...valueNodes(value)].some(isNested)) || !!step.repeatRegion || !!step.optionArms;
-
-/**
- * `observes` for a step of the WRITER'S OWN CHAIN: a key written onto a NEW element (`KeyWriter.fresh`) is
- * seen only by re-sourcing the graph — the chain reaches its own new element as its own (`ownReadExact`),
- * and no movement from an older element reaches a new one but over a new edge, which `edges` already sees.
- */
-function chainObserves(reach: BodyReach, effect: ProgramWrites): boolean | 'fresh-ids' {
-  if (reach.sources) return observes(reach, effect);
-  return observes(reach, { ...effect, writers: effect.writers.filter((writer) => !writer.fresh) });
-}
-
-/**
- * Is a read of the traverser's own element exact after this write, over any number of traversers, with no
- * run-time check? Where no element is written twice (`ownElementsDistinct`); where every traverser writes it
- * ALIKE — a constant `single`/`set` `property()` (`writesAlike`), a constant label mutation — so a second
- * traverser re-writes what the first already read; and after a merge alone, where the only write another
- * traverser makes on a found element is its `onMatch` (`MergeVertexStep.java:78-116`): a read of keys and
- * labels `onMatch` does not touch.
- */
-function ownReadExact(reach: BodyReach, entry: UpstreamWrite, writer: readonly IRStep[], elem: Elem | undefined): boolean {
-  if (entry.ownDistinct) return true;
-  const sites = entry.effect.sites;
-  if (sites === 'unknown') return false;
-  if (writer[0]?.name === 'mergeV' || writer[0]?.name === 'mergeE') {
-    if (sites.length !== 1) return false;
-    // An `onMatch` every driver writes alike re-writes what the first already read — and over several
-    // drivers the merge lowering refuses a driver matching what an earlier one created
-    // (`guardMergeInterleaving`), so no read sees a creation another driver's `onMatch` then changed.
-    const site = sites[0]!;
-    return !!site.onMatchAlike || (!meets(reach.keys, site.keys) && !(site.appendsLabel && reach.labels));
-  }
-  return writer.every((step) => {
-    if (step.name === 'as') return true;
-    if (hasBody(step)) return false;
-    if (step.name === 'addLabel' || step.name === 'dropLabel' || step.name === 'dropLabels') return true;
-    return step.name === 'property' && writesAlike(step, elem);
-  });
-}
-
-type GuardBinding = Binding & { readonly node: Rel; readonly guard: Guard };
-
-/**
- * THE GUARD `site` OWES ONE UPSTREAM WRITE, by where it stands (`Placement`): nothing past a drain, the
- * upstream stream's count in the window. `first` is the
- * site's own step, looked up by identity; one the upstream chain did not place stands in the window.
- */
-function upstreamGuard(upstream: UpstreamWrite, first: IRStep | undefined, also: Rel | undefined, message: string, fresh: Minter): GuardBinding | null {
-  const at = first ? upstream.placed.get(first) : undefined;
-  if (at?.when === 'free') return null;
-  return { name: fresh('gw'), ...upstreamManyGuard(upstream, also, message, fresh) };
-}
-
-/**
- * **WRITE AFTER WRITE — THE GUARDS A WRITER OWES EVERY UPSTREAM WRITE IT MEETS** (`overwrites`), each by
- * where the writer stands (`upstreamGuard`), and run BEFORE the writer's own statements. EVERY write site
- * asks it, with every site it writes (`WriteSite`, any depth of its bodies): `afterWrite` for a writer with
- * a tail — a `property()` run, a label mutation, an `addV`/`addE`, a `mergeV`/`mergeE` with its
- * `onMatch`/`onCreate` options and `property()` tail, a branch whose arms write — and a TERMINAL writer
- * (`drop()`, which composes no continuation) through `terminalWrite`. `first` is the writer's own first step.
- *
- * A write on the traverser's OWN element (no movement since, `Placement.own`) after an upstream write that
- * wrote only each traverser's own element (`UpstreamWrite.own`) meets what another traverser wrote only on
- * an element both reached: none where no element reached the upstream twice (`ownDistinct`), else the
- * guard that none did (`repeatedGuard` over its output) — `g.V(1,2).property(single,'w',5).properties('w').drop()`.
- */
-export function writeAfterWrite(writes: ProgramWrites, writer: readonly WriteSite[] | 'unknown', fresh: Minter, first?: IRStep): Binding[] {
-  const ownOnly = writer !== 'unknown' && writer.length > 0 && writer.every((site) => site.op === 'property' || site.op === 'drop' || site.op === 'label');
-  return writes.upstream.map((upstream) => {
-    // Can the upstream write land on what a creation before `writer` made for an earlier traverser? Not
-    // where its feed cannot reach it (`streamSeesCreation`); through literal ids alone, only while one of
-    // them named no vertex at the start.
-    const sees = (creation: 'addV' | 'addE'): boolean | ReadonlySet<number | string> => streamSeesCreation(upstream.stream, creation, writes);
-    if (!overwrites(upstream.effect.sites, writer, (creation) => sees(creation) === false)) return null;
-    if (ownOnly && upstream.own && first && upstream.placed.get(first)?.own) {
-      if (upstream.ownDistinct) return null;
-      if (upstream.output && streamKey(upstream.output)) return repeatedGuard(upstream.output, 'object', SEQUENTIAL_WRITE, fresh);
-    }
-    const ids = new Set<number | string>();
-    const blindButIds = !overwrites(upstream.effect.sites, writer, (creation) => {
-      const seen = sees(creation);
-      if (seen === true) return false;
-      if (seen !== false) for (const id of seen) ids.add(id);
-      return true;
-    });
-    return upstreamGuard(upstream, first, blindButIds && ids.size ? freshIdsAtStart(writes, ids, fresh) : undefined, SEQUENTIAL_WRITE, fresh);
-  }).filter((guard): guard is GuardBinding => guard !== null);
-}
-
-/** `writeAfterWrite` and `readBeforeWrite` for a TERMINAL `drop()`, which composes no continuation: its
- *  guards ahead of its own statements. `target` is what the lowering drops — an element of a known kind, or
- *  (`'property'`) the property rows of the stream ending at `place.from`, whose keys the chain's
- *  `properties(k…)` names; `input` is the stream reaching it. A read upstream of the drop that a later
- *  traverser re-runs sees what it removed for an earlier one — a `DropStep` switches `LazyBarrierStrategy`
- *  off altogether (`LazyBarrierStrategy.java:80-86`), so nothing is pulled ahead: `g.V().not(__.out()).drop()`
- *  drops peter too in the reference (lop is gone before peter is read). */
-export function terminalWrite(
-  writes: ProgramWrites, target: Elem | 'property', place: WritePlace, input: Rel, bindings: readonly Binding[],
-  params: Record<string, any>, fresh: Minter,
-): Binding[] {
-  const { steps, from: at } = place;
-  const kind: ChainKind = target === 'property'
-    ? (() => { const before = kindBefore(steps, at); return before.kind === 'property' ? before : { kind: 'property', keys: 'all' }; })()
-    : { kind: target, keys: 'all' };
-  const site = writeSiteOf(steps[at]!, steps, at, {}, kind)!;
-  const entry: UpstreamWrite = {
-    effect: { ...programWrites([steps[at]!], params), sites: [site] }, count: writes.draws ? null : fresh('wn'), used: false,
-    placed: new Map(), output: null, own: false, ownDistinct: false, stream: null,
-  };
-  // A property drop's input is its property rows, not the element that owns them: no guard keyed on it.
-  const before = readBeforeWrite(writes, entry, place, [steps[at]!], target === 'property' ? null : input, params, fresh);
-  const counted = entry.count !== null && entry.used ? [streamCount(input, entry.count, fresh)] : [];
-  return [...counted, ...writeAfterWrite(writes, [site], fresh, steps[at]), ...before, ...bindings];
-}
-
-
-
-/**
- * **CAN `later` LAND ON, OR FIND, WHAT `earlier` WROTE — so that which of the two runs first for a given
- * traverser is the reference's per-traverser order, not the plan's per-step order?** The lazy pipeline hands
- * traverser 1 through EVERY later step before traverser 2 reaches the earlier one (no barrier after a short
- * id source or a first flat-map, none at all on a labelled path,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:93-130`;
- * `AddPropertyStep` mutates per traverser, `…/step/sideEffect/AddPropertyStep.java:94`; a merge searches,
- * then runs `onMatch` or creates, per traverser, `…/step/map/MergeVertexStep.java:78-116`,
- * `…/step/map/MergeEdgeStep.java:255-292`; `DropStep` removes per traverser). So
- * `g.inject(1,2).as('a').V(1).property(single,'w',5).filter(select('a').is(1)).property(single,'w',9)` leaves
- * `w=5` — traverser 2's 5 lands after traverser 1's 9 — and so does `….filter(select('a').is(1))
- * .mergeV([name:'marko']).option(onMatch,[w:single(9)])`, where one statement per step leaves 9 for both.
- * Read off the two writes' SITES (`writeSiteOf`), over-approximating by key, by element KIND and by
- * freshness; identity (the traverser's OWN element) and position (a drain, a barrier between) are
- * `writeAfterWrite`'s, through `Placement`:
- *  - two `property()` writes whose keys meet, unless one lands on a vertex and the other on an edge; two
- *    label mutations, unless both only APPEND (`addLabel` commutes with itself);
- *  - a `drop()` against an earlier write it can remove: property rows of a key the earlier write wrote, or
- *    a whole element of a kind the earlier write may have landed on (a vertex drop takes its edges with
- *    it, so it meets everything; an edge drop meets an edge or unknown write, never a vertex's);
- *  - a MERGE, as either side, by what it writes onto a FOUND element (its `onMatch` keys, an appended
- *    label) and by what its SEARCH reads (its keys, a `T.label`), never across element kinds: a later merge
- *    meets an earlier write of a key it searches or re-writes, an earlier label mutation it searches by (or,
- *    a removal, an append it makes), and an earlier creation its search can find (`findsCreated` — a new
- *    vertex matches only a search whose keys its run wrote; an edge search resolves its endpoints by vertex,
- *    `MergeEdgeStep.resolveVertex`, and meets every creation); an earlier merge meets a later write of a
- *    key it searched or re-wrote. A drop before anything meets it.
- *  - a creation (`addV`/`addE`) as the LATER side writes a new element per traverser and meets nothing, and
- *    so does a `property()`/label write onto the element this traverser just made (`WriteSite.fresh`) after
- *    any non-merge write whose feed cannot reach that creation (`blind` — `streamSeesCreation`: a later
- *    traverser re-runs the feed after an earlier one created, so a mid-chain `V()` there lands the earlier
- *    write on the new element too); as the EARLIER side a creation meets only a later merge's search
- *    (above). A later write REACHING another traverser's creation reads it first — `readAfterWrite`'s question.
- */
-function overwrites(before: readonly WriteSite[] | 'unknown', after: readonly WriteSite[] | 'unknown', blind: (creation: 'addV' | 'addE') => boolean): boolean {
-  if (before === 'unknown' || after === 'unknown') return true;
-  const isMerge = (site: WriteSite): boolean => site.op === 'mergeV' || site.op === 'mergeE';
-  const creates = (site: WriteSite): boolean => site.op === 'addV' || site.op === 'addE' || isMerge(site);
-  // What a write may touch on an EXISTING element: the keys it writes there, plus — a merge — the keys
-  // its search reads (a write between two traversers' searches changes what the second finds).
-  const touched = (site: WriteSite): KeySet => isMerge(site) ? unite(site.keys, site.searched ?? 'all') : site.keys;
-  // Does a `drop()` site remove what `site` wrote (or a merge read)?
-  const removes = (drop: WriteSite, site: WriteSite): boolean => {
-    if (site.op === 'addV' || site.op === 'addE') return false;
-    if (site.op === 'drop') return true;
-    if (drop.target === 'property') return site.op !== 'label' && meets(drop.keys, touched(site));
-    if (drop.target === 'edge') return site.target === 'edge' || site.target === 'unknown';
-    return true;
-  };
-  // Two writes onto elements of DIFFERENT known kinds — a vertex's and an edge's — never land on one element.
-  const apart = (a: WriteSite, b: WriteSite): boolean =>
-    (a.target === 'vertex' || a.target === 'edge') && (b.target === 'vertex' || b.target === 'edge') && a.target !== b.target;
-  // Does a label mutation and a merge's label handling meet? A search by label reads what the mutation
-  // changes; an `onMatch` label APPEND commutes with another append, never with a removal.
-  const labelsMeet = (label: WriteSite, merge: WriteSite): boolean => !!merge.searchesLabel || (!!merge.appendsLabel && !label.appends);
-  // Can a later VERTEX merge's search find what an earlier creation made? By a key the creation's run
-  // wrote, by a label or an id it may share, or by an empty search, which finds every vertex.
-  const findsCreated = (creation: WriteSite, merge: WriteSite): boolean => {
-    if (creation.op !== 'addV') return false;
-    if (merge.searchesLabel || merge.searchesId || merge.searched === undefined || merge.searched === 'all' || merge.searched.size === 0) return true;
-    return meets(merge.searched, creation.created ?? 'all');
-  };
-  const clash = (a: WriteSite, b: WriteSite): boolean => {
-    if (a.op === 'drop') return b.op !== 'addV' && b.op !== 'addE';
-    if (b.op === 'drop') return removes(b, a);
-    // A write onto the element this traverser just made: no earlier write of another traverser's reached it.
-    if (b.fresh && (a.op === 'property' || a.op === 'label') && blind(b.fresh)) return false;
-    if (isMerge(b)) {
-      if (a.op === 'property') return !apart(a, b) && meets(a.keys, touched(b));
-      if (a.op === 'label') return b.op === 'mergeV' && labelsMeet(a, b);
-      // An earlier creation the later search can find: an edge search resolves its endpoints by vertex
-      // (`MergeEdgeStep.resolveVertex`) and may find an edge, so it meets every creation and merge.
-      if (b.op === 'mergeE') return true;
-      return isMerge(a) ? a.target === 'vertex' : findsCreated(a, b);
-    }
-    if (b.op === 'addV' || b.op === 'addE') return false;
-    if (isMerge(a)) return !apart(a, b) && (b.op === 'label' ? labelsMeet(b, a) : meets(b.keys, touched(a)));
-    if (creates(a)) return false;
-    if (a.op === 'property' && b.op === 'property') return !apart(a, b) && meets(a.keys, b.keys);
-    return a.op === 'label' && b.op === 'label' && !(a.appends && b.appends);
-  };
-  return before.some((a) => after.some((b) => clash(a, b)));
-}
-
-/** A GUARD raising `message` when more than one (`atLeast`, default two) traverser ran through `upstream`
- *  — its retained stream count (`afterWrite`), or, where nothing counts that stream, always — and
- *  (`also`) only while that relation holds a row. Marks the count used. */
-function upstreamManyGuard(upstream: UpstreamWrite, also: Rel | undefined, message: string, fresh: Minter, atLeast = 2): { readonly node: Rel; readonly guard: Guard } {
-  upstream.used = true;
-  const counted = upstream.count === null
-    ? make.values({ id: fresh('wu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(2)]] })
-    : make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
-  const more: Expr = { kind: 'binary', op: '>=', left: col(counted.id, 'n'), right: compilerInt(atLeast) };
-  const many = make.filter({
-    id: fresh('rf'), input: counted, channels: [], type: counted.type,
-    pred: also ? { kind: 'binary', op: 'and', left: more, right: { kind: 'exists', plan: also, negated: false } } : more,
-  });
-  return {
-    guard: { message, raiseWhen: 'rows' },
-    node: make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
-  };
+  return { ...lowered, effects: [...counted, ...bindings, ...(lowered.effects ?? [])] };
 }
 
 /** How many TRAVERSERS `input` holds — its rows, each weighted by its bulk where it carries one — as a
@@ -2532,10 +1439,6 @@ function streamCount(input: Rel, name: string, fresh: Minter): Binding {
   return { name, node, snapshot: true };
 }
 
-/** Can a body that reaches `reach` cross an edge `program` creates — one of a label it can move over? */
-const seesNewEdges = (reach: BodyReach, program: ProgramWrites): boolean =>
-  reach.edges && program.edges && meets(reach.edgeLabels, program.edgeLabels);
-
 /** Can a body that reaches `reach` observe what `effect` writes — onto any element, since an upstream
  *  write's traversers are not the site's? `'fresh-ids'`: only through a literal vertex id that may name
  *  a vertex the write creates (`BodyReach.vertexIds`), which the program's start decides. */
@@ -2544,7 +1447,7 @@ const observes = (reach: BodyReach, effect: ProgramWrites): boolean | 'fresh-ids
   for (const writer of effect.writers) keys = unite(keys, writer.keys);
   if (meets(reach.keys, keys) || (effect.labels && reach.labels)
     || (reach.sources && effect.drops) || (effect.creates && reach.vertexSources)
-    || seesNewEdges(reach, effect) || (reach.leaves && effect.drops) || (reach.edges && effect.edgeDrops === true)) return true;
+    || (reach.edges && effect.edges) || (reach.leaves && effect.drops)) return true;
   return effect.creates && reach.vertexIds.size > 0 ? 'fresh-ids' : false;
 };
 
@@ -2637,8 +1540,8 @@ function sequentialGuard(
   const readsOwn = reaches.some((reach) => meets(reach.keys, own));
   const readsElsewhere = reaches.some((reach) => meets(reach.keys, elsewhere) || (program.labels && reach.labels));
   const seesNew = reaches.some((reach) => (reach.sources && program.drops) || (program.creates && reach.vertexSources)
-    || seesNewEdges(reach, program) || (reach.leaves && program.drops)
-    || (meets(reach.keys, created) && (reach.vertexSources || seesNewEdges(reach, program))));
+    || (reach.edges && program.edges) || (reach.leaves && program.drops)
+    || (meets(reach.keys, created) && (reach.vertexSources || (program.edges && reach.edges))));
   const perStream = readsElsewhere || seesNew || (readsOwn && (leaves || site.resolve === 'first'));
   const perElement = !perStream && readsOwn;
   // A literal vertex id sees a NEW vertex only if it named none at the program's start (`BodyReach.vertexIds`):
@@ -2663,16 +1566,26 @@ function sequentialGuard(
   // own stream's count, not the host's: a filter, a `limit`, a `select` between the two hides from the
   // host the traversers the reference has not yet pulled through the write (`afterWrite`).
   for (const upstream of program.upstream) {
+    // Past a drain of the write's stream every traverser ran the write first: nothing is owed.
+    if (step !== undefined && upstream.drained.has(step)) continue;
     const seen = reaches.map((reach) => observes(reach, upstream.effect));
     if (!seen.some(Boolean)) continue;
+    upstream.used = true;
     // Seen only through literal vertex ids: only when one of them named no vertex at the program's start.
     const ids = new Set<number | string>();
     if (!seen.includes(true)) reaches.forEach((reach, at) => { if (seen[at]) for (const id of reach.vertexIds) ids.add(id); });
-    // An uncountable stream (a branch's arm writes) is taken to be many: the guard always raises. Where the
-    // site stands past a drain of the upstream write's stream (or an implicit vertex barrier), it owes nothing
-    // (`upstreamGuard`).
-    const owed = upstreamGuard(upstream, step, ids.size ? freshIdsAtStart(program, ids, fresh) : undefined, message, fresh);
-    if (owed) guard(owed.node, owed.guard);
+    const also = ids.size ? freshIdsAtStart(program, ids, fresh) : undefined;
+    // An uncountable stream (a branch's arm writes) is taken to be many: the guard always raises.
+    const counted = upstream.count === null
+      ? make.values({ id: fresh('wu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(2)]] })
+      : make.ref({ id: fresh('r'), name: upstream.count, channels: [], type: typeOf(meta('n', 'int')) });
+    const more: Expr = { kind: 'binary', op: '>', left: col(counted.id, 'n'), right: compilerInt(1) };
+    const many = make.filter({
+      id: fresh('rf'), input: counted, channels: [], type: counted.type,
+      pred: also ? { kind: 'binary', op: 'and', left: more, right: { kind: 'exists', plan: also, negated: false } } : more,
+    });
+    guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', col(many.id, 'n')]] }),
+      { message, raiseWhen: 'rows' });
   }
   if (!perElement && !perStream) return;
   const counts = make.aggregate({
@@ -2733,11 +1646,7 @@ function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
 }
 
 const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here may read what another traverser writes, and TinkerPop runs each traverser through every mutating step before resolving the next one\'s value';
-const SEQUENTIAL_WRITE = 'this traversal is not supported yet: a write here may land on what an earlier write step wrote for another traverser, and TinkerPop runs each traverser through every mutating step before the next one reaches the earlier step';
-const SEQUENTIAL_READ_AFTER = 'this traversal is not supported yet: a step here may read what another traverser writes at an earlier write step, and TinkerPop runs each traverser through every later step before the next one reaches that write';
-const SEQUENTIAL_READ_BEFORE = 'this traversal is not supported yet: a step here may read what a later write step writes for an earlier traverser, and TinkerPop runs each traverser through that write before the next one reaches this step';
-const MERGED_WRITE = 'this traversal is not supported yet: an element reaches this write more than once where TinkerPop may have merged those traversers into one, which it writes once';
-const SEQUENTIAL_ENDPOINT ='this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
+const SEQUENTIAL_ENDPOINT = 'this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
 const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
 const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes the first result of its traversal, and the traversal produced several different values with no order to say which is first';
 
@@ -4419,12 +3328,11 @@ function writeSnapshot(input: Rel, fresh: Minter): { readonly bindings: readonly
  * bindings in order), each raising in one runtime situation:
  *
  *  - **(1) two drivers land on ONE pre-existing element** while the `onMatch`/tail `repeats` (a `list`
- *    append, a per-traverser value — each driver writes its own), `mutatesSearch` (it writes a key the
- *    search reads, so the later driver's search no longer finds the element) or is `overwritten` (another
- *    write sets one of its keys, and the loop orders that write between the two drivers' re-writes).
+ *    append, a per-traverser value — each driver writes its own) or `mutatesSearch` (it writes a key the
+ *    search reads, so the later driver's search no longer finds the element).
  *  - **(2) a later driver would MATCH what an earlier one CREATED** — two drivers that both missed, whose
  *    searches `couldMatch` the earlier one's creation, where the later one would then have run `onMatch`
- *    on it (`acts`), repeated a write on it (`repeats`, `overwritten`), or not have shared it with the earlier one here
+ *    on it (`acts`), repeated a write on it (`repeats`), or not have shared it with the earlier one here
  *    (`createKey` differs — two creations where the loop makes one). Two misses with the SAME create key
  *    and an inert `onMatch` are what `Distinct` already answers correctly — one creation, carried by both
  *    — so that common case still runs.
@@ -4487,8 +3395,8 @@ function guardMergeInterleaving(
   }
   // (1) — one pre-existing element reached by two drivers. An input-independent search (`matched` with no
   // `ord`) reaches every match from every driver.
-  if (facts.repeats || facts.mutatesSearch || facts.overwritten) {
-    const why = 'reaching one element with an onMatch or property() write the next traverser observes (a searched key, a list append, a per-traverser value, or a key another write sets)';
+  if (facts.repeats || facts.mutatesSearch) {
+    const why = 'reaching one element with an onMatch or property() write the next traverser observes (a searched key, a list append, or a per-traverser value)';
     if (matched.type.cols.some((column) => column.name === ORD) && matched.kind === 'ref') {
       const other = make.ref({ id: fresh('r'), name: matched.name, channels: [], type: matched.type });
       raiseOnRows(selfJoin(matched, other, and(eq(col(matched.id, 'id'), col(other.id, 'id')), lt(col(matched.id, ORD), col(other.id, ORD)))), why);
@@ -4504,14 +3412,14 @@ function guardMergeInterleaving(
   // would NOT share the creation (`createKey` differs) or a write that repeats or redirects the search.
   if (!unmatched) return;
   const acts = facts.acts && !(unmatched.sharesOnMatch && facts.onMatchShareable);
-  if (!acts && !facts.repeats && !facts.mutatesSearch && !facts.overwritten && unmatched.createKey === null) return;
+  if (!acts && !facts.repeats && !facts.mutatesSearch && unmatched.createKey === null) return;
   const u = unmatched.rel;
   const earlier = bind(make.project({
     id: fresh('p'), input: u, channels: [], type: u.type, exprs: u.type.cols.map((column) => [column.name, col(u.id, column.name)] as const),
   }), true) as Extract<Rel, { kind: 'ref' }>;
   const later = make.ref({ id: fresh('r'), name: earlier.name, channels: [], type: earlier.type });
   const { createKey, couldMatch } = unmatched;
-  const observable: Expr = acts || facts.repeats || facts.mutatesSearch || facts.overwritten || !createKey ? always
+  const observable: Expr = acts || facts.repeats || facts.mutatesSearch || !createKey ? always
     : isNot(createKey(earlier.id), createKey(later.id));
   raiseOnRows(selfJoin(earlier, later, and(and(lt(col(earlier.id, ORD), col(later.id, ORD)),
     couldMatch ? couldMatch(earlier.id, later.id) : always), observable)),
@@ -4576,9 +3484,6 @@ interface MergeWriteFacts {
   readonly mutatesSearch: boolean;
   /** A write OUTSIDE this merge's own cluster could change what the search finds (`mergeObservesOtherWrites`). */
   readonly othersObserved: boolean;
-  /** A write OUTSIDE this merge's own cluster writes a key the `onMatch` or the tail writes
-   *  (`mergeRewritesOverwritten`) — so an element two drivers share shows which of the two ran last. */
-  readonly overwritten: boolean;
   /**
    * **The `onMatch` may run ONCE per shared creation where the loop runs it once per LATER driver.**
    * `MergeVertexStep.flatMap`/`MergeEdgeStep.flatMap` hand driver 1 the creation and every later driver
@@ -4587,11 +3492,9 @@ interface MergeWriteFacts {
    * final state exactly when
    *  - every `onMatch` write is IDEMPOTENT per element — a constant `single` (any edge write; a vertex
    *    write with a stated `single`/`set`) or a removal; no appended label, no per-traverser value;
-   *  - it neither redirects a search (`mutatesSearch`) nor meets another write (`othersObserved`,
-   *    `overwritten` — a later write driver 1 reaches lands BEFORE driver 2's `onMatch` there); and
-   *  - NO STEP OF THE PROGRAM READS A KEY IT WRITES (`ProgramWrites.reads`) — the one observation that would
-   *    tell driver 1 (which passes every later step before driver 2 merges: no `NoOpBarrierStep` follows a
-   *    first flat-map, `LazyBarrierStrategy.java:73,112-114`) from the plan, which wrote it already.
+   *  - it neither redirects a search (`mutatesSearch`) nor meets another write (`othersObserved`).
+   * A later step that reads a key it writes sees the final merged state — a write sees a snapshot of its
+   * input, steps after it see all of its writes (`docs/feature-support-matrix.md`, Deliberate divergences).
    */
   readonly onMatchShareable: boolean;
 }
@@ -4628,16 +3531,10 @@ function mergeWriteFacts(
   const repeats = onMatch.some(perTraverser) || tail.some(perTraverser);
   const mutatesSearch = onMatch.some(writesSearched) || tail.some(writesSearched);
   const othersObserved = mergeObservesOtherWrites(element, propertySteps, searched, program);
-  const keyOf = (write: PropertyWrite): string | null => (write.kind === 'set' || write.kind === 'remove' ? write.key
-    : write.kind === 'runtime' && typeof write.key === 'string' ? write.key : null);
-  const keysOf = (writes: readonly PropertyWrite[]): KeySet =>
-    writes.some((write) => keyOf(write) === null) ? 'all' : new Set(writes.map((write) => keyOf(write)!));
-  const rewritten = keysOf([...onMatch, ...tail]);
-  const overwritten = (onMatch.length > 0 || tail.length > 0) && mergeRewritesOverwritten(propertySteps, rewritten, program);
   return {
-    acts: onMatch.length > 0 || appended.length > 0, repeats, mutatesSearch, othersObserved, overwritten,
-    onMatchShareable: !appended.length && !repeats && !mutatesSearch && !othersObserved && !overwritten
-      && onMatch.every((write) => write.kind === 'set' || write.kind === 'remove') && !meets(program.reads.keys, keysOf(onMatch)),
+    acts: onMatch.length > 0 || appended.length > 0, repeats, mutatesSearch, othersObserved,
+    onMatchShareable: !appended.length && !repeats && !mutatesSearch && !othersObserved
+      && onMatch.every((write) => write.kind === 'set' || write.kind === 'remove'),
   };
 }
 
@@ -4671,54 +3568,17 @@ function mergeWriteFacts(
 function mergeObservesOtherWrites(
   element: 'vertex' | 'edge', propertySteps: readonly IRStep[], searched: ReadonlySet<string> | null, program: ProgramWrites,
 ): boolean {
+  if (program.sites === 'unknown') return true;
   const observes = (site: WriteSite): boolean => {
     switch (site.op) {
-      case 'drop': case 'mergeV': return true;
-      // A new vertex matches a search only if its run wrote EVERY searched key — so one of them at least:
-      // a search of no key (a label or id alone) finds any vertex.
-      case 'addV': return element === 'edge' || searched === null || searched.size === 0 || site.created === undefined || meets(searched, site.created);
+      case 'drop': case 'addV': case 'mergeV': return true;
       case 'addE': case 'mergeE': return element === 'edge';
       case 'label': return element === 'vertex';
       case 'property': return site.keys === 'all' || searched === null || [...site.keys].some((key) => searched.has(key));
     }
   };
-  return othersWrite(propertySteps, program, observes, 1);
-}
-
-/**
- * **ANY OF THE PROGRAM'S WRITE SITES `picks` SELECTS, BEYOND THIS MERGE'S OWN CLUSTER?** The one counting
- * subtraction both merge questions make (`mergeObservesOtherWrites` for what the SEARCH reads,
- * `mergeRewritesOverwritten` for what each driver re-writes): the program's picked sites, minus `self` (the
- * merge step itself, when `picks` selects it) and each of its `property()` tail steps `picks` selects,
- * must be none. Counted, not matched by identity — a nested body is normalized afresh, so this merge's own
- * step need not be the one the program walk saw. An `'unknown'` program (an unreadable body) always has one.
- */
-function othersWrite(propertySteps: readonly IRStep[], program: ProgramWrites, picks: (site: WriteSite) => boolean, self: 0 | 1): boolean {
-  if (program.sites === 'unknown') return true;
-  const own = self + propertySteps.map((step) => writeSiteOf(step)).filter((site): site is WriteSite => site !== null && picks(site)).length;
-  return program.sites.filter(picks).length !== own;
-}
-
-/**
- * **DOES A WRITE OUTSIDE THIS MERGE'S OWN CLUSTER WRITE A KEY EACH DRIVER RE-WRITES ON AN ELEMENT IT
- * SHARES?** Every driver reaching an element runs `onMatch` (a match) and the `property()` tail (always)
- * on it when IT reaches the merge — and driver 1 has by then passed every LATER step, while every EARLIER
- * step for driver 2 runs after driver 1's merge (no `NoOpBarrierStep` after a first flat-map,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/LazyBarrierStrategy.java:112-130`;
- * the per-traverser loop, `MergeVertexStep.java:78-116`, `MergeEdgeStep.java:255-292`,
- * `AddPropertyStep.java:94`). Every merge host writes `onMatch` and the tail ONCE per element, before any
- * later step. So `g.inject(1,2).as('a').mergeV([name:'x']).option(onMatch,[w:single(1)]).filter(select('a')
- * .is(1)).property(single,'w',9)` leaves `w=1` in the reference — driver 1 writes 9, driver 2's `onMatch`
- * then writes 1 — and `….mergeV([name:'x']).property(single,'w',5).filter(select('a').is(1))
- * .property(single,'w',9)` leaves `w=5`, where the plan leaves 9 for both. Any OTHER write of a re-written
- * key, at any depth or position, may land either side of a later driver's re-write, so it is observable
- * (`guardMergeInterleaving`). The one write ordered exactly is the merge's own tail, which every driver runs
- * straight after its own merge. Another merge, a creation or a `drop()` that the search could see is
- * already `othersObserved`; only `property()` sites count here — over-approximated by key, never by
- * element.
- */
-function mergeRewritesOverwritten(propertySteps: readonly IRStep[], rewritten: KeySet, program: ProgramWrites): boolean {
-  return othersWrite(propertySteps, program, (site) => site.op === 'property' && meets(site.keys, rewritten), 0);
+  const own = 1 + propertySteps.map(writeSiteOf).filter((site): site is WriteSite => site !== null && observes(site)).length;
+  return program.sites.filter(observes).length !== own;
 }
 
 /**
@@ -5111,7 +3971,7 @@ function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { reado
   // still have ONE answer to "which input row is this created row".
   const positioned = rowNumberWindow(ordered, ORD, [], { partitionBy: [],
     orderBy: encounter && cols.some((column) => column.name === encounter.col) ? [{ expr: col(ordered.id, encounter.col), dir: 'asc' }] : [] }, fresh);
-  return nameBindings(positioned, () => fresh('cte'));
+  return nameBindings(positioned);
 }
 
 /** The column a write's input carries its POSITION in, and the created rows recover theirs into.

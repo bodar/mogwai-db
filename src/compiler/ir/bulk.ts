@@ -945,16 +945,13 @@ const REORDERS: ReadonlySet<string> = new Set(['order', 'barrier']);
  *  (`DedupGlobalStep` with no key and no `by()` keeps one traverser per equal class, whatever reached
  *  it) or the START of a step list known to begin a traversal (`start`): a rooted chain's start naming
  *  distinct traversers, or a child traversal's one parent traverser. Anything else — a flat-map, a map,
- *  an unknown start — may hold equal traversers. `passThrough` — further steps the CALLER knows hand on
- *  the traverser they were given (a write question: `property()`, a label mutation, `SideEffectStep`s). */
-export function streamDistinctAt(
-  steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined, passThrough: ReadonlySet<string> = new Set(),
-): boolean {
+ *  an unknown start — may hold equal traversers. */
+export function streamDistinctAt(steps: readonly IRStep[], at: number, start: { readonly rooted: boolean } | undefined): boolean {
   for (let i = at - 1; i >= 0; i--) {
     const s = steps[i]!;
     if (s.name === 'dedup') return !isLocalScope(s) && !(s.args ?? []).length && !s.modulators?.length;
     if (i === 0 && start?.rooted) return knownStartStep(s) && distinctLiterals(s);
-    if (!DISTINCT_PRESERVING.has(s.name) && !REORDERS.has(s.name) && !passThrough.has(s.name)) return false;
+    if (!DISTINCT_PRESERVING.has(s.name) && !REORDERS.has(s.name)) return false;
   }
   return !!start && !start.rooted;
 }
