@@ -183,7 +183,6 @@ stream frames each value by its own tag.
 
 | Limit | Detail |
 |---|---|
-| host-language typing in Java/.NET | |
 | 128-bit arithmetic | declines |
 | int64 overflow | raises |
 | 32-bit float arithmetic | SQLite REAL is always a double (§17 Float) |
