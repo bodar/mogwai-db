@@ -12,7 +12,7 @@ import { compilerParamName } from '../../rel/expr.ts';
 // DO SQLite has no regex function and this project does not filter the TRAVERSAL row-at-a-time
 // (root `CLAUDE.md` decision #3), so `regex` cannot lower to SQL like `containing`/`startingWith`
 // (LIKE) do. It lowers instead as a BARRIER — the one admissible home for a non-SQL predicate
-// (`docs/2026-08-12-regex-as-a-barrier-research.md`): a SQL head narrows and projects the candidate
+// (`docs/archive/2026-08-12-regex-as-a-barrier-research.md`): a SQL head narrows and projects the candidate
 // VALUES, a single BATCHED JS transform applies the regex over them, and the survivors re-inject as
 // an ordinary `within()` that the rest of the chain continues from in SQL. The traversal stays
 // compiled on both sides of the one opaque set-transform; that is what distinguishes a barrier from

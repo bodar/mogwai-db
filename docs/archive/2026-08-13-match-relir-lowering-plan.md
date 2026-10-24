@@ -1,53 +1,15 @@
 # `match()` on the RelIR spine — build plan
 
-> **Status: P0 + P1 + P1c + P2a + P2b + most of P3/P4 LANDED (2026-08-14, L3 1480 → 1544).** Added this
-> session: `and(…)`, keyed `dedup(labels)`, modulated pattern bodies, `where(k1,P.eq/neq(k2))` and
-> `where(<body>)`/`not(<body>)` over the record, a moving no-end existence semi-join, nested `match`, a
-> filter-after-reduce end, and a fail-closed guard for a global slice in a pattern body. **The filter-leg
-> machinery generalized OUT of match**: `applyLeg`/`aliasWhere` are shared by `recordTail` AND the
-> ELEMENT tail, so `where(k1,P.op(k2))[.by(key)]` (alias-vs-alias identity or value compare) and
-> `where(__.as(k)…)`/`not(__.as(k)…)` (a body re-rooted at a bound `as()` label, incl. a `repeat()` body
-> via the fresh-walk JOIN) now compose over ANY stream carrying live labels, not only a match record.
-> Binding patterns, back-edge/cyclic, no-end filter
-> constraints, per-row + reducing-barrier scalar ends, the zero-root regime, the unconditional bindings
-> map, inline `where(key, P.eq/neq)` legs, and the TRAVERSAL filter legs (`not`/`where(<body>)`) as
-> SEMI/ANTI JOINs with multi-column correlation are all live — and the whole GQL match-STRING front end
-> is restored (it desugars to `match(Traversal)`). **Three later-phase pieces landed since:**
-> - **`and(…)` connective (P3a)** — a nested AND MatchStep is a conjunction sharing the binding table, so
->   `collectPatterns` flattens its children (recursively) into the same pattern list.
-> - **modulated pattern bodies** — a match arg body is now `normalize`d before classification, so
->   `order().by()`, `repeat().times()`, `sack().by()` and every modulator folds into ONE `IRStep` and the
->   body runs through the fold (invariant 1), instead of declining on a raw split `order`/`by` pair.
-> - **keyed `dedup(k1,…,kn)[.by(proj)]`** over the record stream — a general downstream collector on the
->   record's own alias channels (`recordTail`), reusing `dedupOn`'s ranked window.
+> **✅ LANDED AND ARCHIVED (2026-10-24).** `match()` lowers on the RelIR spine through the one fold
+> (`src/compiler/rel/match.ts`, P0–P4: binding/back-edge/cyclic patterns, scalar and reducing ends,
+> SEMI/ANTI legs, `and`/`or` filter connectives, nested and top-level `[NOT] match`, modulated bodies,
+> keyed `dedup`, the GQL match-string front end). 57/60 `Match`+`MatchString` scenarios and all 5
+> `Match*Strategy` scenarios pass in `l3-state.json`. Residue (a `map(<reducer>)` pattern body, `match`
+> over a non-element/map stream, a binding `or` branch, and a few fail-closed by-compare/slice shapes)
+> is tracked in `docs/outstanding-work.md`; the body below is historical rationale and its per-phase
+> "still open" notes are stale.
 >
-> **BOTH `or(…)` scenarios LANDED (filter regime, L3 1753 → 1755):** the corpus `or`s are FILTER
-> disjunctions (branches bind nothing), so one predicate `branch₁ ∨ …` via `branchToExpr`/`legExpr`, NOT a
-> UNION — see P3. The infix `.and()` inside a branch canonicalizes before classification, so it composes
-> for free; a branch's back-edges (element, reducing-scalar) and scalar-alias predicates all lower to
-> Exprs. The zero-root scenario also needed two fixes: `labels.ts` now sees a back-edge label referenced
-> only inside a connective (so a pre-bound `b` is not retracted before the match), and the bindings map
-> declares a connective's anchored variables (TinkerPop folds a nested connective's start/end labels into
-> the parent's, `MatchStep.java:127-128`).
->
-> **`where(and(…))`/`not(<conn>)` LANDED:** a `where`/`not` arg whose filtered body is a connective is one
-> conjunctive/disjunctive predicate (negated for `not`) via the same `connectiveExpr`/`legExpr` substrate
-> — its branches arrive Pass-rewritten (`select`-headed), which `branchToExpr`/`existenceExpr` now handle
-> alongside the bare `as`-headed form. Unlike a bare `or(…)` its labels are scope keys, not bindings
-> (`declares: []`). Reaps `Match.feature` `g_V_matchXwhereXandX…XX…`.
->
-> **top-level `not(match(…))`/`where(match(…))` LANDED:** a fourth predicate arm `matchPredicate` roots the
-> match at the SUBJECT (`source.elementRow`) and existence-tests it — a correlated `[NOT] EXISTS`. Landed
-> with a scalar-alias `where(k1, P.eq/neq(k2))` value compare. Reaps `g_V_notXmatchX…X…`.
->
-> **Remaining (each needs new plumbing beyond the leg/seam reuse): a truly BINDING `or` branch (a
-> fresh `.as()`) → the disjunctive-UNION regime with alias reconciliation; `local(match)`; a `map(<mean>)`
-> body; a by-modulated
-> alias compare with `or`/`and` in the predicate (predicate.ts connective over two aliases); a per-origin
-> windowed slice in a pattern body (currently fail-closed); a `fold()` list end; and `ProductiveByStrategy`
-> null-keeping semantics for a by-compare (currently fail-closed).**
->
-> `match()` lowering was deleted with the legacy spine
+> *Original context (2026-08-13):* `match()` lowering was deleted with the legacy spine
 > (`4af061e`, `src/compiler/steps/prefix/match.ts`, 338 lines). The GQL-string front end
 > (`src/gremlin/gql.ts`, `parser/gql/`, the `desugarMatchString` Pass) SURVIVED — it produces the
 > ordinary `match()` IR — so today it desugars and then dead-ends on a `match` step nothing lowers

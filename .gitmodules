@@ -23,7 +23,7 @@
 	path = vendor/gds
 	url = https://github.com/neo4j/graph-data-science.git
 	# READ-ONLY prior art for the graph-algorithm + barrier-substrate layer
-	# (docs/2026-07-24-graph-algorithms-plan.md) — never built, never imported, no Java
+	# (docs/archive/2026-07-24-graph-algorithms-plan.md) — never built, never imported, no Java
 	# toolchain implied (same standing as gremlin-core / calcite). Its `pregel` module is
 	# the BSP/PregelSchema reference; `algo`/`algo-common` the implementations; `core` the
 	# graph-projection model.

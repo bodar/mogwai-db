@@ -38,7 +38,7 @@ TextP predicates are Java's exact `startsWith`/`endsWith`/`contains` (`Text.java
 `LIKE` (which the seek reads) CONJOINED with an exact `instr`/`substr` test (`likePattern`,
 `src/compiler/rel/predicate.ts`). `tinker.search` keeps its own documented case-insensitive literal
 contract (`describeParams`). `regex` is a barrier segment prefiltered by the trigram index
-(`docs/2026-08-12-regex-as-a-barrier-research.md`).
+(`docs/archive/2026-08-12-regex-as-a-barrier-research.md`).
 
 - **One row per property, keyed by the SIGNED property id** (`rowid` = +vertex_properties.id,
   −edge_properties.id — `ftsRowid`). Every delete and probe is a rowid seek (`rowid IN (SELECT ±id …)`),

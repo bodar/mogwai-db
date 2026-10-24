@@ -11,7 +11,7 @@ import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 // `g.V().shortestPath()` emits, from each incoming source vertex, its shortest path(s) to every
 // reachable target. Unlike the three DECORATE algorithms it is NOT a barrier: an unweighted all-pairs
 // shortest path is one recursive `Recursive` term (P1/P2), so it is a PURE `rel` contribution lowered
-// inline (`src/compiler/rel/shortestpath.ts`, `docs/2026-07-24-graph-algorithms-plan.md` Template B).
+// inline (`src/compiler/rel/shortestpath.ts`, `docs/archive/2026-07-24-graph-algorithms-plan.md` Template B).
 // This service parses the `~tinkerpop.shortestPath.*` config and hands the compiler builder the incoming
 // element relation via `site.stream`; the builder produces the PATH-framed result.
 //

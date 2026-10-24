@@ -19,7 +19,7 @@ import { execute, q, value } from '../../../sql/kernel/q.ts';
 // convention wcc uses, so both component families read the same way. `apply` runs it into `barrier_state`
 // round 0; the decorate resume reads it as a synthetic property, so has()/order().by()/project().by()
 // compose over the live stream. The compute is one bulk SQL read plus a bounded closure (the barrier
-// model, `docs/2026-08-21-barrier-substrate-design.md`), never row-at-a-time interpretation.
+// model, `docs/archive/2026-08-21-barrier-substrate-design.md`), never row-at-a-time interpretation.
 
 const SCC_COMPONENT_KEY = 'componentId';
 

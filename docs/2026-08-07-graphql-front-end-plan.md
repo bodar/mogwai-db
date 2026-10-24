@@ -1,11 +1,73 @@
 # A GraphQL front end — design and build plan
 
-**STATUS (2026-08-16): Phases 0–3 have LANDED; the front end is live, deployable, and CONFORMANCE-tested.**
-A GraphQL client can `POST`/`GET /graphql/{g}` on both Bun and Cloudflare and get spec-shaped JSON. What
+**STATUS (2026-10-24): Phases 0–3, `@recurse` (half of Phase 4) and edge-property companions have LANDED
+and are conformance-tested — BUT the schema they serve is reflected from the data with no human input, and
+that is now recorded as a DESIGN MISTAKE (next section). A redesign to an explicit, human-defined schema
+is pending a human call; do not extend the reflection-derived surface in the meantime.** Not landed:
+interfaces/unions, the §5·4 schema cache, `_gremlin`, Phase 5 mutations.
+
+## ⚠️ Design mistake (recorded 2026-10-24): the reflection-derived schema
+
+**What we did.** §4 chose "reflect it, don't declare it": `g.call('schema')`
+(`src/services/catalog/schema.ts`) streams the labels/properties/edges the data holds, `src/graphql/schema.ts`
+folds them into a `GraphSchema`, and `src/graphql/sdl.ts` prints a GraphQL schema from it — batteries
+included, zero config, no human anywhere in the loop.
+
+**Why it was a mistake.** A property graph is schema-less and multi-valued; GraphQL's type system demands
+decisions (names, cardinality, nullability, one concrete type, one scalar type) that reflection cannot make.
+So every gap was filled with a convention we invented — none asked for, each needing its own explanation:
+
+- **Multi-valued properties are flattened silently.** A scalar field lowers to `by(__.values(key))`
+  (`translate.ts`), which keeps the FIRST value of a list/set-cardinality property and advertises it as a
+  single scalar. Meta-properties are not reachable at all.
+- **Mixed-type keys pick a type by row order.** Reflection is `DISTINCT (label, key, vtype)` and
+  `buildSchema` `Map.set`s each row, so a key stored as `int` on one vertex and `string` on another gets
+  whichever arrives last. `'unknown'` and every non-numeric/non-boolean vtype collapse to `String`;
+  `long`/`bigint` collapse to 32-bit `Int` (`sdl.ts` `scalarFor`, `edge.ts` `toJson`).
+- **Edge naming conventions:** out = bare label, in = `<label>_in` (`schema.ts` `edgeFieldName`); edge
+  properties via a `<field>_edges` companion returning `<Type><Field>Edge { node, …props }`
+  (`edgeCompanionFieldName`, `sdl.ts` `edgeWrapperType`), only when the edge has properties.
+- **Synthetic type names and placeholders:** `<ns>Where`/`<ns>Sort`/`<Type><Field>EdgeProps` inputs,
+  `<Scalar>Filter`, a `_noop` field on property-less inputs, a `_empty` root on an empty graph (`sdl.ts`).
+- **Names are unsanitised and collide silently.** `gqlTypeName` is identity, so a label that is not a
+  GraphQL name (hyphen, leading digit) breaks the schema; a property key and an edge label of the same name
+  share one field slot; a label literally ending `_in`/`_edges`, or named `Query`, collides with our own.
+- **Choices reflection cannot make at all:** every edge field is a to-many list and every field nullable
+  (cardinality/required-ness are not observable); a polymorphic edge target is overwritten rather than
+  unioned (§8·2·1); a multi-label vertex has no "concrete" label; interfaces have no source.
+- **The schema is unstable.** All of the above is re-derived per request from whatever the data holds now,
+  so one write can rename, retype or delete a field under a client's feet — the opposite of a contract.
+
+**The direction: an EXPLICIT, human-defined schema, registered through an API.** Prior art:
+- **Neo4j GraphQL Library** — the user supplies type definitions; directives such as
+  `@relationship(type, direction)` (and `@relationshipProperties`, `@cypher`) map fields onto the graph,
+  and the library generates queries/mutations from that. Its introspector only *proposes* type defs.
+- **CouchDB design documents** — named views are *defined into* the database, then queried by name.
+
+Mogwai sketch: a per-graph definition stored in the graph's DO, managed by an API, and GraphQL exposes ONLY
+what has been defined — either SDL with mapping directives, or named views each backed by a Gremlin
+traversal. Reflection survives at most as a scaffolding helper that *proposes* a definition for a human to
+edit. 🔴 **Needs a human call (deliberately unresolved):** SDL+directives vs views-as-traversals (or both);
+where definitions are stored (a graph table, a document via `IoStore`, the Worker); how definitions are
+versioned/migrated as the graph and its clients change; whether reflection-as-scaffolding survives.
+
+**What stays valid, independent of the reflection decision:** translation to a Gremlin STRING through the
+tested compiler door (§5·2); Worker placement (§5·1); variables-as-binds (§6); graphql-js owning
+parse/validate/introspection (§7·4); the conformant GraphQL-over-HTTP edge, content negotiation and the
+`mogwai:explain` extension; the three conformance oracles (§7, Phase 3); the engine substrate (Phase 0,
+per-member `coalesce` dispatch, null-fill, `@recurse`'s lowering); and `g.call('schema')` itself as a
+Gremlin-visible catalog service. What changes is where the `GraphSchema` comes from, and the conventions
+above become explicit, user-written mappings. A defined schema also retires the §5·4 two-round-trip
+problem: a stored definition changes only when a human changes it, so it caches trivially.
+
+---
+
+**Landed detail, as of 2026-08-16 (the surface below is the reflection-derived one the section above
+supersedes).** A GraphQL client can `POST`/`GET /graphql/{g}` on both Bun and Cloudflare and get spec-shaped JSON. What
 works, end to end and tested (`src/graphql/`, `src/services/catalog/schema.ts`, `test/graphql.test.ts`,
 `test/graphql-conformance.test.ts`, `test/services.test.ts`):
 
-- **Schema reflection** — `g.call('mogwai.schema')` (a `mogwai.*` extension in `extendedRegistry` only)
+- **Schema reflection** — `g.call('schema')` (our extension, in `extendedRegistry` only)
   streams the label / property / edge / edge-property model; `src/graphql/schema.ts` folds it into an
   addressable `GraphSchema`.
 - **Translation** — a document → a Gremlin STRING (the §5·2 spike settled this; string reaches the
@@ -225,6 +287,9 @@ shape, never CONSTRUCT it). RelIR is where the §2 work lands — it is not the 
 ---
 
 ## 4. Schema: reflect it, don't declare it
+
+> ⚠️ **Superseded (2026-10-24).** This section's decision is the recorded design mistake at the top of
+> this doc; it is kept as the original rationale. The direction is a declared, human-defined schema.
 
 The graph is schemaless — interned labels and typed properties, no declared types. GraphQL demands
 SDL. The schema is nonetheless **fully derivable from four tables**:
@@ -479,15 +544,15 @@ inside a branch arm). `mise run rel-blockers` is the progress instrument: each i
 family off the ranking, and if it does not, the diagnosis was wrong. Ships value with or without the
 rest of this plan — 2 through 5 are the engine's main line whether GraphQL ever exists.
 
-**Phase 1 — schema reflection as a service. ✅ MOSTLY LANDED.** `g.call('mogwai.schema')`
+**Phase 1 — schema reflection as a service. ✅ MOSTLY LANDED.** `g.call('schema')`
 (`src/services/catalog/schema.ts`) reflects the label/property/edge model as a STREAM of one
 self-describing map per schema element — `{kind:'vertexLabel',name,count}`, `{kind:'property',label,key,type}`,
 `{kind:'edge',label,src,tgt}` — a handful of `GROUP BY`/`DISTINCT`s over the five schema tables, zero
 binds. The stream shape (not a single document) is the prior-art answer: TinkerPop's own `--list`
 meta-service and Neo4j's `db.schema.nodeTypeProperties` both emit one record per element, and it composes
 with the map vocabulary (`.count()`, `.fold()` verified — `.fold()` rides the list-of-maps substrate).
-Namespaced `mogwai.schema` (our extension → `extendedRegistry` only, NEVER `standardRegistry`, so the
-reference-exact `--list` conformance surface is unchanged). Edge-property types are reflected too (the
+`schema` is our extension → `extendedRegistry` only, NEVER `standardRegistry`, so the
+reference-exact `--list` conformance surface is unchanged. Edge-property types are reflected too (the
 `edgeProperty` arm). 🚧 What is LEFT: SDL printing on top (belongs in `src/graphql/`, Phase 2), a
 `with('aggregate', true)` document variant if ever wanted, and the write-counter cache (an optimisation,
 not correctness). `src/graphql/` reads THIS.
@@ -496,7 +561,7 @@ not correctness). `src/graphql/` reads THIS.
 `__typename` — see the STATUS header for the full list; interfaces/unions are the one translator gap
 left). The §5·2 spike settled emission
 (a Gremlin string). `src/graphql/` is built:
-- `schema.ts` folds the `mogwai.schema` rows into an addressable `GraphSchema` (a GraphQL object type =
+- `schema.ts` folds the `schema` rows into an addressable `GraphSchema` (a GraphQL object type =
   a vertex label, a scalar field = a property key, an object field = an edge — reflection-first, an
   in/out pair disambiguated by a `_in` suffix).
 - `translate.ts` walks a document top-down against it — a root → `V().hasLabel(Type)`, a scalar →
@@ -533,7 +598,7 @@ bound list). `@skip(if:)`/`@include(if:)` are resolved at translation — ⚠️
 graphql-js parses the directive but the translator never read `field.directives`, so `@skip` was silently
 IGNORED (a wrong answer) until fixed; the `if:` is a boolean literal (a variable there is refused, like
 variables in sort/limit). `__typename` → `constant(<TypeName>)` (a compile-time constant — the enclosing
-type is fixed at that point in the walk). **Edge-property types LANDED** too: `mogwai.schema` gained an
+type is fixed at that point in the walk). **Edge-property types LANDED** too: `schema` gained an
 `{kind:'edgeProperty', label, key, type}` arm and `EdgeSchema` a `properties` map (folded
 order-independently), so the reflected schema is complete for edge fields.
 

@@ -267,7 +267,7 @@ property.
   NOT a different question: prefer that natural answer to a decline AND to emulating Java. Each
   accepted divergence is one line in `docs/feature-support-matrix.md` §17 *Deliberate divergences*;
   the rationale and the work order that removes the old emulation are in
-  `docs/2026-10-18-simplification-plan.md`.
+  `docs/archive/2026-10-18-simplification-plan.md`.
 - **Correct by design, fail closed — on what is GENUINELY wrong.** Never reject a valid input to keep
   scope small; never mis-count, lose or duplicate rows or writes, write or drop the wrong element, or
   give a wrong number class where the user sees it (`3` vs `3.0`); never crash or let an internal or

@@ -1,4 +1,4 @@
-// The reducer table (docs/2026-08-26-federate-pushdown-design.md) — how a terminal reducer splits into
+// The reducer table (docs/archive/2026-08-26-federate-pushdown-design.md) — how a terminal reducer splits into
 // (partial-remote, combine-local, empty-result) for federate mid-traversal reduction pushdown. `count`
 // is the lone MONOID (identity 0); sum/min/max/mean are SEMIGROUPS (no identity, empty -> nothing).
 // Calcite's SqlSplittableAggFunction: count/sum = SUM0 combine, min/max = self-split, mean = reduce-first.

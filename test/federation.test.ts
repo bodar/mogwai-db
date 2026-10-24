@@ -432,7 +432,7 @@ describe('recursive federation + depth guard', () => {
   });
 });
 
-// SUBGRAPH form (movement over a bound edge Ref — docs/2026-08-21-barrier-substrate-design.md §(B)).
+// SUBGRAPH form (movement over a bound edge Ref — docs/archive/2026-08-21-barrier-substrate-design.md §(B)).
 // `.with("subgraph", true)` over an EDGE-producing sub-traversal brings back the edges (which carry
 // src/tgt adjacency) PLUS their incident vertices WITH data. The local tail then WALKS it: inV/outV/
 // bothV join the landed vertices, so the endpoint re-enters detachedTail with full payload and

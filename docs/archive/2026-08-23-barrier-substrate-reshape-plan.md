@@ -6,7 +6,7 @@ substrate, deferred with cause below) + a GDS-style algorithm library built on i
 FACTS: the `barrier_state` schema and its four output arms, GDS as prior art (§9), and the deferred-with-
 cause GDS algorithms (§ intro: labelPropagation/louvain/eigenvector). The remaining LIVE work it names —
 barrier-in-body slice 2 (blocked on the OLAP graph-filter question) and those three algorithms — is
-indexed in `docs/outstanding-work.md`. Supersedes the "output shape" half of `docs/2026-08-21-barrier-substrate-design.md`
+indexed in `docs/outstanding-work.md`. Supersedes the "output shape" half of `docs/archive/2026-08-21-barrier-substrate-design.md`
 for the OLAP/graph-algorithm barriers. Generalized `barrier_relation` →
 `barrier_state(run,round,scope,id,channel,cval)`, grounded in the vendored `vendor/gds` (Neo4j GDS
 Pregel) as the shape reference. The authority is the code (`src/storage.ts`, `src/compiler/rel/segment.ts`,
@@ -71,7 +71,7 @@ the current one is a degenerate case of.
 
 ## 2. The three limits (each blocks a Tier-2 family), and the substrate basis
 
-Measured per-node iteration state for every Tier 1/2 family (`docs/2026-07-24-graph-algorithms-plan.md`
+Measured per-node iteration state for every Tier 1/2 family (`docs/archive/2026-07-24-graph-algorithms-plan.md`
 §Feasibility tiers):
 
 | Limit | Root cause in code | Blocks |
@@ -109,7 +109,7 @@ per-scope. Build it once; both land on it.
 ## 4. The target shape
 
 DO SQLite forbids runtime DDL (no `TEMP` table — `SQLITE_AUTH`; no per-run `CREATE`/`ALTER`; measured,
-`docs/2026-08-21-barrier-substrate-design.md` §(B)). So a per-barrier declared schema (GDS's approach,
+`docs/archive/2026-08-21-barrier-substrate-design.md` §(B)). So a per-barrier declared schema (GDS's approach,
 which lives in JS heap arrays) must be carried in ONE pre-created generic table whose *rows* encode the
 schema — the EAV/channel form is the only DDL-free way to hold a variable per-node schema.
 

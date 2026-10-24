@@ -42,7 +42,7 @@ import { perRowColumnOf } from '../../sql/kernel/render.ts';
  * `repeat`, `map`, a nested `match`) for free, because it is the same fold the top-level chain uses,
  * not a re-taught subset. The legacy `prefix/match.ts` carried its own `lowerElementSteps`, which is
  * exactly why it deferred `and`/`or`/nested-`match`/modulated bodies. See
- * `docs/2026-08-13-match-relir-lowering-plan.md`.
+ * `docs/archive/2026-08-13-match-relir-lowering-plan.md`.
  *
  * ## No new algebra
  *

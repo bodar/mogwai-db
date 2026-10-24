@@ -11,7 +11,7 @@ import { JAVA_WHITESPACE } from './text-units.ts';
 // `split()` returns a LIST of strings made by splitting the incoming string around the separator
 // (`vendor/tinkerpop/gremlin-core/.../step/map/SplitGlobalStep.java:48-59`). It is the value twin of
 // `reverse()`: a per-traverser string → list transform SQLite has no scalar function for, so it lowers
-// as substrate A's VALUE-TRANSFORM barrier (`docs/2026-08-21-barrier-substrate-design.md`) — the same
+// as substrate A's VALUE-TRANSFORM barrier (`docs/archive/2026-08-21-barrier-substrate-design.md`) — the same
 // SYNC shape reverse uses. The head is the value stream up to `split()`; the JS transform splits each
 // value into a list; the computed lists re-inject through `lowerValueResume` as ONE `json_each` bind
 // that seeds the resumed stream (each list a row, framed back as a list by the UNKNOWN scalar tail — the

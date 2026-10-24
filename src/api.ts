@@ -171,7 +171,7 @@ export type ForeignRow =
  *  which was only ever the ELEMENT shape; a pushed-down reducer (`federate(…).count()`) produces a
  *  SCALAR, so the result shape belongs IN the transferred value, not in the method name. It grows one arm
  *  per shape the federation learns to push (a list, a map, a record next), switched TOTALLY — the same
- *  fail-closed tagged-union discipline as `BarrierOutput`/`Shape` (`docs/2026-08-26-federate-pushdown-design.md`).
+ *  fail-closed tagged-union discipline as `BarrierOutput`/`Shape` (`docs/archive/2026-08-26-federate-pushdown-design.md`).
  *
  *  A scalar crosses as a `{t,v}` `ValueNode` (`gremlin/types.ts`) — the SAME typed envelope element props
  *  already use — so its Gremlin type (Long vs Integer, a stored vtype) survives the JSON transfer and

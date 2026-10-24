@@ -561,7 +561,7 @@ UNEVALUABLE`.
   not a decline; the gap is a missing guard at the nine CALL SITES. ⚠️ The message set depends on ARITY. Settle
   the three-answer coercion HERE, don't add a fourth: `mergeV([(T.label): x])` coerces, `g.addV(x)` declines,
   `addLabel(x)` coerces.
-- 🚧 **`T.id` on `mergeV`/`mergeE`** (5 writes) — `elementIdGuard` exists; the `Insert` column plumbing does not.
+- ✅ **`T.id` on `mergeV`/`mergeE`** — upsert-by-id on both hosts (`src/compiler/rel/write.ts`).
 
 **Writes** (rel-blockers: property 4, addE 3, addV 2, mergeE 1):
 
@@ -609,7 +609,7 @@ UNEVALUABLE`.
 - 🚧 **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
   `path().by(<transform>)` writes) — inert until tags join a comparison.
 - 🚧 **Seeded-fold residue** — declines (correct, but lost answers): a seeded fold as a `group` value and a
-  group value-by whose reducing barrier has more steps after it; a per-origin seeded fold mid-body in `local()`;
+  group value-by whose reducing barrier has more steps after it;
   over-declines of `or(<path processor>)` (`processOrStep` inlines only `has()`) and `filter(math(…))` before the
   fold (rank-0). DEFECTS (answer instead of raising/promoting): a per-row-typed stream answers where the
   reference raises `ClassCastException` (`values('age').fold('z', min)`, `values('name').fold(0, sum)`), and
@@ -628,9 +628,9 @@ UNEVALUABLE`.
 - 🚧 **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug; nobody has swept
   the rest.
 - 🚧 **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
-- 🚧 **`split()` (7 blockers) is DEFERRED BY DESIGN, not a leaf to build.** A Java-`StringUtil.split` string→list
-  transform whose every arm diverges from SQL; its home is the string-op-semantics decision in
-  `docs/2026-08-12-regex-as-a-barrier-research.md`, NOT a bespoke recursive-CTE. Fails closed correctly today.
+- ✅ **`split()`** lowers as a value-transform barrier (`src/compiler/rel/split.ts`), not a recursive CTE.
+  Residue (fail-closed): `split(Scope.local, …)` over a folded list, a LIST-shaped head, and a label bound
+  before it read after it — the last is the barrier channel-carrying item in `docs/outstanding-work.md`.
 
 **Families still largely open** (rank live via `rel-blockers`): the scalar-transform tail; branch (the
 SOURCE-position `g.union(a, b)` and the option-keyed `choose(<projection>)` where the choice is a body rather
@@ -676,7 +676,7 @@ A, C (its Float/out-of-range/signed-zero residue), E and F built emulates how Ja
 order, laziness, error timing, write interleave, number spelling — rather than which rows a query
 returns, and that two of its declines fire on DATA SIZE. Those clusters are therefore **closed, not
 open**: their residue is NOT a worklist item, and their landed machinery is scheduled for removal in
-`docs/2026-10-18-simplification-plan.md`. Do not add more merge, interleave, raise-extent, signed-zero,
+`docs/archive/2026-10-18-simplification-plan.md`. Do not add more merge, interleave, raise-extent, signed-zero,
 UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/feature-support-matrix.md`
 §17 *Deliberate divergences*. The code is the authority for every mechanism named below.
 
@@ -688,20 +688,20 @@ UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/featu
   reducing-option gate, `optional(count())` per start, `mergePeerArms`, the mergeV origin key,
   `path().by()` value positions (`mergesNothing` went with the merges it guarded).
 - ✅ **B — the branch emission key.** ONE authority in `rel/lower.ts` (`branchOrderOwed`, `BranchKeys`,
-  `mintBranchOrder`). The simplification reduces the key to one rule —
+  `mintBranchOrder`). The simplification reduced the key to one rule (`f78f3387`) —
   `row_number() OVER (ORDER BY input.encounter, arm_ordinal, arm.encounter)` — with start-major order
   for flatMap/local bodies.
 - 🟡 **C — the number/type channel.** KEPT: the class authority (`reducer.ts` `numberWidth`/
   `numberFloating` → `commonNumberClass`; 1 stays Int, 1.0 Double, `count()` Long, a Boolean a Boolean),
   the variant per-row class column, alias-rebind class, `numberClassOf`, federate `leafStore`, atomic
-  write programs / bulk load / replication. REVERTED by the simplification plan: the Float authority (a
+  write programs / bulk load / replication. REVERTED (landed): the Float authority (a
   Float is stored as the Double of its literal, `Math.fround` at the framer), the out-of-range Double
   carrier (`<w>p<n>`, `binary64Pair`, `wireCarrier`), signed-zero ordering and keys (`ZeroCarrier`,
   `signedCompare`, `unstableTieGuard`), min/max tie windows and promotion, predicate compare "cells".
   Typed equality becomes SQLite value + a coarse family (boolean, number, string, other).
 - ✅ **D — productivity.** `ChildValue.present` is required; `productivityFilter` is the one by()-drop
-  authority. The simplification makes presence `value IS NOT NULL` (a NULL `by()` counts as absent) and
-  `coalesce()` SQL `COALESCE`.
+  authority. Presence is `value IS NOT NULL` (a NULL `by()` counts as absent) and `coalesce()` is SQL
+  `COALESCE` (`309dad10`).
 - ⛔ **E — raise extent: SUPERSEDED (revert to the eager form).** A raise is ONE in-statement predicate
   (`raisingRows`, the `593317fe` design) evaluated wherever SQLite evaluates it; a query containing a type
   error may raise "early". The pull-level/span machinery (`raise-channel.ts`), `conjoinInOrder`, the
@@ -713,9 +713,9 @@ UTF-16 or Java-dialect machinery; the accepted answers are listed in `docs/featu
   Kept: the side-effect-under-slice decline, `iterate()` → `discard()`, the `where(as(unbound))` decline,
   shared-creation onMatch (without `ProgramWrites.reads`/`overwritten`).
 - ✅ **G — label scope into nested arms.** ONE total IR walker (`ir/walk.ts`), arm column decline,
-  `writesAnywhere`. Residue: threading alias channels through `childSeam`, and a `where`/keyed `dedup` scope
-  key naming a `project()` FIELD (declines; it should read the field). The path-entry maybe/ambiguous
-  lattice is removed (simplification item 21).
+  `writesAnywhere`; a `where`/keyed `dedup` scope key reads a `project()` field / the traverser's own map
+  first (`fa1f902d`, `382d4734`). Residue: threading alias channels through `childSeam`. The path-entry
+  maybe/ambiguous lattice is removed (simplification item 21).
 - 🚧 **H — reference strategy facts copied by hand.** Emit-first unroll and `PLAIN_FOLD` landed; open:
   one table per reference strategy in `ir/` (the `bulk.ts` pattern), each row citing its vendor line —
   for strategies that change WHICH rows a query returns, never for ones that only change execution order.

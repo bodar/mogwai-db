@@ -1,5 +1,14 @@
 # Simplification — a faithful port, not an emulation of Java (2026-10-18)
 
+**✅ LANDED AND ARCHIVED (2026-10-24).** All 24 work items are on trunk. Items 1 and 22's EarlyLimit
+revert landed inside `58d3d800`, item 23 is `62c27089`, and item 24 is `b4b3c32d`; the rest are the
+`simplify(...)`/`revert(order)`/`fix(dedup)`/`refactor(write)` commits. The durable rules are in `CLAUDE.md`,
+and the accepted answers are in feature matrix §17. The residue moves to `docs/outstanding-work.md`: the
+wf16 split-label carry, which is already covered there; the four sensible queries still declined under
+"Where effort should go instead", which still decline on 2026-10-24; and cluster 8's federate/journal
+follow-ups. The trunk `toUpper()` regression was fixed in `4171f792`. The coalesce/choose arm merge positions
+stay DROPPED.
+
 **Status: APPROVED by the user 2026-10-18 — the full plan, with SNAPSHOT write semantics.** This is the
 rationale and the work order; each item lands independently and records its own commit. The durable
 rules it produced live in `CLAUDE.md` (Semantics traps) and the accepted answers in

@@ -34,7 +34,7 @@ paths:
   express fails closed with a deferral (root CLAUDE.md decision #3). Text SQL *can* express
   (`containing`/`startingWith`/`endingWith`) stays in SQL (`LIKE`). **`regex` is the only member of
   that class left** — and it is INTENDED work, not a permanent wall
-  (`docs/2026-08-12-regex-as-a-barrier-research.md`: a batched barrier behind a trigram prefilter,
+  (`docs/archive/2026-08-12-regex-as-a-barrier-research.md`: a batched barrier behind a trigram prefilter,
   gated on a semantics commitment, not on engineering). ⚠️ **`typeOf` is NOT in the class** — it
   lowers as a per-row `vtype` comparison with a storage-class fallback (`typeOfExpr`,
   `compiler/rel/predicate.ts`) and `is(typeOf(GType.LIST))` even retypes the stream.

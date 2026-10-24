@@ -65,7 +65,7 @@ export interface CallSite {
   /** What the LOCAL TAIL after this barrier consumes from the result — a fact ABOUT this call site,
    *  known once at plan time (the tail is right there in the chain), the same category as
    *  `federationDepth`. A barrier that shapes its fetch by the downstream demand (federate skipping the
-   *  endpoint hop when nothing walks to an endpoint — `docs/2026-08-26-federate-pushdown-design.md`,
+   *  endpoint hop when nothing walks to an endpoint — `docs/archive/2026-08-26-federate-pushdown-design.md`,
    *  phase 3) reads it; one that does not ignores it. It is a call-site property so the fetch decision
    *  arrives as a typed dependency of `resolve`, not smuggled through `params` or captured incidentally.
    *  Optional so a caller that plans a barrier WITHOUT a segment tail (a test, a future non-segment path)
@@ -137,7 +137,7 @@ export type { ForeignRow } from '../../api.ts';
 export type BarrierResidency = 'do' | 'worker';
 
 /**
- * A barrier's SECOND output shape (`docs/2026-08-21-barrier-substrate-design.md` Axis 2): a
+ * A barrier's SECOND output shape (`docs/archive/2026-08-21-barrier-substrate-design.md` Axis 2): a
  * data-sized `(id → value)` RELATION rather than a set of detached elements. An iterative graph
  * algorithm's product is a NUMERIC/label relation keyed by element id, not a stream of elements — so
  * `federate`/`io`'s `ForeignRow[]` is the wrong shape for it.
@@ -163,7 +163,7 @@ export interface BarrierRelation {
  *  federate barrier, crossing as a typed `{t,v}` `ValueNode` so its Gremlin type survives (a Long stays
  *  a Long). The resume frames it as a one-row `RelFraming.scalar`. A separate `BarrierOutput` arm from
  *  the element/relation ones because it is neither detached elements nor a keyed relation — it is the
- *  whole stream collapsed to one typed value (`docs/2026-08-26-federate-pushdown-design.md`, phase 2). */
+ *  whole stream collapsed to one typed value (`docs/archive/2026-08-26-federate-pushdown-design.md`, phase 2). */
 export interface BarrierScalar {
   readonly kind: 'barrier-scalar';
   readonly value: ValueNode;
@@ -175,7 +175,7 @@ export interface BarrierScalar {
  *  plus the detached element arm), so the resume re-emits each as its own traverser (`lowerTypedNodeStream`)
  *  keeping every member's Gremlin type. A SEPARATE arm from `barrier-scalar` because a stream of N is not a
  *  collapsed one: the reducer's empty→0/nothing framing does not apply, an empty stream is simply no
- *  traversers (`docs/2026-08-26-federate-pushdown-design.md`, open item 1). */
+ *  traversers (`docs/archive/2026-08-26-federate-pushdown-design.md`, open item 1). */
 export interface BarrierValues {
   readonly kind: 'barrier-values';
   readonly values: readonly FrameNode[];
@@ -311,7 +311,7 @@ export interface BarrierInput {
 // `barrier` is different: it contributes no lowering at all — its rows arrive from an awaited sibling
 // and `apply` runs at EXECUTION time, in the executor's segment loop. Federation and io contribute no
 // lowering either, and the planned iterative graph algorithms
-// (`docs/2026-07-24-graph-algorithms-plan.md`) are barrier contributions for the same reason.
+// (`docs/archive/2026-07-24-graph-algorithms-plan.md`) are barrier contributions for the same reason.
 
 /**
  * A `rel` contribution's product. `null` declines, the one decline convention this route has.
@@ -404,7 +404,7 @@ export const DIRECTORY_SERVICE_NAME = '--list';
  *  the STEP keeps TinkerPop's word, the SERVICE takes the algorithm's (root CLAUDE.md, Naming).
  *  All four are `internal: true` services: they back native TinkerPop steps rather than extending the
  *  reference provider surface, so they are served by both registries yet absent from `--list`, exactly
- *  as `io` is. See `docs/2026-07-24-graph-algorithms-plan.md`. */
+ *  as `io` is. See `docs/archive/2026-07-24-graph-algorithms-plan.md`. */
 export const PAGERANK_SERVICE_NAME = 'pageRank';
 export const WCC_SERVICE_NAME = 'wcc';
 export const PEER_PRESSURE_SERVICE_NAME = 'peerPressure';

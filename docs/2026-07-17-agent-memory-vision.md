@@ -1,6 +1,11 @@
 # mogwai as agent memory — exploratory vision
 
-**Date:** 2026-07-17 · **Status:** exploratory research, not a committed plan · **Author:** Dan + Claude
+**Date:** 2026-07-17 · **Status (2026-10-24):** live product direction, exploratory — NOTHING in it has
+shipped (no MCP server, no in-DO vectors/cosine spike, no Code Mode layer, no memory schema/recipes;
+`src/` has no MCP/vector code). It was pruned once and deliberately restored (`b77bfa79`). The engine
+substrate it leans on has matured since (`math()`, chunked streaming, federation/replication) but its
+Phase 0–4 are all still open, and per fork #2 most of it belongs in a sibling `mogwai-memory` repo,
+not here · **Author:** Dan + Claude
 
 This is a scoping/vision piece, not a design lock. It studies three prior-art systems,
 extracts what to borrow and what to beat, and proposes a shape for **mogwai-as-agent-memory**

@@ -12,7 +12,7 @@ import { isNested, parseGremlin, stepChain, type Step } from '../../gremlin/fron
 // it decides HOW to lower. This module lifts the same classification into ONE named fact over the
 // WHOLE tail, so it can ALSO decide WHAT to fetch (federate pushdown) — and so the two never drift:
 // the fetch decision and the tail's accept/decline become the same function of the same steps
-// (`docs/2026-08-26-federate-pushdown-design.md`).
+// (`docs/archive/2026-08-26-federate-pushdown-design.md`).
 //
 // It is DATA, no behaviour — the `ChainFacts` pattern (`analyze.ts`): a static walk over the post-`from`
 // steps, one record for the whole tail. Consulted, never constructed (`src/compiler/CLAUDE.md`): a
@@ -130,7 +130,7 @@ export function contentDemand(steps: readonly IRStep[], from: number): ContentDe
 // ---------- pushdown: split the post-barrier tail into a REMOTE prefix and a LOCAL suffix ----------
 //
 // For the ARG-LESS federate form (`g.call(federate, {graph}).V()…` — no `traversal` arg,
-// win 2a in `docs/2026-08-26-federate-pushdown-design.md`), the whole tail after the barrier is a
+// win 2a in `docs/archive/2026-08-26-federate-pushdown-design.md`), the whole tail after the barrier is a
 // CANDIDATE to run on the sibling. Pushdown finds the longest PREFIX of the tail that is remote-safe and
 // hands it to the sibling; the rest stays local. This is Calcite's convention/boundary model
 // (`vendor/calcite`), specialized: because the sibling runs the SAME engine, pushing is always cheaper

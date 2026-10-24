@@ -1,4 +1,4 @@
-// Phase 1 of federate pushdown (docs/2026-08-26-federate-pushdown-design.md): the ONE tail classifier
+// Phase 1 of federate pushdown (docs/archive/2026-08-26-federate-pushdown-design.md): the ONE tail classifier
 // `contentDemand`. This phase is BEHAVIOUR-PRESERVING — the fact is computed and `detachedTail` routes
 // its decline check through it, but no fetch behaviour changes yet. These tests pin (a) the fact's
 // vocabulary and (b) the two drift risks the convergence exists to remove: the adjacency-step set must

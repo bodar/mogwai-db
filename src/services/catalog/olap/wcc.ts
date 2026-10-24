@@ -21,7 +21,7 @@ import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 // keeps the element stream LIVE and reads the component as a synthetic property under the key, so
 // `has(key)`/`order().by(key)`/`project().by(key)` compose. `apply` reading the edge list and computing
 // components with union-find is NOT row-at-a-time traversal interpretation — it is one bulk SQL read of
-// the data plus a bounded in-JS graph computation, the barrier model (`docs/2026-08-21-barrier-substrate-design.md`).
+// the data plus a bounded in-JS graph computation, the barrier model (`docs/archive/2026-08-21-barrier-substrate-design.md`).
 
 const CC_COMPONENT_KEY = 'gremlin.connectedComponentVertexProgram.component';
 const CC_PROPERTY_NAME = '~tinkerpop.connectedComponent.propertyName';

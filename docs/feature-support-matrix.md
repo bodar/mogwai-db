@@ -1,9 +1,8 @@
 # mogwai-db — feature support matrix
 
-What you can rely on. A ✅ step works **anywhere in a traversal**, however deeply nested — not just at
-the top. **Notes list ONLY what does not work** (plus flagged divergences); no note means the whole
-step works. Anything unsupported throws a clear error and never mis-executes. Where we answer under
-JS/SQLite semantics rather than Java's (regex dialect, string order, write visibility, …), §17 lists it.
+A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only what does not work**; no
+note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
+Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
 **L3 conformance: <!-- L3:passing -->1,878<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
@@ -12,7 +11,7 @@ JS/SQLite semantics rather than Java's (regex dialect, string order, write visib
 | ✅ | Supported, at any depth. |
 | 🟡 | Partial — the note says what is missing. |
 | ❌ | Not yet. Throws `UnsupportedTraversal`. |
-| 🚫 | Out of scope — we will not build it. **Not** a backlog item; §15 is the whole list. |
+| 🚫 | Out of scope — we will not build it (§15 is the whole list). |
 
 ---
 
@@ -20,22 +19,22 @@ JS/SQLite semantics rather than Java's (regex dialect, string order, write visib
 
 | Step | | Notes |
 |---|:--:|---|
-| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | a mid-traversal re-source (`…as('a').V()`) is ❌ after `path()`/`sack()` |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | ❌ a mid-traversal `V()` after `path()`/`sack()` |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | |
-| `otherV` | ✅ | the edge hop retains its entering vertex (the `fromV` channel) whenever an `otherV()` consumes it — at any depth: through any `where`/`filter`/`not`/`has`/`as`/`order`/slice between the edge and the `otherV()`, inside a `local`/`flatMap` body or a `union`/`coalesce`/`choose` edge-arm, inside an existence gate across a barrier, and with `path()`. Refuses (ill-typed) only a MIXED vertex/edge branch (`union(outE,out).otherV()`), and `E().otherV()` (no entering vertex) |
-| `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
+| `otherV` | ✅ | ❌ `E().otherV()` (no entering vertex); a mixed vertex/edge branch (`union(outE(), out()).otherV()`) |
+| `inject(…)` | ✅ | ❌ a list appended to a scalar stream |
 | `call(service[, params])`, `.with(k,v)` | ✅ | |
-| `io(path).read()` / `.write()` | ✅ | 🚫 GraphML, Gryo; a CSV export refuses a collection-valued property or a meta-property, and declares `bigint`/`bigdecimal`/`uuid`/`char`/`duration` as `String` |
+| `io(path).read()` / `.write()` | ✅ | 🚫 GraphML, Gryo. CSV export refuses collection-valued and meta-properties, and writes `bigint`/`bigdecimal`/`uuid`/`char`/`duration` as `String` |
 
-**Services** — the `call()` registry, a per-runtime DI seam; `--list` enumerates it.
+**Services** — the `call()` registry; `--list` enumerates it.
 
 | Service | | Notes |
 |---|:--:|---|
 | `--list` | ✅ | |
 | `tinker.degree.centrality` | ✅ | |
-| `tinker.search` | ✅ | ❌ `type=VertexProperty`, `<3`-char term, `regex` |
-| `io` (service) | ✅ | internal; what `io()` desugars to. Coverage as `io()` above |
-| `federate` | ✅ | cross-graph pushdown (async barrier); `.with("subgraph", true)` brings back a traversable subgraph. ❌ bound-parameter/`null` movement labels, `order` over the bound stream, `path()`/`as()` spanning the call, and local movement over a NON-subgraph detached result |
+| `tinker.search` | ✅ | ❌ `type=VertexProperty`, terms under 3 chars, `regex` |
+| `io` (service) | ✅ | what `io()` desugars to |
+| `federate` | ✅ | cross-graph pushdown; `.with("subgraph", true)` returns a traversable subgraph. ❌ parameter/`null` movement labels, `order` over the bound stream, `path()`/`as()` across the call, local movement over a non-subgraph result |
 
 ## 2. Filters & predicates
 
@@ -45,78 +44,75 @@ JS/SQLite semantics rather than Java's (regex dialect, string order, write visib
 | `has(T.id,…)`, `hasId` | ✅ | |
 | `hasKey`, `hasValue` | ✅ | |
 | `is(P)` | ✅ | ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
-| `where(__.…)`, `not`, `filter(__.…)` | ✅ | ❌ ordered children using traversal-valued `by()` |
-| `where(P)` / `where('a',P)` | 🟡 | ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
+| `where(__.…)`, `not`, `filter(__.…)` | ✅ | |
+| `where(P)` / `where('a',P)` | 🟡 | ❌ some `where(P.op)` forms; `by(key)` on an edge label; `where('a',P)` over scalar labels |
 | `and`, `or` | ✅ | |
-| `dedup()`, `dedup(labels)` | ✅ | ❌ bare `dedup()` after path tracking; more than one `by()` |
+| `dedup()`, `dedup(labels)` | ✅ | ❌ bare `dedup()` after path tracking |
 | `identity()`, `sample(n)` | ✅ | |
 | `simplePath`, `cyclicPath` | ✅ | |
 | `coin(p)` | ❌ | |
 | `typeOf(GType)` over a stored property | ✅ | |
 
-**Predicates (`P`)** — all ✅ in every position a predicate is accepted, except as noted.
+**Predicates (`P`)** — ✅ in every position a predicate is accepted.
 
 | Predicate | | Notes |
 |---|:--:|---|
 | `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `within`, `without` | ✅ | |
-| `between`, `inside` | ✅ | |
-| `outside` | ✅ | |
+| `between`, `inside`, `outside` | ✅ | |
 
-**Text predicates (`TextP`)** — case-insensitive under SQLite `LIKE`; a ≥3-char literal term uses the
-`property_fts` trigram access path.
+**Text predicates (`TextP`)** — case-exact; a ≥3-char literal term uses the `property_fts` trigram index.
 
 | Predicate | | Notes |
 |---|:--:|---|
 | `containing`, `startingWith`, `endingWith` + negations | ✅ | |
-| `regex`, `notRegex` | ✅ | `has(key, regex)` ONLY (a batched barrier; the pattern is a JavaScript `RegExp` — see Deliberate divergences — `src/compiler/rel/regex.ts` `compileRegex`). ❌ regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) — a fail-closed deferral, `docs/2026-08-12-regex-as-a-barrier-research.md` |
+| `regex`, `notRegex` | 🟡 | `has(key, regex)` only (JavaScript `RegExp`, §17). ❌ in `is`/`where`/`match` |
 
 ## 3. Projections & element data
 
 | Step | | Notes |
 |---|:--:|---|
 | `values(k…)`, `label()`, `labels()`, `id()` | ✅ | |
-| `valueMap()`, `valueMap(true)`, `elementMap()` | ✅ | ❌ selective token subsets (`with(tokens, ids)`) |
-| `properties()`, `key()`, `value()`, `element()` | ✅ | ❌ META-properties (`properties().properties()`, `has(k,v)` over a VertexProperty) |
+| `valueMap()`, `valueMap(true)`, `elementMap()` | ✅ | ❌ token subsets (`with(tokens, ids)`) |
+| `properties()`, `key()`, `value()`, `element()` | ✅ | ❌ meta-property reads (`properties().properties()`, `has(k,v)` on a VertexProperty) |
 | `propertyMap()` | ❌ | |
 | `project(k…).by(…)` | ✅ | |
-| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ dynamic-shape `Pop.mixed`; reading an ELEMENT value back out of a `project()` map once it has collapsed (`fold().unfold().select(k)`, an element field's entry value, a union-demoted record) declines; a multi-key `select(k…).by(…)` over a record field that may hold a productive null declines |
+| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ dynamic-shape `Pop.mixed`; an element read back out of a collapsed `project()` map (`fold().unfold().select(k)`); multi-key `select(k…).by(…)` over a field that may hold a null |
 | `constant(v)` | ✅ | |
 
 ## 4. Aggregation & barriers
 
 | Step | | Notes |
 |---|:--:|---|
-| `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `fold(seed, Operator.x)`, `unfold()` | ✅ | ❌ `fold(seed, Operator.assign)`; a list seed other than `[]`; `and`/`or` over a stream with no boolean type channel; `sum`/`minus`/`mult`/`div` (and a map `addAll`) over a stream the reference may have BULKED — a flat-map after the first, a `math()`/`where()`/`simplePath()` not directly before the fold, bare or wrapped in an inlined `filter()`/`and()` (`PathRetractionStrategy`'s barrier; a `where()` over a still-distinct stream is fine), a `barrier()`/collecting step, duplicate `inject()`/`V()` arguments (`referenceUnbulkedAt`); a byte/short/float/BigInteger/BigDecimal seed or member (one found per row RAISES a deferral); a non-finite double result (raises a deferral). Raises the reference's `long overflow` / `/ by zero`, and a deferral naming `ClassCastException` where an operand is not a Number or a `min`/`max` pair is not comparable |
-| `group().by().by()`, `groupCount()` | ✅ | ❌ a `dedup()` before the fold (it collapses the pool, and a global dedup is not a per-partition one); a value `by()` with steps AFTER its first reducing barrier (`by(__.values(k).sum().fold())` — the pool is cut there); a seeded `fold(seed, Operator.x)` value |
+| `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `fold(seed, Operator.x)`, `unfold()` | ✅ | ❌ `fold(seed, Operator.assign)`; a list seed other than `[]`; `and`/`or` with no boolean type; a byte/short/float/BigInteger/BigDecimal seed or member; a non-finite double result |
+| `group().by().by()`, `groupCount()` | ✅ | ❌ a value `by()` with steps after its first reducing barrier (`by(values(k).sum().fold())`); a seeded `fold(seed, Operator.x)` value |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
-| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | a bare global `order()` over a LIST or MAP stream sorts by ORDERABILITY through the whole-stream value-transform barrier (`order-dedup-local.ts`, the stream twin of `order(Scope.local)`) — a map by its sorted entry-set (`mapComparator`), a base-graph ELEMENT-membered list by carrying member rowids through the barrier and re-sourcing at the edge. Any other global `order()` whose key SQL cannot compare — a PATH stream (`path().order().by(desc)`, labels survive for a later `select`), a LIST/MAP-valued `by()` (`by(__.values('age').fold())`) — is a RANKED-ORDER barrier (`ranked-order.ts`: JS ranks the keys by ORDERABILITY, the resume joins each traverser to its rank, every channel carried). ❌ a ranked `order()` inside a child body/branch arm (top-level only); over a chain that WRITES; a FEDERATED element-membered list (its keys re-source via `BoundGraph`, not the resume's base default); `order().by(Column.keys)` over an unfolded map whose KEY is a collection compares the key's JSON text (a pre-existing divergence) |
+| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | ❌ a list/map/path-keyed `order()` inside a child body, in a writing chain, or over a federated element list. `order().by(Column.keys)` over a collection-valued key compares its JSON text |
 
 ## 5. Branching
 
 | Step | | Notes |
 |---|:--:|---|
-| `union(a, b…)` | 🟡 | ❌ a single-arm form whose one arm is a REDUCTION or binds a label; a MIXED variant with a MAP/record arm; an alias through a collapsed arm; a union whose emission order a downstream slice/collect READS (`union(…).limit(n)`, `.fold()`, `.cap()` — needs the arm-blocked fan-out order, not yet minted) |
-| `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | ❌ where a downstream slice/collect READS the fan-out emission order; over a PROPERTY stream |
-| `coalesce` | ✅ | ❌ a non-seeded reducer arm (`max`/`sum`); a `number`-reducer scalar merged with a plain scalar; a payload-MEMBER tail over a variant stream (`unfold`, a member transform, a keyed/`by()` dedup) |
+| `union(a, b…)` | ✅ | ❌ a single arm that reduces or binds a label; a mixed map/scalar union; an alias through a collapsed arm |
+| `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | |
+| `coalesce` | ✅ | ❌ an unseeded reducer arm (`max`/`sum`); a `number`-reducer merged with a plain scalar; a member step (`unfold`, keyed `dedup`) over a variant stream |
 | `optional` | ✅ | ❌ an element re-source arm (`optional(__.V())`) |
-| `map(__.…)`, `flatMap(__.…)`, `local(__.…)` | 🟡 | ❌ `map` over a fan-out (movement) body (`map(__.out())`); `flatMap` over a pure scalar body (`flatMap(__.values('name'))`); `flatMap`/`local` under `path()`; a label bound inside the body that the outer chain reads (`local(__.out().as('b'))…select('b')`) |
+| `map(__.…)`, `flatMap(__.…)`, `local(__.…)` | ✅ | ❌ `map` over a fan-out body (`map(__.out())`) |
 | `branch`, `sideEffect(__.…)` | ❌ | |
 
-Heterogeneous arms merge into a **variant stream**; after the merge the shape-agnostic steps
-(`count`, the `limit`/`range`/`skip` slices, a bare `dedup`) compose over it, but a payload-MEMBER step
-(`unfold`, a member transform, a keyed `dedup`) does not.
+Heterogeneous arms merge into a **variant stream**: `count`, slices and bare `dedup` work over it; a
+member step (`unfold`, a member transform, keyed `dedup`) does not.
 
 ## 6. Recursion (`repeat`)
 
 | Form | | Notes |
 |---|:--:|---|
-| `repeat(body).times(n)` | ✅ | a compile-time `times(n)` UNROLLS to n phases |
-| `repeat(body).until(p)` / `.emit()` / `.emit(p)` | ✅ | unbounded, compiled as a recursive CTE, at all four modulator positions |
-| `repeat()` with NEITHER modulator | ✅ | |
-| unbounded + a per-iteration barrier | ❌ | refused — SQLite cannot express one in a recursive term (no `DISTINCT`, no aggregate) |
+| `repeat(body).times(n)` | ✅ | unrolled to n phases |
+| `repeat(body).until(p)` / `.emit()` / `.emit(p)` | ✅ | recursive CTE, all modulator positions |
+| `repeat()` with neither modulator | ✅ | |
+| unbounded + a per-iteration barrier | ❌ | a recursive CTE cannot hold `DISTINCT` or an aggregate |
 
-**No artificial depth cap.** A cyclic body without `simplePath()` is infinite per the spec; the DO's
-per-request limit is the backstop.
+**No depth cap.** A cyclic body without `simplePath()` is infinite per the spec; the DO's request
+limit is the backstop.
 
 ## 7. Path
 
@@ -128,48 +124,42 @@ per-request limit is the backstop.
 
 ## 8. Pattern matching
 
-`match(p1, p2, …)` 🟡 — a BINDING TABLE threaded through the ordinary fold, so a pattern body inherits
-the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
-`docs/2026-08-13-match-relir-lowering-plan.md`). The GQL match-STRING form
-(`g.match("MATCH (a)-[:knows]->(b)")`) rides on this via its desugar (`src/gremlin/gql.ts`).
+`match(p1, p2, …)` 🟡 — compiled as a binding table, so a pattern body takes the full step vocabulary.
+The GQL string form (`g.match("MATCH (a)-[:knows]->(b)")`) desugars to it.
 
 | Feature | | Notes |
 |---|:--:|---|
-| conjunctive BINDING pattern `as(x).<body>.as(y)` | ✅ | |
-| readiness scheduling (argument ORDER unobservable) | ✅ | |
-| BACK EDGE `as(y)` re-using a bound variable | ✅ | |
-| terminal bindings MAP + downstream `select`/`select(…).by(…)` | ✅ | |
-| NO-END constraint, filter-only body | ✅ | |
-| per-row SCALAR end | ✅ | |
-| REDUCING-barrier end `count`/`sum`/`mean`/`min`/`max` | ✅ | |
-| start variable bound BEFORE the match | ✅ | |
-| FILTER LEG `where(<body>)`/`not(<body>)` | ✅ | |
-| inline `where('a', P.eq/neq('b'))` between two bound ELEMENT aliases | ✅ | |
-| `or` connective GROUPS | ❌ | they BIND their nested ends |
-| `where('a', P.op('b'))` non-`eq`/`neq`, or over a SCALAR alias | ❌ | |
+| binding pattern `as(x).<body>.as(y)` | ✅ | |
+| any argument order | ✅ | |
+| back edge (re-using a bound variable) | ✅ | |
+| bindings map + downstream `select`/`select(…).by(…)` | ✅ | |
+| no-end filter-only body | ✅ | |
+| per-row scalar end | ✅ | |
+| reducing end `count`/`sum`/`mean`/`min`/`max` | ✅ | |
+| start variable bound before the match | ✅ | |
+| `where(<body>)`/`not(<body>)` leg | ✅ | |
+| `where('a', P.eq/neq('b'))` between element aliases | ✅ | |
+| `or` groups | ❌ | |
+| `where('a', P.op('b'))` other ops, or over scalar aliases | ❌ | |
 | `fold()` end | ❌ | |
-| MOVING no-end pattern | ❌ | |
+| moving no-end pattern | ❌ | |
 | 0/1-variable bindings map | ❌ | |
-| nested `match` inside a pattern | ❌ | |
+| nested `match` | ❌ | |
 
-Every ❌ fails closed, each a named next phase in `docs/2026-08-13-match-relir-lowering-plan.md`.
-
-`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — the OLAP family (full `call()` catalog in §16).
+`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ✅ — see §16.
 
 ## 9. Lists & collections
 
 | Step | | Notes |
 |---|:--:|---|
-| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | a NESTED-list-member `order`/`dedup(Scope.local)` sorts/dedups by ORDERABILITY through the value-transform barrier — SCALAR members and base-graph ELEMENT members (carried as rowids, re-sourced at the edge). `order(Scope.local)` over a MAP re-sorts its entries (bare, `by(Column.keys|values[, asc|desc])`, chained). ❌ a map `order(Scope.local).by(<key>|<traversal>)`; `dedup(local)` with a label tuple or a `by()` projection; a PROPERTY-member list; a FEDERATED element-membered list |
-| `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over a non-iterable SCALAR self |
+| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | ❌ map `order(Scope.local).by(<key>/<traversal>)`; `dedup(local)` with labels or `by()`; a list of properties; a federated element list |
+| `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ over a non-collection scalar |
 | `index()` | ❌ | |
-
-⚠️ A set-op does not yet keep its members' TYPES — `values('when').fold().merge(…)` returns raw millis.
 
 ## 10. Types, math & strings
 
-Every canonical type round-trips with its exact GraphBinary tag; scalar type rides PER ROW, so a
-heterogeneous stream frames each value by its own tag.
+Every canonical type round-trips with its exact GraphBinary tag; the type rides per row, so a mixed
+stream frames each value by its own tag.
 
 | Category | Types |
 |---|---|
@@ -181,35 +171,35 @@ heterogeneous stream frames each value by its own tag.
 
 | Step | | Notes |
 |---|:--:|---|
-| `math(formula)` | ✅ | full exp4j surface, one SQL scalar (always Double — see 🔴 below) |
+| `math(formula)` | ✅ | full exp4j surface; always Double |
 | `format(template)`, `concat`, `substring`, `length`, `toUpper`, `toLower`, `trim`/`lTrim`/`rTrim`, `replace` | ✅ | |
 | `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | |
-| `asString` | ✅ | works over every shape (a collection renders through a JS barrier) and through a global `order().fold()` (a nested barrier); a NULL value / list member RAISES `Can't parse null as String.` via a runtime guard (`AsStringGlobalStep`/`AsStringLocalStep`) |
-| `asNumber` | 🟡 | mixed numeric subtypes ride per-row (§6·7); a bare `asNumber()` / `asNumber(GType)` after a reducer works (`GType` rides a runtime overflow guard); ❌ over an `unfold()`-ed list member |
-| `reverse` | ✅ | ❌ NESTED scalar reverse (in a child body, where a barrier cannot segment) — a fail-closed deferral |
-| `split` | 🟡 | ❌ `split(Scope.local, sep)` over a folded list, a LIST-shaped head, and a read past `split()` of a label bound BEFORE it (`as("x").split(sep).select("x")` — only the value crosses the barrier) — fail-closed deferrals |
+| `asString` | ✅ | a null raises `Can't parse null as String.` |
+| `asNumber` | ✅ | |
+| `reverse` | ✅ | ❌ scalar `reverse` inside a child body |
+| `split` | 🟡 | ❌ `split(Scope.local, sep)`; a list-shaped input; reading a label bound before `split()` |
 
-🔴 **Five documented deviations, not defects:**
+🔴 **Numeric limits (by design, not defects):**
 
-| Deviation | Detail |
+| Limit | Detail |
 |---|---|
 | host-language typing in Java/.NET | |
-| 128-bit arithmetic declines | |
-| int64 overflow raises natively | |
-| 32-bit float arithmetic is not expressible | SQLite REAL is always a double |
-| **`NaN` has no carrier — a NaN VALUE declines** | SQLite has no NaN (stores one as `NULL` however it arrives), so a NaN literal in a VALUE position (`inject`, `constant`, a list/map member, a property value) DECLINES at every depth (`compiler/ir/uncarried-literal.ts`) rather than answer for a null (`inject(NaN,1,NaN).fold()` was `[null,null,1]`, `inject(NaN,1).sum()` was 1). Exempt: a predicate OPERAND (`is(P.lt(NaN))`), and a NaN the very next step drops as it drops a null (`is(P.eq/lt/gt(x))`, `lte`/`gte` of a non-null, an `inject`'s `asBool()`). A negative-scale BigDecimal literal (`1e7m`) answers at scale 0 (see Deliberate divergences). `±Infinity` is unaffected (SQLite represents it via `9e999`/`-9e999`), inlined as a constant — never a bind — and prints SQLite's `Inf`/`-Inf` under `asString()`/`conjoin()` (see Deliberate divergences). A run-time NaN from a `math()` domain error or a sack fold raises a deferral rather than answer `null`; a `sum()`/`mean()` total that is NaN (`Infinity + -Infinity`) answers `null` (see Deliberate divergences) |
+| 128-bit arithmetic | declines |
+| int64 overflow | raises |
+| 32-bit float arithmetic | SQLite REAL is always a double (§17 Float) |
+| `NaN` values | SQLite stores NaN as NULL, so a NaN literal in a value position (`inject`, `constant`, collection member, property) declines. A NaN predicate operand works; `±Infinity` works. A run-time NaN from `math()` or a sack raises; a NaN `sum()`/`mean()` is `null` (§17) |
 
 ## 11. Writes
 
 | Step | | Notes |
 |---|:--:|---|
-| `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | ❌ a runtime/computed label; `addE` after `addE`; `addInE` |
-| `property(k, v)`, `property(Cardinality, k, v)` | ✅ | ✅ `property(k, __.trav)` per traverser (vertex + edge, runtime key, meta, the `property(__.trav)` map form; folded into `addV`/`addE` it reads the incoming traverser; 0→skip, >1 under single→raise, list/set→each); 🚫 refuses a null result, a "first" pick with no stated order, and, over >1 traverser, a body that could read what another traverser writes at any mutating step of the program (the lazy pipeline interleaves them per traverser) |
+| `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | ❌ a traversal-computed label (`addV(__.values('name'))`); `addE` after `addE` |
+| `property(k, v)`, `property(Cardinality, k, v)`, `property(k, __.trav)` | ✅ | ❌ a traversal value that is null, needs an unordered "first" pick, or could read another traverser's write |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | |
-| `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅ (upsert-by-id, both hosts); ❌ a map-valued `inject`/`union` feeding the merge; a meta-property under an undeclared cardinality |
+| `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅. ❌ a map fed by `unfold`/`union`; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |
 
-A write chain is a SEQUENCE of statements, O(write steps) and never O(rows).
+A write chain is a sequence of statements, O(write steps), never O(rows).
 
 ## 12. Side-effect state
 
@@ -217,38 +207,33 @@ A write chain is a SEQUENCE of statements, O(write steps) and never O(rows).
 |---|:--:|---|
 | `aggregate(k)`, `cap(k)`, `group(k)`, `groupCount(k)` | ✅ | |
 | `withSideEffect(k, v)`, `withSideEffect(k, seed, Operator)` | ✅ | |
-| `withSack(seed)`, `sack()`, `sack(op).by(…)` | ✅ | ❌ `withSack(seed, Operator.x)`; a BigInteger/BigDecimal sack or operand (raises a deferral) |
+| `withSack(seed)`, `sack()`, `sack(op).by(…)` | ✅ | ❌ `withSack(seed, Operator.x)`; a BigInteger/BigDecimal sack or operand |
 | `store(k)` | 🚫 | removed from the language upstream |
 
 ## 13. Traversal strategies
 
-Every strategy TinkerPop ships is classified into ONE handling; unlisted → **reject**, the
-fail-closed backstop, so a semantic strategy is never silently ignored. `withStrategies(X)` accepts a
-strategy only if its handling is inject/verify/no-op; `withoutStrategies(X)` filters `X` out of the
-active set — a safe no-op by default (we apply no strategy on our own), EXCEPT for an always-on one
-whose effect is unconditional (that request is rejected, since we cannot un-apply it).
+Every TinkerPop strategy has ONE handling; anything unlisted is **rejected**, so a semantic strategy is
+never silently ignored. `withStrategies(X)` accepts inject/verify/no-op strategies. `withoutStrategies(X)`
+is a no-op, except for an always-on strategy, which is rejected.
 
 | Handling | What it does | Strategies |
 |---|---|---|
-| **Inject** ✅ | rewrites the chain to change the result set | `SubgraphStrategy` (❌ `vertexProperties` criterion; a mutating traversal), `PartitionStrategy` (❌ `mergeV`/`mergeE`; `includeMetaProperties`), `ProductiveByStrategy` (❌ a `by()` on an unsupported host) |
-| **Verify** ✅ | asserts legality and throws the spec's message | `StandardVerificationStrategy` (always-on: `inject()` under `repeat()`, a mutating value-arg child), `ReadOnlyStrategy`, `EdgeLabelVerificationStrategy` (only when `throwException:true`), `ReservedKeysVerificationStrategy` (only when `throwException:true`) |
-| **No-op, but we DO the work** ⚙️ | result unchanged, yet the optimization is genuinely performed; `withoutStrategies` suppresses the PLAN, not the answer | `PathRetractionStrategy` (drops unread labels; cleanly suppressible), `RepeatUnrollStrategy` (unrolls fixed `times(n)` — our only lowering of it, so it is NOT suppressible: `withoutStrategies` of it answers as the default traversal), `ConnectiveStrategy` (infix `.and()`/`.or()` folding, applied unconditionally — and always-on, so `withoutStrategies` of it is REJECTED), `EarlyLimitStrategy` (moves a `limit`/`range`/`skip` left past a SIDE EFFECT — a write, a label mutation, a `sideEffect()` — where it decides how many traversers that effect touches, `ir/early-limit.ts`; a keyed `groupCount`/`group` is a barrier it does not cross; `withoutStrategies` keeps the slice in place, and a slice left behind a side effect DECLINES) |
-| **No-op, inert** 💤 | accepted, changes nothing whether named or disabled — SQLite's planner does this work, or the condition can't arise on our surface | `CountStrategy`, `IdentityRemovalStrategy`, `FilterRankingStrategy`, `LazyBarrierStrategy`, `OrderLimitStrategy`, `AdjacentToIncidentStrategy`, `IncidentToAdjacentStrategy`, `InlineFilterStrategy`, `PathProcessorStrategy`, `ByModulatorOptimizationStrategy`, `MatchAlgorithmStrategy`, `MatchPredicateStrategy`, `GValueReductionStrategy`, `ProviderGValueReductionStrategy`, `RequirementsStrategy`, `LambdaRestrictionStrategy`, `GraphFilterStrategy`, `ComputerFinalizationStrategy`, `MessagePassingReductionStrategy`, `ComputerVerificationStrategy`, `VertexProgramRestrictionStrategy`, `HaltedTraverserStrategy`, `VertexProgramStrategy`, `OptionsStrategy`, `ProfileStrategy`, `SeedStrategy` |
-| **Reject** ❌ | fail-closed — would change results if silently ignored | anything unlisted, incl. `SackStrategy`, `SideEffectStrategy`, `EventStrategy`, `ElementIdStrategy`, `ReferenceElementStrategy` |
+| **Inject** ✅ | rewrites the chain | `SubgraphStrategy` (❌ `vertexProperties`; a mutating traversal), `PartitionStrategy` (❌ `mergeV`/`mergeE`; `includeMetaProperties`), `ProductiveByStrategy` (❌ a `by()` on an unsupported host) |
+| **Verify** ✅ | throws the spec's message | `StandardVerificationStrategy` (always on), `ReadOnlyStrategy`, `EdgeLabelVerificationStrategy` and `ReservedKeysVerificationStrategy` (when `throwException:true`) |
+| **No-op, work done** ⚙️ | the optimization is always performed; the answer is unchanged | `PathRetractionStrategy` (drops unread labels), `RepeatUnrollStrategy` (unrolls `times(n)`; disabling it changes nothing), `ConnectiveStrategy` (folds infix `.and()`/`.or()`; always on, so disabling it is rejected), `EarlyLimitStrategy` (moves a slice before a side effect; disabled, a slice after a side effect declines) |
+| **No-op, inert** 💤 | accepted, changes nothing | `CountStrategy`, `IdentityRemovalStrategy`, `FilterRankingStrategy`, `LazyBarrierStrategy`, `OrderLimitStrategy`, `AdjacentToIncidentStrategy`, `IncidentToAdjacentStrategy`, `InlineFilterStrategy`, `PathProcessorStrategy`, `ByModulatorOptimizationStrategy`, `MatchAlgorithmStrategy`, `MatchPredicateStrategy`, `GValueReductionStrategy`, `ProviderGValueReductionStrategy`, `RequirementsStrategy`, `LambdaRestrictionStrategy`, `GraphFilterStrategy`, `ComputerFinalizationStrategy`, `MessagePassingReductionStrategy`, `ComputerVerificationStrategy`, `VertexProgramRestrictionStrategy`, `HaltedTraverserStrategy`, `VertexProgramStrategy`, `OptionsStrategy`, `ProfileStrategy`, `SeedStrategy` |
+| **Reject** ❌ | would change results if ignored | anything unlisted, incl. `SackStrategy`, `SideEffectStrategy`, `EventStrategy`, `ElementIdStrategy`, `ReferenceElementStrategy` |
 
-⚠️ `OptionsStrategy`/`ProfileStrategy`/`SeedStrategy` are inert only until `with()`/`profile()`/
-`coin()`-`sample()` land — revisit then. The always-on verify + fold passes (`StandardVerificationStrategy`,
-`ConnectiveStrategy`) run whether or not the user names them.
+⚠️ `SeedStrategy` is inert: `sample()` is not reproducible under a seed. `ProfileStrategy` is inert
+because `profile()` is not supported.
 
 ## 14. Element / property model
 
-Vertices carry MULTIPLE labels (`addLabel`/`dropLabel`); TinkerPop's single-label rule is not enforced.
-Vertex properties are multi-valued with meta-properties; edge properties are single-valued by schema.
-Element ids are integer rowids, externally `COALESCE(uid, id)`.
+Vertices carry multiple labels (`addLabel`/`dropLabel`). Vertex properties are multi-valued with
+meta-properties; edge properties are single-valued. Element ids are integer rowids, externally
+`COALESCE(uid, id)`.
 
 ## 15. Locked non-goals (🚫)
-
-Short on purpose: a 🚫 means **we will not build this**, never "we have not got to it".
 
 | Non-goal | Why |
 |---|---|
@@ -257,21 +242,15 @@ Short on purpose: a 🚫 means **we will not build this**, never "we have not go
 
 ## 16. OLAP / graph algorithms (`call()`)
 
-Fourteen graph algorithms run as `call()` services — the compute stays set-based SQL, never a
-row-at-a-time interpreter. Each is invoked `g.V().call("<name>")`.
-
-**Four have a native TinkerPop step** and answer it directly (it desugars to the same service):
-`pageRank()`, `connectedComponent()` (= `wcc`), `peerPressure()`, `shortestPath()`. The other ten are
-reachable only through `call()`.
-
-The four with a native step lead the table; the algorithm name links a canonical reference.
+Fourteen algorithms run as set-based SQL `call()` services, invoked `g.V().call("<name>")`. Four also
+have a native TinkerPop step that desugars to the same service.
 
 | Algorithm | `call()` name | Notes |
 |---|---|---|
 | [PageRank](https://en.wikipedia.org/wiki/PageRank) | `pageRank` | native `pageRank()` |
 | [Weakly-connected components](https://en.wikipedia.org/wiki/Component_(graph_theory)) | `wcc` | native `connectedComponent()` |
 | [Peer-pressure clustering](https://en.wikipedia.org/wiki/Label_propagation_algorithm) | `peerPressure` | native `peerPressure()` |
-| [Shortest path](https://en.wikipedia.org/wiki/Shortest_path_problem) | `shortestPath` | native `shortestPath()`; the path finder (§7/§8) |
+| [Shortest path](https://en.wikipedia.org/wiki/Shortest_path_problem) | `shortestPath` | native `shortestPath()` |
 | [ArticleRank](https://neo4j.com/docs/graph-data-science/current/algorithms/article-rank/) | `articleRank` | |
 | [Strongly-connected components](https://en.wikipedia.org/wiki/Strongly_connected_component) | `scc` | |
 | [Betweenness centrality](https://en.wikipedia.org/wiki/Betweenness_centrality) | `betweenness` | |
@@ -283,60 +262,55 @@ The four with a native step lead the table; the algorithm name links a canonical
 | [k-core](https://en.wikipedia.org/wiki/Degeneracy_(graph_theory)#k-Cores) | `kcore` | decorates the core value |
 | [Node similarity](https://en.wikipedia.org/wiki/Jaccard_index) | `nodeSimilarity` | yields `{node1, node2, similarity}` pairs |
 
-**Reads over a decorated key compose fully.** An element-decorating algorithm (`pageRank`,
-`connectedComponent`, `peerPressure`, `hits`, `kcore`) passes its element stream through with the score
-under a synthetic key, and every property read works on it: `has(key)` (presence), `has(key, value)` /
-`has(key, P.gt(x))` (a vtype-aware compare — numeric for a REAL score, text for a component id),
-`order().by(key)`, `project().by(key)`, `values(key)`, `values(key, storedKey)` (a UNION of the
-decorated value with stored ones), and `valueMap()`. All live in `src/compiler/rel/decorate.ts`.
+A decorating algorithm (`pageRank`, `connectedComponent`, `peerPressure`, `hits`, `kcore`) puts its
+score under a synthetic key that every property read (`has`, `values`, `order().by`, `project().by`,
+`valueMap()`) can use.
 
 ## 17. Deliberate divergences
 
-mogwai-db targets the SEMANTICALLY EQUIVALENT answer — which rows and values a query returns — under
-JavaScript/SQLite semantics, not Java's exact execution (`CLAUDE.md`, Semantics traps). Each line below is
-an accepted difference from the Java reference, not a defect — never a lost or duplicated row, a wrong
-count or a wrong number class. Some sites still emulate Java on trunk until their item in
-[the simplification plan](./2026-10-18-simplification-plan.md) lands; the answer here is the one we keep.
+We return the semantically equivalent answer under JavaScript/SQLite semantics, not Java's exact
+execution. Each line is an accepted difference — never a lost or duplicated row, a wrong count or a
+wrong number class.
 
 | Divergence | What you get |
 |---|---|
-| Regex dialect | JavaScript `RegExp` (tried with the `u` flag, then without), not `java.util.regex` — e.g. `$` is end of input only, `\s` includes Unicode spaces, `\Q…\E` is not quoting; a pattern neither reads raises `UnsupportedTraversal` |
-| String order | SQLite code-point order, not Java's UTF-16 code-unit order (they differ only for astral characters vs U+E000–U+FFFF) |
-| Case mapping | `toUpper`/`toLower` follow SQLite's ASCII mapping; non-ASCII letters may be left as written |
-| String length and indices | `length()`/`substring()` count code points (SQLite), not UTF-16 units: `'😀'.length()` is 1, not 2 |
-| NUL in string data | a NUL arriving as data (a parameter, a JSON literal, a loaded value) is carried whole, but SQLite's `length`/`substr`/`like`/`tinker.search` read text up to it (`'a\u0000bc'.length()` is 1). A NUL in Gremlin statement text still declines |
-| Lone surrogate in a parameter or JSON | a UTF-16 surrogate outside a pair has no UTF-8 form; in a bound parameter or a map/list literal it reaches SQLite as `''` or U+FFFD (statement text still declines it) |
-| Write visibility | SNAPSHOT: a write step sees a snapshot of its input; steps after it see all of its writes (Java's lazy pipeline interleaves per traverser unless a `barrier()` is added) — `g.V().not(out()).drop()` drops exactly the leaves, `g.inject(1,2).addV('x').V().hasLabel('x').count()` is 4, a later `property(single,k,…)` step wins, a merge's shared creation is read after its `onMatch`; no answer depends on graph size |
-| Error timing | eager and in-statement: a query containing a type error may raise even where Java's lazy pull would have stopped before reaching the bad value (`limit(0)` over a raising step answers `[]`) |
-| Error vs filter order | a filter after a type error may drop the row before SQLite evaluates the error (`inject(1).toUpper().is('x')` answers `[]`); `FilterRankingStrategy`'s reordering is not modelled. Where a value is computed once per row for reuse (the emitter's compute-once fence), its type error is raised for every row reaching the step, as Java's eager map step does, even if a later filter drops the row; a not-supported deferral never is |
-| Unread erroneous values | a type error inside a value nothing reads is not evaluated: `project('x').by(values('age').toUpper()).count()` answers the row count, `where(<…>.fold())` keeps the row |
-| Number equality | by VALUE plus a coarse family (boolean / number / string / other) at every merge, `dedup()`, `dedup(local)`, group key and list set op — `1`, `1L` and `1.0` are one value, `true` and `1` stay distinct, a UUID or Char stays apart from an equal String. A survivor keeps its own class on output; a merged group key or set member frames as one of the classes it merged (a collecting `group()`'s key and an ordered `dedup()`'s survivor: the first arrival's): `inject(1, 1.0).dedup()` is `[1]`, `inject(1, 1.0).groupCount()` is `{1.0: 2}` |
-| Signed zero | none: `-0.0` is `0.0` (as in SQLite) in compare, order, dedup, set ops, group keys, `sum`/`mean`/`min`/`max`, labels, stored collections and output (`asString()` prints `0.0`); its class (Double/Float) is kept |
-| Numeric predicate compare | `is`/`has`/`where`/`within` compare numbers BY VALUE with SQLite's exact INTEGER/REAL compare: a Long past 2^53 is not rounded to a Double first (`9007199254740993L > 9007199254740992d` holds), a Double is not widened through `BigDecimal.valueOf`, a BigDecimal compares at double precision (`inject(1.0m).is(1)` holds), and an ordering against a bound past int64 compares as REAL (BigIntegers past int64 within an ulp of each other there tie, while an in-range Long is ordered against such a bound exactly, by its sign; a bound of exactly `Long.MAX_VALUE`/`MIN_VALUE` keeps the exact INTEGER compare, a BigInteger past int64 ordering strictly beyond it by its sign; equality with a BigInteger past int64 stays exact by digits, a zero-fraction BigDecimal included) |
-| Ties in `order()` | values equal by value (`1m`/`1.0d`; `0m`/`-0.0d`/`0.0d`) tie and fall to the existing tie-break, not Java's class-aware order; such a sort always answers, never defers |
-| Float | every Float producer (literal, typed parameter, CSV, GraphSON, federation, compile-time `asNumber(FLOAT)`) stores the Double of its shortest float32 decimal (`0.123456789f` is 0.12345679), rounded to 32 bits (`Math.fround`) only when framed: `0.1f` equals `0.1d`, Float `sum`/`mean`/sack/`math()` and a run-time `asNumber(FLOAT)` run in double (`0.1f×2` is `0.2`, so a COMPUTED Float equals a literal only when the doubles agree), and `asString()` prints that Double (an exact tie rounds half up: `1.00390625f` is `1.0039063`, not `1.0039062`) |
-| Extreme-magnitude Doubles | outside roughly [1e-80, 1e116] a value crossing SQLite's decimal text (a literal, a fold/map/valueMap member, an element payload, a bulk load, a federated landing) may move by its last ulp per crossing (`1.5e-300d` reads back `1.4999999999999998e-300`); it always answers, never declines |
-| Writes over a bulked slot | one element per traverser: `g.V().both().addV('x')` creates 12 vertices on the modern graph, where Java's `LazyBarrierStrategy` bulks equal traversers first and creates 6 |
-| Unordered slices and terminal streams | come back in SQLite's planner order: a stream the query does not `order()` reaches the wire in whatever order the plan produces, and an unordered `limit()`/`range()`/`skip()` keeps SOME n of the right count (`g.V().both().both().limit(4)` is four of its rows, not the first four arrivals); one row per traverser, no TraverserSet/LazyBarrier merge-order emulation. Order IS kept wherever the query reads it: after `order()` (through a branch merge or a per-traverser `local()` body, until the next fan-out — `order().by('name').coalesce(values('age'), constant(0))` is in name order), `tail()`, fold/aggregate/group member lists, `path()`, `dedup(label)`, a branch's per-start arm order, write id assignment |
-| Federated landed order | a federated result's element order is the sibling graph's emission order, which is itself an unordered stream unless the pushed traversal `order()`s it — a fold over a subgraph's `V()` keeps SOME order of the right members |
-| `barrier()` | a pass-through, as is `barrier(n)`: `inject(1,2,1,3).barrier()` is `[1,2,1,3]`, not Java's regrouped `[1,1,2,3]`; ties in `order()` are unordered (a slice after a tie takes any of the tied rows) |
-| Seeded fold over repeats | `fold(seed, Operator)` folds every traverser: `inject(1,1,2).fold(0, sum)` is `4` and `g.V().both().values('age').fold(0, sum)` is `245`, where Java folds a merged slot once |
-| Seeded fold per parent | a `fold([], Operator.addAll)` in a child (`local`/`map`/`where`/`by`/a branch arm…) folds into a fresh copy of the seed per parent, exactly as `fold()`: `g.V().hasLabel('person').local(out().values('name').fold([], addAll))` is four per-vertex lists, where Java's `ConstantSupplier` aliases one list that grows across parents |
-| `min`/`max` class | the winner keeps its OWN class, local and global, at every depth: `inject(5, 2.0d).max()` is the Int `5` and `max()` over a Double beside a BigDecimal answers the Double (Java promotes the winner to the stream's common class: `5.0`, a BigDecimal); a tie between two representations of one value (`1.0m`/`1.00m`) answers whichever the order puts first, never a deferral. A group-value `by(…max())` still frames the common class |
-| `sum`/`mean` arithmetic | every number adds in double (SQLite's REAL `SUM`) and frames the stream's common class: a Double meeting a BigInteger/BigDecimal answers that BigDecimal to 17 digits (`0.1d+0.2d+5n` is `5.3`, Java `5.30000000000000004`); a total Java computes as NaN (`Infinity + -Infinity`) is SQLite's NULL and frames `null` |
-| BigDecimal widening scale | a Double widened to a BigDecimal (`asNumber(GType.BIGDECIMAL)`, a `sum` class meet) is widened by the JS framer from the shortest JS digits: a fractional value has `BigDecimal.valueOf`'s scale, but a WHOLE Double below 10^21 that reaches a scalar frame is scale 0 (`100.0` is `100`, `1.0e7` is `10000000`, Java `100.0` and `1.0E+7`); a negative-scale BigDecimal literal (`1e7m`) is the same value at scale 0. Never a decline |
-| Sack number class | a fold's class is a simple meet — floating if either side is (Double, or Float where neither side is a Long/Double), else Long if either side is or the value leaves 32 bits, else Integer: `withSack(127b).inject(1b).sack(sum)` is the Integer 128 (Java: Short), a Byte/Short fold is an Integer, a Float result past `Float.MAX_VALUE` frames as an infinity; `sack(min/max)` of a pair Java refuses (`ClassCastException`, e.g. a String and a Number) answers SQLite's comparison |
-| Group value pools | a group value body's slice or nested sort reads the key's pooled members one row per traverser — `by(union(out().order()).values('name').fold())` sorts a key's members together, not per member |
-| Per-start sorted bodies | `flatMap`/`local` keep each start's sorted run (start-major); a bare terminal `coalesce()`/`optional()` emission over a sorted arm is unordered |
-| Branch emission order | a `union`/`choose`/`coalesce`/`optional` emits each start's arms in turn, in written order, each arm in its own order — whatever the arms hold (no arm-major switch when an arm holds a barrier, no `Pick`-options-first drain); an arm's `order()` sorts that start's output, so `g.V().union(values('name').order())` is not sorted — put `order()` after the branch. An arm that reduces (`count()`/`fold()`) still reduces over every start and is emitted in its arm's place |
-| Disabled strategies | `withoutStrategies(IdentityRemovalStrategy/LazyBarrierStrategy/PathRetractionStrategy/RepeatUnrollStrategy)` answer as the default traversal (they change only Java's execution; a bounded `repeat` is always unrolled, at every depth) |
-| A null `by()` value | ABSENT: presence is value nullness, so a `by()`/child body that yields NULL (only from a literal — `constant([null]).unfold().sum()`, a `withSack(null)` sack) is "nothing": `project()` omits the key, `select`/`order`/`dedup`/`sack`/`where`/`map` drop the traverser, `aggregate()` collects nothing, and `coalesce(x, constant(1))` is SQL `COALESCE` (null-coalescing) — where Java keeps a productive null |
-| Number spelling | `asString()`/`format()`/`conjoin()` print a Boolean `true`/`false`, an integral number its digits, a Double/Float SQLite's text of the REAL — 15 significant digits, a whole value keeps `.0`, exponent form below 1e-4 or from 1e15 (`1.0e7` is `10000000.0`, `1e-5` is `1.0e-05`, `1e20` is `1.0e+20`, an infinity `Inf`) — and a BigDecimal its plain carried decimal text (`0.0000001`); a list member prints exactly as the same value alone. A Float prints its carried value, today its 32-bit binary value (`0.1f` is `0.100000001490116`). Never `Double`/`Float`/`BigDecimal.toString`'s layout, never a deferral for a number |
-| `format()` over a multi-valued property | a named token answers the property's FIRST value, as `by(key)` does (Java's `Vertex.property(key)` throws) |
-| A non-String text receiver | the raise names the offending VALUE (`The split() step can only take string as argument, encountered 1.`), not its Java class (`encountered class java.lang.Integer.`) |
-| Untyped JSON map keys | the readable `application/json` response spells every key by one total rule and never falls back to GraphBinary: an element by its id, a scalar as `String(v)` (a whole Double keeps `.0`: `1.0`, `1e+21`), a list/map/edge-Property key as the JSON text of its rendering (`["marko"]`, `{"key":"weight","value":0.4}`), `null` as `"null"`; a map whose distinct keys spell alike (`1` and `"1"`, `null` and `"null"`) renders as an array of `[key, value]` entries instead of an object, so no entry is lost. A NaN/infinite value renders as its name string. Never Java's `toString()` layout (`1.0E-5`, `[v[1]]`, `p[weight->0.4]`) |
-| Untyped JSON result shapes | every result shape renders as JSON from the same result nodes GraphBinary frames, and the request compiles and runs once: a path is `{labels, objects}` with one EMPTY label list per position (labels-on-path are not carried, as on GraphBinary), a VertexProperty `{id, key, value}`, `iterate()` `[]`; an edge endpoint is its bare id, not GraphSON V4's `{id, label}` |
-| Read-only child message | a mutating step in a value-argument child raises a `ValueParseError` naming OUR step (`Child traversal contains a mutating step (addV) in '__.addV().count()'. …`), not Java's placeholder/reduced class (`AddVertexStepPlaceholder`/`AddVertexStep`), and never a `VerificationException`-vs-construction timing split |
-| Map scope | the traverser's own map/`project()` record WINS: a `select`/`by(select)`/`math`/`format` key it holds is read from it, and a key it lacks drops the row (a `math` variable reads null) — Java falls through per row to a same-named side effect or path label (`as('a').project('a').by('age').select('a')` is the ages). A `select(k)` over a map whose keys are DATA (`groupCount()`, a stored map) where `as(k)` is live declines rather than drop; a keyed `dedup(k)` follows Java per row over a map or a `project()` record (its value where it holds `k`, else the label) |
-| Side-effect reads | a `select`/`where`/`math` of a side-effect collection sees the COMPLETED collection, as after a `barrier()`: `g.V().local(aggregate('a')).select('a').count(local)` is `6` six times, not Java's growing prefix `1..6` |
-| Path entries of a re-bound label | a label bound again after a `union`/`optional`/`choose`/`local` host, or after a filter that returned to the same element, is a second bind, so `select(Pop.all, k)` may list the element once more than Java; a `map`/`flatMap(identity())` host outside a path-reading traversal opens no entry, so `Pop.all` may list it once fewer |
+| Regex dialect | JavaScript `RegExp`, not `java.util.regex` (`$` is end of input, `\s` includes Unicode spaces, no `\Q…\E`); a pattern JS cannot read raises |
+| String order | code-point order, not UTF-16 code-unit order (differs only for astral vs U+E000–U+FFFF) |
+| Case mapping | `toUpper`/`toLower` map ASCII only |
+| String length and indices | `length()`/`substring()` count code points: `'😀'.length()` is 1 |
+| NUL in string data | carried whole, but `length`/`substr`/`like`/`tinker.search` stop at it. A NUL in statement text declines |
+| Lone surrogate in a parameter or JSON | reaches SQLite as `''` or U+FFFD (in statement text it declines) |
+| Write visibility | a write step sees a snapshot of its input; later steps see all its writes (`g.V().not(out()).drop()` drops exactly the leaves) |
+| Error timing | errors are eager: a type error may raise where Java's lazy pull would stop first (`limit(0)` still answers `[]`) |
+| Error vs filter order | a later filter may drop a row before its type error is evaluated (`inject(1).toUpper().is('x')` is `[]`) |
+| Unread erroneous values | an error in a value nothing reads is not raised (`project('x').by(values('age').toUpper()).count()` answers) |
+| Number equality | by value: `1`, `1L`, `1.0` are one value; `true`/`1` and a UUID/Char vs String stay distinct. A merged key frames as one of the merged classes (`inject(1, 1.0).groupCount()` is `{1.0: 2}`) |
+| Signed zero | `-0.0` is `0.0` everywhere |
+| Numeric predicate compare | by exact SQLite INTEGER/REAL value, no Java widening: `9007199254740993L > 9007199254740992d` holds; BigDecimal compares at double precision; bounds past int64 compare as REAL |
+| Ties in `order()` | equal values (`1m`/`1.0d`) tie, regardless of class |
+| Float | stored as the Double of its shortest float32 decimal; arithmetic runs in double (`0.1f` equals `0.1d`) |
+| Extreme-magnitude Doubles | outside ~[1e-80, 1e116] a value may move by its last ulp (`1.5e-300d` → `1.4999999999999998e-300`) |
+| Writes over a bulked slot | one element per traverser: `g.V().both().addV('x')` creates 12 vertices, not Java's 6 |
+| Unordered slices and terminal streams | without `order()`, rows come in plan order and `limit(n)` keeps some n rows. Order is kept wherever the query reads it (`order()`, `tail()`, collected lists, `path()`, per-start branch arms) |
+| Federated landed order | the sibling graph's emission order, unordered unless the pushed traversal orders it |
+| `barrier()` | a pass-through, as is `barrier(n)`: `inject(1,2,1,3).barrier()` is `[1,2,1,3]` |
+| Seeded fold over repeats | every traverser folds: `inject(1,1,2).fold(0, sum)` is `4` |
+| Seeded fold per parent | a seeded fold in a child starts from a fresh seed per parent (Java aliases one seed) |
+| `min`/`max` class | the winner keeps its own class: `inject(5, 2.0d).max()` is Int `5` |
+| `sum`/`mean` arithmetic | adds in double and frames the common class (`0.1d+0.2d+5n` is `5.3`); `Infinity + -Infinity` is `null` |
+| BigDecimal widening scale | a whole Double widened to BigDecimal has scale 0 (`100.0` → `100`); `1e7m` answers at scale 0 |
+| Sack number class | a simple meet: floating if either side is, else Long if either side is or it exceeds 32 bits, else Integer (`withSack(127b)…sack(sum)` with `1b` is Integer 128) |
+| Group value pools | a group value's slice or sort reads all of that key's members together |
+| Per-start sorted bodies | `flatMap`/`local` keep each start's sorted run; a terminal `coalesce()`/`optional()` over a sorted arm is unordered |
+| Branch emission order | each start's arms in written order; an arm's `order()` sorts only that start's output — put `order()` after the branch |
+| Disabled strategies | `withoutStrategies` of `IdentityRemoval`/`LazyBarrier`/`PathRetraction`/`RepeatUnroll` answers as the default traversal |
+| A null `by()` value | null is absent: `project()` omits the key, `select`/`order`/`dedup`/`where` drop the row; `coalesce` is SQL `COALESCE` |
+| Number spelling | `asString()`/`format()`/`conjoin()` use SQLite's text: 15 significant digits, a whole Double keeps `.0`, exponent below 1e-4 or from 1e15 (`1e-5` is `1.0e-05`), infinity `Inf`; a Float prints its written decimal (`0.1f` is `0.1`) |
+| `format()` over a multi-valued property | uses the first value (Java throws) |
+| A non-String text receiver | the error names the value (`encountered 1.`), not its Java class |
+| Untyped JSON map keys | one total spelling rule; colliding keys render as `[key, value]` entries so nothing is lost; NaN/Infinity as name strings |
+| Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`; an edge endpoint is its bare id |
+| Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |
+| Map scope | a key the traverser's own map holds wins; a key it lacks drops the row (Java falls through to a side effect or path label) |
+| Side-effect reads | a side-effect read sees the completed collection (`local(aggregate('a')).select('a').count(local)` is `6` each time) |
+| Path entries of a re-bound label | a label re-bound after a branch host may appear once more (or fewer) in `select(Pop.all, k)` than in Java |

@@ -1,5 +1,12 @@
 # Federate — cross-graph query, and pushing the boundary onto the compiled tail
 
+**✅ LANDED AND ARCHIVED (2026-10-24).** Pushdown (explicit + arg-less), the `ForeignResult` shape-tagged
+transport, mid-traversal reduction, mapValues injection, and multi-graph merge Phases 1–3 (`d7bc7740`,
+`210afd78`, `4f0e4493`) are on trunk; the "Open #1" list below is stale, and `foreignValueNodes` is now
+`rowsToNodes` (`723c1fa0`). The residue (Phase 2b, Phase 3b, side-effect-boundary widening) lives in
+`docs/outstanding-work.md`; keep reading this doc for the durable reference (pushdown prefix rules,
+reducer algebra, hard edges, why the value-stream resumes stay separate).
+
 _Current-state design notes. This is not a changelog — it records what federate IS and what is left to
 build. The authority is the code (`src/services/catalog/federate.ts`, `src/compiler/rel/segment.ts`,
 `src/compiler/ir/content-demand.ts`, `src/compiler/ir/reducers.ts`, `src/execute.ts`'s `runForeign`)._

@@ -1,8 +1,13 @@
 # Graph Algorithms — a GDS-competitive, TinkerPop-compatible algorithm layer
 
-**Status: BUILD STARTED 2026-08-22. The two-front-end seam is LANDED; the compute is next.** Reviewed
-2026-08-13 against the RelIR spine. OLAP is **no longer a locked non-goal**: the intention is to
-implement it. Names the open research where it matters.
+**✅ LANDED AND ARCHIVED (2026-10-24).** The four native OLAP steps (pageRank/connectedComponent/
+peerPressure/shortestPath — the last rebuilt on the BSP relaxation barrier, the withdrawn recursive walk
+gone) desugar onto `call()` services, alongside the GDS-class catalog in `src/services/catalog/olap/`
+(articleRank, betweenness, centrality, hits, kcore, nodeSimilarity, scc, triangle) and the
+`relationshipWeightProperty` + monoid-completion substrate. The residue — the GDS parameter superset
+(§"Implementation priority" items 2–6) and the iterative algorithms (labelPropagation/eigenvector/louvain)
+— is tracked in `docs/outstanding-work.md` (*Graph algorithms*). Everything below is historical rationale
+plus the parameter matrix that backlog entry points at.
 
 **✅ LANDED (2026-08-22, commit `desugar the four native OLAP steps`).** The front-end for ALL FOUR
 steps and the service registration:
@@ -96,7 +101,7 @@ directional one (a different, directional min-propagation, not the undirected qu
 **✅ LANDED (2026-08-22) — the OLAP computes are substrate-A-iterated (compile-to-SQL).** All three
 decorate barriers now run the reference relaxation as ONE SQL statement per round: the current `(id → v)`
 vector crosses as ONE `json_each` bind into a relaxation that JOINS the real `nodes`/`edges` tables, and
-a loop drives to a fixpoint (`docs/2026-08-21-barrier-substrate-design.md` §Axis 2 / probe D). The graph
+a loop drives to a fixpoint (`docs/archive/2026-08-21-barrier-substrate-design.md` §Axis 2 / probe D). The graph
 stays in SQLite — only the O(V) vector enters JS per round — honouring locked decision #3 (compile to
 SQL, never interpret). WCC = a bothE min-label MIN; pageRank = the probe-D `α·pr/outdeg` join plus an
 O(V) teleport scalar (dangling redistribution) and ε-convergence; peerPressure = an argmax tally with a
@@ -247,7 +252,7 @@ table, each cheap enough to finish in the CPU budget?"**
    iterative algorithm is **host-driven iteration**: a JS loop issuing one *bulk, set-based* SQL
    statement per iteration, the `(id, score)` vector crossing each round as ONE `json_each` bind
    (substrate (A) iterated — NOT a temp table, which DO refuses; measured 2026-08-21, see §"Two
-   mechanism gaps" below and `docs/2026-08-21-barrier-substrate-design.md` §(B)). Each statement is
+   mechanism gaps" below and `docs/archive/2026-08-21-barrier-substrate-design.md` §(B)). Each statement is
    pure SQL. Classic "Pregel-in-SQL" / BSP, **not** interpretation.
 2. **One implementation, two front-ends.** The algorithm lives once, as a `call()` service. Named
    TinkerPop steps are **desugar Passes** to it — never a second lowering (enforced by test; see
@@ -718,7 +723,7 @@ Substrate that unlocks several algorithm families first; leaf, single-algorithm 
    (§3.0, `retained(binding)` = `isStmt(node) || snapshot`, a `Ref` resolving to the rows as one JSON
    bind). The binding needs no DDL, is already `checkPlan`-proven, and is the shape `decorate` requires
    anyway. Settle this before writing an algorithm. **This is barrier output-shape substrate (B) in
-   `docs/2026-08-21-barrier-substrate-design.md`** — the SAME temp-table-vs-`Ref` question federate-
+   `docs/archive/2026-08-21-barrier-substrate-design.md`** — the SAME temp-table-vs-`Ref` question federate-
    subgraph raises; that note also fixes the barrier's sync/async axis (OLAP is async/yielding — it must
    NOT busy-lock the DO across its iterations; §"occupancy").
 5. **DO alarm checkpointing** for large-graph iterative jobs (`stream`/`mutate`/`stats` only).

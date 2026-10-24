@@ -98,7 +98,7 @@ export const NO_OP_STRATEGIES = new Set([
   'GValueReductionStrategy', 'ProviderGValueReductionStrategy', 'RequirementsStrategy',
   // OLAP/GraphComputer strategies. `withComputer()` (the cucumber runner's @GraphComputerOnly setup)
   // serializes to `withStrategies(VertexProgramStrategy(...))`, and the four OLAP STEPS carry the real
-  // semantics — we compile them to SQL (docs/2026-07-24-graph-algorithms-plan.md). So the EXECUTION-
+  // semantics — we compile them to SQL (docs/archive/2026-07-24-graph-algorithms-plan.md). So the EXECUTION-
   // ENGINE choice a graph computer represents is a genuine no-op for us: the steps run the same whether
   // or not a computer is named. VertexProgramStrategy USED to reject here ("naming it requests OLAP,
   // which we don't support"); that rationale flipped when OLAP execution landed — requesting OLAP is now
@@ -527,7 +527,7 @@ export function desugarIo(steps: IRStep[]): IRStep[] {
 // `g.V().pageRank()`, `.connectedComponent()`, `.peerPressure()`, `.shortestPath()` are TinkerPop's
 // four canonical OLAP step names. The v4 grammar carries them but no execution surface; we give them
 // an OLTP compile-to-SQL execution by desugaring EACH to a `call()` on a `mogwai.*` service — the one
-// implementation, two front-ends bet (`docs/2026-07-24-graph-algorithms-plan.md`, principle #2). A
+// implementation, two front-ends bet (`docs/archive/2026-07-24-graph-algorithms-plan.md`, principle #2). A
 // desugar Pass and NOT a step lowering, for the reason `desugarIo` is: the pipeline already does
 // Step[]→Step[] rewrites, and desugaring means the compiler learns no second OLAP step kind — the rest
 // of the pipeline (and every verify Pass, which asserts against ctx.originalChain) sees the canonical

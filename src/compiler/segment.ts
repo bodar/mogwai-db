@@ -56,7 +56,7 @@ export interface FederationSource {
 //     and it needs the async trampoline. `residency` decides whether the Worker may drive it off the DO.
 //
 // Rationale + the two orthogonal axes (this one, and the barrier's OUTPUT shape):
-// `docs/2026-08-21-barrier-substrate-design.md`.
+// `docs/archive/2026-08-21-barrier-substrate-design.md`.
 
 /** An ASYNC barrier. `head` is a COMPLETE, ordinary Compiled — the barrier's INPUT rows, run and
  *  drained like any read — or `null` for a source-form g.call(...) with no local input. For a

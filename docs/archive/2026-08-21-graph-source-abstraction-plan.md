@@ -161,7 +161,7 @@ What follows are the by-design exclusions and staged residue, not unbuilt reads:
   `framing.ts` type comment (which described the pre-id-carry payload-carry model) is corrected.
 
 It supersedes the piecemeal bound-graph vocabulary that landed in `src/compiler/rel/foreign.ts` +
-`detachedTail` (`docs/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work
+`detachedTail` (`docs/archive/2026-08-21-barrier-substrate-design.md` §B, commits `a33bc26`…`d5064ae`): that work
 is CORRECT and pinned the semantics, but it is a **second hand-written traversal vocabulary**, and this
 plan retires it in favour of one vocabulary parameterised by a graph source.
 
@@ -350,7 +350,7 @@ orchestrator loop remains because its source-position semantics genuinely differ
 
 ## References
 
-- The bound-graph vocabulary this retires: `docs/2026-08-21-barrier-substrate-design.md` §B; `foreign.ts`.
+- The bound-graph vocabulary this retires: `docs/archive/2026-08-21-barrier-substrate-design.md` §B; `foreign.ts`.
 - Why there is no temp-table substrate B (a landed subgraph is CTEs): same doc §(B), measured in
   `test/cf-probe/substrate-b.probe.ts`.
 - Prior art for "traverse an injected graph": TinkerPop `sg.traversal()`, SPARQL `SERVICE`+`CONSTRUCT`

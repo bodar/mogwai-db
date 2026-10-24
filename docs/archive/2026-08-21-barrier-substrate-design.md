@@ -1,9 +1,12 @@
 # Barrier substrate — the two axes (rough design, records a discussion)
 
-**Status: DESIGN NOTES, not a plan. Records the 2026-08-21 discussion that landed the regex barrier
-and set the direction for the sync/async split, federate cleanup, and OLAP.** Nothing here beyond the
-regex barrier is built. The authority is the code (`src/compiler/rel/segment.ts`,
-`src/services/spi/types.ts`); this is the mental model for where barriers are going.
+**✅ LANDED AND ARCHIVED (2026-10-24).** Both axes landed: `SegmentPlan` is a `mode: 'sync'|'async'`
+union (`src/compiler/segment.ts`, `driveSegmentsSync` in `src/drive.ts`), with a `residency` on the async
+arm, and substrate (A)'s filter/value-source/list arms carry regex, reverse, split, asString, federate
+value-injection and the federate subgraph. §(B)'s "no storage substrate" verdict was later SUPERSEDED
+for OLAP by the resident `barrier_state` scratch table (`docs/archive/2026-08-23-barrier-substrate-reshape-plan.md`);
+the remaining gaps (nested scalar `reverse`, federate bound-stream residue) are tracked in
+`docs/feature-support-matrix.md`.
 
 A "barrier" today (`SegmentPlan`) is `head (SQL) → transform → resume (SQL)` on the `driveSegments`
 trampoline. Two consumers exist (`federate`, `io`) and three more are coming (`regex` — landed;

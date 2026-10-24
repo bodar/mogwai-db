@@ -86,7 +86,7 @@
   query imposes one. The features that still pin Java execution on trunk (`raise-extent`, `raise-order`,
   `write-interleave`, `side-effect-lazy-read`, …) are
   deleted or rewritten by the simplification work item that removes the code they pin
-  (`docs/2026-10-18-simplification-plan.md`), in the same commit — not before.
+  (`docs/archive/2026-10-18-simplification-plan.md`), in the same commit — not before.
 - **L5** (`test/L5-properties/`) — property-based, the only level whose inputs nobody wrote down.
   Generates well-typed Gremlin by walking a shape lattice (state = stream shape, transition = step,
   so `count().out()` is unreachable by construction) and asserts the fast-path differential:

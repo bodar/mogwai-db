@@ -1,18 +1,13 @@
 # Correlated merge search — build plan
 
-**Status (2026-09-06): COMPLETE — all increments LANDED on trunk. 1 (mergeV computed VALUES), 2 (mergeE
-computed VALUES), 4a (map-valued `mergeV`, scalar string-key maps), 4b (map-valued `mergeV` with a
-`T.label` key → +2 L3), 4c-mergeE (map-valued `mergeE` — the edge host), 4c-select (`select("m")` of a
-`withSideEffect` constant map → a map stream, unlocking the CORPUS `select("m").mergeE()` → L3 1834 → 1835)
-and 4c-traversal (the GENERAL map-producing traversal as a merge argument + the whole-map 0-result raise).**
-A fail-closed safety fix landed
-first (`elementMergeE` was silently dropping a computed criterion — a wrong-answer bug), then increment 2
-replaced that decline with `mergeEComputed`, then 4a built the map-valued driver core. **Increments 3 and 4
-turned out to be ONE substrate** — see the 3+4 entry in the build order.
-The property-VALUE family and the merge WRITE arms (onMatch/onCreate/tail) of the correlated write-arg
-resolver were LANDED earlier (see "Already landed" below). This doc is the merge **SEARCH** correlated
-per driver — a computed criterion in the merge argument (`mergeV(__.project(...))` etc.). Written so a
-fresh session can execute it without re-deriving. All citations are at the pinned submodules.
+**✅ LANDED AND ARCHIVED (2026-10-24).** Every increment is on trunk (`src/compiler/rel/write.ts`
+`mergeVComputed`/`mergeEComputed`/`mergeVFromMap`/`mergeEFromMap`; `src/compiler/rel/lower.ts`
+`mergeFromTraversal`): computed `project` search maps for both hosts, the map-VALUED driver with
+`T.label`/`Direction` keys, `select("m")` of a side-effect map, and the general map-producing traversal
+with its 0-result raise. The small fail-closed residue (edge runtime arm value, explicit list/set runtime
+arm cardinality, `T.id`/list-valued/multi-label map drivers, map-driver endpoint options, the local-slice
+`mergeV(__.select("m").limit(local,1).unfold())` form) moves to `docs/outstanding-work.md`; the
+map-LITERAL `[k: __.trav]` criterion stays permanently declined. The body below is historical rationale.
 
 **What landed (increment 1, `mergeVComputed`, `src/compiler/rel/write.ts`):** `mergeV(__.project('k')
 .by(__.body))` — the SEARCH map, correlated per driver. A leading `project` merge arg parses to

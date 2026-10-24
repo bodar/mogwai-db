@@ -9,7 +9,7 @@ import { UnsupportedTraversal } from '../../../compiler/unsupported.ts';
 // message scope, the `barrier_state` scratch fragments + the in-SQL fixpoint driver (`iterateInSql`),
 // and the scope-keyed shortest-distance relaxation (`relaxShortestPath`). One home so an algorithm file
 // extends ONE kernel, not three copies. Reference + rationale: docs/archive/2026-08-23-barrier-substrate-reshape-plan.md,
-// docs/2026-07-24-graph-algorithms-plan.md.
+// docs/archive/2026-07-24-graph-algorithms-plan.md.
 
 // ---------- the OLAP edge scope (~tinkerpop.<algo>.edges) ----------
 //
@@ -67,7 +67,7 @@ export function edgeScopeOf(value: unknown, defaultDir: EdgeScope['direction'], 
 // O(1) SCALARS (pageRank's teleport energy, the convergence delta). So a graph of millions of vertices
 // never materializes its O(V) vector in JS — not per iteration, and not at the segment handoff, where
 // the DECORATE resume reads the final slot straight off the table by run token
-// (`docs/2026-08-21-barrier-substrate-design.md` §Axis 2). This replaced the former json_each vector
+// (`docs/archive/2026-08-21-barrier-substrate-design.md` §Axis 2). This replaced the former json_each vector
 // bind, which crossed the whole vector both per round and again into the decorate binding. The pure-JS
 // reference implementations that once lived here are TEST-ONLY differential oracles and now live with
 // the test that uses them (`test/L2-sql/olap-differential.test.ts`), so `src/` holds only the SQL path.

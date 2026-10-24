@@ -7,7 +7,7 @@ import { finishLowering } from './spine.ts';
 
 // ---------- the value-transform BARRIER shell — shared by reverse()/split()/regex ----------
 //
-// A value-transform barrier is substrate A's SYNC shape (`docs/2026-08-21-barrier-substrate-design.md`):
+// A value-transform barrier is substrate A's SYNC shape (`docs/archive/2026-08-21-barrier-substrate-design.md`):
 // a SQL head reads the candidate VALUES, a single batched JS transform runs over them, and the
 // survivors re-inject as one `json_each` bind that seeds the resumed stream — the traversal stays
 // compiled on both sides of one opaque set-transform. `reverse()`, `split()` and the regex `has()`

@@ -61,7 +61,7 @@ function traversalOf(params: CallParams): string {
 /** `.with("subgraph", true)` — the sub-traversal is EDGE-producing and the caller wants a traversable
  *  SUBGRAPH back, not detached edges: the edges (which carry `src`/`tgt` adjacency) PLUS their distinct
  *  incident vertices, WITH data. The local tail then walks it (`inV`/`outV` join the landed vertices) —
- *  the movement-over-a-bound-`Ref` substrate (`docs/2026-08-21-barrier-substrate-design.md`). */
+ *  the movement-over-a-bound-`Ref` substrate (`docs/archive/2026-08-21-barrier-substrate-design.md`). */
 const wantsSubgraph = (params: CallParams): boolean => params.subgraph === true;
 
 /** Whether to actually FETCH the subgraph's endpoint vertices — decided ONCE at plan time in `resolve`,
@@ -69,7 +69,7 @@ const wantsSubgraph = (params: CallParams): boolean => params.subgraph === true;
  *  endpoint hop only pays off if the LOCAL TAIL reaches the endpoint vertices (a movement/endpoint hop or a
  *  `.V()` re-source or an edge `elementMap()` — `ContentDemand.reachesAdjacency`). An edges-only or reducing
  *  tail (`…count()`, `.E()…`) does not, so we skip the second sibling hop and the wasted vertex
- *  materialization (`docs/2026-08-26-federate-pushdown-design.md`, phase 3). No `tailDemand` (a caller that
+ *  materialization (`docs/archive/2026-08-26-federate-pushdown-design.md`, phase 3). No `tailDemand` (a caller that
  *  planned no segment tail) = assume it is needed — the safe over-fetch. The demand only ever NARROWS, so a
  *  wrong analysis over-fetches, never under-fetches (the wrong-answer direction). */
 const fetchEndpoints = (params: CallParams, tailDemand: ContentDemand | undefined): boolean =>

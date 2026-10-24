@@ -1,18 +1,11 @@
-# Regex as a barrier service — LANDED (increment 1), 2026-08-21
+# Regex as a barrier service
 
-**Status: `has(key, regex)`/`notRegex` LANDED 2026-08-21 as a batched barrier (`src/compiler/rel/regex.ts`).**
-The SEMANTICS COMMITMENT below (§"The two real costs", item 1) was RESOLVED: committed to **JS `RegExp`**
-semantics (Java `matcher.find()`), divergence on Java-only constructs documented in the code — the corpus
-exercises none of them. The re-injection is the VALUE bound-join (§"The observation"): head projects
-`values(key)` → one JS pass → survivors re-injected as `within(json_each)` (one bind). Everything OUTSIDE
-`has(key, regex)` (`is`/`where`/`match`) stays a fail-closed deferral (§item 2). The barrier is now
-explicitly SYNCHRONOUS — atomic, no interleaving, runs on the sync path too
-(`docs/2026-08-21-barrier-substrate-design.md`, Axis 1, LANDED 2026-08-21). The trigram PREFILTER
-(§"the trigram prefilter") also LANDED (2026-08-21): a POSITIVE regex's mandatory literal run (≥3 chars,
-`extractMandatoryLiteral` — conservative, bails on alternation) narrows the head via
-`has(key, containing(<literal>))`, which reaches `property_fts` through the existing `trigramSeek`;
-answer-invariant (a case-insensitive superset the JS regex refines), `notRegex` is excluded (a non-match
-need not contain the literal). The rest of this note is the research that produced the landing.
+**✅ LANDED AND ARCHIVED (2026-10-24).** `has(key, regex/notRegex)` ships as a batched, synchronous JS
+barrier with a value bound-join and a trigram prefilter (`src/compiler/rel/regex.ts`; ea03a733, 8c637136,
+6fc5e1d1); the dialect is a plain JavaScript `RegExp` (b431ab26, per the simplification plan — the
+Java-`Pattern` translation layered on later was deleted; divergence in `docs/feature-support-matrix.md` §17).
+`split()` landed as a sibling barrier. Regex OUTSIDE `has(key, …)` (`is`/`where`/`match`) stays a deliberate
+fail-closed deferral, recorded in the feature-support matrix. The body below is historical rationale.
 
 ⚠️ **Reviewed against the single-spine cut.** Everything below held up, and two things got STRONGER —
 see "What the RelIR spine changed". The grammar spelling is `TextP.regex(…)` (`Gremlin.g4:1327`), not
@@ -56,7 +49,7 @@ following segment under `INJECT_VALUES_KEY` (`src/compiler/ir/injection.ts`,
 `src/services/catalog/federate.ts`). (Note: the mechanism has since evolved — the marker is
 `call("parent", <read>)`, not the old `T.value` token, and the sibling lowers it to a correlated
 `(corrId, value)`-pairs JOIN rather than a `within(<values>)` substitution; see
-`docs/2026-08-26-federate-pushdown-design.md`. The RE-INJECTION-as-a-bind point below still stands.)
+`docs/archive/2026-08-26-federate-pushdown-design.md`. The RE-INJECTION-as-a-bind point below still stands.)
 injection.ts calls this a **SPARQL bound-join**: N inputs cross as one batched hop, results scattered back by
 a SQL join in `resume`. A regex barrier is the same bound-join with a JS predicate in the middle
 instead of a sibling-graph hop.
@@ -167,7 +160,7 @@ The GLOBAL form over a scalar string stream now lowers as substrate A's value-so
 (`src/compiler/rel/split.ts` + `lowerListResume`): the JS `splitValue` reproduces Commons exactly (no
 recursive-CTE reproduction was needed after all — `str.split(sep).filter(t => t !== '')` IS
 `splitByWholeSeparator`), and the produced lists re-inject as one `json_each` LIST source framed back as
-lists (`docs/2026-08-21-barrier-substrate-design.md`). `split(Scope.local, …)` over a folded list and a
+lists (`docs/archive/2026-08-21-barrier-substrate-design.md`). `split(Scope.local, …)` over a folded list and a
 LIST-shaped head stay fail-closed deferrals. The paragraphs below are kept as the research that reached
 that call.
 

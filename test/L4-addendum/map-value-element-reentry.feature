@@ -8,7 +8,7 @@ Feature: mogwai addendum — a map VALUE that is an element list re-enters eleme
   # nodes, which have no rowid to re-enter on. Now the collecting arm keeps the rowid, so re-entry
   # routes through the ordinary element loop and composes at any depth.
   # Substrate: docs/archive/2026-08-21-map-value-shape-plan.md (line 164 — "an elem value still declines"),
-  # docs/2026-08-26-federate-pushdown-design.md (Injection, Stage 1).
+  # docs/archive/2026-08-26-federate-pushdown-design.md (Injection, Stage 1).
   @gap:map-value-element-reentry
 
   # DEPTH 1 — group().by(name).by(__.out().fold()) is a Map<name, List<vertex>>. select(values)

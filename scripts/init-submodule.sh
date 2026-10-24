@@ -254,7 +254,7 @@ provision() {
 # only DECLARES (it holds the VertexProgram + Messenger/GraphComputer interfaces, not the engine that
 # runs them). It is where the OLAP graph algorithms' exact execution semantics live — multi-program
 # chains, graph-filter message delivery, halted-traverser mass accounting — which the compile-to-SQL
-# OLAP layer (`docs/2026-07-24-graph-algorithms-plan.md`) must match. Cited, never built or imported.
+# OLAP layer (`docs/archive/2026-07-24-graph-algorithms-plan.md`) must match. Cited, never built or imported.
 #
 # `full`, not `shallow`: we read this history — a pin bump is diffed against the previous pin.
 #
@@ -315,7 +315,7 @@ fi
 # ── gds (Neo4j Graph Data Science): READ-ONLY prior art for the algorithm + barrier layer ──────
 #
 # Never built, never imported, no Java toolchain implied — the same standing as gremlin-core and
-# calcite, and vendored for the same reason: docs/2026-07-24-graph-algorithms-plan.md names GDS as
+# calcite, and vendored for the same reason: docs/archive/2026-07-24-graph-algorithms-plan.md names GDS as
 # the competitive target and the barrier-substrate design cites its Pregel model. A citation that
 # resolves only on one laptop is uncheckable; at the pin
 # `vendor/gds/<module>/src/main/java/org/neo4j/gds/…:NNN` resolves for everyone.
@@ -338,7 +338,7 @@ fi
 #               — the per-algorithm `@Configuration` interfaces (PageRankConfig, WccStreamConfig,
 #                 NodeSimilarityBaseConfig, ShortestPath*Config…) carrying each param's DEFAULT and
 #                 validation. These are the surface the GDS-parameter coverage matrix
-#                 (docs/2026-07-24-graph-algorithms-plan.md) is built against; the four families are
+#                 (docs/archive/2026-07-24-graph-algorithms-plan.md) is built against; the four families are
 #                 exactly the algorithms mogwai exposes (ml/node-embeddings/miscellaneous omitted).
 GDS_SRC=src/main/java/org/neo4j/gds
 GDS_CFG=procedures/facade-api/configs

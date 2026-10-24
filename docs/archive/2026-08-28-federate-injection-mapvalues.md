@@ -11,7 +11,7 @@ item below shipped. The authority is now the CODE (`src/services/catalog/federat
 `lower/reduction.ts`'s `mapEntryChild`, `execute.ts`'s `runForeign`); this doc is the DESIGN RATIONALE.
 
 The still-OPEN federate work (multi-graph mixing, side-effect boundary) and the durable reference
-(reducer algebra, output transport, hard edges) stay in the live doc `docs/2026-08-26-federate-pushdown-design.md`.
+(reducer algebra, output transport, hard edges) stay in the live doc `docs/archive/2026-08-26-federate-pushdown-design.md`.
 
 ---
 

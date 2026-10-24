@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 //
 //   @GraphComputerOnly — NO LONGER EXCLUDED (2026-08-22). These scenarios run the four OLAP steps
 //     (pageRank/connectedComponent/peerPressure/shortestPath), which now have an OLTP compile-to-SQL
-//     execution (`docs/2026-07-24-graph-algorithms-plan.md`). The runner sets isGraphComputer and calls
+//     execution (`docs/archive/2026-07-24-graph-algorithms-plan.md`). The runner sets isGraphComputer and calls
 //     `.withComputer()`, which the JS GLV serializes to `withStrategies(VertexProgramStrategy(...))`;
 //     that parses (withStrategies is grammar) and `VertexProgramStrategy` is now a NO_OP_STRATEGIES
 //     entry (the graph-computer choice is inert for compile-to-SQL OLAP), so the query runs. The

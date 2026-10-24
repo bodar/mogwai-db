@@ -3644,7 +3644,7 @@ export function lowerForeignResume(
   // vertices, WITH data (`federate` `.with("subgraph", true)`). A normal federated result
   // is homogeneous (one element kind), so the mix IS the signal. When it is a subgraph the edges are the
   // stream and the vertices become a bound lookup relation the tail's `inV`/`outV`/`bothV` join for the
-  // endpoint's data — movement over a bound edge `Ref` (`docs/2026-08-21-barrier-substrate-design.md`).
+  // endpoint's data — movement over a bound edge `Ref` (`docs/archive/2026-08-21-barrier-substrate-design.md`).
   // The BoundGraph payload binding (`bgv`/`bge`) is a per-ELEMENT lookup, so it must hold each landed
   // element ONCE. A mapValues result can contain one sibling element under several parent keys; the
   // payload binding stays distinct while the keyed pool below preserves that multiplicity for its join.
@@ -3825,7 +3825,7 @@ type EmptyResult = 'zero' | 'nothing';
 
 /**
  * THE MID-TRAVERSAL REDUCTION COMBINE — the reducer applied over a `(key→partial)` map the sibling
- * returned (`docs/2026-08-26-federate-pushdown-design.md`). A mid `V().call(federate,…,inj).count()` is a
+ * returned (`docs/archive/2026-08-26-federate-pushdown-design.md`). A mid `V().call(federate,…,inj).count()` is a
  * GLOBAL reduction over the whole resumed stream (the element path returns ONE number), so the combine
  * folds ALL the per-parent partials into one value with `combine`/`empty`.
  *
@@ -4689,7 +4689,7 @@ function elementTail(
     // `match()` — the conjunctive pattern step. It re-roots each pattern body at its start alias and
     // folds it through the CHILD SEAM (the same fold this chain is), rejoining by binding or
     // constraining each end. It produces a bindings-map/alias-carrying stream, so it hands back to the
-    // ONE dispatcher exactly like `select`. See `match.ts` and `docs/2026-08-13-match-relir-lowering-plan.md`.
+    // ONE dispatcher exactly like `select`. See `match.ts` and `docs/archive/2026-08-13-match-relir-lowering-plan.md`.
     if (step.name === 'match') {
       if (pathCarried(rel)) return null;
       const matched = lowerMatch(step, rel, elem, labels, ctx.params, childSeam(ctx, fresh), ctx.source, fresh);
