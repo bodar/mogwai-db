@@ -557,10 +557,18 @@ UNEVALUABLE`.
 
 **Guard-binding family** (§6·5 — a graph-dependent refusal → `Binding.guard`):
 
-- 🔴 **Runtime / computed LABEL** (~6 writes). `ElementHelper.validateLabel` is three PURE predicates → a guard,
-  not a decline; the gap is a missing guard at the nine CALL SITES. ⚠️ The message set depends on ARITY. Settle
-  the three-answer coercion HERE, don't add a fourth: `mergeV([(T.label): x])` coerces, `g.addV(x)` declines,
-  `addLabel(x)` coerces.
+- ✅ **Runtime / computed LABEL** — `addV(<traversal>)` / `addE(<traversal>)` resolve the label PER TRAVERSER
+  (`AddVertexStep.java:140-182`), and `addLabel(<traversal>)` resolves over the snapshot it mutates
+  (`TraversalUtil.resolveStringArguments`, `TraversalUtil.java:211-236`, then `AddLabelStep.java:86-95`). Mechanism:
+  ONE runtime NAME resolver shared with the runtime property key — `runtimeNameRows` / `parameterSite` /
+  `resolvedNames` in `src/compiler/rel/write.ts` (only the message table differs: `Property.Exceptions` vs
+  `Element.Exceptions`); the emitter's `shadowsOuter` (`src/rel/emit.ts`) keeps a correlated subquery's re-read
+  enclosing relation private so the absent-value guard fires per traverser. No `sequentialGuard` on labels.
+- 🚧 **Computed LABEL residue** (unchanged by the above): a single `addLabel` body framed as a list
+  (`Collection<String>`) still declines; a computed `dropLabel` name still declines; writes inside
+  `union`/`local`/`optional`/`coalesce` arms decline even with constant labels — a separate prerequisite (a write
+  inside a multi-arm or child body). ⚠️ Flagged for the index: `firstPerTraverser`'s `UNORDERED_FIRST` tie raise
+  and `sequentialGuard` on property writes are refusals that depend on DATA SIZE.
 - ✅ **`T.id` on `mergeV`/`mergeE`** — upsert-by-id on both hosts (`src/compiler/rel/write.ts`).
 
 **Writes** (rel-blockers: property 4, addE 3, addV 2, mergeE 1):
