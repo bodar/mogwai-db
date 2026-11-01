@@ -294,6 +294,30 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     }
     return false;
   };
+  /**
+   * WOULD FUSING `b` SHADOW A RELATION AN ENCLOSING BLOCK BINDS? A correlated subquery may re-read the
+   * very relation its enclosing query ranges over — `TraversalUtil.apply`'s absent-value guard is "the
+   * host rows with no value row", and the value rows are the host joined to what its body reads. By the
+   * algebra's scope (a node's direct children plus the enclosing blocks, `check.ts`) the reader's
+   * reference to that relation is the ENCLOSING row; but fusing `b` puts the relation's own FROM item —
+   * the same alias — into the reader's SELECT, where it shadows the enclosing one and the correlation
+   * becomes a tautology (`g.V(1,3).addLabel(__.values('lang'))` then raised for no traverser). A derived
+   * table keeps `b`'s aliases private again, so the reader resolves as the algebra says.
+   */
+  const shadowsOuter = (reader: Rel, input: Rel, b: Block, outer: Scope): boolean => {
+    if (!outer.size) return false;
+    let local: ReadonlySet<string> | undefined;
+    for (const key of ownReads(reader).keys()) {
+      const cut = key.indexOf('\0');
+      const rel = key.slice(0, cut);
+      const spelled = rel === input.id ? undefined : outer.get(rel)?.get(key.slice(cut + 1));
+      if (!spelled) continue;
+      // Textual, as `unanchoredAggregate` is: an alias is what SQLite resolves a qualifier against.
+      local ??= new Set([b.from.alias, ...b.joins.map((join) => join.item.alias)].map((alias) => render(ident(alias)).sql));
+      if (qualifiers(render(spelled).sql).some((alias) => local!.has(alias))) return true;
+    }
+    return false;
+  };
   /** A derived table's columns carry what its body's spellings carried: SQLite flattens it back. */
   const inherit = (built: Built, cols: Cols): void => {
     for (const name of carriesSubquery(built)) subqueryCols.add(cols.get(name)!);
@@ -471,12 +495,13 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    * recursive term's own reference: SQLite requires it unwrapped (P1, `block.ts`). */
   const inputBlock = (input: Rel, outer: Scope, blocked: (b: Block) => boolean, reader?: Rel): Block => {
     const built = build(input, outer);
-    const fence = built.kind === 'block' && reader !== undefined && rereadsSubquery(reader, built)
-      && !fromTree(input).some((source) => source.kind === 'self-ref');
-    if (built.kind === 'block' && !blocked(built) && !fence) return built;
+    const walkFree = !fromTree(input).some((source) => source.kind === 'self-ref');
+    const fence = built.kind === 'block' && reader !== undefined && rereadsSubquery(reader, built) && walkFree;
+    const shadowed = built.kind === 'block' && reader !== undefined && walkFree && shadowsOuter(reader, input, built, outer);
+    if (built.kind === 'block' && !blocked(built) && !fence && !shadowed) return built;
     const closed = fence && built.kind === 'block' ? fenced(reader!, input, built, outer, input.id, []) : undefined;
     if (closed) return closed;
-    if (built.kind === 'block' && !blocked(built)) return built;
+    if (built.kind === 'block' && !blocked(built) && !shadowed) return built;
     const cols = colsOf(input.id, input);
     inherit(built, cols);
     const body = renderBuilt(built);
@@ -574,7 +599,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       const [rel, name] = key.split('\0') as [string, string];
       const local = b.scope.get(rel);
       const spelled = local?.get(name);
-      if (!spelled || rel === input.id || outer.get(rel) === local) continue;
+      // A relation an ENCLOSING block binds is that block's, even where the block below re-reads the same
+      // relation (`shadowsOuter`): the checker's scope is a node's direct children plus the enclosing ones.
+      if (!spelled || rel === input.id || outer.has(rel)) continue;
       const as = `${alias}_c${carried.length}`;
       carried.push([as, spelled]);
       remapped.set(rel, (remapped.get(rel) ?? new Map<string, Expression>()).set(name, qualified(alias, as)));

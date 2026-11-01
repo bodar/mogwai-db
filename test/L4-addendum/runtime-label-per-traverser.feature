@@ -133,3 +133,28 @@ Feature: mogwai addendum — a computed label resolves PER TRAVERSER
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "Traversal argument must produce a String or Collection<String>"
+
+  @gap:runtime-label
+  Scenario: g_V_addLabelXvaluesXlangXX_error_when_some_traversers_have_none
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().addLabel(__.values("lang")).count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "The provided traverser does not map to a value"
+
+  @gap:runtime-label
+  Scenario: g_V_hasLabelXsoftwareX_addLabelXvaluesXnameXX_labels
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("software").addLabel(__.values("name")).labels()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | software |
+      | lop |
+      | software |
+      | ripple |

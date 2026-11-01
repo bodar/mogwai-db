@@ -257,6 +257,23 @@ describe('RelIR relational-core SQL', () => {
     expect(emitQuery(planOf(named)).sql).not.toContain('(SELECT');
   });
 
+  test('a correlated subquery that re-reads its enclosing relation keeps that relation private', () => {
+    // "the rows of n with no `named` row for them" — the subquery's own projection reads `n` again. By
+    // the algebra's scope the predicate's `n.id` is the ENCLOSING row; fused, the inner `nodes n` would
+    // shadow it and the correlation would be `n.id = n.id`, true for every row.
+    const n = scan('n');
+    const named = project({ id: relId('named'), input: filter({ id: relId('nf'), input: n, channels, type: { cols }, pred: eq(col(n.id, 'name'), lit('marko', 'text')) }), channels, type: { cols: [{ name: 'o', type: 'int', nullable: false }] }, exprs: [['o', col(relId('nf'), 'id')]] });
+    const matching = filter({ id: relId('m'), input: named, channels, type: named.type, pred: eq(col(named.id, 'o'), col(n.id, 'id')) });
+    const missing = filter({ id: relId('missing'), input: n, channels, type: { cols }, pred: { kind: 'exists', plan: matching, negated: true } });
+    const emitted = emitQuery(planOf(missing));
+    expect(emitted.sql).toBe('SELECT n.id AS id, n.name AS name FROM nodes n WHERE NOT EXISTS (SELECT named.o AS o FROM (SELECT n.id AS o FROM nodes n WHERE (n.name = ?)) named WHERE (named.o = n.id))');
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT)');
+    db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'vadas')");
+    expect(db.query(emitted.sql).all(...emitted.binds as never[])).toEqual([{ id: 2, name: 'vadas' }]);
+    db.close();
+  });
+
   test('a Window over a WINDOWED block nests, because SQLite refuses one inside another OVER', () => {
     // The rule is legality, not preference: a window's `OVER (…)` may never reference a window
     // function, so a spec reading a column its input MINTED with one has no legal spelling in the

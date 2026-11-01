@@ -119,6 +119,23 @@ describe('a computed addLabel(), per traverser', () => {
       expect(() => run(store, q), q).toThrow(message);
       expect(values(run(store, 'g.V(1).labels()')), q).toEqual(['person']);
     }
+    // SOME traversers absent among several still raises, and NOTHING is written — the guard's
+    // correlation re-reads the snapshot it ranges over (`shadowsOuter`, `src/rel/emit.ts`); fused, it
+    // was a tautology and labelled only the traversers that had a value.
+    for (const q of [
+      "g.V().addLabel(__.values('lang')).count()",
+      "g.V(1,3).addLabel(__.values('lang')).labels()",
+      "g.V().hasLabel('person').addLabel(__.out('knows').values('name')).iterate()",
+      "g.V(1).out().in().addLabel(__.out('knows').values('name')).count()",
+      "g.V(1,3).addV(__.values('lang')).label()",
+    ]) {
+      const store = seededStore();
+      expect(() => run(store, q), q).toThrow('The provided traverser does not map to a value');
+      expect(bagOf(values(run(store, 'g.V().labels()')) as string[]), q).toEqual(bagOf(['person', 'person', 'person', 'person', 'software', 'software']));
+      expect(values(run(store, 'g.V().count()')), q).toEqual([6]);
+    }
+    // ...while every traverser present answers: `out().in()` revisits marko, each `created` a value.
+    expect(values(run(seededStore(), "g.V(1).out().in().addLabel(__.out('created').values('name')).count()"))).toEqual([5]);
     for (const [q, message] of [
       ["g.V(1).addLabel('')", 'Label can not be empty'],
       ["g.V(1).addLabel(__.values('name').fold(), __.constant('x'))", 'must produce a scalar String when multiple traversals are provided'],
