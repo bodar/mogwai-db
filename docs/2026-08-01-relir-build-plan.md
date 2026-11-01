@@ -569,6 +569,54 @@ UNEVALUABLE`.
   `union`/`local`/`optional`/`coalesce` arms decline even with constant labels — a separate prerequisite (a write
   inside a multi-arm or child body). ⚠️ Flagged for the index: `firstPerTraverser`'s `UNORDERED_FIRST` tie raise
   and `sequentialGuard` on property writes are refusals that depend on DATA SIZE.
+- 🔴 **Follow-ups from the 2026-11-01 review of the computed label** (major first; each prerequisite is ordered
+  before what it unblocks):
+  1. **PREREQUISITE — an O(N) join between two taken snapshots** (the shared reading of a `json_each` snapshot in
+     `src/compiler/rel/write.ts`). Every per-traverser runtime NAME route is QUADRATIC: the equi-joins on `(o)` and
+     `(name)` are `json_each(?) ⨝ json_each(?)` nested loops with no index. Measured: `g.V().addV(__.values('name'))`
+     0.84 s @2k / 12.5 s @8k; `addLabel(__.values('name'))` 0.9 s @1k / 14 s @4k / 193 s @16k (two quadratic
+     statements: `internLabels`' `INSERT INTO labels` and the `vertex_labels` pairing); the now-correct absent guard is
+     O(N·M) as a correlated `NOT EXISTS`. Constant `addV('k')` is 47 ms @16k. On a DO's CPU budget this fails ONLY in
+     production — the data-size failure root `CLAUDE.md` forbids. Pre-existing on trunk's runtime property KEY
+     (`property(__.values('name'),1)` 2.8 s @2k), so fix it ONCE in the substrate, not per caller: carry `name` + the
+     interned id on the resolved per-traverser row so pairing needs no re-join, or emit a joined-by-key snapshot as a
+     `MATERIALIZED` CTE so SQLite's automatic index applies; the absent guard becomes ONE set op (host `o` EXCEPT
+     value-row `o`). Same item: `runtimeNameRows` re-inlines its scan + two windows into six statements (guards + the
+     final take) — read one taken `(o, v, vt)` first-per-traverser snapshot instead (root rule: computed ONCE). Add a
+     larger-N exec test or a `sql-hygiene` check for `json_each ⨝ json_each`.
+  2. **Bare internal `Error: RelIR: duplicate Plan binding 'r0'`** reaches the user for
+     `g.V().both().addV(__.values('name')).groupCount().by(label)` and `…addV(__.values('name')).label().groupCount()`
+     (trunk declined these; the constant twin `g.V().both().addV('x').label().groupCount()` already leaked on trunk).
+     Root: `both()` (a union of directions) feeding a write and then a reducing barrier — `out()`/`in()`/`hasLabel()`
+     sources answer correctly. Fix the binding replication, not the label route.
+  3. **ONE authority for addLabel's argument grammar** — `elementAddLabel` runs `mutationLabelNames` FIRST, whose
+     all-constant fold does `String(resolved)`: `addLabel(__.constant(null))` writes `'null'`, `addLabel(__.constant(1))`
+     writes `'1'`, a `UUID` constant writes its text (also `g.addV(__.constant(UUID(…)))`), while
+     `addLabel(__.values('lang'), __.constant(null))` raises correctly via `addLabelConstant` — whether a query raises
+     depends on whether ANOTHER member is a body. Reference: `TraversalUtil.java:211-236` ('Traversal argument must not
+     produce null' / '…must produce a String or Collection<String>'), `AddLabelStep.java:86-95`. Not a regression
+     (trunk `7f041997` same). Fix = reuse-sweep proposal 1 below (route all-constant through `mutationLabelMembers`,
+     delete the `String()` coercion; `mutationLabelNames` then serves `dropLabel` only). Needs a test that the label is
+     NOT written.
+  4. **One first-pick policy for the shared resolver.** A label ranks by `(sq, v)` (`rankedFirst`); a key keeps
+     `firstPerTraverser`'s data-dependent `UNORDERED_FIRST` raise (`NameRules.first`). So `g.V(3).addLabel(__.in()
+     .values('name'))` writes 'josh' while `g.V(3).addV(__.in().values('name')).label()` gives 'marko', and
+     `property(__.out().values('name'),1)` can refuse on graph contents. Moving KEY_NAME to `'rank'` is now one line and
+     removes a data-size decline (simplification item 7 / outstanding-work §6). Then add a clause to §17 'Unordered
+     slices' naming runtime labels/keys (today only a code comment covers it) and drop matrix row 196's "needs an
+     unordered first pick" decline for `property()`.
+  5. Minor: `g.addV(__.inject('q')).label()` answered `['q']` on trunk and now declines — acceptable
+     (`AddVertexStartStep.java:144-160` applies the body to a `false` placeholder), but `parameterSite`'s non-rooted
+     branch admits only bodies starting `V`/`E`, so `g.addV(constant("prefix_").concat(__.V(vid1).label()))`
+     (`Concat.feature:204`) and `g.addV(__.constant('x').concat('y'))` decline; record in the matrix row. The non-String
+     message spells a datetime as its epoch (`…but got 1577836800000`). `emit.ts` `shadowsOuter` skips `walkFree`
+     (self-ref) inputs and `fenced()` now uses `outer.has(rel)` — comment why unreachable or pin with a unit test (incl.
+     differing spellings). Tests: add MIXED multiset witnesses (`g.V().addLabel(__.values('lang'))`,
+     `g.V(1,3).addV(__.values('lang'))`). Depth gaps (clean declines, mostly shared with constant labels): a computed
+     label over non-element traversers (`g.inject('a','b').addV(__.identity())`, `properties('name').addV(__.value())`,
+     path/valueMap hosts); a per-traverser COLLECTION label (`addV(__.values('name').fold())` — reference unfolds a
+     single Collection, `AddVertexStep.resolveLabelCollection`); edge-sourced `g.V().outE().addE(__.label())…`; channel
+     carriage (`withSack(1)…addV(__.values('name')).sack()`, `.path()`).
 - ✅ **`T.id` on `mergeV`/`mergeE`** — upsert-by-id on both hosts (`src/compiler/rel/write.ts`).
 
 **Writes** (rel-blockers: property 4, addE 3, addV 2, mergeE 1):
@@ -676,6 +724,85 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
 - **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive` are
   distinguishable no other way, and a body that cannot report it DECLINES.
 
+
+### Next round (from the 2026-11-01 round — read before picking items)
+
+**PARKED — Source-position `g.union(…)` over a one-row STARTER** (branch `wf/source-union-starter-arms-1-3`, unpushed:
+`d85bc022` source union + `g.union()`, `0ec60b2f` arm labels ride on, `a163f5a8` partially-bound label presence gate).
+Parked because `a163f5a8` REGRESSES its parent with lost rows / wrong counts. Both open defects share ONE root cause:
+the absent-label gate is applied to the body's OUTPUT, so a SEEDED reducing tail loses its seed. Reference: an absent
+key makes `SelectOneStep` emit nothing (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectOneStep.java`),
+then `ReducingBarrierStep.processNextStart` still emits its seed (`…/step/util/ReducingBarrierStep.java:143-148`) — 0
+for `count`, `[]` for `fold`.
+- Defect 1 (`src/compiler/rel/lower/reduction.ts` `scalarChildValue` select reroot, `CASE WHEN guard THEN rest.expr
+  ELSE NULL`): over `g.V().optional(__.out().as('a'))` (9 rows, 3 unbound) — `map(__.select('a').values('name')
+  .count())` six 1s (want +three 0s); `.fold()` misses three `[]`; `map(__.select('a').out().count())` 6 rows (want 9);
+  `project('x').by(…count())` gives `{}` (want `{x:0}`); `order().by(…count()).count()` 6 (want 9);
+  `group().by(__.select('a').out().count()).by(__.count())` `{0:5,2:1}` (want `{0:8,2:1}`);
+  `g.V().has('name','marko').union(__.identity().as('a'), __.out()).map(__.select('a').out().count())` `[3]` (want
+  `[3,0,0,0]`); `g.V().choose(__.hasLabel('person'), __.as('a'), __.identity()).map(__.select('a').out().count())` 4 rows
+  (want 6).
+- Defect 2 (`src/compiler/rel/alias.ts` `guardedPredicate`, used by `filter.ts` `childPredicate` and `match.ts`
+  `legSingle`/`existenceExpr`/reducing back edge — `and(guard, pred)` vetoes a leg TRUE over empty input):
+  `…optional(__.out().as('a')).where(__.select('a').values('name').count().is(0)).count()` 0 (want 3);
+  `where(__.select('a').out().count().is(0))` 5 (want 8); `not(…)` 4 (want 1); the marko-union `where` form 0 (want 3).
+- **PREREQUISITE (ordered BEFORE re-landing the item): ONE "absent label ⇒ the body's INPUT is empty" authority at
+  the select-of-alias lowering itself**, consulting the existing productivity authority
+  (`src/compiler/ir/productivity.ts` `MAPPING_TERMINAL`/`presenceOf`) to know whether the tail is seeded. The gate
+  empties the rerooted host's row presence, so a seeded reduction emits its seed and a predicate over it sees the seed;
+  every body (map/local/flatMap/project-by/order-by/group-by/where/not/match legs) inherits it, replacing the two
+  per-consumer sites (`guardedPredicate`, the `scalarChildValue` CASE) and the per-consumer `aliasGuard` in
+  `childPredicate`/`selectRerootSubject`. A leg form that cannot empty its input DECLINES. Then rebase the branch onto it.
+- Before re-landing also: add L4 scenarios for a label bound inside a starter arm and read downstream
+  (`g.union(constant(1), constant(2).as('a')).select('a')` → [2], with its `inject(0)` oracle; both arms binding 'a' →
+  [1,2]), a reducing tail after a partially-bound select in each consumer (the witnesses above), and
+  `project('x').by(__.select('a'))` → `[{x:1},{}]` (ProjectStep omits an unproductive key). Narrow the rooted-arm label
+  decline: `labelsBoundBefore` counts `match` labels `rootedRead` does carry (trunk answered
+  `g.union(__.V().has('name','marko').match(__.as('x').out().as('y'))).select('y')` = [vadas, josh, lop]), and
+  `labelReads` collects every downstream string so `g.union(__.V()…as('a')).constant('a')` / `.has('name','a')` decline
+  — use an operand-position reader like `preBarrierSelectRead`. `opensOffStarter` admits a declared side-effect
+  `select(k)` but `unionArms` refuses a scalar/list one (`g.withSideEffect('x',1).union(__.select('x'), __.constant(2))`)
+  — cover it or fix the docstring.
+- Depth gaps (clean declines, mostly inherited from `inject(0).union(…)`): `g.union().inject(1)` (ref [1]),
+  `g.union().coalesce(constant(1))` (ref []); `g.union(constant('x')).path()` → `[p[x]]` needs only an EMPTY path seed on
+  the starter (`tracksPath` blocks it today — UnionStep drops the starter's path) — name it as the next step;
+  `repeat`/`local`/`flatMap`/`map`/`fold`/`count`/`unfold` after a source union; mixed starter and re-sourcing arms (by
+  design).
+
+**Shared root causes this round surfaced (one substrate item each, ordered before their dependants):**
+- **O(N) snapshot⨝snapshot join** — computed label item 1 above; unblocks every per-traverser runtime name (label,
+  key) and the property-key route's existing cost.
+- **A write inside a child / multi-arm body** (`local`/`flatMap`/`map`/`union`/`coalesce`/`optional`/`choose`/
+  `repeat`/`sideEffect`) — declines for constant AND computed labels, for merges, and for `addLabel`; one substrate
+  item, not per-write-step.
+- **Absent-label ⇒ empty body input** — the source-union prerequisite above; also what every select-in-body consumer
+  needs.
+
+**Reuse-sweep proposals** (no answer change unless noted):
+1. **addLabel parses its arguments once** — `elementAddLabel` sends the all-constant case through
+   `mutationLabelMembers`/`addLabelConstant` too (all-string members → `bindLabels({owners, names})`, constant SQL
+   byte-identical); `mutationLabelNames` serves `dropLabel` alone. ~15 lines. ANSWER CHANGE (a fix):
+   `g.V(1).addLabel(__.constant(5)).labels()` answers `[person, 5]` today, reference raises (`TraversalUtil.java:211-236`);
+   `constant(null)` writes `'null'`. Needs a test that nothing is written.
+2. **One compile-time `constantName(value, rules: NameRules)`** replacing `labelMember`'s constant branch and
+   `addLabelConstant` (null → `rules.nullMessage`, list → `rules.collection`, non-String → `rules.notString`+value, else
+   `validateLabel`), so compile-time refusal and `runtimeNameRows`' run-time guard read one table. ~12 lines.
+3. **KEY_NAME/LABEL_NAME/ADD_LABEL_NAME sentences from `src/gremlin/validate.ts`** — export its tables (the owner of
+   `ElementHelper`'s rules) and build the `NameRules` from them; six duplicated literals go.
+4. **One positional label-pairing join** — `labelledByPosition` (write.ts) takes the key column (ORD for a creation,
+   `o` for `targetsOf`), so `bindLabels`' non-constant arm and `elementAddLabel`'s `owned`/`named` joins go. ~20 lines;
+   a computed-addLabel census digest may move (say so). Do it together with prerequisite 1 above — same joins.
+5. **`rankedFirst` and `mergeFromTraversal`'s first-map-per-driver on `perOriginWindow`** — move `perOriginWindow`
+   (+`defaultCollation`) from `lower/reduction.ts` into `compiler/rel/build.ts` beside `rowNumberWindow`; emit `rn = 1`
+   for offset 0/limit 1. Two hand-rolled copies gone; census digest may move.
+6. **One exported `ABSENT_VALUE`** ('The provided traverser does not map to a value') — rename write.ts's
+   `ABSENT_LABEL`, export beside `Guard` in `rel/plan.ts` or in `validate.ts`; quote it at `lower.ts` `emptyOperand` and
+   `mergeFromTraversal`'s miss guard.
+7. **`emit.ts` `blockAliases(b)` / `renderedAliases(b)`** — replaces four spellings in `shadowsOuter`,
+   `unanchoredAggregate`, `side()`, `sideAliases`; keeps the two textual qualifier tests agreeing. ~6 lines.
+
+**Needs-human questions:** none raised this round.
+
 ### Substrate worklist (root-cause synthesis, 2026-10-17) — PRUNED 2026-10-18
 
 The 2026-10-17 synthesis grouped every recurring wrong answer into eight clusters (A–H) and built a
@@ -735,8 +862,9 @@ proposed rebuilding on A/E, which are superseded.
 
 ## §11. Open design decisions
 
-Live ones sit beside the work they gate — §10's three-answer label coercion, and §9's
-unbounded-plus-barrier wall.
+Live ones sit beside the work they gate — §9's unbounded-plus-barrier wall. (§10's three-answer label coercion
+is settled by the landed runtime-name resolver; its last disagreeing route — addLabel's constant fold — is §10
+follow-up 3.)
 
 Closed and recorded as law: exact-type literal framing resolved into §6·7. The numeric-tower PROMOTION rule
 was REOPENED on evidence (2026-10-17, see §6·7: exact class) — it had been closed by NOT building it, since reproducing
