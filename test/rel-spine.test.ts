@@ -990,9 +990,12 @@ describe('the RelIR spine', () => {
     for (const [gremlin, message] of [
       ['g.addV(__.V().has("name","zzz").values("name"))', 'The provided traverser does not map to a value'],
       ['g.addV(__.V().has("name","marko").values("nokey").fold().unfold())', 'The provided traverser does not map to a value'],
-      ['g.addV(__.inject(null))', 'Label can not be null'],
-      ['g.addV(__.inject(""))', 'Label can not be empty'],
-      ['g.addV(__.inject("~h"))', 'Label can not be a hidden key: ~h'],
+      ['g.addV(__.V(1).constant(null))', 'Label can not be null'],
+      ['g.addV(__.V(1).constant(""))', 'Label can not be empty'],
+      ['g.addV(__.V(1).constant("~h"))', 'Label can not be a hidden key: ~h'],
+      // NOT coerced: the reference casts `(String)` and writes nothing, so a number raises rather than
+      // being stored as the TEXT `'29'` (`AddVertexStep.resolveLabelCollection`'s sentence, naming the value).
+      ['g.addV(__.V(1).values("age"))', 'Label traversal must produce a String, but got 29'],
     ] as const) {
       expect(compile(gremlin, {}).kind, gremlin).toBe('program');
       expect(() => write(store(), gremlin), gremlin).toThrow(message);
@@ -1022,8 +1025,9 @@ describe('the RelIR spine', () => {
     // The SAME three guards, on the edge host — the validity rules belong to the value, not to the host.
     for (const [gremlin, message] of [
       ['g.V(1).addE(__.V().has("name","zzz").values("name")).to(__.V(2))', 'The provided traverser does not map to a value'],
-      ['g.V(1).addE(__.inject("")).to(__.V(2))', 'Label can not be empty'],
-      ['g.V(1).addE(__.inject("~h")).to(__.V(2))', 'Label can not be a hidden key: ~h'],
+      ['g.V(1).addE(__.V(1).constant("")).to(__.V(2))', 'Label can not be empty'],
+      ['g.V(1).addE(__.V(1).constant("~h")).to(__.V(2))', 'Label can not be a hidden key: ~h'],
+      ['g.V(1).addE(__.values("age")).to(__.V(2))', 'Label traversal must produce a String, but got 29'],
     ] as const)
       expect(() => exec(seeded()).buffers(gremlin, {}), gremlin).toThrow(message);
   });

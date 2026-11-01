@@ -18,6 +18,7 @@ import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, t
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
@@ -387,9 +388,8 @@ export interface PropertyRemoval {
 /**
  * `property(k, __.trav)` — a value the compile-time form does NOT carry, so it is resolved PER
  * incoming traverser at lowering time, correlated to the owner row through `ChildSeam.rows`
- * (`prepareRuntimeWrite`). This is the write side's per-*traverser* surface, the twin of the
- * per-*graph* rooted one `runtimeLabel` already has: a label body reads the graph (one value for the
- * whole batch), a property VALUE body reads the traverser it is being written onto — so
+ * (`prepareRuntimeWrite`). This is the write side's per-*traverser* surface, which a creation's runtime
+ * label shares (`resolveCreationLabels`): a VALUE body reads the traverser it is being written onto — so
  * `property('age2', __.values('age'))` names a different value for every vertex it visits.
  *
  * The reference is `AddPropertyStep.handleTraversalValue`
@@ -779,7 +779,7 @@ const STATED_TEXT_VTYPES: ReadonlySet<string> = new Set(['long', 'bigint']);
  * `Date` (epoch millis) or a `Boolean` (0/1) came back an `Integer`, and a wide `long` carried as decimal
  * TEXT came back a `String` (`property('n', __.values('age').asNumber(GType.BYTE))`). The source's type
  * is carried until something naturally changes it (§6·7), and a write is not such a thing. A runtime KEY
- * (`asKey`) is never stored as a value — its type check reads the framing itself (`runtimeKeyRows`) — so
+ * or LABEL (`asKey`) is never stored as a value — its type check reads the framing itself (`runtimeNameRows`) — so
  * it takes no tag rather than declining.
  */
 const scalarVtype = (framing: RelFraming, asKey = false): Expr | null => {
@@ -1545,7 +1545,7 @@ const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes t
  * the only thing that knows whether a null actually arrived.
  *
  * The `framing` rides out because a KEY's type check needs the type the body STATES, not only the one a
- * row stores (`runtimeKeyRows`).
+ * row stores (`runtimeNameRows`).
  */
 function resolveValueRows(
   body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, fresh: Minter, asKey = false,
@@ -1604,6 +1604,24 @@ function resolveValueRows(
  * equal values is no choice at all and passes (`__.out().values('lang')` over two `java` rows).
  */
 function firstPerTraverser(rel: Rel, guard: Guarder, fresh: Minter): Rel {
+  unorderedFirstGuard(rel, guard, fresh);
+  return rankedFirst(rel, [col(rel.id, 'sq')], fresh);
+}
+
+/**
+ * The FIRST row per traverser by `order` — the rank half of `firstPerTraverser`, shared by every
+ * runtime name. A label takes it bare, ordered by `(sq, v)`: rows the plan does not order come in plan
+ * order (matrix §17 "Unordered slices"), and the value is the tiebreak that makes the pick a function of
+ * the rows rather than of the scan.
+ */
+function rankedFirst(rel: Rel, order: readonly Expr[], fresh: Minter): Rel {
+  const ranked = rowNumberWindow(rel, 'rk', [], { partitionBy: [col(rel.id, 'o')], orderBy: order.map((expr) => ({ expr, dir: 'asc' as const })) }, fresh);
+  const first = make.filter({ id: fresh('rf'), input: ranked, channels: [], type: ranked.type, pred: eq(col(ranked.id, 'rk'), compilerInt(1)) });
+  return make.project({ id: fresh('rv'), input: first, channels: [], type: rel.type, exprs: rel.type.cols.map((column) => [column.name, col(first.id, column.name)] as const) });
+}
+
+/** `firstPerTraverser`'s tie raise: several DIFFERENT values tie for first under `sq`. */
+function unorderedFirstGuard(rel: Rel, guard: Guarder, fresh: Minter): void {
   const tied = make.window({
     id: fresh('rn'), input: rel, channels: [], type: typeOf(...rel.type.cols, meta('lo', 'any', true), meta('hi', 'any', true), meta('tlo', 'text', true), meta('thi', 'text', true)),
     specs: (['lo', 'hi', 'tlo', 'thi'] as const).map((name) => [name, {
@@ -1621,9 +1639,6 @@ function firstPerTraverser(rel: Rel, guard: Guarder, fresh: Minter): Rel {
   });
   guard(make.project({ id: fresh('p'), input: ambiguous, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(ambiguous.id, 'o')]] }),
     { message: UNORDERED_FIRST, raiseWhen: 'rows' });
-  const ranked = rowNumberWindow(rel, 'rk', [], { partitionBy: [col(rel.id, 'o')], orderBy: [{ expr: col(rel.id, 'sq'), dir: 'asc' }] }, fresh);
-  const first = make.filter({ id: fresh('rf'), input: ranked, channels: [], type: ranked.type, pred: eq(col(ranked.id, 'rk'), compilerInt(1)) });
-  return make.project({ id: fresh('rv'), input: first, channels: [], type: rel.type, exprs: rel.type.cols.map((column) => [column.name, col(first.id, column.name)] as const) });
 }
 
 /**
@@ -1639,44 +1654,109 @@ function absentGuard(site: RuntimeSite, rows: Rel, guard: Guarder, fresh: Minter
 }
 
 /**
- * A RUNTIME KEY — `property(__.values('name'), v)` — as `(o, k)` rows, with the reference's checks on
- * the resolved value as guards. The key is ALWAYS one value (`Parameters.get(traverser, T.key, …).get(0)`
- * applies the traversal, `TraversalUtil.apply`), so it is the first row and an absent one RAISES.
+ * The reference's checks on a NAME a body resolves per traverser — a property key or a label — as the
+ * message each one raises. Only the table differs between the callers; the resolution, the four
+ * predicates and their order are `runtimeNameRows`' alone.
  *
- * `ElementHelper.validateProperty`'s three sentences are pure predicates over the value
- * (`structure/util/ElementHelper.java:80-90`, `Property.Exceptions` `structure/Property.java:134-143`),
- * so they ride as guards exactly as a runtime label's do. A NON-STRING key the reference refuses by a
- * cast — a `ClassCastException` on the step path, `legalPropertyKeyValueArray`'s sentence on the folded
- * one (`structure/util/ElementHelper.java:98-105`); the second is the one with portable text, so it is the one raised.
+ *  - a KEY is `ElementHelper.validateProperty` (`structure/util/ElementHelper.java:80-90`,
+ *    `Property.Exceptions` `structure/Property.java:134-143`). Its NON-STRING case the reference refuses
+ *    by a cast — a `ClassCastException` on the step path, `legalPropertyKeyValueArray`'s sentence on the
+ *    folded one (`structure/util/ElementHelper.java:98-105`); the second has portable text, so it is raised.
+ *  - a LABEL is `ElementHelper.validateLabel` (`Element.Exceptions`, `structure/Element.java:212-222`).
+ *    Its non-String case is a `(String)` cast on the single-label path, which has no portable text, so
+ *    it raises the sibling COLLECTION path's sentence (`AddVertexStep.resolveLabelCollection`,
+ *    `step/map/AddVertexStep.java:165-181`), naming the value rather than its Java class (matrix §17
+ *    "A non-String text receiver"). A member of a label COLLECTION (`addV(t1, t2)`) owns that path's
+ *    null sentence too, and refuses a member that is itself a collection.
  */
-function runtimeKeyRows(body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter): Rel | null {
+interface NameRules {
+  /** The output column the name lands in. */
+  readonly column: string;
+  readonly nullMessage: string;
+  readonly notString: string;
+  /** Does `notString` end on the offending value? */
+  readonly notStringNames: boolean;
+  readonly empty: string;
+  readonly hidden: string;
+  /** How the FIRST result is chosen: a key keeps `firstPerTraverser`'s tie raise; a label ranks by
+   *  `(sq, v)`, because rows the plan does not order come in plan order (matrix §17 "Unordered slices"). */
+  readonly first: 'tie-raise' | 'rank';
+  /** The refusal for a body FRAMED as a list, where the host refuses one rather than declining. */
+  readonly collection?: string;
+}
+
+const KEY_NAME: NameRules = {
+  column: 'k', nullMessage: 'Property key can not be null',
+  notString: 'The provided key/value array must have a String or T on even array indices', notStringNames: false,
+  empty: 'Property key can not be the empty string', hidden: 'Property key can not be a hidden key: ', first: 'tie-raise',
+};
+const LABEL_NAME: NameRules = {
+  column: 'name', nullMessage: 'Label can not be null',
+  notString: 'Label traversal must produce a String, but got ', notStringNames: true,
+  empty: 'Label can not be empty', hidden: 'Label can not be a hidden key: ', first: 'rank',
+};
+/** `resolveLabelCollection`'s own two sentences, for a member of `addV(t1, t2, …)`. */
+const LABEL_COLLECTION_NULL = 'Label traversal must not produce null';
+const LABEL_COLLECTION_NESTED = 'Label traversal must produce a scalar String when multiple traversals are provided, but got a Collection';
+const LABEL_MEMBER_NAME: NameRules = { ...LABEL_NAME, nullMessage: LABEL_COLLECTION_NULL, collection: LABEL_COLLECTION_NESTED };
+
+/**
+ * A RUNTIME NAME — `property(__.values('name'), v)`'s key, `addV(__.values('name'))`'s label — as
+ * `(o, <rules.column>)` rows, one per traverser, with the reference's checks on the resolved value as
+ * guards. A name is ALWAYS one value (`TraversalUtil.apply`, `process/traversal/util/TraversalUtil.java:41-53`
+ * — a key through `Parameters.get(traverser, T.key, …).get(0)`, a label through `AddVertexStep.map`),
+ * so it is the first row and an absent one RAISES.
+ *
+ * The four checks are PURE PREDICATES over the value, so they ride as guard statements over the one
+ * resolved relation — each evaluated once, before anything is written, O(plan size). `null` declines.
+ */
+function runtimeNameRows(
+  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter, rules: NameRules,
+): Rel | null {
   const resolved = resolveValueRows(body, site, child, fresh, true);
-  if (!resolved) return null;
+  if (!resolved) {
+    if (rules.collection && listFramed(body, site, child)) throw new ValueParseError(rules.collection);
+    return null;
+  }
   absentGuard(site, resolved.rel, guard, fresh);
-  const first = firstPerTraverser(resolved.rel, guard, fresh);
-  const keyText = (rel: Rel): Expr => ({ kind: 'cast', arg: col(rel.id, 'v'), to: 'text' });
-  const typeOfKey: Expr = { kind: 'call', fn: 'typeof', args: [col(first.id, 'v')] };
+  const first = rules.first === 'tie-raise' ? firstPerTraverser(resolved.rel, guard, fresh)
+    : rankedFirst(resolved.rel, [col(resolved.rel.id, 'sq'), col(resolved.rel.id, 'v')], fresh);
+  const nameText = (rel: Rel): Expr => ({ kind: 'cast', arg: col(rel.id, 'v'), to: 'text' });
+  const typeOfName: Expr = { kind: 'call', fn: 'typeof', args: [col(first.id, 'v')] };
   // A String is TEXT, but not all TEXT is a String: a uuid, a datetime or an exact-decimal tail is stored
   // as text too, and says so either in the row's own type (`vt`, a `values()` read of a typed property)
   // or in the type the body's framing STATES for every row (`constant(UUID(…))`). Either one naming a
-  // type other than `string` is the reference's non-String key.
+  // type other than `string` is the reference's non-String name.
   const { framing } = resolved;
   const statedOther = framing.kind === 'scalar' && framing.type.kind === 'static' && framing.type.type !== 'string';
-  const notString: Expr = statedOther ? { kind: 'binary', op: '!=', left: typeOfKey, right: text('null') } : or(
-    { kind: 'binary', op: '!=', left: typeOfKey, right: text('text') },
+  const notString: Expr = statedOther ? { kind: 'binary', op: '!=', left: typeOfName, right: text('null') } : or(
+    { kind: 'binary', op: '!=', left: typeOfName, right: text('text') },
     { kind: 'binary', op: '!=', left: { kind: 'call', fn: 'coalesce', args: [col(first.id, 'vt'), text('string')] }, right: text('string') });
-  const rules: readonly (readonly [Expr, string, boolean])[] = [
-    [eq(typeOfKey, text('null')), 'Property key can not be null', false],
-    [notString, 'The provided key/value array must have a String or T on even array indices', false],
-    [eq(keyText(first), text('')), 'Property key can not be the empty string', false],
-    [{ kind: 'binary', op: 'like', left: keyText(first), right: text('~%') }, 'Property key can not be a hidden key: ', true],
+  const checks: readonly (readonly [Expr, string, boolean])[] = [
+    [eq(typeOfName, text('null')), rules.nullMessage, false],
+    [notString, rules.notString, rules.notStringNames],
+    [eq(nameText(first), text('')), rules.empty, false],
+    [{ kind: 'binary', op: 'like', left: nameText(first), right: text('~%') }, rules.hidden, true],
   ];
-  for (const [pred, message, names] of rules) {
+  for (const [pred, message, names] of checks) {
     const bad = make.filter({ id: fresh('f'), input: first, channels: [], type: first.type, pred });
-    guard(make.project({ id: fresh('p'), input: bad, channels: [], type: typeOf(meta('v', 'text', true)), exprs: [['v', keyText(bad)]] }),
+    guard(make.project({ id: fresh('p'), input: bad, channels: [], type: typeOf(meta('v', 'text', true)), exprs: [['v', nameText(bad)]] }),
       { message, raiseWhen: 'rows', ...(names ? { valueColumn: 'v' } : {}) });
   }
-  return make.project({ id: fresh('rk'), input: first, channels: [], type: typeOf(meta('o', 'int'), meta('k', 'text')), exprs: [['o', col(first.id, 'o')], ['k', keyText(first)]] });
+  return make.project({
+    id: fresh('rk'), input: first, channels: [], type: typeOf(meta('o', 'int'), meta(rules.column, 'text')),
+    exprs: [['o', col(first.id, 'o')], [rules.column, nameText(first)]],
+  });
+}
+
+/** Is `body` FRAMED as a list over `site` — a `Collection`, which a label-collection member may not
+ *  produce whatever it holds. Asked only on the decline path, so lowering the body again costs nothing
+ *  a compiled plan keeps. */
+function listFramed(body: readonly IRStep[], site: RuntimeSite, child: ChildSeam): boolean {
+  const rows = child.rows(body, site.host, site.hostElem, site.aliases, site.origin);
+  const framing = rows?.framing
+    ?? child.scalar(body, { kind: 'element', id: col(site.host.id, 'id'), elem: site.hostElem, row: { rel: site.host, aliases: site.aliases } })?.framing;
+  return framing?.kind === 'list';
 }
 
 /** `(o, owner, k, v, vt, sq)` — the value rows joined to the element each traverser writes and to the
@@ -1914,7 +1994,7 @@ function prepareRuntimeWrite(
   let key: RuntimeKey;
   if (typeof write.key === 'string') key = { kind: 'const', expr: propertyKeyExpr(write.key, write.keyName) };
   else {
-    const rows = runtimeKeyRows(write.key.body, site, child, guard, fresh);
+    const rows = runtimeNameRows(write.key.body, site, child, guard, fresh, KEY_NAME);
     if (!rows) return null;
     key = { kind: 'rows', rows: bind ? bind(rows, true) : rows };
   }
@@ -2506,7 +2586,7 @@ function foldsIntoAddV(step: IRStep, child: ChildSeam): boolean {
 function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam, step = false): PropertyWrite | null {
   // A RUNTIME KEY (`property(__.values('name'), v)`) is a `property()` STEP's form only — a merge map's
   // keys are its own literal keys. It is resolved per traverser like a value, with
-  // `ElementHelper.validateProperty`'s checks as guards on what it resolves to (`runtimeKeyRows`).
+  // `ElementHelper.validateProperty`'s checks as guards on what it resolves to (`runtimeNameRows`).
   const keyBody = typeof spec.key === 'string' ? null
     : step && isNested(spec.key) ? child.body(spec.key.nested, 'child') : undefined;
   if (keyBody === undefined || (keyBody !== null && !keyBody.length)) return null;
@@ -2614,18 +2694,25 @@ const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label'
  * third hand-rolled copy of an upsert whose `DO UPDATE` looks redundant is a third chance to write
  * the `DO NOTHING` that silently returns nothing.
  */
-function internLabels(labels: readonly Expr[], bind: Binder, fresh: Minter): Rel | null {
-  if (!labels.length) return null;
+function internLabels(labels: CreationLabels, bind: Binder, fresh: Minter): Rel | null {
+  if (isConstantLabels(labels) && !labels.length) return null;
   const target = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  const onConflict = { target: ['name'], set: [['name', col(EXCLUDED, 'name')] as const] };
+  if (isConstantLabels(labels)) {
+    return bind(insert({
+      target, cols: ['name'],
+      source: make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: labels.map((label) => [label]) }),
+      channels: [], type: typeOf(meta('id', 'int')), onConflict, returning: [['id', col(target.id, 'id')]],
+    }));
+  }
+  // A label ASSIGNMENT interns its DISTINCT names, and returns each with its id — the relation the
+  // per-traverser pairing joins on (`labelledByPosition`). `INSERT … SELECT … ON CONFLICT` needs the
+  // emitter's `WHERE true`, which it supplies for every such source.
+  const name = make.project({ id: fresh('p'), input: labels, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labels.id, 'name')]] });
   return bind(insert({
-    target, cols: ['name'],
-    // EXPRESSIONS rather than literal strings, so a RUNTIME label interns by the same statement a
-    // constant one does. A scalar subquery is a legal `VALUES` row here because it is row-independent
-    // — the label body is rooted, so it yields the same name for every row the creation makes.
-    source: make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: labels.map((label) => [label]) }),
-    channels: [], type: typeOf(meta('id', 'int')),
-    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] },
-    returning: [['id', col(target.id, 'id')]],
+    target, cols: ['name'], source: make.distinct({ id: fresh('d'), input: name, channels: [], type: name.type }),
+    channels: [], type: typeOf(...LABELS_COLS), onConflict,
+    returning: [['id', col(target.id, 'id')], ['name', col(target.id, 'name')]],
   }));
 }
 
@@ -2652,7 +2739,7 @@ function internLabels(labels: readonly Expr[], bind: Binder, fresh: Minter): Rel
  *   rather than a special case.
  */
 export function addVertex(
-  input: Rel, labels: readonly Expr[], uid: string | number | null, writes: readonly PropertyWrite[],
+  input: Rel, labels: CreationLabels, uid: string | number | null, writes: readonly PropertyWrite[],
   ordered: boolean, bind: Binder, fresh: Minter, child: ChildSeam, aliases: AliasMap, guard: Guarder,
   folded: readonly FoldedWrite[] = [],
 ): Rel | null {
@@ -2691,11 +2778,15 @@ export function addVertex(
   if (labelRow) {
     const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
     // A CROSS JOIN, so N labels are N pairs per created node — the same statement whether the list
-    // holds one name or four, which is what makes a multi-label creation no new shape.
-    const pairs = make.join({
-      id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [],
-      type: typeOf(meta('node', 'int'), meta('label', 'int')),
-    });
+    // holds one name or four, which is what makes a multi-label creation no new shape. A per-traverser
+    // assignment pairs each new row with ITS traverser's names, by the position `positioned` recovers.
+    const labelled = isConstantLabels(labels) ? null : labelledByPosition(positioned(created, fresh), labels, labelRow, fresh);
+    const pairs = labelled
+      ? make.project({ id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')), exprs: [['node', col(labelled.id, 'id')], ['label', col(labelled.id, 'lbl')]] })
+      : make.join({
+        id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [],
+        type: typeOf(meta('node', 'int'), meta('label', 'int')),
+      });
     bind(insert({
       target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
     }));
@@ -2821,9 +2912,9 @@ const writeInputChannels = (input: Rel): Channels =>
  *
  *  `input` is what decides HOW MANY, and its two callers are the whole story: a `Values` row at
  *  the source (`g.addV(…)` is one vertex), the traverser relation mid-chain (`g.V().addV(…)` is one
- *  per vertex). A label that is a nested traversal or an invalid one declines — the label validator is
- *  the shared waist, and a name it refuses is an ERROR, not a write this route may
- *  silently skip. */
+ *  per vertex). A label that is a nested traversal resolves per traverser (`resolveCreationLabels`); an
+ *  invalid CONSTANT raises — the label validator is the shared waist, and a name it refuses is an ERROR,
+ *  not a write this route may silently skip. */
 export function elementAddV(
   input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter,
   elem: Elem | null = null, aliases: AliasMap = NO_ALIASES,
@@ -2834,7 +2925,7 @@ export function elementAddV(
   // `property(T.label, …)` REPLACES the step's own labels rather than adding to them — `insertVertex`
   // reads the same way, and it is not an addition: `addV('a').property(T.label,'b')` is a vertex
   // labelled `b`. The count rule then applies to whichever list won.
-  const labels = creationLabels(tokens.label === null ? step.args.map((a) => a.value) : [tokens.label], child, fresh);
+  const labels = creationLabels(tokens.label === null ? step.args.map((a) => a.value) : [tokens.label], child);
   if (!labels) return null;
   // The run splits where the reference's FOLD splits it (`foldsIntoAddV`): the creation's own
   // parameters, then the `property()` steps that stayed steps — in that order, whatever order they were
@@ -2866,13 +2957,14 @@ export function elementAddV(
   const { bindings, bind, guard } = effectScope(fresh);
   // BEFORE the creation, because a check after the insert has nothing left to refuse.
   if (tokens.id !== null) { const check = elementIdGuard(tokens.id, 'vertex', fresh); guard(check.node, check.guard); }
-  // A RUNTIME label's validity, also before the creation — the reference validates the resolved value
-  // and so must we, and a check after the insert has nothing left to refuse.
-  for (const runtime of labels.runtime) labelGuards(runtime, guard, fresh);
   const incoming = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
+  // A RUNTIME label resolves per traverser, its validity guarded before the creation — the reference
+  // validates the resolved value, and a check after the insert has nothing left to refuse.
+  const names = resolveCreationLabels(labels, incoming, elem, aliases, child, bind, guard, fresh);
+  if (!names) return null;
   const folded = foldedParameters(foldedWrites, 'vertex', incoming, elem, aliases, child, bind, guard, fresh);
   if (!folded) return null;
-  const result = addVertex(incoming, labels.names, tokens.id, writes, ordered, bind, fresh, child, NO_ALIASES, guard, folded);
+  const result = addVertex(incoming, names, tokens.id, writes, ordered, bind, fresh, child, NO_ALIASES, guard, folded);
   if (!result) return null;
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
@@ -2884,44 +2976,54 @@ type FoldedWrite = PropertyWrite | ((targets: Rel, bind: Binder) => void);
 /**
  * A creation's FOLDED `property()` parameters, resolved against its INCOMING traverser — `null` to decline.
  *
- * A constant passes through. A runtime key or value is `Parameters.getKeyValues(traverser)`'s
- * `TraversalUtil.apply` over the traverser the creation consumes (`step/util/Parameters.java:171-183`),
- * so its site is the incoming SNAPSHOT — keyed by the snapshot's position, which is how the new rows
- * correlate back to it — and every refusal it owes is pushed NOW, before the creation, because the
- * reference raises while resolving the parameters and so creates nothing.
- *
- * Where that traverser is NOT an element this route can root a body at — the SOURCE form (`g.addV()`
- * resolves its parameters against a placeholder `false` traverser, `AddVertexStartStep.java:144-149`), a
- * scalar or a cannot-say stream — only a body that RE-SOURCES first (`__.V(1).values('name')`) is
- * answerable, because it reads nothing of the traverser it is handed; the host is then the incoming rows
- * with no element to offer. Anything else declines.
+ * A constant passes through. A runtime key or value is resolved over `parameterSite`, and every refusal it
+ * owes is pushed NOW, before the creation, because the reference raises while resolving the parameters
+ * and so creates nothing.
  */
 function foldedParameters(
   writes: readonly PropertyWrite[], elem: Elem, incoming: Rel, incomingElem: Elem | null, aliases: AliasMap,
   child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter,
 ): readonly FoldedWrite[] | null {
-  const rooted = incomingElem !== null && incoming.kind !== 'values'
-    && incoming.type.cols.some((column) => column.name === 'id') && incoming.type.cols.some((column) => column.name === ORD);
   const out: FoldedWrite[] = [];
   for (const write of writes) {
     if (write.kind !== 'runtime') { out.push(write); continue; }
-    let site: RuntimeSite;
-    if (rooted && incomingElem !== null) site = { host: incoming, hostElem: incomingElem, origin: ORD, aliases, resolve: 'first' };
-    else {
-      const bodies = [...('body' in write.value ? [write.value.body] : []), ...(typeof write.key === 'string' ? [] : [write.key.body])];
-      if (!bodies.every((body) => body[0]?.name === 'V' || body[0]?.name === 'E')) return null;
-      // The source's one row is position 1 — the position `positioned` gives the one vertex it creates.
-      const host = make.project({
-        id: fresh('h'), input: incoming, channels: [], type: typeOf(meta('id', 'int', true), meta(ORD, 'int')),
-        exprs: [['id', compilerNull('int')], [ORD, incoming.type.cols.some((column) => column.name === ORD) ? col(incoming.id, ORD) : compilerInt(1)]],
-      });
-      site = { host, hostElem: 'vertex', origin: ORD, aliases: NO_ALIASES, resolve: 'first' };
-    }
+    const bodies = [...('body' in write.value ? [write.value.body] : []), ...(typeof write.key === 'string' ? [] : [write.key.body])];
+    const site = parameterSite(incoming, incomingElem, aliases, bodies, fresh);
+    if (!site) return null;
     const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard, bind);
     if (!apply) return null;
     out.push(apply);
   }
   return out;
+}
+
+/**
+ * WHERE A CREATION'S PARAMETER BODIES RUN — its folded `property()` keys and values, and its runtime
+ * labels — or `null` to decline. Both are `TraversalUtil.apply` over the traverser the creation consumes
+ * (`Parameters.getKeyValues(traverser)`, `step/util/Parameters.java:171-183`; the label in
+ * `AddVertexStep.map`, `step/map/AddVertexStep.java:140-162`), so this is ONE site choice for both:
+ *
+ *  - where the incoming relation is a ROOTED element stream, the incoming SNAPSHOT keyed by its position
+ *    (`ord`) — which is how the new rows correlate back to it;
+ *  - where that traverser is NOT an element this route can root a body at — the SOURCE form (`g.addV()`
+ *    resolves its parameters against a placeholder `false` traverser, `AddVertexStartStep.java:144-149`), a
+ *    scalar or a cannot-say stream — only bodies that all RE-SOURCE first (`__.V(1).values('name')`) are
+ *    answerable, because they read nothing of the traverser they are handed; the host is then the incoming
+ *    rows with no element to offer, one position each. Anything else declines.
+ */
+function parameterSite(
+  incoming: Rel, incomingElem: Elem | null, aliases: AliasMap, bodies: readonly (readonly IRStep[])[], fresh: Minter,
+): RuntimeSite | null {
+  const ordered = incoming.type.cols.some((column) => column.name === ORD);
+  if (incomingElem !== null && incoming.kind !== 'values' && ordered && incoming.type.cols.some((column) => column.name === 'id'))
+    return { host: incoming, hostElem: incomingElem, origin: ORD, aliases, resolve: 'first' };
+  if (!bodies.every((body) => body[0]?.name === 'V' || body[0]?.name === 'E')) return null;
+  // The source's one row is position 1 — the position `positioned` gives the one element it creates.
+  const host = make.project({
+    id: fresh('h'), input: incoming, channels: [], type: typeOf(meta('id', 'int', true), meta(ORD, 'int')),
+    exprs: [['id', compilerNull('int')], [ORD, ordered ? col(incoming.id, ORD) : compilerInt(1)]],
+  });
+  return { host, hostElem: 'vertex', origin: ORD, aliases: NO_ALIASES, resolve: 'first' };
 }
 
 /**
@@ -2989,126 +3091,150 @@ function constLabelArg(value: unknown, child: ChildSeam): unknown {
 }
 
 /**
- * THE LABELS A CREATION GIVES ITS NEW VERTEX — `addV`'s arguments and a merge map's `T.label` reduced
- * to the same list, or `null` for a form this route declines.
+ * THE LABELS A CREATION GIVES ITS NEW ELEMENT, read from the query text — `addV`'s arguments, `addE`'s
+ * one label, a merge map's `T.label` — or `null` for a form this route declines.
  *
- * **A creation with NO label of its own is answerable, and it needed only the graph's declared
- * cardinality.** `insertVertex` spells the same rule: an unstated list takes the graph default where
- * the cardinality demands at least one label, and stays empty where it permits zero. That is a
- * compile-time question the moment the cardinality is threaded (see `Lowering.labelCardinality`) —
- * what made it look like a runtime one was that this seam had not been handed the value.
+ * Every argument that folds to a constant (`constLabelArg`) is validated NOW, and an invalid one RAISES
+ * `validateLabel`'s sentence: `addV('')` is the reference's error, a property of the query text, not a
+ * gap (matrix §17 "Error timing" — errors are eager). What is left is either a constant list (`const`) or
+ * a list of MEMBERS some of which are bodies resolved per traverser (`runtime`, `resolveCreationLabels`).
  *
- * The COUNT rule is the other half, and it is a DECLINE rather than a throw: `assertLabelCount` raises
- * a message the conformance suite matches on, and that refusal is the reference's own answer, so it is
- * declined here rather than mis-executed (write-path trap 3).
+ * Two forms, the reference's two paths through `AddVertexStep.map` (`step/map/AddVertexStep.java:140-182`):
  *
- * Deduped as a SET before counting, exactly as `insertVertex` does — `addV('a','a')` is one label, so
- * it must not fail a `max: 1` graph.
+ *  - ONE argument is the single-label path — `TraversalUtil.apply`, then `validateLabel`. A sole LIST
+ *    constant (`addV(__.constant(['a','b']))`) is a multi-label creation.
+ *  - SEVERAL arguments are `resolveLabelCollection`: each member must be one scalar String, under that
+ *    path's own sentences (a list member raises "must produce a scalar String when multiple traversals
+ *    are provided"), collected into a SET.
+ *
+ * **NO DEFAULT LABEL IS SUPPLIED.** A bare `g.addV()` stores nothing, which `Labels.feature`
+ * `g_addV_labels` asserts outright (`count of 0`); `DEFAULT_VERTEX_LABEL` is only what a label-less
+ * vertex REPORTS for `label()`. Deduped as a SET, exactly as `insertVertex` does — `addV('a','a')` is one
+ * label.
  */
-function creationLabels(
-  args: readonly unknown[], child: ChildSeam, fresh: Minter,
-): CreationLabels | null {
-  // A nested arg that does NOT fold keeps its original `{nested}` value rather than becoming a miss:
-  // the fold is an optimization for a literal in traversal clothing, and what it leaves behind is a
-  // RUNTIME label for the branch below — not a decline. (Returning `undefined` here and testing for it
-  // first is what silently killed that branch: every runtime label died before reaching it.)
+function creationLabels(args: readonly unknown[], child: ChildSeam): LabelArgs | null {
+  // A nested arg that does NOT fold keeps its original `{nested}` value rather than becoming a miss: the
+  // fold is an optimization for a literal in traversal clothing, and what it leaves behind is a RUNTIME
+  // label, not a decline.
   const folded = args.map((arg) => constLabelArg(arg, child) ?? arg);
-  const named = folded.length === 1 && Array.isArray(folded[0]) ? folded[0] as unknown[] : folded;
-
-  // A RUNTIME label — a nested body that did not fold to a literal — is resolved by the child seam and
-  // validated by a guard, not declined. See `runtimeLabel` for why the reference makes that possible.
-  // Only the SOLE-ARGUMENT form is taken here: `addV(a, __.trav)` is upstream's `Collection` path, whose
-  // error vocabulary is a different four messages (`resolveLabelCollection`), so answering it with this
-  // one's would be the wrong answer rather than a missing one.
-  if (named.length === 1 && isNested(named[0])) {
-    const resolved = runtimeLabel(named[0], child, fresh);
-    return resolved && { names: [resolved.expr], runtime: [resolved] };
+  if (folded.length === 1 && Array.isArray(folded[0])) {
+    const named = folded[0] as unknown[];
+    if (named.some((arg) => typeof arg !== 'string')) return null;
+    return constantLabels(named as string[]);
   }
-  if (named.some((arg) => typeof arg !== 'string')) return null;
-  const labels = [...new Set(named as string[])];
-  try { for (const label of labels) validateLabel(label); } catch { return null; }
-  // NO DEFAULT LABEL IS SUPPLIED. A bare `g.addV()` stores nothing, which `Labels.feature`
-  // `g_addV_labels` asserts outright (`count of 0`); `DEFAULT_VERTEX_LABEL` is only what a
-  // label-less vertex REPORTS for `label()`.
-  return { names: labels.map(text), runtime: [] };
+  const members: (string | readonly IRStep[])[] = [];
+  for (const value of folded) {
+    const member = labelMember(value, child, folded.length > 1);
+    if (!member) return null;
+    members.push(member);
+  }
+  return members.every((member) => typeof member === 'string') ? constantLabels(members as string[]) : { kind: 'runtime', members };
 }
 
-/** A creation's labels as EXPRESSIONS, plus the subset whose value only exists at run time and
- *  therefore needs `labelGuards`. A constant creation carries an empty `runtime` and costs nothing. */
-interface CreationLabels {
-  readonly names: readonly Expr[];
-  readonly runtime: readonly RuntimeLabel[];
+/** `addE`'s ONE label — `creationLabels`' single-label path. An edge label is singular by spec, so it has
+ *  no collection arm. An ABSENT label (`addE()`) declines. */
+function labelSource(value: unknown, child: ChildSeam): LabelArgs | null {
+  if (value === undefined) return null;
+  const member = labelMember(constLabelArg(value, child) ?? value, child, false);
+  if (!member) return null;
+  return typeof member === 'string' ? constantLabels([member]) : { kind: 'runtime', members: [member] };
+}
+
+const constantLabels = (names: readonly string[]): LabelArgs => {
+  const labels = [...new Set(names)];
+  for (const label of labels) validateLabel(label);
+  return { kind: 'const', names: labels.map(text) };
+};
+
+/**
+ * ONE label argument → a validated constant name, or the body that resolves it per traverser; `null` for
+ * a body the seam cannot normalize. A constant the reference refuses RAISES its sentence — the
+ * collection path's for a member of several (`resolveLabelCollection`), else `validateLabel`'s and the
+ * non-String one `runtimeNameRows` raises at run time.
+ */
+function labelMember(value: unknown, child: ChildSeam, collection: boolean): string | readonly IRStep[] | null {
+  if (isNested(value)) {
+    const body = child.body(value.nested, 'child');
+    return body?.length ? body : null;
+  }
+  if (collection && (value === null || value === undefined)) throw new ValueParseError(LABEL_COLLECTION_NULL);
+  if (collection && Array.isArray(value)) throw new ValueParseError(LABEL_COLLECTION_NESTED);
+  if (value !== null && value !== undefined && typeof value !== 'string') throw new ValueParseError(`${LABEL_NAME.notString}${String(value)}`);
+  return validateLabel(value);
+}
+
+/** A creation's label arguments read from the text — constant names, or members resolved per traverser. */
+type LabelArgs =
+  | { readonly kind: 'const'; readonly names: readonly Expr[] }
+  | { readonly kind: 'runtime'; readonly members: readonly (string | readonly IRStep[])[] };
+
+/**
+ * A creation's labels as it WRITES them: the compile-time names (a constant creation, cross-joined onto
+ * every new row), or the `(o, name)` relation that gives each traverser its own — a label ASSIGNMENT,
+ * joined onto the new rows by position (`labelledByPosition`).
+ */
+type CreationLabels = readonly Expr[] | Rel;
+const isConstantLabels = (labels: CreationLabels): labels is readonly Expr[] => Array.isArray(labels);
+
+/**
+ * A creation's RUNTIME labels resolved per traverser, as the `(o, name)` relation it writes — `null` to
+ * decline. The site is the folded parameters' (`parameterSite`), because the reference resolves both
+ * against the traverser the creation consumes; the names are `runtimeNameRows` under the label sentences,
+ * so every refusal is a guard pushed before anything is written.
+ *
+ * Deliberately NOT `prepareRuntimeWrite`'s route: no `sequentialGuard`. Every traverser's label resolves
+ * against the pre-write snapshot (matrix §17 "Write visibility"), so there is no per-traverser interleave
+ * to refuse — and that guard fires on more than one traverser, a refusal that depends on the data.
+ *
+ * The rows are TAKEN before the creation — a snapshot binding, one JSON value — for the reason
+ * `prepareRuntimeWrite` gives: a body re-run after the insert would see the graph the insert changed.
+ * A collection's members are UNIONED as a set, `resolveLabelCollection`'s `LinkedHashSet`.
+ */
+function resolveCreationLabels(
+  labels: LabelArgs, incoming: Rel, incomingElem: Elem | null, aliases: AliasMap,
+  child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter,
+): CreationLabels | null {
+  if (labels.kind === 'const') return labels.names;
+  const bodies = labels.members.filter((member): member is readonly IRStep[] => typeof member !== 'string');
+  const site = parameterSite(incoming, incomingElem, aliases, bodies, fresh);
+  if (!site) return null;
+  const rules = labels.members.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME;
+  const parts: Rel[] = [];
+  for (const member of labels.members) {
+    const part = typeof member !== 'string' ? runtimeNameRows(member, site, child, guard, fresh, rules) : make.project({
+      id: fresh('ln'), input: site.host, channels: [], type: typeOf(meta('o', 'int'), meta('name', 'text')),
+      exprs: [['o', col(site.host.id, site.origin)], ['name', text(member)]],
+    });
+    if (!part) return null;
+    parts.push(part);
+  }
+  const names = parts.length === 1 ? parts[0]! : make.union({ id: fresh('u'), inputs: parts, all: false, channels: [], type: parts[0]!.type });
+  return bind(names, true);
 }
 
 /**
- * ONE label argument → its expression, plus the guards it owes — the single-label form of
- * `creationLabels`, for the host that takes exactly one.
- *
- * `addE` is that host: an edge label is singular by spec, so it has no `Collection` arm and none of
- * `resolveLabelCollection`'s four messages apply to it. Sharing this with `addV` rather than letting
- * the edge host grow its own resolution is the point — a second copy is a second chance to fold a
- * constant differently, or to forget a guard.
+ * Each row of `left` with the interned id of every label its traverser resolved, as `left`'s columns plus
+ * `lbl`: `left`'s position equi-joined to the names' `o`, then each name to its id. A `left` with no
+ * position is one traverser, so the names cross it. The outer loop stays `left`'s (`ordered`), because
+ * an edge insert assigns rowids in that order.
  */
-function labelSource(value: unknown, child: ChildSeam, fresh: Minter): CreationLabels | null {
-  const folded = constLabelArg(value, child) ?? value;
-  if (isNested(folded)) {
-    const resolved = runtimeLabel(folded, child, fresh);
-    return resolved && { names: [resolved.expr], runtime: [resolved] };
-  }
-  if (typeof folded !== 'string') return null;
-  try { validateLabel(folded); } catch { return null; }
-  return { names: [text(folded)], runtime: [] };
-}
-
-/**
- * A nested label body → the ONE value it produces, as an expression.
- *
- * `TraversalUtil.apply` is `traversal.next()` — the FIRST result — so this is the child seam's rooted
- * arm plus a `Limit 1`, exactly as `endpointOf`'s `read` arm already spells it for `to(__.V(2))`. The
- * body is ROOTED rather than correlated because a label body reads the graph, not the traverser being
- * created: `addV(__.V().has('name','marko').label())` names one label for every row it creates.
- *
- * A body with EFFECTS is refused: resolving a label must not also mutate the graph, and the rooted arm
- * is deliberately policy-free about that (§6·6), so the admission rule is the consumer's — here.
- */
-function runtimeLabel(value: { readonly nested: unknown }, child: ChildSeam, fresh: Minter): RuntimeLabel | null {
-  const body = child.body(value.nested, 'rooted');
-  if (!body?.length) return null;
-  const read = child.rooted(body);
-  if (!read || read.effects?.length) return null;
-  if (read.framing.kind !== 'scalar') return null;
-  const one = make.limit({ id: fresh('li'), input: read.rel, channels: read.rel.channels, type: read.rel.type, count: compilerInt(1) });
-  const only = make.project({
-    id: fresh('p'), input: one, channels: [], type: typeOf(meta('v', 'text')), exprs: [['v', col(one.id, 'v')]],
+function labelledByPosition(left: Rel, names: Rel, interned: Rel, fresh: Minter): Rel {
+  const positional = left.type.cols.some((column) => column.name === ORD);
+  const named = make.join({
+    id: fresh('j'), left, right: names, channels: [], type: typeOf(...left.type.cols, meta('lo', 'int'), meta('ln', 'text')),
+    ...(positional ? { join: 'inner' as const, ordered: true, on: eq(col(left.id, ORD), col(names.id, 'o')) } : { join: 'cross' as const }),
   });
-  // The RELATION rides beside the expression, and it is not redundant: a scalar subquery collapses
-  // "no row" and "a row holding NULL" to the same NULL, while the reference raises DIFFERENT errors
-  // for them. `EXISTS` over this same relation is what tells them apart (see `labelGuards`).
-  return { expr: { kind: 'scalar', plan: only }, plan: only };
+  const labelled = make.join({
+    id: fresh('j'), left: named, right: interned, join: 'inner', ordered: true, channels: [],
+    type: typeOf(...named.type.cols, meta('lbl', 'int'), meta('lbn', 'text')),
+    on: eq(col(named.id, 'ln'), col(interned.id, 'name')),
+  });
+  return make.project({
+    id: fresh('p'), input: labelled, channels: [], type: typeOf(...left.type.cols, meta('lbl', 'int')),
+    exprs: [...left.type.cols.map((column) => [column.name, col(labelled.id, column.name)] as const), ['lbl', col(labelled.id, 'lbl')]],
+  });
 }
 
-/** A label resolved at run time: the value as an expression, and the relation it came from — the
- *  second is what makes "produced nothing" distinguishable from "produced null". */
-interface RuntimeLabel {
-  readonly expr: Expr;
-  readonly plan: Rel;
-}
-
-/**
- * THE VALIDITY OF A LABEL NOBODY WILL SEE UNTIL EXECUTION — as guard bindings, which run once over
- * the whole set rather than row by row.
- *
- * `ElementHelper.validateLabel` is three PURE PREDICATES over the value — null, empty, hidden
- * (`Graph.Hidden.HIDDEN_PREFIX` is `~`) — with no graph access and no traverser state, so all three
- * are expressible in SQL. These run once, over the whole set, BEFORE anything is written — one
- * statement each, O(plan size) — and the message is the one our shared `validateLabel` owns.
- *
- * **The NON-STRING case is deliberately absent, and that is agreement rather than an omission.** The
- * reference casts `(String)` and would raise; our shared `validateLabel` COERCES (`String(label)`) —
- * and `labels.name` is TEXT, so SQLite's affinity coerces identically here. Raising here would be a
- * divergence invented by this function. The coercion itself is a real deviation from the reference,
- * and it is shared code's to fix, not this seam's (plan §Phase 1).
- */
 /**
  * `TraversalUtil.apply`'s refusal when a body yields NO value — the reference's own sentence
  * (`process/traversal/util/TraversalUtil.java:41-53`), truncated to the stable PREFIX because its
@@ -3116,46 +3242,10 @@ interface RuntimeLabel {
  * that no other implementation can reproduce. TinkerPop's own conformance assertions are
  * `containing text of`, so the prefix is the matchable part and the tail is decoration.
  *
- * A CONSTANT because more than one host raises it — a nested label on `addV` today, on `addE` and a
- * nested property key next — and because a string spelled at each site is a string that drifts.
+ * A CONSTANT because every runtime name and folded parameter raises it, and an `addE` endpoint quotes
+ * it — a string spelled at each site is a string that drifts.
  */
 const ABSENT_LABEL = 'The provided traverser does not map to a value';
-
-function labelGuards(label: RuntimeLabel, guard: Guarder, fresh: Minter): void {
-  // TEXT-cast before the string tests for the same reason `labels.name` is a TEXT column: SQLite's
-  // affinity would coerce on the way in anyway, so comparing the raw value would test something the
-  // stored label is not.
-  const asText: Expr = { kind: 'cast', arg: label.expr, to: 'text' };
-  const produced: Expr = { kind: 'exists', plan: label.plan, negated: false };
-  // **EVERY MESSAGE HERE IS THE REFERENCE'S.** A message must come from the reference, never be
-  // borrowed from elsewhere — a borrowed string has no checkable provenance, and correctness must not
-  // depend on it. `Element.Exceptions` (`structure/Element.java:212-222`) owns the three
-  // `Label can not be …` sentences, and `TraversalUtil.apply`
-  // (`process/traversal/util/TraversalUtil.java:41-53`) owns the absent-value one.
-  //
-  // **AN ABSENT BODY AND A NULL VALUE ARE DIFFERENT ERRORS, AND THEY ARE DISTINGUISHABLE.** A scalar
-  // subquery collapses them — both read as NULL — but `EXISTS` over the same relation does not, so
-  // each of the reference's two sentences fires on its own precise condition and neither is a choice
-  // between them: `NOT EXISTS` is `TraversalUtil.apply`'s "does not map to a value", while a row that
-  // exists and holds NULL is `validateLabel`'s "can not be null". The absent sentence interpolates
-  // Java object descriptions no other implementation can reproduce, so `ABSENT_LABEL` is its stable
-  // prefix — the part a `containing text of` assertion matches.
-  const rules: readonly (readonly [Expr, string, boolean])[] = [
-    [{ kind: 'exists', plan: label.plan, negated: true }, ABSENT_LABEL, false],
-    [and(produced, { kind: 'binary', op: 'is', left: label.expr, right: compilerNull('text') }), 'Label can not be null', false],
-    [eq(asText, compilerText('')), 'Label can not be empty', false],
-    [{ kind: 'binary', op: 'like', left: asText, right: compilerText('~%') }, 'Label can not be a hidden key: ', true],
-  ];
-  for (const [pred, message, names] of rules) {
-    const row = make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
-    const bad = make.filter({ id: fresh('f'), input: row, channels: [], type: row.type, pred });
-    // The guard relation PROJECTS THE LABEL so the executor can append it — the hidden-key sentence
-    // names the offending value and a runtime value has none to interpolate at compile time.
-    guard(make.project({
-      id: fresh('p'), input: bad, channels: [], type: typeOf(meta('v', 'text')), exprs: [['v', asText]],
-    }), { message, raiseWhen: 'rows', ...(names ? { valueColumn: 'v' } : {}) });
-  }
-}
 
 /**
  * A write's INPUT SNAPSHOT — its identity, emission order and aliases (`writeInputCols`), positioned —
@@ -3590,12 +3680,11 @@ export function elementAddE(
   // `addV`. Validating the WINNER rather than the step's argument is what makes that true.
   const tokens = creationTokens(propertySteps, child);
   if (!tokens) return null;
-  // A RUNTIME label works here for the same reason it works on `addV`, and by the same two pieces:
-  // the seam's rooted arm resolves the body's FIRST value (`TraversalUtil.apply` is `next()`), and the
-  // reference's three validity rules are pure predicates over that value, so they ride as guards. The
-  // only host-specific part is which label WINS — `property(T.label, …)` replaces the step's argument,
-  // and whichever won is the one validated.
-  const label = labelSource(tokens.label ?? stepLabel, child, fresh);
+  // A RUNTIME label works here for the same reason it works on `addV`, and by the same route: the
+  // creation's parameter site (`parameterSite`) and the one name resolver (`runtimeNameRows`). The only
+  // host-specific part is which label WINS — `property(T.label, …)` replaces the step's argument, and
+  // whichever won is the one validated.
+  const label = labelSource(tokens.label ?? stepLabel, child);
   if (!label) return null;
   const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'edge', child) : [];
   if (!writes) return null;
@@ -3659,14 +3748,16 @@ export function elementAddE(
     guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), taken.guard);
   }
 
-  // A RUNTIME label's validity, before the insert — a check after it has nothing left to refuse.
-  for (const runtime of label.runtime) labelGuards(runtime, guard, fresh);
+  // A RUNTIME label per traverser, its validity guarded before the insert — a check after it has nothing
+  // left to refuse.
+  const names = resolveCreationLabels(label, incoming, elem, aliases, child, bind, guard, fresh);
+  if (!names) return null;
   // EVERY `property()` after an `addE` is one of its PARAMETERS (`GraphTraversal.property` folds into an
   // `AddEdgeStepContract` unconditionally, `dsl/graph/GraphTraversal.java:4034`), so a traversal value is
   // resolved against the INCOMING traverser — and its refusals, like the label's, before the insert.
   const folded = foldedParameters(writes, 'edge', incoming, elem, aliases, child, bind, guard, fresh);
   if (!folded) return null;
-  const labelRow = internLabels(label.names, bind, fresh)!;
+  const labelRow = internLabels(names, bind, fresh)!;
 
   // ORDERED BY THE INPUT'S OWN POSITION, for `addVertex`'s reason: rowids are assigned in the source's
   // output order, so this is what makes the k-th created edge the k-th input row — which is what the
@@ -3674,10 +3765,13 @@ export function elementAddE(
   const inOrder = incoming.type.cols.some((column) => column.name === ORD)
     ? make.sort({ id: fresh('so'), input: incoming, channels: incoming.channels, type: incoming.type, terms: [{ expr: col(incoming.id, ORD), dir: 'asc' }] })
     : incoming;
-  const paired = make.join({
-    id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
-    type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
-  });
+  // One label for every edge, or each traverser's own (`labelledByPosition`).
+  const paired = isConstantLabels(names)
+    ? make.join({
+      id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
+      type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
+    })
+    : labelledByPosition(inOrder, names, labelRow, fresh);
   // A CALLER-SUPPLIED PUBLIC ID lands in one of two columns and the choice is the value's own type,
   // exactly as `addVertex` spells it for `nodes`: a NUMBER is the rowid, a STRING is the `uid`. Absent,
   // the row names neither and takes whatever rowid SQLite assigns.
@@ -4140,8 +4234,8 @@ function mergeVComputed(
   const inOrder = make.sort({ id: fresh('so'), input: wanted, channels: wanted.channels, type: wanted.type, terms: [{ expr: col(wanted.id, 'word'), dir: 'asc' }] });
   const rowPer = make.project({ id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)), exprs: [['uid', compilerNull('text')]] });
   const created = bind(insert({ target: nodesTarget, cols: ['uid'], source: rowPer, channels: [], type: ID_TYPE, returning: [['id', col(nodesTarget.id, 'id')]] }));
-  const createLabels = creationLabels(labels, child, fresh);
-  if (!createLabels || createLabels.runtime?.length) return null;
+  const createLabels = creationLabels(labels, child);
+  if (!createLabels || createLabels.kind !== 'const') return null;
   const labelRow = internLabels(createLabels.names, bind, fresh);
   if (labelRow) {
     const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
@@ -4221,8 +4315,8 @@ export function mergeVFromMap(
   if (!matchWrites || !createExtra || !tailWrites) return null;
   // A RUNTIME arm value roots at the map driver (no element id) — deferred, so constant arms only here.
   if (matchWrites.some((write) => write.kind === 'runtime') || createExtra.some((write) => write.kind === 'runtime')) return null;
-  const createLabels = creationLabels(((onCreate?.label as string[] | null) ?? []), child, fresh);
-  if (!createLabels || createLabels.runtime?.length) return null;
+  const createLabels = creationLabels(((onCreate?.label as string[] | null) ?? []), child);
+  if (!createLabels || createLabels.kind !== 'const') return null;
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
@@ -4778,8 +4872,8 @@ export function elementMergeV(
   } : match, 'vertex', child);
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
-  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], child, fresh);
-  if (!createLabels) return null;
+  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], child);
+  if (!createLabels || createLabels.kind !== 'const') return null;
 
   const searched = matching(searchId, (match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);
   if (!searched) return null;

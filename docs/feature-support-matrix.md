@@ -4,7 +4,7 @@ A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only wh
 note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
 Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
-**L3 conformance: <!-- L3:passing -->1,878<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,881<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -192,7 +192,7 @@ stream frames each value by its own tag.
 
 | Step | | Notes |
 |---|:--:|---|
-| `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | ❌ a traversal-computed label (`addV(__.values('name'))`); `addE` after `addE` |
+| `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | a traversal-computed label resolves per traverser (`addV(__.values('name'))`, `addV(t1, t2)`). ❌ a single label body framed as a list; `addE` after `addE` |
 | `property(k, v)`, `property(Cardinality, k, v)`, `property(k, __.trav)` | ✅ | ❌ a traversal value that is null, needs an unordered "first" pick, or could read another traverser's write |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | |
 | `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅. ❌ a map fed by `unfold`/`union`; a meta-property under an undeclared cardinality |
@@ -306,7 +306,7 @@ wrong number class.
 | A null `by()` value | null is absent: `project()` omits the key, `select`/`order`/`dedup`/`where` drop the row; `coalesce` is SQL `COALESCE` |
 | Number spelling | `asString()`/`format()`/`conjoin()` use SQLite's text: 15 significant digits, a whole Double keeps `.0`, exponent below 1e-4 or from 1e15 (`1e-5` is `1.0e-05`), infinity `Inf`; a Float prints its written decimal (`0.1f` is `0.1`) |
 | `format()` over a multi-valued property | uses the first value (Java throws) |
-| A non-String text receiver | the error names the value (`encountered 1.`), not its Java class |
+| A non-String text receiver | the error names the value (`encountered 1.`), not its Java class — a non-String computed label too (`Label traversal must produce a String, but got 29`) |
 | Untyped JSON map keys | one total spelling rule; colliding keys render as `[key, value]` entries so nothing is lost; NaN/Infinity as name strings |
 | Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`; an edge endpoint is its bare id |
 | Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |
