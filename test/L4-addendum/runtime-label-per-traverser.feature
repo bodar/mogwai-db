@@ -110,3 +110,26 @@ Feature: mogwai addendum — a computed label resolves PER TRAVERSER
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "Label can not be empty"
+
+  @gap:runtime-label
+  Scenario: g_V_hasXname_vadasX_addLabelXvaluesXnameXX_labels
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name", "vadas").addLabel(__.values("name")).labels()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | person |
+      | vadas |
+
+  @gap:runtime-label
+  Scenario: g_V_hasXname_markoX_addLabelXvaluesXageXX_error
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name", "marko").addLabel(__.values("age"))
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "Traversal argument must produce a String or Collection<String>"

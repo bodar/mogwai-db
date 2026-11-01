@@ -89,3 +89,39 @@ describe('a computed creation label, per traverser', () => {
     }
   });
 });
+
+// `addLabel(<traversal>…)` — the same resolver over the snapshot the step mutates, under
+// `TraversalUtil.resolveStringArguments`' sentences
+// (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:211-236`).
+describe('a computed addLabel(), per traverser', () => {
+  test('each vertex gets its own traverser\'s label', () => {
+    const store = seededStore();
+    run(store, "g.V().hasLabel('person').addLabel(__.values('name'), __.constant('x')).iterate()");
+    for (const name of ['marko', 'vadas', 'josh', 'peter'])
+      expect(bagOf(values(run(store, `g.V().has('name','${name}').labels()`)) as string[]), name).toEqual(bagOf([name, 'person', 'x']));
+    expect(labelsOf("g.V(1).addLabel(__.values('name')).labels()")).toEqual(['marko', 'person']);
+    // after as()/select(): lop is reached by three traversers and carries each one's name
+    const aliased = seededStore();
+    run(aliased, "g.V().as('a').out('created').addLabel(__.select('a').values('name')).iterate()");
+    expect(bagOf(values(run(aliased, "g.V().has('name','lop').labels()")) as string[])).toEqual(['josh', 'marko', 'peter', 'software']);
+    // a re-sourcing body over several traversers is not a refusal
+    expect(labelsOf("g.V().hasLabel('software').addLabel(__.V(1).values('name')).labels()")).toEqual(['marko', 'marko', 'software', 'software']);
+  });
+
+  test('the reference refusals', () => {
+    for (const [q, message] of [
+      ["g.V(1).addLabel(__.values('age'))", 'Traversal argument must produce a String or Collection<String>, but got: 29'],
+      ["g.V(1).addLabel(__.values('nope'))", 'The provided traverser does not map to a value'],
+      ["g.V(1).addLabel(__.constant(null).fold().unfold())", 'Traversal argument must not produce null'],
+    ] as const) {
+      const store = seededStore();
+      expect(() => run(store, q), q).toThrow(RaisedByQuery);
+      expect(() => run(store, q), q).toThrow(message);
+      expect(values(run(store, 'g.V(1).labels()')), q).toEqual(['person']);
+    }
+    for (const [q, message] of [
+      ["g.V(1).addLabel('')", 'Label can not be empty'],
+      ["g.V(1).addLabel(__.values('name').fold(), __.constant('x'))", 'must produce a scalar String when multiple traversals are provided'],
+    ] as const) expect(() => compile(q, {}), q).toThrow(message);
+  });
+});

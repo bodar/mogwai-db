@@ -4,7 +4,7 @@ A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only wh
 note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
 Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
-**L3 conformance: <!-- L3:passing -->1,881<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,882<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -194,7 +194,7 @@ stream frames each value by its own tag.
 |---|:--:|---|
 | `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | a traversal-computed label resolves per traverser (`addV(__.values('name'))`, `addV(t1, t2)`). ❌ a single label body framed as a list; `addE` after `addE` |
 | `property(k, v)`, `property(Cardinality, k, v)`, `property(k, __.trav)` | ✅ | ❌ a traversal value that is null, needs an unordered "first" pick, or could read another traverser's write |
-| `addLabel`, `dropLabel`, `dropLabels` | ✅ | |
+| `addLabel`, `dropLabel`, `dropLabels` | ✅ | `addLabel(<traversal>)` resolves per traverser. ❌ a single `addLabel` body framed as a list; a computed `dropLabel` name |
 | `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅. ❌ a map fed by `unfold`/`union`; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |
 

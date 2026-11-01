@@ -1699,6 +1699,15 @@ const LABEL_NAME: NameRules = {
 const LABEL_COLLECTION_NULL = 'Label traversal must not produce null';
 const LABEL_COLLECTION_NESTED = 'Label traversal must produce a scalar String when multiple traversals are provided, but got a Collection';
 const LABEL_MEMBER_NAME: NameRules = { ...LABEL_NAME, nullMessage: LABEL_COLLECTION_NULL, collection: LABEL_COLLECTION_NESTED };
+/** `addLabel(<traversal>…)` — `TraversalUtil.resolveStringArguments`' sentences
+ *  (`process/traversal/util/TraversalUtil.java:211-236`), then `validateLabel`'s (`AddLabelStep.java:86-95`). */
+const ADD_LABEL_NAME: NameRules = {
+  column: 'name', nullMessage: 'Traversal argument must not produce null',
+  notString: 'Traversal argument must produce a String or Collection<String>, but got: ', notStringNames: true,
+  empty: 'Label can not be empty', hidden: 'Label can not be a hidden key: ', first: 'rank',
+};
+const ADD_LABEL_NESTED = 'Traversal argument must produce a scalar String when multiple traversals are provided, but got a Collection';
+const ADD_LABEL_MEMBER_NAME: NameRules = { ...ADD_LABEL_NAME, collection: ADD_LABEL_NESTED };
 
 /**
  * A RUNTIME NAME — `property(__.values('name'), v)`'s key, `addV(__.values('name'))`'s label — as
@@ -2334,57 +2343,124 @@ function mutationLabelNames(
  * passes the SAME vertices through. It is `internLabels`' creation pairing applied to rows that
  * already exist rather than freshly-inserted ones, plus `elementProperty`'s snapshot-then-pass-through.
  *
- * The REFUSALS decline (return `null`) rather than throw: `lowerToRel` must never throw (the
- * `rel-sweep` decline-contract gate), so a form it cannot cover surfaces as `UnsupportedTraversal`
- * rather than being mis-executed. Declined:
+ * A name is a constant, or a body resolved PER TRAVERSER over the snapshot it mutates (`ownerSite`) by
+ * the one runtime-name resolver, under `TraversalUtil.resolveStringArguments`' own sentences
+ * (`process/traversal/util/TraversalUtil.java:211-236`) and then `ElementHelper.validateLabel`
+ * (`step/sideEffect/AddLabelStep.java:86-95`). No `sequentialGuard`, for `resolveCreationLabels`' reason:
+ * every label resolves against the pre-write snapshot (matrix §17 "Write visibility").
  *
- * - an EDGE (edge label cardinality is fixed at ONE by spec — `AddLabel.feature` `g_E_addLabelXfriendX`);
- * - an immutable graph (`labelCardinality.mutable === false` — `g_V_addLabelXemployeeX_single_label_graph`);
- * - a collection argument mixed with others (TinkerPop rejects it), or a nested traversal that is not
- *   a compile-time `constant(...)` (a per-row label value).
+ * Declined (`null`): an EDGE (edge label cardinality is fixed at ONE by spec — `AddLabel.feature`
+ * `g_E_addLabelXfriendX`), and a single body FRAMED as a list (`Collection<String>`), a depth gap.
  *
  * `addLabel` needs no post-mutation count guard: every MUTABLE cardinality has `max = Infinity`, so a
- * label added to a vertex can never overstep it. (`dropLabels`, which can fall BELOW `min`, is the case
- * that would — a guard binding, and not this step.) The `vertex_labels` PRIMARY KEY (node, label) makes
+ * label added to a vertex can never overstep it. The `vertex_labels` PRIMARY KEY (node, label) makes
  * a repeated `addLabel(x)` a no-op via `ON CONFLICT DO NOTHING`.
  */
 export function elementAddLabel(
-  input: Rel, elem: Elem, step: IRStep,
-  sideEffects: Map<string, any> | undefined, params: Record<string, any>, fresh: Minter,
+  input: Rel, elem: Elem, step: IRStep, child: ChildSeam, aliases: AliasMap, fresh: Minter,
 ): Effects | null {
   if (elem === 'edge') return null;
 
-  const names = mutationLabelNames(step, sideEffects, params);
-  if (!names?.length) return null;
-  // `addLabel` VALIDATES and `dropLabel` does not, which is the reference's own asymmetry rather than
-  // an oversight here: a name being added becomes a stored label and goes through `ElementHelper`,
-  // while a name being removed is only ever COMPARED against the ones already stored — an invalid one
-  // simply matches nothing, which is the same no-op `dropLabel("xyz")` already is.
-  try { for (const name of names) validateLabel(name); } catch { return null; }
+  const names = mutationLabelNames(step, child.sideEffects, child.params);
+  if (names) {
+    if (!names.length) return null;
+    // `addLabel` VALIDATES and `dropLabel` does not, which is the reference's own asymmetry rather than
+    // an oversight here: a name being added becomes a stored label and goes through `ElementHelper`,
+    // while a name being removed is only ever COMPARED against the ones already stored — an invalid one
+    // simply matches nothing, which is the same no-op `dropLabel("xyz")` already is. An invalid name
+    // is the reference's ERROR (`AddLabelStep`'s constructor validates it), so it raises.
+    for (const name of names) validateLabel(name);
+    const scope = labelMutationScope(input, fresh);
+    if (!scope) return null;
+    bindLabels({ owners: scope.ownerIds(), names }, scope.bind, fresh);
+    return scope.passThrough();
+  }
 
+  const members = mutationLabelMembers(step, child);
+  if (!members) return null;
   const scope = labelMutationScope(input, fresh);
   if (!scope) return null;
-
-  bindLabels(scope.ownerIds(), names, scope.bind, fresh);
+  const { site, targets } = ownerSite(scope.owners, 'vertex', aliases, fresh);
+  const resolved = resolvedNames(members, site, child, scope.guard, fresh, members.length > 1 ? ADD_LABEL_MEMBER_NAME : ADD_LABEL_NAME);
+  if (!resolved) return null;
+  // TAKEN before the insert, as a creation's are (`resolveCreationLabels`).
+  const taken = scope.bind(resolved, true);
+  const owned = make.join({
+    id: fresh('j'), left: targets, right: taken, join: 'inner', channels: [],
+    type: typeOf(meta('o', 'int'), meta('owner', 'int'), meta('no', 'int'), meta('name', 'text')),
+    on: eq(col(targets.id, 'o'), col(taken.id, 'o')),
+  });
+  bindLabels(make.project({
+    id: fresh('p'), input: owned, channels: [], type: typeOf(meta('owner', 'int'), meta('name', 'text')),
+    exprs: [['owner', col(owned.id, 'owner')], ['name', col(owned.id, 'name')]],
+  }), scope.bind, fresh);
   return scope.passThrough();
 }
 
 /**
- * BIND A SET OF LABELS TO A SET OF VERTICES, idempotently — the statement `addLabel` IS, factored out
- * because a merge's `onMatch` arm needs exactly it and nothing else of that step.
- *
- * A CROSS JOIN pairs every owner with every label — `addVertex`'s pairing, but the left side is
- * EXISTING ids. Both sides project to a single `id` column so the join's positional output is exactly
- * `(node, label)`. `vertex_labels` is `PRIMARY KEY (node, label)`, so a label already carried is a
- * no-op through `ON CONFLICT DO NOTHING` rather than through a check this had to write.
+ * `addLabel`'s arguments as label MEMBERS when at least one is a body only the run can resolve — or
+ * `null` for a body the seam cannot normalize. A constant member is held to `resolveStringArguments`'
+ * rules NOW, raising its sentence: a list beside other arguments, a null, a non-String.
  */
-function bindLabels(ownerIds: Rel, names: readonly string[], bind: Binder, fresh: Minter): void {
-  const labelRow = internLabels(names.map(text), bind, fresh)!; // `names` is non-empty, so never the null arm
+function mutationLabelMembers(step: IRStep, child: ChildSeam): readonly (string | readonly IRStep[])[] | null {
+  const args = step.args.map((a) => a.value);
+  const members: (string | readonly IRStep[])[] = [];
+  for (const value of args) {
+    const folded = isNested(value) ? constFromNested(value, child.sideEffects, child.params) : { has: true as const, value };
+    if (!folded.has) {
+      const body = child.body((value as { readonly nested: unknown }).nested, 'child');
+      if (!body?.length) return null;
+      members.push(body);
+      continue;
+    }
+    const constant = folded.value;
+    if (Array.isArray(constant)) {
+      if (args.length > 1) throw new ValueParseError(ADD_LABEL_NESTED);
+      for (const name of constant) members.push(addLabelConstant(name));
+    } else members.push(addLabelConstant(constant));
+  }
+  return members;
+}
+
+const addLabelConstant = (value: unknown): string => {
+  if (value === null || value === undefined) throw new ValueParseError(ADD_LABEL_NAME.nullMessage);
+  if (typeof value !== 'string') throw new ValueParseError(`${ADD_LABEL_NAME.notString}${String(value)}`);
+  return validateLabel(value);
+};
+
+/**
+ * BIND LABELS TO VERTICES, idempotently — the statement `addLabel` IS, factored out because a merge's
+ * `onMatch` arm needs exactly it and nothing else of that step.
+ *
+ * Two forms of one statement. A constant name list CROSS-JOINS every owner — `addVertex`'s pairing, but
+ * the left side is EXISTING ids; both sides project to a single `id` column so the join's positional
+ * output is exactly `(node, label)`. A per-traverser ASSIGNMENT is an `(owner, name)` relation, each name
+ * joined to its interned id. `vertex_labels` is `PRIMARY KEY (node, label)`, so a label already carried
+ * is a no-op through `ON CONFLICT DO NOTHING` rather than through a check this had to write.
+ */
+function bindLabels(labels: { readonly owners: Rel; readonly names: readonly string[] } | Rel, bind: Binder, fresh: Minter): void {
+  const constant = 'owners' in labels ? labels : null;
+  const assigned = constant ? null : labels as Rel;
+  // A constant `names` is non-empty, so never the null arm.
+  const labelRow = internLabels(constant ? constant.names.map(text) : assigned!, bind, fresh)!;
   const target = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-  const pairs = make.join({
-    id: fresh('j'), left: ownerIds, right: labelRow, join: 'cross', channels: [],
-    type: typeOf(meta('node', 'int'), meta('label', 'int')),
-  });
+  let pairs: Rel;
+  if (constant) {
+    pairs = make.join({
+      id: fresh('j'), left: constant.owners, right: labelRow, join: 'cross', channels: [],
+      type: typeOf(meta('node', 'int'), meta('label', 'int')),
+    });
+  } else {
+    const named = make.join({
+      id: fresh('j'), left: assigned!, right: labelRow, join: 'inner', channels: [],
+      type: typeOf(meta('owner', 'int'), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')),
+      on: eq(col(assigned!.id, 'name'), col(labelRow.id, 'name')),
+    });
+    pairs = make.project({
+      id: fresh('p'), input: named, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')),
+      exprs: [['node', col(named.id, 'owner')], ['label', col(named.id, 'lid')]],
+    });
+  }
   bind(insert({
     target, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
     onConflict: { target: ['node', 'label'], set: [] },
@@ -2407,6 +2483,8 @@ function bindLabels(ownerIds: Rel, names: readonly string[], bind: Binder, fresh
  */
 function labelMutationScope(input: Rel, fresh: Minter): {
   readonly bind: Binder; readonly guard: Guarder;
+  /** The snapshot itself — the site a per-traverser body runs over (`ownerSite`). */
+  readonly owners: Rel;
   /** The snapshot as a bare `(id)` relation — what a statement addresses its rows by. */
   readonly ownerIds: () => Rel;
   readonly passThrough: () => Effects;
@@ -2420,7 +2498,7 @@ function labelMutationScope(input: Rel, fresh: Minter): {
   // scope is vertex-only (`addLabel`/`dropLabel` decline edges above), so the element kind is fixed.
   bind(markDirty('vertex', make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] }), fresh));
   return {
-    bind, guard,
+    bind, guard, owners,
     ownerIds: () => make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] }),
     passThrough: () => {
       // Back to an ELEMENT relation, element-PRESERVING exactly as `elementProperty` is: the snapshot
@@ -3198,9 +3276,17 @@ function resolveCreationLabels(
   const bodies = labels.members.filter((member): member is readonly IRStep[] => typeof member !== 'string');
   const site = parameterSite(incoming, incomingElem, aliases, bodies, fresh);
   if (!site) return null;
-  const rules = labels.members.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME;
+  const names = resolvedNames(labels.members, site, child, guard, fresh, labels.members.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME);
+  return names && bind(names, true);
+}
+
+/** Label MEMBERS — constant names and per-traverser bodies — as one `(o, name)` relation over `site`,
+ *  UNIONED as a set (`resolveLabelCollection`'s `LinkedHashSet`, `resolveStringArguments`' too). */
+function resolvedNames(
+  members: readonly (string | readonly IRStep[])[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter, rules: NameRules,
+): Rel | null {
   const parts: Rel[] = [];
-  for (const member of labels.members) {
+  for (const member of members) {
     const part = typeof member !== 'string' ? runtimeNameRows(member, site, child, guard, fresh, rules) : make.project({
       id: fresh('ln'), input: site.host, channels: [], type: typeOf(meta('o', 'int'), meta('name', 'text')),
       exprs: [['o', col(site.host.id, site.origin)], ['name', text(member)]],
@@ -3208,8 +3294,7 @@ function resolveCreationLabels(
     if (!part) return null;
     parts.push(part);
   }
-  const names = parts.length === 1 ? parts[0]! : make.union({ id: fresh('u'), inputs: parts, all: false, channels: [], type: parts[0]!.type });
-  return bind(names, true);
+  return parts.length === 1 ? parts[0]! : make.union({ id: fresh('u'), inputs: parts, all: false, channels: [], type: parts[0]!.type });
 }
 
 /**
@@ -4046,7 +4131,7 @@ function applyMergeOnMatch(
   runtimeWrite: (write: PropertyRuntimeSet) => boolean,
   bind: Binder, guard: Guarder, fresh: Minter, child: ChildSeam,
 ): boolean {
-  if (appended.length) bindLabels(matchedIds, appended, bind, fresh);
+  if (appended.length) bindLabels({ owners: matchedIds, names: appended }, bind, fresh);
   for (const write of matchWrites) {
     const ok = write.kind === 'runtime' ? runtimeWrite(write)
       : propertyStatements('vertex', matchedIds, write, bind, fresh, child, NO_ALIASES, guard);

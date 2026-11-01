@@ -4870,7 +4870,7 @@ function elementTail(
       // ordinary fold after it. Both lowerings decline the refusal cases (edge/immutable/mixed
       // collection), which are errors rather than writes this route may make.
       const mutated = step.name === 'addLabel'
-        ? elementAddLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh)
+        ? elementAddLabel(rel, elem, step, childSeam(ctx, fresh), labels, fresh)
         : elementDropLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh);
       if (!mutated) return null;
       return afterWrite(ctx.writes, rel, steps, at, at + 1, mutated.bindings, ctx.params, fresh,
