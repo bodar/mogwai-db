@@ -98,15 +98,20 @@ describe('a Gremlin string literal decodes with unescapeJava (GenericLiteralVisi
     expect(one("g.inject('\\u0041'c)")).toBe('A');
   });
 
-  test('a decoded NUL or lone surrogate declines at every position that inlines it', () => {
-    for (const gremlin of [
+  // One case per position: each gets its own timeout budget and a failure names the query. Every case
+  // declines at COMPILE time, so nothing executes and one seeded store serves them all — seeding (~80 ms)
+  // dominates a case (compile <=15 ms), and 13 seeds in one 5 s budget timed out under the parallel fan-out.
+  let declineStore: ReturnType<typeof seededStore> | undefined;
+  test.each([
       "g.inject('a\\u0000b').length()", "g.inject('\\0')", "g.inject('\\ud83d')",
       "g.V().has('name', containing('ma\\u0000rko')).count()", "g.V().has('name','ma\\u0000rko').count()",
       "g.V().has('name', within('\\u0000','marko')).count()", "g.V().union(constant('\\u0000')).count()",
       "g.V().choose(has('name','a\\0'), constant(1), constant(2))", "g.V().where(values('name').is(neq('\\0')))",
       "g.V().project('a').by(constant('\\0'))", "g.V().group().by(constant('\\udc00'))", "g.V().values('\\0')",
       "g.addV('p').property('name','x\\ud83dy')",
-    ]) expect(() => run(seededStore(), gremlin)).toThrow(UnsupportedTraversal);
+  ])('a decoded NUL or lone surrogate declines at every position that inlines it: %s', (gremlin) => {
+    declineStore ??= seededStore();
+    expect(() => run(declineStore!, gremlin)).toThrow(UnsupportedTraversal);
   });
 });
 
