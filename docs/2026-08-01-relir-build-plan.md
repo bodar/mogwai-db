@@ -746,6 +746,218 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
   distinguishable no other way, and a body that cannot report it DECLINES.
 
 
+### Next round (from the 2026-11-02 fourth round — read before picking items)
+
+Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed" locally:
+- `39085c4d`: R11 (`seedOuterAliases`). `1254d29e`: S7 (`choicePresence`/`scalarChoice`).
+- `4a34b58a..4a0530df`: M3 (a null `property()` traversal value removes the key; `sample()` draws per origin).
+- `19115f5e..a33d7983`: S6 (map-first `select('k')`, `mapFirstFallback`).
+- `3c7ba931..4c565396`: R10 + F7 (tuple-collapsed merge guard, `seekedSearch`).
+
+Nothing was deferred whole. Branches left on purpose: `wf/s6-map-first-select-scoping-3-{0,2,3,4}` and
+`wf/r10-merge-super-linear-3-{0,2}` show `git cherry` `+` only because `ae57c06b`/`a75db6e4` landed as `19115f5e`/
+`3c7ba931` with a conflict resolution (imports in `reduction.ts`; both-sides-added in `write.ts`). Their content is on
+trunk; they hold no resume point.
+
+**0. 🔴 TRUNK CI IS RED — fix FIRST.** GitHub CI failed on `4a0530df` (M3) and `a33d7983` (S6), test + L8 brackets:
+`test/compiler/writes.exec.test.ts` "a nullable body that draws is evaluated once" times out at bun's 5,000 ms (6.0 s
+on the runner). It builds `seededStore()` 40 times in one test; green locally, too slow on CI. Not a wrong answer.
+Fix the test, not the timeout: fewer iterations (the property it pins — one draw shared by every statement — fails on
+most single runs), or one store reset per iteration, or a per-test timeout with a comment saying why. `4c565396`'s run
+was still in progress when this was written; expect the same failure.
+
+**Parked residuals (each with its prerequisite, ordered before what it unblocks):**
+- **S6's multi-driver `inject(maps).mergeV().option(Merge.onCreate, __.select('k'))`** — prerequisite R10/F7 is now
+  LANDED, so this is a one-line lift at the "NARROWED to ONE driver" comment in `mergedFromMap`
+  (`src/compiler/rel/write.ts`), plus a scaling witness at 1k/8k drivers. Take it in the same commit as S9 below only
+  if S9 touches `mergedFromMap`; otherwise standalone.
+- **S6's entry-or-side-effect value per row** (select/format over a valueMap or a list/map value side, `format` over
+  an optional record field, `select` of an optional `project()` field) — prerequisite is S9.
+
+**Shared root causes (one substrate item each, ordered BEFORE what they unblock):**
+- **S9. ONE Scoping reader per row: own Map entry → side-effect constant → named collection → path label**
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+  for EVERY host kind (scalar that may be a Map, map, record) and every consumer (select, format, math, keyed dedup,
+  the child seam), LANDED ONCE as a fenced column (as `scalarMapKey` does with `SCOPE_NODE` + `presenceFenced`,
+  `src/compiler/rel/map.ts`). S6 built the order (`mapFirstFallback`) but four hand copies of the expression
+  (`scopedKey`/`mapKeyOr` in map.ts, `mapHostChild` and `scalarMapFirstChild` in `rel/lower/reduction.ts`, mapTail's
+  keyed-dedup `mapScope` in lower.ts, `mathValue` in projector.ts) each cover a different subset. Review found, all
+  from this one cause (major first):
+  1. WRONG, pre-existing — `g.withSideEffect('k',5).V().values('m').math('k + 1')` over m=[k:1],[j:2],[j:3] gives
+     [6,6,6], reference [2,6,6] (`MathStep.java:73` → `getNullableScopeValue`): `sideEffectBehindOwnScope` handles only
+     record/map hosts; the scalar host goes straight to `sideEffectConst` (`src/compiler/rel/projector.ts`).
+  2. WRONG, pre-existing — `g.V().as('k').values('m').select('k')` gives [v1,v2,v3], reference [1,v2,v3] (also
+     `map(select('k'))`, `project('x').by(select('k'))`): `mapFirstFallback` returns 'label' and the readers pass
+     straight to the alias. Contradicts §17 "Map scope".
+  3. WRONG, pre-existing — record host in a by(): `g.withSideEffect('x',7).V().project('x').by(values('age')).math('_ + 1').by(select('x'))`
+     gives [30,28,33,36], reference [30,28,8,33,8,36]. The chain and map hosts were fixed; the record child seam
+     still goes through the generic select re-root.
+  4. WRONG, pre-existing — a MAP stream's `selectKeys` drops instead of falling to the side effect:
+     `g.withSideEffect('c','se').inject([a:1],[b:2]).select('c')` gives [] (reference ['se','se']);
+     `withSideEffect('a','se')…select('a')` gives [1] (reference [1,'se']).
+  5. LOST ROWS recorded as a §17 line — "Map scope" accepts dropping rows where Java falls through to a named
+     collection (`g.V().aggregate('age').by('name').elementMap('age').select('age')`, `…groupCount('x')…cap('x').select('x')`
+     → []). Move it out of §17: a clean decline now (the reader returns 'collection' → decline when the Map may lack
+     the key), the answer with S9. Keep L3's `g_VX1X_groupXaX_byXconstantXaXX_byXnameX_selectXaX_selectXaX` green.
+  6. REGRESSIONS (answer → decline, no corpus coverage): six forms of
+     `g.withSideEffect('k',['x':1]).V().values('name').select('k')` followed by `.unfold()`, `.select(keys)`,
+     `.count(local)`, `.select('x','y')`, `.format('%{x}')`, `.mergeV()` — `selectMapFirst` now runs before
+     `selectSideEffectConstant` in `collectionArm` and loses the constant's map framing; and
+     `g.withSideEffect('a',5).V().project('a','b').by('name').by('age').select('a')`. Let the map-framed side-effect arm
+     own a map constant.
+  7. REGRESSION — `injectMap` records `keys` on its framing, and projector.ts ~267 / `mapHostChild` treat a key
+     outside the set as a DECLINE, contradicting `framing.ts:80` ("advisory ONLY — narrows a decline, never widens"):
+     `g.inject(['name':'x']).format('%{k}')` was `[]`, now declines; `inject([a:1],[b:2]).dedup('z')` likewise.
+     Treat an outside key as absent.
+  8. HYGIENE — the child seam re-inlines the correlated `json_each` map read per reader (`selectedNodeChild`: `v`,
+     `t`, and the `held` gate): 3× per row for `V().values('m').map(__.select('k'))`, 5× for `…math('_+1')`. Linear,
+     but breaks "computed once"; sql-hygiene misses it because the shapes are L4-only — extend it.
+  9. Minor: a null Map entry — chain keeps it (`SelectOneStep.java:62`), `map`/`local`/`flatMap`/`choose` drop it
+     (`selectedNodeChild`'s `present: 'value-nullness'`); base presence on the node's nullness. And
+     `inject([a:1],[b:2]).as('b').select('b')` → [2] where the reference gives [{a:1},2] (newly reachable instance of
+     §17 "Map scope" from the key-set union) — note it in the L4 file.
+  S9 absorbs reuse proposal 1 below. Add L4 scenarios for every witness above.
+- **S10. The merge search seeks the CONJUNCTION, not the first key** (`seekedSearch`/`computedMatch`/`propertySeeks`/
+  `mapEntrySeeks`/`endpointSeek`/`searchKeying`, `src/compiler/rel/write.ts`). R10/F7 is linear only for a selective
+  first key, one map shape and no hub; four shapes stay super-linear (all equally quadratic on the parent, so none is a
+  regression, but "performance is semantics at production size"):
+  1. Low-selectivity FIRST key — the common upsert `mergeV([tenant:'acme', email:x])`:
+     `g.V().mergeV(__.project('kind','name').by(constant('person')).by('name')).count()` 1,054 → 62,807 ms (1k → 8k,
+     60×); map form `inject([kind:'p',name:…]…).mergeV()` 64×. Reversing the keys gives 34 → 71 ms. Intersect one seek
+     per key (or pick by `sqlite_stat1` after ANALYZE).
+  2. TEXT arm (`value >= ''`) reads every TEXT value of the key per NUMERIC driver: `…mergeV(__.project('name').by(values('age')))`
+     683 → 44,587 ms (65×). Cheap, concrete fix: the arm exists only for the decimal-TEXT tail `storedScalar` writes
+     (`src/gremlin/types.ts` ~354), which starts with `-` or a digit, so bound it to `value >= '-' AND value < ':'`.
+     Take this first — it needs no new index or bind.
+  3. Map MASK fan-out is data-sized: `searchKeying` crosses every earlier tuple with every DISTINCT key set, so
+     `inject([k0:1],[k1:1],…).mergeV()` is 61× (1k → 8k). Key the guard on the later map's first searched entry, as
+     `mapEntrySeeks` already does for the search.
+  4. Hub edges: `endpointSeek` seeks `e_out` by `src` alone; re-upserting N edges from one hub is 30.6× (1k → 8k). Seek
+     (src, label-id, tgt) when the map names OUT, label and IN.
+  5. Hygiene: the guard's Aggregate groups by the keying columns AND projects them, so the correlated `g_ks`/`g_sig`
+     subqueries (and `g_ck`) are spelled twice per driver row (SQLite never equates two subqueries) — project the
+     keying columns under the Aggregate and group by the projected columns.
+  Pin each shape in `test/compiler/merge-scale.exec.test.ts` (as a tracked gap if not fixed); the current seven
+  witnesses cannot see any of them. Longer term, `semijoin.ts`'s OwnerSeek pass is the generic home for these seeks
+  (a correlated-join OwnerSeek) — note in outstanding-work.
+- **S11. A body-may-yield-NULL fact on the rows path.** `resolveValueRows` sets `nullFree` only on the scalar branch,
+  so every `child.rows` body (`__.values(k)`, `__.id()`, `__.out().values(k)`, `union(constant…)`, `math`) pays M3's
+  removal machinery with no user-visible reason: a snapshot, two windows (`lo`/`ls`), an extra `unheld` term and two
+  DELETEs — +13–75% (`property(list,'x', union(constant(1),constant(2)))` 116 → 203 ms at 8k; still linear). A stored
+  value is never NULL, `id()`/`constant(non-null)`/`math()` never yield one, and the framing already has
+  `productiveNull` (`src/compiler/rel/framing.ts:56`). Take `nullable` from it; fold `lo`/`ls` into one window on
+  `(o, sq)`. Expect the non-null plans to return byte-identical to pre-M3.
+
+**Follow-ups from review (major first).**
+1. **R11 regression (major) — a VALUE-traverser `where(P.eq(label))` inside a multi-correlation leg now declines;
+   trunk answered it correctly.** Deleting `legRight` deleted its `aliasValueAt` arm, and `aliasWhere`
+   (`src/compiler/rel/lower.ts`) has no scalar-position arm. Witnesses (were 6, 6, 0; now decline):
+   `g.V().as('b').values('name').as('n').select('b').out().as('a').where(__.select('a').in().values('name').where(P.eq('n'))).count()`,
+   the `values('age')…math('_ + 0')` form, `g.V().as('b').out().as('a').where(__.select('a').in().values('name').where(P.eq('b'))).count()`.
+   Give `aliasWhere` the arm (`aliasValueAt(label,'last')` = current value) — it also answers the top-level form
+   `g.V().as('a').values('name').as('n').select('a').out().as('b').in().values('name').where(P.eq('n'))`, which
+   declines today. Pin in `test/compiler/where-leg-alias-scope.exec.test.ts`.
+2. **Lost write (major, pre-existing) — `onCreateOverrideGuards` skips `write.kind === 'remove'`**
+   (`src/compiler/rel/write.ts`): `g.inject([name:'x',age:1]).mergeV().option(Merge.onCreate,[age:null]).valueMap()`
+   creates the vertex WITHOUT age; the reference raises `option(onCreate) cannot override values from merge()
+   argument: (age, null)` (`MergeElementStep.java:325-334`, `Objects.equals(null, 1)` is false). Compare removes too.
+3. **Wrong element written, recorded as §17 (major, pre-existing)** — S6's §17 line "Map-valued property stream …
+   `values('m').mergeV(__.select(k))` merges by the side effect" accepts a write to the wrong element
+   (`Scoping.java:121-122` merges by the Map's `[name:'zz']`). Remove the line; decline the scalar-stream mergeV fold
+   when the select key is a side-effect constant and the stream may be a Map, or (with S9) feed `scalarMapKey`'s
+   per-row node to `mergeVFromMap`. Also say in the matrix that the onCreate no-override check is skipped on a map
+   driver only where it is (add `inject(map).mergeV().option(onCreate, __.select(k))` with an overlapping side effect).
+4. **WRONG, pre-existing (M3 depth) — `project()` drops a productive-null by() entry**, so
+   `g.V(1).property(__.project('age','y').by(__.coalesce(__.values('nope'), __.V().constant(null).limit(1))).by(__.constant(2)))`
+   keeps age=29 (reference removes it, `ProjectStep` puts the null, `AddPropertyStep.java:152-160`); the bare read
+   returns `{y:2}` for `{age:null,y:2}`. Fix in the project framing; narrow the `mapFormStatements` comment meanwhile.
+5. **WRONG, pre-existing (R11 depth, `legSingle`)** —
+   `g.V().as('b').out().as('a').in().as('c').where(__.select('a').in().as('c').select(Pop.all,'c').count(Scope.local).is(2)).count()`
+   gives 0, reference 12 (the child path carries the parent's `c`, `B_O_S_SE_SL_Traverser.split`). Seed the parent
+   path's labels into a single-correlation leg too — the same `seedOuterAliases` move; see 7.
+6. **sql-hygiene baseline moved without a reason (minor, rule).** R10's commit re-banked valueMap terms 75 → 82 and
+   where 91 → 87; re-recording on its parent gives the same deltas, so an EARLIER commit raised valueMap without
+   banking it. Trace it (`git log -S` on the baseline / bisect `mise run sql-hygiene`) and name the user-visible reason
+   or remove the term.
+7. **R11 next step (coverage):** `correlatedExists` (`src/compiler/rel/lower/filter.ts`) still seeds with
+   `NO_ALIASES`, so `g.V().as('a').out().as('b').where(__.in().where(P.eq('a'))).count()` declines while the
+   `select('b')`-spelled twin answers 6. Seed it with `seedOuterAliases`.
+8. **Cheap fixes.**
+   - `src/compiler/rel/lower/slice.ts`: the M3 comment cites `.../AddPropertyStep.java:134` with an elided path —
+     write `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java:134`;
+     and lines ~36-43 still say `sample` is EXCLUDED from per-origin scoping (stale since M3; reuse proposal 7).
+   - `PresentWhen` (`src/compiler/rel/child.ts`): state the invariant `choicePresence`'s `orValue` relies on — a stated
+     `{when}` without `orValue` has a NULL value wherever `when` is false — so a future COALESCE-seeded producer cannot
+     silently keep rows. `choicePresence`'s "every slot the same" is object identity; say so (reuse proposal 3 makes
+     it fire more).
+   - `removeRows`' doc claims to be the one removal; `properties().drop()` (write.ts ~297) still hand-builds the same
+     pair — route it through `removeRows`.
+   - M3's `effectScope` pushes a drawing snapshot's named subtrees into program-level `bindings`, so every later write
+     statement carries the whole body as an unreferenced WITH (statement text and binds × statements, query-text
+     bounded — matters at the DO 100 KB / 100-bind walls). Scope them to the snapshot statement.
+   - The R11 inlined outer channel still reads `CAST(json_extract(jsonb_array(jsonb_object('k',0,'v',x)),'$[#-1].v') AS INT)`
+     per inner row — fold a history-seed/last-read pair to `x` in the alias reader.
+9. **Missing pins.** S7: the routes opened under `local()`/`flatMap()` (`yields: 'first'` → `flatMapRejoin`) and the
+   mixed stated + value-nullness arm (`map(choose(hasLabel('software'), V().constant(null).limit(1), values('age')))`
+   → 32,null,29,35,null,27). R11: a by()-modulated `where(P.eq(label)).by(T.label)` in a leg, which now declines
+   instead of trunk's wrong 6 (reference 12); a multiplicity witness on a self-loop + parallel-edge graph
+   (`BAC.where(__.select('b').out().where(P.eq('a')).count().is(2))` → 10). M3: a multi-traverser drawing witness
+   for the evaluate-once test; list with a null mid-stream (`inject(1,null,2)` → [2]); set `inject(29,null,29)` → [29].
+   S6: mixed-key inject maps under `as(k).select(k)`; a BigDecimal onCreate value; collection restatements in onCreate.
+
+Still open from the third round (below): S8, M1, M2, items 4–7. From earlier: S3, R13–R18, F8, F11–F13, F14b.
+
+**Depth gaps recorded this round (clean declines; not defects):**
+- **S7:** an option-map choose whose CHOICE FUNCTION is an ordered/label-correlated re-sourced scalar
+  (`map(__.choose(__.V().values('name').order().limit(1)).option('josh',…).option(Pick.none,…))`) — `choicePresence`
+  covers arms, not the choice function's own stated presence; map(choose(stated arm)) after `repeat().emit()`, in
+  `sideEffect`/`fold`/`filter`/`coalesce`/`optional`, as a group key, in a two-by project; over list/map/path/property
+  hosts; an option map with no `Pick.unproductive` arm over a vertex host (needs a choice result that is scalar OR
+  element, `ChooseStep.java:71-79`).
+- **S6:** the new select in where/filter/not/coalesce/optional/sideEffect arms, a child continuing into a barrier
+  (`map(__.select('k').fold())`), order/group/project `by(select('k'))`, repeat bodies, `select('k').by(…)`/`.path()`;
+  every child-seam embedding over map and record hosts; heterogeneous `inject(1,[a:1],[b:2]).select('b')`;
+  `inject([a:1],[b:2]).as('x').select('x')` (the key-set union should read "collision possible", not "unknown");
+  `holdsNestedUnordered` declines (not compares) a nested map/set onCreate value. Pre-existing outside S6:
+  `V().elementMap().dedup('label').count()` gives 0 where `DedupGlobalStep.java:82` raises.
+- **R10/F7:** a computed mergeV inside local/map/union/optional/choose/coalesce/repeat; mergeV after
+  `values()`/`inject(scalars)`; `by(constant(29.0m))`/`by(constant(9007199254740993L))`;
+  `inject([name:'zz',a:1],[a:1,name:'zz']).mergeV()` declines because `createKey` spells JSON key-order-dependently.
+- **R11:** a leg nested in where/filter/map/project-by/repeat/choose/coalesce/optional; choose/coalesce/optional
+  inside a leg body; a body binding a label after the correlation; simplePath/cyclicPath/path() in a leg body.
+- **M3:** a mutating `property()` inside any child body (local/union/choose/optional/sideEffect/flatMap/map/repeat),
+  null or not; a `project(…)`-shaped map form.
+- **Not this round, FYI:** `g.V().hasLabel('person').as('a').V().has('z',5).property(...)` is super-linear in the
+  READ (mid-traversal `V().has` with no seek, 813 ms → 44.6 s, same on the parent).
+
+**Reuse-sweep proposals (next round; no answer change unless noted):**
+1. **`scopedNode(map, key, fallback, fresh)`** — factor `scopedKey`'s entry/COALESCE (`src/compiler/rel/map.ts`) and
+   call it from `scalarMapFirstChild`, `mapHostChild` (`rel/lower/reduction.ts`) and mapTail's keyed-dedup `mapScope`
+   (lower.ts ~3070); the shared `mayHold && valOf.kind !== 'scalar'` decline goes with it. ~12-15 lines. Subsumed by S9.
+2. **`allOf(terms)`** in `build.ts` (= `terms.reduce(and, undefined) ?? TRUE`): replaces ~11 reduce sites
+   (write.ts 3644/3696/3813/3824/3827/3941/3962/5965, map.ts:1976, lower/slice.ts:712, lower.ts:5525); the three R10
+   sites stop emitting `1 = 1 AND`, and "reduce of empty array" (the R10 review TypeError) cannot recur.
+3. **One TRUE/FALSE**: `predicate.ts:49 CONSTANT` moves to build.ts; `ALWAYS_PRODUCTIVE`/`NEVER_PRODUCTIVE`
+   (child.ts 267/337), build.ts:390, record.ts:527, lower.ts:2789 and write.ts's ~8 fresh `eq(1,1)` reuse it. The
+   identity folds in `caseWhen`/`choicePresence` then fire for write.ts's terms (SQL can only shrink).
+4. **`reSourcedUnder` case 3 ends in `scalarChoice([{when: present, cv: value}], empty)`** (reduction.ts ~1533) —
+   keep the `sameFraming` guard; restrict to `result === undefined` or carry the shared framing; SQL-diff the S7
+   case-3 witnesses. ~7 lines.
+5. **`armTyping(guarded, last)`** shared by `scalarChoice` (~1387) and `scalarCoalesceChild` (~1474): the
+   static-type meet else per-row vtype CASE. ~8 lines, same SQL.
+6. **`withChannelValues(rel, channels, set, prefix, fresh)`** in `alias.ts`: `bindAliases` (183-191) and
+   `seedOuterAliases` (225-233) end in the same project. ~9 lines, same SQL.
+7. **Per-origin `sample()` reuses the ranked-window builder** — give `perOriginWindow` (or a `rankedKeep` sibling)
+   an optional empty partition and a `fence` flag; `sliceOp`'s sample path becomes one call. Keep `rn <= n` with no
+   `rn > 0` and keep the Materialize fence (an unfenced RANDOM() window regressed `sample(n).fold()`). Fix the stale
+   exclusion comment now regardless.
+8. **`valueResume` uses `withEnclosing`** (lower.ts ~4110) — widen `withEnclosing` (`rel/lower/chain.ts`) to take
+   `Iterable<string> | AliasMap`, so the enclosing-label set S6's `mapFirstFallback` reads has one writer.
+9. Still open from the third round: reuse 1, 2, 4, 5 (3 is S8).
+
+**Needs-human questions:** none raised this round.
+
+
 ### Next round (from the 2026-11-02 third round — read before picking items)
 
 Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed":
