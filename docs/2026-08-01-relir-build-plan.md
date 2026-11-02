@@ -746,6 +746,139 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
   distinguishable no other way, and a body that cannot report it DECLINES.
 
 
+### Next round (from the 2026-11-02 fifth round — read before picking items)
+
+Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed", and green on GitHub CI:
+- `bdfa6f0c` — trunk red CI fixed (test-only: the evaluate-once witness is one 50-traverser write per store, 3 trials).
+- `fb030364..00256441` — R11 follow-ups 1 + 7 (scalar `aliasWhere` arm via `valueTheta`; `declaredParamTypes` at the
+  compile seam; `correlatedExists` seeds `seedOuterAliases`).
+
+**PARKED — S9 (ONE Scoping reader). Resume point: branch `wf/s9-one-scoping-reader-4-4` (`0f2180e6`, 4 commits
+`3cb9b019..0f2180e6`, not on trunk).** It answers every fourth-round S9 witness, scales linearly (1k→8k ≤4.7×), and
+its CI was green, but review found a REGRESSION it cannot ship with: S9 makes every reader TRUST the framing's `held`
+set (keys the row is guaranteed to hold), and `held` has writers that over-claim. Witnesses (modern graph; trunk was
+right on 1–4, newly-reachable wrong on 5–8):
+1. `g.withSideEffect('b',7).inject(1).union(__.constant(['a':1,'b':2]), __.constant(['a':3])).select('b')` → [2], ref [2,7].
+2. `g.withSideEffect('b',7).V().choose(__.hasLabel('person'), __.constant(['a':1,'b':2]), __.constant(['a':3])).select('b')`
+   → four 2s, ref four 2s + two 7s. 3. the `inject(1,2).choose(__.is(1), …)` twin → [2], ref [2,7].
+4. (1) `.as('m').select('m').select('b')` → [2]. 5. (1) `.map(__.select('b'))` / `.local(…)` → [2].
+6. (1) `.format('%{b}')` → ['2']. 7. (1) `.math('b + 1')` RAISES "must resolve to a Number", ref [3.0, 8.0].
+8. `g.V().as('b').union(__.constant(['a':1,'b':2]), __.constant(['a':3])).map(__.select('b')).count()` → 6, ref 12.
+Already wrong on trunk: the arms reversed, `union(constant([a:3]), constant([a:1,b:2])).select('b')` → [7,7], ref [7,2].
+`Scoping.java` `getScopeValue` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`)
+reads the Map, then side effects, then path labels, so a row lacking the key must fall through.
+
+**Shared root cause → ONE substrate item, ordered BEFORE S9's re-land:**
+- **S9a. `held` is a MUST-hold fact: every framing transformer preserves it soundly or drops it.** Two writers
+  over-claim today, and both are independent of S9 (S9 only made the readers trust them):
+  - the map arm of the branch merge (`src/compiler/rel/lower/branch.ts`) keeps the FIRST arm's `held`/`keys` →
+    INTERSECT `held` across arms, UNION `keys` (fixes witnesses 1–8 and the reversed-arm case);
+  - the local slice (`limit/range/skip/tail(local)` arm in `src/compiler/rel/lower.ts`'s `mapTail`) keeps `held`
+    after it may remove keys → clear `held` there (and drop the old `keys` exemption). LOST ROWS on trunk today:
+    `g.inject([a:1,b:2],[a:3,b:4]).limit(local,1).as('b').select('b')` → [], ref [{a:1},{a:3}];
+    `…tail(local,1).as('a').select('a')`; `g.V().as('b').constant([a:1,b:2]).limit(local,1).select('b')` (ref 6
+    vertices); `g.withSideEffect('m',[a:1]).inject(1).select('m').limit(local,0).as('a').select('a')` (ref [{}]).
+  Audit every other `held` writer the same way (`bun scripts/refs.ts held`). L4 pins: a branch merge of map arms
+  with different key sets, and a local slice between a `held` producer (map literal, shared-key inject, side-effect
+  map constant, record `as()`) and a Scoping reader (`select`, `map(select)`, `format`, `math`, alias re-entry).
+  Then rebase S9 onto it.
+- **S9 re-land must also fix (review majors on `0f2180e6`, all pre-existing wrong answers S9 claims to unify):**
+  1. order/dedup `by(__.select(k))` over a RECORD host still use the old field read, not `childScopeNode`:
+     `g.withSideEffect('b',5).V().project('a','b').by('name').by('age').order().by(__.select('b')).select('a')` → 4
+     rows, ref 6; `….dedup().by(__.select('b')).count()` → 4, ref 5 (`src/compiler/rel/lower/reduction.ts`,
+     `scopeValue` in `modulator.ts` still declines map hosts via `mapScopeMayHold` — the second map-scope reader).
+  2. Chain `select(k)` over a per-row scalar that may be a Map runs `selectCollection` BEFORE `selectMapFirst`
+     (lower.ts select arm ~1278): `g.V().aggregate('k').by('age').V().values('m').select('k')` gives the collection
+     where the row's map holds `k:1`; the child seam (`map(__.select('k'))`) answers right. Route through
+     `selectMapFirst` first — `mapFirstFallback` already resolves collections.
+  3. Answer → decline regression: `mapFirstFallback` returns 'label' for a label bound ANYWHERE in the program
+     (`ctx.scopeNames.labels`), so `g.V().elementMap().select('age').as('age')`, `g.V().group().by('name').by('age').select('marko').as('marko')`
+     and `g.V().elementMap().dedup('age').as('age').count()` (new `dedupByLabels` guard) decline; trunk answered.
+     Use a positional MAY-be-bound-before set — a may-bind variant of `labelsBoundBefore` (`src/compiler/ir/labels.ts`).
+  4. Commit message must name every sql-hygiene move: map 1256→1479, and also select 175→176, mergeV 374→376.
+  5. §17 "Map scope": a row lacking the key where a same-named PATH LABEL exists (project(k)/valueMap(k)/
+     elementMap(k), and the newly opened map()/local()/math() forms) is a LOST ROW, not a divergence — decline it
+     until scope-variant-label-arm lands, and drop it from §17. Add an L4 pin for map()/local() with a path-label key.
+  Minor/cheap with it: `renderedNode`'s per-row `(VALUES (json(shn0)))` subquery for each `format()` token
+  (`src/compiler/rel/projector.ts`) → read the landed node column via `asStringOf` directly.
+  Depth gaps S9 leaves (clean declines; record, not blockers): the side-effect fallback through
+  union/choose/coalesce/optional arms, where/not/filter, order/group/project/dedup `by(select(k))`, repeat bodies,
+  `select(k).by(…)`; `map(__.math(…))`; `map(select('k','j'))`; `map(unfold())`/`local(count())`/`map(select(keys))`
+  over a map/record host; `valueMap().map(select(k))`; `project('a').by('name').map(__.select('zz'))` (ref [] — a key
+  outside static keys is absent, not a decline); `withSideEffect('b', null)`; element/path/list hosts under `map()`;
+  `where('a', eq('b'))` over map traversers; the chain `project('y').by('age').select('x')` over a collection (the
+  child form answers).
+
+**Deferred (decided not to build this round; prerequisite ordered first):**
+- **Prereq V1 → `scope-variant-label-arm`.** Path-label scope behind a row that may be a Map (`g.V().as('k').values('m').select('k')`
+  → ref [1, v2, v3]): needs a VARIANT (element-or-value) per-row stream framing that continues through followers —
+  element-requiring steps apply to element rows; shape-agnostic steps (count/fold/dedup/as/select) carry the
+  `{t,v}`/element node. Also the clean answer for S9 re-land item 5.
+- **Prereq V2 → `per-row-map-reenters-map-tail`.** A per-row `{t,v}` map/list scalar re-enters the map/list followers
+  (`unfold`, `select(keys)`, `count(local)`, `select(k1,k2)`, `format`, `mergeV`): decode a stored or scope-read
+  `{t,v}` map/list into the map/list framing so `g.V().values('m').unfold()` and siblings answer. Unblocks the
+  fourth-round S9 item 6 regressions (`withSideEffect('k',['x':1])…select('k').unfold()` etc.) for the scalar host.
+
+**Follow-ups from review (major first):**
+1. **Quadratic write-body re-source with `sample()` (major — production-size outage, pre-existing).**
+   `g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person','software').sample(1).coalesce(__.values('age'), __.constant(null)))`:
+   561 ms → 2.1 s → 34 s at N = 1k/2k/8k holders (≈61×). The cost is the per-traverser sample window: the lowering
+   builds `traversers CROSS JOIN nodes` and runs `row_number() OVER (ORDER BY encounter, id)` over the whole product,
+   applying `hasLabel` afterwards. `property('c', __.V().hasLabel('person').count())` is linear (50 → 83 ms);
+   `…values('age').sample(1)` is quadratic; the read `flatMap(__.V().hasLabel(…)).count()` is 3–7 ms. Fix: push the
+   label filter below the encounter window (traversers × MATCHING vertices), and partition the window per origin
+   rather than ordering the whole product. Add a scaling witness. Also add a line to `docs/outstanding-work.md`.
+2. **R11 hygiene (major, introduced by `82d66183`).** `aliasOperandAt` reads the label's tag via `aliasTypeAt` beside
+   `aliasValueAt`; the emitter fuses the alias-history read back in, so the whole history-entry expression
+   (`jsonb_object` over the exact-REAL printf/CAST CASE) is spelled TWICE per operand (`$[#-1].v` and `$[#-1].t`), and
+   a `math()` subject three times. `g.V().as('v').values('age').as('x').select('v').out().as('w').values('age').as('y').select('w').where('x', P.eq('y')).count()`:
+   8.5→39.9 ms on trunk-before, 15.3→70.9 ms after (1k→8k; linear, ≈1.8× slower); values-family SQL 4072→6817 bytes.
+   The `t` is the source row's `vtype` column. Project the label's v/t ONCE at the as() site (or read `t` from the
+   source column when fused) — the same substrate as fourth-round item 8's last bullet (fold the history seed/last-read
+   pair). Extend sql-hygiene to catch duplicated EXPRESSIONS, not only duplicated subqueries.
+3. **Nested bodies lose parameter types (major, wrong number class — reuse proposal 1 below).**
+4. Minor, R11: an `or`/`and` of alias leaves applies each branch-bound label's `aliasGuard` per leaf, so
+   `where(P.eq('o').or(P.eq('n')))` keeps a row with `o` unbound when `n` matches — the reference raises
+   (`Scoping.getSafeScopeValue`); and a branch-bound label missing on some traversers FILTERS them
+   (`g.V(1).union(__.values('age').as('a'), __.constant(5)).V(1).values('age').where(P.eq('a')).count()` → [1]).
+   Both are the natural answer: one §17 line covering "unbound where label → row dropped, incl. under a connective".
+5. Minor, R11: the `valueTheta` NULL arm (`CASE WHEN a IS NULL OR b IS NULL …`) is emitted even when both sides have a
+   non-null static type (+131 bytes baseline) — skip it then. `valueTheta` is the third copy of the "evaluate operands
+   once in a VALUES row, then project" pattern (`storedCompareOnce`, `typedNodeOnce`) — one helper.
+6. Minor, R11: `declaredTypeOf` (`src/gremlin/types.ts`) re-walks list/set/map like `valueNodeOf`; derive one from the
+   other. Stale comments in `src/wire.ts` (`decodeFields`, `parseJsonQuery` ~131) and `gremlinTypeOf`'s doc still
+   describe the untyped-parameter fallback (reuse proposal 3).
+7. Minor, CI-red test: the rewritten witness no longer covers the original form (one id-anchored traverser, unfiltered
+   in-body `__.V().sample(1)`) — add one cheap old-form run; reword its comment to "one draw per traverser, read by
+   both the snapshot and the write"; cite `AddPropertyStep.java:134` by its full `vendor/tinkerpop/gremlin-core/…` path.
+8. Depth gaps (clean declines): `local()`/`flatMap()` around `__.V()…sample(1)`; `property(list,'l', __.V()…values('age').max())`;
+   a scalar or element bare `where(P.op(label))` inside filter/where/not/optional/coalesce/choose/map/project().by()/
+   repeat until/emit (the filter/branch seams in general); an element subject vs a VALUE label (compile-time fold:
+   neq true, else false); `within`/`without`/`between`/TextP with label operands; list/map/path/property subjects or
+   labels; `where(P.eq('a')).by(…)`; a double constant ordered against an int label (`constant(2.0d).where(P.gt('a'))`);
+   the two-label `where('x', P.lt('y'))` over a scalar current traverser.
+
+**Reuse-sweep proposals (next round):**
+1. **Carry parameter types IN the params environment** — `declaredParamTypes` (`src/gremlin/types.ts`) returns one
+   typed environment (name → {value, type}) that `stepChain` reads, removing the parallel `paramTypes` argument from
+   `stepChain`/`extractArgs`/`walkArgs` (`src/gremlin/frontend.ts`) and its `?? null` fallback. Today every nested
+   re-parse (`ir/passes.ts:childSteps` ~367, `ir/labels.ts:48`, `ir/content-demand.ts:202/240`,
+   `ir/productivity.ts:88/102`, `ir/strategies.ts:275`) passes params but not types, so a nested parameter is
+   untyped again. Measured WRONG NUMBER CLASS: with `{x:5}` declared long, `g.addV('t').property('b', x).values('b')`
+   frames Long but `g.V(1).union(__.addV('t').property('b', x)).values('b')` frames Int. No new SQL.
+2. **`list.ts`'s "encountered %s" tail reads the argument's own type** — `flatType(arg.type) ?? gremlinTypeOf(value)`
+   replaces the private `gremlinTypeOfValue` typeof ladder (`src/compiler/rel/list.ts` ~1453, called at 1419/1436),
+   which misnames int32-overflow numbers, declared long/short/byte, and datetime/uuid literals. Message tail only.
+3. **Retire the stale untyped-parameter comments** (`src/wire.ts:131`, `gremlinTypeOf`'s doc) — point at
+   `declaredParamTypes`. Bundle with 1.
+
+Still open from the fourth round (below): S10, S11, follow-ups 2–6, 8, 9, reuse 2–8, and S6's multi-driver mergeV
+lift (S9's entry-or-side-effect residual now waits on S9a → S9). From earlier rounds: S8, M1, M2, S3, R13–R18, F8,
+F11–F13, F14b.
+
+**Needs-human questions:** none raised this round.
+
+
 ### Next round (from the 2026-11-02 fourth round — read before picking items)
 
 Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed" locally:
@@ -776,6 +909,8 @@ wrapping `V().sample(1)`, and `property(...max())` over a re-sourced `V()`, rais
 
 **Shared root causes (one substrate item each, ordered BEFORE what they unblock):**
 - **S9. ONE Scoping reader per row: own Map entry → side-effect constant → named collection → path label**
+  *(Fifth round: BUILT on `wf/s9-one-scoping-reader-4-4` (`0f2180e6`) and PARKED behind S9a — see the fifth-round
+  section above.)*
   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
   for EVERY host kind (scalar that may be a Map, map, record) and every consumer (select, format, math, keyed dedup,
   the child seam), LANDED ONCE as a fenced column (as `scalarMapKey` does with `SCOPE_NODE` + `presenceFenced`,
