@@ -898,7 +898,13 @@ the first step.
   through is the faithful answer. This is cheap.
 
 **Reuse-sweep proposals (next round; no answer change unless noted):**
-1. **One `aliasElementHost(rel, proj, row)` constructor that always carries `aliasPresence`** (`src/compiler/rel/alias.ts`).
+1. ✅ **LANDED (e54b3a02).** **One `aliasElementHost(rel, proj, row)` constructor that always carries `aliasPresence`** (`src/compiler/rel/alias.ts`).
+   *Landed:* `aliasElementHost` in `src/compiler/rel/alias.ts` is the one alias element host (always carries
+   `aliasPresence`); the where-by hosts now keep `present`, so the witness answers 6. F14 `rerootPresence` is shared by
+   `selectRerootHost` and `selectRerootSubject`. Witnesses: `test/L4-addendum/absent-label-where-by.feature`.
+   *Remains:* the `not(where('a', P.eq('b')).by(...))` twin (should answer 6), `filter`/`choose` over where…by, and a
+   `match` leg whose body is where…by still fail with a clean `UnsupportedTraversal` from the child-predicate route.
+   They were unsupported before this item; that is a separate route.
    It replaces the four inline alias element hosts in `src/compiler/rel/match.ts` (~469/588/787/794) and the two
    `hostOf` closures in `src/compiler/rel/lower.ts` (`aliasValueWhere` ~5262, the where-by VALUE-compare ~5357).
    **This one is a BUG FIX:** those closures drop `present`.
