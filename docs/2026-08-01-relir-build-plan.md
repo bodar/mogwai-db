@@ -779,7 +779,12 @@ as `13acd8c7` with a conflict resolution in `branch.ts`, so `git cherry` shows `
      restores the error; with S6 it becomes moot.
   Separate prerequisite, NOT part of S6: the `project(…)`/record and `inject(map)` drivers with `select('k')` decline
   until `mergeFromTraversal` accepts a record or map driver.
-- **S7. A choose's presence is built from its arm GUARDS.** R7 made `meetPresence` (`src/compiler/rel/child.ts`)
+- ✅ **S7 LANDED (1254d29e, 2026-11-02).** `choicePresence(arms, otherwise)` (`src/compiler/rel/child.ts`) builds a
+  choice's presence as a CASE over the same guards as its value; `scalarChoice` (`rel/lower/reduction.ts`) builds the
+  value/vtype/presence CASEs from one branches array for both `scalarChooseChild` and `scalarChooseOptions`, and
+  `reSourcedUnder` case 3 calls the same helper (SQL byte-identical). Forms with no stated arm compile unchanged; no
+  baseline moved. Remains: nothing.
+  **S7. A choose's presence is built from its arm GUARDS.** R7 made `meetPresence` (`src/compiler/rel/child.ts`)
   return `'unknown'` for any arm with a stated `{ when }` presence, so `scalarChooseChild` (`reduction.ts` ~1409) and
   `scalarChooseOptions` (~1371) now DECLINE a choose with a re-sourced arm that trunk ANSWERED correctly:
   `g.V().map(__.choose(__.hasLabel('person'), __.V().values('name').order().limit(1), __.constant('x')))` →
