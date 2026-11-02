@@ -32,7 +32,7 @@ import { propertyReadOf } from '../property.ts';
 import { PATH_CHANNEL, PATH_COL, appendValuePosition, extendPath, pathCarried, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, inOrderFreeBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
-import { bodyPredicate, childPredicate } from './filter.ts';
+import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { sackTagOf } from '../sack.ts';
@@ -64,6 +64,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // gets the same `select(<label>)` re-root over the row's aliases — not a second, scope-less ladder.
   predicate: (body, subject, negated, aliases) => childPredicate(body, subject, fresh, ctx, negated, aliases),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
+  anchored: (elem, id) => ({ rel: anchoredSeed(ctx.source, elem, id, fresh), framing: { kind: 'elements', elem } }),
   rows: (body, input, elem, aliases, originFrom) => childRows(body, input, elem, aliases, ctx, fresh, false, false, originFrom),
   // `bulked: false` is a fold RESET, and it is safe for a reason worth naming rather than trusting:
   // every step whose lowering READS `bulked` — the slice family and a grouping barrier — mints a

@@ -5,7 +5,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
-import { asLabelsOf, labelReads, scopeKeyReads } from '../ir/labels.ts';
+import { asLabelsOf, scopeKeyReads } from '../ir/labels.ts';
 import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
@@ -228,22 +228,21 @@ function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null 
 
 /** One position in a multi-correlation leg's body that must EQUAL/DIFFER from a bound alias — a
  *  `where(P.eq/neq(label))` the leg reads, wherever it sits in the body. `channel` is the fresh alias
- *  the fresh right walk BINDS the walk's current position to, so the constraint becomes a join clause
- *  `op(left.label, right.channel)` rather than a value the right does not hold. */
+ *  the anchored walk BINDS the walk's current position to, so the constraint becomes a correlated clause
+ *  `op(outer.label, walk.channel)` rather than a value the walk does not hold. */
 interface LegCorrelation { readonly op: 'eq' | 'neq'; readonly label: string; readonly channel: string; }
 
-/** The FRESH right-side walk of a multi-correlation leg, plus its correlation clauses. Every
+/** The walk of a multi-correlation leg's body, plus its correlation clauses. Every
  *  `where(P.eq/neq(label))` in the body — at ANY position, so a MID-body constraint is carried, not
  *  dropped (TinkerPop's `MatchStartStep.getScopeKeys` reads a leg's WHOLE recursive scope-key set,
  *  `MatchStep.java` `anyStepRecursively`, not only the trailing `WhereEndStep`) — BINDS the walk's
- *  current position as a fresh channel and contributes one correlation `op(left.label, right.channel)`;
- *  the start binds a fresh channel correlated by equality. Every other step (movements, `has`, a
- *  non-label `where`) passes through the fold unchanged. `null` never happens here — an unmodellable
- *  step declines later, when `child.chain` cannot lower it. */
-function legRight(start: string, body: readonly IRStep[], host: IRStep, fresh: Minter): { readonly chain: IRStep[]; readonly corr: readonly LegCorrelation[] } {
-  const startChannel = fresh('mc');
-  const corr: LegCorrelation[] = [{ op: 'eq', label: start, channel: startChannel }];
-  const chain: IRStep[] = [syn(host, 'as', [startChannel])];
+ *  current position as a fresh channel and contributes one correlation `op(outer.label, walk.channel)`.
+ *  The START needs no clause: the walk is ANCHORED at it (`child.anchored`). Every other step
+ *  (movements, `has`, a non-label `where`) passes through the fold unchanged. `null` never happens
+ *  here — an unmodellable step declines later, when `child.chain` cannot lower it. */
+function legRight(body: readonly IRStep[], host: IRStep, fresh: Minter): { readonly chain: IRStep[]; readonly corr: readonly LegCorrelation[] } {
+  const corr: LegCorrelation[] = [];
+  const chain: IRStep[] = [];
   for (const s of body) {
     const pred = s.name === 'where' ? s.args?.[0]?.value : undefined;
     if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
@@ -414,32 +413,27 @@ const syn = (host: IRStep, name: string, values: ArgValue[] = []): IRStep =>
  *    predicate seam (`child.predicate` → `correlatedExists`), re-rooted at the one bound element.
  *  - Otherwise — a MULTI-correlation leg (the body constrains a SECOND bound alias) OR a single leg
  *    whose body `child.predicate` cannot express (a RECURSIVE/reducing walk, `repeat().times()`) — is a
- *    SEMI/ANTI JOIN against a FRESH walk of the body. `legRight` builds the walk with its own source,
- *    binding the start and each `where(P.eq/neq(label))` position (at ANY depth) as a channel, and
- *    `make.join` correlates it back on every position. The right must be a relation OF ITS OWN, never a
- *    re-derivation of the carrying table (`col(rel.id, …)` on both sides collapses the correlation),
- *    which is why `child.chain` lowers it over a fresh `V()`/`E()` source — and that path lowers the
- *    FULL step vocabulary, so a `repeat` body works here where a single-subject `EXISTS` cannot thread. */
+ *    correlated `[NOT] EXISTS` over a walk of the body ANCHORED at the start element (`legCorrelated`).
+ *    `legRight` binds each `where(P.eq/neq(label))` position as a channel and the probe correlates it
+ *    back to the outer row. `child.chain` lowers the walk, and that path lowers the FULL step vocabulary,
+ *    so a `repeat` body works here where a single-subject `EXISTS` cannot thread.
+ *
+ *  One node either way: a `Filter` whose predicate is the leg's `legExpr`. (It was a `semi`/`anti`
+ *  JOIN against an UNANCHORED `V()` walk; with the walk correlated to the outer row there is no
+ *  independent right side to join, and `emit.ts` renders both as the same `[NOT] EXISTS`.) */
 export function applyLeg(
   leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
   rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
 ): Rel | null {
-  const single = legSingle(leg, rel, labels, child, fresh);
-  if (single === null) return null;
-  if (single) return make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred: single });
-  // A MULTI-correlation leg is a `semi`/`anti` JOIN against the fresh walk — the standalone form, one
-  // relational node (`branchToExpr` reaches for the `exists`-Expr form instead, so it composes inside a
-  // disjunction; `src/rel/emit.ts:404` renders BOTH to the same `[NOT] EXISTS (SELECT 1 …)` SQL).
-  const cor = legCorrelated(leg, rel, labels, child, host, fresh);
-  return cor && make.join({ id: fresh('mj'), left: rel, right: cor.ran.rel, join: leg.negated ? 'anti' : 'semi', on: cor.on, channels: rel.channels, type: rel.type });
+  const pred = legExpr(leg, rel, labels, child, host, fresh);
+  return pred && make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred });
 }
 
 /** A leg's existence test as a boolean `Expr` over the carrying table — the composable form the
- *  connective path (`branchToExpr`) OR/ANDs together. You cannot OR two SEMI JOINs, but you can OR two
- *  `exists` Exprs, which is the whole reason a leg is an Expr here and a `Rel` in `applyLeg`: an
- *  `or(<leg>, <leg>)` match argument is one predicate, not two joins. A single-correlation leg is its
- *  correlated predicate directly; a multi-correlation one is a correlated `[NOT] EXISTS` over the same
- *  fresh walk `applyLeg`'s join builds (`negated` ⇒ `NOT EXISTS`). */
+ *  connective path (`branchToExpr`) OR/ANDs together, and the predicate `applyLeg` filters on: an
+ *  `or(<leg>, <leg>)` match argument is one predicate. A single-correlation leg is its correlated
+ *  predicate directly; a multi-correlation one is a correlated `[NOT] EXISTS` over the anchored walk
+ *  (`negated` ⇒ `NOT EXISTS`). */
 export function legExpr(
   leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
   rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
@@ -448,7 +442,9 @@ export function legExpr(
   if (single === null) return null;
   if (single) return single;
   const cor = legCorrelated(leg, rel, labels, child, host, fresh);
-  return cor && { kind: 'exists', plan: make.filter({ id: fresh('mx'), input: cor.ran.rel, channels: cor.ran.rel.channels, type: cor.ran.rel.type, pred: cor.on }), negated: leg.negated };
+  if (!cor) return null;
+  const plan = cor.on ? make.filter({ id: fresh('mx'), input: cor.ran.rel, channels: cor.ran.rel.channels, type: cor.ran.rel.type, pred: cor.on }) : cor.ran.rel;
+  return { kind: 'exists', plan, negated: leg.negated };
 }
 
 /** The SINGLE-correlation arm shared by `applyLeg`/`legExpr`: a leg reading only its own start, whose
@@ -470,40 +466,35 @@ function legSingle(
   return child.predicate(leg.body, subject, leg.negated, labels) ?? undefined;
 }
 
-/** The MULTI-correlation core shared by `applyLeg` (→ `semi`/`anti` join) and `legExpr` (→ `exists`
- *  Expr): a FRESH walk of the leg body (its own `V()`/`E()` source, never a re-derivation of the
- *  carrying table — `col(rel.id,…)` on both sides collapses the correlation) plus the `on` clause
- *  correlating it back on every position `legRight` bound (the start by equality, each
- *  `where(P.eq/neq(label))` at any depth as a channel). `null` to decline. */
+/** The MULTI-correlation core of `legExpr`: a walk of the leg body ANCHORED at the start element
+ *  (`child.anchored` — the one row the outer start id names, so the walk costs the start's own fan-out
+ *  per outer row), plus the `on` clause correlating it back on every position `legRight` bound (each
+ *  `where(P.eq/neq(label))` as a channel). `on` is absent when the body correlates nothing past its
+ *  start (a `repeat` body `child.predicate` cannot thread). `null` to decline.
+ *
+ *  ANCHORED, not a fresh `V()` walk joined back on the start's id: that is the same rows, but the join
+ *  key is a `json_extract` over the walk's alias channel, which no index serves — every outer row
+ *  re-ran the whole graph's walk (~N², measured 62× for 8× the traversers). */
 function legCorrelated(
   leg: { readonly start: string; readonly body: readonly IRStep[] },
   rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
-): { readonly ran: ChainRead; readonly on: Expr } | null {
+): { readonly ran: ChainRead; readonly on: Expr | undefined } | null {
   const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
-  if (!startProj || startProj.read.kind !== 'element') return null;
-  const { chain: rightBody, corr } = legRight(leg.start, leg.body, host, fresh);
-  // The fresh walk sees ONLY the positions it correlates — the start and each `where(P.eq/neq(label))`,
+  if (!isElementAlias(startProj)) return null;
+  const { chain: rightBody, corr } = legRight(leg.body, host, fresh);
+  // The walk sees ONLY the positions it correlates — the anchored start and each `where(P.eq/neq(label))`,
   // which `legRight` has already LIFTED into a fresh `as(mcN)` bind. It cannot see the outer row's path BY
-  // CONSTRUCTION, so the leg declines on either of two reads of a live outer label:
-  // - a label the LIFTED walk still reads as a SCOPE KEY (`scopeKeyReads(rightBody)`) — a `select('c')` after
-  //   the lifted `where(P.eq('c'))`, a `select('b')` after a `repeat`, a nested `where('b', …)`, a `path()` —
-  //   would read it as unbound and answer a wrong count. That holds for the start and the correlated labels
-  //   too: the correlation equates a POSITION with them, it does not put them on the walk's path.
-  //   Re-correlating a fresh walk with outer path labels is unbuilt.
-  // - any OTHER live label the body so much as MENTIONS (`labelReads(leg.body)`, start and correlated labels
-  //   exempt), a VALUE argument included (`has('name','b')`). Not a wrong answer but COST: the fresh walk is
-  //   an unanchored `V()` walk correlated back per outer row, ~N² in the rows, and this mention set is the
-  //   reach that plan had before the scope-key read above. Widening the leg past it waits on seeding the
-  //   walk from the correlated start (an anchored walk), never on narrowing this guard.
+  // CONSTRUCTION, so a label the LIFTED walk still reads as a SCOPE KEY (`scopeKeyReads(rightBody)`) — a
+  // `select('c')` after the lifted `where(P.eq('c'))`, a `select('b')` after a `repeat`, a nested
+  // `where('b', …)`, a `path()` — would read as unbound and answer a wrong count. Decline on ANY live one,
+  // the start and correlated labels included: the anchor and the correlation equate a POSITION with them,
+  // they do not put them on the walk's path. Re-correlating the walk with outer path labels is unbuilt. A
+  // VALUE argument spelling a label (`has('name','b')`) is no scope key and costs nothing to admit now
+  // that the walk is anchored.
   const reads = scopeKeyReads(rightBody, child.params);
-  const mentions = labelReads(leg.body, child.params);
-  if (reads.all || mentions.all) return null;
-  const correlated = new Set(corr.map((c) => c.label));
-  for (const label of liveAliases(labels, rel).keys()) {
-    if (reads.labels.has(label) || (mentions.labels.has(label) && !correlated.has(label))) return null;
-  }
-  const src = child.rooted([syn(host, startProj.read.elem === 'edge' ? 'E' : 'V')]);
-  if (!src || src.framing.kind !== 'elements') return null;
+  if (reads.all) return null;
+  for (const label of liveAliases(labels, rel).keys()) if (reads.labels.has(label)) return null;
+  const src = child.anchored(startProj.read.elem, aliasIdAt(col(rel.id, startProj.entry.col), 'last'));
   const ran = child.chain(src.rel, src.framing, rightBody, new Map());
   if (!ran) return null;
   const live = liveAliases(ran.aliases, ran.rel);
@@ -517,7 +508,7 @@ function legCorrelated(
       : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
     on = and(on, op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same });
   }
-  return on ? { ran, on } : null;
+  return { ran, on };
 }
 
 /** A two-variable THETA clause between two already-bound ELEMENT aliases (`where('a', P.eq/neq('c'))`),

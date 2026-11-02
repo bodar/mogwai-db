@@ -120,11 +120,15 @@ describe('match() SQL', () => {
   });
 
   // A MULTI-correlation not(traversal) leg — the body constrains a SECOND bound alias — is a
-  // multi-column ANTI JOIN: a NOT EXISTS over a FRESH walk (its own source, never a re-derivation of
-  // the binding table) correlated back on every alias the leg reads.
+  // multi-column ANTI JOIN: a NOT EXISTS over a walk ANCHORED at the start element (never a
+  // re-derivation of the binding table) correlated back on every other alias the leg reads.
   test('not(traversal) leg reading two aliases → a multi-column NOT EXISTS (anti)', () => {
     const p = read('g.V().match(__.as("a").out().as("b"), __.not(__.as("a").out("created").as("b")))');
     expect(p.sql).toMatch(/NOT EXISTS \(SELECT/);
+    // ANCHORED: the walk's source is a ROWID SEEK on the start (`<scan>.id = <outer start id>`), not an
+    // unanchored `nodes` scan joined back on a `json_extract` — that form re-ran the whole graph's walk
+    // per outer row (~N²).
+    expect(p.sql).toMatch(/NOT EXISTS \(SELECT .* FROM nodes (\w+) .*\b\1\.id = CAST\(json_extract\(/);
     const rows = run(seededStore(), 'g.V().match(__.as("a").out().as("b"), __.not(__.as("a").out("created").as("b"))).select("a","b").by("name")') as any[];
     // marko's out-neighbours are vadas, josh (knows) and lop (created); excluding the created pair
     // leaves the two knows pairs.

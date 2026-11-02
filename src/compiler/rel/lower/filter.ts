@@ -5,6 +5,7 @@ import { and, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '.
 import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
+import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
@@ -96,6 +97,25 @@ export function correlatedExists(
 }
 
 /**
+ * THE ONE ELEMENT AN OUTER ID NAMES, as a fold-ready element source — the correlated ROOT a body walks
+ * from when it must start AT a bound element rather than one hop past it. `source.elementRow(id)` is the
+ * single row that id names (a rowid seek on `nodes`/`edges`), promoted exactly as the `V()`/`E()` seed is
+ * (a projected `id` + a `bulk` channel), so movements and reducers in the body have what they read.
+ *
+ * Correlated, so it lives only inside an `exists`/scalar subplan of the outer row — which is the point:
+ * a walk seeded here costs the start's own fan-out per outer row, where an unanchored `V()` walk joined
+ * back on the start's id costs the whole graph's walk per outer row (~N²). An absent (NULL) id names no
+ * row, so the walk is empty — the unbound-label answer.
+ */
+export function anchoredSeed(source: GraphSource, elem: Elem, id: Expr, fresh: Minter): Rel {
+  const scan = source.elementRow(elem, id, fresh);
+  return make.project({
+    id: fresh('ms'), input: scan, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+    exprs: [['id', col(scan.id, 'id')], ['bulk', compilerInt(1)]],
+  });
+}
+
+/**
  * A `match(…)`-HEADED body as a correlated `[NOT] EXISTS` over the subject — the fourth predicate arm,
  * the one that makes `not(__.match(…).where(…).select(…))` / `where(__.match(…))` a filter at any
  * position (top level, inside `where`, under another `not`). TinkerPop's `NotStep`/`WhereTraversalStep`
@@ -119,13 +139,7 @@ function matchPredicate(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
 ): Expr | null {
   if (subject.kind !== 'element' || body[0]?.name !== 'match') return null;
-  const scan = ctx.source.elementRow(subject.elem, subject.id, fresh);
-  // Promote the bare correlated row to a fold-ready element source, exactly as the `V()`/`E()` seed does
-  // (a projected `id` + a `bulk` channel), so movements/reducers inside the match have what they read.
-  const seed = make.project({
-    id: fresh('ms'), input: scan, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-    exprs: [['id', col(scan.id, 'id')], ['bulk', compilerInt(1)]],
-  });
+  const seed = anchoredSeed(ctx.source, subject.elem, subject.id, fresh);
   const ran = continueAs(seed, { kind: 'elements', elem: subject.elem }, body, 0, false, inOrderFreeBody(ctx), fresh, NO_ALIASES);
   if (!ran) return null;
   const probeCol = ran.rel.type.cols[0];

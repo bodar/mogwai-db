@@ -92,6 +92,10 @@ export interface ChildSeam {
   readonly predicate: (body: readonly IRStep[], subject: Subject, negated: boolean, aliases?: AliasMap) => Expr | null;
   /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
   readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
+  /** The ONE element an outer `id` names, as a fold-ready element source CORRELATED to the outer row
+   *  (`anchoredSeed`) — what a body that must start AT a bound element walks from, inside an `exists`
+   *  subplan. `rooted([V()])` joined back on the id is the same rows at ~N² cost. */
+  readonly anchored: (elem: Elem, id: Expr) => RootedRead;
   /**
    * A child body lowered over the host STREAM — one row per child TRAVERSER, carrying an `origin`
    * channel that names the host row it descends from. `null` declines.
