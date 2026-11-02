@@ -755,6 +755,20 @@ for `count`, `[]` for `fold`.
   `legSingle`/`existenceExpr`/reducing back edge — `and(guard, pred)` vetoes a leg TRUE over empty input):
   `…optional(__.out().as('a')).where(__.select('a').values('name').count().is(0)).count()` 0 (want 3);
   `where(__.select('a').out().count().is(0))` 5 (want 8); `not(…)` 4 (want 1); the marko-union `where` form 0 (want 3).
+- ✅ **LANDED (89ca89d8, 2026-11-02) — the PREREQUISITE below.** An unbound label now empties the rerooted body's
+  INPUT through the host's EXISTING `present?: Presence` (lifted from ChildHost's scalar arm to the element arm and
+  `Subject`): `aliasPresence` (`src/compiler/rel/alias.ts`) sets `present:'value-nullness'` exactly where `aliasGuard`
+  owed a guard; `hostPresence`/`gatedByHost` in `src/compiler/rel/lower/child.ts` gate every consumer; statically bound
+  labels carry no field, so their SQL is unchanged. Witnesses: `test/L4-addendum/absent-label-body-input.feature`,
+  `test/compiler/absent-label-body-input.exec.test.ts`. Remaining, all present before this change:
+  `g.V().as('a').out().as('b').where(__.select('a').select('b')).count()` answers 0 (ref 6) — the where body lowers into
+  an EXISTS over a `WHERE 0=1` relation, a different mechanism; still declining exactly as on trunk:
+  `map(select('a').valueMap())`, `map(select('a').project(..))`, map over select of an edge label then `outV()`,
+  `local(select('a').count())`, a union-headed select body ending in `fold()`, a value label bound in `optional()`, and a
+  label read after an emitting `repeat(...).times(1)`; `where(select('a').label())` over a branch-bound label tests the
+  label subquery IS NOT NULL rather than the cheaper id IS NOT NULL (correct, one correlated read; cheapening it means
+  treating `label()` as a mapping terminal in `productivity.ts`, which other callers share). NEXT: rebase
+  `wf/source-union-starter-arms-1-3` onto trunk and drop its `guardedPredicate` and `scalarChildValue` CASE.
 - **PREREQUISITE (ordered BEFORE re-landing the item): ONE "absent label ⇒ the body's INPUT is empty" authority at
   the select-of-alias lowering itself**, consulting the existing productivity authority
   (`src/compiler/ir/productivity.ts` `MAPPING_TERMINAL`/`presenceOf`) to know whether the tail is seeded. The gate
