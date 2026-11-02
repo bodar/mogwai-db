@@ -313,7 +313,11 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
     type: typeOf(...rowCols),
   });
   const joined = make.join({
-    id: fresh('wjn'), left: input, right: row, join: 'inner', channels: input.channels,
+    // ORDERED (`rel.ts`): the traverser stream drives and the element row is a primary-key probe. Left
+    // free, SQLite may make the element TABLE the outer loop and re-scan a non-flattenable input (a
+    // windowed `dedup(label)`) per element through an automatic index on the wrong column — measured
+    // 54× from 1k to 8k traversers on `V().as(x).out().as(y).dedup(x).select(y)`.
+    id: fresh('wjn'), left: input, right: row, join: 'inner', ordered: true, channels: input.channels,
     type: typeOf(...input.type.cols, ...rowCols.map((column) => meta(ROW(column.name), column.type, column.nullable))),
     on: eq(col(row.id, 'id'), col(input.id, 'id')),
   });

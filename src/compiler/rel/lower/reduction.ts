@@ -15,12 +15,12 @@ import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { someStepDeep } from '../../ir/walk.ts';
-import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
+import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, coalesce, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
-import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
+import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
@@ -2295,12 +2295,18 @@ function mapHostChild(
   const spec = selectSpec(first);
   if (!spec || spec.labels.length !== 1) return null;
   const key = spec.labels[0]!;
-  const mayHold = !host.keys || host.keys.includes(key);
+  const presence = mapKeyPresence(host, key);
+  const mayHold = presence !== 'absent';
   // The NEXT scope (`mapFirstFallback`, `Scoping.java:119-135`): a row whose Map lacks `key` reads a
   // `withSideEffect` constant — gated on the host, so an ABSENT host does not produce — and the entry and
-  // the constant are one per-row scalar node only where the value side IS scalar.
-  const fallback = mapFirstFallback(key, ctx, false);
+  // the constant are one per-row scalar node only where the value side IS scalar. A PATH LABEL is the
+  // next scope where one is live on the host's row (or, with no row to ask, anywhere in the program):
+  // the entry-or-label read has no framing here, so a key the Map only MAY hold declines rather than
+  // drop the rows the label answers.
+  const liveLabel = host.row ? liveAliases(host.row.aliases, host.row.rel).has(key) : ctx.scopeNames.labels.has(key);
+  const fallback = mapFirstFallback(key, ctx, liveLabel);
   if (fallback === null) return null;
+  if (fallback === 'label' && presence === 'may') return null;
   if (typeof fallback === 'object' && fallback.node) {
     if (mayHold && host.valOf.kind !== 'scalar') return null;
     const scoped = mayHold ? coalesce(correlatedMapKey(host.map, key, fresh).node, fallback.node) : fallback.node;

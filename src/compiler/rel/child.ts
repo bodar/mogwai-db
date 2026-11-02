@@ -4,7 +4,7 @@ import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
-import type { RecordField, RelFraming } from './framing.ts';
+import type { MapKeyFacts, RecordField, RelFraming } from './framing.ts';
 import type { SubjectType } from './predicate.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { ProgramWrites } from './write.ts';
@@ -437,10 +437,10 @@ export type ChildHost =
    *  JSON (a `LinkedHashMap` in canonical key order compares by entries), and its ORDER declines — a Java
    *  `Map` is not `Comparable`, so every `by()`/order arm below returns `null` for it (there is no scalar
    *  value to project). `map` is the value expression (a JSONB object); `keyOf`/`valOf` its encodings.
-   *  `keys` is the map's STATIC key set where the producer knows it (`RelFraming.map.keys`), which a
-   *  `select(<key>)` child body needs for TinkerPop's map-key-vs-alias precedence exactly as `mapTail`'s
-   *  chain-level `select` does — a key not in the set cannot be a map key, so the alias resolves. */
-  | { readonly kind: 'map'; readonly map: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf; readonly keys?: readonly string[]; readonly row?: HostRow };
+   *  Its KEY FACTS are the framing's (`MapKeyFacts` — `keys` MAY, `held` MUST), which a `select(<key>)`
+   *  child body or a `format('%{key}')` needs for TinkerPop's map-key-vs-alias precedence exactly as
+   *  `mapTail`'s chain-level `select` does, read through the one `mapKeyPresence`. */
+  | ({ readonly kind: 'map'; readonly map: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf; readonly row?: HostRow } & MapKeyFacts);
 
 /**
  * THE ROW the host traverser rides on — its relation and the labels bound on it.

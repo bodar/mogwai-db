@@ -157,6 +157,22 @@ export interface MapKeyFacts {
   readonly exact?: true;
 }
 
+/**
+ * DOES A MAP HOLD `key`? — the ONE reading of the key facts every map-first reader makes (`mapTail`'s
+ * `select(k)` and keyed `dedup(k)`, `format('%{k}')` and a `by(__.select(k))` over a map host):
+ * `'held'` — every row holds it; `'absent'` — no row does; `'may'` — some rows may.
+ *
+ * Only `'held'` licenses reading the entry as EVERY row's answer while a later scope (a path label) could
+ * also name `key`: the reference reads that scope for a row lacking the entry (`Scoping.getScopeValue`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+ * so a `'may'` read that drops the row is a LOST ROW, and a reader without an entry-or-label variant
+ * declines on it. `keys` alone (the MAY bound) never means present.
+ */
+export function mapKeyPresence(facts: MapKeyFacts, key: string): 'held' | 'absent' | 'may' {
+  if (facts.held?.includes(key)) return 'held';
+  return facts.keys && !facts.keys.includes(key) ? 'absent' : 'may';
+}
+
 /** A map's key facts carried from one description to the next — a framing, a host, an alias entry. The
  *  ONE spread every hop uses, so a hop cannot keep the MAY bound and silently drop the MUST bound (or the
  *  reverse). An empty `held` is the same fact as an absent one and is not carried. */

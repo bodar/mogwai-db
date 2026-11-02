@@ -15,7 +15,7 @@ import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
-import { fieldNamed } from './framing.ts';
+import { fieldNamed, mapKeyPresence } from './framing.ts';
 
 /**
  * THE PER-TRAVERSER PROJECTORS — `math("<formula>")` and `format("…%{t}…")`.
@@ -289,7 +289,12 @@ function formatValue(
     // no minter, so the correlated read is done here where `fresh` is in scope.
     if (host.kind === 'map') {
       if (host.valOf.kind !== 'scalar') return null;
-      if (host.keys && !host.keys.includes(part.name)) return null;
+      const presence = mapKeyPresence(host, part.name);
+      if (presence === 'absent') return null;
+      // A row lacking a key it only MAY hold reads the next scope (`FormatStep`'s
+      // `getNullableScopeValue`, `Scoping.java:119-135`), so where a path label or side effect may name
+      // the token the drop below would LOSE that row: only a HELD key answers there, else decline.
+      if (presence === 'may' && mayScope(part.name, child)) return null;
       // Rendered INSIDE the correlated read (`over`), so the per-row type test spells the matched pair's
       // column rather than re-running the read once per mention. A per-row tag never declines.
       pieces.push(correlatedMapKey(host.map, part.name, fresh,

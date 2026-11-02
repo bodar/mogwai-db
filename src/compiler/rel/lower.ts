@@ -15,7 +15,7 @@ import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
-import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, mapKeyPresence, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
@@ -2879,7 +2879,7 @@ function mapTail(
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     const args = step.args.map((a) => a.value);
-    const { keys, held } = facts;
+    const { keys } = facts;
     if (step.name === 'identity') { if (args.length) return null; continue; }
 
     // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
@@ -2900,7 +2900,7 @@ function mapTail(
     // tail). One lowering at every host (§6·6). `math` yields a Double, `format` a String — a scalar
     // stream, so the rest of the chain continues through `continueAs`.
     if (REL_PROJECTORS.has(step.name)) {
-      const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}), row: { rel, aliases: labels } };
+      const mapHost: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...facts, row: { rel, aliases: labels } };
       const projected = projectorTail(rel, step, mapHost, childSeam(ctx, fresh), ctx.source, fresh);
       return projected && continueAs(projected.rel, projected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -3001,7 +3001,8 @@ function mapTail(
     if (step.name === 'select') {
       const key = selectedKey(step);
       if (key !== null) {
-        const mayHold = !keys || keys.includes(key);
+        const presence = mapKeyPresence(facts, key);
+        const mayHold = presence !== 'absent';
         const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
         if (fallback === null) return null;
         // A LIVE (or enclosing) LABEL is the scope a row lacking `key` reads next, and a label read beside
@@ -3010,13 +3011,11 @@ function mapTail(
         // every row; a key NO row holds (outside `keys`) is the label for every row, read through the
         // ordinary alias read (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) DECLINES
         // — reading the entry would drop exactly the rows the label answers.
-        if (fallback === 'label') {
-          if (!held?.includes(key)) {
-            if (mayHold || !liveAliases(labels, rel).has(key)) return null;
-            const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-              { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) });
-            return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
-          }
+        if (fallback === 'label' && presence !== 'held') {
+          if (presence === 'may' || !liveAliases(labels, rel).has(key)) return null;
+          const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+            { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) });
+          return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
         }
         // A row whose Map lacks `key` falls through to the SIDE EFFECTS before it drops
         // (`mapFirstFallback`): a `withSideEffect` constant is a `{t,v}` node read beside the entry
@@ -3077,20 +3076,23 @@ function mapTail(
     // `dedup(k)` the MAP may hold reads the map's own value first (its scope wins), keyed like the map's
     // own identity, by the value node's JSON.
     // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
-    const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && (!keys || keys.includes(a.value)))
+    const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && mapKeyPresence(facts, a.value) !== 'absent')
       ? fenced(rel, fresh) : rel;
     const mapScope: MapScope = (k) => {
       // A map lacking `k` reads a `withSideEffect` CONSTANT next (`mapFirstFallback`), the same for every
       // such row — so the key term is the entry, else the constant, and no row is absent.
       const fallback = mapFirstFallback(k, ctx, false);
       const constant = fallback && typeof fallback === 'object' ? fallback.node : null;
-      const mayHold = !keys || keys.includes(k);
-      if (!mayHold) return constant ? { terms: [constant], absent: null } : undefined;
+      const presence = mapKeyPresence(facts, k);
+      if (presence === 'absent') return constant ? { terms: [constant], absent: null, mayBeElement: false } : undefined;
       const node = correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node;
-      if (constant) return { terms: [{ kind: 'call', fn: 'COALESCE', args: [node, constant] }], absent: null };
-      // `keys` are the keys a map MAY hold, never ones it must: `elementMap('age')`/`valueMap('age')`
-      // omit a property the element lacks, so the absence test is always per row.
-      return { terms: [node], absent: { kind: 'binary', op: 'is', left: node, right: compilerNull() } };
+      const mayBeElement = valOf.kind === 'elem';
+      if (constant) return { terms: [{ kind: 'call', fn: 'COALESCE', args: [node, constant] }], absent: null, mayBeElement };
+      // Only a HELD key is every row's (`mapKeyPresence`): `keys` is what a map MAY hold —
+      // `elementMap('age')`/`valueMap('age')` omit a property the element lacks — so otherwise the absence
+      // test is per row, and `dedupByLabels` keys a row lacking it on the label only where the two can
+      // never be equal.
+      return { terms: [node], absent: presence === 'held' ? null : { kind: 'binary', op: 'is', left: node, right: compilerNull() }, mayBeElement };
     };
     const kd = keyedDedup(step, scoped, labels, ctx, fresh, mapScope);
     if (kd === null) return null;
@@ -5628,6 +5630,9 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   return applyLeg(leg, rel, labels, childSeam(ctx, fresh), fresh) ?? 'decline';
 }
 
+/** The framings whose value is never an ELEMENT — a Vertex/Edge equals none of them. */
+const VALUE_FRAMINGS: ReadonlySet<RelFraming['kind']> = new Set(['scalar', 'list', 'path', 'map', 'mapEntry', 'record']);
+
 function recordTail(
   seed: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
@@ -5759,6 +5764,8 @@ function recordTail(
           return {
             terms: cols.map((column) => read(fieldCol(field.prefix, column.name))),
             absent: field.optional && present ? { kind: 'unary', op: 'not', arg: present } : null,
+            // Only a value framing is known never to be an element (`dedupByLabels`).
+            mayBeElement: !VALUE_FRAMINGS.has(field.framing.kind),
           };
         };
         // A field with no fixed payload to key on is not a scope this read can answer.

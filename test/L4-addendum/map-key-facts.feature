@@ -262,3 +262,110 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | m[{"a":"d[1].i"}] |
       | d[3].i |
+
+  # EVERY map-first reader reads the facts through the one `mapKeyPresence`, not the chain select alone. After
+  # a merge `b` is a key some rows only MAY hold; `format('%{b}')` reads the path label `b` for a row lacking it
+  # (`FormatStep` → `getNullableScopeValue`), and reading the entry would DROP that row — so it declines.
+  @Unsupported
+  Scenario: g_injectX10X_asXbX_unionXconstantXa3X_constantXa1_b2XX_formatXbX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(10).as("b").union(__.constant(["a": 3]), __.constant(["a": 1, "b": 2])).format("%{b}")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | 10 |
+      | 2 |
+
+  @Unsupported
+  Scenario: g_V_asXbX_unionXconstantXa3X_constantXa1_b2XX_formatXbX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("b").union(__.constant(["a": 3]), __.constant(["a": 1, "b": 2])).format("%{b}").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[12].l |
+
+  # A key EVERY row holds answers from the entry even with a same-named label behind it.
+  Scenario: g_injectX10X_asXbX_unionXconstantXa3_b5X_constantXa1_b2XX_formatXa_bX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(10).as("b").union(__.constant(["a": 3, "b": 5]), __.constant(["a": 1, "b": 2])).format("%{a}-%{b}")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | 3-5 |
+      | 1-2 |
+
+  # A keyed dedup over a merged map stream: `{a:3}` keys on its label `b` (10) and `{a:1,b:10}` on its entry
+  # (10), so the two collide (`DedupGlobalStep` keys on `getSafeScopeValue`). An entry and a VALUE label
+  # side by side never collide, so this declines rather than keep the duplicate — in either arm order.
+  @Unsupported
+  Scenario: g_injectX10X_asXbX_unionXconstantXa3X_constantXa1_b10XX_dedupXbX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(10).as("b").union(__.constant(["a": 3]), __.constant(["a": 1, "b": 10])).dedup("b").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  @Unsupported
+  Scenario: g_injectX10X_asXbX_unionXconstantXa1_b10X_constantXa3XX_dedupXbX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(10).as("b").union(__.constant(["a": 1, "b": 10]), __.constant(["a": 3])).dedup("b").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  # Every row holds `b`, so the entry is every row's key.
+  Scenario: g_injectX10X_asXbX_unionXconstantXa3_b10X_constantXa1_b10XX_dedupXbX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(10).as("b").union(__.constant(["a": 3, "b": 10]), __.constant(["a": 1, "b": 10])).dedup("b").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  # A by(select(k)) child body over a map host reads the same facts: the row lacking `b` reads the label.
+  @Unsupported
+  Scenario: g_injectX10X_asXbX_unionXconstantXa3X_constantXa1_b2XX_projectXxX_byXselectXbXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(10).as("b").union(__.constant(["a": 3]), __.constant(["a": 1, "b": 2])).project("x").by(__.select("b"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"d[10].i"}] |
+      | m[{"x":"d[2].i"}] |
+
+  # A label read behind a local slice of a record, after a keyed dedup: the label is outside the sliced
+  # key set, so it answers from the path (the element re-entry is an ordered primary-key probe).
+  Scenario: g_V_asXxX_out_asXyX_selectXx_yX_dedupXxX_limitXlocal_1X_selectXyX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("x").out().as("y").select("x", "y").dedup("x").limit(Scope.local, 1).select("y").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |

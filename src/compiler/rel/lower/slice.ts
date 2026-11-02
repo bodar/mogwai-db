@@ -624,8 +624,9 @@ function dedupOnTyped(
 /** A MAP-shaped traverser's (a map's, a record's) own value at a keyed `dedup(k)`'s key, read before the
  *  path label (`Scoping.getScopeValue`): the key terms (NULL where the traverser lacks `k`), and `absent`
  *  — the per-row test for lacking `k`, `null` where its KNOWN keys guarantee it. `undefined` where the
- *  traverser cannot hold `k` at all. */
-export type MapScope = (key: string) => { readonly terms: readonly Expr[]; readonly absent: Expr | null } | undefined;
+ *  traverser cannot hold `k` at all. `mayBeElement` — the own value may be an ELEMENT, so it may equal a
+ *  same-named element label's (`dedupByLabels`). */
+export type MapScope = (key: string) => { readonly terms: readonly Expr[]; readonly absent: Expr | null; readonly mayBeElement: boolean } | undefined;
 
 /** The traverser's map HOLDS the key — `MapScope.absent` negated. */
 const holds = (absent: Expr): Expr => ({ kind: 'unary', op: 'not', arg: absent });
@@ -671,6 +672,14 @@ export function dedupByLabels(
       continue;
     }
     if (!proj) return null;
+    // A traverser that may lack `k` PER ROW keys on its own value where it holds `k` and on the label
+    // where it does not (`Scoping.getScopeValue`), and those are ONE key (`DedupGlobalStep.java:80-88`):
+    // `{a:1,b:10}` and a `{a:3}` whose label `b` is 10 collide. The two are read side by side in SEPARATE
+    // columns (below), which never collide — so that is the key only where the two values can never be
+    // EQUAL: an ELEMENT label against an own value that is never an element (a Vertex equals no number,
+    // string, list or map). Any other pair would keep a duplicate; with no single entry-or-label key term
+    // yet, it declines.
+    if (scoped && (scoped.mayBeElement || proj.read.kind !== 'element')) return null;
     const before = keyTerms.length;
     const column = col(rel.id, proj.entry.col);
     if (!by) {
@@ -701,8 +710,8 @@ export function dedupByLabels(
     else if (proj.read.kind === 'list') keyTerms.push(aliasListAt(column, 'last'));
     else return null; // a MAP-valued alias key — order-sensitive JSON text vs entry-equality, a later phase.
     if (scoped?.absent) {
-      // A traverser that may lack `k` per row: ITS value where it holds `k` (its own scope wins,
-      // `Scoping.getScopeValue`), the label's where it does not — never both, so the two cannot collide.
+      // ITS value where it holds `k` (its own scope wins, `Scoping.getScopeValue`), the label's element
+      // where it does not — never both, and (above) never equal across the two.
       const absent = scoped.absent;
       const labelTerms = keyTerms.splice(before).map((t): Expr => ({ kind: 'case', whens: [[absent, t]] }));
       keyTerms.push(...scoped.terms, ...labelTerms);

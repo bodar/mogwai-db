@@ -4,7 +4,7 @@
 // can never adopt one arm's facts for its siblings' rows (the `union(constant([a:3]), constant([a:1,b:2]))
 // .select('b')` defect, which read the side effect for both rows).
 import { describe, expect, test } from 'bun:test';
-import { literalKeyFacts, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type RecordField, type RelFraming } from '../../src/compiler/rel/framing.ts';
+import { literalKeyFacts, mapKeyPresence, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type RecordField, type RelFraming } from '../../src/compiler/rel/framing.ts';
 import { meetFraming } from '../../src/compiler/rel/lower/branch.ts';
 import { joinAliasEntry, type AliasEntry } from '../../src/compiler/alias.ts';
 
@@ -79,3 +79,14 @@ describe('slicedKeyFacts — a local entry window', () => {
 });
 
 const scalarFraming: RelFraming = { kind: 'scalar', type: { kind: 'unknown' } } as RelFraming;
+
+// The ONE reading every map-first reader makes. `keys` (the MAY bound) never means present: after a merge
+// of `[a:3]` and `[a:1,b:2]`, `b` is a key some rows only MAY hold, which a reader with a same-named label
+// behind it must decline rather than drop the rows lacking it.
+test('mapKeyPresence — held, absent, or may', () => {
+  const merged = meetMapKeyFacts([literalKeyFacts(['a']), literalKeyFacts(['a', 'b'])]);
+  expect(mapKeyPresence(merged, 'a')).toBe('held');
+  expect(mapKeyPresence(merged, 'b')).toBe('may');
+  expect(mapKeyPresence(merged, 'c')).toBe('absent');
+  expect(mapKeyPresence({}, 'c')).toBe('may');
+});
