@@ -17,7 +17,7 @@ import { propertyFtsText } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
-import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
+import { LABEL_SENTENCES, PROPERTY_KEY_SENTENCES, type IdentifierSentences, validateIdentifier, validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
@@ -1669,45 +1669,104 @@ function absentGuard(site: RuntimeSite, rows: Rel, guard: Guarder, fresh: Minter
  *    "A non-String text receiver"). A member of a label COLLECTION (`addV(t1, t2)`) owns that path's
  *    null sentence too, and refuses a member that is itself a collection.
  */
-interface NameRules {
+interface NameRules extends IdentifierSentences {
   /** The output column the name lands in. */
   readonly column: string;
-  readonly nullMessage: string;
   readonly notString: string;
   /** Does `notString` end on the offending value? */
   readonly notStringNames: boolean;
-  readonly empty: string;
-  readonly hidden: string;
   /** How the FIRST result is chosen: a key keeps `firstPerTraverser`'s tie raise; a label ranks by
    *  `(sq, v)`, because rows the plan does not order come in plan order (matrix §17 "Unordered slices"). */
   readonly first: 'tie-raise' | 'rank';
-  /** The refusal for a body FRAMED as a list, where the host refuses one rather than declining. */
+  /** The refusal for a name that is itself a COLLECTION — a body framed as a list, or a list constant —
+   *  where the host refuses one rather than declining. */
   readonly collection?: string;
 }
 
+// The empty/hidden sentences (and the plain null one) are `validate.ts`' tables — the ones `validateLabel`
+// and `validatePropertyKey` raise; only what a NAME SITE adds, its own null and non-String sentences, is here.
 const KEY_NAME: NameRules = {
-  column: 'k', nullMessage: 'Property key can not be null',
-  notString: 'The provided key/value array must have a String or T on even array indices', notStringNames: false,
-  empty: 'Property key can not be the empty string', hidden: 'Property key can not be a hidden key: ', first: 'tie-raise',
+  ...PROPERTY_KEY_SENTENCES, column: 'k',
+  notString: 'The provided key/value array must have a String or T on even array indices', notStringNames: false, first: 'tie-raise',
 };
 const LABEL_NAME: NameRules = {
-  column: 'name', nullMessage: 'Label can not be null',
-  notString: 'Label traversal must produce a String, but got ', notStringNames: true,
-  empty: 'Label can not be empty', hidden: 'Label can not be a hidden key: ', first: 'rank',
+  ...LABEL_SENTENCES, column: 'name', notString: 'Label traversal must produce a String, but got ', notStringNames: true, first: 'rank',
 };
 /** `resolveLabelCollection`'s own two sentences, for a member of `addV(t1, t2, …)`. */
-const LABEL_COLLECTION_NULL = 'Label traversal must not produce null';
-const LABEL_COLLECTION_NESTED = 'Label traversal must produce a scalar String when multiple traversals are provided, but got a Collection';
-const LABEL_MEMBER_NAME: NameRules = { ...LABEL_NAME, nullMessage: LABEL_COLLECTION_NULL, collection: LABEL_COLLECTION_NESTED };
+const LABEL_MEMBER_NAME: NameRules = {
+  ...LABEL_NAME, nullMessage: 'Label traversal must not produce null',
+  collection: 'Label traversal must produce a scalar String when multiple traversals are provided, but got a Collection',
+};
+/** An item of a SOLE label list (`addV(__.constant(['a','b']))`), which reaches the graph as a `T.label`
+ *  collection — `ElementHelper.getLabelsValue` (`structure/util/ElementHelper.java:267-275`). */
+const T_LABEL_ITEMS = 'T.label collection must contain only Strings';
+const LABEL_ITEM_NAME: NameRules = { ...LABEL_NAME, nullMessage: T_LABEL_ITEMS, notString: T_LABEL_ITEMS, notStringNames: false };
 /** `addLabel(<traversal>…)` — `TraversalUtil.resolveStringArguments`' sentences
  *  (`process/traversal/util/TraversalUtil.java:211-236`), then `validateLabel`'s (`AddLabelStep.java:86-95`). */
 const ADD_LABEL_NAME: NameRules = {
-  column: 'name', nullMessage: 'Traversal argument must not produce null',
-  notString: 'Traversal argument must produce a String or Collection<String>, but got: ', notStringNames: true,
-  empty: 'Label can not be empty', hidden: 'Label can not be a hidden key: ', first: 'rank',
+  ...LABEL_NAME, nullMessage: 'Traversal argument must not produce null',
+  notString: 'Traversal argument must produce a String or Collection<String>, but got: ',
 };
-const ADD_LABEL_NESTED = 'Traversal argument must produce a scalar String when multiple traversals are provided, but got a Collection';
-const ADD_LABEL_MEMBER_NAME: NameRules = { ...ADD_LABEL_NAME, collection: ADD_LABEL_NESTED };
+const ADD_LABEL_MEMBER_NAME: NameRules = {
+  ...ADD_LABEL_NAME, collection: 'Traversal argument must produce a scalar String when multiple traversals are provided, but got a Collection',
+};
+/** An item of `addLabel`'s SOLE collection — `resolveStringArguments`' Collection arm, naming the value where
+ *  the reference names its class (matrix §17 "A non-String text receiver"); a null names `null`, as there. */
+const ADD_LABEL_ITEMS = 'Traversal argument Collection must contain only Strings, but got: ';
+const ADD_LABEL_ITEM_NAME: NameRules = { ...ADD_LABEL_NAME, nullMessage: `${ADD_LABEL_ITEMS}null`, notString: ADD_LABEL_ITEMS };
+
+/**
+ * A COMPILE-TIME NAME — the constant half of `runtimeNameRows`: the same `rules`, judged on the value the
+ * query TEXT holds (a literal, `constant(…)`, a `withSideEffect` constant) rather than on a resolved row, so
+ * a constant and a body refuse alike, only earlier (matrix §17 "Error timing"). `vtype` is the type the text
+ * STATES for it (`constFromNested`), which is what tells a uuid, a datetime, a char or a big decimal — all
+ * carried as JS strings or numbers — from a String: anything but `string` is the reference's non-String
+ * name, exactly `runtimeNameRows`' `statedOther`. A `null` vtype states nothing, and the JS type decides.
+ */
+function constantName(value: unknown, vtype: CanonicalType | null, rules: NameRules): string {
+  if (value === null || value === undefined) throw new ValueParseError(rules.nullMessage);
+  if (rules.collection && Array.isArray(value)) throw new ValueParseError(rules.collection);
+  if (typeof value !== 'string' || (vtype !== null && vtype !== 'string'))
+    throw new ValueParseError(rules.notStringNames ? `${rules.notString}${String(value)}` : rules.notString);
+  return validateIdentifier(value, rules);
+}
+
+/** A label argument folded to the constant the query text holds — `constantName`'s input. */
+interface FoldedName {
+  readonly value: unknown;
+  /** The type the text states for `value`; `null` states nothing beyond its JS type (a bare literal). */
+  readonly vtype: CanonicalType | null;
+  /** For a LIST constant, each item's stated type, by position. */
+  readonly items: readonly (CanonicalType | null)[];
+}
+
+/**
+ * A LABEL argument that is really a LITERAL, unwrapped WITH ITS TYPE — or `null` for a nested body only
+ * the run can resolve.
+ *
+ * **`ConstantTraversal` is TinkerPop's own wrapper for a literal and every write host unwraps it
+ * explicitly**, so folding one is the reference's behaviour rather than an approximation of it:
+ * `AddVertexStep.java:253-259` ("Handles ConstantTraversal, which can be resolved to a" literal),
+ * `AddEdgeStep.java:180-181`, and `AddPropertyStep.java:106-110`, whose comment states the rule
+ * outright — *"Exclude ConstantTraversal which is used internally by TinkerPop to wrap literal
+ * values."* A constant is therefore NOT a traversal value at all; it never reaches the reference's
+ * per-traverser path.
+ *
+ * ONE authority for the question because every label host asks it (`addV`'s labels, a merge map's
+ * `T.label`, `addE`'s label, `addLabel`'s arguments), and a per-host copy is a per-host chance to fold
+ * differently. The TYPE rides along because a label is a String and not every JS string is one:
+ * `constant(UUID(…))` folds to text, and only the type the text states says it is a uuid — the fold that
+ * dropped it wrote that uuid as a label.
+ */
+function foldedName(value: unknown, child: ChildSeam): FoldedName | null {
+  if (!isNested(value)) return { value, vtype: null, items: Array.isArray(value) ? value.map(() => null) : [] };
+  const folded = constFromNested(value, child.sideEffects, child.params);
+  if (!folded.has) return null;
+  const node = folded.typeNode;
+  const itemNodes = node !== null && typeof node === 'object' && node.t !== 'map' ? node.items : [];
+  const items = Array.isArray(folded.value) ? folded.value.map((item, i) => gremlinTypeOf(item, itemNodes[i] ?? null)) : [];
+  return { value: folded.value, vtype: folded.vtype, items };
+}
 
 /**
  * A RUNTIME NAME — `property(__.values('name'), v)`'s key, `addV(__.values('name'))`'s label — as
@@ -2304,10 +2363,9 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
 }
 
 /**
- * A LABEL-MUTATION STEP'S ARGUMENTS → the names it addresses, or `null` for a form this route
- * declines. ONE authority because `addLabel`, `dropLabel` and `dropLabels` all ask it and the
- * argument grammar is one grammar — three copies would be three chances to fold a `constant(...)`
- * differently or to admit a mixed collection at one host and refuse it at another.
+ * `dropLabel`'S ARGUMENTS → the names it removes, or `null` for a form this route declines. It judges
+ * NO name, which is the reference's asymmetry (see `elementAddLabel`): a removed name is only compared
+ * against the stored ones. `addLabel` reads the same grammar through `mutationLabelMembers`, which does.
  *
  * A name is a bare string, a compile-time `constant(...)` (a string or a list), or a collection as
  * the SOLE argument. Declined: a nested traversal that does not fold to a constant (a per-row label),
@@ -2361,25 +2419,20 @@ export function elementAddLabel(
 ): Effects | null {
   if (elem === 'edge') return null;
 
-  const names = mutationLabelNames(step, child.sideEffects, child.params);
-  if (names) {
-    if (!names.length) return null;
-    // `addLabel` VALIDATES and `dropLabel` does not, which is the reference's own asymmetry rather than
-    // an oversight here: a name being added becomes a stored label and goes through `ElementHelper`,
-    // while a name being removed is only ever COMPARED against the ones already stored — an invalid one
-    // simply matches nothing, which is the same no-op `dropLabel("xyz")` already is. An invalid name
-    // is the reference's ERROR (`AddLabelStep`'s constructor validates it), so it raises.
-    for (const name of names) validateLabel(name);
-    const scope = labelMutationScope(input, fresh);
-    if (!scope) return null;
-    bindLabels({ owners: scope.ownerIds(), names }, scope.bind, fresh);
-    return scope.passThrough();
-  }
-
+  // `addLabel` VALIDATES and `dropLabel` does not, which is the reference's own asymmetry rather than an
+  // oversight here: a name being added becomes a stored label and goes through `ElementHelper`, while a
+  // name being removed is only ever COMPARED against the ones already stored — an invalid one simply
+  // matches nothing, which is the same no-op `dropLabel("xyz")` already is. So `addLabel` reads its
+  // arguments through `mutationLabelMembers` alone, which judges every constant, and `dropLabel` through
+  // `mutationLabelNames`, which judges none.
   const members = mutationLabelMembers(step, child);
-  if (!members) return null;
+  if (!members?.length) return null;
   const scope = labelMutationScope(input, fresh);
   if (!scope) return null;
+  if (members.every((member) => typeof member === 'string')) {
+    bindLabels({ owners: scope.ownerIds(), names: members as readonly string[] }, scope.bind, fresh);
+    return scope.passThrough();
+  }
   const { site, targets } = ownerSite(scope.owners, 'vertex', aliases, fresh);
   const resolved = resolvedNames(members, site, child, scope.guard, fresh, members.length > 1 ? ADD_LABEL_MEMBER_NAME : ADD_LABEL_NAME);
   if (!resolved) return null;
@@ -2398,35 +2451,28 @@ export function elementAddLabel(
 }
 
 /**
- * `addLabel`'s arguments as label MEMBERS when at least one is a body only the run can resolve — or
- * `null` for a body the seam cannot normalize. A constant member is held to `resolveStringArguments`'
- * rules NOW, raising its sentence: a list beside other arguments, a null, a non-String.
+ * `addLabel`'s arguments as label MEMBERS — a constant name, or a body only the run can resolve — or
+ * `null` for a body the seam cannot normalize. THE one reading of `addLabel`'s grammar: every constant is
+ * held to `resolveStringArguments`' rules NOW (`constantName`), raising its sentence — a list beside other
+ * arguments, a null, a non-String (a typed `constant(UUID(…))` included), then `validateLabel`'s. An
+ * all-constant list is `elementAddLabel`'s constant statement; one holding a body, its per-traverser one.
  */
 function mutationLabelMembers(step: IRStep, child: ChildSeam): readonly (string | readonly IRStep[])[] | null {
   const args = step.args.map((a) => a.value);
+  const rules = args.length > 1 ? ADD_LABEL_MEMBER_NAME : ADD_LABEL_NAME;
   const members: (string | readonly IRStep[])[] = [];
   for (const value of args) {
-    const folded = isNested(value) ? constFromNested(value, child.sideEffects, child.params) : { has: true as const, value };
-    if (!folded.has) {
+    const folded = foldedName(value, child);
+    if (!folded) {
       const body = child.body((value as { readonly nested: unknown }).nested, 'child');
       if (!body?.length) return null;
       members.push(body);
-      continue;
-    }
-    const constant = folded.value;
-    if (Array.isArray(constant)) {
-      if (args.length > 1) throw new ValueParseError(ADD_LABEL_NESTED);
-      for (const name of constant) members.push(addLabelConstant(name));
-    } else members.push(addLabelConstant(constant));
+    } else if (Array.isArray(folded.value) && !rules.collection) {
+      folded.value.forEach((name, i) => members.push(constantName(name, folded.items[i] ?? null, ADD_LABEL_ITEM_NAME)));
+    } else members.push(constantName(folded.value, folded.vtype, rules));
   }
   return members;
 }
-
-const addLabelConstant = (value: unknown): string => {
-  if (value === null || value === undefined) throw new ValueParseError(ADD_LABEL_NAME.nullMessage);
-  if (typeof value !== 'string') throw new ValueParseError(`${ADD_LABEL_NAME.notString}${String(value)}`);
-  return validateLabel(value);
-};
 
 /**
  * BIND LABELS TO VERTICES, idempotently — the statement `addLabel` IS, factored out because a merge's
@@ -3142,45 +3188,19 @@ function creationTokens(
 }
 
 /**
- * A LABEL argument that is really a LITERAL, unwrapped — or `undefined` for a nested body this route
- * cannot fold.
- *
- * **`ConstantTraversal` is TinkerPop's own wrapper for a literal and every write host unwraps it
- * explicitly**, so folding one is the reference's behaviour rather than an approximation of it:
- * `AddVertexStep.java:253-259` ("Handles ConstantTraversal, which can be resolved to a" literal),
- * `AddEdgeStep.java:180-181`, and `AddPropertyStep.java:106-110`, whose comment states the rule
- * outright — *"Exclude ConstantTraversal which is used internally by TinkerPop to wrap literal
- * values."* A constant is therefore NOT a traversal value at all; it never reaches the reference's
- * per-traverser path.
- *
- * ONE authority for the question because three hosts ask it (`addV`'s labels, a merge map's
- * `T.label`, `addE`'s label), and a per-host copy is a per-host chance to fold differently. It is
- * deliberately the LABEL fold only: a label is always a string, so nothing here touches the typed
- * value channel (§6·7) the way a folded property VALUE would — that one owes an answer about which
- * vtype survives the fold, and owes it in its own change.
- *
- * `undefined` rather than `null` is the miss, because `null` is a legal folded value elsewhere and a
- * label list must not silently gain one.
- */
-function constLabelArg(value: unknown, child: ChildSeam): unknown {
-  if (!isNested(value)) return value;
-  const folded = constFromNested(value, child.sideEffects, child.params);
-  return folded.has ? folded.value : undefined;
-}
-
-/**
  * THE LABELS A CREATION GIVES ITS NEW ELEMENT, read from the query text — `addV`'s arguments, `addE`'s
  * one label, a merge map's `T.label` — or `null` for a form this route declines.
  *
- * Every argument that folds to a constant (`constLabelArg`) is validated NOW, and an invalid one RAISES
- * `validateLabel`'s sentence: `addV('')` is the reference's error, a property of the query text, not a
- * gap (matrix §17 "Error timing" — errors are eager). What is left is either a constant list (`const`) or
- * a list of MEMBERS some of which are bodies resolved per traverser (`runtime`, `resolveCreationLabels`).
+ * Every argument that folds to a constant (`foldedName`) is judged NOW by `constantName`, and an invalid
+ * one RAISES its sentence: `addV('')` and `addV(__.constant(UUID(…)))` are the reference's errors, properties
+ * of the query text, not gaps (matrix §17 "Error timing" — errors are eager). What is left is either a
+ * constant list (`const`) or a list of MEMBERS some of which are bodies resolved per traverser (`runtime`,
+ * `resolveCreationLabels`) under the SAME rules.
  *
  * Two forms, the reference's two paths through `AddVertexStep.map` (`step/map/AddVertexStep.java:140-182`):
  *
  *  - ONE argument is the single-label path — `TraversalUtil.apply`, then `validateLabel`. A sole LIST
- *    constant (`addV(__.constant(['a','b']))`) is a multi-label creation.
+ *    constant (`addV(__.constant(['a','b']))`) is a multi-label creation, each item a `T.label` String.
  *  - SEVERAL arguments are `resolveLabelCollection`: each member must be one scalar String, under that
  *    path's own sentences (a list member raises "must produce a scalar String when multiple traversals
  *    are provided"), collected into a SET.
@@ -3191,18 +3211,13 @@ function constLabelArg(value: unknown, child: ChildSeam): unknown {
  * label.
  */
 function creationLabels(args: readonly unknown[], child: ChildSeam): LabelArgs | null {
-  // A nested arg that does NOT fold keeps its original `{nested}` value rather than becoming a miss: the
-  // fold is an optimization for a literal in traversal clothing, and what it leaves behind is a RUNTIME
-  // label, not a decline.
-  const folded = args.map((arg) => constLabelArg(arg, child) ?? arg);
-  if (folded.length === 1 && Array.isArray(folded[0])) {
-    const named = folded[0] as unknown[];
-    if (named.some((arg) => typeof arg !== 'string')) return null;
-    return constantLabels(named as string[]);
-  }
+  const folded = args.map((arg) => foldedName(arg, child));
+  const sole = folded.length === 1 ? folded[0] : undefined;
+  if (sole && Array.isArray(sole.value)) return constantLabels(sole.value.map((name, i) => constantName(name, sole.items[i] ?? null, LABEL_ITEM_NAME)));
+  const rules = args.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME;
   const members: (string | readonly IRStep[])[] = [];
-  for (const value of folded) {
-    const member = labelMember(value, child, folded.length > 1);
+  for (const [i, value] of args.entries()) {
+    const member = labelMember(value, folded[i] ?? null, child, rules);
     if (!member) return null;
     members.push(member);
   }
@@ -3213,32 +3228,22 @@ function creationLabels(args: readonly unknown[], child: ChildSeam): LabelArgs |
  *  no collection arm. An ABSENT label (`addE()`) declines. */
 function labelSource(value: unknown, child: ChildSeam): LabelArgs | null {
   if (value === undefined) return null;
-  const member = labelMember(constLabelArg(value, child) ?? value, child, false);
+  const member = labelMember(value, foldedName(value, child), child, LABEL_NAME);
   if (!member) return null;
   return typeof member === 'string' ? constantLabels([member]) : { kind: 'runtime', members: [member] };
 }
 
-const constantLabels = (names: readonly string[]): LabelArgs => {
-  const labels = [...new Set(names)];
-  for (const label of labels) validateLabel(label);
-  return { kind: 'const', names: labels.map(text) };
-};
+/** Judged names (`constantName`) as a creation's constant labels, deduped as a SET. */
+const constantLabels = (names: readonly string[]): LabelArgs => ({ kind: 'const', names: [...new Set(names)].map(text) });
 
 /**
- * ONE label argument → a validated constant name, or the body that resolves it per traverser; `null` for
- * a body the seam cannot normalize. A constant the reference refuses RAISES its sentence — the
- * collection path's for a member of several (`resolveLabelCollection`), else `validateLabel`'s and the
- * non-String one `runtimeNameRows` raises at run time.
+ * ONE label argument → a judged constant name (`constantName` under `rules`), or the body that resolves it
+ * per traverser under the same rules (`runtimeNameRows`); `null` for a body the seam cannot normalize.
  */
-function labelMember(value: unknown, child: ChildSeam, collection: boolean): string | readonly IRStep[] | null {
-  if (isNested(value)) {
-    const body = child.body(value.nested, 'child');
-    return body?.length ? body : null;
-  }
-  if (collection && (value === null || value === undefined)) throw new ValueParseError(LABEL_COLLECTION_NULL);
-  if (collection && Array.isArray(value)) throw new ValueParseError(LABEL_COLLECTION_NESTED);
-  if (value !== null && value !== undefined && typeof value !== 'string') throw new ValueParseError(`${LABEL_NAME.notString}${String(value)}`);
-  return validateLabel(value);
+function labelMember(value: unknown, folded: FoldedName | null, child: ChildSeam, rules: NameRules): string | readonly IRStep[] | null {
+  if (folded) return constantName(folded.value, folded.vtype, rules);
+  const body = child.body((value as { readonly nested: unknown }).nested, 'child');
+  return body?.length ? body : null;
 }
 
 /** A creation's label arguments read from the text — constant names, or members resolved per traverser. */

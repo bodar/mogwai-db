@@ -65,7 +65,6 @@ describe('a computed creation label, per traverser', () => {
       ["g.V(1).addV(__.constant(null).fold().unfold())", 'Label can not be null'],
       ["g.addV('x').property('n','').addV(__.values('n'))", 'Label can not be empty'],
       ["g.addV('x').property('n','~h').addV(__.values('n'))", 'Label can not be a hidden key: ~h'],
-      ["g.V(1).addV(__.constant(null), __.constant('x'))", 'Label traversal must not produce null'],
       ["g.V(1).addV(__.values('age'), __.constant('x'))", 'Label traversal must produce a String, but got 29'],
     ] as const) {
       const store = seededStore();
@@ -81,6 +80,9 @@ describe('a computed creation label, per traverser', () => {
       ["g.addV(__.constant(''))", 'Label can not be empty'],
       ["g.addE('').from(__.V(1)).to(__.V(2))", 'Label can not be empty'],
       ["g.addV('~x')", 'Label can not be a hidden key: ~x'],
+      // a folded constant member is judged at compile time, beside a body too
+      ["g.V(1).addV(__.constant(null), __.constant('x'))", 'Label traversal must not produce null'],
+      ["g.V(1).addV(__.values('name'), __.constant(null))", 'Label traversal must not produce null'],
       ["g.addV(__.constant(['a','b']), __.constant('c'))", 'must produce a scalar String when multiple traversals are provided'],
       ["g.V(1).addV(__.values('name').fold(), __.constant('x'))", 'must produce a scalar String when multiple traversals are provided'],
     ] as const) {
@@ -140,5 +142,68 @@ describe('a computed addLabel(), per traverser', () => {
       ["g.V(1).addLabel('')", 'Label can not be empty'],
       ["g.V(1).addLabel(__.values('name').fold(), __.constant('x'))", 'must produce a scalar String when multiple traversals are provided'],
     ] as const) expect(() => compile(q, {}), q).toThrow(message);
+  });
+});
+
+// A CONSTANT label — a literal, `constant(…)`, a `withSideEffect` constant — is judged at compile time by
+// the one `constantName`, under the same rules a resolved name is guarded by at run time, and with the
+// TYPE the text states: a uuid, a datetime or a big decimal is not a String even where JS carries it as
+// one. Every refusal leaves the graph untouched (`labels()` / `count()` after the raise).
+describe('a constant label is judged like a resolved one', () => {
+  const UUID = "UUID('8f7c2b0a-6e1d-4c3b-9a5f-2d4e6f8a0b1c')";
+  const refuses = (q: string, message: string, after: string, want: unknown[]): void => {
+    const store = seededStore();
+    expect(() => run(store, q), q).toThrow(ValueParseError);
+    expect(() => run(store, q), q).toThrow(message);
+    expect(bagOf(values(run(store, after)) as string[]), q).toEqual(bagOf(want as string[]));
+  };
+
+  test('addLabel refuses a constant the reference refuses, and writes nothing', () => {
+    const notString = 'Traversal argument must produce a String or Collection<String>, but got: ';
+    for (const [q, message] of [
+      ['g.V(1).addLabel(__.constant(null))', 'Traversal argument must not produce null'],
+      ['g.V(1).addLabel(__.constant(5))', `${notString}5`],
+      [`g.V(1).addLabel(__.constant(${UUID}))`, `${notString}8f7c2b0a-6e1d-4c3b-9a5f-2d4e6f8a0b1c`],
+      ["g.V(1).addLabel(__.constant(datetime('2020-01-01T00:00:00Z')))", notString],
+      ['g.V(1).addLabel(__.constant(1.5m))', `${notString}1.5`],
+      ["g.withSideEffect('k', 5).V(1).addLabel(__.select('k'))", `${notString}5`],
+      // an item of the sole collection — `resolveStringArguments`' Collection arm
+      ["g.V(1).addLabel(__.constant(['a', 5]))", 'Traversal argument Collection must contain only Strings, but got: 5'],
+      ["g.V(1).addLabel(__.constant(['a', null]))", 'Traversal argument Collection must contain only Strings, but got: null'],
+      [`g.V(1).addLabel(__.constant(['a', ${UUID}]))`, 'Traversal argument Collection must contain only Strings'],
+      ["g.V(1).addLabel(__.constant(''))", 'Label can not be empty'],
+      // beside a per-traverser body, and at depth
+      ["g.V(1).addLabel(__.values('lang'), __.constant(null))", 'Traversal argument must not produce null'],
+      [`g.V(1).addLabel(__.values('name'), __.constant(${UUID}))`, notString],
+      ['g.V(1).local(__.addLabel(__.constant(5)))', `${notString}5`],
+      [`g.V(1).union(__.addLabel(__.constant(${UUID})))`, notString],
+      ['g.V(1).choose(__.constant(true), __.addLabel(__.constant(null)))', 'Traversal argument must not produce null'],
+    ] as const) refuses(q, message, 'g.V(1).labels()', ['person']);
+  });
+
+  test('a creation refuses a typed non-String constant label, and creates nothing', () => {
+    for (const [q, message] of [
+      [`g.addV(__.constant(${UUID}))`, 'Label traversal must produce a String, but got 8f7c2b0a-6e1d-4c3b-9a5f-2d4e6f8a0b1c'],
+      ['g.addV(__.constant(null))', 'Label can not be null'],
+      ["g.withSideEffect('k', 5).addV(__.select('k'))", 'Label traversal must produce a String, but got 5'],
+      [`g.V(1).addV(__.values('name'), __.constant(${UUID}))`, 'Label traversal must produce a String'],
+      // a sole label list reaches the graph as a `T.label` collection (`ElementHelper.getLabelsValue`)
+      [`g.addV(__.constant(['a', ${UUID}]))`, 'T.label collection must contain only Strings'],
+      ["g.addV(__.constant(['a', 5]))", 'T.label collection must contain only Strings'],
+    ] as const) refuses(q, message, 'g.V().count()', [6]);
+    refuses(`g.V(1).addE(__.constant(${UUID})).to(__.V(2))`, 'Label traversal must produce a String', 'g.E().count()', [6]);
+  });
+
+  test('a String constant still writes', () => {
+    expect(labelsOf("g.V(1).addLabel(__.constant(['a','b'])).labels()")).toEqual(['a', 'b', 'person']);
+    expect(labelsOf("g.V(1).addLabel(__.constant('q'), __.values('name')).labels()")).toEqual(['marko', 'person', 'q']);
+    expect(labelsOf("g.withSideEffect('k', 'w').V(1).addLabel(__.select('k')).labels()")).toEqual(['person', 'w']);
+    expect(labelsOf("g.addV(__.constant(['a','b'])).labels()")).toEqual(['a', 'b']);
+  });
+
+  test('an all-constant addLabel is the constant statement, whatever spelling it takes', () => {
+    const sqlOf = (q: string): string => JSON.stringify(compile(q, {}));
+    expect(sqlOf("g.V(1).addLabel(__.constant('a'), __.constant('b'))")).toBe(sqlOf("g.V(1).addLabel('a','b')"));
+    expect(sqlOf("g.V(1).addLabel(__.constant(['a','b']))")).toBe(sqlOf("g.V(1).addLabel('a','b')"));
   });
 });
