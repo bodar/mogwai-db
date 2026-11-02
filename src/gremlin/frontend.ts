@@ -82,8 +82,9 @@ export interface Arg {
   readonly value: ArgValue;
   /** The canonical Gremlin type of `value` as its carrying channel declared it — a parsed literal's
    *  subtype (numeric suffix, string, boolean, datetime, uuid, list, map) or, for a bound-param
-   *  reference, the wire DataType the client serialized. `null` when the channel said nothing (the
-   *  JSON request path), so the write seam infers from the JS value. Read by bare `asNumber()`/
+   *  reference, the wire DataType the client serialized — or, where the channel declared none (the JSON
+   *  request path), the type its JS value spells (`compilePlan` → `declaredParamTypes`). `null` only
+   *  where nothing can be said (a null, a plain object). Read by bare `asNumber()`/
    *  `asDate()` and by the write seam (to store `vertex_properties`/`edge_properties.vtype`). */
   readonly type: TypeNode | null;
   /** The WIRE PARAMETER NAME (`$x` in the `bindings`/`parameters` map), TinkerPop's `GValue.name`:
@@ -639,8 +640,8 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
     const name = node.getText();
     if (!(name in params)) throw new ValueParseError(`Unbound parameter '${name}'`);
     // The param's canonical type is the wire DataType the client serialized it as
-    // (paramTypes) — the truth a JS value can't carry; null when the channel said
-    // nothing (JSON request path), so the write seam infers from the JS value. The NAME rides
+    // (paramTypes) — the truth a JS value can't carry; where the channel said nothing (JSON
+    // request path) `compilePlan` has completed it from the JS value (`declaredParamTypes`). The NAME rides
     // alongside (the Arg's name): the value is still resolved into `out` for every consumer, but a
     // lowering can now see it was a user PARAMETER and bind it, rather than inline it as a constant.
     emit(params[name], paramTypes[name] ?? null, name); return;

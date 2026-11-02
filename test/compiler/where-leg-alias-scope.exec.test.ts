@@ -17,6 +17,7 @@
 import { test, expect, describe } from 'bun:test';
 import { seededStore, storeSeededWith, run, bare } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
+import { exec } from '../support/executor.ts';
 
 const s = seededStore();
 const count = (g: string): number => bare(run(s, g))[0].v;
@@ -235,4 +236,33 @@ describe('multiplicity over self-loops and parallel edges', () => {
     expect(at("g.V().as('b').values('name').as('n').select('b').out().as('a').where(__.select('a').in().values('name').where(P.eq('n'))).count()")).toBe(4));
   test('a movement-headed body counting its label matches', () =>
     expect(at("g.V().as('b').out().as('a').where(__.in().where(P.eq('b')).count().is(2)).count()")).toBe(2));
+});
+
+// AN UNTYPED PARAMETER IS TYPED BY ITS VALUE. The JSON request channel (and an Executor caller passing no
+// types) declares no parameter type, and an untyped JS `true` reached SQLite as the INTEGER `1`, so every
+// reader downstream saw an Integer and ordered it against the ages: `{x: true}` counted 4. The compile seam
+// now completes the parameter types from the JS value (`declaredParamTypes`), so a Boolean label answers as
+// the literal `inject(true)` does — `GremlinValueComparator` never orders a Boolean against a Number
+// (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java).
+describe('an untyped (JSON-channel) parameter label', () => {
+  const ex = exec(s);
+  const json = async (g: string, params: Record<string, unknown>) =>
+    JSON.parse(await ex.jsonAsync(g, params)).map((v: any) => v?.['@value'] ?? v);
+  const AGE = "g.inject(x).as('a').V()";
+  test('a Boolean is never ordered against a Number', async () => {
+    for (const x of [true, false]) {
+      const literal = await json(`g.inject(${x}).as('a').V().values('age').where(P.gte('a')).count()`, {});
+      expect(await json(`${AGE}.values('age').where(P.gte('a')).count()`, { x })).toEqual(literal);
+      expect(literal).toEqual([0]);
+    }
+    expect(await json(`${AGE}.local(__.values('age').where(P.gte('a'))).count()`, { x: true })).toEqual([0]);
+    expect(await json(`${AGE}.as('v').values('age').where(P.gt('a')).select('v').values('name')`, { x: true })).toEqual([]);
+  });
+  test('a Boolean does not equal 1', async () =>
+    expect(await json("g.inject(x).as('a').constant(1).where(P.eq('a'))", { x: true })).toEqual([]));
+  test('numbers and strings still compare', async () => {
+    expect(await json(`${AGE}.values('age').where(P.gte('a')).count()`, { x: 30 })).toEqual([2]);
+    expect(await json(`${AGE}.values('age').where(P.eq('a')).count()`, { x: 29 })).toEqual([1]);
+    expect(await json(`${AGE}.values('name').where(P.eq('a'))`, { x: 'josh' })).toEqual(['josh']);
+  });
 });

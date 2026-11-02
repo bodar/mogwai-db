@@ -447,6 +447,38 @@ export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): Canonica
 }
 
 /**
+ * A parameter's TYPE where its channel declared none (a JSON request, an `Executor` caller that passed no
+ * types) — the type the JS value itself spells, recursively through a list/set/map, by the same inference
+ * the write seam has always applied (`gremlinTypeOf`). Without it an untyped `true` reached the store as
+ * SQLite's INTEGER `1` with no tag, so every later reader saw an Integer: `g.inject(x).as('a')
+ * .V().values('age').where(P.gte('a'))` with `{x: true}` counted four ages where the literal `inject(true)`
+ * — and the reference, which never orders a Boolean against a Number — counts none. A declared type wins
+ * (`paramTypes` is the wire's truth); `null` where the value spells nothing (null, a plain object).
+ */
+export function declaredTypeOf(jsValue: unknown): TypeNode | null {
+  if (Array.isArray(jsValue) || jsValue instanceof Set)
+    return { t: Array.isArray(jsValue) ? 'list' : 'set', items: [...jsValue].map(declaredTypeOf) };
+  if (jsValue instanceof Map) {
+    const entries: Record<string, MapEntryType | null> = {};
+    for (const [k, v] of jsValue) entries[mapSlot(k)] = { key: declaredTypeOf(k), value: declaredTypeOf(v) };
+    return { t: 'map', entries };
+  }
+  return gremlinTypeOf(jsValue);
+}
+
+/** `paramTypes` completed with `declaredTypeOf` for every parameter its channel left untyped — the ONE
+ *  place a parameter's type is settled, so no reader downstream sees an untyped JS value. */
+export function declaredParamTypes(params: Record<string, unknown>, paramTypes: Record<string, TypeNode>): Record<string, TypeNode> {
+  const out: Record<string, TypeNode> = { ...paramTypes };
+  for (const [k, v] of Object.entries(params)) {
+    if (out[k] != null) continue;
+    const t = declaredTypeOf(v);
+    if (t != null) out[k] = t;
+  }
+  return out;
+}
+
+/**
  * THE CLASS OF AN UNTYPED JS NUMBER — what a value with no declared type (a JSON-request parameter, a
  * typeless client's binding) IS, decided the way the reference GLV decides it when it serializes the same
  * number (`vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/structure/io/binary/internals/NumberSerializationStrategy.js:77-95`,
