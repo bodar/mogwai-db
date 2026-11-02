@@ -1,7 +1,7 @@
 export const meta = {
   name: 'execute-workflow',
   description: 'Drive a plan doc on trunk in rounds: scout + sympathy plan review, then per item build -> two-lens review -> land serially, deferring what needs prerequisites; proposals feed the next round',
-  whenToUse: 'The orchestrated alternative to the /execute-plan skill. args: {plan: "docs/…md", section?: "§10", fixRounds?: 3, maxItems?: <hard ceiling per round>, maxRounds?: 8}. Batch size and whether to start another round are judged by a steward from convergence, not fixed.',
+  whenToUse: 'The orchestrated alternative to the /execute-plan skill. args: {plan: "docs/…md", section?: "§10", fixRounds?: 3, maxItems?: <hard ceiling per round>, maxRounds?: 8}. Batch size and whether to start another round are judged by a steward from convergence, not fixed. Graceful stop: `touch .git/workflow-stop` — in-flight items finish and land, no new build starts, the run ends at the next steward.',
   phases: [
     { title: 'Scout', detail: 'verify plan items against current code, draft a design per item' },
     { title: 'Plan review', detail: 'one sympathy/substrate reviewer: revise designs, order by prerequisite, defer what cannot be built yet' },
@@ -18,6 +18,8 @@ if (!args || !args.plan) throw new Error('execute-workflow needs args.plan (path
 // No machine paths: the main checkout is whatever `git worktree list` names first, which holds from
 // the main checkout and from every linked worktree alike. Agents expand it in their shell commands.
 const REPO = args.repo || '$(git worktree list --porcelain | sed -n 1s/^worktree.//p)'
+// Graceful stop: `touch .git/workflow-stop` in the main checkout. In-flight items finish (fix, land); no new build starts; the steward ends the run and removes the file.
+const STOP_FILE = `$(git -C ${REPO} rev-parse --path-format=absolute --git-common-dir)/workflow-stop`
 const PLAN = args.plan
 const SECTION = args.section ? ` (work ${args.section} only)` : ''
 // Batch size and round count are a JUDGEMENT made by the steward after each round; these are only
@@ -152,7 +154,7 @@ YOUR ITEM: ${it.title}
 Approved design (from the plan reviewer — follow it, or say why it is wrong): seam=${it.seam}; approach=${it.approach}; sympathy=${it.sympathy}${it.review_notes ? `; reviewer notes=${it.review_notes}` : ''}
 Witnesses: ${JSON.stringify(it.witnesses || [])}
 You are in an ISOLATED worktree. Provision with \`mise run submodule\` / \`mise run install\` if needed. \`git checkout -b wf/${it.key}-${round}-${n} ${base}\` and report the sha you branched from as \`base\`. Never merge: history stays linear.
-${issues ? `A reviewer's CONFIRMED blockers on the previous attempt:\n${JSON.stringify(issues, null, 1)}\nFix each one generically, and look for siblings with the same root cause. If one cannot be fixed without missing substrate, narrow to a clean decline instead.` : 'First re-probe the witnesses. If the approved design turns out to need a prerequisite that does not exist, STOP: return status deferred with `needs` (and `needs_item` if one of this round\'s items is it). Do not shoehorn it in.'}
+${issues ? `A reviewer's CONFIRMED blockers on the previous attempt:\n${JSON.stringify(issues, null, 1)}\nFix each one generically, and look for siblings with the same root cause. If one cannot be fixed without missing substrate, narrow to a clean decline instead.` : `FIRST: if \`test -e ${STOP_FILE}\` succeeds, a graceful stop was requested — do nothing and return status blocked with needs "stop requested". Otherwise first re-probe the witnesses. If the approved design turns out to need a prerequisite that does not exist, STOP: return status deferred with \`needs\` (and \`needs_item\` if one of this round's items is it). Do not shoehorn it in.`}
 Build at depth in the seam, probe a few deeper compositions, add tests the ladder expects. Before committing, run the SCALING PROBE on the witnesses and the deeper compositions; if a ratio is super-linear, fix the shape (an indexed or positional join, one MATERIALIZED relation) — or, if that needs substrate that does not exist, return deferred naming it rather than landing a quadratic route. Report the timings in \`scaling\`. \`mise run ci\` green, commit. Do not push.`
 
       let b = await agent(buildPrompt('HEAD', null, 0), { label: `build:${it.key}`, phase: 'Build', isolation: 'worktree', schema: BUILD })
@@ -247,7 +249,7 @@ ROUND RESULTS:\n${JSON.stringify({ results, notBuilt: notBuilt.map((d) => ({ key
 
   phase('Steer')
   const s = await agent(`${PRINCIPLES}
-You are the STEWARD of a multi-round run over ${PLAN}${SECTION}. Decide whether another round is worth it, and shape it. Read-only.
+You are the STEWARD of a multi-round run over ${PLAN}${SECTION}. Decide whether another round is worth it, and shape it. Read-only, with one exception: if \`test -e ${STOP_FILE}\` succeeds, a graceful stop was requested — \`rm ${STOP_FILE}\` and return continue=false, reason "stop requested", without further analysis.
 Read the plan's "Next round" sections (newest first) and §10's open items, then judge the TREND across rounds from these tallies:
 ${JSON.stringify(allRounds.map((r) => ({ round: r.round, ...r.tally })), null, 1)}
 CONVERGING looks like: what lands closes more than review and the sweep add (weigh majors and confirmed wrong answers heavily, minors and reuse proposals lightly); prerequisites land and the items waiting on them become unblocked; parked items stop recurring; the confirmed-wrong-answers-on-trunk list shrinks.
