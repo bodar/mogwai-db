@@ -759,12 +759,12 @@ Nothing was deferred whole. Branches left on purpose: `wf/s6-map-first-select-sc
 `3c7ba931` with a conflict resolution (imports in `reduction.ts`; both-sides-added in `write.ts`). Their content is on
 trunk; they hold no resume point.
 
-**0. 🔴 TRUNK CI IS RED — fix FIRST.** GitHub CI failed on `4a0530df` (M3) and `a33d7983` (S6), test + L8 brackets:
-`test/compiler/writes.exec.test.ts` "a nullable body that draws is evaluated once" times out at bun's 5,000 ms (6.0 s
-on the runner). It builds `seededStore()` 40 times in one test; green locally, too slow on CI. Not a wrong answer.
-Fix the test, not the timeout: fewer iterations (the property it pins — one draw shared by every statement — fails on
-most single runs), or one store reset per iteration, or a per-test timeout with a comment saying why. `4c565396`'s run
-was still in progress when this was written; expect the same failure.
+**0. ✅ TRUNK CI RED — FIXED (`bdfa6f0c`).** "a nullable body that draws is evaluated once" in
+`test/compiler/writes.exec.test.ts` timed out on CI (40 × `seededStore()`). Landed: the witness is now ONE
+multi-traverser write over one store, so a single run exercises the evaluate-once property across many traversers
+instead of building 40 stores. Follow-up: in the write-body `V()` re-source lowering, apply the label filter before
+the encounter window so the cost is linear (traversers × matching vertices). Separately, `local()`/`flatMap()`
+wrapping `V().sample(1)`, and `property(...max())` over a re-sourced `V()`, raise `UnsupportedTraversal`.
 
 **Parked residuals (each with its prerequisite, ordered before what it unblocks):**
 - **S6's multi-driver `inject(maps).mergeV().option(Merge.onCreate, __.select('k'))`** — prerequisite R10/F7 is now
