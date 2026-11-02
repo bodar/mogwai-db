@@ -324,13 +324,45 @@ export const presenceDischarged = <H extends ChildHost>(host: H): H =>
 /** A host that may be ABSENT on some rows — its `hostPresence` is not the constant truth. */
 export const mayBeAbsent = (host: ChildHost | Subject): boolean => presentOfHost(host) !== 'always';
 
-/** The presence of a CASE (or any choice) over arms: every arm `'always'` ⟹ `'always'`; any arm
- *  `'unknown'` ⟹ `'unknown'`; otherwise the chosen value's nullness. */
+/** The presence of arms whose value is one value's nullness: every arm `'always'` ⟹ `'always'`; any arm
+ *  `'unknown'` ⟹ `'unknown'`; otherwise the value's nullness. A stated arm answers `'unknown'` here — a
+ *  productive null under it would read as absent — so a CHOICE between arms goes through
+ *  `choicePresence`, which names each arm's predicate. */
 export const meetPresence = (arms: readonly Presence[]): Presence =>
   arms.every((p) => p === 'always') ? 'always' : arms.some((p) => p === 'unknown') ? 'unknown'
-    // A stated predicate is not the chosen value's nullness — a productive null under it would read as
-    // absent — and a choice that names its arms' predicates is the caller's to build (`reSourcedUnder`).
     : arms.some((p) => typeof p === 'object') ? 'unknown' : 'value-nullness';
+
+/** A constant FALSE — the slot a `'value-nullness'` arm takes in a choice's presence `CASE`, where the
+ *  outer `orValue` (the CHOSEN arm's value is the choice's value) answers for it. SQLite folds it. */
+const NEVER_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(0) };
+
+/** One arm of a CHOICE: taken where `when` holds (the first arm that does), with its own presence. */
+export interface ChoiceArm { readonly when: Expr; readonly present: Presence }
+
+/**
+ * THE PRESENCE OF A CHOICE — `CASE WHEN g1 THEN … ELSE … END` over `arms`, `otherwise` the `ELSE` arm's —
+ * built from the SAME guards as the value's `CASE`, so the two cannot disagree on which arm was chosen. The
+ * chosen arm's productivity is the whole's: a productive null in it keeps its row and an unproductive chosen
+ * arm drops it (`TraversalMapStep` over `BranchStep`'s chosen branch,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java`).
+ *
+ * With no STATED arm this is `meetPresence` — the chosen value's nullness, or `'always'`. With one, each arm
+ * fills its slot of a presence `CASE`: a stated arm its `when`, an `'always'` arm `ALWAYS_PRODUCTIVE`, a
+ * `'value-nullness'` arm FALSE — and `orValue` is then set, because the choice's value IS the chosen arm's,
+ * so "the value is non-null" answers for that arm (and for an arm that itself carries `orValue`). `orValue`
+ * is set ONLY where an arm needs it, so a choice of stated/`'always'` arms spends no `value IS NOT NULL`
+ * term; every slot the same expression folds to it.
+ */
+export const choicePresence = (arms: readonly ChoiceArm[], otherwise: Presence): Presence => {
+  const all = [...arms.map((a) => a.present), otherwise];
+  if (!all.some((p) => typeof p === 'object')) return meetPresence(all);
+  if (all.some((p) => p === 'unknown')) return 'unknown';
+  const slots = all.map((p): Expr => typeof p === 'object' ? p.when : p === 'always' ? ALWAYS_PRODUCTIVE : NEVER_PRODUCTIVE);
+  const when: Expr = slots.every((s) => s === slots[0]) ? slots[0]!
+    : { kind: 'case', whens: arms.map((a, i) => [a.when, slots[i]!] as const), else: slots.at(-1)! };
+  const orValue = all.some((p) => p === 'value-nullness' || (typeof p === 'object' && p.orValue));
+  return orValue ? { when, orValue: true } : { when };
+};
 
 /**
  * WHICH normalization a nested argument gets, and the two are not interchangeable.

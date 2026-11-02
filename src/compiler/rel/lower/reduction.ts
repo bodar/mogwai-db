@@ -1,45 +1,45 @@
-import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, presenceFenced, jsonField, jsonOf, meta, payloadCols, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
+import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
+import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
+import * as make from '../../../rel/factory.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, forEachRel } from '../../../rel/walk.ts';
-import type { Elem } from '../../elem.ts';
-import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
-import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
-import { someStepDeep } from '../../ir/walk.ts';
-import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
-import { normalize } from '../../ir/passes.ts';
-import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
-import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
-import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
-import { constLit, declaredScalarType } from '../const.ts';
-import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
-import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
+import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, presenceDischarged, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, statedPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
-import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
-import { BaseGraph, type GraphSource } from '../source.ts';
-import { recordNode } from '../record.ts';
-import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
-import { REL_PROJECTORS, projectorValue } from '../projector.ts';
-import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
-import { isReducer, REDUCED_TYPE } from '../reducer.ts';
-import { LIST_COL, correlatedListMembers, firstScalarMember } from '../list.ts';
-import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
-import { edgeEndpoint } from '../element.ts';
-import { propertyReadOf } from '../property.ts';
-import { PATH_CHANNEL, PATH_COL, appendValuePosition, extendPath, pathCarried, subPathMembers } from '../path.ts';
-import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, inOrderFreeBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
-import { movement } from './movement.ts';
-import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
-import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
-import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
-import { sackTagOf } from '../sack.ts';
+import type { Elem } from '../../elem.ts';
+import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
+import { normalize } from '../../ir/passes.ts';
+import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
+import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
+import { someStepDeep } from '../../ir/walk.ts';
+import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
+import { constLit, declaredScalarType } from '../const.ts';
+import { edgeEndpoint } from '../element.ts';
+import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
+import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
+import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
+import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
+import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, subPathMembers } from '../path.ts';
+import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { projectorValue, REL_PROJECTORS } from '../projector.ts';
+import { propertyReadOf } from '../property.ts';
+import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
+import { recordNode } from '../record.ts';
+import { isReducer, REDUCED_TYPE } from '../reducer.ts';
+import { sackTagOf } from '../sack.ts';
+import { BaseGraph, type GraphSource } from '../source.ts';
+import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, sameFraming } from './branch.ts';
+import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
+import { movement } from './movement.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -1365,19 +1365,33 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   const guard: { readonly when: Expr; readonly cv: ChildValue } | null =
     unproductiveCV && choice.present !== 'always'
       ? { when: { kind: 'unary', op: 'not', arg: choicePresent }, cv: unproductiveCV } : null;
-  const branches = [...(guard ? [guard] : []), ...keyed];
+  return scalarChoice([...(guard ? [guard] : []), ...keyed], elseCV);
+}
 
+/**
+ * A per-row CHOICE over scalar arms → ONE `ChildValue`: the value `CASE`, the type (a shared STATIC type
+ * stays static — one column; otherwise a per-row `vtype` `CASE` that follows the same branch, because the
+ * type must track WHICH arm the value came from) and the presence (`choicePresence`) are all built HERE,
+ * from ONE `branches` array, so the three cannot pick different arms. The `if`/`else` choose and the option
+ * map both end here; `scalarCoalesceChild` is the `COALESCE` twin.
+ *
+ * Each guard is spelled once per CASE that needs it — at most three, and the presence `CASE` only where an
+ * arm STATES its presence (a re-sourced `__.V()…` arm, an uncorrelated scalar SQLite evaluates once).
+ */
+function scalarChoice(branches: readonly { readonly when: Expr; readonly cv: ChildValue }[], elseCV: ChildValue): ChildValue {
   const value: Expr = { kind: 'case', whens: branches.map((b) => [b.when, b.cv.expr] as const), else: elseCV.expr };
   const all = [...branches.map((b) => b.cv), elseCV];
-  const present = meetPresence(all.map((cv) => cv.present));
+  const present = choicePresence(branches.map((b) => ({ when: b.when, present: b.cv.present })), elseCV.present);
+  // A `'first'` arm (an unordered re-sourced body) is the first of several — the choice is too.
+  const yields = all.some((cv) => cv.yields === 'first') ? 'first' : 'one';
 
   const staticTypes = all.map((cv) => cv.framing.kind === 'scalar' && cv.framing.result === undefined && !cv.vtype ? cv.framing.type : null);
   if (staticTypes.every((t): t is ScalarType => t !== null)) {
     const met = meetScalarTypes(staticTypes);
-    if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
+    if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields };
   }
   const vtype: Expr = { kind: 'case', whens: branches.map((b) => [b.when, armTag(b.cv)] as const), else: armTag(elseCV) };
-  return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
+  return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields };
 }
 
 function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1405,21 +1419,7 @@ function scalarChooseChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: 
   if (!thenCV || thenCV.framing.kind !== 'scalar' || thenCV.framing.result === 'value') return null;
   if (!elseCV || elseCV.framing.kind !== 'scalar' || elseCV.framing.result === 'value') return null;
 
-  const value: Expr = { kind: 'case', whens: [[pred, thenCV.expr]], else: elseCV.expr };
-  // The chosen arm's productivity is the whole's: both always-productive ⟹ always; else the value's nullness.
-  const present = meetPresence([thenCV.present, elseCV.present]);
-
-  // TYPE — a shared STATIC type stays static (one column); otherwise a per-row `vtype` whose value
-  // follows the SAME branch as the value (a `CASE`, because the type must track WHICH arm the value came
-  // from). Mirrors `scalarCoalesceChild`'s tail, with `CASE` in place of `COALESCE`.
-  const arms = [thenCV, elseCV];
-  const staticTypes = arms.map((a) => a.framing.kind === 'scalar' && a.framing.result === undefined && !a.vtype ? a.framing.type : null);
-  if (staticTypes.every((t): t is ScalarType => t !== null)) {
-    const met = meetScalarTypes(staticTypes);
-    if (met.kind === 'static') return { expr: value, framing: { kind: 'scalar', type: met }, present, yields: 'one' };
-  }
-  const vtype: Expr = { kind: 'case', whens: [[pred, armTag(thenCV)]], else: armTag(elseCV) };
-  return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
+  return scalarChoice([{ when: pred, cv: thenCV }], elseCV);
 }
 
 /** `by(__.coalesce(A, …, Z))` over SCALAR arms → one SQL `COALESCE(...)`. The SCALAR twin of the
@@ -1533,15 +1533,11 @@ function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx,
   }
   const empty = reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh);
   if (!empty || !sameFraming(empty.framing, value.framing) || !value.vtype !== !empty.vtype) return null;
-  // The presence is chosen per row exactly as the value is: where either arm STATES its own, the choice
-  // of the two predicates; otherwise the meet, which is the chosen value's nullness.
-  const stated = typeof value.present === 'object' || typeof empty.present === 'object';
-  const whenFull = presenceOf(value.present, value.expr), whenEmpty = presenceOf(empty.present, empty.expr);
-  if (stated && (!whenFull || !whenEmpty)) return null;
+  // The presence is chosen per row exactly as the value is — a choice between the two arms (`choicePresence`).
   return {
     expr: caseWhen(present, value.expr, empty.expr), framing: value.framing,
     ...(value.vtype && empty.vtype ? { vtype: caseWhen(present, value.vtype, empty.vtype) } : {}),
-    present: stated && whenFull && whenEmpty ? { when: caseWhen(present, whenFull, whenEmpty) } : meetPresence([value.present, empty.present]),
+    present: choicePresence([{ when: present, present: value.present }], empty.present),
     yields: value.yields === 'one' && empty.yields === 'one' ? 'one' : 'first',
   };
 }

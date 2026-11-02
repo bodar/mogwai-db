@@ -10,7 +10,7 @@
 // value, of a member of the body's stream, with that member's type — never a particular member (L8).
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare, bagOf } from '../support/harness.ts';
-import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
+import { UnsupportedTraversal, compile } from '../../src/compiler/compiler.ts';
 
 const s = seededStore();
 const rows = (g: string): any[] => bare(run(s, g));
@@ -119,4 +119,64 @@ describe('a SOURCE union arm starts fresh', () => {
     expect(rows('g.withSack(1).union(__.V().sack())').map((r) => r.v)).toEqual([1, 1, 1, 1, 1, 1]));
   test('a host-state-free re-source under a sack host still answers', () =>
     oneRepeated("g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().values('name').order().limit(1))", 6, ['josh'], 'string'));
+});
+
+// A CHOOSE with a re-sourced arm: the arm STATES its presence (an uncorrelated EXISTS over the one fenced
+// row it read), so the choice's presence is a CASE over the SAME guards as its value — `choicePresence`
+// (`rel/child.ts`), built with the value and type CASEs from one branches array (`scalarChoice`,
+// `rel/lower/reduction.ts`). The chosen arm decides: a productive null keeps its row, an unproductive
+// chosen arm drops it (TraversalMapStep over BranchStep's chosen branch,
+// vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java).
+const vals = (g: string): unknown[] => rows(g).map((r) => r.v);
+/** The hosts in a pinned order (josh, lop, marko, peter, ripple, vadas) — a per-row map keeps it. */
+const O = "g.V().order().by('name')";
+describe('a choose whose arm is a re-sourced value', () => {
+  const PERSON = "__.hasLabel('person')";
+  const FIRST_NAME = "__.V().values('name').order().limit(1)";
+  test('an ordered first value vs a constant', () =>
+    expect(vals(`${O}.map(__.choose(${PERSON}, ${FIRST_NAME}, __.constant('x')))`)).toEqual(['josh', 'x', 'josh', 'josh', 'x', 'josh']));
+  test('a reduced value vs a constant', () =>
+    expect(vals(`${O}.map(__.choose(${PERSON}, __.V().values('age').sum(), __.constant(0)))`)).toEqual([123, 0, 123, 123, 0, 123]));
+  test('a productive null keeps its row; an empty chosen arm drops it', () =>
+    expect(vals(`${O}.map(__.choose(${PERSON}, __.V().constant(null).limit(1), __.V(99).values('name')))`)).toEqual([null, null, null, null]));
+  test('where() keeps exactly the rows whose chosen arm produced', () => {
+    const W = `__.choose(${PERSON}, __.V().constant(null).limit(1), __.V(99).values('name'))`;
+    expect(bagOf(vals(`g.V().where(${W}).values('name')`))).toEqual(bagOf(['marko', 'vadas', 'josh', 'peter']));
+    expect(bagOf(vals(`g.V().not(${W}).values('name')`))).toEqual(bagOf(['lop', 'ripple']));
+  });
+  test('an option map with a re-sourced option', () =>
+    expect(vals(`${O}.map(__.choose(__.values('name')).option('marko', ${FIRST_NAME}).option(Pick.none, __.constant('x')).option(Pick.unproductive, __.constant('y')))`))
+      .toEqual(['x', 'x', 'josh', 'x', 'x', 'x']));
+  test('a T-keyed option map', () =>
+    expect(vals(`${O}.map(__.choose(__.label()).option('person', ${FIRST_NAME}).option(Pick.none, __.constant('x')))`))
+      .toEqual(['josh', 'x', 'josh', 'josh', 'x', 'josh']));
+  test('a correlated movement guard, spelled in each CASE, picks the same arm in all three', () =>
+    expect(vals(`${O}.map(__.choose(__.out().count().is(P.gt(1)), ${FIRST_NAME}, __.constant('x')))`)).toEqual(['josh', 'x', 'josh', 'x', 'x', 'x']));
+  test('a value-nullness arm beside a stated one drops only its own null', () =>
+    expect(bare(run(s, `g.V().map(__.choose(${PERSON}, ${FIRST_NAME}, __.values('age'))).fold()`))[0].list).toBe('["josh","josh","josh","josh"]'));
+  test('a nested choose', () =>
+    expect(bagOf(vals(`${O}.map(__.choose(${PERSON}, __.choose(__.has('age', P.gt(30)), ${FIRST_NAME}, __.V(99).values('name')), __.constant('x')))`)))
+      .toEqual(bagOf(['x', 'josh', 'x', 'josh'])));
+  test('under coalesce, an empty chosen arm falls through', () =>
+    expect(vals(`${O}.map(__.coalesce(__.choose(${PERSON}, __.V(99).values('name'), __.constant('x')), __.constant('c')))`)).toEqual(['c', 'x', 'c', 'c', 'x', 'c']));
+  test('as an order key', () =>
+    expect(vals(`g.V().order().by(__.choose(${PERSON}, __.V().values('age').sum(), __.constant(0)), desc).by('name').values('name')`))
+      .toEqual(['josh', 'marko', 'peter', 'vadas', 'lop', 'ripple']));
+  test('over a possibly-absent label host', () =>
+    expect(bagOf(vals(`g.V().optional(__.out().as('a')).map(__.choose(${PERSON}, __.select('a').V().values('name').order().limit(1), __.constant('x')))`)))
+      .toEqual(bagOf(['josh', 'josh', 'x', 'x', 'x', 'x', 'x', 'x'])));
+  test('an unproductive choice over an element host still declines (its pass-through is the vertex)', () =>
+    expect(() => run(s, `g.V().map(__.choose(__.values('name')).option('marko', ${FIRST_NAME}).option(Pick.none, __.constant('x')))`)).toThrow(UnsupportedTraversal));
+});
+
+// `reSourcedUnder`'s case 3 — the body over the graph vs over an empty input — chooses its presence through
+// the same `choicePresence`. Both of its arms STATE their presence, so it spends no `value IS NOT NULL` term:
+// the presence column is the CASE of the two EXISTS, and the filter reads it alone.
+test('a re-sourced body under an absent-able host: a CASE of the two stated presences, no value term', () => {
+  const g = "g.V().optional(__.out().as('a')).map(__.select('a').V().count().choose(__.is(0), __.constant(null), __.constant(1)))";
+  expect(bagOf(vals(g))).toEqual(bagOf([1, 1, 1, 1, 1, 1, null, null, null]));
+  const plan = compile(g, {});
+  if (plan.kind !== 'read') throw new Error('expected read plan');
+  expect(plan.sql).toMatch(/ THEN EXISTS \(SELECT 1 AS one FROM r\d+ rfm\d+\) ELSE EXISTS \(SELECT 1 AS one FROM r\d+ rfm\d+\) END AS mpw /);
+  expect(plan.sql).toMatch(/WHERE mc\d+\.mpw$/);
 });
