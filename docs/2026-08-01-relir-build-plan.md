@@ -774,7 +774,11 @@ Nothing was deferred or parked, and no round branch holds work that is not on tr
   false for `count().is(P.gt(0))`), and gate the by()/operand VALUE on host presence once, in
   `byProjection`/`productivityFilter`, not in each arm. Land this before R1–R3. They then reduce to witnesses plus
   the one-line `aliasElementHost` swap.
-- **S5. One "labels live at this position" judgement for every route that cannot carry the outer path.** Three
+- ✅ **LANDED (b73c4933, 2026-11-02), folding R4, R5, R6 and reuse proposal 2.** One may-direction `pathLabelsAt`
+  in `src/compiler/ir/labels.ts` (bound at any depth, cleared only by a top-level `consumesPath` step) drives the
+  source-union guard; `legCorrelated` reads `scopeKeyReads` over the lifted right walk and declines on any live outer
+  label; the record where guard reads `scopeKeyReads`. Remains: nothing.
+  **S5. One "labels live at this position" judgement for every route that cannot carry the outer path.** Three
   follow-ups (R4, R5, R6) are one class: a route with no path decides which labels a read needs, and decides wrong.
   - Source-union `rootedLabelsOut` clears its set at every `isStreamBarrier`. It should clear only at a REDUCING
     barrier (`CHANNEL_BARRIER_POLICY` alias=consumed). `order`/`dedup`/`limit`/`aggregate`/`barrier` keep the path.
@@ -824,12 +828,14 @@ the same answer.
 
    Fix: `aliasElementHost(rel, proj, freshTraverserRow(rel))`. Then decide what `dedup` does over an unbound `by()`
    operand, in line with the where-by drop rule.
-4. **R4 (major, wrong answer) — a source-union rooted arm loses its labels across a non-reducing barrier** (via S5;
+4. ✅ **LANDED via S5 (b73c4933, 2026-11-02).** Remains: nothing.
+   **R4 (major, wrong answer) — a source-union rooted arm loses its labels across a non-reducing barrier** (via S5;
    `src/compiler/rel/lower/branch.ts` `rootedLabelsOut`).
    - `g.union(V().has('name','marko').as('a').out().order()).select('a').count()` gives 0; the reference and our own
      non-union form give 3.
    - The `barrier()`, `dedup()`, `limit(2)` and `aggregate('q')` arms do the same.
-5. **R5 (major, wrong answer / internal Error) — the source-union `match()` exemption holds after the map is
+5. ✅ **LANDED via S5 (b73c4933, 2026-11-02).** Remains: nothing.
+   **R5 (major, wrong answer / internal Error) — the source-union `match()` exemption holds after the map is
    replaced** (via S5).
    - `g.union(V().has('name','marko').match(__.as('x').out().as('y'))).select('x').select('y').values('name')` gives
      []; the reference gives vadas, josh, lop (`MatchStep.java:445,595` labels the path).
@@ -839,7 +845,8 @@ the same answer.
 
    Restrict the exemption to a read whose input is the arm's map (Scoping.java:119-135), or decline. Add an L4
    witness to `test/L4-addendum/source-union-starter.feature`.
-6. **R6 (major, wrong answer) — `legCorrelated` admits reads of the start label and the correlated labels that the
+6. ✅ **LANDED via S5 (b73c4933, 2026-11-02).** Remains: nothing.
+   **R6 (major, wrong answer) — `legCorrelated` admits reads of the start label and the correlated labels that the
    fresh walk cannot see** (via S5; `src/compiler/rel/match.ts` ~485-492).
    - `g.V().as('b').out().as('a').in().as('c').where(__.select('a').in().where(P.eq('c')).select('c')).count()` gives
      0; the reference gives 12.
@@ -976,7 +983,7 @@ proposal 5).
    mapping-terminal fallback. ANSWER CHANGE (decline → answer):
    `g.V().as('a').out().choose(select('a').hasLabel('person'), constant(1), constant(2))` and its
    `has(age,gt(30))` and `map(choose(…))` forms. Net about 0 lines.
-2. **Callers that only decline read labels through `scopeKeyReads`, not `labelReads`.** The sites are
+2. ✅ **LANDED via S5 (b73c4933, 2026-11-02).** **Callers that only decline read labels through `scopeKeyReads`, not `labelReads`.** The sites are
    `src/compiler/rel/match.ts` ~490 (`legCorrelated`) and the `src/compiler/rel/lower.ts` ~5544 record where-scope
    guard. A body that uses the label's string as a VALUE (`constant('a')`, `has('name','a')`, `out('a')`) then
    stops declining. `labelReads` stays for the callers that delete. Fold this into S5.
