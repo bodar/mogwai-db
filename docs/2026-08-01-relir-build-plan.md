@@ -855,7 +855,7 @@ as `13acd8c7` with a conflict resolution in `branch.ts`, so `git cherry` shows `
    titles a test "(anti)" and calls the form a "multi-column ANTI JOIN"; it is now a Filter over a correlated
    `[NOT] EXISTS` on an anchored walk.
 
-Still open from the round below: S3, R10 (with F7), R11, R13–R18, and F8, F11–F13, F14b. R19 landed with R7.
+Still open from the round below: S3, R10 (with F7), R13–R18, and F8, F11–F13, F14b. R19 landed with R7.
 
 **Depth gaps recorded this round (clean declines, unchanged from the parent commit; not defects):**
 - **where-by / dedup-by (S4):** `where('a',eq('b')).by(…)` nested in where()/not(), inside
@@ -1063,7 +1063,12 @@ the same answer.
     5,326 ms at N=8k (about 40×; 29–39× after S1). Same class as F7's `mergeV` O(N·V) below; fix them together.
     Give the match join an equi key, and extend `test/support/snapshot-scans.ts` to flag a base-table scan driven
     per snapshot row.
-11. **R11 (wrong count, pre-existing) — `dedup()` inside a where leg dedups across ALL rows.**
+11. ✅ **LANDED (39085c4d, 2026-11-02).** A multi-correlation where()/not() leg seeds its anchored walk with the
+    outer labels the body reads (`seedOuterAliases`, `src/compiler/rel/alias.ts`, beside `bindAliases`), so the
+    body runs unchanged and `where(P.eq(label))` filters at its own position before any dedup/limit/range;
+    `legRight`, the `mcN` channels and the post-walk `on` are deleted. Witness now gives 12; scaling linear
+    (2.4x-5.3x, 1k->8k). Only a whole-path read (`path()`) inside the leg still declines. Remains: nothing.
+    **R11 (wrong count, pre-existing) — `dedup()` inside a where leg dedups across ALL rows.**
     `g.V().as('b').out().as('a').in().as('c').where(__.select('a').in().where(P.eq('c')).dedup()).count()` gives 7;
     the reference gives 12. `TraversalUtil.test` resets the child for each traverser, so `dedup()` cannot remove a
     traverser's existence. Record it in `docs/outstanding-work.md` if it is not taken.
