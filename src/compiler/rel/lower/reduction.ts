@@ -117,6 +117,25 @@ export function collapsedToOneRow(rel: Rel): boolean {
 }
 
 /**
+ * DOES THIS RELATION YIELD EXACTLY ONE ROW — `collapsedToOneRow`'s twin, and the fact a child's
+ * `'always'` presence claim needs. The same walk minus what can only LOWER a count: a `Filter`
+ * (`V().count().is(0)`), a `Distinct` or an aggregate's `having` above the collapse can leave ZERO rows,
+ * and a scalar subquery over zero rows reads NULL — a host that kept the row anyway has kept a
+ * traverser the body dropped (`TraversalMapStep.processNextStart` emits `EmptyTraverser` on an empty
+ * body, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`).
+ * A one-row `Limit` keeps "exactly" only over an input that is itself exactly one row.
+ */
+export function exactlyOneRow(rel: Rel): boolean {
+  switch (rel.kind) {
+    case 'aggregate': return rel.groupBy.length === 0 && !rel.having;
+    case 'limit': return rel.count?.kind === 'lit' && rel.count.value === 1 && !rel.offset && exactlyOneRow(rel.input);
+    case 'project': case 'sort': case 'window': case 'materialize':
+      return exactlyOneRow(rel.input);
+    default: return false;
+  }
+}
+
+/**
  * `map()` / `flatMap()` / `local()` — A CHILD BODY APPLIED PER TRAVERSER, or `null` to decline.
  *
  * TinkerPop's three per-traverser hosts differ in ONE thing, and naming that thing is what makes them
@@ -1463,15 +1482,20 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
   return value && { expr: value, framing: rooted.framing, present: 'value-nullness', yields: 'first' };
 }
 
-/** A rooted read that ends in `count()` and collapses to one row, as its one always-present value — or
- *  `null` where it is not that shape. Shared by the scalar arm and the map-entry arm. */
+/** A rooted read that ends in `count()` and collapses to at most one row, as its one value — or `null`
+ *  where it is not that shape. Present `'always'` only where the relation is EXACTLY one row
+ *  (`exactlyOneRow`): a `count().is(P)` that rejects leaves no row, the scalar subquery reads NULL, and
+ *  that NULL is the body's absence. Shared by the scalar arm and the map-entry arm. */
 function rootedCount(rooted: RootedRead, fresh: Minter): ChildValue | null {
   if (rooted.framing.kind !== 'scalar' || rooted.framing.result !== 'count' || !collapsedToOneRow(rooted.rel)) return null;
   const scalar = make.project({
     id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
     exprs: [['v', col(rooted.rel.id, 'v')]],
   });
-  return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: 'always', yields: 'one' };
+  return {
+    expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing,
+    present: exactlyOneRow(rooted.rel) ? 'always' : 'value-nullness', yields: 'one',
+  };
 }
 
 /** A child body's ONE value per host row. */

@@ -166,7 +166,7 @@ export function sackMutate(
   // traverser is folded as a null (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/SackValueStep.java:73-76`).
   // With one, an UNPRODUCTIVE `by()` FILTERS the traverser (`:78-80`), and a NULL value is no value —
   // the drop is the named value's non-nullness; a producer that cannot say declines.
-  const drop = bys[0] ? productivityFilter(step, projected.present, value) : {};
+  const drop = bys[0] ? productivityFilter(step, projected, value) : {};
   if (!drop) return null;
 
   // THREE NODES, and the middle one is why: the by() value has to be FILTERED on before it is folded

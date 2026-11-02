@@ -341,3 +341,110 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
     Then the result should be unordered
       | result |
       | d[6].i |
+
+  # A rooted count FILTERED by `is(P)` is at most one row, not exactly one: where `is` rejects, the body
+  # yields NOTHING, so `map()` drops the traverser (step/map/TraversalMapStep.java:52), `group()` and
+  # `order()` filter the unproductive key and `project()` omits it (step/map/ProjectStep.java). Only an
+  # unfiltered reducing barrier is always present.
+  Scenario: g_V_mapXV_count_isX0XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.V().count().is(0)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  Scenario: g_V_mapXV_count_isX6XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.V().count().is(6))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+
+  Scenario: g_V_groupXX_byXV_count_isX0XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(__.V().count().is(0))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{}] |
+
+  Scenario: g_V_projectXxX_byXV_count_isX0XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("x").by(__.V().count().is(0))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{}] |
+      | m[{}] |
+      | m[{}] |
+      | m[{}] |
+      | m[{}] |
+      | m[{}] |
+
+  Scenario: g_V_orderXX_byXV_count_isX0XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by(__.V().count().is(0)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_count_isX6XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).map(__.select("a").V().count().is(6)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_optionalXout_asXaXX_orderXX_byXselectXaX_V_count_isX6XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).order().by(__.select("a").V().count().is(6)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_mapXV_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.V().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |

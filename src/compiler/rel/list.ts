@@ -553,7 +553,7 @@ export function listMemberOp(
     // and `ripple` have no age (`Order.feature:281-289`). It is a member FILTER, which is the same
     // predicate `productivityFilter` returns for a row and the reason it takes the step: with
     // `ProductiveByStrategy` on, nothing is dropped at all.
-    const drop = productivityFilter(step, probe.present, probe.value);
+    const drop = productivityFilter(step, probe, probe.value);
     if (!drop) return null;
     const kept = drop.keep
       ? make.filter({ id: fresh('mof'), input: members, channels: [], type: members.type, pred: drop.keep })

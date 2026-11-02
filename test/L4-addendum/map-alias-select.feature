@@ -75,8 +75,9 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
       | marko |
 
   # A keyed dedup(k) over a map whose keys are DATA reads, per row, the map's value where it holds k and
-  # the path label where it does not (`Scoping.getScopeValue`); a map lacking k with no label behind it
-  # keys on null, which is productive without a by() (`DedupGlobalStep.java:80-88`).
+  # the path label where it does not (`Scoping.getScopeValue`). A map lacking k with no label behind it is
+  # a scope miss: `getSafeScopeValue` RAISES there (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java),
+  # and we DROP that row instead (docs/feature-support-matrix.md §17, "Map scope").
   Scenario: g_V_asXaX_valueMap_dedupXaX_count
     Given the modern graph
     And the traversal of
@@ -108,7 +109,7 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[2].l |
+      | d[1].l |
 
   Scenario: g_V_group_byXlabelX_dedupXpersonX_count
     Given the modern graph
@@ -154,7 +155,7 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].l |
+      | d[4].l |
 
   # A project() is a map too: a keyed dedup(k) naming a FIELD reads the field, and a field a by() may
   # leave absent falls back per row to the same-named path label, as a map's absent key does.
@@ -178,7 +179,7 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[5].l |
+      | d[4].l |
 
   Scenario: g_V_asXaX_out_asXbX_projectXaX_byXnameX_dedupXa_bX_count
     Given the modern graph

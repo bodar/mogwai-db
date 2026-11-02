@@ -952,7 +952,7 @@ function sortTerms(
     terms.push({ expr: key.value, dir });
     // "only add the traverser if the comparator traversal was productive" (`OrderGlobalStep.java:82-85`);
     // a NULL key is an absent one.
-    const drop = productivityFilter(step, key.present, key.raw ?? key.value);
+    const drop = productivityFilter(step, key, key.raw ?? key.value);
     if (!drop) return null;
     if (drop.keep) drops.push(drop.keep);
   }
@@ -5310,7 +5310,7 @@ function aliasValueWhere(
   const lhsBy = byProjection(ring[0]!, startHost, ctx.source, fresh, true, seam);
   if (!lhsBy) return 'decline';
   const lhs = lhsBy.value;
-  const lhsProd = productivityFilter(step, lhsBy.present, lhs);
+  const lhsProd = productivityFilter(step, lhsBy, lhs);
   if (!lhsProd) return 'decline';
   const prod: Expr[] = lhsProd.keep ? [lhsProd.keep] : [];
   let ringIdx = 1; // startKey took ring[0]; leaves cycle from ring[1] in tree-walk order
@@ -5328,7 +5328,7 @@ function aliasValueWhere(
     const valHost = whereOperandHost(rel, proj);
     const val = byProjection(by, valHost, ctx.source, fresh, true, seam);
     if (!val) return null;
-    const p2 = productivityFilter(step, val.present, val.value);
+    const p2 = productivityFilter(step, val, val.value);
     if (!p2) return null;
     if (p2.keep) prod.push(p2.keep);
     return aliasCompare(p.op, lhs, val.value);
@@ -5405,7 +5405,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         if (!aVal || !bVal) return 'decline';
         // A non-productive `by()` DROPS the row (`productivityFilter`); a NULL value is an absent one, and
         // SQL's three-valued compare never matches it either.
-        const [prodA, prodB] = [productivityFilter(step, aVal.present, aVal.value), productivityFilter(step, bVal.present, bVal.value)];
+        const [prodA, prodB] = [productivityFilter(step, aVal, aVal.value), productivityFilter(step, bVal, bVal.value)];
         if (!prodA || !prodB) return 'decline';
         const cmp = aliasCompare(pred.op, aVal.value, bVal.value);
         if (!cmp) return 'decline';

@@ -306,10 +306,15 @@ const aliasElement = (rel: Rel, proj: ElementAliasProjection) => ({
  *
  * It ALWAYS carries the label's presence: a label first bound inside a branch arm, an `optional()` or a
  * repeat body reads NULL on a row it is unbound on, and a `by()` that never reads through the id
- * (`by(__.constant(1))`) would otherwise PRODUCE there. The reference resolves the operand with
- * `getSafeScopeValue` (null where unbound) and drops the traverser on an unproductive `by()`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java:98-102,131-139`).
- * A statically bound label carries none, so its SQL is unchanged.
+ * (`by(__.constant(1))`) or that produces over nothing (`by(__.outE().count())` counts `0`) would otherwise
+ * PRODUCE there. The reference resolves the operand with `getSafeScopeValue`, which RAISES
+ * `IllegalArgumentException` on a label the traverser does not carry
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java:98-102,131-139`);
+ * we DROP that traverser instead, as `select()` itself does (`docs/feature-support-matrix.md` §17). The
+ * drop is the projection's `hostKeep` (`modulator.ts` `byProjection`), which `productivityFilter`
+ * conjoins and `ProductiveByStrategy` does not waive. A statically bound label carries none, so its SQL is
+ * unchanged.
  */
 export const aliasElementHost = (rel: Rel, proj: ElementAliasProjection, row?: HostRow): ChildHost =>
   ({ ...aliasElement(rel, proj), ...(row ? { row } : {}) });

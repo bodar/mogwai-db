@@ -2,7 +2,7 @@
 // (sliceOp/slice/bulkSlice), the barrier row ops order/dedup (rowOp), and the keyed-dedup builders
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, or, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -12,7 +12,7 @@ import { countOf, isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.t
 import { countLit, sliceBound } from '../const.ts';
 import { byEqualityKey, modulations, productivityFilter, type Modulation } from '../modulator.ts';
 import type { AliasMap } from '../../alias.ts';
-import { aliasIdAt, aliasKeyAt, aliasListAt, aliasProjection } from '../alias.ts';
+import { aliasElementHost, aliasGuard, aliasIdAt, isElementAlias, aliasKeyAt, aliasListAt, aliasProjection } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
 import { payloadCols } from '../build.ts';
 import { exprChildren, freeRelIds } from '../../../rel/walk.ts';
@@ -532,7 +532,7 @@ function dedupBy(
   const key = byEqualityKey(modulation, shape.host, ctx.source, fresh, childSeam(ctx, fresh));
   if (!key) return null;
   // An unproductive `by()` drops the traverser (`DedupGlobalStep.java:77-78`); a NULL key is an absent one.
-  const productive = productivityFilter(step, key.present, key.value);
+  const productive = productivityFilter(step, key, key.value);
   if (!productive) return null;
   const domain = productive.keep
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive.keep })
@@ -619,16 +619,23 @@ function dedupOnTyped(
  *  traverser cannot hold `k` at all. */
 export type MapScope = (key: string) => { readonly terms: readonly Expr[]; readonly absent: Expr | null } | undefined;
 
+/** The traverser's map HOLDS the key — `MapScope.absent` negated. */
+const holds = (absent: Expr): Expr => ({ kind: 'unary', op: 'not', arg: absent });
+
 /**
  * `dedup(k1, …, kn)[.by(proj)]` — a KEYED dedup on the tuple of ALREADY-BOUND alias values, TinkerPop's
  * `DedupGlobalStep` with `dedupLabels`: the survivor's key is the LIST of each label's `Pop.last` scope
  * value run through the shared `by()` projection (`DedupGlobalStep.filter`,
  * `vendor/tinkerpop/gremlin-core/.../DedupGlobalStep.java:80-88`). With no `by()`, an element alias keys
  * by rowid and a scalar alias by stored value; with a `by()`, each label's element is the host the
- * projection reads (`dedup('a','b').by(label)` keys on `(label(a), label(b))`). Every named label must
- * be LIVE, or TinkerPop drops the whole path (a null scope value fails the
- * `objects.size() == dedupLabels.size()` check) — modelled as a DECLINE, fail closed — and a
- * non-productive `by()` drops the row (`productivityFilter`, the same rule `dedup().by()` obeys). The
+ * projection reads (`dedup('a','b').by(label)` keys on `(label(a), label(b))`). A label no row here can
+ * hold declines. One first bound in a branch arm and UNBOUND on a row DROPS that row — the reference
+ * RAISES there (`Scoping.getSafeScopeValue` throws `IllegalArgumentException` on a missing key,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java`),
+ * and dropping is the answer `select()` itself gives (`docs/feature-support-matrix.md` §17). With a `by()`
+ * the label's presence rides on its host (`aliasElementHost` → `hostKeep`), so `ProductiveByStrategy`
+ * cannot waive it; without one it is the label's own guard (`aliasGuard`). A non-productive `by()` drops
+ * the row (`productivityFilter`, the same rule `dedup().by()` obeys). The
  * survivor keeps its WHOLE payload (a following `select('a')` reads a field the dropped duplicates
  * could differ on), so this is `dedupOn`'s ranked window — a fully deterministic tie over every column,
  * since a keyed dedup carries no emission order of its own.
@@ -648,24 +655,32 @@ export function dedupByLabels(
     if (scoped && !scoped.absent) { keyTerms.push(...scoped.terms); continue; }
     const proj = aliasProjection(rel, labels, k, 'last', fresh);
     if (!proj && scoped) {
-      // No label behind it: the map's value, or a NULL every map lacking `k` shares — `getSafeScopeValue`
-      // answers null and, with no `by()`, a null is productive (`DedupGlobalStep.java:80-88`).
+      // No label behind it: the map's value where it holds `k`. A map LACKING `k` is a scope miss —
+      // `getScopeValue` throws `KeyNotFoundException` and `getSafeScopeValue` RAISES on it (`Scoping.java`)
+      // — so that row DROPS, the one rule every unbound key obeys here (§17).
       keyTerms.push(...scoped.terms);
+      if (scoped.absent) productive.push(holds(scoped.absent));
       continue;
     }
     if (!proj) return null;
     const before = keyTerms.length;
     const column = col(rel.id, proj.entry.col);
+    if (!by) {
+      // No `by()`: the label's own guard (`aliasGuard`). Where the traverser's map may hold `k` itself its
+      // value stands in for the label (below), so the label is owed only where the map lacks `k`.
+      const guard = aliasGuard(rel, proj.entry);
+      if (guard) productive.push(scoped?.absent ? or(holds(scoped.absent), guard) : guard);
+    }
     if (by) {
       // A `by()` projection reads each label's ELEMENT as its host; a scalar/list alias under a `by()`
       // is a later phase.
-      if (proj.read.kind !== 'element') return null;
-      // `DedupGlobalStep.java:82` runs the by() on a NEW traverser for the label's value (`freshTraverserRow`).
-      const host: ChildHost = { kind: 'element', id: aliasIdAt(column, 'last'), elem: proj.read.elem, row: freshTraverserRow(rel) };
-      const key = byEqualityKey(by, host, ctx.source, fresh, seam);
+      if (!isElementAlias(proj)) return null;
+      // `DedupGlobalStep.java:82` runs the by() on a NEW traverser for the label's value (`freshTraverserRow`),
+      // and the host carries the label's presence, so an unbound label drops the row (`hostKeep`).
+      const key = byEqualityKey(by, aliasElementHost(rel, proj, freshTraverserRow(rel)), ctx.source, fresh, seam);
       if (!key) return null;
       keyTerms.push(...key.terms);
-      const prod = productivityFilter(step, key.present, key.value);
+      const prod = productivityFilter(step, key, key.value);
       if (!prod) return null;
       if (prod.keep) productive.push(prod.keep);
     } else if (proj.read.kind === 'element') keyTerms.push(aliasIdAt(column, 'last'));

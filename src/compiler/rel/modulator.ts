@@ -6,7 +6,7 @@ import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/fro
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostTag, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
@@ -220,10 +220,31 @@ export interface ByProjection {
   /** The value BEFORE an `ordering` wrapper, where there is one — its nullness is the presence, and it is
    *  the smaller expression to test (`productivityFilter`). */
   readonly raw?: Expr;
+  /** WHETHER THE HOST IS THERE (`hostPresence`), set only where it may be absent (`mayBeAbsent`) — a
+   *  label first bound in a branch arm, an intermediate value. A projection can PRODUCE over an absent
+   *  host (`by(__.outE().count())` counts nothing as `0`, `by(__.constant(1))` reads no row), so the
+   *  value's own presence cannot carry it; `productivityFilter` conjoins it, and `ProductiveByStrategy`
+   *  does NOT waive it — a scope miss is not an unproductive `by()`. */
+  readonly hostKeep?: Expr;
+}
+
+/** The host-absence half of a `by()` projection, attached in ONE place for both lowerings of a `by()`
+ *  (`byProjection`, `byTyped`), so neither can omit it. No field — and no SQL — where the host cannot
+ *  be absent; `null` declines where `hostPresence` cannot say. */
+function hostKept<T extends { readonly present: Presence }>(host: ChildHost, projected: T | null): (T & { readonly hostKeep?: Expr }) | null {
+  if (!projected || !mayBeAbsent(host)) return projected;
+  const hostKeep = hostPresence(host);
+  return hostKeep && { ...projected, hostKeep };
 }
 
 export function byProjection(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
+): ByProjection | null {
+  return hostKept(host, projectionOf(modulation, host, source, fresh, ordering, child));
+}
+
+function projectionOf(
+  modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering: boolean, child?: ChildSeam,
 ): ByProjection | null {
   const { key } = modulation;
   const always = (value: Expr | null): ByProjection | null => value && { value, present: 'always' };
@@ -350,7 +371,7 @@ const isNotNull = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: 
  *  `byProjection` and hands its `present` to `productivityFilter`. */
 export const byExpr = (
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, ordering = false, child?: ChildSeam,
-): Expr | null => byProjection(modulation, host, source, fresh, ordering, child)?.value ?? null;
+): Expr | null => projectionOf(modulation, host, source, fresh, ordering, child)?.value ?? null;
 
 /**
  * A `by()` projection's VALUE together with WHAT IS KNOWN OF ITS TYPE and WHEN A NULL IS A VALUE — the
@@ -370,9 +391,17 @@ export interface TypedBy {
   /** WHETHER the projection produced — `byProjection`'s own answer (a child body's `present`), so a
    *  consumer that both types the value and DROPS an unproductive `by()` reads one lowering for both. */
   readonly present: Presence;
+  /** The host's presence where it may be absent — `ByProjection.hostKeep`, attached by the same helper. */
+  readonly hostKeep?: Expr;
 }
 
 export function byTyped(
+  modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam,
+): TypedBy | null {
+  return hostKept(host, typedOf(modulation, host, source, fresh, child));
+}
+
+function typedOf(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam,
 ): TypedBy | null {
   const { key } = modulation;
@@ -388,7 +417,7 @@ export function byTyped(
       present: produced.present,
     };
   }
-  const projected = byProjection(modulation, host, source, fresh, false, child);
+  const projected = projectionOf(modulation, host, source, fresh, false, child);
   if (!projected) return null;
   const typed = typedArm(modulation, projected.value, host, fresh);
   return typed && { ...typed, present: projected.present };
@@ -403,11 +432,11 @@ export function byTyped(
  */
 export function byEqualityKey(
   modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam,
-): { readonly terms: readonly Expr[]; readonly value: Expr; readonly present: Presence } | null {
+): { readonly terms: readonly Expr[]; readonly value: Expr; readonly present: Presence; readonly hostKeep?: Expr } | null {
   const typed = byTyped(modulation, host, source, fresh, child);
-  if (typed) return { terms: familyKey(typed.value, knownClass(typed.evidence)), value: typed.value, present: typed.present };
+  if (typed) return { ...typed, terms: familyKey(typed.value, knownClass(typed.evidence)) };
   const projected = byProjection(modulation, host, source, fresh, false, child);
-  return projected && { terms: [projected.value], value: projected.value, present: projected.present };
+  return projected && { ...projected, terms: [projected.value] };
 }
 
 /** What `familyKey` is told of a value's type, from the evidence `byTyped` gathered. */
@@ -965,6 +994,20 @@ export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'ele
  * - `{ keep }` — `value IS NOT NULL`, over whatever column or expression the consumer named the value
  *   (or its member node) into;
  * - `null` — DECLINE: the producer said `'unknown'`.
+ *
+ * A projection (`byProjection`/`byTyped`/`byEqualityKey`) is passed WHOLE rather than its `present`,
+ * because it also carries `hostKeep` — the host's own presence where the host may be absent. That half is
+ * conjoined whatever the value's presence, and `ProductiveByStrategy` does NOT waive it: an unbound
+ * `where`/`dedup` key is a scope miss (`Scoping.getSafeScopeValue` RAISES,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java`),
+ * not a `by()` that produced nothing, and we drop that traverser (`docs/feature-support-matrix.md` §17).
  */
-export const productivityFilter = (step: IRStep, present: Presence, value: Expr): { readonly keep?: Expr } | null =>
-  (isProductiveBy(step) || present === 'always' ? {} : present === 'unknown' ? null : { keep: isNotNull(value) });
+export const productivityFilter = (
+  step: IRStep, by: Presence | { readonly present: Presence; readonly hostKeep?: Expr }, value: Expr,
+): { readonly keep?: Expr } | null => {
+  const { present, hostKeep } = typeof by === 'string' ? { present: by, hostKeep: undefined } : by;
+  if (present === 'unknown' && !isProductiveBy(step)) return null;
+  const valueKeep = isProductiveBy(step) || present === 'always' ? undefined : isNotNull(value);
+  const keep = hostKeep && valueKeep ? and(hostKeep, valueKeep) : hostKeep ?? valueKeep;
+  return keep ? { keep } : {};
+};
