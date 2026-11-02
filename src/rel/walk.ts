@@ -406,6 +406,54 @@ export function stmtExprs(s: Stmt): readonly Expr[] {
   }
 }
 
+/**
+ * HOW ONE STATEMENT READS EACH BINDING IT NAMES — how many times its `Ref` is SPELLED (saturating at
+ * 2, which is all the one caller asks) and whether any spelling is a REPEATED read: a side of a join
+ * that may run as its inner loop, or a CORRELATED subplan. `ref` is the first spelling, which carries the binding's declared type.
+ *
+ * Counted by spelling, not by node: the emitter inlines a shared subtree at every parent, so a node
+ * reached twice is read twice. Memoised per node, so the walk stays linear in the DAG. An UNCORRELATED
+ * subplan (`IN (SELECT …)`) runs once, so it is one more read but not a repeated one — SQLite already
+ * builds its ephemeral index. A statement's `Update … FROM` is joined against its target, so it is
+ * inner too.
+ */
+export interface RefRead { readonly ref: Extract<Rel, { readonly kind: 'ref' }>; readonly count: number; readonly inner: boolean; }
+type RefReads = ReadonlyMap<string, RefRead>;
+const refReadMemo = new WeakMap<Rel, RefReads>();
+const addRefReads = (into: Map<string, RefRead>, from: RefReads, inner: boolean): void => {
+  for (const [name, read] of from) {
+    const prior = into.get(name);
+    into.set(name, { ref: prior?.ref ?? read.ref, count: Math.min(2, (prior?.count ?? 0) + read.count), inner: (prior?.inner ?? false) || read.inner || inner });
+  }
+};
+const exprRefReads = (e: Expr, into: Map<string, RefRead>): void =>
+  forEachExpr(e, (node) => exprRels(node).forEach((plan) => addRefReads(into, relRefReads(plan), freeRelIds(plan).size > 0)));
+function relRefReads(r: Rel): RefReads {
+  const known = refReadMemo.get(r);
+  if (known) return known;
+  const out = new Map<string, RefRead>();
+  if (r.kind === 'ref') out.set(r.name, { ref: r, count: 1, inner: false });
+  relExprs(r).forEach((e) => exprRefReads(e, out));
+  if (r.kind === 'join') {
+    // The LEFT side is the outer loop only where the join pins it: an `ordered` or `cross` join renders
+    // `CROSS JOIN`, a `left` join's order is its meaning, and a semi/anti join is the outer query of its
+    // EXISTS. An unordered inner join is the planner's to turn around — measured: it put a spooled
+    // snapshot outer and scanned the `json_each` beside it for every row.
+    addRefReads(out, relRefReads(r.left), r.join === 'inner' && !r.ordered);
+    addRefReads(out, relRefReads(r.right), true);
+  } else relChildren(r).forEach((child) => addRefReads(out, relRefReads(child), false));
+  refReadMemo.set(r, out);
+  return out;
+}
+export function refReads(node: Rel | Stmt): RefReads {
+  if (!isStmt(node)) return relRefReads(node);
+  const out = new Map<string, RefRead>();
+  if (node.kind === 'insert') addRefReads(out, relRefReads(node.source), false);
+  if (node.kind === 'update' && node.from) addRefReads(out, relRefReads(node.from), true);
+  stmtExprs(node).forEach((e) => exprRefReads(e, out));
+  return out;
+}
+
 /** Every `Ref` NAME a node reaches, relations and expression subplans alike — "which bindings does
  * this step read". One walk for both halves of the union, because a program's steps are of both
  * kinds and the question asked of them is the same. */

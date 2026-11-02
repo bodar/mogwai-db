@@ -18,6 +18,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { bindsAsParameter, type Expr } from '../src/rel/expr.ts';
 import { forEachExpr, forEachRel, relExprs, stmtChildren, stmtExprs } from '../src/rel/walk.ts';
 import { isStmt } from '../src/rel/stmt.ts';
+import { nestedSnapshotScans, type PlanRow } from '../test/support/snapshot-scans.ts';
 
 const corpus = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
@@ -57,10 +58,11 @@ const diverged: string[] = [];
  * outer select into, where each row runs one arm; that is not a repeat, and neither is a `REUSE` row.
  */
 const planner = new GraphStore(new BunSqlite(':memory:'));
-const respelled = (sql: string, binds: readonly unknown[]): number => {
-  let plan: { id: number; parent: number; detail: string }[];
-  try { plan = planner.query(`EXPLAIN QUERY PLAN ${sql}`, binds.map((bind) => (isRowsBind(bind) ? '[]' : bind))); }
-  catch { return 0; }
+const planOf = (sql: string, binds: readonly unknown[]): readonly PlanRow[] => {
+  try { return planner.query(`EXPLAIN QUERY PLAN ${sql}`, binds.map((bind) => (isRowsBind(bind) ? '[]' : bind))); }
+  catch { return []; }
+};
+const respelled = (plan: readonly PlanRow[]): number => {
   const sites = new Map<string, number>();
   let repeats = 0;
   for (const row of plan) {
@@ -140,8 +142,13 @@ for (const query of corpus) {
     statements++;
     const violation = cfLimitViolation(step.emitted.sql, step.emitted.binds);
     if (violation) failures.push(`${query} [statement ${index + 1}]: ${violation}`);
-    const repeats = respelled(step.emitted.sql, step.emitted.binds);
+    const plan = planOf(step.emitted.sql, step.emitted.binds);
+    const repeats = respelled(plan);
     if (repeats) failures.push(`${query} [statement ${index + 1}]: SQLite evaluates ${repeats} subquery spelling(s) more than once per row — compute the column once`);
+    // A TAKEN SNAPSHOT IS NEVER AN INNER LOOP (`test/support/snapshot-scans.ts`): a `json_each(?)` re-decoded
+    // per outer row is O(N·M), the production-only CPU wall `spools` (`src/rel/emit.ts`) removes.
+    const nested = nestedSnapshotScans(step.emitted.sql, plan);
+    if (nested.length) failures.push(`${query} [statement ${index + 1}]: a taken snapshot (${nested.join(', ')}) is scanned as an inner loop — spool it`);
     const next = { binds: step.emitted.binds.length, bytes: Buffer.byteLength(step.emitted.sql), compiler: counts.compiler, bound: counts.bound };
     const prior = maxima.get(family) ?? next;
     maxima.set(family, {
@@ -241,4 +248,4 @@ if (ratchetFailures.length) {
   for (const failure of ratchetFailures) console.log(`  RATCHET ${failure}`);
   throw new Error(`sql-hygiene: ${ratchetFailures.length} ratchet violation(s)`);
 }
-console.log('sql-hygiene: 0 DO-wall violations; no subquery evaluated twice per row; literal provenance counted before emission');
+console.log('sql-hygiene: 0 DO-wall violations; no subquery evaluated twice per row; no taken snapshot scanned as an inner loop; literal provenance counted before emission');

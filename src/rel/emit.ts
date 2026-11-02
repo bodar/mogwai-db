@@ -2,13 +2,13 @@ import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value
 import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import { col, compilerInt, type Expr } from './expr.ts';
-import { recursiveSelf } from './factory.ts';
+import { materialize, recursiveSelf } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
-import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, relChildren, relExprs, rewriteExpr } from './walk.ts';
+import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
 import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 
@@ -714,7 +714,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const bound = bindings.get(r.name);
     if (!bound) throw new Error(`RelIR emitter: Ref '${r.name}' has no Plan binding`);
     const alias = aliasOf(r);
-    if (!retained(bound)) {
+    // A retained binding THIS statement spools (`spools`) is read like any CTE: its rows are a table now.
+    if (!retained(bound) || spooled.has(r.name)) {
       const cols = colsOf(alias, r);
       for (const name of cteSubqueryCols.get(r.name) ?? []) { const spelled = cols.get(name); if (spelled) subqueryCols.add(spelled); }
       for (const name of cteJsonCols.get(r.name) ?? r.type.cols.map((column) => column.name)) { const spelled = cols.get(name); if (spelled) jsonText.add(spelled); }
@@ -724,6 +725,44 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${textLiteral(`$[${i}]`)})`]));
     for (const spelled of cols.values()) jsonText.add(spelled);
     return { item: { text: q`json_each(${value(rows)})`, alias }, cols };
+  };
+
+  /**
+   * A TAKEN SNAPSHOT READ MORE THAN ONCE IS SPOOLED — decoded once into a fenced `Materialize`, per statement.
+   *
+   * `json_each(?)` is a table-valued function: SQLite can neither index it nor keep what it decoded, so a
+   * snapshot on the INNER side of a join, or in a correlated `EXISTS`, is re-scanned and re-decoded for
+   * every outer row — O(N·M), which on a DO's CPU budget fails only at production sizes (measured:
+   * `g.V().addLabel(__.values('name'))` 0.9 s @1k, 14 s @4k). A MATERIALIZED CTE is a real table, so the
+   * planner builds its AUTOMATIC COVERING INDEX on the equi-join and the read is O(N log M) — no
+   * hand-built index statement, no chunking, and the snapshot still crosses as ONE bind (fewer, since
+   * every spelling now shares it). Calcite's `Spool`/`TableSpool` is the same node: a shared subplan
+   * computed once (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/Spool.java`).
+   *
+   * PER STATEMENT, because a CTE list is a statement's: a plan-level binding would put the decode, and
+   * its bind, into every later statement whether it reads the snapshot or not. A SINGLE streaming read
+   * is left alone — spooling it buys nothing, so such a statement keeps its SQL byte for byte. The
+   * rendering is the ONE fenced-`Materialize` CTE rendering (`cteDefinition`), never a second.
+   */
+  let spooled: ReadonlySet<string> = new Set();
+  const spools = (node: Rel | Stmt): readonly Expression[] => {
+    spooled = new Set();
+    const reads = [...refReads(node).values()].filter((read) => (read.inner || read.count > 1) && retained(bindings.get(read.ref.name)!));
+    const definitions = reads.map(({ ref }) =>
+      cteDefinition(ref.name, materialize({ id: relId(`${ref.id}_spool`), input: ref, channels: ref.channels, type: ref.type, fenced: true })));
+    spooled = new Set(reads.map(({ ref }) => ref.name));
+    return definitions;
+  };
+  /** A CTE definition — the ONE rendering of a named relation, a fenced `Materialize` as `AS MATERIALIZED`. */
+  const cteDefinition = (name: string, node: Rel): Expression => {
+    // A `fenced` Materialize renders `AS MATERIALIZED` — a barrier SQLite may not flatten. Only the
+    // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`).
+    const fenced = node.kind === 'materialize' && node.fenced === true;
+    const built = build(node, EMPTY_SCOPE);
+    // A fenced CTE is computed once by construction; any other one SQLite may flatten into its reader.
+    if (!fenced) cteSubqueryCols.set(name, new Set(carriesSubquery(built)));
+    cteJsonCols.set(name, new Set(carriesJsonText(built)));
+    return q`${ident(name)} AS ${fenced ? raw('MATERIALIZED ') : empty}(${renderBuilt(built)})`;
   };
 
   function build(r: Rel, outer: Scope): Built {
@@ -997,40 +1036,40 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // A SNAPSHOT is the same STEP as a statement — run it, keep its rows — and only the body
       // differs. That is what makes "the value at this point" one concept: the executor cannot tell
       // the two apart, and neither can a later `Ref`.
-      const retain = (body: Expression): void => {
-        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes(ctes, body, recursiveList)) });
+      const retain = (node: Rel | Stmt, render: () => Expression): void => {
+        const local = spools(node);
+        const body = render();
+        spooled = new Set();
+        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes([...ctes, ...local], body, recursiveList)) });
       };
       // `isStmt` first because it NARROWS the union `retained` only answers a question about, so the
       // CTE arm below has a `Rel`. Then `retained`, not `binding.snapshot`: this is the STEP
       // ASSEMBLER, one of the three readers that predicate exists for, and spelling it inline here
       // is what silently made a GUARD binding a CTE — emitted, never run, and the refusal it carried
       // reached the caller as SQLite's own constraint error instead of the reference's message.
-      if (isStmt(binding.node)) { retain(statement(binding.node)); continue; }
-      if (retained(binding)) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
+      const node = binding.node;
+      if (isStmt(node)) { retain(node, () => statement(node)); continue; }
+      if (retained(binding)) { retain(node, () => renderRel(node, EMPTY_SCOPE)); continue; }
       // A SHARED WALK IS A CTE, not a block inlined at each reference. `renderRel` would give the
       // self-contained `WITH RECURSIVE w AS (…) SELECT * FROM w`, which nests a second WITH inside
       // this list and — being spelled per occurrence — computes the walk once per reference. Hoisting
       // the DEFINITION into this list instead is the same merge `input.result` already gets below,
       // and it is what makes the walk's own name load-bearing (`name.ts` binds it under that name).
-      if (binding.node.kind === 'recursive') {
+      if (node.kind === 'recursive') {
         recursiveList = true;
-        ctes.push(recursiveDefinition(binding.node, EMPTY_SCOPE));
+        ctes.push(recursiveDefinition(node, EMPTY_SCOPE));
         continue;
       }
-      // A `fenced` Materialize renders `AS MATERIALIZED` — a barrier SQLite may not flatten. Only the
-      // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`).
-      const fenced = binding.node.kind === 'materialize' && binding.node.fenced === true;
-      const built = build(binding.node, EMPTY_SCOPE);
-      // A fenced CTE is computed once by construction; any other one SQLite may flatten into its reader.
-      if (!fenced) cteSubqueryCols.set(binding.name, new Set(carriesSubquery(built)));
-      cteJsonCols.set(binding.name, new Set(carriesJsonText(built)));
-      ctes.push(q`${ident(binding.name)} AS ${fenced ? raw('MATERIALIZED ') : empty}(${renderBuilt(built)})`);
+      ctes.push(cteDefinition(binding.name, node));
     }
     if (lastRetained) return { effects };
+    const local = spools(input.result);
+    const all = [...ctes, ...local];
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.
-    const result = input.result.kind === 'recursive' && ctes.length
-      ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
-      : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE), recursiveList);
+    const result = input.result.kind === 'recursive' && all.length
+      ? q`WITH RECURSIVE ${list([...all, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
+      : withCtes(all, renderRel(input.result, EMPTY_SCOPE), recursiveList);
+    spooled = new Set();
     return { effects, result };
   };
 

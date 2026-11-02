@@ -623,8 +623,34 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
     refuses("g.V(1).addV('y').property('n', __.values('name').constant(null))", /resolved to null/, 'g.V().count()');
   });
 
-  test('a first result the plan states no order for', () => {
-    refuses("g.V(1).addV('c').property('w', __.properties().value())", /no order to say which is first/, 'g.V().count()');
+  // NOT a refusal any more: which of several unordered results is "first" is plan order with the value
+  // as tiebreak (`rankedFirst`, matrix §17 "Unordered slices") — a function of the rows, so it holds
+  // under L8, and the data can no longer turn the query into an error.
+  test('a first result the plan states no order for is picked by (plan order, value)', () => {
+    const store = seededStore();
+    // marko's two values tie on plan order; SQLite's value order puts the integer first.
+    expect(run(store, "g.V(1).addV('c').property('w', __.properties().value()).values('w')").map((r) => r.v)).toEqual([29]);
+    expect(run(store, "g.V().count()").map((r) => r.v)).toEqual([7]);
+  });
+
+  test('every first result — a runtime key, an edge value, a folded parameter — takes the one (sq, v) pick', () => {
+    // A runtime KEY over several results: the body's own order (marko's first out() neighbour by its
+    // property row), never a refusal.
+    const keyed = seededStore();
+    expect(bagOf(run(keyed, "g.V(1).property(__.out().values('name'), 1).properties().key()").map((r) => r.v))).toEqual(['age', 'name', 'vadas']);
+    // An edge's first-result value over a re-sourcing body, and over a fan-out from the edge's own vertex.
+    expect(run(seededStore(), "g.addV('x').addE('e').to(__.V(1)).property('w', __.V().values('name')).values('w')").map((r) => r.v)).toEqual(['marko']);
+    expect(run(seededStore(), "g.V(1).addE('e').to(__.V(2)).property('w', __.out().values('name')).values('w')").map((r) => r.v)).toEqual(['vadas']);
+    // After as()/select(): each of the three traversers takes the same first.
+    expect(run(seededStore(), "g.V(1).as('a').out().addV(__.select('a').out().values('name')).label()").map((r) => r.v)).toEqual(['vadas', 'vadas', 'vadas']);
+  });
+
+  test('a runtime key is TAKEN before the write it names, so the displaced-slot delete cannot change it', () => {
+    // The key resolves to the very key it writes: a `single` write displaces the row its own body read.
+    // The name is a snapshot taken before anything is written, so the write lands under it.
+    const store = seededStore();
+    run(store, "g.V(1).property('k', 'k').property(single, __.values('k'), 'z').iterate()");
+    expect(run(store, "g.V(1).values('k')").map((r) => r.v)).toEqual(['z']);
   });
 
   test('a key that is not a String, however it is stored', () => {

@@ -604,7 +604,7 @@ function propertyStatements(
     const { site, targets } = ownerSite(owners, elem, aliases, fresh);
     if (!sequenced) sequenceGuard(site, write, child, guard, fresh);
     if (write.kind === 'map') return mapFormStatements(elem, site, targets, write.body, bind, fresh, child, guard);
-    const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard, undefined, true);
+    const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard, bind, false, true);
     if (!apply) return false;
     apply(targets, bind);
     return true;
@@ -1522,7 +1522,6 @@ function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
 const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here may read what another traverser writes, and TinkerPop runs each traverser through every mutating step before resolving the next one\'s value';
 const SEQUENTIAL_ENDPOINT = 'this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
 const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
-const UNORDERED_FIRST = 'this traversal is not supported yet: property() takes the first result of its traversal, and the traversal produced several different values with no order to say which is first';
 
 /**
  * A runtime body → its rows over the site's host, normalized to `VALUE_ROW_COLS`, plus whether the body
@@ -1592,53 +1591,21 @@ function resolveValueRows(
 }
 
 /**
- * The FIRST row per traverser — `TraversalUtil.apply`'s `next()`, `handleTraversalValue`'s
- * `results.get(0)` — by the child's own order, `sq`.
+ * The FIRST row per traverser — `TraversalUtil.apply`'s `next()`, `handleTraversalValue`'s `results.get(0)` —
+ * for EVERY runtime name and every first-result value (a folded parameter, an edge property), by `(sq, v)`.
  *
- * WHICH row is first is the body's ITERATION order, and the plan states one only where the child rows
- * carry an encounter that separates them. Where it does not — `sq` is the constant `0` when the child has
- * no encounter channel, and a host encounter carried through a fan-out is one value for every row it fans
- * out to — several DIFFERENT values tie for first, and taking one would be the scan's choice dressed as
- * the reference's: `addE(…).property('w', __.out().values('name'))` names whichever neighbour SQLite
- * visits first. So a tie between different values RAISES, before anything is written; a tie between
- * equal values is no choice at all and passes (`__.out().values('lang')` over two `java` rows).
+ * `sq` is the child's own order where the plan states one (its encounter). Where it does not — `sq` is the
+ * constant `0` when the child carries no encounter, and a host encounter carried through a fan-out is one
+ * value for every row it fans out to — the rows come in PLAN order (matrix §17 "Unordered slices"), and the
+ * value is the tiebreak that makes the pick a function of the rows rather than of the scan, so it holds
+ * under `reverse_unordered_selects` (L8). No refusal: which of several unordered results is first is not a
+ * question the data should be able to turn into an error.
  */
-function firstPerTraverser(rel: Rel, guard: Guarder, fresh: Minter): Rel {
-  unorderedFirstGuard(rel, guard, fresh);
-  return rankedFirst(rel, [col(rel.id, 'sq')], fresh);
-}
-
-/**
- * The FIRST row per traverser by `order` — the rank half of `firstPerTraverser`, shared by every
- * runtime name. A label takes it bare, ordered by `(sq, v)`: rows the plan does not order come in plan
- * order (matrix §17 "Unordered slices"), and the value is the tiebreak that makes the pick a function of
- * the rows rather than of the scan.
- */
-function rankedFirst(rel: Rel, order: readonly Expr[], fresh: Minter): Rel {
+function rankedFirst(rel: Rel, fresh: Minter): Rel {
+  const order = [col(rel.id, 'sq'), col(rel.id, 'v')];
   const ranked = rowNumberWindow(rel, 'rk', [], { partitionBy: [col(rel.id, 'o')], orderBy: order.map((expr) => ({ expr, dir: 'asc' as const })) }, fresh);
   const first = make.filter({ id: fresh('rf'), input: ranked, channels: [], type: ranked.type, pred: eq(col(ranked.id, 'rk'), compilerInt(1)) });
   return make.project({ id: fresh('rv'), input: first, channels: [], type: rel.type, exprs: rel.type.cols.map((column) => [column.name, col(first.id, column.name)] as const) });
-}
-
-/** `firstPerTraverser`'s tie raise: several DIFFERENT values tie for first under `sq`. */
-function unorderedFirstGuard(rel: Rel, guard: Guarder, fresh: Minter): void {
-  const tied = make.window({
-    id: fresh('rn'), input: rel, channels: [], type: typeOf(...rel.type.cols, meta('lo', 'any', true), meta('hi', 'any', true), meta('tlo', 'text', true), meta('thi', 'text', true)),
-    specs: (['lo', 'hi', 'tlo', 'thi'] as const).map((name) => [name, {
-      kind: 'window-expr', fn: name.endsWith('lo') ? 'min' : 'max',
-      args: [name.startsWith('t') ? { kind: 'call', fn: 'coalesce', args: [col(rel.id, 'vt'), compilerText('')] } : col(rel.id, 'v')],
-      spec: { partitionBy: [col(rel.id, 'o'), col(rel.id, 'sq')], orderBy: [] },
-    }] as const),
-  });
-  const leading = rowNumberWindow(tied, 'lead', [], { partitionBy: [col(tied.id, 'o')], orderBy: [{ expr: col(tied.id, 'sq'), dir: 'asc' }] }, fresh);
-  const ambiguous = make.filter({
-    id: fresh('f'), input: leading, channels: [], type: leading.type,
-    pred: and(eq(col(leading.id, 'lead'), compilerInt(1)), or(
-      { kind: 'binary', op: 'is not', left: col(leading.id, 'lo'), right: col(leading.id, 'hi') },
-      { kind: 'binary', op: 'is not', left: col(leading.id, 'tlo'), right: col(leading.id, 'thi') })),
-  });
-  guard(make.project({ id: fresh('p'), input: ambiguous, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(ambiguous.id, 'o')]] }),
-    { message: UNORDERED_FIRST, raiseWhen: 'rows' });
 }
 
 /**
@@ -1647,8 +1614,12 @@ function unorderedFirstGuard(rel: Rel, guard: Guarder, fresh: Minter): void {
  * creation's parameters, so nothing was created.
  */
 function absentGuard(site: RuntimeSite, rows: Rel, guard: Guarder, fresh: Minter): void {
-  const matching = make.filter({ id: fresh('f'), input: rows, channels: [], type: rows.type, pred: eq(col(rows.id, 'o'), col(site.host.id, site.origin)) });
-  const missing = make.filter({ id: fresh('f'), input: site.host, channels: site.host.channels, type: site.host.type, pred: { kind: 'exists', plan: matching, negated: true } });
+  // ONE set operation — the host's traversers EXCEPT the ones a value row names — over a TAKEN `rows`,
+  // so the difference reads a spooled snapshot (`src/rel/emit.ts` `spools`) rather than re-deriving it.
+  const missing = make.join({
+    id: fresh('j'), left: site.host, right: rows, join: 'anti', channels: site.host.channels, type: site.host.type,
+    on: eq(col(site.host.id, site.origin), col(rows.id, 'o')),
+  });
   guard(make.project({ id: fresh('p'), input: missing, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(missing.id, site.origin)]] }),
     { message: ABSENT_LABEL, raiseWhen: 'rows' });
 }
@@ -1675,9 +1646,6 @@ interface NameRules extends IdentifierSentences {
   readonly notString: string;
   /** Does `notString` end on the offending value? */
   readonly notStringNames: boolean;
-  /** How the FIRST result is chosen: a key keeps `firstPerTraverser`'s tie raise; a label ranks by
-   *  `(sq, v)`, because rows the plan does not order come in plan order (matrix §17 "Unordered slices"). */
-  readonly first: 'tie-raise' | 'rank';
   /** The refusal for a name that is itself a COLLECTION — a body framed as a list, or a list constant —
    *  where the host refuses one rather than declining. */
   readonly collection?: string;
@@ -1687,10 +1655,10 @@ interface NameRules extends IdentifierSentences {
 // and `validatePropertyKey` raise; only what a NAME SITE adds, its own null and non-String sentences, is here.
 const KEY_NAME: NameRules = {
   ...PROPERTY_KEY_SENTENCES, column: 'k',
-  notString: 'The provided key/value array must have a String or T on even array indices', notStringNames: false, first: 'tie-raise',
+  notString: 'The provided key/value array must have a String or T on even array indices', notStringNames: false,
 };
 const LABEL_NAME: NameRules = {
-  ...LABEL_SENTENCES, column: 'name', notString: 'Label traversal must produce a String, but got ', notStringNames: true, first: 'rank',
+  ...LABEL_SENTENCES, column: 'name', notString: 'Label traversal must produce a String, but got ', notStringNames: true,
 };
 /** `resolveLabelCollection`'s own two sentences, for a member of `addV(t1, t2, …)`. */
 const LABEL_MEMBER_NAME: NameRules = {
@@ -1776,21 +1744,29 @@ function foldedName(value: unknown, child: ChildSeam): FoldedName | null {
  * so it is the first row and an absent one RAISES.
  *
  * The four checks are PURE PREDICATES over the value, so they ride as guard statements over the one
- * resolved relation — each evaluated once, before anything is written, O(plan size). `null` declines.
+ * TAKEN snapshot — each evaluated once, before anything is written, O(plan size). `null` declines.
  */
 function runtimeNameRows(
-  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter, rules: NameRules,
+  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter, rules: NameRules,
 ): Rel | null {
   const resolved = resolveValueRows(body, site, child, fresh, true);
   if (!resolved) {
     if (rules.collection && listFramed(body, site, child)) throw new ValueParseError(rules.collection);
     return null;
   }
-  absentGuard(site, resolved.rel, guard, fresh);
-  const first = rules.first === 'tie-raise' ? firstPerTraverser(resolved.rel, guard, fresh)
-    : rankedFirst(resolved.rel, [col(resolved.rel.id, 'sq'), col(resolved.rel.id, 'v')], fresh);
-  const nameText = (rel: Rel): Expr => ({ kind: 'cast', arg: col(rel.id, 'v'), to: 'text' });
-  const typeOfName: Expr = { kind: 'call', fn: 'typeof', args: [col(first.id, 'v')] };
+  // ONE TAKEN first-per-traverser snapshot — `(o, name, t, vt)`: the name as text, its storage class and
+  // its stated type — that every guard and the result read, so the body, its two windows and the cast are
+  // computed ONCE rather than re-inlined into six statements. Every column is text or an integer, so the
+  // snapshot always crosses as JSON (§6·2).
+  const picked = rankedFirst(resolved.rel, fresh);
+  const first = bind(make.project({
+    id: fresh('nm'), input: picked, channels: [], type: typeOf(meta('o', 'int'), meta('name', 'text', true), meta('t', 'text'), meta('vt', 'text', true)),
+    exprs: [['o', col(picked.id, 'o')], ['name', { kind: 'cast', arg: col(picked.id, 'v'), to: 'text' }],
+      ['t', { kind: 'call', fn: 'typeof', args: [col(picked.id, 'v')] }], ['vt', col(picked.id, 'vt')]],
+  }), true);
+  absentGuard(site, first, guard, fresh);
+  const nameText = (rel: Rel): Expr => col(rel.id, 'name');
+  const typeOfName: Expr = col(first.id, 't');
   // A String is TEXT, but not all TEXT is a String: a uuid, a datetime or an exact-decimal tail is stored
   // as text too, and says so either in the row's own type (`vt`, a `values()` read of a typed property)
   // or in the type the body's framing STATES for every row (`constant(UUID(…))`). Either one naming a
@@ -1964,28 +1940,19 @@ function runtimeWriteRows(
   // encounter, and a body with none (or one a fan-out does not refine) ties every result of a traverser at
   // one `sq`; those rows are inserted in whatever order SQLite yields them, which is not claimed to be the
   // reference's iteration order. It decides only the ORDER of the values a list/set holds, never WHICH
-  // values are written (unlike a "first" pick, which `firstPerTraverser` refuses on a tie).
+  // values are written (unlike a "first" pick, `rankedFirst`).
   const ordered = make.sort({ id: fresh('so'), input: kept, channels: [], type: kept.type, terms: [{ expr: col(kept.id, 'o'), dir: 'asc' }, { expr: col(kept.id, 'sq'), dir: 'asc' }] });
 
   // An EDGE property is an UPSERT on `(edge, key)`, so the row id SURVIVES and the refresh — which skips a
   // pid it already indexed — would keep the OLD text. Its stale index rows go first, scoped to the
   // (element, key) pairs being written; the body has not been re-read by anything that mutated yet.
-  if (elem === 'edge') {
-    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-    const pairs = make.filter({ id: fresh('f'), input: rows, channels: [], type: rows.type, pred: and(eq(col(rows.id, 'owner'), col(scan.id, spec.owner)), eq(col(rows.id, 'k'), col(scan.id, 'key'))) });
-    const displaced = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: { kind: 'exists', plan: pairs, negated: false } });
-    bind(dropStaleIndex('edge', make.project({ id: fresh('p'), input: displaced, channels: [], type: ID_TYPE, exprs: [['id', col(displaced.id, 'id')]] }), fresh));
-  }
+  if (elem === 'edge') bind(dropStaleIndex('edge', slotRows(elem, rows, undefined, fresh), fresh));
 
   // Meta on a value a `set` element already holds is a PATCH of that row (`patchSetMeta`). It changes no
   // VALUE, so the insert below is still the first statement to change anything the body reads.
   if (elem !== 'edge' && meta_ !== null && (cardinality === null || cardinality === 'set')) {
-    bind(patchSetMeta(meta_, cardinality, (t) => ({
-      kind: 'exists', negated: false, plan: make.filter({
-        id: fresh('f'), input: rows, channels: [], type: rows.type,
-        pred: and(and(eq(col(rows.id, 'owner'), col(t.id, spec.owner)), eq(col(rows.id, 'k'), col(t.id, 'key'))), eq(col(rows.id, 'v'), col(t.id, 'value'))),
-      }),
-    }), fresh));
+    const held = slotRows(elem, rows, (slot, row) => eq(slot('value'), row('v')), fresh);
+    bind(patchSetMeta(meta_, cardinality, (t) => ({ kind: 'in-query', expr: col(t.id, 'id'), plan: held, negated: false }), fresh));
   }
 
   const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
@@ -2006,19 +1973,41 @@ function runtimeWriteRows(
   // THE DISPLACED ROWS of a `single` write — the same (element, key) as a row just written, not one of
   // them, on an element whose effective cardinality is `single`. AFTER the insert, so the body read the
   // pre-mutation value (see the header).
-  const displaced = (scan: Rel): Expr => {
-    const sameSlot = make.filter({ id: fresh('f'), input: written, channels: [], type: written.type, pred: and(eq(col(written.id, 'owner'), col(scan.id, spec.owner)), eq(col(written.id, 'k'), col(scan.id, 'key'))) });
-    const newIds = make.project({ id: fresh('p'), input: written, channels: [], type: ID_TYPE, exprs: [['id', col(written.id, 'id')]] });
-    return and(and({ kind: 'exists', plan: sameSlot, negated: false }, { kind: 'in-query', expr: col(scan.id, 'id'), plan: newIds, negated: true }),
-      cardinality === 'single' ? undefined : eq(cardinalityOf(col(scan.id, spec.owner), col(scan.id, 'key'), null, fresh), text('single')));
-  };
   if (cardinality !== 'list' && cardinality !== 'set') {
-    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-    const stale = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: displaced(scan) });
-    bind(dropStaleIndex('vertex', make.project({ id: fresh('p'), input: stale, channels: [], type: ID_TYPE, exprs: [['id', col(stale.id, 'id')]] }), fresh));
+    const newIds = make.project({ id: fresh('p'), input: written, channels: [], type: ID_TYPE, exprs: [['id', col(written.id, 'id')]] });
+    const stale = slotRows(elem, written, (slot) => and({ kind: 'in-query', expr: slot('id'), plan: newIds, negated: true },
+      cardinality === 'single' ? undefined : eq(cardinalityOf(slot(spec.owner), slot('key'), null, fresh), text('single'))), fresh);
+    bind(dropStaleIndex('vertex', stale, fresh));
     const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-    bind(remove({ target: t, channels: [], type: typeOf(), where: displaced(t), returning: [] }));
+    bind(remove({ target: t, channels: [], type: typeOf(), where: { kind: 'in-query', expr: col(t.id, 'id'), plan: stale, negated: false }, returning: [] }));
   }
+}
+
+/**
+ * The property rows already in the (element, key) SLOTS `rows` names — `rows`' `(owner, k)` pairs, each
+ * seeking its slot through the `(owner, key)` index — narrowed by `keep`, projected to `id`.
+ *
+ * DRIVEN FROM THE ROWS, never from the table: the slot test as a correlated `EXISTS` over `rows` made
+ * the statement a full scan of the property table with a scan of the snapshot per property row —
+ * O(P·N), quadratic in a `g.V().property(…)` over every vertex. An `ordered` join keeps the snapshot
+ * the outer loop, so each slot is one index seek and the statement is O(N log P).
+ */
+function slotRows(
+  elem: Elem, rows: Rel, keep: ((slot: (column: string) => Expr, row: (column: string) => Expr) => Expr) | undefined, fresh: Minter,
+): Rel {
+  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
+  const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const slots = make.join({
+    id: fresh('j'), left: rows, right: scan, join: 'inner', ordered: true, channels: [],
+    type: typeOf(...rows.type.cols, ...scan.type.cols.map((column) => meta(`s_${column.name}`, column.type, column.nullable))),
+    on: and(eq(col(rows.id, 'owner'), col(scan.id, spec.owner)), eq(col(rows.id, 'k'), col(scan.id, 'key'))),
+  });
+  // `keep` reads a column of the slot's property row (`slot`) or of the row naming it (`row`).
+  const kept = keep ? make.filter({
+    id: fresh('f'), input: slots, channels: [], type: slots.type,
+    pred: keep((column) => col(slots.id, `s_${column}`), (column) => col(slots.id, column)),
+  }) : slots;
+  return make.project({ id: fresh('p'), input: kept, channels: [], type: ID_TYPE, exprs: [['id', col(kept.id, 's_id')]] });
 }
 
 /** `(id, owner, k)` — a runtime write's `RETURNING`: the new rows, and the (element, key) slot each
@@ -2042,7 +2031,7 @@ const RUNTIME_WRITTEN_TYPE: RelType = typeOf(meta('id', 'int'), meta('owner', 'i
  */
 function prepareRuntimeWrite(
   elem: Elem, site: RuntimeSite, write: PropertyRuntimeSet, fresh: Minter, child: ChildSeam, guard: Guarder,
-  bind?: Binder, sequenced = false,
+  bind: Binder, folded: boolean, sequenced = false,
 ): ((targets: Rel, bind: Binder) => void) | null {
   const value = write.value;
   const resolved = 'body' in value ? resolveValueRows(value.body, site, child, fresh) : {
@@ -2062,21 +2051,24 @@ function prepareRuntimeWrite(
   let key: RuntimeKey;
   if (typeof write.key === 'string') key = { kind: 'const', expr: propertyKeyExpr(write.key, write.keyName) };
   else {
-    const rows = runtimeNameRows(write.key.body, site, child, guard, fresh, KEY_NAME);
+    // The name is already a TAKEN snapshot (`runtimeNameRows`), so it reads the same rows after any write.
+    const rows = runtimeNameRows(write.key.body, site, child, bind, guard, fresh, KEY_NAME);
     if (!rows) return null;
-    key = { kind: 'rows', rows: bind ? bind(rows, true) : rows };
+    key = { kind: 'rows', rows };
   }
   // A FOLDED parameter is one value or a raise; an edge property is the first of several (see the
-  // writer's header).
+  // writer's header) — by the one first-pick policy, `rankedFirst`.
   const first = site.resolve === 'first' || elem === 'edge';
-  if (site.resolve === 'first') absentGuard(site, resolved.rel, guard, fresh);
-  const values = first ? firstPerTraverser(resolved.rel, guard, fresh) : resolved.rel;
+  const picked = first ? rankedFirst(resolved.rel, fresh) : resolved.rel;
+  // A FOLDED parameter's values are taken before the creation (see the header); its guards read the taken
+  // rows, so the body is resolved once.
+  const values = folded ? bind(transportableValues(picked, fresh), true) : picked;
+  if (site.resolve === 'first') absentGuard(site, values, guard, fresh);
   // Only the values the write APPLIES are asked: a null behind the first result of a folded parameter or
   // an edge value is never applied by the reference either. A body whose NULL is ABSENT left none.
   if (!resolved.nullFree) nullValueGuard(values, guard, fresh);
-  const taken = bind ? bind(transportableValues(values, fresh), true) : values;
   return (targets, bindLater) => runtimeWriteRows(
-    elem, keyedRows(taken, targets, key, fresh), resolved.mayBeMulti && !first, write.cardinality, write.meta, bindLater, guard, fresh,
+    elem, keyedRows(values, targets, key, fresh), resolved.mayBeMulti && !first, write.cardinality, write.meta, bindLater, guard, fresh,
   );
 }
 
@@ -2434,19 +2426,11 @@ export function elementAddLabel(
     return scope.passThrough();
   }
   const { site, targets } = ownerSite(scope.owners, 'vertex', aliases, fresh);
-  const resolved = resolvedNames(members, site, child, scope.guard, fresh, members.length > 1 ? ADD_LABEL_MEMBER_NAME : ADD_LABEL_NAME);
+  const resolved = resolvedNames(members, site, child, scope.bind, scope.guard, fresh, members.length > 1 ? ADD_LABEL_MEMBER_NAME : ADD_LABEL_NAME);
   if (!resolved) return null;
-  // TAKEN before the insert, as a creation's are (`resolveCreationLabels`).
-  const taken = scope.bind(resolved, true);
-  const owned = make.join({
-    id: fresh('j'), left: targets, right: taken, join: 'inner', channels: [],
-    type: typeOf(meta('o', 'int'), meta('owner', 'int'), meta('no', 'int'), meta('name', 'text')),
-    on: eq(col(targets.id, 'o'), col(taken.id, 'o')),
-  });
-  bindLabels(make.project({
-    id: fresh('p'), input: owned, channels: [], type: typeOf(meta('owner', 'int'), meta('name', 'text')),
-    exprs: [['owner', col(owned.id, 'owner')], ['name', col(owned.id, 'name')]],
-  }), scope.bind, fresh);
+  // TAKEN before the insert, as a creation's are (`resolveCreationLabels`), and paired with each owner by
+  // its traverser — the one positional pairing a creation uses too (`labelledByPosition`).
+  bindLabels({ targets, names: scope.bind(resolved, true) }, scope.bind, fresh);
   return scope.passThrough();
 }
 
@@ -2480,15 +2464,17 @@ function mutationLabelMembers(step: IRStep, child: ChildSeam): readonly (string 
  *
  * Two forms of one statement. A constant name list CROSS-JOINS every owner — `addVertex`'s pairing, but
  * the left side is EXISTING ids; both sides project to a single `id` column so the join's positional
- * output is exactly `(node, label)`. A per-traverser ASSIGNMENT is an `(owner, name)` relation, each name
- * joined to its interned id. `vertex_labels` is `PRIMARY KEY (node, label)`, so a label already carried
+ * output is exactly `(node, label)`. A per-traverser ASSIGNMENT is the `(o, name)` names paired with the
+ * `(o, owner)` targets by traverser, each name to its interned id — `labelledByPosition`, the creation's. `vertex_labels` is `PRIMARY KEY (node, label)`, so a label already carried
  * is a no-op through `ON CONFLICT DO NOTHING` rather than through a check this had to write.
  */
-function bindLabels(labels: { readonly owners: Rel; readonly names: readonly string[] } | Rel, bind: Binder, fresh: Minter): void {
+function bindLabels(
+  labels: { readonly owners: Rel; readonly names: readonly string[] } | { readonly targets: Rel; readonly names: Rel }, bind: Binder, fresh: Minter,
+): void {
   const constant = 'owners' in labels ? labels : null;
-  const assigned = constant ? null : labels as Rel;
+  const assigned = constant ? null : labels as { readonly targets: Rel; readonly names: Rel };
   // A constant `names` is non-empty, so never the null arm.
-  const labelRow = internLabels(constant ? constant.names.map(text) : assigned!, bind, fresh)!;
+  const labelRow = internLabels(constant ? constant.names.map(text) : assigned!.names, bind, fresh)!;
   const target = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
   let pairs: Rel;
   if (constant) {
@@ -2497,14 +2483,10 @@ function bindLabels(labels: { readonly owners: Rel; readonly names: readonly str
       type: typeOf(meta('node', 'int'), meta('label', 'int')),
     });
   } else {
-    const named = make.join({
-      id: fresh('j'), left: assigned!, right: labelRow, join: 'inner', channels: [],
-      type: typeOf(meta('owner', 'int'), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')),
-      on: eq(col(assigned!.id, 'name'), col(labelRow.id, 'name')),
-    });
+    const labelled = labelledByPosition(assigned!.targets, 'o', assigned!.names, labelRow, fresh);
     pairs = make.project({
-      id: fresh('p'), input: named, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')),
-      exprs: [['node', col(named.id, 'owner')], ['label', col(named.id, 'lid')]],
+      id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')),
+      exprs: [['node', col(labelled.id, 'owner')], ['label', col(labelled.id, 'lbl')]],
     });
   }
   bind(insert({
@@ -2904,7 +2886,7 @@ export function addVertex(
     // A CROSS JOIN, so N labels are N pairs per created node — the same statement whether the list
     // holds one name or four, which is what makes a multi-label creation no new shape. A per-traverser
     // assignment pairs each new row with ITS traverser's names, by the position `positioned` recovers.
-    const labelled = isConstantLabels(labels) ? null : labelledByPosition(positioned(created, fresh), labels, labelRow, fresh);
+    const labelled = isConstantLabels(labels) ? null : labelledByPosition(positioned(created, fresh), ORD, labels, labelRow, fresh);
     const pairs = labelled
       ? make.project({ id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')), exprs: [['node', col(labelled.id, 'id')], ['label', col(labelled.id, 'lbl')]] })
       : make.join({
@@ -3114,7 +3096,7 @@ function foldedParameters(
     const bodies = [...('body' in write.value ? [write.value.body] : []), ...(typeof write.key === 'string' ? [] : [write.key.body])];
     const site = parameterSite(incoming, incomingElem, aliases, bodies, fresh);
     if (!site) return null;
-    const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard, bind);
+    const apply = prepareRuntimeWrite(elem, site, write, fresh, child, guard, bind, true);
     if (!apply) return null;
     out.push(apply);
   }
@@ -3281,18 +3263,18 @@ function resolveCreationLabels(
   const bodies = labels.members.filter((member): member is readonly IRStep[] => typeof member !== 'string');
   const site = parameterSite(incoming, incomingElem, aliases, bodies, fresh);
   if (!site) return null;
-  const names = resolvedNames(labels.members, site, child, guard, fresh, labels.members.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME);
+  const names = resolvedNames(labels.members, site, child, bind, guard, fresh, labels.members.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME);
   return names && bind(names, true);
 }
 
 /** Label MEMBERS — constant names and per-traverser bodies — as one `(o, name)` relation over `site`,
  *  UNIONED as a set (`resolveLabelCollection`'s `LinkedHashSet`, `resolveStringArguments`' too). */
 function resolvedNames(
-  members: readonly (string | readonly IRStep[])[], site: RuntimeSite, child: ChildSeam, guard: Guarder, fresh: Minter, rules: NameRules,
+  members: readonly (string | readonly IRStep[])[], site: RuntimeSite, child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter, rules: NameRules,
 ): Rel | null {
   const parts: Rel[] = [];
   for (const member of members) {
-    const part = typeof member !== 'string' ? runtimeNameRows(member, site, child, guard, fresh, rules) : make.project({
+    const part = typeof member !== 'string' ? runtimeNameRows(member, site, child, bind, guard, fresh, rules) : make.project({
       id: fresh('ln'), input: site.host, channels: [], type: typeOf(meta('o', 'int'), meta('name', 'text')),
       exprs: [['o', col(site.host.id, site.origin)], ['name', text(member)]],
     });
@@ -3304,15 +3286,16 @@ function resolvedNames(
 
 /**
  * Each row of `left` with the interned id of every label its traverser resolved, as `left`'s columns plus
- * `lbl`: `left`'s position equi-joined to the names' `o`, then each name to its id. A `left` with no
- * position is one traverser, so the names cross it. The outer loop stays `left`'s (`ordered`), because
- * an edge insert assigns rowids in that order.
+ * `lbl`: `left`'s traverser column `key` equi-joined to the names' `o`, then each name to its id — ORD for a
+ * creation (`positioned`), `o` for an existing element's `targetsOf`. A `left` with no key (`null`) is one
+ * traverser, so the names cross it. The outer loop stays `left`'s (`ordered`), because an edge insert
+ * assigns rowids in that order; both inner sides are taken snapshots, which the emitter spools so each
+ * equi-join is an index seek (`src/rel/emit.ts` `spools`).
  */
-function labelledByPosition(left: Rel, names: Rel, interned: Rel, fresh: Minter): Rel {
-  const positional = left.type.cols.some((column) => column.name === ORD);
+function labelledByPosition(left: Rel, key: string | null, names: Rel, interned: Rel, fresh: Minter): Rel {
   const named = make.join({
     id: fresh('j'), left, right: names, channels: [], type: typeOf(...left.type.cols, meta('lo', 'int'), meta('ln', 'text')),
-    ...(positional ? { join: 'inner' as const, ordered: true, on: eq(col(left.id, ORD), col(names.id, 'o')) } : { join: 'cross' as const }),
+    ...(key ? { join: 'inner' as const, ordered: true, on: eq(col(left.id, key), col(names.id, 'o')) } : { join: 'cross' as const }),
   });
   const labelled = make.join({
     id: fresh('j'), left: named, right: interned, join: 'inner', ordered: true, channels: [],
@@ -3861,7 +3844,7 @@ export function elementAddE(
       id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
       type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
     })
-    : labelledByPosition(inOrder, names, labelRow, fresh);
+    : labelledByPosition(inOrder, inOrder.type.cols.some((column) => column.name === ORD) ? ORD : null, names, labelRow, fresh);
   // A CALLER-SUPPLIED PUBLIC ID lands in one of two columns and the choice is the value's own type,
   // exactly as `addVertex` spells it for `nodes`: a NUMBER is the rowid, a STRING is the `uid`. Absent,
   // the row names neither and takes whatever rowid SQLite assigns.
