@@ -761,6 +761,18 @@ work: `wf/r7-resourced-scalar-vtype-2-2` and `-2-3` were left in place only beca
 as `13acd8c7` with a conflict resolution in `branch.ts`, so `git cherry` shows `+`; the content is on trunk.
 
 **Shared root causes (one substrate item each, ordered BEFORE what they unblock):**
+- ✅ **S6 LANDED (19115f5e..a33d7983, 2026-11-02).** Map-first `select('k')` where the traverser may be a Map, behind
+  the shared select dispatch: the Map's entry when it holds `k`, else `mapFirstFallback` (`src/compiler/rel/lower.ts`)
+  — the `withSideEffect` constant, or nothing; the per-row Map test is emitted only where that fallback is a constant
+  or nothing. Covers the R8 residual, the single-driver map-tail `option(Merge.onCreate, __.select('k'))` (onCreate
+  may restate, never override, a per-driver merge map), and the write-arg `cannotBeMap` fold. Remains: the
+  multi-driver `inject(maps).mergeV().option(onCreate, __.select('k'))` stays declined until `mergeVFromMap`'s
+  interleaving guard and created-map correlation are positional (the R10/F7 class); lifting it is a one-line change
+  at the "NARROWED to ONE driver" comment in `mergedFromMap`. The plain multi-driver map mergeV is quadratic on trunk
+  already. These still decline because there is no framing for an entry-or-side-effect value per row: a select or
+  format over a valueMap or a list/map value side, `format` over an optional record field, and `select` of an optional
+  `project()` field. Where the Map may hold the key, a named collection or path label behind it still drops the row
+  (§17).
 - **S6. Map-first scoping for `select('k')` on any host that may be a Map.** `Scoping.java:119-135`
   (`vendor/tinkerpop/gremlin-core/.../traversal/step/Scoping.java`) reads the traverser's own Map entry before the
   side effect and the path. Today only the record/map tails know that; the scalar tail assumes "a static scalar can
