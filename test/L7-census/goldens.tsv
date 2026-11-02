@@ -1438,6 +1438,7 @@ ran	1	1	3101e457de327e47	e2af7d42ac8feaec	g.mergeV([name: "marko"]). option(Merg
 ran	1	1	625bdf1ae0f79cd2	18d568f5946e2052	g.mergeV([name: "newperson"]). option(Merge.onCreate, [(T.label): ["person","employee"], name: "newperson"])
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.mergeV(null)
 ran	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.mergeV(null).option(Merge.onCreate,[:])
+ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.union()
 ran	6	6	1c896079cb4d3b31	54b4986ccfb79240	g.union(__.V().hasLabel("software"), __.V().hasLabel("person")).values("name")
 ran	6	6	1c896079cb4d3b31	a23df02ce161bf89	g.union(__.V().values("name"))
 ran	3	3	5c0588a102c4d6f7	5193c42b3be2198b	g.union(__.addV("person").property("name", "alice"), __.addV("person").property("name", "bob"), __.addV("person").property("name", "chris")).values("name")

@@ -52,6 +52,19 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(() => compile('g.V().where(__.and().has("name","x"))', {})).toThrow('empty operand');
   });
 
+  test('a SOURCE union of non-re-sourcing arms is the chain-position union over ONE starter row', () => {
+    // `UnionStep`'s `UNION_STARTER` is one constant `VALUES` row with no binds; each arm is the ordinary
+    // chain-position arm over it, so the merge is a `UNION ALL` exactly as `inject(x).union(…)` emits.
+    const u = read('g.union(__.constant(1), __.constant(2))');
+    expect(u.sql).toContain('FROM (VALUES (NULL))');
+    expect(u.sql).toContain('UNION ALL');
+    expect(u.binds).toEqual([]);
+    // `g.union()` is the EMPTY relation — a false filter over the starter, never a `VALUES` of nothing.
+    const e = read('g.union().count()');
+    expect(e.sql).toContain('WHERE (1 = 0)');
+    expect(run(seededStore(), 'g.union().count()')).toEqual([{ v: 0 }]);
+  });
+
   test('local(<body>.order().by().limit()) is a per-origin WINDOW, not a global slice', () => {
     // A slice inside a fan-out body is scoped PER HOST: `local(out().order().by('name').limit(1))` is the
     // first out-neighbour BY NAME of each vertex, so it lowers to ROW_NUMBER() OVER (PARTITION BY origin

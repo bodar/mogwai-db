@@ -81,7 +81,7 @@ function collectStrings(value: unknown, into: Set<string>): void {
   }
 }
 
-interface Acc { readonly labels: Set<string>; all: boolean }
+interface Acc { readonly labels: Set<string>; all: boolean; readonly valueArgs?: ReadonlySet<string> }
 
 /** Every `as()` label reachable at ANY depth inside a match()'s arguments is a READ of the enclosing
  *  scope — the variable-location rule `matchLabelsOf`'s note explains, applied recursively so it holds
@@ -118,7 +118,7 @@ function walkReads(chain: readonly Step[], read: BodyReader, acc: Acc): void {
     // Liveness is therefore per label NAME rather than per bind site, which is also what makes a
     // REBIND (`as('a')…as('a')`, whose history a later `select(Pop.first)` can read back) safe: both
     // binds live or die together with the name.
-    if (s.name !== 'as') for (const a of s.args ?? []) collectStrings(a.value, acc.labels);
+    if (s.name !== 'as' && !acc.valueArgs?.has(s.name)) for (const a of s.args ?? []) collectStrings(a.value, acc.labels);
     if (typeof ir.from === 'string') acc.labels.add(ir.from);
     if (typeof ir.to === 'string') acc.labels.add(ir.to);
     for (const m of ir.modulators ?? []) for (const v of m) collectStrings(v, acc.labels);
@@ -135,6 +135,29 @@ function walkReads(chain: readonly Step[], read: BodyReader, acc: Acc): void {
 /** Every label the tree reads, at any depth. */
 export function labelReads(steps: readonly Step[], params: Record<string, any>): LabelReads {
   const acc: Acc = { labels: new Set<string>(), all: false };
+  walkReads(steps, rawBodies(params), acc);
+  return acc;
+}
+
+/** Steps whose OWN string arguments are VALUES — a constant, a property key or value, an edge label, an
+ *  element label — and never a `Scoping` key: none of them resolves a string against the traverser's
+ *  scope. The list enumerates NON-readers, so a step missing from it (a new one included) still counts
+ *  its strings — the fail-closed direction this module's note requires. A nested traversal in any of
+ *  their positions (`has('age', gt(__.select('a')))`) is still walked. */
+const VALUE_ARGUMENT_STEPS: ReadonlySet<string> = new Set([
+  'constant', 'inject', 'is', 'has', 'hasLabel', 'hasKey', 'hasValue', 'hasNot', 'values', 'properties',
+  'valueMap', 'elementMap', 'propertyMap', 'out', 'in', 'both', 'outE', 'inE', 'bothE',
+]);
+
+/**
+ * The labels the tree reads as a SCOPE KEY, at any depth — `labelReads` minus the string arguments of
+ * `VALUE_ARGUMENT_STEPS`. For a caller that DECLINES on a read (rather than deletes on its absence), where
+ * over-reading a value (`constant('a')`, `has('name','a')`) as a label read refuses a query the label never
+ * reaches. Still fail closed everywhere else: modulators, `with()` values, a `path()`-family step and an
+ * unreadable body count exactly as in `labelReads`.
+ */
+export function scopeKeyReads(steps: readonly Step[], params: Record<string, any>): LabelReads {
+  const acc: Acc = { labels: new Set<string>(), all: false, valueArgs: VALUE_ARGUMENT_STEPS };
   walkReads(steps, rawBodies(params), acc);
   return acc;
 }

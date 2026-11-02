@@ -10,7 +10,7 @@ import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ColMeta, SortTerm } from '../../rel/types.ts';
+import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
@@ -2264,6 +2264,36 @@ const exactTailConst = (a: Arg | undefined): { expr: Expr; tag: string } | null 
   return { expr: a!.name != null ? param(v, a!.name) : compilerText(String(v)), tag };
 };
 
+/**
+ * A SOURCE OF LITERAL ROWS, seeded with the chain's channels — the one spelling `injectSource` and the
+ * source-union STARTER (`unionStarter`) share. Every row is one traverser of multiplicity 1 (no `bulk`
+ * column: an absent bulk IS 1), and where the chain carries an emission order each row's 1-based ordinal is
+ * its `encounter` — the VALUES order is TinkerPop's inject traversal order. Carried here, before a later
+ * GraphStep expands each input traverser; minting a position only after the cross join would lose that
+ * nesting. The `sack` channel is the caller's (`sacked` in `lowerChainOf`), layered on like any source's.
+ */
+function literalSource(id: RelId, cells: readonly (readonly Expr[])[], payload: readonly ColMeta[], ordered: boolean): Rel {
+  const channels = ordered ? withChannel([], ENCOUNTER) : [];
+  const rows = ordered ? cells.map((row, i) => [...row, compilerInt(i + 1)]) : cells.map((row) => [...row]);
+  return make.values({ id, rows, channels, type: typeOf(...payload, ...carriedCols(channels)) });
+}
+
+/**
+ * THE STARTER a SOURCE `g.union(…)` feeds its arms — `UnionStep`'s `UNION_STARTER`, generated with bulk 1 and
+ * its path dropped when the step `isStart` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/
+ * gremlin/process/traversal/step/branch/UnionStep.java:71-81`). One row with a NULL payload framed scalar
+ * UNKNOWN: no arm the source union admits reads it (`sourceUnion`'s `opensOffStarter`), so its value is never
+ * observed — only its ONE-ness, which is what makes each arm emit once.
+ */
+const unionStarter = (ordered: boolean, fresh: Minter): FramedRel => ({
+  rel: literalSource(fresh('ust'), [[compilerNull()]], [meta('v', 'any', true)], ordered),
+  framing: { kind: 'scalar', type: UNKNOWN },
+});
+
+/** The one-row input a SOURCE write (`addV`/`addE`/`mergeV`/`mergeE`) multiplies: one row means one write. */
+const oneRow = (fresh: Minter): Rel =>
+  make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+
 function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
@@ -2360,17 +2390,9 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   const cells: Expr[][] = perRowType
     ? (rows as Expr[]).map((row, i) => [row, declared[i] ? compilerText(declared[i]!) : compilerNull()])
     : (rows as Expr[]).map((row) => [row]);
-  // Values order is TinkerPop's inject traversal order. Carry it before a later GraphStep expands
-  // each input traverser; minting a position only after the cross join would lose that nesting.
-  const channels = ordered ? withChannel([], ENCOUNTER) : [];
-  const positioned = ordered ? cells.map((row, i) => [...row, compilerInt(i + 1)]) : cells;
   return {
-    rel: make.values({
-      id: fresh('inj'), rows: positioned, channels,
-      type: perRowType
-        ? typeOf(meta('v', 'any', true), meta('vt', 'text', true), ...carriedCols(channels))
-        : typeOf(meta('v', 'any', true), ...carriedCols(channels)),
-    }),
+    rel: literalSource(fresh('inj'), cells,
+      perRowType ? [meta('v', 'any', true), meta('vt', 'text', true)] : [meta('v', 'any', true)], ordered),
     framing: {
       kind: 'scalar',
       type: tag ? STATIC(tag as never, textTail) : perRowType ? PER_ROW('vt') : UNKNOWN,
@@ -4207,22 +4229,32 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
    *  with no accumulator in it. */
   const sacked = (rel: Rel): Rel | null => (ctx.sack ? seedSack(rel, ctx.sack, fresh) : rel);
 
-  // `g.union(a, b, …)` in SOURCE position — every arm is a ROOTED chain of its own, correlated to
-  // nothing, so this is NOT the chain-position `union()` with a different input. `unionArms` lowers
-  // each body against the CURRENT traverser; here there is none, and each arm re-enters `lowerChain`
-  // whole. That distinction is why `sourceUnion` deliberately does not use the child-body arm triage,
-  // and why this is a source arm rather than a widening of that one.
+  // `g.union(a, b, …)` in SOURCE position — two kinds of arm, which `sourceUnion` tells apart from the
+  // query text. An arm that RE-SOURCES (`__.V()…`, `__.inject(…)`) is a rooted chain of its own,
+  // correlated to nothing: it re-enters `lowerChain` whole, and the merge is `mergeArms`, which is
+  // parent-agnostic — a source union has no input to take channels from, so the first arm's are the base
+  // every arm must agree with.
   //
-  // What is SHARED is everything after the arms exist: `mergeArms` is parent-agnostic, which is what
-  // taking a `Channels` rather than an input relation now makes explicit — a source union has no
-  // input to take them from, so the first arm's are the base every arm must agree with.
+  // An arm that does NOT re-source (`g.union(__.constant(1), __.constant(2))`) runs over `UnionStep`'s one
+  // STARTER traverser instead — the chain-position union over a one-row relation (`unionStarter`), seeded
+  // with this chain's channels and its sack like any source. The starter never contributes a path entry
+  // (`UnionStep` drops it), and a path or graph-tagged chain has no seed for it here, so those decline.
   if (first.name === 'union') {
-    const merged = sourceUnion(first, ctx, fresh);
+    const starter = (): FramedRel | null => {
+      if (tracksPath || first.graphTag != null) return null;
+      const seed = unionStarter(ordered, fresh);
+      const rel = sacked(seed.rel);
+      return rel && { rel, framing: seed.framing };
+    };
+    const merged = sourceUnion(first, steps, ctx, fresh, starter);
     if (!merged) return null;
     // A write in a source-union arm threads its effects out (`g.union(__.addV(…), __.addV(…))`) — arm-major
     // order makes the writes' own answer correct; a downstream body that OBSERVES them refuses
     // (`withBranchEffects`), since arm 2 writes only after arm 1 has run through the rest of the chain.
-    return withBranchEffects(merged, steps, 0, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES));
+    // The arms' labels ride on (`merged.aliases`), as every chain-position branch's do: a label an arm binds
+    // is on the traverser it emits, so `g.union(__.constant(1).as('a')).select('a')` reads it. (A rooted arm
+    // has none to carry, and `sourceUnion` declines a downstream read of one.)
+    return withBranchEffects(merged, steps, 0, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, merged.aliases));
   }
 
   if (first.name === 'inject') {
@@ -4300,7 +4332,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // `addE` at the SOURCE is one edge with both ends named — the input is a one-row `Values` and the
   // endpoints carry the whole answer, so the mid-chain lowering runs unchanged.
   if (first.name === 'addE') {
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const one = oneRow(fresh);
     const added = addedEdges(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
     if (!added) return null;
     return afterWrite(ctx.writes, one, steps, 0, added.at, added.effects.bindings, ctx.params, fresh,
@@ -4308,7 +4340,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   }
 
   if (first.name === 'addV') {
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const one = oneRow(fresh);
     const added = addedVertices(one, steps, 0, ctx, fresh);
     if (!added) return null;
     return afterWrite(ctx.writes, one, steps, 0, added.at, added.effects.bindings, ctx.params, fresh,
@@ -4318,7 +4350,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // `mergeV` AT THE SOURCE takes the same one-row input the two creations do, and for the same reason:
   // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
   if (first.name === 'mergeV' || first.name === 'mergeE') {
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const one = oneRow(fresh);
     const merged = mergedElements(one, steps, 0, NO_ALIASES, ctx, fresh);
     if (!merged) return null;
     return afterWrite(ctx.writes, one, steps, 0, merged.at, merged.effects.bindings, ctx.params, fresh,

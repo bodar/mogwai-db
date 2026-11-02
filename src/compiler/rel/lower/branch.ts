@@ -10,6 +10,7 @@ import { isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
 import { referenceDistinctAt } from '../../ir/bulk.ts';
 import { armCollectsInOrder } from '../../ir/analyze.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
+import { labelsBoundBefore, matchLabelsOf, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
@@ -379,23 +380,47 @@ export function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
 /**
  * `g.union(a, b, …)` — a SOURCE union, or `null` to decline.
  *
- * Each argument is a whole traversal, so each one re-enters `lowerChain` through the seam's rooted
- * answer and the merge is the ordinary one. Three declines, each its own reason:
+ * `UnionStep` with `isStart` generates ONE starter traverser (`UNION_STARTER`, bulk 1, path dropped), hands
+ * it to every arm, and skips any arm output that is still the starter
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/UnionStep.java:71-92`).
+ * So an arm is one of two kinds, and the arms' FIRST steps — the query text — decide which:
  *
- * - **fewer than two arms.** `union(t)` IS `t` — not a merge at all — and `union()` is the empty
- *   relation, which `Values` cannot express (§3.3). Both decline.
- * - **an arm with EFFECTS.** `union(__.addV(…), __.addV(…))` is plan composition (§3.0) and the
- *   arms' statements would have to be hoisted to bindings and ordered before the read that merges
- *   them. Expressible, unbuilt, and a write question rather than a branch one.
- * - anything `mergeArms` refuses — a shape disagreement, a label bound in one arm, an arm-local
- *   `order()` minting a second emission order.
+ * - **every arm RE-SOURCES** (`__.V()…`, `__.inject(…)`): the starter is irrelevant (a mid-traversal `V()`
+ *   ignores its input; `inject` passes it through and the skip drops it), so each arm re-enters `lowerChain`
+ *   whole through the seam's rooted answer and the merge is the ordinary one. This is the only route that
+ *   admits arm EFFECTS (`g.union(__.addV(…), __.addV(…))`): one start traverser makes arm-major and
+ *   per-traverser order coincide.
+ * - **every arm OPENS OFF THE STARTER** (`opensOffStarter`): the arms are the chain-position union over a
+ *   one-row relation — `unionArms` whole, so the source form is exactly as capable as `inject(x).union(…)`
+ *   (single and reduction arms, emission order, the scalar meet, map demotion, variants) with no second
+ *   merge. `g.union()` is the EMPTY relation over the same starter.
+ *
+ * Arms that MIX the two decline, as the chain-position union does when one arm re-sources beside a per-input
+ * body: agreeing their channels is the same substrate for both forms, and not this one's. A first step that
+ * could hand the starter back (identity, a filter, `as()`, a side effect, a nested branch, `sack()`) declines
+ * too — the reference skips that output at run time; refusing it at compile time is the fail-closed answer.
+ *
+ * LABELS: a starter-route arm's labels leave on the `unionArms` answer's `aliases`, which the caller carries
+ * on. A rooted arm has no alias channel to carry, so a downstream READ of a label one binds declines.
  */
 export function sourceUnion(
-  step: IRStep, ctx: ChainCtx, fresh: Minter,
+  step: IRStep, steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter, starter: () => FramedRel | null,
 ): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
-  if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
+  if (args.some((arg) => !isNested(arg))) return null;
+  const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params, ctx.sideEffects));
+  if (bodies.every((body) => !!body?.length && opensOffStarter(body[0]!, ctx))) {
+    const start = starter();
+    if (!start) return null;
+    // `g.union()` — no arm, so nothing is emitted: §3.3's empty relation is a false filter over the starter
+    // (`Values` refuses to express zero rows), framed like the starter so `count()` is 0 and `fold()` is `[]`.
+    if (!args.length) {
+      const rel = start.rel;
+      return { rel: make.filter({ id: fresh('ue'), input: rel, channels: rel.channels, type: rel.type, pred: CONSTANT.false }), framing: start.framing, aliases: NO_ALIASES };
+    }
+    return unionArms(step, start.rel, start.framing, false, ctx, fresh, NO_ALIASES, { steps, at: 0 });
+  }
   const arms: Tail[] = [];
   // A WRITE in a SOURCE-union arm (`g.union(__.addV(…), __.addV(…))`) is UNCONDITIONALLY correct, unlike a
   // chain-position branch: a source union has ONE start traverser, so arm-major and per-traverser order
@@ -403,9 +428,19 @@ export function sourceUnion(
   // effects are COLLECTED (in arm order) and threaded out rather than declined; the arm RESULT relations
   // reference those write bindings, which the caller folds into the program before the merge is read.
   const effects: Binding[] = [];
+  // A ROOTED arm is lowered WHOLE (`rootedRead`), so a label it binds leaves with no alias channel — yet it
+  // is on every traverser the arm emits (`UnionStep` forwards the arm's traverser, path and all), so a read
+  // of it downstream (`g.union(__.V()….as('a'), …).select('a')`) would answer the unbound key's EMPTY result.
+  // Carrying a rooted chain's aliases out is unbuilt, so such a read DECLINES. Both sides are the label
+  // authority's: `rootedLabelsOut` (a barrier inside the arm clears its binds — exact), `scopeKeyReads`
+  // (over-approximating every string that could be a scope key — fail closed — but not a VALUE argument,
+  // so `constant('a')`/`has('name','a')` after the union read no label).
+  const reads = scopeKeyReads(steps.slice(1), ctx.params);
   for (const arg of args) {
     const body = rootedSteps((arg as { readonly nested: unknown }).nested, ctx.params, ctx.sideEffects);
     if (!body?.length) return null;
+    const bound = rootedLabelsOut(body, ctx.params);
+    if (bound.size && (reads.all || [...bound].some((label) => reads.labels.has(label)))) return null;
     const read = rootedRead(body, ctx, fresh);
     if (!read) return null;
     if (read.effects?.length) effects.push(...read.effects);
@@ -420,6 +455,48 @@ export function sourceUnion(
   // The arms carry no `effects` field here (collected above), so `mergeArms`' write-arm decline does not
   // fire — its union of the arm results is exactly what a source union owes.
   return withEffects(mergeArms(arms, NO_ALIASES, ctx.source, fresh));
+}
+
+/**
+ * The path labels a ROOTED source-union arm's traverser leaves with that a downstream read could NOT see
+ * through the arm's answer — `labelsBoundBefore` over the whole arm, less the variables of a FINAL
+ * `match()`: that step emits its binding MAP, and `Scoping.getScopeValue` resolves a key against the
+ * traverser's Map before its path
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+ * so `g.union(__.V().match(__.as('x').out().as('y'))).select('y')` reads the map the arm's answer carries.
+ */
+function rootedLabelsOut(body: readonly IRStep[], params: Record<string, any>): ReadonlySet<string> {
+  const bound = labelsBoundBefore(body, body.length, params);
+  const last = body[body.length - 1]!;
+  if (last.name !== 'match' || last.modulators?.length) return bound;
+  const inMap = new Set(matchLabelsOf(last, params));
+  return new Set([...bound].filter((label) => !inMap.has(label)));
+}
+
+/**
+ * DOES A SOURCE-UNION ARM OPEN WITH A MAP THAT NEVER EMITS ITS INPUT — so that the starter traverser can
+ * never reach the arm's output, and `UnionStep`'s run-time skip of it never fires? A static property of the
+ * query text: the arm's FIRST step decides.
+ *
+ * Two steps qualify. `constant(c)` is the one `MAPPING_TERMINAL` (`ir/productivity.ts`) whose value ignores
+ * its input (`ConstantStep.map`); the others (`project`, `valueMap`, `elementMap`) read it. `select(k)` where
+ * `k` names a DECLARED side effect reads that side effect (`SelectOneStep` falls back to the side effects when
+ * the traverser holds no `k`) — and the starter holds none, its path dropped, so no alias can shadow it.
+ * Admitting the arm here only routes it: whether it then LOWERS is `unionArms`' answer, the same as for
+ * `g.inject(0).union(__.select(k), …)` — a map side effect a `mergeE()` consumes runs (the
+ * `…_unionXselectXm1X_selectXm2XX_mergeE` scenario), while a scalar or list one declines there exactly as
+ * `g.withSideEffect('x', 1).inject(0).select('x')` does today.
+ *
+ * Everything else declines: identity and filters emit the starter itself, `as()`/a side effect/`sack()` pass
+ * it through, a nested branch may, and `inject` passes its input through even mid-chain. Declining is the
+ * fail-closed answer: those arms would emit the starter here, which the reference skips.
+ */
+function opensOffStarter(step: IRStep, ctx: ChainCtx): boolean {
+  if (step.modulators?.length || step.optionArms || isLocalScope(step)) return false;
+  if (step.name === 'constant') return step.args.length === 1 && !isNested(step.args[0]!.value);
+  if (step.name !== 'select' || step.args.length !== 1) return false;
+  const key = step.args[0]!.value;
+  return typeof key === 'string' && (ctx.sideEffects.has(key) || ctx.sideEffectPolicies.has(key));
 }
 
 /**
