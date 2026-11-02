@@ -15,7 +15,7 @@ import { arg, isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/
 import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
-import { aliasPresence, aliasProjection, selectSpec } from '../alias.ts';
+import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, presenceDischarged, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
@@ -935,9 +935,9 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
   // host already was (a `select('a').select('b')`: the second label reads the ROW, so `a`'s absence must
   // gate it). Either way the new host carries `present`, which every body arm reads through
   // `hostPresence` — a statically bound label under a present host carries none, and its SQL is unchanged.
-  const key = gatedByHost(host, proj.payload[0]![1]!);
-  if (!key) return null;
-  const present = mayBeAbsent(host) ? { present: 'value-nullness' as const } : aliasPresence(host.row.rel, proj.entry);
+  const rerooted = rerootPresence(host, host.row.rel, proj);
+  if (!rerooted) return null;
+  const { key, present } = rerooted;
   const row = { row: host.row } as const;
   if (proj.read.kind === 'element') return { kind: 'element', id: key, elem: proj.read.elem, ...row, ...present };
   if (proj.read.kind === 'value') {

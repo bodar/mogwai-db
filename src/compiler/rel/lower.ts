@@ -41,7 +41,7 @@ import {
     typedNode, typeOf, withPayload, originOf,
     type Minter, withSubqueryColumns,
 } from './build.ts';
-import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases, selectSpec } from './alias.ts';
+import { aliasElementHost, aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, isElementAlias, liveAliases, selectSpec, type ElementAliasProjection } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, type Modulation } from './modulator.ts';
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
@@ -53,7 +53,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, correlatedMapKey, elementHost,elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
+import { ENTRY, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -5239,6 +5239,12 @@ function aliasIdentityPred(pred: unknown, startId: Expr, rel: Rel, labels: Alias
   return null; // an ordering leaf has no identity meaning — it is the by()-value form, a later phase
 }
 
+/** The host a `where(k1, P(k2)).by(…)` operand's `by()` runs on: the label's element on a FRESH traverser
+ *  (`freshTraverserRow`), carrying the label's presence (`aliasElementHost`) — so a label unbound on this
+ *  row drops it even where the `by()` never reads through the id (`by(__.constant(1))`). */
+const whereOperandHost = (rel: Rel, proj: ElementAliasProjection): ChildHost =>
+  aliasElementHost(rel, proj, freshTraverserRow(rel));
+
 /**
  * A COMPOUND alias-compare under a `by()`-RING — `where('a', P.lt('b').or(P.gt('c'))).by('age').by('weight')`
  * — as a filter clause, or `null`/`'decline'`.
@@ -5255,16 +5261,14 @@ function aliasValueWhere(
   step: IRStep, startKey: string, pred: unknown, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): Rel | 'decline' | null {
   const startProj = aliasProjection(rel, labels, startKey, 'last', fresh);
-  if (!startProj || startProj.read.kind !== 'element') return null; // a scalar-alias theta is unbuilt
+  if (!isElementAlias(startProj)) return null; // a scalar-alias theta is unbuilt
   const ring = modulations(step, step.modulators?.length ?? 0, childSeam(ctx, fresh));
   if (!ring || !ring.length) return null;
   const seam = childSeam(ctx, fresh);
-  const hostOf = (proj: NonNullable<ReturnType<typeof aliasProjection>>): ChildHost =>
-    ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: freshTraverserRow(rel) });
   // Under `ProductiveByStrategy` an unproductive `by()` is KEPT as a null and compared; that keep-null
   // compare is not built, so it declines (as the single-binary path does).
   if (isProductiveBy(step)) return 'decline';
-  const startHost = hostOf(startProj);
+  const startHost = whereOperandHost(rel, startProj);
   const lhsBy = byProjection(ring[0]!, startHost, ctx.source, fresh, true, seam);
   if (!lhsBy) return 'decline';
   const lhs = lhsBy.value;
@@ -5281,9 +5285,9 @@ function aliasValueWhere(
     }
     if (!ALIAS_CMP[p.op] || p.operands.length !== 1 || typeof p.operands[0]!.value !== 'string') return null;
     const proj = aliasProjection(rel, labels, p.operands[0]!.value, 'last', fresh);
-    if (!proj || proj.read.kind !== 'element') return null;
+    if (!isElementAlias(proj)) return null;
     const by = ring[ringIdx % ring.length]!; ringIdx++;
-    const valHost = hostOf(proj);
+    const valHost = whereOperandHost(rel, proj);
     const val = byProjection(by, valHost, ctx.source, fresh, true, seam);
     if (!val) return null;
     const p2 = productivityFilter(step, val.present, val.value);
@@ -5344,7 +5348,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
       const projB = aliasProjection(rel, labels, pred.operands[0]!.value as string, 'last', fresh);
       // A non-element theta (a scalar-alias compare) is an unbuilt shape; fall through (sourceFilter
       // declines it too) rather than over-claiming a fail-closed decline.
-      if (projA && projB && projA.read.kind === 'element' && projB.read.kind === 'element') {
+      if (isElementAlias(projA) && isElementAlias(projB)) {
         const bys = modulations(step, 1, childSeam(ctx, fresh));
         if (!bys) return step.modulators?.length ? 'decline' : null;
         if (!bys.length) {
@@ -5354,13 +5358,11 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
           return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same } });
         }
         // VALUE compare under a `by(key)`: project the key off each alias's element host, compare.
-        const hostOf = (proj: NonNullable<typeof projA>): ChildHost =>
-          ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: freshTraverserRow(rel) });
         const seam = childSeam(ctx, fresh);
         // Under `ProductiveByStrategy` a non-productive `by()` KEEPS the row as a real NULL, a
         // null-keeping compare this does not build, so DECLINE.
         if (isProductiveBy(step)) return 'decline';
-        const [hostA, hostB] = [hostOf(projA), hostOf(projB)];
+        const [hostA, hostB] = [whereOperandHost(rel, projA), whereOperandHost(rel, projB)];
         const [aVal, bVal] = [byProjection(bys[0]!, hostA, ctx.source, fresh, true, seam), byProjection(bys[0]!, hostB, ctx.source, fresh, true, seam)];
         if (!aVal || !bVal) return 'decline';
         // A non-productive `by()` DROPS the row (`productivityFilter`); a NULL value is an absent one, and

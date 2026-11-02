@@ -7,11 +7,11 @@ import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, gatedByHost, hostPresence, mayBeAbsent, presenceOf, type ChildHost, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
-import { aliasPresence, aliasProjection, selectSpec } from '../alias.ts';
+import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
@@ -252,11 +252,11 @@ function selectRerootSubject(step: IRStep, subject: Subject, aliases: AliasMap, 
   if (!spec || spec.labels.length !== 1) return null;
   const proj = aliasProjection(subject.rel, aliases, spec.labels[0]!, spec.pop, fresh);
   if (!proj) return null;
-  // As `selectRerootHost`: a label that may be unbound here (`aliasGuard`), or a subject that may itself
-  // be absent (a nested `select`, which reads the ROW — so the outer absence gates the new key).
-  const key = gatedByHost(subject, proj.payload[0]![1]!);
-  if (!key) return null;
-  const present = mayBeAbsent(subject) ? { present: 'value-nullness' as const } : aliasPresence(subject.rel, proj.entry);
+  // As `selectRerootHost`: a label that may be unbound here, or a subject that may itself be absent
+  // (`rerootPresence`).
+  const rerooted = rerootPresence(subject, subject.rel, proj);
+  if (!rerooted) return null;
+  const { key, present } = rerooted;
   if (proj.read.kind === 'element') return { kind: 'element', id: key, elem: proj.read.elem, rel: subject.rel, ...present };
   if (proj.read.kind === 'value') {
     const vtype = proj.payload[1]?.[1];

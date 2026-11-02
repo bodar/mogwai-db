@@ -9,6 +9,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../elem.ts';
 import { aliasScalarTypeOf, joinAliasEntry, type AliasEntry, type AliasMap } from '../alias.ts';
 import { MAP_COL } from './map.ts';
+import { gatedByHost, mayBeAbsent, type ChildHost, type HostRow, type Subject } from './child.ts';
 import { carriedCols, collectedOf, familyKey, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
@@ -279,6 +280,58 @@ export const aliasGuard = (rel: Rel, entry: AliasEntry): Expr | undefined =>
 export const aliasPresence = (rel: Rel, entry: AliasEntry): { readonly present?: 'value-nullness' } =>
   (aliasGuard(rel, entry) ? { present: 'value-nullness' } : {});
 
+/** ONE LABEL'S PAYLOAD, read off the row — `aliasProjection`'s answer. */
+export interface AliasProjection {
+  readonly entry: AliasEntry;
+  readonly read: AliasRead;
+  readonly payload: readonly (readonly [ColMeta, Expr])[];
+}
+
+/** An `AliasProjection` that names an ELEMENT — narrowed by `isElementAlias`, so a host builder reads
+ *  `read.elem` off the type rather than through a cast. */
+export type ElementAliasProjection = AliasProjection & { readonly read: Extract<AliasRead, { kind: 'element' }> };
+
+export const isElementAlias = (proj: AliasProjection | null): proj is ElementAliasProjection =>
+  proj?.read.kind === 'element';
+
+/** The element a label names at its LAST binding, with the presence it OWES (`aliasPresence`) — the one
+ *  body behind `aliasElementHost` and `aliasElementSubject`, so no host built off a label can drop it. */
+const aliasElement = (rel: Rel, proj: ElementAliasProjection) => ({
+  kind: 'element' as const, id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem,
+  ...aliasPresence(rel, proj.entry),
+});
+
+/**
+ * THE CHILD HOST A LABEL NAMES — a `where('a', P(b)).by(…)` operand, a `match()` leg's start.
+ *
+ * It ALWAYS carries the label's presence: a label first bound inside a branch arm, an `optional()` or a
+ * repeat body reads NULL on a row it is unbound on, and a `by()` that never reads through the id
+ * (`by(__.constant(1))`) would otherwise PRODUCE there. The reference resolves the operand with
+ * `getSafeScopeValue` (null where unbound) and drops the traverser on an unproductive `by()`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java:98-102,131-139`).
+ * A statically bound label carries none, so its SQL is unchanged.
+ */
+export const aliasElementHost = (rel: Rel, proj: ElementAliasProjection, row?: HostRow): ChildHost =>
+  ({ ...aliasElement(rel, proj), ...(row ? { row } : {}) });
+
+/** `aliasElementHost`'s predicate-seam twin — the label's element as a filter SUBJECT over `rel`. */
+export const aliasElementSubject = (rel: Rel, proj: ElementAliasProjection): Subject =>
+  ({ ...aliasElement(rel, proj), rel });
+
+/**
+ * A `select(<label>)` REROOT's key and presence — the one answer `selectRerootHost` (a value body) and
+ * `selectRerootSubject` (a filter body) share. The new host may be ABSENT two ways: the label may be
+ * unbound here (`aliasPresence`), or the OUTER host already was (a nested `select` reads the ROW, so the
+ * outer absence gates the new key). `null` declines with `gatedByHost`.
+ */
+export const rerootPresence = (
+  outer: ChildHost | Subject, rel: Rel, proj: AliasProjection,
+): { readonly key: Expr; readonly present: { readonly present?: 'value-nullness' } } | null => {
+  const key = gatedByHost(outer, proj.payload[0]![1]!);
+  if (!key) return null;
+  return { key, present: mayBeAbsent(outer) ? { present: 'value-nullness' } : aliasPresence(rel, proj.entry) };
+};
+
 /** The projection every `select()` shares: the payload under its canonical column names, then the
  *  carried channels through unchanged.
  *
@@ -318,7 +371,7 @@ export function readProjection(
  */
 export function aliasProjection(
   rel: Rel, aliases: AliasMap, label: string, pop: Pop, fresh?: Minter,
-): { readonly entry: AliasEntry; readonly read: AliasRead; readonly payload: readonly (readonly [ColMeta, Expr])[] } | null {
+): AliasProjection | null {
   // Asked of the RELATION, so a label a barrier consumed reads as unbound — which is the same
   // DECLINE as a label never bound, and correct for both (TinkerPop drops every traverser either way).
   const entry = liveAliases(aliases, rel).get(label);
