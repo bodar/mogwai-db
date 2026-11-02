@@ -593,7 +593,12 @@ UNEVALUABLE`.
      (trunk declined these; the constant twin `g.V().both().addV('x').label().groupCount()` already leaked on trunk).
      Root: `both()` (a union of directions) feeding a write and then a reducing barrier — `out()`/`in()`/`hasLabel()`
      sources answer correctly. Fix the binding replication, not the label route.
-  3. **ONE authority for addLabel's argument grammar** — `elementAddLabel` runs `mutationLabelNames` FIRST, whose
+  3. ✅ **LANDED (2184440a)** — a constant label (addLabel/addV) is judged by ONE `constantName(value, vtype, rules)`
+     (`src/compiler/rel/write.ts`), with the type the query text states; the all-constant fold routes through
+     `mutationLabelMembers`, the `String()` coercion is gone, and the identifier sentences live once in
+     `src/gremlin/validate.ts`. Remains: `addLabel(__.constant([]))` still declines (as before) — the reference
+     treats it as a no-op, so passing the vertices through would be faithful; out of scope. Original report:
+     **ONE authority for addLabel's argument grammar** — `elementAddLabel` runs `mutationLabelNames` FIRST, whose
      all-constant fold does `String(resolved)`: `addLabel(__.constant(null))` writes `'null'`, `addLabel(__.constant(1))`
      writes `'1'`, a `UUID` constant writes its text (also `g.addV(__.constant(UUID(…)))`), while
      `addLabel(__.values('lang'), __.constant(null))` raises correctly via `addLabelConstant` — whether a query raises
@@ -783,15 +788,15 @@ for `count`, `[]` for `fold`.
   needs.
 
 **Reuse-sweep proposals** (no answer change unless noted):
-1. **addLabel parses its arguments once** — `elementAddLabel` sends the all-constant case through
+1. ✅ (2184440a, with 2 and 3) **addLabel parses its arguments once** — `elementAddLabel` sends the all-constant case through
    `mutationLabelMembers`/`addLabelConstant` too (all-string members → `bindLabels({owners, names})`, constant SQL
    byte-identical); `mutationLabelNames` serves `dropLabel` alone. ~15 lines. ANSWER CHANGE (a fix):
    `g.V(1).addLabel(__.constant(5)).labels()` answers `[person, 5]` today, reference raises (`TraversalUtil.java:211-236`);
    `constant(null)` writes `'null'`. Needs a test that nothing is written.
-2. **One compile-time `constantName(value, rules: NameRules)`** replacing `labelMember`'s constant branch and
+2. ✅ (2184440a) **One compile-time `constantName(value, rules: NameRules)`** replacing `labelMember`'s constant branch and
    `addLabelConstant` (null → `rules.nullMessage`, list → `rules.collection`, non-String → `rules.notString`+value, else
    `validateLabel`), so compile-time refusal and `runtimeNameRows`' run-time guard read one table. ~12 lines.
-3. **KEY_NAME/LABEL_NAME/ADD_LABEL_NAME sentences from `src/gremlin/validate.ts`** — export its tables (the owner of
+3. ✅ (2184440a) **KEY_NAME/LABEL_NAME/ADD_LABEL_NAME sentences from `src/gremlin/validate.ts`** — export its tables (the owner of
    `ElementHelper`'s rules) and build the `NameRules` from them; six duplicated literals go.
 4. **One positional label-pairing join** — `labelledByPosition` (write.ts) takes the key column (ORD for a creation,
    `o` for `targetsOf`), so `bindLabels`' non-constant arm and `elementAddLabel`'s `owned`/`named` joins go. ~20 lines;
@@ -867,8 +872,8 @@ proposed rebuilding on A/E, which are superseded.
 ## §11. Open design decisions
 
 Live ones sit beside the work they gate — §9's unbounded-plus-barrier wall. (§10's three-answer label coercion
-is settled by the landed runtime-name resolver; its last disagreeing route — addLabel's constant fold — is §10
-follow-up 3.)
+is settled by the landed runtime-name resolver; its last disagreeing route — addLabel's constant fold — closed by §10
+follow-up 3, 2184440a.)
 
 Closed and recorded as law: exact-type literal framing resolved into §6·7. The numeric-tower PROMOTION rule
 was REOPENED on evidence (2026-10-17, see §6·7: exact class) — it had been closed by NOT building it, since reproducing
