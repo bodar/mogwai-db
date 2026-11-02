@@ -855,7 +855,8 @@ the same answer.
 
    Fix: decline every live outer label the body reads, and allow only the `P.eq`/`neq` operands that `legRight`
    turns into join conditions.
-7. **R7 (major, bare internal Error) — the re-sourcing scalar arm leaks `RelIR: relation mfN has no declared column
+7. ✅ **LANDED (3ed7002d + 13acd8c7 + 6bb959c8, 2026-11-02).** `firstRootedValue` (build.ts) fences one Limit-1 MATERIALIZED row and reads value, per-row type (`relHostTag`) and `EXISTS` off it (`Presence { when, orValue }`), so the host never names a rooted column; a body reading host traverser state (sack, loops, path, unbound labels) declines in `rootedRead` (`'split'` vs `'source'`). Remains: nothing (per-host correlation of host state tracked in `docs/outstanding-work.md` §4).
+   **R7 (major, bare internal Error) — the re-sourcing scalar arm leaks `RelIR: relation mfN has no declared column
    'vtype'` / `'vt'`.**
    - `g.V().map(__.V().values('name'))` and `g.V().optional(__.out().as('a')).map(__.select('a').V().values('name'))`
      both leak it.
