@@ -631,15 +631,26 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
   // runs, so the writer reads it once (a snapshot) and the snapshot computes a shared draw once: one
   // `sample(1)` is ONE vertex, so the list ends as [100, its age] (a person) or [] (software, null) —
   // never the existing 100 dropped beside a written age, nor two values from one draw.
+  // The body is applied PER TRAVERSER (`TraversalUtil.applyAll`, AddPropertyStep.java:134), so one
+  // statement over 50 holders is 50 independent trials of "the snapshot and the write read one draw" —
+  // the trials cost one write, not one seeded store each.
   test('a nullable body that draws is evaluated once', () => {
-    for (let i = 0; i < 40; i++) {
-      const store = seededStore();
-      run(store, "g.V(1).property(list,'l',100)");
-      run(store, "g.V(1).property(list,'l', __.V().sample(1).coalesce(__.values('age'), __.constant(null)))");
-      // A multiset: `values()` is an unordered stream (L8 reverses it).
-      const held = bagOf(run(store, "g.V(1).values('l')").map((r) => r.v)) as number[];
-      const age = held.find((v) => v !== 100);
-      expect(held.length === 0 || (held.length === 2 && held.includes(100) && [27, 29, 32, 35].includes(age!))).toBe(true);
+    const holders = Array.from({ length: 50 }, (_, i) => i).join(',');
+    for (let trial = 0; trial < 3; trial++) {
+      const store = storeSeededWith([
+        "g.addV('person').property('age',27).addV('person').property('age',29).addV('person').property('age',32)" +
+          ".addV('person').property('age',35).addV('software').addV('software')",
+        `g.inject(${holders}).addV('holder').property(list,'l',100)`,
+      ]);
+      run(store, "g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person','software').sample(1).coalesce(__.values('age'), __.constant(null)))");
+      const bags = run(store, "g.V().hasLabel('holder').map(__.values('l').fold())").map((r) => JSON.parse(r.list) as number[]);
+      expect(bags.length).toBe(50);
+      for (const bag of bags) {
+        // A multiset: `values()` is an unordered stream (L8 reverses it).
+        const held = bagOf(bag) as number[];
+        const age = held.find((v) => v !== 100);
+        expect(held.length === 0 || (held.length === 2 && held.includes(100) && [27, 29, 32, 35].includes(age!))).toBe(true);
+      }
     }
   });
 
