@@ -746,6 +746,171 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
   distinguishable no other way, and a body that cannot report it DECLINES.
 
 
+### Next round (from the 2026-11-02 third round — read before picking items)
+
+Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed":
+- `e8b93db8`: R8 + R9 (`MergeTraverser` fact; `collectionMembers` is the one Array|Set judge).
+- `261bfb98`: S4, folding R1, R2, R3 and R12's §17 line.
+- `a85c99b2` + `62226f6e` + `b73c4933`: S5, folding R4, R5, R6 and reuse proposal 2. The legCorrelated leg walk
+  is now ANCHORED at its start element (`ChildSeam.anchored` / `anchoredSeed` in `src/compiler/rel/lower/filter.ts`),
+  a correlated `[NOT] EXISTS` instead of a semi/anti join — the old plan was ~63× from N=1k to 8k.
+- `3ed7002d` + `13acd8c7` + `6bb959c8`: R7 + R19, including the productive-null fix (`Presence { when, orValue }`).
+
+Nothing was deferred whole. One residual was PARKED (R8's Map-first scoping, below). No round branch holds unlanded
+work: `wf/r7-resourced-scalar-vtype-2-2` and `-2-3` were left in place only because their commit `402b7224` landed
+as `13acd8c7` with a conflict resolution in `branch.ts`, so `git cherry` shows `+`; the content is on trunk.
+
+**Shared root causes (one substrate item each, ordered BEFORE what they unblock):**
+- **S6. Map-first scoping for `select('k')` on any host that may be a Map.** `Scoping.java:119-135`
+  (`vendor/tinkerpop/gremlin-core/.../traversal/step/Scoping.java`) reads the traverser's own Map entry before the
+  side effect and the path. Today only the record/map tails know that; the scalar tail assumes "a static scalar can
+  never be a Map", and a write arg folds `select('k')` to the side effect under `cannotBeMap`. The substrate is ONE
+  per-row reader: the Map entry when the traverser is a Map holding `k`, else the side effect/path value (one
+  `json_type`/`json_extract` term, computed once). It unblocks, in this order:
+  1. the R8 residual: `g.withSideEffect('k',[name:'se']).V(1).property('m',[k:[name:'mm']]).values('m').mergeV(__.select('k')).values('name')`
+     gives `['se']`; the reference gives `['mm']`. Plain scalar-tail `select('k')` over a map-valued property has the
+     same wrong answer (pre-existing, not newly exposed).
+  2. the map-tail `option(Merge.onCreate, __.select('k'))`, which R8 turned from answer into a clean decline
+     (`g.withSideEffect('k',[age:5]).inject([name:'x']).mergeV().option(Merge.onCreate, __.select('k')).valueMap()`
+     answered `[name:[x], age:[5]]` on trunk, correct whenever the driver Map lacks `k`). `MergeVertexStep.java:103`.
+  3. widening `cannotBeMap` in `verifyWriteArgs` (`src/compiler/ir/write-args.ts`): `elementKindAt` cannot type a
+     list/path/VertexProperty stream, none of which can be a Map, so `…V(1).fold().mergeV(__.select('k'))` now
+     declines where trunk raised the reference's `ValueParseError`. A "cannot be a Map" kind beside `elementKindAt`
+     restores the error; with S6 it becomes moot.
+  Separate prerequisite, NOT part of S6: the `project(…)`/record and `inject(map)` drivers with `select('k')` decline
+  until `mergeFromTraversal` accepts a record or map driver.
+- **S7. A choose's presence is built from its arm GUARDS.** R7 made `meetPresence` (`src/compiler/rel/child.ts`)
+  return `'unknown'` for any arm with a stated `{ when }` presence, so `scalarChooseChild` (`reduction.ts` ~1409) and
+  `scalarChooseOptions` (~1371) now DECLINE a choose with a re-sourced arm that trunk ANSWERED correctly:
+  `g.V().map(__.choose(__.hasLabel('person'), __.V().values('name').order().limit(1), __.constant('x')))` →
+  `[josh,josh,x,josh,x,josh]`, and the `…V().values('age').sum(), __.constant(0)` form → `[123,123,0,123,0,123]`.
+  The null-arm variant (`…__.V().constant(null).limit(1), __.V(99).values('name')`, reference 4×null) was a WRONG
+  answer on trunk and now declines. Fix ONCE: `meetPresence` takes the arm guards and returns
+  `{ when: CASE pred THEN presenceOf(then) ELSE presenceOf(else) END }` — the shape `reSourcedUnder` case 3 already
+  writes by hand, which then calls the helper instead of being a second copy. This also unblocks where/not over a
+  choose body (`g.V().where(__.choose(__.hasLabel('person'), __.V().values('name').order().limit(1), __.constant(null)))`).
+  Pin the choose-arm case (with and without a null arm) in `test/compiler/resourced-scalar-value.exec.test.ts`; its
+  absence is why CI missed the regression.
+- **S8. One row-count authority `rowBounds(rel) → {min, max}`.** There are now THREE hand switches over the same node
+  kinds: `collapsedToOneRow` and `exactlyOneRow` (`src/compiler/rel/lower/reduction.ts` ~111/~130) and `atMostOneRow`
+  (`src/compiler/rel/lower.ts` ~255). Calcite models this as one min/max authority
+  (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/metadata/RelMdMinRowCount.java`, `RelMdMaxRowCount.java`).
+  One walk answers all three and is more precise: a `Distinct` over exactly one row is exactly one row, and so is a
+  literal `Limit ≥ 1` over one (`exactlyOneRow`'s docstring is wrong on the first point). Today
+  `g.V().map(__.V().count().dedup()).count()` loses `'always'` for that reason: 77 → 353 bytes of SQL and a per-row
+  `IS NOT NULL` with no user-visible reason (same answer). S8 absorbs reuse proposals 3 and 5 below.
+
+**Follow-ups from review (major first).**
+1. **M1 (major, SQL hygiene; from S4) — `hostKept` builds the by() projection over the ORIGINAL, possibly-absent
+   host**, so a by() value already gated on the host carries the host predicate 2–3 times per row
+   (`src/compiler/rel/modulator.ts`). Use the existing authority `presenceDischarged` (`src/compiler/rel/child.ts`
+   ~293, "a body built under the gate owes no second copy of the same term"): build `projectionOf`/`typedOf` over
+   `presenceDischarged(host)` whenever a `hostKeep` is attached. Witnesses (all linear, all correct, all
+   over-weight):
+   - `g.V().union(__.as("a"),__.identity()).as("b").dedup("a","b").by(__.constant(1)).count()` partitions by a
+     `CASE WHEN <host present> THEN 1 END`, and its WHERE repeats the same `json_extract` predicate — 3 copies.
+   - `…dedup("a","b").by(__.id()).count()` projects the key's correlated subquery as `rn18_s0` AND re-inlines it in
+     the WHERE: one correlated subquery evaluated twice per row. sql-hygiene's twice-evaluated check does not cover
+     this L4 shape; extend it while there.
+   - `…where("a",P.eq("b")).by("name")` and `…by(__.constant(1))` add a `hostKeep` conjunct the value's own
+     `IS NOT NULL` already implies.
+2. **M2 (minor, rule "computed once"; from R7) — `reSourcedUnder` case 2 gates `vtype` with a second `gatedByHost`**,
+   so the host-presence test runs twice per row
+   (`g.V().as('a').optional(out().as('b')).map(__.select('b').V().values('age').sum())`, `r38`). Case 3 spells
+   `present` twice in two `caseWhen`s. Leave `vtype` ungated (the row is filtered on `v IS NOT NULL`) or project
+   `present` once.
+3. **M3 (data-dependent refusal, pre-existing class) — a null `property()` traversal value refuses through
+   `nullValueGuard`** (`src/compiler/rel/write.ts`): `g.V().property('x', __.coalesce(__.values('age'), __.V().constant(null).limit(1)))`
+   refuses on modern only because of the two software vertices. Trunk silently skipped the write (wrong when the key
+   exists: the reference REMOVES it). Same as matrix line 196 (❌ a null property() traversal value). The real fix is
+   "a null value removes the key"; it removes a refusal that depends on DATA, which CLAUDE.md calls an outage shape.
+4. **`productivityFilter` still accepts a bare `Presence` string** beside the projection. The five `map.ts`
+   group/groupCount callers and `sack.ts` ~214 pass `'value-nullness'`, so a host-absence drop could be forgotten
+   there if their host ever becomes possibly-absent (not wrong today — the host is the chain traverser). Make the
+   projection the only accepted shape, or comment why those hosts cannot be absent.
+5. **Missing unit pins.**
+   - `test/compiler/productivity-filter.test.ts`: `hostKeep ∧ valueKeep`; `hostKeep` alone when present is
+     `'always'`; `hostKeep` NOT waived under ProductiveByStrategy (→ `{keep: hostKeep}`).
+   - `exactlyOneRow` over `limit(1)`-over-filter and `having` (or S8's `rowBounds` once it lands).
+   - R7: a host whose sack differs from the rooted body's seed
+     (`g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().sack())`, should decline); the S7 choose-arm pins.
+   - S5's newly answering shapes, so a guard change cannot reopen the field-vs-label confusion:
+     legCorrelated with a VALUE argument naming a non-correlated live alias
+     (`g.V().as('x').out().as('a').out().as('b').where(__.as('a').out().where(P.eq('b')).has('name',P.neq('x'))).count()`
+     → 2); match where-legs with a value argument naming an alias (→ 14; the `out('created')` over an alias named
+     `created` form → 8); the record where guard on `scopeKeyReads`
+     (`g.V().as('a').out().as('lop').as('c').select('a','lop').by('name').where(select('c').has('name','lop')).count()`
+     → 3; `…where(__.select('c').constant('a'))` → 2).
+   - `test/L4-addendum/source-union-starter.feature`: two former WRONG answers S5 turned into declines, as
+     `@Unsupported` scenarios carrying the reference answer 6: `g.union(__.V().as('a').local(__.out().fold())).select('a').count()`
+     (LocalStep keeps the outer path) and `g.union(__.V().as('a').groupCount('k')).select('a').count()`.
+   - `'tree'` joined `KEYED_SIDE_EFFECT_WRITERS` (`src/compiler/ir/labels.ts`), which also widens
+     `unlocatableSubPath` (right per `TreeSideEffectStep`, untested).
+6. **S5 lost an answer it should record:** the source-union match-map exemption is now first-step-only, so
+   `g.union(__.V().match(__.as('x').out().as('y'))).identity().select('y')` (answered on trunk) declines. Add an
+   `@Unsupported` scenario or an outstanding-work line. The general fix is "the exemption holds while the traverser
+   is still the arm's map", i.e. `identity()`/filters keep it.
+7. **Cheap doc fixes.** `consumesPath`'s doc (`src/compiler/ir/labels.ts` ~446) cites `test/L2-ir/labels.test.ts`,
+   which does not exist — the test is `test/compiler/path-labels.test.ts`. `test/L2-sql/match.sql.test.ts` still
+   titles a test "(anti)" and calls the form a "multi-column ANTI JOIN"; it is now a Filter over a correlated
+   `[NOT] EXISTS` on an anchored walk.
+
+Still open from the round below: S3, R10 (with F7), R11, R13–R18, and F8, F11–F13, F14b. R19 landed with R7.
+
+**Depth gaps recorded this round (clean declines, unchanged from the parent commit; not defects):**
+- **where-by / dedup-by (S4):** `where('a',eq('b')).by(…)` nested in where()/not(), inside
+  `repeat(optional(out().as('a'))).times(n)`, or under ProductiveByStrategy; a scalar label under where-by/dedup-by
+  (`values('age').union(as('a'),identity())…by(constant(1))`); `dedup('a','b')` inside coalesce or repeat;
+  `dedup('k','a')` over a `project('k')` map; `map(__.valueMap().dedup('lang').count())`;
+  `optional(outE().as('a')).dedup('a').by(label)`; the R1 shape inside where/choose/coalesce/optional/sideEffect.
+- **record where-leg (S5):** the newly admitted value-argument leg answers only at the top of the record tail; it
+  declines wrapped in `map`/`filter`/`local`/a union arm. `pathLabelsAt` has one production caller (`sourceUnion`).
+  `g.union(__.V().match(…)).where(__.select('y')).count()` (reference 6). A multi-correlation where-leg declines in
+  union-arm `where`, optional, coalesce, choose, filter, `where(where(…))`, sideEffect, `map(where(…))`, repeat
+  bodies, a `select('a','b').by()` record host, and after `count().is()` in the leg body — anchoring removed the cost
+  reason, so these are pure coverage gaps now.
+- **re-sourced scalar (R7):** `project().by(__.map(__.V()…))`; where/filter/not/choose-predicate over
+  `__.map(__.V()…)`; `group().by`/`order().by`/`groupCount().by` of it; coalesce, optional, sideEffect,
+  `map(__.map(…))`, `map(__.local(…))`, `map(__.union(…))`, `map(__.optional(…))`, repeat bodies;
+  `map(__.V().valueMap('name'))`, `map(__.V().values('age').order().fold())`, `map(__.inject(1,2.0d).order())`;
+  property/list/map/path hosts (`properties('name').map(…)`, `fold().map(…)`, `valueMap().map(…)`, `path().map(…)`).
+  Host-state over-declines (a sack still at its seed, a fresh `inject()` host, a label bound only in a nested arm) are
+  tracked in `docs/outstanding-work.md` §4.
+- **write args (R8/R9):** Set and List label hosts both decline in local/choose/optional/coalesce/map/sideEffect/
+  repeat and for `addLabel/dropLabel(__.constant({}))` (the reference treats an empty Collection as no labels,
+  `ElementHelper.getLabelsValue`).
+
+**Reuse-sweep proposals (next round; no answer change unless noted):**
+1. **One element-identity theta.** `src/compiler/rel/match.ts:thetaExpr` (~518) is the rule for "two element aliases
+   are the same element"; `matchSteps`' `wpred` branch (~752-762), the no-by() identity branch of the
+   `where(k1,P(k2))` lowering in `src/compiler/rel/lower.ts` (~5385-5397) and `aliasIdentityPred`'s eq/neq leaf
+   (~5271-5276) are three more copies. Export a projection-taking `thetaOf(projA, projB, op, rel)` that `thetaExpr`
+   wraps, so lower.ts does not mint the alias projection twice. About 12 lines; same SQL (re-check L2 snapshots only
+   if relation-id minting order shifts).
+2. **Two exports named `collectionMembers`.** `src/gremlin/frontend.ts:collectionMembers(a: Arg)` (~942) re-derives
+   per-member types by hand; make it delegate to the R9 judge `src/gremlin/validate.ts:collectionMembers(value, type)`
+   (no import cycle — validate imports only coerce/types) and rename it (e.g. `operandMembers`). The collection
+   branch of `valueNodeOf` (`src/gremlin/types.ts` ~562) is a near-duplicate it can also absorb. Leave the two
+   `Array.isArray` gates in `predicate.ts` ~900/~949 and `uncarried-literal.ts` ~61 alone unless `within($set)` is
+   probed first — moving them would let a Set-valued bound param spread (a possible answer change).
+3. **Fold `collapsedToOneRow`/`exactlyOneRow`** into one walk returning `'exactly' | 'atMost' | null`, so `rootedCount`
+   walks once. Superseded by S8 if S8 is taken; otherwise the cheap half of it.
+4. **`modulator.ts` ~515 reads presence through `aliasPresence`** (`src/compiler/rel/alias.ts`) instead of hand-
+   translating `aliasGuard`: `present: aliasPresence(row.rel, projected.entry).present ?? 'always'`. One line, same
+   SQL. (Overlaps the second round's reuse 5.)
+5. **(Coverage; answer change decline → answer) `correlatedReduce` and `mapEntryChild` claim `'always'` from
+   `collapsedToOneRow`** (`reduction.ts` ~1145/~1159/~1181 and ~2102/~2106-2111) and are protected only by a
+   downstream decline. Use R1's rule `present: exactlyOneRow(tail.rel) ? 'always' : 'value-nullness'` (or S8). Probes
+   that then likely answer, to pin as L4 witnesses against `ReducingBarrierStep`/`TraversalMapStep` in
+   `vendor/tinkerpop/gremlin-core`: `g.V().map(__.out().count().is(0)).count()`,
+   `g.V().map(__.out().fold().not(__.unfold())).count()`,
+   `g.V().valueMap().unfold().map(__.select(values).unfold().count().is(5)).count()`.
+6. Still open from the round below: reuse 1, 3–8, and their carried items (`firstPerPartition`, drop `prn > 0`,
+   `unitRow`, `name()` takes the `Minter`, `ABSENT_VALUE`, `blockAliases`).
+
+**Needs-human questions:** none raised this round.
+
+
 ### Next round (from the 2026-11-02 second round — read before picking items)
 
 Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed":
