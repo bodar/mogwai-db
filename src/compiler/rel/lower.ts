@@ -53,7 +53,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps, type MergeTraverser } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, unfoldMap } from './map.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -1278,6 +1278,11 @@ function collectionArm(
     const collectSelect = selectCollection(step, rel, ctx, fresh);
     if (collectSelect !== 'pass')
       return { tail: collectSelect && continueAs(collectSelect.rel, collectSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
+    // A PER-ROW SCALAR stream may hold MAPS, whose own entry is the FIRST scope — read before the side
+    // effect a constant names, or in place of the empty answer an unbound key has (`selectMapFirst`).
+    const mapFirst = selectMapFirst(step, rel, framing, labels, ctx, fresh);
+    if (mapFirst !== 'pass')
+      return { tail: mapFirst && continueAs(mapFirst.rel, mapFirst.framing, steps, at + 1, bulked, ctx, fresh, labels) };
     // A `withSideEffect` CONSTANT MAP resolves through the side effects before the path labels, so it is
     // consulted before `selectKeys` (which sees only the alias map) — the map-producing scope read that
     // feeds the map-valued merge driver.
@@ -1477,6 +1482,59 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
     exprs: [[MAP_COL, blob], ...rel.channels.map((ch) => [ch.col, col(rel.id, ch.col)] as const)],
   });
   return { rel: out, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...(stringKeys.length === keys.length ? { keys: stringKeys } : {}) } };
+}
+
+/**
+ * `select(k)` over a PER-ROW SCALAR stream — the one value stream whose rows MAY be Maps (a map-valued
+ * stored property, a decoded map value; `mayHoldMap`). `Scoping.getScopeValue` asks the traverser's own
+ * Map FIRST, then the side effects, then the path
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+ * so per row the answer is the Map's entry where the row is a Map holding `k`, else the next scope's.
+ *
+ * Built only where the next scope is a value a `{t,v}` node can carry beside the entry
+ * (`scalarMapKey`), so the stream stays ONE per-row scalar:
+ * - a `withSideEffect(k, constant)` — scalar, list or map — is the fallback node (`constantNode`, the
+ *   stored encoding); a constant the encoder cannot spell DECLINES;
+ * - NO scope at all (no collection, side effect or live/enclosing label `k`) — a row whose Map lacks `k`
+ *   DROPS, the empty answer `selectKeys` gives a non-Map stream (`Select.feature:578-596`).
+ *
+ * `'pass'` everywhere else, and deliberately where `k` is a LIVE PATH LABEL or a named collection: those
+ * keep their own answer with no per-row probe — an element/collection-or-entry framing per row does not
+ * exist, and the probe would land on every `values(x).select(label)` in the corpus. That a same-named key
+ * of a stored Map is not read there is a §17 divergence (`docs/feature-support-matrix.md`). A static
+ * scalar (`count()`, a typed literal) is never a Map, and a MAP/RECORD stream reads its own keys in its
+ * own tail, so neither reaches this.
+ */
+function selectMapFirst(
+  step: IRStep, rel: Rel, framing: RelFraming, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
+): FramedRel | null | 'pass' {
+  if (framing.kind !== 'scalar' || step.optionArms) return 'pass';
+  const vtype = perRowColumnOf(framing.type);
+  if (!vtype || !rel.type.cols.some((column) => column.name === vtype)) return 'pass';
+  const key = selectedKey(step);
+  if (key === null) return 'pass';
+  const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
+  if (fallback === 'pass' || fallback === null) return fallback;
+  return { rel: scalarMapKey(rel, vtype, key, fallback.node, fresh), framing: { kind: 'scalar', type: PER_ROW('vtype') } };
+}
+
+/**
+ * The scope a per-row scalar's `select(key)` falls back to when the row is no Map holding `key` — the
+ * ONE decision the chain (`selectMapFirst`) and the child seam (`scalarHostChild`'s map-first arm) share.
+ * `{node}` is a `withSideEffect` constant as a `{t,v}` node; `{node: null}` is NO scope (the row drops);
+ * `'pass'` is a named collection or a path label (live here, or bound by an enclosing scope), which keeps
+ * its own answer; `null` declines a constant the stored encoding cannot spell.
+ */
+export function mapFirstFallback(key: string, ctx: ChainCtx, liveLabel: boolean): { readonly node: Expr | null } | null | 'pass' {
+  const constant = ctx.sideEffects.get(key);
+  // The CONSTANT form declares a policy too (`sideEffectPolicies`); only a REDUCER form's operator makes
+  // the name a merged collection rather than a value to substitute.
+  if (constant && !ctx.sideEffectPolicies.get(key)?.operator && !ctx.collections.has(key)) {
+    const node = constantNode(constant.value, constant.type ?? null, constant.name ?? null);
+    return node && { node };
+  }
+  if (namedElsewhere(ctx)(key) || liveLabel || ctx.enclosingLabels?.has(key)) return 'pass';
+  return { node: null };
 }
 
 /**
@@ -2218,9 +2276,11 @@ function scalarTail(
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
           // A STATIC scalar can never be a Map (`ValueType` excludes the containers), so the fold is
           // exact. A per-row scalar MAY hold one (a map-valued property), whose own `k` precedes the side
-          // effect — but this tail's `select(k)` does not read a Map entry first either, so that case
-          // keeps the fold until the scalar host learns Map-first scoping; carrying the select as a
-          // general body here would only decline forms the fold answers correctly.
+          // effect — and this tail's `select(k)` now reads it (`selectMapFirst`) — but the general-body
+          // merge (`mergeFromTraversal`) needs an ELEMENT driver to root the body at, so carrying the
+          // select as a body here would DECLINE `values('name').mergeV(__.select('k'))`, which the fold
+          // answers correctly for every non-Map row. The fold stays; a Map row merging by the side
+          // effect rather than its own entry is a §17 divergence (`docs/feature-support-matrix.md`).
           : mergedElements(rel, steps, at, labels, 'cannotBeMap', ctx, fresh);
       if (!written) return null;
       return afterWrite(ctx.writes, rel, steps, at, written.at, written.effects.bindings, ctx.params, fresh, () => elementTail(
@@ -2467,12 +2527,17 @@ function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; f
   if (blobs.some((blob) => !blob)) return null;
   const channels = ordered ? withChannel([], ENCOUNTER) : [];
   const rows = (blobs as Expr[]).map((blob, i) => (ordered ? [blob, compilerInt(i + 1)] : [blob]));
+  // The literals' string keys are the stream's STATIC key set — every key a row MAY hold, the union over
+  // the arguments — exactly as `constant([…])` frames its one literal; a token/direction key leaves it
+  // unknown (`keys` then absent, every key read per row).
+  const keys = [...new Set(step.args.flatMap((a) => [...(a.value as Map<unknown, unknown>).keys()]))];
   return {
     rel: make.values({
       id: fresh('injm'), rows, channels,
       type: typeOf(meta(MAP_COL, 'json'), ...carriedCols(channels)),
     }),
-    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } },
+    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' },
+      ...(keys.every((k): k is string => typeof k === 'string') ? { keys } : {}) },
   };
 }
 
@@ -2815,7 +2880,7 @@ function mapTail(
     // the merge argument. Handled here rather than in `mergedElements` because the map value is in scope
     // (`valOf` decides whether it decomposes), and the driver is a map, not an element.
     if (step.name === 'mergeV' || step.name === 'mergeE') {
-      const merged = mergedFromMap(rel, valOf, steps, at, ctx, fresh);
+      const merged = mergedFromMap(rel, valOf, keys, steps, at, ctx, fresh);
       if (!merged) return null;
       return afterWrite(ctx.writes, rel, steps, at, merged.at, merged.effects.bindings, ctx.params, fresh,
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
@@ -5850,7 +5915,7 @@ function mergeFromTraversal(
  *  the `matchFromDriver` form routes here; an EXPLICIT map argument over a map-stream driver treats the map
  *  as a mere multiplier and is deferred (declines). */
 function mergedFromMap(
-  input: Rel, valOf: MapOf, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  input: Rel, valOf: MapOf, keys: readonly string[] | undefined, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   const op = steps[at]!.name;
   if (op !== 'mergeV' && op !== 'mergeE') return null;
@@ -5862,8 +5927,9 @@ function mergedFromMap(
   const tail = steps.slice(options, end);
   const child = childSeam(ctx, fresh);
   let maps: MergeMaps;
-  // The traverser IS a Map here, so a whole-arg `select(k)` reads its entry before any side effect.
-  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, 'mayBeMap'); }
+  // The traverser IS a Map here, so a whole-arg `select(k)` reads its entry before any side effect — but
+  // a Map with a STATIC key set cannot hold a `k` outside it, so there the side effect is exact.
+  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, keys ? { mapKeys: keys } : 'mayBeMap'); }
   catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
   if (!maps.matchFromDriver) return null;
   const effects = op === 'mergeV'

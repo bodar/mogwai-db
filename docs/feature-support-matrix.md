@@ -313,5 +313,6 @@ wrong number class.
 | Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`; an edge endpoint is its bare id |
 | Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |
 | Map scope | a key the traverser's own map holds wins; a key it lacks drops the row (Java falls through to a side effect or path label) |
+| Map-valued property stream | `values('m').select(k)` reads `m`'s own `k`, then a `withSideEffect` constant, else drops the row; where `k` is a path label or a named collection, `select(k)` reads that and not a same-named key of the map, and `values('m').mergeV(__.select(k))` merges by the side effect |
 | Side-effect reads | a side-effect read sees the completed collection (`local(aggregate('a')).select('a').count(local)` is `6` each time) |
 | Path entries of a re-bound label | a label re-bound after a branch host may appear once more (or fewer) in `select(Pop.all, k)` than in Java |

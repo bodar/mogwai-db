@@ -5,7 +5,7 @@ import * as make from '../../../rel/factory.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, forEachRel } from '../../../rel/walk.ts';
-import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
+import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
 import type { Elem } from '../../elem.ts';
 import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
@@ -16,13 +16,13 @@ import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, coalesce, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
-import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
@@ -1719,6 +1719,12 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // A `select(<label>)` RE-ROOT — the alias analogue of the endpoint/owner reroots above, so a child
   // body may read a bound label and continue against it. A bare `select('a')` yields the aliased
   // traverser itself (an element or a value); a chain past it continues against the new host.
+  // …and a PER-ROW SCALAR host may itself be a Map, whose own entry precedes a side effect or the empty
+  // answer (`scalarMapFirstChild`); a label key passes to the alias re-root below unchanged.
+  if (first.name === 'select' && host.kind === 'scalar') {
+    const mapped = scalarMapFirstChild(body, host, ctx, fresh);
+    if (mapped !== 'pass') return mapped;
+  }
   if (first.name === 'select') {
     const reHost = selectRerootHost(first, host, fresh);
     if (!reHost) return null;
@@ -2293,18 +2299,52 @@ function mapHostChild(
   // child seam has no alias vocabulary here, so it declines rather than guessing (fail-closed).
   if (host.keys && !host.keys.includes(key)) return null;
   const { node } = correlatedMapKey(host.map, key, fresh);
-  const valOf = host.valOf;
+  return selectedNodeChild(body, node, host.valOf, host.row, ctx, fresh);
+}
+
+/**
+ * `select(k)` as a child body over a PER-ROW SCALAR host — the child-seam twin of the chain's
+ * `selectMapFirst`: the host value may be a MAP (a map-valued stored property), whose own entry is the
+ * first scope (`Scoping.java:121-122`), read behind `CASE WHEN vtype = 'map'` so a non-Map row opens no
+ * `json_each`. The fallback is `mapFirstFallback`'s — a `withSideEffect` constant node, or nothing (the
+ * row drops) — and `'pass'` hands a label/collection key to the alias re-root unchanged.
+ */
+function scalarMapFirstChild(
+  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>, ctx: ChainCtx, fresh: Minter,
+): ChildValue | null | 'pass' {
+  const first = body[0]!;
+  if (!host.vtype || first.modulators?.length || first.optionArms) return 'pass';
+  const spec = selectSpec(first);
+  if (!spec || spec.labels.length !== 1) return 'pass';
+  const key = spec.labels[0]!;
+  const fallback = mapFirstFallback(key, ctx, false);
+  if (fallback === 'pass' || fallback === null) return fallback;
+  const isMap: Expr = { kind: 'binary', op: '=', left: host.vtype, right: compilerText('map') };
+  const entry: Expr = { kind: 'case', whens: [[isMap, correlatedMapKey(host.value, key, fresh).node]], else: compilerNull() };
+  // A constant fallback would make an ABSENT host (an unbound label's NULL) produce: gate it on the host.
+  const node = fallback.node ? gatedByHost(host, coalesce(entry, fallback.node)) : entry;
+  return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+}
+
+/**
+ * The body CONTINUING from one selected `{t,v}` NODE (a NULL node is "no value" — the traverser drops):
+ * rerooted to the value side's shape (`sideOf`'s decode) and the rest of the body run against it, with
+ * the node's presence threaded onto the result. Shared by the MAP host and the per-row scalar host.
+ */
+function selectedNodeChild(
+  body: readonly IRStep[], node: Expr, valOf: MapOf, row: ChildHost['row'], ctx: ChainCtx, fresh: Minter,
+): ChildValue | null {
   // Reroot to the value side's shape (the `sideOf` decode: a `{t,v}` scalar, a list/map blob).
   let reHost: ChildHost;
   if (valOf.kind === 'scalar') {
     const value = jsonField(node, 'v');
     const vtype = jsonField(node, 't');
     if (body.length === 1) return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present: 'value-nullness', yields: 'one' };
-    reHost = { kind: 'scalar', value, vtype, row: host.row, present: 'value-nullness' };
+    reHost = { kind: 'scalar', value, vtype, row, present: 'value-nullness' };
   } else if (valOf.kind === 'list') {
-    reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row: host.row };
+    reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row };
   } else if (valOf.kind === 'map') {
-    reHost = { kind: 'map', map: jsonOf(jsonField(node, 'v')), keyOf: { kind: 'scalar' }, valOf: valOf.of, row: host.row };
+    reHost = { kind: 'map', map: jsonOf(jsonField(node, 'v')), keyOf: { kind: 'scalar' }, valOf: valOf.of, row };
   } else return null; // an `elem` value side reroots to an element — a later increment
   // A bare `select(k)` of a list/map value is that collection traverser; a scalar consumer cannot use it,
   // so decline here and let a consumer that can (the caller narrows) handle a tail-less form later.

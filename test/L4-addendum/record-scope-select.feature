@@ -184,9 +184,9 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | l[lop] |
       | l[ripple] |
 
-  # A per-row-typed value may be a Map at run time, and then it is the first scope: the alias map cannot
-  # prove the EMPTY answer, so the read declines (was `[]`).
-  @Unsupported
+  # A per-row-typed value may be a Map at run time, and then it is the first scope: the read checks the
+  # row's `vtype` and reads the Map's own entry (`selectMapFirst`), so the alias map's EMPTY answer no
+  # longer stands in for it (was `[]`, then a decline).
   Scenario: g_VX1X_projectXaX_byXprojectXbX_byXnameXX_fold_unfold_selectXaX_selectXbX
     Given the modern graph
     And the traversal of

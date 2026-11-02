@@ -72,7 +72,17 @@ function soleSelectKey(inner: readonly Step[]): string | undefined {
  * INPUT FRAMING — a lowering holds it exactly; the verifier asks `elementKindAt` and treats its
  * cannot-say as `mayBeMap`, so it never raises on a chain it has not typed.
  */
-export type MergeTraverser = 'cannotBeMap' | 'mayBeMap';
+export type MergeTraverser = 'cannotBeMap' | 'mayBeMap' | MapWithKeys;
+
+/** A traverser that IS a Map whose keys are drawn from a STATIC set (an `inject([k:v])` literal, a
+ *  `project()` record) — a `select(k)` for a `k` outside the set reads past the Map exactly as over a
+ *  non-Map, so the fold stays exact there and only a key the Map may hold defers. */
+export interface MapWithKeys { readonly mapKeys: readonly string[] }
+
+/** May the merge's traverser be a Map holding `key`? An unnamed key (a `Pop`-qualified or non-string
+ *  select) is answered conservatively. */
+const mayHoldKey = (traverser: MergeTraverser, key: string | undefined): boolean =>
+  traverser === 'mayBeMap' || (typeof traverser === 'object' && (key === undefined || traverser.mapKeys.includes(key)));
 
 // A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
 //   __.select(k) of a withSideEffect(k, const)  (via constFromSelect), or
@@ -355,7 +365,7 @@ function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffec
   const k = soleSelectKey(inner);
   if (k !== undefined) {
     // Over a traverser that may be a Map, the Map's own `k` precedes the side effect (`MergeTraverser`).
-    if (traverser === 'mayBeMap')
+    if (mayHoldKey(traverser, k))
       throw new Deferral(`merge with select('${k}') over a traverser that may be a Map (its own '${k}' precedes the side effect)`);
     const declared = constFromSelect(raw, sideEffects, params);
     if (declared) return declared;
@@ -693,7 +703,7 @@ function generalMapArg(raw: any, params: Record<string, any>, traverser: MergeTr
   // already handles a bound alias. Over one that MAY be a Map it is a general body like any other: the
   // Map's own entry comes first (`MergeTraverser`), so the fold is no longer the answer. A MULTI-step body
   // carrying a select (`__.out().select(…)`) is always a general producer.
-  if (traverser === 'cannotBeMap' && inner.length === 1 && inner[0].name === 'select') return null;
+  if (inner.length === 1 && inner[0].name === 'select' && !mayHoldKey(traverser, soleSelectKey(inner))) return null;
   // The RAW nested CST — the lowering normalizes it via `child.body` (modulator folding), which a
   // `stepChain` here would skip.
   return raw.nested;

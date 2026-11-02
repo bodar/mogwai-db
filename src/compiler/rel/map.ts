@@ -11,7 +11,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { mapSlot, valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, presenceFenced, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -1868,6 +1868,52 @@ export function correlatedMapKey(
   const matched = make.filter({ id: fresh('cmv'), input: valuePairs, channels: [], type: valuePairs.type, pred: keyMatches(col(valuePairs.id, PAIR.value), key) });
   const node = firstOf(matched, over(pairSide(col(matched.id, PAIR.value), 'values')), col(matched.id, PAIR.ord), fresh);
   return { node };
+}
+
+/** The one column `scalarMapKey` lands the resolved `{t,v}` node in, so its three readers share one read. */
+const SCOPE_NODE = 'snode';
+
+/**
+ * `select(<key>)` over a PER-ROW SCALAR stream whose rows MAY be Maps — a map-valued stored property
+ * (`values('m')`), a map value decoded out of another map. `Scoping.getScopeValue` asks the traverser's
+ * OWN Map first (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:121-122`),
+ * and only a row whose `vtype` says `map` can be one, so the entry read is `correlatedMapKey` behind
+ * `CASE WHEN vtype = 'map'` — SQLite's CASE short-circuits, so a non-Map row never opens a `json_each`.
+ *
+ * `fallback` is the next scope's answer as a `{t,v}` NODE (a `withSideEffect` constant, `constantNode`)
+ * — the same self-describing encoding the stored map's entries carry, so one decode reads both. With no
+ * fallback a row whose Map lacks the key (or that is no Map) has NO scope holding it and DROPS
+ * (`SelectOneStep` emits nothing for a `KeyNotFoundException`, `Select.feature:578-596`).
+ *
+ * The node is landed in ONE column and the presence test, the value and its tag all read that column;
+ * `presenceFenced` keeps the assembler from re-inlining the correlated read at each reader.
+ */
+export function scalarMapKey(input: Rel, vtype: string, key: string, fallback: Expr | null, fresh: Minter): Rel {
+  const isMap = eq(col(input.id, vtype), compilerText('map'));
+  const { node } = correlatedMapKey(col(input.id, 'v'), key, fresh);
+  const entry: Expr = { kind: 'case', whens: [[isMap, node]], else: compilerNull() };
+  const resolved = fallback ? coalesce(entry, fallback) : entry;
+  const read = presenceFenced(withPayload(input, [[SCOPE_NODE, resolved]], [meta(SCOPE_NODE, 'json', true)], fresh), resolved, fresh);
+  const kept = fallback ? read : make.filter({
+    id: fresh('smk'), input: read, channels: read.channels, type: read.type,
+    pred: { kind: 'binary', op: 'is not', left: col(read.id, SCOPE_NODE), right: compilerNull() },
+  });
+  const nodeCol = col(kept.id, SCOPE_NODE);
+  return withPayload(kept, [['v', jsonField(nodeCol, 'v')], ['vtype', jsonField(nodeCol, 't')]],
+    [meta('v', 'any', true), meta('vtype', 'text', true)], fresh);
+}
+
+/**
+ * A COMPILE-TIME value as ONE `{t,v}` node — the exact encoding a stored property's value takes
+ * (`valueNodeOf`, which the write path stores), so a constant can stand where a stored map's entry would
+ * and be decoded by the same reader. `null` when the encoder cannot spell the value (an enum leaf, a
+ * token map key) or it is a bare `null` — the caller declines rather than store a different value.
+ */
+export function constantNode(value: unknown, type: TypeNode | null, paramName: string | null): Expr | null {
+  if (value === null || value === undefined) return null;
+  let json: string;
+  try { json = stringifyExact(valueNodeOf(value, type)); } catch { return null; }
+  return jsonOf(paramName == null ? compilerText(json) : param(json, paramName));
 }
 
 /**
