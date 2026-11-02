@@ -2,6 +2,7 @@ import { withChannel } from '../../../channels.ts';
 import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
+import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, forEachRel } from '../../../rel/walk.ts';
@@ -93,49 +94,10 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
 });
 
-/**
- * DOES THIS RELATION YIELD AT MOST ONE ROW — the question a correlated SCALAR subquery must be able to
- * answer YES to, asked of the plan rather than inferred from a framing marker.
- *
- * SQL's scalar subquery takes the first row of whatever it is given and says nothing about it, so a
- * plan that can emit several is a wrong ANSWER chosen by scan order. The collapsing node is a REDUCING
- * barrier — an `Aggregate` with no `groupBy`, which is one row by definition — or an explicit
- * one-row `Limit`. Above it, row-count-preserving or row-count-REDUCING nodes are transparent: a
- * `Project`/`Sort`/`Window` keeps the count, a `Filter`/`Distinct` can only lower it, and either way
- * "at most one" survives. Anything else (a `Join`, a `Union`, a `Scan`, a `JsonEach`) can multiply and
- * stops the walk.
- *
- * It is deliberately a SUFFICIENT test and not a complete one: answering "no" costs a decline, and
- * answering "yes" wrongly costs an arbitrary row.
- */
-export function collapsedToOneRow(rel: Rel): boolean {
-  switch (rel.kind) {
-    case 'aggregate': return rel.groupBy.length === 0;
-    case 'limit': return rel.count?.kind === 'lit' && rel.count.value === 1;
-    case 'project': case 'sort': case 'window': case 'filter': case 'distinct': case 'materialize':
-      return collapsedToOneRow(rel.input);
-    default: return false;
-  }
-}
-
-/**
- * DOES THIS RELATION YIELD EXACTLY ONE ROW — `collapsedToOneRow`'s twin, and the fact a child's
- * `'always'` presence claim needs. The same walk minus what can only LOWER a count: a `Filter`
- * (`V().count().is(0)`), a `Distinct` or an aggregate's `having` above the collapse can leave ZERO rows,
- * and a scalar subquery over zero rows reads NULL — a host that kept the row anyway has kept a
- * traverser the body dropped (`TraversalMapStep.processNextStart` emits `EmptyTraverser` on an empty
- * body, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`).
- * A one-row `Limit` keeps "exactly" only over an input that is itself exactly one row.
- */
-export function exactlyOneRow(rel: Rel): boolean {
-  switch (rel.kind) {
-    case 'aggregate': return rel.groupBy.length === 0 && !rel.having;
-    case 'limit': return rel.count?.kind === 'lit' && rel.count.value === 1 && !rel.offset && exactlyOneRow(rel.input);
-    case 'project': case 'sort': case 'window': case 'materialize':
-      return exactlyOneRow(rel.input);
-    default: return false;
-  }
-}
+/** A one-row child's presence: `'always'` only where the relation is EXACTLY one row (`exactlyOneRow`,
+ *  `src/rel/bounds.ts`). One that may be EMPTY (`count().is(0)`, `fold().limit(0)`, `count().skip(1)`) leaves the
+ *  scalar subquery reading NULL, and that NULL is the body's absence. */
+const oneRowPresence = (rel: Rel): Presence => (exactlyOneRow(rel) ? 'always' : 'value-nullness');
 
 /**
  * `map()` / `flatMap()` / `local()` — A CHILD BODY APPLIED PER TRAVERSER, or `null` to decline.
@@ -1142,7 +1104,7 @@ export function correlatedReduce(
   // TYPE fact, not a CARDINALITY one: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so a
   // non-collapsed subquery has as many rows as the fan-out and SQLite silently takes the first
   // (measured: `[1,3,3,null,null,null]` where the reference gives `[1,1,1,3,3,3]`).
-  if (!tail || !collapsedToOneRow(tail.rel)) return null;
+  if (!tail || !atMostOneRow(tail.rel)) return null;
   // A fence anywhere below is also a decline: this plan is correlated to the outer row, and a
   // Materialize forces a named CTE that cannot reference it.
   let materialized = false;
@@ -1150,14 +1112,14 @@ export function correlatedReduce(
   if (materialized) return null;
   // A PER-ORIGIN FOLD — the correlated body reduced to ONE list. `foldScalars`/`foldElements` COALESCE
   // an empty fold to `[]` (FoldStep's `ArrayListSupplier` seed), so a sink host emits `[]` with no
-  // per-origin seed machinery; the fold IS the collapse `collapsedToOneRow` requires, and it is ALWAYS
-  // productive (it seeds).
+  // per-origin seed machinery; the fold IS the collapse `atMostOneRow` requires, and it is productive
+  // (it seeds) wherever nothing above it can drop the row (`oneRowPresence`).
   if (tail.framing.kind === 'list') {
     const list = make.project({
       id: fresh('bl'), input: tail.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
       exprs: [[LIST_COL, col(tail.rel.id, LIST_COL)]],
     });
-    return { expr: { kind: 'scalar', plan: list }, framing: tail.framing, present: 'always', yields: 'one' };
+    return { expr: { kind: 'scalar', plan: list }, framing: tail.framing, present: oneRowPresence(tail.rel), yields: 'one' };
   }
   const scalarOf = (column: string): Rel => make.project({
     id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)),
@@ -1177,7 +1139,7 @@ export function correlatedReduce(
       expr: { kind: 'scalar', plan: scalarOf('v') },
       framing: tail.framing,
       ...(tail.framing.result === 'number' ? { vtype: { kind: 'scalar', plan: scalarOf('vt') } as Expr } : {}),
-      present: 'always',
+      present: oneRowPresence(tail.rel),
       yields: 'one',
     };
   }
@@ -1191,7 +1153,7 @@ export function correlatedReduce(
   // it.
   const scalar = scalarOf('v');
   if (tail.framing.result === 'count')
-    return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: 'always', yields: 'one' };
+    return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: oneRowPresence(tail.rel), yields: 'one' };
   // A NON-SEEDED numeric reducer (`sum`/`mean`, and a non-argmax `min`/`max`) emits NOTHING over zero
   // starts (`SumGlobalStep`), and SQL's aggregate over no rows is NULL — so its presence is its value's
   // nullness, and `local(outE.values('weight').sum())` on an edgeless vertex drops the traverser.
@@ -1575,14 +1537,14 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
  *  (`exactlyOneRow`): a `count().is(P)` that rejects leaves no row, the scalar subquery reads NULL, and
  *  that NULL is the body's absence. Shared by the scalar arm and the map-entry arm. */
 function rootedCount(rooted: RootedRead, fresh: Minter): ChildValue | null {
-  if (rooted.framing.kind !== 'scalar' || rooted.framing.result !== 'count' || !collapsedToOneRow(rooted.rel)) return null;
+  if (rooted.framing.kind !== 'scalar' || rooted.framing.result !== 'count' || !atMostOneRow(rooted.rel)) return null;
   const scalar = make.project({
     id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
     exprs: [['v', col(rooted.rel.id, 'v')]],
   });
   return {
     expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing,
-    present: exactlyOneRow(rooted.rel) ? 'always' : 'value-nullness', yields: 'one',
+    present: oneRowPresence(rooted.rel), yields: 'one',
   };
 }
 
@@ -2034,7 +1996,7 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     id: fresh('es'), input: unit, channels: [], type: typeOf(meta('mk', 'json', true), meta('mv', 'json', true)),
     exprs: [['mk', host.entry.key], ['mv', host.entry.val]],
   });
-  // This is structurally one row, so `collapsedToOneRow` can prove a non-barrier local collection is
+  // This is structurally one row, so `atMostOneRow` can prove a non-barrier local collection is
   // still a valid correlated scalar result.
   const root = make.limit({ id: fresh('el'), input: seeded, channels: [], type: seeded.type, count: compilerInt(1) });
 
@@ -2101,16 +2063,21 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     };
   }
   const tail = continueAs(root, { kind: 'mapEntry', keyOf: host.entry.keyOf, valOf: host.entry.valOf }, body, 0, false, inBody(ctx), fresh, NO_ALIASES);
-  if (!tail || !collapsedToOneRow(tail.rel)) return null;
+  if (!tail || !atMostOneRow(tail.rel)) return null;
   const scalarOf = (column: string): Expr => ({ kind: 'scalar', plan: make.project({
     id: fresh('ev'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)), exprs: [[column, col(tail.rel.id, column)]],
   }) });
-  if (tail.framing.kind === 'list') return { expr: scalarOf(LIST_COL), framing: tail.framing, present: 'always', yields: 'one' };
-  if (tail.framing.kind === 'map') return { expr: scalarOf('map'), framing: tail.framing, present: 'always', yields: 'one' };
+  // A collection-valued entry is collected by the grouping as it stands — its absence is not read — so
+  // only an EXACTLY-one-row collection is admitted (`fold().limit(0)` is an unproductive `by()`, and
+  // must drop the key, not land a NULL list).
+  if (tail.framing.kind === 'list' || tail.framing.kind === 'map') {
+    if (!exactlyOneRow(tail.rel)) return null;
+    return { expr: scalarOf(tail.framing.kind === 'list' ? LIST_COL : 'map'), framing: tail.framing, present: 'always', yields: 'one' };
+  }
   if (tail.framing.kind === 'scalar') return {
     expr: scalarOf('v'), framing: tail.framing,
     ...(tail.framing.type.kind === 'perRow' && tail.framing.type.carrier.kind === 'column' ? { vtype: scalarOf(tail.framing.type.carrier.name) } : {}),
-    present: 'always', yields: 'one',
+    present: oneRowPresence(tail.rel), yields: 'one',
   };
   return null;
 }

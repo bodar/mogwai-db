@@ -9,6 +9,7 @@ import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
+import { atMostOneRow } from '../../rel/bounds.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
@@ -249,20 +250,6 @@ export const branchOrderOwed = (ctx: ChainCtx, position: Arrival | undefined, in
 const ORDER_READERS: ReadonlySet<string> = new Set([
   'limit', 'range', 'skip', 'tail', 'fold', 'aggregate', 'store', 'cap', 'group', 'tree', 'dedup', 'order', 'barrier', 'sample',
 ]);
-
-/** Is `rel` provably at most ONE row — a single-row `VALUES` (a correlated child's host row), a global
- *  aggregate, or a `LIMIT 1`, through the row-preserving nodes above it? */
-const atMostOneRow = (rel: Rel): boolean => {
-  for (let node: Rel = rel; ;) {
-    switch (node.kind) {
-      case 'values': return node.rows.length <= 1;
-      case 'aggregate': return node.groupBy.length === 0;
-      case 'limit': return node.count?.kind === 'lit' && typeof node.count.value === 'number' && node.count.value <= 1;
-      case 'project': case 'filter': case 'sort': case 'materialize': node = node.input; break;
-      default: return false;
-    }
-  }
-};
 
 /** Is `rel` the SEED of a per-start body — the per-ROW `origin` `mintRowOrigin` numbers (`ROW_NUMBER` into
  *  the origin column, then reprojected), with no step since? Then every origin holds exactly ONE row: the
