@@ -1171,6 +1171,11 @@ as `13acd8c7` with a conflict resolution in `branch.ts`, so `git cherry` shows `
   choose body (`g.V().where(__.choose(__.hasLabel('person'), __.V().values('name').order().limit(1), __.constant(null)))`).
   Pin the choose-arm case (with and without a null arm) in `test/compiler/resourced-scalar-value.exec.test.ts`; its
   absence is why CI missed the regression.
+- ✅ **S8 LANDED (`c9b06ee8`, `c16d4b52`).** `collapsedToOneRow`/`exactlyOneRow`/`atMostOneRow` are views over ONE
+  recursive `rowBounds` (`src/rel/bounds.ts`, after Calcite's `RelMdMinRowCount`/`RelMdMaxRowCount`); a may-be-empty
+  map-entry body states presence as `EXISTS` (`oneRowPresence`), so a productive null entry is not read as absent.
+  `V().map(__.V().count().dedup())` drops its per-row guard (352 → 76 bytes); pinned in
+  `test/compiler/row-bounds.exec.test.ts`. Remains: nothing.
 - **S8. One row-count authority `rowBounds(rel) → {min, max}`.** There are now THREE hand switches over the same node
   kinds: `collapsedToOneRow` and `exactlyOneRow` (`src/compiler/rel/lower/reduction.ts` ~111/~130) and `atMostOneRow`
   (`src/compiler/rel/lower.ts` ~255). Calcite models this as one min/max authority
