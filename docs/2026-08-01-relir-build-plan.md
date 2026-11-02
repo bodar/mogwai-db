@@ -847,7 +847,15 @@ the same answer.
 
    These fail whenever the value is not wrapped by a downstream count or fold. Either frame the rooted value's
    type column or decline cleanly. Pin each case as an answer or a decline.
-8. **R8 (major, a valid query told it is invalid; newly raised by S1) — `select('k')` folds to the `withSideEffect`
+8. ✅ **LANDED (e8b93db8, 2026-11-02), with R9.** A `MergeTraverser` fact (`cannotBeMap`/`mayBeMap`, from
+   `elementKindAt` and each lowering's input framing) is threaded through `src/compiler/ir/write-args.ts`'s
+   `mergeMaps`/`resolveMergeArg`. A write-arg `select('k')` now folds to the side effect only where the traverser
+   cannot be a Map. Under `mayBeMap` the query declines cleanly. Residual: a per-row scalar traverser that is a Map at
+   runtime (for example a map-valued property) still lets `mergeV(select('k'))` fold to the side effect. Plain
+   `select('k')` on the scalar tail has the same Map-first scoping gap. Fixing it needs the scalar-host select to check
+   the Map entry first; it is not part of this round. Also, the `project`/record and `inject(map)` forms with
+   `select(k)` now decline cleanly; answering them needs `mergeFromTraversal` to accept a record or map driver.
+   **R8 (major, a valid query told it is invalid; newly raised by S1) — `select('k')` folds to the `withSideEffect`
    constant even when the traverser is a Map holding `k`.**
    - `g.withSideEffect('k',[(T.label):5]).V(1).project('k').by(__.constant([name:'marko'])).mergeV(__.select('k'))`
      now raises the `T.label` sentence. The reference reads the Map traverser's own `k` first
@@ -856,7 +864,10 @@ the same answer.
 
    Fix: `constFromSelect`/`resolveMergeArg` (`src/compiler/ir/write-args.ts`) fold, and so judge, only when the
    select's input cannot be a Map (element input). Otherwise decline as before.
-9. **R9 (major, wrong label kept) — a Set constant is not a Collection to `mutationLabelMembers`**
+9. ✅ **LANDED (e8b93db8, 2026-11-02), with R8.** `src/gremlin/validate.ts` exports `collectionMembers`, the one
+   Array|Set notion. `labelNames`/`foldedName` (and so `mutationLabelMembers` and `creationLabels`) use it, so
+   `dropLabel`/`addLabel`/`addV` of a Set constant now act on its members.
+   **R9 (major, wrong label kept) — a Set constant is not a Collection to `mutationLabelMembers`**
    (`src/compiler/rel/write.ts`, `Array.isArray`).
    - `g.V(1).dropLabel(__.constant({'person'}))` and the `withSideEffect('k',{'person'})…select('k')` form raise
      "…must produce a String or Collection<String>, but got: [\"person\"]". The reference drops `person`
