@@ -3516,7 +3516,17 @@ function onCreateOverrideGuards(
     return held && { kind: 'binary', op: 'is', left: held, right: compilerNull() };
   };
   for (const write of writes) {
-    if (write.kind === 'remove' || write.kind === 'map') continue;
+    if (write.kind === 'map') continue;
+    // An onCreate `null` (`'age': null` — a REMOVE) restates only a driver entry that is null too:
+    // `Objects.equals(null, 1)` is false, so a map holding `age: 1` is overridden. Tested with IS NULL,
+    // never `eq(value, NULL)` — that is SQL NULL, which would fall to the else and raise on an agreeing
+    // null-vs-null pair. A driver map without the key reads NULL for the whole entry, so it never raises.
+    if (write.kind === 'remove') {
+      const differs = entry(unmatched.id, write.key, (value) =>
+        ({ kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerInt(0)]], else: compilerInt(1) }));
+      if (differs) raiseOnCreateOverride(unmatched, eq(differs, compilerInt(1)), write.key, null, guard, fresh);
+      continue;
+    }
     const key = write.key;
     if (typeof key !== 'string') return null;
     if (write.kind === 'runtime') { if (entry(unmatched.id, key, () => compilerInt(1))) return null; continue; }

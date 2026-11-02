@@ -543,17 +543,23 @@ export const onCreateOverrideMessage = (token: string, value: unknown): string =
   `option(onCreate) cannot override values from merge() argument: (${token}, ${javaString(value)})`;
 
 export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void {
-  const clash = (token: string, a: any, b: any) => {
-    if (a === undefined || a === null || b === undefined || b === null) return;
+  const absent = (x: unknown) => x === undefined || x === null;
+  // `nullable`: a PROPERTY may be null on ONE side (`['age': 1]` against an onCreate `['age': null]`, a
+  // removal) — `Objects.equals(null, 1)` is false, so that is an override; only BOTH-null agrees. The four
+  // token slots stay null-skipping: null there means "not named", and a null label/id/vertex VALUE is
+  // refused earlier by map validation.
+  const clash = (token: string, a: any, b: any, nullable = false) => {
+    if (absent(a) && absent(b)) return;
+    if (!nullable && (absent(a) || absent(b))) return;
     if (isNested(a) || isNested(b)) return;
-    if (JSON.stringify(a) !== JSON.stringify(b)) throw new ValueParseError(onCreateOverrideMessage(token, b));
+    if (absent(a) !== absent(b) || JSON.stringify(a) !== JSON.stringify(b)) throw new ValueParseError(onCreateOverrideMessage(token, b));
   };
   clash('label', merge.label, onCreate.label);
   clash('id', merge.id, onCreate.id);
   clash('OUT', merge.outV, onCreate.outV);
   clash('IN', merge.inV, onCreate.inV);
   for (const [k, v] of Object.entries(onCreate.props))
-    if (k in merge.props) clash(k, merge.props[k], v);
+    if (k in merge.props) clash(k, merge.props[k], v, true);
 }
 
 function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser, defaultCardinality: Cardinality = null): MergeSpec {

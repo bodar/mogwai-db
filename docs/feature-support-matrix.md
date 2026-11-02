@@ -195,7 +195,7 @@ stream frames each value by its own tag.
 | `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | a traversal-computed label resolves per traverser (`addV(__.values('name'))`, `addV(t1, t2)`). ❌ a single label body framed as a list; `addE` after `addE` |
 | `property(k, v)`, `property(Cardinality, k, v)`, `property(k, __.trav)` | ✅ | a first result (an edge value, a folded parameter, a runtime key) is picked by plan order then value (§17 "Unordered slices"). A traversal value (or map-form entry) that resolves to null removes the key, as `property(k, null)` does. ❌ a traversal value that could read another traverser's write |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | `addLabel(<traversal>)` resolves per traverser. ❌ a single `addLabel` body framed as a list; a computed `dropLabel` name |
-| `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅. ❌ a map fed by `unfold`/`union`; a meta-property under an undeclared cardinality |
+| `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅. onCreate may restate a merge key, never change it — a null (removal) against a held value included: checked STATICALLY for a constant merge map (`ir/write-args.ts` `validateNoOverrides`), per CREATING driver for an injected/computed map (`rel/write.ts` `onCreateOverrideGuards`) ✅. ❌ a map fed by `unfold`/`union`; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |
 
 A write chain is a sequence of statements, O(write steps), never O(rows).
