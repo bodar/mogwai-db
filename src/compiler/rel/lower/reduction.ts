@@ -2295,9 +2295,21 @@ function mapHostChild(
   const spec = selectSpec(first);
   if (!spec || spec.labels.length !== 1) return null;
   const key = spec.labels[0]!;
+  const mayHold = !host.keys || host.keys.includes(key);
+  // The NEXT scope (`mapFirstFallback`, `Scoping.java:119-135`): a row whose Map lacks `key` reads a
+  // `withSideEffect` constant — gated on the host, so an ABSENT host does not produce — and the entry and
+  // the constant are one per-row scalar node only where the value side IS scalar.
+  const fallback = mapFirstFallback(key, ctx, false);
+  if (fallback === null) return null;
+  if (typeof fallback === 'object' && fallback.node) {
+    if (mayHold && host.valOf.kind !== 'scalar') return null;
+    const scoped = mayHold ? coalesce(correlatedMapKey(host.map, key, fresh).node, fallback.node) : fallback.node;
+    const node = gatedByHost(host, scoped);
+    return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+  }
   // Map-key-vs-alias precedence (`Scoping`): a key NOT in the static key set cannot be a map key. The
   // child seam has no alias vocabulary here, so it declines rather than guessing (fail-closed).
-  if (host.keys && !host.keys.includes(key)) return null;
+  if (!mayHold) return null;
   const { node } = correlatedMapKey(host.map, key, fresh);
   return selectedNodeChild(body, node, host.valOf, host.row, ctx, fresh);
 }
@@ -2318,7 +2330,8 @@ function scalarMapFirstChild(
   if (!spec || spec.labels.length !== 1) return 'pass';
   const key = spec.labels[0]!;
   const fallback = mapFirstFallback(key, ctx, false);
-  if (fallback === 'pass' || fallback === null) return fallback;
+  if (fallback === null) return null;
+  if (typeof fallback === 'string') return 'pass';
   const isMap: Expr = { kind: 'binary', op: '=', left: host.vtype, right: compilerText('map') };
   const entry: Expr = { kind: 'case', whens: [[isMap, correlatedMapKey(host.value, key, fresh).node]], else: compilerNull() };
   // A constant fallback would make an ABSENT host (an unbound label's NULL) produce: gate it on the host.

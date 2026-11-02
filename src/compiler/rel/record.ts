@@ -541,6 +541,9 @@ export function selectKeys(
   for (const label of spec.labels) {
     const field = fieldOf(label);
     if (!field?.optional) continue;
+    // …except where a SIDE EFFECT of that name answers a row lacking the field (`Scoping.java:126-127`):
+    // the field-or-side-effect value per row is not a read this builder makes, so decline, never drop.
+    if (host?.named(label)) return null;
     const there = presence(readingRel(rel, ''), field);
     if (!there) return null;
     present.push(there);

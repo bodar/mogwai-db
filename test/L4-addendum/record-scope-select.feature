@@ -199,9 +199,9 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | marko |
 
   # THE TRAVERSER'S OWN MAP WINS. A key the Map holds is read from the Map, never from a same-named side
-  # effect or path label; a key the Map LACKS drops the row, even where a side effect or path label of
-  # that name exists. The reference falls through to those scopes per row (Scoping.java:120-131) — a
-  # deliberate divergence (docs/feature-support-matrix.md): "select k from this map" reads this map.
+  # effect or path label. A key the Map LACKS reads a same-named SIDE EFFECT next, as the reference does
+  # (Scoping.java:119-135), or refuses where that is not built; with only a PATH LABEL of that name it
+  # drops the row — a deliberate divergence (docs/feature-support-matrix.md §17, "Map scope").
   Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXxX
     Given the modern graph
     And the traversal of
@@ -226,6 +226,9 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | m[{"x":"d[27].i","n":"vadas"}] |
       | m[{"x":"d[32].i","n":"josh"}] |
 
+  # An unproductive by() OMITS the key (`ProjectStep.java:66`), so the map lacks "x" and the side effect
+  # answers next (`Scoping.java:119-135`). A field-or-side-effect read per row is not built: it refuses.
+  @Unsupported
   Scenario: g_withSideEffectXx_7X_VX1X_projectXxX_byXnopeX_selectXxX
     Given the modern graph
     And the traversal of
@@ -233,8 +236,12 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       g.withSideEffect("x",7).V(1).project("x").by("nope").select("x")
       """
     When iterated to list
-    Then the result should be empty
+    Then the result should be unordered
+      | result |
+      | d[7].i |
 
+  # lop has no age, so its map lacks "x" and `format`'s token reads the side effect (`FormatStep.java:102-104`).
+  @Unsupported
   Scenario: g_withSideEffectXx_7X_VX1X_out_projectXxX_byXageX_formatXxX
     Given the modern graph
     And the traversal of
@@ -246,6 +253,21 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | 27 |
       | 32 |
+      | 7 |
+
+  # `math` builds the same fallthrough for a Number constant: the field, else the side effect.
+  Scenario: g_withSideEffectXx_7X_VX1X_out_projectXxX_byXageX_mathXx_plus_1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("x",7).V(1).out().project("x").by("age").math("x + 1")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[28.0].d |
+      | d[33.0].d |
+      | d[8.0].d |
 
   Scenario: g_withSideEffectXage_7X_VX1X_out_elementMapXageX_selectXageX
     Given the modern graph
@@ -258,7 +280,10 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | d[27].i |
       | d[32].i |
+      | d[7].i |
 
+  # The group map lacks "a"; the reference reads the side effect "a" — the group itself — next
+  # (`Scoping.java:126-127`). An entry-or-collection per row has no framing, so the row drops (§17, "Map scope").
   Scenario: g_VX1X_groupXaX_byXconstantXbXX_byXnameX_barrier_selectXaX_selectXaX
     Given the modern graph
     And the traversal of

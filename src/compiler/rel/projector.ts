@@ -15,6 +15,7 @@ import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
+import { fieldNamed } from './framing.ts';
 
 /**
  * THE PER-TRAVERSER PROJECTORS — `math("<formula>")` and `format("…%{t}…")`.
@@ -112,6 +113,17 @@ const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
   child.sideEffects.has(name) ? constLit(child.sideEffects.get(name)!) : null;
 
 /**
+ * MAY THE HOST'S OWN SCOPE LACK `name` ON A ROW WHERE A SIDE EFFECT THEN ANSWERS IT? — an OPTIONAL record
+ * field or a map entry, under a name a side effect binds. `Scoping.getScopeValue` reads the Map, then the
+ * side effects (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+ * so the variable is the entry-or-side-effect per row — a read these projectors do not build, and the
+ * row's own NULL (a raise in `math`, a drop in `format`) would be the wrong answer: the caller declines.
+ */
+const sideEffectBehindOwnScope = (name: string, host: ChildHost, child: ChildSeam): boolean =>
+  (child.sideEffects.has(name) || child.scopeNames.sideEffects.has(name))
+  && (host.kind === 'record' ? !!fieldNamed(host.fields, name)?.optional : host.kind === 'map' && mapScopeMayHold(host, name));
+
+/**
  * The formula as ONE expression over the host traverser, or `null` to decline.
  *
  * Split from the tail below because a `math()` is not only a chain step: it is a child body
@@ -132,6 +144,16 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     // variable and N by()s feed N variables (`TraversalRing.next()`).
     const modulation: Modulation = ring.length ? ring[at % ring.length]! : { key: { kind: 'identity' } };
     if (modulation.order !== undefined) return null;
+    // An OPTIONAL record field a side-effect CONSTANT stands behind is that field, else the constant —
+    // `COALESCE`, since an optional field's absence is its value's nullness (`fieldPresence`). Built for a
+    // bare variable over a Number constant; every other entry-or-side-effect form declines.
+    let behind: Expr | null = null;
+    if (name !== CURRENT && sideEffectBehindOwnScope(name, host, child)) {
+      const seeded = child.sideEffects.get(name)?.value;
+      behind = host.kind === 'record' && modulation.key.kind === 'identity' && (typeof seeded === 'number' || typeof seeded === 'bigint')
+        ? sideEffectConst(name, child) : null;
+      if (!behind) return null;
+    }
     const varHost = name === CURRENT ? host : scopedHost(name, host, true);
     if (!varHost) {
       // A side-effect CONSTANT (`withSideEffect('x', 100)` in `math('_ + x')`) resolves to an inlined
@@ -160,8 +182,10 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     if (!typed) return null;
     const offends = receiverOffence('number', typed.value, typed.evidence, typed.productiveNull);
     if (offends === false) return null;
-    if (offends) offences.push([offends, mathVariableMessage(name)]);
-    resolved.set(name, typed.value);
+    // …and only a PRESENT field is tested: an absent one is the constant, a Number by the check above.
+    const held: Expr = { kind: 'binary', op: 'is not', left: typed.value, right: compilerNull() };
+    if (offends) offences.push([behind ? { kind: 'binary', op: 'and', left: held, right: offends } : offends, mathVariableMessage(name)]);
+    resolved.set(name, behind ? { kind: 'call', fn: 'COALESCE', args: [typed.value, behind] } : typed.value);
   }
   // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
   return raisingWhen(offences, nanDeferred(compileMath(formula, relMathOps((name) => resolved.get(name)!)), [...resolved.values()]));
@@ -243,6 +267,7 @@ function formatValue(
   for (const part of formatTemplate(template)) {
     if (part.kind === 'literal') { pieces.push(compilerText(part.text)); continue; }
     tokens++;
+    if (part.name !== FORMAT_FROM_BY && sideEffectBehindOwnScope(part.name, host, child)) return null;
     if (part.name === FORMAT_FROM_BY) {
       const modulation: Modulation = ring.length ? ring[fromBy++ % ring.length]! : { key: { kind: 'identity' } };
       if (modulation.order !== undefined) return null;

@@ -1889,10 +1889,32 @@ const SCOPE_NODE = 'snode';
  * `presenceFenced` keeps the assembler from re-inlining the correlated read at each reader.
  */
 export function scalarMapKey(input: Rel, vtype: string, key: string, fallback: Expr | null, fresh: Minter): Rel {
-  const isMap = eq(col(input.id, vtype), compilerText('map'));
-  const { node } = correlatedMapKey(col(input.id, 'v'), key, fresh);
-  const entry: Expr = { kind: 'case', whens: [[isMap, node]], else: compilerNull() };
-  const resolved = fallback ? coalesce(entry, fallback) : entry;
+  return scopedKey(input, { map: col(input.id, 'v'), when: eq(col(input.id, vtype), compilerText('map')) }, key, fallback, fresh);
+}
+
+/**
+ * `select(<key>)` over a MAP stream whose key's NEXT scope is a `withSideEffect` CONSTANT — `mapKey`'s
+ * twin for the one fallback a `{t,v}` node can carry beside the entry. The reference asks the Map first
+ * and only then the side effects (`Scoping.java:121-127`), so a row whose Map lacks `key` takes the
+ * constant rather than dropping. `mayHold` false (a STATIC key set without `key`) skips the entry read:
+ * every row answers the constant. The value side is a per-row scalar, so a list/map `valOf` that may
+ * hold `key` is the caller's to decline — the entry and the constant would need two framings.
+ */
+export function mapKeyOr(input: Rel, key: string, fallback: Expr, mayHold: boolean, fresh: Minter): Rel {
+  // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
+  const rel = mayHold ? fenced(input, fresh) : input;
+  return scopedKey(rel, mayHold ? { map: col(rel.id, MAP_COL), when: null } : null, key, fallback, fresh);
+}
+
+/** The shared body: the map's entry at `key` (behind `when`, NULL elsewhere; no read at all for a `null`
+ *  map), else `fallback`, landed ONCE in `SCOPE_NODE` and decoded to `v`/`vtype`. With no fallback a row
+ *  no scope holds `key` for DROPS. */
+function scopedKey(
+  input: Rel, map: { readonly map: Expr; readonly when: Expr | null } | null, key: string, fallback: Expr | null, fresh: Minter,
+): Rel {
+  const node = map && correlatedMapKey(map.map, key, fresh).node;
+  const entry: Expr | null = node && map.when ? { kind: 'case', whens: [[map.when, node]], else: compilerNull() } : node;
+  const resolved = entry && fallback ? coalesce(entry, fallback) : entry ?? fallback ?? compilerNull();
   const read = presenceFenced(withPayload(input, [[SCOPE_NODE, resolved]], [meta(SCOPE_NODE, 'json', true)], fresh), resolved, fresh);
   const kept = fallback ? read : make.filter({
     id: fresh('smk'), input: read, channels: read.channels, type: read.type,
