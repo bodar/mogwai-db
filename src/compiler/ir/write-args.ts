@@ -529,12 +529,16 @@ const javaString = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+/** The reference's override sentence — ONE spelling for the static check below and the per-driver guard
+ *  a RUNTIME merge map raises (`write.ts`'s `onCreateOverrideGuards`). */
+export const onCreateOverrideMessage = (token: string, value: unknown): string =>
+  `option(onCreate) cannot override values from merge() argument: (${token}, ${javaString(value)})`;
+
 export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void {
   const clash = (token: string, a: any, b: any) => {
     if (a === undefined || a === null || b === undefined || b === null) return;
     if (isNested(a) || isNested(b)) return;
-    if (JSON.stringify(a) !== JSON.stringify(b))
-      throw new ValueParseError(`option(onCreate) cannot override values from merge() argument: (${token}, ${javaString(b)})`);
+    if (JSON.stringify(a) !== JSON.stringify(b)) throw new ValueParseError(onCreateOverrideMessage(token, b));
   };
   clash('label', merge.label, onCreate.label);
   clash('id', merge.id, onCreate.id);

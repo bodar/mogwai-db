@@ -14,8 +14,8 @@ import { childSteps } from '../ir/passes.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsText } from '../../services/fts-index.ts';
-import { constFromNested, Deferral, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
-import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
+import { constFromNested, Deferral, onCreateOverrideMessage, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
+import { correlatedMapKey, MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import {
   ADD_LABEL_ITEM_NAME, ADD_LABEL_MEMBER_NAME, ADD_LABEL_NAME, collectionMembers, constantName, DROP_LABEL_ITEM_NAME, DROP_LABEL_MEMBER_NAME, DROP_LABEL_NAME, KEY_NAME,
@@ -3449,6 +3449,88 @@ function guardMergeInterleaving(
   'where a later traverser would match what an earlier one created');
 }
 
+/**
+ * One key of a merge map that is DATA per driver — a map-valued driver's own map, a `project` search's
+ * computed tuple. `over(value, vtype)` is read only where the driver's map HOLDS the key (NULL where it
+ * does not); `null` (not an Expr) says the map can never hold it, so there is nothing to compare.
+ */
+type DriverEntry = (rel: RelId, key: string, over: (value: Expr, vtype: Expr) => Expr) => Expr | null;
+
+/** A map-valued driver's entry: the one correlated read of the key's `{t,v}` node (`correlatedMapKey`),
+ *  with `over` evaluated inside it so each reader costs one subquery. */
+const mapDriverEntry = (fresh: Minter): DriverEntry => (rel, key, over) =>
+  correlatedMapKey(col(rel, MAP_COL), key, fresh, (node) => over(
+    { kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] },
+    { kind: 'call', fn: 'json_extract', args: [node, compilerText('$.t')] })).node;
+
+/** A computed (`project`) search's entry: the driver's `(present, value, vtype)` triple for that key. */
+const computedDriverEntry = (
+  cKeys: readonly string[], ppCol: (i: number) => string, cvCol: (i: number) => string, ptCol: (i: number) => string,
+): DriverEntry => (rel, key, over) => {
+  const i = cKeys.indexOf(key);
+  return i < 0 ? null
+    : { kind: 'case', whens: [[eq(col(rel, ppCol(i)), compilerInt(1)), over(col(rel, cvCol(i)), col(rel, ptCol(i)))]], else: compilerNull() };
+};
+
+/**
+ * `MergeElementStep.validateNoOverrides` for a merge map that is DATA per driver — the runtime twin of the
+ * static `validateNoOverrides`, which can only see a CONSTANT merge argument. `onCreateMap` is the merge
+ * map UNION the onCreate map, and onCreate may restate a key the map holds but never change it
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java:182-205`,
+ * `.../MergeElementStep.java:325-334`). So, per onCreate CONSTANT property:
+ * - a guard raises the reference's sentence for a driver that will CREATE (`unmatched`) whose map holds the
+ *   key with a different value — `Objects.equals`, so the same Gremlin type AND value;
+ * - the property is written only onto a created element whose map does NOT hold it (`owners`), because an
+ *   equal restatement is ONE entry of the union, never a second value appended under `list` cardinality.
+ *
+ * `null` declines what this cannot compare: a runtime onCreate value over a key the driver map may hold.
+ */
+function onCreateOverrideGuards(
+  unmatched: Rel, writes: readonly PropertyWrite[], onCreate: MergeSpec | null, entry: DriverEntry, guard: Guarder, fresh: Minter,
+): ((write: PropertyWrite, created: Rel) => Rel) | null {
+  const notHeld = (rel: Rel, key: string): Expr | null => {
+    const held = entry(rel.id, key, () => compilerInt(1));
+    return held && { kind: 'binary', op: 'is', left: held, right: compilerNull() };
+  };
+  for (const write of writes) {
+    if (write.kind === 'remove' || write.kind === 'map') continue;
+    const key = write.key;
+    if (typeof key !== 'string') return null;
+    if (write.kind === 'runtime') { if (entry(unmatched.id, key, () => compilerInt(1))) return null; continue; }
+    if (!write.vtype) return null;
+    // `Objects.equals`: the same tag, and the same value — a collection compared as its `{t,v}` tree's
+    // canonical JSON text (`json_extract` minifies both sides alike).
+    const differs = entry(unmatched.id, key, (value, vtype) => {
+      const same = write.collection
+        ? eq(value, { kind: 'call', fn: 'json_extract', args: [compilerText(String(write.stored)), compilerText('$.v')] })
+        : eq(value, storedExpr(write));
+      return { kind: 'case', whens: [[and(eq(vtype, compilerText(write.vtype!)), same), compilerInt(0)]], else: compilerInt(1) };
+    });
+    if (differs) raiseOnCreateOverride(unmatched, eq(differs, compilerInt(1)), key, onCreate?.props[key] ?? write.stored, guard, fresh);
+  }
+  return (write, created) => {
+    const pred = write.kind === 'set' && typeof write.key === 'string' ? notHeld(created, write.key) : null;
+    return idsOf(pred ? make.filter({ id: fresh('f'), input: created, channels: [], type: created.type, pred }) : created, fresh);
+  };
+}
+
+/** The override raise — fires on any creating driver (`unmatched`) row `overrides` holds for. */
+function raiseOnCreateOverride(unmatched: Rel, overrides: Expr, token: string, value: unknown, guard: Guarder, fresh: Minter): void {
+  guard(make.limit({
+    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
+      input: make.filter({ id: fresh('f'), input: unmatched, channels: [], type: unmatched.type, pred: overrides }) }),
+  }), { message: onCreateOverrideMessage(token, value), raiseWhen: 'rows' });
+}
+
+/** The LABEL half of the per-driver `validateNoOverrides`: a driver map naming a label (`mapLabel`, NULL
+ *  where it names none) is overridden by an onCreate label unless onCreate names exactly that one. */
+function onCreateLabelGuard(unmatched: Rel, mapLabel: Expr, labels: readonly string[], guard: Guarder, fresh: Minter): void {
+  if (!labels.length) return;
+  const overridden = labels.length === 1 ? isNot(mapLabel, compilerText(labels[0]!)) : eq(compilerInt(1), compilerInt(1));
+  raiseOnCreateOverride(unmatched, and(isNot(mapLabel, compilerNull('text')), overridden), 'label', labels, guard, fresh);
+}
+
 /** `guardMergeInterleaving`'s `couldMatch` for a COMPUTED search (`mergeV/mergeE(__.project(…))`): could the
  *  LATER driver's search find what the EARLIER driver's map created? Per key — the later driver's key does
  *  not narrow (an unproductive body, `pp = 0`), or the creation carries it: the earlier map's value, under
@@ -4185,6 +4267,9 @@ function mergeVComputed(
   // The created vertex's LABEL is `onCreate`'s where it gives one, else the merge argument's (a `project`
   // gives none). A runtime label declines.
   const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
+  // The create mints its rowid here, so an `onCreate` T.id (`onCreateMap`'s id) would be silently lost —
+  // decline it, as the map-valued driver does.
+  if (onCreate?.id != null) return null;
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
@@ -4274,6 +4359,9 @@ function mergeVComputed(
       id: fresh('f'), input: matched, channels: [], type: matched.type,
       pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
   });
+  // `onCreate` may restate a computed key's per-driver value, never change it (`onCreateOverrideGuards`).
+  const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, computedDriverEntry(cKeys, ppCol, cvCol, ptCol), guard, fresh);
+  if (!createOwners) return null;
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`).
   guardMergeInterleaving('mergeV', incoming, matched,
     { rel: unmatched, createKey: tupleKey, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol) },
@@ -4327,8 +4415,9 @@ function mergeVComputed(
   }
   // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the
   // creation above). Additional to the merge argument's computed values, which are already written. A
-  // RUNTIME onCreate value is deferred to below — it needs `createdFor`, the per-driver correlation.
-  for (const write of createExtra) if (write.kind !== 'runtime' && !propertyStatements('vertex', created, write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  // RUNTIME onCreate value is deferred to below — it needs `createdFor`, the per-driver correlation. A key
+  // the driver's tuple already holds is not written twice (`createOwners`).
+  for (const write of createExtra) if (write.kind !== 'runtime' && !propertyStatements('vertex', createOwners(write, createdTuples), write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's tuple KEY to the created tuple's, so the
   // one vertex made for a repeated map is carried by every driver that asked for it (`crossed`'s equi-join).
@@ -4380,6 +4469,10 @@ export function mergeVFromMap(
   if (matchWrites.some((write) => write.kind === 'runtime') || createExtra.some((write) => write.kind === 'runtime')) return null;
   const createLabels = creationLabels(((onCreate?.label as string[] | null) ?? []), child);
   if (!createLabels || createLabels.kind !== 'const') return null;
+  // An `onCreate` T.id joins the union map the create writes (`onCreateMap`), and create-with-id over a
+  // DATA-keyed map is the same missing machinery as a T.id in the map itself (refused below) — decline
+  // rather than create the vertex under a minted id the user did not ask for.
+  if (onCreate?.id != null) return null;
 
   const carriedCh = writeInputChannels(input);
   if (carriedCh.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
@@ -4474,6 +4567,11 @@ export function mergeVFromMap(
       id: fresh('f'), input: matched, channels: [], type: matched.type,
       pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
   });
+  // `onCreate` may restate the driver map's keys, never change them (`onCreateOverrideGuards`) — its
+  // properties, and its label against the map's own `T.label`.
+  const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, mapDriverEntry(fresh), guard, fresh);
+  if (!createOwners) return null;
+  onCreateLabelGuard(unmatched, mapLabelScalar(col(unmatched.id, MAP_COL)), (onCreate?.label as string[] | null) ?? [], guard, fresh);
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`). The search's key set is DATA, so
   // any onMatch key may be searched (`null`), and a driver's `[name:x]` finds another's `[name:x, age:1]`
   // creation — `mapCouldMatch`.
@@ -4493,18 +4591,25 @@ export function mergeVFromMap(
   const inOrder = make.sort({ id: fresh('so'), input: wanted, channels: wanted.channels, type: wanted.type, terms: [{ expr: col(wanted.id, 'word'), dir: 'asc' }] });
   const rowPer = make.project({ id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)), exprs: [['uid', compilerNull('text')]] });
   const created = bind(insert({ target: nodesTarget, cols: ['uid'], source: rowPer, channels: [], type: ID_TYPE, returning: [['id', col(nodesTarget.id, 'id')]] }));
-  const labelRow = internLabels(createLabels.names, bind, fresh);
-  if (labelRow) {
-    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-    const labelPairs = make.join({ id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: labelPairs, channels: [], type: typeOf(), returning: [] }));
-  }
   // The created rows correlated back to their map by POSITION (rowid order = insertion order = `word`).
   const rankedCreated = positioned(created, fresh);
   const createdMaps = bind(make.join({
     id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
     type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
   }), true);
+  // Each created vertex's map `T.label` (NULL where it names none), read ONCE for both label writers.
+  const namedCreated = bind(make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('id', 'int'), meta('name', 'any', true)),
+    exprs: [['id', col(createdMaps.id, 'id')], ['name', mapLabelScalar(col(createdMaps.id, MAP_COL))]] }), true);
+  // The `onCreate` CONSTANT label, onto a created vertex whose map names none — where the map does name
+  // one, the guard above proved it is onCreate's, and the map's own label write below lands it once.
+  const labelRow = internLabels(createLabels.names, bind, fresh);
+  if (labelRow) {
+    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const unnamed = make.filter({ id: fresh('f'), input: namedCreated, channels: [], type: namedCreated.type,
+      pred: { kind: 'binary', op: 'is', left: col(namedCreated.id, 'name'), right: compilerNull('text') } });
+    const labelPairs = make.join({ id: fresh('j'), left: idsOf(unnamed, fresh), right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: labelPairs, channels: [], type: typeOf(), returning: [] }));
+  }
   // WRITE THE MAP'S PROPERTIES onto each created vertex — one relational Insert over `json_each` (the
   // sanctioned data-sized write form): explode each created vertex's map into entries, KEEPING the
   // vertex id (`explodeMembers` carries the input row's columns), and project `(node, key, value, vtype)`.
@@ -4525,9 +4630,7 @@ export function mergeVFromMap(
   // names — an upsert, `internLabels`' idiom, but data-sized over the created maps rather than a
   // compile-time list — then link each created vertex to its label id by name. A map with no `T.label`
   // yields NULL and contributes no row (the labelless default, as g.addV()). The `onCreate` CONSTANT
-  // label (below, `internLabels(createLabels.names)` ran above) is the fallback when the map names none.
-  const namedCreated = make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('id', 'int'), meta('name', 'any', true)),
-    exprs: [['id', col(createdMaps.id, 'id')], ['name', mapLabelScalar(col(createdMaps.id, MAP_COL))]] });
+  // label (above) is the fallback when the map names none.
   const labelled = bind(make.filter({ id: fresh('f'), input: namedCreated, channels: [], type: namedCreated.type,
     pred: { kind: 'binary', op: 'is not', left: col(namedCreated.id, 'name'), right: compilerNull('text') } }), true);
   const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
@@ -4541,8 +4644,9 @@ export function mergeVFromMap(
   const vlTarget = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
   bind(insert({ target: vlTarget, cols: ['node', 'label'], channels: [], type: typeOf(), returning: [],
     source: make.project({ id: fresh('p'), input: vlJoined, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')), exprs: [['node', col(vlJoined.id, 'id')], ['label', col(vlJoined.id, 'lid')]] }) }));
-  // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the creation).
-  for (const write of createExtra) if (!propertyStatements('vertex', idsOf(created, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  // `onCreate`'s own CONSTANT properties, over the created vertices whose map does not already hold the key
+  // (`createOwners` — a restated key is one entry of the union, not a second value).
+  for (const write of createExtra) if (!propertyStatements('vertex', createOwners(write, createdMaps), write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's map to the created map (as canonical JSON
   // text), so the one vertex made for a repeated map is carried by every driver that asked (`crossed`).
@@ -4601,6 +4705,9 @@ export function mergeEFromMap(
   // map driver is a separate combination — decline rather than silently ignore it (fail closed).
   if (maps.outV !== undefined || maps.inV !== undefined) return null;
   if (onCreate?.outV !== undefined || onCreate?.inV !== undefined) return null;
+  // …and an `onCreate` T.id: create-with-id over a DATA-keyed map is the machinery the map's own T.id
+  // lacks (refused below), so decline rather than mint an id the user did not ask for.
+  if (onCreate?.id != null) return null;
   const matchWrites = mergeWrites(onMatch, 'edge', child);
   const createExtra = onCreate ? mergeWrites(onCreate, 'edge', child) : [];
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
@@ -4760,6 +4867,11 @@ export function mergeEFromMap(
       id: fresh('f'), input: matched, channels: [], type: matched.type,
       pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
   });
+  // `onCreate` may restate the driver map's keys, never change them (`onCreateOverrideGuards`) — its
+  // properties, and its label against the map's own `T.label` (the carrier's `lbl`).
+  const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, mapDriverEntry(fresh), guard, fresh);
+  if (!createOwners) return null;
+  onCreateLabelGuard(unmatched, col(unmatched.id, 'lbl'), onCreateLabels, guard, fresh);
   // ONE TRAVERSER AT A TIME, before any write — `mergeVFromMap`'s reading (the search's key set is DATA),
   // plus the endpoints: a later map's named side must be the earlier creation's.
   const mapCould = mapCouldMatch(onCreate, fresh);
@@ -4844,9 +4956,9 @@ export function mergeEFromMap(
   });
   const propTarget = make.scan({ id: fresh('t'), table: PROPERTY_TABLE.edge.table, alias: fresh('wt'), channels: [], type: typeOf(...PROPERTY_TABLE.edge.cols) });
   bind(insert({ target: propTarget, cols: ['edge', 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(propTarget.id, 'id')], ['owner', col(propTarget.id, 'edge')]] }));
-  // `onCreate`'s own CONSTANT properties, over the created edges (a shared key upserts, so `onCreate`
-  // wins over the map's value written above).
-  for (const write of createExtra) if (!propertyStatements('edge', idsOf(created, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
+  // `onCreate`'s own CONSTANT properties, over the created edges whose map does not already hold the key
+  // (`createOwners` — the guard above proved a held key restates the map's value).
+  for (const write of createExtra) if (!propertyStatements('edge', createOwners(write, createdTuples), write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
   // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, map)` to the created tuple's,
   // so the one edge made for a repeated tuple is carried by every driver that asked (`crossed` by `ord`).
@@ -5173,6 +5285,9 @@ function mergeEComputed(
       id: fresh('f'), input: matched, channels: [], type: matched.type,
       pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
   });
+  // `onCreate` may restate a computed key's per-driver value, never change it (`onCreateOverrideGuards`).
+  const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, computedDriverEntry(cKeys, ppCol, cvCol, ptCol), guard, fresh);
+  if (!createOwners) return null;
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`). The search narrows by the computed
   // map ALONE — never the endpoints (`MergeEdgeStep.searchEdges(mergeMap)`, `MergeEdgeStep.java:264`) — so
   // two drivers with one map but different endpoints are one edge in the loop (the second MATCHES the
@@ -5270,9 +5385,9 @@ function mergeEComputed(
     bind(insert({ target, cols: ['edge', 'key', 'value', 'vtype'], source: rowsP, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
   }
   // `onCreate`'s own CONSTANT properties, over the created edges (its label already joined the creation;
-  // a runtime onCreate edge value declines upstream, as onMatch's does). A shared key upserts, so
-  // `onCreate` wins over the computed value written above.
-  for (const write of createExtra) if (!propertyStatements('edge', idsOf(created, fresh), write, bind, fresh, child, aliases, guard)) return null;
+  // a runtime onCreate edge value declines upstream, as onMatch's does) — onto a created edge whose
+  // computed tuple does not already hold the key (`createOwners`; the guard proved a held key agrees).
+  for (const write of createExtra) if (!propertyStatements('edge', createOwners(write, createdTuples), write, bind, fresh, child, aliases, guard)) return null;
 
   // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, tupleKey)` to the created
   // tuple's, so the one edge made for a repeated `(endpoints, map)` is carried by every driver that asked
