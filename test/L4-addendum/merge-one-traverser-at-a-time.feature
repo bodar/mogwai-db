@@ -679,46 +679,36 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | d[6].l |
     And the graph should return 1 for count of "g.V().has(\"k\",1)"
 
-  # One driver: no pair to test at all, and the onCreate value replaces the searched one.
+  # AN onCreate KEY THAT RESTATES A COMPUTED KEY WITH A DIFFERENT VALUE is an override, so a creating driver
+  # raises `validateNoOverrides`'s sentence (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:325-334)
+  # — with one driver (no pair to test at all) and with several (the guard has no key to seek by).
   @gap:merge-one-traverser-at-a-time
-  Scenario: g_V_hasXname_markoX_mergeVXproject_k_byXnameXX_optionXonCreate_k_zzX_count
+  Scenario: g_V_hasXname_markoX_mergeVXproject_k_byXnameXX_optionXonCreate_k_zzX_raises
     Given the modern graph
     And the traversal of
       """
       g.V().has("name","marko").mergeV(__.project("k").by("name")).option(Merge.onCreate,[k:"zz"]).count()
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[1].l |
-    And the graph should return 1 for count of "g.V().has(\"k\",\"zz\")"
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (k, zz)"
 
-  # Several drivers whose only compared key is overridden by onCreate: the guard reads the override as
-  # "could match" (it cannot see that `q` is no person's name), so it REFUSES — fail closed, never a
-  # bare error. The reference creates one {code:q} per person, none matching another's search.
   @gap:merge-one-traverser-at-a-time
-  @Unsupported
-  Scenario: g_V_hasLabelXpersonX_mergeVXproject_code_byXnameXX_optionXonCreate_code_qX_count
+  Scenario: g_V_hasLabelXpersonX_mergeVXproject_code_byXnameXX_optionXonCreate_code_qX_raises
     Given the modern graph
     And the traversal of
       """
       g.V().hasLabel("person").mergeV(__.project("code").by("name")).option(Merge.onCreate,[code:"q"]).count()
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[4].l |
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (code, q)"
 
-  # The same for an edge: the computed key w is overridden by onCreate, so the guard has no key to seek by.
+  # The same for an edge: the computed key w is restated with a different value.
   @gap:merge-one-traverser-at-a-time
-  @Unsupported
-  Scenario: g_V_hasLabelXpersonX_mergeEXproject_w_byXnameXX_optionXonCreate_w_z_self_1_1X_count
+  Scenario: g_V_hasLabelXpersonX_mergeEXproject_w_byXnameXX_optionXonCreate_w_z_self_1_1X_raises
     Given the modern graph
     And the traversal of
       """
       g.V().hasLabel("person").mergeE(__.project("w").by("name")).option(Merge.onCreate,[w:"z",(T.label):"self",(Direction.from):1,(Direction.to):1]).count()
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[4].l |
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (w, z)"

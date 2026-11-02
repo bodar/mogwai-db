@@ -130,15 +130,16 @@ describe('a computed merge whose every compared key is an onCreate key', () => {
   test('answers when no pair can differ', () => {
     expect(run(four(), "g.V().mergeV(__.project('k').by(constant(1))).option(Merge.onCreate,[k:1]).id().fold()").map((row: any) => row.list))
       .toEqual(['[5,5,5,5]']);
-    expect(run(four(), "g.V().has('name','a').mergeV(__.project('k').by('name')).option(Merge.onCreate,[k:'zz']).id().fold()").map((row: any) => row.list))
-      .toEqual(['[5]']);
   });
+  // An onCreate value that DIFFERS from a driver's computed key is `validateNoOverrides`'s raise.
   for (const q of [
+    "g.V().has('name','a').mergeV(__.project('k').by('name')).option(Merge.onCreate,[k:'zz']).id().fold()",
     "g.V().hasLabel('person').mergeV(__.project('code').by('name')).option(Merge.onCreate,[code:'q']).count()",
     "g.V().hasLabel('person').mergeE(__.project('w').by('name')).option(Merge.onCreate,[w:'z',(T.label):'self',(Direction.from):1,(Direction.to):1]).count()",
   ]) {
     test(`refuses cleanly: ${q}`, () => {
       expect(() => run(four(), q)).toThrow(RaisedByQuery);
+      expect(() => run(four(), q)).toThrow(/cannot override values from merge\(\) argument/);
     });
   }
 });
