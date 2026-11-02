@@ -820,7 +820,7 @@ the first step.
    `g.V().optional(__.out().as('a')).project('x').by(__.select('a').project('y').by(__.constant(1)))` inlines
    `CAST(json_extract(un16.a0,'$[#-1].v') AS INT) IS NOT NULL` four times. The answers are correct. This breaks
    "computed ONCE". Fix it via S2.
-6. **F6 (major, wrong answer, same on trunk) — a second `select()` in a FILTER body after a reroot reads as unbound.**
+6. ✅ **LANDED (8cc14cd7).** **F6 (major, wrong answer, same on trunk) — a second `select()` in a FILTER body after a reroot reads as unbound.**
    - `g.V().as('b').out().as('a').where(__.select('a').select('b')).count()` gives 0; the reference is 6.
    - `not(…)` gives 6; the reference is 0.
    - `g.V().as('b').out().where(__.select('b').select('b')).count()` gives 0; the reference is 6.
@@ -829,6 +829,10 @@ the first step.
    to an EXISTS over `WHERE (0 = 1)` and never reaches `selectRerootSubject`. The `map(…)` form is correct (6). Route
    it through `selectRerootSubject` or decline cleanly, and test it either way. Reference: `SelectOneStep` →
    `Scoping.getScopeValue`, where the output is a split that keeps the path.
+   **Landed:** `ChildSeam.predicate` now takes the row's aliases and dispatches through `childPredicate` (the one
+   where/filter/not entry), so a leg-body `select()` re-roots via `selectRerootSubject` (`src/compiler/rel/child.ts`,
+   `src/compiler/rel/match.ts`); the fresh-walk multi-correlation route declines a body reading an uncorrelated live
+   outer label (`labelReads`). Tested in `test/compiler/where-leg-alias-scope.exec.test.ts`. Remains: nothing.
 7. **F7 (major, depth) — a per-traverser `mergeV` map is still O(N·V).**
    `g.V().mergeV(__.project('name').by(values('name'))).count()` takes 2.9 s at N=3000 and 11.7 s at N=6000. The match
    join drives a spooled snapshot as the OUTER loop against `nodes` with a non-equi `(pp0 = 0) OR EXISTS(…)`
