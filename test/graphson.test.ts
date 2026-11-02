@@ -7,7 +7,7 @@ import { loadGraphson, graphsonValue, writeGraphson } from '../src/formats/graph
 import { executeQuery } from './support/executor.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { ZOO_SEED } from './fixtures/seed-zoo.ts';
-import { BigDecimal, Duration } from '../src/gremlin/types.ts';
+import { BigDecimal, Duration, mapSlot } from '../src/gremlin/types.ts';
 
 // The typed GraphSON adjacency reader (src/formats/graphson.ts) — read against the corpus's own
 // whole-graph fixtures, which is the only authority on the format.
@@ -74,7 +74,7 @@ describe('graphsonValue — the type channel, 17 for 17', () => {
     // The flat alternating [k,v,k,v] array exists precisely so a key can be typed.
     const map = decode('{"@type":"g:Map","@value":[{"@type":"g:Int64","@value":7},"seven"]}');
     expect(map.value).toEqual(new Map([[7, 'seven']]));
-    expect(map.type).toEqual({ t: 'map', entries: { 7: { key: 'long', value: 'string' } } });
+    expect(map.type).toEqual({ t: 'map', entries: { [mapSlot(7)]: { key: 'long', value: 'string' } } });
   });
 
   test('an unknown @type fails closed rather than landing an inferred type', () => {

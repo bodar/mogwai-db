@@ -822,9 +822,9 @@ function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
     const slot = mapSlot(key);
     const prior = entries[slot];
     if (prior !== undefined && typeof key !== 'object' && prior?.key !== keyType) {
-      // `[1:'a', 1L:'b']` / `[1:'a', '1':'b']`: two keys the reference keeps apart that one JS number
-      // (or this String-keyed record) cannot — decline rather than merge them.
-      throw new UnsupportedTraversal(`map-literal keys ${slot} of two types`);
+      // `[1:'a', 1L:'b']`: two keys the reference keeps apart that one JS number cannot (`mapSlot` is
+      // injective on JS `Map` keys, so this is the only pair left) — decline rather than merge them.
+      throw new UnsupportedTraversal(`map-literal keys ${String(key)} of two types`);
     }
     entries[slot] = {
       key: keyType,
@@ -845,8 +845,8 @@ function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
  *  carry faithfully DECLINES rather than answering a different question: a collection/set/map key (an
  *  object key compares by identity, never by value), a `null` keyword key (the reference's null key), and
  *  any numeric key that is not an Integer/Long (a float's key identity — `1.0d` vs Integer `1`, NaN,
- *  ±Infinity — is not a JS number's). Two keys one JS `Map` cannot tell apart (`[1:'a', 1L:'b']`,
- *  `[1:'a', '1':'b']` in the per-key type record) decline in `mapLiteralType`. */
+ *  ±Infinity — is not a JS number's). Two keys one JS `Map` cannot tell apart (`[1:'a', 1L:'b']`)
+ *  decline in `mapLiteralType`. */
 function mapKeyOf(mk: any): { key: any; type: CanonicalType | null } {
   const tok = mk.traversalT?.() ?? mk.traversalTLong?.() ?? mk.traversalTShort?.();
   if (tok) return { key: { token: enumSuffix(tok) }, type: null };

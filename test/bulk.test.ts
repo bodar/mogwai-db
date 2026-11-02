@@ -5,7 +5,7 @@ import { CfLimitedSql } from '../src/cf-limits.ts';
 import { BulkLoader, loadBulk, type BulkEdge, type BulkVertex } from '../src/bulk.ts';
 import { executeQuery } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
-import { Duration } from '../src/gremlin/types.ts';
+import { Duration, mapSlot } from '../src/gremlin/types.ts';
 
 // The bulk loader's gate: **a graph landed in batches is byte-for-byte the graph the write
 // traversals produce.** (docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md phase 1.)
@@ -135,7 +135,7 @@ describe('the bulk loader lands what the write path lands', () => {
     const store = freshLimited();
     loadBulk(store, [{ id: 1, labels: ['person'], properties: [
       { key: 'scores', value: new Map<unknown, unknown>([[1, 'one'], [2n, 'two']]), vtype: 'map',
-        typeNode: { t: 'map', entries: { 1: { key: 'int', value: 'string' }, 2: { key: 'long', value: 'string' } } } },
+        typeNode: { t: 'map', entries: { [mapSlot(1)]: { key: 'int', value: 'string' }, [mapSlot(2n)]: { key: 'long', value: 'string' } } } },
     ] }]);
     const stored = store.query<{ v: string }>("SELECT json(value) AS v FROM vertex_properties WHERE key='scores'")[0];
     expect(JSON.parse(stored.v)).toEqual([

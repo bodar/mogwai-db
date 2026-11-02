@@ -103,7 +103,10 @@ async function decodeFields(r: StreamReaderT): Promise<{ fields: Map<any, any>; 
       const b = await decodeTyped(r);
       fields.set(k, b.value);
       if (b.type && typeof b.type === 'object' && b.type.t === 'map')
-        for (const [key, e] of Object.entries(b.type.entries)) if (e?.value != null) paramTypes[key] = e.value;
+        for (const key of (b.value as Map<unknown, unknown> | null)?.keys() ?? []) {
+          const e = b.type.entries[mapSlot(key)];
+          if (typeof key === 'string' && e?.value != null) paramTypes[key] = e.value;
+        }
     } else {
       fields.set(k, await ioc.anySerializer.deserialize(r));
     }

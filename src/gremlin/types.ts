@@ -181,8 +181,8 @@ export type TypeNode =
   | CanonicalType
   // A map entry carries BOTH its key and value type (needed for typed/non-string keys —
   // a Map<UUID,Long> / Map<Int,…> round-trips through storage with full key fidelity).
-  // Keyed by String(key) for the merge by-name lookup; a same-stringify key collision is
-  // already collapsed by the JS Map itself, so the Record loses nothing the value doesn't.
+  // Keyed by `mapSlot(key)`: the String key itself for a by-name lookup, and a slot no String
+  // can spell for every other key, so two keys the JS Map keeps apart never share an entry.
   | { t: 'map'; entries: Record<string, MapEntryType | null> }
   | { t: 'list' | 'set'; items: (TypeNode | null)[] };
 
@@ -198,19 +198,29 @@ export const mapEntryType = (tn: TypeNode | null | undefined, key: unknown): Typ
   tn != null && typeof tn === 'object' && tn.t === 'map' ? tn.entries[mapSlot(key)]?.value ?? null : null;
 
 /**
- * The `entries` slot a map KEY's types live under. `String(key)` for every key a JS `Map` keys by value,
- * and the token's own name for a parsed `T`/`Direction` key (`frontend.ts` `TaggedArg`), which a bare
- * `String` spelled `[object Object]` — so `[(T.label): x, (Direction.from): 1]` filed BOTH entries' types
- * under one slot and the label read the endpoint's `int`. A wire `EnumValue` key already spells itself
- * `T.label` (`toString`), so the two producers agree.
+ * The `entries` slot a map KEY's types live under — INJECTIVE on what a JS `Map` keys by, so two keys the
+ * map keeps apart never share a slot and overwrite each other's types. (`String(key)` was not: a parsed
+ * `T.label` token spelled `[object Object]`, filing the label's type under the endpoints'; and spelled
+ * `T.label` it collided with an ordinary String key `'T.label'` in the same literal, storing that entry's
+ * `5` as a `string`.)
+ *
+ * A String key IS its slot — the common case, and what a by-name lookup spells. Every other key lives
+ * under `SLOT` + a kind + its text, which no String can spell because a String that itself starts with
+ * `SLOT` is escaped by doubling it. A parsed `T`/`Direction` token (`frontend.ts` `TaggedArg`) and a wire
+ * `EnumValue` (`typeName`/`elementName`) file under `enum:`; a number / bigint / boolean / null / any
+ * other object under its `typeof`. (Integer `1` and Long `1` are ONE JS `Map` key already — no slot can
+ * keep them apart, which is why `mapLiteralType` declines that pair.)
  */
+const SLOT = '\u0000';
 export const mapSlot = (key: unknown): string => {
+  if (typeof key === 'string') return key.startsWith(SLOT) ? SLOT + key : key;
   if (key !== null && typeof key === 'object') {
-    const tag = key as { readonly token?: unknown; readonly direction?: unknown };
-    if (typeof tag.token === 'string') return `T.${tag.token}`;
-    if (typeof tag.direction === 'string') return `Direction.${tag.direction}`;
+    const tag = key as { readonly token?: unknown; readonly direction?: unknown; readonly typeName?: unknown; readonly elementName?: unknown };
+    if (typeof tag.token === 'string') return `${SLOT}enum:T.${tag.token}`;
+    if (typeof tag.direction === 'string') return `${SLOT}enum:Direction.${tag.direction}`;
+    if (typeof tag.typeName === 'string' && typeof tag.elementName === 'string') return `${SLOT}enum:${tag.typeName}.${tag.elementName}`;
   }
-  return String(key);
+  return `${SLOT}${key === null ? 'null' : typeof key}:${String(key)}`;
 };
 
 /** GraphBinary DataType code → canonical name. Built from the client's own DataType

@@ -257,13 +257,29 @@ describe('every constant-name host is judged, typed', () => {
   });
 
   test('a String merge label still writes, whatever key order the map takes', () => {
-    // The map's per-key types are filed by the token's own name (`mapSlot`), so `T.label` no longer shares
+    // The map's per-key types are filed under the token's own slot (`mapSlot`), so `T.label` no longer shares
     // a slot with `Direction.from`/`to` and reads their `int`.
     expect(labelsOf("g.mergeE([(T.label): 'zz', (Direction.from): 1, (Direction.to): 3]).label()")).toEqual(['zz']);
     expect(labelsOf("g.mergeE([(Direction.from): 1, (Direction.to): 3, (T.label): 'zz']).label()")).toEqual(['zz']);
     expect(labelsOf("g.mergeV([(T.label): ['a','b'], name: 'x']).labels()")).toEqual(['a', 'b']);
     expect(labelsOf("g.mergeV([name: 'marko']).option(Merge.onMatch, [(T.label): ['a','b']]).labels()")).toEqual(['a', 'b', 'person']);
     expect(labelsOf("g.withSideEffect('m', [(T.label): 'q', name: 'z']).mergeV(__.select('m')).labels()")).toEqual(['q']);
+  });
+
+  test("a token key and a String key that spells it keep their own types (`mapSlot` is injective)", () => {
+    // A user property literally named 'T.label' / 'Direction.from' beside the token key: each entry keeps
+    // the type the text gave it, in either key order — never the token's `string`, never a decline.
+    for (const q of [
+      "g.mergeV(['T.label': 5, (T.label): 'zz']).values('T.label')",
+      "g.mergeV([(T.label): 'zz', 'T.label': 5]).values('T.label')",
+    ]) expect(run(seededStore(), q), q).toEqual([{ v: 5, vtype: 'int' }]);
+    expect(values(run(seededStore(), "g.mergeV(['T.label': 5L, (T.label): 'zz']).values('T.label').math('_ / 2')"))).toEqual([2.5]);
+    expect(labelsOf("g.mergeV([(T.label): 'zz', 'T.label': 5]).label()")).toEqual(['zz']);
+    expect(run(seededStore(), "g.mergeE([(T.label): 'kk', 'Direction.from': 5, (Direction.from): 1, (Direction.to): 2]).values('Direction.from')"))
+      .toEqual([{ v: 5, vtype: 'int' }]);
+    // an Integer key and the String that spells it are two keys of one map, each typed
+    expect(run(seededStore(), "g.V(1).property('m', [1: 'a', '1': 'b']).values('m')").map((r) => JSON.parse(r.v)))
+      .toEqual([[[{ t: 'int', v: 1 }, { t: 'string', v: 'a' }], [{ t: 'string', v: '1' }, { t: 'string', v: 'b' }]]]);
   });
 
   test('dropLabel(<traversal>) refuses what resolveStringArguments refuses, before anything is dropped', () => {

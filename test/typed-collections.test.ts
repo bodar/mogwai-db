@@ -1,5 +1,19 @@
 import { test, expect, describe } from 'bun:test';
-import { valueNodeOf, BigDecimal, Duration, type TypeNode } from '../src/gremlin/types.ts';
+import { valueNodeOf, mapSlot, BigDecimal, Duration, type TypeNode } from '../src/gremlin/types.ts';
+
+// The per-key type record is keyed by `mapSlot`, which must be INJECTIVE on what a JS `Map` keys by:
+// two keys the map keeps apart in one shared slot overwrite each other's types.
+describe('mapSlot', () => {
+  test('keeps every pair of distinct Map keys apart, and the two token producers together', () => {
+    const keys: unknown[] = ['T.label', { token: 'label' }, 'Direction.from', { direction: 'from' }, '1', 1, 1n, 'true', true,
+      'null', null, '\u0000enum:T.label', '\u0000number:1', '[object Object]'];
+    expect(new Set(keys.map(mapSlot)).size).toBe(keys.length);
+    // a String key IS its slot (the by-name lookup)
+    expect(mapSlot('name')).toBe('name');
+    // the parsed token and the wire `EnumValue` name one key
+    expect(mapSlot({ typeName: 'T', elementName: 'label' })).toBe(mapSlot({ token: 'label' }));
+  });
+});
 
 // Stage 1 of full-fidelity typed collections: valueNodeOf recursively tags a materialized
 // JS value with its type tree into a self-describing ValueNode. The write path stores the
@@ -55,7 +69,7 @@ describe('valueNodeOf', () => {
 
   test('map → ordered [keyNode, valNode] pairs preserving typed, non-string keys', () => {
     const m = new Map<any, any>([[1, 'a'], [2, 'b']]);
-    const tn: TypeNode = { t: 'map', entries: { '1': { key: 'int', value: 'string' }, '2': { key: 'int', value: 'string' } } };
+    const tn: TypeNode = { t: 'map', entries: { [mapSlot(1)]: { key: 'int', value: 'string' }, [mapSlot(2)]: { key: 'int', value: 'string' } } };
     expect(valueNodeOf(m, tn).v).toEqual([
       [{ t: 'int', v: 1 }, { t: 'string', v: 'a' }],
       [{ t: 'int', v: 2 }, { t: 'string', v: 'b' }],
