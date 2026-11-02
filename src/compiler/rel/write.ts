@@ -3498,12 +3498,16 @@ function onCreateOverrideGuards(
     if (typeof key !== 'string') return null;
     if (write.kind === 'runtime') { if (entry(unmatched.id, key, () => compilerInt(1))) return null; continue; }
     if (!write.vtype) return null;
-    // `Objects.equals`: the same tag, and the same value — a collection compared as its `{t,v}` tree's
-    // canonical JSON text (`json_extract` minifies both sides alike).
+    // `Objects.equals`: the same tag, and the same value (`sameCollection` for a collection — `stored` is
+    // already its `{t,v}` node's `v` payload). A Map or Set NESTED inside is equal regardless of entry
+    // order at a depth `sameCollection` does not walk, so that value declines rather than raise a false
+    // override over an equal restatement.
+    if (write.collection && holdsNestedUnordered(write)) {
+      if (entry(unmatched.id, key, () => compilerInt(1))) return null;
+      continue;
+    }
     const differs = entry(unmatched.id, key, (value, vtype) => {
-      const same = write.collection
-        ? eq(value, { kind: 'call', fn: 'json_extract', args: [compilerText(String(write.stored)), compilerText('$.v')] })
-        : eq(value, storedExpr(write));
+      const same = write.collection ? sameCollection(write.vtype!, value, storedExpr(write), fresh) : eq(value, storedExpr(write));
       return { kind: 'case', whens: [[and(eq(vtype, compilerText(write.vtype!)), same), compilerInt(0)]], else: compilerInt(1) };
     });
     if (differs) raiseOnCreateOverride(unmatched, eq(differs, compilerInt(1)), key, onCreate?.props[key] ?? write.stored, guard, fresh);
@@ -3512,6 +3516,31 @@ function onCreateOverrideGuards(
     const pred = write.kind === 'set' && typeof write.key === 'string' ? notHeld(created, write.key) : null;
     return idsOf(pred ? make.filter({ id: fresh('f'), input: created, channels: [], type: created.type, pred }) : created, fresh);
   };
+}
+
+/** Does a collection value hold a Map or Set BELOW its top level — a container whose `equals` ignores
+ *  entry order, which neither text equality nor `sameMembers` sees at depth? Read off the stored `{t,v}`
+ *  tree (`stored` is its `v` payload). */
+function holdsNestedUnordered(write: PropertySet): boolean {
+  const walk = (node: unknown): boolean =>
+    Array.isArray(node) ? node.some(walk)
+      : typeof node === 'object' && node !== null
+        && ((node as { t?: unknown }).t === 'map' || (node as { t?: unknown }).t === 'set' || Object.values(node).some(walk));
+  try { return walk(JSON.parse(String(write.stored))); } catch { return true; }
+}
+
+/** `Objects.equals` of two `{t,v}` payloads of one collection tag. A LIST is ordered — its JSON text
+ *  (`json()` minifies both sides alike). A MAP's pairs / a SET's members are unique and unordered — the
+ *  same count and every member of one found in the other. */
+function sameCollection(vtype: CanonicalType, value: Expr, stored: Expr, fresh: Minter): Expr {
+  const json = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
+  if (vtype !== 'map' && vtype !== 'set') return eq(json(value), json(stored));
+  const length = (e: Expr): Expr => ({ kind: 'call', fn: 'json_array_length', args: [e] });
+  const ours = pairsOf(json(value), fresh);
+  const theirs = pairsOf(json(stored), fresh);
+  const found = make.filter({ id: fresh('f'), input: theirs, channels: [], type: theirs.type, pred: eq(col(theirs.id, PAIR.value), col(ours.id, PAIR.value)) });
+  const missing = make.filter({ id: fresh('f'), input: ours, channels: [], type: ours.type, pred: { kind: 'exists', plan: found, negated: true } });
+  return and(eq(length(json(value)), length(json(stored))), { kind: 'exists', plan: missing, negated: true });
 }
 
 /** The override raise — fires on any creating driver (`unmatched`) row `overrides` holds for. */

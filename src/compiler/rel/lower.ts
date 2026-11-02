@@ -2527,17 +2527,20 @@ function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; f
   if (blobs.some((blob) => !blob)) return null;
   const channels = ordered ? withChannel([], ENCOUNTER) : [];
   const rows = (blobs as Expr[]).map((blob, i) => (ordered ? [blob, compilerInt(i + 1)] : [blob]));
-  // The literals' string keys are the stream's STATIC key set — every key a row MAY hold, the union over
-  // the arguments — exactly as `constant([…])` frames its one literal; a token/direction key leaves it
-  // unknown (`keys` then absent, every key read per row).
-  const keys = [...new Set(step.args.flatMap((a) => [...(a.value as Map<unknown, unknown>).keys()]))];
+  // The literals' string keys are the stream's STATIC key set exactly as `constant([…])` frames its one
+  // literal — but only where EVERY argument holds that same set. With differing sets a row may lack a
+  // key it is known another holds, and `mapTail`'s live-alias select would DROP that row rather than fall
+  // through to the label (`Scoping.java:119-135`), knowingly losing it: `keys` then stays absent and that
+  // select declines. A token/direction key leaves it unknown too.
+  const keySets = step.args.map((a) => [...(a.value as Map<unknown, unknown>).keys()]);
+  const keys = [...new Set(keySets.flat())];
+  const shared = keySets.every((set) => set.length === keys.length) && keys.every((k): k is string => typeof k === 'string');
   return {
     rel: make.values({
       id: fresh('injm'), rows, channels,
       type: typeOf(meta(MAP_COL, 'json'), ...carriedCols(channels)),
     }),
-    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' },
-      ...(keys.every((k): k is string => typeof k === 'string') ? { keys } : {}) },
+    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...(shared ? { keys: keys as string[] } : {}) },
   };
 }
 

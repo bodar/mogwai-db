@@ -108,3 +108,65 @@ Feature: mogwai addendum — onCreate may restate a per-driver merge map, never 
       """
     When iterated to list
     Then the result should have a count of 2
+
+  # A BigDecimal onCreate value over a map driver answers, and renders in the override sentence.
+  Scenario: g_injectXmapX_mergeV_optionXonCreate_bigdecimalX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["name": "x"]).mergeV().option(Merge.onCreate, ["n": 1.5m]).values("n").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  Scenario: g_injectXmap_bigdecimalX_mergeV_optionXonCreate_other_bigdecimalX_raises
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["n": 1.5m]).mergeV().option(Merge.onCreate, ["n": 2.5m])
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (n, 2.5)"
+
+  # Objects.equals: an equal LIST restates (ordered); an equal MAP restates in any entry order.
+  Scenario: g_injectXedge_map_listX_mergeE_optionXonCreate_same_listX
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([(T.label): "knows", (Direction.OUT): 1, (Direction.IN): 2, "l": ["a", "b"]]).mergeE().option(Merge.onCreate, ["l": ["a", "b"]]).values("l")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[a,b] |
+
+  Scenario: g_injectXmap_listX_mergeV_optionXonCreate_reordered_listX_raises
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["l": ["a", "b"]]).mergeV().option(Merge.onCreate, ["l": ["b", "a"]])
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (l, [b, a])"
+
+  Scenario: g_injectXmap_mapX_mergeV_optionXonCreate_reordered_mapX_count
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["m": ["x": 1, "y": 2]]).mergeV().option(Merge.onCreate, ["m": ["y": 2, "x": 1]]).properties("m").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  Scenario: g_injectXmap_mapX_mergeV_optionXonCreate_other_mapX_raises
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["m": ["x": 1]]).mergeV().option(Merge.onCreate, ["m": ["x": 2]])
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (m, {x=2})"

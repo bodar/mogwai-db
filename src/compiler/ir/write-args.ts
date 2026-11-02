@@ -518,15 +518,23 @@ export function validateResolvedMergeSpec(spec: MergeSpec): void {
  */
 /** The onCreate VALUE as `MergeElementStep.validateNoOverrides` formats it — `%s`, its `toString`
  *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:330-331`):
- *  a String bare, not JSON-quoted; a one-label list its label; a Collection `[a, b]`. What JS cannot
- *  spell as Java does (a Double, a map) keeps the JSON rendering — the message's corpus-asserted prefix is
- *  the same either way. */
+ *  a String bare, not JSON-quoted; a one-label list its label; a Collection `[a, b]`; a Map `{k=v}`.
+ *  TOTAL — every value the parser can carry (a `BigDecimal`/`Duration` carrier, a `bigint`, a nested
+ *  Map) renders, because a message that throws while being built is a bare internal error reaching the
+ *  user. Number spelling is JS's (§17); the message's corpus-asserted prefix is the same either way. */
 const javaString = (value: unknown): string => {
-  if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
-  if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
-  if (Array.isArray(value) && value.every((v) => typeof v === 'string'))
-    return value.length === 1 ? value[0]! : `[${value.join(', ')}]`;
-  return JSON.stringify(value);
+  if (Array.isArray(value) && value.length === 1 && typeof value[0] === 'string') return value[0];
+  return javaText(value);
+};
+const javaText = (value: unknown): string => {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value) || value instanceof Set) return `[${[...value].map(javaText).join(', ')}]`;
+  if (value instanceof Map) return `{${[...value].map(([k, v]) => `${javaText(k)}=${javaText(v)}`).join(', ')}}`;
+  if (typeof value !== 'object') return String(value);
+  // A carrier with its own spelling (`BigDecimal`, `Duration`, a token) — else its JSON, bigint-safe.
+  if (value.toString !== Object.prototype.toString) return String(value);
+  try { return JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)) ?? String(value); }
+  catch { return String(value); }
 };
 
 /** The reference's override sentence — ONE spelling for the static check below and the per-driver guard

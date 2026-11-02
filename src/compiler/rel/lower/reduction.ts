@@ -2339,8 +2339,24 @@ function selectedNodeChild(
   if (valOf.kind === 'scalar') {
     const value = jsonField(node, 'v');
     const vtype = jsonField(node, 't');
-    if (body.length === 1) return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present: 'value-nullness', yields: 'one' };
-    reHost = { kind: 'scalar', value, vtype, row, present: 'value-nullness' };
+    // PRESENCE IS THE NODE, not its value: a Map holding `k` → null is a PRODUCTIVE null
+    // (`SelectOneStep.java:62` splits a null traverser), and only a NULL node — no scope held `k` — drops.
+    const held = isNot(node, compilerNull());
+    if (body.length === 1)
+      return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present: { when: held }, yields: 'one' };
+    // A body CONTINUING past it runs over a host whose null IS a value (`'always'`), so a null entry
+    // reaches `constant('x')`/`fold()` as the reference's null traverser does; the KEY's presence is then
+    // gated onto the result — and since the gate is a CASE around the whole recursed value, a tail that
+    // would raise over a null (`math('_+1')`) is never evaluated for a row with no scope holding `k`.
+    const rerooted = scalarChild(body.slice(1), { kind: 'scalar', value, vtype, row }, ctx, fresh);
+    if (!rerooted) return null;
+    const gate = (e: Expr): Expr => caseWhen(held, e);
+    const gated = { ...rerooted, expr: gate(rerooted.expr), ...(rerooted.vtype ? { vtype: gate(rerooted.vtype) } : {}), ...(rerooted.node ? { node: gate(rerooted.node) } : {}) };
+    const present = rerooted.present;
+    if (present === 'unknown') return null;
+    if (present === 'value-nullness') return { ...gated, present };
+    if (present === 'always') return { ...gated, present: { when: held } };
+    return { ...gated, present: { ...present, when: caseWhen(held, present.when, compilerInt(0)) } };
   } else if (valOf.kind === 'list') {
     reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row };
   } else if (valOf.kind === 'map') {
