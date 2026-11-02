@@ -6,6 +6,7 @@ import { col, compilerInt, or, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
+import type { SortTerm } from '../../../rel/types.ts';
 import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { countOf, isLocalScope, sliceOf, sliceParamNames } from '../../ir/step.ts';
@@ -33,16 +34,40 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   const encounter = encounterOf(input.channels);
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
 
+  // `sample(n)` is n traversers chosen UNIFORMLY — `SampleGlobalStep` is a weighted reservoir sample
+  // whose weights come from a `by()`, and with no modulator every weight is 1. Rank in a window over
+  // RANDOM() and keep `rn <= n` — `perOriginWindow`, FENCED: a Sort(RANDOM()) -> Limit(n) can be fused
+  // so SQLite re-evaluates RANDOM() for each outer candidate, and an unfenced RANDOM() window regressed
+  // `sample(n).fold()` to the wrong cardinality. Filtering preserves the INPUT order of the survivors,
+  // matching CollectingBarrierStep's insertion-order drain. A `by()` declines through the blanket
+  // modulator gate above.
+  //
+  // Over a COLLAPSED relation it declines rather than sampling: a uniform sample of ROWS is not a
+  // uniform sample of traversers when a row stands for N of them, and there is no trimming to do —
+  // sample has no band, so `bulkSlice` has nothing to say about it.
+  //
+  // PER-ORIGIN like every slice below: a live `origin` means the sample sits in a body the reference
+  // applies once PER TRAVERSER (`TraversalUtil.applyAll` resets and re-runs the child for each one —
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/AddPropertyStep.java:134`,
+  // `LocalStep`, a `by()` child), so each traverser draws its OWN n. One window over the whole
+  // post-fan-out stream drew n across ALL traversers: a property() body
+  // `coalesce(values('nope'), constant(null)).sample(1)` removed the key from ONE of N vertices. At the
+  // top level there is no origin and the partition is empty. A ROOTED body's `__.V()…sample(1)` does not
+  // window over the origins × graph product at all — it draws once per origin (`reSourcedOnce`).
+  const origin = originOf(input.channels);
+  if (step.name === 'sample') {
+    if (bulked) return null;
+    return perOriginWindow(input, origin ? col(input.id, origin.col) : null, [RANDOM_ORDER],
+      { scope: 'global', offset: 0, limit: countOf(step) }, fresh, true);
+  }
+
   // PER-ORIGIN when an `origin` channel is live: a DETERMINISTIC slice inside a per-parent body (a
   // `local`/`flatMap` body, or a `match` pattern body that minted a per-traverser origin) is scoped to
   // each parent — the fold-mode rule. Route `limit`/`range`/`skip`/`tail` to the ranked window
   // (`perOriginWindow`) partitioned by `origin`; at the top level there is no `origin`, so the global
-  // `LIMIT`/sort below stands unchanged. `sample` is EXCLUDED and falls through to the RANDOM window
-  // below (which keeps `origin` as a carried channel) — a per-origin reservoir is a separate question,
-  // and intercepting it here regressed a working `by(__.…order().sample(n).fold())` reducer to a
-  // deferral. A bulked relation or a DATA-sized param count (the window inlines its bound) fail closed.
-  const origin = originOf(input.channels);
-  if (origin && step.name !== 'sample') {
+  // `LIMIT`/sort below stands unchanged. A bulked relation or a DATA-sized param count (the window
+  // inlines its bound) fail closed.
+  if (origin) {
     if (bulked) return null;
     // A per-origin `tail(n)` is the last n per origin — the first n under the REVERSED collation.
     // `reverseCollation` falls back to the payload when the body minted no `encounter` (no `order()`),
@@ -52,45 +77,6 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
     if (sliceParamNames(step).some((name) => name != null)) return null;
     let w; try { w = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
     return perOriginWindow(input, col(input.id, origin.col), [], w, fresh);
-  }
-
-  // `sample(n)` is n traversers chosen UNIFORMLY — `SampleGlobalStep` is a weighted reservoir sample
-  // whose weights come from a `by()`, and with no modulator every weight is 1. Rank once in a window
-  // over RANDOM(), then FILTER the chosen ranks: a Sort(RANDOM()) -> Limit(n) can be fused so SQLite
-  // re-evaluates RANDOM() for each outer candidate and returns the wrong cardinality. Filtering also
-  // preserves the INPUT order of the survivors, matching CollectingBarrierStep's insertion-order
-  // drain; the old claim that the root restored a carried position was false because `sample` is not
-  // a positional consumer. A `by()` declines through the blanket modulator gate above.
-  //
-  // Over a COLLAPSED relation it declines rather than sampling: a uniform sample of ROWS is not a
-  // uniform sample of traversers when a row stands for N of them, and there is no trimming to do —
-  // sample has no band, so `bulkSlice` has nothing to say about it.
-  //
-  // PER-ORIGIN, like every slice above: a live `origin` means the sample sits in a body the reference
-  // applies once PER TRAVERSER (`TraversalUtil.applyAll` resets and re-runs the child for each one —
-  // `vendor/tinkerpop/gremlin-core/.../step/sideEffect/AddPropertyStep.java:134`, `LocalStep`, a `by()`
-  // child), so each traverser draws its OWN n. One window over the whole post-fan-out stream drew n
-  // across ALL traversers: a property() body `coalesce(values('nope'), constant(null)).sample(1)`
-  // removed the key from ONE of N vertices. The partition rides the same `ROW_NUMBER()` over RANDOM()
-  // below, not the deterministic ranked window (that interception regressed a `sample(n).fold()` reducer).
-  if (step.name === 'sample') {
-    if (bulked) return null;
-    const rank = 'sample_rank';
-    const ranked = rowNumberWindow(input, rank, input.channels,
-      { partitionBy: origin ? [col(input.id, origin.col)] : [], orderBy: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] }, fresh);
-    // The filter reads a column computed by the window's block, so fence it rather than letting the
-    // assembler inline and re-evaluate the RANDOM() expression at the clause-reader boundary.
-    const frame = make.materialize({
-      id: fresh('sm'), input: ranked, channels: ranked.channels, type: ranked.type,
-    });
-    const sampled = make.filter({
-      id: fresh('sf'), input: frame, channels: frame.channels, type: frame.type,
-      pred: { kind: 'binary', op: '<=', left: col(frame.id, rank), right: countLit(countOf(step)) },
-    });
-    return make.project({
-      id: fresh('sp'), input: sampled, channels: input.channels, type: input.type,
-      exprs: input.type.cols.map((column) => [column.name, col(sampled.id, column.name)] as const),
-    });
   }
 
   // `tail(n)` is `limit(n)` read from the FAR END, so it is the direction flag on the shared slice
@@ -138,6 +124,9 @@ const paramOf = (step: IRStep): { limitParam?: string | null; offsetParam?: stri
  *  the same op rather than as separate arms, which is what `globalRowOps` says with its own three
  *  handlers over one `reprojectRows`. */
 const SLICE_STEPS = new Set(['limit', 'skip', 'range', 'tail', 'sample']);
+
+/** A uniform shuffle as a collation — `sample`'s order. */
+export const RANDOM_ORDER: SortTerm = { expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' };
 
 /** THE STEPS `rowOp` SERVES — every one of them PRESERVES the shape, which is why a tail whose other
  *  arms are retypes must route them FIRST and then recurse. Declared rather than inferred so a new

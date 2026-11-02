@@ -534,4 +534,6 @@ export interface RootedRead {
   readonly framing: RelFraming;
   /** The statements this chain runs before its result is read — absent for every pure read. */
   readonly effects?: readonly Binding[];
+  /** Whether a row may stand for more than one traverser (`Tail.bulked`); absent where nobody asked. */
+  readonly bulked?: boolean;
 }

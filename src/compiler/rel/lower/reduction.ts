@@ -14,13 +14,13 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { normalize } from '../../ir/passes.ts';
 import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
-import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, countOf, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, coalesce, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
-import { constLit, declaredScalarType } from '../const.ts';
+import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
@@ -39,9 +39,11 @@ import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, sameFraming } from './branch.ts';
-import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { BULK, ENCOUNTER, bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { movement } from './movement.ts';
+import { RANDOM_ORDER } from './slice.ts';
+import { nondeterministic } from '../ranked-order.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -317,11 +319,12 @@ function childResultPath(tail: Tail, opensEntry: boolean, fresh: Minter): Tail {
 
 /** The stream barriers that SELF-SCOPE per origin when run inside a per-traverser body — `order()` (a
  *  global sort restricted to a partition IS that origin's order), `dedup()` (per-origin DISTINCT via
- *  `dedupOn`), the slice family (`perOriginWindow` via `sliceOp`), and the no-op `barrier`. Every OTHER
- *  `isStreamBarrier` step (`sample`, `fold`, `group`/`groupCount`/`aggregate`, a reducer, a nested
- *  `local`) either changes the framing or has no per-origin form, so a body containing one DECLINES —
- *  the whitelist twin of `match`'s `PER_ORIGIN_UNSAFE` blacklist. */
-export const PER_ORIGIN_SAFE_BARRIER: ReadonlySet<string> = new Set(['order', 'dedup', 'limit', 'range', 'skip', 'tail', 'barrier']);
+ *  `dedupOn`), the slice family including `sample` (`perOriginWindow` via `sliceOp`, a RANDOM collation
+ *  for `sample`), and the no-op `barrier`. Every OTHER `isStreamBarrier` step (`fold`,
+ *  `group`/`groupCount`/`aggregate`, a reducer, a nested `local`) either changes the framing or has no
+ *  per-origin form, so a body containing one DECLINES — the whitelist twin of `match`'s
+ *  `PER_ORIGIN_UNSAFE` blacklist. */
+export const PER_ORIGIN_SAFE_BARRIER: ReadonlySet<string> = new Set(['order', 'dedup', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier']);
 
 /** The CARDINALITY-changing barriers that self-scope per origin by GROUPING rather than by a window — a
  *  `fold()` that CONTINUES mid-body (`local(__.out().fold().unfold())`) and a `group()`/`groupCount()`
@@ -416,9 +419,9 @@ export function flatMapRejoin(
   // traversers at `marko`, each owed its own `limit(1)`, which the element-id seed collapsed to one), the
   // body's slices/`dedup` self-scope by that origin (`sliceOp`/`dedupOn`) and its `order()` mints the
   // encounter they rank by, then origin is shed. Only per-origin-SAFE barriers compose this way:
-  // `sample` (a global reservoir with no per-origin form), `fold`/`group`/`aggregate`/a reducer
-  // (framing-changing, and a reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE
-  // — a wrong answer if run across all origins at once.
+  // `fold`/`group`/`aggregate`/a reducer that are not per-origin GROUPINGS (framing-changing, and a
+  // reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE — a wrong answer if run
+  // across all origins at once.
   if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
   const rows = childRows(body, rel, framing.elem, labels, bodyCtx, fresh, true, ctx.needsFromV ?? false);
   if (!rows) return null;
@@ -479,14 +482,21 @@ export function reverseCollation(rows: Rel): SortTerm[] {
  * DISTINCT ON keeps `rn = 1`; this keeps `offset < rn ≤ offset+limit` (`limit === null` is the open
  * `skip`/`range(k,-1)` upper bound), the top-N + range generalization.
  */
-export function perOriginWindow(rows: Rel, partitionBy: Expr, order: readonly SortTerm[], slice: Slice, fresh: Minter): Rel {
+export function perOriginWindow(
+  rows: Rel, partitionBy: Expr | null, order: readonly SortTerm[], slice: Slice, fresh: Minter, fenced = false,
+): Rel {
   const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
   const RN = 'prn';
   const orderBy = order.length ? order : defaultCollation(rows);
-  const ranked = rowNumberWindow(rows, RN, rows.channels, { partitionBy: [partitionBy], orderBy }, fresh);
+  const window = rowNumberWindow(rows, RN, rows.channels, { partitionBy: partitionBy ? [partitionBy] : [], orderBy }, fresh);
+  // FENCED for a RANDOM() collation (`sample`): the filter reads a column the window computed, and an
+  // inlined window re-evaluates RANDOM() at the clause-reader boundary — the wrong cardinality.
+  const ranked = fenced ? make.materialize({ id: fresh('sm'), input: window, channels: window.channels, type: window.type }) : window;
+  // `ROW_NUMBER` starts at 1, so a zero offset states no lower bound.
+  const upper = (n: number): Expr => ({ kind: 'binary', op: '<=', left: col(ranked.id, RN), right: countLit(n) });
   const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(slice.offset) };
   const pred: Expr = slice.limit === null ? lower
-    : and(lower, { kind: 'binary', op: '<=', left: col(ranked.id, RN), right: compilerInt(slice.offset + slice.limit) });
+    : slice.offset === 0 ? upper(slice.limit) : and(lower, upper(slice.offset + slice.limit));
   const kept = make.filter({ id: fresh('pf'), input: ranked, channels: ranked.channels, type: ranked.type, pred });
   return make.project({
     id: fresh('pk'), input: kept, channels: rows.channels, type: typeOf(...cols),
@@ -880,7 +890,8 @@ export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minte
     writes: ctx.writes, scopeNames: ctx.scopeNames,
   }, fresh);
   if (!chain) return null;
-  return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };
+  const read = { rel: chain.rel, framing: chain.framing, bulked: chain.bulked };
+  return chain.effects ? { ...read, effects: chain.effects } : read;
 }
 
 /** A nested ROOTED traversal's steps, normalized — or `null` where normalizing RAISES (a deferral
@@ -1545,6 +1556,122 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
   return first.vtype
     ? { expr: first.value, vtype: first.vtype, framing: { kind: 'scalar', type: PER_ROW('vtype') }, present, yields: 'first' }
     : { expr: first.value, framing: rooted.framing, present, yields: 'first' };
+}
+
+/**
+ * A RE-SOURCE INSIDE A PER-TRAVERSER BODY THAT IS SAMPLED — `property('c', __.V().hasLabel('person')
+ * .sample(1).values('name'))`, `local(__.V().sample(1))` — with the origin-independent prefix evaluated
+ * ONCE. `null` where it is not that shape, and the ordinary cross-join re-source (`reSource`) answers.
+ *
+ * A mid-traversal GraphStep emits the graph per incoming traverser
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java`),
+ * so everything between it and the first RANDOM step is the SAME relation for every origin: no host
+ * state read (`rootedRead`'s split rule), no draw (`nondeterministic`), no effect. Lowered per origin it
+ * is a window over the origins × graph product — O(origins × |V|), measured 1.7 s at 1k holders and
+ * 28 s at 4k. Lowered once it is the CANDIDATES, and its filters (`hasLabel`) run before anything meets
+ * the origins.
+ *
+ * `sample(1)` (a `property()` value, a `local`/`flatMap` body) then needs no product at all:
+ * a uniform pick from origin-rows × candidates is an independent uniform pick of EACH factor, so each
+ * origin keeps one of its rows (a per-origin RANDOM window — one row already, when the re-source opens
+ * the body) and draws `d ∈ 1..M` against the candidates numbered once, joined on that number: O(N + M).
+ * The draw is `((random() % M) + M) % M + 1`, never `abs(random()) % M` — SQLite's
+ * `abs(-9223372036854775808)` raises "integer overflow" — and it is FENCED, so the join probe cannot
+ * re-evaluate `random()` per candidate. `M = 0` makes `d` NULL, which joins nothing: a sample of nothing
+ * is nothing. The draw's ORDER is not the reservoir's (`SampleGlobalStep`), only its distribution — §17
+ * "Unordered slices".
+ *
+ * `sample(n > 1)` keeps the reference's own per-traverser cost — the per-origin RANDOM window over
+ * origins × candidates — but over the once-filtered candidates; tracked in `docs/outstanding-work.md`.
+ */
+export function reSourcedOnce(
+  steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  const origin = originOf(input.channels);
+  if (!origin || bulked || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
+  const drawAt = steps.findIndex((step, i) => i > at && step.name === 'sample');
+  const draw = steps[drawAt];
+  if (!draw || draw.modulators?.length || draw.optionArms || isLocalScope(draw)) return null;
+  const prefix = steps.slice(at, drawAt);
+  if (nondeterministic(prefix, ctx.params)) return null;
+  const rooted = rootedRead(prefix, ctx, fresh);
+  if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return null;
+  // Only the payload crosses: a rooted channel other than its position and its (provably unit) bulk —
+  // an alias, a path — is a fact about the candidate that the origins' channels have no slot for.
+  if (rooted.rel.channels.some((channel) => channel.role !== 'encounter' && channel.role !== 'bulk')) return null;
+  const position = encounterOf(rooted.rel.channels);
+  const payload = payloadCols(rooted.rel);
+  const K = 'sample_k';
+  const numbered = rowNumberWindow(rooted.rel, K, rooted.rel.channels,
+    { partitionBy: [], orderBy: position ? [{ expr: col(rooted.rel.id, position.col), dir: 'asc' }] : [] }, fresh);
+  const candidates = make.materialize({
+    id: fresh('sc'), fenced: true, channels: [], type: typeOf(...payload, meta(K, 'int')),
+    input: make.project({
+      id: fresh('scp'), input: numbered, channels: [], type: typeOf(...payload, meta(K, 'int')),
+      exprs: [...payload, meta(K, 'int')].map((column) => [column.name, col(numbered.id, column.name)] as const),
+    }),
+  });
+  // The origins' CARRIED channels cross; their payload is replaced by the candidate's (GraphStep's split).
+  // A bulk is promoted and a position minted where the chain needs one, as `reSource` does.
+  const arriving = encounterOf(input.channels);
+  const withBulk = input.channels.some((channel) => channel.role === 'bulk') ? input.channels : withChannel(input.channels, BULK[0]!);
+  const mint = !arriving && ctx.ordered;
+  const channels = mint ? withChannel(withBulk, ENCOUNTER) : withBulk;
+  const once = countOf(draw) === 1;
+  const origins = once
+    ? perOriginWindow(input, col(input.id, origin.col), [RANDOM_ORDER], { scope: 'global', offset: 0, limit: 1 }, fresh, true)
+    : input;
+  const D = 'sample_d';
+  const carried = carriedCols(input.channels);
+  const met = once ? (() => {
+    const M = 'sample_m';
+    const size = make.aggregate({
+      id: fresh('scn'), input: candidates, channels: [], type: typeOf(meta(M, 'int')),
+      groupBy: [], aggs: [[M, { kind: 'agg', fn: 'count', args: [] }]],
+    });
+    const sized = make.join({
+      id: fresh('sj'), left: origins, right: size, join: 'cross', channels: [],
+      type: typeOf(...origins.type.cols, meta(M, 'int')),
+    });
+    const m = col(sized.id, M);
+    const mod = (left: Expr): Expr => ({ kind: 'binary', op: '%', left, right: m });
+    const d: Expr = { kind: 'binary', op: '+', left: mod({ kind: 'binary', op: '+', left: mod({ kind: 'call', fn: 'RANDOM', args: [] }), right: m }), right: compilerInt(1) };
+    const drawn = make.materialize({
+      id: fresh('sd'), fenced: true, channels: [], type: typeOf(...carried, meta(D, 'int', true)),
+      input: make.project({
+        id: fresh('sdp'), input: sized, channels: [], type: typeOf(...carried, meta(D, 'int', true)),
+        exprs: [...carried.map((column) => [column.name, col(sized.id, column.name)] as const), [D, d]],
+      }),
+    });
+    return make.join({
+      id: fresh('sx'), left: drawn, right: candidates, join: 'inner', ordered: true, channels: [],
+      type: typeOf(...drawn.type.cols, ...candidates.type.cols), on: eq(col(candidates.id, K), col(drawn.id, D)),
+    });
+  })() : make.join({
+    id: fresh('sx'), left: make.project({
+      id: fresh('so'), input: origins, channels: [], type: typeOf(...carried),
+      exprs: carried.map((column) => [column.name, col(origins.id, column.name)] as const),
+    }), right: candidates, join: 'cross', channels: [], type: typeOf(...carried, ...candidates.type.cols),
+  });
+  const cols = [...payload, ...carriedCols(channels)];
+  // Each output column off the meeting: a promoted bulk is 1, a minted position is the candidate's number.
+  const valueOf = (name: string): Expr => input.channels.some((channel) => channel.col === name) || payload.some((column) => column.name === name)
+    ? col(met.id, name) : name === ENCOUNTER.col && mint ? col(met.id, K) : compilerInt(1);
+  // ONE row per origin after a draw keeps the origin's position; a product re-mints it origin-major, then
+  // candidate order — the iterator order GraphStep realizes (`reSource`).
+  const rel = !once && arriving ? (() => {
+    const staged = make.project({
+      id: fresh('ss'), input: met, channels: [],
+      type: typeOf(...cols.filter((column) => column.name !== arriving.col), meta('parent_encounter', 'int'), meta(K, 'int')),
+      exprs: [...cols.filter((column) => column.name !== arriving.col).map((column) => [column.name, valueOf(column.name)] as const),
+        ['parent_encounter', col(met.id, arriving.col)], [K, col(met.id, K)]],
+    });
+    return renumber(staged, [{ expr: col(staged.id, 'parent_encounter'), dir: 'asc' }, { expr: col(staged.id, K), dir: 'asc' }], cols, channels, fresh);
+  })() : make.project({
+    id: fresh('sr'), input: met, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, valueOf(column.name)] as const),
+  });
+  return continueAs(rel, rooted.framing, steps, once ? drawAt + 1 : drawAt, bulked, ctx, fresh, labels);
 }
 
 /** A rooted read that ends in `count()` and collapses to at most one row, as its one value — or `null`

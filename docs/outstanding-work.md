@@ -19,6 +19,12 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 - **Untagged whole REAL re-injected by a value barrier frames as an Int** (`lowerValueResume`).
 - **Set-op literal operand loses member class** — `combine([1.0d])` reads a whole Double back as an Int.
 - **Intermediate `sum` overflow not widened** — a running total that leaves the Long range and returns.
+- **A first-value child over a sampled re-source draws ONCE for every host** — `map(__.V().sample(1))`,
+  `project('x').by(__.V().sample(1))`, `where(__.V().sample(1).values('age').is(gt(k)))` all go through
+  `reSourcedValue`, an UNCORRELATED scalar SQLite evaluates once, so every host gets the same draw (and a
+  `where` passes all hosts or none); the reference draws per traverser. Declining there leaves no route.
+  Needs the scalar seam to take its value off `reSourcedOnce`'s per-origin draw (a per-host row the
+  value correlates to) — the rows path (`property`, `local`, `flatMap`) already draws per origin.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
 
 ## 2. Needs a human call
@@ -131,6 +137,12 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 
 ## 7. Low priority
 
+- **`sample(n > 1)` over a re-sourced per-traverser body is O(origins × candidates)** —
+  `local(__.V().sample(2))`, `property(list, k, __.V().sample(3)…)`. `reSourcedOnce` lowers the prefix once
+  (filters before the product), but n>1 keeps the per-origin RANDOM window over the product — the
+  reference's own per-traverser cost (GraphStep re-iterates the graph per traverser). `sample(1)` is
+  O(origins + candidates). Linear n>1 needs a per-origin draw of n DISTINCT numbers (Floyd's algorithm
+  as a bounded recursive term over n slots, O(origins · n²)).
 - **Bulk journal clear in bounded chunks** — `clearBulkJournal` (`src/storage.ts`) is one DELETE.
 - **Nested scalar `reverse()`/`split()`** inside a child body.
 - **Content-demand 3-arg `has`** — `literalKeysOf` (`src/compiler/ir/content-demand.ts`) takes the label as the key.

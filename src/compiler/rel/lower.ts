@@ -75,7 +75,7 @@ import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, encounterOf, withEnclosing,
 import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
-import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, scalarChild } from './lower/reduction.ts';
+import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
@@ -151,6 +151,18 @@ export interface RelLowering {
  * replaced by the ONE encounter slot; there are never two competing carried positions. Where no
  * position arrives but this chain needs one, it is seeded from the new element id like a source scan.
  */
+
+/** A non-start `V()`/`E()` at `steps[at]` and the rest of the chain after it — the ONE re-source every
+ *  tail dispatches to. A sampled re-source inside a per-traverser body evaluates its origin-independent
+ *  prefix once (`reSourcedOnce`); everything else is GraphStep's cross join (`reSource`). */
+function reSourceTail(
+  steps: readonly IRStep[], at: number, rel: Rel, framing: RelFraming, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  const once = reSourcedOnce(steps, at, rel, bulked, ctx, fresh, labels);
+  if (once) return once;
+  const reSourced = reSource(steps[at]!, rel, framing, ctx, fresh);
+  return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+}
 
 /** The fan-out re-mint: renumber by the incoming position, tie-broken on the element id so rows
  *  that shared one incoming traverser get a deterministic order rather than SQLite's. */
@@ -1636,8 +1648,7 @@ function scalarTail(
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
-      const reSourced = reSource(step, rel, out, ctx, fresh);
-      return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+      return reSourceTail(steps, at, rel, out, bulked, ctx, fresh, labels);
     }
     const args = step.args.map((a) => a.value);
     if (step.optionArms) return null;
@@ -4752,8 +4763,7 @@ function elementTail(
   for (; at < steps.length; at++) {
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
-      const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
-      return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+      return reSourceTail(steps, at, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
     }
     // `UnfoldStep` yields a non-container object itself (`IteratorUtils.of(s)`), so the second
     // `unfold()` after an entry value's element-list expansion is an identity, not a deferral.
@@ -5129,8 +5139,7 @@ export function continueAs(
   // growing an almost-identical source loop.
   const next = steps[from];
   if (next?.name === 'V' || next?.name === 'E') {
-    const reSourced = reSource(next, rel, framing, ctx, fresh);
-    return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, from + 1, bulked, ctx, fresh, labels);
+    return reSourceTail(steps, from, rel, framing, bulked, ctx, fresh, labels);
   }
   // A LIST FUNCTION OVER A TRAVERSER THAT IS NOT A COLLECTION is the traversal's own ANSWER — an error —
   // and this is the one dispatcher that knows both the step and the shape, which is why the check is here
