@@ -137,12 +137,16 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 
 ## 7. Low priority
 
-- **`sample(n > 1)` over a re-sourced per-traverser body is O(origins × candidates)** —
-  `local(__.V().sample(2))`, `property(list, k, __.V().sample(3)…)`. `reSourcedOnce` lowers the prefix once
-  (filters before the product), but n>1 keeps the per-origin RANDOM window over the product — the
-  reference's own per-traverser cost (GraphStep re-iterates the graph per traverser). `sample(1)` is
-  O(origins + candidates). Linear n>1 needs a per-origin draw of n DISTINCT numbers (Floyd's algorithm
-  as a bounded recursive term over n slots, O(origins · n²)).
+- **A sampled re-source `reSourcedOnce` cannot evaluate once DECLINES** rather than paying the
+  origins × graph product (trunk answered these quadratically through `property()`):
+  an alias on the candidate (`__.V().as('x').sample(1).select('x')`) — the rooted read's alias channel and
+  `AliasMap` would have to cross into the origins' rows; and a coupling barrier after a fan-out
+  (`__.out().V().dedup().sample(2)`) — the barrier sees R concatenated copies (`dedup` keeps one, `count`
+  counts R·M), a per-barrier rule over R the draw does not have.
+- **A deterministic per-origin slice over a re-source is O(origins × |V|)** — `local(__.V().hasLabel('person')
+  .limit(2))` (7.5 s at 4k holders). Same root as the sampled case: with one row per origin
+  (`ChainCtx.originRows`) the prefix THROUGH the slice is origin-independent, so `rootedRead` it once and
+  cross the origins with its (small) result — O(origins × n).
 - **Bulk journal clear in bounded chunks** — `clearBulkJournal` (`src/storage.ts`) is one DELETE.
 - **Nested scalar `reverse()`/`split()`** inside a child body.
 - **Content-demand 3-arg `has`** — `literalKeysOf` (`src/compiler/ir/content-demand.ts`) takes the label as the key.

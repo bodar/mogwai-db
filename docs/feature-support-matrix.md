@@ -291,7 +291,7 @@ wrong number class.
 | Float | stored as the Double of its shortest float32 decimal; arithmetic runs in double (`0.1f` equals `0.1d`) |
 | Extreme-magnitude Doubles | outside ~[1e-80, 1e116] a value may move by its last ulp (`1.5e-300d` → `1.4999999999999998e-300`) |
 | Writes over a bulked slot | one element per traverser: `g.V().both().addV('x')` creates 12 vertices, not Java's 6 |
-| Unordered slices and terminal streams | without `order()`, rows come in plan order and `limit(n)` keeps some n rows. A write that takes the FIRST result of a body — a runtime label (`addV`/`addE`/`addLabel(<traversal>)`), a runtime property key, an edge property value or a folded parameter — takes the first by the body's own order, then by value: never a refusal. Order is kept wherever the query reads it (`order()`, `tail()`, collected lists, `path()`, per-start branch arms) |
+| Unordered slices and terminal streams | without `order()`, rows come in plan order and `limit(n)` keeps some n rows; `sample(n)` keeps a uniform n, not in the reservoir's draw order. A write that takes the FIRST result of a body — a runtime label (`addV`/`addE`/`addLabel(<traversal>)`), a runtime property key, an edge property value or a folded parameter — takes the first by the body's own order, then by value: never a refusal. Order is kept wherever the query reads it (`order()`, `tail()`, collected lists, `path()`, per-start branch arms) |
 | Federated landed order | the sibling graph's emission order, unordered unless the pushed traversal orders it |
 | `barrier()` | a pass-through, as is `barrier(n)`: `inject(1,2,1,3).barrier()` is `[1,2,1,3]` |
 | Seeded fold over repeats | every traverser folds: `inject(1,1,2).fold(0, sum)` is `4` |

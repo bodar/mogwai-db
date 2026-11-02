@@ -6,8 +6,9 @@
 // `hasLabel` applied above the product. Measured on trunk: 1.8 s at 1k holders × 1k candidates, 28 s at 4k
 // and 169 s at 8k — passing every six-vertex fixture, a CPU wall only a production-sized DO reaches. The
 // prefix up to the draw is origin-INDEPENDENT, so it is now lowered ONCE (`reSourcedOnce`,
-// `src/compiler/rel/lower/reduction.ts`) and `sample(1)` draws one numbered candidate per origin through an
-// equi-join: O(origins + candidates).
+// `src/compiler/rel/lower/reduction.ts`) and `sample(n)` draws n distinct numbered candidates per origin
+// (Floyd's algorithm) through an equi-join: O(origins · n² + candidates). A prefix that cannot be evaluated
+// once declines rather than falling back to the product.
 //
 // Assertions of two kinds: the ANSWER (cardinality per origin, the draw lands in the candidate set, draws are
 // independent per origin, a sample of nothing is nothing) and a WALL budget generous enough for a loaded CI
@@ -110,5 +111,56 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     const store = graph(10, 10);
     expect(count(store, "g.V().hasLabel('person').sample(1).fold().count(local)")).toBe(1);
     expect(count(store, "g.V().hasLabel('person').sample(3).fold().count(local)")).toBe(3);
+  });
+
+  test('sample(n > 1) is linear too — n DISTINCT picks per origin, each a candidate', () => {
+    const store = graph(N, N);
+    for (const q of [
+      "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(2)).count()",
+      "g.V().hasLabel('holder').flatMap(__.V().sample(2)).hasLabel('person','software','holder').count()",
+    ]) {
+      const { rows, ms } = timed(store, q);
+      expect(rows).toEqual([{ v: 2 * N }]);
+      expect(ms).toBeLessThan(BUDGET_MS);
+    }
+    const small = graph(200, 200);
+    run(small, "g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person').sample(3).values('age'))");
+    // Three values on every holder, three DIFFERENT persons' ages (Floyd's draw never repeats an index).
+    expect(count(small, "g.V().hasLabel('holder').where(__.values('l').dedup().count().is(3)).count()")).toBe(200);
+    expect(count(small, "g.V().hasLabel('holder').values('l').is(lte(200)).count()")).toBe(0);
+    // n beyond the candidates takes them all: a sample never repeats a traverser.
+    expect(count(small, "g.V().hasLabel('holder').limit(3).local(__.V().hasLabel('person').sample(500).dedup()).count()")).toBe(300);
+  });
+
+  test('a shuffle no slice observes is harmless; a host-reading prefix keeps its own product', () => {
+    const store = graph(N, N);
+    const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().order().by(shuffle).sample(1)).count()");
+    expect(rows).toEqual([{ v: N }]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+    const small = graph(30, 30);
+    expect(count(small, "g.V().hasLabel('holder').as('h').local(__.V().where(neq('h')).sample(1)).count()")).toBe(30);
+    // A body-opening re-source has one row per origin, so a coupling barrier before the draw is evaluated once.
+    // The two youngest persons are ids (= ages) 32 and 34.
+    const youngest = "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').limit(2).sample(1)).values('age')";
+    expect(count(small, `${youngest}.count()`)).toBe(30);
+    expect(count(small, `${youngest}.is(gt(34)).count()`)).toBe(0);
+  });
+
+  // What a once-evaluated prefix cannot be, the draw DECLINES rather than answering wrong or crossing the
+  // origins with the graph: a side-effect collector counts PER origin in the reference (6 × 6 on the
+  // modern graph, where one evaluation counts each vertex once), a draw or a sliced shuffle would be
+  // shared by every origin, and a coupling barrier after a fan-out sees R concatenated copies.
+  test.each([
+    "g.V().local(__.V().groupCount('x').sample(1)).cap('x')",
+    "g.V().local(__.V().group('x').by(label).sample(2)).cap('x')",
+    "g.V().property('c', __.V().groupCount('x').sample(1).id()).cap('x').select(values).unfold().sum()",
+    "g.V().local(__.V().aggregate('a').sample(1)).cap('a')",
+    "g.V().local(__.V().sideEffect(__.groupCount('a')).sample(1)).count()",
+    "g.V().local(__.V().coin(0.5).sample(1)).count()",
+    "g.V().local(__.V().order().by(shuffle).limit(2).sample(1)).count()",
+    "g.V().local(__.out().V().dedup().sample(2)).count()",
+    "g.V().local(__.V().as('x').sample(1).select('x')).count()",
+  ])('declines %s', (q) => {
+    expect(() => compile(q, {})).toThrow(/not supported/);
   });
 });

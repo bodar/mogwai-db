@@ -173,6 +173,28 @@ export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !is
 export const isLocalScope = (s: IRStep): boolean =>
   (s.args ?? []).some((a) => isScopeArg(a.value) && a.value.scope === 'local');
 
+/**
+ * Does this step write a TRAVERSAL SIDE EFFECT — a keyed collection a later `cap`/`select` reads — rather
+ * than the graph? `aggregate('a')` (`AggregateStep`, a `LocalBarrier`), and the keyed `group('a')`/
+ * `groupCount('a')`/`tree('a')`/`subgraph('a')` (`SideEffectBarrierStep`s), all under
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/`.
+ * Each drains its input per invocation, so at the top level it is no side effect a slice can cut (it is in
+ * `DRAINS`). Inside a body run once PER TRAVERSER it is: `LocalStep`/`FlatMapStep`/`MapStep` feed the
+ * body one start at a time (`…/step/branch/LocalStep.java` `processNextStart`), so a `limit(1)` after
+ * `local(__.aggregate('a'))` stops the outer stream after two starts (`RangeGlobalStep.java:72-82` pulls
+ * one past its bound) and `cap('a')` holds two members, where the plan aggregates all six. So the walk
+ * counts it as an effect, and the per-traverser parent's slice declines — the same rule as for a write.
+ * A bare `group()`/`groupCount()`/`tree()` is a REDUCER, not a side effect. A step-vocabulary fact because
+ * two lowerings ask it: the write walk (`rel/write.ts`), and `reSourcedOnce`, which must not evaluate a
+ * collector ONCE where the reference runs it per traverser.
+ */
+const SIDE_EFFECT_COLLECTORS: ReadonlySet<string> = new Set(['aggregate', 'subgraph']);
+const KEYED_REDUCERS: ReadonlySet<string> = new Set(['group', 'groupCount', 'tree']);
+export function collectsSideEffect(step: IRStep): boolean {
+  return SIDE_EFFECT_COLLECTORS.has(step.name)
+    || (KEYED_REDUCERS.has(step.name) && step.args.some((a) => typeof a.value === 'string'));
+}
+
 /** The three steps that MUTATE an element's labels. A base here rather than a private set in a
  *  lowering, because the question "is this traversal a label mutation" is now asked ABOVE the routing
  *  switch (`verifyLabelMutationTarget`) as well as inside one. */
