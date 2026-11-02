@@ -1,7 +1,7 @@
 export const meta = {
   name: 'execute-workflow',
   description: 'Drive a plan doc on trunk in rounds: scout + sympathy plan review, then per item build -> two-lens review -> land serially, deferring what needs prerequisites; proposals feed the next round',
-  whenToUse: 'The orchestrated alternative to the /execute-plan skill. args: {plan: "docs/…md", section?: "§10", maxItems?: 4, rounds?: 1, fixRounds?: 2}',
+  whenToUse: 'The orchestrated alternative to the /execute-plan skill. args: {plan: "docs/…md", section?: "§10", fixRounds?: 3, maxItems?: <hard ceiling per round>, maxRounds?: 8}. Batch size and whether to start another round are judged by a steward from convergence, not fixed.',
   phases: [
     { title: 'Scout', detail: 'verify plan items against current code, draft a design per item' },
     { title: 'Plan review', detail: 'one sympathy/substrate reviewer: revise designs, order by prerequisite, defer what cannot be built yet' },
@@ -10,21 +10,27 @@ export const meta = {
     { title: 'Land', detail: 'serial: rebase, mise run ci, push, local plan-doc commit' },
     { title: 'Sweep', detail: 'can existing features reuse what landed? proposals only' },
     { title: 'Record', detail: 'write deferrals, follow-ups and proposals into the plan for the next round' },
+    { title: 'Steer', detail: 'are we converging or just growing the list? continue/stop, next batch size and focus' },
   ],
 }
 
 if (!args || !args.plan) throw new Error('execute-workflow needs args.plan (path to the plan doc)')
-const REPO = args.repo || '/home/dan/Projects/mogwai-db'
+// No machine paths: the main checkout is whatever `git worktree list` names first, which holds from
+// the main checkout and from every linked worktree alike. Agents expand it in their shell commands.
+const REPO = args.repo || '$(git worktree list --porcelain | sed -n 1s/^worktree.//p)'
 const PLAN = args.plan
 const SECTION = args.section ? ` (work ${args.section} only)` : ''
-const MAX_ITEMS = args.maxItems || 4
-const ROUNDS = args.rounds || 1
-const FIX_ROUNDS = args.fixRounds === undefined ? 2 : args.fixRounds
+// Batch size and round count are a JUDGEMENT made by the steward after each round; these are only
+// ceilings. MAX_ROUNDS is a runaway backstop, not a target.
+const MAX_ITEMS = args.maxItems || 8
+const MAX_ROUNDS = args.maxRounds || args.rounds || 8
+const FIX_ROUNDS = args.fixRounds === undefined ? 3 : args.fixRounds
 const MAX_MINORS = 5
 
 // Every agent gets this — builders as much as reviewers. Steering the first attempt is cheaper than
 // reviewing it back into shape.
 const PRINCIPLES = `
+THE MAIN CHECKOUT is written below as \`${REPO}\` — a shell expression; let your shell expand it (it works from any worktree), and expand it once to learn the path when you need it in prose.
 mogwai-db (TinkerPop 4 Gremlin compiled to SQLite). CLAUDE.md is injected — its "Semantics traps" section is binding. The ones that steer this work:
 - FAITHFUL, NOT EXACT. A faithful port MECHANICALLY SYMPATHETIC to SQLite and the JS runtime — not a port of Java's execution. The reference decides WHICH rows and values a query returns, not HOW Java computes them. Do NOT emulate: laziness/pull order, LazyBarrierStrategy/NoOpBarrier/TraverserSet merge order, when an error fires, number spelling, signed zero, UTF-16 code units, java.util.regex, Java number towers. Use JS RegExp, SQLite code-point order and length/substr, JS doubles, a write sees a SNAPSHOT of its input. Accepted divergences are listed in docs/feature-support-matrix.md §17; the 2026-10 overreach that motivated this (≈8k lines of Java emulation, +77% SQL, production-only declines) is docs/archive/2026-10-18-simplification-plan.md "Why" — read it once if you are tempted to match Java's output exactly.
 - If exactness would cost much SQL/JS code or runtime, or a decline, take the natural JS/SQLite answer instead and add one §17 line.
@@ -77,6 +83,10 @@ const ISSUES = { type: 'object', properties: { issues: { type: 'array', items: {
 const TRIAGE = { type: 'object', properties: { confirmed: { type: 'array', items: { type: 'object', properties: {
   detail: { type: 'string' }, why: { type: 'string' } }, required: ['detail', 'why'] } } }, required: ['confirmed'] }
 const LAND = { type: 'object', properties: { pushed: { type: 'boolean' }, pushed_sha: { type: 'string' }, ci_passed: { type: 'boolean' }, notes: { type: 'string' } }, required: ['pushed', 'notes'] }
+const STEER = { type: 'object', properties: {
+  trend: { type: 'string', enum: ['converging', 'flat', 'diverging'] },
+  continue: { type: 'boolean' }, reason: { type: 'string' },
+  next_batch: { type: 'number' }, focus: { type: 'string' } }, required: ['trend', 'continue', 'reason'] }
 const SWEEP = { type: 'object', properties: { proposals: { type: 'array', items: { type: 'object', properties: {
   title: { type: 'string' }, existing: { type: 'string', description: 'file:function that could be re-expressed' },
   payoff: { type: 'string', description: 'lines removed / SQL or runtime / fewer concepts' } }, required: ['title', 'existing', 'payoff'] } } }, required: ['proposals'] }
@@ -99,10 +109,17 @@ let landChain = Promise.resolve()
 const onLandChain = (fn) => { const p = landChain.then(fn); landChain = p.catch(() => null); return p }
 
 const allRounds = []
-for (let round = 1; round <= ROUNDS; round++) {
+// The steward's verdict carries forward: how many items the next scout should pick, and what to focus on.
+let steer = { next_batch: 0, focus: '' }
+let barren = 0
+for (let round = 1; round <= MAX_ROUNDS; round++) {
+  const batchRule = steer.next_batch
+    ? `Pick ${Math.min(steer.next_batch, MAX_ITEMS)} open items (the steward's judgement from the last round).`
+    : `Pick the items that are READY — prerequisites landed, design clear — usually 2–5: fewer when they chain on each other or touch one seam, more when they are independent. Never more than ${MAX_ITEMS}.`
+  const focusRule = steer.focus ? `\nSTEWARD'S FOCUS for this round: ${steer.focus}` : ''
   phase('Scout')
   const scout = await agent(`${PRINCIPLES}
-You are the SCOUT for round ${round}. Plan: ${REPO}/${PLAN}${SECTION}. The plan is a STALE POINTER, not a spec — the code is the authority. \`git -C ${REPO} fetch origin trunk\`; read the plan and the CLAUDE.md of each subsystem it touches. Pick up to ${MAX_ITEMS} open items (prefer items the plan's own "next round"/proposal notes name, then substrate others depend on, then the rest). For each, probe current trunk to confirm it is still real (status stale if not), then DRAFT A DESIGN: the generic seam it should extend, the approach, how it stays sympathetic to SQLite/JS, and which other items must land first (after). Read-only.`, { label: `scout#${round}`, phase: 'Scout', schema: SCOUT })
+You are the SCOUT for round ${round}. Plan: ${REPO}/${PLAN}${SECTION}. The plan is a STALE POINTER, not a spec — the code is the authority. \`git -C ${REPO} fetch origin trunk\`; read the plan and the CLAUDE.md of each subsystem it touches. ${batchRule} Prefer, in order: substrate that other open items depend on (a prerequisite before its dependents — never pick an item whose prerequisite is still open unless that prerequisite is also picked), confirmed wrong answers already on trunk, items the plan's "next round" notes name, then the rest.${focusRule} For each, probe current trunk to confirm it is still real (status stale if not), then DRAFT A DESIGN: the generic seam it should extend, the approach, how it stays sympathetic to SQLite/JS, and which other items must land first (after). Read-only.`, { label: `scout#${round}`, phase: 'Scout', schema: SCOUT })
   if (!scout || !scout.items.length) { log('scout found nothing to do'); break }
 
   phase('Plan review')
@@ -206,8 +223,42 @@ Then check CI of each pushed sha (\`gh run list --commit <sha>\`, \`gh run view 
 CLEANUP — only what THIS round created, only what is provably on trunk. Candidates are the local branches named \`wf/<key>-${round}-<n>\` for the keys in ROUND RESULTS. For each: if \`git cherry origin/trunk <branch>\` prints only \`-\` lines (every commit is on trunk by patch-id), remove the worktree that has it checked out (\`git worktree list --porcelain\` gives the path). Git refuses to remove a worktree containing submodules without --force, and every worktree here has them, so: confirm \`git -C <path> status --porcelain\` is EMPTY and every entry under \`<path>/vendor/\` is a SYMLINK into the main checkout (that is how worktrees share vendor — see CLAUDE.md; removing the link does not touch the shared submodule), and only then \`git worktree remove --force <path>\`. If either check fails, leave the worktree and say why. Then remove the branch (\`git branch -D <branch>\` — -D only because a cherry-picked branch is never an ancestor, which is why the cherry check comes first). Leave any branch with a \`+\` line untouched (that is unlanded work — a parked item's branch is the resume point; name it in the plan). Do not touch any other branch or worktree; list stale \`wf/*\` branches from earlier rounds in your report instead. If a removal is refused, record it and carry on.
 ROUND RESULTS:\n${JSON.stringify({ results, notBuilt: notBuilt.map((d) => ({ key: d.key, title: d.title, decision: d.decision, status: d.status, prerequisite: d.prerequisite, merged_into: d.merged_into, human_question: d.human_question })), proposals: sweep ? sweep.proposals : [] }, null, 1)}`, { label: `record#${round}`, phase: 'Record' }))
 
-  allRounds.push({ round, results, notBuilt, proposals: sweep ? sweep.proposals : [], record })
-  if (!shipped.length) { log(`round ${round}: nothing landed — stopping`); break }
+  // Counted in code so the steward judges a trend from facts, not from re-reading prose.
+  const earlierParked = new Set(allRounds.flatMap((r) => r.tally.parked))
+  const followups = results.flatMap((r) => r.followups || [])
+  const tally = {
+    picked: designs.length, built: toBuild.length,
+    landed: shipped.map((r) => r.key),
+    parked: results.filter((r) => r.outcome === 'parked').map((r) => r.key),
+    deferred: results.filter((r) => r.outcome === 'deferred').map((r) => r.key).concat(notBuilt.filter((d) => d.decision === 'defer').map((d) => d.key)),
+    reparked: results.filter((r) => r.outcome === 'parked' && earlierParked.has(r.key)).map((r) => r.key),
+    new_majors: followups.filter((f) => f.severity === 'major').length,
+    new_minors: followups.filter((f) => f.severity === 'minor').length,
+    new_proposals: sweep ? sweep.proposals.length : 0,
+  }
+  allRounds.push({ round, tally, results, notBuilt, proposals: sweep ? sweep.proposals : [], record })
+  log(`round ${round}: landed ${tally.landed.length}/${tally.built}, parked ${tally.parked.length}, deferred ${tally.deferred.length}; added ${tally.new_majors} majors, ${tally.new_proposals} proposals`)
+
+  // Hard stops only; everything else is the steward's call.
+  barren = shipped.length ? 0 : barren + 1
+  if (barren >= 2) { log('two rounds in a row landed nothing — stopping'); break }
+  if (round === MAX_ROUNDS) { log(`hit the maxRounds backstop (${MAX_ROUNDS}) — stopping; the steward would have been asked next`); break }
+
+  phase('Steer')
+  const s = await agent(`${PRINCIPLES}
+You are the STEWARD of a multi-round run over ${PLAN}${SECTION}. Decide whether another round is worth it, and shape it. Read-only.
+Read the plan's "Next round" sections (newest first) and §10's open items, then judge the TREND across rounds from these tallies:
+${JSON.stringify(allRounds.map((r) => ({ round: r.round, ...r.tally })), null, 1)}
+CONVERGING looks like: what lands closes more than review and the sweep add (weigh majors and confirmed wrong answers heavily, minors and reuse proposals lightly); prerequisites land and the items waiting on them become unblocked; parked items stop recurring; the confirmed-wrong-answers-on-trunk list shrinks.
+DIVERGING looks like: each round adds more majors/wrong answers than it resolves; the same root cause parks again (reparked is a strong signal); items keep deferring on a prerequisite no round picks; the work drifts out of ${SECTION || 'the plan'} into an ever-wider list.
+Decide:
+- continue=false when the trend is diverging for a second round, when what remains needs a human design decision, or when the section's real work is done (only minors/proposals left). Say which.
+- continue=true otherwise, with next_batch (1–${MAX_ITEMS}): SMALLER when items parked or chained or collided on one seam, LARGER when the last round's items were independent and landed clean.
+- focus: the one or two things the next scout must pick first — usually the substrate a parked/deferred item is waiting on, or a recurring root cause — so the next round resolves rather than widens.`, { label: `steward#${round}`, phase: 'Steer', effort: 'high', schema: STEER })
+  allRounds[allRounds.length - 1].steer = s
+  if (!s || !s.continue) { log(`steward: stop — ${s ? s.reason : 'no verdict'}`); break }
+  steer = s
+  log(`steward: ${s.trend}, continue with ${s.next_batch} — ${s.focus}`)
 }
 
 return allRounds
