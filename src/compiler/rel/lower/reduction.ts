@@ -7,11 +7,12 @@ import type { ColMeta, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, forEachRel } from '../../../rel/walk.ts';
 import type { Elem } from '../../elem.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
-import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { someStepDeep } from '../../ir/walk.ts';
+import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
-import { arg, isColumnArg, isNested, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
+import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
@@ -823,8 +824,57 @@ export function pathSimplePredicate(rel: Rel, cyclic: boolean, from: string | un
   return { kind: 'scalar', plan: probe };
 }
 
-export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
+/**
+ * Where a rooted chain's FIRST traverser comes from. `'source'`: it is a fresh start traverser (a
+ * source `g.union(…)` arm), so it holds the `withSack` seed, no loop and an empty path. `'split'`: it
+ * is a mid-traversal `V()`/`E()` re-sourcing under a host (`map(__.V()…)`, a `P` operand, a `where`
+ * body, a write's endpoint), which emits `head.split(element, this)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:196`)
+ * — so its sack, loops and path are the HOST traverser's.
+ */
+export type RootedStart = 'source' | 'split';
+
+/**
+ * Does a split body read state its first traverser inherits from the host? Its sack, loop counter or
+ * path (`TRAVERSER_STATE_READS`), or a path LABEL: `Scoping.getScopeValue` resolves a key against the
+ * traverser's path
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
+ * and the split's path is the host's. A scope-key read (`scopeKeyReads`) at top-level step `i` of a
+ * label the PROGRAM binds is the host's unless the body itself bound it before `i` (`labelsBoundBefore`,
+ * which also clears at a barrier). Under a `Pop.first`/`Pop.all`/`Pop.mixed` anywhere in the body, even a
+ * label the body bound may read the host's earlier bind, so any such read declines. This over-declines
+ * (a string argument that is not really a scope key counts); it never answers wrong. A side-effect key
+ * is global, not inherited, so reading one is not host state.
+ */
+function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
+  const { params } = ctx;
+  if (someStepDeep(steps, params, (s) => TRAVERSER_STATE_READS.has(s.name))) return true;
+  const popped = someStepDeep(steps, params, (s) => (s.args ?? []).some((a) => isPopArg(a.value) && a.value.pop !== 'last'));
+  return steps.some((step, i) => {
+    const reads = scopeKeyReads([step], params);
+    if (reads.all) return true;
+    const named = [...reads.labels].filter((label) => ctx.scopeNames.labels.has(label));
+    if (!named.length) return false;
+    if (popped) return true;
+    const bound = labelsBoundBefore(steps, i, params);
+    return named.some((label) => !bound.has(label));
+  });
+}
+
+/**
+ * A rooted chain lowered as one relation, or `null` to decline.
+ *
+ * A `'split'` read is computed ONCE for every host (an uncorrelated relation), so it cannot hold the
+ * host's own sack, loop counter or path. A split body that reads any of them declines
+ * (`readsHostState`): lowering it would answer with the `withSack` seed and a one-element path.
+ * `withSack(1).V().sack(sum).by(constant(2)).map(__.V().sack())` would answer 1 where the reference
+ * answers 3, `out().map(__.V().simplePath().count())` 6 where it answers 4, and
+ * `as('x').map(__.V().as('y').select('x').count())` 0 where it answers 6. Correlating that state per
+ * host would re-read the graph per traverser, which is unbuilt.
+ */
+export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter, start: RootedStart = 'split'): RootedRead | null {
   if (!steps.length) return null;
+  if (start === 'split' && readsHostState(steps, ctx)) return null;
   const chain = lowerChain(steps, {
     params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
     labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,

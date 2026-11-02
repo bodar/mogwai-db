@@ -60,6 +60,11 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   ProductiveByStrategy null-keeping; `where('a',P)` over scalar aliases / non-eq ops; per-origin slice
   in a pattern body; `match` over a map stream (`g.V().valueMap().match(as('a').select('name').as('b'))`);
   `concat(constant(…), select('b').by('name'))` (likely a concat-with-select-child gap).
+- **A re-sourced body that reads host traverser state** — `map(__.V().sack())`, `__.V().simplePath()`,
+  `__.V().select('<host label>')`, `loops()` under a host. A mid-traversal `V()` splits the host traverser,
+  but `rootedRead` computes the body once for every host, so `readsHostState` declines. Needs that state
+  correlated into the body (a per-host read). Tests: `test/L4-addendum/resourced-scalar-value.feature`
+  `@gap:resourced-host-state`.
 - **`where(without('x'))` after `aggregate('x')`** — lower as `NOT IN (SELECT … FROM <collection>)`.
 - **`repeat(...).until(where(eq('a')))`.**
 - **`choose()` with mixed list-shaped arms** — `choose(hasLabel('person'), out().fold(), values('name').fold())`.

@@ -10,6 +10,7 @@
 // value, of a member of the body's stream, with that member's type — never a particular member (L8).
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare } from '../support/harness.ts';
+import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 
 const s = seededStore();
 const rows = (g: string): any[] => bare(run(s, g));
@@ -57,4 +58,33 @@ describe('an order-pinned or reduced re-sourced value is exact', () => {
     expect(got.every((r) => r.vtype === 'int')).toBe(true);
   });
   test('an empty body maps to nothing', () => expect(rows("g.V().map(__.V().values('age').is(gt(100)))")).toEqual([]));
+});
+
+// A mid-traversal V() SPLITS the host traverser (GraphStep.java:196 `head.split(element, this)`), so the
+// body sees the HOST's sack, loops, path and path labels. The rooted read is computed once for every host,
+// so it cannot hold any of them: a body that reads one refuses (`rootedRead`'s `readsHostState`) rather
+// than answering with the withSack seed or a one-element path. Reference answers in the comments.
+describe('a re-sourced body that reads host traverser state refuses', () => {
+  const refuses = (g: string): void => { expect(() => run(s, g)).toThrow(UnsupportedTraversal); };
+  const SACK3 = 'g.withSack(1).V().sack(sum).by(__.constant(2))';
+  test('sack()', () => refuses(`${SACK3}.map(__.V().sack())`)); // 6 x 3
+  test('sack().sum()', () => refuses(`${SACK3}.map(__.V().sack().sum())`)); // 6 x 18
+  test('values().sack()', () => refuses(`${SACK3}.map(__.V().values('age').sack())`)); // 6 x 3
+  test('sack().order()', () => refuses(`${SACK3}.map(__.V().sack().order())`)); // 6 x 3
+  test('a per-row host sack', () => refuses("g.withSack(1).V().sack(sum).by('age').map(__.V().sack())")); // 30, 28, 33, 36
+  test('project().by()', () => refuses(`${SACK3}.project('s').by(__.V().sack())`)); // 6 x {s:3}
+  test('a sack fold in the body', () => refuses(`${SACK3}.map(__.V().sack(sum).by(__.constant(1)).sack())`)); // 6 x 4
+  test('a where() body', () => refuses(`${SACK3}.where(__.V().sack().is(3))`)); // all 6
+  test('a P operand', () => refuses(`${SACK3}.where(__.constant(3).is(eq(__.V().sack())))`)); // all 6
+  test('a nested choose arm', () => refuses(`${SACK3}.choose(__.hasLabel('person'), __.map(__.V().sack()), __.constant(0))`));
+  test('simplePath()', () => refuses("g.V().out().map(__.V().simplePath().count())")); // 6 x 4
+  test('a host path label', () => refuses("g.V().as('x').map(__.V().as('y').select('x').count())")); // 6 x 6
+  test('loops() inside a walk', () => refuses("g.V().repeat(__.out()).times(1).map(__.V().loops())"));
+});
+
+describe('a SOURCE union arm starts fresh', () => {
+  test('it reads the withSack seed', () =>
+    expect(rows('g.withSack(1).union(__.V().sack())').map((r) => r.v)).toEqual([1, 1, 1, 1, 1, 1]));
+  test('a host-state-free re-source under a sack host still answers', () =>
+    oneRepeated("g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().values('name').order().limit(1))", 6, ['josh'], 'string'));
 });

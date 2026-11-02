@@ -112,3 +112,128 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
     Then the result should be unordered
       | result |
       | ripple |
+
+  # A mid-traversal V() SPLITS the host traverser (`head.split(element, this)`,
+  # vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:196),
+  # so the re-sourced body sees the HOST's sack, loops, path and path labels. The rooted read is computed once
+  # for every host and cannot hold them, so a body that reads one REFUSES rather than answering with the
+  # withSack seed or a one-element path. The rows below are the reference's answers.
+  @gap:resourced-host-state
+  @Unsupported
+  Scenario: g_withSackX1X_V_sackXsumX_byXconstantX2XX_mapXV_sackX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().sack())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+      | d[3].i |
+      | d[3].i |
+      | d[3].i |
+      | d[3].i |
+      | d[3].i |
+
+  @gap:resourced-host-state
+  @Unsupported
+  Scenario: g_withSackX1X_V_sackXsumX_byXconstantX2XX_mapXV_sack_sumX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().sack().sum())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[18].i |
+      | d[18].i |
+      | d[18].i |
+      | d[18].i |
+      | d[18].i |
+      | d[18].i |
+
+  @gap:resourced-host-state
+  @Unsupported
+  Scenario: g_withSackX1X_V_sackXsumX_byXconstantX2XX_projectXsX_byXV_sackX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(sum).by(__.constant(2)).project("s").by(__.V().sack())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"s":"d[3].i"}] |
+      | m[{"s":"d[3].i"}] |
+      | m[{"s":"d[3].i"}] |
+      | m[{"s":"d[3].i"}] |
+      | m[{"s":"d[3].i"}] |
+      | m[{"s":"d[3].i"}] |
+
+  @gap:resourced-host-state
+  @Unsupported
+  Scenario: g_withSackX1X_V_sackXsumX_byXconstantX2XX_whereXV_sack_isX3XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).V().sack(sum).by(__.constant(2)).where(__.V().sack().is(3)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  @gap:resourced-host-state
+  @Unsupported
+  Scenario: g_V_out_mapXV_simplePath_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().map(__.V().simplePath().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+      | d[4].l |
+      | d[4].l |
+      | d[4].l |
+      | d[4].l |
+      | d[4].l |
+
+  @gap:resourced-host-state
+  @Unsupported
+  Scenario: g_V_asXxX_mapXV_asXyX_selectXxX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("x").map(__.V().as("y").select("x").count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+
+  # A SOURCE union's arm starts from a fresh traverser, which holds the withSack seed.
+  Scenario: g_withSackX1X_unionXV_sackX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSack(1).union(__.V().sack())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |

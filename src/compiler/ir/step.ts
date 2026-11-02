@@ -98,6 +98,15 @@ export const EDGE_SOURCE: ReadonlySet<string> = new Set(['E']);
 /** The path-family steps: they thread a path AND host from()/to() scoping modulators. */
 export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
+/**
+ * The steps whose answer reads state a traverser SPLIT inherits from its parent: the sack (read or
+ * folded), the loop counter, and the path (the path family, and `tree`, which is built from it). A
+ * mid-traversal `V()`/`E()` emits `head.split(element, this)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:196`),
+ * so a body that re-sources under a host still sees the HOST traverser's sack, loops and path.
+ */
+export const TRAVERSER_STATE_READS: ReadonlySet<string> = new Set(['sack', 'loops', 'tree', ...PATH_FAMILY]);
+
 /** The `Operator` tokens a `sack()` may fold with — TinkerPop's `Operator` enum, minus the ones the
  *  lowering does not express (`and`/`or`/`addAll`/`sumLong`). DATA the lowering and its emission layer
  *  must agree on, so it lives here beside the other step-name vocabularies rather than inside the
