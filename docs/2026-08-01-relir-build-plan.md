@@ -769,6 +769,12 @@ Already wrong on trunk: the arms reversed, `union(constant([a:3]), constant([a:1
 reads the Map, then side effects, then path labels, so a row lacking the key must fall through.
 
 **Shared root cause → ONE substrate item, ordered BEFORE S9's re-land:**
+- ✅ **S9a LANDED (`79c3a336`, `ce6498be`).** A map framing carries `MapKeyFacts` (`src/compiler/rel/framing.ts`):
+  `keys` a sound MAY bound, `held` a sound MUST bound, `exact` for literals. Arm merges and alias joins go through
+  ONE meet (`meetFraming`/`meetMapKeyFacts`, `lower/branch.ts`); local slices re-state facts via `slicedKeyFacts`;
+  every map-first reader reads key presence through one authority, ambiguous cases decline on the query text.
+  Fixed the reversed-arm union and the local-slice lost rows; L4 `map-key-facts.feature`. Remains: nothing —
+  S9 can now rebase onto it.
 - **S9a. `held` is a MUST-hold fact: every framing transformer preserves it soundly or drops it.** Two writers
   over-claim today, and both are independent of S9 (S9 only made the readers trust them):
   - the map arm of the branch merge (`src/compiler/rel/lower/branch.ts`) keeps the FIRST arm's `held`/`keys` →
