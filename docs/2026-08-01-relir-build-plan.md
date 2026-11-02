@@ -764,7 +764,7 @@ the first step.
   REFUSES a non-string rather than coercing it, every constant label goes through `constantName`, and the side-effect
   registry keeps the `TypeNode` of a typed value. If that last part is too big for one item, decline a typed
   side-effect constant at a label site and say so in `docs/outstanding-work.md`.
-- **S2. ✅ LANDED — the re-sourcing V()/E() arm honours the absent-host INPUT rule.** (Corrected wording: an OUTPUT
+- **S2. ✅ LANDED (8143edf2) — the re-sourcing V()/E() arm honours the absent-host INPUT rule. Remains: nothing.** (Corrected wording: an OUTPUT
   gate around `scalarChildValue` is the refuted 2026-11-01 mechanism — it loses a seed, a seed table is wrong once any
   step follows the reduction, and it would add a per-row CASE to the arms that already gate their input.) The one arm
   that ignored the host now goes through `reduction.ts:reSourcedUnder`: unchanged for a host that cannot be absent;
