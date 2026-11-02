@@ -26,7 +26,7 @@ import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type Merge
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
-import { asLabelsOf, labelReads, whereHasScopeKey } from '../ir/labels.ts';
+import { asLabelsOf, scopeKeyReads, whereHasScopeKey } from '../ir/labels.ts';
 import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.ts';
 import { someStepDeep } from '../ir/walk.ts';
 import { contentDemand } from '../ir/content-demand.ts';
@@ -5545,9 +5545,9 @@ function recordTail(
     // THE RECORD'S OWN MAP SCOPE WINS: a `where` scope key naming one of its FIELDS reads that field
     // (`Scoping.getScopeValue` asks the traverser's Map first), and the alias readers below read the path
     // label — so such a step declines, unless the field mirrors that label (`RecordField.mirrorsAlias`).
-    // Over-approximate (any name the step mentions). A keyed `dedup` reads the field itself, below.
+    // Over-approximate (any scope key the step mentions). A keyed `dedup` reads the field itself, below.
     if (step.name === 'where'
-      && [...labelReads([step], ctx.params).labels].some((label) => { const field = fieldNamed(fields, label); return !!field && !field.mirrorsAlias; })) return null;
+      && [...scopeKeyReads([step], ctx.params).labels].some((label) => { const field = fieldNamed(fields, label); return !!field && !field.mirrorsAlias; })) return null;
 
     // `where(k1, P.eq/neq(k2))` THETA and `where(<body>)`/`not(<body>)` LEG over the record's bound
     // aliases — the alias-aware filters, shared with the element tail (`aliasWhere`). A repeat/count leg

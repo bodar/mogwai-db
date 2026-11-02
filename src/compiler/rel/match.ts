@@ -5,7 +5,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
-import { asLabelsOf, labelReads } from '../ir/labels.ts';
+import { asLabelsOf, scopeKeyReads } from '../ir/labels.ts';
 import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
@@ -482,14 +482,17 @@ function legCorrelated(
   const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
   if (!startProj || startProj.read.kind !== 'element') return null;
   const { chain: rightBody, corr } = legRight(leg.start, leg.body, host, fresh);
-  // The fresh walk sees ONLY the positions it correlates — the start and each `where(P.eq/neq(label))`.
-  // It cannot see the outer row's path BY CONSTRUCTION, so a body reading any OTHER live outer label
-  // (`select('b')` after a `repeat`, a nested `where('b', …)`, a `path()`) would read it as unbound and
-  // answer a wrong count. Decline instead (`labelReads` over-approximates, which only over-declines).
-  const correlated = new Set(corr.map((c) => c.label));
-  const reads = labelReads(leg.body, child.params);
+  // The fresh walk sees ONLY the positions it correlates — the start and each `where(P.eq/neq(label))`,
+  // which `legRight` has already LIFTED into a fresh `as(mcN)` bind. It cannot see the outer row's path BY
+  // CONSTRUCTION, so any label the LIFTED walk still reads as a scope key — a `select('c')` after the lifted
+  // `where(P.eq('c'))`, a `select('b')` after a `repeat`, a nested `where('b', …)`, a `path()` — would read
+  // it as unbound and answer a wrong count. That holds for the start and the correlated labels too: the
+  // correlation equates a POSITION with them, it does not put them on the walk's path. Decline on ANY live
+  // outer label read (`scopeKeyReads` over-approximates every scope key, but not a VALUE argument, so
+  // `has('name','b')` reads no `b`). Re-correlating a fresh walk with outer path labels is unbuilt.
+  const reads = scopeKeyReads(rightBody, child.params);
   if (reads.all) return null;
-  for (const label of liveAliases(labels, rel).keys()) if (reads.labels.has(label) && !correlated.has(label)) return null;
+  for (const label of liveAliases(labels, rel).keys()) if (reads.labels.has(label)) return null;
   const src = child.rooted([syn(host, startProj.read.elem === 'edge' ? 'E' : 'V')]);
   if (!src || src.framing.kind !== 'elements') return null;
   const ran = child.chain(src.rel, src.framing, rightBody, new Map());

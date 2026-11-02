@@ -663,3 +663,84 @@ Feature: mogwai addendum — a SOURCE g.union(…) whose arms do not re-source r
     Then the result should be unordered
       | result |
       | d[0].l |
+
+  # A PATH-PASSING barrier inside a rooted arm — `order()`, `aggregate()`, `limit()` — re-emits the
+  # traverser it was given, labels and all (`CollectingBarrierStep`, `AggregateStep`, `RangeGlobalStep`,
+  # vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/),
+  # so `a` is still on the path the union forwards. The rooted arm carries no alias channel out, so the
+  # read DECLINES rather than answer the unbound key's 0.
+  @Unsupported
+  Scenario: g_unionXV_nameXmarkoX_asXaX_out_orderX_selectXaX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().has("name", "marko").as("a").out().order()).select("a").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  @Unsupported
+  Scenario: g_unionXV_nameXmarkoX_asXaX_out_aggregateXqXX_selectXaX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().has("name", "marko").as("a").out().aggregate("q")).select("a").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+
+  @Unsupported
+  Scenario: g_unionXV_nameXmarkoX_asXaX_out_limitX2XX_selectXaX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().has("name", "marko").as("a").out().limit(2)).select("a").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  # A path-CONSUMING barrier (`count()`, a `ReducingBarrierStep`) emits a traverser it GENERATES, with no
+  # path, so the label is genuinely gone and `select('a')` answers nothing — no decline owed.
+  Scenario: g_unionXV_nameXmarkoX_asXaX_out_countX_selectXaX
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().has("name", "marko").as("a").out().count()).select("a")
+      """
+    When iterated to list
+    Then the result should be empty
+
+  # A FINAL match()'s map serves only the FIRST step after the union: `select('x')` replaces the traverser
+  # with the vertex, and a later `select('y')` is a PATH read the rooted answer cannot serve — it declines
+  # (the reference reads `y` off the path) rather than answer `[]`, or throw an internal error.
+  @Unsupported
+  Scenario: g_unionXV_nameXmarkoX_matchXasXxX_out_asXyXXX_selectXxX_selectXyX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().has("name", "marko").match(__.as("x").out().as("y"))).select("x").select("y").values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | josh |
+      | lop |
+
+  @Unsupported
+  Scenario: g_unionXV_nameXmarkoX_matchXasXxX_out_asXyXXX_selectXxX_asXzX_selectXy_zX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().has("name", "marko").match(__.as("x").out().as("y"))).select("x").as("z").select("y", "z").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |

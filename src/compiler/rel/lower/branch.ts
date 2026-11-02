@@ -10,7 +10,7 @@ import { isLocalScope, SLICE_BARRIERS } from '../../ir/step.ts';
 import { referenceDistinctAt } from '../../ir/bulk.ts';
 import { armCollectsInOrder } from '../../ir/analyze.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
-import { labelsBoundBefore, matchLabelsOf, scopeKeyReads } from '../../ir/labels.ts';
+import { matchLabelsOf, pathLabelsAt, readsPathLabel, scopeKeyReads, type LabelReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
@@ -432,15 +432,17 @@ export function sourceUnion(
   // is on every traverser the arm emits (`UnionStep` forwards the arm's traverser, path and all), so a read
   // of it downstream (`g.union(__.V()….as('a'), …).select('a')`) would answer the unbound key's EMPTY result.
   // Carrying a rooted chain's aliases out is unbuilt, so such a read DECLINES. Both sides are the label
-  // authority's: `rootedLabelsOut` (a barrier inside the arm clears its binds — exact), `scopeKeyReads`
-  // (over-approximating every string that could be a scope key — fail closed — but not a VALUE argument,
-  // so `constant('a')`/`has('name','a')` after the union read no label).
+  // authority's, each over-approximating — the fail-closed direction for a decline: `pathLabelsAt` (every
+  // label the arm's traverser MAY hold — only a top-level path-CONSUMING barrier clears, so `order()`,
+  // `limit()` and `aggregate()` keep the labels they re-emit) and `scopeKeyReads` (every string that could
+  // be a scope key, but not a VALUE argument, so `constant('a')`/`has('name','a')` read no label).
   const reads = scopeKeyReads(steps.slice(1), ctx.params);
+  const laterReads = scopeKeyReads(steps.slice(2), ctx.params);
   for (const arg of args) {
     const body = rootedSteps((arg as { readonly nested: unknown }).nested, ctx.params, ctx.sideEffects);
     if (!body?.length) return null;
-    const bound = rootedLabelsOut(body, ctx.params);
-    if (bound.size && (reads.all || [...bound].some((label) => reads.labels.has(label)))) return null;
+    const { held, inMap } = rootedLabelsOut(body, ctx.params);
+    if (readsPathLabel(held, reads) || readsPathLabel(inMap, laterReads)) return null;
     const read = rootedRead(body, ctx, fresh);
     if (!read) return null;
     if (read.effects?.length) effects.push(...read.effects);
@@ -458,19 +460,26 @@ export function sourceUnion(
 }
 
 /**
- * The path labels a ROOTED source-union arm's traverser leaves with that a downstream read could NOT see
- * through the arm's answer — `labelsBoundBefore` over the whole arm, less the variables of a FINAL
- * `match()`: that step emits its binding MAP, and `Scoping.getScopeValue` resolves a key against the
- * traverser's Map before its path
+ * The path labels a ROOTED source-union arm's traverser leaves with, split by where a downstream read may
+ * resolve them. A FINAL `match()` emits its binding MAP, and `Scoping.getScopeValue` resolves a key against
+ * the traverser's Map before its path
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
  * so `g.union(__.V().match(__.as('x').out().as('y'))).select('y')` reads the map the arm's answer carries.
+ * But only the FIRST step after the union is certain to see that map: a later step's traverser may be a
+ * different object (`select('x')` replaces it with the vertex), and its read of `y` is then a PATH read the
+ * rooted answer cannot serve. Modelling which steps keep the map would be a new classification; first-step-only
+ * is the fail-closed spelling. So `inMap` — the map's variables — is checked against the reads from the
+ * SECOND step on, and `held` — every other label (`pathLabelsAt`) — against every read.
  */
-function rootedLabelsOut(body: readonly IRStep[], params: Record<string, any>): ReadonlySet<string> {
-  const bound = labelsBoundBefore(body, body.length, params);
+function rootedLabelsOut(body: readonly IRStep[], params: Record<string, any>): { readonly held: LabelReads; readonly inMap: LabelReads } {
+  const all = pathLabelsAt(body, body.length, params);
   const last = body[body.length - 1]!;
-  if (last.name !== 'match' || last.modulators?.length) return bound;
-  const inMap = new Set(matchLabelsOf(last, params));
-  return new Set([...bound].filter((label) => !inMap.has(label)));
+  if (last.name !== 'match' || last.modulators?.length) return { held: all, inMap: { labels: new Set(), all: false } };
+  const mapped = new Set(matchLabelsOf(last, params));
+  return {
+    held: { labels: new Set([...all.labels].filter((label) => !mapped.has(label))), all: all.all },
+    inMap: { labels: mapped, all: false },
+  };
 }
 
 /**

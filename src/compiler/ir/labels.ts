@@ -1,6 +1,6 @@
 import { isNested, isPred, stepChain, type Arg, type Pred, type Step } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { PATH_FAMILY, isStreamBarrier, type IRStep } from './step.ts';
+import { PATH_FAMILY, REDUCERS, isLocalScope, isStreamBarrier, type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, eachStepDeep, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 
 // ---------- labels: who BINDS one, who READS one ----------
@@ -429,10 +429,63 @@ function collectWhereKeys(pred: Pred, out: WhereKey[]): void {
  *  barrier (`fold`, `count`, an unkeyed `group`, …) is not here: `ReducingBarrierStep` emits a traverser
  *  it GENERATES, carrying no path (`.../step/util/ReducingBarrierStep.java`). */
 const PATH_PASSING_BARRIERS: ReadonlySet<string> = new Set(['dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier', 'aggregate', 'store']);
-const KEYED_SIDE_EFFECT_WRITERS: ReadonlySet<string> = new Set(['group', 'groupCount']);
-const passesTraverser = (s: Step): boolean =>
-  PATH_PASSING_BARRIERS.has(s.name)
-  || (KEYED_SIDE_EFFECT_WRITERS.has(s.name) && (s.args ?? []).some((a) => typeof a.value === 'string'));
+const KEYED_SIDE_EFFECT_WRITERS: ReadonlySet<string> = new Set(['group', 'groupCount', 'tree']);
+const keyed = (s: Step): boolean => (s.args ?? []).some((a) => typeof a.value === 'string');
+export const passesTraverser = (s: Step): boolean =>
+  PATH_PASSING_BARRIERS.has(s.name) || (KEYED_SIDE_EFFECT_WRITERS.has(s.name) && keyed(s));
+
+/** The barriers whose output traverser is one they GENERATE, so no path label bound before them survives:
+ *  a REDUCER, `fold()` and an unkeyed `group()`/`groupCount()`/`tree()` are `ReducingBarrierStep`s
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ReducingBarrierStep.java`
+ *  — `processAllStarts` emits `generator.generate(seed, …)`), and `cap()` is a `SupplyingBarrierStep`
+ *  (`.../step/util/SupplyingBarrierStep.java`), emitting a generated traverser over the side effect.
+ *
+ *  A POSITIVE list, and that is the safe direction for its one consumer (`pathLabelsAt`, a MAY analysis):
+ *  a step missing here — a new barrier, `local()` (per traverser: `LocalStep` keeps the outer path), a
+ *  `Scope.local` reducer (a map over one value) — merely leaves the labels LIVE, which over-declines. The
+ *  partition test in `test/L2-ir/labels.test.ts` holds every `GLOBAL_BARRIER_STEPS` name to one of
+ *  `passesTraverser`, `consumesPath` or the per-traverser `local`, so a new barrier cannot fall through. */
+const PATH_CONSUMING_BARRIERS: ReadonlySet<string> = new Set([...REDUCERS, 'fold', 'cap']);
+export const consumesPath = (s: Step): boolean =>
+  !isLocalScope(s as IRStep)
+  && (PATH_CONSUMING_BARRIERS.has(s.name) || (KEYED_SIDE_EFFECT_WRITERS.has(s.name) && !keyed(s)));
+
+/**
+ * The labels that MAY be on the path of a traverser reaching `index` — the MAY-direction twin of
+ * `labelsBoundBefore` (a MUST answer). For a caller that DECLINES on an intersection with a read: a label it
+ * cannot carry but which the traverser may hold is exactly what a downstream `select` would see.
+ *
+ * Over-approximating on both axes, each the fail-closed direction for a decline:
+ * - a bind at ANY depth counts (an `as()` inside a branch arm, a repeat body, a `match()` pattern), since
+ *   `UnionStep`/`RepeatStep`/… forward the inner traverser, path and all;
+ * - only a TOP-LEVEL `consumesPath` step clears — a path-passing barrier (`order`, `limit`, `aggregate`,
+ *   …) re-emits the traverser it was given, labels and all, and a barrier NESTED in a child does not
+ *   replace the outer traverser (`labelsBoundBefore`'s `carriesBarrier` clear is the MUST rule, wrong here).
+ * A body the scan cannot read sets `all`: its binds are unknown.
+ */
+export function pathLabelsAt(steps: readonly Step[], index: number, params: Record<string, any>): LabelReads {
+  let labels = new Set<string>();
+  let all = false;
+  const read = rawBodies(params);
+  for (let i = 0; i < index && i < steps.length; i++) {
+    const s = steps[i]!;
+    if (consumesPath(s)) { labels = new Set(); all = false; }
+    eachStepDeep([s], read, (inner) => {
+      for (const l of asLabelsOf(inner)) labels.add(l);
+      for (const l of matchLabelsOf(inner, params)) labels.add(l);
+    }, () => { all = true; });
+  }
+  return { labels, all };
+}
+
+/** Does a READ (`scopeKeyReads`) possibly name a label the traverser MAY hold (`pathLabelsAt`)? Either
+ *  side's `all` is an unknown set, which intersects anything non-empty. */
+export function readsPathLabel(held: LabelReads, reads: LabelReads): boolean {
+  if (!held.labels.size && !held.all) return false;
+  if (reads.all) return true;
+  if (held.all) return reads.labels.size > 0;
+  return [...held.labels].some((l) => reads.labels.has(l));
+}
 
 /**
  * A SUB-PATH this compile cannot prove LOCATABLE — a `path()`/`simplePath()`/`cyclicPath()` whose
