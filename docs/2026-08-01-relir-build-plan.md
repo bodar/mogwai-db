@@ -1002,7 +1002,12 @@ wrapping `V().sample(1)`, and `property(...max())` over a re-sourced `V()`, rais
    Give `aliasWhere` the arm (`aliasValueAt(label,'last')` = current value) — it also answers the top-level form
    `g.V().as('a').values('name').as('n').select('a').out().as('b').in().values('name').where(P.eq('n'))`, which
    declines today. Pin in `test/compiler/where-leg-alias-scope.exec.test.ts`.
-2. **Lost write (major, pre-existing) — `onCreateOverrideGuards` skips `write.kind === 'remove'`**
+2. ✅ **LANDED (7f3a5996).** An onCreate `null` against a merge key holding a value is now an override at both
+   checks: the static `validateNoOverrides` (`src/compiler/ir/write-args.ts`, null on ONE side clashes) and the
+   runtime `onCreateOverrideGuards` (`src/compiler/rel/write.ts`, the `remove` arm is `value IS NULL`); pinned in
+   `test/L4-addendum/merge-oncreate-null-override.feature`. Landed with c682a953 (L5 oracle: a window nested in a
+   step argument is count-undetermined after the enclosing step). Remains: nothing. *(Original:)*
+   **Lost write (major, pre-existing) — `onCreateOverrideGuards` skips `write.kind === 'remove'`**
    (`src/compiler/rel/write.ts`): `g.inject([name:'x',age:1]).mergeV().option(Merge.onCreate,[age:null]).valueMap()`
    creates the vertex WITHOUT age; the reference raises `option(onCreate) cannot override values from merge()
    argument: (age, null)` (`MergeElementStep.java:325-334`, `Objects.equals(null, 1)` is false). Compare removes too.
