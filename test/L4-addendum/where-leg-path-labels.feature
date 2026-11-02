@@ -81,3 +81,43 @@ Feature: mogwai addendum — a multi-correlation where()/not() leg reads no oute
     Then the result should be unordered
       | result |
       | d[0].l |
+
+  # A VALUE argument spelling a live outer label that the leg does NOT correlate is no wrong answer — but
+  # the fresh walk is an UNANCHORED `V()` walk correlated back per outer row, ~N² in the rows, so the leg
+  # keeps declining any live label its body so much as mentions (`labelReads`, start and correlated labels
+  # exempt). It lands with an anchored walk seeded from the correlated start; each carries the reference.
+  @Unsupported
+  Scenario: g_V_asXaX_out_asXbX_in_asXcX_whereXasXaX_out_whereXeqXbXX_hasXname_cXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").in().as("c").where(__.as("a").out().where(P.eq("b")).has("name", "c")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  @Unsupported
+  Scenario: g_V_asXxX_asXaX_out_asXbX_whereXasXaX_out_whereXeqXbXX_hasXname_neqXxXXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("x").as("a").out().as("b").where(__.as("a").out().where(P.eq("b")).has("name", P.neq("x"))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  @Unsupported
+  Scenario: g_V_asXaX_out_asXbX_matchXasXaX_out_asXcX__whereXasXaX_out_whereXeqXcXX_hasXname_neqXbXXXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").match(__.as("a").out().as("c"), __.where(__.as("a").out().where(P.eq("c")).has("name", P.neq("b")))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[14].l |

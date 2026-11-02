@@ -5,7 +5,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
-import { asLabelsOf, scopeKeyReads } from '../ir/labels.ts';
+import { asLabelsOf, labelReads, scopeKeyReads } from '../ir/labels.ts';
 import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
@@ -484,15 +484,24 @@ function legCorrelated(
   const { chain: rightBody, corr } = legRight(leg.start, leg.body, host, fresh);
   // The fresh walk sees ONLY the positions it correlates — the start and each `where(P.eq/neq(label))`,
   // which `legRight` has already LIFTED into a fresh `as(mcN)` bind. It cannot see the outer row's path BY
-  // CONSTRUCTION, so any label the LIFTED walk still reads as a scope key — a `select('c')` after the lifted
-  // `where(P.eq('c'))`, a `select('b')` after a `repeat`, a nested `where('b', …)`, a `path()` — would read
-  // it as unbound and answer a wrong count. That holds for the start and the correlated labels too: the
-  // correlation equates a POSITION with them, it does not put them on the walk's path. Decline on ANY live
-  // outer label read (`scopeKeyReads` over-approximates every scope key, but not a VALUE argument, so
-  // `has('name','b')` reads no `b`). Re-correlating a fresh walk with outer path labels is unbuilt.
+  // CONSTRUCTION, so the leg declines on either of two reads of a live outer label:
+  // - a label the LIFTED walk still reads as a SCOPE KEY (`scopeKeyReads(rightBody)`) — a `select('c')` after
+  //   the lifted `where(P.eq('c'))`, a `select('b')` after a `repeat`, a nested `where('b', …)`, a `path()` —
+  //   would read it as unbound and answer a wrong count. That holds for the start and the correlated labels
+  //   too: the correlation equates a POSITION with them, it does not put them on the walk's path.
+  //   Re-correlating a fresh walk with outer path labels is unbuilt.
+  // - any OTHER live label the body so much as MENTIONS (`labelReads(leg.body)`, start and correlated labels
+  //   exempt), a VALUE argument included (`has('name','b')`). Not a wrong answer but COST: the fresh walk is
+  //   an unanchored `V()` walk correlated back per outer row, ~N² in the rows, and this mention set is the
+  //   reach that plan had before the scope-key read above. Widening the leg past it waits on seeding the
+  //   walk from the correlated start (an anchored walk), never on narrowing this guard.
   const reads = scopeKeyReads(rightBody, child.params);
-  if (reads.all) return null;
-  for (const label of liveAliases(labels, rel).keys()) if (reads.labels.has(label)) return null;
+  const mentions = labelReads(leg.body, child.params);
+  if (reads.all || mentions.all) return null;
+  const correlated = new Set(corr.map((c) => c.label));
+  for (const label of liveAliases(labels, rel).keys()) {
+    if (reads.labels.has(label) || (mentions.labels.has(label) && !correlated.has(label))) return null;
+  }
   const src = child.rooted([syn(host, startProj.read.elem === 'edge' ? 'E' : 'V')]);
   if (!src || src.framing.kind !== 'elements') return null;
   const ran = child.chain(src.rel, src.framing, rightBody, new Map());
