@@ -87,9 +87,12 @@ describe('a re-sourced first value that is a productive null is kept', () => {
       .toEqual(bagOf([29, 27, 32, 35, null, null])));
   // A null `by()` value is absent (docs/feature-support-matrix.md §17): `project()` omits the key.
   test('a by() null is absent (§17)', () => expect(rows(`g.V().project('a').by(${CHOOSE})`).map((r) => r.map)).toEqual(Array(6).fill('[]')));
-  // A write refuses a null rather than skipping it: the reference REMOVES the key.
-  test('a property() value that is a productive null refuses', () =>
-    expect(() => run(seededStore(), "g.V().property('x', __.V().constant(null).limit(1))")).toThrow(/resolved to null/));
+  // A write applies a productive null rather than skipping it: the reference REMOVES the key.
+  test('a property() value that is a productive null removes the key', () => {
+    const store = seededStore();
+    run(store, "g.V().property('age', __.V().constant(null).limit(1))");
+    expect(run(store, "g.V().has('age').count()").map((r) => r.v)).toEqual([0]);
+  });
 });
 
 // A mid-traversal V() SPLITS the host traverser (GraphStep.java:196 `head.split(element, this)`), so the

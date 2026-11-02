@@ -563,6 +563,22 @@ function dropStaleIndex(elem: Elem, rows: Rel, fresh: Minter): Stmt {
   });
 }
 
+/**
+ * REMOVE a set of property rows: the FTS text they own, then the rows. The one removal every write that
+ * drops a property runs — `property(k, null)` (a constant, or a traversal that resolved to null) and a
+ * displaced `single` value. `where` addresses the rows directly when the caller already holds that
+ * predicate (`existingRows`); otherwise they are `rows`' ids.
+ */
+function removeRows(elem: Elem, rows: Rel, bind: Binder, fresh: Minter, where?: (target: Rel) => Expr): void {
+  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
+  bind(dropStaleIndex(elem, rows, fresh));
+  const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  bind(remove({
+    target, channels: [], type: typeOf(), returning: [],
+    where: where ? where(target) : { kind: 'in-query', expr: col(target.id, 'id'), plan: rows, negated: false },
+  }));
+}
+
 /** The existing property rows for one key over a set of owners, optionally narrowed further (the
  *  single-cardinality guard). Projected to `id`, which is what both the FTS sweep and the row
  *  delete address them by. */
@@ -618,9 +634,7 @@ function propertyStatements(
   // every cardinality, which is what makes it a removal rather than a `single` write of nothing.
   if (write.kind === 'remove') {
     const stale = existingRows(elem, ids, propertyKeyExpr(write.key, write.keyName), undefined, fresh);
-    bind(dropStaleIndex(elem, stale.ids, fresh));
-    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-    bind(remove({ target, channels: [], type: typeOf(), where: stale.pred(target), returning: [] }));
+    removeRows(elem, stale.ids, bind, fresh, stale.pred);
     return true;
   }
 
@@ -647,11 +661,8 @@ function propertyStatements(
       ? undefined
       : (owner: Expr): Expr => eq(cardinalityOf(owner, propertyKeyExpr(write.key, write.keyName), null, fresh), text('single'));
     const stale = existingRows(elem, ids, propertyKeyExpr(write.key, write.keyName), guard, fresh);
-    bind(dropStaleIndex(elem, stale.ids, fresh));
-    if (elem !== 'edge') {
-      const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-      bind(remove({ target, channels: [], type: typeOf(), where: stale.pred(target), returning: [] }));
-    }
+    if (elem === 'edge') bind(dropStaleIndex(elem, stale.ids, fresh));
+    else removeRows(elem, stale.ids, bind, fresh, stale.pred);
   }
 
   // Meta on a value a `set` element already holds is a PATCH of that row, not a second row.
@@ -1508,23 +1519,8 @@ const meets = (read: KeySet, written: KeySet): boolean =>
   : written === 'all' ? read.size > 0
   : [...read].some((key) => written.has(key));
 
-/**
- * A NULL value the body resolved, refused before anything is written. A non-productive framing is the
- * framer's signal for "no result", yet `constant(null)` still carries its null as a row — so a null here is
- * either a real null, which the reference turns into a REMOVAL of the key (`ElementHelper.attachProperties`,
- * `structure/util/ElementHelper.java:316-381`), or no value at all, which is no mutation. The two need
- * different statements and the row cannot say which it is; storing it, which is neither, is the one answer
- * known to be wrong.
- */
-function nullValueGuard(values: Rel, guard: Guarder, fresh: Minter): void {
-  const nulls = make.filter({ id: fresh('f'), input: values, channels: [], type: values.type, pred: { kind: 'binary', op: 'is', left: col(values.id, 'v'), right: compilerNull() } });
-  guard(make.project({ id: fresh('p'), input: nulls, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(nulls.id, 'o')]] }),
-    { message: NULL_VALUE, raiseWhen: 'rows' });
-}
-
 const SEQUENTIAL_READ = 'this traversal is not supported yet: a property() traversal here may read what another traverser writes, and TinkerPop runs each traverser through every mutating step before resolving the next one\'s value';
 const SEQUENTIAL_ENDPOINT = 'this traversal is not supported yet: an addE() from()/to() traversal here may read what another traverser writes, and TinkerPop resolves each traverser\'s endpoint only after the traversers before it have run through every mutating step';
-const NULL_VALUE = 'this traversal is not supported yet: a property() traversal resolved to null, which TinkerPop applies as a removal of the key';
 
 /**
  * A runtime body → its rows over the site's host, normalized to `VALUE_ROW_COLS`, plus whether the body
@@ -1541,10 +1537,10 @@ const NULL_VALUE = 'this traversal is not supported yet: a property() traversal 
  *
  * `null` declines: a non-scalar result (an element/list/map value is not a property value), or a
  * reducer whose productivity the arm cannot state (a 0-result would be indistinguishable from a value).
- * A NULL row is not declined here but refused at run time by the writer (`nullValueGuard`): a framing's
- * `productiveNull` only says a null MAY be real (every numeric reducer states it, and `sum()` over ages
- * never yields one), so declining on it refused writes that are always answerable, while the row itself is
- * the only thing that knows whether a null actually arrived.
+ * A NULL row is a value like any other: the writer applies it as a REMOVAL of the key (`runtimeWriteRows`),
+ * which is what the reference does with a traversal that resolved to null. A framing's `productiveNull`
+ * only says a null MAY arrive, so `nullFree` — "no NULL row can reach the writer" — is stated only where
+ * the arm filtered NULL as absent, and it is what keeps the removal statements out of every other write.
  *
  * The `framing` rides out because a KEY's type check needs the type the body STATES, not only the one a
  * row stores (`runtimeNameRows`).
@@ -1578,7 +1574,7 @@ function resolveValueRows(
     ?? scalarVtype(produced.framing, asKey);
   if (!vt) return null;
   // A STATED presence (`{ when }`) is a host-scope predicate: projected beside the value and filtered on,
-  // so a NULL that survives it is a real null the writer refuses (`nullValueGuard`), never a silent skip.
+  // so a NULL that survives it is a real null the writer applies as a removal, never a silent skip.
   const stated = typeof produced.present === 'object' ? produced.present : undefined;
   const projected = make.project({
     id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, ...(stated ? [meta('pw', 'int', true)] : [])),
@@ -1817,7 +1813,7 @@ function keyedRows(values: Rel, targets: Rel, key: RuntimeKey, fresh: Minter): R
  * is also why stale-on-overwrite deletes stay here (`dropStaleIndex`), so the refresh only ever INSERTS.
  */
 function runtimeWriteRows(
-  elem: Elem, rows: Rel, mayBeMulti: boolean, cardinality: VertexCardinality | null, meta_: PropertyRuntimeSet['meta'],
+  elem: Elem, rows: Rel, mayBeMulti: boolean, nullable: boolean, cardinality: VertexCardinality | null, meta_: PropertyRuntimeSet['meta'],
   bind: Binder, guard: Guarder, fresh: Minter,
 ): void {
   const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
@@ -1841,12 +1837,51 @@ function runtimeWriteRows(
       { message: 'Single-cardinality property requires exactly one value, but traversal produced ', raiseWhen: 'rows', valueColumn: 'n', tail: ' results' });
   }
 
+  // A NULL VALUE REMOVES THE KEY — `property(k, null)` is a removal under every cardinality (the constant
+  // arm's rule, `propertyStatements`), and a traversal that resolved to null is that call
+  // (`AddPropertyStep.applyPropertyMutation`, `step/sideEffect/AddPropertyStep.java:205-240`, hands the value
+  // to `Vertex.property`/`Edge.property` whatever it is; a map entry's null likewise, `:152-160`). Applied in
+  // the reference's order, one element's rows are: everything before its LATEST null is undone by it, so
+  // the slot ends as "removed, then the values after that null written by the ordinary rules". Hence two
+  // things, and only where the body can yield a null at all (`nullable`):
+  //  - the SLOTS that saw a null, TAKEN now (a snapshot, so the removal after the insert addresses the
+  //    slots the body named before anything changed), whose pre-existing rows are removed after the insert;
+  //  - the rows that SURVIVE: non-null and ordered after their slot's latest null, by `(o, sq)` — a window
+  //    over the rows the writer already reads (`lo` the latest null traverser, `ls` its latest null `sq`),
+  //    never a correlated "is there a later null" probe, which is quadratic in rows per element.
+  const isNull = (rel: Rel): Expr => ({ kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() });
+  const notNull = (rel: Rel): Expr => ({ kind: 'binary', op: 'is not', left: col(rel.id, 'v'), right: compilerNull() });
+  let removed: Rel | undefined;
+  let live = rows;
+  if (nullable) {
+    const nulls = make.filter({ id: fresh('f'), input: rows, channels: [], type: rows.type, pred: isNull(rows) });
+    const slots = make.project({ id: fresh('p'), input: nulls, channels: [], type: typeOf(meta('owner', 'int'), meta('k', 'text')), exprs: [['owner', col(nulls.id, 'owner')], ['k', col(nulls.id, 'k')]] });
+    removed = bind(make.distinct({ id: fresh('d'), input: slots, channels: [], type: slots.type }), true);
+    const nullAt = (column: string): Expr => ({ kind: 'case', whens: [[isNull(rows), col(rows.id, column)]] });
+    const marked = make.window({
+      id: fresh('rn'), input: rows, channels: [], type: typeOf(...rows.type.cols, meta('lo', 'int', true), meta('ls', 'int', true)),
+      specs: [
+        ['lo', { kind: 'window-expr', fn: 'max', args: [nullAt('o')], spec: { partitionBy: [col(rows.id, 'owner'), col(rows.id, 'k')], orderBy: [] } }],
+        ['ls', { kind: 'window-expr', fn: 'max', args: [nullAt('sq')], spec: { partitionBy: [col(rows.id, 'owner'), col(rows.id, 'k'), col(rows.id, 'o')], orderBy: [] } }],
+      ],
+    });
+    const lo = col(marked.id, 'lo');
+    const o = col(marked.id, 'o');
+    live = make.filter({
+      id: fresh('f'), input: marked, channels: [], type: marked.type,
+      pred: and(notNull(marked), or(or({ kind: 'binary', op: 'is', left: lo, right: compilerNull('int') }, { kind: 'binary', op: '>', left: o, right: lo }),
+        and(eq(o, lo), { kind: 'binary', op: '>', left: col(marked.id, 'sq'), right: col(marked.id, 'ls') }))),
+    });
+  }
+
   // A DECLARED cardinality is a schema write, before anything reads it back — `propertyStatements`' rule.
+  // A null declares nothing, as the constant removal does not.
   if (cardinality) {
     const target = make.scan({ id: fresh('t'), table: 'vertex_property_cardinality', alias: fresh('wt'), channels: [], type: typeOf(...CARDINALITY_COLS) });
+    const valued = nullable ? make.filter({ id: fresh('f'), input: rows, channels: [], type: rows.type, pred: notNull(rows) }) : rows;
     const declared = make.project({
-      id: fresh('p'), input: rows, channels: [], type: typeOf(...CARDINALITY_COLS),
-      exprs: [['node', col(rows.id, 'owner')], ['key', col(rows.id, 'k')], ['cardinality', text(cardinality)]],
+      id: fresh('p'), input: valued, channels: [], type: typeOf(...CARDINALITY_COLS),
+      exprs: [['node', col(valued.id, 'owner')], ['key', col(valued.id, 'k')], ['cardinality', text(cardinality)]],
     });
     bind(insert({
       target, cols: CARDINALITY_COLS.map((column) => column.name), source: declared, channels: [], type: typeOf(),
@@ -1858,26 +1893,29 @@ function runtimeWriteRows(
   // a `single`, and an edge is single by spec); `firstOfValue` ranks each distinct value's copies
   // earliest-first (one copy survives a `set`, and only if the element does not already hold it).
   const ranked = make.window({
-    id: fresh('rn'), input: rows, channels: [], type: typeOf(...rows.type.cols, meta('last', 'int'), meta('fv', 'int')),
+    id: fresh('rn'), input: live, channels: [], type: typeOf(...live.type.cols, meta('last', 'int'), meta('fv', 'int')),
     specs: [
-      ['last', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [col(rows.id, 'owner'), col(rows.id, 'k')], orderBy: [{ expr: col(rows.id, 'o'), dir: 'desc' }, { expr: col(rows.id, 'sq'), dir: 'desc' }] } }],
-      ['fv', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [col(rows.id, 'owner'), col(rows.id, 'k'), col(rows.id, 'v')], orderBy: [{ expr: col(rows.id, 'o'), dir: 'asc' }, { expr: col(rows.id, 'sq'), dir: 'asc' }] } }],
+      ['last', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [col(live.id, 'owner'), col(live.id, 'k')], orderBy: [{ expr: col(live.id, 'o'), dir: 'desc' }, { expr: col(live.id, 'sq'), dir: 'desc' }] } }],
+      ['fv', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [col(live.id, 'owner'), col(live.id, 'k'), col(live.id, 'v')], orderBy: [{ expr: col(live.id, 'o'), dir: 'asc' }, { expr: col(live.id, 'sq'), dir: 'asc' }] } }],
     ],
   });
-  const present = (): Expr => {
+  // A `set` value the element already holds is not re-written — unless its slot saw a null, whose removal
+  // (after the insert) takes the held copy with it.
+  const unheld = (): Expr => {
     const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), col(ranked.id, 'owner')), eq(col(scan.id, 'key'), col(ranked.id, 'k'))), eq(col(scan.id, 'value'), col(ranked.id, 'v'))),
     });
-    return { kind: 'exists', plan: matching, negated: true };
+    const absent: Expr = { kind: 'exists', plan: matching, negated: true };
+    return nullable ? or({ kind: 'binary', op: 'is not', left: col(ranked.id, 'lo'), right: compilerNull('int') }, absent) : absent;
   };
   const isLast = eq(col(ranked.id, 'last'), compilerInt(1));
   const keep: Expr | undefined = elem === 'edge' ? isLast
     : cardinality === 'list' ? undefined
     : cardinality === 'single' ? isLast
-    : cardinality === 'set' ? and(eq(col(ranked.id, 'fv'), compilerInt(1)), present())
-    : or(or(and(eq(card(ranked), text('single')), isLast), and(eq(card(ranked), text('set')), and(eq(col(ranked.id, 'fv'), compilerInt(1)), present()))),
+    : cardinality === 'set' ? and(eq(col(ranked.id, 'fv'), compilerInt(1)), unheld())
+    : or(or(and(eq(card(ranked), text('single')), isLast), and(eq(card(ranked), text('set')), and(eq(col(ranked.id, 'fv'), compilerInt(1)), unheld()))),
       { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: card(ranked), values: [text('single'), text('set')] } });
   const kept = keep ? make.filter({ id: fresh('f'), input: ranked, channels: [], type: ranked.type, pred: keep }) : ranked;
   // IN TRAVERSER ORDER, then the child's own: rowids are assigned in source order, and a multi-property's
@@ -1914,18 +1952,24 @@ function runtimeWriteRows(
     ...(elem === 'edge' ? { onConflict: { target: ['edge', 'key'], set: [['value', col(EXCLUDED, 'value')], ['vtype', col(EXCLUDED, 'vtype')]] } } : {}),
     returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)], ['k', col(target.id, 'key')]],
   }));
+  const newIds = (): Rel => make.project({ id: fresh('p'), input: written, channels: [], type: ID_TYPE, exprs: [['id', col(written.id, 'id')]] });
+
+  // THE REMOVED SLOTS — every row of a slot that saw a null, except the ones just written after it (an
+  // edge's upsert keeps its id, so a value after the null survives by the same exclusion).
+  if (removed) {
+    const justWritten = newIds();
+    removeRows(elem, slotRows(elem, removed, (slot) => ({ kind: 'in-query', expr: slot('id'), plan: justWritten, negated: true }), fresh), bind, fresh);
+  }
   if (elem === 'edge') return;
 
   // THE DISPLACED ROWS of a `single` write — the same (element, key) as a row just written, not one of
   // them, on an element whose effective cardinality is `single`. AFTER the insert, so the body read the
   // pre-mutation value (see the header).
   if (cardinality !== 'list' && cardinality !== 'set') {
-    const newIds = make.project({ id: fresh('p'), input: written, channels: [], type: ID_TYPE, exprs: [['id', col(written.id, 'id')]] });
-    const stale = slotRows(elem, written, (slot) => and({ kind: 'in-query', expr: slot('id'), plan: newIds, negated: true },
+    const justWritten = newIds();
+    const stale = slotRows(elem, written, (slot) => and({ kind: 'in-query', expr: slot('id'), plan: justWritten, negated: true },
       cardinality === 'single' ? undefined : eq(cardinalityOf(slot(spec.owner), slot('key'), null, fresh), text('single'))), fresh);
-    bind(dropStaleIndex('vertex', stale, fresh));
-    const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-    bind(remove({ target: t, channels: [], type: typeOf(), where: { kind: 'in-query', expr: col(t.id, 'id'), plan: stale, negated: false }, returning: [] }));
+    removeRows('vertex', stale, bind, fresh);
   }
 }
 
@@ -2010,11 +2054,8 @@ function prepareRuntimeWrite(
   // rows, so the body is resolved once.
   const values = folded ? bind(transportableValues(picked, fresh), true) : picked;
   if (site.resolve === 'first') absentGuard(site, values, guard, fresh);
-  // Only the values the write APPLIES are asked: a null behind the first result of a folded parameter or
-  // an edge value is never applied by the reference either. A body whose NULL is ABSENT left none.
-  if (!resolved.nullFree) nullValueGuard(values, guard, fresh);
   return (targets, bindLater) => runtimeWriteRows(
-    elem, keyedRows(values, targets, key, fresh), resolved.mayBeMulti && !first, write.cardinality, write.meta, bindLater, guard, fresh,
+    elem, keyedRows(values, targets, key, fresh), resolved.mayBeMulti && !first, !resolved.nullFree, write.cardinality, write.meta, bindLater, guard, fresh,
   );
 }
 
@@ -2043,8 +2084,8 @@ function transportableValues(values: Rel, fresh: Minter): Rel {
  * `select(a, b)`) — because then every entry is a column, and the whole write is the runtime writer over a
  * UNION of one keyed row set per field: ONE insert, so the body is read once, before anything changes, as
  * the reference reads it. Declined: an EDGE (a map entry is a vertex-cardinality write), a map whose keys
- * only exist at run time, a field whose value is not a scalar, and an OPTIONAL field that may be a
- * productive null (a required one is refused at run time only if a null actually arrives).
+ * only exist at run time, and a field whose value is not a scalar. A REQUIRED field holding a null
+ * removes that entry's key (`AddPropertyStep.java:152-160` hands the null to `Vertex.property`).
  *
  * The refusals are the reference's: >1 result is *"property(traversal) requires the traversal to produce
  * a Map, but got: "* naming the first result's class — a `LinkedHashMap`, which is what both record
@@ -2063,10 +2104,9 @@ function mapFormStatements(
   // `sq` carries for the writer's per-traverser ordering, there being one map per traverser.
   const perField: Rel[] = [];
   for (const [index, field] of rows.framing.fields.entries()) {
-    // A NULL would be `property(k, null)` — a REMOVAL, which this writer does not emit. For a REQUIRED
-    // field the row says whether one arrived, so `nullValueGuard` below refuses it at run time exactly as
-    // the step form does (`resolveValueRows`). An OPTIONAL field's NULL is an ABSENT entry (presence is
-    // value nullness, `fieldPresence`), so it is simply not a row.
+    // A REQUIRED field's NULL is `property(k, null)` for that entry — a REMOVAL of its key, which the writer
+    // applies (`runtimeWriteRows`) as it does for the step form. An OPTIONAL field's NULL is an ABSENT entry
+    // (presence is value nullness, `fieldPresence`), so it is simply not a row.
     if (field.framing.kind !== 'scalar') return false;
     try { validatePropertyKey(field.key); } catch { return false; }
     const cols = framingCols(field.framing);
@@ -2097,10 +2137,9 @@ function mapFormStatements(
   guard(make.project({ id: fresh('p'), input: many, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(many.id, 'o')]] }),
     { message: 'property(traversal) requires the traversal to produce a Map, but got: LinkedHashMap', raiseWhen: 'rows' });
   const entries = perField.length === 1 ? perField[0]! : make.union({ id: fresh('u'), inputs: perField, all: true, channels: [], type: perField[0]!.type });
-  // The map's entries are writes like any other: refused where an entry the map DOES have holds a null —
-  // and, by the caller before the run's first statement (`sequenceGuard`), where one statement cannot
-  // stand for the reference's per-traverser loop.
-  nullValueGuard(entries, guard, fresh);
+  // The map's entries are writes like any other, a null entry included — refused only by the caller,
+  // before the run's first statement (`sequenceGuard`), where one statement cannot stand for the
+  // reference's per-traverser loop.
   const keyed = make.join({
     id: fresh('j'), left: entries, right: targets, join: 'inner', channels: [],
     type: typeOf(...entries.type.cols, meta('to', 'int'), meta('owner', 'int')),
@@ -2110,7 +2149,8 @@ function mapFormStatements(
     id: fresh('kr'), input: keyed, channels: [], type: typeOf(...KEYED_ROW_COLS),
     exprs: KEYED_ROW_COLS.map((column) => [column.name, col(keyed.id, column.name)] as const),
   });
-  runtimeWriteRows(elem, keyedRows_, false, null, null, bind, guard, fresh);
+  // Only a REQUIRED field can carry a NULL to the writer; an optional one's was filtered as absent.
+  runtimeWriteRows(elem, keyedRows_, false, rows.framing.fields.some((field) => !field.optional), null, null, bind, guard, fresh);
   return true;
 }
 
@@ -2154,9 +2194,7 @@ function mergeArmValueWrite(
   if (replaces) {
     const g = write.cardinality === 'single' ? undefined : (o: Expr): Expr => eq(cardinalityOf(o, key, null, fresh), text('single'));
     const stale = existingRows('vertex', ids, key, g, fresh);
-    bind(dropStaleIndex('vertex', stale.ids, fresh));
-    const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-    bind(remove({ target: t, channels: [], type: typeOf(), where: stale.pred(t), returning: [] }));
+    removeRows('vertex', stale.ids, bind, fresh, stale.pred);
   }
   // A `set` write (declared, or the element default) does not re-insert a value already present.
   const skippable = write.cardinality !== 'single' && write.cardinality !== 'list';
@@ -2233,9 +2271,7 @@ function armValueWriteCorrelated(
   // REPLACE the key on the merged vertices (single, declared or the element default) before the insert.
   const g = write.cardinality === 'single' ? undefined : (owner: Expr): Expr => eq(cardinalityOf(owner, key, null, fresh), text('single'));
   const stale = existingRows('vertex', ids, key, g, fresh);
-  bind(dropStaleIndex('vertex', stale.ids, fresh));
-  const t0 = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-  bind(remove({ target: t0, channels: [], type: typeOf(), where: stale.pred(t0), returning: [] }));
+  removeRows('vertex', stale.ids, bind, fresh, stale.pred);
   const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
   const source = make.project({
     id: fresh('p'), input: paired, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),

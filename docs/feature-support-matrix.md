@@ -193,7 +193,7 @@ stream frames each value by its own tag.
 | Step | | Notes |
 |---|:--:|---|
 | `addV(label…)`, `addE(label)`, `from`/`to` | ✅ | a traversal-computed label resolves per traverser (`addV(__.values('name'))`, `addV(t1, t2)`). ❌ a single label body framed as a list; `addE` after `addE` |
-| `property(k, v)`, `property(Cardinality, k, v)`, `property(k, __.trav)` | ✅ | a first result (an edge value, a folded parameter, a runtime key) is picked by plan order then value (§17 "Unordered slices"). ❌ a traversal value that is null, or could read another traverser's write |
+| `property(k, v)`, `property(Cardinality, k, v)`, `property(k, __.trav)` | ✅ | a first result (an edge value, a folded parameter, a runtime key) is picked by plan order then value (§17 "Unordered slices"). A traversal value (or map-form entry) that resolves to null removes the key, as `property(k, null)` does. ❌ a traversal value that could read another traverser's write |
 | `addLabel`, `dropLabel`, `dropLabels` | ✅ | `addLabel(<traversal>)` resolves per traverser. ❌ a single `addLabel` body framed as a list; a computed `dropLabel` name |
 | `mergeV`, `mergeE`, `.option(onCreate/onMatch)` | 🟡 | `T.id` in the merge map ✅. ❌ a map fed by `unfold`/`union`; a meta-property under an undeclared cardinality |
 | `drop()` | ✅ | elements and properties |

@@ -618,9 +618,13 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
     expect(bagOf(run(named, "g.V(1,2).values('n')").map((r) => r.v))).toEqual(['marko', 'vadas']);
   });
 
-  test('a value that resolves to null', () => {
-    refuses("g.E(7).property('weight', __.inV().values('name').constant(null))", /resolved to null/, 'g.E(7).valueMap()');
-    refuses("g.V(1).addV('y').property('n', __.values('name').constant(null))", /resolved to null/, 'g.V().count()');
+  // A null is `property(k, null)` — a REMOVAL of the key, not a refusal (AddPropertyStep.java:127-240).
+  test('a value that resolves to null removes the key', () => {
+    const store = seededStore();
+    run(store, "g.E(7).property('weight', __.inV().values('name').constant(null))");
+    expect(run(store, "g.E(7).properties().count()").map((r) => r.v)).toEqual([0]);
+    run(store, "g.V(1).addV('y').property('n', __.values('name').constant(null))");
+    expect(run(store, "g.V().hasLabel('y').properties().count()").map((r) => r.v)).toEqual([0]);
   });
 
   // NOT a refusal any more: which of several unordered results is "first" is plan order with the value

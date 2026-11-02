@@ -244,11 +244,11 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
 
   # ---- a null value is a REMOVAL (`ElementHelper.attachProperties` on a graph without null values) ----
   #
-  # A null the body resolves cannot be told from "no result" by the row that carries it, so these REFUSE
-  # rather than store a null — which is neither answer.
+  # The runtime writer applies a null the body resolved as `property(k, null)`: the key goes. More such
+  # pins (several traversers on one element, list cardinality, the map form) are in
+  # `property-traversal-null-removes.feature`.
 
   @gap:property-traversal-site
-  @Unsupported
   Scenario: g_E_hasXweight_0d5X_propertyXweight_inV_valuesXnameX_constantXnullXX
     Given the modern graph
     And the traversal of
@@ -262,7 +262,6 @@ Feature: mogwai addendum — WHICH traverser a traversal-valued property() reads
 
   # A folded null removes what an EARLIER parameter of the same creation set, so the copy has no `n`.
   @gap:property-traversal-site
-  @Unsupported
   Scenario: g_V_hasXname_markoX_addVXcX_propertyXn_aX_propertyXn_valuesXnameX_constantXnullXX
     Given the modern graph
     And the traversal of
