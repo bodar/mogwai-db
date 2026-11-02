@@ -458,9 +458,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // once at the recursive term's top-level FROM and reports "circular reference" if it is wrapped.
       case 'self-ref': return { item: { text: ident(r.name), alias: aliasOf(r) }, cols: colsOf(aliasOf(r), r) };
       case 'values': {
-        const rows = list(r.rows.map((row) => q`(${list(row.map((e) => expr(e, outer)))})`));
-        // SQLite names anonymous VALUES columns column1, column2, … . Bind the declared names to those
-        // positions here rather than re-projecting, so the row source stays one FROM item.
+        // SQLite names anonymous VALUES columns column1, column2, … — EXCEPT one whose FIRST-row expression
+        // is a bare column reference, which takes that column's name (measured on 3.51: `(VALUES (m.v, 1))`
+        // has columns `v`, `column2`, so `column1` is "no such column"). A unary `+` is a value no-op that
+        // makes it an expression again, so a correlated `VALUES (m.v, …)` row keeps its positional names.
+        const cell = (e: Expr, first: boolean): Expression => (first && e.kind === 'col' ? q`+(${expr(e, outer)})` : expr(e, outer));
+        const rows = list(r.rows.map((row, i) => q`(${list(row.map((e) => cell(e, i === 0)))})`));
+        // Bind the declared names to those positions here rather than re-projecting, so the row source
+        // stays one FROM item.
         const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, qualified(aliasOf(r), `column${i + 1}`)]));
         for (const spelled of cols.values()) jsonText.add(spelled);
         return { item: { text: q`(VALUES ${rows})`, alias: aliasOf(r) }, cols };

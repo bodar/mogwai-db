@@ -111,6 +111,7 @@ ran	2	2	63513e4461f39371	cb29d7fc7dbabecd	g.V().as("a").out().as("b").out().as("
 ran	2	2	63513e4461f39371	a363eb6c32ee0b01	g.V().as("a").out().as("b").out().as("c").select("a","b","c").by("name").tail(Scope.local, 1)
 ran	2	2	63513e4461f39371	cb29d7fc7dbabecd	g.V().as("a").out().as("b").out().as("c").select("a","b","c").by("name").tail(Scope.local, 2)
 ran	2	2	65e2b1434d251c98	b627a7fe1d4f884e	g.V().as("a").out().as("b").out().as("c").simplePath().by(T.label).from("b").to("c").path().by("name")
+ran	2	2	891bb5aed7d57d5e	1714032a66ac8cb2	g.V().as("a").out().as("b").where(__.and(__.as("a").out("knows").as("b"), __.or(__.as("b").out("created").has("name", "ripple"), __.as("b").in("knows").count().is(P.not(P.eq(0)))))).select("a", "b")
 ran	4	4	32eb77e88cb5a19f	45fd1695d9431e5f	g.V().as("a").outE("created").as("b").inV().as("c").in("created").as("d").where("a", P.lt("b").or(P.gt("c")).and(P.neq("d"))).by("age").by("weight").by(__.in("created").values("age").min()).select("a", "c", "d").by("name")
 ran	4	4	d4f6169fe7bf75b4	c7feca9a0dcd320e	g.V().as("a").outE("created").as("b").inV().as("c").where("a", P.gt("b").or(P.eq("b"))).by("age").by("weight").by("weight").select("a", "c").by("name")
 ran	4	4	27729c79d0b3e0d1	f1d0bdec0d37f464	g.V().as("a").select("a").by("age")

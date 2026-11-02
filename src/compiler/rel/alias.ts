@@ -12,6 +12,7 @@ import { MAP_COL } from './map.ts';
 import { gatedByHost, mayBeAbsent, type ChildHost, type HostRow, type Subject } from './child.ts';
 import { carriedCols, collectedOf, familyKey, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
+import { perRowSubject, subjectOperand, SUBJECT_UNKNOWN, type SubjectType, type TypedOperand } from './predicate.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 
 /**
@@ -95,6 +96,22 @@ export const aliasIdAt = (column: Expr, end: 'first' | 'last'): Expr =>
 /** The stored scalar a VALUE label holds, and its recorded type tag beside it. */
 export const aliasValueAt = (column: Expr, end: 'first' | 'last'): Expr => fieldAt(column, end, 'v');
 export const aliasTypeAt = (column: Expr, end: 'first' | 'last'): Expr => fieldAt(column, end, 't');
+
+/** A VALUE label's Gremlin type as a predicate `SubjectType` — its compile-time type where the label's
+ *  history is statically typed, else its recorded `t` tag read beside the value (`perRowSubject`, so a
+ *  NULL tag reads the value the way a stream's does), else unknown. The ONE mapping from a value label's
+ *  recorded type to a comparison's, shared by a `match()` leg's scalar subject and an alias compare. */
+export const aliasValueTypeAt = (column: Expr, end: 'first' | 'last', type: ScalarType): SubjectType =>
+  type.kind === 'static' ? { kind: 'static', type: type.type, text: type.text }
+    : type.kind === 'perRow' ? perRowSubject(aliasTypeAt(column, end), aliasValueAt(column, end))
+      : SUBJECT_UNKNOWN;
+
+/** A VALUE label as a `valueTheta` operand — `aliasValueTypeAt`'s type, but a per-row label carries its RAW
+ *  `t` read (the NULL-tag inference is applied once, over the comparison's evaluated columns). */
+export const aliasOperandAt = (column: Expr, end: 'first' | 'last', type: ScalarType): TypedOperand =>
+  type.kind === 'perRow'
+    ? { value: aliasValueAt(column, end), tag: aliasTypeAt(column, end), inferNullTag: true }
+    : subjectOperand(aliasValueAt(column, end), aliasValueTypeAt(column, end, type));
 
 /**
  * A VALUE label's history entry AS a `{t,v}` member node — the entry minus its shape `k`. The `as()` site

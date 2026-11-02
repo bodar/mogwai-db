@@ -15,7 +15,7 @@
 // in-neighbour and the post-walk equality then dropped half the rows (12 -> 6). Only a body reading the
 // whole path (`path()`) still declines — the seed carries labels, not path positions.
 import { test, expect, describe } from 'bun:test';
-import { seededStore, run, bare } from '../support/harness.ts';
+import { seededStore, storeSeededWith, run, bare } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 
 const s = seededStore();
@@ -94,4 +94,87 @@ describe('a multi-correlation leg reads outer labels after the correlation', () 
     expect(() => run(s, `${BAC}.where(__.select('a').in().where(P.eq('c')).path()).count()`)).toThrow(UnsupportedTraversal));
   test('a multi-correlation leg reading only its correlated labels still answers', () =>
     expect(count("g.V().as('a').out().as('b').match(__.as('a').out().as('b'), __.where(__.as('a').out('knows').as('b'))).count()")).toBe(2));
+});
+
+// A VALUE TRAVERSER'S BARE `where(P.eq(label))` — `WherePredicateStep` with no start key compares the
+// traverser itself against the label (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`),
+// so over `values(…)` the subject is a typed SCALAR. `bareAliasWhere` (`src/compiler/rel/lower.ts`) takes
+// it with the value leaf: `typedValueEq` for eq/neq (so `true` is not `1` and `30` is `30.0`),
+// `comparableTheta` for an ordering (same bucket, else false), and a scalar against an ELEMENT label folds
+// at compile time (`neq` true, everything else false — a String is never a Vertex). `P.not` is pushed INTO
+// the op (`Compare.negate`), so a cross-bucket ordering stays false under it.
+const names = (g: string): string[] => bare(run(s, g)).map((r: { v: string }) => r.v).sort();
+
+describe('a value traverser compares against a label', () => {
+  test('in a leg, against a value label', () =>
+    expect(count("g.V().as('b').values('name').as('n').select('b').out().as('a').where(__.select('a').in().values('name').where(P.eq('n'))).count()")).toBe(6));
+  test('in a leg, a computed double against an int label (29.0 = 29)', () =>
+    expect(count("g.V().as('b').values('age').as('n').select('b').out().as('a').where(__.select('a').in().values('age').math('_ + 0').where(P.eq('n'))).count()")).toBe(6));
+  test('in a leg, against an element label — never equal', () =>
+    expect(count(`${BA}.where(__.select('a').in().values('name').where(P.eq('b'))).count()`)).toBe(0));
+  test('at top level', () =>
+    expect(names("g.V().as('a').values('name').as('n').select('a').out().as('b').in().values('name').where(P.eq('n'))"))
+      .toEqual(['josh', 'josh', 'marko', 'marko', 'marko', 'peter']));
+  test('a String against a Vertex label is []', () =>
+    expect(bare(run(s, "g.V(1).as('x').values('name').where(P.eq('x'))"))).toEqual([]));
+  test('neq against a Vertex label keeps it', () =>
+    expect(names("g.V(1).as('x').values('name').where(P.not(P.eq('x')))")).toEqual(['marko']));
+  test('not(ordering) across buckets stays false', () => {
+    expect(bare(run(s, "g.V(1).as('x').values('name').where(P.not(P.lt('x')))"))).toEqual([]);
+    expect(bare(run(s, "g.V(1).values('age').as('a').constant('x').where(P.not(P.gt('a')))"))).toEqual([]);
+    expect(bare(run(s, "g.V(1).values('age').as('a').constant('x').where(P.not(P.lte('a').or(P.eq('a'))))"))).toEqual([]);
+  });
+  test('a boolean is not an int', () => {
+    expect(bare(run(s, "g.inject(true).as('i').constant(1).where(P.eq('i'))"))).toEqual([]);
+    expect(bare(run(s, "g.inject(true).as('i').constant(1).where(P.neq('i'))"))).toEqual([{ v: 1 }]);
+  });
+  test('an int equals the same double', () =>
+    expect(bare(run(s, "g.V(1).values('age').as('a').math('_ + 1.0').math('_ - 1').where(P.eq('a'))")).map((r: { v: number }) => r.v)).toEqual([29]));
+  test('an ordering within one bucket', () =>
+    expect(count("g.V().values('age').as('a').V().values('age').where(P.gt('a')).count()")).toBe(6));
+  test('a label unbound on the row drops it, even for a folded neq', () =>
+    expect(count("g.V().as('a').optional(__.out().as('o')).values('name').where(P.neq('o')).count()")).toBe(6));
+  test('inside a union arm', () =>
+    expect(count("g.V().as('a').values('name').as('n').select('a').union(__.out().values('name').where(P.lt('n')), __.in().values('name').where(P.gt('n'))).count()")).toBe(6));
+  test('inside a repeat body inside a where', () =>
+    expect(count("g.V().as('a').values('name').as('n').select('a').where(__.repeat(__.out()).times(1).values('name').where(P.lt('n'))).count()")).toBe(2));
+  test('inside flatMap', () =>
+    expect(names("g.V().as('a').values('name').as('n').select('a').flatMap(__.out().values('name').where(P.lt('n')))")).toEqual(['josh', 'lop', 'lop']));
+  test('a by()-modulated label compare in a leg declines (unbuilt), never a wrong count', () =>
+    expect(() => run(s, `${BAC}.where(__.select('a').in().where(P.eq('c')).by(T.label)).count()`)).toThrow(UnsupportedTraversal));
+});
+
+describe('two value labels compare by type', () => {
+  // (age 29 → 27), (29 → 32): marko is the only aged vertex with aged out-neighbours.
+  const VW = "g.V().has('age').as('v').values('age').as('a').select('v').out().has('age').as('w').values('age').as('b').select('w')";
+  test('lt', () => expect(count(`${VW}.where('a', P.lt('b')).count()`)).toBe(1));
+  test('not(lt) is gte', () => expect(count(`${VW}.where('a', P.not(P.lt('b'))).count()`)).toBe(1));
+  test('a connective', () => expect(count(`${VW}.where('a', P.eq('b').or(P.gt('b'))).count()`)).toBe(1));
+  test('neq', () => expect(count(`${VW}.where('a', P.neq('b')).count()`)).toBe(2));
+  test('a value label against an element label', () =>
+    expect(count("g.V().has('age').as('v').values('name').as('a').select('v').where('a', P.eq('v')).count()")).toBe(0));
+});
+
+describe('a movement-headed where body reads the outer labels', () => {
+  test('where(in().where(P.eq(a))) answers as its select(b) twin', () => {
+    expect(count("g.V().as('a').out().as('b').where(__.in().where(P.eq('a'))).count()")).toBe(6);
+    expect(count("g.V().as('a').out().as('b').where(__.select('b').in().where(P.eq('a'))).count()")).toBe(6);
+  });
+});
+
+// A SELF-LOOP + PARALLEL-EDGE graph: x→y twice, x→x, y→y. Multiplicity is what a correlated EXISTS or a
+// seeded leg could lose; every expectation below is counted by hand off the four edges.
+describe('multiplicity over self-loops and parallel edges', () => {
+  const loops = storeSeededWith([
+    "g.addV('n').property('name','x').as('x').addV('n').property('name','y').as('y').addE('e').from('x').to('y').addE('e').from('x').to('y').addE('e').from('x').to('x').addE('e').from('y').to('y')",
+  ]);
+  const at = (g: string): number => bare(run(loops, g))[0].v;
+  const LBAC = "g.V().as('b').out().as('a').in().as('c')"; // 10 rows
+  test('the base', () => expect(at(`${LBAC}.count()`)).toBe(10));
+  test('b reaches a exactly twice', () =>
+    expect(at(`${LBAC}.where(__.select('b').out().where(P.eq('a')).count().is(2)).count()`)).toBe(6));
+  test('a value label in a leg', () =>
+    expect(at("g.V().as('b').values('name').as('n').select('b').out().as('a').where(__.select('a').in().values('name').where(P.eq('n'))).count()")).toBe(4));
+  test('a movement-headed body counting its label matches', () =>
+    expect(at("g.V().as('b').out().as('a').where(__.in().where(P.eq('b')).count().is(2)).count()")).toBe(2));
 });

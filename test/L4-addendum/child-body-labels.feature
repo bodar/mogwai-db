@@ -83,7 +83,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
     Then the result should be empty
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXxX_whereXoutXcreatedX_whereXselectXxXXX_valuesXnameX
     Given the modern graph
     And the traversal of

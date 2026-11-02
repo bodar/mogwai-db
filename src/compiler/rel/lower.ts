@@ -31,7 +31,7 @@ import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.
 import { someStepDeep } from '../ir/walk.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
-import { comparabilityClass, comparableTheta, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { comparabilityClass, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, subjectOperand, type SubjectType, type TypedOperand, valueTheta } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
@@ -41,7 +41,7 @@ import {
     typedNode, typeOf, withPayload, originOf,
     type Minter, withSubqueryColumns,
 } from './build.ts';
-import { aliasElementHost, aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, isElementAlias, liveAliases, selectSpec, type ElementAliasProjection } from './alias.ts';
+import { aliasElementHost, aliasGuard, aliasIdAt, aliasProjection, aliasOperandAt, bindAliases, isElementAlias, liveAliases, selectSpec, type AliasProjection, type ElementAliasProjection } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, productivityFilter, type Modulation } from './modulator.ts';
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
@@ -2034,7 +2034,15 @@ function scalarTail(
      * live labels are in scope, rather than in `sourceFilter`.
      */
     if ((step.name === 'where' || step.name === 'filter') && args.length === 1 && isPred(args[0])) {
-      if (namesALiveLabel(args[0], labels)) return null;
+      // It names a live label: TinkerPop's alias compare with THIS value as the subject (`bareAliasWhere`,
+      // the element tail's own arm over a scalar subject). Only that arm — not `aliasWhere`'s leg/theta
+      // arms, which read an element or record stream.
+      if (namesALiveLabel(args[0], labels)) {
+        const aliased = bareAliasWhere(step, rel, labels, fresh, { kind: 'value', operand: subjectOperand(col(rel.id, 'v'), subjectType()) });
+        if (!aliased || aliased === 'decline') return null;
+        rel = aliased;
+        continue;
+      }
       // A `where` leaf that is not a traversal is a SELECT KEY (`whereHasScopeKey`), and here it names no
       // live label — the reference reads a side effect, a Map entry or throws; never the string itself.
       if (step.name === 'where' && whereHasScopeKey(args[0])) return null;
@@ -5361,33 +5369,111 @@ function aliasCompare(op: string, left: Expr, right: Expr): Expr | null {
   return sql ? { kind: 'binary', op: sql, left, right } : null;
 }
 
+/** `Compare`'s own `negate()` per op (`eq`↔`neq`, `lt`↔`gte`, `gt`↔`lte`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`). */
+const NEGATED_CMP: Record<string, string | undefined> = { eq: 'neq', neq: 'eq', lt: 'gte', gte: 'lt', gt: 'lte', lte: 'gt' };
+
+/** ONE alias-compare LEAF — `op` against the label it names — as a boolean expression, or `null` to
+ *  decline. Any `P.not` above it is already folded INTO `op`. */
+type AliasLeaf = (op: string, label: string) => Expr | null;
+
 /**
- * A COMPOUND alias-compare predicate over IDENTITIES — `where(k, P.not(P.eq('a').or(P.eq('d'))))` — as a
- * boolean expression, or `null` to decline.
+ * A COMPOUND alias-compare predicate — `where(k, P.not(P.eq('a').or(P.eq('d'))))`, `where(P.lt('a'))` — as
+ * a boolean expression, or `null` to decline.
  *
- * `WherePredicateStep` composes `eq`/`neq`/`and`/`or`/`not` over `selectKey` operands; without a `by()`
- * the comparison is over the elements' rowids (TinkerPop compares by IDENTITY there). The recursion
- * mirrors `predicateExpr`'s connective handling, except a leaf operand is a LABEL resolved to
- * `aliasIdAt` rather than a literal — and only `eq`/`neq` have identity meaning, so an ordering leaf
- * declines (that is the `by()`-value form, a further phase). Every referenced label must be a LIVE
- * element alias or the whole predicate declines, fail closed.
+ * `WherePredicateStep` composes `eq`/`neq`/orderings/`and`/`or`/`not` over `selectKey` operands; what a
+ * LEAF compares (two rowids, a `by()` ring's values, a scalar against a value label) is the caller's
+ * `leaf`. `P.not(p)` IS `p.negate()` in the reference (`P.java` `not`, `ConnectiveP.negate` swaps
+ * `and`/`or` and negates each branch), so the negation is pushed to the leaves rather than wrapped as a
+ * SQL `NOT`: an ordering across `Comparability` buckets is FALSE and so is its negation (`lt` across a
+ * String and a Number is false, and so is `gte`), which a SQL `NOT` over that false would turn TRUE.
+ * Every leaf must build or the whole predicate declines, fail closed.
  */
-function aliasIdentityPred(pred: unknown, startId: Expr, rel: Rel, labels: AliasMap, fresh: Minter): Expr | null {
+function aliasPred(pred: unknown, leaf: AliasLeaf, negated = false): Expr | null {
   if (!isPred(pred)) return null;
   const { op, operands } = pred;
-  if (op === 'not') { const inner = aliasIdentityPred(operands[0]!.value, startId, rel, labels, fresh); return inner && { kind: 'unary', op: 'not', arg: inner }; }
+  if (op === 'not') return operands.length === 1 ? aliasPred(operands[0]!.value, leaf, !negated) : null;
   if (op === 'and' || op === 'or') {
-    const parts = operands.map((o) => aliasIdentityPred(o.value, startId, rel, labels, fresh));
-    return parts.every((p): p is Expr => !!p) ? parts.reduce((a, b) => ({ kind: 'binary', op, left: a, right: b })) : null;
+    const parts = operands.map((o) => aliasPred(o.value, leaf, negated));
+    const joint: 'and' | 'or' = negated ? (op === 'and' ? 'or' : 'and') : op;
+    return parts.every((p): p is Expr => !!p) ? parts.reduce((a, b) => ({ kind: 'binary', op: joint, left: a, right: b })) : null;
   }
-  if ((op === 'eq' || op === 'neq') && operands.length === 1 && typeof operands[0]!.value === 'string') {
-    const proj = aliasProjection(rel, labels, operands[0]!.value, 'last', fresh);
-    if (!proj || proj.read.kind !== 'element') return null;
-    const same = eq(startId, aliasIdAt(col(rel.id, proj.entry.col), 'last'));
-    return op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
-  }
-  return null; // an ordering leaf has no identity meaning — it is the by()-value form, a later phase
+  if (operands.length !== 1 || typeof operands[0]!.value !== 'string') return null;
+  const actual = negated ? NEGATED_CMP[op] : op;
+  return actual ? leaf(actual, operands[0]!.value) : null;
 }
+
+/** The IDENTITY leaf — an ELEMENT subject (its rowid `startId`) against an element label, with no `by()`:
+ *  TinkerPop compares the elements themselves. Only `eq`/`neq` have identity meaning, so an ordering leaf
+ *  declines (that is the `by()`-value form, `aliasValueWhere`). */
+const identityLeaf = (startId: Expr, rel: Rel, labels: AliasMap, fresh: Minter): AliasLeaf => (op, label) => {
+  if (op !== 'eq' && op !== 'neq') return null;
+  const proj = aliasProjection(rel, labels, label, 'last', fresh);
+  if (!isElementAlias(proj)) return null;
+  const same = eq(startId, aliasIdAt(col(rel.id, proj.entry.col), 'last'));
+  return op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
+};
+
+/**
+ * The VALUE leaf — a SCALAR subject (`values('name').where(P.eq('n'))`) against a label.
+ *
+ * Against a VALUE label it is `valueTheta` over the two typed values (`typedValueEq`/`comparableTheta`, the
+ * existing comparators). Against an ELEMENT label the two are different `Comparability` types — a String is
+ * never equal to, less or greater than a Vertex (`GremlinValueComparator.COMPARABILITY`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`)
+ * — so it folds at compile time: `neq` true, every other op false. A list/map label is not built (declines).
+ * A label first bound inside a branch arm owes its presence guard (`aliasGuard`) — conjoined OUTSIDE the
+ * compare, so an unbound label drops the row whatever the op (a folded `neq` would otherwise keep it).
+ */
+const valueLeaf = (subject: TypedOperand, rel: Rel, labels: AliasMap, fresh: Minter): AliasLeaf => (op, label) => {
+  const proj = aliasProjection(rel, labels, label, 'last', fresh);
+  if (!proj) return null;
+  const column = col(rel.id, proj.entry.col);
+  const cmp = proj.read.kind === 'element' ? (op === 'neq' ? CONSTANT.true : CONSTANT.false)
+    : proj.read.kind === 'value'
+      ? valueTheta(op, subject, aliasOperandAt(column, 'last', proj.read.type), fresh)
+      : null;
+  const guard = aliasGuard(rel, proj.entry);
+  return cmp && (guard ? and(guard, cmp) : cmp);
+};
+
+/**
+ * A BARE `where(P)` with NO startKey whose predicate NAMES A LIVE LABEL — TinkerPop's alias compare with the
+ * CURRENT traverser as the LHS (`WherePredicateStep` with a null startKey uses `traverser.get()`):
+ * `where(P.neq('a'))`, `where(P.eq('a').or(P.eq('b')))`. The subject is the stream's own: an ELEMENT
+ * stream compares rowids (`identityLeaf`), a SCALAR stream its typed value (`valueLeaf`).
+ *
+ * Three answers, `aliasWhere`'s contract: the filtered relation, `'decline'` (it named a live label, so
+ * this IS the alias-compare route and a build miss must not fall through to a value comparison that
+ * would read the label as a string), or `null` (not this route — no live label, a `by()`).
+ */
+function bareAliasWhere(step: IRStep, rel: Rel, labels: AliasMap, fresh: Minter, subject: AliasSubject): Rel | 'decline' | null {
+  if (step.name !== 'where' || step.optionArms || step.modulators?.length || step.args.length !== 1) return null;
+  const pred = step.args[0]?.value;
+  if (!isPred(pred) || !namesALiveLabel(pred, labels)) return null;
+  const leaf = subject.kind === 'element'
+    ? identityLeaf(subject.id, rel, labels, fresh)
+    : valueLeaf(subject.operand, rel, labels, fresh);
+  const clause = aliasPred(pred, leaf);
+  return clause ? make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause }) : 'decline';
+}
+
+/** `where(k, P)` with no `by()` whose start label `k` holds a VALUE: that value, typed by the label's
+ *  recorded type, is the `valueLeaf` subject — the same leaf a value traverser's bare `where(P)` uses —
+ *  under the start label's own presence guard. `null` when a leaf does not build. */
+function valueKeyWhere(start: AliasProjection, pred: unknown, rel: Rel, labels: AliasMap, fresh: Minter): Rel | null {
+  if (start.read.kind !== 'value') return null;
+  const column = col(rel.id, start.entry.col);
+  const clause = aliasPred(pred, valueLeaf(aliasOperandAt(column, 'last', start.read.type), rel, labels, fresh));
+  if (!clause) return null;
+  const guard = aliasGuard(rel, start.entry);
+  return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: guard ? and(guard, clause) : clause });
+}
+
+/** What a bare `where(P)` compares: the element's rowid, or a typed scalar value. */
+type AliasSubject =
+  | { readonly kind: 'element'; readonly id: Expr }
+  | { readonly kind: 'value'; readonly operand: TypedOperand };
 
 /** The host a `where(k1, P(k2)).by(…)` operand's `by()` runs on: the label's element on a FRESH traverser
  *  (`freshTraverserRow`), carrying the label's presence (`aliasElementHost`) — so a label unbound on this
@@ -5426,15 +5512,11 @@ function aliasValueWhere(
   if (!lhsProd) return 'decline';
   const prod: Expr[] = lhsProd.keep ? [lhsProd.keep] : [];
   let ringIdx = 1; // startKey took ring[0]; leaves cycle from ring[1] in tree-walk order
-  const build = (p: unknown): Expr | null => {
-    if (!isPred(p)) return null;
-    if (p.op === 'not') { const inner = build(p.operands[0]!.value); return inner && { kind: 'unary', op: 'not', arg: inner }; }
-    if (p.op === 'and' || p.op === 'or') {
-      const parts = p.operands.map((o) => build(o.value));
-      return parts.every((x): x is Expr => !!x) ? parts.reduce((a, b) => ({ kind: 'binary', op: p.op as 'and' | 'or', left: a, right: b })) : null;
-    }
-    if (!ALIAS_CMP[p.op] || p.operands.length !== 1 || typeof p.operands[0]!.value !== 'string') return null;
-    const proj = aliasProjection(rel, labels, p.operands[0]!.value, 'last', fresh);
+  // The leaves are visited in the tree's left-to-right order (`aliasPred` keeps it under a `P.not`'s
+  // and/or swap), which is the order the ring hands out `by()`s.
+  const leaf: AliasLeaf = (op, label) => {
+    if (!ALIAS_CMP[op]) return null;
+    const proj = aliasProjection(rel, labels, label, 'last', fresh);
     if (!isElementAlias(proj)) return null;
     const by = ring[ringIdx % ring.length]!; ringIdx++;
     const valHost = whereOperandHost(rel, proj);
@@ -5443,9 +5525,9 @@ function aliasValueWhere(
     const p2 = productivityFilter(step, val, val.value);
     if (!p2) return null;
     if (p2.keep) prod.push(p2.keep);
-    return aliasCompare(p.op, lhs, val.value);
+    return aliasCompare(op, lhs, val.value);
   };
-  const clause = build(pred);
+  const clause = aliasPred(pred, leaf);
   if (!clause) return 'decline';
   const kept = prod.reduce<Expr | undefined>((a, b) => (a ? and(a, b) : b), undefined);
   return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: kept ? and(kept, clause) : clause });
@@ -5461,19 +5543,11 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   if (step.name === 'where') {
     const wargs = step.args.map((a) => a.value);
     const pred = step.args?.[1]?.value;
-    const pred1 = step.args?.[0]?.value; // the bare `where(P)` predicate (no startKey)
-    // A BARE `where(P)` with NO startKey — the subject is the CURRENT traverser, compared against the
-    // label operand(s) (`where(P.neq('a'))`, `where(P.eq('a').or(P.eq('b')))`). `WherePredicateStep`
-    // with a null startKey uses `traverser.get()` as the LHS. Only when the predicate NAMES A LIVE LABEL
-    // (else it is an ordinary value predicate `sourceFilter`/`is` build), only over an ELEMENT stream
-    // (the current row carries an `id` — a scalar-subject or by()-value form is a later phase), and
-    // no `by()` (identity rowid compare).
-    if (wargs.length === 1 && isPred(pred1) && !step.modulators?.length
-      && namesALiveLabel(pred1, labels) && rel.type.cols.some((c) => c.name === 'id')) {
-      const clause = aliasIdentityPred(pred1, col(rel.id, 'id'), rel, labels, fresh);
-      // It named a live label, so this IS the alias-compare route: a build miss DECLINES rather than
-      // falling through to a value comparison that would read the label as a string.
-      return clause ? make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause }) : 'decline';
+    // A BARE `where(P)` naming a live label over this ELEMENT stream (the row carries an `id`); the
+    // scalar stream's twin is called from `scalarTail` with its typed value as the subject.
+    if (rel.type.cols.some((c) => c.name === 'id')) {
+      const bare = bareAliasWhere(step, rel, labels, fresh, { kind: 'element', id: col(rel.id, 'id') });
+      if (bare) return bare;
     }
     // A COMPOUND connective (`and`/`or`/`not`) over selectKey operands. WITH a `by()` it is a value
     // compare through the ring (`aliasValueWhere`); WITHOUT one the leaves compare rowids
@@ -5486,9 +5560,12 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         if (built) return built;
       } else {
         const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
-        if (startProj && startProj.read.kind === 'element') {
-          const clause = aliasIdentityPred(pred, aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, labels, fresh);
+        if (isElementAlias(startProj)) {
+          const clause = aliasPred(pred, identityLeaf(aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, labels, fresh));
           if (clause) return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+        } else if (startProj?.read.kind === 'value') {
+          const built = valueKeyWhere(startProj, pred, rel, labels, fresh);
+          if (built) return built;
         }
       }
     }
@@ -5525,29 +5602,11 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         const guard = kept.length ? and(kept.reduce((a, b) => and(a, b)), cmp) : cmp;
         return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: guard });
       }
-      // A SCALAR-alias theta (`where('b', P.eq('c'))` over two VALUE aliases, no `by()`) — compare the
-      // STORED values. `eq`/`neq` is value+type equality (`COMPARABILITY.equals`): SQLite's `=` over two
-      // stored scalars matches it (an int 29 and a text "marko" are unequal, as are two types that print
-      // alike). An ORDERING op (gt/lt/gte/lte) is `COMPARABILITY.compare` — comparable ONLY within one
-      // `Type` bucket, else the predicate is FALSE (never the cross-type total order ORDERABILITY, which
-      // `order(Scope.local)` uses); `comparableTheta` builds that per-row (Compare.java:63-116 →
-      // GremlinValueComparator.comparable).
-      if (projA && projB && projA.read.kind === 'value' && projB.read.kind === 'value' && !step.modulators?.length) {
-        const [valA, valB] = [aliasValueAt(col(rel.id, projA.entry.col), 'last'), aliasValueAt(col(rel.id, projB.entry.col), 'last')];
-        if (pred.op === 'eq' || pred.op === 'neq') {
-          const same = eq(valA, valB);
-          return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same } });
-        }
-        const cmpOp = ALIAS_CMP[pred.op];
-        if (!cmpOp) return 'decline';
-        // `comparableTheta` reads each side's runtime `t` tag to pick the bucket; an UNKNOWN-typed alias
-        // writes NO tag (`history.ts` `objectEntry`), so its bucket cannot be told from a genuine
-        // cross-bucket mismatch — DECLINE that tail (fail-closed) rather than answer a real comparison
-        // false via the CASE `else`. A `static`/`perRow` alias always carries the tag.
-        if (projA.read.type.kind === 'unknown' || projB.read.type.kind === 'unknown') return 'decline';
-        const [typeA, typeB] = [aliasTypeAt(col(rel.id, projA.entry.col), 'last'), aliasTypeAt(col(rel.id, projB.entry.col), 'last')];
-        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: comparableTheta(cmpOp, valA, typeA, valB, typeB) });
-      }
+      // A SCALAR-alias theta (`where('b', P.eq('c'))` with a VALUE start label, no `by()`) — the start
+      // label's stored value is the subject of the value leaf (`valueLeaf`), the same one a value
+      // traverser's bare `where(P.eq('c'))` uses: `typedValueEq` for eq/neq, `comparableTheta` for an
+      // ordering (comparable ONLY within one bucket, else FALSE — never ORDERABILITY's total order).
+      if (projA?.read.kind === 'value' && projB && !step.modulators?.length) return valueKeyWhere(projA, pred, rel, labels, fresh) ?? 'decline';
     }
   }
   if (step.modulators?.length) return null; // a modulated where/not that is not the theta above is not an alias filter.

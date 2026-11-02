@@ -10,9 +10,8 @@ import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { aliasElementHost, aliasElementSubject, aliasIdAt, aliasPresence, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, isElementAlias, liveAliases, seedOuterAliases } from './alias.ts';
+import { aliasElementHost, aliasElementSubject, aliasIdAt, aliasPresence, aliasProjection, aliasTypeAt, aliasValueAt, aliasValueTypeAt, bindAliases, isElementAlias, liveAliases, seedOuterAliases } from './alias.ts';
 import type { Subject } from './child.ts';
-import { perRowSubject, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 import type { GraphSource } from './source.ts';
@@ -587,11 +586,10 @@ function existenceExpr(start: string, body: readonly IRStep[], rel: Rel, labels:
  *  same mapping `values(k).is(P)` uses over a stream). `null` when the alias is not a value. */
 function scalarSubjectOf(sproj: NonNullable<ReturnType<typeof aliasProjection>>, rel: Rel): Subject | null {
   if (sproj.read.kind !== 'value') return null;
-  const value = aliasValueAt(col(rel.id, sproj.entry.col), 'last');
-  const t = sproj.read.type;
-  const vtype = t.kind === 'perRow' ? aliasTypeAt(col(rel.id, sproj.entry.col), 'last') : undefined;
-  const type: SubjectType = t.kind === 'static' ? { kind: 'static', type: t.type, text: t.text }
-    : vtype ? perRowSubject(vtype, value) : SUBJECT_UNKNOWN;
+  const column = col(rel.id, sproj.entry.col);
+  const value = aliasValueAt(column, 'last');
+  const vtype = sproj.read.type.kind === 'perRow' ? aliasTypeAt(column, 'last') : undefined;
+  const type = aliasValueTypeAt(column, 'last', sproj.read.type);
   return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}), ...aliasPresence(rel, sproj.entry) };
 }
 

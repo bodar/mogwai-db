@@ -12,7 +12,8 @@ import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subje
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
-import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
+import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
+import { scopeKeyReads } from '../../ir/labels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
@@ -67,7 +68,13 @@ export function correlatedExists(
   // still on its path (`TraversalUtil.prepare` splits the WHOLE traverser into the child): they ride in as
   // ENCLOSING (`withEnclosing`), so a `select('a')` past the hop DECLINES rather than reading an absent
   // label as the empty answer — `V().as('a').where(out().select('a'))` answered `[]` for every vertex.
-  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, withEnclosing(inOrderFreeBody(ctx), aliases), fresh, NO_ALIASES);
+  // The labels the body READS ride further: seeded onto the hop as alias channels (`seedOuterAliases`, the
+  // multi-correlation leg's own seeding), so `where(__.in().where(P.eq('a')))` reads the outer `a` at its
+  // own position exactly as its `select('b')`-spelled twin does. A body reading the whole path seeds none.
+  const reads = scopeKeyReads(body, ctx.params);
+  const outer = reads.all ? [] : [...liveAliases(aliases, subject.rel)].filter(([label]) => reads.labels.has(label));
+  const seeded = seedOuterAliases(child.rel, subject.rel, outer, fresh);
+  const tail = continueAs(seeded.rel, { kind: 'elements', elem: child.elem }, body, 1, false, withEnclosing(inOrderFreeBody(ctx), aliases), fresh, seeded.aliases);
   if (!tail) return null;
   // A NUMERIC REDUCER OVER AN EMPTY CHILD IS THE ONE PLACE SQL AND GREMLIN DISAGREE ABOUT EXISTENCE,
   // so it fails closed. `sum`/`min`/`max`/`mean` over zero rows return ONE row holding NULL in SQL,

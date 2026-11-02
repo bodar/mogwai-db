@@ -424,8 +424,8 @@ Feature: mogwai addendum — the parked branches' target defects, on the substra
 
   # ---- a label past a hop in a FILTER body is the subject's, never an absent key ----
   # The child is the whole traverser split (TraversalUtil.prepare); the hop's fresh relation has no
-  # alias channel, and select('a') read as unbound answered [] for every vertex. Not threaded: declines.
-  @Unsupported
+  # alias channel, and select('a') read as unbound answered [] for every vertex. The labels the body reads
+  # are now seeded onto the hop (`correlatedExists` → `seedOuterAliases`).
   Scenario: g_V_asXaX_whereXout_selectXaX_hasLabelXpersonXX_valuesXnameX
     Given the modern graph
     And the traversal of
