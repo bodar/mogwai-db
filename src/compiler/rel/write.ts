@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerReal, compilerText, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
@@ -3457,6 +3457,9 @@ function guardMergeInterleaving(
     ...(createKey ? [[meta(MERGE_CK, 'text', true), createKey(u.id)] as const] : []),
     ...(keying?.columns(u.id, fresh) ?? []),
   ];
+  // A key's spelling in the select list and in `GROUP BY` is one computation: SQLite reads a result column
+  // that matches a grouping term back from the grouping (and a projection under the aggregate is fused
+  // into it by the emitter anyway).
   const earlier = bind(make.aggregate({
     id: fresh('ag'), input: u, channels: [],
     type: typeOf(...grouping.map(([column]) => column), meta(MERGE_FIRST, 'int'), meta(MERGE_LAST, 'int')),
@@ -3464,7 +3467,7 @@ function guardMergeInterleaving(
     aggs: [[MERGE_FIRST, { kind: 'agg', fn: 'min', args: [col(u.id, ORD)] }], [MERGE_LAST, { kind: 'agg', fn: 'max', args: [col(u.id, ORD)] }]],
   }), true) as Extract<Rel, { kind: 'ref' }>;
   const later = make.ref({ id: fresh('r'), name: earlier.name, channels: [], type: earlier.type });
-  const pairs = keying ? keying.pairs(earlier, later, fresh) : { left: earlier, right: later, on: always };
+  const pairs = keying ? keying.pairs(earlier, later, fresh, bind) : { left: earlier, right: later, on: always };
   const e = pairs.left.id, l = pairs.right.id;
   const observable: Expr = acts || facts.repeats || facts.mutatesSearch || !createKey ? always
     : isNot(col(e, MERGE_CK), col(l, MERGE_CK));
@@ -3599,12 +3602,11 @@ function onCreateLabelGuard(unmatched: Rel, mapLabel: Expr, labels: readonly str
  * creation" from a predicate over every pair of distinct searches into a seek. `columns` are grouped with
  * the collapsed tuples (computed once per driver row, from its own columns); `pairs` builds the join over
  * the collapsed tuples, whose `on` every pair `couldMatch` admits must satisfy — it narrows, never decides.
- * The LATER side stays the spooled relation itself, its key columns raw, so SQLite seeks it through an
- * automatic index.
+ * The LATER side is a spooled relation, its key columns raw, so SQLite seeks it through an automatic index.
  */
 interface PairKeying {
   readonly columns: (rel: RelId, fresh: Minter) => readonly (readonly [ColMeta, Expr])[];
-  readonly pairs: (earlier: Rel, later: Rel, fresh: Minter) => { left: Rel; right: Rel; on: Expr };
+  readonly pairs: (earlier: Rel, later: Rel, fresh: Minter, bind: Binder) => { left: Rel; right: Rel; on: Expr };
 }
 
 /** One search criterion's equi key, as `searchKeying` reads it: `present` is 0/1 per row (does this driver's
@@ -3625,87 +3627,120 @@ const MERGE_CK = 'g_ck', MERGE_FIRST = 'g_first', MERGE_LAST = 'g_last';
  * criteria its search narrows by: under a fixed mask it is a plain conjunction of equalities.
  *  - A FIXED key's mask is its `present` bit; its key is NULL where the row does not narrow by it, which
  *    only another NULL meets (`IS`), so a later search narrowing by a key the earlier creation lacks
- *    cannot find it.
- *  - A MAP's keys are DATA, so its mask is the later map's KEY SET and its key the later map's SIGNATURE:
- *    its entries sorted by key, each `(key, family, value)` with a `Number` normalised to REAL
- *    (`typedValueEq` meets `30` and `30.0`; the REAL form is a SUPERSET of its equality, so it only
- *    narrows). An `onCreate` key is left out of both — `mapCouldMatch` reads it as "could".
- * The earlier tuples are crossed with the DISTINCT masks present — at most 2^K for K fixed keys (bounded by
- * the query text), and one per map SHAPE — each earlier key PROJECTED onto the mask (an earlier map
- * lacking a searched key projects short and meets nothing), and met against the later tuples' OWN columns,
- * so the later side is the spooled relation itself and SQLite seeks it through an automatic index. Cost is
- * tuples × masks; `couldMatch` stays the residual.
+ *    cannot find it. The earlier tuples are crossed with the DISTINCT masks present — at most 2^K for K
+ *    fixed keys, bounded by the query text — each earlier key PROJECTED onto the mask.
+ *  - A MAP's keys are DATA, so no mask set is bounded (N maps of N different keys are N masks). What is
+ *    bounded is ONE ENTRY: the later map's search needs every searched entry carried by the creation, so in
+ *    particular its PICKED entry — the one the fewest earlier creations carry (counted once over all of
+ *    them, ties to the lowest key) — and the earlier side is EXPLODED to its entries, met on that one. An
+ *    entry is `(key, family, value)` with a `Number` normalised to REAL (`typedValueEq` meets `30` and
+ *    `30.0`; the REAL form is a SUPERSET of its equality, so it only narrows). A later map with no searched
+ *    entry picks NULL and meets each earlier tuple's one NULL row. An `onCreate` key is left out —
+ *    `mapCouldMatch` reads it as "could".
+ * Cost is the earlier tuples × masks × entries plus, per later tuple, the earlier creations that carry its
+ * rarest entry — linear whenever any entry of it is selective; `couldMatch` stays the residual.
  */
 function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: readonly string[] } | null): PairKeying {
-  const KS = 'g_ks', SIG = 'g_sig';
-  const maskCols = [...fixed.map((_, i) => maskCol(i)), ...(map ? [KS] : [])];
-  const signature = (mapCol: Expr, keys: Expr | null, fresh: Minter, entry: 'key' | 'whole'): Expr => {
-    const pairs = pairsOf(mapCol, fresh);
+  // `NOTHING` is the pick of a map with no searched entry — an EQUI key (an `IS` takes no automatic index), and
+  // no entry's JSON spelling is empty.
+  const ENTRY = 'g_e', PICK = 'g_pick', COUNT = 'g_n', NOTHING = '';
+  const maskCols = fixed.map((_, i) => maskCol(i));
+  // A map's searched entries, one row per entry over `input` (every column kept), as `g_e`.
+  const entries = (input: Rel, fresh: Minter): Rel => {
+    const pairs = make.explode({
+      id: fresh('ex'), input, expr: col(input.id, MAP_COL), channels: [], as: { value: 'g_pv', ord: 'g_po' },
+      type: typeOf(...input.type.cols, meta('g_pv', 'any', true), meta('g_po', 'int')),
+    });
     const at = (rel: RelId, which: 'keys' | 'values', path: string): Expr =>
-      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(rel, PAIR.value), which), compilerText(path)] });
-    const listed = (): Expr => {
-      const ks = make.explode({ id: fresh('kx'), expr: keys!, channels: [], as: { value: 'kv', ord: 'ko' }, type: typeOf(meta('kv', 'any', true), meta('ko', 'int')) });
-      return { kind: 'in-query', expr: at(pairs.id, 'keys', '$.v'), negated: false,
-        plan: make.project({ id: fresh('p'), input: ks, channels: [], type: typeOf(meta('kv', 'any', true)), exprs: [['kv', col(ks.id, 'kv')]] }) };
-    };
+      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(rel, 'g_pv'), which), compilerText(path)] });
     const searched = make.filter({
       id: fresh('f'), input: pairs, channels: [], type: pairs.type,
       pred: [eq(at(pairs.id, 'keys', '$.t'), compilerText('string')),
-        ...(map!.excluded.length ? [{ kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: at(pairs.id, 'keys', '$.v'), values: map!.excluded.map(compilerText) } } as Expr] : []),
-        ...(keys ? [listed()] : [])].reduce((a, b) => and(a, b)),
+        ...(map!.excluded.length ? [{ kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: at(pairs.id, 'keys', '$.v'), values: map!.excluded.map(compilerText) } } as Expr] : [])]
+        .reduce((a, b) => and(a, b)),
     });
     const key = at(searched.id, 'keys', '$.v'), value = at(searched.id, 'values', '$.v'), vtype = at(searched.id, 'values', '$.t');
     const numeric: Expr = { kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) };
-    const member: Expr = entry === 'key' ? key : { kind: 'json-array', binary: false, items: [key, typedValueKey(value, vtype)[0],
-      { kind: 'case', whens: [[numeric, { kind: 'cast', arg: value, to: 'real' }]], else: value }] };
-    return { kind: 'scalar', plan: make.aggregate({
-      id: fresh('ag'), input: searched, channels: [], type: typeOf(meta('s', 'text')), groupBy: [],
-      aggs: [['s', { kind: 'agg', fn: 'json_group_array', args: [member], orderBy: [{ expr: key, dir: 'asc' }] }]],
-    }) };
+    return make.project({
+      id: fresh('p'), input: searched, channels: [], type: typeOf(...input.type.cols, meta(ENTRY, 'text', true)),
+      exprs: [...input.type.cols.map((column) => [column.name, col(searched.id, column.name)] as const),
+        [ENTRY, { kind: 'json-array', binary: false, items: [key, typedValueKey(value, vtype)[0],
+          { kind: 'case', whens: [[numeric, { kind: 'cast', arg: value, to: 'real' }]], else: value }] }]],
+    });
   };
+  const refOf = (rel: Rel, fresh: Minter): Rel => make.ref({ id: fresh('r'), name: (rel as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: rel.type });
   return {
-    columns: (rel, fresh) => [
-      ...fixed.flatMap((key, i) => [
-        [meta(maskCol(i), 'int'), key.present(rel)] as const,
-        ...key.key(rel).map((part, j) => [meta(keyCol(i, j), 'any', true),
-          { kind: 'case', whens: [[eq(key.present(rel), compilerInt(1)), part]], else: compilerNull('any') } as Expr] as const),
-      ]),
-      ...(map ? [
-        [meta(KS, 'text'), signature(col(rel, MAP_COL), null, fresh, 'key')] as const,
-        [meta(SIG, 'text'), signature(col(rel, MAP_COL), null, fresh, 'whole')] as const,
-      ] : []),
-    ],
-    pairs: (earlier, later, fresh) => {
+    columns: (rel) => fixed.flatMap((key, i) => [
+      [meta(maskCol(i), 'int'), key.present(rel)] as const,
+      ...key.key(rel).map((part, j) => [meta(keyCol(i, j), 'any', true),
+        { kind: 'case', whens: [[eq(key.present(rel), compilerInt(1)), part]], else: compilerNull('any') } as Expr] as const),
+    ]),
+    pairs: (earlier, later, fresh, bind) => {
       // NOTHING TO KEY BY — every criterion is an `onCreate` key (read as "could"), so every pair is a
       // candidate and `couldMatch` decides alone: the pair test stays exact, it simply has no seek.
-      if (!maskCols.length) return { left: earlier, right: later, on: eq(compilerInt(1), compilerInt(1)) };
+      if (!maskCols.length && !map) return { left: earlier, right: later, on: eq(compilerInt(1), compilerInt(1)) };
       const arity = fixed.map((key) => key.key(earlier.id).length);
-      const source = make.ref({ id: fresh('r'), name: (earlier as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: earlier.type });
-      const maskType = typeOf(...maskCols.map((name) => ({ ...earlier.type.cols.find((column) => column.name === name)!, name: `m_${name}` })));
-      const masks = make.distinct({
-        id: fresh('d'), channels: [], type: maskType,
-        input: make.project({ id: fresh('p'), input: source, channels: [], type: maskType,
-          exprs: maskCols.map((name) => [`m_${name}`, col(source.id, name)] as const) }),
-      });
-      const crossed = make.join({ id: fresh('j'), left: earlier, right: masks, join: 'cross', channels: [], type: typeOf(...earlier.type.cols, ...maskType.cols) });
-      const projected: (readonly [string, Expr])[] = [
-        ...arity.flatMap((n, i) => Array.from({ length: n }, (_, j) => [pairKeyCol(i, j), {
+      let left: Rel = earlier;
+      if (maskCols.length) {
+        const source = refOf(earlier, fresh);
+        const maskType = typeOf(...maskCols.map((name) => ({ ...earlier.type.cols.find((column) => column.name === name)!, name: `m_${name}` })));
+        const masks = make.distinct({
+          id: fresh('d'), channels: [], type: maskType,
+          input: make.project({ id: fresh('p'), input: source, channels: [], type: maskType,
+            exprs: maskCols.map((name) => [`m_${name}`, col(source.id, name)] as const) }),
+        });
+        const crossed = make.join({ id: fresh('j'), left: earlier, right: masks, join: 'cross', channels: [], type: typeOf(...earlier.type.cols, ...maskType.cols) });
+        const projected: (readonly [string, Expr])[] = arity.flatMap((n, i) => Array.from({ length: n }, (_, j) => [pairKeyCol(i, j), {
           kind: 'case', whens: [[eq(col(crossed.id, `m_${maskCol(i)}`), compilerInt(1)), col(crossed.id, keyCol(i, j))]], else: compilerNull('any'),
-        } as Expr] as const)),
-        ...(map ? [[`p_${SIG}`, signature(col(crossed.id, MAP_COL), col(crossed.id, `m_${KS}`), fresh, 'whole')] as const] : []),
-      ];
-      const left = make.project({
-        id: fresh('p'), input: crossed, channels: [],
-        type: typeOf(...crossed.type.cols, ...projected.map(([name]) => meta(name, 'any', true))),
-        exprs: [...crossed.type.cols.map((column) => [column.name, col(crossed.id, column.name)] as const), ...projected],
-      });
+        } as Expr] as const));
+        left = make.project({
+          id: fresh('p'), input: crossed, channels: [],
+          type: typeOf(...crossed.type.cols, ...projected.map(([name]) => meta(name, 'any', true))),
+          exprs: [...crossed.type.cols.map((column) => [column.name, col(crossed.id, column.name)] as const), ...projected],
+        });
+      }
+      let right: Rel = later;
+      if (map) {
+        // How many earlier creations carry each entry — counted ONCE, then read by every later tuple's pick.
+        const all = entries(refOf(earlier, fresh), fresh);
+        const counts = bind(make.aggregate({
+          id: fresh('ag'), input: all, channels: [], type: typeOf(meta(ENTRY, 'text', true), meta(COUNT, 'int')),
+          groupBy: [col(all.id, ENTRY)], aggs: [[COUNT, { kind: 'agg', fn: 'count', args: [] }]],
+        }), true);
+        const own = refOf(later, fresh);
+        const mine = entries(make.values({ id: fresh('ve'), channels: [], type: typeOf(meta(MAP_COL, 'any', true)), rows: [[col(own.id, MAP_COL)]] }), fresh);
+        const tally = refOf(counts, fresh);
+        const hit = make.filter({ id: fresh('f'), input: tally, channels: [], type: tally.type, pred: eq(col(tally.id, ENTRY), col(mine.id, ENTRY)) });
+        const carried: Expr = { kind: 'scalar', plan: make.project({
+          id: fresh('p'), input: hit, channels: [], type: typeOf(meta(COUNT, 'int')), exprs: [[COUNT, col(hit.id, COUNT)]],
+        }) };
+        const rarest = make.sort({ id: fresh('so'), input: mine, channels: [], type: mine.type,
+          terms: [{ expr: { kind: 'call', fn: 'coalesce', args: [carried, compilerInt(0)] }, dir: 'asc' }, { expr: col(mine.id, ENTRY), dir: 'asc' }] });
+        const pick = make.limit({ id: fresh('li'), channels: [], type: typeOf(meta(PICK, 'text', true)), count: compilerInt(1),
+          input: make.project({ id: fresh('p'), input: rarest, channels: [], type: typeOf(meta(PICK, 'text', true)), exprs: [[PICK, col(rarest.id, ENTRY)]] }) });
+        right = bind(make.project({
+          id: fresh('p'), input: own, channels: [], type: typeOf(...own.type.cols, meta(PICK, 'text', true)),
+          exprs: [...own.type.cols.map((column) => [column.name, col(own.id, column.name)] as const), [PICK, { kind: 'call', fn: 'coalesce', args: [{ kind: 'scalar', plan: pick }, compilerText(NOTHING)] }]],
+        }), true);
+        // Each earlier tuple's entries, and its one NULL row for a later map with nothing to pick — over
+        // the masked tuples retained once, since both read them.
+        if (left !== earlier) left = bind(left, true);
+        const exploded = entries(left, fresh);
+        const bare = make.project({
+          id: fresh('p'), input: left, channels: [], type: exploded.type,
+          exprs: [...left.type.cols.map((column) => [column.name, col(left.id, column.name)] as const), [ENTRY, compilerText(NOTHING)]],
+        });
+        // Retained, so the pair join meets two spooled relations by an equi key — SQLite's automatic index; left
+        // inline, it flattened the union into the join and scanned the later side per earlier tuple.
+        left = bind(make.union({ id: fresh('u'), all: true, channels: [], type: exploded.type, inputs: [exploded, bare] }), true);
+      }
       const on = [
-        ...maskCols.map((name) => eq(col(left.id, `m_${name}`), col(later.id, name))),
+        ...maskCols.map((name) => eq(col(left.id, `m_${name}`), col(right.id, name))),
         ...arity.flatMap((n, i) => Array.from({ length: n }, (_, j): Expr =>
-          ({ kind: 'binary', op: 'is', left: col(left.id, pairKeyCol(i, j)), right: col(later.id, keyCol(i, j)) }))),
-        ...(map ? [eq(col(left.id, `p_${SIG}`), col(later.id, SIG))] : []),
+          ({ kind: 'binary', op: 'is', left: col(left.id, pairKeyCol(i, j)), right: col(right.id, keyCol(i, j)) }))),
+        ...(map ? [eq(col(left.id, ENTRY), col(right.id, PICK))] : []),
       ].reduce((a, b) => and(a, b));
-      return { left, right: later, on };
+      return { left, right, on };
     },
   };
 }
@@ -3779,49 +3814,174 @@ function seekOwners(driving: Rel, index: Rel, on: Expr, owner: string, fresh: Mi
 }
 
 /**
- * The PROPERTY seek for a `has(key, value)` criterion of a typed value — two arms over `drivers` (a fresh
+ * The PROPERTY seek for a `has(key, value)` criterion of a typed value — arms over `drivers` (a fresh
  * relation per call, narrowed by the predicate it is handed). The first reads `(key, value)` through
  * `vp_key_value`/`ep_key_value` at the value's `typedValueKey`, which equals every stored row
  * `typedValueEq` admits whose storage form IS its compare form. The rows whose form is not are a number
  * held as decimal TEXT (`storedScalar`'s exact tail — a BigDecimal, a long past ±2^53 — the reason
- * `storedCompareOn` casts at all), so a NUMERIC driver also reads the key's TEXT values, an index RANGE
- * (`value >= ''`: SQLite orders every TEXT after every number).
+ * `storedCompareOn` casts at all), so a NUMERIC driver also reads the key's TEXT values through
+ * `decimalTextSeeks`.
  */
 function propertySeeks(
   elem: Elem, drivers: (narrow: (driver: RelId) => Expr) => Rel,
-  key: (driver: RelId) => Expr, value: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
+  key: (driver: RelId) => Expr, valueKey: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
 ): readonly Rel[] {
   const spec = PROPERTY_TABLE[elem];
-  const seek = (narrow: (driver: RelId) => Expr, match: (props: RelId, driver: RelId) => Expr): Rel => {
-    const driving = drivers(narrow);
-    const props = make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
-    return seekOwners(driving, props, and(eq(col(props.id, 'key'), key(driving.id)), match(props.id, driving.id)), spec.owner, fresh);
-  };
+  const props = (): Rel => make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
+  const exact = drivers(() => eq(compilerInt(1), compilerInt(1))), exactProps = props();
   return [
-    seek(() => eq(compilerInt(1), compilerInt(1)), (props, driver) => eq(col(props, 'value'), typedValueKey(value(driver), vtype(driver))[1])),
-    seek((driver) => ({ kind: 'in-list', expr: vtype(driver), values: NUMERIC_VTYPES.map(compilerText) }),
-      (props) => ({ kind: 'binary', op: '>=', left: col(props, 'value'), right: compilerText('') })),
+    seekOwners(exact, exactProps, and(eq(col(exactProps.id, 'key'), key(exact.id)), eq(col(exactProps.id, 'value'), valueKey(exact.id))), spec.owner, fresh),
+    // A NUMERIC value's key IS its compared number (`typedValueKey`'s numeric arm is `storedCompareOn`).
+    ...decimalTextSeeks((narrow) => drivers((driver) => and({ kind: 'in-list', expr: vtype(driver), values: NUMERIC_VTYPES.map(compilerText) }, narrow(driver))),
+      key, valueKey, props, spec.owner, fresh),
   ];
+}
+
+/** The columns a property seek reads per driver, PROJECTED ONCE into the retained drivers — the key, the
+ *  value's vtype and its `typedValueKey` compare form — so no arm re-spells the extraction. */
+const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x';
+
+/**
+ * THE DECIMAL-TEXT tail of a NUMERIC criterion — the stored TEXT rows (`storedScalar`'s exact tail, always a
+ * PLAIN decimal: `BigDecimal.toString` writes no exponent, a long its digits) whose `storedCompareOn` cast
+ * could equal the driver's compared number `c`, as index RANGES on `(key, value)` rather than the whole TEXT
+ * range of the key (which made a numeric search over a string-valued key read every string, per driver).
+ *
+ * A stored text `x` meets `c` only where its cast lands on `c` — exactly (a long's INT cast) or by rounding
+ * (a BigDecimal's REAL cast, within an ulp of `c`, plus slack for the text-to-real conversion). So, by the
+ * magnitude of `c` (two arms that partition the numeric drivers):
+ *  - `|c| < 2^52` — `x` lies within 2 of `c`, so its integer part is one of trunc(c)−2 … trunc(c)+2 (and
+ *    `-0` near zero): one PREFIX seek per integer part `p`, `value >= p AND value < p || '/'` — exactly `p`,
+ *    `p.…` and nothing longer (`'/'` sorts right after `'.'` and before every digit);
+ *  - `2^52 ≤ |c| < 9·10^18` — `|x|`'s integer part lies within `U = |c|/2^50 + 1` (several ulps) of trunc|c|;
+ *    where both ends spell the same number of digits a decimal's text order IS its numeric order, so it is
+ *    one RANGE between the two ends (sign-prefixed); otherwise (the ends' lengths differ, a magnitude past
+ *    an INTEGER) the same arm reads the key's numeric-looking TEXT, `value >= '-' AND value < ':'` — the
+ *    bound that still keeps every other string out.
+ * A seek only NARROWS: the search's residual decides, so a range that admits more than the cast does costs a
+ * probe, never an answer.
+ */
+function decimalTextSeeks(
+  drivers: (narrow: (driver: RelId) => Expr) => Rel, key: (driver: RelId) => Expr, compared: (driver: RelId) => Expr,
+  props: () => Rel, owner: string, fresh: Minter,
+): readonly Rel[] {
+  const C = 'sk_c', LO = 'sk_lo', HI = 'sk_hi';
+  const cmp = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
+  const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
+  const text = (e: Expr): Expr => ({ kind: 'cast', arg: e, to: 'text' });
+  const int = (e: Expr): Expr => ({ kind: 'cast', arg: e, to: 'int' });
+  const cat = (a: Expr, b: Expr): Expr => cmp('||', a, b);
+  const SMALL = 2 ** 52, INTEGRAL = 9e18;
+  // A magnitude test spelled as two comparisons — `abs()` of the least INTEGER raises in SQLite.
+  const within = (c: Expr, bound: number): Expr => and(cmp('>', c, compilerReal(-bound)), cmp('<', c, compilerReal(bound)));
+  const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
+  // The driver's compared number (a column of the retained drivers), named once for every regime test and bound.
+  const keyed = (narrow: (c: Expr) => Expr): Rel => {
+    const driving = drivers(() => eq(compilerInt(1), compilerInt(1)));
+    const withC = make.project({
+      id: fresh('p'), input: driving, channels: [], type: typeOf(...driving.type.cols, meta(C, 'any', true)),
+      exprs: [...driving.type.cols.map((column) => [column.name, col(driving.id, column.name)] as const), [C, compared(driving.id)]],
+    });
+    return make.filter({ id: fresh('f'), input: withC, channels: [], type: withC.type, pred: narrow(col(withC.id, C)) });
+  };
+  // `driving` carries `[lo, hi)` columns; the arm is the TEXT values of the key in that range.
+  const ranged = (driving: Rel, lo: (rel: RelId) => Expr, hi: (rel: RelId) => Expr): Rel => {
+    const bounded = make.project({
+      id: fresh('p'), input: driving, channels: [], type: typeOf(...drivingCols(driving), meta(LO, 'text', true), meta(HI, 'text', true)),
+      exprs: [...drivingCols(driving).map((column) => [column.name, col(driving.id, column.name)] as const), [LO, lo(driving.id)], [HI, hi(driving.id)]],
+    });
+    const scan = props();
+    return seekOwners(bounded, scan, and(and(eq(col(scan.id, 'key'), key(bounded.id)),
+      cmp('>=', col(scan.id, 'value'), col(bounded.id, LO))), cmp('<', col(scan.id, 'value'), col(bounded.id, HI))), owner, fresh);
+  };
+  const drivingCols = (rel: Rel): readonly ColMeta[] => rel.type.cols.filter((column) => column.name !== C);
+  // |c| < 2^52: the integer parts trunc(c)−2 … trunc(c)+2, and `-0` where trunc(c) is within 2 of zero.
+  const small = keyed((c) => within(c, SMALL));
+  const parts = make.explode({
+    id: fresh('ex'), input: small, channels: [], as: { value: 'sk_p', ord: 'sk_o' },
+    expr: { kind: 'json-array', binary: false, items: [
+      ...[-2, -1, 0, 1, 2].map((d): Expr => text(cmp('+', int(col(small.id, C)), compilerInt(d)))),
+      { kind: 'case', whens: [[cmp('<=', call('abs', int(col(small.id, C))), compilerInt(2)), compilerText('-0')]], else: compilerNull('text') },
+    ] },
+    type: typeOf(...small.type.cols, meta('sk_p', 'text', true), meta('sk_o', 'int')),
+  });
+  const prefixes = make.project({
+    id: fresh('p'), input: parts, channels: [], type: typeOf(...drivingCols(small), meta('sk_p', 'text', true)),
+    exprs: [...drivingCols(small).map((column) => [column.name, col(parts.id, column.name)] as const), ['sk_p', col(parts.id, 'sk_p')]],
+  });
+  const prefixed = ranged(prefixes, (rel) => col(rel, 'sk_p'), (rel) => cat(col(rel, 'sk_p'), compilerText('/')));
+  // |c| ≥ 2^52: below 9·10^18 with ends of one length, one range on the integer part's digits; otherwise the
+  // key's numeric-looking TEXT. A CASE, so the ends are only computed for a magnitude they are defined on.
+  const sign = (c: Expr): Expr => ({ kind: 'case', whens: [[cmp('<', c, compilerInt(0)), compilerText('-')]], else: compilerText('') });
+  const reach = (c: Expr): Expr => cmp('+', cmp('/', call('abs', int(c)), compilerInt(2 ** 50)), compilerInt(1));
+  const end = (c: Expr, side: '-' | '+'): Expr => text(cmp(side, call('abs', int(c)), reach(c)));
+  const spans = (c: Expr): Expr => ({ kind: 'case', whens: [[within(c, INTEGRAL), eq(call('length', end(c, '-')), call('length', end(c, '+')))]],
+    else: eq(compilerInt(1), compilerInt(0)) });
+  const bound = (c: Expr, ranged: Expr, otherwise: string): Expr => ({ kind: 'case', whens: [[spans(c), ranged]], else: compilerText(otherwise) });
+  const large = keyed((c) => not(within(c, SMALL)));
+  const spanned = ranged(large, (rel) => bound(col(rel, C), cat(sign(col(rel, C)), end(col(rel, C), '-')), '-'),
+    (rel) => bound(col(rel, C), cat(cat(sign(col(rel, C)), end(col(rel, C), '+')), compilerText('/')), ':'));
+  return [prefixed, spanned];
+}
+
+/**
+ * HOW MANY stored rows hold `key` at `valueKey` (a `typedValueKey` compare form), CAPPED — the selectivity a
+ * merge search picks its driving criterion by, per driver. A `LIMIT` inside the count makes it an O(64)
+ * probe of `vp_key_value`/`ep_key_value` however common the value is: it needs only to tell a selective key
+ * from an unselective one (`tenant:'acme'` beside `email:x`), never to count. No answer depends on it — the
+ * search's arms partition the drivers whichever criterion each takes, and the residual decides.
+ */
+const SELECTIVITY_CAP = 64;
+function cappedCount(elem: Elem, key: Expr, valueKey: Expr, fresh: Minter): Expr {
+  const spec = PROPERTY_TABLE[elem];
+  const scan = make.scan({ id: fresh('cc'), table: spec.table, alias: fresh('rcc'), channels: [], type: typeOf(...spec.cols) });
+  const hits = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'key'), key), eq(col(scan.id, 'value'), valueKey)) });
+  const one = make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const capped = make.limit({ id: fresh('li'), input: one, channels: [], type: one.type, count: compilerInt(SELECTIVITY_CAP) });
+  return { kind: 'scalar', plan: make.aggregate({
+    id: fresh('ag'), input: capped, channels: [], type: typeOf(meta('n', 'int')), groupBy: [],
+    aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
+  }) };
 }
 
 /**
  * A COMPUTED merge's SEARCH (`mergeV/mergeE(__.project(…))`) — `has(k, value)` per computed key the
- * driver's body was productive for (an unproductive key does not narrow), seeked by the driver's FIRST
- * productive key (`seekedSearch`). One arm pair per key, plus the drivers productive for none.
+ * driver's body was productive for (an unproductive key does not narrow), seeked by the driver's MOST
+ * SELECTIVE productive key (`cappedCount`, ties to the first) — so `project('kind','name')` over drivers that
+ * all share one `kind` seeks by `name`. One arm set per key, plus the drivers productive for none.
  */
 function computedMatch(
   elem: Elem, carrier: Rel, candidates: () => Rel, cKeys: readonly string[],
   ppCol: (i: number) => string, cvCol: (i: number) => string, ptCol: (i: number) => string, hasOrd: boolean, bind: Binder, fresh: Minter,
 ): Rel {
   const spec = PROPERTY_TABLE[elem];
-  const name = (carrier as Extract<Rel, { kind: 'ref' }>).name;
+  const productive = (rel: RelId, i: number, yes: boolean): Expr => eq(col(rel, ppCol(i)), compilerInt(yes ? 1 : 0));
+  // Each productive key's capped count, projected ONCE per driver beside it (one key has no choice to make).
+  const countCol = (i: number): string => `sc_${i}`;
+  const valueCol = (i: number): string => `${SEEK_VALUE}_${i}`;
+  const counted = (() => {
+    const ref = make.ref({ id: fresh('r'), name: (carrier as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: carrier.type });
+    const valueKey = (i: number): Expr => typedValueKey(col(ref.id, cvCol(i)), col(ref.id, ptCol(i)))[1];
+    return bind(make.project({
+      id: fresh('p'), input: ref, channels: [],
+      type: typeOf(...carrier.type.cols, ...cKeys.map((_, i) => meta(valueCol(i), 'any', true)), ...(cKeys.length < 2 ? [] : cKeys.map((_, i) => meta(countCol(i), 'int', true)))),
+      exprs: [...carrier.type.cols.map((column) => [column.name, col(ref.id, column.name)] as const),
+        ...cKeys.map((_, i) => [valueCol(i), valueKey(i)] as const),
+        ...(cKeys.length < 2 ? [] : cKeys.map((key, i) => [countCol(i), { kind: 'case', whens: [[productive(ref.id, i, true),
+          cappedCount(elem, compilerText(key), valueKey(i), fresh)]], else: compilerNull('int') } as Expr] as const))],
+    }), true);
+  })();
+  const name = (counted as Extract<Rel, { kind: 'ref' }>).name;
   const drivers = (pred: (rel: RelId) => Expr): Rel => {
-    const ref = make.ref({ id: fresh('r'), name, channels: [], type: carrier.type });
+    const ref = make.ref({ id: fresh('r'), name, channels: [], type: counted.type });
     return make.filter({ id: fresh('f'), input: ref, channels: [], type: ref.type, pred: pred(ref.id) });
   };
-  const productive = (rel: RelId, i: number, yes: boolean): Expr => eq(col(rel, ppCol(i)), compilerInt(yes ? 1 : 0));
-  const firstProductive = (i: number) => (rel: RelId): Expr =>
-    cKeys.slice(0, i).map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b), productive(rel, i, true));
+  // Key `i` drives where it is productive and no other productive key is more selective (ties to the lower
+  // index) — a total choice, so the arms still partition the drivers.
+  const drives = (i: number) => (rel: RelId): Expr => cKeys.length < 2 ? productive(rel, i, true)
+    : cKeys.map((_, j): Expr => j === i ? productive(rel, i, true)
+      : or(productive(rel, j, false), { kind: 'binary', op: j < i ? '>' : '>=', left: col(rel, countCol(j)), right: col(rel, countCol(i)) }))
+      .reduce((a, b) => and(a, b));
   // The residual: every key's `has(k, v)`, as a correlated EXISTS over the candidate's stored property.
   const residual = (driver: RelId, candidate: RelId): Expr => cKeys.map((key, i) => {
     const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
@@ -3833,8 +3993,8 @@ function computedMatch(
     const probe = make.project({ id: fresh('p'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return or(productive(driver, i, false), { kind: 'exists', plan: probe, negated: false } as Expr);
   }).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1)));
-  const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(firstProductive(i)(rel), narrow(rel))),
-    () => compilerText(key), (driver) => col(driver, cvCol(i)), (driver) => col(driver, ptCol(i)), fresh));
+  const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(drives(i)(rel), narrow(rel))),
+    () => compilerText(key), (driver) => col(driver, valueCol(i)), (driver) => col(driver, ptCol(i)), fresh));
   const unnarrowed = drivers((rel) => cKeys.map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1))));
   return seekedSearch(carrier.type.cols, arms, unnarrowed, candidates, 'id', residual, hasOrd, bind, fresh);
 }
@@ -3850,7 +4010,7 @@ interface MapDrivers {
   readonly without: (narrow?: (driver: RelId) => Expr) => Rel;
   readonly all: (narrow: (driver: RelId) => Expr) => Rel;
 }
-function mapDrivers(carrier: Rel, fresh: Minter): MapDrivers {
+function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapDrivers {
   const name = (carrier as Extract<Rel, { kind: 'ref' }>).name;
   const ref = (): Rel => make.ref({ id: fresh('r'), name, channels: [], type: carrier.type });
   const stringKey = (pair: Expr): Expr => eq({ kind: 'call', fn: 'json_extract', args: [pairSide(pair, 'keys'), compilerText('$.t')] }, compilerText('string'));
@@ -3859,22 +4019,46 @@ function mapDrivers(carrier: Rel, fresh: Minter): MapDrivers {
     return make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: stringKey(col(pairs.id, PAIR.value)) });
   };
   const always = eq(compilerInt(1), compilerInt(1));
+  // The driving entry per driver, chosen ONCE and retained: its most selective STRING entry
+  // (`cappedCount`), ties to the map's own order — `[tenant:'acme', email:x]` seeks by `email`.
+  let chosen: Rel | null = null;
+  const driving = (): Rel => {
+    if (chosen) return make.ref({ id: fresh('r'), name: (chosen as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: chosen.type });
+    const drivers = ref();
+    const exploded = make.explode({
+      id: fresh('ex'), input: drivers, expr: col(drivers.id, MAP_COL), channels: [], as: PAIR,
+      type: typeOf(...drivers.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+    });
+    const others = stringPairs(exploded.id);
+    const side = (which: 'keys' | 'values', path: string): Expr =>
+      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(others.id, PAIR.value), which), compilerText(path)] });
+    const ranked = make.sort({
+      id: fresh('so'), input: others, channels: [], type: others.type,
+      terms: [{ expr: cappedCount(elem, side('keys', '$.v'), typedValueKey(side('values', '$.v'), side('values', '$.t'))[1], fresh), dir: 'asc' },
+        { expr: col(others.id, PAIR.ord), dir: 'asc' }],
+    });
+    const pick = make.limit({
+      id: fresh('li'), channels: [], type: typeOf(meta('o', 'int')), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), input: ranked, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(ranked.id, PAIR.ord)]] }),
+    });
+    const picked = make.filter({
+      id: fresh('f'), input: exploded, channels: [], type: exploded.type,
+      pred: and(stringKey(col(exploded.id, PAIR.value)), eq(col(exploded.id, PAIR.ord), { kind: 'scalar', plan: pick })),
+    });
+    const entry = (which: 'keys' | 'values', path: string): Expr =>
+      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(picked.id, PAIR.value), which), compilerText(path)] });
+    chosen = bind(make.project({
+      id: fresh('p'), input: picked, channels: [],
+      type: typeOf(...picked.type.cols, meta(SEEK_KEY, 'any', true), meta(SEEK_VTYPE, 'text', true), meta(SEEK_VALUE, 'any', true)),
+      exprs: [...picked.type.cols.map((column) => [column.name, col(picked.id, column.name)] as const),
+        [SEEK_KEY, entry('keys', '$.v')], [SEEK_VTYPE, entry('values', '$.t')], [SEEK_VALUE, typedValueKey(entry('values', '$.v'), entry('values', '$.t'))[1]]],
+    }), true);
+    return driving();
+  };
   return {
     with: (narrow) => {
-      const drivers = ref();
-      const exploded = make.explode({
-        id: fresh('ex'), input: drivers, expr: col(drivers.id, MAP_COL), channels: [], as: PAIR,
-        type: typeOf(...drivers.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
-      });
-      const others = stringPairs(exploded.id);
-      const first: Expr = { kind: 'scalar', plan: make.aggregate({
-        id: fresh('ag'), input: others, channels: [], type: typeOf(meta('o', 'int', true)), groupBy: [],
-        aggs: [['o', { kind: 'agg', fn: 'min', args: [col(others.id, PAIR.ord)] }]],
-      }) };
-      return make.filter({
-        id: fresh('f'), input: exploded, channels: [], type: exploded.type,
-        pred: and(and(stringKey(col(exploded.id, PAIR.value)), eq(col(exploded.id, PAIR.ord), first)), narrow(exploded.id)),
-      });
+      const drivers = driving();
+      return make.filter({ id: fresh('f'), input: drivers, channels: [], type: drivers.type, pred: narrow(drivers.id) });
     },
     without: (narrow = () => always) => {
       const drivers = ref();
@@ -3893,22 +4077,29 @@ function mapDrivers(carrier: Rel, fresh: Minter): MapDrivers {
 /** The property seek of a map-valued driver's first STRING entry (`mapDrivers.with`) — `propertySeeks` with
  *  the key, value and vtype read off the pair's `{t,v}` nodes. */
 function mapEntrySeeks(elem: Elem, drivers: MapDrivers, fresh: Minter, narrow: (driver: RelId) => Expr = () => eq(compilerInt(1), compilerInt(1))): readonly Rel[] {
-  const side = (driver: RelId, which: 'keys' | 'values', path: string): Expr =>
-    ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(driver, PAIR.value), which), compilerText(path)] });
   return propertySeeks(elem, (seek) => drivers.with((driver) => and(narrow(driver), seek(driver))),
-    (driver) => side(driver, 'keys', '$.v'), (driver) => side(driver, 'values', '$.v'), (driver) => side(driver, 'values', '$.t'), fresh);
+    (driver) => col(driver, SEEK_KEY), (driver) => col(driver, SEEK_VALUE), (driver) => col(driver, SEEK_VTYPE), fresh);
 }
 
-/** The ENDPOINT seek of an edge search that names an endpoint (`side`, the driver's resolved rowid): the
- *  edges leaving (`src`) or entering (`tgt`) it, through `e_out`/`e_in`. */
-function endpointSeek(driving: Rel, side: 'src' | 'tgt', fresh: Minter): Rel {
+/** The ENDPOINT seek of an edge search that names endpoints (`sides`, the driver's resolved rowids): the
+ *  edges leaving (`src`) and/or entering (`tgt`) them, through `e_out`/`e_in`. With `label` (the driver's
+ *  `lbl`, a NAME — its id read once per driver) beside both ends it is the whole `e_out (src, label, tgt)`
+ *  key, so re-upserting N edges out of one hub seeks each edge rather than the hub's N. */
+function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: boolean, fresh: Minter): Rel {
   const scan = make.scan({ id: fresh('se'), table: 'edges', alias: fresh('rse'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   // Renamed, so the join's output names stay unique beside the driver's own resolved `src`/`tgt`.
   const edges = make.project({
-    id: fresh('p'), input: scan, channels: [], type: typeOf(meta('se_id', 'int'), meta('se_end', 'int')),
-    exprs: [['se_id', col(scan.id, 'id')], ['se_end', col(scan.id, side)]],
+    id: fresh('p'), input: scan, channels: [], type: typeOf(meta('se_id', 'int'), meta('se_src', 'int'), meta('se_label', 'int'), meta('se_tgt', 'int')),
+    exprs: [['se_id', col(scan.id, 'id')], ['se_src', col(scan.id, 'src')], ['se_label', col(scan.id, 'label')], ['se_tgt', col(scan.id, 'tgt')]],
   });
-  return seekOwners(driving, edges, eq(col(edges.id, 'se_end'), col(driving.id, side)), 'se_id', fresh);
+  const labelId = (): Expr => {
+    const names = make.scan({ id: fresh('sl'), table: 'labels', alias: fresh('rsl'), channels: [], type: typeOf(...LABELS_COLS) });
+    const named = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'name'), col(driving.id, 'lbl')) });
+    return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: named, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(named.id, 'id')]] }) };
+  };
+  const on = [...sides.map((side) => eq(col(edges.id, `se_${side}`), col(driving.id, side))), ...(label ? [eq(col(edges.id, 'se_label'), labelId())] : [])]
+    .reduce((a, b) => and(a, b));
+  return seekOwners(driving, edges, on, 'se_id', fresh);
 }
 
 /** The LABEL seek of a vertex search that names a label (`label`, a name per driver): the vertices
@@ -4955,7 +5146,7 @@ export function mergeVFromMap(
     return make.project({ id: fresh('p'), input: candScan, channels: [], type: ID_TYPE, exprs: [['id', col(candScan.id, 'id')]] });
   };
   // SEEKED by the map's first property entry, else by its `T.label`; an empty map meets every vertex.
-  const drivers = mapDrivers(carrier, fresh);
+  const drivers = mapDrivers(carrier, 'vertex', bind, fresh);
   const named = (driver: RelId): Expr => ({ kind: 'binary', op: 'is not', left: mapLabelScalar(col(driver, MAP_COL)), right: compilerNull('text') });
   const matched = bind(seekedSearch(carrier.type.cols, [
     ...mapEntrySeeks('vertex', drivers, fresh),
@@ -5257,12 +5448,16 @@ export function mergeEFromMap(
   };
   // SEEKED by what the map names, most selective first: its OUT endpoint, else its IN endpoint, else its
   // first property entry; a map naming none of them (a label, or nothing) meets every edge.
-  const drivers = mapDrivers(carrier, fresh);
+  const drivers = mapDrivers(carrier, 'edge', bind, fresh);
   const named = (driver: RelId, side: 'hasOut' | 'hasIn'): Expr => eq(col(driver, side), compilerInt(1));
   const neither = (driver: RelId): Expr => and(eq(col(driver, 'hasOut'), compilerInt(0)), eq(col(driver, 'hasIn'), compilerInt(0)));
+  const labelled = (driver: RelId): Expr => isNot(col(driver, 'lbl'), compilerNull('any'));
+  const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
   const matched = bind(seekedSearch(carrier.type.cols, [
-    endpointSeek(drivers.all((driver) => named(driver, 'hasOut')), 'src', fresh),
-    endpointSeek(drivers.all((driver) => and(eq(col(driver, 'hasOut'), compilerInt(0)), named(driver, 'hasIn'))), 'tgt', fresh),
+    endpointSeek(drivers.all((driver) => and(and(named(driver, 'hasOut'), named(driver, 'hasIn')), labelled(driver))), ['src', 'tgt'], true, fresh),
+    endpointSeek(drivers.all((driver) => and(and(named(driver, 'hasOut'), named(driver, 'hasIn')), not(labelled(driver)))), ['src', 'tgt'], false, fresh),
+    endpointSeek(drivers.all((driver) => and(named(driver, 'hasOut'), eq(col(driver, 'hasIn'), compilerInt(0)))), ['src'], false, fresh),
+    endpointSeek(drivers.all((driver) => and(eq(col(driver, 'hasOut'), compilerInt(0)), named(driver, 'hasIn'))), ['tgt'], false, fresh),
     ...mapEntrySeeks('edge', drivers, fresh, neither),
   ], drivers.without(neither), candidates, 'cid', allMatch, hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING — a carrier row whose `ord` has no matched row (or the single-row carrier

@@ -106,6 +106,11 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 - **Identity-reprojection idiom ~43×** in `src/compiler/rel/**`, `src/rel/**` — add an override-aware
   `carriedExprs(channels, sourceId, overrides?)` and a `from` on `withPayload`; migrate.
 - **`OwnerSeek` DISTINCT tail ×3** in `src/rel/passes/semijoin.ts` — extract `distinctOwners`.
+- **The merge search's seeks are hand-built in `write.ts`** (`seekedSearch`, `propertySeeks`,
+  `decimalTextSeeks`, `endpointSeek`, `cappedCount`'s per-driver choice). Their generic home is a
+  CORRELATED-join `OwnerSeek` in `src/rel/passes/semijoin.ts` — a seek per outer row chosen over the
+  finished algebra — so any per-row property search (not only a merge's) gets the most-selective-key and
+  decimal-TEXT-prefix access paths. Move them there once `semijoin.ts` seeks under a correlated join.
 - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts`) — extracting
   `pathPositionProjection` also fixes a mid-path value/list/map position read as a vertex.
 - **Four copied blocks in `write.ts`** (carrier reproject, merged-create spread, alias-carry, nested-spec decline).

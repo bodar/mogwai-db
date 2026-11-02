@@ -1,19 +1,19 @@
 {
   "addE": {
     "binds": 2,
-    "bytes": 1279,
+    "bytes": 1238,
     "compiler": 47,
     "bound": 0
   },
   "addLabel": {
     "binds": 2,
-    "bytes": 1323,
+    "bytes": 1221,
     "compiler": 19,
     "bound": 0
   },
   "addV": {
     "binds": 2,
-    "bytes": 1301,
+    "bytes": 1266,
     "compiler": 19,
     "bound": 0
   },
@@ -37,7 +37,7 @@
   },
   "as": {
     "binds": 2,
-    "bytes": 1340,
+    "bytes": 1303,
     "compiler": 49,
     "bound": 0
   },
@@ -163,13 +163,13 @@
   },
   "dropLabel": {
     "binds": 1,
-    "bytes": 1323,
+    "bytes": 1221,
     "compiler": 17,
     "bound": 0
   },
   "dropLabels": {
     "binds": 1,
-    "bytes": 1323,
+    "bytes": 1221,
     "compiler": 17,
     "bound": 0
   },
@@ -385,8 +385,8 @@
   },
   "mergeV": {
     "binds": 3,
-    "bytes": 4868,
-    "compiler": 376,
+    "bytes": 5832,
+    "compiler": 483,
     "bound": 0
   },
   "min": {
