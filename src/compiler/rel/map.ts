@@ -11,13 +11,13 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { mapSlot, valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
-import { relHostTag, type ChildHost, type ChildSeam } from './child.ts';
+import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
 

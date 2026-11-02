@@ -38,7 +38,7 @@ import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { sackTagOf } from '../sack.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
-import { BRANCH_HOSTS } from './branch.ts';
+import { BRANCH_HOSTS, sameFraming } from './branch.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -777,7 +777,7 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
     // `P.resolve(traverser)` takes the operand's FIRST result (ORDER BY encounter, LIMIT 1); the whole
     // rule — and the decline for an effectful or non-scalar body — is `firstRootedValue` (`build.ts`),
     // shared with `list.ts`'s member-predicate operand so the two cannot drift.
-    return firstRootedValue(read, fresh);
+    return firstRootedValue(read, fresh)?.value ?? null;
   }
   if (!host) return null;
   // The alias scope rides on the host's `row` so a `select(<label>)`-led operand can RE-ROOT to the
@@ -1453,13 +1453,16 @@ function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx,
   if (!value || !mayBeAbsent(host)) return value;
   if (yieldsNothingFromEmpty(body.slice(1))) {
     const expr = gatedByHost(host, value.expr);
-    return expr && { ...value, expr, present: meetPresence([value.present, presentOfHost(host)]) };
+    // The TAG is gated with the value — a NULL value is "nothing", whatever its row's type was.
+    const vtype = value.vtype && gatedByHost(host, value.vtype);
+    return expr && { ...value, expr, ...(vtype ? { vtype } : {}), present: meetPresence([value.present, presentOfHost(host)]) };
   }
   const present = hostPresence(host);
   const empty = present && reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh);
-  if (!present || !empty || JSON.stringify(empty.framing) !== JSON.stringify(value.framing)) return null;
+  if (!present || !empty || !sameFraming(empty.framing, value.framing) || !value.vtype !== !empty.vtype) return null;
   return {
     expr: caseWhen(present, value.expr, empty.expr), framing: value.framing,
+    ...(value.vtype && empty.vtype ? { vtype: caseWhen(present, value.vtype, empty.vtype) } : {}),
     present: meetPresence([value.present, empty.present]),
     yields: value.yields === 'one' && empty.yields === 'one' ? 'one' : 'first',
   };
@@ -1479,8 +1482,14 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
   // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"), so
   // productivity is an EXISTS over the rooted rows — the concat/dateDiff empty-operand guard raises on
   // it, never silently skipping. `yields:'first'` because several rows collapse to their first.
-  const value = firstRootedValue(rooted, fresh);
-  return value && { expr: value, framing: rooted.framing, present: 'value-nullness', yields: 'first' };
+  // A PER-ROW type is the first row's own tag, read beside its value from the same fenced row, and the
+  // framing names the `ChildValue.vtype` slot every consumer projects (`reductionTail`, a coalesce arm)
+  // — never the rooted relation's `vtype`/`vt` column, which is not in the host's scope.
+  const first = firstRootedValue(rooted, fresh, true);
+  if (!first) return null;
+  return first.vtype
+    ? { expr: first.value, vtype: first.vtype, framing: { kind: 'scalar', type: PER_ROW('vtype') }, present: 'value-nullness', yields: 'first' }
+    : { expr: first.value, framing: rooted.framing, present: 'value-nullness', yields: 'first' };
 }
 
 /** A rooted read that ends in `count()` and collapses to at most one row, as its one value — or `null`

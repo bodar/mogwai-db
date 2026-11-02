@@ -625,7 +625,7 @@ export function listMemberOp(
       const steps = child.body(isNested(nested) ? nested.nested : nested, 'rooted');
       if (!steps?.length) return null;
       const read = child.rooted(steps);
-      return read ? firstRootedValue(read, fresh) : null;
+      return read ? firstRootedValue(read, fresh)?.value ?? null : null;
     } : undefined;
     const pred = memberPredicate(memberPayload(of, members), args[0], resolveScalar);
     if (!pred) return null;

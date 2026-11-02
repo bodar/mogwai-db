@@ -772,10 +772,39 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
  * (`list.ts`'s rooted `resolveScalar`) — which had drifted: the list copy projected `v` with no
  * order/limit, so `none(P.eq(__.V(x).values(k).order()))` took a scan-order value, the exact
  * non-determinism this rule exists to prevent.
+ *
+ * `typed` also answers the first row's PER-ROW TYPE (`relHostTag`) — the third seam, a re-sourcing
+ * child value (`map(__.V().values('name'))`, `reSourcedValue`), whose consumer frames the value by a tag
+ * it carries IN THE HOST, so the rooted relation's own `vtype`/`vt` column cannot be named there. Value
+ * and type must come from the SAME row, so the typed form always takes `LIMIT 1` (an unordered body's
+ * two independent subqueries could otherwise each pick a different arbitrary row) and FENCES that one
+ * row as a materialized relation both subqueries read: the rooted read runs once per statement, and
+ * each uncorrelated subquery over it is O(1) in the host's traverser count. A STATIC type is a compiler
+ * literal and needs no second subquery, so it comes back as `vtype: undefined` and the caller keeps the
+ * read's own static framing.
  */
-export function firstRootedValue(read: RootedRead, fresh: Minter): Expr | null {
+export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false): { readonly value: Expr; readonly vtype?: Expr } | null {
   if (read.effects?.length || read.framing.kind !== 'scalar') return null;
   const encounter = read.rel.channels.find((channel) => channel.role === 'encounter');
+  const tag = typed ? relHostTag(read.rel, read.framing.type) : undefined;
+  if (tag && tag.kind !== 'lit') {
+    // PROJECT the value, its tag and the order key in the read's own scope first (`firstOf`'s rule:
+    // after a `Limit` that scope is gone), then sort, take one row, and fence it.
+    const projected = make.project({
+      id: fresh('rft'), input: read.rel, channels: [],
+      type: typeOf(meta('v', 'any', true), meta('t', 'text', true), ...(encounter ? [meta('k', 'any', true)] : [])),
+      exprs: [['v', col(read.rel.id, 'v')], ['t', tag], ...(encounter ? [['k', col(read.rel.id, encounter.col)] as const] : [])],
+    });
+    const sorted = encounter
+      ? make.sort({ id: fresh('rfs'), input: projected, channels: [], type: projected.type, terms: [{ expr: col(projected.id, 'k'), dir: 'asc' }] })
+      : projected;
+    const one = make.limit({ id: fresh('rfl'), input: sorted, channels: [], type: sorted.type, count: compilerInt(1) });
+    const row = make.materialize({ id: fresh('rfm'), input: one, channels: [], type: one.type, fenced: true });
+    const readOne = (name: 'v' | 't', type: SqlType): Expr => ({ kind: 'scalar', plan: make.project({
+      id: fresh('rfv'), input: row, channels: [], type: typeOf(meta(name, type, true)), exprs: [[name, col(row.id, name)]],
+    }) });
+    return { value: readOne('v', 'any'), vtype: readOne('t', 'text') };
+  }
   const ordered = encounter
     ? make.limit({
       id: fresh('rfl'),
@@ -784,10 +813,10 @@ export function firstRootedValue(read: RootedRead, fresh: Minter): Expr | null {
       channels: read.rel.channels, type: read.rel.type, count: compilerInt(1),
     })
     : read.rel;
-  return { kind: 'scalar', plan: make.project({
+  return { value: { kind: 'scalar', plan: make.project({
     id: fresh('rfv'), input: ordered, channels: [], type: typeOf(meta('v', 'any', true)),
     exprs: [['v', col(ordered.id, 'v')]],
-  }) };
+  }) } };
 }
 
 /**
@@ -1011,6 +1040,24 @@ export const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
   (inner, storageClass) => ({ kind: 'call', fn: 'nullif', args: [inner, compilerText(storageClass)] }),
   { kind: 'call', fn: 'replace', args: [vt, compilerText('real'), compilerText('double')] },
 );
+
+/**
+ * The type tag of a scalar relation's OWN row: its `vtype` column, else the per-row column its type
+ * names (`perRowColumnOf` — a mixed `inject(1, 1.0)`'s `vt`, a min/max winner's), read through
+ * `reducedVtype` because that column may speak the storage-class vocabulary (`real`/`integer`), else the
+ * static tag as a compiler literal (`hostTag`'s rule, `child.ts`). Reading `vtype` alone dropped the
+ * per-row tag every other column carries, so `inject(1, 1.0).groupCount()` keyed the Double as an
+ * untagged `1.0` and framed it an Int (`{1:1, 1:1}` where `GroupCountStep` keys `Integer(1)` and
+ * `Double(1.0)` apart). It lives here, not in `child.ts`, because `firstRootedValue` reads it too.
+ */
+export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undefined => {
+  const carries = (name: string): boolean => rel.type.cols.some((column) => column.name === name);
+  if (carries('vtype')) return col(rel.id, 'vtype');
+  const column = perRowColumnOf(type);
+  if (column && carries(column)) return reducedVtype(col(rel.id, column));
+  const known = staticTypeOf(type);
+  return known ? compilerText(known) : undefined;
+};
 
 
 /**

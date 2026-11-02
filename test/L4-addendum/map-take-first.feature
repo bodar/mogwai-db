@@ -42,7 +42,6 @@ Feature: mogwai addendum — map() take-first over a fan-out arm (canonical emis
       | old |
 
   @gap:map-take-first
-  @Unsupported
   Scenario: g_V1_valuesXageX_mapXV_valuesXnameXX
     Given the modern graph
     And the traversal of
