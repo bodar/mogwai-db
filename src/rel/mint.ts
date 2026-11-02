@@ -22,7 +22,7 @@ export interface Minter {
  *
  * A `src/rel/` pass mints its own rather than taking the lowering's minter, because it may not reach
  * into `src/compiler/` — and because a pass must be runnable over any plan, including one a test
- * hand-built. Same technique as `name`'s generated binding names.
+ * hand-built.
  *
  * ⚠️ **Seed it with the WHOLE plan, not the subtree being rewritten.** A name absent from the subtree
  * may still be taken by a sibling, and the collision that produces is a wrong ANSWER — the two

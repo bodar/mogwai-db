@@ -13,6 +13,9 @@ import { isRel, type Rel } from '../src/rel/rel.ts';
 import { relId } from '../src/rel/types.ts';
 import { freeRelIds } from '../src/rel/walk.ts';
 
+/** A fresh `r0, r1, …` source for `name` — in production it is the compile's own minter. */
+const counting = (): (() => string) => { let n = 0; return () => `r${n++}`; };
+
 const channels: Channels = [];
 const cols = [{ name: 'id', type: 'int', nullable: false }, { name: 'name', type: 'text', nullable: false }] as const;
 const scan = scanRel({ id: relId('n'), table: 'nodes', alias: 'n', channels, type: { cols } });
@@ -190,7 +193,7 @@ describe('RelIR', () => {
     // …and the pass agrees rather than merely being refused downstream: `name` must not hoist a
     // subtree holding the walk's own reference, which `freeRelIds` alone does not forbid (a SelfRef
     // names its walk positionally, so such a subtree is free-reference-clean and looked bindable).
-    expect(name(fenced).bindings.map((binding) => binding.name)).not.toContain('fence');
+    expect(name(fenced, counting()).bindings.map((binding) => binding.name)).not.toContain('fence');
   });
 
   /**
@@ -366,7 +369,7 @@ describe('RelIR', () => {
       type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'n', type: 'int', nullable: false }] },
       exprs: [['id', col(shared.id, 'id')], ['n', { kind: 'scalar', plan: counted }]] });
 
-    const named = name(root);
+    const named = name(root, counting());
     expect(named.bindings.map((b) => b.node)).toContainEqual(expect.objectContaining({ id: 'shared' }));
     const sql = emitQuery(named).sql;
     // Spelled ONCE as a CTE body, referenced from the spine and from inside the subquery.
@@ -388,7 +391,7 @@ describe('RelIR', () => {
       type: { cols: [{ name: 'a', type: 'int', nullable: false }, { name: 'b', type: 'int', nullable: false }] },
       exprs: [['a', { kind: 'scalar', plan: correlated }], ['b', { kind: 'scalar', plan: correlated }]] });
 
-    const named = name(root);
+    const named = name(root, counting());
     expect(named.bindings.flatMap((b) => (isRel(b.node) ? [b.node.id] : []))).not.toContain('corr');
   });
 
@@ -447,7 +450,7 @@ describe('RelIR', () => {
     const recursive = recursiveRel({ id: relId('walk'), name: 'walk', cols: ['id'], seed, channels, type: { cols: oneCol },
       step: (self) => filter({ id: relId('step'), input: self, channels, type: { cols: oneCol }, pred: { kind: 'binary', op: '<', left: col(self.id, 'id'), right: lit(0, 'int') } }),
     });
-    const emitted = emitQuery(name(recursive));
+    const emitted = emitQuery(name(recursive, counting()));
     expect(emitted.sql).toContain('WITH RECURSIVE');
     expect(emitted.sql).toContain('seed AS');
     const db = new Database(':memory:');
@@ -606,8 +609,8 @@ describe('RelIR', () => {
 
   test('names shared DAG vertices and explicit materialization boundaries', () => {
     const joined = sharedUnderTwoSides();
-    expect(name(joined).bindings.map((binding) => binding.node.kind)).toEqual(['project']);
-    const emitted = emitQuery(name(joined));
+    expect(name(joined, counting()).bindings.map((binding) => binding.node.kind)).toEqual(['project']);
+    const emitted = emitQuery(name(joined, counting()));
     expect(emitted.sql).toContain('WITH');
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
@@ -693,10 +696,20 @@ describe('RelIR', () => {
     const joined = sharedUnderTwoSides();
     for (const pass of [fuse, (plan: typeof joined) => prune(plan)]) {
       const after = pass(joined);
-      expect(name(after).bindings.map((binding) => binding.name)).toEqual(['r0']);
+      expect(name(after, counting()).bindings.map((binding) => binding.name)).toEqual(['r0']);
       if (after.kind === 'join' && after.left.kind === 'filter' && after.right.kind === 'filter')
         expect(after.left.input).toBe(after.right.input);
     }
+  });
+
+  test('two separately named plans drawing on ONE minter never share a binding name', () => {
+    // A write program splices an input plan's bindings beside a continuation's; a private per-call
+    // counter named both first CTEs `r0` and `plan()` refused the splice.
+    const mint = counting();
+    const first = name(sharedUnderTwoSides(), mint).bindings.map((binding) => binding.name);
+    const second = name(sharedUnderTwoSides(), mint).bindings.map((binding) => binding.name);
+    expect(first).toEqual(['r0']);
+    expect(second).toEqual(['r1']);
   });
 
   test('a generated CTE name never collides with an explicit Materialize name', () => {
@@ -704,7 +717,7 @@ describe('RelIR', () => {
     const shared = filter({ id: relId('sharedTwice'), input: scan, channels, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
     const inner = join({ id: relId('innerJoin'), left: shared, right: shared, join: 'cross', channels, type: { cols: pairedCols } });
     const names = name(join({ id: relId('outerJoin'), left: pinned, right: inner, join: 'cross', channels,
-      type: { cols: [...cols, ...pairedCols.map((column) => ({ ...column, name: `${column.name}2` }))] } })).bindings.map((binding) => binding.name);
+      type: { cols: [...cols, ...pairedCols.map((column) => ({ ...column, name: `${column.name}2` }))] } }), counting()).bindings.map((binding) => binding.name);
     expect(new Set(names).size).toBe(names.length);
     expect(names).toContain('r0');
   });

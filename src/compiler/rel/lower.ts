@@ -3536,7 +3536,7 @@ const lowered = (
   const named = nameBindings(semijoin(wire.rel, [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
-  ]));
+  ]), () => fresh('r'));
   // A stateful SOURCE (a `decorateGraph` stack) declares its landed `(id → value)` CTEs HERE — the one
   // collection point — so every entry that reads through it (a resume's final SQL, a downstream
   // barrier's head) gets them without threading a binding by hand. `BaseGraph`/`BoundGraph` carry none.
@@ -3776,7 +3776,7 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
   // `Values` refuses the empty relation, so the empty aggregate is the honest `Filter(false)` over the one
   // row (§3.3) — no traverser.
   const rel = empty ? make.filter({ id: fresh('scf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
-  return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
+  return { plan: nameBindings(rel, () => fresh('r')), shape: { kind: 'typedNode' } };
 }
 
 /**
@@ -3815,7 +3815,7 @@ export function lowerTypedNodeStream(nodes: readonly FrameNode[], parents?: numb
       return make.join({ id: fresh('tnj'), left: one, right: parentRows, channels: [], join: 'cross', type: typeOf(meta(NODE_COL, 'json', true), meta('p', 'int')) });
     })();
   const rel = nodes.length > 0 ? scattered : make.filter({ id: fresh('tnf'), input: one, channels: [], type, pred: CONSTANT.false });
-  return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
+  return { plan: nameBindings(rel, () => fresh('r')), shape: { kind: 'typedNode' } };
 }
 
 /** What a mid-traversal reduction emits when a parent has no partial (see `reducers.ts`): `zero` = the
@@ -3869,7 +3869,7 @@ export function lowerReduceCombine(
   // A null fold (an all-empty semigroup) frames as NO traverser — `Values` refuses the empty relation, so
   // it is the honest `Filter(false)` (§3.3), matching `lowerScalarResume`'s empty-aggregate spelling.
   const rel = folded === null ? make.filter({ id: fresh('rcf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
-  return { plan: nameBindings(rel), shape: { kind: 'typedNode' } };
+  return { plan: nameBindings(rel, () => fresh('r')), shape: { kind: 'typedNode' } };
 }
 
 /**

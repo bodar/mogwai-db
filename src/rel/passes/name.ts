@@ -15,12 +15,15 @@ import { exprRels, forEachExpr, freeRelIds, hasFreeSelfRef, relChildren, relExpr
  * sharing — a rewrite that rebuilds per parent occurrence makes every count 1 and silently turns
  * this analysis off.
  *
- * ⚠️ **Generated names are unique within ONE call, not across calls.** A caller that splices the
- * bindings of two separately named plans into one program — a write's target snapshot and a guard over
- * the same target — passes `mint`, its program-wide fresh-name source; else both plans call their first
- * shared node `r0` and `plan()` refuses the splice (`duplicate Plan binding`).
+ * ⚠️ **`mint` is REQUIRED, and it is the caller's program-wide fresh-name source.** A private counter
+ * made names unique within ONE call only: a program that splices the bindings of two separately named
+ * plans — a write's target snapshot and the read that produced its input — had both call their first
+ * shared node `r0`, and `plan()` refused the splice (`duplicate Plan binding`, a bare internal Error on
+ * `g.V().both().addV('x')`). Drawing binding names from the same per-compile minter as `Rel` ids also
+ * means a CTE name can never equal a relation alias. The `taken` loop below still guards the names this
+ * pass did NOT mint — an explicit `Materialize` name and a `Recursive`'s CTE name.
  */
-export function name(root: Rel, mint?: () => string): Plan {
+export function name(root: Rel, mint: () => string): Plan {
   const counts = new Map<Rel, number>();
   const visit = (rel: Rel): void => {
     const seen = (counts.get(rel) ?? 0) + 1;
@@ -41,11 +44,9 @@ export function name(root: Rel, mint?: () => string): Plan {
   // own term refers to it — so generated names must not collide with either.
   const taken = new Set([...counts.keys()].flatMap((rel) =>
     ((rel.kind === 'materialize' && rel.name) || rel.kind === 'recursive' ? [rel.name] : [])));
-  let n = 0;
   const generate = (): string => {
-    const next = mint ?? ((): string => `r${n++}`);
-    let candidate = next();
-    while (taken.has(candidate)) candidate = next();
+    let candidate = mint();
+    while (taken.has(candidate)) candidate = mint();
     taken.add(candidate);
     return candidate;
   };

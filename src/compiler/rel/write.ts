@@ -219,7 +219,7 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   // The target is lowered like any other relation — `name` binds its shared subexpressions as CTEs —
   // and only then snapshotted. Those CTEs are read by ONE step (the snapshot's own SELECT), which is
   // exactly the case `checkSnapshots` leaves alone.
-  const targetPlan = nameBindings(idsOf(target, fresh));
+  const targetPlan = nameBindings(idsOf(target, fresh), () => fresh('r'));
   const ids = fresh('drop');
   const owners = make.ref({ id: fresh('r'), name: ids, channels: [], type: ID_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
@@ -281,7 +281,7 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   const targetPlan = nameBindings(make.project({
     id: fresh('w'), input: target, channels: [], type: PDROP_TYPE,
     exprs: [['id', propertyRowId(target)], ['owner', propertyOwnerId(target, elem)]],
-  }));
+  }), () => fresh('r'));
   const ids = fresh('pdrop');
   const snap = make.ref({ id: fresh('r'), name: ids, channels: [], type: PDROP_TYPE });
   const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
@@ -4020,7 +4020,7 @@ function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { reado
   // still have ONE answer to "which input row is this created row".
   const positioned = rowNumberWindow(ordered, ORD, [], { partitionBy: [],
     orderBy: encounter && cols.some((column) => column.name === encounter.col) ? [{ expr: col(ordered.id, encounter.col), dir: 'asc' }] : [] }, fresh);
-  return nameBindings(positioned);
+  return nameBindings(positioned, () => fresh('r'));
 }
 
 /** The column a write's input carries its POSITION in, and the created rows recover theirs into.
