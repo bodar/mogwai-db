@@ -746,9 +746,197 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
   distinguishable no other way, and a body that cannot report it DECLINES.
 
 
+### Next round (from the 2026-11-02 round — read before picking items)
+
+Landed this round, all on trunk with green CI: `803e8252` (`name()` takes the compile's minter, so the bare
+`duplicate Plan binding 'r0'` is gone), `2184440a` (constant labels judged by ONE `constantName`), `89ca89d8`
+(absent label ⇒ the rerooted body's INPUT is empty, carried as the host's `Presence`), `0dce4db8` (taken snapshots
+that are read again are spooled as fenced `MATERIALIZED` CTEs, plus one `rankedFirst` first-pick policy). Nothing was
+deferred or parked. The source-union item above is UNBLOCKED: its prerequisite landed in `89ca89d8`, so rebasing
+`wf/source-union-starter-arms-1-3` onto trunk and dropping its `guardedPredicate` and `scalarChildValue` CASE is now
+the first step.
+
+**Shared root causes (one substrate item each, ordered BEFORE the follow-ups they fix):**
+- **S1. One constant-label judge at EVERY host, typed.** Three follow-ups below (F2, F3, F4) are one defect class.
+  `constantName` is the judge, but the literal merge-map `T.label` (`src/compiler/ir/write-args.ts` `labelNames` →
+  `validateLabel`, which does `String(v)`), `dropLabel`'s traversal form (`mutationLabelNames`), and an untyped
+  `withSideEffect` constant all bypass it or reach it without a type. The fix that closes the class is: `validateLabel`
+  REFUSES a non-string rather than coercing it, every constant label goes through `constantName`, and the side-effect
+  registry keeps the `TypeNode` of a typed value. If that last part is too big for one item, decline a typed
+  side-effect constant at a label site and say so in `docs/outstanding-work.md`.
+- **S2. Apply the absent-host gate ONCE.** F1 (V()/E() arm) and F5 (redundant nested gates) are the same mistake: the
+  gate is spread across `scalarChildValue`'s arms rather than wrapped around its result. Fix it by applying
+  `gatedByHost` once around the whole `scalarChildValue` result (and the matching fan-out path), where the enclosing
+  gate discharges the inner presence. An early-return arm then cannot skip the gate, and a nested `by()` is not gated
+  twice.
+- **S3 (carried). A write inside a child / multi-arm body**: still the one substrate item for
+  `local`/`flatMap`/`map`/`union`/`coalesce`/`optional`/`choose`/`repeat`/`sideEffect`/`where`/merge `onMatch` writes.
+  This round confirmed it from three sides: `name()` probes, the `addLabel` probes, and the spooling item's
+  union/local arms.
+
+**Follow-ups from review (major first):**
+1. **F1 (major, wrong answer, same on trunk) — the V()/E() arm skips the absent-host gate** (`src/compiler/rel/lower/reduction.ts`
+   `scalarChildValue`, ~1471, returns `present:'always'` before the gate runs). On modern, with
+   `g.V().optional(__.out().as('a'))` (9 rows, 3 unbound):
+   - `.map(__.select('a').V().count()).fold()` gives [6×9]; the reference is [6×6].
+   - `.map(__.select('a').V().values('name')).count()` gives 9; the reference is 6.
+   - `.local(__.select('a').V().count())` gives 6 on the unbound rows; the reference is 0.
+   - `local(select('a').E().count())` is also wrong.
+   - `project('x').by(__.select('a').V().count())` keeps `x:6`; the reference omits the key.
+
+   Fix it via S2. This also contradicts `hostSelfRow`'s claim to be "the ONE place".
+2. **F2 (major, wrong element written, same on trunk) — the literal merge-map `T.label` bypasses `constantName`.**
+   Each of these writes the wrong label; the reference raises in every case:
+   - `g.mergeV([(T.label): 5])` writes the label `'5'`, and a UUID value writes its text.
+   - `[(T.label): ['a', 5]]` writes `['a','5']`.
+   - the `option(Merge.onCreate|onMatch, [(T.label): 5])` forms do the same.
+   - `g.mergeE([(T.label): 5 or UUID, …])` does the same.
+
+   References: `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:263-306`,
+   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:258-281`.
+   Fix it via S1. The map's TypeNode exists, so the typed judge is available there.
+3. **F3 (major, wrong label dropped, same on trunk) — `dropLabel(<traversal>)` validates nothing.** The builder said
+   this "matches the reference", which is false. The reference resolves through `TraversalUtil.resolveStringArguments`
+   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/DropLabelsStep.java:98-103`),
+   with the same rules as `addLabel` except the empty/hidden check:
+   - `g.V(1).dropLabel(__.constant(['person', 5]))` drops `person`; the reference raises before any drop.
+   - `dropLabel(__.constant('person'), __.constant(5))` drops `person`; the reference raises.
+   - `dropLabel(__.constant(null))` is a silent no-op; the reference raises.
+
+   Fix: `constantName` with `ADD_LABEL_NAME`'s null/notString/collection rules, minus `validateIdentifier`. Then
+   `mutationLabelNames` goes away.
+4. **F4 (major, wrong label written, same on trunk) — a UUID side-effect constant is written as a label.**
+   `constFromNested`'s `withSideEffect` arm (`src/compiler/ir/write-args.ts:68`) has no TypeNode, so it infers
+   `'string'`:
+   - `g.withSideEffect('k', UUID(…)).addV(__.select('k'))` writes the uuid text as a label.
+   - `withSideEffect('k', ['a', UUID(…)]).V(1).addLabel(__.select('k'))` does the same.
+
+   Fix it via S1. Its prerequisite is that the side-effect registry keeps a typed value's type.
+5. **F5 (major, sql-hygiene) — nested gates repeat the same per-row presence term.**
+   `g.V().optional(__.out().as('a')).project('x').by(__.select('a').project('y').by(__.constant(1)))` inlines
+   `CAST(json_extract(un16.a0,'$[#-1].v') AS INT) IS NOT NULL` four times. The answers are correct. This breaks
+   "computed ONCE". Fix it via S2.
+6. **F6 (major, wrong answer, same on trunk) — a second `select()` in a FILTER body after a reroot reads as unbound.**
+   - `g.V().as('b').out().as('a').where(__.select('a').select('b')).count()` gives 0; the reference is 6.
+   - `not(…)` gives 6; the reference is 0.
+   - `g.V().as('b').out().where(__.select('b').select('b')).count()` gives 0; the reference is 6.
+
+   The where-leg / end-label route (`classifyWhereLeg`, `src/compiler/rel/lower/filter.ts`) lowers the second select
+   to an EXISTS over `WHERE (0 = 1)` and never reaches `selectRerootSubject`. The `map(…)` form is correct (6). Route
+   it through `selectRerootSubject` or decline cleanly, and test it either way. Reference: `SelectOneStep` →
+   `Scoping.getScopeValue`, where the output is a split that keeps the path.
+7. **F7 (major, depth) — a per-traverser `mergeV` map is still O(N·V).**
+   `g.V().mergeV(__.project('name').by(values('name'))).count()` takes 2.9 s at N=3000 and 11.7 s at N=6000. The match
+   join drives a spooled snapshot as the OUTER loop against `nodes` with a non-equi `(pp0 = 0) OR EXISTS(…)`
+   predicate. `test/support/snapshot-scans.ts` misses it because the snapshot is outer. Either extend the detector to
+   flag a full base-table scan driven per snapshot row, or give the match join an equi key. Record it in
+   `outstanding-work.md` if it is not taken.
+8. **F8 (minor, cheap) — make `rankedFirst`'s order key total.** Add `vt` as a third sort term (it is already a
+   column, so this is no new per-row term). Today int `1` and double `1.0` tie, so the number class written is
+   decided by scan order (`src/compiler/rel/write.ts`).
+9. **F9 (minor) — say the eager-raise change in §17.**
+   - `g.V().limit(0).addLabel(__.constant(5))`, `…has('name','nobody').addLabel(__.constant(null))` and a statically
+     dead `choose` arm now raise at compile time where the reference answers `[]` / `[v1]`.
+   - `g.addV(__.constant(null))` changed from a decline to `Label can not be null`.
+
+   §17 "Error timing" says "`limit(0)` still answers `[]`", which these cases contradict. Amend that line to cover a
+   constant argument judged at compile time, and pin one empty-input case in a test.
+10. **F10 (minor) — render non-scalar values readably in `constantName`'s `notString`.** Today it prints `String(value)`:
+   - `addLabel(__.constant([['a']]))` raises "…but got: a".
+   - a map prints "[object Map]".
+   - a datetime prints epoch millis.
+
+   Use JSON for a list or map and ISO text for a datetime (`TraversalUtil.java:225` names the class).
+11. **F11 (minor) — `refReads` stops at a Ref** (`src/rel/walk.ts`). A non-retained plan CTE that reads a retained
+    snapshot inline is never spooled; only the corpus gate `nestedSnapshotScans` catches it. Either walk into the
+    definitions of non-retained bindings, or document the limit. Also document that the outer side of an unordered
+    inner join is spooled too: one extra O(N) fill, which corrects the "byte for byte" claim.
+12. **F12 (minor) — `snapshot-scans.ts` finds spools by regex** with one nesting level. Read spool names off the Plan
+    (or an emitter marker) so a deeper spool body cannot silently leave the gate.
+13. **F13 (minor) — missing witnesses.** Each of these now answers correctly but has no test:
+    - choose/coalesce branch-bound labels: `hasLabel('person').choose(values('age').is(gt(30)), out().as('a'), identity()).map(select('a').constant(1)).count()` = 3; `coalesce(out('created').as('a'), identity()).where(select('a').constant(1)).count()` = 4.
+    - a self-loop under `optional(both().as('a'))`.
+    - a nested by-of-reroot record.
+    - `local(select('a').constant(1).sum())` = 6.
+    - `order().by(select('a').label()).by(select('a').id())` = 6.
+    - `map(select('a').id().math('_+1'))` = 6 (trunk raised).
+    - coalesce/choose-led bare `by()`/`map()` bodies.
+    - addLabel in coalesce/optional/flatMap arms, multiplicity `union(identity(),identity()).addLabel(constant('z'))`,
+      and a nested-list item.
+14. **F14 (minor, cheap) — the reroot presence is spelled twice.**
+    - `selectRerootHost` and `filter.ts:selectRerootSubject` repeat `gatedByHost(host, payload)` + the
+      `mayBeAbsent ? 'value-nullness' : aliasPresence` pair. Make it one helper (e.g. `rerootPresence`).
+    - `aliasGuard` spells "label bound" as `aliasPresent(col)` while `aliasPresence` uses `payload id IS NOT NULL`.
+      Make `aliasGuard` use the cheaper spelling, so the fact has one spelling.
+
+**Depth gaps recorded this round (clean declines, unchanged from trunk; not defects):**
+- **Absent-label reroot:**
+  - an edge label rerooted through an endpoint (`optional(outE().as('e')).map(select('e').inV())`), so the
+    edge-endpoint `present` carry is unexercised.
+  - a property/list/map-valued label.
+  - a repeat-body label (`emit().repeat(out().as('a')).times(1).map(select('a'))`, `select(last,'a')`).
+  - a value label with a seeded tail.
+  - a label bound in a union over a value host.
+  - `select('a').valueMap()/elementMap()/project()` under `map()`/`local()`.
+  - top-level union/coalesce/choose/optional with `select('a')…` arms.
+  - `match(__.as('a').where(select('a').label()))`.
+  - `local(select('a').count())`, `where(select('a').count().is(1))`, `choose(select('a'),…)`,
+    `coalesce(select('a').constant(1),…)`, `map(select('a').identity())`.
+- **Writes in arms (S3):**
+  - `local/map/flatMap/union/coalesce/choose/optional/where/sideEffect/repeat(__.both().addV(..))`.
+  - `path()/fold()/groupCount()/valueMap()/simplePath()` feeding `addV`.
+  - `values('name').as('n').addV().property('n', select('n'))`.
+  - `withSack(1)…sack(sum).addV().sack()`.
+  - `addV().path()`.
+  - addLabel in `project().by()`, `map()`, `where()`, `repeat()` bodies and in `mergeV` `option(onMatch, …)`.
+  - `mergeV([(T.label): __.constant(x)])`.
+- **`addLabel(__.constant([]))` still declines.** The reference treats it as a no-op, so passing the vertices
+  through is the faithful answer. This is cheap.
+
+**Reuse-sweep proposals (next round; no answer change unless noted):**
+1. **One `aliasElementHost(rel, proj, row)` constructor that always carries `aliasPresence`** (`src/compiler/rel/alias.ts`).
+   It replaces the four inline alias element hosts in `src/compiler/rel/match.ts` (~469/588/787/794) and the two
+   `hostOf` closures in `src/compiler/rel/lower.ts` (`aliasValueWhere` ~5262, the where-by VALUE-compare ~5357).
+   **This one is a BUG FIX:** those closures drop `present`.
+   `g.V().union(__.as('a'), __.identity()).as('b').where('a', P.eq('b')).by(__.constant(1)).count()` gives 12 on
+   trunk and should be 6 (`by('name')` gives 6). Reference: `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java:131-151`.
+   Static-label SQL is unchanged.
+2. **One `firstPerPartition(rel, partitionBy, orderBy, fresh)`** (Window `row_number` + Filter `rn = 1` +
+   Project-away; this is Calcite's DISTINCT ON,
+   `vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`). It replaces five
+   hand-rolls: `write.ts:rankedFirst`, `map.ts:dedupGroupMembers` (~1155), `collection.ts:firstOccurrences` (~720),
+   the `lower/slice.ts` dedup survivors (~600), and `lower.ts` first-map-per-driver (~5764). It supersedes the
+   2026-11-01 proposal 5. `perOriginWindow` delegates when offset=0 and limit=1. ~35–45 lines; the SQL is identical
+   except for rank/alias names.
+3. **`perOriginWindow` drops the always-true `prn > 0` when `slice.offset` is 0**
+   (`src/compiler/rel/lower/reduction.ts`). That is one per-row term fewer in every local/flatMap/match
+   `limit(n)`/`tail`. The sql-hygiene byte baselines move DOWN; say so in the commit.
+4. **`unitRow(fresh, hint)` in `build.ts`** for the one-row `Values(1)` source. It replaces six literals:
+   `reduction.ts:hostSelfRow` and `mapEntryChild`, the `lower.ts` addE/addV/mergeV source arms (~4303/4311/4321), and
+   `write.ts` ~1354. `mapEntryChild`'s column `one` becomes `n`.
+5. **Fold constant PROPERTY keys through `constantName(KEY_NAME)`** (`src/compiler/ir/write-args.ts:parseProperty`'s
+   uuid/datetime carve-out and `key == null → kind:'none'`). Keys and labels then share one judge. **ANSWER
+   CHANGE:** `g.V(1).property(__.constant(5), 1)` and `property(__.constant(null), 1)` go from an UnsupportedTraversal
+   decline to KEY_NAME's reference sentences. Land it together with S1.
+6. **One `gateOn(pred, value)` CASE primitive**, split out of `child.ts:gatedByHost` and used by
+   `modulator.ts:gatedOn` (~623). Collapse the identity Presence remap at `reduction.ts` ~1380 to `final.present`.
+   Do it with S2.
+7. **`name()` takes the compile's `Minter` directly** (or one shared helper), replacing the seven `() => fresh('r')`
+   adapters (`lower.ts` ×4, `write.ts` ×3). Readability only.
+8. Still open from the 2026-11-01 round: proposal 6 (one exported `ABSENT_VALUE`) and 7 (`emit.ts`
+   `blockAliases`/`renderedAliases`). Proposal 5 is superseded by item 2 above.
+
+**Test infrastructure note:** `test/text-literal.test.ts` "a decoded NUL or lone surrogate declines at every position
+that inlines it" timed out at 5 s under the parallel suite in TWO of this round's CI runs (7.9 s), and passed alone in
+~3.7 s. It needs a larger timeout or a smaller sweep before it starts failing CI.
+
+**Needs-human questions:** none raised this round. (One conditional call for whoever picks it up, not a question:
+reuse proposal 5 turns a decline into a raise. The project rule "a decline costs the user something" favours the
+raise.)
+
 ### Next round (from the 2026-11-01 round — read before picking items)
 
-**PARKED — Source-position `g.union(…)` over a one-row STARTER** (branch `wf/source-union-starter-arms-1-3`, unpushed:
+**PARKED — UNBLOCKED 2026-11-02 (prerequisite landed `89ca89d8`) — Source-position `g.union(…)` over a one-row STARTER** (branch `wf/source-union-starter-arms-1-3`, unpushed:
 `d85bc022` source union + `g.union()`, `0ec60b2f` arm labels ride on, `a163f5a8` partially-bound label presence gate).
 Parked because `a163f5a8` REGRESSES its parent with lost rows / wrong counts. Both open defects share ONE root cause:
 the absent-label gate is applied to the body's OUTPUT, so a SEEDED reducing tail loses its seed. Reference: an absent
