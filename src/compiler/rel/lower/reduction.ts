@@ -11,12 +11,13 @@ import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, type Slice } from '..
 import { someStepDeep } from '../../ir/walk.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
-import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
+import { arg, isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
+import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasPresence, aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, presenceDischarged, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -1377,7 +1378,7 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   // The whole is NULL only where every arm is: a value-nullness answer, unless the FINAL arm always
   // produces (a `constant`/token/`count()` fallback), whose NULL is then kept as the answer.
   const final = arms.at(-1)!;
-  const present: Presence = final.present === 'always' ? 'always' : final.present === 'unknown' ? 'unknown' : 'value-nullness';
+  const present = final.present;
   // A single shared STATIC type stays static (one column); otherwise a per-row tag whose column is the
   // COALESCE of each arm's own vtype — a reducer's `vt` expr, else the arm's static-type literal (the
   // expression-level twin of `withMergedVtype`, `build.ts`).
@@ -1402,6 +1403,76 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
 /** The leading steps of the element arm whose value is a correlated read KEYED ON the host id, so a NULL
  *  id (an absent host) already reads NULL and owes no `gatedByHost` term. */
 const READS_THROUGH_ID: ReadonlySet<string> = new Set(['values', 'label', 'id']);
+
+/**
+ * A RE-SOURCING body (`__.V()…`, `__.E()…`) as ONE value per host row — or `null` to decline.
+ *
+ * A mid-traversal GraphStep emits the graph PER INCOMING TRAVERSER
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java`),
+ * so its rows do not depend on the host's VALUE and the body lowers once as an ordinary rooted read whose
+ * one-row result is an UNCORRELATED scalar SQLite evaluates once. They do depend on the host's PRESENCE:
+ * an absent host (a label unbound on this row — `hostPresence`) is an EMPTY INPUT, and the body over an
+ * empty input is not the body over the graph (`select('a').V().count()` is `0` there, `.values('name')`
+ * is nothing). That is the rule every other arm of this seam keeps — absent host ⟹ the body's INPUT is
+ * empty — applied to the one arm whose read never goes through the host. Three cases:
+ *
+ * 1. a host that cannot be absent — the rooted value unchanged, so a statically bound label's SQL is
+ *    byte-identical;
+ * 2. a body that yields nothing from nothing (`yieldsNothingFromEmpty`) — the value gated by the host,
+ *    NULL (nothing) where it is absent;
+ * 3. otherwise the empty-input value is the body's OWN lowering over an empty input (`[V, limit(0),
+ *    …tail]`, a second uncorrelated scalar), chosen per row. No seed table: `count().math('_+1')` answers
+ *    `1.0` there because that is what that tail answers over nothing.
+ *
+ * An OUTPUT gate keyed on the tail's seed is the refuted alternative — it is wrong as soon as any step
+ * follows the reduction. A body whose empty form `rootedRead` cannot lower declines, which is a property
+ * of the query text.
+ */
+function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const value = reSourcedValue(body, ctx, fresh);
+  if (!value || !mayBeAbsent(host)) return value;
+  if (yieldsNothingFromEmpty(body.slice(1))) {
+    const expr = gatedByHost(host, value.expr);
+    return expr && { ...value, expr, present: meetPresence([value.present, presentOfHost(host)]) };
+  }
+  const present = hostPresence(host);
+  const empty = present && reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh);
+  if (!present || !empty || JSON.stringify(empty.framing) !== JSON.stringify(value.framing)) return null;
+  return {
+    expr: caseWhen(present, value.expr, empty.expr), framing: value.framing,
+    present: meetPresence([value.present, empty.present]),
+    yields: value.yields === 'one' && empty.yields === 'one' ? 'one' : 'first',
+  };
+}
+
+/** A re-sourcing body's value over the graph, whoever the host — `reSourcedUnder`'s one lowering. */
+function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const rooted = rootedRead(body, ctx, fresh);
+  if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar') return null;
+  // A reducing barrier (`__.V().count()`) collapses to EXACTLY one row and is always productive.
+  const counted = rootedCount(rooted, fresh);
+  if (counted) return counted;
+  // THE GENERAL rooted operand — `TraversalUtil.apply` takes the operand's FIRST result (`P.resolve` /
+  // a `ScalarMapStep`, `vendor/tinkerpop/gremlin-core/.../P.java` `tv.next()`), and where the body ends
+  // in `order()` the first is the ORDERED first, which `firstRootedValue` reads off the encounter
+  // channel (`build.ts` — the one authority the predicate/list operand seams share). An EMPTY re-source
+  // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"), so
+  // productivity is an EXISTS over the rooted rows — the concat/dateDiff empty-operand guard raises on
+  // it, never silently skipping. `yields:'first'` because several rows collapse to their first.
+  const value = firstRootedValue(rooted, fresh);
+  return value && { expr: value, framing: rooted.framing, present: 'value-nullness', yields: 'first' };
+}
+
+/** A rooted read that ends in `count()` and collapses to one row, as its one always-present value — or
+ *  `null` where it is not that shape. Shared by the scalar arm and the map-entry arm. */
+function rootedCount(rooted: RootedRead, fresh: Minter): ChildValue | null {
+  if (rooted.framing.kind !== 'scalar' || rooted.framing.result !== 'count' || !collapsedToOneRow(rooted.rel)) return null;
+  const scalar = make.project({
+    id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+    exprs: [['v', col(rooted.rel.id, 'v')]],
+  });
+  return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: 'always', yields: 'one' };
+}
 
 /** A child body's ONE value per host row. */
 export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
@@ -1462,34 +1533,11 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     };
   }
 
-  // A GraphStep inside a per-traverser child still splits each host traverser, but a reducing tail
-  // has one answer independent of which host triggered it. Lower that source chain once as an
-  // ordinary rooted read and embed its one-row result as the correlated scalar value. This is the
-  // `map(__.V().count())` half of re-sourcing; fan-out `flatMap(__.V()…)` needs the general child
-  // rejoin and remains that substrate's responsibility rather than abusing a scalar subquery's
-  // arbitrary-first-row behaviour.
-  if (first.name === 'V' || first.name === 'E') {
-    const rooted = rootedRead(body, ctx, fresh);
-    if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar') return null;
-    // A reducing barrier (`__.V().count()`) collapses to EXACTLY one row and is always productive — the
-    // fast path is unchanged.
-    if (rooted.framing.result === 'count' && collapsedToOneRow(rooted.rel)) {
-      const scalar = make.project({
-        id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
-        exprs: [['v', col(rooted.rel.id, 'v')]],
-      });
-      return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: 'always', yields: 'one' };
-    }
-    // THE GENERAL rooted operand — `TraversalUtil.apply` takes the operand's FIRST result (`P.resolve` /
-    // a `ScalarMapStep`, `vendor/tinkerpop/gremlin-core/.../P.java` `tv.next()`), and where the body ends
-    // in `order()` the first is the ORDERED first, which `firstRootedValue` reads off the encounter
-    // channel (`build.ts` — the one authority the predicate/list operand seams share). An EMPTY re-source
-    // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"), so
-    // productivity is an EXISTS over the rooted rows — the concat/dateDiff empty-operand guard raises on
-    // it, never silently skipping. `yields:'first'` because several rows collapse to their first.
-    const value = firstRootedValue(rooted, fresh);
-    return value && { expr: value, framing: rooted.framing, present: 'value-nullness', yields: 'first' };
-  }
+  // A GraphStep inside a per-traverser child RE-SOURCES the graph: its answer is independent of WHICH
+  // host triggered it, but not of WHETHER one did (`reSourcedUnder`). This is the `map(__.V().count())`
+  // half of re-sourcing; fan-out `flatMap(__.V()…)` is the general child rejoin's (`flatMapRejoin`),
+  // rather than abusing a scalar subquery's arbitrary-first-row behaviour.
+  if (first.name === 'V' || first.name === 'E') return reSourcedUnder(host, body, ctx, fresh);
 
   // THE RECORD ARM — `by(__.project('a','b')…)`, one traverser in and one MAP out.
   //
@@ -1498,10 +1546,13 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // whole body or nothing: a chain past it (`__.project('a').select('a')`) re-roots to a field's own
   // stream, which is the RECORD relation's business and not a correlated read's.
   if (first.name === 'project' && body.length === 1) {
-    const self = hostSelf(host);
-    const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
     // `project()` is a `ScalarMapStep` — one map per traverser, never several — and NONE over an absent
-    // host (`gatedByHost`): its map is built from the row's labels as much as from the host.
+    // host (`gatedByHost`): its map is built from the row's labels as much as from the host. The map is
+    // built UNDER that gate, so its `by()`s see the host present (`presenceDischarged`) rather than each
+    // re-spelling the same presence term.
+    const inner = presenceDischarged(host);
+    const self = hostSelf(inner);
+    const node = self && recordNode(first, inner, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
     const expr = node && gatedByHost(host, node.node);
     return expr && { expr, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: node.valOf }, present: presentOfHost(host), yields: 'one' };
   }
@@ -1882,13 +1933,8 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     // scalar-child V()/E() arm. Keep it scalar; only the unreduced fan-out below becomes the
     // group's List value.
     const rooted = rootedRead(body, ctx, fresh);
-    if (rooted?.framing.kind === 'scalar' && rooted.framing.result === 'count' && collapsedToOneRow(rooted.rel)) {
-      const scalar = make.project({
-        id: fresh('evc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
-        exprs: [['v', col(rooted.rel.id, 'v')]],
-      });
-      return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: 'always', yields: 'one' };
-    }
+    const counted = rooted && rootedCount(rooted, fresh);
+    if (counted) return counted;
     const elem = first.name === 'V' ? 'vertex' : 'edge';
     const scanned = ctx.source.elementScan(elem, first.args, fresh);
     if (!scanned) return null;

@@ -764,11 +764,15 @@ the first step.
   REFUSES a non-string rather than coercing it, every constant label goes through `constantName`, and the side-effect
   registry keeps the `TypeNode` of a typed value. If that last part is too big for one item, decline a typed
   side-effect constant at a label site and say so in `docs/outstanding-work.md`.
-- **S2. Apply the absent-host gate ONCE.** F1 (V()/E() arm) and F5 (redundant nested gates) are the same mistake: the
-  gate is spread across `scalarChildValue`'s arms rather than wrapped around its result. Fix it by applying
-  `gatedByHost` once around the whole `scalarChildValue` result (and the matching fan-out path), where the enclosing
-  gate discharges the inner presence. An early-return arm then cannot skip the gate, and a nested `by()` is not gated
-  twice.
+- **S2. ✅ LANDED — the re-sourcing V()/E() arm honours the absent-host INPUT rule.** (Corrected wording: an OUTPUT
+  gate around `scalarChildValue` is the refuted 2026-11-01 mechanism — it loses a seed, a seed table is wrong once any
+  step follows the reduction, and it would add a per-row CASE to the arms that already gate their input.) The one arm
+  that ignored the host now goes through `reduction.ts:reSourcedUnder`: unchanged for a host that cannot be absent;
+  `gatedByHost` where the tail yields nothing from nothing (`ir/productivity.ts:yieldsNothingFromEmpty`); else
+  `CASE WHEN <presence> THEN <rooted body> ELSE <rooted [V|E, limit(0), …tail]> END` — two uncorrelated scalars, so
+  the empty-input answer is the body's own lowering. The fan-out path (`flatMapRejoin`) was already right (it
+  reroots through the host). F5: a record built under the host gate sees the host `presenceDischarged`. One
+  `caseWhen` primitive backs `gatedByHost` and `modulator.ts:gatedOn`.
 - **S3 (carried). A write inside a child / multi-arm body**: still the one substrate item for
   `local`/`flatMap`/`map`/`union`/`coalesce`/`optional`/`choose`/`repeat`/`sideEffect`/`where`/merge `onMatch` writes.
   This round confirmed it from three sides: `name()` probes, the `addLabel` probes, and the spooling item's

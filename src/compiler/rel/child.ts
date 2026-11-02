@@ -274,8 +274,20 @@ export const presentOfHost = (host: ChildHost | Subject): Presence =>
 export const gatedByHost = (host: ChildHost | Subject, value: Expr): Expr | null => {
   const present = hostPresence(host);
   if (!present) return null;
-  return present === ALWAYS_PRODUCTIVE ? value : { kind: 'case', whens: [[present, value]], else: compilerNull() };
+  return caseWhen(present, value);
 };
+
+/** `CASE WHEN <pred> THEN value ELSE otherwise END` — `otherwise` NULL ("nothing") unless given — and
+ *  `value` itself, no per-row term, where `pred` is the constant `ALWAYS_PRODUCTIVE`. The one spelling of
+ *  a presence gate, shared by `gatedByHost` and a member node's `gatedOn` (`modulator.ts`). */
+export const caseWhen = (pred: Expr, value: Expr, otherwise: Expr = compilerNull()): Expr =>
+  pred === ALWAYS_PRODUCTIVE ? value : { kind: 'case', whens: [[pred, value]], else: otherwise };
+
+/** The host as seen INSIDE a value already gated on its presence (`gatedByHost`): present by
+ *  construction there, so a body built under the gate owes no second copy of the same term. The caller
+ *  must gate the result on the ORIGINAL host. */
+export const presenceDischarged = <H extends ChildHost>(host: H): H =>
+  mayBeAbsent(host) ? { ...host, present: 'always' } : host;
 
 /** A host that may be ABSENT on some rows — its `hostPresence` is not the constant truth. */
 export const mayBeAbsent = (host: ChildHost | Subject): boolean => presentOfHost(host) !== 'always';

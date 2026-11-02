@@ -91,6 +91,42 @@ describe('a value label bound in a union arm', () => {
   test('not(select.constant)', () => expect(vals(`${U}.not(__.select('a').constant(1))`)).toEqual([2]));
 });
 
+// A RE-SOURCING body (`select('a').V()…`) never reads through the host, so its input is emptied by
+// `reSourcedUnder` (`rel/lower/reduction.ts`): a mid-traversal GraphStep emits once per incoming traverser
+// (step/map/GraphStep.java), so over an unbound label the body answers what it answers over NOTHING.
+describe('a re-sourcing body over an unbound label sees an empty input', () => {
+  test('map(select.V.count) is 0 there', () => expect(sorted(vals(`${OPT}.map(__.select('a').V().count())`))).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]));
+  test('a continuation after the seed computes on it', () =>
+    expect(sorted(vals(`${OPT}.map(__.select('a').V().count().math('_+1'))`))).toEqual([1, 1, 1, 7, 7, 7, 7, 7, 7]));
+  test('an unseeded tail is nothing', () => expect(count(`${OPT}.map(__.select('a').V().values('name')).count()`)).toBe(6));
+  test('local(select.E.count)', () => expect(sorted(vals(`${OPT}.local(__.select('a').E().count())`))).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]));
+  test('local(select.V.fold).count(local)', () =>
+    expect(sorted(vals(`${OPT}.local(__.select('a').V().fold()).count(local)`))).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]));
+  test('flatMap(select.V) fans out only from bound rows', () => expect(count(`${OPT}.flatMap(__.select('a').V()).count()`)).toBe(36));
+  test('project().by(select.V.count) is 0 there', () => {
+    const xs = rows(`${OPT}.project('x').by(__.select('a').V().count())`).map((r) => JSON.parse(r.map)[0][1].v);
+    expect(sorted(xs)).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]);
+  });
+  test('a statically bound label keeps the plain rooted read', () => {
+    const plan = compile("g.V().as('a').out().map(__.select('a').V().count())", {});
+    if (plan.kind !== 'read') throw new Error('expected read plan');
+    expect(plan.sql).not.toContain('CASE WHEN');
+  });
+});
+
+// A record built over the possibly-absent label is gated ONCE (`presenceDischarged`): its by()s run under
+// that gate, so the presence term is not re-spelled inside the map it already guards.
+test('a record over an unbound label spells its presence term once per map', () => {
+  const g = `${OPT}.project('x').by(__.select('a').project('y').by(__.constant(1))).select('x').select('y').sum()`;
+  expect(vals(g)).toEqual([6]);
+  const plan = compile(g, {});
+  if (plan.kind !== 'read') throw new Error('expected read plan');
+  const presence = plan.sql.match(/json_extract\(\w+\.a0, '\$\[#-1\]\.v'\) AS INT\) IS NOT NULL/g)?.length ?? 0;
+  const maps = plan.sql.split("json_object('t', 'string', 'v', 'y')").length - 1;
+  expect(maps).toBeGreaterThan(0);
+  expect(presence).toBe(maps);
+});
+
 describe('a statically bound label owes no presence term', () => {
   for (const g of [
     "g.V().as('a').out().map(__.select('a').label())",

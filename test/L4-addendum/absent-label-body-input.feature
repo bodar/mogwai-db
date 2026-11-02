@@ -180,3 +180,164 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
     Then the result should be unordered
       | result |
       | d[1].i |
+
+  # A body that RE-SOURCES the graph after the unbound label (`select("a").V()…`) still has an EMPTY
+  # input there: a mid-traversal GraphStep emits once PER incoming traverser (step/map/GraphStep.java),
+  # so nothing for none. Its answer on those rows is the body's own answer over nothing — a seeded
+  # `count()` is 0, a continuation after it computes on that 0, an unseeded tail is nothing at all —
+  # never the whole graph's answer.
+  Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).map(__.select("a").V().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[0].l |
+      | d[0].l |
+      | d[0].l |
+
+  Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_count_mathX_plus_1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).map(__.select("a").V().count().math("_+1"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[7.0].d |
+      | d[7.0].d |
+      | d[7.0].d |
+      | d[7.0].d |
+      | d[7.0].d |
+      | d[7.0].d |
+      | d[1.0].d |
+      | d[1.0].d |
+      | d[1.0].d |
+
+  Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_valuesXnameXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).map(__.select("a").V().values("name")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_optionalXout_asXaXX_localXselectXaX_V_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).local(__.select("a").V().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[0].l |
+      | d[0].l |
+      | d[0].l |
+
+  Scenario: g_V_optionalXout_asXaXX_localXselectXaX_E_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).local(__.select("a").E().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[6].l |
+      | d[0].l |
+      | d[0].l |
+      | d[0].l |
+
+  Scenario: g_V_optionalXout_asXaXX_projectXxX_byXselectXaX_V_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).project("x").by(__.select("a").V().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"d[6].l"}] |
+      | m[{"x":"d[6].l"}] |
+      | m[{"x":"d[6].l"}] |
+      | m[{"x":"d[6].l"}] |
+      | m[{"x":"d[6].l"}] |
+      | m[{"x":"d[6].l"}] |
+      | m[{"x":"d[0].l"}] |
+      | m[{"x":"d[0].l"}] |
+      | m[{"x":"d[0].l"}] |
+
+  Scenario: g_V_optionalXout_asXaXX_order_byXselectXaX_V_countX_byXnameX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).order().by(__.select("a").V().count()).by("name").values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | lop |
+      | ripple |
+      | vadas |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | ripple |
+      | vadas |
+
+  Scenario: g_V_optionalXout_asXaXX_localXmapXselectXaX_E_count_mathX_times_2XXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).local(__.map(__.select("a").E().count().math("_*2")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[12.0].d |
+      | d[12.0].d |
+      | d[12.0].d |
+      | d[12.0].d |
+      | d[12.0].d |
+      | d[12.0].d |
+      | d[0.0].d |
+      | d[0.0].d |
+      | d[0.0].d |
+
+  # A record built over the possibly-absent label is gated ONCE; its by()s run under that gate.
+  Scenario: g_V_optionalXout_asXaXX_projectXxX_byXselectXaX_projectXyX_byXconstantX1XXX_selectXxX_selectXyX_sum
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().optional(__.out().as("a")).project("x").by(__.select("a").project("y").by(__.constant(1))).select("x").select("y").sum()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].i |
