@@ -61,7 +61,7 @@
  * blocked traversals themselves, so the shape of the work is read off the instrument rather than
  * guessed at from a number.
  */
-import { extractSack, extractSideEffects, extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
+import { extractSack, extractSideEffects, extractStrategies, parseGremlin, stepChain, type SideEffectConstants } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
@@ -188,7 +188,7 @@ for (const query of CORPUS) {
   // The `withSideEffect` registry rides with the chain, exactly as `compiler.ts` supplies it: a
   // constant the lowering is not handed reads as an uncovered gap, which is precisely the
   // measurement error this instrument exists to avoid.
-  let sideEffects: Map<string, any>;
+  let sideEffects: SideEffectConstants;
   // The SACK SEED rides with the chain for the same reason the `withSideEffect` registry does, and
   // its absence was the same measurement error one step further on: a `withSack()` traversal lowered
   // with no seed declines at its first `sack()` and reads as vocabulary the algebra cannot express,

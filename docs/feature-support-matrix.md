@@ -4,7 +4,7 @@ A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only wh
 note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
 Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
-**L3 conformance: <!-- L3:passing -->1,882<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,883<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -280,7 +280,7 @@ wrong number class.
 | NUL in string data | carried whole, but `length`/`substr`/`like`/`tinker.search` stop at it. A NUL in statement text declines |
 | Lone surrogate in a parameter or JSON | reaches SQLite as `''` or U+FFFD (in statement text it declines) |
 | Write visibility | a write step sees a snapshot of its input; later steps see all its writes (`g.V().not(out()).drop()` drops exactly the leaves) |
-| Error timing | errors are eager: a type error may raise where Java's lazy pull would stop first (`limit(0)` still answers `[]`) |
+| Error timing | errors are eager: a type error may raise where Java's lazy pull would stop first (`limit(0)` still answers `[]` for a value computed per row). A CONSTANT name in the query text — a label or property key (`addLabel(constant(5))`, `dropLabel(constant(null))`, `mergeV([(T.label): 5])`, `property(constant(5), 1)`) — is judged at compile time, so it raises even over a stream that turns out empty (`V().limit(0).addLabel(constant(5))`) or a statically dead `choose` arm |
 | Error vs filter order | a later filter may drop a row before its type error is evaluated (`inject(1).toUpper().is('x')` is `[]`) |
 | Unread erroneous values | an error in a value nothing reads is not raised (`project('x').by(values('age').toUpper()).count()` answers) |
 | Number equality | by value: `1`, `1L`, `1.0` are one value; `true`/`1` and a UUID/Char vs String stay distinct. A merged key frames as one of the merged classes (`inject(1, 1.0).groupCount()` is `{1.0: 2}`) |
@@ -307,7 +307,7 @@ wrong number class.
 | A null-valued label in a child body | a label bound to `null` inside a branch arm reads as unbound there: `inject(0).union(constant(null).as('a'), constant(2)).map(select('a')).count()` is `0` (Java `1`) |
 | Number spelling | `asString()`/`format()`/`conjoin()` use SQLite's text: 15 significant digits, a whole Double keeps `.0`, exponent below 1e-4 or from 1e15 (`1e-5` is `1.0e-05`), infinity `Inf`; a Float prints its written decimal (`0.1f` is `0.1`) |
 | `format()` over a multi-valued property | uses the first value (Java throws) |
-| A non-String text receiver | the error names the value (`encountered 1.`), not its Java class — a non-String computed label too (`Label traversal must produce a String, but got 29`) |
+| A non-String text receiver | the error names the value (`encountered 1.`), not its Java class — a non-String computed label too (`Label traversal must produce a String, but got 29`); a list or map is named by its JSON, a datetime by its ISO text, a merge map's `T.label` by the value its `found: %s` names the class of |
 | Untyped JSON map keys | one total spelling rule; colliding keys render as `[key, value]` entries so nothing is lost; NaN/Infinity as name strings |
 | Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`; an edge endpoint is its bare id |
 | Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |

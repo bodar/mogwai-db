@@ -22,7 +22,7 @@ import { propertyAsString, propertyElement, propertyHasClause, propertyId, prope
 import { edgeEndpoint } from './element.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy, type SideEffectConstants } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
@@ -1463,9 +1463,9 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
   if (!spec || spec.labels.length !== 1) return 'pass';
   const name = spec.labels[0]!;
   if (!ctx.sideEffects.has(name)) return 'pass';
-  const value = ctx.sideEffects.get(name);
+  const { value, type } = ctx.sideEffects.get(name)!;
   if (!(value instanceof Map)) return 'pass';
-  const blob = mapLiteralBlob(value, null, null);
+  const blob = mapLiteralBlob(value, type, null);
   if (!blob) return null;
   const keys = [...(value as Map<unknown, unknown>).keys()];
   const stringKeys = keys.filter((k): k is string => typeof k === 'string');
@@ -3147,7 +3147,7 @@ export interface Lowering {
    *
    * Defaults to EMPTY, which is what a lowering with no source options has.
    */
-  readonly sideEffects?: Map<string, any>;
+  readonly sideEffects?: SideEffectConstants;
   /**
    * The labels declared with the REDUCER form `withSideEffect(name, seed, Operator.x)` — a seeded,
    * operator-merged collection.
@@ -3270,7 +3270,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
 const NO_RANKED_ORDERS: RankedOrders = new Map();
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
-const NO_SIDE_EFFECTS: Map<string, any> = new Map();
+const NO_SIDE_EFFECTS: SideEffectConstants = new Map();
 
 /** No reducer-form `withSideEffect` declared. */
 const NO_SIDE_EFFECT_POLICIES: ReadonlyMap<string, MergePolicy> = new Map();
@@ -4867,11 +4867,11 @@ function elementTail(
       if (pathCarried(rel)) return null;
       if (step.modulators?.length || step.optionArms) return null;
       // A sideEffect that mutates labels and passes the SAME vertices through, so the tail is the
-      // ordinary fold after it. Both lowerings decline the refusal cases (edge/immutable/mixed
-      // collection), which are errors rather than writes this route may make.
+      // ordinary fold after it. Both lowerings decline an edge or an immutable graph; a constant name the
+      // reference refuses (a null, a non-String, a mixed collection) raises its sentence at compile time.
       const mutated = step.name === 'addLabel'
         ? elementAddLabel(rel, elem, step, childSeam(ctx, fresh), labels, fresh)
-        : elementDropLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh);
+        : elementDropLabel(rel, elem, step, childSeam(ctx, fresh), fresh);
       if (!mutated) return null;
       return afterWrite(ctx.writes, rel, steps, at, at + 1, mutated.bindings, ctx.params, fresh,
         () => elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels));

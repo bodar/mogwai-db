@@ -33,7 +33,7 @@ import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
-    BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
+    BigDecimal, Duration, exactInteger, gremlinTypeOf, mapSlot, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
 import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
@@ -152,7 +152,7 @@ export function graphsonValue(x: unknown): TypedValue {
       const k = graphsonValue(flat[i]);
       const v = graphsonValue(flat[i + 1]);
       pairs.push([k.value, v.value]);
-      entries[String(k.value)] = { key: k.type, value: v.type };
+      entries[mapSlot(k.value)] = { key: k.type, value: v.type };
     }
     return { value: new Map(pairs), type: { t: 'map', entries } };
   }

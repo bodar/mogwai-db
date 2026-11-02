@@ -11,7 +11,7 @@ import { BATCHING_BRANCHES, isLocalScope, isStreamBarrier, type Slice } from '..
 import { someStepDeep } from '../../ir/walk.ts';
 import { normalize } from '../../ir/passes.ts';
 import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarType } from '../../../sql/kernel/render.ts';
-import { arg, isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
+import { arg, isColumnArg, isNested, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
@@ -824,7 +824,7 @@ export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minte
  *  the compiler will raise for itself). A rooted body goes through `normalize(stepChain(…))` and not
  *  `childSteps`, which strips a source and answers the empty chain, i.e. an endpoint that silently
  *  matched nothing. */
-export function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null {
+export function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?: SideEffectConstants): readonly IRStep[] | null {
   try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch { return null; }
 }
 

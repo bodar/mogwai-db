@@ -5,7 +5,7 @@ import { renderProgram } from '../../program.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
-import type { MergePolicy } from '../../gremlin/frontend.ts';
+import type { MergePolicy, SideEffectConstants } from '../../gremlin/frontend.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
@@ -91,7 +91,7 @@ export interface RelRequest {
  * flag.
  */
 export function compileViaRel(
-  request: RelRequest, steps: IRStep[], params: Record<string, any>, sideEffects: Map<string, any>,
+  request: RelRequest, steps: IRStep[], params: Record<string, any>, sideEffects: SideEffectConstants,
 ): Compiled | Program | null {
   // ONE fast-path switch reaches the lowering. `movementCollapse` picks the grouped `SUM(bulk)`,
   // which is a lowering STRATEGY the algebra can state, so both positions stay expressible and the
@@ -131,7 +131,7 @@ export function compileViaRel(
  * different label regime from its head, which is a wrong answer no gate would name.
  */
 export function loweringOptions(
-  request: RelRequest, params: Record<string, any>, sideEffects: Map<string, any>,
+  request: RelRequest, params: Record<string, any>, sideEffects: SideEffectConstants,
 ): Lowering {
   return {
     params,

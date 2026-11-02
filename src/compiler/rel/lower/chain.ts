@@ -5,7 +5,7 @@ import type { AliasMap } from '../../alias.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { childSteps } from '../../ir/passes.ts';
 import type { GraphSource } from '../source.ts';
-import type { MergePolicy } from '../../../gremlin/frontend.ts';
+import type { MergePolicy, SideEffectConstants } from '../../../gremlin/frontend.ts';
 import type { Service } from '../../../services/spi/types.ts';
 import type { Collections } from '../collection.ts';
 import type { LabelRegime } from '../../../api.ts';
@@ -146,7 +146,7 @@ export interface ChainCtx extends FilterCtx {
    *  a table inline. See `src/compiler/rel/source.ts`. */
   readonly source: GraphSource;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
-  readonly sideEffects: Map<string, any>;
+  readonly sideEffects: SideEffectConstants;
   /** The merge POLICY declared with the REDUCER form of `withSideEffect`, by label. See `Lowering`. */
   readonly sideEffectPolicies: ReadonlyMap<string, MergePolicy>;
   /** Every side-effect key and path label the whole PROGRAM declares. See `Lowering.scopeNames`. */
@@ -273,7 +273,7 @@ export const inArmBody = (ctx: ChainCtx): ChainCtx =>
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */
-export const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null => {
+export const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: SideEffectConstants): readonly IRStep[] | null => {
   try { return childSteps(nested, params, sideEffects); } catch { return null; }
 };
 

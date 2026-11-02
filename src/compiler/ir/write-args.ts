@@ -1,9 +1,9 @@
-import { gremlinTypeOf, mapEntryType, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
+import { gremlinTypeOf, mapEntryType, mapSlot, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import {
     isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
-    stepChain, type Arg, type ArgValue, type Step,
+    stepChain, type Arg, type ArgValue, type SideEffectConstants, type Step,
 } from '../../gremlin/frontend.ts';
-import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
+import { constantName, KEY_NAME, mergeLabelRules, validatePropertyKey } from '../../gremlin/validate.ts';
 import { LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../api.ts';
 import type { IRStep } from './strategies.ts';
 import { elementKindAt, LABEL_MUTATIONS } from './step.ts';
@@ -43,14 +43,14 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 
 
 // A nested `__.select(k)` where k is a withSideEffect(k, const) key resolves to the
-// constant at compile time (correct-by-construction — the value never changes). Returns
-// {has:false} for any other nested shape so the caller falls through to its own handling.
-function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: true; value: ArgValue } | { has: false; value: undefined } {
-  if (!isNested(nested)) return { has: false, value: undefined };
+// constant's declaring `Arg` at compile time (correct-by-construction — the value never
+// changes, and its type rides along). `null` for any other nested shape so the caller falls
+// through to its own handling.
+function constFromSelect(nested: any, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): Arg | null {
+  if (!isNested(nested)) return null;
   const inner = stepChain(nested.nested, params);
-  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string' && sideEffects?.has(inner[0].args[0].value))
-    return { has: true, value: sideEffects.get(inner[0].args[0].value) };
-  return { has: false, value: undefined };
+  const key = inner.length === 1 && inner[0].name === 'select' ? inner[0].args[0]?.value : undefined;
+  return typeof key === 'string' ? sideEffects?.get(key) ?? null : null;
 }
 
 // A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
@@ -59,13 +59,12 @@ function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined,
 //                    so UUID(..)/datetime(..) keep their type, not a JS-inferred string/int).
 // This is what lets a global mergeV (no driver to seed a V/E source at) resolve a nested
 // value, and what resolves a nested property KEY. {has:false} → fall through to a seeded read.
-export function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: true; value: ArgValue; vtype: CanonicalType | null; typeNode: TypeNode | null } | { has: false; value: undefined; vtype: null; typeNode: null } {
+export function constFromNested(nested: any, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): { has: true; value: ArgValue; vtype: CanonicalType | null; typeNode: TypeNode | null } | { has: false; value: undefined; vtype: null; typeNode: null } {
+  // A `withSideEffect` constant is its declaring `Arg` (`extractSideEffects`), so it carries the type its
+  // text stated exactly as a `constant(…)` does: `withSideEffect('k', UUID(…))` is a uuid, not the string
+  // a JS-value inference would call it.
   const c = constFromSelect(nested, sideEffects, params);
-  // A `withSideEffect` constant is a raw JS value out of the registry with no wire arg behind it, so
-  // it HAS no TypeNode and `null` is the honest answer rather than a gap — `gremlinTypeOf(v, null)`
-  // infers the same way every JSON-path value does. The `constant(…)` arm below is the one that has a
-  // declared type to carry, and the asymmetry is the provenance, not an omission.
-  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null), typeNode: null };
+  if (c) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, c.type), typeNode: c.type };
   if (isNested(nested)) {
     const inner = stepChain(nested.nested, params);
     // THE TYPE NODE RIDES ALONG, because the constant's own `Arg` already holds it and dropping it
@@ -142,12 +141,6 @@ export function readCardinality(args: any[]): { cardinality: Cardinality; rest: 
   return { cardinality: null, rest: args, off: 0 };
 }
 
-/** The canonical stored type of a property()'s VALUE arg: the type its carrying
- *  channel declared (the value Arg's type), else inferred from the
- *  JS value. `off`+1 is the value's index in the original arg list (key is at off). */
-const propVtype = (step: Step, val: any, off: number): CanonicalType | null =>
-  gremlinTypeOf(val, step.args[off + 1]?.type ?? null);
-
 /** The property()'s VALUE arg's full recursive TypeNode (the value Arg's type at the value's
  *  position) — carried alongside vtype so a collection value's elements/keys are tagged
  *  losslessly by valueNodeOf. null for an untyped channel (infer per element at storage). */
@@ -172,7 +165,7 @@ export type ParsedProperty =
    *  which is why it is its own arm rather than a `prop` whose key happens to be missing. */
   | { kind: 'mapBody'; nested: { nested: any } };
 
-export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
+export function parseProperty(s: Step, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): ParsedProperty {
   // The MAP FORM has no value argument at all, so it is recognized before the (key, value) read —
   // reading `args[1]` of a one-argument step was a TypeError out of a verify Pass, i.e. a crash where
   // the contract is an answer or a decline. (A literal Map argument never reaches here: the
@@ -187,14 +180,21 @@ export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined
   let key = keyArg.value, val = valueArg.value;
   let keyName = keyArg.name, valueName = valueArg.name;
   const metaArgs = s.args.slice(off + 2);
-  // A constant KEY folds to its literal — unless the constant is a TEXT-carried non-String (a uuid, a
-  // datetime), which would fold to a string the reference never sees: it refuses that key as not a String
-  // (`ElementHelper.legalPropertyKeyValueArray`), and the runtime-key path is the one that says so.
-  { const ck = constFromNested(key, sideEffects, params); if (ck.has && !(typeof ck.value === 'string' && ck.vtype !== null && ck.vtype !== 'string')) { key = ck.value; keyName = null; } }
-  { const cv = constFromSelect(val, sideEffects, params); if (cv.has) { val = cv.value; valueName = null; } }
+  // A constant KEY (`constant(…)`, a `withSideEffect` constant) is a name the query TEXT holds, so it is
+  // judged NOW by the one constant-name judge under the key's rules (`constantName(KEY_NAME)`, the same
+  // table the runtime-key path guards by): a null, a non-String — a TEXT-carried uuid or datetime
+  // included, by its stated type — or an empty or hidden key raises the reference's sentence
+  // (`ElementHelper.validateProperty` / `legalPropertyKeyValueArray`) rather than declining. A folded T
+  // token stays the token.
+  const ck = constFromNested(key, sideEffects, params);
+  if (ck.has) { key = isTokenArg(ck.value) ? ck.value : constantName(ck.value, ck.vtype, KEY_NAME); keyName = null; }
+  // A `withSideEffect` VALUE folds to its declaring `Arg`, whose stated type is the value's.
+  const cv = constFromSelect(val, sideEffects, params);
+  if (cv) { val = cv.value; valueName = null; }
   if (key == null || (typeof key === 'object' && !isNested(key) && !isTokenArg(key))) return { kind: 'none' };
   if (isTokenArg(key)) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
-  return { kind: 'prop', spec: { key, keyName, value: val, valueName, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality } };
+  const typeNode = cv ? cv.type : propTypeNode(s, off);
+  return { kind: 'prop', spec: { key, keyName, value: val, valueName, vtype: gremlinTypeOf(val, typeNode), typeNode, meta: metaOf(metaArgs), cardinality } };
 }
 
 /** What an EDGE property may not carry. TinkerPop's edge `Property` has neither a cardinality nor
@@ -207,7 +207,7 @@ export function assertEdgePropertySpec(sp: PropSpec): void {
 
 /** A run of `property()` steps → their specs, for a host on an element that ALREADY EXISTS (a
  *  mutation tail, a merge tail). A T token is immutable on such an element, so it is the refusal. */
-export function parsePropertyTail(steps: readonly Step[], what: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): PropSpec[] {
+export function parsePropertyTail(steps: readonly Step[], what: string, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): PropSpec[] {
   const specs: PropSpec[] = [];
   for (const s of steps) {
     if (s.name !== 'property') throw new Deferral(`step not implemented after ${what}: ${s.name}()`);
@@ -314,8 +314,9 @@ function classifyMergeVal(v: any): any {
   return m ? { incoming: m } : v;
 }
 
-// Resolve a WHOLE-ARG merge traversal (mergeV(__.…) / option(Merge.x, __.…)) to a
-// concrete map. A withSideEffect(key, map) constant read back by __.select(key) is a
+// Resolve a WHOLE-ARG merge traversal (mergeV(__.…) / option(Merge.x, __.…)) to a concrete map WITH ITS
+// TYPE (a map literal keeps the type it came with; a side-effect constant brings its declaring `Arg`'s).
+// A withSideEffect(key, map) constant read back by __.select(key) is a
 // per-driver-invariant constant, so substitute it directly (correct-by-construction).
 // The other legal whole-arg forms each need substrate this seam doesn't own — fail
 // CLOSED naming exactly what's missing (never mis-execute):
@@ -327,12 +328,13 @@ function classifyMergeVal(v: any): any {
 //     nested-WRITE execution (runNested runs reads only).
 // Per-VALUE nested traversals inside a map literal ([k: __.trav]) do NOT come here —
 // they stay in the map and resolveMergeSpec resolves them correlated per driver.
-function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): any {
-  if (!isNested(raw)) return raw;
+function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): { readonly value: any; readonly type: TypeNode | null } {
+  if (!isNested(raw)) return { value: raw, type };
   const inner = stepChain(raw.nested, params);
   if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string') {
     const k = inner[0].args[0].value;
-    if (sideEffects?.has(k)) return sideEffects.get(k);
+    const declared = sideEffects?.get(k);
+    if (declared) return declared;
     throw new Deferral(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
   }
   const names = inner.map((s) => s.name).join('.');
@@ -508,7 +510,7 @@ export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void
     if (k in merge.props) clash(k, merge.props[k], v);
 }
 
-function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = null): MergeSpec {
+function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: SideEffectConstants, params: Record<string, any> = {}, defaultCardinality: Cardinality = null): MergeSpec {
   const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} };
   // A WHOLE-ARG map-producing traversal as the SEARCH map — `mergeV(__.project('k').by(__.body))` —
   // resolves to concrete values PER DRIVER (`MergeElementStep.materializeMap`), so its criteria are
@@ -525,7 +527,7 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       return spec;
     }
   }
-  raw = resolveMergeArg(raw, sideEffects, params);
+  ({ value: raw, type: typeNode } = resolveMergeArg(raw, typeNode, sideEffects, params));
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
     throw new Deferral('a merge argument that is not a map ([k:v] / bound Map), null, or empty ([:])');
@@ -543,11 +545,11 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       continue;
     }
     const c = classifyMergeKey(k);
-    const entryKey = typeNode && typeof typeNode === 'object' && typeNode.t === 'map' ? typeNode.entries[String(k)]?.key : null;
+    const entryKey = typeNode && typeof typeNode === 'object' && typeNode.t === 'map' ? typeNode.entries[mapSlot(k)]?.key : null;
     validateMergeKey(role, k, v, c.kind, typeof entryKey === 'string' ? entryKey : null);
     // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
-    // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
-    if (c.kind === 'label') spec.label = isNested(v) ? v : labelNames(v, true, 'mergeV');
+    // resolveMergeSpec, per driver). Only a non-nested label is judged, typed, now.
+    if (c.kind === 'label') spec.label = isNested(v) ? v : labelNames(v, mapEntryType(typeNode, k), role);
     else if (c.kind === 'id') spec.id = v;
     else if (c.kind === 'outV') spec.outV = classifyMergeVal(v);
     else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
@@ -673,7 +675,7 @@ function generalMapArg(raw: any, params: Record<string, any>): unknown | null {
 
 export function mergeMaps(
   step: IRStep, mods: readonly Step[], op: MergeRole['op'],
-  sideEffects: Map<string, any> | undefined, params: Record<string, any>,
+  sideEffects: SideEffectConstants | undefined, params: Record<string, any>,
 ): MergeMaps {
   // THE INCOMING TRAVERSER AS THE MAP — no-arg `mergeV()`/`mergeE()` and `mergeV(__.identity())` both
   // mean "the driver's value IS the merge map" (`materializeMap` with an identity map traversal). The
@@ -743,20 +745,18 @@ function requireEndpointOption(
     throw new ValueParseError(`option(${side}) must be specified if it is used for ${side === 'outV' ? 'OUT' : 'IN'}`);
 }
 
-/** A label value in a merge map / an addV() argument is a string OR a list of strings; a list is
- *  only legal as the sole argument (TinkerPop rejects mixing, with a message naming Collection).
- *  Returns the flattened names. `sole` says whether this value was the only argument. */
-export function labelNames(v: any, sole: boolean, step: string): string[] {
-  // THE waist every label name passes through — addV, addLabel, mergeV and mergeE alike — so the
-  // element-identifier rules (validate.ts) are enforced once here rather than at each caller.
-  if (!Array.isArray(v)) return [validateLabel(v)];
-  // Upstream words the two rejections differently and the scenarios match on the text, so this
-  // is not one shared message: AddVertex asserts "must produce a scalar String when multiple
-  // traversals are provided", AddLabel asserts "Collection".
-  if (!sole) throw new ValueParseError(step === 'addV'
-    ? `${step}(): a label traversal must produce a scalar String when multiple traversals are provided`
-    : `${step}(): a Collection argument must be the only argument`);
-  return v.map(validateLabel);
+/**
+ * A merge map's literal `T.label` value → its names, each judged by the ONE constant-name judge
+ * (`constantName`) under `MergeElementStep.validate`'s own sentences for this map's role
+ * (`mergeLabelRules`), WITH the type the map states for it (`type`, the entry's TypeNode): a String or
+ * a Collection of Strings, nothing else — a number, a uuid (text in JS, a uuid by its type), a datetime.
+ * It used to `String(v)` each one, which wrote `5` as the label `'5'`.
+ */
+export function labelNames(v: unknown, type: TypeNode | null, role: MergeRole): string[] {
+  const rules = mergeLabelRules(role.op, role.kind === 'onMatch');
+  if (!Array.isArray(v) && !(v instanceof Set)) return [constantName(v, gremlinTypeOf(v, type), rules.scalar)];
+  const items = type !== null && typeof type === 'object' && type.t !== 'map' ? type.items : [];
+  return [...v].map((name, i) => constantName(name, gremlinTypeOf(name, items[i] ?? null), rules.member));
 }
 
 
@@ -783,7 +783,7 @@ export function labelNames(v: any, sole: boolean, step: string): string[] {
  * write is verified where it can be verified CORRECTLY, rather than here against an environment
  * that may not be its own.
  */
-export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string, any>, sideEffects: Map<string, any>): void {
+export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string, any>, sideEffects: SideEffectConstants): void {
   const guarded = (run: () => void): void => {
     try { run(); } catch (e) { if (!(e instanceof Deferral)) throw e; }
   };

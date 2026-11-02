@@ -5,7 +5,7 @@
 // carries none, and passes {gremlin, params} across the manager seam to the store
 // tier (concern B). No compilation, no store, no HTTP here.
 import { ioc, StreamReader } from './io.ts';
-import { WIRE_TYPE_TO_NAME, type TypeNode, type MapEntryType } from './gremlin/types.ts';
+import { mapSlot, WIRE_TYPE_TO_NAME, type TypeNode, type MapEntryType } from './gremlin/types.ts';
 
 /** The client's async byte reader (no shipped types for the internals subpath). Every read
  *  is a Promise because the same reader also backs a live ReadableStream; over a complete
@@ -61,7 +61,7 @@ async function decodeTyped(r: StreamReaderT): Promise<{ value: any; type: TypeNo
       // non-string key (Map<UUID,…>, Map<Int,…>) keeps its type end-to-end (bug #3).
       const k = await decodeTyped(r);
       const v = await decodeTyped(r);
-      map.set(k.value, v.value); entries[String(k.value)] = { key: k.type, value: v.type };
+      map.set(k.value, v.value); entries[mapSlot(k.value)] = { key: k.type, value: v.type };
     }
     return { value: map, type: { t: 'map', entries } };
   }

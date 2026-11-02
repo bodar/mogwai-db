@@ -1,6 +1,5 @@
 import { col, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { arg } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
 import { compileMath, mathVars, type MathOps } from '../../gremlin/math.ts';
 import { FORMAT_FROM_BY, formatTemplate } from '../../gremlin/format.ts';
@@ -110,7 +109,7 @@ const CURRENT = '_';
  * `ir/labels.ts`), for this reader and every other scope reader at once.
  */
 const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
-  child.sideEffects.has(name) ? constLit(arg(child.sideEffects.get(name))) : null;
+  child.sideEffects.has(name) ? constLit(child.sideEffects.get(name)!) : null;
 
 /**
  * The formula as ONE expression over the host traverser, or `null` to decline.
@@ -144,7 +143,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
       if (!se) return null;
       // A side-effect constant is a compile-time value, so its Number-ness is decided here: anything
       // else is the reference's raise, and declining is the fail-closed half of it.
-      const seeded = child.sideEffects.get(name);
+      const seeded = child.sideEffects.get(name)?.value;
       if (typeof seeded !== 'number' && typeof seeded !== 'bigint') return null;
       resolved.set(name, se);
       continue;

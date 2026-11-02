@@ -1,4 +1,4 @@
-import { BigDecimal, type TypeNode } from './types.ts';
+import { BigDecimal, mapSlot, type TypeNode } from './types.ts';
 import { exactNumberOf, isExactNumber, type ExactNumber } from '../json-exact.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
@@ -36,7 +36,7 @@ export function canonicalFloatParams(params: Record<string, any>, paramTypes: Re
     if (t === 'float') return typeof v === 'number' ? floatCanonical(v) : v;
     if (typeof t !== 'object') return v;
     if (t.t === 'map') return v instanceof Map
-      ? new Map([...v].map(([k, x]) => [land(k, t.entries[String(k)]?.key), land(x, t.entries[String(k)]?.value)]))
+      ? new Map([...v].map(([k, x]) => [land(k, t.entries[mapSlot(k)]?.key), land(x, t.entries[mapSlot(k)]?.value)]))
       : v;
     if (Array.isArray(v)) return v.map((x, i) => land(x, t.items[i]));
     if (v instanceof Set) return new Set([...v].map((x, i) => land(x, t.items[i])));

@@ -17,7 +17,10 @@ import { propertyFtsText } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
-import { LABEL_SENTENCES, PROPERTY_KEY_SENTENCES, type IdentifierSentences, validateIdentifier, validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
+import {
+  ADD_LABEL_ITEM_NAME, ADD_LABEL_MEMBER_NAME, ADD_LABEL_NAME, constantName, DROP_LABEL_ITEM_NAME, DROP_LABEL_MEMBER_NAME, DROP_LABEL_NAME, KEY_NAME,
+  LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
+} from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
@@ -1625,79 +1628,17 @@ function absentGuard(site: RuntimeSite, rows: Rel, guard: Guarder, fresh: Minter
 }
 
 /**
- * The reference's checks on a NAME a body resolves per traverser — a property key or a label — as the
- * message each one raises. Only the table differs between the callers; the resolution, the four
- * predicates and their order are `runtimeNameRows`' alone.
- *
- *  - a KEY is `ElementHelper.validateProperty` (`structure/util/ElementHelper.java:80-90`,
- *    `Property.Exceptions` `structure/Property.java:134-143`). Its NON-STRING case the reference refuses
- *    by a cast — a `ClassCastException` on the step path, `legalPropertyKeyValueArray`'s sentence on the
- *    folded one (`structure/util/ElementHelper.java:98-105`); the second has portable text, so it is raised.
- *  - a LABEL is `ElementHelper.validateLabel` (`Element.Exceptions`, `structure/Element.java:212-222`).
- *    Its non-String case is a `(String)` cast on the single-label path, which has no portable text, so
- *    it raises the sibling COLLECTION path's sentence (`AddVertexStep.resolveLabelCollection`,
- *    `step/map/AddVertexStep.java:165-181`), naming the value rather than its Java class (matrix §17
- *    "A non-String text receiver"). A member of a label COLLECTION (`addV(t1, t2)`) owns that path's
- *    null sentence too, and refuses a member that is itself a collection.
+ * The reference's checks on a NAME a body resolves per traverser — the compile-time judge's own table
+ * (`NameRules`, `gremlin/validate.ts`, which documents each host's sentences) plus the one thing only a
+ * RELATION needs: the output column the name lands in. Only the table differs between the callers; the
+ * resolution, the four predicates and their order are `runtimeNameRows`' alone.
  */
-interface NameRules extends IdentifierSentences {
+interface RowNameRules extends NameRules {
   /** The output column the name lands in. */
   readonly column: string;
-  readonly notString: string;
-  /** Does `notString` end on the offending value? */
-  readonly notStringNames: boolean;
-  /** The refusal for a name that is itself a COLLECTION — a body framed as a list, or a list constant —
-   *  where the host refuses one rather than declining. */
-  readonly collection?: string;
 }
 
-// The empty/hidden sentences (and the plain null one) are `validate.ts`' tables — the ones `validateLabel`
-// and `validatePropertyKey` raise; only what a NAME SITE adds, its own null and non-String sentences, is here.
-const KEY_NAME: NameRules = {
-  ...PROPERTY_KEY_SENTENCES, column: 'k',
-  notString: 'The provided key/value array must have a String or T on even array indices', notStringNames: false,
-};
-const LABEL_NAME: NameRules = {
-  ...LABEL_SENTENCES, column: 'name', notString: 'Label traversal must produce a String, but got ', notStringNames: true,
-};
-/** `resolveLabelCollection`'s own two sentences, for a member of `addV(t1, t2, …)`. */
-const LABEL_MEMBER_NAME: NameRules = {
-  ...LABEL_NAME, nullMessage: 'Label traversal must not produce null',
-  collection: 'Label traversal must produce a scalar String when multiple traversals are provided, but got a Collection',
-};
-/** An item of a SOLE label list (`addV(__.constant(['a','b']))`), which reaches the graph as a `T.label`
- *  collection — `ElementHelper.getLabelsValue` (`structure/util/ElementHelper.java:267-275`). */
-const T_LABEL_ITEMS = 'T.label collection must contain only Strings';
-const LABEL_ITEM_NAME: NameRules = { ...LABEL_NAME, nullMessage: T_LABEL_ITEMS, notString: T_LABEL_ITEMS, notStringNames: false };
-/** `addLabel(<traversal>…)` — `TraversalUtil.resolveStringArguments`' sentences
- *  (`process/traversal/util/TraversalUtil.java:211-236`), then `validateLabel`'s (`AddLabelStep.java:86-95`). */
-const ADD_LABEL_NAME: NameRules = {
-  ...LABEL_NAME, nullMessage: 'Traversal argument must not produce null',
-  notString: 'Traversal argument must produce a String or Collection<String>, but got: ',
-};
-const ADD_LABEL_MEMBER_NAME: NameRules = {
-  ...ADD_LABEL_NAME, collection: 'Traversal argument must produce a scalar String when multiple traversals are provided, but got a Collection',
-};
-/** An item of `addLabel`'s SOLE collection — `resolveStringArguments`' Collection arm, naming the value where
- *  the reference names its class (matrix §17 "A non-String text receiver"); a null names `null`, as there. */
-const ADD_LABEL_ITEMS = 'Traversal argument Collection must contain only Strings, but got: ';
-const ADD_LABEL_ITEM_NAME: NameRules = { ...ADD_LABEL_NAME, nullMessage: `${ADD_LABEL_ITEMS}null`, notString: ADD_LABEL_ITEMS };
-
-/**
- * A COMPILE-TIME NAME — the constant half of `runtimeNameRows`: the same `rules`, judged on the value the
- * query TEXT holds (a literal, `constant(…)`, a `withSideEffect` constant) rather than on a resolved row, so
- * a constant and a body refuse alike, only earlier (matrix §17 "Error timing"). `vtype` is the type the text
- * STATES for it (`constFromNested`), which is what tells a uuid, a datetime, a char or a big decimal — all
- * carried as JS strings or numbers — from a String: anything but `string` is the reference's non-String
- * name, exactly `runtimeNameRows`' `statedOther`. A `null` vtype states nothing, and the JS type decides.
- */
-function constantName(value: unknown, vtype: CanonicalType | null, rules: NameRules): string {
-  if (value === null || value === undefined) throw new ValueParseError(rules.nullMessage);
-  if (rules.collection && Array.isArray(value)) throw new ValueParseError(rules.collection);
-  if (typeof value !== 'string' || (vtype !== null && vtype !== 'string'))
-    throw new ValueParseError(rules.notStringNames ? `${rules.notString}${String(value)}` : rules.notString);
-  return validateIdentifier(value, rules);
-}
+const KEY_ROWS: RowNameRules = { ...KEY_NAME, column: 'k' };
 
 /** A label argument folded to the constant the query text holds — `constantName`'s input. */
 interface FoldedName {
@@ -1747,7 +1688,7 @@ function foldedName(value: unknown, child: ChildSeam): FoldedName | null {
  * TAKEN snapshot — each evaluated once, before anything is written, O(plan size). `null` declines.
  */
 function runtimeNameRows(
-  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter, rules: NameRules,
+  body: readonly IRStep[], site: RuntimeSite, child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter, rules: RowNameRules,
 ): Rel | null {
   const resolved = resolveValueRows(body, site, child, fresh, true);
   if (!resolved) {
@@ -2052,7 +1993,7 @@ function prepareRuntimeWrite(
   if (typeof write.key === 'string') key = { kind: 'const', expr: propertyKeyExpr(write.key, write.keyName) };
   else {
     // The name is already a TAKEN snapshot (`runtimeNameRows`), so it reads the same rows after any write.
-    const rows = runtimeNameRows(write.key.body, site, child, bind, guard, fresh, KEY_NAME);
+    const rows = runtimeNameRows(write.key.body, site, child, bind, guard, fresh, KEY_ROWS);
     if (!rows) return null;
     key = { kind: 'rows', rows };
   }
@@ -2355,40 +2296,6 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
 }
 
 /**
- * `dropLabel`'S ARGUMENTS → the names it removes, or `null` for a form this route declines. It judges
- * NO name, which is the reference's asymmetry (see `elementAddLabel`): a removed name is only compared
- * against the stored ones. `addLabel` reads the same grammar through `mutationLabelMembers`, which does.
- *
- * A name is a bare string, a compile-time `constant(...)` (a string or a list), or a collection as
- * the SOLE argument. Declined: a nested traversal that does not fold to a constant (a per-row label),
- * and a collection MIXED with other arguments — TinkerPop rejects that outright (`DropLabel.feature`
- * asserts an error "containing text of `Collection`"), so it is an error to raise rather than a write
- * this route may silently reinterpret.
- *
- * `dropLabels()` is deliberately NOT a caller: it takes no arguments and means every label, which is
- * an absent list rather than an empty one.
- */
-function mutationLabelNames(
-  step: IRStep, sideEffects: Map<string, any> | undefined, params: Record<string, any>,
-): readonly string[] | null {
-  const args = step.args.map((a) => a.value);
-  const names: string[] = [];
-  for (const value of args) {
-    let resolved: unknown = value;
-    if (isNested(value)) {
-      const folded = constFromNested(value, sideEffects, params);
-      if (!folded.has) return null;
-      resolved = folded.value;
-    }
-    if (Array.isArray(resolved)) {
-      if (args.length > 1) return null;
-      names.push(...resolved.map(String));
-    } else names.push(String(resolved));
-  }
-  return names;
-}
-
-/**
  * `addLabel(...)` over an EXISTING vertex stream — a sideEffect that ADDS labels idempotently and
  * passes the SAME vertices through. It is `internLabels`' creation pairing applied to rows that
  * already exist rather than freshly-inserted ones, plus `elementProperty`'s snapshot-then-pass-through.
@@ -2410,14 +2317,7 @@ export function elementAddLabel(
   input: Rel, elem: Elem, step: IRStep, child: ChildSeam, aliases: AliasMap, fresh: Minter,
 ): Effects | null {
   if (elem === 'edge') return null;
-
-  // `addLabel` VALIDATES and `dropLabel` does not, which is the reference's own asymmetry rather than an
-  // oversight here: a name being added becomes a stored label and goes through `ElementHelper`, while a
-  // name being removed is only ever COMPARED against the ones already stored — an invalid one simply
-  // matches nothing, which is the same no-op `dropLabel("xyz")` already is. So `addLabel` reads its
-  // arguments through `mutationLabelMembers` alone, which judges every constant, and `dropLabel` through
-  // `mutationLabelNames`, which judges none.
-  const members = mutationLabelMembers(step, child);
+  const members = mutationLabelMembers(step, child, ADD_LABEL_RULES);
   if (!members?.length) return null;
   const scope = labelMutationScope(input, fresh);
   if (!scope) return null;
@@ -2434,16 +2334,32 @@ export function elementAddLabel(
   return scope.passThrough();
 }
 
+/** The three rule tables a label MUTATION's arguments are judged under — a sole argument, a member of
+ *  several, an item of a sole collection. */
+interface MutationLabelRules {
+  readonly sole: NameRules;
+  readonly member: NameRules;
+  readonly item: NameRules;
+}
+
+const ADD_LABEL_RULES: MutationLabelRules = { sole: ADD_LABEL_NAME, member: ADD_LABEL_MEMBER_NAME, item: ADD_LABEL_ITEM_NAME };
+/** `dropLabel`'s — `resolveStringArguments` as `addLabel`'s, minus `validateLabel`: a name being added
+ *  becomes a stored label and goes through `ElementHelper`, while a name being removed is only ever
+ *  COMPARED against the stored ones, so an empty or hidden one simply matches nothing — the same no-op
+ *  `dropLabel("xyz")` is. That asymmetry is the reference's (`DropLabelsStep.java:98-103`), not ours. */
+const DROP_LABEL_RULES: MutationLabelRules = { sole: DROP_LABEL_NAME, member: DROP_LABEL_MEMBER_NAME, item: DROP_LABEL_ITEM_NAME };
+
 /**
- * `addLabel`'s arguments as label MEMBERS — a constant name, or a body only the run can resolve — or
- * `null` for a body the seam cannot normalize. THE one reading of `addLabel`'s grammar: every constant is
- * held to `resolveStringArguments`' rules NOW (`constantName`), raising its sentence — a list beside other
- * arguments, a null, a non-String (a typed `constant(UUID(…))` included), then `validateLabel`'s. An
- * all-constant list is `elementAddLabel`'s constant statement; one holding a body, its per-traverser one.
+ * A label MUTATION's arguments (`addLabel`, `dropLabel`) as label MEMBERS — a constant name, or a body
+ * only the run can resolve — or `null` for a body the seam cannot normalize. THE one reading of that
+ * grammar: every constant is held to `resolveStringArguments`' rules NOW (`constantName`), raising its
+ * sentence — a list beside other arguments, a null, a non-String (a typed `constant(UUID(…))` included),
+ * then, for `addLabel`, `validateLabel`'s. An all-constant list is the constant statement; one holding a
+ * body, the per-traverser one.
  */
-function mutationLabelMembers(step: IRStep, child: ChildSeam): readonly (string | readonly IRStep[])[] | null {
+function mutationLabelMembers(step: IRStep, child: ChildSeam, table: MutationLabelRules): readonly (string | readonly IRStep[])[] | null {
   const args = step.args.map((a) => a.value);
-  const rules = args.length > 1 ? ADD_LABEL_MEMBER_NAME : ADD_LABEL_NAME;
+  const rules = args.length > 1 ? table.member : table.sole;
   const members: (string | readonly IRStep[])[] = [];
   for (const value of args) {
     const folded = foldedName(value, child);
@@ -2452,7 +2368,7 @@ function mutationLabelMembers(step: IRStep, child: ChildSeam): readonly (string 
       if (!body?.length) return null;
       members.push(body);
     } else if (Array.isArray(folded.value) && !rules.collection) {
-      folded.value.forEach((name, i) => members.push(constantName(name, folded.items[i] ?? null, ADD_LABEL_ITEM_NAME)));
+      folded.value.forEach((name, i) => members.push(constantName(name, folded.items[i] ?? null, table.item)));
     } else members.push(constantName(folded.value, folded.vtype, rules));
   }
   return members;
@@ -2563,25 +2479,24 @@ function labelMutationScope(input: Rel, fresh: Minter): {
  * rather than performing and inspecting one — and it is also what keeps the refusal from leaving a
  * partly-stripped vertex behind.
  *
- * Declined for `addLabel`'s reasons and no others: an EDGE (edge label cardinality is fixed at ONE by
- * spec — `DropLabel.feature` `g_E_dropLabelXknowsX_labels`), an immutable graph, and a collection
- * argument mixed with others. `dropLabel("xyz")` on a label the vertex does not carry is a NO-OP and
- * not an error — the DELETE simply matches nothing, which is what the scenario asserts.
+ * Its NAMES are read by `mutationLabelMembers` under `DROP_LABEL_RULES` — `addLabel`'s one reading of
+ * the grammar, so a constant `dropLabel` refuses exactly what `resolveStringArguments` refuses (a null, a
+ * non-String, a collection beside other arguments, a non-String collection item) BEFORE anything is
+ * dropped, minus the identifier rules `addLabel` adds. A body only the run can resolve is a depth gap and
+ * declines. Declined too, for `addLabel`'s reasons: an EDGE (edge label cardinality is fixed at ONE by
+ * spec — `DropLabel.feature` `g_E_dropLabelXknowsX_labels`) and an immutable graph. `dropLabel("xyz")` on
+ * a label the vertex does not carry is a NO-OP and not an error — the DELETE simply matches nothing,
+ * which is what the scenario asserts.
  */
-export function elementDropLabel(
-  input: Rel, elem: Elem, step: IRStep,
-  sideEffects: Map<string, any> | undefined, params: Record<string, any>, fresh: Minter,
-): Effects | null {
+export function elementDropLabel(input: Rel, elem: Elem, step: IRStep, child: ChildSeam, fresh: Minter): Effects | null {
   if (elem === 'edge') return null;
   const all = step.name === 'dropLabels';
   if (all && step.args.length) return null;
-  // `null` NAMES means EVERY label, and that reading belongs to `dropLabels()` ALONE — the branch is
-  // on the step, never on the resolver's answer. `mutationLabelNames` also returns `null`, and there
-  // it means DECLINE; conflating the two made `dropLabel(constant(["a","b"]), constant("c"))` — a
-  // mixed collection TinkerPop rejects — silently drop every label the vertex had instead of
-  // declining it as unsupported.
-  const names = all ? null : mutationLabelNames(step, sideEffects, params);
-  if (!all && !names?.length) return null;
+  // `null` NAMES means EVERY label, and that reading belongs to `dropLabels()` ALONE — the branch is on
+  // the step, never on the resolver's answer, whose `null` means DECLINE.
+  const members = all ? null : mutationLabelMembers(step, child, DROP_LABEL_RULES);
+  if (!all && (!members?.length || members.some((member) => typeof member !== 'string'))) return null;
+  const names = members as readonly string[] | null;
 
   const scope = labelMutationScope(input, fresh);
   if (!scope) return null;
@@ -3274,7 +3189,7 @@ function resolvedNames(
 ): Rel | null {
   const parts: Rel[] = [];
   for (const member of members) {
-    const part = typeof member !== 'string' ? runtimeNameRows(member, site, child, bind, guard, fresh, rules) : make.project({
+    const part = typeof member !== 'string' ? runtimeNameRows(member, site, child, bind, guard, fresh, { ...rules, column: 'name' }) : make.project({
       id: fresh('ln'), input: site.host, channels: [], type: typeOf(meta('o', 'int'), meta('name', 'text')),
       exprs: [['o', col(site.host.id, site.origin)], ['name', text(member)]],
     });

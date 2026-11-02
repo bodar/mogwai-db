@@ -1,4 +1,4 @@
-import type { StrategyUse } from '../../gremlin/frontend.ts';
+import type { SideEffectConstants, StrategyUse } from '../../gremlin/frontend.ts';
 import type { IRStep } from './strategies.ts';
 
 // ---------- the Pass contract: rewrite the chain ----------
@@ -43,7 +43,7 @@ export interface PassContext {
    *  A verify Pass that parses a write step needs it for the same reason the lowerings do: a
    *  `__.select(k)` key or value IS the constant, and verifying without it would refuse a traversal
    *  for a fact the compile already holds. Empty where a caller declared none. */
-  readonly sideEffects: Map<string, any>;
+  readonly sideEffects: SideEffectConstants;
   /** Parsed withStrategies/withoutStrategies specs, already filtered: withoutStrategies-suppressed
    *  and no-op strategies are removed before the pipeline runs, so a decoration/verify Pass's
    *  `applies` only ever asks "is this strategy named", never re-litigates suppression. */

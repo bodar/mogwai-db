@@ -8,7 +8,7 @@ import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { countOf, isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
+import { mapSlot, valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
@@ -1244,7 +1244,7 @@ export function mapLiteralBlob(value: unknown, type: TypeNode | null, paramName:
     else if (typeof k === 'string') keyNode = { t: 'string', v: k };
     else return null;
     let valNode: ValueNode;
-    try { valNode = valueNodeOf(vv, entries[String(k)]?.value ?? null); } catch { return null; }
+    try { valNode = valueNodeOf(vv, entries[mapSlot(k)]?.value ?? null); } catch { return null; }
     pairs.push([keyNode, valNode]);
   }
   let json: string;

@@ -1,7 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
-import { fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
+import { fitsSafeInteger, BigDecimal, Duration, mapSlot, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 import { floatCanonical } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 import { ValueParseError } from './coerce.ts';
@@ -487,13 +487,20 @@ export function extractSourceOptions(tree: any, params: Record<string, any>): Ma
  *  withSideEffect(key, seed, BiFunction) is NOT a constant and stays out of this map —
  *  a consumer of THIS registry wants a value it can substitute, and there is none.
  *  `sideEffectPolicies` below reports both forms, because the seed and the operator are a
- *  different question from the substitutable value and every label has an answer to it. */
-export function extractSideEffects(tree: any, params: Record<string, any>): Map<string, any> {
-  const out = new Map<string, any>();
+ *  different question from the substitutable value and every label has an answer to it.
+ *
+ *  Each constant is its declaring `Arg` — value, TYPE and parameter name — never the bare value: a
+ *  `withSideEffect('k', UUID(…))` is a uuid the JS value spells as text, and the registry that kept only
+ *  the value made every reader re-infer `string` (and write a uuid as a label). Flattening it here was
+ *  the same lossy step CLAUDE.md's parameter rule deletes at `frontend.ts`, applied to a constant. */
+export type SideEffectConstants = ReadonlyMap<string, Arg>;
+
+export function extractSideEffects(tree: any, params: Record<string, any>): SideEffectConstants {
+  const out = new Map<string, Arg>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
     if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → sideEffectPolicies
     const declared = sideEffectDeclaration(w, params);
-    if (declared) out.set(declared.key, declared.policy.seed.value);
+    if (declared) out.set(declared.key, declared.policy.seed);
   }
   return out;
 }
@@ -812,7 +819,7 @@ function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
     // T/Direction token → not a stored scalar), so its type is 'string' or null; a typed
     // client's non-string keys arrive typed via the wire's decodeTyped instead.
     const { key, type: keyType } = mapKeyOf(entry.mapKey());
-    const slot = String(key);
+    const slot = mapSlot(key);
     const prior = entries[slot];
     if (prior !== undefined && typeof key !== 'object' && prior?.key !== keyType) {
       // `[1:'a', 1L:'b']` / `[1:'a', '1':'b']`: two keys the reference keeps apart that one JS number

@@ -10,6 +10,7 @@ import { perRowColumnOf, type ListOf, type ScalarType } from '../../sql/kernel/r
 import { reducedVtype } from './build.ts';
 import type { ProgramWrites } from './write.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
+import type { SideEffectConstants } from '../../gremlin/frontend.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -72,7 +73,7 @@ export interface ChildSeam {
    * what stopped `mergeV(__.select(c))` reading as an uncovered gap.
    */
   readonly params: Record<string, any>;
-  readonly sideEffects: Map<string, any>;
+  readonly sideEffects: SideEffectConstants;
   /** EVERY NAME A SCOPE READ MAY RESOLVE PAST THE TRAVERSER'S OWN MAP, program-wide — every side-effect
    *  key (not only the `withSideEffect` constants above: an `aggregate('w')` anywhere registers `w` at
    *  every step) and every path label (`programScopeNames`, `ir/labels.ts`). A reader that cannot see a

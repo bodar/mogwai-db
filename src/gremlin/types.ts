@@ -194,8 +194,24 @@ export const flatType = (tn: TypeNode | null | undefined): CanonicalType | null 
   tn == null ? null : typeof tn === 'string' ? tn : tn.t;
 
 /** The value-type under a merge-map key, or null. */
-export const mapEntryType = (tn: TypeNode | null | undefined, key: string): TypeNode | null =>
-  tn != null && typeof tn === 'object' && tn.t === 'map' ? tn.entries[key]?.value ?? null : null;
+export const mapEntryType = (tn: TypeNode | null | undefined, key: unknown): TypeNode | null =>
+  tn != null && typeof tn === 'object' && tn.t === 'map' ? tn.entries[mapSlot(key)]?.value ?? null : null;
+
+/**
+ * The `entries` slot a map KEY's types live under. `String(key)` for every key a JS `Map` keys by value,
+ * and the token's own name for a parsed `T`/`Direction` key (`frontend.ts` `TaggedArg`), which a bare
+ * `String` spelled `[object Object]` — so `[(T.label): x, (Direction.from): 1]` filed BOTH entries' types
+ * under one slot and the label read the endpoint's `int`. A wire `EnumValue` key already spells itself
+ * `T.label` (`toString`), so the two producers agree.
+ */
+export const mapSlot = (key: unknown): string => {
+  if (key !== null && typeof key === 'object') {
+    const tag = key as { readonly token?: unknown; readonly direction?: unknown };
+    if (typeof tag.token === 'string') return `T.${tag.token}`;
+    if (typeof tag.direction === 'string') return `Direction.${tag.direction}`;
+  }
+  return String(key);
+};
 
 /** GraphBinary DataType code → canonical name. Built from the client's own DataType
  *  enum so it stays byte-stable with the serializers (no magic numbers). Only the
@@ -544,7 +560,7 @@ export function valueNodeOf(val: any, tn: TypeNode | null): ValueNode {
     return {
       t: 'map',
       v: [...val].map(([k, vv]): [ValueNode, ValueNode] => {
-        const e = entries[String(k)] ?? null;
+        const e = entries[mapSlot(k)] ?? null;
         return [valueNodeOf(k, e?.key ?? null), valueNodeOf(vv, e?.value ?? null)];
       }),
     };
