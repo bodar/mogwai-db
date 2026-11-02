@@ -142,6 +142,14 @@ export function orderIndeterminacy(q: string): 'members' | 'cardinality' | null 
     let depth = 1, i = start;
     for (; i < q.length && depth > 0; i++) depth += q[i] === '(' ? 1 : q[i] === ')' ? -1 : 0;
     if (q[i] === '.') return 'cardinality';
+    // A window nested in a step's argument (`repeat(__.limit(2)).times(1).hasLabel('person')`,
+    // `union(__.range(0, 2), …).has('age')`) ends ITS scope, but the enclosing step's output carries
+    // the picked members onward: a step chained after ANY enclosing call consumes them too. Walk out
+    // through each enclosing `)` (a sibling argument's own calls close at depth 0 and do not count).
+    for (let d = 0; i < q.length; i++) {
+      d += q[i] === '(' ? 1 : q[i] === ')' ? -1 : 0;
+      if (q[i] === ')' && d < 0) { d = 0; if (q[i + 1] === '.') return 'cardinality'; }
+    }
     worst = 'members';
   }
   return worst;
