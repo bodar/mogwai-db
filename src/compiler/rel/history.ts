@@ -1,5 +1,6 @@
 import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { ListOf, MapOf, ScalarType } from '../../sql/kernel/render.ts';
+import type { MapKeyFacts } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../alias.ts';
 import { exactRealEntry } from './build.ts';
@@ -32,7 +33,7 @@ export type TraverserObject =
   // blob is the self-describing pairs array (`MAP_COL`), stored like a list's — the re-entry shape
   // (`keyOf`/`valOf`, and the static `keys` where known) rides on the alias entry so `select(label)`
   // restores the right map vocabulary and can resolve a nested `select(k)` against the right key set.
-  | { readonly kind: 'map'; readonly map: Expr; readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] };
+  | ({ readonly kind: 'map'; readonly map: Expr; readonly keyOf: MapOf; readonly valOf: MapOf } & MapKeyFacts);
 
 export const shapeOf = (object: TraverserObject): AliasShape =>
   object.kind === 'element' ? elemShape(object.elem)

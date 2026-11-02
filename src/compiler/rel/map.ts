@@ -1624,6 +1624,17 @@ export const mapSize = (input: Rel, fresh: Minter): Rel =>
   withPayload(input, [['v', { kind: 'call', fn: 'json_array_length', args: [jsonOf(col(input.id, MAP_COL))] }]],
     [meta('v', 'int')], fresh);
 
+/** A local map slice's WINDOW — the one decode both the entry slice (`mapRange`) and its key facts
+ *  (`slicedKeyFacts`, framing.ts) read, so the two cannot disagree about which positions survive.
+ *  `fromEnd` is `tail`'s LAST-n take. `null` declines; an illegal `range` PROPAGATES its `ValueParseError`. */
+export function mapWindow(step: IRStep): { readonly offset: number; readonly limit: number | null; readonly fromEnd: boolean } | null {
+  if (step.name === 'tail') return { offset: 0, limit: countOf(step), fromEnd: true };
+  try {
+    const { offset, limit } = sliceOf(step);
+    return { offset, limit, fromEnd: false };
+  } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
+}
+
 /**
  * `limit`/`range`/`skip`/`tail`(Scope.local) over a MAP — an ORDER-PRESERVING ENTRY slice
  * (`RangeLocalStep.applyRangeMap`, `vendor/tinkerpop/gremlin-core/.../step/filter/RangeLocalStep.java:98-112`:
@@ -1636,15 +1647,13 @@ export const mapSize = (input: Rel, fresh: Minter): Rel =>
  * `ValueParseError` that PROPAGATES, exactly `listMemberOp`'s local slice).
  */
 export function mapRange(input: Rel, step: IRStep, fresh: Minter): Rel | null {
-  const window = step.name === 'tail'
-    ? { offset: 0, limit: countOf(step) }
-    : (() => { try { return sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; } })();
+  const window = mapWindow(step);
   if (!window) return null;
   const rel = fenced(input, fresh);
   const pairs = pairsOf(col(rel.id, MAP_COL), fresh);
   const ordered = make.sort({
     id: fresh('mps'), input: pairs, channels: [], type: pairs.type,
-    terms: [{ expr: col(pairs.id, PAIR.ord), dir: step.name === 'tail' ? 'desc' : 'asc' }],
+    terms: [{ expr: col(pairs.id, PAIR.ord), dir: window.fromEnd ? 'desc' : 'asc' }],
   });
   const taken = make.limit({
     id: fresh('mpl'), input: ordered, channels: [], type: ordered.type,

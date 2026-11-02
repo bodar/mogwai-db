@@ -11,7 +11,7 @@ import { aliasScalarTypeOf, joinAliasEntry, type AliasEntry, type AliasMap } fro
 import { MAP_COL } from './map.ts';
 import { gatedByHost, mayBeAbsent, type ChildHost, type HostRow, type Subject } from './child.ts';
 import { carriedCols, collectedOf, familyKey, meta, payloadCols, typeOf, type Minter } from './build.ts';
-import type { RelFraming } from './framing.ts';
+import { mapKeyFacts, type MapKeyFacts, type RelFraming } from './framing.ts';
 import { perRowSubject, subjectOperand, SUBJECT_UNKNOWN, type SubjectType, type TypedOperand } from './predicate.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 
@@ -184,7 +184,7 @@ export function bindAliases(
       shapes: new Set([shape]),
       ...(bound.kind === 'value' ? { scalarType: aliasScalarTypeOf(bound.type) } : {}),
       ...(bound.kind === 'list' ? { listOf: bound.of } : {}),
-      ...(bound.kind === 'map' ? { mapOf: { keyOf: bound.keyOf, valOf: bound.valOf, ...(bound.keys ? { keys: bound.keys } : {}) } } : {}),
+      ...(bound.kind === 'map' ? { mapOf: { keyOf: bound.keyOf, valOf: bound.valOf, ...mapKeyFacts(bound) } } : {}),
     };
     // A REBIND APPENDS, so the label's description is the JOIN of what it held and this binding —
     // never this binding alone, which re-framed every earlier entry by the LAST bind's class
@@ -263,7 +263,7 @@ export type AliasRead =
   | { readonly kind: 'element'; readonly elem: Elem }
   | { readonly kind: 'value'; readonly type: ScalarType }
   | { readonly kind: 'list'; readonly of: ListOf }
-  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] };
+  | ({ readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf } & MapKeyFacts);
 
 /** A single-shape history, read. A MIXED history declines: it has no single re-entry — it would be a
  *  VARIANT stream, a shape this route does not produce. `property` declines for the same reason — the
@@ -277,7 +277,7 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
     // entry beside a differently-typed one): there is no single class to frame by, so the read declines.
     case 'value': return entry.scalarType ? { kind: 'value', type: scalarTypeOfAlias(entry.scalarType, vtype) } : null;
     case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
-    case 'map': return entry.mapOf ? { kind: 'map', keyOf: entry.mapOf.keyOf, valOf: entry.mapOf.valOf, ...(entry.mapOf.keys ? { keys: entry.mapOf.keys } : {}) } : null;
+    case 'map': return entry.mapOf ? { kind: 'map', keyOf: entry.mapOf.keyOf, valOf: entry.mapOf.valOf, ...mapKeyFacts(entry.mapOf) } : null;
     default: return null;
   }
 };
@@ -483,7 +483,7 @@ export function aliasProjection(
 export const readFraming = (read: AliasRead): RelFraming =>
   read.kind === 'element' ? { kind: 'elements', elem: read.elem }
     : read.kind === 'list' ? { kind: 'list', of: read.of }
-      : read.kind === 'map' ? { kind: 'map', keyOf: read.keyOf, valOf: read.valOf, ...(read.keys ? { keys: read.keys } : {}) }
+      : read.kind === 'map' ? { kind: 'map', keyOf: read.keyOf, valOf: read.valOf, ...mapKeyFacts(read) }
         // The label's own recorded type, restored by `aliasProjection` (a per-row type lands in `vtype`).
         : { kind: 'scalar', type: read.type };
 

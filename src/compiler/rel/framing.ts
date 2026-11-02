@@ -72,15 +72,13 @@ export type RelFraming =
    *  the framing layer exactly as `of` does for a list, and a pairs ARRAY rather than a JSON object is
    *  what keeps the entry order ours to state and lets a key be something other than a string.
    *
-   *  `keys` — the map's STATIC key set where the producer knows it (`valueMap(a,b)→[a,b]`,
-   *  `project(n)→[n]`, `select(k…)`). It is the compile-time answer to `map.containsKey(k)`, which is
-   *  exactly what `select(k)` needs to resolve TinkerPop's map-key-vs-alias precedence
-   *  (`Scoping.getScopeValue`: map first, then the label): a key NOT in this set cannot be a map key, so
-   *  a live-alias `select` re-enters the alias unambiguously rather than declining. `undefined` = keys
-   *  not statically known (a stored map property, `valueMap()` all-keys), where the ambiguity stands and
-   *  a live-alias select stays fail-closed. Advisory ONLY — it narrows a DECLINE to a re-entry, never
-   *  widens what a map means, so a Pass that drops it is safe (the bright line in `compiler/CLAUDE.md`). */
-  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] }
+   *  Its two static KEY FACTS (`MapKeyFacts`) answer `map.containsKey(k)` at compile time, which is what
+   *  `select(k)` needs to resolve TinkerPop's map-key-then-side-effect-then-label precedence
+   *  (`Scoping.getScopeValue`,
+   *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`).
+   *  They are a MAY set and a MUST set, and each is load-bearing in its own direction — see
+   *  `MapKeyFacts`. */
+  | ({ readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf } & MapKeyFacts)
   /** ONE ENTRY of a map, as the traverser — what `unfold()` over a map produces. A separate arm from
    *  `map` and not a one-entry map value, because the two sides are their own COLUMNS here: that is
    *  what makes `select(Column.keys)` after it a column read rather than a second JSON walk, and it is
@@ -125,6 +123,93 @@ export type RelFraming =
    *  Terminal, exactly as `variant` is. */
   | { readonly kind: 'typedNode' }
   | { readonly kind: 'discard' };
+
+/**
+ * A MAP'S TWO STATIC KEY FACTS — what every row's map MAY hold and what it MUST hold.
+ *
+ * - **`keys` is a SOUND MAY upper bound**: no row's map holds a string key outside it. It is
+ *   LOAD-BEARING, not advisory — a `select(k)` whose `k` is outside it skips the entry read and answers
+ *   from the next scope (a side effect, a path label), so a `keys` that is too NARROW is a wrong answer.
+ *   A writer may DROP it (`undefined` = any key possible: a stored map property, `valueMap()` all-keys,
+ *   `group()`), never narrow it.
+ * - **`held` is a SOUND MUST lower bound**: every row's map holds every key in it. A `select(k)` with
+ *   `k ∈ held` may take the entry as EVERY row's answer even where a path label of that name is the scope
+ *   a row lacking `k` would read next; a `held` that is too WIDE silently drops those rows. A writer may
+ *   DROP it (`undefined` = none known held), never widen it. `valueMap(k)`/`elementMap(k)` omit a
+ *   property the element lacks and `project(k).by(…)` omits an unproductive `by()`'s key
+ *   (`ProjectStep.map`'s `ifProductive`,
+ *   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66`),
+ *   so those know `keys` and not `held`; a map LITERAL (`constant`, `inject`, a `withSideEffect` map)
+ *   holds every key it states.
+ *
+ * Invariant: `held ⊆ keys` wherever both are known. THE BRIGHT LINE: a Pass or writer that cannot keep a
+ * fact sound DROPS it — any transformer that is not identity on a map's entries (a sub-map select, a
+ * `{t,v}` re-entry, a fold/unfold, an arm demotion) drops `held`, and a local slice re-states it only
+ * through `slicedKeyFacts`; a merge of several streams goes through ONE meet (`meetMapKeyFacts`, reached
+ * from `meetFraming` in `lower/branch.ts` and from an alias history's join).
+ */
+export interface MapKeyFacts {
+  readonly keys?: readonly string[];
+  readonly held?: readonly string[];
+  /** The strongest form of both: every row's map is EXACTLY `keys`, in that entry order (so `held` is
+   *  `keys` too). Only a literal knows it, and it is what lets a local entry SLICE re-state `held` rather
+   *  than drop it — the window is positional, so which keys survive it depends on the order. */
+  readonly exact?: true;
+}
+
+/** A map's key facts carried from one description to the next — a framing, a host, an alias entry. The
+ *  ONE spread every hop uses, so a hop cannot keep the MAY bound and silently drop the MUST bound (or the
+ *  reverse). An empty `held` is the same fact as an absent one and is not carried. */
+export const mapKeyFacts = (from: MapKeyFacts): MapKeyFacts => ({
+  ...(from.keys ? { keys: from.keys } : {}),
+  ...(from.held?.length ? { held: from.held } : {}),
+  ...(from.keys && from.exact ? { exact: true as const } : {}),
+});
+
+/** The key facts of a map LITERAL — every row holds exactly `keys`, in order. Its string keys are held; a
+ *  non-string key (a `T`/`Direction` token) is not a string a `select` could name, but it makes the MAY set
+ *  something this vocabulary does not spell, so `keys` (and the exact order) is then left unknown. */
+export function literalKeyFacts(keys: readonly unknown[]): MapKeyFacts {
+  const strings = keys.filter((key): key is string => typeof key === 'string');
+  return strings.length === keys.length ? mapKeyFacts({ keys: strings, held: strings, exact: true }) : mapKeyFacts({ held: strings });
+}
+
+/**
+ * THE KEY FACTS AFTER A LOCAL ENTRY SLICE — `limit`/`range`/`skip`/`tail`(Scope.local) keep a positional
+ * WINDOW of each map's entries (`RangeLocalStep.applyRangeMap`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/RangeLocalStep.java:98`).
+ * `keys` survives as an upper bound (a slice adds no key). `held` survives only where it is still TRUE:
+ * an `exact` map's window is the same keys on every row, so it is computed; anything else spends `held`
+ * — a row lacking the key then reads the next scope (`Scoping.java:119-135`) instead of losing the
+ * sliced-away entry. (A non-exact map's row may also carry entries no string key names — a `T` token — so
+ * even a window "covering" `keys` is not known to keep them.)
+ */
+export function slicedKeyFacts(facts: MapKeyFacts, window: { readonly offset: number; readonly limit: number | null; readonly fromEnd: boolean }): MapKeyFacts {
+  const { keys } = facts;
+  if (!keys) return {};
+  if (!facts.exact) return mapKeyFacts({ keys });
+  const n = keys.length;
+  const kept = window.fromEnd
+    ? keys.slice(Math.max(0, n - (window.limit ?? n)))
+    : keys.slice(Math.min(n, window.offset), window.limit === null ? n : Math.min(n, window.offset + window.limit));
+  return mapKeyFacts({ keys: kept, held: kept, exact: true });
+}
+
+/**
+ * THE MEET of several streams' key facts — what a stream holding ANY of their rows may claim. Compile-time
+ * lattice algebra per node, the way Calcite's `RelMetadataQuery` answers a `Union`'s metadata from its
+ * inputs': the MAY set is the UNION (unknown if any side is unknown — an absent upper bound is the top),
+ * the MUST set the INTERSECTION (an absent side is the empty set — an absent lower bound is the bottom).
+ */
+export function meetMapKeyFacts(facts: readonly MapKeyFacts[]): MapKeyFacts {
+  const keys = facts.every((fact) => fact.keys)
+    ? [...new Set(facts.flatMap((fact) => fact.keys!))] : undefined;
+  const [first, ...rest] = facts;
+  const held = (first?.held ?? []).filter((key) => rest.every((fact) => fact.held?.includes(key)));
+  // EXACT survives only where every side is exact over the SAME keys in the SAME order.
+  const exact = facts.every((fact) => fact.exact && JSON.stringify(fact.keys) === JSON.stringify(first?.keys));
+  return mapKeyFacts({ ...(keys ? { keys } : {}), held, ...(exact ? { exact: true as const } : {}) });
+}
 
 /**
  * A RELATION AND WHAT IT HOLDS — the pair every producer in the fold hands back, and the smallest
@@ -177,6 +262,15 @@ export interface RecordField {
 export function fieldPresence(field: RecordField, read: (column: string) => Expr): Expr | null {
   const first = framingCols(field.framing)?.[0];
   return first ? { kind: 'binary', op: 'is not', left: read(fieldCol(field.prefix, first.name)), right: compilerNull() } : null;
+}
+
+/** The key facts of a record COLLAPSED to a map (`recordToMap`): it MAY hold every field and MUST hold
+ *  every non-`optional` one, because the collapse appends a required field's pair unconditionally and in
+ *  field order (`recordPairs`, `record.ts`) — so a record with no optional field is `exact`. */
+export function recordKeyFacts(fields: readonly RecordField[]): MapKeyFacts {
+  const keys = fields.map((field) => field.key);
+  const held = fields.filter((field) => !field.optional).map((field) => field.key);
+  return mapKeyFacts({ keys, held, ...(held.length === keys.length ? { exact: true as const } : {}) });
 }
 
 /** A record's field by KEY, or `undefined`. Here rather than in `record.ts` because the by()

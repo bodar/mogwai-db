@@ -1,5 +1,6 @@
 import { type Elem } from './elem.ts';
 import { PER_ROW_ENVELOPE, type ListOf, type MapOf, type ScalarType } from '../sql/kernel/render.ts';
+import { meetMapKeyFacts, type MapKeyFacts } from './rel/framing.ts';
 
 // ---------- the as() alias channel — COMPILE-TIME description ----------
 //
@@ -41,7 +42,7 @@ export type AliasEntry = {
    *  (`mapTail`'s `keyOf`/`valOf`, plus the static `keys` where the producer knew them), the `listOf`
    *  analogue one collection along. `keys` lets a `select(m).select(k)` resolve `k` against the map's
    *  compile-time key set (the map-key-vs-alias precedence). */
-  mapOf?: { readonly keyOf: MapOf; readonly valOf: MapOf; readonly keys?: readonly string[] };
+  mapOf?: { readonly keyOf: MapOf; readonly valOf: MapOf } & MapKeyFacts;
   /** Compile-time binding count along the traverser's path: 1 for a once-bound label, >1 after rebinds.
    *  `undefined` = dynamic depth (bound inside repeat()/a branch arm), where the count is only known at
    *  runtime and Pop must resolve via SQL. Lets Pop.all/mixed/first/last resolve statically for the
@@ -109,7 +110,11 @@ export function joinAliasEntry(left: AliasEntry, right: AliasEntry): Omit<AliasE
       : left.shapes.has(shape) ? a : right.shapes.has(shape) ? b : undefined;
   const scalarType = field('value', left.scalarType, right.scalarType, scalar);
   const listOf = field('list', left.listOf, right.listOf, same);
-  const mapOf = field('map', left.mapOf, right.mapOf, same);
+  // A map's SIDES must agree (they decide how its pairs re-enter); its KEY FACTS meet — the MAY set
+  // unions, the MUST set intersects (`meetMapKeyFacts`) — because the history now holds either side's maps.
+  const mapOf = field('map', left.mapOf, right.mapOf, (a, b) =>
+    a && b && same(a.keyOf, b.keyOf) && same(a.valOf, b.valOf)
+      ? { keyOf: a.keyOf, valOf: a.valOf, ...meetMapKeyFacts([a, b]) } : undefined);
   const propertyElem = field('property', left.propertyElem, right.propertyElem, same);
   return {
     shapes: new Set([...left.shapes, ...right.shapes]),

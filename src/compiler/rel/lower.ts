@@ -15,7 +15,7 @@ import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
-import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
@@ -53,7 +53,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps, type MergeTraverser } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapKeyOr, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapKeyOr, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapWindow, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -503,8 +503,9 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
   // `constant([k:v, …])` — a MAP LITERAL, the per-row twin of `injectMap`. It REPLACES each traverser's
   // value with the same compile-time map (`mapLiteralBlob`, the self-describing pairs blob every map
   // producer shares), so the whole re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold`,
-  // a slice, `as()`) composes over it. The literal's string keys are the map's STATIC key set (framing
-  // `keys`), so a `constant([…]).as(m).select(m).select(k)` resolves like every other aliased map (G4).
+  // a slice, `as()`) composes over it. Every row holds exactly the literal's string keys, so they are
+  // both key facts (`literalKeyFacts`): a `constant([…]).as(m).select(m).select(k)` resolves like every
+  // other aliased map (G4).
   if (arg.value instanceof Map) {
     const blob = mapLiteralBlob(arg.value, arg.type ?? null, arg.name);
     if (!blob) return null;
@@ -515,7 +516,7 @@ function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | nu
       type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(input.channels)),
       exprs: [[MAP_COL, blob], ...input.channels.map((ch) => [ch.col, col(input.id, ch.col)] as const)],
     });
-    return { rel, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, keys } };
+    return { rel, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...literalKeyFacts(keys) } };
   }
   // `constant([a, b, …])` — a LIST LITERAL, the per-row twin of `injectList` (the SAME `listLiteralBlob`).
   // It replaces each traverser's value with the compile-time list, so the whole re-enterable list tail
@@ -606,11 +607,12 @@ function terminal(
     const mapped = elementValueMap(input, elem, asked.all ? null : asked.keys,
       needsTokens, ctx.labelRegime, ctx.source, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
-    // The STATIC key set, for `select(k)`'s map-key-vs-alias precedence (framing.ts `keys`). Known only
-    // for the explicit-key form: `valueMap()`/`valueMap(true)` (`asked.all`) reads every property, so
-    // the set is data-dependent and stays undefined (the ambiguity holds). Token keys (`T.id`/`T.label`)
+    // The STATIC key set, for `select(k)`'s map-key-vs-alias precedence (framing.ts `MapKeyFacts`). Known
+    // only for the explicit-key form: `valueMap()`/`valueMap(true)` (`asked.all`) reads every property,
+    // so the set is data-dependent and stays undefined (the ambiguity holds). Token keys (`T.id`/`T.label`)
     // are never string-equal to an alias name, so the string key set is a sound answer to "can this map
-    // contain string key k" even when tokens are also present.
+    // contain string key k" even when tokens are also present. It is a MAY set only — never `held`: the
+    // map omits a property the element lacks.
     const keys = asked.all ? undefined : (asked.keys as readonly string[]);
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf, ...(keys ? { keys } : {}) } };
   }
@@ -1472,8 +1474,6 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
   if (!(value instanceof Map)) return 'pass';
   const blob = mapLiteralBlob(value, type, null);
   if (!blob) return null;
-  const keys = [...(value as Map<unknown, unknown>).keys()];
-  const stringKeys = keys.filter((k): k is string => typeof k === 'string');
   // The constant REPLACES each traverser's value with the same map — one row per surviving traverser,
   // channels intact (a barrier below still sorts by the emission order), exactly `constantRetype`'s shape.
   const out = make.project({
@@ -1481,7 +1481,7 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
     type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(rel.channels)),
     exprs: [[MAP_COL, blob], ...rel.channels.map((ch) => [ch.col, col(rel.id, ch.col)] as const)],
   });
-  return { rel: out, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...(stringKeys.length === keys.length ? { keys: stringKeys } : {}) } };
+  return { rel: out, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...literalKeyFacts([...(value as Map<unknown, unknown>).keys()]) } };
 }
 
 /**
@@ -2554,20 +2554,17 @@ function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; f
   if (blobs.some((blob) => !blob)) return null;
   const channels = ordered ? withChannel([], ENCOUNTER) : [];
   const rows = (blobs as Expr[]).map((blob, i) => (ordered ? [blob, compilerInt(i + 1)] : [blob]));
-  // The literals' string keys are the stream's STATIC key set exactly as `constant([…])` frames its one
-  // literal — but only where EVERY argument holds that same set. With differing sets a row may lack a
-  // key it is known another holds, and `mapTail`'s live-alias select would DROP that row rather than fall
-  // through to the label (`Scoping.java:119-135`), knowingly losing it: `keys` then stays absent and that
-  // select declines. A token/direction key leaves it unknown too.
-  const keySets = step.args.map((a) => [...(a.value as Map<unknown, unknown>).keys()]);
-  const keys = [...new Set(keySets.flat())];
-  const shared = keySets.every((set) => set.length === keys.length) && keys.every((k): k is string => typeof k === 'string');
+  // Each literal states its own key facts exactly as `constant([…])` frames its one literal, and the
+  // stream holds ANY of their rows, so its facts are their MEET — the MAY set is every argument's keys,
+  // the MUST set the keys they all share. A row lacking a key another holds is then a key in `keys` but not
+  // `held`, which `mapTail`'s label select declines rather than drop (`Scoping.java:119-135`).
+  const facts = meetMapKeyFacts(step.args.map((a) => literalKeyFacts([...(a.value as Map<unknown, unknown>).keys()])));
   return {
     rel: make.values({
       id: fresh('injm'), rows, channels,
       type: typeOf(meta(MAP_COL, 'json'), ...carriedCols(channels)),
     }),
-    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...(shared ? { keys: keys as string[] } : {}) },
+    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...facts },
   };
 }
 
@@ -2872,20 +2869,24 @@ function pathTail(
  */
 function mapTail(
   seed: Rel, keyOf: MapOf, valOf: MapOf, steps: readonly IRStep[], from: number,
-  ctx: ChainCtx, fresh: Minter, aliases: AliasMap, keys?: readonly string[],
+  ctx: ChainCtx, fresh: Minter, aliases: AliasMap, seedFacts: MapKeyFacts = {},
 ): Tail | null {
   let rel = seed;
   let labels = aliases;
+  // The map's key facts (framing.ts `MapKeyFacts`) — `keys` MAY, `held` MUST. A step below that is not
+  // identity on the entries re-states them soundly or drops them.
+  let facts = mapKeyFacts(seedFacts);
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     const args = step.args.map((a) => a.value);
+    const { keys, held } = facts;
     if (step.name === 'identity') { if (args.length) return null; continue; }
 
     // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
     // `keyOf`/`valOf` recorded on the entry so `select(label)` re-enters `mapTail` with the same
     // vocabulary. Shape-preserving, exactly like `as()` over an element/list/scalar (`bindAliases`).
     if (step.name === 'as') {
-      const bound = bindAliases(step, rel, labels, { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...(keys ? { keys } : {}) }, fresh);
+      const bound = bindAliases(step, rel, labels, { kind: 'map', map: col(rel.id, MAP_COL), keyOf, valOf, ...facts }, fresh);
       if (!bound) return null;
       rel = bound.rel;
       labels = bound.aliases;
@@ -2944,10 +2945,15 @@ function mapTail(
     // insertion order, the map's own `MAP_COL` pairs array sliced like the list-local slice. The map
     // shape is preserved, so the tail continues under the SAME framing. `order`/`dedup`(Scope.local) over
     // a map (by key/value) is a different question and is NOT this arm — it declines below.
+    // The window may REMOVE entries, so the key facts are re-stated through `slicedKeyFacts`: `held`
+    // survives only where it is still true, so `inject([a:1,b:2]).limit(local,1).as('b').select('b')` does
+    // not read the dropped `b` entry as every row's answer.
     if (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step)) {
-      const sliced = mapRange(rel, step, fresh);
-      if (!sliced) return null;
+      const window = mapWindow(step);
+      const sliced = window && mapRange(rel, step, fresh);
+      if (!window || !sliced) return null;
       rel = sliced;
+      facts = slicedKeyFacts(facts, window);
       continue;
     }
 
@@ -2988,33 +2994,36 @@ function mapTail(
       return listTail(side.rel, side.of, steps, at + 1, ctx, fresh, labels, side.set);
     }
 
-    // `select(<key>)` reads the MAP first — see `mapKey`. THE TRAVERSER'S OWN MAP WINS: where the map may
-    // hold the key it answers; a row whose map lacks it reads a same-named SIDE EFFECT next, as the
-    // reference does (`Scoping.getScopeValue`, below), and otherwise DROPS — the natural reading of "select
-    // k from this map" where Java would fall through to a path label (`docs/feature-support-matrix.md`
-    // §17). A key that also
-    // names a LIVE alias of a map whose keys are DATA (`groupCount()`, a stored map) declines: the label
-    // was written in the query and the key was not, so dropping would lose the row the label answers.
-    // Where the static key set EXCLUDES the key the alias answers through the ordinary alias read
-    // (`selectKeys`); where it includes it, the map wins as above.
+    // `select(<key>)` reads the MAP first — see `mapKey` — then the SIDE EFFECTS, then the PATH LABELS
+    // (`Scoping.getScopeValue`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`).
+    // Where no further scope names `key` a row whose map lacks it DROPS — the reference's own answer.
     if (step.name === 'select') {
       const key = selectedKey(step);
       if (key !== null) {
-        if (liveAliases(labels, rel).has(key) && !keys?.includes(key)) {
-          if (!keys) return null;
-          const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-            { framing: { kind: 'map', keyOf, valOf, keys }, ...selectScope(ctx) });
-          return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
+        const mayHold = !keys || keys.includes(key);
+        const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
+        if (fallback === null) return null;
+        // A LIVE (or enclosing) LABEL is the scope a row lacking `key` reads next, and a label read beside
+        // the entry per row has no framing yet (it would be an element-or-value VARIANT stream). So the
+        // map's KEY FACTS decide on the query text alone: a key EVERY row holds (`held`) is the entry for
+        // every row; a key NO row holds (outside `keys`) is the label for every row, read through the
+        // ordinary alias read (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) DECLINES
+        // — reading the entry would drop exactly the rows the label answers.
+        if (fallback === 'label') {
+          if (!held?.includes(key)) {
+            if (mayHold || !liveAliases(labels, rel).has(key)) return null;
+            const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+              { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) });
+            return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
+          }
         }
         // A row whose Map lacks `key` falls through to the SIDE EFFECTS before it drops
-        // (`mapFirstFallback`, `Scoping.java:119-135`): a `withSideEffect` constant is a `{t,v}` node read
-        // beside the entry (`mapKeyOr`) wherever the value side is scalar. A named collection is every
-        // row's answer where the static key set excludes `key`; where the Map may hold it, the entry
-        // answers and a row lacking it DROPS, as for a path label — a collection beside the entry per row
-        // has no framing (§17; `Select.feature`'s `group("a")…select("a").select("a")` reads the entry).
-        const mayHold = !keys || keys.includes(key);
-        const fallback = mapFirstFallback(key, ctx, false);
-        if (fallback === null) return null;
+        // (`mapFirstFallback`): a `withSideEffect` constant is a `{t,v}` node read beside the entry
+        // (`mapKeyOr`) wherever the value side is scalar. A named collection is every row's answer where the
+        // static key set excludes `key`; where the Map may hold it, the entry answers and a row lacking it
+        // DROPS — a collection beside the entry per row has no framing (§17; `Select.feature`'s
+        // `group("a")…select("a").select("a")` reads the entry).
         if (fallback === 'collection' && !mayHold) {
           const collected = selectCollection(step, rel, ctx, fresh);
           return collected === 'pass' ? null : collected && continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, labels);
@@ -3091,7 +3100,7 @@ function mapTail(
     if (!row) return null;
     rel = row;
   }
-  return { rel, framing: { kind: 'map', keyOf, valOf, ...(keys ? { keys } : {}) }, aliases: labels, bulked: false };
+  return { rel, framing: { kind: 'map', keyOf, valOf, ...facts }, aliases: labels, bulked: false };
 }
 
 /**
@@ -5155,7 +5164,7 @@ export function continueAs(
     case 'path': return pathTail(rel, framing.of, framing.scalars, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
-    case 'map': return mapTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels, framing.keys);
+    case 'map': return mapTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels, framing);
     case 'mapEntry': return mapEntryTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels);
     case 'record': return recordTail(rel, framing.fields, steps, from, bulked, ctx, fresh, labels);
     // A PROPERTY traverser re-enters through `element()`/`key()`/`value()`, and through the ordinary
@@ -5638,12 +5647,12 @@ function recordTail(
     if (step.name === 'as') {
       // `as(label…)` binds the record AS THE MAP it is — collapse it (recordToMap, the same boundary
       // fold()/unfold()/local-slice cross) and re-enter `mapTail` at THIS step, where the map's own `as`
-      // handler binds the blob to each label. The record's field names ARE the map's static key set, so
-      // a later `select(label).select(k)` resolves `k` against them (the map-key-vs-alias precedence).
+      // handler binds the blob to each label. The record's fields ARE the map's key facts
+      // (`recordKeyFacts`), so a later `select(label).select(k)` resolves `k` against them (the
+      // map-key-vs-alias precedence).
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
-      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels,
-        fields.map((f) => f.key));
+      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels, recordKeyFacts(fields));
     }
 
     if (step.name === 'select') {
@@ -5684,7 +5693,7 @@ function recordTail(
     if ((step.name === 'count' && isLocalScope(step)) || (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step))) {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
-      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels);
+      return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels, recordKeyFacts(fields));
     }
 
     if (step.name === 'count') {

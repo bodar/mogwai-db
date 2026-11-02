@@ -60,9 +60,11 @@ Feature: mogwai addendum — a MAP bound to an as() label, read back with select
       | l[ripple] |
 
   # PRECEDENCE: when the alias name IS also a possible map key (project("n").as("n")), TinkerPop returns
-  # the MAP value where the map holds the key (containsKey wins). The map's own scope wins here too; a row
-  # whose map lacked the key would drop (a deliberate divergence — the reference falls through to the alias).
-  @gap:map-alias
+  # the MAP value where the map holds the key (containsKey wins) and the alias where it does not. `by("name")`
+  # is unproductive on a vertex lacking `name`, so `n` is a key the map MAY hold but not one every row MUST
+  # hold (framing.ts `MapKeyFacts`): reading the entry would drop the rows the alias answers, so the select
+  # DECLINES on the query text until a per-row element-or-value stream exists.
+  @Unsupported
   Scenario: g_V_projectXnX_asXnX_selectXnX_ambiguous_declines
     Given the modern graph
     And the traversal of

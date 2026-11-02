@@ -16,7 +16,7 @@ import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, ty
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
 import { ALWAYS_PRODUCTIVE, presenceOf } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
-import type { FramedRel, RecordField, RelFraming } from '../framing.ts';
+import { meetMapKeyFacts, type FramedRel, type RecordField, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { joinAliasEntry, type AliasEntry, type AliasMap } from '../../alias.ts';
 import { liveAliases } from '../alias.ts';
@@ -626,7 +626,7 @@ export function mergeArms(
       id: fresh('un'), inputs: arms.map((arm) => arm.rel), all: true,
       channels, type: first.rel.type,
     }),
-    framing: first.framing,
+    framing: meetFraming(arms.map((arm) => arm.framing)),
     aliases: remapped.aliases,
   };
 }
@@ -1218,6 +1218,42 @@ export const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
                   : left.kind === 'typedNode' ? false
                     : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
+/**
+ * THE MERGED FRAMING of arms `sameFraming` admits — the ONE authority for what a merged stream may claim,
+ * so no caller adopts the first arm's framing for its siblings' rows.
+ *
+ * `sameFraming` compares what decides the PAYLOAD (the columns and their encodings); it deliberately
+ * ignores a map's static key facts, which differ between arms that union perfectly well
+ * (`union(constant([a:3]), constant([a:1,b:2]))`). Those facts are a MAY set and a MUST set, so the merge
+ * is their lattice meet (`meetMapKeyFacts`) — and a record's map-valued FIELD is the same question one
+ * level down, so the meet recurses through the fields. Every other kind is equal across admitted arms,
+ * which is exactly what `sameFraming` guarantees, so the first arm's framing IS the merged one.
+ */
+export function meetFraming(framings: readonly RelFraming[]): RelFraming {
+  const first = framings[0]!;
+  if (first.kind === 'map') {
+    const maps = framings as readonly Extract<RelFraming, { kind: 'map' }>[];
+    return { kind: 'map', keyOf: first.keyOf, valOf: first.valOf, ...meetMapKeyFacts(maps) };
+  }
+  if (first.kind === 'record') {
+    const records = framings as readonly Extract<RelFraming, { kind: 'record' }>[];
+    return {
+      kind: 'record',
+      fields: first.fields.map((field, i) => {
+        const peers = records.map((record) => record.fields[i]!);
+        // `mirrorsAlias` is a MUST fact too (every row's field IS the label's last value): kept only where
+        // every arm says so.
+        const { mirrorsAlias: _claimed, ...rest } = field;
+        return {
+          ...rest, framing: meetFraming(peers.map((peer) => peer.framing)),
+          ...(peers.every((peer) => peer.mirrorsAlias) ? { mirrorsAlias: true as const } : {}),
+        };
+      }),
+    };
+  }
+  return first;
+}
+
 /** A record collapsed to a map value carries SELF-DESCRIBING `{t,v}` pairs, which is the map
  *  vocabulary's one scalar encoding on both sides (`MapOf`, `render.ts`: "the scalar side of a map is
  *  ALWAYS a self-describing {t,v} ValueNode … heterogeneous maps round-trip"). Spelled once here
@@ -1316,9 +1352,9 @@ function mergedSide(sides: readonly MapOf[]): MapOf {
  * (`prefixAt`, `record.ts`), so position IS the column name and two records that agree here occupy the
  * same columns by construction.
  *
- * `optional` is compared rather than merged, and that is the deliberate narrowing: `mergeArms` adopts
- * the FIRST arm's framing for the merged stream, so admitting a disagreement would silently impose one
- * arm's productivity rule on the other's rows — TinkerPop omits an unproductive key
+ * `optional` is compared rather than merged, and that is the deliberate narrowing: the merged record's
+ * fields are the FIRST arm's (`meetFraming` meets only their key facts), so admitting a disagreement would
+ * silently impose one arm's productivity rule on the other's rows — TinkerPop omits an unproductive key
  * (`ProjectStep.map`'s `ifProductive`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66`),
  * so getting that flag wrong is a key present where the reference has none. Merging it properly means
