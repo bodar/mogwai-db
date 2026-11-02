@@ -65,11 +65,19 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   // Over a COLLAPSED relation it declines rather than sampling: a uniform sample of ROWS is not a
   // uniform sample of traversers when a row stands for N of them, and there is no trimming to do —
   // sample has no band, so `bulkSlice` has nothing to say about it.
+  //
+  // PER-ORIGIN, like every slice above: a live `origin` means the sample sits in a body the reference
+  // applies once PER TRAVERSER (`TraversalUtil.applyAll` resets and re-runs the child for each one —
+  // `vendor/tinkerpop/gremlin-core/.../step/sideEffect/AddPropertyStep.java:134`, `LocalStep`, a `by()`
+  // child), so each traverser draws its OWN n. One window over the whole post-fan-out stream drew n
+  // across ALL traversers: a property() body `coalesce(values('nope'), constant(null)).sample(1)`
+  // removed the key from ONE of N vertices. The partition rides the same `ROW_NUMBER()` over RANDOM()
+  // below, not the deterministic ranked window (that interception regressed a `sample(n).fold()` reducer).
   if (step.name === 'sample') {
     if (bulked) return null;
     const rank = 'sample_rank';
     const ranked = rowNumberWindow(input, rank, input.channels,
-      { partitionBy: [], orderBy: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] }, fresh);
+      { partitionBy: origin ? [col(input.id, origin.col)] : [], orderBy: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] }, fresh);
     // The filter reads a column computed by the window's block, so fence it rather than letting the
     // assembler inline and re-evaluate the RANDOM() expression at the clause-reader boundary.
     const frame = make.materialize({

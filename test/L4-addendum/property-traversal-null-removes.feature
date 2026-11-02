@@ -140,3 +140,19 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
     Then the result should have a count of 1
     And the graph should return 0 for count of "g.V().has(\"x\")"
     And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").has(\"q\",1)"
+
+  # A DRAWING body is applied once PER TRAVERSER (`TraversalUtil.applyAll`, AddPropertyStep.java:134), so a
+  # `sample(1)` inside it draws one row for EACH person — every body here yields null and every age is
+  # removed. One draw across the whole stream removed the key from one person only.
+  @gap:property-traversal-null
+  Scenario: g_V_hasLabelXpersonX_propertyXage_coalesceXvaluesXnopeX_constantXnullXX_sampleX1XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").property("age", __.coalesce(__.values("nope"), __.constant(null)).sample(1)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+    And the graph should return 0 for count of "g.V().has(\"age\")"

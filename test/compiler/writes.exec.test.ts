@@ -5,7 +5,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { bagOf, idAlreadyExists, run, seededStore, written } from '../support/harness.ts';
+import { bagOf, idAlreadyExists, run, seededStore, storeSeededWith, written } from '../support/harness.ts';
 import { isRowsBind } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -640,6 +640,22 @@ describe('property(k, <traversal>) refuses what one statement cannot answer', ()
       const held = bagOf(run(store, "g.V(1).values('l')").map((r) => r.v)) as number[];
       const age = held.find((v) => v !== 100);
       expect(held.length === 0 || (held.length === 2 && held.includes(100) && [27, 29, 32, 35].includes(age!))).toBe(true);
+    }
+  });
+
+  // EACH traverser draws its own sample: the body is applied once per traverser
+  // (`TraversalUtil.applyAll`, AddPropertyStep.java:134), so `sample(1)` is one row PER VERTEX, never one
+  // row across the whole stream. One global draw removed the key from 1 of N vertices and wrote `y` to 1.
+  test('a drawing body samples per traverser, not across the stream', () => {
+    const seed = Array.from({ length: 10 }, (_, i) => `g.addV('person').property('z', ${i}).property('w', ${i + 100})`);
+    for (let i = 0; i < 5; i++) {
+      const store = storeSeededWith(seed);
+      expect(run(store, "g.V().hasLabel('person').property('z', __.coalesce(__.values('nope'), __.constant(null)).sample(1)).count()").map((r) => r.v)).toEqual([10]);
+      expect(run(store, "g.V().hasLabel('person').values('z').count()").map((r) => r.v)).toEqual([0]);
+      run(store, "g.V().hasLabel('person').property(single, 'y', __.union(__.values('w'), __.values('w').math('_ + 1')).sample(1))");
+      expect(run(store, "g.V().hasLabel('person').values('y').count()").map((r) => r.v)).toEqual([10]);
+      run(store, "g.V().hasLabel('person').property(list, 'l', __.union(__.values('w'), __.values('w'), __.values('w')).sample(2))");
+      expect(run(store, "g.V().hasLabel('person').values('l').count()").map((r) => r.v)).toEqual([20]);
     }
   });
 
