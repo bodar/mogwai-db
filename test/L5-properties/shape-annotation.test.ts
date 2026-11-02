@@ -15,7 +15,7 @@ import type { Shape } from './shape.ts';
 type Annotation = Shape | 'unknown';
 type State = { shape: Annotation; folded?: Annotation };
 const SAME = new Set(['hasLabel', 'has', 'hasId', 'identity', 'dedup', 'where', 'filter', 'not', 'and', 'or', 'union', 'coalesce', 'optional', 'local', 'order', 'limit', 'skip', 'range', 'tail', 'repeat']);
-const anyParams = () => new Proxy({}, { has: () => true, get: () => null }) as any;
+import { anyParams } from '../support/any-params.ts';
 
 function advance(state: State, step: Step): State {
   const s = state.shape;

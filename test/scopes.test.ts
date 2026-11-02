@@ -1,3 +1,4 @@
+import { paramEnv } from '../src/gremlin/param-env.ts';
 import { describe, expect, test } from 'bun:test';
 import { createAppScope, createRequestScope } from '../src/scopes.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
@@ -21,7 +22,7 @@ describe('DI scopes', () => {
     const fastPaths = { ...DEFAULT_FAST_PATHS, movementCollapse: false };
     const app = createAppScope({ registry: () => registry, fastPaths });
     const sourceOptions = new Map([['~mogwai.test', true]]);
-    const scope = createRequestScope(app, { params: { x: 1 }, federationDepth: 2, sourceOptions });
+    const scope = createRequestScope(app, { params: paramEnv({ x: 1 }), federationDepth: 2, sourceOptions });
 
     // inherited from the app scope — the direct-read contract
     expect(scope.registry).toBe(registry);
@@ -29,7 +30,8 @@ describe('DI scopes', () => {
     expect(scope.fastPaths.movementCollapse).toBe(false);
 
     // the request scope's own entries — one traversal's fixed context
-    expect(scope.params).toEqual({ x: 1 });
+    expect(scope.params.values).toEqual({ x: 1 });
+    expect(scope.params.types).toEqual({ x: 'int' });
     expect(scope.federationDepth).toBe(2);
     expect(scope.sourceOptions).toBe(sourceOptions);
   });

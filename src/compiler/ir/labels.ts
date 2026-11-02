@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, isPred, stepChain, type Arg, type Pred, type Step } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { PATH_FAMILY, REDUCERS, isLocalScope, isStreamBarrier, type IRStep } from './step.ts';
@@ -40,7 +41,7 @@ export const asLabelsOf = (s: Step): string[] =>
  *  re-read with the same `stepChain` primitive every other scanner uses, and a FILTER argument
  *  (`not(…)`/`where(…)`, which binds nothing — see prefix/match.ts) contributes no label because it
  *  does not open with `as()`. */
-export const matchLabelsOf = (s: Step, params: Record<string, any>): string[] => {
+export const matchLabelsOf = (s: Step, params: ParamEnv): string[] => {
   if (s.name !== 'match') return [];
   const out: string[] = [];
   for (const { value: a } of s.args ?? []) {
@@ -133,7 +134,7 @@ function walkReads(chain: readonly Step[], read: BodyReader, acc: Acc): void {
 }
 
 /** Every label the tree reads, at any depth. */
-export function labelReads(steps: readonly Step[], params: Record<string, any>): LabelReads {
+export function labelReads(steps: readonly Step[], params: ParamEnv): LabelReads {
   const acc: Acc = { labels: new Set<string>(), all: false };
   walkReads(steps, rawBodies(params), acc);
   return acc;
@@ -156,7 +157,7 @@ const VALUE_ARGUMENT_STEPS: ReadonlySet<string> = new Set([
  * reaches. Still fail closed everywhere else: modulators, `with()` values, a `path()`-family step and an
  * unreadable body count exactly as in `labelReads`.
  */
-export function scopeKeyReads(steps: readonly Step[], params: Record<string, any>): LabelReads {
+export function scopeKeyReads(steps: readonly Step[], params: ParamEnv): LabelReads {
   const acc: Acc = { labels: new Set<string>(), all: false, valueArgs: VALUE_ARGUMENT_STEPS };
   walkReads(steps, rawBodies(params), acc);
   return acc;
@@ -167,7 +168,7 @@ export function scopeKeyReads(steps: readonly Step[], params: Record<string, any
  * every string. Nested predicate operands are walked because `has(k, select('x'))` stores its select as
  * a nested traversal there. */
 export function preBarrierSelectRead(
-  steps: readonly Step[], bound: ReadonlySet<string>, params: Record<string, any>,
+  steps: readonly Step[], bound: ReadonlySet<string>, params: ParamEnv,
 ): string | null {
   let found: string | null = null;
   let ambiguous = false;
@@ -198,7 +199,7 @@ export function preBarrierSelectRead(
  *  body's traverser outward from the ones that re-project the parent is a second question, and getting
  *  it wrong here licenses a deletion. Over-answering costs a retraction; under-answering costs an
  *  answer. */
-function carriesBarrier(s: Step, params: Record<string, any>): boolean {
+function carriesBarrier(s: Step, params: ParamEnv): boolean {
   // Every child position, a predicate operand's traversal included; an unreadable body counts as one.
   return someStepDeep([s], params, (inner) => isStreamBarrier(inner as IRStep), true);
 }
@@ -219,7 +220,7 @@ function carriesBarrier(s: Step, params: Record<string, any>): boolean {
  *  `g.V().as('x').values('age').union(__.min(), __.identity()).select('x').count()` is 4, not 5,
  *  BECAUSE `select('x')` drops the `min()` arm's traverser, whose label that arm's barrier ate. Treating
  *  the bind as still live made the presence filter look like a tautology and deleting it returned 5. */
-export function labelsBoundBefore(steps: readonly Step[], index: number, params: Record<string, any>): ReadonlySet<string> {
+export function labelsBoundBefore(steps: readonly Step[], index: number, params: ParamEnv): ReadonlySet<string> {
   let bound = new Set<string>();
   for (let i = 0; i < index && i < steps.length; i++) {
     if (carriesBarrier(steps[i], params)) bound = new Set();
@@ -298,7 +299,7 @@ export function sideEffectShadowedLabel(
  * row) asks this whether the name MAY be bound there, and fails closed where it may.
  */
 export function programScopeNames(
-  steps: readonly Step[], params: Record<string, any>, declared: Iterable<string>,
+  steps: readonly Step[], params: ParamEnv, declared: Iterable<string>,
 ): ProgramScopeNames {
   const sideEffects = new Set(declared);
   const labels = new Set<string>();
@@ -358,7 +359,7 @@ interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unn
  * compare the string (`whereHasScopeKey`, read by the scalar `where(P)` arm in `rel/lower.ts`).
  */
 export function unresolvableWhereKey(
-  steps: readonly Step[], params: Record<string, any>, { sideEffects, labels }: ProgramScopeNames,
+  steps: readonly Step[], params: ParamEnv, { sideEffects, labels }: ProgramScopeNames,
 ): string | null {
   const keys: WhereKey[] = [];
   eachStepDeep(steps, rawBodies(params), (s) => {
@@ -463,7 +464,7 @@ export const consumesPath = (s: Step): boolean =>
  *   replace the outer traverser (`labelsBoundBefore`'s `carriesBarrier` clear is the MUST rule, wrong here).
  * A body the scan cannot read sets `all`: its binds are unknown.
  */
-export function pathLabelsAt(steps: readonly Step[], index: number, params: Record<string, any>): LabelReads {
+export function pathLabelsAt(steps: readonly Step[], index: number, params: ParamEnv): LabelReads {
   let labels = new Set<string>();
   let all = false;
   const read = rawBodies(params);
@@ -507,7 +508,7 @@ export function readsPathLabel(held: LabelReads, reads: LabelReads): boolean {
  * - with both bounds, no bind of the from-label — at any depth — follows the to-label's last top-level
  *   bind, so the from position can never land after the to position.
  */
-export function unlocatableSubPath(steps: readonly Step[], params: Record<string, any>): string | null {
+export function unlocatableSubPath(steps: readonly Step[], params: ParamEnv): string | null {
   let found: string | null = null;
   eachChainDeep(steps, rawBodies(params), (chain) => {
     for (let i = 0; i < chain.length && found === null; i++) {

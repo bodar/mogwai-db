@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -33,7 +34,7 @@ function ioDir(): string {
 const managerOn = (dir: string) => new BunGraphManager(undefined, standardRegistry, new FileIoStore(dir));
 
 const steps = (gremlin: string) =>
-  runPasses(stepChain(parseGremlin(gremlin), {}), { with: [], without: [] } as any, {}).steps;
+  runPasses(stepChain(parseGremlin(gremlin), NO_PARAMS), { with: [], without: [] } as any, NO_PARAMS).steps;
 
 describe('io() desugars to a call() on the internal service', () => {
   test('io(path).read() becomes one call step carrying path + direction', () => {

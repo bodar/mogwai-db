@@ -20,6 +20,7 @@
 //
 // LazyMaps are cheap: create as many as there are lifecycles.
 
+import type { ParamEnv } from './gremlin/param-env.ts';
 import { LazyMap, instance } from '@bodar/yadic/LazyMap.ts';
 import type { Dependency } from '@bodar/yadic/types.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from './compiler/options/fast-paths.ts';
@@ -64,7 +65,7 @@ export type AppScope =
 /** The per-REQUEST dependency contract (an AppScope plus what one traversal fixes). */
 export type RequestScope =
   & AppScope
-  & Dependency<'params', Record<string, any>>
+  & Dependency<'params', ParamEnv>
   & Dependency<'federationDepth', number>
   /** Source-level `g.with(k[,v])` options — a per-TRAVERSAL configuration, and a traversal is
    *  what a request IS, so a nested sub-compile inherits them rather than losing them. */
@@ -114,12 +115,12 @@ export function createCompileScope(
 /** Mint a request scope from an app scope for ONE client request (one traversal, or one
  *  federated hop into a sibling graph — which is a request of its own, one level deeper). */
 export function createRequestScope(app: AppScope, deps: {
-  params?: Record<string, any>;
+  params: ParamEnv;
   federationDepth?: number;
   sourceOptions?: ReadonlyMap<string, any>;
 }): RequestScope {
   return LazyMap.create(app)
-    .set('params', instance(deps.params ?? {}))
+    .set('params', instance(deps.params))
     .set('federationDepth', instance(deps.federationDepth ?? 0))
     .set('sourceOptions', instance(deps.sourceOptions ?? new Map()));
 }

@@ -2,6 +2,7 @@
 // only in prose comments + the inside-out normalize() nesting. Encoding them as a test turns a
 // silent mis-compile (a future reorder) into a loud failure. Asserted DIRECTLY against the PASSES
 // array — no compile() needed.
+import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { PASSES } from '../../src/compiler/ir/passes.ts';
 import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
@@ -90,11 +91,11 @@ describe('Pass pipeline ordering invariants', () => {
 // only in a child body and only while that flag was on. These pin the three properties that made
 // moving it to a Pass the right call; each one was a measured defect before.
 describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => {
-  const fold = (g: string) => canonicalizeConnectives(stepChain(parseGremlin(g), {}), {});
+  const fold = (g: string) => canonicalizeConnectives(stepChain(parseGremlin(g), NO_PARAMS), NO_PARAMS);
   const shape = (steps: any[]): string =>
     steps.map((s) => {
       const nested = s.args.map((a: any) => a.value).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
-      return nested.length ? `${s.name}(${nested.map((n: any) => shape(stepChain(n.nested, {}))).join(', ')})` : s.name;
+      return nested.length ? `${s.name}(${nested.map((n: any) => shape(stepChain(n.nested, NO_PARAMS))).join(', ')})` : s.name;
     }).join('.');
 
   test('a SOURCE step is never absorbed into an operand', () => {
@@ -130,8 +131,8 @@ describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => 
     // services/params/traversal-param.ts un-parses one back to Gremlin via the client's
     // TranslateVisitor (needs `tree.accept`). An unconditional pass that rebuilt every nested arg
     // as a Step[] broke every federate `with("traversal", __.V())` param.
-    const steps = stepChain(parseGremlin('g.V().call("x").with("traversal", __.V().out())'), {});
-    expect(canonicalizeConnectives(steps, {})).toBe(steps);
+    const steps = stepChain(parseGremlin('g.V().call("x").with("traversal", __.V().out())'), NO_PARAMS);
+    expect(canonicalizeConnectives(steps, NO_PARAMS)).toBe(steps);
   });
 
   test('an empty operand throws rather than silently dropping a conjunct', () => {
@@ -141,7 +142,7 @@ describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => 
 
 describe('the writeArguments verify Pass — a text-level refusal is not the lowering\'s business (§6·5)', () => {
   const passes = (gremlin: string) =>
-    runPasses(stepChain(parseGremlin(gremlin), {}), EMPTY_STRATEGY_USE, {});
+    runPasses(stepChain(parseGremlin(gremlin), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS);
 
   test('a text-level write ERROR raises from the Pass tier, above the lowering', () => {
     // The point is WHERE, and it is what makes the coverage counter able to reach 100%. Raised from
@@ -182,7 +183,7 @@ describe('the writeArguments verify Pass — a text-level refusal is not the low
 // lowering has to learn separately.
 describe('inlineIdentityHostBody: a per-traverser host over a stream-identity body IS its body', () => {
   const chain = (g: string) =>
-    runPasses(stepChain(parseGremlin(g), {}), EMPTY_STRATEGY_USE, {}).steps.map((s: any) => s.name).join('.');
+    runPasses(stepChain(parseGremlin(g), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps.map((s: any) => s.name).join('.');
 
   test('local(aggregate) / map(aggregate) / flatMap(aggregate) all splice', () => {
     for (const host of ['local', 'map', 'flatMap'])
@@ -193,7 +194,7 @@ describe('inlineIdentityHostBody: a per-traverser host over a stream-identity bo
     // The reason this Pass sits in `extract`: at this point `absorbModulators` has not run, so the
     // body is the TWO steps `[aggregate, by]`. Splicing before the fold is what lets the modulator
     // land on its host.
-    const steps = runPasses(stepChain(parseGremlin('g.V().local(aggregate("x").by("age")).cap("x")'), {}), EMPTY_STRATEGY_USE, {}).steps;
+    const steps = runPasses(stepChain(parseGremlin('g.V().local(aggregate("x").by("age")).cap("x")'), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps;
     expect(steps.map((s: any) => s.name).join('.')).toBe('V.aggregate.cap');
     expect((steps[1] as any).modulators).toEqual([['age']]);
   });
@@ -221,14 +222,14 @@ describe('inlineIdentityHostBody: a per-traverser host over a stream-identity bo
   });
 
   test('it reaches a NESTED body too, because every child chain re-runs the pipeline', () => {
-    const where: any = runPasses(stepChain(parseGremlin('g.V().where(__.local(__.aggregate("a")).values("name"))'), {}), EMPTY_STRATEGY_USE, {}).steps[1];
-    expect(childSteps(where.args[0].value.nested, {}).map((s: any) => s.name).join('.')).toBe('aggregate.values');
+    const where: any = runPasses(stepChain(parseGremlin('g.V().where(__.local(__.aggregate("a")).values("name"))'), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps[1];
+    expect(childSteps(where.args[0].value.nested, NO_PARAMS).map((s: any) => s.name).join('.')).toBe('aggregate.values');
   });
 });
 
 describe('the label retractions: state nobody reads is not carried (§7.4 items 2-3)', () => {
   const chain = (g: string) =>
-    runPasses(stepChain(parseGremlin(g), {}), EMPTY_STRATEGY_USE, {}).steps.map((s: any) => s.name).join('.');
+    runPasses(stepChain(parseGremlin(g), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps.map((s: any) => s.name).join('.');
 
   // NOTE: the shape §7 blocks on — `repeat(__.out()).times(5).as("a").out("writtenBy").as("b")
   // .select("a","b").count()`, 24 309 134 024 traversers over the grateful graph — is NOT pinned here.
@@ -290,14 +291,14 @@ describe('the label retractions: state nobody reads is not carried (§7.4 items 
     // the merge, and deleting the bind there answered [] where three traversers were expected.
     const arm = 'g.union(__.V(1).as("a").out(), __.V(2)).select("a")';
     expect(chain(arm)).toBe('union.select');
-    const union: any = runPasses(stepChain(parseGremlin(arm), {}), EMPTY_STRATEGY_USE, {}).steps[0];
-    expect(childSteps(union.args[0].value.nested, {}).map((s: any) => s.name).join('.')).toBe('V.as.out');
+    const union: any = runPasses(stepChain(parseGremlin(arm), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps[0];
+    expect(childSteps(union.args[0].value.nested, NO_PARAMS).map((s: any) => s.name).join('.')).toBe('V.as.out');
   });
 
   test('withoutStrategies(PathRetractionStrategy) genuinely suppresses the retraction', () => {
     const suppressed = runPasses(
-      stepChain(parseGremlin('g.V().as("a").out().count()'), {}),
-      { with: [], without: ['PathRetractionStrategy'] }, {},
+      stepChain(parseGremlin('g.V().as("a").out().count()'), NO_PARAMS),
+      { with: [], without: ['PathRetractionStrategy'] }, NO_PARAMS,
     ).steps.map((s: any) => s.name).join('.');
     expect(suppressed).toBe('V.as.out.count');
   });
@@ -340,7 +341,7 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
   // desugar to the ONE call() service, never a second lowering. Asserted at the Pass level (runPasses,
   // no compile) so it sees the rewrite before the service's fail-closed deferral fires.
   const chainOf = (gremlin: string) =>
-    runPasses(stepChain(parseGremlin(gremlin), {}), EMPTY_STRATEGY_USE, {}, undefined, false).steps;
+    runPasses(stepChain(parseGremlin(gremlin), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS, undefined, false).steps;
   const callOf = (gremlin: string) => {
     const chain = chainOf(gremlin);
     const call = chain.find((s) => s.name === 'call');

@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
@@ -107,7 +108,7 @@ describe('a federated landing binds the whole result set once', () => {
   const landAndCount = (n: number) => {
     // The rows a barrier awaited, landed as the resumed chain's SOURCE — the same call `segment.ts`
     // makes after `apply` resolves, with an empty tail so the plan is the landing alone.
-    const lowered = lowerForeignResume(Array.from({ length: n }, (_, i) => vrow(i + 1)), 'vertex', [], 0);
+    const lowered = lowerForeignResume(Array.from({ length: n }, (_, i) => vrow(i + 1)), 'vertex', [], 0, { params: NO_PARAMS });
     if (!lowered) throw new Error('expected a lowered resume');
     const plan = finishLowering(lowered);
     if (plan.kind !== 'read') throw new Error('expected read plan');

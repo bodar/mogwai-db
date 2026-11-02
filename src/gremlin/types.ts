@@ -417,8 +417,9 @@ export function normalizeTypeName(name: string): CanonicalType | null {
  *  declared (`argType` — a wire DataType name or a parsed literal subtype) and the
  *  materialized JS value. The declared type wins when present (it is the truth the
  *  wire/literal gave us, and is the ONLY way datetime/uuid are distinguishable from
- *  long/string); otherwise infer conservatively from the JS runtime type — the
- *  honest fallback for an untyped channel (a JSON-request param, an unftagged arg).
+ *  long/string); otherwise infer conservatively from the JS runtime type — for a value
+ *  no channel typed (an untagged arg). A PARAMETER never reaches here untyped:
+ *  `declaredParamTypes` settles every one into the `ParamEnv` before the compiler reads it.
  *  Returns null when nothing can be said (e.g. a null value), leaving vtype NULL =
  *  "infer on read" (the legacy storage-class path). */
 export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): CanonicalType | null {

@@ -18,6 +18,7 @@
 //
 // Design rationale, the measured translation table, and the residuals:
 // docs/archive/2026-07-28-match-string-frontend-design.md.
+import type { ParamEnv } from './param-env.ts';
 import { CharStream, CommonTokenStream, BaseErrorListener, type ParserRuleContext } from 'antlr4ng';
 import { GQLLexer } from '../../parser/gql/GQLLexer.ts';
 import { GQLParser } from '../../parser/gql/GQLParser.ts';
@@ -75,7 +76,7 @@ const anonVar = (n: number) => ` anon${n}`;
 /** Walk the parse tree into nodes + edges. Two occurrences of the same DECLARED variable are the
  *  same node (their constraints merge); two anonymous `()` are always DISTINCT nodes, matching
  *  upstream's identity-keyed map. */
-function patternGraph(tree: any, params: Record<string, any>): { nodes: PatNode[]; edges: PatEdge[] } {
+function patternGraph(tree: any, params: ParamEnv): { nodes: PatNode[]; edges: PatEdge[] } {
   const nodes: PatNode[] = [];
   const edges: PatEdge[] = [];
   const byName = new Map<string, PatNode>();
@@ -119,7 +120,7 @@ function patternGraph(tree: any, params: Record<string, any>): { nodes: PatNode[
 }
 
 /** One `edgePattern` → its direction (from the LEFT node's perspective) plus variable/label/props. */
-function edgeSpec(ep: any, params: Record<string, any>): { dir: PatEdge['dir']; var?: string; label?: string; props: PropFilter[] } {
+function edgeSpec(ep: any, params: ParamEnv): { dir: PatEdge['dir']; var?: string; label?: string; props: PropFilter[] } {
   const directed = ep.directedEdge?.();
   const reverse = ep.reverseDirectedEdge?.();
   const inner = directed ?? reverse ?? ep.undirectedEdge?.();
@@ -137,7 +138,7 @@ function edgeSpec(ep: any, params: Record<string, any>): { dir: PatEdge['dir']; 
  *  `match(str, [k: v])`; an UNBOUND one throws, matching the Gremlin front end's own
  *  `Unbound parameter` rather than upstream's fail-open (which resolves a missing param to null and
  *  so silently matches an ABSENT property instead). */
-function propFilters(pf: any, params: Record<string, any>): PropFilter[] {
+function propFilters(pf: any, params: ParamEnv): PropFilter[] {
   if (!pf) return [];
   return pf.propertyPair().map((pair: any): PropFilter => {
     const key = pair.propertyKey().getText();
@@ -145,9 +146,9 @@ function propFilters(pf: any, params: Record<string, any>): PropFilter[] {
     const ref = pv.paramRef?.();
     if (ref) {
       const name = ref.IDENTIFIER().getText();
-      if (!(name in params)) throw new ValueParseError(`MATCH pattern references unbound parameter $${name}`);
-      const value = params[name];
-      return value === null ? { key, absent: true } : { key, value };
+      if (!Object.hasOwn(params.values, name)) throw new ValueParseError(`MATCH pattern references unbound parameter $${name}`);
+      const value = params.values[name];
+      return value === null ? { key, absent: true } : { key, value, type: params.types[name] ?? null };
     }
     return { key, ...literalValue(pv.literal()) };
   });
@@ -252,7 +253,7 @@ const flip = (d: PatEdge['dir']): PatEdge['dir'] => (d === 'out' ? 'in' : d === 
  */
 export function gqlMatchSteps(
   text: string,
-  params: Record<string, any>,
+  params: ParamEnv,
   ctx: ParserRuleContext,
   terminal: boolean,
 ): Step[] {

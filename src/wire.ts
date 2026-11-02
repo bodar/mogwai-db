@@ -27,7 +27,8 @@ export interface ParsedQuery {
    *  GraphBinary DataType) — the truth for a param's type, which a JS `number` alone
    *  can't carry. Consumed by the frontend to tag the param's argType so a typed
    *  property write records the right vtype. Empty for the JSON request path (no wire
-   *  type tags — the write seam then infers from the JS value). */
+   *  type tags): `paramEnv` (`declaredParamTypes`) then settles each param's type from its JS
+   *  value, once, before the compiler reads it. */
   paramTypes: Record<string, TypeNode>;
   /** Traversal-source name from the body; the router prefers a path id over it. */
   g?: string;
@@ -92,7 +93,7 @@ async function decodeTyped(r: StreamReaderT): Promise<{ value: any; type: TypeNo
  *  MAP byte — the shape the client sends), capturing the bound-param value types by
  *  decoding the bindings/parameters sub-map with decodeTyped (recursively typed). Every
  *  other field decodes normally via anySerializer. paramTypes keeps only the params the
- *  wire actually typed (unknown/absent → omitted, so the write seam infers). */
+ *  wire actually typed (unknown/absent → omitted, so `paramEnv` settles it from the JS value). */
 async function decodeFields(r: StreamReaderT): Promise<{ fields: Map<any, any>; paramTypes: Record<string, TypeNode> }> {
   const count = await r.readInt32BE();
   const fields = new Map<any, any>();
@@ -128,8 +129,9 @@ export interface JsonQuery {
 
 /** Build a {@link ParsedQuery} from an ALREADY-PARSED JSON request object. The reuse seam shared by
  *  `parseRequest`'s JSON branch and the router's cacheable `GET ?gremlin=…` path — the two entries that
- *  carry no GraphBinary type tags. `paramTypes` is therefore always empty: the write seam infers a
- *  param's vtype from its JS value downstream (same as the JSON body path has always done). */
+ *  carry no GraphBinary type tags. `paramTypes` is therefore always empty: `paramEnv`
+ *  (`declaredParamTypes`) settles each param's type from its JS value once, at the top of the compile,
+ *  so every nested body reads the same type the root chain does. */
 export function parseJsonQuery(msg: JsonQuery): ParsedQuery {
   // batchSize wins over resultIterationBatchSize; 0 / negative / non-numeric → default.
   const n = Number(msg.batchSize ?? msg.resultIterationBatchSize);

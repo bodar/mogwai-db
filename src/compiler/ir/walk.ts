@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
 import type { IRStep } from './step.ts';
 
@@ -25,7 +26,7 @@ import type { IRStep } from './step.ts';
 export type BodyReader = (nested: unknown) => readonly Step[] | null;
 
 /** The raw reader: `stepChain`, with an unparseable body reported as `null`. */
-export const rawBodies = (params: Record<string, any>): BodyReader => (nested) => {
+export const rawBodies = (params: ParamEnv): BodyReader => (nested) => {
   try { return stepChain(nested, params); } catch { return null; }
 };
 
@@ -114,7 +115,7 @@ export function eachStepDeep(
  * random draw, a barrier — fail closed), `false` for one that merely skips what it cannot see.
  */
 export function someStepDeep(
-  steps: readonly Step[], params: Record<string, any> | BodyReader, pred: (s: Step) => boolean, unreadable = false,
+  steps: readonly Step[], params: ParamEnv | BodyReader, pred: (s: Step) => boolean, unreadable = false,
 ): boolean {
   const read: BodyReader = typeof params === 'function' ? params as BodyReader : rawBodies(params);
   const any = (chain: readonly Step[]): boolean => chain.some((s) => {

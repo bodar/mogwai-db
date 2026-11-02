@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
@@ -71,7 +72,7 @@ export interface ChildSeam {
    * `mergeMaps` take exactly this pair, and the write vocabulary reaching them through the seam is
    * what stopped `mergeV(__.select(c))` reading as an uncovered gap.
    */
-  readonly params: Record<string, any>;
+  readonly params: ParamEnv;
   readonly sideEffects: SideEffectConstants;
   /** EVERY NAME A SCOPE READ MAY RESOLVE PAST THE TRAVERSER'S OWN MAP, program-wide — every side-effect
    *  key (not only the `withSideEffect` constants above: an `aggregate('w')` anywhere registers `w` at

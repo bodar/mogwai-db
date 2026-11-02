@@ -35,6 +35,7 @@
 // not the 6 that `V.dedup.dedup` gives. So a dedup body unrolls only at n = 1 and declines beyond it —
 // unless every body step is a value-preserving filter, whose levels ≥ 2 are then provably empty.
 // The file's job is to keep the line visible rather than to bless a direction.
+import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
@@ -56,7 +57,7 @@ describe('the repeat() unroll boundary', () => {
     // that can collapse a multiset frontier. Pin the transformation itself: answer equality alone
     // would not distinguish the old enumerate-every-walk plan from the phase-wise one.
     const names = (g: string) =>
-      normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
+      normalize(stepChain(parseGremlin(g), NO_PARAMS), NO_PARAMS, undefined, false).steps.map((s) => s.name);
     for (const q of [
       'g.V(1).repeat(__.out()).times(2)',
       'g.V(1).repeat(__.outE().inV()).times(2)',
@@ -175,7 +176,7 @@ describe('the repeat() unroll boundary', () => {
     // the barrier written out n times — is in `test/L2-sql/olap-chain.exec.test.ts` because a barrier
     // needs the async drive this sync helper does not run.
     const names = (g: string) =>
-      normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
+      normalize(stepChain(parseGremlin(g), NO_PARAMS), NO_PARAMS, undefined, false).steps.map((s) => s.name);
     const cc = names('g.V().repeat(__.connectedComponent()).times(2).count()');
     expect(cc).not.toContain('repeat');
     expect(cc.filter((n) => n === 'call').length).toBe(2);
@@ -279,7 +280,7 @@ describe('the repeat() unroll boundary', () => {
     // `nested: false` — these are ROOT traversals, and `normalize` defaults the other way (see its own
     // comment: every `src/` caller holds a body, so that is the safe default).
     const rolled = (g: string) =>
-      normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
+      normalize(stepChain(parseGremlin(g), NO_PARAMS), NO_PARAMS, undefined, false).steps.map((s) => s.name);
     expect(rolled('g.V().repeat("a", __.out().limit(2)).times(2)')).toContain('repeat');
     // …and the unnamed form still unrolls, so the guard is about the NAME and nothing else.
     expect(rolled('g.V().repeat(__.out().limit(2)).times(2)')).not.toContain('repeat');
@@ -321,7 +322,7 @@ describe('the repeat() unroll boundary', () => {
       ...s.args.flatMap((a: any) => (a.value && Array.isArray(a.value.nested) ? slicesOf(a.value.nested) : [])),
     ]);
     const tree = parseGremlin('g.withoutStrategies(EarlyLimitStrategy).V().union(__.out().limit(1), __.both())');
-    const nested = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}, undefined, false).steps;
+    const nested = runPasses(stepChain(tree, NO_PARAMS), extractStrategies(tree, NO_PARAMS), NO_PARAMS, undefined, false).steps;
     const found = slicesOf(nested);
     expect(found).toHaveLength(1);
     expect(found[0].earlyLimitSuppressed).toBe(true);

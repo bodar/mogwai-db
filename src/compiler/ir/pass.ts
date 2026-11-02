@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import type { SideEffectConstants, StrategyUse } from '../../gremlin/frontend.ts';
 import type { IRStep } from './strategies.ts';
 
@@ -37,7 +38,7 @@ export type PassCategory = typeof PASS_CATEGORIES[number];
  *  across compiles) — a one-shot data bag threaded by value through the fold, exactly as LoweringState is
  *  for the lowering half. Built once per compilePlan() call. */
 export interface PassContext {
-  readonly params: Record<string, any>;
+  readonly params: ParamEnv;
   /** The `withSideEffect(name, constant)` registry the front-end extracted — the SECOND compile-scope
    *  constant environment a step's arguments resolve against, beside the wire bindings in `params`.
    *  A verify Pass that parses a write step needs it for the same reason the lowerings do: a

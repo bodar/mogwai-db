@@ -3,6 +3,7 @@
 // its decline check through it, but no fetch behaviour changes yet. These tests pin (a) the fact's
 // vocabulary and (b) the two drift risks the convergence exists to remove: the adjacency-step set must
 // equal `HOPS`, and the decline set must match what `detachedTail` failed closed on before.
+import { NO_PARAMS, paramEnv } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { ADJACENCY_STEPS, BOUND_HANDOFF_DENY, contentDemand, pushableTailPrefix } from '../../src/compiler/ir/content-demand.ts';
 import { HOPS } from '../../src/compiler/rel/lower/movement.ts';
@@ -14,7 +15,7 @@ import { normalize } from '../../src/compiler/ir/passes.ts';
 // lowering sees, and slicing off the source. The federation suite covers end-to-end; here we unit the
 // fact directly on the normalized step chain, so it matches what `detachedTail` reads.
 const tailOf = (gremlin: string) => {
-  const steps = normalize(stepChain(parseGremlin(gremlin), {})).steps as any[];
+  const steps = normalize(stepChain(parseGremlin(gremlin), NO_PARAMS), NO_PARAMS).steps as any[];
   return { steps, from: 1 }; // drop the source V()/E()
 };
 
@@ -110,8 +111,8 @@ describe('contentDemand — what the tail consumes', () => {
 describe('pushableTailPrefix — the remote/local boundary walk', () => {
   // The chain is g.call(federate)<tail>; the barrier is at index 0, so the tail begins at 1.
   const prefixOf = (tail: string, params: Record<string, any> = {}) => {
-    const steps = normalize(stepChain(parseGremlin(`g.call("x")${tail}`), params)).steps as any[];
-    return pushableTailPrefix(steps, 0, params);
+    const steps = normalize(stepChain(parseGremlin(`g.call("x")${tail}`), paramEnv(params)), paramEnv(params)).steps as any[];
+    return pushableTailPrefix(steps, 0, paramEnv(params));
   };
 
   test('the WHOLE tail pushes when every step is remote-safe', () => {
@@ -149,9 +150,9 @@ describe('pushableTailPrefix — the remote/local boundary walk', () => {
 
   test('a backtrack to a PRE-barrier label ends the prefix', () => {
     // g.V().as("x").call(federate).where(eq("x")) — the where reads a label bound before the barrier.
-    const steps = normalize(stepChain(parseGremlin('g.V().as("x").call("f").where(eq("x"))'), {})).steps as any[];
+    const steps = normalize(stepChain(parseGremlin('g.V().as("x").call("f").where(eq("x"))'), NO_PARAMS), NO_PARAMS).steps as any[];
     const barrierAt = steps.findIndex((s: any) => s.name === 'call');
-    const p = pushableTailPrefix(steps, barrierAt, {});
+    const p = pushableTailPrefix(steps, barrierAt, NO_PARAMS);
     expect(p.length).toBe(0);          // where(eq("x")) reads pre-barrier 'x' -> nothing pushes
   });
 });

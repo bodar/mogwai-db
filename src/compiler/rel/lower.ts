@@ -1,3 +1,4 @@
+import { NO_PARAMS, type ParamEnv } from '../../gremlin/param-env.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, compilerParamName, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
@@ -1820,7 +1821,7 @@ function scalarTail(
     // `transformExpr` arm below owns (`isDateDiffConstant`/`dateDiffOtherMs`), and intercepting it here
     // would re-route a constant subtraction through a needless child scope. Every OTHER nested body
     // (`inject(datetime(…))`, a movement) is this seam's.
-    if (step.name === 'dateDiff' && args.length === 1 && args[0] !== null && isNested(args[0]) && !isDateDiffConstant(args[0], {})) {
+    if (step.name === 'dateDiff' && args.length === 1 && args[0] !== null && isNested(args[0]) && !isDateDiffConstant(args[0], NO_PARAMS)) {
       const seam = childSeam(ctx, fresh);
       const body = seam.body(args[0].nested, 'child');
       if (!body) return null;
@@ -3233,7 +3234,7 @@ function mapEntryTail(
  *  the two fast-path switches RelIR implements a side of; a switch it cannot implement is never
  *  read here, because coverage must not become a function of configuration. */
 export interface Lowering {
-  readonly params?: Record<string, any>;
+  readonly params: ParamEnv;
   readonly collapse?: boolean;
   readonly correlatedChildren?: boolean;
   /** May the driving property seek run (`src/rel/passes/semijoin.ts`, `indexSeek`)? A PHYSICAL
@@ -3385,7 +3386,7 @@ export interface Lowering {
  * `?? true` beside this one would be a second default, i.e. the kind of thing that agrees until it does not.
  */
 const settle = (opts: Lowering): Required<Lowering> => ({
-  params: opts.params ?? {},
+  params: opts.params,
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
@@ -3725,7 +3726,7 @@ const lowered = (
   }
 };
 
-export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
+export function lowerToRel(steps: readonly IRStep[], opts: Lowering): RelLowering | null {
   // ONE minter for the chain AND its wire projection: the projection's relation ids come from the same
   // id space the fold used, exactly as a sub-read's do (§11 — a second `minter()` would restart at 0 and
   // the emitter's scope would see one id naming two relations).
@@ -3779,7 +3780,7 @@ function combinedPathEncounterSeed(input: Rel, elem: Elem, demandsPathLabels: bo
  * dispatch would mean a fold arm whose input is not the traversal.
  */
 export function lowerForeignResume(
-  rows: readonly ForeignRow[], elem: Elem, steps: readonly IRStep[], from: number, opts: Lowering = {},
+  rows: readonly ForeignRow[], elem: Elem, steps: readonly IRStep[], from: number, opts: Lowering,
   rejoin?: { readonly parentCount: number } | { readonly parentCount: number; readonly mapValues: Extract<ValueNode, { readonly t: 'map' }> },
 ): RelLowering | null {
   const fresh = minter();
@@ -4026,7 +4027,7 @@ export function lowerReduceCombine(
  * the resume because the relaxation is a runtime barrier. `run`/`round` inline as literals (O(1) plan).
  */
 export function lowerPathResume(
-  run: number, round: number, cfg: ReconstructConfig, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
+  run: number, round: number, cfg: ReconstructConfig, steps: readonly IRStep[], barrierAt: number, opts: Lowering,
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
@@ -4046,7 +4047,7 @@ export function lowerPathResume(
  * (`source.externalId`); the score by the spec's vtype. `run`/`round` inline as literals (O(1) plan).
  */
 export function lowerPairResume(
-  run: number, round: number, spec: PairSpec, steps: readonly IRStep[], barrierAt: number, opts: Lowering = {},
+  run: number, round: number, spec: PairSpec, steps: readonly IRStep[], barrierAt: number, opts: Lowering,
 ): RelLowering | null {
   const fresh = minter();
   const settled = settle(opts);
@@ -4112,7 +4113,7 @@ function valueResume(
   // A tail that REBINDS one would shadow it: the read finds the post-barrier binding, so
   // `as('x').split(',').as('x').select(first,'x')` would answer the split list, not `'a,b'`. Decline.
   // (An unreadable nested body counts as a rebind: fail closed.)
-  if (bound.length && someStepDeep(steps.slice(from), opts.params ?? {}, (s) => asLabelsOf(s).some((l) => bound.includes(l)), true)) return null;
+  if (bound.length && someStepDeep(steps.slice(from), opts.params, (s) => asLabelsOf(s).some((l) => bound.includes(l)), true)) return null;
   const ctx: ChainCtx = bound.length ? { ...tailCtx, enclosingLabels: new Set([...(tailCtx.enclosingLabels ?? []), ...bound]) } : tailCtx;
   // A tail that tracks a PATH cannot be seeded from a bare value list (no path history crossed the
   // barrier), so it declines rather than compile a plan with the column silently missing. An
@@ -4172,7 +4173,7 @@ export const typedValueSeed = (data: readonly TypedDatum[]) => (fresh: Minter): 
 };
 
 /** `lowerValueResume` over TYPED data (`typedValueSeed`). */
-export function lowerTypedValueResume(data: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+export function lowerTypedValueResume(data: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering): RelLowering | null {
   return valueResume(steps, from, opts, typedValueSeed(data as readonly TypedDatum[]),
     (rel, framing, ctx, fresh) => scalarTail(rel, framing, steps, from, false, ctx, fresh));
 }
@@ -4207,7 +4208,7 @@ export const mapSeed = (maps: readonly unknown[]) => (fresh: Minter): FramedRel 
   };
 };
 
-export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+export function lowerValueResume(values: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering): RelLowering | null {
   return valueResume(steps, from, opts, valueSeed(values),
     (rel, framing, ctx, fresh) => scalarTail(rel, framing, steps, from, false, ctx, fresh));
 }
@@ -4223,7 +4224,7 @@ export function lowerValueResume(values: readonly unknown[], steps: readonly IRS
  * resume would frame each list as its JSON TEXT (a string on the wire), which is why the list producer
  * needs its own seed rather than reusing `lowerValueResume`.
  */
-export function lowerListResume(lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+export function lowerListResume(lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering): RelLowering | null {
   return lowerListResumeOf(BARE_LIST, lists, steps, from, opts);
 }
 
@@ -4238,7 +4239,7 @@ export function lowerListResume(lists: readonly unknown[], steps: readonly IRSte
  * carried rowids, not framed objects), and the resumed tail re-sources it as an element the ordinary way
  * (`unfoldList`'s `elem` arm), materializing at the edge — the framing is NOT done here.
  */
-export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering): RelLowering | null {
   return valueResume(steps, from, opts, listSeed(of, lists),
     (rel, framing, ctx, fresh) => continueAs(rel, framing, steps, from, false, ctx, fresh, NO_ALIASES));
 }
@@ -4252,7 +4253,7 @@ export function lowerListResumeOf(of: ListOf, lists: readonly unknown[], steps: 
  * `json(sv)` turns each member back into the JSONB pairs blob the map framer reads (json_each hands it
  * back as TEXT). The array index rides as an ENCOUNTER channel for the `unfold()` stream-order reason.
  */
-export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering = {}): RelLowering | null {
+export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRStep[], from: number, opts: Lowering): RelLowering | null {
   return valueResume(steps, from, opts, mapSeed(maps),
     (rel, framing, ctx, fresh) => continueAs(rel, framing, steps, from, false, ctx, fresh, NO_ALIASES));
 }

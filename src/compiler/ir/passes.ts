@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step, type SideEffectConstants, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
@@ -338,7 +339,7 @@ const DECORATION_ORDINAL = PASS_CATEGORIES.indexOf('decoration');
  *  would leave the NEXT one broken; a new nested caller now inherits the safe answer instead. A caller
  *  that genuinely holds a root chain says so. */
 export function normalize(
-  steps: Step[], params: Record<string, any> = {}, sideEffects: SideEffectConstants = NO_SIDE_EFFECTS,
+  steps: Step[], params: ParamEnv, sideEffects: SideEffectConstants = NO_SIDE_EFFECTS,
   nested = true,
 ): { steps: IRStep[]; discard: boolean } {
   return runPasses(steps, EMPTY_STRATEGY_USE, params, sideEffects, nested);
@@ -363,7 +364,7 @@ const NO_SIDE_EFFECTS: SideEffectConstants = new Map();
  *  into IR is IR production, and the classifier, the lowering and the service SPI all need
  *  it without also needing a lowering. Contrast `rootedSteps` (`rel/lower.ts`), which is
  *  deliberately NOT this — a ROOTED nested body must keep its source, where this strips one. */
-export const childSteps = (nested: any, params: Record<string, any>, sideEffects?: SideEffectConstants): IRStep[] => {
+export const childSteps = (nested: any, params: ParamEnv, sideEffects?: SideEffectConstants): IRStep[] => {
   const rawSteps = stepChain(nested, params);
   const normalized = normalize(rawSteps, params, sideEffects);
   return normalized.discard ? [...normalized.steps, rawSteps.at(-1)! as IRStep] : normalized.steps;
@@ -378,7 +379,7 @@ export const childSteps = (nested: any, params: Record<string, any>, sideEffects
  *  named strategy to be claimed by SOME pass's `applies` — the fail-closed catch-all, now a pipeline
  *  invariant instead of a ladder `else throw`. `discard` rides out-of-band on ctx.out. */
 export function runPasses(
-  steps: Step[], use: StrategyUse, params: Record<string, any> = {}, sideEffects: SideEffectConstants = NO_SIDE_EFFECTS,
+  steps: Step[], use: StrategyUse, params: ParamEnv, sideEffects: SideEffectConstants = NO_SIDE_EFFECTS,
   nested = false,
 ): { steps: IRStep[]; discard: boolean } {
   for (const name of use.without)

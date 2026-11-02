@@ -2,6 +2,7 @@ import { test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { summary, detail } from '../support/output.ts';
+import { anyParams } from '../support/any-params.ts';
 
 const lines = readFileSync(new URL('./corpus.txt', import.meta.url), 'utf8')
   .split('\n').filter(Boolean);
@@ -15,7 +16,7 @@ test('corpus parses and chains at 100%', () => {
     let tree;
     try { tree = parseGremlin(q); parsed++; } catch { parseFails.push(q); continue; }
     try {
-      for (const s of stepChain(tree, new Proxy({}, { has: () => true, get: () => null }) as any)) {
+      for (const s of stepChain(tree, anyParams())) {
         stepCounts.set(s.name, (stepCounts.get(s.name) ?? 0) + 1);
       }
       chained++;

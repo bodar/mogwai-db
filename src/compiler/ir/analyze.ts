@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../../gremlin/param-env.ts';
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { isNested, stepChain } from '../../gremlin/frontend.ts';
 import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
@@ -55,7 +56,7 @@ function repeatBodyTracksPath(step: IRStep): boolean {
   for (const { value } of step.args) {
     if (!isNested(value)) continue;
     try {
-      const body = stepChain((value as { nested: unknown }).nested, {}) as IRStep[];
+      const body = stepChain((value as { nested: unknown }).nested, NO_PARAMS) as IRStep[];
       if (body.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s))) return true;
     } catch { /* unnormalizable — declines in the lowering, never mis-seeds here */ }
   }
@@ -120,7 +121,7 @@ function armChains(step: IRStep): IRStep[][] {
     if (n) trees.push((n as { nested: unknown }).nested);
   }
   const chains: IRStep[][] = [];
-  for (const t of trees) { try { chains.push(stepChain(t, {}) as IRStep[]); } catch { /* unnormalizable — skip */ } }
+  for (const t of trees) { try { chains.push(stepChain(t, NO_PARAMS) as IRStep[]); } catch { /* unnormalizable — skip */ } }
   return chains;
 }
 
@@ -145,7 +146,7 @@ function groupReducesItsValues(step: IRStep): boolean {
   const value = (step.modulators ?? [])[1]?.[0];
   if (value === undefined || !isNested(value)) return false;
   try {
-    const inner = stepChain(value.nested, {});
+    const inner = stepChain(value.nested, NO_PARAMS);
     return inner.some(isStreamBarrier) && inner.length > 0
       && REDUCERS.has(inner.at(-1)!.name) && isStreamBarrier(inner.at(-1)!);
   } catch {

@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, meta, notProduced, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
@@ -471,7 +472,7 @@ export function sourceUnion(
  * is the fail-closed spelling. So `inMap` — the map's variables — is checked against the reads from the
  * SECOND step on, and `held` — every other label (`pathLabelsAt`) — against every read.
  */
-function rootedLabelsOut(body: readonly IRStep[], params: Record<string, any>): { readonly held: LabelReads; readonly inMap: LabelReads } {
+function rootedLabelsOut(body: readonly IRStep[], params: ParamEnv): { readonly held: LabelReads; readonly inMap: LabelReads } {
   const all = pathLabelsAt(body, body.length, params);
   const last = body[body.length - 1]!;
   if (last.name !== 'match' || last.modulators?.length) return { held: all, inMap: { labels: new Set(), all: false } };
@@ -1051,7 +1052,7 @@ const STREAM_CHILD_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'rep
  * traverser's rows answers `3`. An unparseable nested body answers `true` — the conservative answer is a
  * decline.
  */
-function slicesAcrossStarts(body: readonly IRStep[], params: Record<string, any>): boolean {
+function slicesAcrossStarts(body: readonly IRStep[], params: ParamEnv): boolean {
   const nestedSlices = (value: unknown): boolean => {
     if (!isNested(value)) return false;
     const inner = bodyOf(value.nested, params);

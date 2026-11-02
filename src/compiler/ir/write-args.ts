@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { gremlinTypeOf, mapEntryType, mapSlot, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import {
     isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
@@ -46,7 +47,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 // constant's declaring `Arg` at compile time (correct-by-construction — the value never
 // changes, and its type rides along). `null` for any other nested shape so the caller falls
 // through to its own handling.
-function constFromSelect(nested: any, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): Arg | null {
+function constFromSelect(nested: any, sideEffects: SideEffectConstants | undefined, params: ParamEnv): Arg | null {
   if (!isNested(nested)) return null;
   const key = soleSelectKey(stepChain(nested.nested, params));
   return key === undefined ? null : sideEffects?.get(key) ?? null;
@@ -90,7 +91,7 @@ const mayHoldKey = (traverser: MergeTraverser, key: string | undefined): boolean
 //                    so UUID(..)/datetime(..) keep their type, not a JS-inferred string/int).
 // This is what lets a global mergeV (no driver to seed a V/E source at) resolve a nested
 // value, and what resolves a nested property KEY. {has:false} → fall through to a seeded read.
-export function constFromNested(nested: any, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): { has: true; value: ArgValue; vtype: CanonicalType | null; typeNode: TypeNode | null } | { has: false; value: undefined; vtype: null; typeNode: null } {
+export function constFromNested(nested: any, sideEffects: SideEffectConstants | undefined, params: ParamEnv): { has: true; value: ArgValue; vtype: CanonicalType | null; typeNode: TypeNode | null } | { has: false; value: undefined; vtype: null; typeNode: null } {
   // A `withSideEffect` constant is its declaring `Arg` (`extractSideEffects`), so it carries the type its
   // text stated exactly as a `constant(…)` does: `withSideEffect('k', UUID(…))` is a uuid, not the string
   // a JS-value inference would call it.
@@ -196,7 +197,7 @@ export type ParsedProperty =
    *  which is why it is its own arm rather than a `prop` whose key happens to be missing. */
   | { kind: 'mapBody'; nested: { nested: any } };
 
-export function parseProperty(s: Step, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): ParsedProperty {
+export function parseProperty(s: Step, sideEffects: SideEffectConstants | undefined, params: ParamEnv): ParsedProperty {
   // The MAP FORM has no value argument at all, so it is recognized before the (key, value) read —
   // reading `args[1]` of a one-argument step was a TypeError out of a verify Pass, i.e. a crash where
   // the contract is an answer or a decline. (A literal Map argument never reaches here: the
@@ -238,7 +239,7 @@ export function assertEdgePropertySpec(sp: PropSpec): void {
 
 /** A run of `property()` steps → their specs, for a host on an element that ALREADY EXISTS (a
  *  mutation tail, a merge tail). A T token is immutable on such an element, so it is the refusal. */
-export function parsePropertyTail(steps: readonly Step[], what: string, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): PropSpec[] {
+export function parsePropertyTail(steps: readonly Step[], what: string, sideEffects: SideEffectConstants | undefined, params: ParamEnv): PropSpec[] {
   const specs: PropSpec[] = [];
   for (const s of steps) {
     if (s.name !== 'property') throw new Deferral(`step not implemented after ${what}: ${s.name}()`);
@@ -359,7 +360,7 @@ function classifyMergeVal(v: any): any {
 //     nested-WRITE execution (runNested runs reads only).
 // Per-VALUE nested traversals inside a map literal ([k: __.trav]) do NOT come here —
 // they stay in the map and resolveMergeSpec resolves them correlated per driver.
-function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser): { readonly value: any; readonly type: TypeNode | null } {
+function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: ParamEnv, traverser: MergeTraverser): { readonly value: any; readonly type: TypeNode | null } {
   if (!isNested(raw)) return { value: raw, type };
   const inner = stepChain(raw.nested, params);
   const k = soleSelectKey(inner);
@@ -398,7 +399,7 @@ function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffec
  * project not at the head — a map rooted at a different element, which needs the general
  * map-producing-traversal substrate this increment does not yet build).
  */
-function parseComputedMergeArg(raw: any, params: Record<string, any>): Record<string, readonly Step[]> | null {
+function parseComputedMergeArg(raw: any, params: ParamEnv): Record<string, readonly Step[]> | null {
   if (!isNested(raw)) return null;
   const chain = stepChain(raw.nested, params);
   // A LEADING `project` and only its `by()`s. A step before it (`__.out().project(…)`) roots the map at
@@ -562,7 +563,7 @@ export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void
     if (k in merge.props) clash(k, merge.props[k], v, true);
 }
 
-function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser, defaultCardinality: Cardinality = null): MergeSpec {
+function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: ParamEnv, traverser: MergeTraverser, defaultCardinality: Cardinality = null): MergeSpec {
   const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} };
   // A WHOLE-ARG map-producing traversal as the SEARCH map — `mergeV(__.project('k').by(__.body))` —
   // resolves to concrete values PER DRIVER (`MergeElementStep.materializeMap`), so its criteria are
@@ -697,7 +698,7 @@ export interface MergeMaps {
 
 /** A whole-arg `__.identity()` — the merge argument is the traverser itself. Distinct from a `null`
  *  argument (`mergeV(null)` matches anything) and from a map-producing traversal. */
-function isTraverserIdentity(raw: any, params: Record<string, any>): boolean {
+function isTraverserIdentity(raw: any, params: ParamEnv): boolean {
   if (!isNested(raw)) return false;
   const inner = stepChain(raw.nested, params);
   return inner.length === 1 && inner[0].name === 'identity';
@@ -710,7 +711,7 @@ function isTraverserIdentity(raw: any, params: Record<string, any>): boolean {
  * produce a map?) is a lowering question the `child.rows` framing answers, so this carries any other
  * nested traversal and the lowering declines a non-map body fail-closed.
  */
-function generalMapArg(raw: any, params: Record<string, any>, traverser: MergeTraverser): unknown | null {
+function generalMapArg(raw: any, params: ParamEnv, traverser: MergeTraverser): unknown | null {
   if (!isNested(raw)) return null;
   const inner = stepChain(raw.nested, params);
   if (inner.length === 1 && inner[0].name === 'identity') return null;
@@ -729,7 +730,7 @@ function generalMapArg(raw: any, params: Record<string, any>, traverser: MergeTr
 
 export function mergeMaps(
   step: IRStep, mods: readonly Step[], op: MergeRole['op'],
-  sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser,
+  sideEffects: SideEffectConstants | undefined, params: ParamEnv, traverser: MergeTraverser,
 ): MergeMaps {
   // THE INCOMING TRAVERSER AS THE MAP — no-arg `mergeV()`/`mergeE()` and `mergeV(__.identity())` both
   // mean "the driver's value IS the merge map" (`materializeMap` with an identity map traversal). The
@@ -841,7 +842,7 @@ export function labelNames(v: unknown, type: TypeNode | null, role: MergeRole): 
  * write is verified where it can be verified CORRECTLY, rather than here against an environment
  * that may not be its own.
  */
-export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string, any>, sideEffects: SideEffectConstants, nested: boolean): void {
+export function verifyWriteArgs(steps: readonly IRStep[], params: ParamEnv, sideEffects: SideEffectConstants, nested: boolean): void {
   const guarded = (run: () => void): void => {
     try { run(); } catch (e) { if (!(e instanceof Deferral)) throw e; }
   };

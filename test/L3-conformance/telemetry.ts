@@ -24,6 +24,7 @@
 // the exact PASSED/FAILED scenario-name sets. Every local run diffs against it to
 // print the DELTA (gains + regressions), then rewrites it on a clean run. It is
 // the single source of truth for the ratchet — no separate baseline.json.
+import { paramEnv } from '../../src/gremlin/param-env.ts';
 import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
@@ -44,7 +45,7 @@ export interface QueryRecord {
  *  on any parse/chain failure; never throws (telemetry must not perturb a run). */
 export function stepNames(gremlin: string, params: Record<string, any>): string[] {
   try {
-    return [...stepChain(parseGremlin(gremlin), params)].map((s) => s.name);
+    return [...stepChain(parseGremlin(gremlin), paramEnv(params))].map((s) => s.name);
   } catch {
     return [];
   }

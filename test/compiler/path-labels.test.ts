@@ -2,17 +2,18 @@
 // partition it clears on. `consumesPath` is a POSITIVE list — a may-analysis is unsafe in the clearing
 // direction — so the partition test below is what stops a new `GLOBAL_BARRIER_STEPS` name from silently
 // being neither: it must be classified as passing the traverser, consuming the path, or per-traverser.
+import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain, type Step } from '../../src/gremlin/frontend.ts';
 import { GLOBAL_BARRIER_STEPS } from '../../src/compiler/ir/step.ts';
 import { consumesPath, passesTraverser, pathLabelsAt } from '../../src/compiler/ir/labels.ts';
 
-const chain = (gremlin: string): Step[] => stepChain(parseGremlin(gremlin), {});
+const chain = (gremlin: string): Step[] => stepChain(parseGremlin(gremlin), NO_PARAMS);
 /** The LAST step of `g.V().<step>` — the parser takes a whole traversal, never a bare `__` step. */
 const one = (step: string): Step => chain(`g.V().${step}`).at(-1)!;
 const held = (gremlin: string): string[] => {
   const steps = chain(gremlin);
-  const at = pathLabelsAt(steps, steps.length, {});
+  const at = pathLabelsAt(steps, steps.length, NO_PARAMS);
   expect(at.all).toBe(false);
   return [...at.labels].sort();
 };
@@ -61,6 +62,6 @@ describe('pathLabelsAt', () => {
   });
   test('only binds before the index count', () => {
     const steps = chain("g.V().as('a').out().as('b')");
-    expect([...pathLabelsAt(steps, 2, {}).labels]).toEqual(['a']);
+    expect([...pathLabelsAt(steps, 2, NO_PARAMS).labels]).toEqual(['a']);
   });
 });

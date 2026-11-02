@@ -1,8 +1,9 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
-import { flatType, mapEntryType } from '../../gremlin/types.ts';
+import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
@@ -192,7 +193,7 @@ const EXISTENCE_FILTER_HOSTS = new Set(['where', 'filter', 'not']);
  * "constant false" concept). `and`/`or` are handled by dropping always-true ARMS — for `or` a single
  * true arm makes the whole step inert, for `and` the remaining arms still have to hold.
  */
-export function isAlwaysProductiveFilterNoOp(steps: Step[], params: Record<string, any>): Step[] {
+export function isAlwaysProductiveFilterNoOp(steps: Step[], params: ParamEnv): Step[] {
   return recurseInject(steps, params, (level) => {
     const out: Step[] = [];
     for (const s of level) {
@@ -247,7 +248,7 @@ export const MUTATING_STEPS: ReadonlySet<string> = new Set(['addV', 'addE', 'mer
  *  query every consumer that cannot host a write asks — a ranked-order head, and a correlated child VALUE
  *  (`scalarChild`): a write is a `Plan` binding (§3.0), which a per-row subquery has nowhere to declare,
  *  so lowering one there leaves a `Ref` to a statement that never runs. */
-export const writesAnywhere = (steps: readonly Step[], params: Record<string, any> | BodyReader): boolean =>
+export const writesAnywhere = (steps: readonly Step[], params: ParamEnv | BodyReader): boolean =>
   someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name), true);
 
 export const rejectMsg = (name: string) =>
@@ -268,7 +269,7 @@ const nestedArg = (steps: Step[]): any => ({ nested: steps });
  *  wherever it lives (local()/repeat()/union()/where(...) bodies included), with no
  *  fail-closed hole. The rule's OWN injected filters are added after the map, so the
  *  strategy never re-filters its own criterion bodies (TinkerPop's hidden-marker rule). */
-function recurseInject(steps: Step[], params: Record<string, any>, applyLevel: (s: Step[]) => Step[]): Step[] {
+function recurseInject(steps: Step[], params: ParamEnv, applyLevel: (s: Step[]) => Step[]): Step[] {
   const withRewrittenChildren = steps.map((s) => ({
     ...s,
     args: s.args.map((a) => isNested(a.value)
@@ -289,7 +290,7 @@ function recurseInject(steps: Step[], params: Record<string, any>, applyLevel: (
  * outE.inV / inE.outV / bothE.otherV so the traversed edge itself can be filtered. Recurses
  * into nested bodies; criterion bodies are used verbatim (never re-subgraphed).
  */
-export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
+export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: ParamEnv): Step[] {
   if (spec.config.vertexProperties !== undefined)
     throw new UnsupportedTraversal('SubgraphStrategy(vertexProperties) criterion not yet supported');
   const vArg = spec.config.vertices;
@@ -348,7 +349,7 @@ export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Rec
  *  element-producing step (read visibility) and property(partitionKey, writePartition)
  *  after every addV/addE (write stamping), at every nesting depth. Read and write
  *  partitions are independent (TinkerPop allows writing to a partition you cannot read). */
-export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Record<string, any>): Step[] {
+export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: ParamEnv): Step[] {
   const key = spec.config.partitionKey;
   if (typeof key !== 'string')
     throw new ValueParseError('PartitionStrategy requires a string partitionKey');
@@ -640,7 +641,7 @@ const isAllArg = (a: any): boolean =>
 /** Steps that emit EXACTLY their input traverser, once and unchanged — they write side-effect or
  *  channel state and leave the stream alone. A per-traverser host over a body of only these is that
  *  body. Recursive on the hosts themselves, so `local(__.local(__.aggregate("a")))` unwraps too. */
-export function isStreamIdentity(s: Step, params: Record<string, any>): boolean {
+export function isStreamIdentity(s: Step, params: ParamEnv): boolean {
   if (s.name === 'aggregate' || s.name === 'sideEffect' || s.name === 'identity') return true;
   // A LABELLED group/groupCount is a SIDE EFFECT: `GroupSideEffectStep`/`GroupCountSideEffectStep`
   // extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser unchanged
@@ -668,7 +669,7 @@ const labelled = (s: Step): boolean => (s.args ?? []).length === 1 && typeof s.a
  *  TWO steps `[aggregate, by]`. A modulator is not a step of the stream at all — it decides what its
  *  host reads — so what has to be identity is the host it will be folded onto, which the leading
  *  `aggregate` already is. It is spliced through verbatim and the ordinary pipeline folds it after. */
-function identityHostBody(s: Step, params: Record<string, any>): Step[] | null {
+function identityHostBody(s: Step, params: ParamEnv): Step[] | null {
   if (s.name !== 'local' && s.name !== 'map' && s.name !== 'flatMap') return null;
   const args = s.args ?? [];
   if (args.length !== 1 || !isNested(args[0].value)) return null;
@@ -698,7 +699,7 @@ function identityHostBody(s: Step, params: Record<string, any>): Step[] | null {
  * unconditional rather than only-for-`aggregate`, because "this step ran per traverser" is a property
  * of the position, not of who happens to read it today.
  */
-export function inlineIdentityHostBody(steps: Step[], params: Record<string, any>, nested: boolean): Step[] {
+export function inlineIdentityHostBody(steps: Step[], params: ParamEnv, nested: boolean): Step[] {
   const readsPath = someStepDeep(steps, params, (s) => PATH_FAMILY.has(s.name));
   // A path read is a WHOLE-TRAVERSAL fact: the root's `.path()` observes the entry a `map(identity())`
   // opens inside a `union`/`optional`/`repeat` body, and that body is normalized LATER and in isolation
@@ -715,7 +716,7 @@ export function inlineIdentityHostBody(steps: Step[], params: Record<string, any
  * entry it opens may be on a path that is read: this chain reads the path (`readsPath`), or the root
  * marked it (`keepsPathEntry`).
  */
-function spliceIdentityHosts(steps: Step[], params: Record<string, any>, readsPath: boolean): Step[] {
+function spliceIdentityHosts(steps: Step[], params: ParamEnv, readsPath: boolean): Step[] {
   const out: Step[] = [];
   for (const s of steps) {
     const body = identityHostBody(s, params);
@@ -749,7 +750,7 @@ const perTraverser = (s: Step): Step => s.name === 'by' ? s : { ...s, perTravers
 
 /** The literal a nested traversal is worth, or `undefined` when it is not a bare constant. A
  *  parse needing params we do not have (a nested normalize runs param-free) simply declines. */
-function constantOperand(nested: any, params: Record<string, any>): { value: any } | undefined {
+function constantOperand(nested: any, params: ParamEnv): { value: any } | undefined {
   let body: Step[];
   try { body = stepChain(nested, params); } catch { return undefined; }
   if (body.length !== 1 || body[0].name !== 'constant') return undefined;
@@ -777,7 +778,7 @@ const VALUE_OPERAND_SLOTS: Record<string, (args: readonly any[]) => readonly num
 };
 
 /** Fold constants inside a predicate object's `operands`, recursively (P.not(P.gt(…)) nests). */
-function foldPredOperands(pred: any, params: Record<string, any>): any {
+function foldPredOperands(pred: any, params: ParamEnv): any {
   if (!isPred(pred) || !Array.isArray(pred.operands)) return pred;
   return {
     ...pred,
@@ -790,7 +791,7 @@ function foldPredOperands(pred: any, params: Record<string, any>): any {
   };
 }
 
-export function foldConstantPredicateOperands(steps: IRStep[], params: Record<string, any>): IRStep[] {
+export function foldConstantPredicateOperands(steps: IRStep[], params: ParamEnv): IRStep[] {
   return steps.map((s, at) => {
     // NOT inside a `where(P)` as such: there a literal leaf is a SELECT KEY and a traversal leaf is a
     // value (`WherePredicateStep`, `unresolvableWhereKey` in `ir/labels.ts`), so folding
@@ -885,7 +886,7 @@ function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | und
  * ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
  * `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied).
  */
-export function verifyStandard(steps: IRStep[], params: Record<string, any>): void {
+export function verifyStandard(steps: IRStep[], params: ParamEnv): void {
   const scan = (chain: readonly Step[], underRepeat: boolean) => {
     for (const s of chain) {
       if (underRepeat && s.name === 'inject')
@@ -954,7 +955,7 @@ const BY_MODULATOR_ARITY: ReadonlyMap<string, { readonly max: number; readonly m
  *
  * ALWAYS ON, like `verifyReadOnlyChildren`: an arity violation is invalid Gremlin, not a strategy.
  */
-export function verifyByModulatorArity(steps: IRStep[], params: Record<string, any>): void {
+export function verifyByModulatorArity(steps: IRStep[], params: ParamEnv): void {
   const scan = (chain: Step[]) => {
     for (let i = 0; i < chain.length; i++) {
       const s = chain[i];
@@ -1167,7 +1168,7 @@ function canonicalizeConnectivesLevel(steps: Step[]): Step[] {
  * recursion and its own per-step wrapper. The scope walk's arg loop is deliberately NOT folded in — it
  * transforms the body before recursing (the where-variable rewrite) and signals "unchanged" with a null
  * return rather than reference identity, so sharing this contract would obscure its scope tracking. */
-function mapNestedArgs(args: readonly Arg[], params: Record<string, any>, recurse: (inner: Step[]) => Step[]): { args: Arg[]; changed: boolean } {
+function mapNestedArgs(args: readonly Arg[], params: ParamEnv, recurse: (inner: Step[]) => Step[]): { args: Arg[]; changed: boolean } {
   let changed = false;
   const mapped = args.map((a) => {
     if (!isNested(a.value)) return a;
@@ -1180,7 +1181,7 @@ function mapNestedArgs(args: readonly Arg[], params: Record<string, any>, recurs
   return { args: mapped, changed };
 }
 
-export function canonicalizeConnectives(steps: Step[], params: Record<string, any>): IRStep[] {
+export function canonicalizeConnectives(steps: Step[], params: ParamEnv): IRStep[] {
   let anyChild = false;
   const mapped = steps.map((s) => {
     const { args, changed } = mapNestedArgs(s.args, params, (inner) => canonicalizeConnectives(inner, params));
@@ -1295,12 +1296,12 @@ const valuePreservingBodyStep = (s: Step): boolean =>
  *  (`normalize` passes `EMPTY_STRATEGY_USE`), and `withoutStrategies` holds at every depth or not at all.
  *  IDENTITY-PRESERVING for `canonicalizeConnectives`' reason: an arg holding no slice keeps its raw parse
  *  tree (`services/params/traversal-param.ts` un-parses a sub-traversal via `tree.accept`). */
-export function markEarlyLimitSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
+export function markEarlyLimitSuppressed(steps: Step[], params: ParamEnv): IRStep[] {
   return markAtDepth(steps, params, (s) => SLICE_STEPS.has(s.name), (s) => { s.earlyLimitSuppressed = true; });
 }
 
 /** Mark each step `matches` accepts, at every depth, preserving identity where nothing was marked. */
-function markAtDepth(steps: Step[], params: Record<string, any>, matches: (s: Step) => boolean, mark: (s: IRStep) => void): IRStep[] {
+function markAtDepth(steps: Step[], params: ParamEnv, matches: (s: Step) => boolean, mark: (s: IRStep) => void): IRStep[] {
   let changed = false;
   const marked = steps.map((s) => {
     const { args, changed: argsChanged } = mapNestedArgs(s.args, params, (inner) => markAtDepth(inner, params, matches, mark));
@@ -1362,7 +1363,7 @@ const unrollableBodyStep = (s: Step): boolean =>
 /** `childSteps` (`ir/passes.ts`), injected. It runs the WHOLE pass pipeline over the nested body, and
  *  that pipeline is what this file's passes are folded into — so taking it as an argument is what
  *  keeps the dependency one-way instead of importing the module that imports this one. */
-type ChildBody = (nested: any, params: Record<string, any>) => IRStep[];
+type ChildBody = (nested: any, params: ParamEnv) => IRStep[];
 
 /**
  * `repeat(body).times(n)` → the body spliced n times, when every step in the body is one an
@@ -1397,7 +1398,7 @@ function gatherRepeatRegion(steps: Step[], i: number): { region: Step[]; end: nu
   return { region, end: j };
 }
 
-export function unrollFixedRepeat(steps: Step[], params: Record<string, any>, body: ChildBody): Step[] {
+export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBody): Step[] {
   const out: Step[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
@@ -1410,7 +1411,7 @@ export function unrollFixedRepeat(steps: Step[], params: Record<string, any>, bo
 }
 
 /** One repeat run → its unrolled steps, or null to leave the run alone. */
-function tryUnroll(region: Step[], params: Record<string, any>, childBody: ChildBody): Step[] | null {
+function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step[] | null {
   // The bounded regime is `repeat`+`times`, optionally with a bare `emit` (repeat+times+emit). A region
   // carrying `until` is the UNBOUNDED regime — no compile-time n — and belongs to the walk (`walk.ts`),
   // not the unroll; decline it here rather than unrolling a loop whose bound is a runtime predicate.
@@ -1656,7 +1657,7 @@ const KEEPS_PATH_ENTRY: ReadonlySet<string> = new Set([
  * `choose`/`local` is a second bind, so `as('a').union(identity()).as('a').select(Pop.all,'a')` may
  * list the element once more than the reference (a deliberate divergence, `docs/feature-support-matrix.md`).
  */
-export function mergeStepLabels(steps: IRStep[], params: Record<string, any> = {}): IRStep[] {
+export function mergeStepLabels(steps: IRStep[], params: ParamEnv): IRStep[] {
   return mergeLabelsFrom(steps, new Set(), rawBodies(params));
 }
 
@@ -1777,7 +1778,7 @@ export const MATCH_FILTER_HEADS = new Set(['where', 'filter', 'not']);
  *
  * The START half rides along for the same reason — see rewriteStartLabel.
  */
-function rewriteWhereVariables(body: Step[], bound: ReadonlySet<string>, params: Record<string, any>): Step[] {
+function rewriteWhereVariables(body: Step[], bound: ReadonlySet<string>, params: ParamEnv): Step[] {
   if (!body.length) return body;
   const last = body[body.length - 1];
   // Recurse THROUGH a connective: each branch carries its own start/end, exactly as upstream's
@@ -1838,7 +1839,7 @@ function rewriteEndLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
  *  bound BEFORE each host. Walks left to right so an `as()` types only the where()s that follow
  *  it, and descends into every nested body with the labels visible where that body sits — so the
  *  rule holds at any nesting depth, not just on the root chain. */
-export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, any>): IRStep[] {
+export function rewriteWhereEndLabels(steps: IRStep[], params: ParamEnv): IRStep[] {
   // IDENTITY-PRESERVING: an arg is rebuilt ONLY when the rewrite actually changed something below
   // it. `nestedArg` swaps a raw parse tree for a Step[], which every ordinary consumer accepts
   // (stepChain is idempotent on a Step[]) — but call()'s param path serializes a nested traversal
@@ -1931,7 +1932,7 @@ function isPlainLabelSelect(s: IRStep): boolean {
  * oversight: `iterate()` throws the whole result away, so a dropped traverser is not observable
  * either.
  */
-export function retractUnobservedSelect(steps: IRStep[], params: Record<string, any>, discard: boolean): IRStep[] {
+export function retractUnobservedSelect(steps: IRStep[], params: ParamEnv, discard: boolean): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -1968,7 +1969,7 @@ export function retractUnobservedSelect(steps: IRStep[], params: Record<string, 
  * traversal ending in `.as("b")`), and a ratchet losing its witness for a rewrite that buys nothing is
  * evidence deleted rather than moved.
  */
-export function retractUnreadAlias(steps: IRStep[], params: Record<string, any>): IRStep[] {
+export function retractUnreadAlias(steps: IRStep[], params: ParamEnv): IRStep[] {
   const reads = labelReads(steps, params);
   if (reads.all) return steps;
   const out: IRStep[] = [];
@@ -1987,7 +1988,7 @@ export function retractUnreadAlias(steps: IRStep[], params: Record<string, any>)
 /** Just enough of `PassContext` to keep this module free of a `pass.ts` import (pass.ts already
  *  depends on this one). The desugar reads nothing from it — a pattern's `$name` bindings are scoped
  *  to the match() call, not to the wire params. */
-type PassContextLike = { readonly params: Record<string, any> };
+type PassContextLike = { readonly params: ParamEnv };
 
 /** Is this a `match("<gql>")` — the string form rather than the traversal form? The two share a step
  *  name (both the source-spawn and traversal-method grammar rules yield `match`), so the ARGUMENT
@@ -1996,12 +1997,19 @@ const isMatchString = (s: IRStep): boolean => s.name === 'match' && typeof (s.ar
 
 /** The `$name` bindings a pattern may reference: the optional SECOND argument of
  *  `match(str, [k: v])`, which reaches here as a JS Map (a map literal and a bound map parameter
- *  both arrive that way). Not the wire params — a pattern's `$name` is scoped to its own call. */
-function matchStringParams(step: IRStep): Record<string, any> {
-  const mp = (step.args ?? [])[1]?.value;
-  if (mp instanceof Map) return Object.fromEntries(mp);
-  if (mp && typeof mp === 'object') return mp as Record<string, any>;
-  return {};
+ *  both arrive that way). Not the wire params — a pattern's `$name` is scoped to its own call. Each
+ *  binding's TYPE is the map argument's own entry type, so a `$name` keeps the class it was written
+ *  (or bound) with, as a wire parameter does (`ParamEnv`). */
+function matchStringParams(step: IRStep): ParamEnv {
+  const map = (step.args ?? [])[1];
+  const mp = map?.value;
+  const values: Record<string, any> = mp instanceof Map ? Object.fromEntries(mp) : mp && typeof mp === 'object' ? mp as Record<string, any> : {};
+  const types: Record<string, TypeNode> = {};
+  for (const k of Object.keys(values)) {
+    const t = mapEntryType(map?.type, k);
+    if (t != null) types[k] = t;
+  }
+  return { values, types };
 }
 
 /**

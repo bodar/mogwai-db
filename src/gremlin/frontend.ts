@@ -1,3 +1,4 @@
+import { NO_PARAMS, type ParamEnv } from './param-env.ts';
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
@@ -83,7 +84,7 @@ export interface Arg {
   /** The canonical Gremlin type of `value` as its carrying channel declared it — a parsed literal's
    *  subtype (numeric suffix, string, boolean, datetime, uuid, list, map) or, for a bound-param
    *  reference, the wire DataType the client serialized — or, where the channel declared none (the JSON
-   *  request path), the type its JS value spells (`compilePlan` → `declaredParamTypes`). `null` only
+   *  request path), the type its JS value spells (`paramEnv` → `declaredParamTypes`). `null` only
    *  where nothing can be said (a null, a plain object). Read by bare `asNumber()`/
    *  `asDate()` and by the write seam (to store `vertex_properties`/`edge_properties.vtype`). */
   readonly type: TypeNode | null;
@@ -298,9 +299,9 @@ export const stepName = (cls: string, prefix: string) =>
     : null;
 
 /** Collect the top-level step chain (does not descend into nested traversal args).
- *  `paramTypes` names the wire DataType of each bound param (from wire.ts) so a
- *  param-resolved arg records the right canonical type on its Arg. */
-export function stepChain(tree: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Step[] {
+ *  `params` carries each bound param's settled type (`ParamEnv`), so a param-resolved arg records
+ *  the right canonical type on its Arg at every depth a nested body is re-parsed from. */
+export function stepChain(tree: any, params: ParamEnv): Step[] {
   // A nested-traversal arg's payload (`{nested}`) is normally an ANTLR
   // NestedTraversalContext, lowered lazily here. But a TraversalStrategy rewrite
   // (strategies.ts) synthesizes filter bodies that have NO parse tree — it stores an
@@ -327,7 +328,7 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
     if (cls === ITERATE_TERMINAL && !insideNested) { steps.push({ name: 'discard', args: [], ctx: node }); return; }
     const name =stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
-      const args = extractArgs(node, params, paramTypes);
+      const args = extractArgs(node, params);
       // The grammar deliberately exposes the named repeat overload as
       // repeat(name, body), while every repeat consumer needs one uniform body
       // channel. Canonicalize that overload at the front-end boundary and retain
@@ -376,7 +377,7 @@ function descendants(node: any, cls: string, out: any[] = []): any[] {
 /** One `TraversalStrategyContext` → {name, config}. ClassType is the bare strategy
  *  name (the optional `new` is a sibling terminal, so getText() is clean). Each
  *  ConfigurationContext is `key : genericArgument`; the value walks via argOf. */
-function strategySpec(node: any, params: Record<string, any>): StrategySpec {
+function strategySpec(node: any, params: ParamEnv): StrategySpec {
   const name = descendants(node, 'ClassTypeContext')[0]?.getText() ?? node.getText();
   const config: Record<string, any> = {};
   for (const cfg of descendants(node, 'ConfigurationContext')) {
@@ -389,7 +390,7 @@ function strategySpec(node: any, params: Record<string, any>): StrategySpec {
 
 /** Pull withStrategies (as {name,config} specs) and withoutStrategies (as bare class
  *  names) out of the parse tree. Empty arrays when the traversal names none. */
-export function extractStrategies(tree: any, params: Record<string, any>): StrategyUse {
+export function extractStrategies(tree: any, params: ParamEnv): StrategyUse {
   const use: StrategyUse = { with: [], without: [] };
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withStrategiesContext'))
     for (const s of descendants(w, 'TraversalStrategyContext')) use.with.push(strategySpec(s, params));
@@ -445,7 +446,7 @@ export function unansweredTerminalMethod(tree: any): string | null {
 const ANSWERED_TERMINALS = ['TraversalTerminalMethod_toListContext', ITERATE_TERMINAL];
 
 /** Pull withSack(seed[, Operator.x]) out of the parse tree, or null if none. */
-export function extractSack(tree: any, params: Record<string, any>): MergePolicy | null {
+export function extractSack(tree: any, params: ParamEnv): MergePolicy | null {
   const w = descendants(tree, 'TraversalSourceSelfMethod_withSackContext')[0];
   if (!w) return null;
   const gl = descendants(w, 'GenericLiteralContext')[0];
@@ -471,7 +472,7 @@ const operatorNamed = (node: any): string | undefined => {
  *  Distinct from the two `with()` forms already handled elsewhere: a `valueMap().with(tokens)`
  *  MODULATOR (ir/strategies.ts) and a `call().with(k,v)` argument (ir/strategies.ts). Those attach
  *  to a step; this attaches to the traversal source. */
-export function extractSourceOptions(tree: any, params: Record<string, any>): Map<string, any> {
+export function extractSourceOptions(tree: any, params: ParamEnv): Map<string, any> {
   const out = new Map<string, any>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withContext')) {
     const args: Arg[] = [];
@@ -496,7 +497,7 @@ export function extractSourceOptions(tree: any, params: Record<string, any>): Ma
  *  the same lossy step CLAUDE.md's parameter rule deletes at `frontend.ts`, applied to a constant. */
 export type SideEffectConstants = ReadonlyMap<string, Arg>;
 
-export function extractSideEffects(tree: any, params: Record<string, any>): SideEffectConstants {
+export function extractSideEffects(tree: any, params: ParamEnv): SideEffectConstants {
   const out = new Map<string, Arg>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
     if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → sideEffectPolicies
@@ -531,7 +532,7 @@ export function extractSideEffects(tree: any, params: Record<string, any>): Side
  * The front-end stays a thin translator either way: this reports what the traversal DECLARED, and what
  * to do about it is entirely the compiler's.
  */
-export function sideEffectPolicies(tree: any, params: Record<string, any>): ReadonlyMap<string, MergePolicy> {
+export function sideEffectPolicies(tree: any, params: ParamEnv): ReadonlyMap<string, MergePolicy> {
   const out = new Map<string, MergePolicy>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
     const declared = sideEffectDeclaration(w, params);
@@ -545,7 +546,7 @@ export function sideEffectPolicies(tree: any, params: Record<string, any>): Read
  *  seed is; a COLLECTION seed is ONE `Arg` carrying a JS array/Set (`collectionArg`), never N flattened
  *  ones, so the seed is `args[0]` whatever its shape. */
 function sideEffectDeclaration(
-  node: any, params: Record<string, any>,
+  node: any, params: ParamEnv,
 ): { readonly key: string; readonly policy: MergePolicy } | null {
   const keyNode = descendants(node, 'StringLiteralContext')[0];
   const seedNode = descendants(node, 'GenericLiteralContext')[0];
@@ -559,10 +560,10 @@ function sideEffectDeclaration(
 
 /** Pull a step context's arguments out as `Arg[]` — each a value + its canonical type + its
  *  wire-parameter name (a top-level `$x` records its name, everything else null). */
-function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Arg[] {
+function extractArgs(ctx: any, params: ParamEnv): Arg[] {
   const args: Arg[] = [];
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
-  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, paramTypes);
+  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params);
   return args;
 }
 
@@ -571,7 +572,7 @@ function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<s
  *  for these, so they're discarded), and for a withStrategies configuration value
  *  (a nested criterion → `{nested}`, a list → array, a scalar → the literal), so
  *  strategy config reuses the one arg walker. */
-function argOf(node: any, params: Record<string, any>): any {
+function argOf(node: any, params: ParamEnv): any {
   const out: Arg[] = [];
   walkArgs(node, out, params);
   return out.length === 1 ? out[0].value : out.map((a) => a.value);
@@ -581,7 +582,7 @@ function argOf(node: any, params: Record<string, any>): any {
  *  type + wire-parameter name, all in one object). Unrecognised nodes recurse into children (a literal
  *  buried deeper still surfaces). The value+type+name travel together, so no caller has to thread three
  *  parallel arrays in lockstep any more. */
-function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): void {
+function walkArgs(node: any, out: Arg[], params: ParamEnv): void {
   const emit = (v: any, t: TypeNode | null = null, name: string | null = null) => { out.push(arg(v, t, name)); };
   const cls = node.constructor.name;
   if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
@@ -638,13 +639,14 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
   if (cls === 'NullLiteralContext') { emit(null); return; }
   if (cls === 'VariableContext') {
     const name = node.getText();
-    if (!(name in params)) throw new ValueParseError(`Unbound parameter '${name}'`);
-    // The param's canonical type is the wire DataType the client serialized it as
-    // (paramTypes) — the truth a JS value can't carry; where the channel said nothing (JSON
-    // request path) `compilePlan` has completed it from the JS value (`declaredParamTypes`). The NAME rides
-    // alongside (the Arg's name): the value is still resolved into `out` for every consumer, but a
-    // lowering can now see it was a user PARAMETER and bind it, rather than inline it as a constant.
-    emit(params[name], paramTypes[name] ?? null, name); return;
+    if (!Object.hasOwn(params.values, name)) throw new ValueParseError(`Unbound parameter '${name}'`);
+    // The param's canonical type is the one the ENV settled (`ParamEnv`): the wire DataType the client
+    // serialized it as — the truth a JS value can't carry — or, where the channel said nothing (JSON
+    // request path), the type its JS value spells (`declaredParamTypes`). It travels inside the env, so a
+    // nested body re-parsed at any depth reads the same type. The NAME rides alongside (the Arg's name):
+    // the value is still resolved into `out` for every consumer, but a lowering can now see it was a user
+    // PARAMETER and bind it, rather than inline it as a constant.
+    emit(params.values[name], params.types[name] ?? null, name); return;
   }
   // A COMPOSED predicate — `P.gt(20).and(P.lt(30))`, `TextP.startingWith('m').or(…)`,
   // `P.gt(5).negate()`. The grammar's three infix alternatives
@@ -758,7 +760,7 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
     return;
   }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
-  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, paramTypes);
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params);
 }
 
 /** Parse an ISO-8601 date / date-time string to epoch-millis, UTC-normalized. Per
@@ -783,7 +785,7 @@ function enumSuffix(node: any): string {
  *  typed scalar → its subtype; a `$x` element → its name so a member can bind; a nested traversal /
  *  multi-arg element → a nameless, typeless member). One member per element, in order — the per-element
  *  type is what the collection storage tags each leaf with (full-fidelity elements). */
-function literalItems(nodes: any[], params: Record<string, any>): Arg[] {
+function literalItems(nodes: any[], params: ParamEnv): Arg[] {
   return nodes.map((lit) => {
     const out: Arg[] = [];
     walkArgs(lit, out, params);
@@ -796,7 +798,7 @@ function literalItems(nodes: any[], params: Record<string, any>): Arg[] {
 /** A `[k: v, …]` / `[:]` map literal → a JS Map, keyed by the classified map
  *  key ({token}/{direction} tag or a plain string), values via argOf so nested
  *  traversals/maps survive. Mirrors the shape of a bound map parameter. */
-function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
+function mapLiteral(node: any, params: ParamEnv): Map<any, any> {
   const m = new Map<any, any>();
   for (const entry of node.mapEntry()) {
     m.set(mapKeyOf(entry.mapKey()).key, argOf(entry.genericLiteral(), params));
@@ -810,7 +812,7 @@ function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
  *  literal `mergeV([gid: UUID(x)])` carries the same type truth a typed client would send.
  *  The value type is read from the same walkArgs pass that produces the value, so nested
  *  maps recurse through the GenericMapLiteral case automatically. */
-function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
+function mapLiteralType(node: any, params: ParamEnv): TypeNode {
   const entries: Record<string, MapEntryType | null> = {};
   for (const entry of node.mapEntry()) {
     const out: Arg[] = [];
@@ -860,7 +862,7 @@ function mapKeyOf(mk: any): { key: any; type: CanonicalType | null } {
   const num = mk.numericLiteral?.();
   if (num) {
     const out: Arg[] = [];
-    walkArgs(num, out, {});
+    walkArgs(num, out, NO_PARAMS);
     const only = out.length === 1 ? out[0]! : null;
     if (!only || (only.type !== 'int' && only.type !== 'long') || typeof only.value !== 'number') {
       throw new UnsupportedTraversal(`the numeric map-literal key ${mk.getText()}`);
@@ -896,7 +898,7 @@ export const isPred = (arg: unknown): arg is Pred =>
  * `not` op — `predicateSql` already renders that — so only `and`/`or` are new ops downstream.
  * Recurses, so `a.or(b).or(c)` and arbitrarily nested compositions build a left-leaning tree.
  */
-function parseComposedPredicate(node: any, params: Record<string, any>): Pred | null {
+function parseComposedPredicate(node: any, params: ParamEnv): Pred | null {
   if (node.getChildCount() <= 1) return null;
   const left = node.traversalPredicate?.(0);
   if (!left) return null;
@@ -922,7 +924,7 @@ function parseComposedPredicate(node: any, params: Record<string, any>): Pred | 
   return { op: kw, operands: [arg(operand(left)), arg(operand(right))] };
 }
 
-function parsePredicate(node: any, params: Record<string, any>): Pred {
+function parsePredicate(node: any, params: ParamEnv): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
   // FAITHFUL translation, no unwrap. `P.within/without/inside/between` accept both varargs
   // (`P.within('a','b')`) and a single collection (`P.within(['a','b'])` / `P.within($list)`), and a

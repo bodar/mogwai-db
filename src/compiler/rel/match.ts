@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { arg, isNested, isPred, stepChain, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
 import { normalize } from '../ir/passes.ts';
 import { col, type Expr } from '../../rel/expr.ts';
@@ -103,7 +104,7 @@ type Pattern =
  *  as split steps and DECLINED at the fold; normalizing here is the same seam every other nested body
  *  crosses via `childSteps`. A pattern keeps its `as()` anchors, so it runs `normalize` directly rather
  *  than `childSteps` (which strips a source). `null` where normalizing RAISES — a deferral, not a crash. */
-function patternSteps(nested: unknown, params: Record<string, any>): IRStep[] | null {
+function patternSteps(nested: unknown, params: ParamEnv): IRStep[] | null {
   try { return normalize(stepChain(nested, params), params).steps as IRStep[]; } catch { return null; }
 }
 
@@ -117,7 +118,7 @@ const readsOf = (p: Pattern): readonly string[] =>
  *  an over-approximation is safe (a filter branch binds nothing, so every alias it mentions must be
  *  bound anyway), but it must EXCLUDE non-alias strings (edge labels, property values) or readiness
  *  would wait forever on a name that is never a binding and the whole step would fail closed. */
-function aliasRefsIn(steps: readonly IRStep[], params: Record<string, any>, out: Set<string>): void {
+function aliasRefsIn(steps: readonly IRStep[], params: ParamEnv, out: Set<string>): void {
   for (const s of steps) {
     if (s.name === 'as') for (const l of asLabelsOf(s)) out.add(l);
     if (s.name === 'select') for (const a of s.args ?? []) if (typeof a.value === 'string') out.add(a.value);
@@ -133,7 +134,7 @@ function aliasRefsIn(steps: readonly IRStep[], params: Record<string, any>, out:
 /** The START∪END labels a branch body BINDS/references via `as()` — recursively, so a nested `and`/`or`
  *  contributes its own anchors. Distinct from `aliasRefsIn`: this is ONLY the `as()` labels (the
  *  bindings-map keys per `MatchStep.getBindings`), not the `where`-referenced ones. */
-function asLabelsDeep(steps: readonly IRStep[], params: Record<string, any>, out: Set<string>): void {
+function asLabelsDeep(steps: readonly IRStep[], params: ParamEnv, out: Set<string>): void {
   for (const s of steps) {
     if (s.name === 'as') for (const l of asLabelsOf(s)) out.add(l);
     for (const a of s.args ?? []) if (isNested(a.value)) { const inner = patternSteps(a.value.nested, params); if (inner) asLabelsDeep(inner, params, out); }
@@ -196,7 +197,7 @@ function reducingEnd(body: readonly IRStep[]): { readonly reduceBody: readonly I
  *  every alias a `where(P.eq/neq(label))` in the body references (the Pass rewrote each bound end that
  *  way). A leg BINDS nothing, so an intra-body `as()` — which the Pass leaves alone in the MIDDLE — is
  *  an unseen shape and declines. */
-function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null {
+function classifyLeg(head: IRStep, params: ParamEnv): Pattern | null {
   const negated = head.name === 'not';
   const nested = head.args?.[0]?.value;
   if ((head.args?.length ?? 0) !== 1 || !isNested(nested)) return null;
@@ -229,7 +230,7 @@ function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null 
  *  the anchored `as(start).<body>[.as(end)]` shapes, the two-variable `where('a', P)` clause, and a
  *  `where(<body>)`/`not(<body>)` filter leg; the `and`/`or` connective groups are a later phase and
  *  DECLINE here rather than being mis-lowered. */
-function classify(a: unknown, params: Record<string, any>): Pattern | null {
+function classify(a: unknown, params: ParamEnv): Pattern | null {
   if (!isNested(a)) return null;
   const chain = patternSteps((a as { nested: unknown }).nested, params);
   if (!chain) return null;
@@ -286,7 +287,7 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
  *  variable scope and binding table — every child must match — so it is exactly a CONJUNCTION: its
  *  children are simply more patterns on the same table. (`or(…)` is a DISJUNCTION — a UNION of
  *  per-branch tables — a different construction, a later phase; it is NOT flattened here.) */
-function andChildren(a: unknown, params: Record<string, any>): readonly Arg[] | null {
+function andChildren(a: unknown, params: ParamEnv): readonly Arg[] | null {
   if (!isNested(a)) return null;
   const chain = patternSteps((a as { nested: unknown }).nested, params);
   return chain?.length === 1 && chain[0]!.name === 'and' ? (chain[0]!.args ?? []) : null;
@@ -298,7 +299,7 @@ function andChildren(a: unknown, params: Record<string, any>): readonly Arg[] | 
  *  and combined into one disjunctive predicate. `reads` (for readiness) is every alias the branches
  *  reference. TinkerPop replaces a match arg whose start step is an `OrStep` with a nested `MatchStep`
  *  of connective OR (`MatchStep.configureStartAndEndSteps`, `MatchStep.java:122`). */
-function orConnective(a: unknown, params: Record<string, any>): Pattern | null {
+function orConnective(a: unknown, params: ParamEnv): Pattern | null {
   if (!isNested(a)) return null;
   const chain = patternSteps((a as { nested: unknown }).nested, params);
   if (!(chain?.length === 1 && chain[0]!.name === 'or')) return null;
@@ -317,7 +318,7 @@ function orConnective(a: unknown, params: Record<string, any>): Pattern | null {
  *  bound by a sibling pattern, not by this filter). The branches arrive Pass-rewritten (`select`-headed),
  *  which `branchToExpr` handles. Returns `null` for a non-connective body (an ordinary single leg, which
  *  `classifyLeg` takes) or a malformed head. */
-function whereConnective(head: IRStep, params: Record<string, any>): Pattern | null {
+function whereConnective(head: IRStep, params: ParamEnv): Pattern | null {
   if ((head.args?.length ?? 0) !== 1) return null;
   const nested = head.args?.[0]?.value;
   if (!isNested(nested)) return null;
@@ -334,7 +335,7 @@ function whereConnective(head: IRStep, params: Record<string, any>): Pattern | n
  *  children (recursively — a nested `and` flattens too) and keeping each top-level `or(…)` as one
  *  disjunctive `connective`. Each other argument classifies as one `Pattern`. Returns `null` to DECLINE
  *  the whole step (fail closed) on any unclassifiable argument. */
-function collectPatterns(args: readonly Arg[], params: Record<string, any>): Pattern[] | null {
+function collectPatterns(args: readonly Arg[], params: ParamEnv): Pattern[] | null {
   const out: Pattern[] = [];
   for (const a of args) {
     const children = andChildren(a.value, params);
@@ -490,7 +491,7 @@ function thetaExpr(keyA: string, op: 'eq' | 'neq', keyB: string, rel: Rel, label
  *  a later phase — and returns `null`, declining the whole connective (fail closed). */
 function branchToExpr(
   branch: unknown, rel: Rel, labels: AliasMap, bound: ReadonlySet<string>,
-  child: ChildSeam, host: IRStep, fresh: Minter, params: Record<string, any>,
+  child: ChildSeam, host: IRStep, fresh: Minter, params: ParamEnv,
 ): Expr | null {
   if (!isNested(branch)) return null;
   const steps = patternSteps(branch.nested, params);
@@ -597,7 +598,7 @@ function scalarSubjectOf(sproj: NonNullable<ReturnType<typeof aliasProjection>>,
  *  the connective's operator. Fail closed — one unclassifiable branch declines the whole connective. */
 function connectiveExpr(
   op: 'and' | 'or', branches: readonly Arg[], rel: Rel, labels: AliasMap, bound: ReadonlySet<string>,
-  child: ChildSeam, host: IRStep, fresh: Minter, params: Record<string, any>,
+  child: ChildSeam, host: IRStep, fresh: Minter, params: ParamEnv,
 ): Expr | null {
   let acc: Expr | undefined;
   for (const b of branches) {
@@ -611,7 +612,7 @@ function connectiveExpr(
 /** Parse a top-level `where(<body>)`/`not(<body>)` step (over a record's bound aliases) into a leg, or
  *  `null` to decline. The same classifier `match` uses for a filter argument — the body's leading `as`
  *  is Pass-re-rooted to `select(start)`, and `reads` is every alias it references. */
-export function classifyWhereLeg(step: IRStep, params: Record<string, any>): { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] } | null {
+export function classifyWhereLeg(step: IRStep, params: ParamEnv): { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] } | null {
   if ((step.name !== 'where' && step.name !== 'not') || step.modulators?.length || step.optionArms) return null;
   const p = classifyLeg(step, params);
   return p && p.kind === 'leg' ? p : null;
@@ -654,7 +655,7 @@ function producedObject(rel: Rel, framing: RelFraming): { readonly value: Expr; 
  */
 export function lowerMatch(
   step: IRStep, seed: Rel, elem: Elem, aliases: AliasMap,
-  params: Record<string, any>, child: ChildSeam, source: GraphSource, fresh: Minter,
+  params: ParamEnv, child: ChildSeam, source: GraphSource, fresh: Minter,
 ): (FramedRel & { readonly aliases: AliasMap }) | null {
   // A modulator/option arm on `match` is a front-end shape this has not seen; decline.
   if (step.modulators?.length || step.optionArms) return null;

@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import { withChannel } from '../../../channels.ts';
 import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../../rel/expr.ts';
@@ -538,7 +539,7 @@ export const isMintedRowOrigin = (window: Rel): boolean =>
  * step that re-mints the position over the whole stream (a global `order()`, a branch merge) can interleave
  * starts; any other body keeps the origin-major position its movements already numbered.
  */
-function originMajor(rel: Rel, body: readonly IRStep[], params: Record<string, any>, fresh: Minter): Rel {
+function originMajor(rel: Rel, body: readonly IRStep[], params: ParamEnv, fresh: Minter): Rel {
   const origin = originOf(rel.channels), enc = encounterOf(rel.channels);
   if (!origin || !enc) return rel;
   if (!someStepDeep(body, params, (s) => (s.name === 'order' && !isLocalScope(s as IRStep)) || BATCHING_BRANCHES.has(s.name), true)) return rel;
@@ -886,7 +887,7 @@ export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minte
  *  the compiler will raise for itself). A rooted body goes through `normalize(stepChain(…))` and not
  *  `childSteps`, which strips a source and answers the empty chain, i.e. an endpoint that silently
  *  matched nothing. */
-export function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?: SideEffectConstants): readonly IRStep[] | null {
+export function rootedSteps(nested: unknown, params: ParamEnv, sideEffects?: SideEffectConstants): readonly IRStep[] | null {
   try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch { return null; }
 }
 

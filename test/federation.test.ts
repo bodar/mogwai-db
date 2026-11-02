@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../src/gremlin/param-env.ts';
 import { test, expect, describe, beforeAll } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
@@ -17,7 +18,7 @@ import { describeThrow, failsClosed } from './support/fail-closed.ts';
 // A federate `traversal` param, built the SAME way production does — parse the sub-traversal string to
 // IRStep[] and wrap as a TraversalParam — so a hand-wired spy CallSite can never drift from the shape
 // `parseCallSpec` actually produces (a string is NOT the param shape; the steps are).
-const subTraversal = (gremlin: string) => ({ kind: 'traversal' as const, steps: stepChain(parseGremlin(gremlin), {}) });
+const subTraversal = (gremlin: string) => ({ kind: 'traversal' as const, steps: stepChain(parseGremlin(gremlin), NO_PARAMS) });
 
 // End-to-end federation on the REAL stack: two graphs owned by one BunGraphManager, one
 // federating into the other via federate — the real service, real env, real depth
@@ -141,9 +142,9 @@ describe('federate — arg-less pushdown (win 2a)', () => {
     // local: the collection lives on the PARENT and no resume can reach it; the point here is it is not
     // shipped to the sibling. A SELF-CONTAINED cap within the prefix DOES push and frame — see below.)
     const q = 'g.V().aggregate("x").call("federate", ["graph":"crew"]).V().cap("x")';
-    const steps = stepChain(parseGremlin(q), {});
+    const steps = stepChain(parseGremlin(q), NO_PARAMS);
     const at = steps.findIndex((s) => s.name === 'call');
-    const p = pushableTailPrefix(steps, at, {});
+    const p = pushableTailPrefix(steps, at, NO_PARAMS);
     expect(steps.slice(at + 1, at + 1 + p.length).map((s) => s.name)).toEqual(['V']);   // cap NOT pushed
   });
 
@@ -151,9 +152,9 @@ describe('federate — arg-less pushdown (win 2a)', () => {
     // The cap reads a collection written WITHIN the prefix, so it is self-contained — the guard does not
     // fire (the key is in the "written within the prefix" set), and the whole side-effect pushes.
     const q = 'g.call("federate", ["graph":"crew"]).V().aggregate("a").cap("a").unfold()';
-    const steps = stepChain(parseGremlin(q), {});
+    const steps = stepChain(parseGremlin(q), NO_PARAMS);
     const at = steps.findIndex((s) => s.name === 'call');
-    const p = pushableTailPrefix(steps, at, {});
+    const p = pushableTailPrefix(steps, at, NO_PARAMS);
     expect(steps.slice(at + 1, at + 1 + p.length).map((s) => s.name)).toEqual(['V', 'aggregate', 'cap', 'unfold']);
   });
 
@@ -296,7 +297,7 @@ describe('federate — standard as()/select() MID injection', () => {
       }),
     } as any).resolve({
       params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
-      boundParams: {}, federationDepth: 0,
+      boundParams: NO_PARAMS, federationDepth: 0,
       mapValues: { param: 'injectedMap', label: 'e' },
     });
     await contribution.apply([
@@ -319,7 +320,7 @@ describe('federate — standard as()/select() MID injection', () => {
       }),
     } as any).resolve({
       params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
-      boundParams: {}, federationDepth: 0,
+      boundParams: NO_PARAMS, federationDepth: 0,
       mapValues: { param: 'injectedMap', label: 'e', reduce: { partial: 'count', combine: 'sum', empty: 'zero' } },
     });
     const result = await contribution.apply([

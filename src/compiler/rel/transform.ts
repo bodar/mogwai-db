@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../../gremlin/param-env.ts';
 import { compilerInt, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import { constLit } from './const.ts';
@@ -466,10 +467,10 @@ export function transformExpr(
     // declined here. `dateDiffOtherMs` THROWS a `ValueParseError` for an unsupported nested form, which
     // is not this arm's decline — so it is asked only for the literal or the recognised constant.
     const isNum = typeof args[0] === 'number';
-    if (!isNum && !isDateDiffConstant(args[0], {})) return null;
+    if (!isNum && !isDateDiffConstant(args[0], NO_PARAMS)) return null;
     // A datetime literal is a PARSED constant (inlines as a typed literal); a folded `constant(null)`→0
     // is COMPILER-AUTHORED — both are constants, neither spends a bind (`heldInt`, the root bind rule).
-    return { expr: { kind: 'binary', op: '-', left: v, right: heldInt(dateDiffOtherMs(args[0], {})) }, type: STATIC('long') };
+    return { expr: { kind: 'binary', op: '-', left: v, right: heldInt(dateDiffOtherMs(args[0], NO_PARAMS)) }, type: STATIC('long') };
   }
 
   return null;

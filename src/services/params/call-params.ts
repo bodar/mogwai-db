@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { stepChain, isNested } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
@@ -28,7 +29,7 @@ export const isTraversalParam = (v: unknown): v is TraversalParam =>
  *  federate/OLAP sub-traversal carries a COMPILE-unbound var (the old `xxN`/`T.value` injection that
  *  did is gone — the `parent` marker replaced it), so `stepChain` does not throw. A constant probe
  *  runs first (a `constant(literal)` never references a var, so its `stepChain` is safe too). */
-function resolveValueTraversal(nested: any, params: Record<string, any>): unknown {
+function resolveValueTraversal(nested: any, params: ParamEnv): unknown {
   const body = stepChain(nested, params);
   if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
     return body[0].args[0].value;
@@ -53,7 +54,7 @@ function resolveValueTraversal(nested: any, params: Record<string, any>): unknow
 
 /** Resolve a nested `{nested}` traversal used as a PARAM VALUE (`.with(k, __.constant(x))`)
  *  to its compile-time constant. Only `constant(literal)` is supported. */
-function constFromValueTraversal(nested: any, params: Record<string, any>): unknown {
+function constFromValueTraversal(nested: any, params: ParamEnv): unknown {
   const body = stepChain(nested, params);
   if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
     return body[0].args[0].value;
@@ -63,7 +64,7 @@ function constFromValueTraversal(nested: any, params: Record<string, any>): unkn
 /** Resolve a nested `{nested}` traversal used as the PARAM MAP
  *  (`call(name, __.project(k1,k2).by(__.constant(v1)).by(__.constant(v2)))`) to a constant
  *  map. Each project field's by() body must be `__.constant(literal)`. */
-function constMapFromTraversal(nested: any, params: Record<string, any>): CallParams {
+function constMapFromTraversal(nested: any, params: ParamEnv): CallParams {
   // stepChain over the nested traversal keeps project + its by() modulators as SIBLING
   // steps (this raw chain is un-normalized, so by() has not been folded onto project).
   const chain = stepChain(nested, params);
@@ -89,7 +90,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
  *  (call_string / call_string_map / call_string_traversal / call_string_map_traversal). A lone nested
  *  traversal arg is TinkerPop's DYNAMIC-PARAMS traversal (`project(...).by(constant)` → a constant map).
  */
-export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSpec {
+export function parseCallSpec(step: IRStep, params: ParamEnv): CallSpec {
   const [name, ...rest] = step.args.map((a) => a.value);
   // Bare g.call() ≡ g.call("--list") (the directory). A missing name defaults to it.
   const serviceName = typeof name === 'string' ? name : DIRECTORY_SERVICE_NAME;
@@ -144,7 +145,7 @@ export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSp
  *  `parseCallSpec` rather than re-reading `args[0]`, so the bare-`g.call()`-means-`--list` default
  *  cannot be spelled twice. */
 export function servicesNamedBy(
-  steps: readonly IRStep[], params: Record<string, any>, registry: ServiceRegistry,
+  steps: readonly IRStep[], params: ParamEnv, registry: ServiceRegistry,
 ): ReadonlyMap<string, Service> {
   const found = new Map<string, Service>();
   const visit = (chain: readonly IRStep[]): void => {

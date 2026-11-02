@@ -1,7 +1,7 @@
 import { and, col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { type Channel } from '../../channels.ts';
 import { constLit, itemTypeAt, sliceBound } from './const.ts';
-import { flatType, NUMBER_STORED_NON_NUMBERS, valueNodeOf, type TypeNode } from '../../gremlin/types.ts';
+import { flatType, gremlinTypeOf, NUMBER_STORED_NON_NUMBERS, valueNodeOf, type TypeNode } from '../../gremlin/types.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
@@ -1416,7 +1416,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
   if (!isNested(arg)) {
     if (arg === undefined) return null;
-    return nonIterableArgument(step, arg, arg === null ? null : gremlinTypeOfValue(arg));
+    return nonIterableArgument(step, arg, arg === null ? null : encounteredType(arg, listArg?.type));
   }
   const inner = child.body((arg as { readonly nested: unknown }).nested, 'child');
   if (!inner?.length) return null;
@@ -1433,7 +1433,7 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
   if (inner.length === 1 && inner[0]!.name === 'constant') {
     const value = inner[0]!.args[0]?.value, extra = inner[0]!.args[1]?.value;
     if (extra !== undefined || value === undefined || Array.isArray(value)) return null;
-    return nonIterableArgument(step, arg, value === null ? null : gremlinTypeOfValue(value));
+    return nonIterableArgument(step, arg, value === null ? null : encounteredType(value, inner[0]!.args[0]?.type));
   }
   const read = child.rooted(inner);
   // A DECLINING operand stays a decline — we cannot type what did not lower, and §6·5's fail-open rule
@@ -1449,13 +1449,11 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
 
 /** A LITERAL's Gremlin type name, for the `encountered %s` tail. Java prints a class there and the corpus
  *  matches on the prefix, so naming the Gremlin type is both checkable and more useful to a client than a
- *  Java class we do not have. */
-const gremlinTypeOfValue = (value: unknown): string =>
-  typeof value === 'string' ? 'string'
-    : typeof value === 'boolean' ? 'boolean'
-      : typeof value === 'bigint' ? 'long'
-        : typeof value === 'number' ? (Number.isInteger(value) ? 'integer' : 'double')
-          : value instanceof Map ? 'map' : 'object';
+ *  Java class we do not have. The type its channel DECLARED (the literal's suffix, the parameter's settled
+ *  type) wins — `2L` is a long, not the integer its JS value spells — and only an untyped value falls back
+ *  to the one JS-value inference (`gremlinTypeOf`). */
+const encounteredType = (value: unknown, declared: TypeNode | null | undefined): string =>
+  flatType(declared) ?? gremlinTypeOf(value) ?? 'object';
 
 /** What a lowered operand YIELDED, as a Gremlin type name — or `null` where the framing cannot say, which
  *  fails open rather than naming a type the answer does not have. A `path` is deliberately absent: it

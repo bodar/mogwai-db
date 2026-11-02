@@ -65,6 +65,7 @@ import { extractSack, extractSideEffects, extractStrategies, parseGremlin, stepC
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
+import { NO_PARAMS } from '../src/gremlin/param-env.ts';
 
 const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
@@ -202,9 +203,9 @@ for (const query of CORPUS) {
   let tree: ReturnType<typeof parseGremlin>;
   try { tree = parseGremlin(query); } catch { unparsed++; continue; }
   try {
-    steps = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}).steps as IRStep[];
-    sideEffects = extractSideEffects(tree, {});
-    sack = extractSack(tree, {});
+    steps = runPasses(stepChain(tree, NO_PARAMS), extractStrategies(tree, NO_PARAMS), NO_PARAMS).steps as IRStep[];
+    sideEffects = extractSideEffects(tree, NO_PARAMS);
+    sack = extractSack(tree, NO_PARAMS);
   } catch { raised++; continue; }
   if (!steps.length) continue;
   // EVERY prefix, never stopping at the first decline — because coverage is NOT monotonic in prefix
@@ -222,7 +223,7 @@ for (const query of CORPUS) {
   for (let n = 1; n <= steps.length; n++) {
     // A throw counts as a decline. `mise run rel-sweep` is what asserts there are none; here it would
     // only distort the count to treat one differently.
-    try { if (lowerToRel(steps.slice(0, n), { sideEffects, sack })) longest = n; } catch { /* a declining prefix, not the end */ }
+    try { if (lowerToRel(steps.slice(0, n), { params: NO_PARAMS, sideEffects, sack })) longest = n; } catch { /* a declining prefix, not the end */ }
   }
   if (longest === steps.length) { covered++; continue; }
   // When even the SOURCE declines, the source is the blocker.

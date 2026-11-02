@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { isLocalScope, REDUCERS } from './step.ts';
 import { labelReads, labelsBoundBefore, preBarrierSelectRead } from './labels.ts';
@@ -184,7 +185,7 @@ const TEXTLESS_FIELDS = [
 
 /** Does an IR step denote the same thing as `parsed`, the step its source text parses to? Same name,
  *  `loopName` and arguments, and nothing folded onto it (`TEXTLESS_FIELDS`). */
-function sameStep(ir: Step, parsed: Step, params: Record<string, any>): boolean {
+function sameStep(ir: Step, parsed: Step, params: ParamEnv): boolean {
   const fields = ir as unknown as Record<string, unknown>;
   return !TEXTLESS_FIELDS.some((f) => fields[f] !== undefined)
     && ir.name === parsed.name && ir.loopName === parsed.loopName && ir.args.length === parsed.args.length
@@ -194,7 +195,7 @@ function sameStep(ir: Step, parsed: Step, params: Record<string, any>): boolean 
 /** Do an IR argument value and its parsed counterpart denote the same thing? A nested traversal compares
  *  as a CHAIN, step by step (`sameStep`): a Pass may have rewritten a body into a `Step[]` payload, which
  *  still denotes its text exactly when every step does. */
-function sameValue(a: unknown, b: unknown, params: Record<string, any>): boolean {
+function sameValue(a: unknown, b: unknown, params: ParamEnv): boolean {
   if (a === b) return true;
   if (isNested(a) || isNested(b)) {
     if (!isNested(a) || !isNested(b)) return false;
@@ -233,7 +234,7 @@ function sameValue(a: unknown, b: unknown, params: Record<string, any>): boolean
  * with no field the text cannot carry (`TEXTLESS_FIELDS`). Anything else stays LOCAL, the fail-closed
  * side of the boundary.
  */
-function textDenotes(step: IRStep, params: Record<string, any>): boolean {
+function textDenotes(step: IRStep, params: ParamEnv): boolean {
   let reparsed: Step | undefined;
   try {
     // `inject(0)` roots a step that is not a source step (`out()`); a mid-traversal `V()` is also legal.
@@ -259,7 +260,7 @@ export interface PushablePrefix {
 /** The longest remote-safe prefix of the tail `steps.slice(barrier + 1)`. `params` resolves label reads
  *  faithfully (`labels.ts`). A step that is local-dependent (see above) and everything after it stays
  *  local. Pure `Step[]` reasoning — the correct layer for a plan-time boundary (`src/compiler/CLAUDE.md`). */
-export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, params: Record<string, any>): PushablePrefix {
+export function pushableTailPrefix(steps: readonly IRStep[], barrier: number, params: ParamEnv): PushablePrefix {
   const from = barrier + 1;
   // Labels bound before the barrier — a prefix step reading one of these backtracks ACROSS the boundary
   // and cannot push. `labelsBoundBefore` clears at the barrier, so this is exactly the pre-barrier set.

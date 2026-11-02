@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
 import { SCALAR_TRANSFORMS, type IRStep } from './step.ts';
 import { someValueNode } from './walk.ts';
@@ -82,7 +83,7 @@ const mayRaise = (s: Step): boolean => SCALAR_TRANSFORMS.has(s.name) || s.name =
  *  side effect would be skipped, and — although a filter consumer confines its body's binds today
  *  (see the child-seam guardrail in steps/CLAUDE.md) — declining on `as()` keeps this Pass from
  *  depending on that asymmetry holding. Fail closed: an unrecognisable arg counts as impure. */
-function isImpure(steps: readonly Step[], params: Record<string, any>): boolean {
+function isImpure(steps: readonly Step[], params: ParamEnv): boolean {
   return steps.some((s) => {
     if (isSideEffecting(s) || s.name === 'as' || mayRaise(s)) return true;
     return s.args.some((a) => isNested(a.value) && isImpure(stepChain(a.value.nested, params), params));
@@ -97,7 +98,7 @@ function isImpure(steps: readonly Step[], params: Record<string, any>): boolean 
  * step alone would make `where(__.hasLabel('person').constant(1))` a provable no-op and delete a filter
  * that really filters.
  */
-export function bodyAlwaysProduces(nested: any, params: Record<string, any>): boolean {
+export function bodyAlwaysProduces(nested: any, params: ParamEnv): boolean {
   if (!isNested(nested)) return false;
   const body = stepChain(nested.nested, params);
   return alwaysProduces(body) && !isImpure(body, params);

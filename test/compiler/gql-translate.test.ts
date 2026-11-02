@@ -9,6 +9,7 @@
 //  · BEHAVIOUR — that same rendered chain EXECUTED against the modern graph, compared with
 //    MatchString.feature's expected rows. The rendering is valid Gremlin, so the translator can be
 //    verified end-to-end before the desugar Pass exists to wire it in.
+import { NO_PARAMS, paramEnv } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain, type Step } from '../../src/gremlin/frontend.ts';
 import { gqlMatchSteps } from '../../src/gremlin/gql.ts';
@@ -18,7 +19,7 @@ import { exec } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
 /** Any real parse context serves as the host stamp; the translator only carries it through. */
-const HOST_CTX = stepChain(parseGremlin('g.V()'), {})[0].ctx;
+const HOST_CTX = stepChain(parseGremlin('g.V()'), NO_PARAMS)[0].ctx;
 
 /** Render a synthesized chain back to Gremlin text. Doubles as the executable form — which is the
  *  point: the assertion and the execution read the same emitted steps. */
@@ -31,7 +32,7 @@ function render(steps: readonly Step[]): string {
 }
 
 const translate = (gql: string, opts: { terminal?: boolean; params?: Record<string, any> } = {}) =>
-  render(gqlMatchSteps(gql, opts.params ?? {}, HOST_CTX, opts.terminal ?? false));
+  render(gqlMatchSteps(gql, paramEnv(opts.params ?? {}), HOST_CTX, opts.terminal ?? false));
 
 describe('GQL MATCH translation — shape', () => {
   test('a node pattern binds the seed in the PREFIX, so an index can serve its constraints', () => {

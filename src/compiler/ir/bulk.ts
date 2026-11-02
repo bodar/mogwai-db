@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../../gremlin/param-env.ts';
 import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 
@@ -176,7 +177,7 @@ function reducingGroupCollapseTerminal(step: IRStep): boolean {
   const value = bys[1]?.[0];
   if (!isNested(value)) return false;
   try {
-    const inner = stepChain(value.nested, {});
+    const inner = stepChain(value.nested, NO_PARAMS);
     return inner.length === 1 && inner[0].name === 'count' && (inner[0].args?.length ?? 0) === 0;
   } catch {
     return false;

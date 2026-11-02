@@ -1,3 +1,4 @@
+import { NO_PARAMS, paramEnv } from '../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { createRegistry, EMPTY_REGISTRY } from '../src/services/spi/registry.ts';
 import { standardRegistry, extendedRegistry } from '../src/services/standard.ts';
@@ -23,11 +24,11 @@ import { decode, decodeAll } from './support/decode.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call IRStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
-  const steps = normalize(stepChain(parseGremlin(gremlin), params)).steps;
+  const steps = normalize(stepChain(parseGremlin(gremlin), paramEnv(params)), paramEnv(params)).steps;
   return steps.find((s) => s.name === 'call')!;
 };
 const spec = (gremlin: string, params: Record<string, any> = {}) =>
-  parseCallSpec(callStep(gremlin, params), params);
+  parseCallSpec(callStep(gremlin, params), paramEnv(params));
 
 // The call() service subsystem: the ServiceRegistry (this file) + the call/with front-end
 // fold + param resolver (added as those land). The registry is a DI seam sibling to
@@ -455,7 +456,7 @@ describe('barrier source form via Executor (stub source → drive → land → f
 // yet (the Worker-driven drive loop is Phase 2); the test pins the declared answer so a later change
 // cannot silently reclassify which barrier leaves.
 describe('barrier residency', () => {
-  const site = (params: Record<string, unknown>) => ({ params, boundParams: {}, federationDepth: 0 });
+  const site = (params: Record<string, unknown>) => ({ params, boundParams: NO_PARAMS, federationDepth: 0 });
 
   test('federate is a worker barrier (remote wait), io is a do barrier (store-bound)', () => {
     const fed = createFederateService(undefined).resolve(site({ graph: 'crew', traversal: 'g.V()' }));

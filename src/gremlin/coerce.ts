@@ -1,3 +1,4 @@
+import { NO_PARAMS, type ParamEnv } from './param-env.ts';
 import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
@@ -495,7 +496,7 @@ export function asDateConst(v: any, subtype: string | null): number {
 /** dateDiff's other operand in millis (result = self − other). A datetime literal
  *  (epoch-ms number) or a `constant(datetime|null)` nested traversal (null → epoch 0,
  *  = new Date(null)). A nested inject()/movement defers. */
-export function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
+export function dateDiffOtherMs(arg: any, params: ParamEnv): number {
   if (typeof arg === 'number') return arg;
   if (isNested(arg)) {
     const inner = stepChain(arg.nested, params);
@@ -510,7 +511,7 @@ export function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
 
 /** Whether dateDiff's nested operand is the constant form the fused transform can fold
  * without a child scope. Every other nested body belongs to the apply-contract seam. */
-export const isDateDiffConstant = (arg: any, params: Record<string, any>): boolean =>
+export const isDateDiffConstant = (arg: any, params: ParamEnv): boolean =>
   isNested(arg) && (() => {
     const inner = stepChain(arg.nested, params);
     return inner.length === 1 && inner[0].name === 'constant';
@@ -618,7 +619,7 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     perRow = undefined;
     // A traversal date is an apply-style child value, not a constant coercion. Leave it
     // for the scalar dispatcher, which provisions the correlated child scope.
-    if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, {})) break;
+    if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, NO_PARAMS)) break;
     if (step.name === 'asBool') {
       for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
       as = 'boolean';
@@ -685,7 +686,7 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
       as = 'datetime';
       continue;
     }
-    const other = dateDiffOtherMs(step.args[0]?.value, {});
+    const other = dateDiffOtherMs(step.args[0]?.value, NO_PARAMS);
     for (let i = 0; i < vals.length; i++) {
       if (!datetimeSubject(i)) {
         const v = vals[i];

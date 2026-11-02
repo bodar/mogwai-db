@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import type { Channel, ChannelRole, Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
@@ -116,7 +117,7 @@ export const graphOf = (channels: Channels): Channel | undefined =>
 
 /** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
-export interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }
+export interface FilterCtx { readonly params: ParamEnv; readonly correlatedChildren: boolean; }
 
 /** What the ELEMENT loop needs on top of a filter's context: whether this compile asked for the
  *  movement collapse, and the rest of the settled per-compile facts. One record rather than a dozen
@@ -273,7 +274,7 @@ export const inArmBody = (ctx: ChainCtx): ChainCtx =>
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */
-export const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: SideEffectConstants): readonly IRStep[] | null => {
+export const bodyOf = (nested: unknown, params: ParamEnv, sideEffects?: SideEffectConstants): readonly IRStep[] | null => {
   try { return childSteps(nested, params, sideEffects); } catch { return null; }
 };
 

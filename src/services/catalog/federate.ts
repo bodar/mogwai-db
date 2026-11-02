@@ -7,6 +7,7 @@ import { subTraversalToGremlin } from '../params/traversal-param.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
 import { ENDPOINT_IDS_KEY } from '../../compiler/ir/injection.ts';
 import { UnsupportedTraversal } from '../../compiler/compiler.ts';
+import { NO_PARAMS } from '../../gremlin/param-env.ts';
 
 const mapValuesGremlin = (gremlin: string, label: string, param: string, reducer?: string): string | null => {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -139,7 +140,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       // reference the OUTER traversal's bound params (a pushed `has("age", gt(x))`), so those ride along.
       // `pushdown` is a call-site fact the segment planner computed where the tail was visible.
       const gremlin = pushdown ? pushdown.siblingGremlin : traversalOf(params);
-      const siblingBinds = pushdown ? boundParams : {};
+      const siblingBinds = pushdown ? boundParams : NO_PARAMS;
       // Fail closed rather than answer a different question: a registry carrying this service in a
       // context with no way to reach siblings is a wiring mistake, not an empty result.
       if (!source) throw new Error('federate: no federation source is wired into this graph\'s app scope');
@@ -156,7 +157,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         // returned tag: a pushed reducer → `barrier-scalar`, a pushed value terminal → `barrier-values`
         // (each member re-emitted as a traverser), elements → the detached rows (with the optional endpoint
         // hop for a `.with("subgraph")` tail).
-        const out = await ex.runForeign(gremlin, siblingBinds, depth + 1, {}, pushdown?.reduces ? 'reduce' : undefined);
+        const out = await ex.runForeign(gremlin, siblingBinds.values, depth + 1, siblingBinds.types, pushdown?.reduces ? 'reduce' : undefined);
         if (out.kind === 'scalar') return { kind: 'barrier-scalar', value: out.value };
         if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
         // A user's map terminal is a `values` stream (one map per traverser); only the injection, which
@@ -178,7 +179,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         // backstop that must never surface as an internal error).
         if (!sibling) throw new UnsupportedTraversal(`federate: a per-parent injection of select("${mapValues.label}") the sibling query ${gremlin} does not spell`);
         const values = new Map(rows.map((row, ordinal) => [String(ordinal), row.injectedValue]));
-        const out = await ex.runForeign(sibling, { ...siblingBinds, [mapValues.param]: values }, depth + 1, {}, 'keyedMap');
+        const out = await ex.runForeign(sibling, { ...siblingBinds.values, [mapValues.param]: values }, depth + 1, siblingBinds.types, 'keyedMap');
         if (out.kind !== 'map') throw new Error(`federate: expected a keyed map from mapValues injection, got ${out.kind}`);
         // A bare reducer is the group's value traversal, so the ordinary map is already
         // `(parentId -> partial)`. Count supplies its 0 identity while sum/min/max emit nothing on
@@ -188,7 +189,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       }
       // A non-injecting mid traversal is still a valid constant sibling read. The resume performs its
       // ordinary CROSS scatter over the parent stream; only the removed marker spelling lacks a route.
-      const out = await ex.runForeign(gremlin, siblingBinds, depth + 1, {}, pushdown?.reduces ? 'reduce' : undefined);
+      const out = await ex.runForeign(gremlin, siblingBinds.values, depth + 1, siblingBinds.types, pushdown?.reduces ? 'reduce' : undefined);
       if (out.kind === 'scalar') return { kind: 'barrier-scalar', value: out.value };
       if (out.kind === 'values') return { kind: 'barrier-values', values: out.values };
       if (out.kind === 'map') throw new Error('federate: mid traversal returned an internal mapValues result');

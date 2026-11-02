@@ -12,6 +12,7 @@ import { UnsupportedTraversal, compile } from '../src/compiler/compiler.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
+import { NO_PARAMS } from '../src/gremlin/param-env.ts';
 import { emit, isRowsBind } from '../src/rel/emit.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
@@ -110,12 +111,12 @@ for (const query of corpus) {
   let steps;
   try {
     const tree = parseGremlin(query);
-    steps = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}).steps;
+    steps = runPasses(stepChain(tree, NO_PARAMS), extractStrategies(tree, NO_PARAMS), NO_PARAMS).steps;
   } catch { continue; }
   // A traversal whose ANSWER is an error (a literal that cannot parse — `asNumber('1,000')`) raises
   // out of the lowering by design, and is not a plan to sweep. `null` is the other exit: not covered.
   let lowered;
-  try { lowered = lowerToRel(steps, { correlatedChildren: true, wireTerminal: true }); } catch { continue; }
+  try { lowered = lowerToRel(steps, { params: NO_PARAMS, correlatedChildren: true, wireTerminal: true }); } catch { continue; }
   if (!lowered) continue;
   admitted++;
   const counts = { compiler: 0, bound: 0 };

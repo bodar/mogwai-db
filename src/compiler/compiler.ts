@@ -1,6 +1,6 @@
 import { parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
-import { declaredParamTypes, type TypeNode } from '../gremlin/types.ts';
-import { canonicalFloatParams } from '../gremlin/float.ts';
+import { type TypeNode } from '../gremlin/types.ts';
+import { paramEnv } from '../gremlin/param-env.ts';
 import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
 import { uncarriedLiteral } from './ir/uncarried-literal.ts';
@@ -45,11 +45,11 @@ function applyDiscard(plan: Executable): Executable {
  *  (segment.ts runPlan). Every non-barrier caller keeps using compile() below, whose type never
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, wireParams: Record<string, any>, options?: CompileOptions, wireParamTypes: Record<string, TypeNode> = {}): Plan {
-  // Every parameter carries a type from here on: the wire's where it declared one, the JS value's own
-  // otherwise (`declaredParamTypes`) — an untyped Boolean would otherwise be stored, and compared, as 1/0.
-  const paramTypes = declaredParamTypes(wireParams, wireParamTypes);
-  // A Float parameter lands on the carrier every other Float rides as, before anything reads it.
-  const params = canonicalFloatParams(wireParams, paramTypes);
+  // THE PARAMETER ENVIRONMENT, built once (`paramEnv`): every parameter carries a type from here on (the
+  // wire's where it declared one, the JS value's own otherwise — an untyped Boolean would otherwise be
+  // stored, and compared, as 1/0), and a Float lands on its carrier before anything reads it. ONE value,
+  // so every nested body re-parsed downstream reads the same types as the root chain.
+  const params = paramEnv(wireParams, wireParamTypes);
   const tree = parseGremlin(gremlin);
   // A terminal method the step walk cannot see (`next()`, `toSet()`, …) asks a different question than
   // the stream does — decline rather than answer the stream for it (`unansweredTerminalMethod`).
@@ -63,7 +63,7 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   // registry — a settled value the lowering declines on, exactly as `sackInit` is (§6·6: a fact the
   // route drops is indistinguishable from a lowering that cannot express it, in every counter).
   const sideEffectPolicies = extractSideEffectPolicies(tree, params);
-  const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
+  const { steps, discard } = runPasses(stepChain(tree, params), extractStrategies(tree, params), params, sideEffects);
   if (steps.length === 0) throw new UnsupportedTraversal('a traversal source with no steps');
   // The ONE whole-tree scan of the two namespaces a `Scoping` read resolves past the traverser's own Map
   // (side-effect keys, path labels) — `programScopeNames`. Every scope-key authority below, and the

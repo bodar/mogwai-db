@@ -23,7 +23,7 @@ const SEED = L5_SEED;
 const RUNS = Number(process.env.L5_RUNS ?? 300);
 /** The permissive params proxy L1's corpus test uses: every name is "bound", so a traversal
  *  referencing a variable still chains. */
-const anyParams = () => new Proxy({}, { has: () => true, get: () => null }) as any;
+import { anyParams } from '../support/any-params.ts';
 
 describe('L5 shape table', () => {
   // ---------- the generator emits valid Gremlin, always ----------

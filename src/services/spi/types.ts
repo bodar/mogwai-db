@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { Minter } from '../../compiler/rel/build.ts';
 import type { FramedRel } from '../../compiler/rel/framing.ts';
@@ -51,7 +52,7 @@ export interface CallSite {
   /** THIS call's resolved params — `g.call(name, {k: v})` / `.with(k, v)`. Not to be confused with
    *  `boundParams`: these are the call's arguments, those are the traversal's wire bindings. */
   readonly params: CallParams;
-  readonly boundParams: Record<string, any>;   // the traversal's bound-param table (wire bindings)
+  readonly boundParams: ParamEnv;   // the traversal's bound parameters, values AND settled types
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;

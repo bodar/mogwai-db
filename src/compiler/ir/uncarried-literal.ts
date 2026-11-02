@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { collectionMembers, isNested, isPred, type Step } from '../../gremlin/frontend.ts';
 import { eachChainDeep, rawBodies, valueNodes } from './walk.ts';
 
@@ -68,7 +69,7 @@ function verdict(p: unknown, subject: 'nan' | 'null'): boolean | undefined {
 /** Does `step` DROP a NaN traverser under the verdict it gives a NULL one (see the module comment) — a
  *  filter FALSE for both, so neither is ever observed? An `is(p)`, or a `where`/`filter` whose whole body is
  *  one such `is`. */
-function dropsNaNAsNull(step: Step | undefined, source: Step, params: Record<string, any>): boolean {
+function dropsNaNAsNull(step: Step | undefined, source: Step, params: ParamEnv): boolean {
   if (!step) return false;
   if (step.name === 'asBool') return source.name === 'inject';
   if ((step.name === 'where' || step.name === 'filter') && step.args.length === 1 && isNested(step.args[0]!.value)) {
@@ -82,7 +83,7 @@ function dropsNaNAsNull(step: Step | undefined, source: Step, params: Record<str
 
 /** The first step, at any depth, holding a literal VALUE no carrier keeps — `null` when there is none. A
  *  non-null answer is a DECLINE (`compiler.ts`). */
-export function uncarriedLiteral(steps: readonly Step[], params: Record<string, any>): Step | null {
+export function uncarriedLiteral(steps: readonly Step[], params: ParamEnv): Step | null {
   let found: Step | null = null;
   eachChainDeep(steps, rawBodies(params), (chain) => {
     chain.forEach((s, i) => {

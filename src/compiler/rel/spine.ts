@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
@@ -91,7 +92,7 @@ export interface RelRequest {
  * flag.
  */
 export function compileViaRel(
-  request: RelRequest, steps: IRStep[], params: Record<string, any>, sideEffects: SideEffectConstants,
+  request: RelRequest, steps: IRStep[], params: ParamEnv, sideEffects: SideEffectConstants,
 ): Compiled | Program | null {
   // ONE fast-path switch reaches the lowering. `movementCollapse` picks the grouped `SUM(bulk)`,
   // which is a lowering STRATEGY the algebra can state, so both positions stay expressible and the
@@ -131,7 +132,7 @@ export function compileViaRel(
  * different label regime from its head, which is a wrong answer no gate would name.
  */
 export function loweringOptions(
-  request: RelRequest, params: Record<string, any>, sideEffects: SideEffectConstants,
+  request: RelRequest, params: ParamEnv, sideEffects: SideEffectConstants,
 ): Lowering {
   return {
     params,

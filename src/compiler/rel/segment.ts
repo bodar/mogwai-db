@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { ResumeGap, type AsyncSegmentPlan, type Plan, type SegmentPlan } from '../segment.ts';
 import type { BarrierInput, BarrierOutput, BarrierRelation, BarrierResidency, CallSite, CallSpec, DecorateSpec, ForeignRow, PairSpec, PathSpec, Service } from '../../services/spi/types.ts';
@@ -83,7 +84,7 @@ interface Barrier {
  *  plus the hop depth a barrier's `apply` closure captures at resolve time. */
 export interface SegmentRequest {
   readonly services: ReadonlyMap<string, Service>;
-  readonly params: Record<string, any>;
+  readonly params: ParamEnv;
   readonly federationDepth: number;
   /** The lowering options the RESUMED chain compiles under — the same object the route hands
    *  `lowerToRel`, so the two halves of one traversal cannot disagree about collapse, the label
@@ -115,7 +116,7 @@ export interface SegmentRequest {
  *  marker-bearing prefix ends right after the marker, `reduces:false`. Without a marker the whole prefix
  *  pushes (source form), reducer included. `null` when nothing pushes (an empty prefix). */
 function inferredPushdown(
-  steps: readonly IRStep[], at: number, spec: CallSpec, params: Record<string, any>,
+  steps: readonly IRStep[], at: number, spec: CallSpec, params: ParamEnv,
 ): { siblingGremlin: string; prefixLength: number; reduces: boolean; injectionLabel?: string } | null {
   if (spec.serviceName !== FEDERATE_SERVICE || spec.params.traversal != null) return null;
   const prefix = pushableTailPrefix(steps, at, params);
@@ -136,7 +137,7 @@ function inferredPushdown(
 /** The standard injection spelling in an explicit federate sub-traversal. The binding is intentionally
  * read from the outer chain: `select()` passes the scoped value through unchanged
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-89`). */
-function explicitInjectionLabel(steps: readonly IRStep[], at: number, spec: CallSpec, params: Record<string, any>): string | undefined {
+function explicitInjectionLabel(steps: readonly IRStep[], at: number, spec: CallSpec, params: ParamEnv): string | undefined {
   const traversal = spec.params.traversal;
   if (!isTraversalParam(traversal)) return undefined;
   return preBarrierSelectRead(traversal.steps, labelsBoundBefore(steps, at, params), params) ?? undefined;
@@ -265,7 +266,7 @@ function nestedBarrierIn(
  *  an already-landed marker (`landedSource`)? A BASE arm (a bare `V()`/`E()` reading the local graph) is
  *  NOT, and it has no landed relation for the unified post-merge rejoin, so an element-read merge that
  *  includes one fails closed. A non-element arm shape declines too (only element arms merge here). */
-function allArmsFederate(branchStep: IRStep, params: Record<string, any>): boolean {
+function allArmsFederate(branchStep: IRStep, params: ParamEnv): boolean {
   return branchStep.args.every((a) => {
     if (!isNested(a.value)) return false;
     const body = rootedSteps((a.value as { readonly nested: unknown }).nested, params);
@@ -390,7 +391,7 @@ function nestedBranchSegment(
  *  graph (a bare `V()`/`E()`, not yet a landed marker or a federate call). A federate-call arm is left
  *  alone — it stamps its OWN sibling-graph name when its segment lands it — and an already-tagged marker
  *  or a non-element arm is left unchanged. Idempotent, so it survives the re-plan across N arms. */
-function stampLocalArm<T extends { readonly value: unknown }>(arg: T, params: Record<string, any>): T {
+function stampLocalArm<T extends { readonly value: unknown }>(arg: T, params: ParamEnv): T {
   if (!isNested(arg.value)) return arg;
   const body = rootedSteps((arg.value as { readonly nested: unknown }).nested, params);
   const head = body?.[0];
@@ -404,7 +405,7 @@ function stampLocalArm<T extends { readonly value: unknown }>(arg: T, params: Re
  */
 
 /** Pick an ordinary sibling variable that cannot shadow a user binding carried into the pushed tail. */
-function freshMapValuesParam(params: Record<string, any>): string {
+function freshMapValuesParam(params: ParamEnv): string {
   // `map` itself is a Gremlin GType token, not a VariableContext, so use an ordinary identifier
   // that cannot be parsed as a grammar keyword.
   let param = 'injectedMap';

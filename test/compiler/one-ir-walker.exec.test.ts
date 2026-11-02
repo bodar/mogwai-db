@@ -1,3 +1,4 @@
+import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 // ONE IR WALKER, and the declines and fixes that ride on it (`src/compiler/ir/walk.ts`).
 //
 // Every whole-tree question the compiler asks — "is there a write anywhere?", "a random draw?", "which
@@ -23,7 +24,7 @@ describe('someStepDeep is TOTAL over every child position', () => {
   const write: Step = { name: 'addV', args: [arg('x')] } as Step;
   const nested = { nested: [write] };
   const host = (extra: Partial<IRStep>): IRStep[] => [{ name: 'identity', args: [], ...extra } as IRStep];
-  const writes = (steps: Step[]) => someStepDeep(steps, {}, (s) => s.name === 'addV');
+  const writes = (steps: Step[]) => someStepDeep(steps, NO_PARAMS, (s) => s.name === 'addV');
 
   test.each([
     ['an argument', host({ args: [arg(nested)] })],

@@ -1,3 +1,4 @@
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
@@ -1068,7 +1069,7 @@ function writeSiteOf(step: IRStep): WriteSite | null {
 /** Steps after which the traverser is still the element an `addV`/`addE` just made. */
 const KEEPS_FRESH: ReadonlySet<string> = new Set(['property', 'as']);
 
-export function programWrites(steps: readonly IRStep[], params: Record<string, any>): ProgramWrites {
+export function programWrites(steps: readonly IRStep[], params: ParamEnv): ProgramWrites {
   const writers: KeyWriter[] = [];
   const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
@@ -1302,7 +1303,7 @@ function createsOnce(step: IRStep, chain: readonly IRStep[], at: number): boolea
  */
 export function afterWrite<T extends { readonly effects?: readonly Binding[] }>(
   writes: ProgramWrites, input: Rel | null, steps: readonly IRStep[], from: number, end: number, bindings: readonly Binding[],
-  params: Record<string, any>, fresh: Minter, tail: () => T | null,
+  params: ParamEnv, fresh: Minter, tail: () => T | null,
 ): T | null {
   const entry: UpstreamWrite = {
     effect: programWrites(steps.slice(from, end), params), count: input && !writes.draws ? fresh('wn') : null, used: false,

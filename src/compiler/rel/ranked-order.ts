@@ -34,6 +34,7 @@
 // sorting another. Whatever slips past both — a key the resume meets that the head never ranked — fails
 // the resume statement (`rankJoin`), never sorts as an unranked NULL.
 
+import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isOrderArg } from '../../gremlin/frontend.ts';
 import { someStepDeep, someValueNode } from '../ir/walk.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../rel/expr.ts';
@@ -204,7 +205,7 @@ const RANKED_RANK = 'rkv';
  * keys in one statement and sorting by them in the other is ranking a different stream. A body that does
  * not normalize is treated as random — fail closed.
  */
-export function nondeterministic(steps: readonly IRStep[], params: Record<string, any>): boolean {
+export function nondeterministic(steps: readonly IRStep[], params: ParamEnv): boolean {
   return someStepDeep(steps, params, (step) => RANDOM_STEPS.has(step.name)
     || someValueNode(step, (n) => isOrderArg(n) && n.order === 'shuffle'), true);
 }

@@ -6,6 +6,7 @@
 // the whole-chain collapse verdict; `bulkObservedFrom` is the suffix question asked at each hop
 // instead. The invariant that outlives all of it is that they cannot disagree about what a plain
 // order() does, which is why `isPlainOrder` has one home.
+import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
@@ -19,14 +20,14 @@ import { bulkObservedFrom } from '../../src/compiler/ir/bulk.ts';
  *  own comment — every `src/` caller holds a body, so that is the safe default). It matters here: the
  *  label retractions are root-only, so a body-normalized chain would keep an `as()` the compiler has
  *  already dropped and these pins would describe a chain no compile produces. */
-const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
+const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), NO_PARAMS), NO_PARAMS, undefined, false).steps);
 
 /** The chain-global collapse verdict. No longer a `ChainFacts` field — the positional answer
  *  (`bulkObservedFrom` below, plus `groupableChannels` at the node) answers the same question per
  *  position, so the whole-chain form is its own separate gate. These pins describe that whole-chain
  *  gate rather than a fact about the chain. */
 const collapseSafe = (gremlin: string) =>
-  chainCollapseSafe(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
+  chainCollapseSafe(normalize(stepChain(parseGremlin(gremlin), NO_PARAMS), NO_PARAMS, undefined, false).steps);
 
 describe('ChainFacts.tracksPath', () => {
   test('true iff a top-level path-family step is present', () => {
@@ -51,7 +52,7 @@ describe('ChainFacts.tracksPath', () => {
 describe('ChainFacts.demandsEncounter', () => {
   /** The ROOT single-statement read: its rows go to the wire, so an unordered terminal owes no order. */
   const wire = (gremlin: string) =>
-    analyzeChain(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps, { wireTerminal: true });
+    analyzeChain(normalize(stepChain(parseGremlin(gremlin), NO_PARAMS), NO_PARAMS, undefined, false).steps, { wireTerminal: true });
 
   test('an unordered limit/range/skip owes no order — it is "some n"', () => {
     // These read `true` until 2026-10-18: a slice seeded an encounter so it took the SOURCE's first n,
@@ -135,7 +136,7 @@ describe('bulkObservedFrom — the POSITIONAL half (src/compiler/ir/bulk.ts)', (
   /** The suffix question, asked at the position a collapse would sit at. `from` is the index AFTER the
    *  hop being collapsed, which is what the movement fold passes (`at + 1`). */
   const observed = (gremlin: string, from: number) =>
-    bulkObservedFrom(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps, from);
+    bulkObservedFrom(normalize(stepChain(parseGremlin(gremlin), NO_PARAMS), NO_PARAMS, undefined, false).steps, from);
 
   test('an element leaf observes it — that framing RLEs (v, bulk) onto the wire', () => {
     expect(observed('g.V().out()', 2)).toBe(true);

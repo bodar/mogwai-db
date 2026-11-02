@@ -38,6 +38,7 @@
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { verifyWriteArgs } from '../src/compiler/ir/write-args.ts';
+import { NO_PARAMS } from '../src/gremlin/param-env.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { ValueParseError } from '../src/gremlin/coerce.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
@@ -192,9 +193,9 @@ const renderedSteps = (plan: Plan) =>
  * this the instrument would demand that the lowerings keep the blanket `catch` §6·5 exists to remove.
  */
 function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolean, at: () => string): void {
-  try { verifyWriteArgs(chain, {}, NO_SIDE_EFFECTS, false); } catch { return; }
+  try { verifyWriteArgs(chain, NO_PARAMS, NO_SIDE_EFFECTS, false); } catch { return; }
   try {
-    const lowered = lowerToRel(chain, { collapse, correlatedChildren });
+    const lowered = lowerToRel(chain, { params: NO_PARAMS, collapse, correlatedChildren });
     if (!lowered) return;
     const rendered = renderedSteps(lowered.plan);
     emitted++;
@@ -249,7 +250,7 @@ for (const [index, query] of CORPUS.entries()) {
   // A traversal the FRONT END rejects is not this gate's business — L1 owns parse coverage.
   try {
     const tree = parseGremlin(query);
-    steps = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}).steps as IRStep[];
+    steps = runPasses(stepChain(tree, NO_PARAMS), extractStrategies(tree, NO_PARAMS), NO_PARAMS).steps as IRStep[];
   } catch { continue; }
   if (!steps.length) continue;
 
