@@ -7,11 +7,11 @@ import type { RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, presenceOf, type ChildHost, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, gatedByHost, hostPresence, mayBeAbsent, presenceOf, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
-import { aliasProjection, selectSpec } from '../alias.ts';
+import { aliasPresence, aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
 import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
@@ -217,12 +217,19 @@ export function childPredicate(
   // A body that leads with `select(<label>)` REROOTS the subject to the aliased traverser and continues
   // — `Scoping.getScopeValue` resolves a label off the traverser's scope for a filter body exactly as it
   // does for a projection, so `where(__.select('n').hasLabel('person'))` is a filter on the element `n`
-  // named. A bare `select('n')` is productive iff the label is live (`aliasProjection` answers that), so
-  // it is the constant truth value under either polarity.
+  // named. A bare `select('n')` is productive iff the label is bound on THIS row — `hostPresence`, the
+  // constant truth for a statically bound label and `id IS NOT NULL` for one bound in a branch arm.
+  // A continuation is NOT conjoined with that presence: it already sees an empty subject where the label
+  // is unbound, and a conjunct would veto a seeded body (`select('a').count().is(0)`) that keeps it.
   if (body[0]?.name === 'select') {
     const re = selectRerootSubject(body[0]!, subject, aliases, fresh);
     if (!re) return null;
-    if (body.length === 1) return negated ? CONSTANT.false : CONSTANT.true;
+    if (body.length === 1) {
+      const present = hostPresence(re);
+      if (!present) return null;
+      if (present === ALWAYS_PRODUCTIVE) return negated ? CONSTANT.false : CONSTANT.true;
+      return negated ? notProduced(present) : present;
+    }
     return childPredicate(body.slice(1), re, fresh, ctx, negated, aliases);
   }
   const direct = childPredicateDirect(body, subject, fresh, ctx, negated, aliases);
@@ -245,15 +252,20 @@ function selectRerootSubject(step: IRStep, subject: Subject, aliases: AliasMap, 
   if (!spec || spec.labels.length !== 1) return null;
   const proj = aliasProjection(subject.rel, aliases, spec.labels[0]!, spec.pop, fresh);
   if (!proj) return null;
-  if (proj.read.kind === 'element') return { kind: 'element', id: proj.payload[0]![1]!, elem: proj.read.elem, rel: subject.rel };
+  // As `selectRerootHost`: a label that may be unbound here (`aliasGuard`), or a subject that may itself
+  // be absent (a nested `select`, which reads the ROW — so the outer absence gates the new key).
+  const key = gatedByHost(subject, proj.payload[0]![1]!);
+  if (!key) return null;
+  const present = mayBeAbsent(subject) ? { present: 'value-nullness' as const } : aliasPresence(subject.rel, proj.entry);
+  if (proj.read.kind === 'element') return { kind: 'element', id: key, elem: proj.read.elem, rel: subject.rel, ...present };
   if (proj.read.kind === 'value') {
     const vtype = proj.payload[1]?.[1];
     return {
-      kind: 'scalar', value: proj.payload[0]![1]!, rel: subject.rel,
-      type: vtype ? perRowSubject(vtype, proj.payload[0]![1]!)
+      kind: 'scalar', value: key, rel: subject.rel,
+      type: vtype ? perRowSubject(vtype, key)
         : proj.read.type.kind === 'static' ? { kind: 'static', type: proj.read.type.type, text: proj.read.type.text }
           : SUBJECT_UNKNOWN,
-      ...(vtype ? { vtype } : {}),
+      ...(vtype ? { vtype } : {}), ...present,
     };
   }
   return null; // a list/Pop history alias in a filter body is a later phase
@@ -407,10 +419,12 @@ export function valuePredicate(
  */
 export const childHostOf = (subject: Subject, aliases: AliasMap = NO_ALIASES): ChildHost => {
   const row = { row: { rel: subject.rel, aliases } };
+  // A possibly-unbound label subject stays a possibly-absent host (`hostPresence`).
+  const present = subject.kind !== 'property' && subject.present ? { present: subject.present } : {};
   switch (subject.kind) {
-    case 'element': return { kind: 'element', id: subject.id, elem: subject.elem, ...row };
+    case 'element': return { kind: 'element', id: subject.id, elem: subject.elem, ...row, ...present };
     case 'property': return { kind: 'property', id: subject.id, ownerElem: subject.ownerElem, ...row };
-    case 'scalar': return { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}), ...row };
+    case 'scalar': return { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}), ...row, ...present };
   }
 };
 

@@ -10,7 +10,7 @@ import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { aliasIdAt, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
+import { aliasIdAt, aliasPresence, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
 import type { ChildHost, Subject } from './child.ts';
 import { perRowSubject, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import type { TraverserObject } from './history.ts';
@@ -464,7 +464,9 @@ function legSingle(
   const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
   if (!startProj || startProj.read.kind !== 'element') return null;
   if (leg.reads.length !== 1) return undefined;
-  const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem };
+  // A start label bound in a branch arm may be unbound on this row: the subject is then ABSENT
+  // (`aliasPresence`), so a body that never reads through its id (`select('a').label()`) still drops it.
+  const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem, ...aliasPresence(rel, startProj.entry) };
   return child.predicate(leg.body, subject, leg.negated) ?? undefined;
 }
 
@@ -583,7 +585,7 @@ function branchToExpr(
       if (!sproj || sproj.read.kind !== 'element') return null;
       const cEntry = liveAliases(labels, rel).get(end);
       if (!cEntry) return null;
-      const hostR: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, sproj.entry.col), 'last'), elem: sproj.read.elem, row: { rel, aliases: labels } };
+      const hostR: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, sproj.entry.col), 'last'), elem: sproj.read.elem, row: { rel, aliases: labels }, ...aliasPresence(rel, sproj.entry) };
       const produced = child.scalar(reduce.reduceBody, hostR);
       if (!produced || produced.framing.kind !== 'scalar') return null;
       return eq(produced.expr, aliasValueAt(col(rel.id, cEntry.col), 'last'));
@@ -629,7 +631,7 @@ function scalarSubjectOf(sproj: NonNullable<ReturnType<typeof aliasProjection>>,
   const vtype = t.kind === 'perRow' ? aliasTypeAt(col(rel.id, sproj.entry.col), 'last') : undefined;
   const type: SubjectType = t.kind === 'static' ? { kind: 'static', type: t.type, text: t.text }
     : vtype ? perRowSubject(vtype, value) : SUBJECT_UNKNOWN;
-  return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}) };
+  return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}), ...aliasPresence(rel, sproj.entry) };
 }
 
 /** A whole `and(…)`/`or(…)` connective as one boolean `Expr`: every branch to an `Expr`, folded with
@@ -782,14 +784,14 @@ export function lowerMatch(
         // the drop this end owes. Filter FIRST, then rebuild the alias read against the narrowed table.
         const sproj = aliasProjection(rel, labels, p.start, 'last', fresh);
         if (!sproj || sproj.read.kind !== 'element') return null;
-        const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, sproj.entry.col), 'last'), rel, elem: sproj.read.elem };
+        const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, sproj.entry.col), 'last'), rel, elem: sproj.read.elem, ...aliasPresence(rel, sproj.entry) };
         const clause = child.predicate(p.body, subject, false);
         if (!clause) return null;
         rel = make.filter({ id: fresh('mr'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
       }
       const proj = aliasProjection(rel, labels, p.start, 'last', fresh);
       if (!proj || proj.read.kind !== 'element') return null;
-      const host: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
+      const host: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem, row: { rel, aliases: labels }, ...aliasPresence(rel, proj.entry) };
       const produced = child.scalar(reduce.reduceBody, host);
       if (!produced || produced.framing.kind !== 'scalar') return null;
       if (bound.has(p.end)) {

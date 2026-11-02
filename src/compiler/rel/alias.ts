@@ -271,6 +271,14 @@ const historyList = (history: Expr, of: ListOf, fresh: Minter): Expr => {
 export const aliasGuard = (rel: Rel, entry: AliasEntry): Expr | undefined =>
   (entry.binds === undefined ? aliasPresent(col(rel.id, entry.col)) : undefined);
 
+/** The `present` field a child host or predicate subject REROOTED AT this label carries
+ *  (`ChildHost.present`): `'value-nullness'` exactly where `aliasGuard` owes a guard — the label's
+ *  payload reads NULL on a row it is unbound on — and nothing for a statically bound label, so its SQL
+ *  is unchanged. `id IS NOT NULL` over the payload is `aliasPresent`'s answer one term cheaper:
+ *  `json_extract(a, '$[#-1].id')` is NULL exactly where `a` is NULL or empty. */
+export const aliasPresence = (rel: Rel, entry: AliasEntry): { readonly present?: 'value-nullness' } =>
+  (aliasGuard(rel, entry) ? { present: 'value-nullness' } : {});
+
 /** The projection every `select()` shares: the payload under its canonical column names, then the
  *  carried channels through unchanged.
  *

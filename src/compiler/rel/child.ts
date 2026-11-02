@@ -249,6 +249,37 @@ export const presenceOf = (present: Presence, value: Expr): Expr | null =>
   present === 'unknown' ? null : present === 'always' ? ALWAYS_PRODUCTIVE
     : { kind: 'binary', op: 'is not', left: value, right: compilerNull() };
 
+/**
+ * IS THE HOST THERE AT ALL — its own `present` as a per-row predicate over its key (an element's `id`,
+ * a scalar's `value`): `ALWAYS_PRODUCTIVE` for a host that cannot be absent (every host but a
+ * possibly-unbound label or an intermediate value), `null` to DECLINE where it cannot say.
+ *
+ * ONE authority for "absent label ⟹ the body's INPUT is empty". A body step that reads THROUGH the key
+ * (`values(k)`, `label()`, a movement) already answers nothing for a NULL key; one that reads the ROW or
+ * nothing at all (`constant()`, `sack()`, a nested `select()`, the self-rooted one-row relation) must be
+ * gated by this, or an unbound label reads as one phantom traverser.
+ */
+export const hostPresence = (host: ChildHost | Subject): Expr | null =>
+  host.kind === 'element' ? presenceOf(presentOfHost(host), host.id)
+    : host.kind === 'scalar' ? presenceOf(presentOfHost(host), host.value)
+      : ALWAYS_PRODUCTIVE;
+
+/** The host's own `present` as a `Presence` — `'always'` where it carries none (every host but a
+ *  possibly-unbound label or an intermediate value). What a body that IS the host reports. */
+export const presentOfHost = (host: ChildHost | Subject): Presence =>
+  (host.kind === 'element' || host.kind === 'scalar') ? host.present ?? 'always' : 'always';
+
+/** `value` where the host is present, NULL where it is not — `CASE WHEN <present> THEN value END`, and
+ *  `value` itself (no per-row term) for a host that cannot be absent. `null` declines with `hostPresence`. */
+export const gatedByHost = (host: ChildHost | Subject, value: Expr): Expr | null => {
+  const present = hostPresence(host);
+  if (!present) return null;
+  return present === ALWAYS_PRODUCTIVE ? value : { kind: 'case', whens: [[present, value]], else: compilerNull() };
+};
+
+/** A host that may be ABSENT on some rows — its `hostPresence` is not the constant truth. */
+export const mayBeAbsent = (host: ChildHost | Subject): boolean => presentOfHost(host) !== 'always';
+
 /** The presence of a CASE (or any choice) over arms: every arm `'always'` ⟹ `'always'`; any arm
  *  `'unknown'` ⟹ `'unknown'`; otherwise the chosen value's nullness. */
 export const meetPresence = (arms: readonly Presence[]): Presence =>
@@ -299,13 +330,20 @@ export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undef
  * a stored property, which is the same distinction `predicateExpr`'s `compare` parameter draws.
  */
 export type ChildHost =
-  | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
+  | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow;
+      /** WHETHER THE HOST IS THERE AT ALL — `'value-nullness'` where it is a LABEL that may be unbound on
+       *  this row (`selectRerootHost`, set from `aliasGuard`: a label first bound inside a branch arm, an
+       *  `optional()` or a repeat body), so a NULL `id` means "the body's INPUT is empty". ABSENT
+       *  (`'always'`) for every other element host, which keeps their SQL byte-identical. Read through
+       *  `hostPresence`; an element's id is never a null VALUE, so the reading is exact here. */
+      readonly present?: Presence }
   | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow;
       /** WHETHER A NULL `value` IS A VALUE (as `ChildValue.present`). ABSENT (`'always'`) where the host
        *  is a TRAVERSER — a traverser's NULL is a null value. `'value-nullness'` where the host is an
        *  INTERMEDIATE value whose NULL means "nothing": a child value run's value past an `is()` filter or
-       *  over an absent property (`valueRun`), a `select(k)` of an absent map key. A type-demanding
-       *  consumer (`math()`'s variables, `receiver.ts`) raises on a NULL only where it is a value. */
+       *  over an absent property (`valueRun`), a `select(k)` of an absent map key, a `select(<label>)` of a
+       *  label unbound on this row. A type-demanding consumer (`math()`'s variables, `receiver.ts`) raises
+       *  on a NULL only where it is a value. */
       readonly present?: Presence;
       /** Present only for a child rooted at an unfolded Map.Entry. */
       readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf } }
@@ -404,8 +442,12 @@ export const freshTraverserRow = (rel: Rel): HostRow => ({ rel, aliases: NO_LABE
  * `predicateExpr` takes) and `vtype` the column carrying it per row, where there is one.
  */
 export type Subject =
-  | { readonly kind: 'element'; readonly id: Expr; readonly label?: Expr; readonly rel: Rel; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly rel: Rel; readonly type: SubjectType }
+  | { readonly kind: 'element'; readonly id: Expr; readonly label?: Expr; readonly rel: Rel; readonly elem: Elem;
+      /** As `ChildHost`'s: `'value-nullness'` where the subject is a label unbound on some rows
+       *  (`selectRerootSubject`), absent otherwise. */
+      readonly present?: Presence }
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly rel: Rel; readonly type: SubjectType;
+      readonly present?: Presence }
   /** A PROPERTY traverser as a filter/branch subject — the third traverser shape a correlated body can
    *  be rooted at, mirroring the `property` `ChildHost`. It carries no `value`/`type`: a property is not
    *  a scalar, so a value predicate (`is`) declines on it and a body-over-property folds through the

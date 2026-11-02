@@ -304,6 +304,7 @@ wrong number class.
 | Branch emission order | each start's arms in written order; an arm's `order()` sorts only that start's output — put `order()` after the branch |
 | Disabled strategies | `withoutStrategies` of `IdentityRemoval`/`LazyBarrier`/`PathRetraction`/`RepeatUnroll` answers as the default traversal |
 | A null `by()` value | null is absent: `project()` omits the key, `select`/`order`/`dedup`/`where` drop the row; `coalesce` is SQL `COALESCE` |
+| A null-valued label in a child body | a label bound to `null` inside a branch arm reads as unbound there: `inject(0).union(constant(null).as('a'), constant(2)).map(select('a')).count()` is `0` (Java `1`) |
 | Number spelling | `asString()`/`format()`/`conjoin()` use SQLite's text: 15 significant digits, a whole Double keeps `.0`, exponent below 1e-4 or from 1e15 (`1e-5` is `1.0e-05`), infinity `Inf`; a Float prints its written decimal (`0.1f` is `0.1`) |
 | `format()` over a multi-valued property | uses the first value (Java throws) |
 | A non-String text receiver | the error names the value (`encountered 1.`), not its Java class — a non-String computed label too (`Label traversal must produce a String, but got 29`) |

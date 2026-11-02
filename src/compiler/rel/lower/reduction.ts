@@ -14,9 +14,9 @@ import { PER_ROW, STATIC, UNKNOWN, meetScalarTypes, staticTypeOf, type ScalarTyp
 import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
-import { aliasProjection, selectSpec } from '../alias.ts';
+import { aliasPresence, aliasProjection, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { hostTag, meetPresence, presenceOf, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -889,7 +889,9 @@ export function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extr
   const row = host.row ? { row: host.row } : {};
   if (host.kind === 'element' && host.elem === 'edge') {
     const end = step.name === 'outV' ? 'src' : step.name === 'inV' ? 'tgt' : null;
-    return end && { kind: 'element', id: edgeEndpoint(host.id, end, fresh), elem: 'vertex', ...row };
+    // An ABSENT edge's endpoint is absent too — the endpoint read of a NULL id is NULL — so the presence
+    // rides through (`hostPresence`).
+    return end && { kind: 'element', id: edgeEndpoint(host.id, end, fresh), elem: 'vertex', ...row, ...(host.present ? { present: host.present } : {}) };
   }
   if (host.kind === 'property' && step.name === 'element')
     return { kind: 'element', id: propertyReadOf(host.id, host.ownerElem, 'owner', fresh), elem: host.ownerElem, ...row };
@@ -927,11 +929,19 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
   }
   const proj = aliasProjection(host.row.rel, host.row.aliases, spec.labels[0]!, spec.pop, fresh);
   if (!proj) return null;
+  // THE NEW HOST MAY BE ABSENT on this row, two ways: the label was first bound inside a branch arm /
+  // `optional()` / repeat body (`aliasGuard` — its payload reads NULL where it is unbound), or the CURRENT
+  // host already was (a `select('a').select('b')`: the second label reads the ROW, so `a`'s absence must
+  // gate it). Either way the new host carries `present`, which every body arm reads through
+  // `hostPresence` — a statically bound label under a present host carries none, and its SQL is unchanged.
+  const key = gatedByHost(host, proj.payload[0]![1]!);
+  if (!key) return null;
+  const present = mayBeAbsent(host) ? { present: 'value-nullness' as const } : aliasPresence(host.row.rel, proj.entry);
   const row = { row: host.row } as const;
-  if (proj.read.kind === 'element') return { kind: 'element', id: proj.payload[0]![1]!, elem: proj.read.elem, ...row };
+  if (proj.read.kind === 'element') return { kind: 'element', id: key, elem: proj.read.elem, ...row, ...present };
   if (proj.read.kind === 'value') {
     const vtype = hostTag(proj.read.type, proj.payload[1]?.[1]);
-    return { kind: 'scalar', value: proj.payload[0]![1]!, ...(vtype ? { vtype } : {}), ...row };
+    return { kind: 'scalar', value: key, ...(vtype ? { vtype } : {}), ...row, ...present };
   }
   return null; // a list/Pop history alias in a child body is a later phase
 }
@@ -1133,9 +1143,29 @@ export const selfCollapses = (name: string): boolean => isReducer(name) || name 
  * to disagree about what a self root IS.
  */
 export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'element' }>, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const selfRow = hostSelfRow(host, fresh);
+  return selfRow && correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
+}
+
+/**
+ * THE ONE-ROW SELF RELATION of an element host — `Values(1)` projected as the host id, the root every
+ * self-rooted body continues from (`selfRootedReduce`, the `valueMap()`/`elementMap()` arm).
+ *
+ * It is the ONE place a body's input is built from a host WITHOUT being keyed on the host id, so it is
+ * where an ABSENT host (`hostPresence` — a label unbound on this row) empties the input: the root keeps
+ * its row only `WHERE id IS NOT NULL`. Over the empty input SQLite's own aggregates answer the seeded
+ * tails exactly — `count()` 0, `fold()` `[]`, as `ReducingBarrierStep` emits its seed over no starts
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ReducingBarrierStep.java:143-148`)
+ * — and every unseeded one answers nothing. A root keyed on the id (a movement) needs no such term: the
+ * NULL id already matches nothing. A host that cannot be absent adds no term at all.
+ */
+function hostSelfRow(host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Rel | null {
+  const present = hostPresence(host);
+  if (!present) return null;
   const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
   const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
-  return correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
+  return present === ALWAYS_PRODUCTIVE ? selfRow
+    : make.filter({ id: fresh('slp'), input: selfRow, channels: [], type: selfRow.type, pred: presenceOf(host.present!, col(selfRow.id, 'id'))! });
 }
 
 /** A ChildHost as a filter/branch `Subject` — the inverse of `childHostOf` (`filter.ts`), so a
@@ -1145,11 +1175,13 @@ export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHos
 export function hostSubject(host: ChildHost): Subject | null {
   const rel = host.row?.rel;
   if (!rel) return null;
-  if (host.kind === 'element') return { kind: 'element', id: host.id, elem: host.elem, rel };
+  // The host's `present` rides across — an unbound label is as absent as a subject as it is as a host.
+  const present = (host.kind === 'element' || host.kind === 'scalar') && host.present ? { present: host.present } : {};
+  if (host.kind === 'element') return { kind: 'element', id: host.id, elem: host.elem, rel, ...present };
   if (host.kind === 'property') return { kind: 'property', id: host.id, ownerElem: host.ownerElem, rel };
   if (host.kind === 'scalar')
     return { kind: 'scalar', value: host.value, ...(host.vtype ? { vtype: host.vtype } : {}), rel,
-      type: host.vtype ? perRowSubject(host.vtype, host.value) : SUBJECT_UNKNOWN };
+      type: host.vtype ? perRowSubject(host.vtype, host.value) : SUBJECT_UNKNOWN, ...present };
   return null;
 }
 
@@ -1367,6 +1399,10 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present, yields: 'one' };
 }
 
+/** The leading steps of the element arm whose value is a correlated read KEYED ON the host id, so a NULL
+ *  id (an absent host) already reads NULL and owes no `gatedByHost` term. */
+const READS_THROUGH_ID: ReadonlySet<string> = new Set(['values', 'label', 'id']);
+
 /** A child body's ONE value per host row. */
 export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: ChainCtx, fresh: Minter): ChildValue | null {
   return scalarChildValue(body, host, outer, fresh);
@@ -1421,7 +1457,8 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     const typeCol = cols.find((column) => column.name !== payload.name);
     return {
       expr: self.col(payload.name), framing: self.framing,
-      ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: 'always', yields: injects ? 'first' : 'one',
+      // The host ITSELF, so it is present exactly where the host is.
+      ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: presentOfHost(host), yields: injects ? 'first' : 'one',
     };
   }
 
@@ -1463,8 +1500,10 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   if (first.name === 'project' && body.length === 1) {
     const self = hostSelf(host);
     const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), ctx.source, fresh);
-    // `project()` is a `ScalarMapStep` — one map per traverser, never several.
-    return node && { expr: node.node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: node.valOf }, present: 'always', yields: 'one' };
+    // `project()` is a `ScalarMapStep` — one map per traverser, never several — and NONE over an absent
+    // host (`gatedByHost`): its map is built from the row's labels as much as from the host.
+    const expr = node && gatedByHost(host, node.node);
+    return expr && { expr, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: node.valOf }, present: presentOfHost(host), yields: 'one' };
   }
 
   // `valueMap()`/`elementMap()` are the other per-traverser map producers. Reuse the ordinary map
@@ -1476,11 +1515,9 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     const tokens = args.includes(true);
     const asked = propertyKeyArgs(args.filter((arg) => !(tokens && arg === true)));
     if (!asked || first.modulators?.length || first.optionArms || (first.name === 'elementMap' && tokens)) return null;
-    const unit = make.values({ id: fresh('vm'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
-    const self = make.project({
-      id: fresh('vs'), input: unit, channels: [], type: typeOf(meta('id', 'int')),
-      exprs: [['id', host.id]],
-    });
+    // The ONE self root, so an absent host (an unbound label) maps NOTHING rather than `{}`.
+    const self = hostSelfRow(host, fresh);
+    if (!self) return null;
     const mapped = elementValueMap(self, host.elem, asked.all ? null : asked.keys,
       first.name === 'elementMap' || tokens, ctx.labelRegime, ctx.source, fresh,
       first.name === 'elementMap' ? { flat: true, endpoints: true } : {});
@@ -1488,7 +1525,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
       id: fresh('vn'), input: mapped.rel, channels: [], type: typeOf(meta(MAP_COL, 'json', true)),
       exprs: [[MAP_COL, col(mapped.rel.id, MAP_COL)]],
     });
-    return { expr: jsonOf({ kind: 'scalar', plan: scalar }), framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf }, present: 'always', yields: 'one' };
+    return { expr: jsonOf({ kind: 'scalar', plan: scalar }), framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf }, present: presentOfHost(host), yields: 'one' };
   }
 
   // THE RE-ROOTING ARM — a step that turns this traverser into exactly ONE other traverser, so the
@@ -1506,7 +1543,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     // scalar narrows it; one that can frame a member (`byNode`) makes it an element node.
     // ONE by the schema — that is `rerootedHost`'s whole membership rule — so a consumer that emits
     // every result may take this expression, not only one that takes the first.
-    if (body.length === 1) return { expr: rerooted.id, framing: { kind: 'elements', elem: rerooted.elem }, present: 'always', yields: 'one' };
+    if (body.length === 1) return { expr: rerooted.id, framing: { kind: 'elements', elem: rerooted.elem }, present: presentOfHost(rerooted), yields: 'one' };
     return scalarChild(body.slice(1), rerooted, ctx, fresh);
   }
 
@@ -1522,11 +1559,12 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   if (first.name === 'select') {
     const reHost = selectRerootHost(first, host, fresh);
     if (!reHost) return null;
+    // The label's traverser ITSELF, present exactly where the label is bound (`presentOfHost`).
     if (body.length === 1) {
-      if (reHost.kind === 'element') return { expr: reHost.id, framing: { kind: 'elements', elem: reHost.elem }, present: 'always', yields: 'one' };
+      if (reHost.kind === 'element') return { expr: reHost.id, framing: { kind: 'elements', elem: reHost.elem }, present: presentOfHost(reHost), yields: 'one' };
       if (reHost.kind === 'scalar') return {
         expr: reHost.value, framing: { kind: 'scalar', type: reHost.vtype ? PER_ROW('vtype') : UNKNOWN },
-        ...(reHost.vtype ? { vtype: reHost.vtype } : {}), present: 'always', yields: 'one',
+        ...(reHost.vtype ? { vtype: reHost.vtype } : {}), present: presentOfHost(reHost), yields: 'one',
       };
     }
     return scalarChild(body.slice(1), reHost, ctx, fresh);
@@ -1801,6 +1839,19 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
+  // AN ABSENT HOST (a label unbound on this row — `hostPresence`) PRODUCES NOTHING, whatever the leading
+  // step. A read THROUGH the id (`values(k)`, `label()`, `id()`) is already NULL for a NULL id, so it only
+  // states that; one that reads the ROW or nothing (`constant()`, `sack()`, a projector, a service) is
+  // gated, or an unbound label reads as one phantom value. A host that cannot be absent changes nothing.
+  if (mayBeAbsent(host)) {
+    if (!READS_THROUGH_ID.has(leading!.name)) {
+      const gated = gatedByHost(host, value);
+      if (!gated) return null;
+      value = gated;
+    }
+    if (present !== 'unknown') present = 'value-nullness';
+  }
+
   const run = valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
   // A BARE stored read's member node is the `by(k)` node: value and tag off ONE row (`ChildValue.node`).
   const key = body.length === 1 && leading?.name === 'values' ? leading.args[0]?.value : undefined;
@@ -2026,8 +2077,9 @@ export function scalarHostChild(
     const literal = constLit(leading.args[0]);
     if (!literal) return null;
     // A host whose NULL means "nothing" (`host.present`) replaced by a constant still produced nothing there.
-    value = host.present && host.present !== 'always'
-      ? { kind: 'case', whens: [[isNot(host.value, compilerNull()), literal]], else: compilerNull() } : literal;
+    const gated = gatedByHost(host, literal);
+    if (!gated) return null;
+    value = gated;
     vtype = undefined;
     // Its declared type, as at the element host above.
     type = declaredScalarType(leading.args[0]);
