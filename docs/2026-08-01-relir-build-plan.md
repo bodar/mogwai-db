@@ -584,7 +584,11 @@ UNEVALUABLE`.
      value-row `o`). Same item: `runtimeNameRows` re-inlines its scan + two windows into six statements (guards + the
      final take) — read one taken `(o, v, vt)` first-per-traverser snapshot instead (root rule: computed ONCE). Add a
      larger-N exec test or a `sql-hygiene` check for `json_each ⨝ json_each`.
-  2. **Bare internal `Error: RelIR: duplicate Plan binding 'r0'`** reaches the user for
+  2. ✅ **LANDED (2026-11-02, `803e8252`).** `name()` (`src/rel/passes/name.ts`) now takes its fresh-name source as
+     a REQUIRED argument — every caller passes the compile's one minter (`() => fresh('r')`), so two separately named
+     plans spliced into one write program can no longer both mint `r0`. Witnesses + deeper compositions pinned in
+     `test/L4-addendum/write-program-binding-names.feature`. Remains: nothing. Original report follows.
+     **Bare internal `Error: RelIR: duplicate Plan binding 'r0'`** reaches the user for
      `g.V().both().addV(__.values('name')).groupCount().by(label)` and `…addV(__.values('name')).label().groupCount()`
      (trunk declined these; the constant twin `g.V().both().addV('x').label().groupCount()` already leaked on trunk).
      Root: `both()` (a union of directions) feeding a write and then a reducing barrier — `out()`/`in()`/`hasLabel()`
