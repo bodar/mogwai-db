@@ -757,7 +757,14 @@ deferred or parked. The source-union item above is UNBLOCKED: its prerequisite l
 the first step.
 
 **Shared root causes (one substrate item each, ordered BEFORE the follow-ups they fix):**
-- **S1. One constant-label judge at EVERY host, typed.** Three follow-ups below (F2, F3, F4) are one defect class.
+- **S1. ✅ LANDED (30461694, 311c95ae) — one constant-label judge at EVERY host, typed.** *Landed:* `constantName`
+  moved to `src/gremlin/validate.ts` and judges every name the query TEXT holds with the type the text states — merge-map
+  `T.label` (`labelNames`, `validateLabel` refuses a non-String), `dropLabel(<traversal>)` via `mutationLabelMembers`
+  (`mutationLabelNames` deleted), `withSideEffect` constants keep their declaring `Arg` (`SideEffectConstants`), and a
+  constant property key folds through `KEY_NAME`; the map TypeNode's per-key slot is `mapSlot(key)`, now injective so a
+  token key no longer shares a String key's slot. *Remains:* nothing for S1. Not fixed here: the super-linear
+  per-traverser mergeE (29–40×) is a pre-existing problem in the mergeE lowering and needs its own item.
+  Three follow-ups below (F2, F3, F4) are one defect class.
   `constantName` is the judge, but the literal merge-map `T.label` (`src/compiler/ir/write-args.ts` `labelNames` →
   `validateLabel`, which does `String(v)`), `dropLabel`'s traversal form (`mutationLabelNames`), and an untyped
   `withSideEffect` constant all bypass it or reach it without a type. The fix that closes the class is: `validateLabel`
@@ -789,7 +796,7 @@ the first step.
    - `project('x').by(__.select('a').V().count())` keeps `x:6`; the reference omits the key.
 
    Fix it via S2. This also contradicts `hostSelfRow`'s claim to be "the ONE place".
-2. **F2 (major, wrong element written, same on trunk) — the literal merge-map `T.label` bypasses `constantName`.**
+2. ✅ **LANDED via S1 (30461694).** **F2 (major, wrong element written, same on trunk) — the literal merge-map `T.label` bypasses `constantName`.**
    Each of these writes the wrong label; the reference raises in every case:
    - `g.mergeV([(T.label): 5])` writes the label `'5'`, and a UUID value writes its text.
    - `[(T.label): ['a', 5]]` writes `['a','5']`.
@@ -799,7 +806,7 @@ the first step.
    References: `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:263-306`,
    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:258-281`.
    Fix it via S1. The map's TypeNode exists, so the typed judge is available there.
-3. **F3 (major, wrong label dropped, same on trunk) — `dropLabel(<traversal>)` validates nothing.** The builder said
+3. ✅ **LANDED via S1 (30461694).** **F3 (major, wrong label dropped, same on trunk) — `dropLabel(<traversal>)` validates nothing.** The builder said
    this "matches the reference", which is false. The reference resolves through `TraversalUtil.resolveStringArguments`
    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/DropLabelsStep.java:98-103`),
    with the same rules as `addLabel` except the empty/hidden check:
@@ -809,7 +816,7 @@ the first step.
 
    Fix: `constantName` with `ADD_LABEL_NAME`'s null/notString/collection rules, minus `validateIdentifier`. Then
    `mutationLabelNames` goes away.
-4. **F4 (major, wrong label written, same on trunk) — a UUID side-effect constant is written as a label.**
+4. ✅ **LANDED via S1 (30461694).** **F4 (major, wrong label written, same on trunk) — a UUID side-effect constant is written as a label.**
    `constFromNested`'s `withSideEffect` arm (`src/compiler/ir/write-args.ts:68`) has no TypeNode, so it infers
    `'string'`:
    - `g.withSideEffect('k', UUID(…)).addV(__.select('k'))` writes the uuid text as a label.
@@ -842,14 +849,14 @@ the first step.
 8. **F8 (minor, cheap) — make `rankedFirst`'s order key total.** Add `vt` as a third sort term (it is already a
    column, so this is no new per-row term). Today int `1` and double `1.0` tie, so the number class written is
    decided by scan order (`src/compiler/rel/write.ts`).
-9. **F9 (minor) — say the eager-raise change in §17.**
+9. ✅ **LANDED via S1 (30461694).** **F9 (minor) — say the eager-raise change in §17.**
    - `g.V().limit(0).addLabel(__.constant(5))`, `…has('name','nobody').addLabel(__.constant(null))` and a statically
      dead `choose` arm now raise at compile time where the reference answers `[]` / `[v1]`.
    - `g.addV(__.constant(null))` changed from a decline to `Label can not be null`.
 
    §17 "Error timing" says "`limit(0)` still answers `[]`", which these cases contradict. Amend that line to cover a
    constant argument judged at compile time, and pin one empty-input case in a test.
-10. **F10 (minor) — render non-scalar values readably in `constantName`'s `notString`.** Today it prints `String(value)`:
+10. ✅ **LANDED via S1 (30461694).** **F10 (minor) — render non-scalar values readably in `constantName`'s `notString`.** Today it prints `String(value)`:
    - `addLabel(__.constant([['a']]))` raises "…but got: a".
    - a map prints "[object Map]".
    - a datetime prints epoch millis.
@@ -928,7 +935,7 @@ the first step.
 4. **`unitRow(fresh, hint)` in `build.ts`** for the one-row `Values(1)` source. It replaces six literals:
    `reduction.ts:hostSelfRow` and `mapEntryChild`, the `lower.ts` addE/addV/mergeV source arms (~4303/4311/4321), and
    `write.ts` ~1354. `mapEntryChild`'s column `one` becomes `n`.
-5. **Fold constant PROPERTY keys through `constantName(KEY_NAME)`** (`src/compiler/ir/write-args.ts:parseProperty`'s
+5. ✅ **LANDED via S1 (30461694).** **Fold constant PROPERTY keys through `constantName(KEY_NAME)`** (`src/compiler/ir/write-args.ts:parseProperty`'s
    uuid/datetime carve-out and `key == null → kind:'none'`). Keys and labels then share one judge. **ANSWER
    CHANGE:** `g.V(1).property(__.constant(5), 1)` and `property(__.constant(null), 1)` go from an UnsupportedTraversal
    decline to KEY_NAME's reference sentences. Land it together with S1.
