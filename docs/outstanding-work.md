@@ -111,6 +111,9 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   CORRELATED-join `OwnerSeek` in `src/rel/passes/semijoin.ts` — a seek per outer row chosen over the
   finished algebra — so any per-row property search (not only a merge's) gets the most-selective-key and
   decimal-TEXT-prefix access paths. Move them there once `semijoin.ts` seeks under a correlated join.
+- **The map merge guard's key-set containment** (`searchKeying`, `write.ts`) crosses each earlier map with
+  every PRESENT key set it contains — linear for any batch of a few key sets, but a batch that is itself
+  a power set of k keys is 3^k pairs over 2^k maps (N^1.58). Measure before touching; no real batch seen.
 - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts`) — extracting
   `pathPositionProjection` also fixes a mid-path value/list/map position read as a vertex.
 - **Four copied blocks in `write.ts`** (carrier reproject, merged-create spread, alias-carry, nested-spec decline).

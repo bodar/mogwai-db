@@ -96,7 +96,7 @@ describe(`a merge over ${N} traversers is linear`, () => {
   }
 });
 
-// THE SEARCH SEEKS ITS MOST SELECTIVE CRITERION, and the guard keys a map by ONE entry — each witness below
+// THE SEARCH SEEKS ITS MOST SELECTIVE CRITERION, and the guard keys a map by its key set — each witness below
 // was quadratic on trunk (8k traversers: 34 s, 65 s, 360 s, 149 s, 86 s, 8.7 s), each through a seek that
 // was correct and read a whole key range per driver:
 //  - a NUMERIC search over a string-valued key read every TEXT value of the key (`value >= ''`), now only
@@ -104,8 +104,10 @@ describe(`a merge over ${N} traversers is linear`, () => {
 //  - a search whose FIRST criterion every element shares (`kind`, `tenant`) seeked by it, now by the key
 //    with the fewest capped matches per driver (`cappedCount`);
 //  - a long past 2^53 is stored as decimal TEXT, so every such search read the whole TEXT range;
-//  - the guard crossed every earlier creation with every distinct map KEY SET (N shapes, N²), now it meets
-//    the later map's rarest entry (`searchKeying`);
+//  - the guard crossed every earlier creation with every distinct map KEY SET (N shapes, N²), now only with
+//    the key sets it CONTAINS, met on (key set, signature) (`searchKeying`) — the WHOLE key: a composite
+//    key whose every entry hundreds of maps share (`[x, y, z]` below) is one seek per map, not one per
+//    sharer (keyed by the rarest entry alone it was 20–30× from 1k to 8k);
 //  - a map naming OUT, IN and a label seeked the OUT vertex's every edge, now the `e_out` key whole.
 const BIG = 9007199254740993n;
 function shaped(n: number, extra: (i: number) => readonly (readonly [string, unknown, string])[], hub = false): GraphStore {
@@ -139,6 +141,9 @@ describe(`a merge search over ${N} traversers seeks its most selective criterion
     ["g.V().mergeV(__.project('sid').by('sid')).count()", () => shaped(N, (i) => [['sid', (BIG + BigInt(2 * i)).toString(), 'long']]), N, "g.V().count()", N],
     // N maps of N different keys, every one creating — the guard's N shapes.
     [`g.inject(${maps((i) => `[k${i}:1]`)}).mergeV().count()`, () => graph(N), N, "g.V().has('k4242',1).count()", 1],
+    // A composite key whose every ENTRY hundreds of maps share; a batch of two key sets, one containing the other.
+    [`g.inject(${maps((i) => `[x:${i % 20},y:${Math.floor(i / 20) % 20},z:${Math.floor(i / 400)}]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
+    [`g.inject(${maps((i) => i % 2 ? `[a:${i % 20},b:${Math.floor(i / 20)},e:${i}]` : `[a:${i % 20},b:${Math.floor(i / 20) + N}]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
     // N edges out of one hub, re-upserted.
     [`g.inject(${maps((i) => `[(T.label):'x',(Direction.OUT):${N + 1},(Direction.IN):${i}]`)}).mergeE().count()`, () => shaped(N, () => [], true), N, "g.E().count()", N],
   ] as const) {
@@ -232,4 +237,31 @@ describe('a computed merge whose every compared key is an onCreate key', () => {
       expect(() => run(four(), q)).toThrow(/cannot override values from merge\(\) argument/);
     });
   }
+});
+
+// THE GUARD'S KEY ONLY NARROWS — keyed by (key set, signature) over the key sets each earlier map CONTAINS,
+// it still finds every pair where a later map's search would find an earlier one's creation: a later map
+// whose entries an earlier map holds among more (refused), one whose `1.0` meets an earlier `1`, the empty
+// map (every creation contains it), the empty-string key; and it admits the pairs no search could meet.
+describe('a map-valued merge guard finds a later map an earlier creation contains', () => {
+  const later = /where a later traverser would match what an earlier one created/;
+  for (const q of [
+    'g.inject([a:1,b:2],[a:1]).mergeV().count()',
+    'g.inject([a:1,b:2],[b:2,a:1.0]).mergeV().count()',
+    'g.inject([a:1,b:2,c:3],[c:3,a:1]).mergeV().count()',
+    'g.inject([a:1,b:2],[:]).mergeV().count()',
+    "g.inject(['':1,b:2],['':1]).mergeV().count()",
+    "g.inject([a:1,(T.label):'x'],[a:1]).mergeV().count()",
+  ]) test(`refuses: ${q}`, () => expect(() => run(new GraphStore(new BunSqlite(':memory:')), q)).toThrow(later));
+  for (const [q, vertices] of [
+    ['g.inject([a:1],[a:1,b:2]).mergeV().count()', 2],
+    ['g.inject([a:1,b:2],[a:1,b:3]).mergeV().count()', 2],
+    ['g.inject([:],[a:1]).mergeV().count()', 2],
+    ['g.inject([a:1,b:2,c:3],[c:3,a:2]).mergeV().count()', 2],
+    ['g.inject([a:1],[a:1]).mergeV().count()', 1],
+  ] as const) test(`answers: ${q}`, () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    expect(run(store, q).map((row: any) => row.v)).toEqual([2]);
+    expect(run(store, 'g.V().count()').map((row: any) => row.v)).toEqual([vertices]);
+  });
 });
