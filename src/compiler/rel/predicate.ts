@@ -612,37 +612,50 @@ const vtypeOf = (type: SubjectType): Expr | null =>
  * negation (`Compare.neq` is `!eq`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`),
  * and the four orderings `comparableTheta` (same bucket, else FALSE).
  *
- * Where either side's type is UNKNOWN (an untagged computed value) there is no tag to pick a bucket by:
- * `eq`/`neq` keep SQLite's raw `=` (the behaviour before either side was typed) and an ordering
- * declines (`null`), because a cross-bucket FALSE could not be told from a genuine comparison.
+ * EVERY side has a tag. An UNKNOWN-typed side (an untagged computed value or label) is `ScalarType`'s
+ * "infer from the value at framing", so its tag IS that inference (`inferredVtype`, the framer's own
+ * int/long/double/string reading of the storage class): the comparison is over the type the user is
+ * shown. Never SQLite's raw `=`, which calls the Boolean `true` equal to the Integer `1`.
+ *
+ * NULL is a VALUE here, not SQL's unknown: null is comparable to null alone
+ * (`GremlinValueComparator.comparable`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:314-316`),
+ * and `WherePredicateStep` hands a null label value to the predicate like any other. So where either side
+ * is NULL the answer is decided before a comparator runs — `eq`/`lte`/`gte` hold iff BOTH are null
+ * (`compare(null, null)` is 0), `neq` iff not both, `lt`/`gt` never — rather than a NULL leaking out of a
+ * comparator and dropping the row whatever the op (`neq` included).
+ *
  * The caller pushes any `P.not` INTO the op (`lt` ↔ `gte`) — a SQL `NOT` over a cross-bucket FALSE
  * would answer TRUE, which `Compare.lt.negate()` never does.
  *
  * Both comparators spell each operand and tag several times over (a bucket test, then a cast per arm), so
  * an operand that is not a bare column or literal — a label's `json_extract` read, a per-row tag's
  * inference — is evaluated ONCE, as the one row of a `VALUES` the comparison is projected over
- * (`storedCompareOnce`'s shape).
+ * (`storedCompareOnce`'s shape). `null` only for an op that is not a comparison.
  */
 export const valueTheta = (op: string, lhs: TypedOperand, rhs: TypedOperand, fresh: Minter): Expr | null => {
-  const sql = ORDERING.has(op) ? COMPARISON[op] : undefined;
-  const typed = !!(lhs.tag && rhs.tag);
-  if (op !== 'eq' && op !== 'neq' && !(sql && typed)) return null;
-  // A per-row tag that may be NULL reads the value instead (`perRowSubject`'s rule), applied HERE over the
-  // once-evaluated columns rather than re-reading the operand inside the tag.
+  const sql = COMPARISON[op];
+  if (!sql) return null;
+  // An unknown tag is the value's own inference; a per-row tag that may be NULL reads the value where it is
+  // (`perRowSubject`'s rule). Applied HERE, over the once-evaluated columns, never inside the operand.
   const tagOf = (o: TypedOperand, value: Expr, tag: Expr): Expr =>
-    (o.inferNullTag ? { kind: 'call', fn: 'coalesce', args: [tag, inferredVtype(value)] } : tag);
-  const compare = (a: Expr, at: Expr | null, b: Expr, bt: Expr | null): Expr => {
-    if (sql) return comparableTheta(sql, a, at!, b, bt!);
-    const same = at && bt ? typedValueEq(a, at, b, bt) : binary('=', a, b);
-    return op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
+    (!o.tag ? inferredVtype(value) : o.inferNullTag ? { kind: 'call', fn: 'coalesce', args: [tag, inferredVtype(value)] } : tag);
+  const compare = (a: Expr, at: Expr, b: Expr, bt: Expr): Expr => {
+    const isNull = (e: Expr): Expr => binary('is', e, compilerNull());
+    const bothNull = and(isNull(a), isNull(b));
+    const onNull: Expr = op === 'eq' || op === 'lte' || op === 'gte' ? bothNull
+      : op === 'neq' ? { kind: 'unary', op: 'not', arg: bothNull } : compilerFalse;
+    const same = (): Expr => typedValueEq(a, at, b, bt);
+    const cmp: Expr = ORDERING.has(op) ? comparableTheta(sql, a, at, b, bt)
+      : op === 'eq' ? same() : { kind: 'unary', op: 'not', arg: same() };
+    return { kind: 'case', whens: [[binary('or', isNull(a), isNull(b)), onNull]], else: cmp };
   };
   const operands = [lhs.value, lhs.tag, rhs.value, rhs.tag].filter((e): e is Expr => !!e);
-  if (!typed || (!lhs.inferNullTag && !rhs.inferNullTag && operands.every((e) => e.kind === 'col' || e.kind === 'lit')))
-    return compare(lhs.value, lhs.tag && tagOf(lhs, lhs.value, lhs.tag), rhs.value, rhs.tag && tagOf(rhs, rhs.value, rhs.tag));
+  if (operands.every((e) => e.kind === 'col' || e.kind === 'lit'))
+    return compare(lhs.value, tagOf(lhs, lhs.value, lhs.tag!), rhs.value, tagOf(rhs, rhs.value, rhs.tag!));
   const one = make.values({
     id: fresh('vto'), channels: [],
     type: typeOf(meta('a', 'any', true), meta('at', 'text', true), meta('b', 'any', true), meta('bt', 'text', true)),
-    rows: [[lhs.value, lhs.tag!, rhs.value, rhs.tag!]],
+    rows: [[lhs.value, lhs.tag ?? compilerNull('text'), rhs.value, rhs.tag ?? compilerNull('text')]],
   });
   const [a, at, b, bt] = (['a', 'at', 'b', 'bt'] as const).map((name) => col(one.id, name)) as [Expr, Expr, Expr, Expr];
   // The NULL-tag inference is re-spelled per bucket arm, but over the evaluated COLUMNS (a `typeof` and a
@@ -654,8 +667,9 @@ export const valueTheta = (op: string, lhs: TypedOperand, rhs: TypedOperand, fre
   }) };
 };
 
-/** One side of a `valueTheta` — a value and its Gremlin tag (`null` where unknown). `inferNullTag` marks a
- *  RAW per-row tag (a label's recorded `t`) that is NULL where the type must be read off the value. */
+/** One side of a `valueTheta` — a value and its Gremlin tag (`null` where unknown: the value's own
+ *  inference is its tag). `inferNullTag` marks a RAW per-row tag (a label's recorded `t`) that is NULL where
+ *  the type must be read off the value. */
 export interface TypedOperand { readonly value: Expr; readonly tag: Expr | null; readonly inferNullTag?: boolean }
 
 /** A predicate subject as a `valueTheta` operand — its tag already settled by its `SubjectType`. */

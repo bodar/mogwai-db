@@ -144,6 +144,64 @@ describe('a value traverser compares against a label', () => {
     expect(() => run(s, `${BAC}.where(__.select('a').in().where(P.eq('c')).by(T.label)).count()`)).toThrow(UnsupportedTraversal));
 });
 
+// An UNKNOWN-typed side (an untagged `inject`, a `select` of an untagged label) is typed by the value's own
+// inference — the framer's — so it is never SQLite's raw `=`, which calls `true` equal to `1`
+// (`GremlinValueComparator`: Boolean and Integer are different comparability types).
+describe('an untyped side is typed by its value', () => {
+  const rows = (g: string) => bare(run(s, g)).map((r: { v: unknown }) => r.v);
+  test('a boolean against an untyped int label', () => {
+    expect(rows("g.inject(1).as('a').constant(true).where(P.eq('a'))")).toEqual([]);
+    expect(rows("g.inject([1]).unfold().as('a').constant(true).where(P.eq('a'))")).toEqual([]);
+    expect(rows("g.inject([0]).unfold().as('a').constant(false).where(P.eq('a'))")).toEqual([]);
+    expect(rows("g.inject(1).as('a').constant(true).where(P.neq('a'))")).toEqual([1]);
+    expect(rows("g.inject(1).as('a').constant(true).where(P.not(P.eq('a')))")).toEqual([1]);
+  });
+  test('a projected boolean against an untyped int label', () => {
+    const K = "g.inject(1).as('i').V(1).project('k').by(__.constant(true)).select('k')";
+    expect(rows(`${K}.where(P.eq('i'))`)).toEqual([]);
+    expect(rows(`${K}.where(P.neq('i'))`)).toEqual([1]);
+    expect(count("g.inject(1).as('i').V().project('k').by(__.constant(true)).select('k').where(P.eq('i')).count()")).toBe(0);
+    // the untyped side as the subject, the boolean as the label
+    expect(rows(`${K}.as('j').select('i').where(P.eq('j'))`)).toEqual([]);
+  });
+  test('an untyped int against an untyped int, and orderings', () => {
+    expect(rows("g.inject(1).as('i').V(1).project('k').by(__.constant(1)).select('k').where(P.eq('i'))")).toEqual([1]);
+    expect(rows("g.inject(2).as('a').select('a').where(P.lt('a'))")).toEqual([]);
+    expect(rows("g.inject(2).as('a').select('a').where(P.lte('a'))")).toEqual([2]);
+    expect(rows("g.inject('x').as('a').constant(1).where(P.not(P.lt('a')))")).toEqual([]);
+  });
+  test('two value labels, boolean vs int and int vs double', () => {
+    expect(count("g.inject(true).as('a').constant(1).as('b').V(1).where('a', P.eq('b')).count()")).toBe(0);
+    expect(count("g.inject(1).as('a').constant(1.0).as('b').V(1).where('a', P.eq('b')).count()")).toBe(1);
+  });
+});
+
+// NULL is a value: comparable to null alone (`GremlinValueComparator.comparable`), so `eq`/`lte`/`gte` hold
+// iff both are null, `neq` iff not both, `lt`/`gt` never — never SQL's unknown, which drops the row.
+describe('a null value or label', () => {
+  const rows = (g: string) => bare(run(s, g)).map((r: { v: unknown }) => r.v);
+  test('eq / neq', () => {
+    expect(rows("g.inject(null).as('a').constant(null).where(P.eq('a'))")).toEqual([null]);
+    expect(rows("g.inject(1).as('a').constant(null).where(P.neq('a'))")).toEqual([null]);
+    expect(rows("g.inject(null).as('a').constant(1).where(P.not(P.eq('a')))")).toEqual([1]);
+    expect(rows("g.inject('x').as('a').constant(null).where(P.eq('a'))")).toEqual([]);
+  });
+  test('a null label never loses a neq row', () => {
+    expect(rows("g.inject(null, 1).as('a').V(1).values('age').where(P.neq('a'))")).toEqual([29, 29]);
+    expect(rows("g.inject(null, 1).as('a').V(1).values('age').where(P.eq('a'))")).toEqual([]);
+  });
+  test('orderings: null against null is compare 0', () => {
+    expect(rows("g.inject(null).as('a').constant(null).where(P.lte('a'))")).toEqual([null]);
+    expect(rows("g.inject(null).as('a').constant(null).where(P.lt('a'))")).toEqual([]);
+    expect(rows("g.inject(null).as('a').constant(null).where(P.not(P.lt('a')))")).toEqual([null]);
+    expect(rows("g.inject(null).as('a').constant(1).where(P.not(P.lt('a')))")).toEqual([]);
+  });
+  test('two value labels', () => {
+    expect(count("g.inject(1).as('a').constant(null).as('b').V(1).where('a', P.neq('b')).count()")).toBe(1);
+    expect(count("g.inject(null).as('a').constant(null).as('b').V(1).where('a', P.eq('b')).count()")).toBe(1);
+  });
+});
+
 describe('two value labels compare by type', () => {
   // (age 29 → 27), (29 → 32): marko is the only aged vertex with aged out-neighbours.
   const VW = "g.V().has('age').as('v').values('age').as('a').select('v').out().has('age').as('w').values('age').as('b').select('w')";
