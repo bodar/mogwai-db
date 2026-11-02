@@ -74,3 +74,44 @@ describe("a non-iterable list-step operand names its DECLARED type in the `encou
     expect(message(q, values, types)).toEndWith(`encountered ${encountered}`);
   });
 });
+
+// A UUID parameter written at depth is now STORED as a uuid (above), which is only right if equality
+// against a stored uuid holds. A UUID equals a UUID and nothing else — a String that spells one included
+// (`GremlinValueComparator.equals`: `ft == st`,
+// `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:239-275`).
+describe('a UUID bound equals a UUID, never a String that spells one', () => {
+  const U = '6f6b7c64-0b1a-4b8e-9b1c-1a2b3c4d5e6f';
+  const UUID_X: Record<string, TypeNode> = { x: 'uuid' };
+  test.each([
+    ['written in a union() arm', "g.V(1).union(__.property('u', x)).V().has('u', x).count()", '1L'],
+    ['written by addV in a union() arm', "g.V(1).union(__.addV('t').property('u', x)).V().has('u', x).count()", '1L'],
+    ['written on the root chain', "g.V(1).property('u', x).V().has('u', x).count()", '1L'],
+    ['is() after values()', "g.V(1).property('u', x).values('u').is(x).count()", '1L'],
+    ['inside where()', "g.V(1).property('u', x).V().where(__.values('u').is(x)).count()", '1L'],
+    ['inside local()', "g.V(1).property('u', x).V().local(__.values('u').is(x)).count()", '1L'],
+    ['within() a vararg set', "g.V(1).property('u', x).V().has('u', within(x, 'zz')).count()", '1L'],
+    ['neq()', "g.V(1).property('u', x).V().has('u', neq(x)).count()", '0L'],
+    ['without()', "g.V(1).property('u', x).V().has('u', without(x)).count()", '0L'],
+    ['a stored String spelling the UUID', `g.V(1).property('u', '${U}').V().has('u', x).count()`, '0L'],
+    ['a stored UUID against the String literal', `g.V(1).property('u', x).V().has('u', '${U}').count()`, '0L'],
+    ['an injected String', `g.inject('${U}').is(x).count()`, '0L'],
+    ['an injected UUID against the String literal', `g.inject(UUID('${U}')).fold().unfold().is('${U}').count()`, '0L'],
+  ])('%s', (_, q, count) => {
+    expect(run(q, { x: U }, UUID_X)).toEqual([count]);
+  });
+
+  test('a UUID written at depth is found by a later request, by parameter and by literal', () => {
+    const store = seededStore();
+    executeQuery(store, "g.V(1).union(__.property('u', x))", { x: U }, UUID_X);
+    expect(typedAll(executeQuery(store, "g.V().has('u', x).count()", { x: U }, UUID_X))).toEqual(['1L']);
+    expect(typedAll(executeQuery(store, `g.V().has('u', UUID('${U}')).count()`))).toEqual(['1L']);
+    expect(typedAll(executeQuery(store, `g.V().has('u', '${U}').count()`))).toEqual(['0L']);
+  });
+
+  test.each([
+    ['uuid', 'u', '1L'], ['uuid', 's', '0L'], ['string', 'u', '0L'], ['string', 's', '1L'],
+  ] as const)('within() a %s list parameter, against the %s property', (item, key, count) => {
+    const q = `g.V(1).property('u', UUID('${U}')).property('s', '${U}').V().has('${key}', within(xs)).count()`;
+    expect(run(q, { xs: [U] }, { xs: { t: 'list', items: [item] } })).toEqual([count]);
+  });
+});

@@ -413,26 +413,59 @@ const textCarriedOthers = (bound: string): readonly string[] => [
   ...(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bound) ? ['uuid'] : []),
 ];
 
+/**
+ * A TEXT-CARRIED BOUND STAYS IN ITS OWN TYPE SPACE. A String and a UUID both ride as TEXT, and so does a
+ * `T`/`Direction` token (an `elementMap()` key, whose text is its name); equality across them is false
+ * (`GremlinValueComparator.equals`: `ft == st`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:239-275`),
+ * so `elementMap().unfold().select(keys).is('label')` is empty, not `T.label`, and a String that spells a
+ * UUID never meets a stored UUID. The subject's own type fact decides, exactly as `typeSpaced` does for
+ * the non-text spaces:
+ * - a UUID bound (`uuid` — its DECLARED type: a UUID parameter, a `UUID(...)` literal, a UUID member)
+ *   meets only a subject that NAMES `uuid`; an untagged UNKNOWN value is framed by its storage class, so
+ *   its TEXT is a String and never a UUID;
+ * - a String bound excludes the TEXT-carried vtypes its text could spell (`others`) — only a bound that
+ *   IS some such value's text pays for the guard.
+ */
+function textSpaced(equal: Expr, type: SubjectType, uuid: boolean, others: readonly string[]): Expr {
+  if (type.kind === 'static') {
+    const canonical = normalizeTypeName(type.type);
+    return canonical !== null && (uuid || canonical === 'uuid') && !(uuid && canonical === 'uuid') ? CONSTANT.false : equal;
+  }
+  const tag = type.kind === 'perRow' ? type.vtype : type.tag;
+  const named: Expr | undefined = tag && { kind: 'call', fn: 'coalesce', args: [tag, compilerText('')] };
+  if (uuid) return named ? binary('and', equal, binary('=', named, compilerText('uuid'))) : compilerFalse;
+  return named && others.length
+    ? binary('and', equal, { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: named, values: others.map(compilerText) } })
+    : equal;
+}
+
+/**
+ * `textSpaced` for a bound LIST-PARAMETER's `json_each` set, whose members cannot each carry their own
+ * guard: the set's declared item types decide it once. A set with no UUID member excludes whatever its
+ * String members' text could spell; a set of UUIDs only meets UUIDs. A set MIXING UUID members with
+ * other members keeps the raw membership — a per-member type would have to ride the bind's JSON.
+ */
+function textSpacedSet(member: Expr, values: readonly unknown[], setType: TypeNode | null, type: SubjectType): Expr {
+  const items = setType !== null && typeof setType === 'object' && 'items' in setType ? setType.items : [];
+  const present = values.map((v, i) => ({ v, uuid: flatType(items[i]) === 'uuid' })).filter(({ v }) => v !== null);
+  const uuids = present.filter(({ uuid }) => uuid).length;
+  if (uuids === 0) return textSpaced(member, type, false, [...new Set(present.flatMap(({ v }) => typeof v === 'string' ? textCarriedOthers(v) : []))]);
+  return uuids === present.length ? textSpaced(member, type, true, []) : member;
+}
+
 const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: SubjectType, boundType: TypeNode | null): Expr | null => {
   const raw = binary('=', subject, bound);
   if (typeof value === 'string') {
-    if (type.kind === 'static') {
+    const uuid = flatType(boundType) === 'uuid';
+    if (!uuid && type.kind === 'static') {
       const canonical = normalizeTypeName(type.type);
-      return canonical !== null && (NUMERIC_VTYPES.includes(canonical) || canonical === 'duration') ? CONSTANT.false : raw;
+      if (canonical !== null && (NUMERIC_VTYPES.includes(canonical) || canonical === 'duration')) return CONSTANT.false;
     }
     // A NULL vtype is "read the value", and a TEXT value read that way is a String.
-    if (type.kind === 'perRow' && numberSpelling(value))
+    if (!uuid && type.kind === 'perRow' && numberSpelling(value))
       return binary('and', raw, binary('=', { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('string')] }, compilerText('string')));
-    // A TEXT-carried value of another `Type` — a `T`/`Direction` token (an `elementMap()` key, whose text
-    // is its name), a UUID — is never equal to a String (`GremlinValueComparator.equals`: `ft == st`,
-    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:239-275`),
-    // so `elementMap().unfold().select(keys).is('label')` is empty, not `T.label`. Only a bound that IS some
-    // such value's text can meet one, so only that bound pays for the guard.
-    const others = textCarriedOthers(value);
-    if (type.kind === 'perRow' && others.length)
-      return binary('and', raw, { kind: 'unary', op: 'not', arg: {
-        kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('')] }, values: others.map(compilerText) } });
-    return raw;
+    return textSpaced(raw, type, uuid, uuid ? [] : textCarriedOthers(value));
   }
   const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
   if (temporal || !(typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal)) return raw;
@@ -989,7 +1022,7 @@ export function predicateExpr(
     if (coll && coll.name != null && !coll.members) {
       if (!fresh) return null;   // no relation minter reached this caller — decline (fail closed)
       const values = coll.value as readonly unknown[];
-      return settle(jsonEachInSet(subject, values, coll.name, fresh, false), values.some((v) => v === null));
+      return settle(textSpacedSet(jsonEachInSet(subject, values, coll.name, fresh, false), values, coll.type, type), values.some((v) => v === null));
     }
     // A literal NULL member leaves the `IN` list (where it could only ever make the test NULL) and becomes
     // `settle`'s `subject IS NULL` arm. Reference: `within(27,null)` over age 27 matches and over 29 does
