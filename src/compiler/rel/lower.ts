@@ -5445,7 +5445,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   if (!leg) return null;
   const live = liveAliases(labels, rel);
   if (!leg.reads.every((l) => live.has(l))) return null;
-  return applyLeg(leg, rel, labels, childSeam(ctx, fresh), step, fresh) ?? 'decline';
+  return applyLeg(leg, rel, labels, childSeam(ctx, fresh), fresh) ?? 'decline';
 }
 
 function recordTail(
@@ -5551,7 +5551,7 @@ function recordTail(
 
     // `where(k1, P.eq/neq(k2))` THETA and `where(<body>)`/`not(<body>)` LEG over the record's bound
     // aliases — the alias-aware filters, shared with the element tail (`aliasWhere`). A repeat/count leg
-    // body lowers through the fresh-walk join, an ordinary movement body through a correlated EXISTS.
+    // body lowers through the anchored walk (`legCorrelated`), an ordinary movement body through a correlated EXISTS.
     const aliased = aliasWhere(step, rel, labels, ctx, fresh);
     if (aliased === 'decline') return null;
     if (aliased) { rel = aliased; continue; }

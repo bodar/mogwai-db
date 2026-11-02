@@ -10,7 +10,7 @@ import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { aliasElementHost, aliasElementSubject, aliasIdAt, aliasPresence, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, isElementAlias, liveAliases } from './alias.ts';
+import { aliasElementHost, aliasElementSubject, aliasIdAt, aliasPresence, aliasProjection, aliasTypeAt, aliasValueAt, bindAliases, isElementAlias, liveAliases, seedOuterAliases } from './alias.ts';
 import type { Subject } from './child.ts';
 import { perRowSubject, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import type { TraverserObject } from './history.ts';
@@ -226,39 +226,6 @@ function classifyLeg(head: IRStep, params: Record<string, any>): Pattern | null 
   return { kind: 'leg', negated, start, body, reads: [...reads] };
 }
 
-/** One position in a multi-correlation leg's body that must EQUAL/DIFFER from a bound alias — a
- *  `where(P.eq/neq(label))` the leg reads, wherever it sits in the body. `channel` is the fresh alias
- *  the anchored walk BINDS the walk's current position to, so the constraint becomes a correlated clause
- *  `op(outer.label, walk.channel)` rather than a value the walk does not hold. */
-interface LegCorrelation { readonly op: 'eq' | 'neq'; readonly label: string; readonly channel: string; }
-
-/** The walk of a multi-correlation leg's body, plus its correlation clauses. Every
- *  `where(P.eq/neq(label))` in the body — at ANY position, so a MID-body constraint is carried, not
- *  dropped (TinkerPop's `MatchStartStep.getScopeKeys` reads a leg's WHOLE recursive scope-key set,
- *  `MatchStep.java` `anyStepRecursively`, not only the trailing `WhereEndStep`) — BINDS the walk's
- *  current position as a fresh channel and contributes one correlation `op(outer.label, walk.channel)`.
- *  The START needs no clause: the walk is ANCHORED at it (`child.anchored`). Every other step
- *  (movements, `has`, a non-label `where`) passes through the fold unchanged. `null` never happens
- *  here — an unmodellable step declines later, when `child.chain` cannot lower it. */
-function legRight(body: readonly IRStep[], host: IRStep, fresh: Minter): { readonly chain: IRStep[]; readonly corr: readonly LegCorrelation[] } {
-  const corr: LegCorrelation[] = [];
-  const chain: IRStep[] = [];
-  for (const s of body) {
-    const pred = s.name === 'where' ? s.args?.[0]?.value : undefined;
-    if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
-      // A label constraint anywhere in the body: bind the current walk position as a fresh channel and
-      // lift the equality/inequality into the join's ON. This is the SAME move a trailing bound end
-      // takes (the Pass turned its `.as(e)` into this `where(P.eq(e))`), applied uniformly at any depth.
-      const channel = fresh('mc');
-      corr.push({ op: pred.op, label: pred.operands[0]!.value, channel });
-      chain.push(syn(host, 'as', [channel]));
-      continue;
-    }
-    chain.push(s);
-  }
-  return { chain, corr };
-}
-
 /** Parse a match argument into a `Pattern`, or `null` to decline the whole step (fail closed). Admits
  *  the anchored `as(start).<body>[.as(end)]` shapes, the two-variable `where('a', P)` clause, and a
  *  `where(<body>)`/`not(<body>)` filter leg; the `and`/`or` connective groups are a later phase and
@@ -413,19 +380,19 @@ const syn = (host: IRStep, name: string, values: ArgValue[] = []): IRStep =>
  *    predicate seam (`child.predicate` → `correlatedExists`), re-rooted at the one bound element.
  *  - Otherwise — a MULTI-correlation leg (the body constrains a SECOND bound alias) OR a single leg
  *    whose body `child.predicate` cannot express (a RECURSIVE/reducing walk, `repeat().times()`) — is a
- *    correlated `[NOT] EXISTS` over a walk of the body ANCHORED at the start element (`legCorrelated`).
- *    `legRight` binds each `where(P.eq/neq(label))` position as a channel and the probe correlates it
- *    back to the outer row. `child.chain` lowers the walk, and that path lowers the FULL step vocabulary,
- *    so a `repeat` body works here where a single-subject `EXISTS` cannot thread.
+ *    correlated `[NOT] EXISTS` over a walk of the body ANCHORED at the start element (`legCorrelated`),
+ *    seeded with the outer labels the body reads, so each `where(P.eq/neq(label))` filters at its own
+ *    position. `child.chain` lowers the walk, and that path lowers the FULL step vocabulary, so a
+ *    `repeat` body works here where a single-subject `EXISTS` cannot thread.
  *
  *  One node either way: a `Filter` whose predicate is the leg's `legExpr`. (It was a `semi`/`anti`
  *  JOIN against an UNANCHORED `V()` walk; with the walk correlated to the outer row there is no
  *  independent right side to join, and `emit.ts` renders both as the same `[NOT] EXISTS`.) */
 export function applyLeg(
   leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
-  rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
+  rel: Rel, labels: AliasMap, child: ChildSeam, fresh: Minter,
 ): Rel | null {
-  const pred = legExpr(leg, rel, labels, child, host, fresh);
+  const pred = legExpr(leg, rel, labels, child, fresh);
   return pred && make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred });
 }
 
@@ -436,15 +403,13 @@ export function applyLeg(
  *  (`negated` ⇒ `NOT EXISTS`). */
 export function legExpr(
   leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
-  rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
+  rel: Rel, labels: AliasMap, child: ChildSeam, fresh: Minter,
 ): Expr | null {
   const single = legSingle(leg, rel, labels, child, fresh);
   if (single === null) return null;
   if (single) return single;
-  const cor = legCorrelated(leg, rel, labels, child, host, fresh);
-  if (!cor) return null;
-  const plan = cor.on ? make.filter({ id: fresh('mx'), input: cor.ran.rel, channels: cor.ran.rel.channels, type: cor.ran.rel.type, pred: cor.on }) : cor.ran.rel;
-  return { kind: 'exists', plan, negated: leg.negated };
+  const ran = legCorrelated(leg, rel, labels, child, fresh);
+  return ran && { kind: 'exists', plan: ran.rel, negated: leg.negated };
 }
 
 /** The SINGLE-correlation arm shared by `applyLeg`/`legExpr`: a leg reading only its own start, whose
@@ -466,49 +431,34 @@ function legSingle(
   return child.predicate(leg.body, subject, leg.negated, labels) ?? undefined;
 }
 
-/** The MULTI-correlation core of `legExpr`: a walk of the leg body ANCHORED at the start element
+/** The MULTI-correlation core of `legExpr`: the leg body walked from its start element
  *  (`child.anchored` — the one row the outer start id names, so the walk costs the start's own fan-out
- *  per outer row), plus the `on` clause correlating it back on every position `legRight` bound (each
- *  `where(P.eq/neq(label))` as a channel). `on` is absent when the body correlates nothing past its
- *  start (a `repeat` body `child.predicate` cannot thread). `null` to decline.
+ *  per outer row), with the OUTER labels the body reads seeded onto that walk as alias channels
+ *  (`seedOuterAliases`). The body then runs UNCHANGED: a `where(P.eq/neq(label))` is the chain's own
+ *  positional label filter (`aliasWhere`) at its own position, so a `limit`/`dedup`/`range` after it
+ *  slices the CONSTRAINED stream — the reference's child traverser carries its parent's path
+ *  (`TraversalFilterStep.filter` → `TraversalUtil.test` over a split,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/TraversalFilterStep.java`),
+ *  and so does a `select('b')`/`where('b', …)` after it. `null` to decline.
+ *
+ *  A body that reads EVERY label (`path()`, an unreadable nested body) still declines: the seed carries
+ *  labels, not the outer path's positions.
  *
  *  ANCHORED, not a fresh `V()` walk joined back on the start's id: that is the same rows, but the join
  *  key is a `json_extract` over the walk's alias channel, which no index serves — every outer row
  *  re-ran the whole graph's walk (~N², measured 62× for 8× the traversers). */
 function legCorrelated(
   leg: { readonly start: string; readonly body: readonly IRStep[] },
-  rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
-): { readonly ran: ChainRead; readonly on: Expr | undefined } | null {
+  rel: Rel, labels: AliasMap, child: ChildSeam, fresh: Minter,
+): ChainRead | null {
   const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
   if (!isElementAlias(startProj)) return null;
-  const { chain: rightBody, corr } = legRight(leg.body, host, fresh);
-  // The walk sees ONLY the positions it correlates — the anchored start and each `where(P.eq/neq(label))`,
-  // which `legRight` has already LIFTED into a fresh `as(mcN)` bind. It cannot see the outer row's path BY
-  // CONSTRUCTION, so a label the LIFTED walk still reads as a SCOPE KEY (`scopeKeyReads(rightBody)`) — a
-  // `select('c')` after the lifted `where(P.eq('c'))`, a `select('b')` after a `repeat`, a nested
-  // `where('b', …)`, a `path()` — would read as unbound and answer a wrong count. Decline on ANY live one,
-  // the start and correlated labels included: the anchor and the correlation equate a POSITION with them,
-  // they do not put them on the walk's path. Re-correlating the walk with outer path labels is unbuilt. A
-  // VALUE argument spelling a label (`has('name','b')`) is no scope key and costs nothing to admit now
-  // that the walk is anchored.
-  const reads = scopeKeyReads(rightBody, child.params);
+  const reads = scopeKeyReads(leg.body, child.params);
   if (reads.all) return null;
-  for (const label of liveAliases(labels, rel).keys()) if (reads.labels.has(label)) return null;
+  const outer = [...liveAliases(labels, rel)].filter(([label]) => reads.labels.has(label));
   const src = child.anchored(startProj.read.elem, aliasIdAt(col(rel.id, startProj.entry.col), 'last'));
-  const ran = child.chain(src.rel, src.framing, rightBody, new Map());
-  if (!ran) return null;
-  const live = liveAliases(ran.aliases, ran.rel);
-  let on: Expr | undefined;
-  for (const { op, label, channel } of corr) {
-    const lproj = aliasProjection(rel, labels, label, 'last', fresh);
-    const rEntry = live.get(channel);
-    if (!lproj || !rEntry) return null;
-    const same = lproj.read.kind === 'element'
-      ? eq(aliasIdAt(col(rel.id, lproj.entry.col), 'last'), aliasIdAt(col(ran.rel.id, rEntry.col), 'last'))
-      : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
-    on = and(on, op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same });
-  }
-  return { ran, on };
+  const seeded = seedOuterAliases(src.rel, rel, outer, fresh);
+  return child.chain(seeded.rel, src.framing, leg.body, seeded.aliases);
 }
 
 /** A two-variable THETA clause between two already-bound ELEMENT aliases (`where('a', P.eq/neq('c'))`),
@@ -560,7 +510,7 @@ function branchToExpr(
         return thetaExpr(wargs[0]!.value, pred.op, pred.operands[0]!.value, rel, labels, fresh);
     }
     const leg = classifyLeg(only, params);
-    return leg && leg.kind === 'leg' ? legExpr(leg, rel, labels, child, host, fresh) : null;
+    return leg && leg.kind === 'leg' ? legExpr(leg, rel, labels, child, fresh) : null;
   }
 
   const head = steps[0]!;
@@ -571,7 +521,7 @@ function branchToExpr(
     const sels = (head.args ?? []).map((a) => a.value).filter((v): v is string => typeof v === 'string');
     if (sels.length !== 1 || !bound.has(sels[0]!)) return null;
     const body = steps.slice(1);
-    return body.length ? existenceExpr(sels[0]!, body, rel, labels, child, host, fresh) : null;
+    return body.length ? existenceExpr(sels[0]!, body, rel, labels, child, fresh) : null;
   }
   const starts = asLabelsOf(head);
   if (head.name !== 'as' || starts.length !== 1) return null;
@@ -604,11 +554,11 @@ function branchToExpr(
     // A bound `.as(end)` back edge is `where(P.eq(end))`, exactly the trailing-end rewrite the Pass
     // applies to a `where`/`not` arg — done HERE because the connective heads are (deliberately) not in
     // `MATCH_FILTER_HEADS`, so the bind-vs-constrain decision for an `or` branch lives in this lowering.
-    return existenceExpr(start, [...inner, syn(head, 'where', [{ op: 'eq', operands: [arg(end)] }])], rel, labels, child, host, fresh);
+    return existenceExpr(start, [...inner, syn(head, 'where', [{ op: 'eq', operands: [arg(end)] }])], rel, labels, child, fresh);
   }
   const body = steps.slice(1);
   if (!body.length || body.some((s) => s.name === 'as')) return null;
-  return existenceExpr(start, body, rel, labels, child, host, fresh);
+  return existenceExpr(start, body, rel, labels, child, fresh);
 }
 
 /** An existence test over an already-bound `start` and a `body`, as a boolean `Expr`. An ELEMENT start
@@ -616,7 +566,7 @@ function branchToExpr(
  *  start (`as('c').is(P.gt(2))`) is a value predicate over the bound scalar (`child.predicate` with a
  *  scalar subject). The one existence tail shared by the bare `as`-headed and Pass-rewritten
  *  `select`-headed branch forms. */
-function existenceExpr(start: string, body: readonly IRStep[], rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter): Expr | null {
+function existenceExpr(start: string, body: readonly IRStep[], rel: Rel, labels: AliasMap, child: ChildSeam, fresh: Minter): Expr | null {
   const sproj = aliasProjection(rel, labels, start, 'last', fresh);
   if (!sproj) return null;
   if (sproj.read.kind === 'value') {
@@ -629,7 +579,7 @@ function existenceExpr(start: string, body: readonly IRStep[], rel: Rel, labels:
     const pred = s.args?.[0]?.value;
     if (isPred(pred)) for (const o of pred.operands) if (typeof o.value === 'string') reads.add(o.value);
   }
-  return legExpr({ negated: false, start, body, reads: [...reads] }, rel, labels, child, host, fresh);
+  return legExpr({ negated: false, start, body, reads: [...reads] }, rel, labels, child, fresh);
 }
 
 /** A bound SCALAR alias as a `child.predicate` subject — its stored `v` value plus the `SubjectType`
@@ -763,7 +713,7 @@ export function lowerMatch(
     }
 
     if (p.kind === 'leg') {
-      const filtered = applyLeg(p, rel, labels, child, step, fresh);
+      const filtered = applyLeg(p, rel, labels, child, fresh);
       if (!filtered) return null;
       rel = filtered;
       continue;

@@ -194,6 +194,47 @@ export function bindAliases(
 }
 
 /**
+ * CARRY AN OUTER ROW'S LABELS ONTO A CORRELATED SEED — the parent path a child walk starts with.
+ *
+ * A child traverser is a SPLIT of its parent and carries the parent's whole path
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java`
+ * `split`), so a `select('c')`/`where(P.eq('c'))` anywhere in a body walked from an anchored seed reads
+ * the OUTER `c`. Each named label rides in as an alias CHANNEL whose value is the outer row's own history
+ * column, VERBATIM — so every Pop and every reader (`aliasWhere`, `select`) sees exactly what it would at
+ * the outer position. The reference is an outer-column read inside a correlated subplan, resolved from
+ * the enclosing row: no per-row work beyond the read.
+ *
+ * Columns are renumbered `a0…` in the seed (an outer `a2` may be the only label carried), so a label the
+ * body BINDS later mints `a${size}` without colliding. `pathPos` is dropped: the seed carries no path.
+ */
+export function seedOuterAliases(
+  seed: Rel, outer: Rel, entries: readonly (readonly [string, AliasEntry])[], fresh: Minter,
+): { readonly rel: Rel; readonly aliases: AliasMap } {
+  if (!entries.length) return { rel: seed, aliases: new Map() };
+  const aliases = new Map<string, AliasEntry>();
+  const set = new Map<string, Expr>();
+  let channels: Channels = seed.channels;
+  entries.forEach(([label, entry], i) => {
+    const column = `a${i}`;
+    const { pathPos: _dropped, ...rest } = entry;
+    aliases.set(label, { ...rest, col: column });
+    channels = withChannel(channels, { col: column, role: 'alias' });
+    set.set(column, col(outer.id, entry.col));
+  });
+  const payload = payloadCols(seed);
+  return {
+    rel: make.project({
+      id: fresh('so'), input: seed, channels, type: typeOf(...payload, ...carriedCols(channels)),
+      exprs: [
+        ...payload.map((column) => [column.name, col(seed.id, column.name)] as const),
+        ...channels.map((channel) => [channel.col, set.get(channel.col) ?? col(seed.id, channel.col)] as const),
+      ],
+    }),
+    aliases,
+  };
+}
+
+/**
  * WHAT A LABEL RE-ENTERS AS — the read side's whole decision, taken from the entry alone.
  *
  * A total union rather than a set of optionals, for `ScalarType`'s reason

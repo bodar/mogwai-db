@@ -1,16 +1,13 @@
-Feature: mogwai addendum — a multi-correlation where()/not() leg reads no outer path label it cannot see
+Feature: mogwai addendum — a multi-correlation where()/not() leg reads the outer path labels
 
   # A `where(<body>)`/`not(<body>)` leg that constrains a SECOND bound alias lowers as a correlated
   # [NOT] EXISTS over a walk of its body ANCHORED at the start element (src/compiler/rel/match.ts
-  # `legCorrelated`): each `where(P.eq/neq(label))` becomes a fresh position the probe correlates. That walk
-  # holds none of the outer traverser's path — but in the reference the body's traverser CARRIES that path
-  # (`WhereTraversalStep` runs its child on a split of the outer traverser,
+  # `legCorrelated`), SEEDED with the outer labels the body reads. In the reference the body's traverser
+  # CARRIES the outer path (`WhereTraversalStep` runs its child on a split of the outer traverser,
   # vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WhereTraversalStep.java),
-  # so a `select('c')` after the lifted constraint reads `c` and produces. A body that still reads an outer
-  # label after the lift — the start and the correlated labels included — DECLINES; re-correlating the
-  # walk with outer path labels is unbuilt. Each @Unsupported scenario carries the REFERENCE answer.
+  # so a `where(P.eq('c'))` filters at its own position — a `limit` after it slices the CONSTRAINED stream —
+  # and a `select('c')` after it reads `c` and produces.
 
-  @Unsupported
   Scenario: g_V_asXbX_out_asXaX_in_asXcX_whereXselectXaX_in_whereXeqXcXX_selectXcXX_count
     Given the modern graph
     And the traversal of
@@ -22,7 +19,6 @@ Feature: mogwai addendum — a multi-correlation where()/not() leg reads no oute
       | result |
       | d[12].l |
 
-  @Unsupported
   Scenario: g_V_asXbX_out_asXaX_in_asXcX_notXselectXaX_in_whereXeqXcXX_selectXcXX_count
     Given the modern graph
     And the traversal of
@@ -34,8 +30,7 @@ Feature: mogwai addendum — a multi-correlation where()/not() leg reads no oute
       | result |
       | d[0].l |
 
-  # The same leg nested in a branch arm declines the same way: the guard is the leg's, not the host's.
-  @Unsupported
+  # The same leg nested in a branch arm.
   Scenario: g_V_asXbX_out_asXaX_in_asXcX_unionXwhereXselectXaX_in_whereXeqXcXX_selectXcXXX_count
     Given the modern graph
     And the traversal of
@@ -47,7 +42,29 @@ Feature: mogwai addendum — a multi-correlation where()/not() leg reads no oute
       | result |
       | d[12].l |
 
-  # The lifted constraint alone reads no label after the lift, so the anchored walk answers.
+  # A slice AFTER the label filter keeps a constrained traverser: every `c` is an in-neighbour of its `a`.
+  Scenario: g_V_asXbX_out_asXaX_in_asXcX_whereXselectXaX_in_whereXeqXcXX_limitX1XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("b").out().as("a").in().as("c").where(__.select("a").in().where(P.eq("c")).limit(1)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[12].l |
+
+  Scenario: g_V_asXbX_out_asXaX_in_asXcX_notXselectXaX_in_whereXeqXcXX_dedup_limitX1XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("b").out().as("a").in().as("c").not(__.select("a").in().where(P.eq("c")).dedup().limit(1)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
   Scenario: g_V_asXbX_out_asXaX_in_asXcX_whereXselectXaX_in_whereXeqXcXXX_count
     Given the modern graph
     And the traversal of
