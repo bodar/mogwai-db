@@ -27,7 +27,7 @@ import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
 import { typedValueEq } from './predicate.ts';
-import { presenceOf, type ChildValue } from './child.ts';
+import { presenceOf, statedPresence, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
@@ -1577,19 +1577,23 @@ function resolveValueRows(
   const vt = produced.vtype
     ?? scalarVtype(produced.framing, asKey);
   if (!vt) return null;
+  // A STATED presence (`{ when }`) is a host-scope predicate: projected beside the value and filtered on,
+  // so a NULL that survives it is a real null the writer refuses (`nullValueGuard`), never a silent skip.
+  const stated = typeof produced.present === 'object' ? produced.present : undefined;
   const projected = make.project({
-    id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS),
-    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt], ['sq', compilerInt(0)]],
+    id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, ...(stated ? [meta('pw', 'int', true)] : [])),
+    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt], ['sq', compilerInt(0)], ...(stated ? [['pw', stated.when] as const] : [])],
   });
-  const valued = produced.present === 'always' ? projected : presenceFenced(projected, produced.expr, fresh);
+  const valued = produced.present === 'always' || stated ? projected : presenceFenced(projected, produced.expr, fresh);
   const kept = produced.present === 'always' ? valued
-    : make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type, pred: presenceOf('value-nullness', col(valued.id, 'v'))! });
+    : make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type,
+      pred: stated ? statedPresence({ ...stated, when: col(valued.id, 'pw') }, col(valued.id, 'v')) : presenceOf('value-nullness', col(valued.id, 'v'))! });
   return {
     rel: make.project({ id: fresh('rv'), input: kept, channels: [], type: typeOf(...VALUE_ROW_COLS), exprs: VALUE_ROW_COLS.map((column) => [column.name, col(kept.id, column.name)] as const) }),
     mayBeMulti: false,
     framing: produced.framing,
     // A value-nullness body's NULL was filtered as absent, so no NULL row is left to refuse.
-    ...(produced.present === 'always' ? {} : { nullFree: true as const }),
+    ...(produced.present === 'always' || stated ? {} : { nullFree: true as const }),
   };
 }
 
@@ -2203,7 +2207,9 @@ function armValueWriteCorrelated(
   const key = propertyKeyExpr(write.key, write.keyName);
   const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases } };
   const produced = child.scalar(write.value.body, host);
-  if (!produced || produced.framing.kind !== 'scalar' || produced.present === 'unknown') return false;
+  // A STATED presence (`{ when }`, a re-sourced `__.V()…` value) may carry a productive null, which the
+  // value-nullness filter below would skip where the reference removes the key — declined.
+  if (!produced || produced.framing.kind !== 'scalar' || produced.present === 'unknown' || typeof produced.present === 'object') return false;
   // The value AT the driver, carrying the driver's `ord` so it lands on the right merged element. An
   // unproductive driver (a NULL value) is filtered out (the reference's 0-result skip).
   const projectedVals = make.project({

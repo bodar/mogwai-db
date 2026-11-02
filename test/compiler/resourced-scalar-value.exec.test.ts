@@ -9,7 +9,7 @@
 // An UNORDERED body's first value is SQLite's scan-order first, so these assert every host got the SAME
 // value, of a member of the body's stream, with that member's type — never a particular member (L8).
 import { test, expect, describe } from 'bun:test';
-import { seededStore, run, bare } from '../support/harness.ts';
+import { seededStore, run, bare, bagOf } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 
 const s = seededStore();
@@ -58,6 +58,38 @@ describe('an order-pinned or reduced re-sourced value is exact', () => {
     expect(got.every((r) => r.vtype === 'int')).toBe(true);
   });
   test('an empty body maps to nothing', () => expect(rows("g.V().map(__.V().values('age').is(gt(100)))")).toEqual([]));
+});
+
+// WHETHER the body produced is the first ROW's existence, not its value's nullness: `TraversalMapStep`
+// emits `iterator.next()` whenever `hasNext()` (step/map/TraversalMapStep.java), a null included, and
+// Order.feature sorts null first. `reSourcedValue` states its presence as an EXISTS over the fenced row.
+describe('a re-sourced first value that is a productive null is kept', () => {
+  const nulls = (g: string, n: number): void => expect(rows(g).map((r) => r.v)).toEqual(Array(n).fill(null));
+  const CHOOSE = "__.V().choose(__.hasLabel('person'), __.values('age'), __.constant(null)).order().limit(1)";
+  test('choose(…, constant(null)).order().limit(1)', () => nulls(`g.V().map(${CHOOSE})`, 6));
+  test('it agrees with local()', () => nulls(`g.V().local(${CHOOSE})`, 6));
+  test('coalesce(values(age), constant(null))', () =>
+    nulls("g.V().map(__.V().coalesce(__.values('age'), __.constant(null)).order().limit(1))", 6));
+  test('union(values(age), constant(null))', () =>
+    nulls("g.V().map(__.V().union(__.values('age'), __.constant(null)).order().limit(1))", 6));
+  test('an inject host', () => nulls(`g.inject(1).map(${CHOOSE})`, 1));
+  test('constant(null).limit(1)', () => nulls('g.V().map(__.V().constant(null).limit(1))', 6));
+  test('under an absent-able host', () => nulls(`g.V().optional(__.out().as('a')).map(__.select('a').${CHOOSE.slice(3)})`, 6));
+  test('inside local(map())', () => nulls(`g.V().local(__.map(${CHOOSE}))`, 6));
+  test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null).limit(1)).count()')[0].v).toBe(6));
+  test('a where() body over it passes', () => expect(rows('g.V().where(__.V().constant(null).limit(1))')).toHaveLength(6));
+  test('an EMPTY re-source still drops the row', () => expect(rows('g.V().map(__.V(99).constant(null))')).toEqual([]));
+  // A re-sourced FINAL coalesce arm states its own presence; an earlier arm's value still answers.
+  test('a re-sourced coalesce fallback keeps the earlier arm', () =>
+    expect(bagOf(rows("g.V().map(__.coalesce(__.values('age'), __.V(99).values('name')))").map((r) => r.v))).toEqual([27, 29, 32, 35]));
+  test('a re-sourced coalesce fallback that is a productive null', () =>
+    expect(bagOf(rows("g.V().map(__.coalesce(__.values('age'), __.V().constant(null).limit(1)))").map((r) => r.v)))
+      .toEqual(bagOf([29, 27, 32, 35, null, null])));
+  // A null `by()` value is absent (docs/feature-support-matrix.md §17): `project()` omits the key.
+  test('a by() null is absent (§17)', () => expect(rows(`g.V().project('a').by(${CHOOSE})`).map((r) => r.map)).toEqual(Array(6).fill('[]')));
+  // A write refuses a null rather than skipping it: the reference REMOVES the key.
+  test('a property() value that is a productive null refuses', () =>
+    expect(() => run(seededStore(), "g.V().property('x', __.V().constant(null).limit(1))")).toThrow(/resolved to null/));
 });
 
 // A mid-traversal V() SPLITS the host traverser (GraphStep.java:196 `head.split(element, this)`), so the

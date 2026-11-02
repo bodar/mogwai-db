@@ -18,7 +18,7 @@ import { constLit, declaredScalarType } from '../const.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
 import { aliasProjection, rerootPresence, selectSpec } from '../alias.ts';
 import type { AliasMap } from '../../alias.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, presenceDischarged, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, presenceDischarged, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceOf, presentOfHost, statedPresence, type Presence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type RootedRead, type Subject } from '../child.ts';
 import { fieldNamed, framingCols, type RelFraming } from '../framing.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { recordNode } from '../record.ts';
@@ -213,13 +213,29 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
   if (!payload) return null;
   const channels = rel.channels;
   const cols = [...payload.cols.map(([column]) => column), ...carriedCols(channels)];
-  const projected = make.project({
-    id: fresh('mc'), input: rel, channels, type: typeOf(...cols),
-    exprs: [
-      ...payload.cols.map(([column, expression]) => [column.name, expression] as const),
-      ...channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
-    ],
-  });
+  const exprs = [
+    ...payload.cols.map(([column, expression]) => [column.name, expression] as const),
+    ...channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
+  ];
+  // A STATED presence is a predicate in the HOST's scope: projected beside the payload, filtered on, and
+  // shed — a NULL value that survives it is a productive null, kept.
+  if (typeof produced.present === 'object') {
+    const PRESENT = 'mpw';
+    const withPresence = make.project({
+      id: fresh('mc'), input: rel, channels, type: typeOf(...cols, meta(PRESENT, 'int', true)),
+      exprs: [...exprs, [PRESENT, produced.present.when]],
+    });
+    const kept = make.filter({
+      id: fresh('mf'), input: withPresence, channels, type: withPresence.type,
+      pred: statedPresence({ ...produced.present, when: col(withPresence.id, PRESENT) }, col(withPresence.id, payload.cols[0]![0].name)),
+    });
+    const shed = make.project({
+      id: fresh('mc'), input: kept, channels, type: typeOf(...cols),
+      exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+    });
+    return { rel: shed, framing: payload.framing, aliases: labels, bulked };
+  }
+  const projected = make.project({ id: fresh('mc'), input: rel, channels, type: typeOf(...cols), exprs });
   if (produced.present === 'always') return { rel: projected, framing: payload.framing, aliases: labels, bulked };
   const named = presenceFenced(projected, produced.expr, fresh);
   const kept = make.filter({
@@ -1448,7 +1464,10 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   // The whole is NULL only where every arm is: a value-nullness answer, unless the FINAL arm always
   // produces (a `constant`/token/`count()` fallback), whose NULL is then kept as the answer.
   const final = arms.at(-1)!;
-  const present = final.present;
+  // A final arm that STATES its presence (a re-sourced `__.V()…` fallback) states it for ITSELF; where an
+  // earlier arm answered, that arm's non-null value is the presence — `orValue`, so a consumer that
+  // projects the value tests its column rather than reading every arm a second time.
+  const present: Presence = typeof final.present === 'object' ? { when: final.present.when, orValue: true } : final.present;
   // A single shared STATIC type stays static (one column); otherwise a per-row tag whose column is the
   // COALESCE of each arm's own vtype — a reducer's `vt` expr, else the arm's static-type literal (the
   // expression-level twin of `withMergedVtype`, `build.ts`).
@@ -1501,19 +1520,28 @@ const READS_THROUGH_ID: ReadonlySet<string> = new Set(['values', 'label', 'id'])
 function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
   const value = reSourcedValue(body, ctx, fresh);
   if (!value || !mayBeAbsent(host)) return value;
+  const present = hostPresence(host);
+  if (!present) return null;
   if (yieldsNothingFromEmpty(body.slice(1))) {
     const expr = gatedByHost(host, value.expr);
     // The TAG is gated with the value — a NULL value is "nothing", whatever its row's type was.
     const vtype = value.vtype && gatedByHost(host, value.vtype);
-    return expr && { ...value, expr, ...(vtype ? { vtype } : {}), present: meetPresence([value.present, presentOfHost(host)]) };
+    // A STATED presence is conjoined with the host's: the body produced where both did.
+    const produced: Presence = typeof value.present === 'object' ? { ...value.present, when: and(present, value.present.when) }
+      : meetPresence([value.present, presentOfHost(host)]);
+    return expr && { ...value, expr, ...(vtype ? { vtype } : {}), present: produced };
   }
-  const present = hostPresence(host);
-  const empty = present && reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh);
-  if (!present || !empty || !sameFraming(empty.framing, value.framing) || !value.vtype !== !empty.vtype) return null;
+  const empty = reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh);
+  if (!empty || !sameFraming(empty.framing, value.framing) || !value.vtype !== !empty.vtype) return null;
+  // The presence is chosen per row exactly as the value is: where either arm STATES its own, the choice
+  // of the two predicates; otherwise the meet, which is the chosen value's nullness.
+  const stated = typeof value.present === 'object' || typeof empty.present === 'object';
+  const whenFull = presenceOf(value.present, value.expr), whenEmpty = presenceOf(empty.present, empty.expr);
+  if (stated && (!whenFull || !whenEmpty)) return null;
   return {
     expr: caseWhen(present, value.expr, empty.expr), framing: value.framing,
     ...(value.vtype && empty.vtype ? { vtype: caseWhen(present, value.vtype, empty.vtype) } : {}),
-    present: meetPresence([value.present, empty.present]),
+    present: stated && whenFull && whenEmpty ? { when: caseWhen(present, whenFull, whenEmpty) } : meetPresence([value.present, empty.present]),
     yields: value.yields === 'one' && empty.yields === 'one' ? 'one' : 'first',
   };
 }
@@ -1532,14 +1560,18 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
   // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"), so
   // productivity is an EXISTS over the rooted rows — the concat/dateDiff empty-operand guard raises on
   // it, never silently skipping. `yields:'first'` because several rows collapse to their first.
+  // That EXISTS is STATED (`{ when }`), not read off the value: a first value that is a productive null
+  // (`__.V().constant(null)`, a `choose`/`coalesce` arm answering null, sorted first by `order()`) is
+  // still the answer, and reading it as absent dropped the host row.
   // A PER-ROW type is the first row's own tag, read beside its value from the same fenced row, and the
   // framing names the `ChildValue.vtype` slot every consumer projects (`reductionTail`, a coalesce arm)
   // — never the rooted relation's `vtype`/`vt` column, which is not in the host's scope.
   const first = firstRootedValue(rooted, fresh, true);
   if (!first) return null;
+  const present: Presence = { when: first.exists };
   return first.vtype
-    ? { expr: first.value, vtype: first.vtype, framing: { kind: 'scalar', type: PER_ROW('vtype') }, present: 'value-nullness', yields: 'first' }
-    : { expr: first.value, framing: rooted.framing, present: 'value-nullness', yields: 'first' };
+    ? { expr: first.value, vtype: first.vtype, framing: { kind: 'scalar', type: PER_ROW('vtype') }, present, yields: 'first' }
+    : { expr: first.value, framing: rooted.framing, present, yields: 'first' };
 }
 
 /** A rooted read that ends in `count()` and collapses to at most one row, as its one value — or `null`
@@ -2129,7 +2161,7 @@ export function valueRun(
       vtype = undefined;
       // A projector whose NULL is UNPRODUCTIVE (`drop`: `math()` over an unproductive `by()` FILTERS —
       // `MathStep.java:75-78`) narrows `present` exactly as an `is()` does, for the same consumers.
-      if (projected.drop && present === 'always') present = 'value-nullness';
+      if (projected.drop && present !== 'unknown') present = 'value-nullness';
       continue;
     }
     // A trailing `is(pred)` FILTERS the child value: `by(__.values('age').is(P.gt(29)))` contributes the
@@ -2154,7 +2186,7 @@ export function valueRun(
       value = { kind: 'case', whens: [[test, value]], else: compilerNull() };
       // A failed test is a NULL, so the run is now present exactly where its value is. A seed that cannot
       // say stays unable to (`'unknown'`), so its consumers keep declining.
-      if (present === 'always') present = 'value-nullness';
+      if (present !== 'unknown') present = 'value-nullness';
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;
@@ -2169,7 +2201,7 @@ export function valueRun(
     // A RAISING transform (a runtime `asNumber(GType.X)`, a receiver offence) raises when its VALUE is
     // evaluated — so a host that asks only WHETHER the run produced (`where`/`not`/`choose`) must read
     // the value: an `'always'` run becomes a value-nullness one.
-    if ((transformed.fenced || offences.length) && present === 'always') present = 'value-nullness';
+    if ((transformed.fenced || offences.length) && present !== 'unknown') present = 'value-nullness';
     value = raisingWhen(offences, transformed.expr);
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
@@ -2285,7 +2317,9 @@ function mapHostChild(
   if (!rerooted) return null;
   // Thread the key's presence onto the recursed value: an absent key (a NULL node) means the whole child
   // produced nothing. A tail whose presence is its value's nullness is already NULL over an absent key;
-  // one that ALWAYS produces (`count()` seeds 0) is gated on the key.
+  // one that ALWAYS produces (`count()` seeds 0) is gated on the key. A STATED presence already reads the
+  // key through `reHost`'s own presence (`reSourcedUnder`), so it rides out as it is.
+  if (typeof rerooted.present === 'object') return rerooted;
   if (rerooted.present !== 'always') return { ...rerooted, present: 'value-nullness' };
   const gated: Expr = { kind: 'case', whens: [[isNot(node, compilerNull()), rerooted.expr]], else: compilerNull() };
   return { ...rerooted, expr: gated, present: 'value-nullness' };

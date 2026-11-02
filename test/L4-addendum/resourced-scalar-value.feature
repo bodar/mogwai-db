@@ -237,3 +237,38 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | d[1].i |
       | d[1].i |
       | d[1].i |
+
+  # A first value that is a PRODUCTIVE null is still the answer: `TraversalMapStep` emits `iterator.next()`
+  # whenever `hasNext()` (step/map/TraversalMapStep.java), Map.feature g_V_mapXconstantXnullXX keeps 6 nulls,
+  # and Order.feature sorts null first. Presence is the first row's EXISTENCE, not its value's nullness.
+  Scenario: g_V_mapXV_chooseXhasLabelXpersonX_valuesXageX_constantXnullXX_order_limitX1XX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.V().choose(__.hasLabel("person"), __.values("age"), __.constant(null)).order().limit(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | null |
+      | null |
+      | null |
+      | null |
+      | null |
+      | null |
+
+  Scenario: g_V_mapXcoalesceXvaluesXageX_V_constantXnullX_limitX1XXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.coalesce(__.values("age"), __.V().constant(null).limit(1)))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[29].i |
+      | d[27].i |
+      | d[32].i |
+      | d[35].i |
+      | null |
+      | null |

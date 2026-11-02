@@ -235,6 +235,12 @@ export interface ChildValue {
    *   itself), so a consumer owes no drop; a NULL it yields is kept as a null.
    * - `'value-nullness'` — the body produced exactly where `expr IS NOT NULL` (`presenceOf`).
    * - `'unknown'` — the arm cannot say; a consumer that needs presence DECLINES on it.
+   * - `{ when }` — the body produced exactly where `when` holds, and a NULL value under it is a
+   *   PRODUCTIVE null. Stated by an arm whose productivity is not its value's nullness and is cheap to
+   *   test on its own: a re-sourced body's first value (`map(__.V().choose(…, constant(null)).order()
+   *   .limit(1))`), whose presence is an uncorrelated EXISTS over the one fenced row it read the value
+   *   from. A consumer that keeps productive nulls (`map()`, a write) filters on `when`; one that reads
+   *   `presenceOf` gets it for free; one that drops a null value anyway (a `by()`, §17) still may.
    *
    * REQUIRED, as `yields` and `framing` are: only the arm that built the expression knows, and an
    * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence.
@@ -243,18 +249,37 @@ export interface ChildValue {
 }
 
 /** A child body's PRODUCTIVITY — see `ChildValue.present`. Never absent. */
-export type Presence = 'always' | 'value-nullness' | 'unknown';
+export type Presence = 'always' | 'value-nullness' | 'unknown' | PresentWhen;
+
+/** A presence STATED as its own per-row predicate (`ChildValue.present`'s `{ when }`). `orValue`: the body
+ *  ALSO produced wherever its value is non-null — a `coalesce` whose earlier arms answer by value and whose
+ *  final arm states its own presence. A flag rather than the OR spelled into `when`, so a consumer that
+ *  projects the value (`reductionTail`) tests the column instead of reading the value a second time. */
+export interface PresentWhen { readonly when: Expr; readonly orValue?: true }
+
+/** A HOST's presence (`ChildHost.present`) — never a stated predicate: a body over the host narrows its
+ *  presence to its value's nullness (an `is()`, a `drop` projector, `valueRun`), and narrowing a `{ when }`
+ *  that way would read a NULL the filter made as a productive null. */
+export type HostPresence = Exclude<Presence, PresentWhen>;
 
 /** A constant TRUE, the per-row predicate `presenceOf` answers for `'always'` — ONE shared object, so a
  *  consumer can test it by reference and spend no `CASE`/filter on it. SQLite folds it. */
 export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
 
 /** The presence as a per-row predicate over the body's VALUE — `ALWAYS_PRODUCTIVE` for `'always'`,
- *  `value IS NOT NULL` for `'value-nullness'`, or `null` to DECLINE on `'unknown'`. One function so
- *  "decline on unknown" is spelled once. */
+ *  `value IS NOT NULL` for `'value-nullness'`, the stated predicate for `{ when }`, or `null` to DECLINE
+ *  on `'unknown'`. One function so "decline on unknown" is spelled once. */
 export const presenceOf = (present: Presence, value: Expr): Expr | null =>
   present === 'unknown' ? null : present === 'always' ? ALWAYS_PRODUCTIVE
-    : { kind: 'binary', op: 'is not', left: value, right: compilerNull() };
+    : present === 'value-nullness' ? isNotNullExpr(value)
+      : statedPresence(present, value);
+
+/** A `{ when }` presence as a predicate, given where the VALUE can be read — the value expression itself,
+ *  or the column a consumer projected it to. */
+export const statedPresence = (present: PresentWhen, value: Expr): Expr =>
+  present.orValue ? { kind: 'binary', op: 'or', left: isNotNullExpr(value), right: present.when } : present.when;
+
+const isNotNullExpr = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: value, right: compilerNull() });
 
 /**
  * IS THE HOST THERE AT ALL — its own `present` as a per-row predicate over its key (an element's `id`,
@@ -302,7 +327,10 @@ export const mayBeAbsent = (host: ChildHost | Subject): boolean => presentOfHost
 /** The presence of a CASE (or any choice) over arms: every arm `'always'` ⟹ `'always'`; any arm
  *  `'unknown'` ⟹ `'unknown'`; otherwise the chosen value's nullness. */
 export const meetPresence = (arms: readonly Presence[]): Presence =>
-  arms.every((p) => p === 'always') ? 'always' : arms.some((p) => p === 'unknown') ? 'unknown' : 'value-nullness';
+  arms.every((p) => p === 'always') ? 'always' : arms.some((p) => p === 'unknown') ? 'unknown'
+    // A stated predicate is not the chosen value's nullness — a productive null under it would read as
+    // absent — and a choice that names its arms' predicates is the caller's to build (`reSourcedUnder`).
+    : arms.some((p) => typeof p === 'object') ? 'unknown' : 'value-nullness';
 
 /**
  * WHICH normalization a nested argument gets, and the two are not interchangeable.
@@ -340,7 +368,7 @@ export type ChildHost =
        *  `optional()` or a repeat body), so a NULL `id` means "the body's INPUT is empty". ABSENT
        *  (`'always'`) for every other element host, which keeps their SQL byte-identical. Read through
        *  `hostPresence`; an element's id is never a null VALUE, so the reading is exact here. */
-      readonly present?: Presence }
+      readonly present?: HostPresence }
   | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow;
       /** WHETHER A NULL `value` IS A VALUE (as `ChildValue.present`). ABSENT (`'always'`) where the host
        *  is a TRAVERSER — a traverser's NULL is a null value. `'value-nullness'` where the host is an
@@ -348,7 +376,7 @@ export type ChildHost =
        *  over an absent property (`valueRun`), a `select(k)` of an absent map key, a `select(<label>)` of a
        *  label unbound on this row. A type-demanding consumer (`math()`'s variables, `receiver.ts`) raises
        *  on a NULL only where it is a value. */
-      readonly present?: Presence;
+      readonly present?: HostPresence;
       /** Present only for a child rooted at an unfolded Map.Entry. */
       readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf } }
   /** A PROPERTY traverser — `properties()`, addressed by the stored row's own rowid exactly as an
@@ -449,9 +477,9 @@ export type Subject =
   | { readonly kind: 'element'; readonly id: Expr; readonly label?: Expr; readonly rel: Rel; readonly elem: Elem;
       /** As `ChildHost`'s: `'value-nullness'` where the subject is a label unbound on some rows
        *  (`selectRerootSubject`), absent otherwise. */
-      readonly present?: Presence }
+      readonly present?: HostPresence }
   | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly rel: Rel; readonly type: SubjectType;
-      readonly present?: Presence }
+      readonly present?: HostPresence }
   /** A PROPERTY traverser as a filter/branch subject — the third traverser shape a correlated body can
    *  be rooted at, mirroring the `property` `ChildHost`. It carries no `value`/`type`: a property is not
    *  a scalar, so a value predicate (`is`) declines on it and a body-over-property folds through the

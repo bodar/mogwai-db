@@ -781,19 +781,23 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
  * row as a materialized relation both subqueries read: the rooted read runs once per statement, and
  * each uncorrelated subquery over it is O(1) in the host's traverser count. A STATIC type is a compiler
  * literal and needs no second subquery, so it comes back as `vtype: undefined` and the caller keeps the
- * read's own static framing.
+ * read's own static framing. The typed form also answers the row's EXISTENCE (`exists`), an EXISTS over
+ * the same fenced row: whether the body produced is not whether its first value is null.
  */
-export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false): { readonly value: Expr; readonly vtype?: Expr } | null {
+export function firstRootedValue(read: RootedRead, fresh: Minter, typed?: false): { readonly value: Expr } | null;
+export function firstRootedValue(read: RootedRead, fresh: Minter, typed: true): FirstRootedRow | null;
+export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false): { readonly value: Expr } | FirstRootedRow | null {
   if (read.effects?.length || read.framing.kind !== 'scalar') return null;
   const encounter = read.rel.channels.find((channel) => channel.role === 'encounter');
-  const tag = typed ? relHostTag(read.rel, read.framing.type) : undefined;
-  if (tag && tag.kind !== 'lit') {
+  if (typed) {
+    const tag = relHostTag(read.rel, read.framing.type);
+    const perRow = tag && tag.kind !== 'lit' ? tag : undefined;
     // PROJECT the value, its tag and the order key in the read's own scope first (`firstOf`'s rule:
     // after a `Limit` that scope is gone), then sort, take one row, and fence it.
     const projected = make.project({
       id: fresh('rft'), input: read.rel, channels: [],
-      type: typeOf(meta('v', 'any', true), meta('t', 'text', true), ...(encounter ? [meta('k', 'any', true)] : [])),
-      exprs: [['v', col(read.rel.id, 'v')], ['t', tag], ...(encounter ? [['k', col(read.rel.id, encounter.col)] as const] : [])],
+      type: typeOf(meta('v', 'any', true), ...(perRow ? [meta('t', 'text', true)] : []), ...(encounter ? [meta('k', 'any', true)] : [])),
+      exprs: [['v', col(read.rel.id, 'v')], ...(perRow ? [['t', perRow] as const] : []), ...(encounter ? [['k', col(read.rel.id, encounter.col)] as const] : [])],
     });
     const sorted = encounter
       ? make.sort({ id: fresh('rfs'), input: projected, channels: [], type: projected.type, terms: [{ expr: col(projected.id, 'k'), dir: 'asc' }] })
@@ -803,7 +807,13 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
     const readOne = (name: 'v' | 't', type: SqlType): Expr => ({ kind: 'scalar', plan: make.project({
       id: fresh('rfv'), input: row, channels: [], type: typeOf(meta(name, type, true)), exprs: [[name, col(row.id, name)]],
     }) });
-    return { value: readOne('v', 'any'), vtype: readOne('t', 'text') };
+    // WHETHER there was a first row is that row's EXISTENCE, not its value's nullness: a first value
+    // that is a productive null (`__.V().constant(null)`) is still the answer (`TraversalMapStep` emits
+    // `iterator.next()` whenever `hasNext()`, `vendor/tinkerpop/gremlin-core/.../step/map/TraversalMapStep.java`).
+    const exists: Expr = { kind: 'exists', negated: false, plan: make.project({
+      id: fresh('rfe'), input: row, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
+    }) };
+    return { value: readOne('v', 'any'), ...(perRow ? { vtype: readOne('t', 'text') } : {}), exists };
   }
   const ordered = encounter
     ? make.limit({
@@ -818,6 +828,10 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
     exprs: [['v', col(ordered.id, 'v')]],
   }) } };
 }
+
+/** A rooted body's FIRST ROW, read off one fenced row (`firstRootedValue`'s typed form): its value, its
+ *  per-row type where the type is not static, and whether the row exists at all. */
+export interface FirstRootedRow { readonly value: Expr; readonly vtype?: Expr; readonly exists: Expr }
 
 /**
  * RENUMBER the emission order — `ROW_NUMBER()` into the `encounter` channel's own column, over
