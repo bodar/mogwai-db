@@ -760,7 +760,11 @@ Through S1 and S2 this also closed F1–F6, F9, F10, F14 (its first half), reuse
 Nothing was deferred or parked, and no round branch holds work that is not on trunk.
 
 **Shared root causes (one substrate item each, ordered BEFORE the follow-ups they fix):**
-- **S4. A body's presence comes from ONE authority, and the CONSUMER gates on it.** Three follow-ups below (R1, R2,
+- ✅ **LANDED (261bfb98, 2026-11-02), folding R1, R2, R3 and R12's §17 line.** `rootedCount` takes 'always' from
+  `exactlyOneRow` (a Rel-level twin of `collapsedToOneRow` that excludes filter/distinct); `byProjection`/`byTyped`
+  attach `hostKeep` once via `hostKept` and `productivityFilter` conjoins it; `dedupByLabels` uses
+  `aliasElementHost`. Remains: nothing.
+  **S4. A body's presence comes from ONE authority, and the CONSUMER gates on it.** Three follow-ups below (R1, R2,
   R3) share one defect. The consumer trusts a presence claim that is either wrong or that nobody honours:
   - `rootedCount` claims `'always'` from `collapsedToOneRow`, which means "at most one row", not "exactly one".
   - A where-by operand counts on each body arm to consult `hostPresence`, and a reducing `by()` does not.
@@ -787,7 +791,9 @@ Nothing was deferred or parked, and no round branch holds work that is not on tr
 
 **Follow-ups from review (major first).** All are pre-existing unless marked otherwise: trunk before this round gave
 the same answer.
-1. **R1 (major, wrong answer) — `count().is(P)` in a body is treated as always present** (via S4;
+1. ✅ **LANDED via S4 (261bfb98, 2026-11-02).** `rootedCount` claims 'always' only from `exactlyOneRow`
+   (`src/compiler/rel/lower/reduction.ts`); witnesses in `test/L4-addendum/absent-label-body-input.feature`. Remains: nothing.
+   **R1 (major, wrong answer) — `count().is(P)` in a body is treated as always present** (via S4;
    `src/compiler/rel/lower/reduction.ts` `rootedCount`, `reSourcedUnder` case 3).
    - `g.V().map(__.V().count().is(0)).count()` gives 6; the reference gives 0 (`TraversalMapStep.java:52` drops a
      traverser whose child yields nothing).
@@ -799,7 +805,9 @@ the same answer.
 
    Fix it via S4: make `rootedCount` require that the reduction is the terminal step, or take presence from
    `presenceOf`. Add the `count().is()` forms to `test/L4-addendum/absent-label-body-input.feature`.
-2. **R2 (major, wrong count) — a where-by operand whose `by()` is a reducing barrier survives an unbound label** (via
+2. ✅ **LANDED via S4 (261bfb98, 2026-11-02).** The by() projection carries `hostKeep` where the host may be absent;
+   `productivityFilter` (`src/compiler/rel/modulator.ts`) gates on it. Remains: nothing.
+   **R2 (major, wrong count) — a where-by operand whose `by()` is a reducing barrier survives an unbound label** (via
    S4; `src/compiler/rel/lower.ts` `whereOperandHost`).
    - `g.V().union(__.as('a'), __.identity()).as('b').where('a', P.eq('b')).by(__.outE().count()).count()` gives 9; it
      should be 6.
@@ -807,7 +815,9 @@ the same answer.
    - The compound `P.eq('b').or(P.neq('b'))` gives 12.
 
    This contradicts the claim in `aliasElementHost`'s doc that "no host built off a label can drop it".
-3. **R3 (major, wrong count) — `dedup('a','b').by(…)` builds its alias host by hand with no presence**
+3. ✅ **LANDED via S4 (261bfb98, 2026-11-02).** `dedupByLabels` builds its host with `aliasElementHost` and drops an
+   unbound key (the where-by rule, §17). Remains: nothing.
+   **R3 (major, wrong count) — `dedup('a','b').by(…)` builds its alias host by hand with no presence**
    (`src/compiler/rel/lower/slice.ts` ~664, `dedupByLabels`). It is the last hand-built alias element host in `src/`.
    - `g.V().union(__.as('a'), __.identity()).as('b').dedup('a','b').by(__.id()).count()` gives 12.
    - `by(__.constant(1))` gives 1.
@@ -884,7 +894,9 @@ the same answer.
     `g.V().as('b').out().as('a').in().as('c').where(__.select('a').in().where(P.eq('c')).dedup()).count()` gives 7;
     the reference gives 12. `TraversalUtil.test` resets the child for each traverser, so `dedup()` cannot remove a
     traverser's existence. Record it in `docs/outstanding-work.md` if it is not taken.
-12. **R12 (minor, doc + §17) — the `getSafeScopeValue` citation is wrong.** At the pin, `Scoping.java:141-147`
+12. ✅ **LANDED via S4 (261bfb98, 2026-11-02).** Citations corrected; §17 line "an unbound where/dedup key drops the
+    traverser" added. Remains: nothing.
+    **R12 (minor, doc + §17) — the `getSafeScopeValue` citation is wrong.** At the pin, `Scoping.java:141-147`
     RAISES `IllegalArgumentException`. `getNullableScopeValue` is the variant that returns null.
     - Correct the citation in the `aliasElementHost` doc (`src/compiler/rel/alias.ts`), in the header of
       `test/L4-addendum/absent-label-where-by.feature`, and in `slice.ts` ~651.
