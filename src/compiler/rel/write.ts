@@ -26,7 +26,7 @@ import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or,
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
-import { typedValueEq } from './predicate.ts';
+import { NUMERIC_VTYPES, typedValueEq, typedValueKey } from './predicate.ts';
 import { presenceOf, statedPresence, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
@@ -3381,6 +3381,10 @@ function guardMergeInterleaving(
     readonly createKey: ((rel: RelId) => Expr) | null;
     /** Could the LATER driver's search find the EARLIER one's creation? `null` = always. */
     readonly couldMatch: ((earlier: RelId, later: RelId) => Expr) | null;
+    /** An EQUI key `couldMatch` IMPLIES (`PairKeying`). It only NARROWS the pair join — `couldMatch` stays
+     *  the residual — but it is what makes that join an indexed seek instead of every pair of distinct
+     *  searches. */
+    readonly keying?: PairKeying;
     /** The HOST applies `onMatch` to a creation two or more drivers share (`shareOnMatch`) — so a later
      *  driver matching an earlier one's creation is answered, not refused, for an `onMatch` that is
      *  `onMatchShareable`. Only a host that does so may pass `true`. */
@@ -3436,16 +3440,35 @@ function guardMergeInterleaving(
   if (!unmatched) return;
   const acts = facts.acts && !(unmatched.sharesOnMatch && facts.onMatchShareable);
   if (!acts && !facts.repeats && !facts.mutatesSearch && unmatched.createKey === null) return;
+  // THE PAIR TEST OVER TUPLES, NOT DRIVERS. Every column the pair predicate reads (`couldMatch`, `createKey`,
+  // the keys) is a function of the row's non-`ord` columns, so the rows collapse by those — keeping the
+  // tuple's FIRST and LAST `ord` — and "a pair of distinct drivers e < l with tuples A, B" exists exactly
+  // when `A.first < B.last`: for A ≠ B the two `ord` sets are disjoint, for A = B it says the tuple holds
+  // two drivers. An exact rewrite of the per-driver test (a MIN-ord collapse alone would not be — a LATER
+  // unproductive search matches anything, so `ord 1:B, 2:A, 3:B` must still see `(A@2, B@3)`), and it is
+  // what makes N drivers asking ONE question one row rather than N² pairs.
   const u = unmatched.rel;
-  const earlier = bind(make.project({
-    id: fresh('p'), input: u, channels: [], type: u.type, exprs: u.type.cols.map((column) => [column.name, col(u.id, column.name)] as const),
+  const { createKey, couldMatch, keying } = unmatched;
+  const grouping: (readonly [ColMeta, Expr])[] = [
+    ...u.type.cols.filter((column) => column.name !== ORD).map((column) => [column, col(u.id, column.name)] as const),
+    // The create key is grouped as the VALUE it is compared as: `GROUP BY` meets `30` and `30.0`, and the
+    // key's JSON spelling does not.
+    ...(createKey ? [[meta(MERGE_CK, 'text', true), createKey(u.id)] as const] : []),
+    ...(keying?.columns(u.id, fresh) ?? []),
+  ];
+  const earlier = bind(make.aggregate({
+    id: fresh('ag'), input: u, channels: [],
+    type: typeOf(...grouping.map(([column]) => column), meta(MERGE_FIRST, 'int'), meta(MERGE_LAST, 'int')),
+    groupBy: grouping.map(([, e]) => e),
+    aggs: [[MERGE_FIRST, { kind: 'agg', fn: 'min', args: [col(u.id, ORD)] }], [MERGE_LAST, { kind: 'agg', fn: 'max', args: [col(u.id, ORD)] }]],
   }), true) as Extract<Rel, { kind: 'ref' }>;
   const later = make.ref({ id: fresh('r'), name: earlier.name, channels: [], type: earlier.type });
-  const { createKey, couldMatch } = unmatched;
+  const pairs = keying ? keying.pairs(earlier, later, fresh) : { left: earlier, right: later, on: always };
+  const e = pairs.left.id, l = pairs.right.id;
   const observable: Expr = acts || facts.repeats || facts.mutatesSearch || !createKey ? always
-    : isNot(createKey(earlier.id), createKey(later.id));
-  raiseOnRows(selfJoin(earlier, later, and(and(lt(col(earlier.id, ORD), col(later.id, ORD)),
-    couldMatch ? couldMatch(earlier.id, later.id) : always), observable)),
+    : isNot(col(e, MERGE_CK), col(l, MERGE_CK));
+  raiseOnRows(selfJoin(pairs.left, pairs.right, and(and(and(pairs.on, lt(col(e, MERGE_FIRST), col(l, MERGE_LAST))),
+    couldMatch ? couldMatch(e, l) : always), observable)),
   'where a later traverser would match what an earlier one created');
 }
 
@@ -3560,21 +3583,382 @@ function onCreateLabelGuard(unmatched: Rel, mapLabel: Expr, labels: readonly str
   raiseOnCreateOverride(unmatched, and(isNot(mapLabel, compilerNull('text')), overridden), 'label', labels, guard, fresh);
 }
 
+/**
+ * AN EQUI KEY FOR `guardMergeInterleaving`'s PAIR JOIN — what turns "could the later search find the earlier
+ * creation" from a predicate over every pair of distinct searches into a seek. `columns` are grouped with
+ * the collapsed tuples (computed once per driver row, from its own columns); `pairs` builds the join over
+ * the collapsed tuples, whose `on` every pair `couldMatch` admits must satisfy — it narrows, never decides.
+ * The LATER side stays the spooled relation itself, its key columns raw, so SQLite seeks it through an
+ * automatic index.
+ */
+interface PairKeying {
+  readonly columns: (rel: RelId, fresh: Minter) => readonly (readonly [ColMeta, Expr])[];
+  readonly pairs: (earlier: Rel, later: Rel, fresh: Minter) => { left: Rel; right: Rel; on: Expr };
+}
+
+/** One search criterion's equi key, as `searchKeying` reads it: `present` is 0/1 per row (does this driver's
+ *  search narrow by it), `key` the values that must be EQUAL for an earlier creation to satisfy it
+ *  (`typedValueKey`'s pair for a typed value). Both are read over the guard's per-driver rows. */
+interface MergeKey {
+  readonly present: (rel: RelId) => Expr;
+  readonly key: (rel: RelId) => readonly Expr[];
+}
+const MERGE_CK = 'g_ck', MERGE_FIRST = 'g_first', MERGE_LAST = 'g_last';
+
+/**
+ * THE SEARCH'S `PairKeying` — `couldMatch` for a search that narrows by FIXED keys (a computed map's
+ * criteria, an edge map's endpoints: `fixed`) and/or by a map-valued driver's STRING entries (`map`).
+ *
+ * Per criterion the test is "the later search does not narrow by it, OR the earlier creation carries an
+ * equal value" — a DISJUNCTION, which no index answers. So it is split by the later driver's MASK, which
+ * criteria its search narrows by: under a fixed mask it is a plain conjunction of equalities.
+ *  - A FIXED key's mask is its `present` bit; its key is NULL where the row does not narrow by it, which
+ *    only another NULL meets (`IS`), so a later search narrowing by a key the earlier creation lacks
+ *    cannot find it.
+ *  - A MAP's keys are DATA, so its mask is the later map's KEY SET and its key the later map's SIGNATURE:
+ *    its entries sorted by key, each `(key, family, value)` with a `Number` normalised to REAL
+ *    (`typedValueEq` meets `30` and `30.0`; the REAL form is a SUPERSET of its equality, so it only
+ *    narrows). An `onCreate` key is left out of both — `mapCouldMatch` reads it as "could".
+ * The earlier tuples are crossed with the DISTINCT masks present — at most 2^K for K fixed keys (bounded by
+ * the query text), and one per map SHAPE — each earlier key PROJECTED onto the mask (an earlier map
+ * lacking a searched key projects short and meets nothing), and met against the later tuples' OWN columns,
+ * so the later side is the spooled relation itself and SQLite seeks it through an automatic index. Cost is
+ * tuples × masks; `couldMatch` stays the residual.
+ */
+function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: readonly string[] } | null): PairKeying {
+  const KS = 'g_ks', SIG = 'g_sig';
+  const maskCols = [...fixed.map((_, i) => maskCol(i)), ...(map ? [KS] : [])];
+  const signature = (mapCol: Expr, keys: Expr | null, fresh: Minter, entry: 'key' | 'whole'): Expr => {
+    const pairs = pairsOf(mapCol, fresh);
+    const at = (rel: RelId, which: 'keys' | 'values', path: string): Expr =>
+      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(rel, PAIR.value), which), compilerText(path)] });
+    const listed = (): Expr => {
+      const ks = make.explode({ id: fresh('kx'), expr: keys!, channels: [], as: { value: 'kv', ord: 'ko' }, type: typeOf(meta('kv', 'any', true), meta('ko', 'int')) });
+      return { kind: 'in-query', expr: at(pairs.id, 'keys', '$.v'), negated: false,
+        plan: make.project({ id: fresh('p'), input: ks, channels: [], type: typeOf(meta('kv', 'any', true)), exprs: [['kv', col(ks.id, 'kv')]] }) };
+    };
+    const searched = make.filter({
+      id: fresh('f'), input: pairs, channels: [], type: pairs.type,
+      pred: [eq(at(pairs.id, 'keys', '$.t'), compilerText('string')),
+        ...(map!.excluded.length ? [{ kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: at(pairs.id, 'keys', '$.v'), values: map!.excluded.map(compilerText) } } as Expr] : []),
+        ...(keys ? [listed()] : [])].reduce((a, b) => and(a, b)),
+    });
+    const key = at(searched.id, 'keys', '$.v'), value = at(searched.id, 'values', '$.v'), vtype = at(searched.id, 'values', '$.t');
+    const numeric: Expr = { kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) };
+    const member: Expr = entry === 'key' ? key : { kind: 'json-array', binary: false, items: [key, typedValueKey(value, vtype)[0],
+      { kind: 'case', whens: [[numeric, { kind: 'cast', arg: value, to: 'real' }]], else: value }] };
+    return { kind: 'scalar', plan: make.aggregate({
+      id: fresh('ag'), input: searched, channels: [], type: typeOf(meta('s', 'text')), groupBy: [],
+      aggs: [['s', { kind: 'agg', fn: 'json_group_array', args: [member], orderBy: [{ expr: key, dir: 'asc' }] }]],
+    }) };
+  };
+  return {
+    columns: (rel, fresh) => [
+      ...fixed.flatMap((key, i) => [
+        [meta(maskCol(i), 'int'), key.present(rel)] as const,
+        ...key.key(rel).map((part, j) => [meta(keyCol(i, j), 'any', true),
+          { kind: 'case', whens: [[eq(key.present(rel), compilerInt(1)), part]], else: compilerNull('any') } as Expr] as const),
+      ]),
+      ...(map ? [
+        [meta(KS, 'text'), signature(col(rel, MAP_COL), null, fresh, 'key')] as const,
+        [meta(SIG, 'text'), signature(col(rel, MAP_COL), null, fresh, 'whole')] as const,
+      ] : []),
+    ],
+    pairs: (earlier, later, fresh) => {
+      const arity = fixed.map((key) => key.key(earlier.id).length);
+      const source = make.ref({ id: fresh('r'), name: (earlier as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: earlier.type });
+      const maskType = typeOf(...maskCols.map((name) => ({ ...earlier.type.cols.find((column) => column.name === name)!, name: `m_${name}` })));
+      const masks = make.distinct({
+        id: fresh('d'), channels: [], type: maskType,
+        input: make.project({ id: fresh('p'), input: source, channels: [], type: maskType,
+          exprs: maskCols.map((name) => [`m_${name}`, col(source.id, name)] as const) }),
+      });
+      const crossed = make.join({ id: fresh('j'), left: earlier, right: masks, join: 'cross', channels: [], type: typeOf(...earlier.type.cols, ...maskType.cols) });
+      const projected: (readonly [string, Expr])[] = [
+        ...arity.flatMap((n, i) => Array.from({ length: n }, (_, j) => [pairKeyCol(i, j), {
+          kind: 'case', whens: [[eq(col(crossed.id, `m_${maskCol(i)}`), compilerInt(1)), col(crossed.id, keyCol(i, j))]], else: compilerNull('any'),
+        } as Expr] as const)),
+        ...(map ? [[`p_${SIG}`, signature(col(crossed.id, MAP_COL), col(crossed.id, `m_${KS}`), fresh, 'whole')] as const] : []),
+      ];
+      const left = make.project({
+        id: fresh('p'), input: crossed, channels: [],
+        type: typeOf(...crossed.type.cols, ...projected.map(([name]) => meta(name, 'any', true))),
+        exprs: [...crossed.type.cols.map((column) => [column.name, col(crossed.id, column.name)] as const), ...projected],
+      });
+      const on = [
+        ...maskCols.map((name) => eq(col(left.id, `m_${name}`), col(later.id, name))),
+        ...arity.flatMap((n, i) => Array.from({ length: n }, (_, j): Expr =>
+          ({ kind: 'binary', op: 'is', left: col(left.id, pairKeyCol(i, j)), right: col(later.id, keyCol(i, j)) }))),
+        ...(map ? [eq(col(left.id, `p_${SIG}`), col(later.id, SIG))] : []),
+      ].reduce((a, b) => and(a, b));
+      return { left, right: later, on };
+    },
+  };
+}
+const maskCol = (i: number): string => `g_m${i}`;
+const keyCol = (i: number, j: number): string => `g_k${i}_${j}`;
+const pairKeyCol = (i: number, j: number): string => `g_p${i}_${j}`;
+
+/**
+ * A MERGE SEARCH PER DRIVER, SEEKED — every driver × candidate pair the search admits, as `(ord?, id)`.
+ *
+ * `MergeVertexStep`/`MergeEdgeStep` search once per traverser (`MergeElementStep.java:397-404` — a
+ * `has(k, v)` chain per driver), and asked of every driver × candidate pair that test is N × V: a search
+ * per driver that reads the whole graph. So the pairs are SEEKED and the test is kept as the `residual`,
+ * `semijoin.ts`'s `indexSeek` contract — a seek NARROWS, never decides. Each `arm` is driver rows that
+ * found candidate ids (`sid`) through an index (`propertySeeks`, `endpointSeek`); the `unnarrowed`
+ * drivers have nothing to seek by and meet every candidate — the reference's answer, by definition. The
+ * arms are a function of the query text, never the data, and partition the drivers; `DISTINCT` keeps a
+ * list-cardinality key holding one value twice from finding one element twice.
+ */
+function seekedSearch(
+  driverCols: readonly ColMeta[], arms: readonly Rel[], unnarrowed: Rel, candidatesOf: () => Rel, candId: string,
+  residual: (driver: RelId, candidate: RelId) => Expr, hasOrd: boolean, bind: Binder, fresh: Minter,
+): Rel {
+  const ownerType = typeOf(...driverCols, meta(SEEK_ID, 'int'));
+  const owned = (rel: Rel, sid: Expr): Rel => make.project({
+    id: fresh('p'), input: rel, channels: [], type: ownerType,
+    exprs: [...driverCols.map((column) => [column.name, col(rel.id, column.name)] as const), [SEEK_ID, sid]],
+  });
+  const every = candidatesOf(), candidates = candidatesOf();
+  // The unnarrowed drivers have no key to drive by: they are taken FIRST (their filter read once per
+  // driver) and then read inside the candidates, each candidate once — every pair is an answer
+  // candidate, so the work is the output's size.
+  const few = bind(unnarrowed, true);
+  const everyCandidate = make.join({
+    id: fresh('j'), left: every, right: few, join: 'inner', ordered: true, channels: [],
+    on: eq(compilerInt(1), compilerInt(1)), type: typeOf(...every.type.cols, ...few.type.cols),
+  });
+  // Every arm's (driver, candidate id) first, and the search's test ONCE over their union — so the
+  // residual is spelled once per statement, not once per arm.
+  const owners = make.union({
+    id: fresh('u'), all: true, channels: [], type: ownerType,
+    inputs: [...arms.map((arm) => owned(arm, col(arm.id, SEEK_ID))), owned(everyCandidate, col(everyCandidate.id, candId))],
+  });
+  const joined = make.join({
+    id: fresh('j'), left: owners, right: candidates, join: 'inner', ordered: true, channels: [], type: typeOf(...owners.type.cols, ...candidates.type.cols),
+    on: and(eq(col(candidates.id, candId), col(owners.id, SEEK_ID)), residual(owners.id, candidates.id)),
+  });
+  const outCols = typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int'));
+  return make.distinct({
+    id: fresh('d'), channels: [], type: outCols,
+    input: make.project({
+      id: fresh('p'), input: joined, channels: [], type: outCols,
+      exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, candId)]],
+    }),
+  });
+}
+const SEEK_ID = 'sid';
+
+/** Driver rows joined to what an index found for them, projected as the driver's columns plus `sid`. The
+ *  join is ORDERED — the drivers are the outer loop and the index the inner seek; SQLite cannot estimate a
+ *  spooled snapshot, and left to itself it scanned the index's key range once per driver instead. */
+function seekOwners(driving: Rel, index: Rel, on: Expr, owner: string, fresh: Minter): Rel {
+  const hits = make.join({
+    id: fresh('j'), left: driving, right: index, join: 'inner', ordered: true, channels: [], on,
+    type: typeOf(...driving.type.cols, ...index.type.cols),
+  });
+  return make.project({
+    id: fresh('p'), input: hits, channels: [], type: typeOf(...driving.type.cols, meta(SEEK_ID, 'int')),
+    exprs: [...driving.type.cols.map((column) => [column.name, col(hits.id, column.name)] as const), [SEEK_ID, col(hits.id, owner)]],
+  });
+}
+
+/**
+ * The PROPERTY seek for a `has(key, value)` criterion of a typed value — two arms over `drivers` (a fresh
+ * relation per call, narrowed by the predicate it is handed). The first reads `(key, value)` through
+ * `vp_key_value`/`ep_key_value` at the value's `typedValueKey`, which equals every stored row
+ * `typedValueEq` admits whose storage form IS its compare form. The rows whose form is not are a number
+ * held as decimal TEXT (`storedScalar`'s exact tail — a BigDecimal, a long past ±2^53 — the reason
+ * `storedCompareOn` casts at all), so a NUMERIC driver also reads the key's TEXT values, an index RANGE
+ * (`value >= ''`: SQLite orders every TEXT after every number).
+ */
+function propertySeeks(
+  elem: Elem, drivers: (narrow: (driver: RelId) => Expr) => Rel,
+  key: (driver: RelId) => Expr, value: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
+): readonly Rel[] {
+  const spec = PROPERTY_TABLE[elem];
+  const seek = (narrow: (driver: RelId) => Expr, match: (props: RelId, driver: RelId) => Expr): Rel => {
+    const driving = drivers(narrow);
+    const props = make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
+    return seekOwners(driving, props, and(eq(col(props.id, 'key'), key(driving.id)), match(props.id, driving.id)), spec.owner, fresh);
+  };
+  return [
+    seek(() => eq(compilerInt(1), compilerInt(1)), (props, driver) => eq(col(props, 'value'), typedValueKey(value(driver), vtype(driver))[1])),
+    seek((driver) => ({ kind: 'in-list', expr: vtype(driver), values: NUMERIC_VTYPES.map(compilerText) }),
+      (props) => ({ kind: 'binary', op: '>=', left: col(props, 'value'), right: compilerText('') })),
+  ];
+}
+
+/**
+ * A COMPUTED merge's SEARCH (`mergeV/mergeE(__.project(…))`) — `has(k, value)` per computed key the
+ * driver's body was productive for (an unproductive key does not narrow), seeked by the driver's FIRST
+ * productive key (`seekedSearch`). One arm pair per key, plus the drivers productive for none.
+ */
+function computedMatch(
+  elem: Elem, carrier: Rel, candidates: () => Rel, cKeys: readonly string[],
+  ppCol: (i: number) => string, cvCol: (i: number) => string, ptCol: (i: number) => string, hasOrd: boolean, bind: Binder, fresh: Minter,
+): Rel {
+  const spec = PROPERTY_TABLE[elem];
+  const name = (carrier as Extract<Rel, { kind: 'ref' }>).name;
+  const drivers = (pred: (rel: RelId) => Expr): Rel => {
+    const ref = make.ref({ id: fresh('r'), name, channels: [], type: carrier.type });
+    return make.filter({ id: fresh('f'), input: ref, channels: [], type: ref.type, pred: pred(ref.id) });
+  };
+  const productive = (rel: RelId, i: number, yes: boolean): Expr => eq(col(rel, ppCol(i)), compilerInt(yes ? 1 : 0));
+  const firstProductive = (i: number) => (rel: RelId): Expr =>
+    cKeys.slice(0, i).map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b), productive(rel, i, true));
+  // The residual: every key's `has(k, v)`, as a correlated EXISTS over the candidate's stored property.
+  const residual = (driver: RelId, candidate: RelId): Expr => cKeys.map((key, i) => {
+    const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
+    const found = make.filter({
+      id: fresh('f'), input: scan, channels: [], type: scan.type,
+      pred: and(and(eq(col(scan.id, spec.owner), col(candidate, 'id')), eq(col(scan.id, 'key'), compilerText(key))),
+        typedValueEq(col(scan.id, 'value'), col(scan.id, 'vtype'), col(driver, cvCol(i)), col(driver, ptCol(i)))),
+    });
+    const probe = make.project({ id: fresh('p'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return or(productive(driver, i, false), { kind: 'exists', plan: probe, negated: false } as Expr);
+  }).reduce((a, b) => and(a, b));
+  const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(firstProductive(i)(rel), narrow(rel))),
+    () => compilerText(key), (driver) => col(driver, cvCol(i)), (driver) => col(driver, ptCol(i)), fresh));
+  const unnarrowed = drivers((rel) => cKeys.map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b)));
+  return seekedSearch(carrier.type.cols, arms, unnarrowed, candidates, 'id', residual, hasOrd, bind, fresh);
+}
+
+/**
+ * A MAP-VALUED merge's drivers (`inject(map).mergeV()`/`.mergeE()`), read off its spooled carrier and split
+ * by what they can seek: `with` the drivers whose map holds a STRING key (a property criterion) — exploded
+ * to their FIRST such entry in the map's own order, the one the seek reads — and `without` the rest (a
+ * `T.label`-only or empty map). `narrow` partitions them further (a host's own seek arms).
+ */
+interface MapDrivers {
+  readonly with: (narrow: (driver: RelId) => Expr) => Rel;
+  readonly without: (narrow?: (driver: RelId) => Expr) => Rel;
+  readonly all: (narrow: (driver: RelId) => Expr) => Rel;
+}
+function mapDrivers(carrier: Rel, fresh: Minter): MapDrivers {
+  const name = (carrier as Extract<Rel, { kind: 'ref' }>).name;
+  const ref = (): Rel => make.ref({ id: fresh('r'), name, channels: [], type: carrier.type });
+  const stringKey = (pair: Expr): Expr => eq({ kind: 'call', fn: 'json_extract', args: [pairSide(pair, 'keys'), compilerText('$.t')] }, compilerText('string'));
+  const stringPairs = (driver: RelId): Rel => {
+    const pairs = pairsOf(col(driver, MAP_COL), fresh);
+    return make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: stringKey(col(pairs.id, PAIR.value)) });
+  };
+  const always = eq(compilerInt(1), compilerInt(1));
+  return {
+    with: (narrow) => {
+      const drivers = ref();
+      const exploded = make.explode({
+        id: fresh('ex'), input: drivers, expr: col(drivers.id, MAP_COL), channels: [], as: PAIR,
+        type: typeOf(...drivers.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+      });
+      const others = stringPairs(exploded.id);
+      const first: Expr = { kind: 'scalar', plan: make.aggregate({
+        id: fresh('ag'), input: others, channels: [], type: typeOf(meta('o', 'int', true)), groupBy: [],
+        aggs: [['o', { kind: 'agg', fn: 'min', args: [col(others.id, PAIR.ord)] }]],
+      }) };
+      return make.filter({
+        id: fresh('f'), input: exploded, channels: [], type: exploded.type,
+        pred: and(and(stringKey(col(exploded.id, PAIR.value)), eq(col(exploded.id, PAIR.ord), first)), narrow(exploded.id)),
+      });
+    },
+    without: (narrow = () => always) => {
+      const drivers = ref();
+      return make.filter({
+        id: fresh('f'), input: drivers, channels: [], type: drivers.type,
+        pred: and({ kind: 'exists', plan: stringPairs(drivers.id), negated: true }, narrow(drivers.id)),
+      });
+    },
+    all: (narrow) => {
+      const drivers = ref();
+      return make.filter({ id: fresh('f'), input: drivers, channels: [], type: drivers.type, pred: narrow(drivers.id) });
+    },
+  };
+}
+
+/** The property seek of a map-valued driver's first STRING entry (`mapDrivers.with`) — `propertySeeks` with
+ *  the key, value and vtype read off the pair's `{t,v}` nodes. */
+function mapEntrySeeks(elem: Elem, drivers: MapDrivers, fresh: Minter, narrow: (driver: RelId) => Expr = () => eq(compilerInt(1), compilerInt(1))): readonly Rel[] {
+  const side = (driver: RelId, which: 'keys' | 'values', path: string): Expr =>
+    ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(driver, PAIR.value), which), compilerText(path)] });
+  return propertySeeks(elem, (seek) => drivers.with((driver) => and(narrow(driver), seek(driver))),
+    (driver) => side(driver, 'keys', '$.v'), (driver) => side(driver, 'values', '$.v'), (driver) => side(driver, 'values', '$.t'), fresh);
+}
+
+/** The ENDPOINT seek of an edge search that names an endpoint (`side`, the driver's resolved rowid): the
+ *  edges leaving (`src`) or entering (`tgt`) it, through `e_out`/`e_in`. */
+function endpointSeek(driving: Rel, side: 'src' | 'tgt', fresh: Minter): Rel {
+  const scan = make.scan({ id: fresh('se'), table: 'edges', alias: fresh('rse'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
+  // Renamed, so the join's output names stay unique beside the driver's own resolved `src`/`tgt`.
+  const edges = make.project({
+    id: fresh('p'), input: scan, channels: [], type: typeOf(meta('se_id', 'int'), meta('se_end', 'int')),
+    exprs: [['se_id', col(scan.id, 'id')], ['se_end', col(scan.id, side)]],
+  });
+  return seekOwners(driving, edges, eq(col(edges.id, 'se_end'), col(driving.id, side)), 'se_id', fresh);
+}
+
+/** The LABEL seek of a vertex search that names a label (`label`, a name per driver): the vertices
+ *  carrying it, through `labels(name)` and `vl_label`. */
+function labelSeek(driving: Rel, label: (driver: RelId) => Expr, fresh: Minter): Rel {
+  const names = make.scan({ id: fresh('sl'), table: 'labels', alias: fresh('rsl'), channels: [], type: typeOf(...LABELS_COLS) });
+  const owners = make.scan({ id: fresh('sv'), table: 'vertex_labels', alias: fresh('rsv'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+  const labelled = make.join({
+    id: fresh('j'), left: names, right: owners, join: 'inner', ordered: true, channels: [], on: eq(col(owners.id, 'label'), col(names.id, 'id')),
+    type: typeOf(...LABELS_COLS, ...VERTEX_LABEL_COLS),
+  });
+  const index = make.project({
+    id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('sl_name', 'text'), meta('sl_node', 'int')),
+    exprs: [['sl_name', col(labelled.id, 'name')], ['sl_node', col(labelled.id, 'node')]],
+  });
+  return seekOwners(driving, index, eq(col(index.id, 'sl_name'), label(driving.id)), 'sl_node', fresh);
+}
+
+/**
+ * THE CREATION EACH UNMATCHED DRIVER CARRIES — a computed merge's per-driver tuple (and the `exact`
+ * columns beside it, an edge's endpoints) met against the created tuples', as `(ord?, …, cid)`.
+ *
+ * `wanted`'s `Distinct` decided which drivers share a creation, so this joins by the SAME identity: every
+ * column NULL-safe equal (`IS` — `Distinct` puts NULLs together and meets `30` with `30.0`), over the
+ * tuple's own columns, so SQLite seeks the spooled side through an automatic index. A JSON spelling of the
+ * tuple is an expression no index holds (drivers × creations, a nested loop) and a DIFFERENT identity from
+ * `Distinct`'s: `30` and `30.0` share one creation but not one JSON key, which loses a driver's row.
+ */
+function createdPerDriver(unmatched: Rel, created: Rel, tupleCols: readonly ColMeta[], exact: readonly string[], hasOrd: boolean, fresh: Minter): Rel {
+  const names = [...exact, ...tupleCols.map((column) => column.name)];
+  const typed = (rel: Rel, name: string): ColMeta => rel.type.cols.find((column) => column.name === name)!;
+  const um = make.project({
+    id: fresh('p'), input: unmatched, channels: [], type: typeOf(...[...(hasOrd ? [ORD] : []), ...names].map((name) => typed(unmatched, name))),
+    exprs: [...(hasOrd ? [ORD] : []), ...names].map((name) => [name, col(unmatched.id, name)] as const),
+  });
+  const ct = make.project({
+    id: fresh('p'), input: created, channels: [],
+    type: typeOf(meta('cid', 'int'), ...names.map((name) => ({ ...typed(created, name), name: `c_${name}` }))),
+    exprs: [['cid', col(created.id, 'id')], ...names.map((name) => [`c_${name}`, col(created.id, name)] as const)],
+  });
+  const on = names.map((name): Expr => ({ kind: 'binary', op: 'is', left: col(um.id, name), right: col(ct.id, `c_${name}`) })).reduce((a, b) => and(a, b));
+  return make.join({ id: fresh('j'), left: um, right: ct, join: 'inner', on, channels: [], type: typeOf(...um.type.cols, ...ct.type.cols) });
+}
+
 /** `guardMergeInterleaving`'s `couldMatch` for a COMPUTED search (`mergeV/mergeE(__.project(…))`): could the
  *  LATER driver's search find what the EARLIER driver's map created? Per key — the later driver's key does
  *  not narrow (an unproductive body, `pp = 0`), or the creation carries it: the earlier map's value, under
  *  the search's own compare (`typedValueEq`), or an `onCreate` constant (read as "could", its value is not
- *  compared here — fail closed). */
+ *  compared here — fail closed). Its equi key (`keying`, `searchKeying`) is each compared key's `typedValueKey`, narrowing
+ *  where the later driver's body was productive. */
 function computedCouldMatch(
   cKeys: readonly string[], onCreate: MergeSpec | null,
   ppCol: (i: number) => string, cvCol: (i: number) => string, ptCol: (i: number) => string,
-): (earlier: RelId, later: RelId) => Expr {
+): { readonly couldMatch: (earlier: RelId, later: RelId) => Expr; readonly keying: PairKeying } {
   const always = eq(compilerInt(1), compilerInt(1));
   const created = new Set(Object.keys(onCreate?.props ?? {}));
-  return (earlier, later) => cKeys.map((key, i): Expr => created.has(key) ? always
-    : or(eq(col(later, ppCol(i)), compilerInt(0)), and(eq(col(earlier, ppCol(i)), compilerInt(1)),
-      typedValueEq(col(earlier, cvCol(i)), col(earlier, ptCol(i)), col(later, cvCol(i)), col(later, ptCol(i))))))
-    .reduce((a, b) => and(a, b), always);
+  const compared = cKeys.flatMap((key, i) => created.has(key) ? [] : [i]);
+  return {
+    couldMatch: (earlier, later) => compared.map((i): Expr =>
+      or(eq(col(later, ppCol(i)), compilerInt(0)), and(eq(col(earlier, ppCol(i)), compilerInt(1)),
+        typedValueEq(col(earlier, cvCol(i)), col(earlier, ptCol(i)), col(later, cvCol(i)), col(later, ptCol(i))))))
+      .reduce((a, b) => and(a, b), always),
+    keying: searchKeying(compared.map((i) => ({ present: (rel) => col(rel, ppCol(i)), key: (rel) => typedValueKey(col(rel, cvCol(i)), col(rel, ptCol(i))) })), null),
+  };
 }
 
 /** `guardMergeInterleaving`'s `couldMatch` for a MAP-VALUED driver (`inject(map).mergeV()`): could the
@@ -4355,30 +4739,9 @@ function mergeVComputed(
   const tupleKey = (rel: RelId): Expr => ({ kind: 'call', fn: 'json_array', args: cKeys.flatMap((_, i) => [col(rel, ppCol(i)), col(rel, ptCol(i)), col(rel, cvCol(i))]) });
 
   // THE MATCH — candidates (constant criteria, input-independent) narrowed by every computed criterion.
-  const candidates = matching(searchId, labels, Object.entries(match.props), child, fresh);
-  if (!candidates) return null;
-  // `has(k, concreteValue)` per key as a correlated EXISTS over the candidate's stored property, compared
-  // vtype-aware (`typedValueEq` = `Compare.eq`); an unproductive key (`present=0`) does not narrow.
-  const criterion = (candId: Expr, i: number): Expr => {
-    const spec = PROPERTY_TABLE.vertex;
-    const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
-    const matched = make.filter({
-      id: fresh('f'), input: scan, channels: [], type: scan.type,
-      pred: and(and(eq(col(scan.id, spec.owner), candId), eq(col(scan.id, 'key'), compilerText(cKeys[i]!))),
-        typedValueEq(col(scan.id, 'value'), col(scan.id, 'vtype'), col(carrier.id, cvCol(i)), col(carrier.id, ptCol(i)))),
-    });
-    const probe = make.project({ id: fresh('p'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return or(eq(col(carrier.id, ppCol(i)), compilerInt(0)), { kind: 'exists', plan: probe, negated: false });
-  };
-  const conj = cKeys.map((_, i) => criterion(col(candidates.id, 'id'), i)).reduce((a, b) => and(a, b));
-  const joined = make.join({
-    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: conj, channels: [],
-    type: typeOf(...carrier.type.cols, meta('id', 'int')),
-  });
-  const matched = bind(make.project({
-    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
-    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
-  }), true);
+  const candidates = (): Rel | null => matching(searchId, labels, Object.entries(match.props), child, fresh);
+  if (!candidates()) return null;
+  const matched = bind(computedMatch('vertex', carrier, () => candidates()!, cKeys, ppCol, cvCol, ptCol, hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
   // the carrier when `matched` is empty).
   const trueLit = eq(compilerInt(1), compilerInt(1));
@@ -4393,7 +4756,7 @@ function mergeVComputed(
   if (!createOwners) return null;
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`).
   guardMergeInterleaving('mergeV', incoming, matched,
-    { rel: unmatched, createKey: tupleKey, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol) },
+    { rel: unmatched, createKey: tupleKey, ...computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol) },
     { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, new Set([...cKeys, ...Object.keys(match.props)]), propertySteps, child.writes), perDriverSearch: true },
     bind, guard, fresh);
   // `onMatch` over the MATCHED vertices — shared with the constant path; the per-driver runtime write
@@ -4450,12 +4813,7 @@ function mergeVComputed(
 
   // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's tuple KEY to the created tuple's, so the
   // one vertex made for a repeated map is carried by every driver that asked for it (`crossed`'s equi-join).
-  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('tk', 'text')),
-    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['tk', tupleKey(unmatched.id)]] });
-  const ctMin = make.project({ id: fresh('p'), input: createdTuples, channels: [], type: typeOf(meta('cid', 'int'), meta('tk', 'text')),
-    exprs: [['cid', col(createdTuples.id, 'id')], ['tk', tupleKey(createdTuples.id)]] });
-  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner', on: eq(col(umMin.id, 'tk'), col(ctMin.id, 'tk')), channels: [],
-    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('tk', 'text'), meta('cid', 'int'), meta('ct_tk', 'text')) });
+  const cf = createdPerDriver(unmatched, createdTuples, tupleCols, [], hasOrd, fresh);
   const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
   // A RUNTIME `onCreate` value resolves at the DRIVER and lands per-driver on the vertex that driver
@@ -4553,8 +4911,8 @@ export function mergeVFromMap(
   // the candidate does NOT have (`has(k, v)` for every entry) — the dynamic-key form of `mergeVComputed`'s
   // per-key EXISTS, the key read off the pair instead of a compile-time string. An empty map matches
   // every vertex, exactly as `V()` does (`searchVerticesTraversal` returns `g.V()` for an empty map).
-  const allMatch = (candId: Expr): Expr => {
-    const pairs = pairsOf(driverMap, fresh);
+  const allMatch = (driver: RelId, candId: Expr): Expr => {
+    const pairs = pairsOf(col(driver, MAP_COL), fresh);
     // A STRING property key satisfied by a stored property (vtype-aware compare).
     const vp = make.scan({ id: fresh('vp'), table: PROPERTY_TABLE.vertex.table, alias: fresh('rp'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
     const vpMatch = make.filter({
@@ -4578,16 +4936,18 @@ export function mergeVFromMap(
     });
     return { kind: 'exists', plan: unsat, negated: true };
   };
-  const candScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('nc'), channels: [], type: typeOf(...NODES_COLS) });
-  const candidates = make.project({ id: fresh('p'), input: candScan, channels: [], type: ID_TYPE, exprs: [['id', col(candScan.id, 'id')]] });
-  const joined = make.join({
-    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: allMatch(col(candidates.id, 'id')), channels: [],
-    type: typeOf(...carrier.type.cols, meta('id', 'int')),
-  });
-  const matched = bind(make.project({
-    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
-    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
-  }), true);
+  const candidates = (): Rel => {
+    const candScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('nc'), channels: [], type: typeOf(...NODES_COLS) });
+    return make.project({ id: fresh('p'), input: candScan, channels: [], type: ID_TYPE, exprs: [['id', col(candScan.id, 'id')]] });
+  };
+  // SEEKED by the map's first property entry, else by its `T.label`; an empty map meets every vertex.
+  const drivers = mapDrivers(carrier, fresh);
+  const named = (driver: RelId): Expr => ({ kind: 'binary', op: 'is not', left: mapLabelScalar(col(driver, MAP_COL)), right: compilerNull('text') });
+  const matched = bind(seekedSearch(carrier.type.cols, [
+    ...mapEntrySeeks('vertex', drivers, fresh),
+    labelSeek(drivers.without(named), (driver) => mapLabelScalar(col(driver, MAP_COL)), fresh),
+  ], drivers.without((driver) => ({ kind: 'unary', op: 'not', arg: named(driver) })), candidates, 'id',
+  (driver, candidate) => allMatch(driver, col(candidate, 'id')), hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING → one create per DISTINCT map (two drivers with the same map create one vertex).
   const trueLit = eq(compilerInt(1), compilerInt(1));
   const unmatched = make.filter({
@@ -4605,7 +4965,7 @@ export function mergeVFromMap(
   // any onMatch key may be searched (`null`), and a driver's `[name:x]` finds another's `[name:x, age:1]`
   // creation — `mapCouldMatch`.
   guardMergeInterleaving('mergeV', incoming, matched,
-    { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, fresh) },
+    { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, fresh), keying: searchKeying([], { excluded: Object.keys(onCreate?.props ?? {}) }) },
     { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, null, propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched vertices (runtime declined above, so the callback is never
   // reached). Shared with the other vertex-merge paths.
@@ -4677,14 +5037,9 @@ export function mergeVFromMap(
   // (`createOwners` — a restated key is one entry of the union, not a second value).
   for (const write of createExtra) if (!propertyStatements('vertex', createOwners(write, createdMaps), write, bind, fresh, child, NO_ALIASES, guard)) return null;
 
-  // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's map to the created map (as canonical JSON
-  // text), so the one vertex made for a repeated map is carried by every driver that asked (`crossed`).
-  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('mk', 'text')),
-    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['mk', jsonText(col(unmatched.id, MAP_COL))]] });
-  const ctMin = make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('cid', 'int'), meta('mk', 'text')),
-    exprs: [['cid', col(createdMaps.id, 'id')], ['mk', jsonText(col(createdMaps.id, MAP_COL))]] });
-  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner', on: eq(col(umMin.id, 'mk'), col(ctMin.id, 'mk')), channels: [],
-    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('mk', 'text'), meta('cid', 'int'), meta('ct_mk', 'text')) });
+  // THE CREATED VERTEX PER UNMATCHED DRIVER — join the driver's map to the created map (`wanted`'s own
+  // identity), so the one vertex made for a repeated map is carried by every driver that asked (`crossed`).
+  const cf = createdPerDriver(unmatched, createdMaps, [meta(MAP_COL, 'json')], [], hasOrd, fresh);
   const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
 
@@ -4812,12 +5167,18 @@ export function mergeEFromMap(
   const endpointRowid = (mapCol: Expr, side: 'OUT' | 'IN'): Expr => {
     const p = pairsOf(mapCol, fresh);
     const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isDir(p, side) });
-    const nodeScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('rn'), channels: [], type: typeOf(...NODES_COLS) });
     const numeric: Expr = { kind: 'in-list', expr: valT(hits), values: NUMERIC_ID_VTYPES.map((t) => compilerText(t)) };
-    const match: Expr = { kind: 'case', whens: [[numeric, eq(col(nodeScan.id, 'id'), valV(hits))]], else: eq(col(nodeScan.id, 'uid'), valV(hits)) };
-    const joined = make.join({ id: fresh('j'), left: hits, right: nodeScan, join: 'inner', on: match, channels: [],
-      type: typeOf(...hits.type.cols, ...NODES_COLS) });
-    const only = make.project({ id: fresh('p'), input: joined, channels: [], type: ID_TYPE, exprs: [['id', col(joined.id, 'id')]] });
+    // One LOOKUP per id form — the rowid, or the unique `uid` — chosen by the endpoint's type OUTSIDE the
+    // lookup: a `CASE` inside the join's ON is a predicate no index answers, a scan of every vertex per driver.
+    const byColumn = (column: 'id' | 'uid'): Expr => {
+      const nodeScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('rn'), channels: [], type: typeOf(...NODES_COLS) });
+      const found = make.filter({ id: fresh('f'), input: nodeScan, channels: [], type: nodeScan.type, pred: eq(col(nodeScan.id, column), valV(hits)) });
+      return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: found, channels: [], type: ID_TYPE, exprs: [['id', col(found.id, 'id')]] }) };
+    };
+    const only = make.project({
+      id: fresh('p'), input: hits, channels: [], type: ID_TYPE,
+      exprs: [['id', { kind: 'case', whens: [[numeric, byColumn('id')]], else: byColumn('uid') }]],
+    });
     return { kind: 'scalar', plan: make.limit({ id: fresh('li'), input: only, channels: [], type: ID_TYPE, count: compilerInt(1) }) };
   };
 
@@ -4837,21 +5198,22 @@ export function mergeEFromMap(
       ['lbl', mapLabelScalar(map0)],
     ],
   }), true);
-  const driverMap = col(carrier.id, MAP_COL);
 
   // THE MATCH — every edge the driver's whole map is satisfied by: no STRING-key pair the candidate
   // lacks (dynamic-key EXISTS over `edge_properties`, vtype-aware), narrowed by the label (`hasLabel`),
   // the source endpoint (`edge.src`), and the target endpoint (`edge.tgt`) where the map named them.
-  const candScan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('ec'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   // Renamed so the search join's output names stay unique — the candidate's own endpoints/label do not
   // collide with the carrier's resolved `src`/`tgt`.
-  const candidates = make.project({
-    id: fresh('p'), input: candScan, channels: [], type: typeOf(meta('cid', 'int'), meta('csrc', 'int'), meta('clabel', 'int'), meta('ctgt', 'int')),
-    exprs: [['cid', col(candScan.id, 'id')], ['csrc', col(candScan.id, 'src')], ['clabel', col(candScan.id, 'label')], ['ctgt', col(candScan.id, 'tgt')]],
-  });
-  const allMatch = (cand: Rel): Expr => {
-    const candId = col(cand.id, 'cid');
-    const pairs = pairsOf(driverMap, fresh);
+  const candidates = (): Rel => {
+    const candScan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('ec'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
+    return make.project({
+      id: fresh('p'), input: candScan, channels: [], type: typeOf(meta('cid', 'int'), meta('csrc', 'int'), meta('clabel', 'int'), meta('ctgt', 'int')),
+      exprs: [['cid', col(candScan.id, 'id')], ['csrc', col(candScan.id, 'src')], ['clabel', col(candScan.id, 'label')], ['ctgt', col(candScan.id, 'tgt')]],
+    });
+  };
+  const allMatch = (driver: RelId, cand: RelId): Expr => {
+    const candId = col(cand, 'cid');
+    const pairs = pairsOf(col(driver, MAP_COL), fresh);
     const spec = PROPERTY_TABLE.edge;
     const ep = make.scan({ id: fresh('ep'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
     const epMatch = make.filter({
@@ -4868,25 +5230,27 @@ export function mergeEFromMap(
     });
     const propsOk: Expr = { kind: 'exists', negated: true, plan: unsat };
     // The label: no `T.label` in the map matches any label, else the candidate's label must be that name.
-    const lblCol = col(carrier.id, 'lbl');
+    const lblCol = col(driver, 'lbl');
     const lb = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
     const lblFilter = make.filter({ id: fresh('f'), input: lb, channels: [], type: lb.type, pred: eq(col(lb.id, 'name'), lblCol) });
     const lblIds = make.project({ id: fresh('p'), input: lblFilter, channels: [], type: ID_TYPE, exprs: [['id', col(lblFilter.id, 'id')]] });
     const labelOk: Expr = or({ kind: 'binary', op: 'is', left: lblCol, right: compilerNull('text') },
-      { kind: 'in-query', expr: col(cand.id, 'clabel'), plan: lblIds, negated: false });
+      { kind: 'in-query', expr: col(cand, 'clabel'), plan: lblIds, negated: false });
     // The endpoints: a side the map did not name does not narrow; one it named must equal the candidate's.
-    const outOk: Expr = or(eq(col(carrier.id, 'hasOut'), compilerInt(0)), eq(col(cand.id, 'csrc'), col(carrier.id, 'src')));
-    const inOk: Expr = or(eq(col(carrier.id, 'hasIn'), compilerInt(0)), eq(col(cand.id, 'ctgt'), col(carrier.id, 'tgt')));
+    const outOk: Expr = or(eq(col(driver, 'hasOut'), compilerInt(0)), eq(col(cand, 'csrc'), col(driver, 'src')));
+    const inOk: Expr = or(eq(col(driver, 'hasIn'), compilerInt(0)), eq(col(cand, 'ctgt'), col(driver, 'tgt')));
     return and(and(propsOk, labelOk), and(outOk, inOk));
   };
-  const joined = make.join({
-    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: allMatch(candidates), channels: [],
-    type: typeOf(...carrier.type.cols, ...candidates.type.cols),
-  });
-  const matched = bind(make.project({
-    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
-    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'cid')]],
-  }), true);
+  // SEEKED by what the map names, most selective first: its OUT endpoint, else its IN endpoint, else its
+  // first property entry; a map naming none of them (a label, or nothing) meets every edge.
+  const drivers = mapDrivers(carrier, fresh);
+  const named = (driver: RelId, side: 'hasOut' | 'hasIn'): Expr => eq(col(driver, side), compilerInt(1));
+  const neither = (driver: RelId): Expr => and(eq(col(driver, 'hasOut'), compilerInt(0)), eq(col(driver, 'hasIn'), compilerInt(0)));
+  const matched = bind(seekedSearch(carrier.type.cols, [
+    endpointSeek(drivers.all((driver) => named(driver, 'hasOut')), 'src', fresh),
+    endpointSeek(drivers.all((driver) => and(eq(col(driver, 'hasOut'), compilerInt(0)), named(driver, 'hasIn'))), 'tgt', fresh),
+    ...mapEntrySeeks('edge', drivers, fresh, neither),
+  ], drivers.without(neither), candidates, 'cid', allMatch, hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING — a carrier row whose `ord` has no matched row (or the single-row carrier
   // when `matched` is empty).
   const trueLit = eq(compilerInt(1), compilerInt(1));
@@ -4910,6 +5274,7 @@ export function mergeEFromMap(
     rel: unmatched,
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [col(rel, 'src'), col(rel, 'tgt'), jsonText(col(rel, MAP_COL))] }),
     couldMatch: (earlier, later) => and(mapCould(earlier, later), and(sameSide(earlier, later, 'hasOut', 'src'), sameSide(earlier, later, 'hasIn', 'tgt'))),
+    keying: searchKeying(([['hasOut', 'src'], ['hasIn', 'tgt']] as const).map(([has, side]) => ({ present: (rel: RelId) => col(rel, has), key: (rel: RelId) => [col(rel, side)] })), { excluded: Object.keys(onCreate?.props ?? {}) }),
   }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, null, propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched edges (runtime declined above). Empty on the create path.
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
@@ -4991,13 +5356,7 @@ export function mergeEFromMap(
 
   // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, map)` to the created tuple's,
   // so the one edge made for a repeated tuple is carried by every driver that asked (`crossed` by `ord`).
-  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('mk', 'text')),
-    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')], ['mk', jsonText(col(unmatched.id, MAP_COL))]] });
-  const ctMin = make.project({ id: fresh('p'), input: createdTuples, channels: [], type: typeOf(meta('cid', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta('mk', 'text')),
-    exprs: [['cid', col(createdTuples.id, 'id')], ['src', col(createdTuples.id, 'src')], ['tgt', col(createdTuples.id, 'tgt')], ['mk', jsonText(col(createdTuples.id, MAP_COL))]] });
-  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner',
-    on: and(and(eq(col(umMin.id, 'src'), col(ctMin.id, 'src')), eq(col(umMin.id, 'tgt'), col(ctMin.id, 'tgt'))), eq(col(umMin.id, 'mk'), col(ctMin.id, 'mk'))), channels: [],
-    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('mk', 'text'), meta('cid', 'int'), meta('ct_src', 'int'), meta('ct_tgt', 'int'), meta('ct_mk', 'text')) });
+  const cf = createdPerDriver(unmatched, createdTuples, [meta(MAP_COL, 'json')], ['src', 'tgt'], hasOrd, fresh);
   const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
 
@@ -5278,28 +5637,9 @@ function mergeEComputed(
   // criterion as a correlated EXISTS over the candidate edge's stored property, vtype-aware
   // (`typedValueEq` = `Compare.eq`). Endpoints do NOT narrow the search (`MergeEdgeStep` searches by the
   // MATCH map alone; `onCreate`'s endpoints are for the create). An unproductive key does not narrow.
-  const candidates = edgeCriteria(null, null, [], child, fresh);
-  if (!candidates) return null;
-  const criterion = (candId: Expr, i: number): Expr => {
-    const spec = PROPERTY_TABLE.edge;
-    const scan = make.scan({ id: fresh('ep'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
-    const matchedRows = make.filter({
-      id: fresh('f'), input: scan, channels: [], type: scan.type,
-      pred: and(and(eq(col(scan.id, spec.owner), candId), eq(col(scan.id, 'key'), compilerText(cKeys[i]!))),
-        typedValueEq(col(scan.id, 'value'), col(scan.id, 'vtype'), col(carrier.id, cvCol(i)), col(carrier.id, ptCol(i)))),
-    });
-    const probe = make.project({ id: fresh('p'), input: matchedRows, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return or(eq(col(carrier.id, ppCol(i)), compilerInt(0)), { kind: 'exists', plan: probe, negated: false });
-  };
-  const conj = cKeys.map((_, i) => criterion(col(candidates.id, 'id'), i)).reduce((a, b) => and(a, b));
-  const joined = make.join({
-    id: fresh('j'), left: carrier, right: candidates, join: 'inner', on: conj, channels: [],
-    type: typeOf(...carrier.type.cols, meta('id', 'int')),
-  });
-  const matched = bind(make.project({
-    id: fresh('p'), input: joined, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
-    exprs: [...(hasOrd ? [[ORD, col(joined.id, ORD)] as const] : []), ['id', col(joined.id, 'id')]],
-  }), true);
+  const candidates = (): Rel | null => edgeCriteria(null, null, [], child, fresh);
+  if (!candidates()) return null;
+  const matched = bind(computedMatch('edge', carrier, () => candidates()!, cKeys, ppCol, cvCol, ptCol, hasOrd, bind, fresh), true);
   // `onMatch` over the MATCHED edges. A runtime EDGE arm value is declined upstream (`writeOf`, the
   // take-first edge path), so `matchWrites` is constant-only here — a computed mergeE whose onMatch holds
   // a `__.trav` value declines the whole merge (fail closed), the same deferral the inline edge path has.
@@ -5322,7 +5662,7 @@ function mergeEComputed(
   // two drivers with one map but different endpoints are one edge in the loop (the second MATCHES the
   // first's creation) and two here: the create key is the endpoints AND the map, as `wanted` dedupes them.
   guardMergeInterleaving('mergeE', incoming, matched, {
-    rel: unmatched, couldMatch: computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol),
+    rel: unmatched, ...computedCouldMatch(cKeys, onCreate, ppCol, cvCol, ptCol),
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [...(src ? [col(rel, 'src')] : []), ...(tgt ? [col(rel, 'tgt')] : []), tupleKey(rel)] }),
   }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, new Set(cKeys), propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, aliases, guard)) return null;
@@ -5418,16 +5758,10 @@ function mergeEComputed(
   // computed tuple does not already hold the key (`createOwners`; the guard proved a held key agrees).
   for (const write of createExtra) if (!propertyStatements('edge', createOwners(write, createdTuples), write, bind, fresh, child, aliases, guard)) return null;
 
-  // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, tupleKey)` to the created
-  // tuple's, so the one edge made for a repeated `(endpoints, map)` is carried by every driver that asked
-  // (`crossed`'s equi-join by `ord`).
-  const umMin = make.project({ id: fresh('p'), input: unmatched, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('tk', 'text')),
-    exprs: [...(hasOrd ? [[ORD, col(unmatched.id, ORD)] as const] : []), ['src', col(unmatched.id, 'src')], ['tgt', col(unmatched.id, 'tgt')], ['tk', tupleKey(unmatched.id)]] });
-  const ctMin = make.project({ id: fresh('p'), input: createdTuples, channels: [], type: typeOf(meta('cid', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta('tk', 'text')),
-    exprs: [['cid', col(createdTuples.id, 'id')], ['src', col(createdTuples.id, 'src')], ['tgt', col(createdTuples.id, 'tgt')], ['tk', tupleKey(createdTuples.id)]] });
-  const cf = make.join({ id: fresh('j'), left: umMin, right: ctMin, join: 'inner',
-    on: and(and(eq(col(umMin.id, 'src'), col(ctMin.id, 'src')), eq(col(umMin.id, 'tgt'), col(ctMin.id, 'tgt'))), eq(col(umMin.id, 'tk'), col(ctMin.id, 'tk'))), channels: [],
-    type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('src', 'int'), meta('tgt', 'int'), meta('tk', 'text'), meta('cid', 'int'), meta('ct_src', 'int'), meta('ct_tgt', 'int'), meta('ct_tk', 'text')) });
+  // THE CREATED EDGE PER UNMATCHED DRIVER — join the driver's `(src, tgt, map)` to the created tuple's, so
+  // the one edge made for a repeated `(endpoints, map)` is carried by every driver that asked (`crossed`'s
+  // equi-join by `ord`).
+  const cf = createdPerDriver(unmatched, createdTuples, tupleCols, ['src', 'tgt'], hasOrd, fresh);
   const createdFor = bind(make.project({ id: fresh('p'), input: cf, channels: [], type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta('id', 'int')),
     exprs: [...(hasOrd ? [[ORD, col(cf.id, ORD)] as const] : []), ['id', col(cf.id, 'cid')]] }), true);
 

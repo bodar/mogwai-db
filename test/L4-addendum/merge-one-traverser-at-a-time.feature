@@ -627,3 +627,38 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
     Then the result should be unordered
       | result |
       | d[3].l |
+
+  # THE GUARD COLLAPSES DRIVERS BY TUPLE, KEEPING EACH TUPLE'S FIRST AND LAST POSITION — and the LAST is
+  # load-bearing. Ordered by name the drivers are lop (code x, no tag), marko (x, 29), ripple (x, no tag):
+  # lop creates {code:x}; marko's search (x, 29) misses it and creates {code:x, tag:29}; ripple's search
+  # (x alone — its tag body is unproductive) then finds BOTH and emits 2, so the reference answers 4. The
+  # set-based merge would share lop's creation with ripple and answer 3. The only pair that says so is
+  # (marko, ripple), which a tuple keyed by its FIRST position (lop's tuple at 1, before marko) never sees.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_V_hasXname_lop_marko_rippleX_orderXbyXnameX_mergeVXproject_code_tag_byXconstant_xX_byXageXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name",P.within("lop","marko","ripple")).order().by("name").mergeV(__.project("code","tag").by(__.constant("x")).by("age")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+
+  # MIXED MASKS that interleaving cannot change, which must keep answering: lop and ripple (code y, no tag)
+  # share one creation; vadas's search (y, 27) cannot find a creation without a tag and makes its own.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_V_hasXname_lop_ripple_vadasX_orderXbyXnameX_mergeVXproject_code_tag_byXconstant_yX_byXageXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name",P.within("lop","ripple","vadas")).order().by("name").mergeV(__.project("code","tag").by(__.constant("y")).by("age")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].l |
+    And the graph should return 2 for count of "g.V().has(\"code\",\"y\")"
+    And the graph should return 1 for count of "g.V().has(\"code\",\"y\").has(\"tag\",27)"

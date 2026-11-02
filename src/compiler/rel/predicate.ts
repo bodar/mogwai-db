@@ -599,6 +599,27 @@ export const typedValueEq = (aValue: Expr, aVtype: Expr, bValue: Expr, bVtype: E
   };
 };
 
+/**
+ * `typedValueEq`'s EQUIVALENCE KEY — a `(family, key)` pair per typed value such that
+ * `typedValueEq(a, b)` holds exactly when `a.family = b.family AND a.key = b.key`, so a pair test that
+ * was a per-pair CASE becomes an EQUI-join SQLite can index (an automatic index on a spooled side, or
+ * `vp_key_value`).
+ *
+ * It is `typedValueEq`'s two arms read as one partition: every `Number` vtype is ONE family (the
+ * `numeric` arm — `NumberHelper` compares across int/real), keyed by `storedCompareOn` (the same cast
+ * the arm applies, which bridges `30` and `30.0` and pulls a decimal/bigint TEXT tail to its number);
+ * every other vtype is its own family keyed by the raw value (the same-vtype arm). A `NULL` vtype or
+ * value keys `NULL`, which no `=` meets — `typedValueEq` is false there too. The family sentinel is not
+ * a vtype name, so a numeric value cannot meet a non-numeric one whose vtype spells it.
+ */
+export const typedValueKey = (value: Expr, vtype: Expr): readonly [Expr, Expr] => {
+  const numeric: Expr = { kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) };
+  return [
+    { kind: 'case', whens: [[numeric, compilerText('#number')]], else: vtype },
+    { kind: 'case', whens: [[numeric, storedCompareOn(vtype)(value)]], else: value },
+  ];
+};
+
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped. A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
  * compiler constant. */

@@ -385,8 +385,8 @@
   },
   "mergeV": {
     "binds": 3,
-    "bytes": 2166,
-    "compiler": 195,
+    "bytes": 4868,
+    "compiler": 374,
     "bound": 0
   },
   "min": {
@@ -584,7 +584,7 @@
   "valueMap": {
     "binds": 3,
     "bytes": 2391,
-    "compiler": 75,
+    "compiler": 82,
     "bound": 0
   },
   "values": {
@@ -595,8 +595,8 @@
   },
   "where": {
     "binds": 0,
-    "bytes": 7420,
-    "compiler": 91,
+    "bytes": 7277,
+    "compiler": 87,
     "bound": 0
   }
 }
