@@ -710,7 +710,7 @@ UNEVALUABLE`.
   before it read after it — the last is the barrier channel-carrying item in `docs/outstanding-work.md`.
 
 **Families still largely open** (rank live via `rel-blockers`): the scalar-transform tail; branch (the
-SOURCE-position `g.union(a, b)` and the option-keyed `choose(<projection>)` where the choice is a body rather
+option-keyed `choose(<projection>)` where the choice is a body rather
 than a `T` token); row ops (`Column`-keyed and the `path()` tails); aliases (`select`, dominated by
 `Pop.all`/`Pop.mixed` history reads); side effects; then `local`, `match`, `where`, the `path` tails.
 
@@ -744,6 +744,243 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
   (`Select.feature:578-596`).
 - **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive` are
   distinguishable no other way, and a body that cannot report it DECLINES.
+
+
+### Next round (from the 2026-11-02 second round — read before picking items)
+
+Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed":
+- `fa25b24e`: the text-literal decline sweep is unflaked.
+- `8143edf2`: S2, the re-sourcing V()/E() arm honours the absent host.
+- `e54b3a02`: reuse-sweep 1, `aliasElementHost`.
+- `8cc14cd7`: F6, leg bodies see the row's labels.
+- `30461694` and `311c95ae`: S1, one typed constant-name judge, and `mapSlot` is now injective.
+- `71416f55`: source `g.union(…)` over the starter row.
+
+Through S1 and S2 this also closed F1–F6, F9, F10, F14 (its first half), reuse 5 and reuse 6 of the round below.
+Nothing was deferred or parked, and no round branch holds work that is not on trunk.
+
+**Shared root causes (one substrate item each, ordered BEFORE the follow-ups they fix):**
+- **S4. A body's presence comes from ONE authority, and the CONSUMER gates on it.** Three follow-ups below (R1, R2,
+  R3) share one defect. The consumer trusts a presence claim that is either wrong or that nobody honours:
+  - `rootedCount` claims `'always'` from `collapsedToOneRow`, which means "at most one row", not "exactly one".
+  - A where-by operand counts on each body arm to consult `hostPresence`, and a reducing `by()` does not.
+  - `dedupByLabels` builds its host by hand with no presence at all.
+
+  The fix: take presence from `ir/productivity.ts` `alwaysProduces`/`presenceOf` (that authority already returns
+  false for `count().is(P.gt(0))`), and gate the by()/operand VALUE on host presence once, in
+  `byProjection`/`productivityFilter`, not in each arm. Land this before R1–R3. They then reduce to witnesses plus
+  the one-line `aliasElementHost` swap.
+- **S5. One "labels live at this position" judgement for every route that cannot carry the outer path.** Three
+  follow-ups (R4, R5, R6) are one class: a route with no path decides which labels a read needs, and decides wrong.
+  - Source-union `rootedLabelsOut` clears its set at every `isStreamBarrier`. It should clear only at a REDUCING
+    barrier (`CHANNEL_BARRIER_POLICY` alias=consumed). `order`/`dedup`/`limit`/`aggregate`/`barrier` keep the path.
+  - Its `match()` exemption holds even after a later step has replaced the binding map.
+  - F6's `legCorrelated` exempts the leg's start label and its correlated labels, yet the fresh `V()` walk cannot
+    see either.
+
+  The fix: one helper in `src/compiler/ir/labels.ts`, built on `scopeKeyReads`. It returns the labels a downstream
+  or inner read takes from the PATH (not from a map traverser) and the reducing barriers that clear them. Both
+  routes call it and DECLINE on any label they cannot carry. Land this before R4–R6. It also absorbs reuse
+  proposal 2 below.
+- **S3 (carried). A write inside a child / multi-arm body.** Still the one substrate item for writes in arms.
+  Nothing this round changed it.
+
+**Follow-ups from review (major first).** All are pre-existing unless marked otherwise: trunk before this round gave
+the same answer.
+1. **R1 (major, wrong answer) — `count().is(P)` in a body is treated as always present** (via S4;
+   `src/compiler/rel/lower/reduction.ts` `rootedCount`, `reSourcedUnder` case 3).
+   - `g.V().map(__.V().count().is(0)).count()` gives 6; the reference gives 0 (`TraversalMapStep.java:52` drops a
+     traverser whose child yields nothing).
+   - `group().by(__.V().count().is(0))` gives `{null:6}`, and `project('x').by(__.V().count().is(0))` gives
+     `{x:null}`.
+   - Over `g.V().optional(__.out().as('a'))`, `map(__.select('a').V().count().is(6))` gives 6×6 plus 3 nulls; the
+     reference gives 6×6. `group().by(…)` gives `{6:6, null:3}`; the reference gives `{6:6}`.
+     `order().by(…).count()` gives 9; the reference gives 6.
+
+   Fix it via S4: make `rootedCount` require that the reduction is the terminal step, or take presence from
+   `presenceOf`. Add the `count().is()` forms to `test/L4-addendum/absent-label-body-input.feature`.
+2. **R2 (major, wrong count) — a where-by operand whose `by()` is a reducing barrier survives an unbound label** (via
+   S4; `src/compiler/rel/lower.ts` `whereOperandHost`).
+   - `g.V().union(__.as('a'), __.identity()).as('b').where('a', P.eq('b')).by(__.outE().count()).count()` gives 9; it
+     should be 6.
+   - The `out().count()` and `out().fold().count(local)` forms do the same.
+   - The compound `P.eq('b').or(P.neq('b'))` gives 12.
+
+   This contradicts the claim in `aliasElementHost`'s doc that "no host built off a label can drop it".
+3. **R3 (major, wrong count) — `dedup('a','b').by(…)` builds its alias host by hand with no presence**
+   (`src/compiler/rel/lower/slice.ts` ~664, `dedupByLabels`). It is the last hand-built alias element host in `src/`.
+   - `g.V().union(__.as('a'), __.identity()).as('b').dedup('a','b').by(__.id()).count()` gives 12.
+   - `by(__.constant(1))` gives 1.
+
+   Fix: `aliasElementHost(rel, proj, freshTraverserRow(rel))`. Then decide what `dedup` does over an unbound `by()`
+   operand, in line with the where-by drop rule.
+4. **R4 (major, wrong answer) — a source-union rooted arm loses its labels across a non-reducing barrier** (via S5;
+   `src/compiler/rel/lower/branch.ts` `rootedLabelsOut`).
+   - `g.union(V().has('name','marko').as('a').out().order()).select('a').count()` gives 0; the reference and our own
+     non-union form give 3.
+   - The `barrier()`, `dedup()`, `limit(2)` and `aggregate('q')` arms do the same.
+5. **R5 (major, wrong answer / internal Error) — the source-union `match()` exemption holds after the map is
+   replaced** (via S5).
+   - `g.union(V().has('name','marko').match(__.as('x').out().as('y'))).select('x').select('y').values('name')` gives
+     []; the reference gives vadas, josh, lop (`MatchStep.java:445,595` labels the path).
+   - `…select('y').select('x')…` gives []; the reference gives marko×3.
+   - `…select('y').out().select('x')` gives [].
+   - `…select('x').as('z').select('y','z').count()` leaks a bare `Error: channel column 'a0' is already carried`.
+
+   Restrict the exemption to a read whose input is the arm's map (Scoping.java:119-135), or decline. Add an L4
+   witness to `test/L4-addendum/source-union-starter.feature`.
+6. **R6 (major, wrong answer) — `legCorrelated` admits reads of the start label and the correlated labels that the
+   fresh walk cannot see** (via S5; `src/compiler/rel/match.ts` ~485-492).
+   - `g.V().as('b').out().as('a').in().as('c').where(__.select('a').in().where(P.eq('c')).select('c')).count()` gives
+     0; the reference gives 12.
+   - `…select('a'))` gives 0, `…select('c').values('name'))` gives 0, and the `match()` spelling gives 0.
+   - The `not(…)` form gives 12; the reference gives 0.
+
+   Fix: decline every live outer label the body reads, and allow only the `P.eq`/`neq` operands that `legRight`
+   turns into join conditions.
+7. **R7 (major, bare internal Error) — the re-sourcing scalar arm leaks `RelIR: relation mfN has no declared column
+   'vtype'` / `'vt'`.**
+   - `g.V().map(__.V().values('name'))` and `g.V().optional(__.out().as('a')).map(__.select('a').V().values('name'))`
+     both leak it.
+   - So do the `.limit(1)`, `.order().limit(1)`, `.dedup()` and `coalesce(values('nope'), constant(9))` tails, and
+     `map(select('a').V().values('age').sum())` / `…E().values('weight').max()`.
+
+   These fail whenever the value is not wrapped by a downstream count or fold. Either frame the rooted value's
+   type column or decline cleanly. Pin each case as an answer or a decline.
+8. **R8 (major, a valid query told it is invalid; newly raised by S1) — `select('k')` folds to the `withSideEffect`
+   constant even when the traverser is a Map holding `k`.**
+   - `g.withSideEffect('k',[(T.label):5]).V(1).project('k').by(__.constant([name:'marko'])).mergeV(__.select('k'))`
+     now raises the `T.label` sentence. The reference reads the Map traverser's own `k` first
+     (`Scoping.java:119-136`) and answers. Trunk before S1 declined.
+   - The same happens with an `inject([k:…])` input and with `option(Merge.onMatch, __.select('k'))`.
+
+   Fix: `constFromSelect`/`resolveMergeArg` (`src/compiler/ir/write-args.ts`) fold, and so judge, only when the
+   select's input cannot be a Map (element input). Otherwise decline as before.
+9. **R9 (major, wrong label kept) — a Set constant is not a Collection to `mutationLabelMembers`**
+   (`src/compiler/rel/write.ts`, `Array.isArray`).
+   - `g.V(1).dropLabel(__.constant({'person'}))` and the `withSideEffect('k',{'person'})…select('k')` form raise
+     "…must produce a String or Collection<String>, but got: [\"person\"]". The reference drops `person`
+     (`TraversalUtil.java:211-236` accepts any Collection). Trunk before S1 silently did nothing.
+   - `addLabel(__.constant({'x'}))` has the same problem.
+
+   Share `constantName`'s Collection notion rather than deciding it again.
+10. **R10 (major, performance) — per-traverser `mergeE` is super-linear.**
+    `g.V().hasLabel('p').mergeE([(T.label):'kk',(Direction.from):1,(Direction.to):1])` takes 132 ms at N=1k and
+    5,326 ms at N=8k (about 40×; 29–39× after S1). Same class as F7's `mergeV` O(N·V) below; fix them together.
+    Give the match join an equi key, and extend `test/support/snapshot-scans.ts` to flag a base-table scan driven
+    per snapshot row.
+11. **R11 (wrong count, pre-existing) — `dedup()` inside a where leg dedups across ALL rows.**
+    `g.V().as('b').out().as('a').in().as('c').where(__.select('a').in().where(P.eq('c')).dedup()).count()` gives 7;
+    the reference gives 12. `TraversalUtil.test` resets the child for each traverser, so `dedup()` cannot remove a
+    traverser's existence. Record it in `docs/outstanding-work.md` if it is not taken.
+12. **R12 (minor, doc + §17) — the `getSafeScopeValue` citation is wrong.** At the pin, `Scoping.java:141-147`
+    RAISES `IllegalArgumentException`. `getNullableScopeValue` is the variant that returns null.
+    - Correct the citation in the `aliasElementHost` doc (`src/compiler/rel/alias.ts`), in the header of
+      `test/L4-addendum/absent-label-where-by.feature`, and in `slice.ts` ~651.
+    - Add a §17 line: "a `where()`/`where().by()` key unbound on a traverser drops that traverser (Java raises
+      IllegalArgumentException)". `src/compiler/ir/labels.ts:314` already reads it right.
+13. **R13 (minor, cheap) — the text-literal flake moved to a neighbouring test.**
+    `test/text-literal.test.ts` "end to end: the decoded literal is the value a step sees" timed out at 5.2–6.4 s
+    under load. Its `one` helper seeds a new store on each of 7 calls, and the 's'-suffix and char-literal tests
+    seed 3 each. Have `one` and those tests share one lazily seeded store, like `declineStore`; every query there is
+    a read. Drop the hard-coded "~80 ms / ≤15 ms" figures from the comment.
+14. **R14 (minor, cheap) — `desugarPropertyMap` still calls `mapEntryType(entryType, String(k))`**
+    (`src/compiler/ir/strategies.ts` ~481). It should pass `k`. It is inert today because the token-keyed property
+    map declines. Reuse proposal 6 removes this whole pattern.
+15. **R15 (minor, cheap) — pin the number-class change S1 made but did not name.** A `withSideEffect` constant now
+    keeps its stated type: `3.0d` → double (was int), `3L` → long, `1.5f` → float, `[1,2L]` → int,long, datetime →
+    datetime. Add a test for at least the `3.0d` → double case (3 vs 3.0 is visible to users).
+16. **R16 (minor) — `mapSlot` comments overclaim.**
+    - Parsed and wire token keys agree for `T` only: `Direction.from` and wire `Direction.OUT` get different slots
+      (inert, since nothing mixes the two producers).
+    - A typed wire or GraphSON map `{Int 1, Long 1}` still collapses to one entry silently. Either say so in the
+      comment, or decline the pair at `src/wire.ts:64` / `src/formats/graphson.ts:155` as the literal path does.
+    - `mapSlot` repeats the `isTokenArg`/`isDirectionArg` shape probes. Put the slot spelling next to `TaggedArg`, or
+      fall back to a collision-free JSON spelling, so a third tagged key kind cannot collide.
+17. **R17 (minor, SQL weight) — a constant `by()` under presence types the constant through a correlated
+    `VALUES` subquery** (349 → 910 chars of SQL for the where-by witness). Fold a constant by() under presence to
+    `CASE WHEN <present> THEN <literal> END`.
+18. **R18 (minor) — missing pins.**
+    - Negated-reducer legs that now answer: `not(__.select('a').values('age').sum())` → 4;
+      `…mean()/min()/max()` → 4; `not(__.select('a').select('b').project('x').by('name'))` → 0;
+      `not(__.select('a').select('b').values('age').is(P.gt(30)))` → 3.
+    - A String key spelling a token (`'T.label'`) next to the real token key.
+    - Set constants for `dropLabel`/`addLabel` (with R9).
+    - The wire-typed Int `1` + String `'1'` map.
+    - The read-back of `[1:'a','1':'b']` through `valueMap()`/`properties()`.
+19. **R19 (minor) — `reSourcedUnder` compares framings with `JSON.stringify`**, which depends on key order. Use a
+    structural equality helper. It is safe today because a mismatch declines.
+
+Still open from the round below: F7 (with R10), F8, F11, F12, F13, and the second bullet of F14 (now reuse
+proposal 5).
+
+**Depth gaps recorded this round (clean declines; not defects):**
+- **S2 arm:**
+  - `map(select('a').V().fold())`, and groupCount/group/inject tails.
+  - coalesce/union/choose/filter/sideEffect arms holding `select('a').V()…`.
+  - `select(all,'a')` and `select('a','b')` hosts.
+  - `map(map(…count()))`, and `repeat(map(…count()))`.
+  - inject-map and valueMap hosts.
+  - `local(…count().math().fold())`, `flatMap(…count().math())`, and `local(…values('age').sum())`.
+  - a value-label host from `optional(values('age').as('a'))`.
+- **where-by:**
+  - repeat-bound labels.
+  - coalesce/optional/where/not wrappers around the whole chain.
+  - `P.within`/`P.without`, and a two-element by() ring.
+  - by() bodies that are `select`, `constant(null)`, `fold`, `project`, `union`, `local` or `map`.
+  - where-by after a `values().as('c')` reroot.
+  - the `not(where('a',P.eq('b')).by(…))` twin (should answer 6), `filter`/`choose` over where…by, and a `match` leg
+    whose body is where…by. These all decline through the child-predicate route.
+- **S1:** `dropLabel` inside choose/where/flatMap/map/optional/sideEffect/repeat, `local(__.mergeV(…))`, and a
+  per-row `dropLabel` body (S3 covers most of these). The `[1:'a','1':'b']` map works only as a stored property
+  value; it declines in inject/constant/project/select/count(local)/unfold, and as a `mergeV` value.
+- **F6:**
+  - repeat `until`/`emit` and `shortestPath` predicates pass no aliases (`walk.ts:202/216`, `shortestpath.ts:203`), so
+    `g.V().as('a').repeat(__.out()).until(__.select('a').hasLabel('person'))` declines.
+  - `where(select('a').select('a','b'))` and `…select('b').by('name')` decline, as does a leg wrapped in
+    coalesce/choose/optional/map/project-by/group-by/sideEffect.
+- **Source union:**
+  - a nested `union` as an arm's first step, and `g.union(constant(1), V().count())` (mixed arms).
+  - `g.withSideEffect('m',[a:1]).union(select('m'), constant(2))`, and `g.withSack(1).union(…).V().sack()`.
+  - writes in starter arms (S3).
+  - `g.union(constant('x')).path()`, which needs an empty path seed on the starter.
+  - `g.union(V().as('a'), V().has('age',29)).count()`, whose arms bind labels unevenly (the `mergeArms` route).
+
+**Reuse-sweep proposals (next round; no answer change unless noted):**
+1. **`choose()` conditions go through `childPredicate`**, the one predicate entry. Today they go through
+   `bodyPredicate` directly at `src/compiler/rel/lower/reduction.ts` ~1312 and `src/compiler/rel/lower/branch.ts`
+   ~1127, and `branch.ts` ~1016 passes no aliases. The change picks up the select-reroot, the match head and the
+   mapping-terminal fallback. ANSWER CHANGE (decline → answer):
+   `g.V().as('a').out().choose(select('a').hasLabel('person'), constant(1), constant(2))` and its
+   `has(age,gt(30))` and `map(choose(…))` forms. Net about 0 lines.
+2. **Callers that only decline read labels through `scopeKeyReads`, not `labelReads`.** The sites are
+   `src/compiler/rel/match.ts` ~490 (`legCorrelated`) and the `src/compiler/rel/lower.ts` ~5544 record where-scope
+   guard. A body that uses the label's string as a VALUE (`constant('a')`, `has('name','a')`, `out('a')`) then
+   stops declining. `labelReads` stays for the callers that delete. Fold this into S5.
+3. **One emits-from-empty authority instead of three step-name tables.** Export `emitsFromNothing(step)` from
+   `src/compiler/ir/productivity.ts`. It should cover the name set plus the `!isLocalScope` refinement and the
+   keyed-argument refinement now held by `seedsUngated`. Then derive `SEEDED_TERMINAL` (productivity.ts ~28),
+   `EMITS_FROM_NOTHING` (~152) and `branch.ts` `SEEDS_OVER_EMPTY` (~108) from it. A `count(local)` tail then takes
+   the cheaper `gatedByHost` branch; only the SQL gets shorter.
+4. **One alias-reroot core.** Add `aliasValueSubject(rel, proj, key?, present?)` beside `aliasElementSubject` in
+   `src/compiler/rel/alias.ts`, and let both take a key and presence override from `rerootPresence`.
+   `filter.ts:selectRerootSubject` then becomes two calls and `match.ts:scalarSubjectOf` is deleted (about 20–25
+   lines). A value-label subject then cannot drop presence either.
+5. **`aliasPresence` is the only judge of a label's presence.** `src/compiler/rel/modulator.ts` ~486 and
+   `src/compiler/rel/record.ts` ~649 work it out again from `aliasGuard`. After this change `aliasGuard` keeps one
+   outside caller (the record filter). This also covers the second bullet of F14. The SQL is unchanged.
+6. **`mapEntryOf(tn, key)` next to `mapEntryType`** in `src/gremlin/types.ts`. It replaces the `tn.t === 'map' ?
+   tn.entries[mapSlot(k)]` guard written out at `write-args.ts` ~548, `rel/map.ts` ~1247, `gremlin/float.ts` ~39
+   (two lookups per entry), `wire.ts` ~107 and `types.ts` ~573. Do R14 with it. Compile time only.
+7. **`caseWhen` is the one single-arm CASE builder.** Move it from `child.ts` ~287 to `src/compiler/rel/build.ts`,
+   delete `operator.ts` ~129 `when`, and write `modulator.ts:gatedOn` as one call to `caseWhen(presenceOf(…), …)`.
+   The SQL is unchanged.
+8. **Build `VALUE_ARGUMENT_STEPS`** (`src/compiler/ir/labels.ts`) **from `VERTEX_MOVES`/`EDGE_MOVES`**
+   (`src/compiler/ir/step.ts`) with `unionOf`, so a new move step is added in one place.
+9. Still open from the round below: reuse 2 (`firstPerPartition`), 3 (drop `prn > 0`), 4 (`unitRow`) and 7
+   (`name()` takes the `Minter`), plus 2026-11-01 proposals 6 (`ABSENT_VALUE`) and 7 (`blockAliases`).
+
+**Needs-human questions:** none raised this round.
 
 
 ### Next round (from the 2026-11-02 round — read before picking items)
@@ -785,7 +1022,7 @@ authority.
   union/local arms.
 
 **Follow-ups from review (major first):**
-1. **F1 (major, wrong answer, same on trunk) — the V()/E() arm skips the absent-host gate** (`src/compiler/rel/lower/reduction.ts`
+1. ✅ **LANDED via S2 (8143edf2).** **F1 (major, wrong answer, same on trunk) — the V()/E() arm skips the absent-host gate** (`src/compiler/rel/lower/reduction.ts`
    `scalarChildValue`, ~1471, returns `present:'always'` before the gate runs). On modern, with
    `g.V().optional(__.out().as('a'))` (9 rows, 3 unbound):
    - `.map(__.select('a').V().count()).fold()` gives [6×9]; the reference is [6×6].
@@ -822,7 +1059,8 @@ authority.
    - `withSideEffect('k', ['a', UUID(…)]).V(1).addLabel(__.select('k'))` does the same.
 
    Fix it via S1. Its prerequisite is that the side-effect registry keeps a typed value's type.
-5. **F5 (major, sql-hygiene) — nested gates repeat the same per-row presence term.**
+5. ✅ **LANDED via S2 (8143edf2) — one presence term per map expression; one copy remains in the `WHERE` from the
+   existing produced-values filter.** **F5 (major, sql-hygiene) — nested gates repeat the same per-row presence term.**
    `g.V().optional(__.out().as('a')).project('x').by(__.select('a').project('y').by(__.constant(1)))` inlines
    `CAST(json_extract(un16.a0,'$[#-1].v') AS INT) IS NOT NULL` four times. The answers are correct. This breaks
    "computed ONCE". Fix it via S2.
@@ -877,7 +1115,8 @@ authority.
     - coalesce/choose-led bare `by()`/`map()` bodies.
     - addLabel in coalesce/optional/flatMap arms, multiplicity `union(identity(),identity()).addLabel(constant('z'))`,
       and a nested-list item.
-14. **F14 (minor, cheap) — the reroot presence is spelled twice.**
+14. ✅ **LANDED (first bullet) via reuse-sweep 1 (e54b3a02) — `rerootPresence`; the `aliasGuard` spelling bullet is
+    carried as reuse proposal 5 of the round below.** **F14 (minor, cheap) — the reroot presence is spelled twice.**
     - `selectRerootHost` and `filter.ts:selectRerootSubject` repeat `gatedByHost(host, payload)` + the
       `mayBeAbsent ? 'value-nullness' : aliasPresence` pair. Make it one helper (e.g. `rerootPresence`).
     - `aliasGuard` spells "label bound" as `aliasPresent(col)` while `aliasPresence` uses `payload id IS NOT NULL`.
@@ -938,7 +1177,8 @@ authority.
    uuid/datetime carve-out and `key == null → kind:'none'`). Keys and labels then share one judge. **ANSWER
    CHANGE:** `g.V(1).property(__.constant(5), 1)` and `property(__.constant(null), 1)` go from an UnsupportedTraversal
    decline to KEY_NAME's reference sentences. Land it together with S1.
-6. **One `gateOn(pred, value)` CASE primitive**, split out of `child.ts:gatedByHost` and used by
+6. ✅ **LANDED via S2 (8143edf2) as `child.ts:caseWhen`; the remaining consolidation is reuse proposal 7 below.**
+   **One `gateOn(pred, value)` CASE primitive**, split out of `child.ts:gatedByHost` and used by
    `modulator.ts:gatedOn` (~623). Collapse the identity Presence remap at `reduction.ts` ~1380 to `final.present`.
    Do it with S2.
 7. **`name()` takes the compile's `Minter` directly** (or one shared helper), replacing the seven `() => fresh('r')`
@@ -992,8 +1232,8 @@ for `count`, `[]` for `fold`.
   `local(select('a').count())`, a union-headed select body ending in `fold()`, a value label bound in `optional()`, and a
   label read after an emitting `repeat(...).times(1)`; `where(select('a').label())` over a branch-bound label tests the
   label subquery IS NOT NULL rather than the cheaper id IS NOT NULL (correct, one correlated read; cheapening it means
-  treating `label()` as a mapping terminal in `productivity.ts`, which other callers share). NEXT: rebase
-  `wf/source-union-starter-arms-1-3` onto trunk and drop its `guardedPredicate` and `scalarChildValue` CASE.
+  treating `label()` as a mapping terminal in `productivity.ts`, which other callers share). DONE as `71416f55`
+  (`wf/source-union-starter-arms-1-3` is superseded and holds nothing to resume).
 - **PREREQUISITE (ordered BEFORE re-landing the item): ONE "absent label ⇒ the body's INPUT is empty" authority at
   the select-of-alias lowering itself**, consulting the existing productivity authority
   (`src/compiler/ir/productivity.ts` `MAPPING_TERMINAL`/`presenceOf`) to know whether the tail is seeded. The gate
