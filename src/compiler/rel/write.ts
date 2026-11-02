@@ -14,11 +14,11 @@ import { childSteps } from '../ir/passes.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { propertyFtsText } from '../../services/fts-index.ts';
-import { constFromNested, Deferral, mergeMaps, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
+import { constFromNested, Deferral, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import {
-  ADD_LABEL_ITEM_NAME, ADD_LABEL_MEMBER_NAME, ADD_LABEL_NAME, constantName, DROP_LABEL_ITEM_NAME, DROP_LABEL_MEMBER_NAME, DROP_LABEL_NAME, KEY_NAME,
+  ADD_LABEL_ITEM_NAME, ADD_LABEL_MEMBER_NAME, ADD_LABEL_NAME, collectionMembers, constantName, DROP_LABEL_ITEM_NAME, DROP_LABEL_MEMBER_NAME, DROP_LABEL_NAME, KEY_NAME,
   LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
@@ -1645,7 +1645,9 @@ interface FoldedName {
   readonly value: unknown;
   /** The type the text states for `value`; `null` states nothing beyond its JS type (a bare literal). */
   readonly vtype: CanonicalType | null;
-  /** For a LIST constant, each item's stated type, by position. */
+  /** The constant's members when it is a COLLECTION — a List or a Set (`collectionMembers`) — else `null`. */
+  readonly members: readonly unknown[] | null;
+  /** For a COLLECTION constant, each member's stated type, by position. */
   readonly items: readonly (CanonicalType | null)[];
 }
 
@@ -1668,13 +1670,12 @@ interface FoldedName {
  * dropped it wrote that uuid as a label.
  */
 function foldedName(value: unknown, child: ChildSeam): FoldedName | null {
-  if (!isNested(value)) return { value, vtype: null, items: Array.isArray(value) ? value.map(() => null) : [] };
+  if (!isNested(value)) return { value, vtype: null, members: collectionMembers(value, null)?.members ?? null, items: [] };
   const folded = constFromNested(value, child.sideEffects, child.params);
   if (!folded.has) return null;
-  const node = folded.typeNode;
-  const itemNodes = node !== null && typeof node === 'object' && node.t !== 'map' ? node.items : [];
-  const items = Array.isArray(folded.value) ? folded.value.map((item, i) => gremlinTypeOf(item, itemNodes[i] ?? null)) : [];
-  return { value: folded.value, vtype: folded.vtype, items };
+  const collection = collectionMembers(folded.value, folded.typeNode);
+  const items = collection ? collection.members.map((item, i) => gremlinTypeOf(item, collection.types[i] ?? null)) : [];
+  return { value: folded.value, vtype: folded.vtype, members: collection?.members ?? null, items };
 }
 
 /**
@@ -2367,8 +2368,8 @@ function mutationLabelMembers(step: IRStep, child: ChildSeam, table: MutationLab
       const body = child.body((value as { readonly nested: unknown }).nested, 'child');
       if (!body?.length) return null;
       members.push(body);
-    } else if (Array.isArray(folded.value) && !rules.collection) {
-      folded.value.forEach((name, i) => members.push(constantName(name, folded.items[i] ?? null, table.item)));
+    } else if (folded.members && !rules.collection) {
+      folded.members.forEach((name, i) => members.push(constantName(name, folded.items[i] ?? null, table.item)));
     } else members.push(constantName(folded.value, folded.vtype, rules));
   }
   return members;
@@ -3110,7 +3111,7 @@ function creationTokens(
 function creationLabels(args: readonly unknown[], child: ChildSeam): LabelArgs | null {
   const folded = args.map((arg) => foldedName(arg, child));
   const sole = folded.length === 1 ? folded[0] : undefined;
-  if (sole && Array.isArray(sole.value)) return constantLabels(sole.value.map((name, i) => constantName(name, sole.items[i] ?? null, LABEL_ITEM_NAME)));
+  if (sole?.members) return constantLabels(sole.members.map((name, i) => constantName(name, sole.items[i] ?? null, LABEL_ITEM_NAME)));
   const rules = args.length > 1 ? LABEL_MEMBER_NAME : LABEL_NAME;
   const members: (string | readonly IRStep[])[] = [];
   for (const [i, value] of args.entries()) {
@@ -4796,15 +4797,11 @@ export function mergeEFromMap(
 }
 
 export function elementMergeV(
-  input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
+  input: Rel, step: IRStep, maps: MergeMaps, propertySteps: readonly IRStep[],
   driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  let maps: MergeMaps;
-  // `propertyWrites`' rule, one host up: a `Deferral` declines, a text-level ERROR was already
-  // raised by the `writeArguments` verify Pass and cannot reach here (§6·5).
-  try { maps = mergeMaps(step, options, 'mergeV', child.sideEffects, child.params); }
-  catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
+  // `maps` is the caller's ONE parse of the cluster (`mergedElements`), under the input framing it holds.
   const { match, onCreate, onMatch } = maps;
   // THE MAP-VALUED DRIVER (`mergeV()`/`mergeV(__.identity())`) is handled where the map value is in
   // scope — `mapTail` — because the driver IS a map, not an element. An element or scalar stream
@@ -5277,15 +5274,11 @@ function mergeEComputed(
  *   `writeOf` is the one place that says so.
  */
 export function elementMergeE(
-  input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
+  input: Rel, step: IRStep, maps: MergeMaps, propertySteps: readonly IRStep[],
   aliases: AliasMap, driverElem: Elem | undefined, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  let maps: MergeMaps;
-  // `elementMergeV`'s rule: a `Deferral` declines, a text-level ERROR was raised by the
-  // `writeArguments` verify Pass and cannot reach here (§6·5).
-  try { maps = mergeMaps(step, options, 'mergeE', child.sideEffects, child.params); }
-  catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
+  // `elementMergeV`'s rule: `maps` is the caller's one parse, under the input framing it holds.
   const { match, onCreate, onMatch } = maps;
   // The map-VALUED driver is `mapTail`'s (the map is not an element); an element/scalar driver has no
   // map here. (Edge map-valued merge is a later sub-increment; for now it declines everywhere.)

@@ -327,3 +327,62 @@ describe('every constant-name host is judged, typed', () => {
       expect(() => compile(q, {}), q).toThrow(ValueParseError);
   });
 });
+
+describe('a Set constant is a Collection at every label host (one `collectionMembers`)', () => {
+  // `resolveStringArguments` takes ANY `Collection` (`TraversalUtil.java:211-236`), as `getLabelsValue` and
+  // `MergeElementStep.validate` do: a `{…}` literal is a Set, and a Set is not a non-String.
+  test('dropLabel / addLabel / addV / a merge label take a Set exactly as a List', () => {
+    expect(labelsOf("g.V(1).dropLabel(__.constant({'person'})).labels()")).toEqual([]);
+    expect(labelsOf("g.withSideEffect('k', {'person'}).V(1).dropLabel(__.select('k')).labels()")).toEqual([]);
+    expect(labelsOf("g.V(1).addLabel(__.constant({'x'})).labels()")).toEqual(['person', 'x']);
+    expect(labelsOf("g.withSideEffect('k', {'q', 'r'}).V(1).addLabel(__.select('k')).labels()")).toEqual(['person', 'q', 'r']);
+    expect(labelsOf("g.V(1).union(__.addLabel(__.constant({'x'}))).labels()")).toEqual(['person', 'x']);
+    expect(labelsOf("g.addV(__.constant({'a', 'b'})).labels()")).toEqual(['a', 'b']);
+    expect(labelsOf("g.mergeV([(T.label): {'a', 'b'}]).labels()")).toEqual(['a', 'b']);
+  });
+
+  test("a Set's members are judged under the Collection arm's sentences", () => {
+    const store = seededStore();
+    for (const [q, message] of [
+      ["g.V(1).addLabel(__.constant({'x', 5}))", 'Traversal argument Collection must contain only Strings, but got: 5'],
+      ["g.V(1).dropLabel(__.constant({'person'}), __.constant('x'))", 'must produce a scalar String when multiple traversals are provided'],
+      ["g.mergeV([(T.label): {'a', 5}])", 'mergeV() expects T.label collection to contain only Strings - found: 5'],
+    ] as const) expect(() => run(store, q), q).toThrow(message);
+    expect(bagOf(values(run(store, 'g.V(1).labels()')) as string[])).toEqual(['person']);
+  });
+});
+
+describe('a whole-arg merge select(k) folds to the side effect only where the traverser cannot be a Map', () => {
+  // `Scoping.getScopeValue` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`)
+  // reads the traverser's own Map entry FIRST, then the side effect. So the fold is exact over an element,
+  // a scalar or the start — and is no answer at all over a Map, whose own `k` only the run decides.
+  const BAD = "g.withSideEffect('k', [(T.label): 5])";
+  const sentence = 'mergeV() and option(onCreate) args expect T.label value to be String or Collection<String> - found: 5';
+  const notTheSideEffect = (q: string): void => {
+    try { run(seededStore(), q); } catch (e) { expect(e, q).not.toBeInstanceOf(ValueParseError); }
+  };
+
+  test('over a traverser that may be a Map, the side effect is never judged in its place', () => {
+    notTheSideEffect(`${BAD}.V(1).project('k').by(__.constant([name: 'marko'])).mergeV(__.select('k'))`);
+    notTheSideEffect(`${BAD}.V(1).project('k').by(__.constant([name: 'marko'])).mergeV(__.constant([name: 'marko'])).option(Merge.onMatch, __.select('k'))`);
+    notTheSideEffect(`${BAD}.inject([k: [name: 'marko']]).mergeV(__.select('k'))`);
+    notTheSideEffect(`${BAD}.V(1).project('k').by(__.constant([name: 'marko'])).mergeE(__.select('k'))`);
+  });
+
+  test('over the start, an element, a scalar or a child of an element, the side effect IS the answer', () => {
+    for (const q of [
+      `${BAD}.mergeV(__.select('k'))`,
+      `${BAD}.V(1).mergeV(__.select('k'))`,
+      `${BAD}.V(1).out().mergeV(__.select('k'))`,
+      `${BAD}.inject(1).mergeV(__.select('k'))`,
+      `${BAD}.V(1).local(__.mergeV(__.select('k')))`,
+    ]) expect(() => run(seededStore(), q), q).toThrow(sentence);
+    expect(values(run(seededStore(), "g.withSideEffect('k', [name: 'zz']).inject(1).mergeV(__.select('k')).values('name')"))).toEqual(['zz']);
+    expect(values(run(seededStore(), "g.withSideEffect('k', [name: 'zz']).V(1).union(__.mergeV(__.select('k'))).values('name')"))).toEqual(['zz']);
+    expect(labelsOf("g.withSideEffect('k', [(T.label): 'person', name: 'marko']).V(1).mergeV(__.select('k')).labels()")).toEqual(['person']);
+  });
+
+  test('a withSideEffect constant keeps the number class its text states (3.0d is a Double)', () => {
+    expect(run(seededStore(), "g.withSideEffect('k', 3.0d).V(1).property('d', __.select('k')).values('d')")).toEqual([{ v: 3, vtype: 'double' }]);
+  });
+});

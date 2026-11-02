@@ -3,7 +3,7 @@ import {
     isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
     stepChain, type Arg, type ArgValue, type SideEffectConstants, type Step,
 } from '../../gremlin/frontend.ts';
-import { constantName, KEY_NAME, mergeLabelRules, validatePropertyKey } from '../../gremlin/validate.ts';
+import { collectionMembers, constantName, KEY_NAME, mergeLabelRules, validatePropertyKey } from '../../gremlin/validate.ts';
 import { LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../api.ts';
 import type { IRStep } from './strategies.ts';
 import { elementKindAt, LABEL_MUTATIONS } from './step.ts';
@@ -48,10 +48,31 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 // through to its own handling.
 function constFromSelect(nested: any, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): Arg | null {
   if (!isNested(nested)) return null;
-  const inner = stepChain(nested.nested, params);
-  const key = inner.length === 1 && inner[0].name === 'select' ? inner[0].args[0]?.value : undefined;
-  return typeof key === 'string' ? sideEffects?.get(key) ?? null : null;
+  const key = soleSelectKey(stepChain(nested.nested, params));
+  return key === undefined ? null : sideEffects?.get(key) ?? null;
 }
+
+/** The key of a body that is exactly ONE `select(<String>)`, else `undefined`. */
+function soleSelectKey(inner: readonly Step[]): string | undefined {
+  const key = inner.length === 1 && inner[0]!.name === 'select' ? inner[0]!.args[0]?.value : undefined;
+  return typeof key === 'string' ? key : undefined;
+}
+
+/**
+ * WHETHER THE MERGE'S INCOMING TRAVERSER MAY BE A MAP — the one input fact that decides whether a
+ * whole-arg `__.select(k)` may FOLD to a `withSideEffect(k, …)` constant.
+ *
+ * `select(k)` is `Scoping.getScopeValue`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`):
+ * the traverser's own Map entry FIRST, then the side effect, then the path. So the fold — the side
+ * effect, read at compile time — is the reference's answer exactly when the traverser cannot be a Map
+ * (an element, a graph-start's one row, a scalar), and a SHORTCUT only there: over a traverser that may
+ * be a Map the Map's own `k` wins, which only the run can see, so the select is carried as the general
+ * map-producing body the lowering resolves (or declines) rather than folded. The fact is the caller's
+ * INPUT FRAMING — a lowering holds it exactly; the verifier asks `elementKindAt` and treats its
+ * cannot-say as `mayBeMap`, so it never raises on a chain it has not typed.
+ */
+export type MergeTraverser = 'cannotBeMap' | 'mayBeMap';
 
 // A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
 //   __.select(k) of a withSideEffect(k, const)  (via constFromSelect), or
@@ -328,12 +349,15 @@ function classifyMergeVal(v: any): any {
 //     nested-WRITE execution (runNested runs reads only).
 // Per-VALUE nested traversals inside a map literal ([k: __.trav]) do NOT come here —
 // they stay in the map and resolveMergeSpec resolves them correlated per driver.
-function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>): { readonly value: any; readonly type: TypeNode | null } {
+function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser): { readonly value: any; readonly type: TypeNode | null } {
   if (!isNested(raw)) return { value: raw, type };
   const inner = stepChain(raw.nested, params);
-  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string') {
-    const k = inner[0].args[0].value;
-    const declared = sideEffects?.get(k);
+  const k = soleSelectKey(inner);
+  if (k !== undefined) {
+    // Over a traverser that may be a Map, the Map's own `k` precedes the side effect (`MergeTraverser`).
+    if (traverser === 'mayBeMap')
+      throw new Deferral(`merge with select('${k}') over a traverser that may be a Map (its own '${k}' precedes the side effect)`);
+    const declared = constFromSelect(raw, sideEffects, params);
     if (declared) return declared;
     throw new Deferral(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
   }
@@ -510,7 +534,7 @@ export function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void
     if (k in merge.props) clash(k, merge.props[k], v);
 }
 
-function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: SideEffectConstants, params: Record<string, any> = {}, defaultCardinality: Cardinality = null): MergeSpec {
+function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser, defaultCardinality: Cardinality = null): MergeSpec {
   const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} };
   // A WHOLE-ARG map-producing traversal as the SEARCH map — `mergeV(__.project('k').by(__.body))` —
   // resolves to concrete values PER DRIVER (`MergeElementStep.materializeMap`), so its criteria are
@@ -527,7 +551,7 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       return spec;
     }
   }
-  ({ value: raw, type: typeNode } = resolveMergeArg(raw, typeNode, sideEffects, params));
+  ({ value: raw, type: typeNode } = resolveMergeArg(raw, typeNode, sideEffects, params, traverser));
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
     throw new Deferral('a merge argument that is not a map ([k:v] / bound Map), null, or empty ([:])');
@@ -658,16 +682,18 @@ function isTraverserIdentity(raw: any, params: Record<string, any>): boolean {
  * produce a map?) is a lowering question the `child.rows` framing answers, so this carries any other
  * nested traversal and the lowering declines a non-map body fail-closed.
  */
-function generalMapArg(raw: any, params: Record<string, any>): unknown | null {
+function generalMapArg(raw: any, params: Record<string, any>, traverser: MergeTraverser): unknown | null {
   if (!isNested(raw)) return null;
   const inner = stepChain(raw.nested, params);
   if (inner.length === 1 && inner[0].name === 'identity') return null;
   if (parseComputedMergeArg(raw, params)) return null;
-  // A BARE single `select(name)` stays with `resolveMergeArg`: a `withSideEffect` constant resolves to a
-  // literal map, an undeclared one is that resolver's own refusal — the map is a scope READ, not a
-  // producing traversal, and the preceding-step form (`…select("m").mergeV()`) already handles a bound
-  // alias. A MULTI-step body carrying a select (`__.out().select(…)`) is still a general producer.
-  if (inner.length === 1 && inner[0].name === 'select') return null;
+  // A BARE single `select(name)` over a traverser that CANNOT be a Map stays with `resolveMergeArg`: a
+  // `withSideEffect` constant resolves to a literal map, an undeclared one is that resolver's own refusal —
+  // the map is a scope READ, not a producing traversal, and the preceding-step form (`…select("m").mergeV()`)
+  // already handles a bound alias. Over one that MAY be a Map it is a general body like any other: the
+  // Map's own entry comes first (`MergeTraverser`), so the fold is no longer the answer. A MULTI-step body
+  // carrying a select (`__.out().select(…)`) is always a general producer.
+  if (traverser === 'cannotBeMap' && inner.length === 1 && inner[0].name === 'select') return null;
   // The RAW nested CST — the lowering normalizes it via `child.body` (modulator folding), which a
   // `stepChain` here would skip.
   return raw.nested;
@@ -675,7 +701,7 @@ function generalMapArg(raw: any, params: Record<string, any>): unknown | null {
 
 export function mergeMaps(
   step: IRStep, mods: readonly Step[], op: MergeRole['op'],
-  sideEffects: SideEffectConstants | undefined, params: Record<string, any>,
+  sideEffects: SideEffectConstants | undefined, params: Record<string, any>, traverser: MergeTraverser,
 ): MergeMaps {
   // THE INCOMING TRAVERSER AS THE MAP — no-arg `mergeV()`/`mergeE()` and `mergeV(__.identity())` both
   // mean "the driver's value IS the merge map" (`materializeMap` with an identity map traversal). The
@@ -684,11 +710,11 @@ export function mergeMaps(
   // A GENERAL map-producing traversal argument (`mergeV(__.out().project(…))`, `mergeV(__.select(dynMap))`)
   // is resolved per driver by the lowering, so `match` is empty and the body is carried, exactly as the
   // map-VALUED driver is — the difference is only WHERE the map comes from (the body vs the traverser).
-  const matchTraversal = matchFromDriver ? undefined : generalMapArg(step.args[0]?.value, params);
+  const matchTraversal = matchFromDriver ? undefined : generalMapArg(step.args[0]?.value, params, traverser);
   const emptyMatch = { role: { op, kind: 'merge' as const }, label: null, id: undefined, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} } satisfies MergeSpec;
   const match = matchFromDriver || matchTraversal
     ? emptyMatch
-    : normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
+    : normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params, traverser);
 
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   let outV: unknown, inV: unknown;
@@ -715,7 +741,7 @@ export function mergeMaps(
     }
     const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
     if (!kind) throw new Deferral(`${op} option(Merge.${sel.merge}) not supported`);
-    const spec = normalizeMergeMap({ op, kind }, mapArg, s.args[1]?.type ?? null, sideEffects, params, defaultCardinality);
+    const spec = normalizeMergeMap({ op, kind }, mapArg, s.args[1]?.type ?? null, sideEffects, params, traverser, defaultCardinality);
     if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
   }
 
@@ -754,9 +780,9 @@ function requireEndpointOption(
  */
 export function labelNames(v: unknown, type: TypeNode | null, role: MergeRole): string[] {
   const rules = mergeLabelRules(role.op, role.kind === 'onMatch');
-  if (!Array.isArray(v) && !(v instanceof Set)) return [constantName(v, gremlinTypeOf(v, type), rules.scalar)];
-  const items = type !== null && typeof type === 'object' && type.t !== 'map' ? type.items : [];
-  return [...v].map((name, i) => constantName(name, gremlinTypeOf(name, items[i] ?? null), rules.member));
+  const collection = collectionMembers(v, type);
+  if (!collection) return [constantName(v, gremlinTypeOf(v, type), rules.scalar)];
+  return collection.members.map((name, i) => constantName(name, gremlinTypeOf(name, collection.types[i] ?? null), rules.member));
 }
 
 
@@ -778,12 +804,16 @@ export function labelNames(v: unknown, type: TypeNode | null, role: MergeRole): 
  * for `mergeV(…).values('name')`, a traversal the fold continues past perfectly well. A verifier
  * must never narrow what the lowering may attempt.
  *
+ * **A merge's own input decides one parse fact** — whether a whole-arg `select(k)` folds to its side
+ * effect (`MergeTraverser`) — and that is the stream's type, not an argument, so it asks `elementKindAt`
+ * exactly as `verifyLabelMutationTarget` does: on cannot-say the select stays a body, never a raise.
+ *
  * It does NOT recurse into nested bodies. Each is normalized through this same pipeline when its
  * host lowers it, with that call site's own parameters and side-effect registry — so a nested
  * write is verified where it can be verified CORRECTLY, rather than here against an environment
  * that may not be its own.
  */
-export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string, any>, sideEffects: SideEffectConstants): void {
+export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string, any>, sideEffects: SideEffectConstants, nested: boolean): void {
   const guarded = (run: () => void): void => {
     try { run(); } catch (e) { if (!(e instanceof Deferral)) throw e; }
   };
@@ -793,7 +823,12 @@ export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string,
     if (step.name !== 'mergeV' && step.name !== 'mergeE') continue;
     let end = at + 1;
     while (end < steps.length && (steps[end]!.name === 'option' || steps[end]!.name === 'property')) end++;
-    guarded(() => { mergeMaps(step, steps.slice(at + 1, end), step.name as 'mergeV' | 'mergeE', sideEffects, params); });
+    // The incoming traverser cannot be a Map at the traversal's own start (a CHILD body's first step
+    // reads its host's traverser, which may be) or on an element stream; anywhere this cannot type
+    // (`elementKindAt`'s cannot-say) it MAY be, so a whole-arg `select(k)` is left to the lowering, which
+    // holds the exact input framing, rather than folded and raised on here.
+    const traverser: MergeTraverser = (at === 0 && !nested) || elementKindAt(steps, at) !== undefined ? 'cannotBeMap' : 'mayBeMap';
+    guarded(() => { mergeMaps(step, steps.slice(at + 1, end), step.name as 'mergeV' | 'mergeE', sideEffects, params, traverser); });
   }
 }
 

@@ -1,5 +1,5 @@
 import { ValueParseError } from './coerce.ts';
-import type { CanonicalType } from './types.ts';
+import type { CanonicalType, TypeNode } from './types.ts';
 
 // ---------- the element-identifier rules every write must satisfy ----------
 //
@@ -66,6 +66,28 @@ export function validatePropertyKey(key: unknown): string {
  *  the label `'5'`. Returns the label so a caller can validate inline. */
 export function validateLabel(label: unknown): string {
   return constantName(label, null, LABEL_NAME);
+}
+
+// ---------- what a COLLECTION is ----------
+
+/**
+ * A value's members when it is a Gremlin COLLECTION — a List (a JS array) or a Set (a JS `Set`, what a
+ * `{…}` literal parses to) — each with the item TypeNode its text stated (`type`'s `items`, by
+ * position), or `null` for anything else (a Map is not a Collection, as `java.util.Map` is not).
+ *
+ * THE one spelling of the question, because the reference asks `instanceof Collection` and
+ * `Array.isArray` answers it only for a List: a label host that read `Array.isArray` refused
+ * `{'person'}` as a non-String where `resolveStringArguments`' Collection arm
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:211-236`),
+ * `ElementHelper.getLabelsValue` (`.../structure/util/ElementHelper.java:267-275`) and
+ * `MergeElementStep.validate` (`.../process/traversal/step/map/MergeElementStep.java:258-300`) all take
+ * it. A Set's members come in its insertion order — the order the text wrote them.
+ */
+export function collectionMembers(value: unknown, type: TypeNode | null): { readonly members: readonly unknown[]; readonly types: readonly (TypeNode | null)[] } | null {
+  if (!Array.isArray(value) && !(value instanceof Set)) return null;
+  const items = type !== null && typeof type === 'object' && type.t !== 'map' ? type.items : [];
+  const members = [...value];
+  return { members, types: members.map((_, i) => items[i] ?? null) };
 }
 
 // ---------- names judged at compile time — the ONE constant-name judge ----------
@@ -171,7 +193,7 @@ export function mergeLabelRules(op: 'mergeV' | 'mergeE', onMatch: boolean): { re
  */
 export function constantName(value: unknown, vtype: CanonicalType | null, rules: NameRules): string {
   if (value === null || value === undefined) throw new ValueParseError(rules.nullMessage);
-  if (rules.collection && (Array.isArray(value) || value instanceof Set)) throw new ValueParseError(rules.collection);
+  if (rules.collection && collectionMembers(value, null)) throw new ValueParseError(rules.collection);
   if (typeof value !== 'string' || (vtype !== null && vtype !== 'string'))
     throw new ValueParseError(rules.notStringNames ? `${rules.notString}${shownValue(value, vtype)}` : rules.notString);
   return rules.identifier === false ? value : validateIdentifier(value, rules);
@@ -185,7 +207,7 @@ export function constantName(value: unknown, vtype: CanonicalType | null, rules:
  */
 function shownValue(value: unknown, vtype: CanonicalType | null): string {
   if (vtype === 'datetime' && typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString();
-  if (value instanceof Map || value instanceof Set || Array.isArray(value)) return JSON.stringify(jsonOf(value));
+  if (value instanceof Map || collectionMembers(value, null)) return JSON.stringify(jsonOf(value));
   return String(value);
 }
 
@@ -193,7 +215,8 @@ function shownValue(value: unknown, vtype: CanonicalType | null): string {
  *  and any other carrier object (a big decimal) by their own text. */
 const jsonOf = (value: unknown): unknown => {
   if (value instanceof Map) return Object.fromEntries([...value].map(([k, v]) => [typeof k === 'string' ? k : shownValue(k, null), jsonOf(v)]));
-  if (value instanceof Set || Array.isArray(value)) return [...value].map(jsonOf);
+  const collection = collectionMembers(value, null);
+  if (collection) return collection.members.map(jsonOf);
   if (typeof value === 'bigint') return String(value);
   if (value !== null && typeof value === 'object' && value.constructor !== Object) return String(value);
   return value;

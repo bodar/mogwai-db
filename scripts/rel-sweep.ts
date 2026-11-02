@@ -192,7 +192,7 @@ const renderedSteps = (plan: Plan) =>
  * this the instrument would demand that the lowerings keep the blanket `catch` §6·5 exists to remove.
  */
 function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolean, at: () => string): void {
-  try { verifyWriteArgs(chain, {}, NO_SIDE_EFFECTS); } catch { return; }
+  try { verifyWriteArgs(chain, {}, NO_SIDE_EFFECTS, false); } catch { return; }
   try {
     const lowered = lowerToRel(chain, { collapse, correlatedChildren });
     if (!lowered) return;

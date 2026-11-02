@@ -304,7 +304,7 @@ const VERIFY: Pass[] = group('verify', [
     name: 'writeArguments',
     applies: (_steps, ctx) => ctx.originalChain.some((s) => WRITE_ARG_HOSTS.has(s.name)),
     run: function writeArgumentsPass(steps, ctx) {
-      verifyWriteArgs(ctx.originalChain as IRStep[], ctx.params, ctx.sideEffects);
+      verifyWriteArgs(ctx.originalChain as IRStep[], ctx.params, ctx.sideEffects, ctx.nested);
       return steps;
     },
   },
