@@ -2,7 +2,7 @@ import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr }
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
-import type { Rel, Table } from '../../rel/rel.ts';
+import { isRel, type Rel, type Table } from '../../rel/rel.ts';
 import type { Channels } from '../../channels.ts';
 import { insert, remove, update } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
@@ -1813,9 +1813,19 @@ function keyedRows(values: Rel, targets: Rel, key: RuntimeKey, fresh: Minter): R
  * is also why stale-on-overwrite deletes stay here (`dropStaleIndex`), so the refresh only ever INSERTS.
  */
 function runtimeWriteRows(
-  elem: Elem, rows: Rel, mayBeMulti: boolean, nullable: boolean, cardinality: VertexCardinality | null, meta_: PropertyRuntimeSet['meta'],
+  elem: Elem, keyed: Rel, mayBeMulti: boolean, nullable: boolean, once: { readonly drawn: boolean } | undefined, cardinality: VertexCardinality | null, meta_: PropertyRuntimeSet['meta'],
   bind: Binder, guard: Guarder, fresh: Minter,
 ): void {
+  // THE BODY IS EVALUATED ONCE where its statements must agree on what it returned (`once`). Every
+  // statement below re-reads `rows` — the raise, the declaration, the insert, the removal — while the
+  // reference evaluates the body ONCE per traverser and decides from that one result. Re-evaluating is the
+  // same answer only for a body that returns the same rows each time: one that DRAWS (`sample`, `coin`, a
+  // `shuffle` — `ProgramWrites.draws`) can see a null in the removal's run and a value in the insert's,
+  // and drop a stored value while writing another, which no single evaluation does. A NULLABLE body is
+  // taken too, since its removal and its insert are two readers of one decision. The snapshot crosses as
+  // JSON (`transportableValues`) and every statement below reads it; a drawing one also computes each
+  // shared draw once inside itself (`effectScope`'s `drawn`).
+  const rows = once ? bind(transportableValues(keyed, fresh), true, [], once.drawn) : keyed;
   const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
   const card = (rel: Rel): Expr => cardinalityOf(col(rel.id, 'owner'), col(rel.id, 'k'), cardinality, fresh);
 
@@ -1844,8 +1854,9 @@ function runtimeWriteRows(
   // the reference's order, one element's rows are: everything before its LATEST null is undone by it, so
   // the slot ends as "removed, then the values after that null written by the ordinary rules". Hence two
   // things, and only where the body can yield a null at all (`nullable`):
-  //  - the SLOTS that saw a null, TAKEN now (a snapshot, so the removal after the insert addresses the
-  //    slots the body named before anything changed), whose pre-existing rows are removed after the insert;
+  //  - the SLOTS that saw a null — read off the TAKEN rows (`once`), so the removal after the insert
+  //    addresses the slots the body named before anything changed — whose pre-existing rows are removed
+  //    after the insert;
   //  - the rows that SURVIVE: non-null and ordered after their slot's latest null, by `(o, sq)` — a window
   //    over the rows the writer already reads (`lo` the latest null traverser, `ls` its latest null `sq`),
   //    never a correlated "is there a later null" probe, which is quadratic in rows per element.
@@ -1856,7 +1867,7 @@ function runtimeWriteRows(
   if (nullable) {
     const nulls = make.filter({ id: fresh('f'), input: rows, channels: [], type: rows.type, pred: isNull(rows) });
     const slots = make.project({ id: fresh('p'), input: nulls, channels: [], type: typeOf(meta('owner', 'int'), meta('k', 'text')), exprs: [['owner', col(nulls.id, 'owner')], ['k', col(nulls.id, 'k')]] });
-    removed = bind(make.distinct({ id: fresh('d'), input: slots, channels: [], type: slots.type }), true);
+    removed = make.distinct({ id: fresh('d'), input: slots, channels: [], type: slots.type });
     const nullAt = (column: string): Expr => ({ kind: 'case', whens: [[isNull(rows), col(rows.id, column)]] });
     const marked = make.window({
       id: fresh('rn'), input: rows, channels: [], type: typeOf(...rows.type.cols, meta('lo', 'int', true), meta('ls', 'int', true)),
@@ -2052,10 +2063,13 @@ function prepareRuntimeWrite(
   const picked = first ? rankedFirst(resolved.rel, fresh) : resolved.rel;
   // A FOLDED parameter's values are taken before the creation (see the header); its guards read the taken
   // rows, so the body is resolved once.
-  const values = folded ? bind(transportableValues(picked, fresh), true) : picked;
+  const values = folded ? bind(transportableValues(picked, fresh), true, [], child.writes.draws) : picked;
   if (site.resolve === 'first') absentGuard(site, values, guard, fresh);
   return (targets, bindLater) => runtimeWriteRows(
-    elem, keyedRows(values, targets, key, fresh), resolved.mayBeMulti && !first, !resolved.nullFree, write.cardinality, write.meta, bindLater, guard, fresh,
+    elem, keyedRows(values, targets, key, fresh), resolved.mayBeMulti && !first, !resolved.nullFree,
+    // Taken for a folded parameter too: its values are already a snapshot, but its keyed rows are a join of
+    // three, and the removal reading one taken relation is one bind rather than three.
+    !resolved.nullFree || child.writes.draws ? { drawn: child.writes.draws } : undefined, write.cardinality, write.meta, bindLater, guard, fresh,
   );
 }
 
@@ -2150,7 +2164,8 @@ function mapFormStatements(
     exprs: KEYED_ROW_COLS.map((column) => [column.name, col(keyed.id, column.name)] as const),
   });
   // Only a REQUIRED field can carry a NULL to the writer; an optional one's was filtered as absent.
-  runtimeWriteRows(elem, keyedRows_, false, rows.framing.fields.some((field) => !field.optional), null, null, bind, guard, fresh);
+  const nullable = rows.framing.fields.some((field) => !field.optional);
+  runtimeWriteRows(elem, keyedRows_, false, nullable, nullable || child.writes.draws ? { drawn: child.writes.draws } : undefined, null, null, bind, guard, fresh);
   return true;
 }
 
@@ -2283,7 +2298,7 @@ function armValueWriteCorrelated(
 
 /** Push a binding and hand back a `Ref` to it — the one place a name is minted, so a statement can
  *  read the rows of the statement before it without the caller threading names. */
-type Binder = (node: Stmt | Rel, snapshot?: boolean, channels?: Channels) => Rel;
+type Binder = (node: Stmt | Rel, snapshot?: boolean, channels?: Channels, drawn?: boolean) => Rel;
 
 /** Push a GUARD binding — a refusal the graph decides, carried by the plan (§6·5). Separate from
  *  `Binder` because nothing reads its `Ref`: what it returns is a step, not a relation, and giving
@@ -2917,8 +2932,25 @@ export function effectScope(fresh: Minter): { readonly bindings: Binding[]; read
   // A `Ref` DECLARES what it carries, like every other relation. Most of them carry nothing — a
   // statement's `RETURNING` is a bare row set — but a snapshot of the input relation still holds that
   // traverser's channels, and a channel a relation does not declare is one no later step can read.
-  const bind: Binder = (node, snapshot, channels = []) => {
+  //
+  // A snapshot that DRAWS (`drawn` — the program holds a `sample`/`coin`/`shuffle`, `ProgramWrites.draws`)
+  // is ONE evaluation only if a subtree it reads twice is computed once. Spelled inline at each reader, a
+  // `coalesce` over `V().sample(1)` drew one vertex for its first arm and another for its second, and so
+  // took TWO values from one `sample(1)`. So its shared nodes are named, as a read plan names them
+  // (`nameBindings`), and FENCED — `AS MATERIALIZED`, which SQLite may not flatten back into each reader.
+  // Only a drawing snapshot: elsewhere re-evaluation is the same rows, and flattening is the planner's.
+  const bind: Binder = (node, snapshot, channels = [], drawn = false) => {
     const name = `${fresh('pw')}`;
+    if (snapshot && drawn && isRel(node)) {
+      const named = nameBindings(node, () => fresh('r'));
+      for (const shared of named.bindings) {
+        const rel = shared.node as Rel;
+        // A walk is its own CTE under its own name (`name.ts`), computed once already.
+        bindings.push(rel.kind === 'recursive' ? shared
+          : { name: shared.name, node: make.materialize({ id: fresh('m'), input: rel, channels: rel.channels, type: rel.type, fenced: true }) });
+      }
+      node = named.result;
+    }
     bindings.push({ name, node, ...(snapshot ? { snapshot: true } : {}) });
     return make.ref({ id: fresh('r'), name, channels, type: node.type });
   };
