@@ -842,7 +842,9 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
    The `t` is the source row's `vtype` column. Project the label's v/t ONCE at the as() site (or read `t` from the
    source column when fused) — the same substrate as fourth-round item 8's last bullet (fold the history seed/last-read
    pair). Extend sql-hygiene to catch duplicated EXPRESSIONS, not only duplicated subqueries.
-3. **Nested bodies lose parameter types (major, wrong number class — reuse proposal 1 below).**
+3. ✅ **LANDED (4edf3f20, 745e65ef, 0200909d) — nested bodies keep parameter types.** One `ParamEnv` = {values, types}
+   (`src/gremlin/param-env.ts`) built once in `compilePlan`; `stepChain`/`extractArgs`/`walkArgs` take only the env, so a
+   nested re-parse cannot drop the type. Also covers reuse proposals 1–3 below, plus UUID-bound equality fixes. Remains: nothing.
 4. Minor, R11: an `or`/`and` of alias leaves applies each branch-bound label's `aliasGuard` per leaf, so
    `where(P.eq('o').or(P.eq('n')))` keeps a row with `o` unbound when `n` matches — the reference raises
    (`Scoping.getSafeScopeValue`); and a branch-bound label missing on some traversers FILTERS them
@@ -865,7 +867,7 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
    the two-label `where('x', P.lt('y'))` over a scalar current traverser.
 
 **Reuse-sweep proposals (next round):**
-1. **Carry parameter types IN the params environment** — `declaredParamTypes` (`src/gremlin/types.ts`) returns one
+1. ✅ **LANDED (4edf3f20)** — **Carry parameter types IN the params environment** — `declaredParamTypes` (`src/gremlin/types.ts`) returns one
    typed environment (name → {value, type}) that `stepChain` reads, removing the parallel `paramTypes` argument from
    `stepChain`/`extractArgs`/`walkArgs` (`src/gremlin/frontend.ts`) and its `?? null` fallback. Today every nested
    re-parse (`ir/passes.ts:childSteps` ~367, `ir/labels.ts:48`, `ir/content-demand.ts:202/240`,
