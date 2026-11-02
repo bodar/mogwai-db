@@ -22,7 +22,7 @@ const PLAN = args.plan
 const SECTION = args.section ? ` (work ${args.section} only)` : ''
 // Batch size and round count are a JUDGEMENT made by the steward after each round; these are only
 // ceilings. MAX_ROUNDS is a runaway backstop, not a target.
-const MAX_ITEMS = args.maxItems || 8
+const MAX_ITEMS = args.maxItems || 10
 const MAX_ROUNDS = args.maxRounds || args.rounds || 8
 const FIX_ROUNDS = args.fixRounds === undefined ? 3 : args.fixRounds
 const MAX_MINORS = 5
@@ -115,7 +115,7 @@ let barren = 0
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   const batchRule = steer.next_batch
     ? `Pick ${Math.min(steer.next_batch, MAX_ITEMS)} open items (the steward's judgement from the last round).`
-    : `Pick the items that are READY — prerequisites landed, design clear — usually 2–5: fewer when they chain on each other or touch one seam, more when they are independent. Never more than ${MAX_ITEMS}.`
+    : `Pick the items that are READY — prerequisites landed, design clear — one per independent seam, usually 4–8; items that chain are fine (set \`after\`), items that touch ONE seam merge into one. Never more than ${MAX_ITEMS}.`
   const focusRule = steer.focus ? `\nSTEWARD'S FOCUS for this round: ${steer.focus}` : ''
   phase('Scout')
   const scout = await agent(`${PRINCIPLES}
@@ -254,7 +254,8 @@ CONVERGING looks like: what lands closes more than review and the sweep add (wei
 DIVERGING looks like: each round adds more majors/wrong answers than it resolves; the same root cause parks again (reparked is a strong signal); items keep deferring on a prerequisite no round picks; the work drifts out of ${SECTION || 'the plan'} into an ever-wider list.
 Decide:
 - continue=false when the trend is diverging for a second round, when what remains needs a human design decision, or when the section's real work is done (only minors/proposals left). Say which.
-- continue=true otherwise, with next_batch (1–${MAX_ITEMS}): SMALLER when items parked or chained or collided on one seam, LARGER when the last round's items were independent and landed clean.
+Surfacing PRE-EXISTING wrong answers on trunk is the run doing its job, not divergence, when they collapse onto a named substrate root with a concrete fix: count that as progress toward maturity. It is divergence only when the new majors are scattered one-offs or the same root keeps parking.
+- continue=true otherwise, with next_batch (1–${MAX_ITEMS}): fill one slot per INDEPENDENT seam — parallel agents are welcome, so be generous. Chaining is NOT a reason to shrink (the round orders items by \`after\` and a dependent simply waits for its prerequisite); shrink only when items parked or two items collided on ONE seam — fold those into one item instead.
 - focus: the one or two things the next scout must pick first — usually the substrate a parked/deferred item is waiting on, or a recurring root cause — so the next round resolves rather than widens.`, { label: `steward#${round}`, phase: 'Steer', effort: 'high', schema: STEER })
   allRounds[allRounds.length - 1].steer = s
   if (!s || !s.continue) { log(`steward: stop — ${s ? s.reason : 'no verdict'}`); break }
