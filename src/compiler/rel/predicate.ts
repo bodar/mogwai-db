@@ -422,10 +422,15 @@ const textCarriedOthers = (bound: string): readonly string[] => [
  * UUID never meets a stored UUID. The subject's own type fact decides, exactly as `typeSpaced` does for
  * the non-text spaces:
  * - a UUID bound (`uuid` — its DECLARED type: a UUID parameter, a `UUID(...)` literal, a UUID member)
- *   meets only a subject that NAMES `uuid`; an untagged UNKNOWN value is framed by its storage class, so
- *   its TEXT is a String and never a UUID;
+ *   meets only a subject whose tag NAMES `uuid`, never one whose tag names another type;
  * - a String bound excludes the TEXT-carried vtypes its text could spell (`others`) — only a bound that
  *   IS some such value's text pays for the guard.
+ * A subject with NO type fact — an UNKNOWN with no tag, or a tag that is NULL on this row — says nothing
+ * either way, so its TEXT is compared as text in both directions. An unfolded list member is the case
+ * that matters: a list member carries no per-member UUID type (`inject([UUID(u)]).unfold()` reads back
+ * its text), and answering `false` there dropped the very row a UUID bound names
+ * (`inject([UUID(u)]).unfold().is(UUID(u))` is 1, its `neq` 0). The price is that, on that untyped path
+ * only, a String spelling a UUID equals the UUID (`docs/feature-support-matrix.md` §17).
  */
 function textSpaced(equal: Expr, type: SubjectType, uuid: boolean, others: readonly string[]): Expr {
   if (type.kind === 'static') {
@@ -433,10 +438,12 @@ function textSpaced(equal: Expr, type: SubjectType, uuid: boolean, others: reado
     return canonical !== null && (uuid || canonical === 'uuid') && !(uuid && canonical === 'uuid') ? CONSTANT.false : equal;
   }
   const tag = type.kind === 'perRow' ? type.vtype : type.tag;
-  const named: Expr | undefined = tag && { kind: 'call', fn: 'coalesce', args: [tag, compilerText('')] };
-  if (uuid) return named ? binary('and', equal, binary('=', named, compilerText('uuid'))) : compilerFalse;
-  return named && others.length
-    ? binary('and', equal, { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: named, values: others.map(compilerText) } })
+  if (!tag) return equal;
+  // A NULL tag on this row is "no fact" — coalesced to each direction's own passing value.
+  if (uuid) return binary('and', equal, binary('=', { kind: 'call', fn: 'coalesce', args: [tag, compilerText('uuid')] }, compilerText('uuid')));
+  return others.length
+    ? binary('and', equal, { kind: 'unary', op: 'not', arg: {
+      kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [tag, compilerText('')] }, values: others.map(compilerText) } })
     : equal;
 }
 

@@ -284,6 +284,7 @@ wrong number class.
 | Error vs filter order | a later filter may drop a row before its type error is evaluated (`inject(1).toUpper().is('x')` is `[]`) |
 | Unread erroneous values | an error in a value nothing reads is not raised (`project('x').by(values('age').toUpper()).count()` answers) |
 | Number equality | by value: `1`, `1L`, `1.0` are one value; `true`/`1` and a UUID/Char vs String stay distinct. A merged key frames as one of the merged classes (`inject(1, 1.0).groupCount()` is `{1.0: 2}`) |
+| UUID vs String on an untyped value | a value with no type fact — an unfolded list member, an injected String — compares by its text, so a String spelling a UUID equals that UUID there (`inject(['<u>']).unfold().is(UUID('<u>'))` is 1); a stored or typed value keeps the two distinct |
 | Signed zero | `-0.0` is `0.0` everywhere |
 | Numeric predicate compare | by exact SQLite INTEGER/REAL value, no Java widening: `9007199254740993L > 9007199254740992d` holds; BigDecimal compares at double precision; bounds past int64 compare as REAL |
 | Ties in `order()` | equal values (`1m`/`1.0d`) tie, regardless of class |

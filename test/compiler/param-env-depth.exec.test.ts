@@ -94,10 +94,40 @@ describe('a UUID bound equals a UUID, never a String that spells one', () => {
     ['without()', "g.V(1).property('u', x).V().has('u', without(x)).count()", '0L'],
     ['a stored String spelling the UUID', `g.V(1).property('u', '${U}').V().has('u', x).count()`, '0L'],
     ['a stored UUID against the String literal', `g.V(1).property('u', x).V().has('u', '${U}').count()`, '0L'],
-    ['an injected String', `g.inject('${U}').is(x).count()`, '0L'],
     ['an injected UUID against the String literal', `g.inject(UUID('${U}')).fold().unfold().is('${U}').count()`, '0L'],
+    ['a typed injected UUID', "g.inject(UUID('" + U + "')).is(x).count()", '1L'],
+    ['a typed injected UUID through fold/unfold', "g.inject(UUID('" + U + "')).fold().unfold().is(x).count()", '1L'],
   ])('%s', (_, q, count) => {
     expect(run(q, { x: U }, UUID_X)).toEqual([count]);
+  });
+
+  // A list member carries no per-member UUID type, so an UNFOLDED member is a value with no type fact:
+  // it compares by its text (`textSpaced`), and a UUID bound must still find it — answering `false` lost
+  // every equality row and flipped neq/without. The reference answers these from the member's UUID
+  // (`GremlinValueComparator.equals`, cited above); the String-spelling side is §17's untyped-path line.
+  const XS: Record<string, TypeNode> = { x: 'uuid', xs: { t: 'list', items: ['uuid'] } };
+  test.each([
+    [`g.inject([UUID('${U}')]).unfold().is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().is(UUID('${U}')).count()`, '1L'],
+    ['g.inject(xs).unfold().is(x).count()', '1L'],
+    [`g.inject(1).constant([UUID('${U}')]).unfold().is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}'),'a']).unfold().is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().fold().unfold().is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().dedup().is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().where(__.is(x)).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().union(__.identity()).is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().as('a').select('a').is(x).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().is(within(x,'a')).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().is(within(xs)).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().is(P.eq(x).or(P.eq('a'))).count()`, '1L'],
+    [`g.inject([UUID('${U}')]).unfold().choose(__.is(x), __.constant(1), __.constant(2))`, '1i'],
+    [`g.inject([UUID('${U}')]).unfold().is(neq(x)).count()`, '0L'],
+    [`g.inject([UUID('${U}')]).unfold().is(without(xs)).count()`, '0L'],
+    [`g.inject([UUID('${U}')]).unfold().is(without(x)).count()`, '0L'],
+    ["g.inject(['a']).unfold().is(x).count()", '0L'],
+    [`g.inject('${U}').is(x).count()`, '1L'],   // §17: untyped text
+  ])('an untyped value: %s', (q, count) => {
+    expect(run(q, { x: U, xs: [U] }, XS)).toEqual([count]);
   });
 
   test('a UUID written at depth is found by a later request, by parameter and by literal', () => {
