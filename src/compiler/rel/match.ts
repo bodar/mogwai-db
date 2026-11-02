@@ -5,7 +5,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
-import { asLabelsOf } from '../ir/labels.ts';
+import { asLabelsOf, labelReads } from '../ir/labels.ts';
 import { type IRStep } from '../ir/step.ts';
 import { and, eq, or, type Minter } from './build.ts';
 import type { ChainRead, ChildSeam } from './child.ts';
@@ -467,7 +467,7 @@ function legSingle(
   // A start label bound in a branch arm may be unbound on this row: the subject is then ABSENT
   // (`aliasElementSubject`), so a body that never reads through its id (`select('a').label()`) still drops it.
   const subject = aliasElementSubject(rel, startProj);
-  return child.predicate(leg.body, subject, leg.negated) ?? undefined;
+  return child.predicate(leg.body, subject, leg.negated, labels) ?? undefined;
 }
 
 /** The MULTI-correlation core shared by `applyLeg` (→ `semi`/`anti` join) and `legExpr` (→ `exists`
@@ -482,6 +482,14 @@ function legCorrelated(
   const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
   if (!startProj || startProj.read.kind !== 'element') return null;
   const { chain: rightBody, corr } = legRight(leg.start, leg.body, host, fresh);
+  // The fresh walk sees ONLY the positions it correlates — the start and each `where(P.eq/neq(label))`.
+  // It cannot see the outer row's path BY CONSTRUCTION, so a body reading any OTHER live outer label
+  // (`select('b')` after a `repeat`, a nested `where('b', …)`, a `path()`) would read it as unbound and
+  // answer a wrong count. Decline instead (`labelReads` over-approximates, which only over-declines).
+  const correlated = new Set(corr.map((c) => c.label));
+  const reads = labelReads(leg.body, child.params);
+  if (reads.all) return null;
+  for (const label of liveAliases(labels, rel).keys()) if (reads.labels.has(label) && !correlated.has(label)) return null;
   const src = child.rooted([syn(host, startProj.read.elem === 'edge' ? 'E' : 'V')]);
   if (!src || src.framing.kind !== 'elements') return null;
   const ran = child.chain(src.rel, src.framing, rightBody, new Map());
@@ -610,7 +618,7 @@ function existenceExpr(start: string, body: readonly IRStep[], rel: Rel, labels:
   if (!sproj) return null;
   if (sproj.read.kind === 'value') {
     const subject = scalarSubjectOf(sproj, rel);
-    return subject && child.predicate(body, subject, false);
+    return subject && child.predicate(body, subject, false, labels);
   }
   const reads = new Set<string>([start]);
   for (const s of body) {
@@ -785,7 +793,7 @@ export function lowerMatch(
         const sproj = aliasProjection(rel, labels, p.start, 'last', fresh);
         if (!isElementAlias(sproj)) return null;
         const subject = aliasElementSubject(rel, sproj);
-        const clause = child.predicate(p.body, subject, false);
+        const clause = child.predicate(p.body, subject, false, labels);
         if (!clause) return null;
         rel = make.filter({ id: fresh('mr'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
       }

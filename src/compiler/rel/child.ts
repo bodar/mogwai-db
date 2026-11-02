@@ -84,8 +84,11 @@ export interface ChildSeam {
   readonly writes: ProgramWrites;
   /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
   readonly scalar: (body: readonly IRStep[], host: ChildHost) => ChildValue | null;
-  /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. */
-  readonly predicate: (body: readonly IRStep[], subject: Subject, negated: boolean) => Expr | null;
+  /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. `aliases` is
+   *  the ROW'S path-label scope, the predicate twin of `ChildHost.row`: a `select(<label>)` in the body
+   *  re-roots off it (`childPredicate`), so a caller holding a carrying table passes its labels and a
+   *  body reading an outer label is answered rather than read as unbound. Absent = no labels in scope. */
+  readonly predicate: (body: readonly IRStep[], subject: Subject, negated: boolean, aliases?: AliasMap) => Expr | null;
   /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
   readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
   /**

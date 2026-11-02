@@ -32,7 +32,7 @@ import { propertyReadOf } from '../property.ts';
 import { PATH_CHANNEL, PATH_COL, appendValuePosition, extendPath, pathCarried, subPathMembers } from '../path.ts';
 import { CARRIED_READ, NO_ALIASES, ORIGIN, bodyOf, encounterOf, inBody, inOrderFreeBody, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { movement } from './movement.ts';
-import { bodyPredicate, correlatedExists, valuePredicate } from './filter.ts';
+import { bodyPredicate, childPredicate } from './filter.ts';
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { sackTagOf } from '../sack.ts';
@@ -60,9 +60,9 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   scopeNames: ctx.scopeNames,
   writes: ctx.writes,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
-  predicate: (body, subject, negated) => (negated
-    ? correlatedExists(body, subject, fresh, ctx, true) ?? valuePredicate(body, subject, fresh, ctx, true)
-    : bodyPredicate(body, subject, fresh, ctx)),
+  // THE ONE predicate entry `where()`/`filter()`/`not()` already use, so a body lowered through the seam
+  // gets the same `select(<label>)` re-root over the row's aliases — not a second, scope-less ladder.
+  predicate: (body, subject, negated, aliases) => childPredicate(body, subject, fresh, ctx, negated, aliases),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
   rows: (body, input, elem, aliases, originFrom) => childRows(body, input, elem, aliases, ctx, fresh, false, false, originFrom),
   // `bulked: false` is a fold RESET, and it is safe for a reason worth naming rather than trusting:
