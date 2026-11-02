@@ -752,9 +752,8 @@ Landed this round, all on trunk with green CI: `803e8252` (`name()` takes the co
 `duplicate Plan binding 'r0'` is gone), `2184440a` (constant labels judged by ONE `constantName`), `89ca89d8`
 (absent label ⇒ the rerooted body's INPUT is empty, carried as the host's `Presence`), `0dce4db8` (taken snapshots
 that are read again are spooled as fenced `MATERIALIZED` CTEs, plus one `rankedFirst` first-pick policy). Nothing was
-deferred or parked. The source-union item above is UNBLOCKED: its prerequisite landed in `89ca89d8`, so rebasing
-`wf/source-union-starter-arms-1-3` onto trunk and dropping its `guardedPredicate` and `scalarChildValue` CASE is now
-the first step.
+deferred or parked. The source-union item above has since LANDED as `71416f55`, rebased over `89ca89d8`'s presence
+authority.
 
 **Shared root causes (one substrate item each, ordered BEFORE the follow-ups they fix):**
 - **S1. ✅ LANDED (30461694, 311c95ae) — one constant-label judge at EVERY host, typed.** *Landed:* `constantName`
@@ -958,9 +957,13 @@ raise.)
 
 ### Next round (from the 2026-11-01 round — read before picking items)
 
-**PARKED — UNBLOCKED 2026-11-02 (prerequisite landed `89ca89d8`) — Source-position `g.union(…)` over a one-row STARTER** (branch `wf/source-union-starter-arms-1-3`, unpushed:
-`d85bc022` source union + `g.union()`, `0ec60b2f` arm labels ride on, `a163f5a8` partially-bound label presence gate).
-Parked because `a163f5a8` REGRESSES its parent with lost rows / wrong counts. Both open defects share ONE root cause:
+**✅ LANDED 2026-11-02 (`71416f55`) — Source-position `g.union(…)` over a one-row STARTER.** `d85bc022` + `0ec60b2f`
+re-landed as one commit; `a163f5a8`'s code (`guardedPredicate`, the `scalarChildValue` CASE) and `0ec60b2f`'s
+`aliasGuard` conjunct were dropped, and its witnesses were kept, passing through trunk's `hostPresence`/`gatedByHost`.
+Mechanism: a source union whose arms open off the starter is the chain-position `unionArms` over ONE starter `VALUES`
+row (`literalSource`, shared with `injectSource`, `src/compiler/rel/lower/branch.ts`); `g.union()` is the empty
+relation; downstream label reads are judged by `scopeKeyReads` (`src/compiler/ir/labels.ts`). L3 1,883 → 1,885.
+Remaining: nothing. (The history below is kept for its reference citations.) It was originally parked because `a163f5a8` REGRESSES its parent with lost rows / wrong counts. Both open defects share ONE root cause:
 the absent-label gate is applied to the body's OUTPUT, so a SEEDED reducing tail loses its seed. Reference: an absent
 key makes `SelectOneStep` emit nothing (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectOneStep.java`),
 then `ReducingBarrierStep.processNextStart` still emits its seed (`…/step/util/ReducingBarrierStep.java:143-148`) — 0
