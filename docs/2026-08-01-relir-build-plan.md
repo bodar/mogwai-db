@@ -824,7 +824,12 @@ as `13acd8c7` with a conflict resolution in `branch.ts`, so `git cherry` shows `
    (`g.V().as('a').optional(out().as('b')).map(__.select('b').V().values('age').sum())`, `r38`). Case 3 spells
    `present` twice in two `caseWhen`s. Leave `vtype` ungated (the row is filtered on `v IS NOT NULL`) or project
    `present` once.
-3. **M3 (data-dependent refusal, pre-existing class) — a null `property()` traversal value refuses through
+3. ✅ **M3 LANDED (4a34b58a..4a0530df, 2026-11-02).** A null `property()` traversal value now REMOVES the key
+   inside the one runtime writer, `runtimeWriteRows` (`src/compiler/rel/write.ts`): the null-seeing slots are taken
+   as a snapshot before the write and their prior rows removed after it (only where the body is not `nullFree`); the
+   body is evaluated once where its statements must agree, and `sample()` draws per traverser in a per-origin body.
+   `nullValueGuard`'s data-dependent refusal is gone; matrix line updated. Remains: nothing.
+   **M3 (data-dependent refusal, pre-existing class) — a null `property()` traversal value refuses through
    `nullValueGuard`** (`src/compiler/rel/write.ts`): `g.V().property('x', __.coalesce(__.values('age'), __.V().constant(null).limit(1)))`
    refuses on modern only because of the two software vertices. Trunk silently skipped the write (wrong when the key
    exists: the reference REMOVES it). Same as matrix line 196 (❌ a null property() traversal value). The real fix is
