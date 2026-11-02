@@ -1080,7 +1080,14 @@ the same answer.
    - `addLabel(__.constant({'x'}))` has the same problem.
 
    Share `constantName`'s Collection notion rather than deciding it again.
-10. **R10 (major, performance) — per-traverser `mergeE` is super-linear.**
+10. ✅ **LANDED with F7 (3c7ba931..4c565396, 2026-11-02).** The interleaving guard pairs collapsed TUPLES
+    (first/last ord) over an equi key (`PairKeying`/`searchKeying`), the search seeks per driver with the old test
+    as residual (`seekedSearch`), and the creation join uses `Distinct`'s identity (`createdPerDriver`), all in
+    `src/compiler/rel/write.ts`; `test/support/snapshot-scans.ts` flags an unkeyed snapshot self-join and a base
+    table scanned per snapshot row. mergeE constant 43 → 58 ms (1k → 8k, was 43×); every witness 2.5–4.7×.
+    Remains: nothing. (Now unblocked, separate: S6's multi-driver `inject(maps).mergeV().option(onCreate,
+    __.select('k'))` one-line lift at "NARROWED to ONE driver" in `mergedFromMap`.)
+    **R10 (major, performance) — per-traverser `mergeE` is super-linear.**
     `g.V().hasLabel('p').mergeE([(T.label):'kk',(Direction.from):1,(Direction.to):1])` takes 132 ms at N=1k and
     5,326 ms at N=8k (about 40×; 29–39× after S1). Same class as F7's `mergeV` O(N·V) below; fix them together.
     Give the match join an equi key, and extend `test/support/snapshot-scans.ts` to flag a base-table scan driven
@@ -1300,7 +1307,9 @@ authority.
    where/filter/not entry), so a leg-body `select()` re-roots via `selectRerootSubject` (`src/compiler/rel/child.ts`,
    `src/compiler/rel/match.ts`); the fresh-walk multi-correlation route declines a body reading an uncorrelated live
    outer label (`labelReads`). Tested in `test/compiler/where-leg-alias-scope.exec.test.ts`. Remains: nothing.
-7. **F7 (major, depth) — a per-traverser `mergeV` map is still O(N·V).**
+7. ✅ **LANDED with R10 (3c7ba931..4c565396, 2026-11-02)** — see R10 above (`seekedSearch`/`computedMatch`,
+   `src/compiler/rel/write.ts`). Remains: nothing.
+   **F7 (major, depth) — a per-traverser `mergeV` map is still O(N·V).**
    `g.V().mergeV(__.project('name').by(values('name'))).count()` takes 2.9 s at N=3000 and 11.7 s at N=6000. The match
    join drives a spooled snapshot as the OUTER loop against `nodes` with a non-equi `(pp0 = 0) OR EXISTS(…)`
    predicate. `test/support/snapshot-scans.ts` misses it because the snapshot is outer. Either extend the detector to
