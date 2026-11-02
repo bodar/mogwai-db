@@ -22,6 +22,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { rawVertex } from '../support/graph.ts';
 import { run } from '../support/harness.ts';
+import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { nestedSnapshotScans, type PlanRow } from '../support/snapshot-scans.ts';
 
 const N = 6000;
@@ -116,4 +117,28 @@ describe('nestedSnapshotScans names a pairing with no equi key', () => {
     const sql = `${spooled} SELECT 1 FROM s a CROSS JOIN nodes n WHERE n.id = a.k`;
     expect(nestedSnapshotScans(sql, plan(sql))).toEqual([]);
   });
+});
+
+// NOTHING TO KEY THE GUARD BY — every compared key is an `onCreate` key, so `searchKeying` has no criterion
+// and the pair join runs without a seek. It once built an empty conjunction and leaked a bare `TypeError`.
+describe('a computed merge whose every compared key is an onCreate key', () => {
+  const four = (): GraphStore => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    for (const name of ['a', 'b', 'c', 'd']) run(store, `g.addV('person').property('name','${name}')`);
+    return store;
+  };
+  test('answers when no pair can differ', () => {
+    expect(run(four(), "g.V().mergeV(__.project('k').by(constant(1))).option(Merge.onCreate,[k:1]).id().fold()").map((row: any) => row.list))
+      .toEqual(['[5,5,5,5]']);
+    expect(run(four(), "g.V().has('name','a').mergeV(__.project('k').by('name')).option(Merge.onCreate,[k:'zz']).id().fold()").map((row: any) => row.list))
+      .toEqual(['[5]']);
+  });
+  for (const q of [
+    "g.V().hasLabel('person').mergeV(__.project('code').by('name')).option(Merge.onCreate,[code:'q']).count()",
+    "g.V().hasLabel('person').mergeE(__.project('w').by('name')).option(Merge.onCreate,[w:'z',(T.label):'self',(Direction.from):1,(Direction.to):1]).count()",
+  ]) {
+    test(`refuses cleanly: ${q}`, () => {
+      expect(() => run(four(), q)).toThrow(RaisedByQuery);
+    });
+  }
 });

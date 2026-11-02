@@ -3665,6 +3665,9 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
       ] : []),
     ],
     pairs: (earlier, later, fresh) => {
+      // NOTHING TO KEY BY — every criterion is an `onCreate` key (read as "could"), so every pair is a
+      // candidate and `couldMatch` decides alone: the pair test stays exact, it simply has no seek.
+      if (!maskCols.length) return { left: earlier, right: later, on: eq(compilerInt(1), compilerInt(1)) };
       const arity = fixed.map((key) => key.key(earlier.id).length);
       const source = make.ref({ id: fresh('r'), name: (earlier as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: earlier.type });
       const maskType = typeOf(...maskCols.map((name) => ({ ...earlier.type.cols.find((column) => column.name === name)!, name: `m_${name}` })));
@@ -3818,10 +3821,10 @@ function computedMatch(
     });
     const probe = make.project({ id: fresh('p'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return or(productive(driver, i, false), { kind: 'exists', plan: probe, negated: false } as Expr);
-  }).reduce((a, b) => and(a, b));
+  }).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1)));
   const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(firstProductive(i)(rel), narrow(rel))),
     () => compilerText(key), (driver) => col(driver, cvCol(i)), (driver) => col(driver, ptCol(i)), fresh));
-  const unnarrowed = drivers((rel) => cKeys.map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b)));
+  const unnarrowed = drivers((rel) => cKeys.map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1))));
   return seekedSearch(carrier.type.cols, arms, unnarrowed, candidates, 'id', residual, hasOrd, bind, fresh);
 }
 
@@ -3935,7 +3938,7 @@ function createdPerDriver(unmatched: Rel, created: Rel, tupleCols: readonly ColM
     type: typeOf(meta('cid', 'int'), ...names.map((name) => ({ ...typed(created, name), name: `c_${name}` }))),
     exprs: [['cid', col(created.id, 'id')], ...names.map((name) => [`c_${name}`, col(created.id, name)] as const)],
   });
-  const on = names.map((name): Expr => ({ kind: 'binary', op: 'is', left: col(um.id, name), right: col(ct.id, `c_${name}`) })).reduce((a, b) => and(a, b));
+  const on = names.map((name): Expr => ({ kind: 'binary', op: 'is', left: col(um.id, name), right: col(ct.id, `c_${name}`) })).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1)));
   return make.join({ id: fresh('j'), left: um, right: ct, join: 'inner', on, channels: [], type: typeOf(...um.type.cols, ...ct.type.cols) });
 }
 

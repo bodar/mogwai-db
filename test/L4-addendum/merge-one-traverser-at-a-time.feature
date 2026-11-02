@@ -662,3 +662,63 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       | d[3].l |
     And the graph should return 2 for count of "g.V().has(\"code\",\"y\")"
     And the graph should return 1 for count of "g.V().has(\"code\",\"y\").has(\"tag\",27)"
+
+  # EVERY COMPARED KEY IS AN onCreate KEY — the guard has nothing to key its pair join by (an onCreate key
+  # reads as "could match"), so the pair test runs without a seek rather than building an empty key. The
+  # first driver creates {k:1}; every later search for k=1 finds that creation, so all six emit it.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_V_mergeVXproject_k_byXconstant_1XX_optionXonCreate_k_1X_asXmX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().mergeV(__.project("k").by(__.constant(1))).option(Merge.onCreate,[k:1]).as("m").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+    And the graph should return 1 for count of "g.V().has(\"k\",1)"
+
+  # One driver: no pair to test at all, and the onCreate value replaces the searched one.
+  @gap:merge-one-traverser-at-a-time
+  Scenario: g_V_hasXname_markoX_mergeVXproject_k_byXnameXX_optionXonCreate_k_zzX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").mergeV(__.project("k").by("name")).option(Merge.onCreate,[k:"zz"]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V().has(\"k\",\"zz\")"
+
+  # Several drivers whose only compared key is overridden by onCreate: the guard reads the override as
+  # "could match" (it cannot see that `q` is no person's name), so it REFUSES — fail closed, never a
+  # bare error. The reference creates one {code:q} per person, none matching another's search.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_mergeVXproject_code_byXnameXX_optionXonCreate_code_qX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").mergeV(__.project("code").by("name")).option(Merge.onCreate,[code:"q"]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+
+  # The same for an edge: the computed key w is overridden by onCreate, so the guard has no key to seek by.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_mergeEXproject_w_byXnameXX_optionXonCreate_w_z_self_1_1X_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").mergeE(__.project("w").by("name")).option(Merge.onCreate,[w:"z",(T.label):"self",(Direction.from):1,(Direction.to):1]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
