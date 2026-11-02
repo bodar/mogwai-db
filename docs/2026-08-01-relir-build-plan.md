@@ -567,11 +567,19 @@ UNEVALUABLE`.
 - 🚧 **Computed LABEL residue** (unchanged by the above): a single `addLabel` body framed as a list
   (`Collection<String>`) still declines; a computed `dropLabel` name still declines; writes inside
   `union`/`local`/`optional`/`coalesce` arms decline even with constant labels — a separate prerequisite (a write
-  inside a multi-arm or child body). ⚠️ Flagged for the index: `firstPerTraverser`'s `UNORDERED_FIRST` tie raise
-  and `sequentialGuard` on property writes are refusals that depend on DATA SIZE.
+  inside a multi-arm or child body). ⚠️ Flagged for the index: `sequentialGuard` on property writes is a refusal
+  that depends on DATA SIZE (the first-pick tie raise is gone — follow-up 4, `0dce4db8`).
 - 🔴 **Follow-ups from the 2026-11-01 review of the computed label** (major first; each prerequisite is ordered
   before what it unblocks):
-  1. **PREREQUISITE — an O(N) join between two taken snapshots** (the shared reading of a `json_each` snapshot in
+  1. ✅ **LANDED (2026-11-02, `0dce4db8`).** A retained binding read twice, on a join side that may run as the inner
+     loop, or in a correlated subplan, is read through a fenced `Materialize` over its Ref (`spools` in
+     `src/rel/emit.ts`, `refReads` in `src/rel/walk.ts`; Calcite `Spool`), so SQLite auto-indexes it;
+     `runtimeNameRows` takes ONE first-per-traverser `(o, name, t, vt)` snapshot and the absent guard is one anti join;
+     runtime-write slot cleanup is driven from the written rows (`slotRows`). ~6k vertices: 9–32 s → ~0.1 s, linear.
+     Gates: `test/compiler/runtime-name-scale.exec.test.ts`, and `sql-hygiene` fails a taken-snapshot inner-loop scan
+     (`test/support/snapshot-scans.ts`). Remains: writes inside `union()`/`local()` arms still decline — already true
+     and unrelated to this item. Original report follows.
+     **PREREQUISITE — an O(N) join between two taken snapshots** (the shared reading of a `json_each` snapshot in
      `src/compiler/rel/write.ts`). Every per-traverser runtime NAME route is QUADRATIC: the equi-joins on `(o)` and
      `(name)` are `json_each(?) ⨝ json_each(?)` nested loops with no index. Measured: `g.V().addV(__.values('name'))`
      0.84 s @2k / 12.5 s @8k; `addLabel(__.values('name'))` 0.9 s @1k / 14 s @4k / 193 s @16k (two quadratic
@@ -607,7 +615,11 @@ UNEVALUABLE`.
      (trunk `7f041997` same). Fix = reuse-sweep proposal 1 below (route all-constant through `mutationLabelMembers`,
      delete the `String()` coercion; `mutationLabelNames` then serves `dropLabel` only). Needs a test that the label is
      NOT written.
-  4. **One first-pick policy for the shared resolver.** A label ranks by `(sq, v)` (`rankedFirst`); a key keeps
+  4. ✅ **LANDED (2026-11-02, `0dce4db8`).** `rankedFirst` on `(sq, v)` is the ONLY first-pick policy (runtime keys,
+     edge values, folded parameters too); `firstPerTraverser`/`unorderedFirstGuard`/`UNORDERED_FIRST`/`NameRules.first`
+     are deleted, so the data-dependent refusal is gone. §17 "Unordered slices" names it and matrix row 196 drops the
+     decline. Remains: nothing. Original report follows.
+     **One first-pick policy for the shared resolver.** A label ranks by `(sq, v)` (`rankedFirst`); a key keeps
      `firstPerTraverser`'s data-dependent `UNORDERED_FIRST` raise (`NameRules.first`). So `g.V(3).addLabel(__.in()
      .values('name'))` writes 'josh' while `g.V(3).addV(__.in().values('name')).label()` gives 'marko', and
      `property(__.out().values('name'),1)` can refuse on graph contents. Moving KEY_NAME to `'rank'` is now one line and
@@ -793,7 +805,7 @@ for `count`, `[]` for `fold`.
   design).
 
 **Shared root causes this round surfaced (one substrate item each, ordered before their dependants):**
-- **O(N) snapshot⨝snapshot join** — computed label item 1 above; unblocks every per-traverser runtime name (label,
+- ✅ (`0dce4db8`) **O(N) snapshot⨝snapshot join** — computed label item 1 above; unblocks every per-traverser runtime name (label,
   key) and the property-key route's existing cost.
 - **A write inside a child / multi-arm body** (`local`/`flatMap`/`map`/`union`/`coalesce`/`optional`/`choose`/
   `repeat`/`sideEffect`) — declines for constant AND computed labels, for merges, and for `addLabel`; one substrate
@@ -812,7 +824,7 @@ for `count`, `[]` for `fold`.
    `validateLabel`), so compile-time refusal and `runtimeNameRows`' run-time guard read one table. ~12 lines.
 3. ✅ (2184440a) **KEY_NAME/LABEL_NAME/ADD_LABEL_NAME sentences from `src/gremlin/validate.ts`** — export its tables (the owner of
    `ElementHelper`'s rules) and build the `NameRules` from them; six duplicated literals go.
-4. **One positional label-pairing join** — `labelledByPosition` (write.ts) takes the key column (ORD for a creation,
+4. ✅ (`0dce4db8`, with follow-up 1) **One positional label-pairing join** — `labelledByPosition` (write.ts) takes the key column (ORD for a creation,
    `o` for `targetsOf`), so `bindLabels`' non-constant arm and `elementAddLabel`'s `owned`/`named` joins go. ~20 lines;
    a computed-addLabel census digest may move (say so). Do it together with prerequisite 1 above — same joins.
 5. **`rankedFirst` and `mergeFromTraversal`'s first-map-per-driver on `perOriginWindow`** — move `perOriginWindow`
