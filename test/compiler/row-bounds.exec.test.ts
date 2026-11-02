@@ -82,4 +82,25 @@ describe('a one-row child body', () => {
     // traversal produces nothing is absent from the map, never mapped to null.
     expect(answer('g.inject([a:1]).unfold().group().by(keys).by(__.select(values).count().is(0)).count(local)')).toEqual([0]);
   });
+
+  // A map entry's value may be a PRODUCTIVE null: over a body that may be empty its NULL cannot say "no
+  // row", so presence is the row's EXISTENCE, never the value's nullness. `DedupGlobalStep.filter` keeps the
+  // first null, `Grouping.doFinalReduction` drops a key only when its value traversal has no next, and a
+  // sum over all-null input is null (`Sum.feature`). Each of these dropped the `a` key under value-nullness.
+  test('a null map-entry value through a may-be-empty body keeps its group key', () => {
+    const groups = (q: string) => (run(store, q) as { map: string }[]).map((r) => JSON.parse(r.map) as unknown);
+    const NULL = { t: null, v: null };
+    const A = [{ t: 'string', v: 'a' }, NULL], B = [{ t: 'string', v: 'b' }, { t: 'int', v: 1 }];
+    for (const tail of ['dedup()', 'sum()', 'max()', 'dedup().limit(1)'])
+      expect(groups(`g.inject(['a':null,'b':1]).unfold().group().by(keys).by(__.select(values).${tail})`)).toEqual([[A, B]]);
+    for (const tail of ['is(null)', 'is(eq(null))', 'is(neq(1))', 'not(__.is(1))'])
+      expect(groups(`g.inject(['a':null,'b':1]).unfold().group().by(keys).by(__.select(values).${tail})`)).toEqual([[A]]);
+    // The key arm reads the same authority: a null key is a group, not an absent one.
+    expect(groups("g.inject(['a':null]).unfold().group().by(__.select(values).dedup()).by(keys)"))
+      .toEqual([[[NULL, { t: 'list', v: [{ t: 'string', v: 'a' }] }]]]);
+    expect(groups("g.inject(['a':null,'b':1]).unfold().groupCount().by(__.select(values).dedup())"))
+      .toEqual([[[{ t: 'int', v: 1 }, { t: 'long', v: 1 }], [NULL, { t: 'long', v: 1 }]]]);
+    // A body that rejects the entry still drops its key.
+    expect(groups("g.inject(['a':1,'b':2]).unfold().group().by(keys).by(__.select(values).is(1))")).toEqual([[[{ t: 'string', v: 'a' }, { t: 'int', v: 1 }]]]);
+  });
 });

@@ -6,7 +6,7 @@ import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../gremlin/fro
 import { listNodeExpr } from './list.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
@@ -616,7 +616,7 @@ export const memberNodeOf = (produced: ChildValue, source: GraphSource, fresh: M
  *  per-row tag where it has one (a NULL tag frames by inference), else untagged. Inline where value and tag
  *  are free of a correlated read (cheap to repeat), else `typedNodeOnce`, which evaluates each ONCE. A map
  *  KEY node is grouped by its value and family, not its text (`groupKeyed`, map.ts). */
-const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType, fresh: Minter): Expr => {
+export const scalarNode = (value: Expr, vtype: Expr | undefined, type: ScalarType, fresh: Minter): Expr => {
   if (staticTypeOf(type) || !vtype) return typedNode(value, staticTagExpr(type));
   return vtype.kind !== 'lit' && (exprHasSubquery(value) || exprHasSubquery(vtype)) ? typedNodeOnce(value, vtype, fresh) : typedNode(value, vtype);
 };
@@ -646,10 +646,12 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
   return gatedOn(framing.kind === 'scalar' ? present : 'value-nullness', value, member);
 }
 
-/** A member node that EXISTS only where the body produced — `value IS NOT NULL` unless it always does.
- *  The SQL NULL outside it is "produced nothing" (`producedMemberNode`'s contract). */
+/** A member node that EXISTS only where the body produced — `value IS NOT NULL` unless it always does,
+ *  or the producer's own STATED predicate (`{ when }`), under which a NULL value is a productive null
+ *  member (`{t:null, v:null}`) rather than an absent one. The SQL NULL outside it is "produced nothing"
+ *  (`producedMemberNode`'s contract). */
 function gatedOn(present: Presence, value: Expr, member: Expr): Expr {
-  return caseWhen(present === 'always' ? ALWAYS_PRODUCTIVE : isNotNull(value), member);
+  return caseWhen(present === 'always' ? ALWAYS_PRODUCTIVE : typeof present === 'object' ? statedPresence(present, value) : isNotNull(value), member);
 }
 
 export function byNode(modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam): Expr | null {

@@ -25,7 +25,7 @@ import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../fra
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
-import { byExpr, byNode, propertyFirstPassing, propertyVtype, scopedHost } from '../modulator.ts';
+import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, subPathMembers } from '../path.ts';
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
@@ -94,10 +94,24 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
 });
 
-/** A one-row child's presence: `'always'` only where the relation is EXACTLY one row (`exactlyOneRow`,
- *  `src/rel/bounds.ts`). One that may be EMPTY (`count().is(0)`, `fold().limit(0)`, `count().skip(1)`) leaves the
- *  scalar subquery reading NULL, and that NULL is the body's absence. */
-const oneRowPresence = (rel: Rel): Presence => (exactlyOneRow(rel) ? 'always' : 'value-nullness');
+/**
+ * A one-row child's presence: `'always'` only where the relation is EXACTLY one row (`exactlyOneRow`,
+ * `src/rel/bounds.ts`). One that may be EMPTY (`count().is(0)`, `fold().limit(0)`, `count().skip(1)`)
+ * leaves the scalar subquery reading NULL, and how that NULL is read depends on the VALUE:
+ * - a value that is never NULL when present (a count, a seeded list) — the NULL IS the body's absence,
+ *   so `'value-nullness'` reads it exactly and costs no second subquery;
+ * - a value that may be a PRODUCTIVE NULL (`nullable` — a map entry's own value through `dedup()`,
+ *   `is(null)`, `limit(1)`) — a NULL cannot tell "no row" from "a null row", so presence is STATED as
+ *   `EXISTS` over the same relation. `DedupGlobalStep.filter` keeps the first null
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java`)
+ *   and `Grouping.doFinalReduction` drops a key only when its value traversal has NO next
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java`),
+ *   so reading that null as absence drops a group key.
+ */
+const oneRowPresence = (rel: Rel, nullable = false): Presence =>
+  exactlyOneRow(rel) ? 'always'
+    : nullable ? { when: { kind: 'exists', negated: false, plan: rel } }
+      : 'value-nullness';
 
 /**
  * `map()` / `flatMap()` / `local()` — A CHILD BODY APPLIED PER TRAVERSER, or `null` to decline.
@@ -2074,11 +2088,25 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     if (!exactlyOneRow(tail.rel)) return null;
     return { expr: scalarOf(tail.framing.kind === 'list' ? LIST_COL : 'map'), framing: tail.framing, present: 'always', yields: 'one' };
   }
-  if (tail.framing.kind === 'scalar') return {
-    expr: scalarOf('v'), framing: tail.framing,
-    ...(tail.framing.type.kind === 'perRow' && tail.framing.type.carrier.kind === 'column' ? { vtype: scalarOf(tail.framing.type.carrier.name) } : {}),
-    present: oneRowPresence(tail.rel), yields: 'one',
-  };
+  if (tail.framing.kind === 'scalar') {
+    const carrier = tail.framing.type.kind === 'perRow' && tail.framing.type.carrier.kind === 'column' ? tail.framing.type.carrier.name : undefined;
+    const present = oneRowPresence(tail.rel, true);
+    // A body that may be EMPTY (`dedup()`, `is(null)`, `sum()` over the entry's one value) states its
+    // presence as `EXISTS` — a map entry's value may be a productive NULL — and its member node is read
+    // INSIDE the one relation (`ChildValue.node`): NULL exactly where there is no row, a `{t, v:null}`
+    // node where the row's value is null, so a `group()`/`groupCount()` member costs one read, not
+    // a value read, a tag read and an EXISTS.
+    const node = present === 'always' ? undefined : { kind: 'scalar' as const, plan: make.project({
+      id: fresh('en'), input: tail.rel, channels: [], type: typeOf(meta('n', 'json', true)),
+      exprs: [['n', scalarNode(col(tail.rel.id, 'v'), carrier ? col(tail.rel.id, carrier) : undefined, tail.framing.type, fresh)]],
+    }) };
+    return {
+      expr: scalarOf('v'), framing: tail.framing,
+      ...(carrier ? { vtype: scalarOf(carrier) } : {}),
+      ...(node ? { node } : {}),
+      present, yields: 'one',
+    };
+  }
   return null;
 }
 

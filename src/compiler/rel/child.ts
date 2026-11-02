@@ -239,8 +239,9 @@ export interface ChildValue {
    *   PRODUCTIVE null. Stated by an arm whose productivity is not its value's nullness and is cheap to
    *   test on its own: a re-sourced body's first value (`map(__.V().choose(…, constant(null)).order()
    *   .limit(1))`), whose presence is an uncorrelated EXISTS over the one fenced row it read the value
-   *   from. A consumer that keeps productive nulls (`map()`, a write) filters on `when`; one that reads
-   *   `presenceOf` gets it for free; one that drops a null value anyway (a `by()`, §17) still may.
+   *   from. A consumer that keeps productive nulls (`map()`, a write, a `group()` member node —
+   *   `gatedOn`, `modulator.ts`) filters on `when`; one that reads `presenceOf` gets it for free; one that
+   *   drops a null value anyway (an ordering/dedup `by()`, §17) still may.
    *
    * REQUIRED, as `yields` and `framing` are: only the arm that built the expression knows, and an
    * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence.
