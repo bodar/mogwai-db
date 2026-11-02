@@ -926,9 +926,10 @@ the first step.
 8. Still open from the 2026-11-01 round: proposal 6 (one exported `ABSENT_VALUE`) and 7 (`emit.ts`
    `blockAliases`/`renderedAliases`). Proposal 5 is superseded by item 2 above.
 
-**Test infrastructure note:** `test/text-literal.test.ts` "a decoded NUL or lone surrogate declines at every position
-that inlines it" timed out at 5 s under the parallel suite in TWO of this round's CI runs (7.9 s), and passed alone in
-~3.7 s. It needs a larger timeout or a smaller sweep before it starts failing CI.
+**Test infrastructure note — ✅ LANDED 2026-11-02 (`fa25b24e`).** `test/text-literal.test.ts` "a decoded NUL or lone
+surrogate declines at every position that inlines it" used to time out at 5 s under the parallel suite. It is now a
+`test.each` with one case per position (each case gets its own budget, and a failure names the query), and every case
+shares one lazily seeded store because each one declines at compile time. Remaining: nothing.
 
 **Needs-human questions:** none raised this round. (One conditional call for whoever picks it up, not a question:
 reuse proposal 5 turns a decline into a raise. The project rule "a decline costs the user something" favours the
