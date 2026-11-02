@@ -849,7 +849,11 @@ wrapping `V().sample(1)`, and `property(...max())` over a re-sourced `V()`, rais
   `(o, sq)`. Expect the non-null plans to return byte-identical to pre-M3.
 
 **Follow-ups from review (major first).**
-1. **R11 regression (major) — a VALUE-traverser `where(P.eq(label))` inside a multi-correlation leg now declines;
+1. ✅ **LANDED (`fb030364`..`00256441`).** `aliasWhere`'s bare `where(P)` arm takes a scalar subject (current value
+   vs `aliasValueAt(label,'last')`) through the one `valueTheta` comparator, which now types an untyped side by its
+   value and decides NULL first; untyped parameters are typed once at the compile seam (`declaredParamTypes`,
+   `src/gremlin/types.ts`). Answers in legs and at top level; pinned in `where-leg-alias-scope.exec.test.ts`.
+   Remains: nothing. *(Original:)* **R11 regression (major) — a VALUE-traverser `where(P.eq(label))` inside a multi-correlation leg now declines;
    trunk answered it correctly.** Deleting `legRight` deleted its `aliasValueAt` arm, and `aliasWhere`
    (`src/compiler/rel/lower.ts`) has no scalar-position arm. Witnesses (were 6, 6, 0; now decline):
    `g.V().as('b').values('name').as('n').select('b').out().as('a').where(__.select('a').in().values('name').where(P.eq('n'))).count()`,
@@ -879,7 +883,8 @@ wrapping `V().sample(1)`, and `property(...max())` over a re-sourced `V()`, rais
    where 91 → 87; re-recording on its parent gives the same deltas, so an EARLIER commit raised valueMap without
    banking it. Trace it (`git log -S` on the baseline / bisect `mise run sql-hygiene`) and name the user-visible reason
    or remove the term.
-7. **R11 next step (coverage):** `correlatedExists` (`src/compiler/rel/lower/filter.ts`) still seeds with
+7. ✅ **LANDED (`fb030364`, with 1):** `correlatedExists` seeds with `seedOuterAliases`; the witness answers 6.
+   Remains: nothing. *(Original:)* **R11 next step (coverage):** `correlatedExists` (`src/compiler/rel/lower/filter.ts`) still seeds with
    `NO_ALIASES`, so `g.V().as('a').out().as('b').where(__.in().where(P.eq('a'))).count()` declines while the
    `select('b')`-spelled twin answers 6. Seed it with `seedOuterAliases`.
 8. **Cheap fixes.**
