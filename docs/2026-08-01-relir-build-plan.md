@@ -474,7 +474,9 @@ F last. Each step lands `mise run ci` green on its own.
   held halves of `literalKeyFacts`/`recordKeyFacts`, the record recursion in `meetFraming`; `mapKeyPresence` →
   boolean `mayHoldKey`; `injectMap` → union. Keep `MapScope.mayBeElement` and the `ordered` element join. If L3
   moves, keep `held` for `recordKeyFacts` only. ≈−95.
-- **C1 cleanup-presence-group-key** — gate 3b5cb096's `$.t IS NOT NULL` sort key (`map.ts` `collectedValue`) on a
+- ✅ **C1 cleanup-presence-group-key** — LANDED `1aeb8683`: `GroupRecipe.mayYieldNull` (from the value body's
+  `ChildValue.present`, or ProductiveByStrategy) gates `collectedValue`'s `nullsFirst` key (`rel/map.ts`); plain
+  `by(__.values(p))` drops the term. Remains: nothing. Original spec: gate 3b5cb096's `$.t IS NOT NULL` sort key (`map.ts` `collectedValue`) on a
   `GroupRecipe` flag set only where the value body STATES its presence; common `group().by(k).by(child)` goes back
   to pre-3b5cb096 SQL (`test/L2-sql/group.sql.test.ts`), `sql-hygiene-record` (group goes down). +4, −1 common term.
 - **C2 cleanup-presence-by-plain** (after C1) — revert a37017d9's semantic half: delete `landedOnce`;
