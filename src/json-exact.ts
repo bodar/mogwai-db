@@ -82,3 +82,17 @@ function exactSpelling(member: number): string | undefined {
   if (member === -Infinity) return '-9.0e+999';
   return undefined;
 }
+
+/** A Double's JSON spelling, so every reader keeps it a Double (SQLite's REAL, `json_type` = `real`): its
+ *  shortest round-trip text, with a point or an exponent — a whole `2` is `2.0`, and a whole value past 15
+ *  significant digits its exponent form, which SQLite's decimal reader takes back exactly. `±Infinity` is
+ *  SQLite's own overflow spelling (`exactSpelling`). The ONE authority for a compile-time Double headed into
+ *  SQLite JSON: the emitter's JSON-entry rule (`rel/emit.ts` `jsonEntry`) and a list literal encoded in JS
+ *  (`compiler/rel/list.ts` `listLiteralBlob`) both spell through it, so the two forms of one literal agree. */
+export function realJsonText(v: number): string {
+  const infinite = exactSpelling(v);
+  if (infinite !== undefined) return infinite;
+  const shortest = String(v);
+  if (/[.eE]/.test(shortest)) return shortest;
+  return Number(v.toPrecision(15)) === v ? `${shortest}.0` : v.toExponential();
+}

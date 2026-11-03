@@ -11,6 +11,7 @@ import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from
 import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, refNames, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
 import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
+import { realJsonText } from '../json-exact.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -341,8 +342,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       if (x.kind !== 'lit' || x.source !== 'compiler-real' || !Number.isFinite(x.value as number)) return self(x);
       const v = x.value as number;
       if (Number(v.toPrecision(15)) === v) return self(x);
-      const shortest = String(v);
-      return raw(`json('${/[.eE]/.test(shortest) ? shortest : v.toExponential()}')`);
+      return raw(`json('${realJsonText(v)}')`);
     };
     switch (e.kind) {
       case 'col': {

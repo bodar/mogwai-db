@@ -1,4 +1,4 @@
-import { and, col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, compilerParamName, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { type Channel } from '../../channels.ts';
 import { constLit, itemTypeAt, sliceBound } from './const.ts';
 import { flatType, gremlinTypeOf, NUMBER_STORED_NON_NUMBERS, valueNodeOf, type TypeNode } from '../../gremlin/types.ts';
@@ -15,7 +15,7 @@ import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { stringifyExact } from '../../json-exact.ts';
+import { realJsonText, stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
@@ -1888,8 +1888,8 @@ export function listPayload(rel: Rel, of: ListOf, set: boolean, source: GraphSou
  *  positions. */
 export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): { readonly blob: Expr; readonly of: ListOf } | null {
   // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
-  // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
-  // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
+  // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) has each member's
+  // type in the container's `type.items[i]`.
   const members = listArg.members;
   // A BOOLEAN, DATE or DURATION member declines: the bare encoding writes it as the number SQLite stores
   // it as (1/0, epoch millis), so every member read after — `unfold()`, `sum(local)`, `asString(local)`,
@@ -1897,6 +1897,12 @@ export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): { re
   // bare member has no tag to say otherwise (`NUMBER_STORED_NON_NUMBERS`).
   const memberType = (mi: number): string | null => flatType(members?.[mi]?.type ?? itemTypeAt(listArg.type ?? null, mi));
   if (values.some((value, mi) => typeof value === 'boolean' || NUMBER_STORED_NON_NUMBERS.includes(memberType(mi) ?? ''))) return null;
+  // EVERY MEMBER A CONSTANT — a list PARAMETER (`inject($ns)`: the whole list is the user's ONE value) or
+  // a literal with no `$x` member — crosses as ONE JSON value, encoded here in JS once. Spelled member by
+  // member as `jsonb_array(…)` it put one SQL function argument per member, so a list longer than
+  // SQLite's function-argument cap raised SQLite's own bare `too many arguments` for a perfectly valid
+  // `inject($ns)` — a refusal on DATA SIZE — and inlined the parameter's data into the statement text.
+  if (!members?.some((member) => member.name != null)) return constantListBlob(listArg, values, memberType);
   let typed = false;
   const items = values.map((value, mi) => {
     const item = constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi)));
@@ -1920,4 +1926,55 @@ export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): { re
   });
   return items.some((item) => !item) ? null
     : { blob: { kind: 'json-array', items: items as Expr[], binary: true }, of: typed ? TYPED_MEMBERS : BARE_LIST };
+}
+
+/** A compiler constant's JSON text — exactly what SQLite's JSON writer makes of the same literal as a
+ *  `jsonb_array` entry: a Double keeps a point or exponent (`realJsonText`, the emitter's own rule), so
+ *  `json_type` still says `real` and a member read off it keeps its class. `null` for anything else. */
+const constantJsonText = (e: Expr | null): string | null => {
+  if (e?.kind !== 'lit') return null;
+  switch (e.source) {
+    case 'compiler-text': return JSON.stringify(e.value);
+    case 'compiler-int': return String(e.value);
+    case 'compiler-real': return realJsonText(e.value as number);
+    case 'compiler-null': return 'null';
+    default: return null;
+  }
+};
+
+/**
+ * `listLiteralBlob` for a list whose members are ALL compile-time constants — ONE JSON value, so the
+ * statement's text and bind count are O(1) in the list's length, never a function of its data.
+ *
+ * Each member is the literal `constLit` makes of it (the one bind-vs-inline / Int-vs-Double authority),
+ * spelled as the JSON text the per-member `jsonb_array` form would have produced, and enveloped by the
+ * same per-member `literalMemberEnvelopes` rule — so the list a reader sees is the SAME bytes either
+ * way. A list PARAMETER binds that text once under its wire name (`jsonb(?)`); a literal inlines it as
+ * one compiler text literal.
+ *
+ * The bind's REUSE KEY is the parameter's name only when the text IS the parameter's plain JSON — the
+ * form a `within($ns)` set binds (`build.ts jsonEachSet`). An enveloped or re-spelled encoding is a
+ * DIFFERENT value, and sharing the key would hand one site the other's bytes (`within($ns)` reading
+ * `{t,v}` envelopes would match nothing), so it binds under a compiler-minted key no user name can spell.
+ */
+function constantListBlob(
+  listArg: Arg, values: readonly ArgValue[], memberType: (mi: number) => string | null,
+): { readonly blob: Expr; readonly of: ListOf } | null {
+  let typed = false;
+  const parts: string[] = [];
+  for (let mi = 0; mi < values.length; mi++) {
+    const value = values[mi];
+    const text = constantJsonText(constLit(listArg.members?.[mi] ?? arg(value, itemTypeAt(listArg.type ?? null, mi))));
+    if (text === null) return null;
+    const declared = memberType(mi);
+    if (literalMemberEnvelopes(declared, value)) {
+      typed = true;
+      parts.push(`{"t":${JSON.stringify(declared)},"v":${text}}`);
+    } else parts.push(text);
+  }
+  const json = `[${parts.join(',')}]`;
+  const name = listArg.name;
+  const leaf = name == null ? compilerText(json)
+    : param(json, json === stringifyExact(values) ? name : compilerParamName(`${name}:members`), 'text');
+  return { blob: { kind: 'call', fn: 'jsonb', args: [leaf] }, of: typed ? TYPED_MEMBERS : BARE_LIST };
 }
