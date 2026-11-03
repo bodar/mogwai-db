@@ -32,6 +32,11 @@ json_each `key` as its encounter channel like the scalar/map/list arms (`correla
 `src/compiler/rel/list.ts`), so the re-collecting `fold()` and a body `tail(1)` read list order.
 L3 1904 → 1907. Remains: nothing.
 
+**A `null` id member (✅ landed, 9ec195ad).** `V(null)`/`E(null)`/`V(1,null)`/`hasId(2,null)` answer
+instead of declining: a `null` member is an id no element has, so it adds no clause, and a set with
+members but none matchable is `CONSTANT.false`, never `V()` (`idMembership` in
+`src/compiler/rel/source.ts`; `boundGraph.elementScan` likewise). L3 1908 → 1919. Remains: nothing.
+
 **Reducer-headed child body (✅ landed, 202bdbce).** A per-traverser child body whose head is a reducer
 (`local(count())`, `values('age').local(sum())`) reduces the host's one-row self at bulk 1, exactly as
 `identity()` does (`TraversalUtil.apply`): `hostSelfRow` seeds element AND scalar hosts through one gate,
