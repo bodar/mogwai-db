@@ -50,13 +50,43 @@ describe('select(k) over a per-row scalar stream — Map first only where nothin
     expect(() => run(seededStore(), "g.V().values('name').mergeV(__.select('k'))")).toThrow(UnsupportedTraversal);
   });
 
-  test('a merge select(k) over a stream of Maps declines with the reason, never writing by the side effect', () => {
+  // A merge `select(k)` over a stream of Maps is decided by the stream's MAY key set (`MergeTraverser`).
+  // `Scoping.getScopeValue` reads the Map's own `k` first, then the side effect
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135).
+  test('a key no Map can hold reads the side effect — the merge answers', () => {
+    expect(bare(run(seededStore(), "g.withSideEffect('c',[age:1]).inject([name:'x']).mergeV().option(Merge.onCreate, __.select('c')).valueMap()")))
+      .toEqual(bare(run(seededStore(), "g.inject([name:'x']).mergeV().option(Merge.onCreate, [age:1]).valueMap()")));
+    // A whole-arg map over a Map driver is a mere multiplier, which the Map-driver lowering does not cover
+    // yet whatever spells the map (`inject([a:1]).mergeV([name:'q'])` declines too) — a clean decline, never
+    // the collision message.
+    expect(() => run(seededStore(), "g.withSideEffect('k',[name:'zz']).inject([name:'q']).mergeV(__.select('k'))"))
+      .toThrow(/^this traversal is not supported yet: no lowering covers/);
+    expect(values(run(seededStore(), "g.withSideEffect('c',[age:1]).inject([name:'nobody']).mergeV().option(Merge.onMatch, __.select('c')).values('name')"))).toEqual(['nobody']);
+    // At depth: after as(), into a barrier, both arms.
+    expect(values(run(seededStore(), "g.withSideEffect('c',[age:1]).inject([name:'x']).as('m').mergeV().option(Merge.onCreate, __.select('c')).values('age')"))).toEqual([1]);
+    expect(values(run(seededStore(), "g.withSideEffect('c',[age:1]).inject([name:'x'],[name:'y']).mergeV().option(Merge.onCreate, __.select('c')).values('age').sum()"))).toEqual([2]);
+    // The side effect answers, so its own reference error follows: an onCreate cannot override the merge map.
+    expect(() => run(seededStore(), "g.withSideEffect('c',[(T.label):'person',name:'zz']).inject([name:'nobody']).mergeV().option(Merge.onCreate, __.select('c')).values('name')"))
+      .toThrow("option(onCreate) cannot override values from merge() argument");
+  });
+
+  test('a key a Map MAY hold beside a same-named side effect declines naming the collision', () => {
     for (const q of [
       "g.withSideEffect('k',[name:'zz']).inject([k:[name:'q']]).mergeV(__.select('k'))",
-      "g.withSideEffect('k',[name:'zz']).inject([name:'q']).mergeV(__.select('k'))",
-      "g.withSideEffect('c',[(T.label):'person',name:'zz']).inject([name:'nobody']).mergeV().option(Merge.onCreate, __.select('c')).values('name')",
-      "g.withSideEffect('c',[age:1]).inject([name:'nobody']).mergeV().option(Merge.onMatch, __.select('c'))",
-    ]) expect(() => run(seededStore(), q), q).toThrow(/a merge over a stream of Maps cannot use select\('[kc]'\)/);
+      "g.withSideEffect('name',[age:1]).V(1).valueMap().mergeV(__.select('name'))",
+      "g.withSideEffect('c',[age:1]).inject([c:2],[name:'x']).mergeV().option(Merge.onCreate, __.select('c'))",
+    ]) expect(() => run(seededStore(), q), q).toThrow(/a Map stream MAY hold '(k|name|c)' and a side effect '\1' is declared/);
+  });
+
+  test('a key a Map MAY hold with no side effect is a plain own-entry decline, with no rename advice', () => {
+    for (const q of [
+      "g.inject([lookup:[name:'x'], create:[name:'x',age:3]]).mergeV(__.select('lookup')).option(Merge.onCreate, __.select('create'))",
+      "g.V(1).valueMap().mergeV(__.select('name'))",
+    ]) {
+      let message = '';
+      try { run(seededStore(), q); } catch (e) { message = (e as Error).message; expect(e).toBeInstanceOf(UnsupportedTraversal); }
+      expect(message, q).toMatch(/^this traversal is not supported yet: reading a Map's own '(lookup|name)' entry \(select\('\1'\) over a stream of Maps\) as a merge argument$/);
+    }
   });
 
   test('a map or record that MAY hold k beside a same-named side effect DECLINES — chain, child, math() and dedup()', () => {

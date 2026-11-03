@@ -133,16 +133,29 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | d[2].l |
 
-  # A MERGE driven by a stream of MAPS: each Map is the first scope its own option select("k") reads, so the
-  # side effect is no compile-time constant there and the merge declines with that reason.
-  Scenario: g_withSideEffectXk_mapX_injectXmapX_mergeV_optionXonCreate_selectXkXX_declines
+  # A MERGE driven by a stream of MAPS: each Map is the first scope its own option select("k") reads, but a
+  # Map that cannot hold "k" has no such entry, so the side effect answers and the merge writes by it.
+  Scenario: g_withSideEffectXk_mapX_injectXmapX_mergeV_optionXonCreate_selectXkXX_valueMap
     Given the empty graph
     And the traversal of
       """
       g.withSideEffect("k", ["age": 5]).inject(["name": "x"]).mergeV().option(Merge.onCreate, __.select("k")).valueMap()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "a merge over a stream of Maps cannot use select('k')"
+    Then the result should be unordered
+      | result |
+      | m[{"name": ["x"], "age": [5]}] |
+
+  # Where a Map MAY hold "k" beside a side effect "k", the answer depends on which rows hold it: the merge
+  # declines naming the collision.
+  Scenario: g_withSideEffectXk_mapX_injectXmap_with_kX_mergeV_optionXonCreate_selectXkXX_declines
+    Given the empty graph
+    And the traversal of
+      """
+      g.withSideEffect("k", ["age": 5]).inject(["k": 6], ["name": "x"]).mergeV().option(Merge.onCreate, __.select("k")).valueMap()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "a Map stream MAY hold 'k' and a side effect 'k' is declared"
 
   # A path label keeps its own answer over a value stream — no per-row Map probe (the §17 line).
   Scenario: g_V_asXaX_valuesXnameX_selectXaX_count

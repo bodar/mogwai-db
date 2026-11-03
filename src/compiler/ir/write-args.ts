@@ -69,13 +69,19 @@ function soleSelectKey(inner: readonly Step[]): string | undefined {
  * Map-framed — an element, a graph-start's one row, a scalar — the fold is the answer. A per-row scalar
  * (`values('m')`) MAY hold a stored Map at run time, and there the named scope WINS, exactly as the
  * chain spelling and the read path already decide (`docs/feature-support-matrix.md` §17 "Map scope"):
- * no row is probed for a same-named key. Over a driver the lowering frames AS a Map (`mapTail`: an
- * `inject([k:v])`, a `project()` record) the Map is the first scope on every row, so the select is no
- * compile-time constant and the merge declines (`MapScopeDeferral`) rather than writing by the side
- * effect. The verifier asks `elementKindAt` and treats its cannot-say as `'map'` — the conservative
- * reading — so it never raises a side effect's error on a chain it has not typed.
+ * no row is probed for a same-named key.
+ *
+ * Over a driver the lowering frames AS a Map (`mapTail`: an `inject([k:v])`, a `project()` record) the
+ * Map is the first scope — but only for a key it MAY hold. `mayHold` is the lowering's static key fact
+ * (a sound MAY set): a key no row can hold has no Map entry, so the side effect answers and the select
+ * folds exactly as over `'notMap'`. A key a row MAY hold is no compile-time constant (`MapScopeDeferral`):
+ * against a declared side effect of that name it is a COLLISION that signals a confused query; with none
+ * it is the Map's own entry read as a merge argument — a depth gap, not confusion. A PREDICATE, not the
+ * lowering's framing type, so this tier imports nothing from `rel/`: the verifier, which cannot type the
+ * stream (`elementKindAt`'s cannot-say), passes `{ mayHold: () => true }` — the conservative reading — so
+ * it never raises a side effect's error on a chain it has not typed.
  */
-export type MergeTraverser = 'map' | 'notMap';
+export type MergeTraverser = 'notMap' | { readonly mayHold: (key: string) => boolean };
 
 // A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
 //   __.select(k) of a withSideEffect(k, const)  (via constFromSelect), or
@@ -125,10 +131,14 @@ export function constFromNested(nested: any, sideEffects: SideEffectConstants | 
  */
 export class Deferral extends Error {}
 
-/** A merge `select(k)` over a Map-framed driver (`MergeTraverser`) — the one `Deferral` the map-driver
- *  lowering turns into an EXPLANATORY decline, because the shape signals a confused query: the Map's own
- *  `k` entry, not the side effect `k`, is what the select reads first on every row. */
-export class MapScopeDeferral extends Deferral {}
+/** A merge `select(k)` over a Map-framed driver whose Maps MAY hold `k` (`MergeTraverser`) — the
+ *  `Deferral` the map-driver lowering records as a REASON rather than "no lowering covers". `kind` says
+ *  which: `'merge-map-scope'` collides with a declared side effect `k` (a confused query: each Map's own
+ *  entry, not the side effect, is read first wherever a Map holds it); `'merge-own-entry'` reads a Map's
+ *  own entry as the merge argument, which is a depth gap, not confusion. */
+export class MapScopeDeferral extends Deferral {
+  constructor(message: string, readonly kind: 'merge-map-scope' | 'merge-own-entry') { super(message); }
+}
 
 /** What the STEP declared. `null` is a real state, not a missing one: it means the traversal
  *  named no cardinality, so the graph's default applies — and only the storage waist may resolve
@@ -362,9 +372,13 @@ function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffec
   const inner = stepChain(raw.nested, params);
   const k = soleSelectKey(inner);
   if (k !== undefined) {
-    // Over a Map-framed driver the Map's own `k` precedes the side effect (`MergeTraverser`).
-    if (traverser === 'map')
-      throw new MapScopeDeferral(`a merge over a stream of Maps cannot use select('${k}'): each Map's own '${k}' entry is read before any side effect '${k}'. Name the side effect so no Map key shadows it, or merge a stream that is not Maps`);
+    // Over a Map-framed driver whose Maps MAY hold `k`, the Map's own entry precedes the side effect
+    // (`MergeTraverser`); a key no Map can hold falls through to the side effect, as over `'notMap'`.
+    if (traverser !== 'notMap' && traverser.mayHold(k)) {
+      if (sideEffects?.has(k))
+        throw new MapScopeDeferral(`a Map stream MAY hold '${k}' and a side effect '${k}' is declared: select('${k}') as a merge argument reads each Map's own '${k}' entry first and the side effect only where a Map lacks it. Rename the side effect so no Map key shadows it, or merge a stream that is not Maps`, 'merge-map-scope');
+      throw new MapScopeDeferral(`reading a Map's own '${k}' entry (select('${k}') over a stream of Maps) as a merge argument`, 'merge-own-entry');
+    }
     const declared = constFromSelect(raw, sideEffects, params);
     if (declared) return declared;
     throw new Deferral(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
@@ -850,9 +864,9 @@ export function verifyWriteArgs(steps: readonly IRStep[], params: ParamEnv, side
     while (end < steps.length && (steps[end]!.name === 'option' || steps[end]!.name === 'property')) end++;
     // The incoming traverser is no Map at the traversal's own start (a CHILD body's first step reads its
     // host's traverser, which may be) or on an element stream; anywhere this cannot type
-    // (`elementKindAt`'s cannot-say) it is read as `'map'`, so a whole-arg `select(k)` is left to the
+    // (`elementKindAt`'s cannot-say) it is read as a Map that MAY hold any key, so a whole-arg `select(k)` is left to the
     // lowering, which holds the exact input framing, rather than folded and raised on here.
-    const traverser: MergeTraverser = (at === 0 && !nested) || elementKindAt(steps, at) !== undefined ? 'notMap' : 'map';
+    const traverser: MergeTraverser = (at === 0 && !nested) || elementKindAt(steps, at) !== undefined ? 'notMap' : { mayHold: () => true };
     guarded(() => { mergeMaps(step, steps.slice(at + 1, end), step.name as 'mergeV' | 'mergeE', sideEffects, params, traverser); });
   }
 }

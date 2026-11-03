@@ -3125,7 +3125,7 @@ function mapTail(
     // the merge argument. Handled here rather than in `mergedElements` because the map value is in scope
     // (`valOf` decides whether it decomposes), and the driver is a map, not an element.
     if (step.name === 'mergeV' || step.name === 'mergeE') {
-      const merged = mergedFromMap(rel, valOf, steps, at, ctx, fresh);
+      const merged = mergedFromMap(rel, valOf, facts, steps, at, ctx, fresh);
       if (!merged) return null;
       return afterWrite(ctx.writes, rel, steps, at, merged.at, merged.effects.bindings, ctx.params, fresh,
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
@@ -6255,7 +6255,7 @@ function mergeFromTraversal(
  *  the `matchFromDriver` form routes here; an EXPLICIT map argument over a map-stream driver treats the map
  *  as a mere multiplier and is deferred (declines). */
 function mergedFromMap(
-  input: Rel, valOf: MapOf, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  input: Rel, valOf: MapOf, facts: MapKeyFacts, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   const op = steps[at]!.name;
   if (op !== 'mergeV' && op !== 'mergeE') return null;
@@ -6267,13 +6267,13 @@ function mergedFromMap(
   const tail = steps.slice(options, end);
   const child = childSeam(ctx, fresh);
   let maps: MergeMaps;
-  // The driver IS Map-framed here (`MergeTraverser`), so a `select(k)` in the argument or an option arm
-  // reads the Map's own entry before any side effect: no compile-time constant answers it, and the shape
-  // signals a confused query, so it declines with the reason (`MapScopeDeferral`, recorded into the
-  // compile's `Declines`) rather than "no lowering".
-  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, 'map'); }
+  // The driver IS Map-framed here (`MergeTraverser`), bounded by the stream's MAY key set: a `select(k)`
+  // in the argument or an option arm over a key no Map can hold folds to its side effect (the reference's
+  // answer, `Scoping.java:119-135`). One a Map MAY hold is no compile-time constant, and the reason is
+  // recorded into the compile's `Declines` (`MapScopeDeferral`'s kind) rather than "no lowering".
+  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, { mayHold: (k) => mayHoldKey(facts, k) }); }
   catch (e) {
-    if (e instanceof MapScopeDeferral) ctx.declines.note({ kind: 'map-scope-shadow', message: e.message, terminal: true });
+    if (e instanceof MapScopeDeferral) ctx.declines.note({ kind: e.kind, message: e.message, terminal: true });
     else if (!(e instanceof Deferral)) throw e;
     return null;
   }

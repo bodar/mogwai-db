@@ -12,8 +12,11 @@ export type DeclineKind =
   | 'shared-draw'
   /** A re-sourcing V()/E() body under a host value that MAY be absent (`reSourcedUnder`). */
   | 'resource-under-absent'
-  /** A merge over a stream of Maps whose `select(k)` a Map key shadows (`mergedFromMap`). */
-  | 'map-scope-shadow'
+  /** A merge `select(k)` over a stream of Maps that MAY hold `k`, colliding with a side effect `k`
+   *  (`mergedFromMap`). */
+  | 'merge-map-scope'
+  /** A merge `select(k)` reading a Map's own `k` entry as the merge argument (`mergedFromMap`). */
+  | 'merge-own-entry'
   /** A `select(k)` over Maps that MAY hold a key `k` while a side effect or path label `k` is also in scope
    *  (`mapKeyCollision`, `rel/lower.ts`). Always ADVISORY — a hint appended to the generic decline. */
   | 'map-key-collision';
@@ -28,7 +31,8 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'uncovered': 'this traversal is not supported yet',
   'shared-draw': 'this traversal is not supported yet',
   'resource-under-absent': 'this traversal is ambiguous',
-  'map-scope-shadow': 'this traversal is not supported yet',
+  'merge-map-scope': 'this traversal is not supported yet',
+  'merge-own-entry': 'this traversal is not supported yet',
   // Advisory only, so the generic prefix is what the user reads; listed because the table is total.
   'map-key-collision': 'this traversal is ambiguous',
 };

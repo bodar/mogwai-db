@@ -37,7 +37,7 @@ describe('the lowering RECORDS a framing-decided decline and returns null — it
     ["g.inject(1,2).map(__.V().sample(1).values('name'))", 'shared-draw'],
     ["g.V().optional(__.out().as('a')).map(__.select('a').V().count())", 'resource-under-absent'],
     ["g.V().map(__.values('age').math('_ + 1').by(__.V().count()))", 'resource-under-absent'],
-    ["g.V(1).valueMap().mergeV(__.select('name'))", 'map-scope-shadow'],
+    ["g.V(1).valueMap().mergeV(__.select('name'))", 'merge-own-entry'],
   ] as const) {
     test(q, () => {
       const declines = new Declines();
@@ -96,10 +96,16 @@ describe('a terminal reason is the message, and its prefix is a property of its 
     ]) expect(declineOf(q).message).toMatch(AMBIGUOUS);
   });
 
-  test('a merge over Maps whose select() a Map key shadows names the shadow', () => {
+  test('a merge select() over Maps that MAY hold the key names the side-effect collision', () => {
+    const e = declineOf("g.withSideEffect('name',[age:1]).V(1).valueMap().mergeV(__.select('name'))");
+    expect(e.kind).toBe('merge-map-scope');
+    expect(e.message).toStartWith("this traversal is not supported yet: a Map stream MAY hold 'name' and a side effect 'name' is declared");
+  });
+
+  test('with no side effect it is a plain own-entry decline, with no rename advice', () => {
     const e = declineOf("g.V(1).valueMap().mergeV(__.select('name'))");
-    expect(e.kind).toBe('map-scope-shadow');
-    expect(e.message).toStartWith("this traversal is not supported yet: a merge over a stream of Maps cannot use select('name')");
+    expect(e.kind).toBe('merge-own-entry');
+    expect(e.message).toBe("this traversal is not supported yet: reading a Map's own 'name' entry (select('name') over a stream of Maps) as a merge argument");
   });
 
   test('a terminal reason recorded while planning a barrier RESUME is that resume\'s decline', () => {
@@ -116,7 +122,7 @@ describe('a terminal reason is the message, and its prefix is a property of its 
 });
 
 describe('an ADVISORY reason is a hint, never the decline', () => {
-  const advisory = { kind: 'map-scope-shadow', message: 'a probe declined here', terminal: false } as const;
+  const advisory = { kind: 'merge-map-scope', message: 'a probe declined here', terminal: false } as const;
 
   test('a note from a probe whose sibling route succeeds is not reported', () => {
     const declines = new Declines();

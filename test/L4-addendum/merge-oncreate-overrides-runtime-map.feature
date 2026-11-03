@@ -18,17 +18,17 @@ Feature: mogwai addendum — onCreate may restate a per-driver merge map, never 
     When iterated to list
     Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (name, y)"
 
-  # A `select("k")` in an option arm over a stream of MAPS declines with its reason: each Map's own "k" entry
-  # is read before the side effect (Scoping.java:119-135), so the side effect is no compile-time constant there
-  # (docs/feature-support-matrix.md §17 "Map scope").
-  Scenario: g_withSideEffectXk_mapX_injectXmapX_mergeV_optionXonCreate_selectXkXX_declines
+  # A `select("k")` in an option arm over a stream of MAPS that cannot hold "k" reads the side effect (each
+  # Map's own entry comes first, Scoping.java:119-135, but there is none), so the side effect's onCreate map is
+  # checked like a literal one (docs/feature-support-matrix.md §17 "Map scope").
+  Scenario: g_withSideEffectXk_mapX_injectXmapX_mergeV_optionXonCreate_selectXkXX_raises
     Given the empty graph
     And the traversal of
       """
       g.withSideEffect("k", ["name": "y"]).inject(["name": "x"]).mergeV().option(Merge.onCreate, __.select("k"))
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "a merge over a stream of Maps cannot use select('k')"
+    Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (name, y)"
 
   Scenario: g_injectXmap_mapX_mergeV_optionXonCreate_mapX_second_driver_overrides
     Given the empty graph
