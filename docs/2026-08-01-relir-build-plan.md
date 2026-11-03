@@ -508,9 +508,16 @@ fold it into these lists at the end of the run.
   → 0, ref 6 (`Scoping.java:129-130`). Fix in the authority: `aliasPresence`/`rerootPresence` (`rel/alias.ts`)
   state `{when: aliasGuard}` for the scalar arm, `HostPresence` admits `PresentWhen`; delete the `modulator.ts`
   copies (= r7-reuse2).
-- **r7-fu3** a re-source inside `local()`/`map()` binds the outer alias to the inner candidate: `src/rel/emit.ts`
-  reuses alias `rn` for both scans. `g.V().hasLabel('person').local(__.values('name').as('e').V().has('name', select('e')).count())`
-  → 6 per person, ref 1. Emitter alias freshness.
+- ✅ **r7-fu3** LANDED `26851fcc`: a re-source inside `local()`/`map()`/`by()`/`where()` no longer binds the outer
+  alias to the inner candidate (`…local(__.values('name').as('e').V().has('name', select('e')).count())` → 1 per
+  person). `freshAlias` (`src/rel/emit.ts`) gives a direct-source FROM item its RelId alias when an enclosing scope
+  or earlier item already binds the fixed one; `scopeAliases`/`itemAliases` are the one "aliases in play" authority
+  (shared with `shadowsOuter`/`unanchoredAggregate`). Remains: a correlated-value property seek in
+  `src/rel/passes/semijoin.ts` (outside this design's scope) — a narrowing `element.id IN (owner seek)` conjunct on
+  a top-level positive conjunct whose value reads a sibling/enclosing relation, with the pass entering correlated
+  subplans via `rewriteRels`; removes the N² for both nested and top-level `V().has(k, select(label))`. Separately,
+  `union(...)`/`choose(...)`/`map(local(...))`/`as('p').map(...select('p')...)` around this body still raise
+  UnsupportedTraversal — a coverage gap, not introduced here.
 - **r7-fu4** `group()` pooled fold value: `inject([a:3],[a:null]).unfold().group().by(keys).by(select(values).fold())`
   → `{a:[null]}`, ref `{a:[3,null]}`; `ProductiveByStrategy` must skip a child ending in a reducing barrier; the
   per-origin path drops a key whose only value is a productive null (`rel/map.ts`).
