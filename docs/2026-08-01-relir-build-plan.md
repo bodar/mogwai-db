@@ -514,7 +514,10 @@ F last. Each step lands `mise run ci` green on its own.
   Original spec — revert a37017d9's semantic half: delete `landedOnce`;
   `productivityFilter` reads `{when}` as value-nullness. KEEP `keptDedup`. Restore §17 line "a null `by()` value is
   absent" to its plain rule. `by-stated-presence.feature` moves to that answer. ≈−30.
-- **C3 cleanup-presence-first-value** (after C2) — revert 6bb959c8's producer: `reSourcedValue` answers
+- ✅ **C3 cleanup-presence-first-value** — LANDED `96bdf92b`: `reSourcedValue` (`rel/lower/reduction.ts`) answers
+  `present: 'value-nullness'`; `firstRootedValue` (`rel/build.ts`) drops its EXISTS subplan and `FirstRootedRow.exists`;
+  one §17 line (a re-sourced body's null first value is absent). Remains: nothing.
+  Original spec — revert 6bb959c8's producer: `reSourcedValue` answers
   `'value-nullness'`; `firstRootedValue` drops `exists`. One §17 line: a re-sourced body's null first value is
   absent. ≈−13, −1 column on the plausible `map(__.V().values('name').order().limit(1))`.
 - **C4 cleanup-presence-resource-decline** (after C3) — `reSourcedUnder`: `if (mayBeAbsent(host))` decline FIRST;
