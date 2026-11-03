@@ -535,7 +535,11 @@ F last. Each step lands `mise run ci` green on its own.
   bound on every row and `V()`/`E()` discards the selected value, so the answer would depend on which rows matched;
   suggest `select('a').out()…` or `V().has(…, select('a'))`. Tag the 12 shapes `@Unsupported` (`absent-label-body-input`,
   `resourced-scalar-value` features); exec test → refusal assertions. ≈−70, −3 per-row terms.
-- **C5 cleanup-presence-choice-meet** (after C4) — `scalarChoice` presence = `meetPresence(...)`; delete
+- ✅ **C5 cleanup-presence-choice-meet** — LANDED `61d41586`: `scalarChoice` (`rel/child.ts`) reads
+  `present = meetPresence(arms)`, and `meetPresence` folds a stated arm to `'unknown'` itself, so no second per-row
+  presence CASE; `choicePresence`/`ChoiceArm`/`NEVER_PRODUCTIVE` deleted (−32 net). No probed shape newly declines;
+  baselines unchanged. Remains: nothing.
+  Original spec — `scalarChoice` presence = `meetPresence(...)`; delete
   `choicePresence`, `ChoiceArm`, `NEVER_PRODUCTIVE`. ≈−28.
 - ✅ **D cleanup-map-equality-decline** — LANDED `7ed8f578`: `uncomparableLiteral` (`ir/uncarried-literal.ts`, sibling
   of `uncarriedLiteral`, same OPERAND_STEPS/valueNodes/eachChainDeep walk) declines at any depth a map/set equality
