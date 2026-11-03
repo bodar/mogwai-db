@@ -180,3 +180,130 @@ Feature: mogwai addendum — a predicate body that LEADS with a filter and then 
     Then the result should be unordered
       | result |
       | lop |
+
+  # A SEEDED barrier in the suffix is NOT strict: `count()` is 0 and `fold()` is [] over the empty stream a
+  # rejecting leading filter leaves (ReducingBarrierStep), so the subject the filter rejected can still
+  # pass. These must NOT split into `F ∧ productive(rest)` — the software vertices are kept.
+  Scenario: g_V_whereXhasLabelXpersonX_out_count_isX0XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.hasLabel("person").out().count().is(0)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | ripple |
+
+  Scenario: g_V_whereXhasLabelXpersonX_outEXknowsX_count_isXltX1XXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.hasLabel("person").outE("knows").count().is(P.lt(1))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | josh |
+      | ripple |
+      | peter |
+
+  Scenario: g_V_filterXhasLabelXpersonX_outEXcreatedX_count_isX0XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().filter(__.hasLabel("person").outE("created").count().is(0)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | ripple |
+
+  Scenario: g_V_notXhasLabelXpersonX_out_count_isX0XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().not(__.hasLabel("person").out().count().is(0)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | josh |
+      | peter |
+
+  Scenario: g_V_chooseXhasLabelXpersonX_out_count_isX0X_constantXleafX_constantXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(__.hasLabel("person").out().count().is(0), __.constant("leaf"), __.constant("x"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | leaf |
+      | leaf |
+      | leaf |
+      | x |
+      | x |
+      | x |
+
+  Scenario: g_V_andXhasLabelXpersonX_out_count_isX0X_hasXnameXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().and(__.hasLabel("person").out().count().is(0), __.has("name")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | ripple |
+
+  Scenario: g_V_whereXhasXage_gtX30XX_out_fold_countXlocalX_isX0XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.has("age", P.gt(30)).out().fold().count(Scope.local).is(0)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | lop |
+      | ripple |
+
+  Scenario: g_V_whereXhasLabelXpersonX_count_isX0XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.hasLabel("person").count().is(0)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |
+
+  # A seeded barrier NESTED in a per-traverser child keeps the suffix strict: the inner where() runs
+  # only on traversers that reach it (BranchStep/TraversalUtil), so the split still applies.
+  Scenario: g_V_whereXhasLabelXpersonX_out_whereXout_count_isX0XXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.hasLabel("person").out().where(__.out().count().is(0))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | josh |
+      | peter |

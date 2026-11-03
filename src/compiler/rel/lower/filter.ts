@@ -11,7 +11,7 @@ import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
-import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
+import { MAPPING_TERMINAL, producesWithoutInput } from '../../ir/productivity.ts';
 import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
 import { scopeKeyReads } from '../../ir/labels.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -167,8 +167,8 @@ function matchPredicate(
  *   would ask the same question through an extra subquery.
  * - a body that MOVES (`__.out('created')`) is a sub-traversal, so it is the correlated EXISTS above.
  *
- * A body that LEADS with filters and then moves or projects is the filters' conjunction AND the
- * suffix's answer (the loop below); filters AFTER a hop are folded by `correlatedExists` itself.
+ * A body that LEADS with filters and then moves or projects, which the whole-body shapes decline, is
+ * the filters' conjunction AND the suffix's answer when the suffix is strict (the loop below); filters AFTER a hop are folded by `correlatedExists` itself.
  * Anything else — a body that PROJECTS
  * (`__.values('age').is(P.gt(30))`, `__.out().count().is(P.gt(0))`) — declines: its condition is a
  * value comparison over a correlated sub-read, which is a further arm rather than this one.
@@ -178,23 +178,32 @@ export function bodyPredicate(
 ): Expr | null {
   // A write anywhere in a predicate body declines (`writesAnywhere`, see `correlatedExists`).
   if (writesAnywhere(body, ctx.params)) return null;
-  // A LEADING RUN OF FILTERS TESTS THE SUBJECT ITSELF, so it is a conjunct beside whatever the rest of
-  // the body asks. A child body is run on a split of the traverser (`TraversalUtil.test`,
+  // The three shapes a moving/projecting body can take, spelled in their one order.
+  const shapes = (b: readonly IRStep[]): Expr | null =>
+    correlatedExists(b, subject, fresh, ctx, false, aliases)
+    ?? valuePredicate(b, subject, fresh, ctx, false, aliases)
+    ?? projectionProductive(b, subject, fresh, ctx, aliases);
+  // A LEADING RUN OF FILTERS TESTS THE SUBJECT ITSELF, so over a STRICT rest it is a conjunct beside
+  // whatever the rest asks. A child body is run on a split of the traverser (`TraversalUtil.test`,
   // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`),
-  // and a filter step never moves it — so `where(F.rest)` produces for this traverser exactly when `F`
-  // holds of it AND `rest` produces from it: `F(subject) ∧ productive(rest)`. This loop is the ONE place
-  // that order is spelled — the suffix goes through the same three shapes a whole body does, so
-  // `where(hasLabel('person').out('created'))` is `<label clause> AND EXISTS(<the hop>)`, the identical
-  // SQL vocabulary the arms already emit. At position 0 the suffix IS the body, so every body answered
-  // before keeps its SQL; a suffix none of the three answers declines, as the whole body did.
+  // and a filter step never moves it, so `rest` runs on this one traverser when `F` holds of it and on NO
+  // traverser when it does not. `where(F.rest)` is therefore `F(subject) ∧ productive(rest)` exactly when
+  // `rest` yields nothing from no input. A seeded barrier breaks that — `count()` is 0 and `fold()` is `[]`
+  // over an empty stream (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ReducingBarrierStep.java`)
+  // — so `where(hasLabel('person').out().count().is(0))` KEEPS a software vertex, and conjoining would
+  // drop it. `producesWithoutInput` (`ir/productivity.ts`) is that authority.
+  //
+  // The WHOLE body is asked first, so every body answered before keeps its SQL and its answer; the split
+  // is reached only where the whole body declines, and a non-strict rest declines as the whole body did.
   let clause: Expr | undefined;
   for (let i = 0; i < body.length; i++) {
     const filter = sourceFilter(body[i]!, subject, fresh, ctx, aliases);
     if (!filter) {
-      const rest = i === 0 ? body : body.slice(i);
-      const suffix = correlatedExists(rest, subject, fresh, ctx, false, aliases)
-        ?? valuePredicate(rest, subject, fresh, ctx, false, aliases)
-        ?? projectionProductive(rest, subject, fresh, ctx, aliases);
+      const whole = shapes(body);
+      if (whole || i === 0) return whole;
+      const rest = body.slice(i);
+      if (producesWithoutInput(rest)) return null;
+      const suffix = shapes(rest);
       return suffix && and(clause, suffix);
     }
     clause = and(clause, filter);

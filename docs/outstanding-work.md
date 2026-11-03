@@ -318,7 +318,7 @@ Beside the RelIR substrate:
   `E().map(__.outV().hasLabel('person'))`, `E().map(__.hasLabel('knows').outV())` decline: `scalarChild`
   has no first-result element arm, so a leading filter has nowhere to conjoin either (not a dispatch at
   the predicate seam's position). `flatMap`/`local` answer all three; a predicate body (`where`/`not`/
-  `choose`/`until`/strategy criteria) takes a leading filter via `bodyPredicate`.
+  `choose`/`until`/strategy criteria) takes a leading filter via `bodyPredicate`, but only over a STRICT suffix (`producesWithoutInput`): a filter-led body whose suffix holds a seeded/supplying step and that the whole-body shapes decline (`where(hasLabel(..).out().groupCount())`) still declines.
 - **`property(T.label)` on an existing element** (label append) — genuine future work; see debt for `T.id`.
 
 ## 5. Product capabilities

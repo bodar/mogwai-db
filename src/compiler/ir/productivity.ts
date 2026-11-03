@@ -28,6 +28,35 @@ import { SCALAR_TRANSFORMS } from './step.ts';
 const SEEDED_TERMINAL: ReadonlySet<string> = new Set(['count', 'fold']);
 
 /**
+ * The REVERSE question, "can this step yield a traverser when NO traverser reaches it", is a superset of
+ * `SEEDED_TERMINAL`. It adds the other seeded reducing barriers, whose seed supplier is the empty `{}` or
+ * tree (`GroupStep`, `GroupCountStep`, `TreeStep` under `.../traversal/step/map/`). It adds the supplying
+ * barrier `cap` (`SideEffectCapStep` extends `SupplyingBarrierStep`, which emits the side effect however
+ * empty its input). It adds a mid-chain `inject` (`InjectStep` extends `StartStep`) and `call`, whose
+ * service may start a stream. These are not in `SEEDED_TERMINAL` because that set answers "always
+ * produces", and keyed `group('x')` is a pass-through side effect, not a seed. HERE a name match only
+ * makes the caller fail closed, so the name alone is enough.
+ *
+ * Only the TOP-LEVEL steps matter. A step that hosts a child body runs it per traverser it RECEIVES, so
+ * a child sees nothing when nothing arrives: `BranchStep` checks `hasStarts()` before pulling an option,
+ * because a `ReducingBarrierStep` "will always return true for hasNext()"
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java`).
+ */
+const PRODUCES_WITHOUT_INPUT: ReadonlySet<string> = new Set([...SEEDED_TERMINAL, 'group', 'groupCount', 'tree', 'cap', 'inject', 'call']);
+
+/**
+ * Can this body yield a traverser from an EMPTY input stream, i.e. is it NOT strict? A strict body
+ * (`out()`, `values('x').is(…)`, `out().where(__.count())`) yields nothing from nothing. A body with a
+ * seeded or supplying step at its top level (`out().count().is(0)`, `fold()`) can yield something from
+ * nothing. The answer is fail-closed: a name match says "may produce", even for a `count(local)` that
+ * cannot. That is why a predicate may split `where(F.rest)` into `F ∧ productive(rest)` only when this
+ * returns false.
+ */
+export function producesWithoutInput(body: readonly { readonly name: string }[]): boolean {
+  return body.some((s) => PRODUCES_WITHOUT_INPUT.has(s.name));
+}
+
+/**
  * A MAPPING terminal emits exactly one traverser PER INCOMING traverser, so it is productive iff
  * something REACHES it. Each is a `ScalarMapStep`, whose `processNextStart` is
  * `return traverser.split(this.map(traverser), this)` — unconditional
