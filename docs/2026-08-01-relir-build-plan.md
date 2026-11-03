@@ -596,7 +596,13 @@ fix.
 
 ### Declines to lift
 
-- **nr-fu2-mapscope-advice** Reach: common. `MapScopeDeferral` (`ir/write-args.ts` ~:367) fires for EVERY bare
+- ✅ **nr-fu2-mapscope-advice** LANDED `3140e83b`..`5fbebe54`: `mergedFromMap` (`ir/write-args.ts`) decides a
+  merge `select(k)` over a Map driver by the stream's MAY key set (`MergeTraverser` = `'notMap' | { mayHold }`, built
+  from `mapTail`'s `MapKeyFacts`): a key no Map can hold reads the side effect (the cr-fu2 regression answers
+  again); a MAY-held `k` beside a declared side effect `k` declines `merge-map-scope` naming the collision; else a
+  plain `merge-own-entry` decline (own-entry support stays R8-res). The one-at-a-time guard is bounded by the same
+  MAY set, and a null entry in a created map is not a property. Remains: nothing. Original note:
+  Reach: common. `MapScopeDeferral` (`ir/write-args.ts` ~:367) fires for EVERY bare
   `select(k)` over a Map driver, so the batch-upsert idiom is told to "name the side effect" when none exists.
   Raise it only when a side effect or named scope declares `k`; otherwise decline plainly (the own-entry support
   is R8-res). The regression: `g.withSideEffect('c',[age:1]).inject([name:'x']).mergeV().option(Merge.onCreate,
