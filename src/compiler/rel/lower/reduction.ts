@@ -18,7 +18,7 @@ import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, type RelFraming } from '../framing.ts';
@@ -1415,17 +1415,16 @@ function scalarChooseOptions(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
 /**
  * A per-row CHOICE over scalar arms → ONE `ChildValue`: the value `CASE`, the type (a shared STATIC type
  * stays static — one column; otherwise a per-row `vtype` `CASE` that follows the same branch, because the
- * type must track WHICH arm the value came from) and the presence (`choicePresence`) are all built HERE,
+ * type must track WHICH arm the value came from) and the presence (`meetPresence`, a compile-time meet) are all built HERE,
  * from ONE `branches` array, so the three cannot pick different arms. The `if`/`else` choose and the option
  * map both end here; `scalarCoalesceChild` is the `COALESCE` twin.
  *
- * Each guard is spelled once per CASE that needs it — at most three, and the presence `CASE` only where an
- * arm STATES its presence (a re-sourced `__.V()…` arm, an uncorrelated scalar SQLite evaluates once).
+ * Each guard is spelled once per CASE that needs it — at most two (value, and `vtype` where the type is per-row).
  */
 function scalarChoice(branches: readonly { readonly when: Expr; readonly cv: ChildValue }[], elseCV: ChildValue): ChildValue {
   const value: Expr = { kind: 'case', whens: branches.map((b) => [b.when, b.cv.expr] as const), else: elseCV.expr };
   const all = [...branches.map((b) => b.cv), elseCV];
-  const present = choicePresence(branches.map((b) => ({ when: b.when, present: b.cv.present })), elseCV.present);
+  const present = meetPresence(all.map((cv) => cv.present));
   // A `'first'` arm (an unordered re-sourced body) is the first of several — the choice is too.
   const yields = all.some((cv) => cv.yields === 'first') ? 'first' : 'one';
 
