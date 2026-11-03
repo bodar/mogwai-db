@@ -177,11 +177,11 @@ makes a new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 | **`name`** | named CTE vs inlined derived table per shared node, honouring `Materialize`. **The only pass with a production caller** (`lower.ts`) |
 | **`prune`** | column pruning — a walk carries only what its body and its consumer read |
 | **`semijoin`** | the PHYSICAL tier: lift a correlated property `EXISTS` in front of the bare scan it filters, as a DISTINCT relation the plan is DRIVEN from (a semi-join). ONE decorrelation with the access path as a pluggable `OwnerSeek` strategy — `indexSeek` (base `vp_key_value`, switched by `propertySeek`) and `trigramSeek` (the `property_fts` trigram index, switched by `ftsSubstringPredicate`, positive + negative TextP). The caller passes the enabled strategies STRATEGY-MAJOR (trigram before index, so a substring predicate takes the trigram index); the pass reads no config. Formerly two clones, `seek.ts` + `fts.ts` |
-| **`fuse`** | 🚧 small semantic rewrites. Ask what still buys anything the assembler doesn't before wiring it |
+| **`fuse`** | ✅ wired in the read `lowered()` before `semijoin` (`src/rel/passes/fuse.ts`, `a4d38776`): transposes a Filter below a no-PARTITION `row_number` renumber Window when a whole-plan use-analysis shows the minted column is read only as an ORDER position (Calcite `FilterWindowTransposeRule` relaxed only for that case). Not run on the stream feeding a write (see Next round) |
 | **`flatten`** | ✅ landed by DISSOLUTION, not a pass — the join-flattening / decorrelation legality it needed became `src/rel/block.ts` (`shapeOf`/`fromTree`/`fusedInto`), consumed by `recursive.ts` (P1/barrier laws) and the emitter. No `JoinUnionTranspose` pass was built: a `union`-topped body decorrelates structurally |
 | **`recognize`** | ✅ RETIRED as a distinct pass — "fast paths as plan rewrites" is the physical-rewrite KIND, realised by `semijoin` over the finished algebra, not a tier of its own. Residue is a PERF tail (a nested/param `containing()` takes the correct-but-unindexed generic `LIKE`), gated on a real slow query + EXPLAIN |
 
-**Declared is not wired.** Only `name` and `semijoin` have production callers; there is no object that
+**Declared is not wired.** Only `name`, `fuse` and `semijoin` have production callers; there is no object that
 orders them — the order above is the order.
 
 ---
@@ -432,6 +432,32 @@ fold it into these lists at the end of the run.
 
 ### Substrate — in unlock order
 
+0. **r7-fu1 alias-presence-binding** — PARKED, re-land FIRST: round 3 deferred both per-row-node-vocabulary-closed
+   (2) and the S9 re-land (1) on it, so all three share ONE root cause — a value label's presence is its BINDING,
+   stated once by `aliasPresence`/`rerootPresence` (`rel/alias.ts`). Resume branch `wf/alias-presence-binding-3-4`
+   (`f04bad28`; `-3-0` `f397e3f3`, `-3-2`, `-3-3` are its earlier fix rounds). Fix, in order, before re-review:
+   - **BLOCKER** (`lower/reduction.ts` valueRun projector arm ~:2454): the `nullOnly` flag a stated presence gets from
+     `is(...)` survives a value-REPLACING projector that does not drop (token-free `format('x')`), so a following
+     `asString()` raises. `g.V().union(__.constant(null).as('k'), __.constant(0)).map(__.select('k').is(P.eq(null)).format('x').asString()).count()`
+     → raises "Can't parse null as String." (parent `[6]`); same with `is(P.neq(1))` and the `choose(...).as('c')` form
+     (ref `["x","x"]`, `vendor/tinkerpop/gremlin-core/.../step/map/FormatStep.java:80-121`). Make ONE "output is not
+     the input → drop `nullOnly`" helper that the projector arm and the transform arm (~:2509) both call.
+   - **MAJOR** SQL re-inlining: `selectedNodeChild` puts `{when: held}` on the continuation AND keeps the outer
+     `gate = caseWhen(held, …)` → `CASE WHEN held THEN CASE WHEN held …`; `held` (a correlated `json_each` read)
+     appears 4× not 2×; `map(select c math(_+1))` 4123→7033 chars, the math expression copied into a WHERE. Measured
+     17× slower per row on an always-bound label (`union(constant(2),id()).as('k').map(select('k').math(…)…)`
+     26→446 ms at 16k). Drop the outer gate when the rerooted presence already states `held`, or land `held` once
+     as a column.
+   - **MAJOR** `nullMayPass` (`rel/predicate.ts`) is a second, syntactic authority on `predicateExpr`'s null space;
+     replace it by constant-folding `predicateExpr(compilerNull(), pred)`, which hands `narrowedPresence` a constant
+     instead of copying the test into `when`.
+   - minors: route filter.ts's `and(hostPresence(subject), test)` through `child.ts` `narrowedPresence`; `sack.ts`
+     `statedKeep` only in the `{when}` case (else the by() expression is spelled twice — latent); pins for a RAISING
+     receiver (asString/math/asNumber) after `select(nullBound)` and after `is()`+`format('x')`, and a chained
+     `is()`+math shape in `stated-presence-sql-growth.exec.test.ts`; narrow the "a statically bound null survives
+     `is(eq(null))`" claim (the `'always'` case still drops it — Next round); delete or narrow the §17 "null-valued
+     label in a child body" line WHEN it lands (it answers 1 then).
+
 1. **S9 — ONE per-row Scoping reader**: own Map entry → side effect → named collection → path label
    (`Scoping.java:119-135`), landed once as a fenced column for every host and consumer
    (`rel/map.ts` scopedKey, `rel/lower.ts` selectMapFirst, `lower/reduction.ts` childScopeNode,
@@ -507,8 +533,8 @@ fold it into these lists at the end of the run.
 
 ### Wrong answers on trunk (outside S9)
 
-- **r7-fu1** a value label bound to NULL inside a branch reads as unbound everywhere except the two readers
-  `f91e0943` patched. `g.V().as('v').union(constant(null).as('k'), constant(0)).select('v').map(select('k')).count()`
+- **r7-fu1** (PARKED — Substrate 0, `wf/alias-presence-binding-3-4`) a value label bound to NULL inside a branch
+  reads as unbound everywhere except the two readers `f91e0943` patched. `g.V().as('v').union(constant(null).as('k'), constant(0)).select('v').map(select('k')).count()`
   → 0, ref 6 (`Scoping.java:129-130`). Fix in the authority: `aliasPresence`/`rerootPresence` (`rel/alias.ts`)
   state `{when: aliasGuard}` for the scalar arm, `HostPresence` admits `PresentWhen`; delete the `modulator.ts`
   copies (= r7-reuse2).
@@ -522,7 +548,7 @@ fold it into these lists at the end of the run.
   subplans via `rewriteRels`; removes the N² for both nested and top-level `V().has(k, select(label))`. Separately,
   `union(...)`/`choose(...)`/`map(local(...))`/`as('p').map(...select('p')...)` around this body still raise
   UnsupportedTraversal — a coverage gap, not introduced here.
-- **r7-fu4** `group()` pooled fold value: `inject([a:3],[a:null]).unfold().group().by(keys).by(select(values).fold())`
+- **r7-fu4** (round 3: NOT STARTED — the build saw `.git/workflow-stop`; nothing to resume) `group()` pooled fold value: `inject([a:3],[a:null]).unfold().group().by(keys).by(select(values).fold())`
   → `{a:[null]}`, ref `{a:[3,null]}`; `ProductiveByStrategy` must skip a child ending in a reducing barrier; the
   per-origin path drops a key whose only value is a productive null (`rel/map.ts`).
 - **r7-fu5** a dedup key collapses a Long above 2^53 with its numeric String (tag-class CASE has no long arm,
@@ -540,8 +566,8 @@ fold it into these lists at the end of the run.
   form. Remains: nothing.
 - **r6-fu1** REGRESSION: a user param named `injectedMap` collides with federate's fresh name. Step 1 ✅ LANDED
   `d4e6de21` (the `2c64d6a9` fix: `freshMapValuesParam` tests `params.values`, not the `ParamEnv`). Rest PARKED on
-  `wf/federate-fresh-param-collision-2-4` (`12133bec`). Resume:
-  scan-bound-metadata; then re-land `d6722340..12133bec` (`correlatedIn`, `rel/passes/semijoin.ts`) fixing its
+  `wf/federate-fresh-param-collision-2-4` (`12133bec`). Resume: scan-bound-metadata is ✅ (`ccf8a401`); the
+  `scanBound` metadata query lands HERE, with this consumer measured; then re-land `d6722340..12133bec` (`correlatedIn`, `rel/passes/semijoin.ts`) fixing its
   majors — a string id `V('u0')` isn't treated as a bound (61×), a shared `EXISTS` hoists a CTE over the whole
   property table, a constant seek must outrank a correlated one (45×), four quadratic shapes regress 1.15–1.45×,
   `mapValueElem` throws a bare Error; pins for uid/`E('…')`/multi-conjunct in `test/plan-stability.test.ts`.
@@ -659,6 +685,111 @@ o-l4-sweep stale L4 expectations · pins: r7 (V2 compositions, bind-key share, `
 - Row count has ONE min/max authority, `rowBounds` (Calcite `RelMdMinRowCount`/`RelMdMaxRowCount`).
 - A refusal that is arithmetic over row count needs a runtime GUARD, not a decline.
 - Never join-union with a disjunctive `ON (src=w OR tgt=w)`: a self-loop must yield twice under `both()`.
+
+### Next round (from round 3 — fold into the lists above at the end of the run)
+
+Round 3 landed r7-reuse3 (`59cf3c7d`), r7-fu7 + r6-fu1 step 1 (`d4e6de21`), filter-below-window (`a4d38776`),
+r7-fu3 (`26851fcc`), scan-bound-metadata (`24340231`, `ccf8a401`); CI green on every pushed sha. PARKED:
+r7-fu1 (Substrate 0). DEFERRED on it: per-row-node-vocabulary-closed, the S9 re-land. NOT STARTED (stop file):
+r7-fu4. Needs-human questions raised this round: none.
+
+**Follow-ups — major**
+
+- **rf3-fed-barrier** (folds r7-fu7's "Remains") federate `noParents()` decides the zero-parent answer from
+  `pushdown.reduces`, i.e. only the LAST pushed step, and with parents a pushed global barrier runs the sibling ONCE
+  rather than per parent. With `h = g.V().has('name','nobody').call('federate',['graph':'crew'])`: `h.V().count().is(0)`
+  `[]` (ref `[0]`), `.count().fold()` `[]` (`[[0]]`), `.count().sum()` `[]` (`[0]`), `.fold()` `[]` (`[[]]`),
+  `.has('name','zzz').count().math('_+1')` `[]` (`[1]`); with parents `within('marko','vadas')…V().count()` `[6]`
+  (ref `[12]`), `…count().fold()` `[[6],[6]]`. All wrong on trunk before round 3 too. Generic fix, ONE of: stop
+  `pushableTailPrefix` at the first global barrier in MID form (the barrier then runs locally over the per-parent
+  union, which also fixes the P>1 count), or lower the pushed prefix locally over an EMPTY relation for the seed.
+  Seeds: `CountGlobalStep.java`, `FoldStep.java`, `ReducingBarrierStep.java:143-148`. Pin the barrier-mid cases in
+  `test/federation.test.ts`, and drop the docstring's "deeper compositions" claim until then.
+- **rf3-boundgraph-ids** `BoundGraph.elementScan` (`src/compiler/rel/boundgraph.ts:103`, and `inlineNames` ~:55)
+  still flattens every list id argument; `idMembership` now follows TINKERPOP-3273. Federate subgraph
+  `…with('subgraph',true).with('traversal',__.V().outE()).V(2,[3,4]).values('name')` → `[josh,lop,vadas]`, ref
+  `[vadas]`; `V([3,4],[1])` → 3 rows, ref `[]`. Extract `idArgMembers(args)` from `idMembership` (single-argument
+  unroll, list-among-several adds no clause, all-lists → false) and call it from both. Pin a subgraph case in
+  `test/L4-addendum/id-list-argument.feature`.
+- **rf3-where-armlabel-json** a bare `Error: malformed JSON` reaches the user (pre-existing):
+  `g.inject(1,2,3).choose(__.is(1), __.constant('cd').as('k'), __.choose(__.is(2), __.constant('ab').as('k'), __.constant(7))).where(__.select('k').toUpper().is('AB'))`
+  → ref `[2]`; also `length()`/`trim()` bodies and `not(...)`. `map(...)`/`local(...)` of the same body answer.
+  `lower/filter.ts` where-path over an arm-bound string label.
+- **rf3-is-chain-size** a chain of value-run `is()` re-inlines its input per `CASE WHEN test THEN value`:
+  `union(values('age').as('k'), constant(0)).map(select('k').is(neq 5).is(neq 6).is(neq 7).is(neq 8))` emits 1.52 MB
+  of SQL on trunk — over the DO 100 KB statement cap, so a production-only failure. `is()` must project its input
+  once (named column / MATERIALIZED hop). Pin it under `CfLimitedSql`.
+- **rf3-bulk-dup-uid** `loadBulk` APPEND with a uid twice in ONE batch (`[V('a'),V('a')]` on a non-empty store, or
+  two spellings `[V('a\ud800'),V('a\udc00')]`) surfaces SQLite's raw "UNIQUE constraint failed: nodes.uid":
+  `assertNoCollisions` checks batch-vs-store only and is skipped on an empty target. Add an in-batch check keyed like
+  `dedupeByKey` (`toWellFormed`) with the named-remedy error (`src/bulk.ts`); test the two-spellings case.
+
+**Follow-ups — minor, cheap and concrete**
+
+- **rf3-bulk-remap-replace** `{idPolicy:'remap', onCollision:'replace'}`: `resolveReplace` ignores `idPolicy`, so
+  `V(1)` lands as rowid 1 with uid NULL instead of a minted rowid with uid `"1"` (wrong element id). `src/bulk.ts`.
+- **rf3-static-null-is** a STATICALLY bound null still fails `is(eq(null))` (`narrowedPresence('always',…)` turns it
+  into value-nullness): `g.inject(null).as('k').map(__.select('k').is(P.eq(null))).count()` 0 (ref 1);
+  `inject(null,1).as('k').map(select('k').is(P.neq(1))).fold()` `[]` (ref `[null]`); even `inject(null,1).map(__.is(P.neq(1)))`
+  drops the null. Belongs with r7-fu6 (same productive-null-under-`Compare` family).
+- **rf3-project-null-label** `project('a').by(__.select('k'))` over a branch-bound null label omits the key (ref
+  `{a:null}`) — presence-is-binding does not reach `project()`'s by() productivity (`src/project.ts`); with r4-fu4.
+- **rf3-fed-explicit-params** explicit federate `traversal` referencing an outer user parameter declines
+  ("Unbound parameter 'injectedMap'"): the explicit form sends `NO_PARAMS`, the arg-less form forwards `boundParams`.
+  Forward them in both (`src/services/catalog/federate.ts`).
+- **rf3-callsite-form** `barrierIn`'s `form = at === 0 ? 'source' : 'mid'` mislabels an arm call (arm-local position
+  0 has a head) via `nestedBarrierIn`; pass the real form or fix the comment (`src/compiler/rel/segment.ts`).
+- **rf3-idquery-dup** `idQueryOf`'s `routable`/`listAmongSeveral` (`lower/filter.ts` ~:755) re-derive what
+  `idMembership` decides, and already drift: `hasId([],[])`, `hasId(within([],[]))`, `hasId(without([],[]))` decline
+  (ref `[]`, `[]`, all 6). Classify the predicate only and let `idMembership` judge operands. Also: fix
+  `idMembership`'s doc comment "`V(1,[2,3]) ≡ V(1,2,3)`" (refuted by `GraphTraversalTest.java:146-147`); comment
+  that `IS NOT 1` negation is null-safe on purpose and pin `hasId(neq('x'))`/`without('x',2)` over a uid-NULL row;
+  pin edges `E(7,[8,9])`, `hasId('x',['y'])`, branch depth. `V([2,[3]])` and `hasId(null,[3,4])` still decline.
+- **rf3-fuse-write** `fuse` runs only in the read `lowered()`; the stream feeding a write (addV/addE/property/mergeV
+  after `order().by(…).V().has(…)`) still renumbers |holders|×|V| before filtering. Same for a correlated-`EXISTS`
+  predicate after a re-source (not an IN-seek; 55× for 64× rows — linear but not cheap): that is r4-perf1 / the
+  r7-fu3 correlated-value seek, not fuse. Soften fuse's "property predicate reaches the access-path strategies".
+- **rf3-alias-authority** `block.ts` `aliasOf` (fixed `rn`) vs `emit.ts` `freshAlias` can disagree under a
+  correlated scope (only in the conservative direction; no wrong answer found). One-line comment in `block.ts`, or a
+  pin in `test/rel-core-sql.test.ts:215` for a non-empty outer scope. `scopeAliases` rebuilt per nested `Scope`
+  (quadratic in plan nesting, compile-time only) — extend the parent's set in `withRel`.
+- **rf3-pins** emit-alias-freshness witnesses beyond vertex/name: edge re-scan `g.E().local(__.values('weight').as('w').E().has('weight', select('w')).count())`
+  → `[1,1,2,2,2,2]`; `where('h', eq('j'))` re-scan → `[1,1,1,1]`; re-scan inside `union`/`repeat` arms.
+  `test/plan-stability.test.ts` "hasId after a hop adds no scan" passes on trunk too — pin the uncorrelated
+  `IN (SELECT id FROM nodes WHERE …)` shape instead.
+- **rf3-ci-port** `test/cf-constructs.test.ts` binds fixed port 127.0.0.1:8977, so concurrent `mise run ci`
+  (worktrees) flake on ConnectionRefused; take an ephemeral port.
+
+**Reuse sweep proposals**
+
+- **rf3-reuse1** write-path vertex-id lookups through `idMembership`'s per-id clause — FIXES A WRONG-ELEMENT WRITE.
+  `write.ts` `endpointRowid` (~:6415), the map-valued mergeE `endpointRowid.byColumn` (~:5449, `id = v` with no uid
+  check) and `withPreChecks` (~:1345) hand-roll `typeof id === 'number' ? … : …`. On a store with
+  `addV('a').property(T.id,'x')` (rowid 1) + `addV('b')`: `g.mergeE([(T.label):'k',(OUT):1,(IN):2])`, the
+  `inject(map).mergeE()` and `Merge.inV` forms write an edge from `'x'` although `g.V(1)` is `[]` (ref: "Vertex does
+  not exist for mergeE"). Export the scalar clause (`externalIdIs(idCol, uidCol, v)` from `rowidOnly`); cost one
+  `uid IS NULL` on a row the rowid seek already fetched. Leave `elementIdGuard` (~:2970) — physical occupancy, not
+  identity. RANK FIRST.
+- **rf3-reuse2** one `jsonMembers(values)` helper (`SELECT value FROM json_each(<stringifyExact bind>)`) replacing
+  ~10 hand-rolled membership subqueries: `src/bulk.ts` (494, 505, 539, 584), `src/setwrite.ts` (106, 117),
+  `src/formats/drain.ts:32`, and the three still on bare `JSON.stringify` with USER strings —
+  `services/catalog/olap/kernel.ts:84` (edge-scope label names: a lone-surrogate label matches nothing),
+  `olap/pagerank.ts:76` (injected seed ids), `src/manager.ts:81` (changes-feed match). Byte-identical for number
+  lists; `replicate.ts`/`refresh.ts` rowid/hex-gid sites may migrate at no risk. Also corrects `59cf3c7d`'s commit
+  claim that every data-sized bind already goes through the one encoder. A later `mise run binds` rule can point at it.
+- **rf3-reuse3** `BoundGraph.elementScan` via `idArgMembers` — the code half of rf3-boundgraph-ids (~8 lines removed).
+- **rf3-reuse4** fold `semijoin.ts` `retarget` (~:139) and `write.ts` `reScope` (~:4735) into `walk.ts` `substRelId`
+  (now with the optional rename); `reScope` then also follows a Col into a correlated subplan (latent today).
+  Optionally semijoin.ts:337's value→text re-point. Also: fuse.ts `colsOf`/`census` re-walk what prune.ts
+  `refs`/`scan`, semijoin `referencesBeyond` and walk `freeRelIds` do — one `colsRead(e, rel)` in walk.ts.
+- **rf3-reuse5** `olap/pagerank.ts:72` chooses uniform vs input seed by `rows.length`; route it by the call's form
+  (the `d4e6de21` rule) so a zero-parent mid call skips the whole ε relaxation over |V|. No answer changes; ~3
+  lines; only alongside other kernel work.
+
+**Branches left for resume** (unlanded, do not delete): `wf/alias-presence-binding-3-{0,2,3,4}` (resume `-3-4`);
+`wf/federate-fresh-param-collision-2-{0,2,3,4}` (r6-fu1, resume `-2-4`); `wf/s9-one-scoping-reader-reland-1-{0,2,3,4}`
+(resume `-1-4`); `wf/s9-one-scoping-reader-4-{0,2,3,4}` (superseded by the re-land; prune when S9 lands).
+`wf/group-pooled-fold-value-3-0` is empty (at trunk `9163598f`).
 
 ---
 
