@@ -497,7 +497,13 @@ F last. Each step lands `mise run ci` green on its own.
   reason. Remains: nothing. Original spec — remove `MergeTraverser`'s `MapWithKeys`/`mayHoldKey` and
   `mergedFromMap`'s `keys` arg; an inject-literal driver whose onCreate `select('k')`s a key it lacks declines as
   before S6. Keep 70c36a6f and 18c5871a's write half. Confirm `test/compiler/merge-scale.exec.test.ts`. ≈−25.
-- **B4 cleanup-mapkey-may-set** (after B3) — `MapKeyFacts` = `keys` only, a sound MAY set; ONE union meet
+- ✅ **B4 cleanup-mapkey-may-set** — LANDED `75a6928f`: `MapKeyFacts` = `keys` only, a sound MAY upper bound;
+  `meetMapKeyFacts` is the plain union (unknown if any side unknown) from `meetFraming` and the alias join;
+  `held`/`exact`/`slicedKeyFacts`/`mapKeyPresence` deleted (boolean `mayHoldKey`). A map key colliding with a live
+  label/side-effect constant now declines (13 L4 scenarios @Unsupported, §17 "Map scope"); L3/census/hygiene
+  unmoved, so `held` was not kept. Remains: the collision declines carry the generic message. Making them explain
+  the collision needs a way to return a decline with a reason from the lowering (rel-sweep forbids throwing).
+  Original spec — `MapKeyFacts` = `keys` only, a sound MAY set; ONE union meet
   (unknown if any side unknown) in `mergeArms` and the alias join; delete `held`, `exact`, `slicedKeyFacts`, the
   held halves of `literalKeyFacts`/`recordKeyFacts`, the record recursion in `meetFraming`; `mapKeyPresence` →
   boolean `mayHoldKey`; `injectMap` → union. Keep `MapScope.mayBeElement` and the `ordered` element join. If L3
