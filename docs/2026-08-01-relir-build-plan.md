@@ -475,10 +475,11 @@ fold it into these lists at the end of the run.
      answered on trunk, now declines (also fold/sum/order). Keep it scalar when every record holds the field, and
      route `recordTail`'s next-scope through `mapFirstFallback` (it ignores `ctx.enclosingLabels` and a
      `withSideEffect` constant).
-3. **filter-below-window** — a RelIR pass pushing a Filter below a Window that doesn't read the window's column
-   (`src/rel/passes/fuse.ts`; Calcite `FilterWindowTransposeRule.java`). Fixes the ordered re-source then filter:
-   `g.V().hasLabel('holder').order().by('name').V().hasLabel('person').values('name').count()` 66×, and
-   `choose(has('name'), V().hasLabel('person').sample(2), identity())` 73×.
+3. ✅ **filter-below-window** — LANDED (`a4d38776`). `fuse` (now wired before `semijoin` in the read lowering)
+   transposes Filter → [renaming Project →] Window(row_number, no PARTITION BY) when a whole-plan use-analysis
+   shows every reader of the minted column uses it only as an ORDER position (Sort key, window/aggregate ORDER BY);
+   any value reader or a partition blocks it (`src/rel/passes/fuse.ts`; Calcite `FilterWindowTransposeRule.java`
+   relaxed only for that case). The holder→person witness went from 61× to 6.3× over 1k→8k. Remains: nothing.
 4. **scan-bound-metadata** — one metadata query "does this element scan carry an index-usable conjunct" (equality/
    IN/range on `id`, `uid`, label or any selective indexed column, incl. `hasId(within)` and `has(T.id, gt(n))`,
    both quadratic today), beside `src/rel/bounds.ts` with `elementScanBehind` (Calcite `RelMdColumnOrigins`).
