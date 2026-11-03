@@ -864,6 +864,10 @@ Depth gaps (clean declines, record only):
    driving statement alone; trunk spent <20 ms. Project the pick once per driver (or use one
    `row_number() OVER (PARTITION BY driver ORDER BY cappedCount, ord)`), then filter on `ord = picked`. Add a
    map-WIDTH witness (~30 entries) to `test/compiler/merge-scale.exec.test.ts`.
+   ✅ **LANDED (`1408c320`).** `mapDrivers` (`src/compiler/rel/write.ts`) projects the pick once per driver as
+   `sk_o`, MATERIALIZED before the map is exploded; the explode keeps the string entry whose `ord = sk_o`. One
+   1000-entry map 1.9 s → 107 ms; 30-entry maps 1k → 8k drivers 8.2×; two-pool grid 6.7×. Width, ratio and grid
+   witnesses in `test/compiler/merge-scale.exec.test.ts`. **Remains:** nothing.
 4. **`reSourcedOnce` re-implements `reSource`'s join contract (major, `c4b1f4ef`).** Both the bulk promotion, the
    encounter mint and the origin-major `parent_encounter` renumber are written twice
    (`src/compiler/rel/lower/movement.ts:19-97` and `src/compiler/rel/lower/reduction.ts`), and the n>1 arm is
