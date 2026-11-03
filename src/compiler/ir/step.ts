@@ -440,6 +440,19 @@ export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
 export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose']);
 
 /**
+ * Does this step feed its WHOLE incoming stream into one child traversal — TinkerPop's GLOBAL children
+ * (`TraversalParent.getGlobalChildren`)? A `union`/`choose`/`branch` arm (`BranchStep.java:168`,
+ * `branches.forEach(traversal -> traversal.addStart(start.split()))`), a `repeat` body and a `match`
+ * pattern all see every start, so a barrier there reduces over the concatenated stream. Every OTHER
+ * child — a `local`/`map`/`flatMap`/`coalesce`/`optional`/`where` body, a `by()` — is a LOCAL child
+ * applied once per traverser (`TraversalUtil.apply`). A `choose`'s condition and a `repeat`'s
+ * `until`/`emit` are local children the walk enters anyway: over-inclusive, which for a question whose
+ * `true` is a refusal is the fail-closed side.
+ */
+export const streamsIntoChildren = (s: Step): boolean =>
+  BATCHING_BRANCHES.has(s.name) || s.name === 'branch' || s.name === 'repeat' || s.name === 'match' || !!(s as IRStep).repeatRegion;
+
+/**
  * The barriers that PRESERVE cardinality but choose or reorder a subset of the whole stream. Every
  * one is a `Barrier` in the reference — `RangeGlobalStepContract`/`TailGlobalStepContract extends
  * FilteringBarrier`, `OrderGlobalStep`/`SampleGlobalStep extends CollectingBarrierStep`,

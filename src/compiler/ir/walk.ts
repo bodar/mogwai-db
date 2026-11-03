@@ -113,13 +113,17 @@ export function eachStepDeep(
  * Does any step at ANY depth — every child position (`eachChildChain`) — satisfy `pred`? A body that
  * cannot be read answers `unreadable`: `true` for a question whose `true` is the REFUSAL (a write, a
  * random draw, a barrier — fail closed), `false` for one that merely skips what it cannot see.
+ * `enters` names the steps whose children the walk descends into — every step by default; a question
+ * about the stream a child SEES (`streamsIntoChildren`, `ir/step.ts`) enters only the hosts that feed it.
  */
 export function someStepDeep(
   steps: readonly Step[], params: ParamEnv | BodyReader, pred: (s: Step) => boolean, unreadable = false,
+  enters: (s: Step) => boolean = () => true,
 ): boolean {
   const read: BodyReader = typeof params === 'function' ? params as BodyReader : rawBodies(params);
   const any = (chain: readonly Step[]): boolean => chain.some((s) => {
     if (pred(s)) return true;
+    if (!enters(s)) return false;
     let hit = false;
     eachChildChain(s, read, (c) => { if (!hit && any(c)) hit = true; }, () => { if (unreadable) hit = true; });
     return hit;

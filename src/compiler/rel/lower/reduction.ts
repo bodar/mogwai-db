@@ -15,7 +15,7 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { normalize } from '../../ir/passes.ts';
 import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
-import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, streamsIntoChildren, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
@@ -40,6 +40,7 @@ import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, sameFraming } from './branch.ts';
+import { RANDOM_ORDER } from './slice.ts';
 import { BULK, ENCOUNTER, bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { movement } from './movement.ts';
@@ -1586,15 +1587,22 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
  * - a COUPLING barrier (`dedup`, a slice, a reducer, `fold`) over an origin with several rows: the
  *   reference applies it to the CONCATENATION of their candidate streams (`dedup` keeps one copy, `count()`
  *   counts R·M), which R copies of one evaluation are not. Only a body-opening re-source promises one
- *   row per origin (`onePerOrigin`).
+ *   row per origin (`onePerOrigin`). At ANY depth the stream reaches — a `union`/`choose` arm, a
+ *   `repeat` body (`streamsIntoChildren`) — not only at the top level; a per-traverser child (`local`,
+ *   `where`, a `by()`) runs per row and couples nothing.
  *
  * Otherwise origin `o`'s stream is R_o copies of the M candidates, and `sample(n)` is a uniform n-subset of
  * those P = R_o·M rows: `SampleGlobalStep` is a weighted reservoir and, with no `by()`, every weight is 1.
- * Each origin draws q = min(n, P) DISTINCT indexes in 1..P by FLOYD'S ALGORITHM — for j = P-q+1..P, t
- * uniform in 1..j, take j if t is already taken, else t: a uniform q-subset — as a walk of q levels over
- * the origins, its taken set riding as `,i,j,…,` text; `sample(1)` is the walk's seed alone. Index p names
- * origin row ⌈p/M⌉ and candidate ((p-1) mod M)+1, both equi-joined: O(origins·n² + M log M), where the
- * per-origin RANDOM window over origins × candidates was O(origins·M log M). Each `t` is
+ * Each origin takes q = min(n, P) DISTINCT indexes in 1..P by the cheaper of two uniform draws:
+ * - where q² <= P, FLOYD'S ALGORITHM — for j = P-q+1..P, t uniform in 1..j, take j if t is already taken,
+ *   else t — as a walk of q levels over the origins, its taken set riding as `,i,j,…,` text (rescanned per
+ *   level, so q² per origin); `sample(1)` is the walk's seed alone. Index p names origin row ⌈p/M⌉ and
+ *   candidate ((p-1) mod M)+1, both equi-joined;
+ * - otherwise (n near or past P) the origin's P (row, candidate) pairs ranked by RANDOM(), keeping rn <= n —
+ *   `perOriginWindow`, fenced, as `sliceOp` draws a top-level sample: P log P.
+ * So an origin costs min(q², P log P) + M log M once — never more than the P rows the reference streams
+ * through it, where the per-origin window over EVERY origin × candidates was O(origins·M log M) even for
+ * `sample(1)`. Each `t` is
  * `((random() % j) + j) % j + 1`, never `abs(random()) % j` — SQLite's `abs(-9223372036854775808)` raises
  * "integer overflow" — computed once per walk row, and the picks are FENCED before any join probe could
  * re-evaluate them. M = 0 seeds nothing: a sample of nothing is nothing. The picks' ORDER is not the
@@ -1613,7 +1621,9 @@ export function reSourcedOnce(
   const draw = steps[drawAt]!;
   if (bulked || draw.modulators?.length || draw.optionArms
     || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
-  const coupled = prefix.some((step) => isStreamBarrier(step) && !ORDER_ONLY_BARRIERS.has(step.name));
+  // AT ANY DEPTH a stream reaches: a barrier in a `union`/`choose` arm or a `repeat` body reduces over every
+  // start fed into it (`streamsIntoChildren`), so it couples the R copies exactly as a top-level one does.
+  const coupled = someStepDeep(prefix, params, (step) => isStreamBarrier(step as IRStep) && !ORDER_ONLY_BARRIERS.has(step.name), true, streamsIntoChildren);
   if (coupled && !onePerOrigin(input, ctx)) return null;
   const unshuffled = prefix.filter((step) => !isShuffle(step));
   if (nondeterministic(unshuffled, params) || (coupled && unshuffled.length < prefix.length)) return null;
@@ -1664,15 +1674,24 @@ export function reSourcedOnce(
   const spanned = project(sized, [int(O), int(M), int(P)], (name) => name === O ? col(sized.id, origin.col)
     : name === P ? bin('*', col(sized.id, RN), col(sized.id, M)) : col(sized.id, name));
   // q = min(P, n) picks, the first at j = P - q + 1 = max(P - n, 0) + 1.
-  const bounded = project(spanned, [int(O), int(M), int(Q), int(J)], (name) => name === Q
+  const bounded = project(spanned, [int(O), int(M), int(Q), int(J), int(P)], (name) => name === Q
     ? { kind: 'call', fn: 'min', args: [col(spanned.id, P), compilerInt(n)] }
     : name === J ? bin('+', { kind: 'call', fn: 'max', args: [bin('-', col(spanned.id, P), compilerInt(n)), compilerInt(0)] }, compilerInt(1))
       : col(spanned.id, name));
   // Fenced, one row per origin, so the seed's draw reads `j` as a column rather than re-inlining it.
   const drawing = fence(make.filter({ id: fresh('sq'), input: bounded, channels: [], type: bounded.type, pred: bin('>', col(bounded.id, Q), compilerInt(0)) }));
+  // Floyd's walk costs q² per origin (q levels, each rescanning a taken set of up to q); ranking the origin's
+  // P rows costs P log P. Each origin takes the cheaper: Floyd where q² <= P, else the ranked pairs below —
+  // so an origin costs min(q², P log P), never more than the P rows the reference streams through it.
+  // `sample(1)`'s q² = 1 <= P always.
+  const floydWhere = (cheaper: boolean): Rel => make.filter({
+    id: fresh('sq'), input: drawing, channels: [], type: drawing.type,
+    pred: bin(cheaper ? '<=' : '>', bin('*', col(drawing.id, Q), col(drawing.id, Q)), col(drawing.id, P)),
+  });
+  const floydFrom = n === 1 ? drawing : floydWhere(true);
   const level = [int(O), int(M), int(Q), int(I), int(J), int(T), meta(S, 'text')];
-  const seed = project(drawing, level, (name) => name === I ? compilerInt(1) : name === T ? uniform(col(drawing.id, J))
-    : name === S ? compilerText(',') : col(drawing.id, name));
+  const seed = project(floydFrom, level, (name) => name === I ? compilerInt(1) : name === T ? uniform(col(floydFrom.id, J))
+    : name === S ? compilerText(',') : col(floydFrom.id, name));
   /** Floyd's pick at one level: `j` where `t` is already taken, else `t`. */
   const pick = (at: Rel): Expr => ({
     kind: 'case', else: col(at.id, T),
@@ -1695,10 +1714,27 @@ export function reSourcedOnce(
   const offset = bin('-', col(picks.id, D), compilerInt(1));
   const located = project(picks, [int(O), int(RI), int(KI)], (name) => name === RI ? bin('+', bin('/', offset, col(picks.id, M)), compilerInt(1))
     : name === KI ? bin('+', bin('%', offset, col(picks.id, M)), compilerInt(1)) : col(picks.id, name));
+  // THE RANKED ORIGINS (q² > P): each origin's P = R·M (row, candidate) pairs ranked by RANDOM() — the
+  // FENCED `perOriginWindow` `sliceOp` draws a top-level `sample(n)` with — keeping rn <= n, which is
+  // q = min(n, P) of them. O(P log P) for that origin.
+  const rankedPairs = (): Rel => {
+    const wide = floydWhere(false);
+    const spread = make.join({
+      id: fresh('sj'), left: wide, right: rows, join: 'inner', channels: [], type: typeOf(...wide.type.cols, ...rows.type.cols),
+      on: eq(col(rows.id, origin.col), col(wide.id, O)),
+    });
+    const pairs = make.join({
+      id: fresh('sj'), left: spread, right: candidates, join: 'cross', channels: [], type: typeOf(...spread.type.cols, ...candidates.type.cols),
+    });
+    const keyed = project(pairs, located.type.cols, (name) => col(pairs.id, name === RI ? R : name === KI ? K : name));
+    return perOriginWindow(keyed, col(keyed.id, O), [RANDOM_ORDER], { scope: 'global', offset: 0, limit: n }, fresh, true);
+  };
+  const chosen = n === 1 ? located
+    : make.union({ id: fresh('su'), inputs: [located, rankedPairs()], all: true, channels: [], type: located.type });
   const row = make.join({
-    id: fresh('sx'), left: located, right: rows, join: 'inner', ordered: true, channels: [],
-    type: typeOf(...located.type.cols, ...rows.type.cols),
-    on: and(eq(col(rows.id, origin.col), col(located.id, O)), eq(col(rows.id, R), col(located.id, RI))),
+    id: fresh('sx'), left: chosen, right: rows, join: 'inner', ordered: true, channels: [],
+    type: typeOf(...chosen.type.cols, ...rows.type.cols),
+    on: and(eq(col(rows.id, origin.col), col(chosen.id, O)), eq(col(rows.id, R), col(chosen.id, RI))),
   });
   const met = make.join({
     id: fresh('sx'), left: row, right: candidates, join: 'inner', ordered: true, channels: [],

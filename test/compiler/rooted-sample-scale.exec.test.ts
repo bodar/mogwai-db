@@ -7,7 +7,8 @@
 // and 169 s at 8k — passing every six-vertex fixture, a CPU wall only a production-sized DO reaches. The
 // prefix up to the draw is origin-INDEPENDENT, so it is now lowered ONCE (`reSourcedOnce`,
 // `src/compiler/rel/lower/reduction.ts`) and `sample(n)` draws n distinct numbered candidates per origin
-// (Floyd's algorithm) through an equi-join: O(origins · n² + candidates). A prefix that cannot be evaluated
+// (Floyd's algorithm where n² <= the origin's rows, else a RANDOM() rank of them) through an equi-join:
+// O(origins · min(n², P log P) + candidates). A prefix that cannot be evaluated
 // once declines rather than falling back to the product.
 //
 // Assertions of two kinds: the ANSWER (cardinality per origin, the draw lands in the candidate set, draws are
@@ -19,7 +20,7 @@ import { runSteps } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bare, run } from '../support/harness.ts';
+import { bare, run, seededStore } from '../support/harness.ts';
 
 const N = 6000;
 /** Quadratic was ≥ 60 s at this size on trunk; linear is ~0.1 s. */
@@ -132,6 +133,29 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(count(small, "g.V().hasLabel('holder').limit(3).local(__.V().hasLabel('person').sample(500).dedup()).count()")).toBe(300);
   });
 
+  test('a barrier in a per-traverser child of the prefix couples nothing; one in an arm over a single row is evaluated once', () => {
+    const store = graph(20, 20);
+    // V() opens the body, so each origin has one row; the arm's limit(1) runs over its ONE copy of the graph.
+    expect(count(store, "g.V().hasLabel('holder').local(__.V().union(__.hasLabel('person').limit(1)).sample(2)).count()")).toBe(20);
+    // AFTER a fan-out (marko/josh/peter have 3/2/1 out-edges, so R = 3/2/1 rows each): a dedup in a `where()`
+    // child runs per candidate, so the 3 persons with out-edges stand R times each — sample(30) takes all 18.
+    const modern = seededStore();
+    expect(count(modern, "g.V().local(__.out().V().hasLabel('person').where(__.out().dedup().count().is(gt(0))).sample(30)).count()")).toBe(18);
+  });
+
+  test('sample(n) with n at least the candidates stays linear — each origin ranks its own rows, never q² Floyd levels', () => {
+    // 10 origins × M candidates, n ≥ M: q = M, so Floyd's walk would be M² per origin (~1.4 s at M = 8k);
+    // the ranked window is ~0.1 s.
+    const store = graph(10, N);
+    const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person','software').sample(100000)).count()");
+    expect(rows).toEqual([{ v: 10 * N }]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+    // Every candidate at most once per origin, whichever route draws it: q² > P ranks, q² <= P walks.
+    const small = graph(5, 40);
+    expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(15).dedup()).count()")).toBe(75);
+    expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(4).dedup()).count()")).toBe(20);
+  });
+
   test('a shuffle no slice observes is harmless; a host-reading prefix keeps its own product', () => {
     const store = graph(N, N);
     const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().order().by(shuffle).sample(1)).count()");
@@ -160,6 +184,19 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     "g.V().local(__.V().order().by(shuffle).limit(2).sample(1)).count()",
     "g.V().local(__.out().V().dedup().sample(2)).count()",
     "g.V().local(__.V().as('x').sample(1).select('x')).count()",
+    // A barrier in a union/choose arm or a repeat body sees every start fed into it — the R concatenated
+    // copies — exactly as a top-level one does (`BranchStep.java:168`), so it couples them too.
+    "g.V().has('name','marko').local(__.out().V().union(__.dedup()).sample(100)).count()",
+    "g.V().local(__.out().V().union(__.dedup(), __.identity()).sample(100)).count()",
+    "g.V().local(__.out().V().union(__.limit(1), __.identity()).sample(100)).count()",
+    "g.V().local(__.out().V().union(__.count(), __.constant(0)).sample(100)).count()",
+    "g.V().local(__.out().V().choose(__.constant(true), __.dedup(), __.identity()).sample(100)).count()",
+    "g.V().local(__.out().V().union(__.union(__.dedup())).sample(100)).count()",
+    "g.V().local(__.out().V().repeat(__.dedup()).times(1).sample(100)).count()",
+    "g.V().has('name','marko').property(list,'c', __.out().V().union(__.dedup().id()).sample(100)).values('c').count()",
+    // ... and a slice there observes a shuffle every origin would otherwise share.
+    "g.V().local(__.V().order().by(shuffle).union(__.limit(1)).sample(1)).dedup().count()",
+    "g.V().local(__.V().order().by(shuffle).choose(__.constant(true), __.limit(1), __.limit(1)).sample(5)).dedup().count()",
   ])('declines %s', (q) => {
     expect(() => compile(q, {})).toThrow(/not supported/);
   });
