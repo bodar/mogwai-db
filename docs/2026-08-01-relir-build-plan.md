@@ -454,7 +454,14 @@ F last. Each step lands `mise run ci` green on its own.
 - **A3 cleanup-sample-docs** (after A2) — `reSourcedOnce` doc to ≈12 lines; fix `sliceOp` and `collectsSideEffect`
   comments. Plus: `reSourcedValue` declines (query text, explanatory) when its prefix holds `sample`/`coin`/shuffle,
   because every host would share one draw (`project().by(__.V().sample(1))` — a wrong answer today). ≈−15.
-- **B1 cleanup-mapkey-revert-v1** — revert b549cc3a and f91e0943's `labelScopeNode` half: delete
+- ✅ **B1 cleanup-mapkey-revert-v1** — LANDED `7b6557cb`: `labelScopeNode`/`LabelScope`/`scopedValueNode` deleted;
+  `mapFirstFallback(key, ctx, liveLabel: boolean)` answers `'label'` for any live or enclosing label (`labelNamed`
+  in `lower/reduction.ts` is the one liveness question); math() reads a variable by `scopedHost` again (no
+  `vtype = 'map'`, json_each or VALUES); query-text collisions decline. Remains: B2 builds on the narrowed
+  `mapFirstFallback(key, ctx, liveLabel: boolean)` signature. Follow-up, now in `docs/outstanding-work.md` §1: a
+  child `select(k)` of a label bound to null in a branch arm drops the row; fixing it needs a host's presence to
+  be able to carry a stated `{when}`.
+  Original spec — revert b549cc3a and f91e0943's `labelScopeNode` half: delete
   `labelScopeNode`/`LabelScope`; `mapFirstFallback` → `'label'` for any live/enclosing label (the label wins, §17);
   restore the pre-V1 math-variable reader (no one-row VALUES); mapTail `'may'` + value label declines; record
   optional field + same-named live label declines in every form (drop the two-Filter variant merge). KEEP
