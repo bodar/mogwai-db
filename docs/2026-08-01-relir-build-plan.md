@@ -526,7 +526,11 @@ F last. Each step lands `mise run ci` green on its own.
   Original spec — revert 6bb959c8's producer: `reSourcedValue` answers
   `'value-nullness'`; `firstRootedValue` drops `exists`. One §17 line: a re-sourced body's null first value is
   absent. ≈−13, −1 column on the plausible `map(__.V().values('name').order().limit(1))`.
-- **C4 cleanup-presence-resource-decline** (after C3) — `reSourcedUnder`: `if (mayBeAbsent(host))` decline FIRST;
+- ✅ **C4 cleanup-presence-resource-decline** — LANDED `16401f5f`: `reSourcedUnder` (`rel/lower/reduction.ts`) throws
+  `RESOURCE_UNDER_ABSENT` (an explanatory `UnsupportedTraversal`) when `mayBeAbsent(host)`, before lowering; cases 2/3,
+  `yieldsNothingFromEmpty`/`EMITS_FROM_NOTHING` deleted; affected L4 scenarios `@Unsupported`, exec tests assert the
+  reason. Remains: nothing.
+  Original spec — `reSourcedUnder`: `if (mayBeAbsent(host))` decline FIRST;
   delete case 2, case 3, `yieldsNothingFromEmpty`/`EMITS_FROM_NOTHING`. Message (explanatory): the label is not
   bound on every row and `V()`/`E()` discards the selected value, so the answer would depend on which rows matched;
   suggest `select('a').out()…` or `V().has(…, select('a'))`. Tag the 12 shapes `@Unsupported` (`absent-label-body-input`,
