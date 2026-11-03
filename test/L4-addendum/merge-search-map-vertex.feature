@@ -140,3 +140,37 @@ Feature: mogwai addendum — a map-VALUED mergeV driver (the traverser IS the me
       """
     When iterated to list
     Then the result should be empty
+
+  # A NULL entry in a created map is NOT a property: the graph does not support null property values, so
+  # the create skips it (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:348-352),
+  # as a literal mergeV([k:null]) and addV().property(k,null) do. Storing it would make has("age") count x.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXname_x_age_nullX_XnameX_vadasX_mergeV_optionXonMatch_seenX_null_entry_is_no_property
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([name:"x",age:null],[name:"vadas"]).mergeV().option(Merge.onMatch,[seen:true]).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | x |
+      | vadas |
+    And the graph should return 4 for count of "g.V().has(\"age\")"
+    And the graph should return 1 for count of "g.V().has(\"name\",\"x\").properties()"
+
+  # A NULL as the map's only searched value: the search has(name,null) matches nothing, and the created
+  # vertex has no name — so values("name") reads only vadas.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXname_nullX_XnameX_vadasX_mergeV_optionXonMatch_seenX_values_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([name:null],[name:"vadas"]).mergeV().option(Merge.onMatch,[seen:true]).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+    And the graph should return 7 for count of "g.V()"
+    And the graph should return 6 for count of "g.V().has(\"name\")"

@@ -195,3 +195,18 @@ Feature: mogwai addendum — a map-VALUED mergeE driver (the traverser IS the me
       | result |
       | likes |
     And the graph should return 7 for count of "g.E()"
+
+  # A NULL entry in a created edge's map is not a property (ElementHelper.attachProperties skips a null,
+  # vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:348-352).
+  @gap:merge-search-map-edge
+  Scenario: g_injectXlikes_1_2_weight_null_w_3X_mergeE_null_entry_is_no_property
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([(T.label):"likes",(OUT):1,(IN):2,weight:null,w:3]).mergeE().properties().key()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | w |
+    And the graph should return 6 for count of "g.E().has(\"weight\")"

@@ -5295,22 +5295,8 @@ export function mergeVFromMap(
     const labelPairs = make.join({ id: fresh('j'), left: idsOf(unnamed, fresh), right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
     bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: labelPairs, channels: [], type: typeOf(), returning: [] }));
   }
-  // WRITE THE MAP'S PROPERTIES onto each created vertex — one relational Insert over `json_each` (the
-  // sanctioned data-sized write form): explode each created vertex's map into entries, KEEPING the
-  // vertex id (`explodeMembers` carries the input row's columns), and project `(node, key, value, vtype)`.
-  const { exploded } = explodeMembers(fenced(createdMaps, fresh), MAP_COL, PAIR, fresh);
-  // Only STRING-key pairs become properties — a `T.label`/`T.id` token pair is not a property (the label
-  // is written below; a `T.id` was refused by the guard). `exploded` carries the created vertex id.
-  const propPairs = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type,
-    pred: eq(ext(pairSide(col(exploded.id, PAIR.value), 'keys'), '$.t'), compilerText('string')) });
-  const propRows = make.project({
-    id: fresh('p'), input: propPairs, channels: [],
-    type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [['node', col(propPairs.id, 'id')], ['key', ext(pairSide(col(propPairs.id, PAIR.value), 'keys'), '$.v')],
-      ['value', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.v')], ['vtype', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.t')]],
-  });
-  const propTarget = make.scan({ id: fresh('t'), table: PROPERTY_TABLE.vertex.table, alias: fresh('wt'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
-  bind(insert({ target: propTarget, cols: ['node', 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(propTarget.id, 'id')], ['owner', col(propTarget.id, 'node')]] }));
+  // WRITE THE MAP'S PROPERTIES onto each created vertex (`mapEntryProperties`).
+  bind(mapEntryProperties('vertex', createdMaps, fresh));
   // THE CREATED VERTEX'S LABEL, from the map's `T.label` (per created map). Intern the distinct label
   // names — an upsert, `internLabels`' idiom, but data-sized over the created maps rather than a
   // compile-time list — then link each created vertex to its label id by name. A map with no `T.label`
@@ -5343,6 +5329,36 @@ export function mergeVFromMap(
     appended.length > 0 || matchWrites.length > 0, tailWrites, true, ordered, carriedCh, bind, guard, fresh, child);
   if (!result) return null;
   return { bindings: [...seeded.bindings, ...bindings], result };
+}
+
+/**
+ * THE MAP'S PROPERTIES onto each created element of a map-valued merge driver — one relational Insert over
+ * `json_each` (the sanctioned data-sized write form): explode each created element's map into entries,
+ * KEEPING the element id (`explodeMembers` carries the input row's `id`), and project
+ * `(owner, key, value, vtype)`. Two kinds of entry are NOT a property:
+ * - a token key (`T.label`/`T.id`/`Direction`) — the label is written by the host, an id was refused;
+ * - a NULL value. The graph does not support null property values, so the reference's create SKIPS the
+ *   entry (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:348-352`,
+ *   `attachProperties`) — exactly what a literal `mergeV([k:null])` and `addV().property(k, null)` do
+ *   here (matrix: a null removes the key). Storing it would make `has(k)` count the element.
+ * `created` is a retained relation with `id` and `MAP_COL`; the result is the Insert, for the caller to bind.
+ */
+function mapEntryProperties(elem: Elem, created: Rel, fresh: Minter): Stmt {
+  const { exploded } = explodeMembers(fenced(created, fresh), MAP_COL, PAIR, fresh);
+  const sideOf = (rel: RelId) => (which: 'keys' | 'values', path: string): Expr =>
+    ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(rel, PAIR.value), which), compilerText(path)] });
+  const pair = sideOf(exploded.id);
+  const propPairs = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type,
+    pred: and(eq(pair('keys', '$.t'), compilerText('string')), { kind: 'binary', op: 'is not', left: pair('values', '$.v'), right: compilerNull() }) });
+  const side = sideOf(propPairs.id);
+  const { table, owner, cols } = PROPERTY_TABLE[elem];
+  const propRows = make.project({
+    id: fresh('p'), input: propPairs, channels: [],
+    type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    exprs: [[owner, col(propPairs.id, 'id')], ['key', side('keys', '$.v')], ['value', side('values', '$.v')], ['vtype', side('values', '$.t')]],
+  });
+  const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
+  return insert({ target, cols: [owner, 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, owner)]] });
 }
 
 /** The vtype tags an external vertex id carries when it is a ROWID (SQLite's integer storage class) —
@@ -5636,20 +5652,8 @@ export function mergeEFromMap(
     id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
     type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
   }), true);
-  // WRITE THE MAP'S STRING PROPERTIES onto each created edge — one relational Insert over `json_each`:
-  // explode each created edge's map into entries KEEPING the edge id, keep only string-key pairs (a
-  // `T.label`/`Direction`/`T.id` token is not a property), and project `(edge, key, value, vtype)`.
-  const { exploded } = explodeMembers(fenced(createdTuples, fresh), MAP_COL, PAIR, fresh);
-  const propPairs = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type,
-    pred: eq(ext(pairSide(col(exploded.id, PAIR.value), 'keys'), '$.t'), compilerText('string')) });
-  const propRows = make.project({
-    id: fresh('p'), input: propPairs, channels: [],
-    type: typeOf(meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [['edge', col(propPairs.id, 'id')], ['key', ext(pairSide(col(propPairs.id, PAIR.value), 'keys'), '$.v')],
-      ['value', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.v')], ['vtype', ext(pairSide(col(propPairs.id, PAIR.value), 'values'), '$.t')]],
-  });
-  const propTarget = make.scan({ id: fresh('t'), table: PROPERTY_TABLE.edge.table, alias: fresh('wt'), channels: [], type: typeOf(...PROPERTY_TABLE.edge.cols) });
-  bind(insert({ target: propTarget, cols: ['edge', 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(propTarget.id, 'id')], ['owner', col(propTarget.id, 'edge')]] }));
+  // WRITE THE MAP'S STRING PROPERTIES onto each created edge (`mapEntryProperties`).
+  bind(mapEntryProperties('edge', createdTuples, fresh));
   // `onCreate`'s own CONSTANT properties, over the created edges whose map does not already hold the key
   // (`createOwners` — the guard above proved a held key restates the map's value).
   for (const write of createExtra) if (!propertyStatements('edge', createOwners(write, createdTuples), write, bind, fresh, child, NO_ALIASES, guard)) return null;
