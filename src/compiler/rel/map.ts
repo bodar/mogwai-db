@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -819,9 +819,21 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
   // A `tail()` value drops nothing: the traverser IS the member, so there is no `by()` that could have
   // been unproductive — the drop belongs to a PROJECTED value only.
   const memberDrop = dropMembers ? productivityFilter(step, 'value-nullness', col(rows.id, MEMBER_COL))?.keep : undefined;
+  // AN ANONYMOUS CHILD'S LAST-WINS VALUE IS THE LAST *NON-NULL* ONE. `GroupStep.GroupBiOperator.apply`
+  // keeps `objectA` when `objectB` is null and takes `objectB` only when `objectA` is null
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:205-216`),
+  // so a later PRODUCTIVE null never overwrites an earlier value, and a key that only ever saw nulls
+  // keeps null. Stated as a LEADING sort key on the one aggregate this arm already runs — null nodes
+  // (`{t:null}`, or a bare SQL NULL with `ProductiveByStrategy` off) sort first, so `$[#-1]` reads the
+  // last non-null member when there is one and the last null otherwise. No second aggregate, no extra
+  // pass. A `tail()` value (`firstOnly`) is a traverser, never null, and an element (`rowid`) member is
+  // never null either, so neither carries the key.
+  const nullsFirst = single && !recipe.firstOnly && member?.kind === 'node'
+    ? [{ expr: isNot(jsonField(col(rows.id, MEMBER_COL), 't'), compilerNull()), dir: 'asc' as const }]
+    : [];
   const memberAggregate: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [collected],
-    orderBy: order.map((name) => ({ expr: col(rows.id, name), dir: 'asc' as const })),
+    orderBy: [...nullsFirst, ...order.map((name) => ({ expr: col(rows.id, name), dir: 'asc' as const }))],
     ...(memberDrop ? { filter: memberDrop } : {}),
   };
   const groupedValue: Expr = single

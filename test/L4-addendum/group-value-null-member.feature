@@ -127,3 +127,64 @@ Feature: mogwai addendum — a group value body's PRODUCTIVE null is a member, n
     Then the result should be unordered
       | result |
       | m[{"person":"d[1].l"}] |
+
+  # AN ANONYMOUS CHILD'S value is LAST-WINS (`Operator.assign`), but `GroupStep.GroupBiOperator.apply`
+  # never lets a null `objectB` replace a held `objectA`, and takes `objectB` whenever `objectA` is null
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:205-216).
+  # So the key holds the LAST NON-NULL value in either arrival order, and null only when every value was.
+  Scenario: g_injectXmap_a_3X_mapXa_nullXX_unfold_group_byXkeysX_byXselectXvaluesXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["a":3],["a":null]).unfold().group().by(Column.keys).by(__.select(Column.values))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"d[3].i"}] |
+
+  Scenario: g_injectXmap_a_nullX_mapXa_3XX_unfold_group_byXkeysX_byXselectXvaluesXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["a":null],["a":3]).unfold().group().by(Column.keys).by(__.select(Column.values))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"d[3].i"}] |
+
+  Scenario: g_injectXmap_a_nullX_mapXa_nullXX_unfold_group_byXkeysX_byXselectXvaluesXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["a":null],["a":null]).unfold().group().by(Column.keys).by(__.select(Column.values))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":null}] |
+
+  # Interleaved, and per key: `a` keeps its last non-null (4), `b` saw only null.
+  Scenario: g_injectXa3_anull_a4_anull_bnullX_unfold_group_byXkeysX_byXselectXvaluesXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["a":3],["a":null],["a":4],["a":null],["b":null]).unfold().group().by(Column.keys).by(__.select(Column.values))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"d[4].i","b":null}] |
+
+  # Graph-sourced arrivals: the older people (null) arrive LAST, and still do not overwrite.
+  Scenario: g_V_hasLabelXpersonX_order_byXidX_chooseXhasXage_ltX30XX_constantXa_1X_constantXa_nullXX_unfold_group_byXkeysX_byXselectXvaluesXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by(T.id).choose(__.has("age",P.lt(30)), __.constant(["a":1]), __.constant(["a":null])).unfold().group().by(Column.keys).by(__.select(Column.values))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"a":"d[1].i"}] |

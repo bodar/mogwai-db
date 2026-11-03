@@ -310,8 +310,16 @@ describe('group / properties SQL', () => {
   test('group().by(child).by(child) assigns the last arriving traverser\'s scalar value', () => {
     const p = read('g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))');
     expect(p.shape).toEqual({ kind: 'mapValue' });
-    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT NULL\)\), '\$\[#-1\]'\)/);
+    // The leading sort key puts productive-null members (`{t:null}`) FIRST, so `$[#-1]` is the last
+    // NON-NULL arrival — `GroupStep.GroupBiOperator` never lets a null overwrite a held value.
+    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \(json_extract\(\w+\.gt, '\$\.t'\) IS NOT NULL\) ASC, \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT NULL\)\), '\$\[#-1\]'\)/);
     expect(p.sql).not.toContain("json_object('t', 'list', 'v', json_group_array(json(");
+  });
+
+  test('group().by(tail()) reads the FIRST arrival and carries no null sort key', () => {
+    const p = read('g.V().both().group().by(T.label).by(__.tail())');
+    expect(p.sql).toContain("'$[0]'");
+    expect(p.sql).not.toContain("'$.t') IS NOT NULL) ASC");
   });
 
 
