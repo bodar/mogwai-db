@@ -219,11 +219,14 @@ function carriesBarrier(s: Step, params: ParamEnv): boolean {
  *  not visible after it. Measured, as an answer rather than a plan:
  *  `g.V().as('x').values('age').union(__.min(), __.identity()).select('x').count()` is 4, not 5,
  *  BECAUSE `select('x')` drops the `min()` arm's traverser, whose label that arm's barrier ate. Treating
- *  the bind as still live made the presence filter look like a tautology and deleting it returned 5. */
+ *  the bind as still live made the presence filter look like a tautology and deleting it returned 5.
+ *  A mid-traversal `inject(x…)` clears it for the same reason: its traversers are new and unlabelled. */
 export function labelsBoundBefore(steps: readonly Step[], index: number, params: ParamEnv): ReadonlySet<string> {
   let bound = new Set<string>();
   for (let i = 0; i < index && i < steps.length; i++) {
-    if (carriesBarrier(steps[i], params)) bound = new Set();
+    // An `inject(x…)` past the source adds FRESH traversers beside the stream, each with no label
+    // (`StartStep` generates them), so a bind before it holds on only some rows after it.
+    if (carriesBarrier(steps[i], params) || (i > 0 && steps[i].name === 'inject' && (steps[i].args?.length ?? 0) > 0)) bound = new Set();
     for (const l of asLabelsOf(steps[i])) bound.add(l);
     for (const l of matchLabelsOf(steps[i], params)) bound.add(l);
   }

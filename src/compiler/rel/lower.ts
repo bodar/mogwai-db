@@ -1,6 +1,7 @@
 import { NO_PARAMS, type ParamEnv } from '../../gremlin/param-env.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
+import type { TraverserObject } from './history.ts';
 import { col, compilerInt, compilerNull, compilerText, compilerParamName, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
@@ -1864,6 +1865,7 @@ function scalarTail(
     if (step.name === 'V' || step.name === 'E') {
       return reSourceTail(steps, at, rel, out, bulked, ctx, fresh, labels);
     }
+    if (step.name === 'inject') return injectTail(steps, at, rel, out, bulked, ctx, fresh, labels);
     const args = step.args.map((a) => a.value);
     if (step.optionArms) return null;
     // A PATH carried into the scalar stream (a `values()` appended a value position). It composes with
@@ -2811,6 +2813,7 @@ function listTail(
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
+    if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'list', of: items, ...(set ? { set: true } : {}) }, false, ctx, fresh, labels);
 
     // `as()` over a LIST traverser binds the whole collection as ONE history entry, tagged `list` — a
     // list is one traverser, so binding it per member would be a different question. `listOf` rides on
@@ -3095,6 +3098,7 @@ function mapTail(
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
+    if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'map', keyOf, valOf, ...facts }, false, ctx, fresh, labels);
 
     // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
     // `keyOf`/`valOf` recorded on the entry so `select(label)` re-enters `mapTail` with the same
@@ -4608,6 +4612,16 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   }
 
   if (first.name === 'inject') {
+    // `g.inject()` — no injections, so no traverser: §3.3's EMPTY relation is a false filter over the
+    // one-row starter (`Values` refuses to express zero rows), `g.union()`'s spelling exactly. Framed
+    // like the starter, so `count()` is 0 and `fold()` is `[]`.
+    if (!first.args.length && !first.modulators?.length && !first.optionArms) {
+      if (tracksPath || first.graphTag != null) return null;
+      const seed = unionStarter(ordered, fresh);
+      const empty = make.filter({ id: fresh('ie'), input: seed.rel, channels: seed.rel.channels, type: seed.rel.type, pred: CONSTANT.false });
+      const withSack = sacked(empty);
+      return withSack && scalarTail(withSack, seed.framing, steps, 1, false, ctx, fresh);
+    }
     // A scalar CAST directly on a COLLECTION traverser RAISES, and that answer beats the collection
     // shape. `asNumber`/`asBool`/`asDate` are `ScalarMapStep`s over the whole traverser, and a list or
     // map is parseable as none of number/bool/date — `AsNumberStep.map` throws *"Can't parse type
@@ -4980,6 +4994,7 @@ function elementTail(
     if (step.name === 'V' || step.name === 'E') {
       return reSourceTail(steps, at, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
     }
+    if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
     // `UnfoldStep` yields a non-container object itself (`IteratorUtils.of(s)`), so the second
     // `unfold()` after an entry value's element-list expansion is an identity, not a deferral.
     // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/UnfoldStep.java:42-53`.)
@@ -5330,6 +5345,134 @@ function elementTail(
 }
 
 /**
+ * THE LITERAL ROWS an `inject(x…)` contributes — the SOURCE inject's three builders, one per argument
+ * shape (a map literal, a list literal, an ordinary value), asked in the source's own order so a
+ * mid-traversal inject is not a second spelling of `VALUES`. The step alone, with no following steps:
+ * the source's leading-coercion fold (`asNumber()` after `g.inject(…)`) belongs to the SOURCE, where the
+ * whole stream is the injected values; past the source, a following cast applies to the incoming
+ * traversers too and lowers as the ordinary step it is.
+ */
+function injectedRows(step: IRStep, ordered: boolean, fresh: Minter): FramedRel | null {
+  const mapped = injectMap(step, ordered, fresh);
+  if (mapped) return mapped;
+  const listed = injectList(step, ordered, fresh);
+  if (listed) return listed;
+  const scalar = injectSource([step], ordered, fresh);
+  return scalar && scalar.at === 1 ? { rel: scalar.rel, framing: scalar.framing } : null;
+}
+
+/** The object an injected row IS, for a path that starts at it — the payload under the framing the
+ *  literal builder gave it. `null` for a shape no injected literal has. */
+function injectedObject(rows: FramedRel): TraverserObject | null {
+  const { rel, framing } = rows;
+  if (framing.kind === 'scalar') {
+    const tagCol = perRowColumnOf(framing.type);
+    const vtype = tagCol && rel.type.cols.some((column) => column.name === tagCol) ? col(rel.id, tagCol) : undefined;
+    return { kind: 'value', value: col(rel.id, 'v'), type: framing.type, ...(vtype ? { vtype } : {}) };
+  }
+  if (framing.kind === 'list') return { kind: 'list', list: col(rel.id, LIST_COL), of: framing.of };
+  if (framing.kind === 'map') {
+    const { kind: _, ...map } = framing;
+    return { kind: 'map', map: col(rel.id, MAP_COL), ...map };
+  }
+  return null;
+}
+
+/**
+ * FRESH TRAVERSERS for injected rows, carried on the incoming stream's channels so the two can be one
+ * `UNION ALL`. `InjectStep` is a `StartStep`: each injection is `generate(value, this, 1L)` — a NEW
+ * traverser of bulk 1 with no labels, an empty history and the traversal's initial sack
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/StartStep.java:59-77`).
+ * So per role: an alias is NULL (absent — a later `select` drops the row, as for any unbound label), the
+ * bulk is 1, a path STARTS at the injected object, the sack is `withSack`'s seed, and an emission position
+ * is the literal's own (its argument order). Any other role is state a fresh traverser has no value for
+ * here (a per-start `origin`, a retained `fromV`, a loop counter, a graph tag), so it declines.
+ */
+function freshTraversers(rows: FramedRel, like: Channels, ctx: ChainCtx, fresh: Minter): Rel | null {
+  let rel: Rel | null = rows.rel;
+  if (like.some((channel) => channel.role === 'sack')) {
+    rel = ctx.sack ? seedSack(rel, ctx.sack, fresh) : null;
+    if (!rel) return null;
+  }
+  const seeded = rel;
+  const own = encounterOf(seeded.channels);
+  let channels: Channels = withoutEncounter(like);
+  if (own) channels = withChannel(channels, own);
+  const object = injectedObject(rows);
+  const value = (channel: Channel): Expr | null => {
+    switch (channel.role) {
+      case 'alias': return compilerNull();
+      case 'bulk': return compilerInt(1);
+      case 'encounter':
+      case 'sack': return seeded.type.cols.some((column) => column.name === channel.col) ? col(seeded.id, channel.col) : null;
+      case 'path': return object && seedPath(object, ctx.demandsPathLabels);
+      default: return null;
+    }
+  };
+  const exprs = channels.map((channel) => [channel.col, value(channel)] as const);
+  if (exprs.some(([, expr]) => !expr)) return null;
+  const payload = payloadCols(seeded);
+  return make.project({
+    id: fresh('ij'), input: seeded, channels, type: typeOf(...payload, ...carriedCols(channels)),
+    exprs: [...payload.map((column) => [column.name, col(seeded.id, column.name)] as const), ...(exprs as (readonly [string, Expr])[])],
+  });
+}
+
+/**
+ * `inject(x…)` PAST THE SOURCE — the incoming stream PLUS one fresh traverser per argument, i.e.
+ * `UNION ALL` of the stream with the source inject's literal relation (`injectedRows`), merged the way a
+ * branch's arms are (`mergeArms`: the same static type keeps it, a disagreeing scalar tag rides per row,
+ * a disagreeing shape is a `variant`). The arms are the injected rows FIRST and the stream second, so
+ * where a consumer reads the emission order (`branchOrderOwed`) the merge is numbered injected-then-stream
+ * (`mintBranchOrder`) — `StartStep.processNextStart` adds the injections to its `starts` before the first
+ * incoming traverser is pulled. Where nothing reads the order the result is the plain multiset (§17
+ * *Unordered slices*).
+ *
+ * `inject()` with no arguments adds nothing and is the identity at every position.
+ *
+ * ONLY ON THE ROOT TRAVERSAL. Inside a child body (`local`/`map`/`flatMap`/a `by()`/a branch arm/a
+ * `repeat()` body) the reference applies ONE child per host traverser and its `StartStep` latches after
+ * the first application (`InjectStep.reset()` never restores `first`), so the injections arrive for the
+ * first host only — an arrival-order answer, not a per-host one (see `scalarChild`'s bare-inject arm,
+ * `lower/reduction.ts`, for the cases that answer without seeing it). Neither a per-host injection nor a
+ * first-host latch is invented: the child form declines and says so.
+ */
+function injectTail(
+  steps: readonly IRStep[], at: number, rel: Rel, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  const step = steps[at]!;
+  if (step.modulators?.length || step.optionArms) return null;
+  if (!step.args.length) return continueAs(rel, framing, steps, at + 1, bulked, ctx, fresh, labels);
+  if (!(ctx.traversal?.rooted && ctx.traversal.steps === steps)) {
+    ctx.declines.note({
+      kind: 'inject-in-child', terminal: false,
+      message: 'inject() with values inside a child traversal (a local/map/flatMap/by/branch or repeat body) is not supported, '
+        + 'because the reference injects them for the first parent traverser only — inject on the outer traversal instead, '
+        + 'or use constant(…)/union(identity(), constant(…)) for a per-traverser value',
+    });
+    return null;
+  }
+  const owed = branchOrderOwed(ctx, { steps, at }, rel);
+  const rows = injectedRows(step, owed, fresh);
+  if (!rows) return null;
+  const incoming = owed ? rel : dropEncounter(rel, fresh);
+  const injected = freshTraversers(rows, incoming.channels, ctx, fresh);
+  if (!injected) return null;
+  const arms: Tail[] = [
+    { rel: injected, framing: rows.framing, aliases: NO_ALIASES, bulked: false },
+    { rel: incoming, framing, aliases: labels, bulked },
+  ];
+  const merged = owed ? mintBranchOrder(arms, undefined, labels, ctx.source, fresh) : mergeArms(arms, labels, ctx.source, fresh);
+  if (!merged) return null;
+  // Every incoming label is now bound on SOME rows only — an injected traverser holds none — so no entry
+  // keeps a static binding count (`binds`) or path position: a later `select` then owes the presence guard
+  // (`aliasGuard`) that drops the injected rows, as the reference's `select` of an unbound key does.
+  const aliases: AliasMap = new Map([...merged.aliases].map(([label, entry]) => [label, { ...entry, binds: undefined, pathPos: undefined }]));
+  return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, aliases);
+}
+
+/**
  * GIVEN A RELATION AND ITS SHAPE, WHICH LOOP OWNS THE REST OF THE CHAIN.
  *
  * The ONE dispatcher, and it is what stops every step that produces a new shape mid-chain from
@@ -5356,6 +5499,9 @@ export function continueAs(
   if (next?.name === 'V' || next?.name === 'E') {
     return reSourceTail(steps, from, rel, framing, bulked, ctx, fresh, labels);
   }
+  // `inject()` mid-chain adds fresh traversers BESIDE the stream, whatever its shape — the same reason
+  // the re-source sits here: one lowering, reached from every tail.
+  if (next?.name === 'inject') return injectTail(steps, from, rel, framing, bulked, ctx, fresh, labels);
   // A LIST FUNCTION OVER A TRAVERSER THAT IS NOT A COLLECTION is the traversal's own ANSWER — an error —
   // and this is the one dispatcher that knows both the step and the shape, which is why the check is here
   // rather than in each tail. `ListFunction.convertTraverserToCollection` raises for anything

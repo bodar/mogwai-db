@@ -242,8 +242,8 @@ Beside the RelIR substrate:
   (o-set-framing); global `order()` over element lists (o-order-elemlist); local split (o-split); sack merge
   seed and `normSack` (o-sack); inject list/set residue `g.inject({1,1})` (r6-fu2-r).
 - **Depth gaps** — Column/multi-key select inside arms (`path().select(Column.keys)`); `values('m')
-  .select(k)` over a Map-capable scalar; federate tails beyond values/count/order; mid-traversal
-  `inject(xs)`; `project().by()` after an `emit().repeat(…simplePath())` walk.
+  .select(k)` over a Map-capable scalar; federate tails beyond values/count/order;
+  `project().by()` after an `emit().repeat(…simplePath())` walk.
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`
   (`choose(values('name')).option(is('marko'),…)`), Column/path row ops, `Pop.all/mixed`, side effects
   (`group('m').by().by(__.in().values())`), local/match/where; the single-missing-caller list.

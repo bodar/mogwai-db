@@ -277,7 +277,7 @@
   },
   "inject": {
     "binds": 0,
-    "bytes": 84,
+    "bytes": 148,
     "compiler": 4,
     "bound": 0
   },
@@ -386,7 +386,7 @@
   "mergeV": {
     "binds": 3,
     "bytes": 7313,
-    "compiler": 492,
+    "compiler": 495,
     "bound": 0
   },
   "min": {

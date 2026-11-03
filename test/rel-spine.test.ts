@@ -185,6 +185,9 @@ const COVERED = [
   'g.inject(1)', 'g.inject(1,2,3)', "g.inject('a','b')", 'g.inject(null)', 'g.inject(true)',
   'g.inject(1).count()', 'g.inject(1,2,3).count()', 'g.inject(1,2).is(P.gt(1))',
   'g.inject(1,2).limit(1)', 'g.inject(1,2).skip(1)', 'g.inject(1,2,2).dedup()',
+  // `g.inject()` is the EMPTY relation (a false filter over the starter, `g.union()`'s spelling); a second
+  // inject is a UNION ALL with the first (`injectTail`).
+  'g.inject()', "g.inject('a').inject('b')",
   // The scalar tail is now ONE fold whichever source fed it, so these reach the same arms.
   "g.V().values('name').dedup()", 'g.V().count().count()', "g.V().out().values('name').dedup()",
   // A SCALAR `order()` — a `Sort`, which is what separates it from the element one: over values
@@ -622,7 +625,6 @@ const DECLINED = [
   // `Pick.unproductive` are distinguishable only where the choice reports productivity BESIDE its
   // value. What still declines is a choice whose body cannot report one, and a `T`-TOKEN choice
   // (`choose(T.label)`, no nested body at all), which is a different projection.
-  'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
   // `g.inject(['a','b']).order(Scope.local)` LEFT this list: the member sort landed, and it takes the
   // vtype-aware compare key from `byExpr` rather than a second policy. The guard that REPLACES it is
@@ -640,7 +642,6 @@ const DECLINED = [
   'g.V().order().by(T.key)',          // an element has no key
   'g.E().properties().id()',          // an edge `Property` is not an Element — no id, no label
   'g.E().properties().label()',
-  "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
