@@ -912,7 +912,12 @@ items that change WHEN a decline fires do not.
   the VALUES row (~3.2 KB); hold the node once and extract `v`/`t` in the body. Fix the commit's "raise order
   unchanged" claim: a raise inside a later variable now fires before an earlier variable's Number test. That
   error timing is allowed by §17.
-- **cr-fu6**: gate `withLocalHint` on what `reSourcedOnce` accepts (element origins, draw not under a reducer),
+- ✅ **cr-fu6 local(…) hint** LANDED `22fd3b71`: `reSourcesOncePerOrigin` (`rel/lower/reduction.ts`) is the one
+  spelling of `reSourcedOnce`'s admission rule; the `SHARED_DRAW` hint asks it (via `localDrawsPerRow`, keyed on
+  the decline KIND) before suggesting `local(…)`, and the decline says the body "may run" for more than one
+  traverser. Pins in `test/compiler/decline-reasons.exec.test.ts` and `rooted-sample-scale.exec.test.ts`; the
+  element-framed one-host gap is recorded under "cr-fu6 remains". Remains: nothing. Original note:
+  gate `withLocalHint` on what `reSourcedOnce` accepts (element origins, draw not under a reducer),
   not on `step.name`. Today it suggests `local(…)` for `g.inject(1,2).map(__.V().sample(1).values('name'))` and
   `g.V().map(__.V().coin(0.5).count())`, and both of those `local` forms decline too. The text "runs for more than
   one traverser" is false for the one-host seams that pass no host (`g.V(1).has('age', __.V().sample(1)
