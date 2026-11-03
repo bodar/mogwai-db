@@ -3,7 +3,8 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, or, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, type Minter } from '../build.ts';
+import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, withSubqueryColumns, type Minter } from '../build.ts';
+import type { ColMeta } from '../../../rel/types.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { SortTerm } from '../../../rel/types.ts';
@@ -529,13 +530,30 @@ function dedupBy(
   // keeps a vertex whose `p` is `true` apart from one whose `p` is `1`.
   const key = byEqualityKey(modulation, shape.host, ctx.source, fresh, childSeam(ctx, fresh));
   if (!key) return null;
-  // An unproductive `by()` drops the traverser (`DedupGlobalStep.java:77-78`); a NULL key is an absent one.
+  // An unproductive `by()` drops the traverser (`DedupGlobalStep.java:77-78`); a NULL key is an absent one
+  // unless the projection STATES its presence, whose null is a productive null that keys as null.
   const productive = productivityFilter(step, key, key.value);
   if (!productive) return null;
-  const domain = productive.keep
-    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive.keep })
-    : input;
-  return dedupOnTyped(key.terms, domain, shape.tie(domain), fresh);
+  return keptDedup(productive.keep, key.terms, input, shape.tie, fresh);
+}
+
+/**
+ * A by()-keyed dedup's KEEP and KEY over ONE landing of their subqueries — the filter that drops an
+ * unproductive `by()` and the window that partitions on its key are two nodes that cannot share an
+ * expression, so each would evaluate the projection again (and a stated presence is a THIRD read of the same
+ * body). `withSubqueryColumns` computes every subquery they spell once as a column below both, and the
+ * landed columns are projected away again by `dedupOnTyped`, so the traverser's payload is the input's.
+ * Where nothing hoists, the two read the expressions as spelled.
+ */
+function keptDedup(
+  keep: Expr | undefined, terms: readonly Expr[], input: Rel, tieOf: (domain: Rel) => readonly Expr[], fresh: Minter,
+): Rel | null {
+  if (!keep) return dedupOnTyped(terms, input, tieOf(input), fresh);
+  const keyed = withSubqueryColumns(input, [keep, ...terms], fresh);
+  const at = keyed?.rel ?? input;
+  const [pred, ...keys] = keyed?.exprs ?? [keep, ...terms];
+  const domain = make.filter({ id: fresh('f'), input: at, channels: at.channels, type: at.type, pred: pred! });
+  return dedupOnTyped(keys, domain, tieOf(domain), fresh, payloadCols(input));
 }
 
 /**
@@ -579,11 +597,11 @@ export function dedupOn(
  *  value, whose type the caller knows better than `typedEquality` can read off a bare expression
  *  (`byEqualityKey`, `aliasKeyAt`). */
 function dedupOnTyped(
-  typedKeysOf: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter,
+  typedKeysOf: readonly Expr[], domain: Rel, tie: readonly Expr[], fresh: Minter, payload: readonly ColMeta[] = payloadCols(domain),
 ): Rel | null {
   // The PAYLOAD survives whole, which is what makes this form serve a traverser that is more than its
-  // identity: only `bulk` is rewritten.
-  const cols = [...payloadCols(domain), ...carriedCols(domain.channels)];
+  // identity: only `bulk` is rewritten. `payload` narrows it where the domain carries a landed key column.
+  const cols = [...payload, ...carriedCols(domain.channels)];
   const position = encounterOf(domain.channels);
   // PER-ORIGIN when an `origin` channel is live: a `dedup()` inside a per-parent body
   // (`local(__.out().dedup())`) is DISTINCT within each parent, not globally — so the parent is the
@@ -707,8 +725,6 @@ export function dedupByLabels(
       keyTerms.push(...scoped.terms, ...labelTerms);
     }
   }
-  const domain = productive.length
-    ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: productive.reduce((a, b) => and(a, b)) })
-    : rel;
-  return dedupOnTyped(keyTerms, domain, domain.type.cols.map((c) => col(domain.id, c.name)), fresh);
+  const keep = productive.length ? productive.reduce((a, b) => and(a, b)) : undefined;
+  return keptDedup(keep, keyTerms, rel, (domain) => rel.type.cols.map((c) => col(domain.id, c.name)), fresh);
 }
