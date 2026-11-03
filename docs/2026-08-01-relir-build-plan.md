@@ -517,13 +517,18 @@ fold it into these lists at the end of the run.
   `lower/slice.ts`). `inject([a:9007199254740993L,b:'9007199254740993']).unfold().dedup().by(select(values)).count()` → 1, ref 2.
 - **r7-fu6** `where().by()` / `sack().by()` with a stated presence drop a productive null (`Compare.eq` null==null):
   wrong counts, not divergences — take them out of the §17 line `a37017d9` widened.
-- **r7-fu7** DATA-DEPENDENT DECLINE: federate over an EMPTY parent stream raises; ref `[0]`. `federate.ts` `apply()`
-  routes `rows.length === 0` to the source form before checking `mapValues`.
+- ✅ **r7-fu7** LANDED `d4e6de21`: a zero-parent MID federate call no longer runs the sibling read unbound or
+  declines — the planner records `form: 'source' | 'mid'` on the CallSite (same position test `segmentPlan` routes
+  on) and `apply()` routes by form, not `rows.length`; a MID call with no parents returns its terminal's empty
+  answer (reducer seed via `CallSite.pushdown`, empty map for a mapValues injection, else no rows) → `[0]`.
+  Remains: the pushed-barrier question (count gives `[6]` with two parents; fold gives per-parent lists, or `[]`
+  with zero parents); the per-parent mapValues injection cost is still super-linear and untouched.
 - ✅ **r7-reuse3** LANDED `59cf3c7d`: every data-sized `json_each` bind in `src/bulk.ts`/`src/setwrite.ts` goes
   through `stringifyExact` (one encoder); `existingUid` maps the landed uid back, replace dedup keys by landed
   form. Remains: nothing.
-- **r6-fu1** REGRESSION: a user param named `injectedMap` collides with federate's fresh name. PARKED on
-  `wf/federate-fresh-param-collision-2-4` (`12133bec`). Resume: land `2c64d6a9` (the fix) ALONE first; then
+- **r6-fu1** REGRESSION: a user param named `injectedMap` collides with federate's fresh name. Step 1 ✅ LANDED
+  `d4e6de21` (the `2c64d6a9` fix: `freshMapValuesParam` tests `params.values`, not the `ParamEnv`). Rest PARKED on
+  `wf/federate-fresh-param-collision-2-4` (`12133bec`). Resume:
   scan-bound-metadata; then re-land `d6722340..12133bec` (`correlatedIn`, `rel/passes/semijoin.ts`) fixing its
   majors — a string id `V('u0')` isn't treated as a bound (61×), a shared `EXISTS` hoists a CTE over the whole
   property table, a constant seek must outrank a correlated one (45×), four quadratic shapes regress 1.15–1.45×,
