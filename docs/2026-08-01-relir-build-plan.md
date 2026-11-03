@@ -489,7 +489,11 @@ F last. Each step lands `mise run ci` green on its own.
   `by(__.values(p))` drops the term. Remains: nothing. Original spec: gate 3b5cb096's `$.t IS NOT NULL` sort key (`map.ts` `collectedValue`) on a
   `GroupRecipe` flag set only where the value body STATES its presence; common `group().by(k).by(child)` goes back
   to pre-3b5cb096 SQL (`test/L2-sql/group.sql.test.ts`), `sql-hygiene-record` (group goes down). +4, −1 common term.
-- **C2 cleanup-presence-by-plain** (after C1) — revert a37017d9's semantic half: delete `landedOnce`;
+- ✅ **C2 cleanup-presence-by-plain** — LANDED `024a9440`: `landedOnce` deleted; `productivityFilter`
+  (`rel/modulator.ts`) keeps `value IS NOT NULL` for a stated `{when}` presence as for every other `by()` presence,
+  so one column per `by()` replaces the value+presence pair; `keptDedup` kept; §17 "A null `by()` value" back to
+  its plain rule; `by-stated-presence.feature` re-expected. No baseline moved. Remains: nothing.
+  Original spec — revert a37017d9's semantic half: delete `landedOnce`;
   `productivityFilter` reads `{when}` as value-nullness. KEEP `keptDedup`. Restore §17 line "a null `by()` value is
   absent" to its plain rule. `by-stated-presence.feature` moves to that answer. ≈−30.
 - **C3 cleanup-presence-first-value** (after C2) — revert 6bb959c8's producer: `reSourcedValue` answers
