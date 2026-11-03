@@ -981,14 +981,14 @@ per-row expression read N>1 times as ONE projected column (or `MATERIALIZED` hop
   **owner to confirm the trade at 8k×8k (~20 s per DO request)**. Either way state it in an outstanding-work line and a
   test comment (no test guards the origins×candidates axis now), and fix the `rankPairs` doc: the rank CTE is not
   `MATERIALIZED` ("FENCED" overclaims; one reference, so still correct).
-- ✅ **cr-fu6** (A3) — LANDED: `rootedRead` takes a required `hosts: 'one' | 'many'` and throws `SHARED_DRAW` only
+- ✅ **cr-fu6** (A3) — LANDED `5f50072f`: `rootedRead` takes a required `hosts: 'one' | 'many'` and throws `SHARED_DRAW` only
   for `'many'`. ONE authority decides: `rootedHosts(hostRel)` = `atMostOneRow` ∧ self-contained (a one-row host
   inside a per-row body is still many — SQLite runs an uncorrelated subquery once per statement). `rowBounds`
   gained the unique-key filter arm (`id IN (k) AND uid IS NULL` / `uid IN (k)` / `=` over a nodes/edges scan → max k),
   so `g.V(1)`, `g.V().hasId(1)`, `g.E(7)` are one host. Callers pass their host row (`reSourcedUnder`,
   `nestedFirstValue`, the child seam's `rooted(steps, host)`, `addE`'s endpoints over its INPUT); the rest pass
   `'many'`. A drawn addE endpoint is now bound ONCE (the absence guard and the insert drew separately, and the
-  insert hit NOT NULL). Message in user terms; the `local()` hint only from `map()`/`flatMap()`. Remains: a
+  insert hit NOT NULL). Message in user terms; the `local()` hint only from `map()`/`flatMap()`. Remains (two declines, not wrong answers): a
   `where`/`P`-operand body under a one-row host still declines (the predicate seam names no host row);
   `g.addV().addE().to(__.V().sample(1))` declines (addV's output is a ref, unbounded).
 
