@@ -41,6 +41,16 @@ import { readFileSync } from 'node:fs';
 //   (a multi-label-default traversal source in the test server config), tracked as item 19b — not,
 //   as this file previously said, a stub deletable in four lines.
 //
+//   By NAME, two more of the same standing: upstream's `IgnoreError` map (`IGNORED_SCENARIOS`) and
+//   the GLV-lossy scenarios (`GLV_LOSSY`), whose generated client traversal is not the `.feature`'s
+//   question — both derived from upstream's own files, never listed by hand.
+//
+// ── Everything else in scope that fails is LEDGERED ────────────────────────────────────────────
+//
+// `expected-outcomes.ts` names every remaining failure with its kind (divergence / wall / decline /
+// defect) and the document that authorizes it, and the ledger must equal the failing set exactly. A
+// wall stays IN the denominator there — it is our capability, so it counts against us, named.
+//
 // ── Not excluded, and a standing trap ──────────────────────────────────────────────────────────
 //
 // @StepWrite is io().write() graph SERIALIZATION (sideEffect/Write.feature: kryo/graphson to file),
@@ -113,6 +123,81 @@ export const IGNORED_SCENARIOS: ReadonlySet<string> = (() => {
   return new Set([...src.matchAll(/'([^']+)':\s*new IgnoreError/g)].map((m) => m[1]));
 })();
 
-/** Whether the upstream runner ignores this scenario (its `IgnoreError` map) — unadjudicable, so it
- *  leaves the L3 denominator, exactly as a runner-skipped tag does. */
-export const isIgnoredScenario = (name: string): boolean => IGNORED_SCENARIOS.has(name);
+/** Why a scenario's GENERATED CLIENT TRAVERSAL cannot ask the question its `.feature` asks. */
+export type GlvLoss =
+  /** `gremlin.js` calls `uuid.parse(…)`/`uuid.v4()` but never imports `uuid`, so the scenario dies
+   *  CLIENT-side with `uuid is not defined` before a query is sent (patches/upstream 01). */
+  | 'uuid-unimported'
+  /** The `.feature` writes a Long literal (`1L`) and asks for its TYPE (`GType.LONG`), but the JS
+   *  translator renders it as a bare `1`, so the server receives an Int (patches/upstream 08). */
+  | 'long-literal-bare';
+
+const GREMLIN_JS = new URL('../../vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/gremlin.js', import.meta.url);
+const FEATURES_DIR = new URL('../../vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/', import.meta.url);
+
+/** `gremlin.js` → scenario name → its translated traversal(s), one entry per generated line. */
+export function gremlinJsEntries(src: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of src.matchAll(/^ {4}(\w+): \[(.*)\], *$/gm)) out.set(m[1], m[2]);
+  return out;
+}
+
+/** `.feature` text → scenario name → the concatenated docstrings (initializer + traversal). Repeated
+ *  names concatenate, since the exclusion is by name either way. */
+export function featureDocstrings(texts: Iterable<string>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const text of texts) for (const block of text.split(/\n\s*Scenario(?: Outline)?: /).slice(1)) {
+    const name = block.slice(0, block.indexOf('\n')).trim();
+    const docs = [...block.matchAll(/"""([\s\S]*?)"""/g)].map((m) => m[1]).join('\n');
+    out.set(name, (out.get(name) ?? '') + docs);
+  }
+  return out;
+}
+
+/**
+ * Derive the GLV-lossy scenarios from upstream's own text — the generated `gremlin.js` and the
+ * `.feature` corpus — rather than listing them. Each rule names a defect in the GENERATED CLIENT, so
+ * an upstream fix (an `import … uuid`, a translator that emits `toLong(1)`) empties its rule on the
+ * next pin bump and the scenarios come back into scope with no edit here.
+ *
+ * `long-literal-bare` is NARROW on purpose: a bare `1` for `1L` is harmless wherever the query never
+ * observes the class (`V(1L)`, `limit(2L)` all pass), and excluding a passing scenario would shrink
+ * the floor. The one observer is `GType.LONG`, so only a scenario that both writes the literal and
+ * asks for that type is unadjudicable.
+ */
+export function deriveGlvLossy(gremlinJs: string, docstrings: ReadonlyMap<string, string>): Map<string, GlvLoss> {
+  const out = new Map<string, GlvLoss>();
+  const importsUuid = /^\s*import\b[^\n]*\buuid\b/m.test(gremlinJs);
+  for (const [name, translated] of gremlinJsEntries(gremlinJs)) {
+    if (!importsUuid && /\buuid\.\w+\(/.test(translated)) { out.set(name, 'uuid-unimported'); continue; }
+    const docs = docstrings.get(name);
+    if (!docs || !/\bGType\.LONG\b/.test(docs)) continue;
+    const longs = [...docs.matchAll(/(?<![\w.])(-?\d+)[lL]\b/g)].map((m) => m[1]);
+    // Bare = the digits as a number token of their own: not inside a string or a longer number, and
+    // not already wrapped as `toLong(…)`/`new Long(…)` (the fixed translator's spelling).
+    if (longs.some((n) => new RegExp(`(?<![\\w.'"])(?<!Long\\()${n}(?![\\w.])`).test(translated))) out.set(name, 'long-literal-bare');
+  }
+  return out;
+}
+
+/**
+ * SCENARIOS THE GENERATED JS CLIENT CANNOT ASK — category 3 again, beside `IGNORED_SCENARIOS` and with
+ * the same standing: the traversal that reaches the server is not the one the `.feature` describes
+ * (or none reaches it at all), so its verdict says nothing about our engine. Derived, not listed —
+ * see `deriveGlvLossy`; `runner-skips.test.ts` re-derives every name. The two upstream fixes are
+ * `patches/upstream/tinkerpop-01-…` and `…-08-…`.
+ */
+export const GLV_LOSSY: ReadonlyMap<string, GlvLoss> = (() => {
+  const features = [...new Bun.Glob('**/*.feature').scanSync(FEATURES_DIR.pathname)]
+    .map((f) => readFileSync(new URL(f, FEATURES_DIR), 'utf8'));
+  return deriveGlvLossy(readFileSync(GREMLIN_JS, 'utf8'), featureDocstrings(features));
+})();
+
+/** Whether the harness cannot adjudicate this scenario — upstream's `IgnoreError` map, or a GLV-lossy
+ *  translation (`GLV_LOSSY`). It leaves the L3 denominator, exactly as a runner-skipped tag does. */
+export const isIgnoredScenario = (name: string): boolean => IGNORED_SCENARIOS.has(name) || GLV_LOSSY.has(name);
+
+/** Whether a scenario is outside the L3 report altogether — a DECLARED WALL (`EXCLUDED_SCENARIOS`) or
+ *  one the harness cannot adjudicate (`isIgnoredScenario`). The ONE predicate the live count, the
+ *  scenario rows and the recorded floor all filter by, so the three cannot disagree on scope. */
+export const isOutOfScope = (name: string): boolean => isExcludedScenario(name) || isIgnoredScenario(name);

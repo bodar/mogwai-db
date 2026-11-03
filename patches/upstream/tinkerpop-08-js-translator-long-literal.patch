@@ -1,0 +1,89 @@
+diff --git a/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/translator/JavascriptTranslateVisitor.java b/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/translator/JavascriptTranslateVisitor.java
+--- a/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/translator/JavascriptTranslateVisitor.java
++++ b/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/translator/JavascriptTranslateVisitor.java
+@@ -39,7 +39,8 @@
+  *     <li>Makes enums explicit with their proper name</li>
+  * </ul>
+  * <p/>
+- * Assumes use of https://www.npmjs.com/package/uuid library for UUID handling.
++ * Assumes use of https://www.npmjs.com/package/uuid library for UUID handling, and of the GLV's {@code toLong}
++ * (from {@code gremlin}'s utils) for Long literals.
+  */
+ public class JavascriptTranslateVisitor extends AbstractTranslateVisitor {
+     public JavascriptTranslateVisitor() {
+@@ -159,7 +160,22 @@
+         int lastCharIndex = integerLiteral.length() - 1;
+         char lastChar = integerLiteral.charAt(lastCharIndex);
+ 
+-        // if there is a suffix then strip it
++        // a Long keeps its type. JavaScript has one number type, so a bare 1 reaches the server as an Int
++        // and the "L" is lost (P.typeOf(GType.LONG) then matches nothing). toLong() is the GLV's own Long
++        // carrier, which GremlinLang renders back with its suffix. Past Number.MAX_SAFE_INTEGER a JS number
++        // has already lost digits, so a long digit string travels as text.
++        if (lastChar == 'l') {
++            final String digits = integerLiteral.substring(0, lastCharIndex).replaceFirst("^\\+", "");
++            sb.append("toLong(");
++            if (digits.matches("-?\\d{16,}"))
++                sb.append('"').append(digits).append('"');
++            else
++                sb.append(digits);
++            sb.append(')');
++            return null;
++        }
++
++        // if there is any other suffix then strip it
+         if (Character.isAlphabetic(lastChar))
+             sb.append(integerLiteral, 0, lastCharIndex);
+         else
+diff --git a/gremlin-core/src/test/java/org/apache/tinkerpop/gremlin/language/translator/GremlinTranslatorTest.java b/gremlin-core/src/test/java/org/apache/tinkerpop/gremlin/language/translator/GremlinTranslatorTest.java
+--- a/gremlin-core/src/test/java/org/apache/tinkerpop/gremlin/language/translator/GremlinTranslatorTest.java
++++ b/gremlin-core/src/test/java/org/apache/tinkerpop/gremlin/language/translator/GremlinTranslatorTest.java
+@@ -446,7 +446,7 @@
+                             "g.With(\"x\", int64(1))",
+                             null,
+                             "g.with(\"x\", 1l)",
+-                            "g.with_(\"x\", 1)",
++                            "g.with_(\"x\", toLong(1))",
+                             "g.with_('x', long(1))"},
+                     {"g.with('x', 1L)",
+                             "g.with('x', 1l)",
+@@ -455,7 +455,7 @@
+                             "g.With(\"x\", int64(1))",
+                             "g.with('x', 1l)",
+                             "g.with(\"x\", 1l)",
+-                            "g.with_(\"x\", 1)",
++                            "g.with_(\"x\", toLong(1))",
+                             "g.with_('x', long(1))"},
+                     {"g.with('x', -1l)",
+                             null,
+@@ -464,7 +464,7 @@
+                             "g.With(\"x\", int64(-1))",
+                             null,
+                             "g.with(\"x\", -1l)",
+-                            "g.with_(\"x\", -1)",
++                            "g.with_(\"x\", toLong(-1))",
+                             "g.with_('x', long(-1))"},
+                     {"g.with('x', 1n)",
+                             null,
+@@ -1269,7 +1269,7 @@
+                             "g.V().Limit(int64(1))",
+                             "g.V().limit(1l)",
+                             "g.V().limit(1l)",
+-                            "g.V().limit(1)",
++                            "g.V().limit(toLong(1))",
+                             "g.V().limit(long(1))"},
+                     {"g.V().limit(1)",
+                             null,
+diff --git a/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy b/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy
+--- a/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy
++++ b/gremlin-js/gremlin-javascript/scripts/groovy/generate.groovy
+@@ -54,6 +54,9 @@
+     writer.writeLine("//********************************************************************************\n\n")
+ 
+     writer.writeLine(
++                    // JavascriptTranslateVisitor emits toLong(...) for a Long literal (1L), so the generated
++                    // file must import it or the Long is sent as a bare Int.
++                    'import { toLong } from \'../../lib/utils.js\';\n' +
+                     'import * as graphTraversalModule from \'../../lib/process/graph-traversal.js\';\n' +
+                     'import * as traversalModule from \'../../lib/process/traversal.js\';\n' +
+                     'import { Buffer } from \'buffer\';\n' +

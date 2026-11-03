@@ -6,7 +6,8 @@ IDs in parentheses are stable — `git log -S<id>` finds their history (much of 
 [RelIR plan](./archive/2026-08-01-relir-build-plan.md) §10). Reach is common / plausible unless marked.
 
 **Instruments.** L3 floor: `test/L3-conformance/l3-state.json` (deferral buckets in
-`l3-telemetry.summary.json`). RelIR coverage by family: `mise run rel-blockers`. Fail-closed check:
+`l3-telemetry.summary.json`); every in-scope failure is named with its kind and reason in
+`test/L3-conformance/expected-outcomes.ts`. RelIR coverage by family: `mise run rel-blockers`. Fail-closed check:
 `test/L7-census/deferrals.tsv` must hold no `crashed` rows. Three worklists fail loudly when a shape
 lands: `test/rel-spine.test.ts` `DECLINED`, `test/L4-addendum` `@Unsupported`, L5 `LAW UNEVALUABLE`.
 
@@ -57,6 +58,29 @@ refusal comes first: it is a production outage.
 - **Set-op literal operand loses member class** — `combine([1.0d])` reads a whole Double back as an Int.
 - **Intermediate `sum` overflow not widened** — a running total that leaves the Long range and returns.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
+- **L3-ledgered wrong answers** — each is a `defect` in `test/L3-conformance/expected-outcomes.ts`; the
+  fix deletes its names there.
+  - **`Binary(…)` is carried as its base64 String (l3-binary)** — `g.inject(Binary('AQID'))` answers
+    `'AQID'`, and `values('blob').is(typeOf(GType.BINARY))` matches nothing: no binary value class exists
+    end to end (literal, storage, GraphBinary `BINARY`). `data/Binary.feature`, 5 scenarios.
+  - **An edge `Property` frames as a VertexProperty (l3-edge-prop-frame)** — `g.E().properties()` sends a
+    VertexProperty with a synthetic `owner:key` id (`framePropertyRow`, `src/execute.ts`) where the
+    reference sends a `Property` (`propertyFrame` already exists). 6 scenarios.
+  - **`call(service, map, traversal)` ignores the traversal's map (l3-call-trav-params)** —
+    `call('tinker.degree.centrality', ['x':'y'], __.project('direction').by(constant(Direction.OUT)))`
+    answers the default direction, and `call('--list', …, project('service')…)` lists every service. 2.
+  - **`select(Pop.mixed, k).by(…)` answers wrong values (l3-select-mixed-by)** —
+    `V().as('a').out().as('a').out().as('a').select(mixed,'a').by(unfold().values('name').fold()).tail(local,1)`;
+    the matrix lists dynamic-shape `Pop.mixed` as unsupported, yet it answers. 3.
+  - **`with('multilabel')` frames an edge's own label as a String (l3-multilabel-edge-label)** —
+    `E().elementMap()` gives its endpoints' labels as Sets but its own as a String. 1.
+  - **`order(local).by(keys)` sorts `T` keys after every String (l3-t-token-order)** —
+    `V(1).elementMap().order(local).by(keys, desc)` gives `id, label, name, age`; the reference orders a
+    `T` key by its name (`name, label, id, age`). 2.
+  - **`merge()` over an incoming Map raises a type error (l3-map-merge)** —
+    `V().has('name','marko').elementMap().merge(__.V().has('name','lop').elementMap())` raises `merge step
+    can only take an array or an Iterable type for incoming traversers, encountered map`; the reference
+    merges the two maps. 3.
 
 ## 1b. Super-linear at production size
 

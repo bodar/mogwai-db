@@ -30,7 +30,8 @@ import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ReplicateOptions, ReplicationStats, ConflictEntry } from '../../src/api.ts';
-import { isExcludedScenario, isIgnoredScenario } from './tags.ts';
+import { isOutOfScope } from './tags.ts';
+import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 
 export interface QueryRecord {
   g: string;
@@ -38,7 +39,22 @@ export interface QueryRecord {
   ok: boolean;
   error?: string;
   steps: string[];
+  /** The cucumber scenario that issued the query (`scenarioCursor`), when a run sets one. It is what
+   *  joins a server-side outcome to a scenario NAME — the ledger cross-check (`expected-outcomes.ts`)
+   *  reads it to prove a `decline` really declined. */
+  scenario?: string;
+  /** The failure was the compiler's own DECLINE (`UnsupportedTraversal`) rather than some other error.
+   *  Read from the class, the one authority, not from the message's prefix. */
+  declined?: boolean;
 }
+
+/**
+ * THE SCENARIO NOW RUNNING, set by a cucumber `Before` hook (`glv-compat.ts`) and stamped onto every
+ * record. Sound because the whole L3 run is ONE process and cucumber runs scenarios serially: the
+ * client, the in-memory transport and this decorator share the thread, so the cursor names the
+ * scenario whose step issued the query. Undefined outside a cucumber run (the mini-L3, a unit test).
+ */
+export const scenarioCursor: { name?: string } = {};
 
 /** The top-level step-name chain of a gremlin string, best-effort (same scope as
  *  the L1 corpus machinery — does not descend into nested traversals). Returns []
@@ -73,10 +89,10 @@ export class LoggingGraphManager implements GraphManager {
       async framedAsync(gremlin, params, paramTypes) {
         try {
           const r = await inner.framedAsync(gremlin, params, paramTypes);
-          log({ g: id, gremlin, ok: true, steps: stepNames(gremlin, params) });
+          log({ g: id, gremlin, ok: true, steps: stepNames(gremlin, params), scenario: scenarioCursor.name });
           return r;
         } catch (e: any) {
-          log({ g: id, gremlin, ok: false, error: e?.message ?? String(e), steps: stepNames(gremlin, params) });
+          log({ g: id, gremlin, ok: false, error: e?.message ?? String(e), steps: stepNames(gremlin, params), scenario: scenarioCursor.name, declined: e instanceof UnsupportedTraversal });
           throw e;
         }
       },
@@ -290,7 +306,7 @@ export function collectScenarios(cucumberJson: any[]): ScenarioRow[] {
     // A DECLARED WALL leaves the report entirely — numerator and denominator both — so it can neither
     // read as a regression in the delta nor sit in the floor as a permanent failure (tags.ts). An
     // upstream-IGNORED scenario (gremlin-js's IgnoreError map — float/uuid-unstable) leaves it too.
-    if (isExcludedScenario(el.name) || isIgnoredScenario(el.name)) continue;
+    if (isOutOfScope(el.name)) continue;
     const steps = el.steps ?? [];
     const passed = steps.length > 0 && steps.every((s: any) => s.result?.status === 'passed');
     if (passed) { rows.push({ name: el.name, passed: true }); continue; }
@@ -365,12 +381,13 @@ export function readState(file: string): L3State {
   const s = parseStateFile(file);
   if (!s) return EMPTY_STATE();
   // **A NAME THAT IS NO LONGER MEASURED CANNOT BE A REGRESSION.** When a scenario joins
-  // `EXCLUDED_SCENARIOS` — a capability we have DECLARED we do not have — it leaves the live report's
+  // `EXCLUDED_SCENARIOS` — a capability we have DECLARED we do not have — or becomes one the harness
+  // cannot adjudicate (`isIgnoredScenario`: an upstream IgnoreError, a GLV-lossy translation), it leaves the live report's
   // numerator and denominator both, so a floor still naming it would read as "was passing, now gone"
   // forever and no clean run could ever rewrite it (the ratchet fails, so the state is never
   // rewritten, so the ratchet fails). Filtering on READ makes the floor self-healing and keeps the
   // decision in ONE place — the exclusion list — rather than requiring a hand-edit of the artifact.
-  const live = (names: readonly string[]) => names.filter((n) => !isExcludedScenario(n));
+  const live = (names: readonly string[]) => names.filter((n) => !isOutOfScope(n));
   const passed = live(s.passed ?? []);
   const failed = live(s.failed ?? []);
   const dropped = ((s.passed?.length ?? 0) - passed.length) + ((s.failed?.length ?? 0) - failed.length);

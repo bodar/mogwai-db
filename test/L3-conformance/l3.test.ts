@@ -31,8 +31,9 @@ import '../support/undici-shim.ts'; // client teardown calls Agent.close() — s
 import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
-import { L3_TAGS, isExcludedScenario, isIgnoredScenario } from './tags.ts';
-import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
+import { L3_TAGS, isOutOfScope } from './tags.ts';
+import { auditLedger, declinesThatAnswered, reasonOf } from './expected-outcomes.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 // A GLOB, not a bare directory: cucumber 13 (the submodule's runner since the master bump)
@@ -126,12 +127,10 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   let passing = 0, total = 0;
   for (const feat of json) for (const el of feat.elements ?? []) {
     if (el.type && el.type !== 'scenario') continue;
-    // A DECLARED WALL is not part of the denominator — see `EXCLUDED_SCENARIOS` in tags.ts. It never
-    // reaches `passing` either (it fails), so cucumber's own summary cross-check below still holds.
-    if (isExcludedScenario(el.name)) continue;
-    // A scenario the upstream runner SKIPPED (its IgnoreError map — float/uuid-unstable) leaves the
-    // denominator, exactly as a runner-skipped tag does; counting it as our failure would be a lie.
-    if (isIgnoredScenario(el.name)) continue;
+    // A DECLARED WALL (`EXCLUDED_SCENARIOS`) and a scenario the harness cannot adjudicate (upstream's
+    // IgnoreError map, a GLV-lossy translation) are not part of the denominator — see tags.ts. None
+    // reaches `passing` (each fails or is skipped), so cucumber's own summary cross-check still holds.
+    if (isOutOfScope(el.name)) continue;
     total++;
     const steps = el.steps ?? [];
     if (steps.length && steps.every((s: any) => s.result?.status === 'passed')) passing++;
@@ -173,7 +172,8 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   // Partition failures with the corpus's own expected-error strings: a throw satisfying a
   // negative scenario's assertion is an expected error (scenario passes), kept out of the
   // buckets so the ranking reflects only real gaps.
-  const sum = summarize(readTelemetry(tpath), expectedErrorSubstrings(FEATURES));
+  const records = readTelemetry(tpath);
+  const sum = summarize(records, expectedErrorSubstrings(FEATURES));
   console.log(formatReport(sum, rows));
   const artifact = tpath.replace(/\.ndjson$/, '') + '.summary.json';
   writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: rows }, null, 2) + '\n');
@@ -217,4 +217,19 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
     const synced = syncCountFiles(passing);
     if (synced.length) console.log(`L3 prose count synced to ${passing} — commit ${synced.join(' + ')}.`);
   }
+
+  // ── THE EXPECTED-OUTCOME LEDGER — every failure named, every decline proven ──────────────────────
+  //
+  // Checked AFTER the state is recorded, so a gain still lands in l3-state.json and the failure below
+  // is only the prompt to delete the fixed name from `expected-outcomes.ts` in the same commit.
+  const { passed: livePassed, failed: liveFailed } = stateOf(rows);
+  const audit = auditLedger(liveFailed, livePassed);
+  const exercised = new Set(rows.map((r) => r.name));
+  const answered = declinesThatAnswered(records, exercised);
+  const problems = [
+    ...audit.unledgered.map((n) => `  unledgered failure: ${n} — fix it, or file it in expected-outcomes.ts under a reason`),
+    ...audit.stale.map(({ name, passes }) => `  stale ledger entry (${reasonOf(name)}): ${name} — ${passes ? 'now PASSES' : 'no longer in scope'}; delete it from expected-outcomes.ts`),
+    ...answered.map((n) => `  ledgered as a decline (${reasonOf(n)}) but did not raise UnsupportedTraversal: ${n} — a pass to delete, or a defect to re-file`),
+  ];
+  if (problems.length) throw new Error(`L3 expected-outcome ledger is out of date (${problems.length}):\n${problems.join('\n')}`);
 }, LONG);

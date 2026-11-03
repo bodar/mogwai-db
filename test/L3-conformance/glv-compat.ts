@@ -28,3 +28,12 @@ const numberResult = (serializer: any) => {
 };
 numberResult(ioc.serializers[ioc.DataType.BIGDECIMAL]);
 numberResult(ioc.bigIntegerSerializer);
+
+// Stamp each query the server sees with the scenario that issued it (`scenarioCursor`), so telemetry
+// can be joined to a scenario NAME — the expected-outcome ledger's `decline` cross-check needs it.
+// The hook must register on the SAME cucumber instance upstream's steps use (its registry is
+// per-instance — `test/support/cucumber.ts`), which is the submodule's copy, resolved here by path.
+const { CUCUMBER_ROOT } = await import('../support/cucumber.ts');
+const { scenarioCursor } = await import('./telemetry.ts');
+const cucumber = await import(`${CUCUMBER_ROOT}/lib/index.js`);
+cucumber.Before(function ({ pickle }: { pickle: { name: string } }) { scenarioCursor.name = pickle.name; });

@@ -231,7 +231,8 @@ because `profile()` is not supported.
 
 Vertices carry multiple labels (`addLabel`/`dropLabel`). Vertex properties are multi-valued with
 meta-properties; edge properties are single-valued. Element ids are integer rowids, externally
-`COALESCE(uid, id)`.
+`COALESCE(uid, id)`. Vertex-property ids are assigned by the graph, so a loaded file's vertex-property
+ids are not kept (the corpus's `@UserSuppliedVertexPropertyIds`).
 
 ## 15. Locked non-goals (🚫)
 
@@ -285,6 +286,8 @@ wrong number class.
 | Error vs filter order | a later filter may drop a row before its type error is evaluated (`inject(1).toUpper().is('x')` is `[]`) |
 | Unread erroneous values | an error in a value nothing reads is not raised (`project('x').by(values('age').toUpper()).count()` answers) |
 | Number equality | by value: `1`, `1L`, `1.0` are one value; `true`/`1` and a UUID/Char vs String stay distinct. A merged key frames as one of the merged classes (`inject(1, 1.0).groupCount()` is `{1.0: 2}`) |
+| String vs integer element id | a String id is not the integer it spells: `V('1')`, `hasId('1')`, `E('11')` do not find rowid `1`/`11`. A user-supplied `T.id` may be a String or an integer and both may exist, so coercing would be ambiguous (TinkerGraph's id manager coerces) |
+| `merge()` type-error text | a list `merge()` given a Map argument raises `merge step can only take an array or an Iterable as an argument, encountered map`, not Java's `step type mismatch: expected argument to be Iterable but got Map` |
 | UUID vs String on an untyped value | a value with no type fact — an unfolded list member, an injected String — compares by its text, so a String spelling a UUID equals that UUID there (`inject(['<u>']).unfold().is(UUID('<u>'))` is 1); a stored or typed value keeps the two distinct |
 | Signed zero | `-0.0` is `0.0` everywhere |
 | Numeric predicate compare | by exact SQLite INTEGER/REAL value, no Java widening: `9007199254740993L > 9007199254740992d` holds; BigDecimal compares at double precision; bounds past int64 compare as REAL |

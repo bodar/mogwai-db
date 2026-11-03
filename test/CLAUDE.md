@@ -62,6 +62,15 @@
     the ceiling and the floor follows for free. So read a rising L3 count as a *side effect* of the
     right work, never as the target — and don't chase a scenario with a special-case (see the
     seam directive in `src/compiler/CLAUDE.md`).
+  - **Every in-scope failure is LEDGERED** in `expected-outcomes.ts` with a kind — `divergence` (a §17
+    row), `wall` (a declared capability we lack), `decline` (a clean `UnsupportedTraversal`), `defect` (a
+    known wrong answer, with its `outstanding-work.md` §1 ID) — and the ledger must EQUAL the failing set
+    by multiplicity. So **a commit that fixes a scenario deletes its name there** (L3 and
+    `l3-state.test.ts` both fail on a stale entry), and a new failure cannot land unnamed. A wrong answer
+    is never a `decline` or a `divergence`: every L3 run proves each ledgered decline raised
+    `UnsupportedTraversal` (telemetry is stamped with the scenario), and a divergence/defect must cite a
+    row that exists. Scope itself is `tags.ts` `isOutOfScope` — declared walls, runner skips, upstream
+    `IgnoreError`s and the DERIVED GLV-lossy set (`GLV_LOSSY`).
   - **`passed[]` legitimately contains repeated names — this is NOT a ratchet bug (we have
     diagnosed it twice; do not "fix" it a third time).** TinkerPop ships distinct scenarios that
     normalize to the same name (e.g. the `g_V_bothE_properties_dedup_hasKeyXweightX_hasValueXltX0d3XX_value`
