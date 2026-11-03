@@ -11,6 +11,12 @@ IDs in parentheses are stable — `git log -S<id>` finds their history (much of 
 `test/L7-census/deferrals.tsv` must hold no `crashed` rows. Three worklists fail loudly when a shape
 lands: `test/rel-spine.test.ts` `DECLINED`, `test/L4-addendum` `@Unsupported`, L5 `LAW UNEVALUABLE`.
 
+**L3 accounting (✅ landed, faecb6f2).** Every in-scope L3 failure is ledgered with a kind
+(divergence/wall/decline/defect) and a checked citation; the 16 scenarios the JS GLV cannot ask are
+excluded as GLV-lossy, DERIVED from gremlin.js + the corpus (`GLV_LOSSY`, `test/L3-conformance/tags.ts`).
+The ledger must equal the failing set (`l3-state.test.ts`, `l3.test.ts`). Remains: nothing — the ledgered
+defects are §1 items; a fix deletes its names from the ledger.
+
 ## 1. Wrong answers today
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
