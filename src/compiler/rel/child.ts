@@ -85,14 +85,6 @@ export interface ChildSeam {
   readonly writes: ProgramWrites;
   /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
   readonly scalar: (body: readonly IRStep[], host: ChildHost) => ChildValue | null;
-  /**
-   * A SCOPE KEY over a host that MAY BE A MAP — a per-row scalar whose row may be a stored Map — as ONE
-   * `{t,v}` node: the row's own entry first, then the next scope (`Scoping.java:119-135`), NULL where none
-   * holds the key. The reader `select(k)` uses as a child body, offered to the projectors whose named
-   * variables are the same scope read (`math()`). `'pass'` where the host cannot be a Map or the next scope
-   * keeps its own reader (an element/collection label); `null` declines.
-   */
-  readonly scopeNode: (key: string, host: ChildHost) => Expr | null | 'pass';
   /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. `aliases` is
    *  the ROW'S path-label scope, the predicate twin of `ChildHost.row`: a `select(<label>)` in the body
    *  re-roots off it (`childPredicate`), so a caller holding a carrying table passes its labels and a

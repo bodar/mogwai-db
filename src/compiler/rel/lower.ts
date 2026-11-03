@@ -46,7 +46,7 @@ import {
 } from './build.ts';
 import { aliasElementHost, aliasGuard, aliasIdAt, aliasProjection, aliasOperandAt, bindAliases, isElementAlias, liveAliases, selectSpec, type AliasProjection, type ElementAliasProjection } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
-import { byExpr, byProjection, isProductiveBy, labelScopeNode, modulations, producedMemberNode, productivityFilter, type LabelScope, type Modulation } from './modulator.ts';
+import { byExpr, byProjection, isProductiveBy, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
@@ -1497,17 +1497,15 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
  * (`scalarMapKey`), so the stream stays ONE per-row scalar:
  * - a `withSideEffect(k, constant)` — scalar, list or map — is the fallback node (`constantNode`, the
  *   stored encoding); a constant the encoder cannot spell DECLINES;
- * - a live path label `k` holding a VALUE is the fallback node read off the row (`labelScopeNode`), so the
- *   entry-or-label is still one per-row scalar; a row the label is unbound on (and whose Map lacks `k`)
- *   DROPS;
  * - NO scope at all (no collection, side effect or live/enclosing label `k`) — a row whose Map lacks `k`
  *   DROPS, the empty answer `selectKeys` gives a non-Map stream (`Select.feature:578-596`).
  *
- * `'pass'` where `k` is a path label holding an ELEMENT or a collection, or a named collection: those keep
- * their own answer with no per-row probe — an element/collection-or-entry framing per row does not exist.
- * That a same-named key of a stored Map is not read there is a §17 divergence
- * (`docs/feature-support-matrix.md`, "Map scope"). A static scalar (`count()`, a typed literal) is never a
- * Map, and a MAP/RECORD stream reads its own keys in its own tail, so neither reaches this.
+ * `'pass'` everywhere else, and deliberately where `k` is a LIVE (or enclosing) PATH LABEL or a named
+ * collection: those keep their own answer with no per-row probe — a path-label read is a column read, and
+ * the probe would land on every `values(x).as('a')…select('a')`. That a same-named key of a stored Map is
+ * not read there is a §17 divergence (`docs/feature-support-matrix.md`, "Map scope"). A static scalar
+ * (`count()`, a typed literal) is never a Map, and a MAP/RECORD stream reads its own keys in its own tail,
+ * so neither reaches this.
  */
 function selectMapFirst(
   step: IRStep, rel: Rel, framing: RelFraming, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
@@ -1517,10 +1515,10 @@ function selectMapFirst(
   if (!vtype || !rel.type.cols.some((column) => column.name === vtype)) return 'pass';
   const key = selectedKey(step);
   if (key === null) return 'pass';
-  const fallback = mapFirstFallback(key, ctx, labelScopeNode({ rel, aliases: labels }, key, selectSpec(step)!.pop));
+  const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
   if (fallback === null) return null;
   if (typeof fallback === 'string') return 'pass';
-  return { rel: scalarMapKey(rel, vtype, key, fallback.node, fresh, fallback.total), framing: { kind: 'scalar', type: PER_ROW('vtype') } };
+  return { rel: scalarMapKey(rel, vtype, key, fallback.node, fresh), framing: { kind: 'scalar', type: PER_ROW('vtype') } };
 }
 
 /** The tags a per-row scalar's collection rows carry — the stored encoding's own (`valueNodeOf`). */
@@ -1697,16 +1695,15 @@ function reNoded(arms: readonly Tail[], source: GraphSource, fresh: Minter): rea
  * every map-first reader shares: the chain over a per-row scalar (`selectMapFirst`) and over a map
  * (`mapTail`), and the child seam over either host (`scalarMapFirstChild`, `mapHostChild`). In the
  * reference's order (`Scoping.java:119-135` — the Map, then the side effects, then the path):
- * `{node}` is a `withSideEffect` constant, or a live SCALAR path label read off the reader's row
- * (`labelScopeNode`), as a `{t,v}` node — `total: false` where the node may be NULL (a label unbound on
- * some row, which drops there); `{node: null}` is NO scope (the row drops); `'collection'` is a named
- * collection (or a keyed side-effect writer), `'label'` an element/collection path label (live here, or
- * bound by an enclosing scope the reader cannot read) — each keeps its own answer where the reader can
- * give it; `null` declines a constant the stored encoding cannot spell.
+ * `{node}` is a `withSideEffect` constant as a `{t,v}` node; `{node: null}` is NO scope (the row drops);
+ * `'collection'` is a named collection (or a keyed side-effect writer), `'label'` a path label of ANY kind
+ * (`liveLabel` on the reader's row, or bound by an enclosing scope) — each keeps its own answer where the
+ * reader can give it; `null` declines a constant the stored encoding cannot spell. A label is never read
+ * per row beside a Map's entry: the label wins (§17 "Map scope", `docs/feature-support-matrix.md`).
  */
 export function mapFirstFallback(
-  key: string, ctx: ChainCtx, label: LabelScope,
-): { readonly node: Expr | null; readonly total?: boolean } | null | 'collection' | 'label' {
+  key: string, ctx: ChainCtx, liveLabel: boolean,
+): { readonly node: Expr | null } | null | 'collection' | 'label' {
   const constant = ctx.sideEffects.get(key);
   // The CONSTANT form declares a policy too (`sideEffectPolicies`); only a REDUCER form's operator makes
   // the name a merged collection rather than a value to substitute.
@@ -1715,8 +1712,7 @@ export function mapFirstFallback(
     return node && { node };
   }
   if (namedElsewhere(ctx)(key)) return 'collection';
-  if (label && label !== 'opaque') return label;
-  if (label || ctx.enclosingLabels?.has(key)) return 'label';
+  if (liveLabel || ctx.enclosingLabels?.has(key)) return 'label';
   return { node: null };
 }
 
@@ -3184,24 +3180,16 @@ function mapTail(
       if (key !== null) {
         const presence = mapKeyPresence(facts, key);
         const mayHold = presence !== 'absent';
-        const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key) ? 'opaque' : null);
+        const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
         if (fallback === null) return null;
-        // A LIVE (or enclosing) LABEL is the scope a row lacking `key` reads next. The map's KEY FACTS
-        // decide on the query text alone: a key EVERY row holds (`held`) is the entry for every row; a key
-        // NO row holds (outside `keys`) is the label for every row, read through the ordinary alias read
-        // (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) reads the entry-or-label per
-        // row where the label is a VALUE and the map's value side scalar — one `{t,v}` node either way
-        // (`labelScopeNode`, spelled over the FENCED relation `mapKeyOr` reads). An element/collection label
-        // there has no framing yet (an element-or-value VARIANT stream), so it DECLINES — reading the entry
-        // would drop exactly the rows the label answers.
+        // A LIVE (or enclosing) LABEL is the scope a row lacking `key` reads next, and an entry-or-label
+        // read per row is not built (a path-label read stays a column read). So the map's KEY FACTS decide
+        // on the query text alone: a key EVERY row holds (`held`) is the entry for every row; a key NO row
+        // holds (outside `keys`) is the label for every row, read through the ordinary alias read
+        // (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) DECLINES — reading the
+        // entry would drop exactly the rows the label answers, and the query text names the collision.
         if (fallback === 'label' && presence !== 'held') {
-          if (presence === 'may') {
-            const over = fenced(rel, fresh);
-            const label = valOf.kind === 'scalar' ? labelScopeNode({ rel: over, aliases: labels }, key) : null;
-            if (!label || label === 'opaque') return null;
-            return scalarTail(mapKeyOr(over, key, label.node, true, fresh, label.total), { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
-          }
-          if (!liveAliases(labels, rel).has(key)) return null;
+          if (presence === 'may' || !liveAliases(labels, rel).has(key)) return null;
           const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
             { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) });
           return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
@@ -3270,7 +3258,7 @@ function mapTail(
     const mapScope: MapScope = (k) => {
       // A map lacking `k` reads a `withSideEffect` CONSTANT next (`mapFirstFallback`), the same for every
       // such row — so the key term is the entry, else the constant, and no row is absent.
-      const fallback = mapFirstFallback(k, ctx, null);
+      const fallback = mapFirstFallback(k, ctx, false);
       const constant = fallback && typeof fallback === 'object' ? fallback.node : null;
       const presence = mapKeyPresence(facts, k);
       if (presence === 'absent') return constant ? { terms: [constant], absent: null, mayBeElement: false } : undefined;
@@ -5822,32 +5810,6 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
 /** The framings whose value is never an ELEMENT — a Vertex/Edge equals none of them. */
 const VALUE_FRAMINGS: ReadonlySet<RelFraming['kind']> = new Set(['scalar', 'list', 'path', 'map', 'mapEntry', 'record']);
 
-/**
- * `select(k)` over a RECORD whose field `k` is OPTIONAL while a path label `k` is live — the field where the
- * row holds it, else the label: the traverser's own Map is the first scope and the path the next
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
- * and `project()` OMITS a key whose `by()` was unproductive
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66`).
- * Presence is the field's own nullness (`fieldPresence`), so the split is two Filters over ONE fenced record
- * relation, and the arms MERGE through `mergeArms` — a scalar meet where the label holds a value, a
- * `{scalar, elements}` variant where it holds an element. `null` declines what either arm declines.
- */
-function optionalFieldOrLabel(
-  step: IRStep, rel: Rel, field: RecordField, fields: readonly RecordField[], labels: AliasMap,
-  bulked: boolean, ctx: ChainCtx, fresh: Minter,
-): BranchRel | null {
-  const over = fenced(rel, fresh);
-  const present = fieldPresence(field, (name) => col(over.id, name));
-  if (!present) return null;
-  const held = recordField(over, field, fresh);
-  const lacking = make.filter({ id: fresh('rl'), input: over, channels: over.channels, type: over.type, pred: { kind: 'unary', op: 'not', arg: present } });
-  // The label arm reads the PATH: the record minus this field is the host, so `selectKeys` cannot re-read it.
-  const label = selectKeys(step, lacking, labels, childSeam(ctx, fresh), ctx.source, fresh,
-    { framing: { kind: 'record', fields: fields.filter((other) => other !== field) }, ...selectScope(ctx) });
-  if (!held || !label) return null;
-  return mergeArms([{ ...held, aliases: labels, bulked }, { ...label, aliases: labels, bulked }], labels, ctx.source, fresh);
-}
-
 function recordTail(
   seed: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
@@ -5887,13 +5849,11 @@ function recordTail(
       if (field) {
         // An OPTIONAL field a row may lack reads a same-named SIDE EFFECT there (`mapFirstFallback`'s
         // order, `Scoping.java:119-135`) — a field-or-constant value this read does not build: decline.
-        if (field.optional && namedElsewhere(ctx)(field.key)) return null;
-        // …and a same-named LIVE PATH LABEL is that next scope (`Scoping.java:129-130`): a row holding the
-        // field takes it, a row lacking it takes the label (`ProjectStep.java:66` omits an unproductive key).
-        if (field.optional && liveAliases(labels, rel).has(field.key)) {
-          const split = optionalFieldOrLabel(step, rel, field, fields, labels, bulked, ctx, fresh);
-          return split && continueAs(split.rel, split.framing, steps, at + 1, bulked, ctx, fresh, split.aliases);
-        }
+        // …and so does a same-named PATH LABEL (`Scoping.java:129-130`; `ProjectStep.java:66` omits an
+        // unproductive key), live here or bound by an enclosing scope. Field-or-label per row is a collision
+        // the query text names, so it declines rather than drop the rows the label answers (§17 "Map scope").
+        if (field.optional && (namedElsewhere(ctx)(field.key) || liveAliases(labels, rel).has(field.key)
+          || ctx.enclosingLabels?.has(field.key))) return null;
         const entered = recordField(rel, field, fresh);
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }

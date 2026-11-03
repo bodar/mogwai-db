@@ -200,10 +200,11 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
 
   # THE TRAVERSER'S OWN MAP WINS. A key the Map holds is read from the Map, never from a same-named side
   # effect or path label. A key the Map LACKS reads a same-named SIDE EFFECT next, as the reference does
-  # (Scoping.java:119-135), or refuses where that is not built; with only a PATH LABEL of that name the
-  # single-key select reads the label (lop has no age, so its map lacks "x" and the label's vertex answers).
-  # The MULTI-key select still drops that row — a deliberate divergence (docs/feature-support-matrix.md
-  # §17, "Map scope").
+  # (Scoping.java:119-135), or refuses where that is not built. With a same-named PATH LABEL behind a field
+  # some rows lack (lop has no age, so its map lacks "x" and the reference reads the label's vertex), the
+  # field-or-label per row is a collision the query text names, so every select form DECLINES rather than
+  # drop lop's row (docs/feature-support-matrix.md §17, "Map scope"). The tables are the reference answers.
+  @Unsupported
   Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXxX
     Given the modern graph
     And the traversal of
@@ -217,6 +218,7 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | d[32].i |
       | v[lop] |
 
+  @Unsupported
   Scenario: g_VX1X_out_asXxX_projectXx_nX_byXageX_byXnameX_selectXx_nX
     Given the modern graph
     And the traversal of
@@ -228,6 +230,21 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | m[{"x":"d[27].i","n":"vadas"}] |
       | m[{"x":"d[32].i","n":"josh"}] |
+      | m[{"x":"v[lop]","n":"lop"}] |
+
+  @Unsupported
+  Scenario: g_VX1X_out_asXxX_projectXx_nX_byXageX_byXnameX_orderXbyXselectXxXX_selectXnX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).out().as("x").project("x","n").by("age").by("name").order().by(__.select("x")).select("n")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | josh |
+      | lop |
 
   # An unproductive by() OMITS the key (`ProjectStep.java:66`), so the map lacks "x" and the side effect
   # answers next (`Scoping.java:119-135`). A field-or-side-effect read per row is not built: it refuses.

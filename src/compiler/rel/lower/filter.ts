@@ -244,8 +244,8 @@ export function childPredicate(
   // is unbound, and a conjunct would veto a seeded body (`select('a').count().is(0)`) that keeps it.
   if (body[0]?.name === 'select') {
     // …except over a per-row scalar that MAY BE A MAP: its own entry is the first scope, then a side effect
-    // or a VALUE label (`readsMapFirst`) — one `{t,v}` node the value seam reads, so the body's productivity
-    // is that seam's presence (`projectionProductive`).
+    // (`readsMapFirst`; a path label keeps this re-root) — one `{t,v}` node the value seam reads, so the
+    // body's productivity is that seam's presence (`projectionProductive`).
     if (readsMapFirst(body[0]!, childHostOf(subject, aliases), ctx)) {
       const present = projectionProductive(body, subject, fresh, ctx, aliases);
       return present && (negated ? notProduced(present) : present);

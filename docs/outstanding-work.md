@@ -26,6 +26,12 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   Needs the scalar seam to take its value off `reSourcedOnce`'s per-origin draw (a per-host row the
   value correlates to) — the rows path (`property`, `local`, `flatMap`) already draws per origin.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
+- **A child `select(k)` of a label BOUND TO NULL in a branch arm drops the row** —
+  `g.V().as('v').union(constant(null).as('k'), constant(0)).select('v').map(__.select('k'))` gives `[]`
+  and `…where(__.select('k')).count()` gives `0` (reference: `[null, null]` / `2`, `Scoping.java:129-130`);
+  the chain `select('k')` already answers. The re-root host's presence is `'value-nullness'`
+  (`rerootPresence`), and a `HostPresence` deliberately cannot be a stated `{ when: aliasGuard }`
+  (`child.ts`), so this needs that host-presence substrate rather than a per-shape route.
 
 ## 2. Needs a human call
 

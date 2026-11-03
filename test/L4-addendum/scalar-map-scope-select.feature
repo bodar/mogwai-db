@@ -7,9 +7,9 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
   # `withSideEffect` constant `k` — or, with no scope holding `k`, drops the row (Select.feature:578-596).
   # Before: the side-effect map answered over a Map holding `k` (wrong), and the other forms declined.
   #
-  # A VALUE path label `k` is the next scope like a side-effect constant (scope-label-next.feature); an
-  # ELEMENT/collection label or a named collection `k` keeps its own answer without reading the Map's key —
-  # a §17 divergence (docs/feature-support-matrix.md, "Map-valued property stream").
+  # A path label (of any kind) or a named collection `k` keeps its own answer without reading the Map's
+  # key — a path-label read stays a column read (scope-label-next.feature), a §17 divergence
+  # (docs/feature-support-matrix.md, "Map-valued property stream").
 
   Scenario: g_withSideEffectXk_mapX_VX1X_propertyXm_mapX_valuesXmX_selectXkX
     Given the empty graph

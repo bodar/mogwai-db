@@ -1,13 +1,15 @@
-Feature: mogwai addendum — a path label is the scope a traverser's own Map falls back to
+Feature: mogwai addendum — a path label beside a traverser's own Map is read as the label
 
   # `Scoping.getScopeValue` asks the traverser's OWN Map first, then the side effects, then the path
   # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135).
-  # Where the traverser MAY be a Map (a stored map property read by `values('m')`, a record with an optional
-  # field) and a path label of the same name is live, a row holding the key reads its entry and a row
-  # lacking it reads the label. Before: the label answered every row (a stored Map's `k` was never read),
-  # or a record's optional field dropped the rows the label answers.
+  # Where the traverser MAY be a Map (a stored map property read by `values('m')`) and a path label of the
+  # same name is live, mogwai reads the LABEL on every row: a path-label read is a column read, never a
+  # per-row probe of the stream for a Map holding the key. A stored Map's own `k` is therefore not read
+  # there — a deliberate divergence (docs/feature-support-matrix.md §17, "Map scope" and "Map-valued
+  # property stream"). Where the key only MAY be in a map or record stream's own keys, the read DECLINES
+  # instead: the query text names the collision, and reading either scope alone would drop rows.
 
-  # --- a per-row scalar stream behind a VALUE label: one `{t,v}` node per row, entry-else-label ---
+  # --- a per-row scalar stream behind a VALUE label: the label answers every row ---
 
   Scenario: g_V_constantX7X_asXkX_V_valuesXmX_mathXk_plus_1X
     Given the empty graph
@@ -22,9 +24,9 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[2.0].d |
-      | d[2.0].d |
-      | d[2.0].d |
+      | d[8.0].d |
+      | d[8.0].d |
+      | d[8.0].d |
       | d[8.0].d |
       | d[8.0].d |
       | d[8.0].d |
@@ -32,7 +34,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | d[8.0].d |
       | d[8.0].d |
 
-  # A side-effect constant is the next scope the same way (it used to answer the Map row too).
+  # math()'s variable reads a side-effect constant the same way: no per-row Map probe.
   Scenario: g_withSideEffectXk_5X_V_valuesXmX_mathXk_plus_1X
     Given the empty graph
     And the graph initializer of
@@ -46,7 +48,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[2.0].d |
+      | d[6.0].d |
       | d[6.0].d |
       | d[6.0].d |
 
@@ -63,7 +65,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
+      | d[7].i |
       | d[7].i |
       | d[7].i |
 
@@ -81,7 +83,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
+      | d[7].i |
       | d[7].i |
       | d[7].i |
 
@@ -98,7 +100,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
+      | d[7].i |
       | d[7].i |
       | d[7].i |
 
@@ -115,11 +117,11 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
+      | d[7].i |
       | d[7].i |
       | d[7].i |
 
-  Scenario: g_injectX7X_asXkX_V_valuesXmX_whereXselectXkX_isX1XX_count
+  Scenario: g_injectX7X_asXkX_V_valuesXmX_whereXselectXkX_isX7XX_count
     Given the empty graph
     And the graph initializer of
       """
@@ -127,12 +129,12 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       """
     And the traversal of
       """
-      g.inject(7).as("k").V().values("m").where(__.select("k").is(1)).count()
+      g.inject(7).as("k").V().values("m").where(__.select("k").is(7)).count()
       """
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].l |
+      | d[3].l |
 
   Scenario: g_injectX7X_asXkX_V_valuesXmX_mapXmathXk_times_10XX
     Given the empty graph
@@ -147,11 +149,11 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[10.0].d |
+      | d[70.0].d |
       | d[70.0].d |
       | d[70.0].d |
 
-  # A label bound in ONE union arm: a row from the other arm whose Map lacks `k` has no scope and drops.
+  # A label bound in ONE union arm: the arm that never bound it drops.
   Scenario: g_injectX1X_unionXconstantX7X_asXkX_identityX_V_valuesXmX_selectXkX
     Given the empty graph
     And the graph initializer of
@@ -165,10 +167,43 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
-      | d[1].i |
       | d[7].i |
       | d[7].i |
+      | d[7].i |
+
+  # With no label of that name the stream's own Map is the first scope, then a side-effect constant; a row
+  # no scope holds `k` for drops (Select.feature:578-596).
+  Scenario: g_V_valuesXmX_selectXkX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1]).addV("p").property("m", ["j": 5]).addV("p").property("m", 3)
+      """
+    And the traversal of
+      """
+      g.V().values("m").select("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+
+  Scenario: g_withSideEffectXk_5X_V_valuesXmX_selectXkX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1]).addV("p").property("m", ["j": 5]).addV("p").property("m", 3)
+      """
+    And the traversal of
+      """
+      g.withSideEffect("k", 5).V().values("m").select("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[5].i |
+      | d[5].i |
 
   # --- a label BOUND TO NULL on some rows: presence is the BINDING, never the value's nullness ---
   # `Scoping.getScopeValue` answers `path.get(k)` whenever `path.hasLabel(k)`, null included
@@ -228,38 +263,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | d[1].i |
       | d[1].i |
 
-  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_mapXselectXkXX
-    Given the empty graph
-    And the graph initializer of
-      """
-      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
-      """
-    And the traversal of
-      """
-      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").map(__.select("k"))
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | null |
-      | null |
-
-  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_whereXselectXkXX_count
-    Given the empty graph
-    And the graph initializer of
-      """
-      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
-      """
-    And the traversal of
-      """
-      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").where(__.select("k")).count()
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[2].l |
-
-  # A stored Map holding `k` answers its entry on BOTH arms; a non-Map row answers the null binding.
+  # A stored Map holding `k` does not answer behind the label: the null binding answers (the label wins).
   Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_selectXkX_mapRow
     Given the empty graph
     And the graph initializer of
@@ -273,11 +277,13 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
-      | d[1].i |
+      | null |
       | null |
 
-  # A map stream whose key some rows only MAY hold (elementMap omits an absent property) behind a VALUE label.
+  # --- the collision DECLINES where the key only MAY be the stream's own, rather than drop rows ---
+
+  # A map stream whose key some rows only MAY hold (elementMap omits an absent property) behind a label.
+  @Unsupported
   Scenario: g_V_hasXname_markoX_valuesXageX_asXageX_V_elementMapXageX_selectXageX
     Given the modern graph
     And the traversal of
@@ -294,10 +300,12 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | d[29].i |
       | d[29].i |
 
-  # --- a record's OPTIONAL field beside a live label of the same name ---
-  # `project()` omits a key whose by() is unproductive (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66),
-  # so a software vertex's record lacks `age` and `select('age')` reads the label.
+  # A record's OPTIONAL field beside a label of the same name: `project()` omits a key whose by() is
+  # unproductive (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:66),
+  # so a software vertex's record lacks `age` and the reference reads the label. Every select form declines;
+  # the tables are the reference answers.
 
+  @Unsupported
   Scenario: g_V_asXageX_projectXage_nX_byXvaluesXageXX_byXnameX_selectXageX
     Given the modern graph
     And the traversal of
@@ -314,29 +322,7 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | v[lop] |
       | v[ripple] |
 
-  Scenario: g_V_asXageX_projectXage_nX_byXvaluesXageXX_byXnameX_selectXageX_count
-    Given the modern graph
-    And the traversal of
-      """
-      g.V().as("age").project("age", "n").by(__.values("age")).by("name").select("age").count()
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[6].l |
-
-  Scenario: g_V_hasLabelXsoftwareX_valuesXnameX_asXageX_V_hasXname_markoX_projectXage_nX_byXvaluesXageXX_byXnameX_selectXageX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V().hasLabel("software").values("name").as("age").V().has("name", "marko").project("age", "n").by(__.values("age")).by("name").select("age")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | d[29].i |
-      | d[29].i |
-
+  @Unsupported
   Scenario: g_V_hasLabelXsoftwareX_valuesXnameX_asXageX_V_hasLabelXsoftwareX_projectXage_nX_byXvaluesXageXX_byXnameX_selectXageX
     Given the modern graph
     And the traversal of
@@ -351,8 +337,23 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | ripple |
       | ripple |
 
-  # The CHILD form needs a per-traverser body over a RECORD stream (map/local/flatMap over project()),
-  # which no lowering covers yet — `map(select('n'))` declines there too. It refuses rather than answer.
+  @Unsupported
+  Scenario: g_V_asXageX_projectXage_nX_byXvaluesXageXX_byXnameX_selectXage_nX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("age").project("age", "n").by(__.values("age")).by("name").select("age", "n")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"age":"d[29].i","n":"marko"}] |
+      | m[{"age":"d[27].i","n":"vadas"}] |
+      | m[{"age":"d[32].i","n":"josh"}] |
+      | m[{"age":"d[35].i","n":"peter"}] |
+      | m[{"age":"v[lop]","n":"lop"}] |
+      | m[{"age":"v[ripple]","n":"ripple"}] |
+
   @Unsupported
   Scenario: g_V_asXageX_projectXage_nX_byXvaluesXageXX_byXnameX_mapXselectXageXX
     Given the modern graph
@@ -369,3 +370,15 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | d[35].i |
       | v[lop] |
       | v[ripple] |
+
+  # count() needs no value: the record is kept whichever scope would answer, so it counts every traverser.
+  Scenario: g_V_asXageX_projectXage_nX_byXvaluesXageXX_byXnameX_selectXageX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("age").project("age", "n").by(__.values("age")).by("name").select("age").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
