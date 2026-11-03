@@ -1690,6 +1690,59 @@ function reNoded(arms: readonly Tail[], source: GraphSource, fresh: Minter): rea
 export const namedBeyondMap = (key: string, ctx: ChainCtx, liveLabel: boolean): boolean =>
   liveLabel || !!ctx.enclosingLabels?.has(key) || namedElsewhere(ctx)(key);
 
+/**
+ * A MAP KEY THAT COLLIDES WITH A NAMED SCOPE: rows MAY hold `key` (`mayHoldKey` on the map's key fact) and
+ * a scope beyond the Map ALSO names it (`namedBeyondMap`). That collision is in the query text. Which scope
+ * a row answers from would depend on whether that row holds the key, so it is almost certainly a confused
+ * query. `scope` says what else names `key`, in the precedence `Scoping.getScopeValue` reads them
+ * (side effects, then path labels: `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`):
+ * a `withSideEffect` CONSTANT, a path LABEL (live on the row or bound by an enclosing scope), or any
+ * other side effect (a named collection or a keyed writer).
+ *
+ * The ONE classifier every map-first reader that declines on the collision asks: `mapTail`'s `select(k)` and
+ * `select(k, …)`, `mapHostChild`, a record's optional field, a keyed `dedup` (`mapKeyCollidedOwn`), and a
+ * `format`/`math` token through the child seam (`ChildSeam.mapKeyCollided`). WHEN a reader declines stays that reader's own rule: a map's
+ * `select(k)` keeps its entry beside a `'collection'` (§17 "Map scope"); a record's optional field declines
+ * on any scope. Where it declines, `mapKeyCollided` records why.
+ */
+export interface MapKeyCollision {
+  readonly key: string;
+  readonly scope: 'constant' | 'label' | 'collection';
+}
+
+export const mapKeyCollision = (key: string, facts: MapKeyFacts, ctx: ChainCtx, liveLabel: boolean): MapKeyCollision | null => {
+  if (!mayHoldKey(facts, key) || !namedBeyondMap(key, ctx, liveLabel)) return null;
+  if (sideEffectConstant(key, ctx)) return { key, scope: 'constant' };
+  if (liveLabel || ctx.enclosingLabels?.has(key)) return { key, scope: 'label' };
+  return { key, scope: 'collection' };
+};
+
+/**
+ * DECLINE ON A MAP-KEY COLLISION, saying why — records an ADVISORY `'map-key-collision'` reason (a hint the
+ * generic decline appends, `Declines.uncovered`) and returns `null`. The wording is a MAY: the static key
+ * fact is what rows may hold, never what every row holds. It quotes the user's own step.
+ */
+export const mapKeyCollided = (step: IRStep, collision: MapKeyCollision, ctx: ChainCtx): null => {
+  const { key, scope } = collision;
+  const said = (step.ctx as IRStep['ctx'] | undefined)?.getText() ?? `${step.name}('${key}')`;
+  const other = scope === 'label' ? `a path label '${key}' is also bound` : `a side effect '${key}' is also declared`;
+  const rename = scope === 'label' ? `the label (as('${key}1'))`
+    : scope === 'constant' ? `the side effect (withSideEffect('${key}1', …))` : 'the side effect';
+  ctx.declines.note({
+    kind: 'map-key-collision', terminal: false,
+    message: `${said} is ambiguous here: each Map may hold a key '${key}' and ${other}, so which one is read `
+      + `would depend on the row — rename ${rename} or the key`,
+  });
+  return null;
+};
+
+/** `mapKeyCollided` for a reader that has already found the traverser's OWN scope may hold `key` (a keyed
+ *  `dedup`'s `MapScope` answered, with a per-row absence) — so no key fact narrows it further. */
+export const mapKeyCollidedOwn = (step: IRStep, key: string, ctx: ChainCtx, liveLabel: boolean): null => {
+  const collision = mapKeyCollision(key, {}, ctx, liveLabel);
+  return collision ? mapKeyCollided(step, collision, ctx) : null;
+};
+
 /** The `withSideEffect(key, constant)` a `select(key)` reads — its declaring `Arg` — or `undefined` where
  *  `key` names no plain constant. The CONSTANT form declares a policy too (`sideEffectPolicies`); only a
  *  REDUCER form's operator, or a collection of that name, makes it a merged collection instead. */
@@ -1712,7 +1765,8 @@ function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   if (step.name !== 'dedup' || isLocalScope(step) || step.optionArms || !(step.args ?? []).length) return 'skip';
   const keys = step.args.map((a) => a.value);
   if (!keys.every((k) => typeof k === 'string')) return 'skip';
-  if (sideEffectUnanswered(keys as string[], ctx, mapScope)) return null;
+  const unanswered = sideEffectUnanswered(keys as string[], ctx, mapScope);
+  if (unanswered) return unanswered.own ? mapKeyCollidedOwn(step, unanswered.key, ctx, false) : null;
   const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
   return dedupByLabels(step, rel, labels, keys as string[], bys[0], ctx, fresh, mapScope);
@@ -1722,11 +1776,17 @@ function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
  * Does a keyed dedup name a SIDE EFFECT its traverser's own scope does not answer on every row? The side
  * effect is read before the path (`Scoping.java:126-127`), so only an own scope that holds the key on
  * every row (a required record field) may be built — reading the label, or
- * dropping a row lacking the key, would be a wrong answer; the caller declines.
+ * dropping a row lacking the key, would be a wrong answer; the caller declines. Answers the first such key,
+ * and whether the traverser's OWN scope may hold it (`own`: a map-key collision) or cannot at all.
  */
-function sideEffectUnanswered(keys: readonly string[], ctx: ChainCtx, scope: MapScope | undefined): boolean {
+function sideEffectUnanswered(keys: readonly string[], ctx: ChainCtx, scope: MapScope | undefined): { key: string; own: boolean } | undefined {
   const named = namedElsewhere(ctx);
-  return keys.some((k) => { if (!named(k)) return false; const own = scope?.(k); return !own || own.absent !== null; });
+  for (const k of keys) {
+    if (!named(k)) continue;
+    const own = scope?.(k);
+    if (!own || own.absent !== null) return { key: k, own: !!own };
+  }
+  return undefined;
 }
 
 function scalarTail(
@@ -3151,30 +3211,23 @@ function mapTail(
     if (step.name === 'select') {
       const key = selectedKey(step);
       if (key !== null) {
-        const may = mayHoldKey(facts, key);
         const live = liveAliases(labels, rel).has(key);
         // A scope beyond the Map that names `key` is read for a row lacking it, and an entry-or-scope read
         // per row is not built. So the map's KEY FACT decides on the query text alone: a key NO row holds
         // (outside `keys`) is the named scope for every row — the collection, the constant, or the label
         // through the ordinary alias read (`selectKeys`); a key a row MAY hold beside a side-effect constant
-        // or a label DECLINES — the answer would depend on which rows hold it, and the query text names the
-        // collision. A named COLLECTION a row may shadow keeps the entry and a row lacking it DROPS — a
-        // collection beside the entry per row has no framing (§17; `Select.feature`'s
-        // `group("a")…select("a").select("a")` reads the entry).
-        if (namedBeyondMap(key, ctx, live)) {
-          const constant = sideEffectConstant(key, ctx);
-          if (may) {
-            // A clean decline (`lowerToRel` never throws — the `rel-sweep` gate). The message is the generic
-            // "no lowering covers …": an explanatory reason needs a decline-with-reason channel out of the
-            // lowering, which does not exist yet.
-            if (constant || live || ctx.enclosingLabels?.has(key)) return null;
-          } else {
-            let scoped = selectCollection(step, rel, ctx, fresh);
-            if (scoped === 'pass') scoped = selectSideEffectConstant(step, rel, ctx, fresh);
-            if (scoped === 'pass') scoped = live ? selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-              { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) }) : null;
-            return scoped && continueAs(scoped.rel, scoped.framing, steps, at + 1, false, ctx, fresh, labels);
-          }
+        // or a label DECLINES saying why (`mapKeyCollision`) — the answer would depend on which rows hold
+        // it, and the query text names the collision. A named COLLECTION a row may shadow keeps the entry
+        // and a row lacking it DROPS — a collection beside the entry per row has no framing (§17;
+        // `Select.feature`'s `group("a")…select("a").select("a")` reads the entry).
+        const collision = mapKeyCollision(key, facts, ctx, live);
+        if (collision && collision.scope !== 'collection') return mapKeyCollided(step, collision, ctx);
+        if (!mayHoldKey(facts, key) && namedBeyondMap(key, ctx, live)) {
+          let scoped = selectCollection(step, rel, ctx, fresh);
+          if (scoped === 'pass') scoped = selectSideEffectConstant(step, rel, ctx, fresh);
+          if (scoped === 'pass') scoped = live ? selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+            { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) }) : null;
+          return scoped && continueAs(scoped.rel, scoped.framing, steps, at + 1, false, ctx, fresh, labels);
         }
         const keyed = mapKey(rel, key, valOf, fresh);
         if (!keyed) return null;
@@ -3192,7 +3245,13 @@ function mapTail(
       const spec = selectSpec(step);
       if (!spec || spec.labels.length < 2) return null;
       // …as does one naming a SIDE EFFECT, the next scope a row lacking it would read (`namedBeyondMap`).
-      if (spec.labels.some((k) => liveAliases(labels, rel).has(k) || namedElsewhere(ctx)(k))) return null;
+      // Where that key is also one a row MAY hold, the decline says so (`mapKeyCollision`).
+      const live = liveAliases(labels, rel);
+      const named = spec.labels.filter((k) => live.has(k) || namedElsewhere(ctx)(k));
+      if (named.length) {
+        const collision = named.map((k) => mapKeyCollision(k, facts, ctx, live.has(k))).find((c) => c !== null);
+        return collision ? mapKeyCollided(step, collision, ctx) : null;
+      }
       const selected = mapSelect(rel, spec.labels, valOf, fresh);
       return selected && continueAs(selected.rel, { kind: 'map', keyOf: selected.keyOf, valOf: selected.valOf }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -5826,8 +5885,9 @@ function recordTail(
         // An OPTIONAL field a row may lack reads a same-named SIDE EFFECT or PATH LABEL there
         // (`Scoping.java:119-135`; `ProjectStep.java:66` omits an unproductive key) — field-or-scope per row
         // is a collision the query text names, so it declines rather than drop the rows the other scope
-        // answers (`namedBeyondMap`, §17 "Map scope").
-        if (field.optional && namedBeyondMap(field.key, ctx, liveAliases(labels, rel).has(field.key))) return null;
+        // answers (`mapKeyCollision`, which says why; §17 "Map scope").
+        const collision = field.optional ? mapKeyCollision(field.key, recordKeyFacts(fields), ctx, liveAliases(labels, rel).has(field.key)) : null;
+        if (collision) return mapKeyCollided(step, collision, ctx);
         const entered = recordField(rel, field, fresh);
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }

@@ -21,9 +21,9 @@ import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, json
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
-import { fieldNamed, framingCols, mayHoldKey, type RelFraming } from '../framing.ts';
+import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
-import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, namedBeyondMap, sideEffectConstant, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, mapKeyCollided, mapKeyCollision, minMaxOrder, namedBeyondMap, sideEffectConstant, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
@@ -94,6 +94,11 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   body: (nested, scope) => (scope === 'child'
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
+  mapKeyCollided: (step, key, host) => {
+    const facts = host.kind === 'map' ? host : host.kind === 'record' ? recordKeyFacts(host.fields) : null;
+    const collision = facts && mapKeyCollision(key, facts, ctx, labelNamed(key, host, ctx));
+    return collision ? mapKeyCollided(step, collision, ctx) : null;
+  },
 });
 
 /**
@@ -2510,10 +2515,12 @@ function mapHostChild(
   // no alias vocabulary for here, a decline; a key a row MAY hold beside a constant or a label declines
   // (the collision is in the query text), and beside a named collection keeps the entry (a row lacking it
   // drops, §17 "Map scope").
-  if (namedBeyondMap(key, ctx, labelNamed(key, host, ctx))) {
+  const live = labelNamed(key, host, ctx);
+  const collision = mapKeyCollision(key, host, ctx, live);
+  if (collision && collision.scope !== 'collection') return mapKeyCollided(first, collision, ctx);
+  if (!may && namedBeyondMap(key, ctx, live)) {
     const constant = sideEffectConstant(key, ctx);
-    if (!may) return constant ? constantSelectChild(body, host, constant, ctx, fresh) : null;
-    if (constant || labelNamed(key, host, ctx) || ctx.enclosingLabels?.has(key)) return null;
+    return constant ? constantSelectChild(body, host, constant, ctx, fresh) : null;
   }
   // A key NOT in the static key set cannot be a map key, and no scope names it: every row drops.
   if (!may) return null;

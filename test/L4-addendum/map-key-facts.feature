@@ -6,10 +6,15 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
   # The compiler decides that on ONE compile-time fact per map stream (src/compiler/rel/framing.ts
   # `MapKeyFacts`): `keys`, the keys a row MAY hold (a too-narrow set skips a real entry). A branch merge
   # and an alias history UNION it (`meetMapKeyFacts`); a local entry slice keeps it as an upper bound. A key
-  # outside it reads the next scope for every row; a key inside it beside a same-named side effect or label
-  # DECLINES naming the collision (§17 "Map scope") — there is no MUST set, so this holds even where every
-  # row does hold the key: the collision is in the query text, and the user almost certainly meant one or
-  # the other.
+  # outside it reads the next scope for every row. A key inside it beside a same-named side effect or label
+  # DECLINES (§17 "Map scope"). There is no MUST set, so this holds even where every row does hold the key:
+  # the collision is in the query text, and the user almost certainly meant one or the other.
+  #
+  # The decline says why. ONE classifier (`mapKeyCollision`, src/compiler/rel/lower.ts, beside
+  # `namedBeyondMap`) names the collision for every map-first reader: `select`, `format`, `math`, a keyed
+  # `dedup`. Its reason is appended to the generic "no lowering covers …" as a hint, and it is worded as a
+  # MAY ("each Map may hold a key 'b'"), because the key fact is only what a row MAY hold. Each scenario
+  # whose decline is that collision pins the reason with `And the decline should say "…"`.
 
   # A branch merge of map arms with DIFFERENT key sets: the merged stream may hold `b` (one arm does), so the
   # row lacking it reads the side effect. Before, the merge kept the FIRST arm's key set and read `7` twice.
@@ -27,6 +32,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | d[7].i |
       | d[2].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a side effect 'b' is also declared"
 
   @Unsupported
   Scenario: g_withSideEffectXb_7X_injectX1X_unionXconstantXa1_b2X_constantXa3XX_selectXbX
@@ -40,6 +46,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | d[2].i |
       | d[7].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a side effect 'b' is also declared"
 
   @Unsupported
   Scenario: g_withSideEffectXb_7X_V_chooseXhasLabelXpersonX_constantXa1_b2X_constantXa3XX_selectXbX
@@ -57,6 +64,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | d[2].i |
       | d[7].i |
       | d[7].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a side effect 'b' is also declared"
 
   # The merged facts ride an as() label too.
   @Unsupported
@@ -71,6 +79,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | d[7].i |
       | d[2].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a side effect 'b' is also declared"
 
   # The record-field twin: two record arms whose map-valued FIELD has different key sets. The meet recurses
   # through the record's fields, in either arm order.
@@ -92,6 +101,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | d[27].i |
       | d[32].i |
       | d[35].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'age' and a side effect 'age' is also declared"
 
   @Unsupported
   Scenario: g_withSideEffectXage_7X_V_hasLabelXpersonX_unionXprojectXmX_byXelementMapXname_ageXX_projectXmX_byXelementMapXnameXXX_selectXmX_selectXageX
@@ -111,6 +121,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | d[7].i |
       | d[7].i |
       | d[7].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'age' and a side effect 'age' is also declared"
 
   # A label bound in arms with different key sets: its history MEETS the facts too. `{a:1}` lacks `b` and
   # nothing else names `b`, so that row drops.
@@ -138,6 +149,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | d[1].i |
       | d[3].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'a' and a path label 'a' is also bound"
 
   # A LOCAL ENTRY SLICE between a map literal and a same-named label: the slice keeps the key set as an
   # upper bound (it is not re-derived from the window), so the label collision declines.
@@ -153,6 +165,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | m[{"a":"d[1].i"}] |
       | m[{"a":"d[3].i"}] |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   @Unsupported
   Scenario: g_injectXa1_b2X_a3_b4X_tailXlocal_1X_asXaX_selectXaX
@@ -166,6 +179,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | m[{"b":"d[2].i"}] |
       | m[{"b":"d[4].i"}] |
+    And the decline should say "is ambiguous here: each Map may hold a key 'a' and a path label 'a' is also bound"
 
   @Unsupported
   Scenario: g_V_asXbX_constantXa1_b2X_limitXlocal_1X_selectXbX_valuesXnameX
@@ -183,6 +197,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | josh |
       | ripple |
       | peter |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   @Unsupported
   Scenario: g_withSideEffectXm_a1X_injectX1X_selectXmX_limitXlocal_0X_asXaX_selectXaX
@@ -195,6 +210,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | m[{}] |
+    And the decline should say "is ambiguous here: each Map may hold a key 'a' and a path label 'a' is also bound"
 
   @Unsupported
   Scenario: g_injectXa1_b2X_rangeXlocal_1_2X_asXaX_selectXaX
@@ -207,6 +223,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | m[{"b":"d[2].i"}] |
+    And the decline should say "is ambiguous here: each Map may hold a key 'a' and a path label 'a' is also bound"
 
   @Unsupported
   Scenario: g_injectXa1_b2X_skipXlocal_1X_asXbX_selectXbX
@@ -219,6 +236,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[2].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # The same fact decides the label read inside a child body (an enclosing label) and behind math().
   @Unsupported
@@ -232,6 +250,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[6].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   @Unsupported
   Scenario: g_V_valuesXageX_asXbX_constantXa1_b2X_limitXlocal_1X_mathXbX
@@ -247,6 +266,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | d[27.0].d |
       | d[32.0].d |
       | d[35.0].d |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # A key some rows MAY hold behind a same-named label: the rows lacking it read the label, which is an
   # element-or-value stream this route cannot frame yet — so the query declines rather than drop them.
@@ -266,6 +286,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | d[35].i |
       | v[lop] |
       | v[ripple] |
+    And the decline should say "is ambiguous here: each Map may hold a key 'age' and a path label 'age' is also bound"
 
   # Literals whose entry ORDERS differ: the slice keeps `b` as a key a row may hold, so the label select declines.
   @Unsupported
@@ -280,6 +301,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | m[{"a":"d[1].i"}] |
       | d[3].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # EVERY map-first reader reads the facts through the one `mayHoldKey`, not the chain select alone. After
   # a merge `b` is a key some rows only MAY hold; `format('%{b}')` reads the path label `b` for a row lacking it
@@ -296,6 +318,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | 10 |
       | 2 |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   @Unsupported
   Scenario: g_V_asXbX_unionXconstantXa3X_constantXa1_b2XX_formatXbX_count
@@ -308,6 +331,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[12].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # A key every row holds beside a same-named label still declines: the key fact is a MAY set only.
   @Unsupported
@@ -322,6 +346,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
       | result |
       | 3-5 |
       | 1-2 |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # A keyed dedup over a merged map stream: `{a:3}` keys on its label `b` (10) and `{a:1,b:10}` on its entry
   # (10), so the two collide (`DedupGlobalStep` keys on `getSafeScopeValue`). An entry and a VALUE label
@@ -337,6 +362,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[1].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   @Unsupported
   Scenario: g_injectX10X_asXbX_unionXconstantXa1_b10X_constantXa3XX_dedupXbX_count
@@ -349,6 +375,7 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[1].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # Every row holds `b`, but beside the label `b` the keyed dedup still declines (a MAY set only).
   @Unsupported
@@ -362,8 +389,11 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[1].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # A by(select(k)) child body over a map host reads the same facts: the row lacking `b` reads the label.
+  # It pins no reason: a project() over a stream of Maps declines before any key fact is read
+  # (`g.inject(["a": 1]).project("x").by(__.select("a"))`, with no label, declines too).
   @Unsupported
   Scenario: g_injectX10X_asXbX_unionXconstantXa3X_constantXa1_b2XX_projectXxX_byXselectXbXX
     Given the empty graph
@@ -390,3 +420,80 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[3].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'y' and a path label 'y' is also bound"
+
+  # REALISTIC COLLISIONS — a path label named like a property key. `valueMap()` and `project()` (whose
+  # `by('name')` may be unproductive, `ProjectStep.java:66`) MAY hold `name`, so which scope answers would
+  # depend on the row. The reference reads each row's entry; the decline names both and suggests a rename.
+  @Unsupported
+  Scenario: g_V_asXnameX_valueMap_selectXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("name").valueMap().select("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[marko] |
+      | l[vadas] |
+      | l[lop] |
+      | l[josh] |
+      | l[ripple] |
+      | l[peter] |
+    And the decline should say "select(\"name\") is ambiguous here: each Map may hold a key 'name' and a path label 'name' is also bound, so which one is read would depend on the row — rename the label (as('name1')) or the key"
+
+  @Unsupported
+  Scenario: g_V_asXnameX_projectXname_ageX_byXnameX_byXageX_selectXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("name").project("name", "age").by("name").by("age").select("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | lop |
+      | josh |
+      | ripple |
+      | peter |
+    And the decline should say "select(\"name\") is ambiguous here: each Map may hold a key 'name' and a path label 'name' is also bound"
+
+  # The same collision with a side-effect constant, and inside a local() body.
+  @Unsupported
+  Scenario: g_withSideEffectXa_1X_V_constantXa1X_selectXaX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("a", 1).V().constant(["a": 1]).select("a")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+    And the decline should say "select(\"a\") is ambiguous here: each Map may hold a key 'a' and a side effect 'a' is also declared, so which one is read would depend on the row — rename the side effect (withSideEffect('a1', …)) or the key"
+
+  @Unsupported
+  Scenario: g_V_asXnameX_localXvalueMap_selectXnameXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("name").local(__.valueMap().select("name"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[marko] |
+      | l[vadas] |
+      | l[lop] |
+      | l[josh] |
+      | l[ripple] |
+      | l[peter] |
+    And the decline should say "select(\"name\") is ambiguous here: each Map may hold a key 'name' and a path label 'name' is also bound"

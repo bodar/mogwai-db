@@ -265,6 +265,7 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | d[1].i |
       | m[{"b":2}] |
+    And the decline should say "is ambiguous here: each Map may hold a key 'a' and a path label 'a' is also bound"
 
   # Maps that MAY hold `a` beside a same-named label: a collision the query text names, so it declines (the
   # key fact is a MAY set only, so even maps sharing ONE key set are not read as holding it on every row).
@@ -280,6 +281,7 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | d[1].i |
       | d[2].i |
+    And the decline should say "is ambiguous here: each Map may hold a key 'a' and a path label 'a' is also bound"
 
   # Without a label, a row lacking the key has no scope holding it and drops.
   Scenario: g_injectXa1_b2X_selectXbX

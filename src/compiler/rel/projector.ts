@@ -148,7 +148,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     if (modulation.order !== undefined) return null;
     // An OPTIONAL record field or a Map entry some rows may lack, beside a same-named side effect: the
     // field-or-side-effect read per row is not built, and the query text names both: decline.
-    if (name !== CURRENT && sideEffectBehindOwnScope(name, host, child)) return null;
+    if (name !== CURRENT && sideEffectBehindOwnScope(name, host, child)) return child.mapKeyCollided(step, name, host);
     // A named variable is the direct scope read — a path label's column, a record field — and never a
     // per-row probe of a scalar row that may be a stored Map (§17 "Map scope").
     const varHost = name === CURRENT ? host : scopedHost(name, host, true);
@@ -157,7 +157,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
       // literal, taking no `by()`. Only after a path-label miss (see `sideEffectConst`).
       // Only a TRUE miss: where the host's own Map may hold the name, `scopedHost` declined and the
       // side effect behind it is not the answer (`mapScopeMayHold`).
-      if (name !== CURRENT && mapScopeMayHold(host, name)) return null;
+      if (name !== CURRENT && mapScopeMayHold(host, name)) return child.mapKeyCollided(step, name, host);
       const se = name === CURRENT ? null : sideEffectConst(name, child);
       if (!se) return null;
       // A side-effect constant is a compile-time value, so its Number-ness is decided here: anything
@@ -279,7 +279,7 @@ function formatValue(
   for (const part of formatTemplate(template)) {
     if (part.kind === 'literal') { pieces.push(compilerText(part.text)); continue; }
     tokens++;
-    if (part.name !== FORMAT_FROM_BY && sideEffectBehindOwnScope(part.name, host, child)) return null;
+    if (part.name !== FORMAT_FROM_BY && sideEffectBehindOwnScope(part.name, host, child)) return child.mapKeyCollided(step, part.name, host);
     if (part.name === FORMAT_FROM_BY) {
       const modulation: Modulation = ring.length ? ring[fromBy++ % ring.length]! : { key: { kind: 'identity' } };
       if (modulation.order !== undefined) return null;
@@ -305,7 +305,7 @@ function formatValue(
       // A row lacking a key it only MAY hold reads the next scope (`FormatStep`'s
       // `getNullableScopeValue`, `Scoping.java:119-135`), so where a path label or side effect may name
       // the token the drop below would LOSE that row: the collision is in the query text, so decline.
-      if (mayScope(part.name, child)) return null;
+      if (mayScope(part.name, child)) return child.mapKeyCollided(step, part.name, host);
       // Rendered INSIDE the correlated read (`over`), so the per-row type test spells the matched pair's
       // column rather than re-running the read once per mention. A per-row tag never declines.
       pieces.push(correlatedMapKey(host.map, part.name, fresh,

@@ -59,6 +59,10 @@ export interface Scenario {
    *  tag comes off. The count is printed on every run so the population stays visible rather than
    *  becoming a quiet exclusion list. */
   unsupported: boolean;
+  /** `And the decline should say "…"` — on an `@Unsupported` scenario, text its refusal's message must
+   *  contain (case-insensitively, as upstream compares error text): the decline EXPLAINS itself rather than
+   *  only refusing. `null` = any refusal will do. */
+  declineSays: string | null;
   /** The `| result |` table, one entry per row, compared against what the traversal produced per the
    *  scenario's `assertion` (see the table in l4.test.ts). */
   expected: string[];
@@ -88,7 +92,7 @@ function toScenario(feature: string, name: string, tags: readonly string[], step
   const s: Scenario = {
     feature, name, graph: 'empty', initializer: null, gremlin: '',
     assertion: 'unordered', count: null, error: null, expected: [], graphChecks: [],
-    unsupported: tags.includes('@Unsupported'),
+    unsupported: tags.includes('@Unsupported'), declineSays: null,
   };
   // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY graph
   // is the multi-label source, not the plain one. Mirrored so a scenario can be copied in with its
@@ -122,6 +126,13 @@ function toScenario(feature: string, name: string, tags: readonly string[], step
       if (err) {
         s.assertion = 'error';
         s.error = err[1] ? { comparison: err[1] as 'containing' | 'starting' | 'ending', text: unescape(err[2]) } : null;
+        continue;
+      }
+
+      const says = text.match(/^the\s+decline\s+should\s+say\s+"(.*)"$/);
+      if (says) {
+        if (!s.unsupported) throw new Error(`${feature} / ${name}: "the decline should say" needs @Unsupported`);
+        s.declineSays = unescape(says[1]!);
         continue;
       }
 

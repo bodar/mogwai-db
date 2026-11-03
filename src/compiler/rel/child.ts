@@ -139,6 +139,10 @@ export interface ChildSeam {
   readonly unscopeRows: (rows: Rel) => Rel;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
+  /** DECLINE `step`'s read of `key` over a MAP or RECORD host whose own scope may hold `key` beside another
+   *  scope naming it — always `null`. Where the ONE classifier (`mapKeyCollision`, `lower.ts`) recognizes
+   *  the collision, it also records why. The caller decides WHEN to decline; this only says why. */
+  readonly mapKeyCollided: (step: IRStep, key: string, host: ChildHost) => null;
 }
 
 /** A continued chain: a rooted read plus the labels live at its end. */

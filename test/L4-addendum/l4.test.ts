@@ -270,6 +270,8 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
           for (const g of s.graphChecks) await decodeAll(executeQuery(store, g.gremlin, {}, {}, standardRegistry));
         } catch (e) { thrown = e; }
         expect(thrown, `${s.name} is tagged @Unsupported but now ANSWERS — drop the tag`).toBeInstanceOf(Error);
+        // A decline that EXPLAINS itself pins its reason, so a change that loses the reason fails here.
+        if (s.declineSays) expect(String((thrown as Error).message).toUpperCase()).toContain(s.declineSays.toUpperCase());
         return;
       }
       // An `error` scenario asserts the REFUSAL, so it runs the traversal expecting a throw and

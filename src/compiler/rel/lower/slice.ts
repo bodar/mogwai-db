@@ -26,7 +26,7 @@ import { propertyIdentityKey, propertyOrderTerms, propertyRowId } from '../prope
 import { pathCarried } from '../path.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
-import { dropPath, orderRows } from '../lower.ts';
+import { dropPath, mapKeyCollidedOwn, orderRows } from '../lower.ts';
 import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
 
 export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
@@ -687,7 +687,7 @@ export function dedupByLabels(
     // EQUAL: an ELEMENT label against an own value that is never an element (a Vertex equals no number,
     // string, list or map). Any other pair would keep a duplicate; with no single entry-or-label key term
     // yet, it declines.
-    if (scoped && (scoped.mayBeElement || proj.read.kind !== 'element')) return null;
+    if (scoped && (scoped.mayBeElement || proj.read.kind !== 'element')) return mapKeyCollidedOwn(step, k, ctx, true);
     const before = keyTerms.length;
     const column = col(rel.id, proj.entry.col);
     if (!by) {
