@@ -54,7 +54,8 @@ import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOf
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClassAggs, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
-import { Deferral, mergeMaps, type MergeMaps, type MergeTraverser } from '../ir/write-args.ts';
+import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
+import { UnsupportedTraversal } from '../unsupported.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapWindow, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
@@ -2457,16 +2458,14 @@ function scalarTail(
     // own rule (`AddEdgeStartStep` defaults both ends to `null` and raises).
     if (step.name === 'addV' || step.name === 'addE' || step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
-      const tagCol = out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
-      const mayBeMap = !!tagCol && carries(tagCol);
       const written = step.name === 'addV' ? addedVertices(rel, steps, at, ctx, fresh)
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
-          // A scalar with no per-row tag is never a stored Map (`ValueType` excludes the containers), so a whole-arg
-          // `select(k)` folds to its side effect exactly. A per-row scalar MAY hold one (a map-valued
-          // property) whose own `k` precedes the side effect, and a merge that wrote by the side effect
-          // there would write the wrong element — so the select stays a general body, which needs an
-          // ELEMENT driver and declines (`values('m').mergeV(__.select('k'))`).
-          : mergedElements(rel, steps, at, labels, mayBeMap ? 'mayBeMap' : 'cannotBeMap', ctx, fresh);
+          // A scalar driver is not MAP-FRAMED, so a whole-arg `select(k)` folds to its side effect. A
+          // per-row scalar (`values('m')`) may hold a stored Map at run time, and the named scope WINS
+          // over it exactly as the chain spelling `values('m').select('k').mergeV()` and the read path
+          // decide (§17 "Map scope", `MergeTraverser`) — no row is probed. With no side effect `k`,
+          // `resolveMergeArg`'s own refusal declines.
+          : mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!written) return null;
       return afterWrite(ctx.writes, rel, steps, at, written.at, written.effects.bindings, ctx.params, fresh, () => elementTail(
         written.effects.result, step.name === 'addE' || step.name === 'mergeE' ? 'edge' : 'vertex',
@@ -3037,7 +3036,6 @@ function mapTail(
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     const args = step.args.map((a) => a.value);
-    const { keys } = facts;
     if (step.name === 'identity') { if (args.length) return null; continue; }
 
     // `as(label…)` binds the WHOLE map to each label — its pairs array stored in history, its
@@ -3069,7 +3067,7 @@ function mapTail(
     // the merge argument. Handled here rather than in `mergedElements` because the map value is in scope
     // (`valOf` decides whether it decomposes), and the driver is a map, not an element.
     if (step.name === 'mergeV' || step.name === 'mergeE') {
-      const merged = mergedFromMap(rel, valOf, keys, steps, at, ctx, fresh);
+      const merged = mergedFromMap(rel, valOf, steps, at, ctx, fresh);
       if (!merged) return null;
       return afterWrite(ctx.writes, rel, steps, at, merged.at, merged.effects.bindings, ctx.params, fresh,
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
@@ -4641,7 +4639,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   if (first.name === 'mergeV' || first.name === 'mergeE') {
     const one = oneRow(fresh);
     // A start step has no incoming traverser at all — nothing a `select(k)` could read a Map entry from.
-    const merged = mergedElements(one, steps, 0, NO_ALIASES, 'cannotBeMap', ctx, fresh);
+    const merged = mergedElements(one, steps, 0, NO_ALIASES, ctx, fresh);
     if (!merged) return null;
     return afterWrite(ctx.writes, one, steps, 0, merged.at, merged.effects.bindings, ctx.params, fresh,
       () => elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES));
@@ -5145,7 +5143,7 @@ function elementTail(
     }
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
-      const merged = mergedElements(rel, steps, at, labels, 'cannotBeMap', ctx, fresh);
+      const merged = mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
       // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
@@ -6058,7 +6056,7 @@ function addedVertices(
  *  its endpoints: `option(Merge.outV, __.select("x"))` is an alias read, and an omitted endpoint is
  *  the incoming traverser, which a non-vertex stream cannot supply. */
 function mergedElements(
-  input: Rel, steps: readonly IRStep[], at: number, aliases: AliasMap, traverser: MergeTraverser, ctx: ChainCtx, fresh: Minter,
+  input: Rel, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let options = at + 1;
   while (options < steps.length && steps[options]!.name === 'option') options++;
@@ -6075,12 +6073,11 @@ function mergedElements(
   const op = steps[at]!.name as 'mergeV' | 'mergeE';
   // A GENERAL map-producing TRAVERSAL argument (`mergeV(__.out().project(…))`, `mergeV(__.select(dynMap))`)
   // is resolved per driver here — the map is not on the stream (as `matchFromDriver`) nor a compile-time
-  // spec (as `match.computed`), but the FIRST result of a body run at the driver. Parsed ONCE, under the
-  // caller's input framing (`traverser`): a whole-arg `select(k)` folds to its side effect only where the
-  // traverser cannot be a Map, and is a general body otherwise. A `Deferral` declines; a text-level ERROR
-  // is the answer and propagates.
+  // spec (as `match.computed`), but the FIRST result of a body run at the driver. Parsed ONCE; an element or
+  // scalar driver is never MAP-FRAMED (`MergeTraverser`), so a whole-arg `select(k)` folds to its side
+  // effect. A `Deferral` declines; a text-level ERROR is the answer and propagates.
   let maps: MergeMaps;
-  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, traverser); }
+  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, 'notMap'); }
   catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
   if (maps.matchTraversal) {
     const effects = mergeFromTraversal(input, maps, op, tail, driverElem, aliases, ctx, fresh);
@@ -6194,7 +6191,7 @@ function mergeFromTraversal(
  *  the `matchFromDriver` form routes here; an EXPLICIT map argument over a map-stream driver treats the map
  *  as a mere multiplier and is deferred (declines). */
 function mergedFromMap(
-  input: Rel, valOf: MapOf, keys: readonly string[] | undefined, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  input: Rel, valOf: MapOf, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   const op = steps[at]!.name;
   if (op !== 'mergeV' && op !== 'mergeE') return null;
@@ -6206,16 +6203,15 @@ function mergedFromMap(
   const tail = steps.slice(options, end);
   const child = childSeam(ctx, fresh);
   let maps: MergeMaps;
-  // The traverser IS a Map here, so a whole-arg `select(k)` reads its entry before any side effect — but
-  // a Map with a STATIC key set cannot hold a `k` outside it, so there the side effect is exact.
-  // ⚠️ NARROWED to ONE driver (`writeSnapshot`'s one-traverser reading: a single-row `Values`): over
-  // several, the map-valued merge (`mergeVFromMap`) is still PAIRWISE in its drivers — the
-  // `guardMergeInterleaving` creation self-join and the created-map `json(map) = json(map)` correlation,
-  // the R10/F7 class (`docs/2026-08-01-relir-build-plan.md`) — so the side-effect fold stays declined
-  // there rather than newly reaching a quadratic plan. Lift this once those are positional.
-  const oneDriver = input.kind === 'values' && input.rows.length <= 1;
-  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, keys && oneDriver ? { mapKeys: keys } : 'mayBeMap'); }
-  catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
+  // The driver IS Map-framed here (`MergeTraverser`), so a `select(k)` in the argument or an option arm
+  // reads the Map's own entry before any side effect: no compile-time constant answers it, and the shape
+  // signals a confused query, so it declines with the reason (`MapScopeDeferral`) rather than "no lowering".
+  try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, 'map'); }
+  catch (e) {
+    if (e instanceof MapScopeDeferral) throw UnsupportedTraversal.because(e.message);
+    if (!(e instanceof Deferral)) throw e;
+    return null;
+  }
   if (!maps.matchFromDriver) return null;
   const effects = op === 'mergeV'
     ? mergeVFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh)

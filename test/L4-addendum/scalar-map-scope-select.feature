@@ -8,8 +8,8 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
   #
   # A `withSideEffect` constant, a path label (of any kind) or a named collection `k` WINS: it keeps its own
   # answer without reading the Map's key, so no row pays a per-row Map probe — a §17 divergence
-  # (docs/feature-support-matrix.md, "Map scope"). A merge driven by such a select declines: writing by the
-  # side effect where the row's own Map holds `k` would write the wrong element.
+  # (docs/feature-support-matrix.md, "Map scope"). A merge driven by such a select follows the same rule in
+  # both spellings (`mergeV(__.select("k"))` and `select("k").mergeV()`): it merges by the side effect.
 
   Scenario: g_withSideEffectXk_mapX_VX1X_propertyXm_mapX_valuesXmX_selectXkX
     Given the empty graph
@@ -133,18 +133,16 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | d[2].l |
 
-  # A MERGE driven by an injected map literal: its static key set lacks "k", so the onCreate select("k")
-  # reads past the Map to the side effect exactly as over a non-Map traverser.
-  Scenario: g_withSideEffectXk_mapX_injectXmapX_mergeV_optionXonCreate_selectXkXX
+  # A MERGE driven by a stream of MAPS: each Map is the first scope its own option select("k") reads, so the
+  # side effect is no compile-time constant there and the merge declines with that reason.
+  Scenario: g_withSideEffectXk_mapX_injectXmapX_mergeV_optionXonCreate_selectXkXX_declines
     Given the empty graph
     And the traversal of
       """
       g.withSideEffect("k", ["age": 5]).inject(["name": "x"]).mergeV().option(Merge.onCreate, __.select("k")).valueMap()
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | m[{"name":["x"],"age":[5]}] |
+    Then the traversal will raise an error with message containing text of "a merge over a stream of Maps cannot use select('k')"
 
   # A path label keeps its own answer over a value stream — no per-row Map probe (the §17 line).
   Scenario: g_V_asXaX_valuesXnameX_selectXaX_count
@@ -158,9 +156,8 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | d[6].l |
 
-  # A side-effect map merged over a value stream that may hold stored Maps DECLINES: a row whose own Map
-  # holds `k` would merge by that entry, so writing by the side effect could write the wrong element.
-  @Unsupported
+  # A side-effect map merged over a value stream that may hold stored Maps: the named scope WINS, exactly as
+  # the chain spelling `values("name").select("k").mergeV()` (the §17 "Map scope" line) — six merges by the side effect.
   Scenario: g_withSideEffectXk_mapX_V_valuesXnameX_mergeVXselectXkXX_count
     Given the modern graph
     And the traversal of

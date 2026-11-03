@@ -60,30 +60,22 @@ function soleSelectKey(inner: readonly Step[]): string | undefined {
 }
 
 /**
- * WHETHER THE MERGE'S INCOMING TRAVERSER MAY BE A MAP — the one input fact that decides whether a
- * whole-arg `__.select(k)` may FOLD to a `withSideEffect(k, …)` constant.
+ * WHETHER THE MERGE'S DRIVER IS MAP-FRAMED — the one input fact that decides whether a whole-arg or
+ * option-arm `__.select(k)` may FOLD to a `withSideEffect(k, …)` constant.
  *
  * `select(k)` is `Scoping.getScopeValue`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`):
- * the traverser's own Map entry FIRST, then the side effect, then the path. So the fold — the side
- * effect, read at compile time — is the reference's answer exactly when the traverser cannot be a Map
- * (an element, a graph-start's one row, a scalar), and a SHORTCUT only there: over a traverser that may
- * be a Map the Map's own `k` wins, which only the run can see, so the select is carried as the general
- * map-producing body the lowering resolves (or declines) rather than folded. The fact is the caller's
- * INPUT FRAMING — a lowering holds it exactly; the verifier asks `elementKindAt` and treats its
- * cannot-say as `mayBeMap`, so it never raises on a chain it has not typed.
+ * the traverser's own Map entry FIRST, then the side effect, then the path. Over a driver that is not
+ * Map-framed — an element, a graph-start's one row, a scalar — the fold is the answer. A per-row scalar
+ * (`values('m')`) MAY hold a stored Map at run time, and there the named scope WINS, exactly as the
+ * chain spelling and the read path already decide (`docs/feature-support-matrix.md` §17 "Map scope"):
+ * no row is probed for a same-named key. Over a driver the lowering frames AS a Map (`mapTail`: an
+ * `inject([k:v])`, a `project()` record) the Map is the first scope on every row, so the select is no
+ * compile-time constant and the merge declines (`MapScopeDeferral`) rather than writing by the side
+ * effect. The verifier asks `elementKindAt` and treats its cannot-say as `'map'` — the conservative
+ * reading — so it never raises a side effect's error on a chain it has not typed.
  */
-export type MergeTraverser = 'cannotBeMap' | 'mayBeMap' | MapWithKeys;
-
-/** A traverser that IS a Map whose keys are drawn from a STATIC set (an `inject([k:v])` literal, a
- *  `project()` record) — a `select(k)` for a `k` outside the set reads past the Map exactly as over a
- *  non-Map, so the fold stays exact there and only a key the Map may hold defers. */
-export interface MapWithKeys { readonly mapKeys: readonly string[] }
-
-/** May the merge's traverser be a Map holding `key`? An unnamed key (a `Pop`-qualified or non-string
- *  select) is answered conservatively. */
-const mayHoldKey = (traverser: MergeTraverser, key: string | undefined): boolean =>
-  traverser === 'mayBeMap' || (typeof traverser === 'object' && (key === undefined || traverser.mapKeys.includes(key)));
+export type MergeTraverser = 'map' | 'notMap';
 
 // A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
 //   __.select(k) of a withSideEffect(k, const)  (via constFromSelect), or
@@ -132,6 +124,11 @@ export function constFromNested(nested: any, sideEffects: SideEffectConstants | 
  * Merge.onCreate/onMatch" is an `Error` because no lowering ever will.
  */
 export class Deferral extends Error {}
+
+/** A merge `select(k)` over a Map-framed driver (`MergeTraverser`) — the one `Deferral` the map-driver
+ *  lowering turns into an EXPLANATORY decline, because the shape signals a confused query: the Map's own
+ *  `k` entry, not the side effect `k`, is what the select reads first on every row. */
+export class MapScopeDeferral extends Deferral {}
 
 /** What the STEP declared. `null` is a real state, not a missing one: it means the traversal
  *  named no cardinality, so the graph's default applies — and only the storage waist may resolve
@@ -365,9 +362,9 @@ function resolveMergeArg(raw: any, type: TypeNode | null, sideEffects: SideEffec
   const inner = stepChain(raw.nested, params);
   const k = soleSelectKey(inner);
   if (k !== undefined) {
-    // Over a traverser that may be a Map, the Map's own `k` precedes the side effect (`MergeTraverser`).
-    if (mayHoldKey(traverser, k))
-      throw new Deferral(`merge with select('${k}') over a traverser that may be a Map (its own '${k}' precedes the side effect)`);
+    // Over a Map-framed driver the Map's own `k` precedes the side effect (`MergeTraverser`).
+    if (traverser === 'map')
+      throw new MapScopeDeferral(`a merge over a stream of Maps cannot use select('${k}'): each Map's own '${k}' entry is read before any side effect '${k}'. Name the side effect so no Map key shadows it, or merge a stream that is not Maps`);
     const declared = constFromSelect(raw, sideEffects, params);
     if (declared) return declared;
     throw new Deferral(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
@@ -711,18 +708,17 @@ function isTraverserIdentity(raw: any, params: ParamEnv): boolean {
  * produce a map?) is a lowering question the `child.rows` framing answers, so this carries any other
  * nested traversal and the lowering declines a non-map body fail-closed.
  */
-function generalMapArg(raw: any, params: ParamEnv, traverser: MergeTraverser): unknown | null {
+function generalMapArg(raw: any, params: ParamEnv): unknown | null {
   if (!isNested(raw)) return null;
   const inner = stepChain(raw.nested, params);
   if (inner.length === 1 && inner[0].name === 'identity') return null;
   if (parseComputedMergeArg(raw, params)) return null;
-  // A BARE single `select(name)` over a traverser that CANNOT be a Map stays with `resolveMergeArg`: a
-  // `withSideEffect` constant resolves to a literal map, an undeclared one is that resolver's own refusal —
-  // the map is a scope READ, not a producing traversal, and the preceding-step form (`…select("m").mergeV()`)
-  // already handles a bound alias. Over one that MAY be a Map it is a general body like any other: the
-  // Map's own entry comes first (`MergeTraverser`), so the fold is no longer the answer. A MULTI-step body
-  // carrying a select (`__.out().select(…)`) is always a general producer.
-  if (inner.length === 1 && inner[0].name === 'select' && !mayHoldKey(traverser, soleSelectKey(inner))) return null;
+  // A BARE single `select(name)` stays with `resolveMergeArg`: a `withSideEffect` constant resolves to a
+  // literal map, an undeclared one — or one a Map-framed driver shadows (`MergeTraverser`) — is that
+  // resolver's own refusal. The map is a scope READ, not a producing traversal, and the preceding-step
+  // form (`…select("m").mergeV()`) already handles a bound alias. A MULTI-step body carrying a select
+  // (`__.out().select(…)`) is always a general producer.
+  if (inner.length === 1 && inner[0].name === 'select') return null;
   // The RAW nested CST — the lowering normalizes it via `child.body` (modulator folding), which a
   // `stepChain` here would skip.
   return raw.nested;
@@ -739,7 +735,7 @@ export function mergeMaps(
   // A GENERAL map-producing traversal argument (`mergeV(__.out().project(…))`, `mergeV(__.select(dynMap))`)
   // is resolved per driver by the lowering, so `match` is empty and the body is carried, exactly as the
   // map-VALUED driver is — the difference is only WHERE the map comes from (the body vs the traverser).
-  const matchTraversal = matchFromDriver ? undefined : generalMapArg(step.args[0]?.value, params, traverser);
+  const matchTraversal = matchFromDriver ? undefined : generalMapArg(step.args[0]?.value, params);
   const emptyMatch = { role: { op, kind: 'merge' as const }, label: null, id: undefined, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {}, computed: {} } satisfies MergeSpec;
   const match = matchFromDriver || matchTraversal
     ? emptyMatch
@@ -852,11 +848,11 @@ export function verifyWriteArgs(steps: readonly IRStep[], params: ParamEnv, side
     if (step.name !== 'mergeV' && step.name !== 'mergeE') continue;
     let end = at + 1;
     while (end < steps.length && (steps[end]!.name === 'option' || steps[end]!.name === 'property')) end++;
-    // The incoming traverser cannot be a Map at the traversal's own start (a CHILD body's first step
-    // reads its host's traverser, which may be) or on an element stream; anywhere this cannot type
-    // (`elementKindAt`'s cannot-say) it MAY be, so a whole-arg `select(k)` is left to the lowering, which
-    // holds the exact input framing, rather than folded and raised on here.
-    const traverser: MergeTraverser = (at === 0 && !nested) || elementKindAt(steps, at) !== undefined ? 'cannotBeMap' : 'mayBeMap';
+    // The incoming traverser is no Map at the traversal's own start (a CHILD body's first step reads its
+    // host's traverser, which may be) or on an element stream; anywhere this cannot type
+    // (`elementKindAt`'s cannot-say) it is read as `'map'`, so a whole-arg `select(k)` is left to the
+    // lowering, which holds the exact input framing, rather than folded and raised on here.
+    const traverser: MergeTraverser = (at === 0 && !nested) || elementKindAt(steps, at) !== undefined ? 'notMap' : 'map';
     guarded(() => { mergeMaps(step, steps.slice(at + 1, end), step.name as 'mergeV' | 'mergeE', sideEffects, params, traverser); });
   }
 }

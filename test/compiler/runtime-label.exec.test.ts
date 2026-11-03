@@ -352,7 +352,7 @@ describe('a Set constant is a Collection at every label host (one `collectionMem
   });
 });
 
-describe('a whole-arg merge select(k) folds to the side effect only where the traverser cannot be a Map', () => {
+describe('a whole-arg merge select(k) folds to the side effect wherever the driver is not a Map', () => {
   // `Scoping.getScopeValue` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`)
   // reads the traverser's own Map entry FIRST, then the side effect. So the fold is exact over an element,
   // a scalar or the start — and is no answer at all over a Map, whose own `k` only the run decides.
@@ -362,7 +362,7 @@ describe('a whole-arg merge select(k) folds to the side effect only where the tr
     try { run(seededStore(), q); } catch (e) { expect(e, q).not.toBeInstanceOf(ValueParseError); }
   };
 
-  test('over a traverser that may be a Map, the side effect is never judged in its place', () => {
+  test('over a Map driver (or a record), the side effect is never judged in its place', () => {
     notTheSideEffect(`${BAD}.V(1).project('k').by(__.constant([name: 'marko'])).mergeV(__.select('k'))`);
     notTheSideEffect(`${BAD}.V(1).project('k').by(__.constant([name: 'marko'])).mergeV(__.constant([name: 'marko'])).option(Merge.onMatch, __.select('k'))`);
     notTheSideEffect(`${BAD}.inject([k: [name: 'marko']]).mergeV(__.select('k'))`);
@@ -376,6 +376,8 @@ describe('a whole-arg merge select(k) folds to the side effect only where the tr
       `${BAD}.V(1).out().mergeV(__.select('k'))`,
       `${BAD}.inject(1).mergeV(__.select('k'))`,
       `${BAD}.V(1).local(__.mergeV(__.select('k')))`,
+      // a per-row scalar that may hold a stored Map: the named scope wins (§17 "Map scope")
+      `${BAD}.V(1).values('name').mergeV(__.select('k'))`,
     ]) expect(() => run(seededStore(), q), q).toThrow(sentence);
     expect(values(run(seededStore(), "g.withSideEffect('k', [name: 'zz']).inject(1).mergeV(__.select('k')).values('name')"))).toEqual(['zz']);
     expect(values(run(seededStore(), "g.withSideEffect('k', [name: 'zz']).V(1).union(__.mergeV(__.select('k'))).values('name')"))).toEqual(['zz']);

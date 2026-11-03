@@ -7,6 +7,8 @@ import { test, expect, describe } from 'bun:test';
 import { bare, read, run, seededStore } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 
+const values = (rows: readonly any[]): unknown[] => rows.map((row) => row.v);
+
 const probes = (q: string): boolean => /vtype = 'map'/.test(read(q).sql);
 
 describe('select(k) over a per-row scalar stream — Map first only where nothing else names k', () => {
@@ -35,10 +37,26 @@ describe('select(k) over a per-row scalar stream — Map first only where nothin
       .toEqual([{ map: '[[{"t":"T","v":"label"},{"t":"string","v":"x"}]]' }]);
   });
 
-  test('a merge by a side effect over values that may be stored Maps DECLINES (it could write the wrong element)', () => {
-    expect(() => run(seededStore(), "g.withSideEffect('k',[a:1]).V().values('m').mergeV(__.select('k'))")).toThrow(UnsupportedTraversal);
-    // …while a scalar with no per-row tag is never a Map, so the side effect IS the answer there.
+  test('a merge by a side effect over values that may be stored Maps follows the side effect, as the chain spelling does', () => {
+    // §17 "Map scope": the named scope WINS over a per-row scalar, no row probed — the child spelling
+    // `mergeV(__.select('k'))` and the chain spelling `select('k').mergeV()` are one query.
+    const store = seededStore();
+    run(store, "g.V(1).property('m',[k:[name:'own']])");
+    expect(values(run(store, "g.withSideEffect('k',[name:'zz']).V().values('m').mergeV(__.select('k')).values('name')"))).toEqual(['zz']);
+    expect(values(run(seededStore(), "g.withSideEffect('k',[name:'zz']).V().values('name').mergeV(__.select('k')).values('name')"))).toEqual(['zz', 'zz', 'zz', 'zz', 'zz', 'zz']);
+    expect(bare(run(seededStore(), "g.withSideEffect('k',[name:'zz']).V().values('name').select('k').mergeV().count()"))).toEqual([{ v: 6 }]);
     expect(bare(run(seededStore(), "g.withSideEffect('k',[name:'zz']).inject(1).mergeV(__.select('k')).count()"))).toEqual([{ v: 1 }]);
+    // With no side effect `k` there is no map to merge: a clear decline.
+    expect(() => run(seededStore(), "g.V().values('name').mergeV(__.select('k'))")).toThrow(UnsupportedTraversal);
+  });
+
+  test('a merge select(k) over a stream of Maps declines with the reason, never writing by the side effect', () => {
+    for (const q of [
+      "g.withSideEffect('k',[name:'zz']).inject([k:[name:'q']]).mergeV(__.select('k'))",
+      "g.withSideEffect('k',[name:'zz']).inject([name:'q']).mergeV(__.select('k'))",
+      "g.withSideEffect('c',[(T.label):'person',name:'zz']).inject([name:'nobody']).mergeV().option(Merge.onCreate, __.select('c')).values('name')",
+      "g.withSideEffect('c',[age:1]).inject([name:'nobody']).mergeV().option(Merge.onMatch, __.select('c'))",
+    ]) expect(() => run(seededStore(), q), q).toThrow(/a merge over a stream of Maps cannot use select\('[kc]'\)/);
   });
 
   test('a map or record that MAY hold k beside a same-named side effect DECLINES — chain, child, math() and dedup()', () => {

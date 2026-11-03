@@ -61,8 +61,7 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 - **An explanatory decline from the lowering.** `lowerToRel` must return `null`, never throw
   (`scripts/rel-sweep.ts`), so a decline decided on framing facts — not the query text alone — can only
   say "no lowering covers …". The Map-scope collision (a map or record that MAY hold `k` beside a
-  same-named side-effect constant or path label; `values('m').mergeV(__.select('k'))` over a side effect)
-  should name both and suggest a rename. Needs a per-compile decline-reason channel the lowering records
+  same-named side-effect constant or path label) should name both and suggest a rename. Needs a per-compile decline-reason channel the lowering records
   into and `compilePlan` reads when the result is `null`.
 - **Per-origin slice in a batched `union`/`choose` arm or bounded-`repeat` body** under an outer
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
