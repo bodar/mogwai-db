@@ -491,7 +491,10 @@ F last. Each step lands `mise run ci` green on its own.
   `Select.feature` `g_VX1X_groupXaX_byXconstantXaXX_byXnameX_selectXaX_selectXaX` must still answer). Drop the
   keyed-dedup COALESCE key, math COALESCE, projector/record side-effect arms. `values(<maybe-Map>).mergeV(__.select(k))`
   with a side effect `k` declines (closes r4-fu3). ≈−80, −3 per-row terms.
-- **B3 cleanup-mapkey-merge-keys** (after B2) — remove `MergeTraverser`'s `MapWithKeys`/`mayHoldKey` and
+- ✅ **B3 cleanup-mapkey-merge-keys** — LANDED `39aba300` (with cr-fu2): `MergeTraverser` narrows to
+  `'map' | 'notMap'` (the driver's Map framing, `src/compiler/ir/write-args.ts`); `MapWithKeys`/`mayHoldKey`/
+  `mergedFromMap`'s `keys` arg deleted; a `select(k)` merge arg/option arm over a stream of Maps declines with its
+  reason. Remains: nothing. Original spec — remove `MergeTraverser`'s `MapWithKeys`/`mayHoldKey` and
   `mergedFromMap`'s `keys` arg; an inject-literal driver whose onCreate `select('k')`s a key it lacks declines as
   before S6. Keep 70c36a6f and 18c5871a's write half. Confirm `test/compiler/merge-scale.exec.test.ts`. ≈−25.
 - **B4 cleanup-mapkey-may-set** (after B3) — `MapKeyFacts` = `keys` only, a sound MAY set; ONE union meet
@@ -943,7 +946,9 @@ per-row expression read N>1 times as ONE projected column (or `MATERIALIZED` hop
   every use of the variable (Number test, value, NaN guard, WHERE). `math('a + 1')` 2,930 → 7,873 bytes; ten uses
   59,949 bytes; 17 uses 90,609 (the DO 100 KB statement cap is a few uses away — a production-only failure). 3–7×
   constant-factor slower at 1k/8k (`math('a % 10').groupCount()` 40.9 → 202.9 ms at 8k); still linear. Common reach.
-- **cr-fu2** (B2) the `mayBeMap` flip in `scalarTail` (`rel/lower.ts`) declines `values(x).mergeV(__.select('k'))`
+- ✅ **cr-fu2** — LANDED `39aba300`: the `mayBeMap` flip in `scalarTail` deleted; child
+  `values(x).mergeV(__.select('k'))` follows §17 "scope wins" like the chain spelling. Remains: nothing.
+  Original: (B2) the `mayBeMap` flip in `scalarTail` (`rel/lower.ts`) declines `values(x).mergeV(__.select('k'))`
   whenever the stream carries a per-row tag (every `values()` stream), contradicting B2's own §17 "scope wins": the
   chain spelling `values('m').select('k').mergeV()` now merges by the side effect, the child spelling declines.
   Regressions: `withSideEffect('k',[(T.label):'person',name:'zz']).V().values('name').mergeV(__.select('k')).count()`
