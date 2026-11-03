@@ -529,7 +529,12 @@ F last. Each step lands `mise run ci` green on its own.
   literal or parameter. Message names map-valued equality and why (entry order). ≈+20, no per-row SQL.
 - **E cleanup-never-bound-label** (verify) — `g.V().select('a')` with no `as('a')`/side effect/collection named `a`
   anywhere in the query: if it silently returns `[]`, decline from the query text naming the unbound label.
-- **F cleanup-plan-doc** (last, docs only) — drop S9 and its tree, r7-fu1 (+r7-reuse2), r7-fu2, r7-fu6, M2,
+  **NEEDS-HUMAN (cleanup round, not built):** verified — the empty answer is the reference's own, pinned by 9
+  `Select.feature` scenarios that pass today; declining drops 9 L3 passes. Reviewer recommends CLOSING E. The
+  question is under "Needs a human decision".
+- **F cleanup-plan-doc** (last, docs only) — drop S9 and its tree, r7-fu1 (+r7-reuse2), r7-fu2, r7-fu6 (now
+  SUPERSEDED by C2, which made a stated null's drop the §17 rule for order/dedup/where/sack — close it, do not
+  build it; likewise re-read rf3-static-null-is against C2), M2,
   r2-gap-S2, S6.1, r4-ru7 (done), r4-fu0 (fold into filter-below-window if open); promote S9-blk, S9.9, r4-fu4 to
   Wrong answers, r6-s9-4/S9.8/r6-s9-6/r5-fu2/r6-m-orderby to Performance, r6-s9-1/r6-s9-5 to Hygiene; move r7-fu4,
   M1, r1-gap-reroot/r1101-ab, r6-m-sample, the per-origin deterministic-slice item, and r6-fu8 options A/B/JS-barrier
@@ -539,6 +544,12 @@ F last. Each step lands `mise run ci` green on its own.
 
 ### Needs a human decision
 
+- **E cleanup-never-bound-label** (asked by the cleanup round, verbatim): "The empty answer for `g.V().select('a')`
+  with no as('a') anywhere is the reference's own pinned answer in 9 Select.feature scenarios (g_V_selectXaX,
+  g_V_selectXaX_count, g_V_selectXa_bX and the Pop.first/last/all variants), all passing today. Declining drops 9 L3
+  passes. The reviewer recommends keeping the answer and closing E: it is the specified result, the shape is
+  contrived, and nothing about it is internally inconsistent. Build the decline anyway (moving the L3 baseline), or
+  close E?"
 - **r6-fu8 mergev-canonical-map-equality** — `mergeV` compares a map/set-valued property by raw JSON spelling
   (`g.inject([b:2,a:[x:1,y:2]],[a:[y:2,x:1]]).mergeV()`). Option A: STORE entries in canonical key order (reads
   come back key-sorted, one §17 line, equality and seeks stay index-backed). Option B: keep insertion order and
@@ -904,6 +915,131 @@ r7-fu4. Needs-human questions raised this round: none.
 `wf/federate-fresh-param-collision-2-{0,2,3,4}` (r6-fu1, resume `-2-4`); `wf/s9-one-scoping-reader-reland-1-{0,2,3,4}`
 (resume `-1-4`); `wf/s9-one-scoping-reader-4-{0,2,3,4}` (superseded by the re-land; prune when S9 lands).
 `wf/group-pooled-fold-value-3-0` is empty (at trunk `9163598f`).
+**⚠️ As of 2026-11-03 NONE of these branches exists, locally or on origin** — they were removed before the cleanup
+round. r7-fu1 / r6-fu1 / the S9 re-land therefore have NO resume point; the owner's cleanup list drops S9 and r7-fu1
+anyway (F), and r6-fu1 must restart from this description.
+
+### Next round (from the cleanup round, 2026-11-03 — fold into the lists above at the end of the run)
+
+The cleanup round landed A1 `1e561929`, A2 `3bf01eda`, A3 `a6a5aae8`, B1 `7b6557cb`, B2 `2d11a73b`, C1 `1aeb8683`,
+C2 `024a9440`, D `7ed8f578` (CI green on every pushed sha; see the round report for `2d11a73b`). NOT BUILT: E
+(needs-human, question under "Needs a human decision"). NOT STARTED: B3, B4, C3, C4, C5, F — they keep their order
+in the Cleanup list. No branch is parked: every round branch landed and was pruned.
+
+**One root cause behind three majors — propose ONE substrate item, ordered BEFORE them.** B1's math variable, C2's
+correlated `by()` and rf3-is-chain-size all RE-INLINE a per-row expression at each use (a `CASE` tower, a correlated
+windowed subquery) because the lowering has no general "land this per-row value once" step: the only instances were
+point mechanisms (math's one-row `VALUES` `scopeSlots`, `landedOnce`), and the cleanup deleted them together with the
+semantics they carried. **cr-land-once** (Substrate, before cr-fu1/cr-fu6/rf3-is-chain-size): one helper that lands a
+per-row expression read N>1 times as ONE projected column (or `MATERIALIZED` hop), owned by `rel/build.ts` beside
+`fenced`, and called by `scopedHost` (math variables), `projectionOf`/`typedOf` (`rel/modulator.ts`) and value-run
+`is()`. Semantics-free — it must not bring back the Map probe or `landedOnce`'s presence half. Done when
+`values('age').as('a').math('a+a+a+a+a+a+a+a+a+a').groupCount()` is back near 4.5 KB (59.9 KB today) and pinned under
+`CfLimitedSql`.
+
+**Follow-ups — major**
+
+- **cr-fu1** (B1, after cr-land-once) `values(x).as('a').math(...)`: the label's history-entry build is inlined at
+  every use of the variable (Number test, value, NaN guard, WHERE). `math('a + 1')` 2,930 → 7,873 bytes; ten uses
+  59,949 bytes; 17 uses 90,609 (the DO 100 KB statement cap is a few uses away — a production-only failure). 3–7×
+  constant-factor slower at 1k/8k (`math('a % 10').groupCount()` 40.9 → 202.9 ms at 8k); still linear. Common reach.
+- **cr-fu2** (B2) the `mayBeMap` flip in `scalarTail` (`rel/lower.ts`) declines `values(x).mergeV(__.select('k'))`
+  whenever the stream carries a per-row tag (every `values()` stream), contradicting B2's own §17 "scope wins": the
+  chain spelling `values('m').select('k').mergeV()` now merges by the side effect, the child spelling declines.
+  Regressions: `withSideEffect('k',[(T.label):'person',name:'zz']).V().values('name').mergeV(__.select('k')).count()`
+  answered `[6]`, `values('age')…` `[4]`; both decline now. Fix = DELETION: drop the flip, fold to the side effect
+  wherever `namedBeyondMap(k)` holds (matches the read path). Plausible reach.
+- **cr-fu3** (B2) two constant routes at the child seam: `sideEffectSelectChild`/`constantSelectChild`
+  (`lower/reduction.ts`) encode a scalar side-effect constant as a `{t,v}` JSON node via `constantNode` and decode
+  it per reference (`where(__.select('k').is(5))` emits a ~1 KB CASE tower where `5 = 5` would do), while the
+  existing `constLit`/`declaredScalarType` arms spell `constant(5)` as a typed literal. Route a scalar constant through
+  `constLit`; keep `constantNode` only for list/map constants. Runtime flat (SQLite hoists it) — this is one authority,
+  not speed.
+- **cr-fu4** (A1) shapes the once-path ACCEPTED on trunk (a prefix holding a barrier or a child: order, dedup, slice,
+  coalesce, union, map) now fall to GraphStep's product and emit the per-origin `RANDOM()` window over origins×graph —
+  a regression where trunk had a linear plan, not just where it declined. The timed 6k×6k shuffle guard and the
+  `youngest` pin's linear property were deleted with it. Measure the common forms at 1k/8k; restore timed budget pins
+  for one barrier prefix, one per-row-child prefix (union/coalesce arms) and one order-only prefix
+  (`test/compiler/rooted-sample-scale.exec.test.ts`).
+- **cr-fu5** (A2) `sample(n>1)` under a candidate set that GROWS with the graph is quadratic: `rankPairs` crosses
+  every origin with every candidate. `local(__.V().hasLabel('person').sample(2)).count()` 281 ms → 19.6 s at 1k → 8k
+  (70×; trunk was 20 → 138 ms); `property(list,…sample(2)…)` 347 ms → 21.9 s. Fixed small candidate sets stay linear
+  and faster than trunk; `sample(1)` unchanged. The commit records it as the owner's trade but quotes only 1k×1k —
+  **owner to confirm the trade at 8k×8k (~20 s per DO request)**. Either way state it in an outstanding-work line and a
+  test comment (no test guards the origins×candidates axis now), and fix the `rankPairs` doc: the rank CTE is not
+  `MATERIALIZED` ("FENCED" overclaims; one reference, so still correct).
+- **cr-fu6** (A3) the `SHARED_DRAW` decline in `rootedRead`'s 'split' gate fires for ONE-host shapes, where a shared
+  draw IS the reference answer. Regressed: `g.addE('rnd').from(__.V().sample(1)).to(__.V().sample(1))` (the usual
+  random-edge idiom, plausible), `g.V(1).addE(…).to(__.V().sample(1))`, `g.V(1).project('x').by(__.V().sample(1).values('name'))`,
+  `g.inject(1).map(__.V().sample(1)…)`. Gate the throw on "host may hold >1 row" via the existing authorities
+  (`write.ts` `singleSource`, `rel/bounds.ts` `atMostOneRow` — no new cardinality authority), at the callers that
+  know the host. Also fix the message: its suggested `local(__.V()…sample(1))` rewrite fails in most positions it
+  fires (`addE().to(__.local(…))` returns the SAME message; `project().by(__.local(…))` gives "no lowering covers"),
+  and it fires when the user already wrote `local(...)`. Say "not supported: it would be drawn once for all rows" and
+  only suggest a rewrite that works there. Document in `rootedRead`'s doc that it may now throw from inside a
+  speculative probe.
+
+**Follow-ups — minor, cheap and concrete**
+
+- **cr-fu7** (C1) `sameGroupRecipe` (`rel/map.ts`) compares `mayYieldNull`, so two `group('m')` sites with differently
+  nullable value bodies no longer merge and decline (trunk answered, e.g. `…group('m').by(label).by(values('age'))…
+  group('m').by(label).by(id()).cap('m')`). Merge with `mayYieldNull: a || b` in `accumulate` (`collection.ts`) and drop
+  it from `sameGroupRecipe`. Also fix `test/L4-addendum/group-value-null-member.feature`'s ProductiveByStrategy
+  scenario: under `order().by('name',desc)` josh arrives last, so it does not test the key — use
+  `order().by(label).by('name')` (answer `{x:27}`).
+- **cr-fu8** (C2) stale comments: `lower/slice.ts` `dedupBy` (~:533) and `keptDedup`'s doc still describe a stated
+  presence keying its null. Drop the third spelling at `lower.ts:959` (`productivityFilter(step, key, key.raw ?? key.value)`
+  → `key.value`; a CAST preserves nullness) — a deletion. Pin `compilerNull()` instead of `expect.anything()` in
+  `test/compiler/productivity-filter.test.ts`, and add the `aliasGuard` witnesses (`union(constant(null).as('b'),
+  constant(2).as('b'), constant(3)).order().by(select('b'))` → `[2]`; `dedup().by(select('b')).count()` → 1).
+- **cr-fu9** (B1/B2) every new collision decline (recordTail, selectKeys, scopeValue, mapTail 'may', mergeV) says only
+  "no lowering covers …". Needs a decline-reason channel through `lowerToRel` (the `rel-sweep` gate forbids a throw
+  there) — already in `docs/outstanding-work.md` §3; it is the prerequisite for every explanatory decline that depends
+  on framing rather than query text.
+- **cr-fu10** (B1) math() over a Map-valued property reading the Map's OWN keys, no label or side effect, now declines:
+  `g.V().has('name','marko').values('m').math('k + a')` (trunk `[3]`). Either keep a map-entry read when no scope beyond
+  the Map names the variable (`Scoping.java:119-135`), or record the decline in §17 and outstanding-work. Plausible.
+- **cr-fu11** (B1) a `project()` key equal to a live label now declines even where every row holds the field
+  (`g.V().as('name').project('name','age').by('name').by('age').select('name')`). The multi-key/order() rows-dropped fix is
+  worth keeping; the held-field case should answer.
+- **cr-fu12** (B2) side-effect constant read depth gaps — clean declines, chain form answers: `project(...).by(__.select('k'))`,
+  `group().by(__.select('k'))`, `order().by(__.select('k'))`, `sideEffect(__.select('k'))`, a null constant under
+  `map`/`where`. The by()/project seam does not route to `sideEffectSelectChild`. Plus L4 coverage for the newly answering
+  element-host forms (`withSideEffect('k',5).V().select('k')`, union/coalesce/choose arms, number class `3.0d`/`3L`).
+- **cr-fu13** (D) `UNCOMPARABLE_LITERAL` drops the query text and the triggering step (`uncomparableLiteral` returns it);
+  name the step and suggest the likely intent (match on scalar keys, put the map in `option(onCreate/onMatch)`). The two
+  `@Unsupported` pins in `merge-oncreate-overrides-runtime-map.feature` only assert "some Error" — assert the reason.
+  §10 Limits: add that other text-borne drivers (`identity()`, `barrier()`, `union(constant…)`, `mergeV(identity())`)
+  are not checked either; a real fix needs the merge lowering to know its driver's type can hold a map — do NOT grow the
+  peephole. `write-args.ts` `validateNoOverrides` stringifies every JS Map as `"{}"`.
+- **cr-fu14** (pre-existing, found by probes) `g.V().project('n','m').by('name').by(values('m')).select('m')` over a
+  Map-valued property leaks `TypeError: pairs.flatMap is not a function` (`src/execute.ts:226`) — a bare error reaching
+  the user. `g.inject([x:1,y:2],[y:2,x:1]).dedup().count()` → 2, ref 1 (with r6-fu8). Under ProductiveByStrategy a
+  `group()` nested in `local()` still drops absent values (the strategy does not reach nested steps).
+- **cr-fu15** (A1/A3) `ONCE_FILTER_HOSTS` is a fourth spelling of the per-traverser filter-host set (`COLLAPSE_FILTERS`
+  `ir/bulk.ts`, `SHAPE_PRESERVING` `ir/step.ts`, `EXISTENCE_FILTER_HOSTS` `strategies.ts`) — one authority or a comment
+  saying why it differs; the rejoin-first guard adds another hand-rolled `V||E` re-source test (≈10 copies).
+  A3 newly declines draw-independent bodies (`project().by(__.V().sample(1).count())`, `local(__.V().sample(1).count())`):
+  record in §17/outstanding-work, not only the commit.
+
+**Reuse sweep proposals**
+
+- **cr-reuse1** `perRowCollectionStep`'s `submap` reader (`rel/lower.ts` ~:1596) hand-writes `namedBeyondMap`'s
+  three-term disjunction; call `namedBeyondMap(k, ctx, live.has(k))`. Identical answers, −2 lines.
+- **cr-reuse2** one `mapKeyScope(presence, key, ctx, live): 'entry' | 'scope' | 'decline'` beside `namedBeyondMap`,
+  shared by `mapTail`'s select(k) arm (`rel/lower.ts` ~:3162) and `mapHostChild` (`lower/reduction.ts` ~:2501); plus a
+  `constantArgNode(arg)` wrapper for the two identical `constantNode(...)` calls. ≈−8 lines, no answer change. Leave out
+  (probe first — folding them in ADDS declines) the multi-key map select (~:3201, omits enclosing labels) and
+  `modulator.ts` `scopeValue`'s record arm (omits side effects/enclosing labels; drops rows rather than declining).
+- **cr-reuse3** `record.ts` `selectKeys` (~:547) rebuilds `namedBeyondMap` as `named || hidden || live`; give
+  `selectScope` a `beyond(label, live)` closure. One rule, no `lower.ts` import into the record builder.
+- **cr-reuse4** derive `group()`'s `mayYieldNull` from the member node's own gate: export `memberGate(framing,
+  present)` from `producedMemberNode` (`rel/modulator.ts` l.653) and set `mayYieldNull = !!produced.node ||
+  memberGate(...) !== 'value-nullness' || isProductiveBy(step)`. Drops the null-first sort term from every group whose
+  value body is fold/list/map/element-valued. Verify with `test/L2-sql/group.sql.test.ts` plus a fold case.
+- **cr-reuse5** `uncarriedLiteral`/`uncomparableLiteral` share a cloned `eachChainDeep` first-match scaffold; add a
+  chain-aware `firstInChainsDeep(steps, read, (chain, i) => boolean)` to `ir/walk.ts` and an exported `someNode(value,
+  pred)` used by `someValueNode`, `holdsNaN`, `uncomparable` (no array per argument). ≈−10 lines.
 
 ---
 
