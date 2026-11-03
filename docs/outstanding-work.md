@@ -314,12 +314,17 @@ Beside the RelIR substrate:
   `valueMap().project('c').by(__.count(local))`, `withSideEffect('k',[x:1]).V().values('n').select('k')
   .map(__.count(local))` (`mapHostChild` reads only `select(k)`). Tests:
   `test/L4-addendum/per-row-collection-readers.feature` (the `@Unsupported` side-effect form).
+- **A `map()` body whose ELEMENT result may be absent** — `V().map(__.out('created'))`,
+  `E().map(__.outV().hasLabel('person'))`, `E().map(__.hasLabel('knows').outV())` decline: `scalarChild`
+  has no first-result element arm, so a leading filter has nowhere to conjoin either (not a dispatch at
+  the predicate seam's position). `flatMap`/`local` answer all three; a predicate body (`where`/`not`/
+  `choose`/`until`/strategy criteria) takes a leading filter via `bodyPredicate`.
 - **`property(T.label)` on an existing element** (label append) — genuine future work; see debt for `T.id`.
 
 ## 5. Product capabilities
 
 - **Strategies** (`src/compiler/ir/strategies.ts`) — the largest L3 clusters:
-  `SubgraphStrategy(edges: __.or(…))`, `SubgraphStrategy(vertexProperties:)`, `includeMetaProperties`,
+  `SubgraphStrategy(vertexProperties:)`, `includeMetaProperties`,
   ProductiveByStrategy on a non-standard host. No rule yet wraps a criterion around a mutation.
 - **Step vocabulary (matrix-fill).** `tree`, `subgraph('sg')`, `withSack(seed, Operator)`,
   `mean/sum(Scope.local)` over a value list, string steps inside `repeat`, null carriage under `path()`,

@@ -167,8 +167,9 @@ function matchPredicate(
  *   would ask the same question through an extra subquery.
  * - a body that MOVES (`__.out('created')`) is a sub-traversal, so it is the correlated EXISTS above.
  *
- * A body that mixes a movement with a leading filter is handled by the second arm, since
- * `correlatedExists` folds the filters after the hop itself. Anything else — a body that PROJECTS
+ * A body that LEADS with filters and then moves or projects is the filters' conjunction AND the
+ * suffix's answer (the loop below); filters AFTER a hop are folded by `correlatedExists` itself.
+ * Anything else — a body that PROJECTS
  * (`__.values('age').is(P.gt(30))`, `__.out().count().is(P.gt(0))`) — declines: its condition is a
  * value comparison over a correlated sub-read, which is a further arm rather than this one.
  */
@@ -177,12 +178,25 @@ export function bodyPredicate(
 ): Expr | null {
   // A write anywhere in a predicate body declines (`writesAnywhere`, see `correlatedExists`).
   if (writesAnywhere(body, ctx.params)) return null;
+  // A LEADING RUN OF FILTERS TESTS THE SUBJECT ITSELF, so it is a conjunct beside whatever the rest of
+  // the body asks. A child body is run on a split of the traverser (`TraversalUtil.test`,
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`),
+  // and a filter step never moves it — so `where(F.rest)` produces for this traverser exactly when `F`
+  // holds of it AND `rest` produces from it: `F(subject) ∧ productive(rest)`. This loop is the ONE place
+  // that order is spelled — the suffix goes through the same three shapes a whole body does, so
+  // `where(hasLabel('person').out('created'))` is `<label clause> AND EXISTS(<the hop>)`, the identical
+  // SQL vocabulary the arms already emit. At position 0 the suffix IS the body, so every body answered
+  // before keeps its SQL; a suffix none of the three answers declines, as the whole body did.
   let clause: Expr | undefined;
-  for (const step of body) {
-    const filter = sourceFilter(step, subject, fresh, ctx, aliases);
-    if (!filter) return correlatedExists(body, subject, fresh, ctx, false, aliases)
-      ?? valuePredicate(body, subject, fresh, ctx, false, aliases)
-      ?? projectionProductive(body, subject, fresh, ctx, aliases);
+  for (let i = 0; i < body.length; i++) {
+    const filter = sourceFilter(body[i]!, subject, fresh, ctx, aliases);
+    if (!filter) {
+      const rest = i === 0 ? body : body.slice(i);
+      const suffix = correlatedExists(rest, subject, fresh, ctx, false, aliases)
+        ?? valuePredicate(rest, subject, fresh, ctx, false, aliases)
+        ?? projectionProductive(rest, subject, fresh, ctx, aliases);
+      return suffix && and(clause, suffix);
+    }
     clause = and(clause, filter);
   }
   return clause ?? null;
