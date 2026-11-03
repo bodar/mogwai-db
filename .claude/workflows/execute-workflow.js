@@ -49,10 +49,12 @@ mogwai-db (TinkerPop 4 Gremlin compiled to SQLite). CLAUDE.md is injected — it
 
 // One rubric for every reviewer and the skeptic, so severity cannot drift between prompts.
 const RUBRIC = `
+REACH (state it for every issue, naming the query): common = an ordinary app query (has/out/in/values/project/group/order/dedup/count, select/where over labels, property/addV/addE/mergeV upserts) at realistic sizes; plausible = real but less usual (side effects, map-valued properties, choose/coalesce/optional arms, federate, parameters at depth); contrived = only a constructed composition reaches it (e.g. a label, a map key and a side effect sharing one name; a label bound to null in one arm; sample() under nested coupling barriers). The 2026-11-03 audit found the loop spending ~650 lines and most of its fix-on-fix churn on contrived reach — do not repeat that.
 SEVERITY (use exactly):
-- blocker: a concrete traversal, NEWLY REACHABLE through this change (trunk declined it, answered it correctly, or ran it in linear time), that now gives a genuinely WRONG answer (rows, counts, elements, number class), crashes, leaks an internal or bare Error, declines on data size, or runs SUPER-LINEAR in traverser/row count (scaling probe ratio above ≈16× from N≈1k to N≈8k). Newly reachable is the whole test: it is a blocker EVEN WHEN the root cause predates this commit — this commit is what puts it in front of users. Must include the traversal and either what we return vs what the reference returns, or the two timings.
+- blocker: a concrete traversal, NEWLY REACHABLE through this change (trunk declined it, answered it correctly, or ran it in linear time), that now gives a genuinely WRONG answer (rows, counts, elements, number class), crashes, leaks an internal or bare Error, declines on data size, or runs SUPER-LINEAR in traverser/row count (scaling probe ratio above ≈16× from N≈1k to N≈8k). Newly reachable is the whole test: it is a blocker EVEN WHEN the root cause predates this commit — this commit is what puts it in front of users. Contrived reach is NEVER a blocker: record it as a minor marked contrived, with the query, unless the fix is a deletion or a consolidation onto an existing authority. Must include the traversal, its reach, and either what we return vs what the reference returns, or the two timings.
 - major: built as a special case where an existing/obvious generic seam was available; duplicates an existing authority; Java-execution emulation with real SQL/JS/runtime cost; a per-row SQL term with no user-visible reason.
-- minor: citations, tests, naming, comments, docs.
+- major also: a fix whose cost is out of proportion to its reach — new per-row SQL, or more than ~100 src lines, for a contrived case.
+- minor: citations, tests, naming, comments, docs; and every contrived-reach wrong answer.
 NOT a defect: a divergence a user would find sensible under JS/SQLite semantics (see §17); a clean decline of a legal-but-unsupported composition (report it as a depth gap, minor).`
 
 const DESIGN = { type: 'object', properties: {
@@ -99,7 +101,7 @@ const LENSES = [
   { key: 'depth', prompt: (it, b) => `${PRINCIPLES}${RUBRIC}
 You are the DEPTH reviewer — adversarial. Item: ${it.title}. Commit ${b.sha}; diff \`git -C ${REPO} log -p HEAD..${b.sha}\` (or origin/trunk..). Builder's summary: ${b.summary}
 ${probeCheckout(b.sha)}
-Try to REFUTE it. Embed each newly supported form at depth (the list under GENERIC AT DEPTH), over each traverser shape it admits (element, property, scalar, list, map, path), plus empty input, nulls, self-loops and multiplicity (traversers are multisets). Aim for ~20 probes. For each that ANSWERS, check the rows against the reference's WHAT (the .feature corpus, then gremlin-core) — not Java's evaluation order. Also: does anything trunk DECLINED now answer differently from the reference?` },
+Try to REFUTE it. Embed each newly supported form at depth (the list under GENERIC AT DEPTH), over each traverser shape it admits (element, property, scalar, list, map, path), plus empty input, nulls, self-loops and multiplicity (traversers are multisets). Aim for ~20 probes, and spend at least HALF of them on COMMON shapes at realistic sizes (the ordinary queries a user of this feature writes, at N≈1k and 8k), not on deep compositions. Label each finding's reach. For each that ANSWERS, check the rows against the reference's WHAT (the .feature corpus, then gremlin-core) — not Java's evaluation order. Also: does anything trunk DECLINED now answer differently from the reference?` },
   { key: 'sympathy', prompt: (it, b) => `${PRINCIPLES}${RUBRIC}
 You are the SYMPATHY + SUBSTRATE reviewer. Item: ${it.title}. Commit ${b.sha}; diff \`git -C ${REPO} log -p HEAD..${b.sha}\`. Approved design: seam=${it.seam}; sympathy=${it.sympathy}. Builder's summary: ${b.summary}
 Builder's scaling report: ${b.scaling || 'NONE — treat as unmeasured and measure it yourself'}
@@ -127,7 +129,7 @@ You are the SCOUT for round ${round}. Plan: ${REPO}/${PLAN}${SECTION}. The plan 
   phase('Plan review')
   // A barrier on purpose: ordering, merging and deferral are cross-item decisions.
   const reviewed = await agent(`${PRINCIPLES}${RUBRIC}
-You are the SYMPATHY PLAN REVIEWER — the earliest and cheapest place to stop Java emulation and one-off special cases. Below are the scout's draft designs for round ${round} of ${PLAN}. For EACH: is the seam really the generic one (check the code)? Does the approach emulate Java execution, add per-row SQL, or decline on data size? Revise the design where it does. Then decide across items: build | merge (two items share one seam — merge into the substrate item) | defer (needs a substrate that does not exist and is not in this round — name it as \`prerequisite\`, phrased as a plan item) | drop (stale/not worth it). Set \`after\` so substrate lands before what uses it; no cycles. Read-only.
+You are the SYMPATHY PLAN REVIEWER — the earliest and cheapest place to stop Java emulation and one-off special cases. Below are the scout's draft designs for round ${round} of ${PLAN}. For EACH: is the seam really the generic one (check the code)? Does the approach emulate Java execution, add per-row SQL, or decline on data size? What is its REACH (common / plausible / contrived, with the query)? Drop or defer an item whose whole value is contrived reach unless it deletes code or consolidates an authority, and order common-reach items first. Revise the design where it does. Then decide across items: build | merge (two items share one seam — merge into the substrate item) | defer (needs a substrate that does not exist and is not in this round — name it as \`prerequisite\`, phrased as a plan item) | drop (stale/not worth it). Set \`after\` so substrate lands before what uses it; no cycles. Read-only.
 DRAFTS:\n${JSON.stringify(scout.items, null, 1)}`, { label: `plan-review#${round}`, phase: 'Plan review', schema: PLAN_REVIEW, effort: 'high' })
   const designs = (reviewed ? reviewed.items : scout.items.map((i) => ({ ...i, decision: 'build' })))
   const toBuild = designs.filter((d) => d.decision === 'build' && d.status === 'live')
@@ -179,7 +181,7 @@ Build at depth in the seam, probe a few deeper compositions, add tests the ladde
         let confirmed = []
         if (blockers.length) {
           const t = await agent(`${PRINCIPLES}${RUBRIC}
-You are the SKEPTIC. Reviewers flagged these as BLOCKERS on commit ${b.sha} (${it.title}). For each, try to REFUTE it: reproduce the traversal yourself, and ask whether a user would actually call our answer wrong or whether it is a sensible JS/SQLite divergence or a Java-execution detail. Keep only what survives. Default to refuted when uncertain.
+You are the SKEPTIC. Reviewers flagged these as BLOCKERS on commit ${b.sha} (${it.title}). For each, try to REFUTE it: reproduce the traversal yourself, and ask whether a user would actually call our answer wrong or whether it is a sensible JS/SQLite divergence or a Java-execution detail. Also refute on REACH: if only a contrived composition reaches it, downgrade it to a minor marked contrived and say so. Keep only what survives. Default to refuted when uncertain.
 ${probeCheckout(b.sha)}
 BLOCKERS:\n${JSON.stringify(blockers, null, 1)}`, { label: `skeptic:${it.key}${fix ? '#' + fix : ''}`, phase: 'Review', schema: TRIAGE })
           confirmed = t ? t.confirmed : blockers
@@ -258,6 +260,7 @@ Decide:
 - continue=false when the trend is diverging for a second round, when what remains needs a human design decision, or when the section's real work is done (only minors/proposals left). Say which.
 Surfacing PRE-EXISTING wrong answers on trunk is the run doing its job, not divergence, when they collapse onto a named substrate root with a concrete fix: count that as progress toward maturity. It is divergence only when the new majors are scattered one-offs or the same root keeps parking.
 - continue=true otherwise, with next_batch (1–${MAX_ITEMS}): fill one slot per INDEPENDENT seam — parallel agents are welcome, so be generous. Chaining is NOT a reason to shrink (the round orders items by \`after\` and a dependent simply waits for its prerequisite); shrink only when items parked or two items collided on ONE seam — fold those into one item instead.
+- Rank by REACH: common-reach wrong answers, data-size declines and super-linear routes first; a family whose witnesses are all contrived is low priority however many root causes it surfaces — never the focus.
 - focus: the one or two things the next scout must pick first — usually the substrate a parked/deferred item is waiting on, or a recurring root cause — so the next round resolves rather than widens.`, { label: `steward#${round}`, phase: 'Steer', effort: 'high', schema: STEER })
   allRounds[allRounds.length - 1].steer = s
   if (!s || !s.continue) { log(`steward: stop — ${s ? s.reason : 'no verdict'}`); break }
