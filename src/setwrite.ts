@@ -23,6 +23,7 @@ import { insert } from './rel/stmt-factory.ts';
 import type { ColMeta, SqlType } from './rel/types.ts';
 import { jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
 import { runProgram, type RowSource } from './program.ts';
+import { stringifyExact } from './json-exact.ts';
 import { execute, identifier, list, q, textLiteral, value, type Expression } from './sql/kernel/q.ts';
 
 /** One column of a set-insert target. `jsonb` wraps the cell in `jsonb(<text>)` — the collection /
@@ -102,7 +103,7 @@ export function insertSet(
  */
 export function deleteMembers(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
   if (!ids.length) return 0;
-  execute(store, q`DELETE FROM ${identifier(table)} WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(JSON.stringify([...ids]))}))`);
+  execute(store, q`DELETE FROM ${identifier(table)} WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(stringifyExact([...ids]))}))`);
   return 1;
 }
 
@@ -113,7 +114,7 @@ export function deleteMembers(store: RowSource, table: string, column: string, i
  *  changes content without re-landing the element row (bulk `'replace'`, and replication apply). */
 export function markMembersDirty(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
   if (!ids.length) return 0;
-  execute(store, q`UPDATE ${identifier(table)} SET dirty = 2 WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(JSON.stringify([...ids]))}))`);
+  execute(store, q`UPDATE ${identifier(table)} SET dirty = 2 WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(stringifyExact([...ids]))}))`);
   return 1;
 }
 
@@ -147,6 +148,6 @@ export function updateSet(
   const assignments = list(columns.map((c, i) => q`${identifier(c.name)} = ${cell(i + 1)}`));
   const t = identifier(table);
   execute(store,
-    q`UPDATE ${t} SET ${assignments} FROM json_each(${value(JSON.stringify(rows))}) AS u WHERE ${t}.${identifier(keyColumn)} = ${extractAt(0)}`);
+    q`UPDATE ${t} SET ${assignments} FROM json_each(${value(stringifyExact(rows))}) AS u WHERE ${t}.${identifier(keyColumn)} = ${extractAt(0)}`);
   return 1;
 }

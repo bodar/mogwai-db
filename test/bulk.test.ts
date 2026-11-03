@@ -400,6 +400,30 @@ describe('onCollision: replace', () => {
     expect(store.query<{ v: unknown }>(`SELECT value AS v FROM vertex_properties WHERE key='name'`)).toEqual([{ v: 'b' }]);
   });
 
+  // A uid holding a LONE SURROGATE lands well-formed (U+FFFD, `stringifyExact`), so every json_each bind
+  // that later names it — the collision pre-check, the replace match, the wipe — must cross the same
+  // encoder, or SQLite's JSON decoder reads `"a\ud800b"` as '' and the match silently misses.
+  test('a uid with a lone surrogate matches itself — replace keeps one element, append names the clash', () => {
+    const store = freshLimited();
+    const vs = [V('a\ud800b', { name: 'x' }), V('c\udc00', { name: 'y' })];
+    const es: BulkEdge[] = [{ id: 'e\ud800', label: 'knows', src: 'a\ud800b', tgt: 'c\udc00' }];
+    loadBulk(store, vs, es);
+    loadBulk(store, [V('a\ud800b', { name: 'x2' }), vs[1]!], es, { onCollision: 'replace' });
+    expect(count(store, 'nodes')).toBe(2);
+    expect(count(store, 'edges')).toBe(1);
+    expect(count(store, 'vertex_properties')).toBe(2);
+    expect(propOf(store, 'a�b', 'name')).toEqual([{ v: 'x2' }]);
+    expect(() => loadBulk(store, [vs[0]!])).toThrow(/nodes uid "a�b" already exists/);
+    expect(() => loadBulk(store, [], [{ ...es[0]!, id: 'e\ud800' }])).toThrow(/edges uid "e�" already exists/);
+  });
+
+  test('two spellings of one landed uid are ONE element in a replace batch', () => {
+    const store = fresh();
+    loadBulk(store, [V('a\ud800', { name: 'lone' }), V('a�', { name: 'replacement' })], [], { onCollision: 'replace' });
+    expect(count(store, 'nodes')).toBe(1);
+    expect(propOf(store, 'a�', 'name')).toEqual([{ v: 'replacement' }]);
+  });
+
   test('the default policy still fails closed on a collision', () => {
     const store = fresh();
     loadBulk(store, [V('a', { name: 'x' })]);

@@ -135,6 +135,27 @@ describe('the reference graphs load from their own GraphSON files', () => {
   });
 });
 
+describe('reloading a document whose id holds a lone surrogate', () => {
+  // The uid lands well-formed (U+FFFD — `stringifyExact`, §17's lone-surrogate line), so a reload must
+  // name it through the same encoder: the collision pre-check and the replace match both used to miss and
+  // fall through to SQLite's raw `UNIQUE constraint failed: nodes.uid`.
+  const doc = JSON.stringify({ id: 'a\ud800b', label: 'person', properties: { name: [{ id: 9, value: 'x' }] } });
+
+  test('the default policy names the clash', () => {
+    const store = fresh();
+    loadGraphson(store, doc);
+    expect(() => loadGraphson(store, doc)).toThrow(/bulk load: nodes uid "a�b" already exists in this graph/);
+  });
+
+  test("onCollision 'replace' leaves exactly one vertex", () => {
+    const store = fresh();
+    loadGraphson(store, doc);
+    loadGraphson(store, doc, { onCollision: 'replace' });
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0]!.n).toBe(1);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM vertex_properties')[0]!.n).toBe(1);
+  });
+});
+
 describe('v3 and v4 differ in exactly one field, and the other artefacts fail closed', () => {
   // No v4 line-oriented adjacency fixture ships with the corpus (every `-v4` file is a detached
   // `g:Vertex` or the `g:graph` container), so the v4 label form is exercised against a document in

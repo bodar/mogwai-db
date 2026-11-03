@@ -167,7 +167,8 @@ function dedupeByKey<T>(items: readonly T[], keyOf: (item: T) => number | string
   for (const item of items) {
     const key = keyOf(item);
     if (key === null || key === undefined) anonymous.push(item);
-    else keyed.set(typeof key === 'number' ? `n${key}` : `s${key}`, item);
+    // A string key is the uid it LANDS as — well-formed (`stringifyExact`) — so two spellings of one uid are one element.
+    else keyed.set(typeof key === 'number' ? `n${key}` : `s${key.toWellFormed()}`, item);
   }
   return [...keyed.values(), ...anonymous];
 }
@@ -490,17 +491,25 @@ export class BulkLoader {
     this.counts.statements++;
     const c = identifier(column);
     return new Set(execute<{ v: number }>(this.store,
-      q`SELECT ${c} AS v FROM ${identifier(table)} WHERE ${c} IN (SELECT value FROM json_each(${value(JSON.stringify(ids))}))`)
+      q`SELECT ${c} AS v FROM ${identifier(table)} WHERE ${c} IN (SELECT value FROM json_each(${value(stringifyExact(ids))}))`)
       .map((r) => r.v));
   }
 
-  /** The existing rowid for each of `uids` that is already present — one `json_each` read. */
+  /** The existing rowid for each of `uids` that is already present — one `json_each` read. Keyed by the
+   *  CALLER's spelling: a uid holding a lone surrogate crosses, and was stored, well-formed
+   *  (`stringifyExact`), so each stored uid is matched back to the source string that asked for it. */
   private existingUid(table: 'nodes' | 'edges', uids: readonly string[]): Map<string, number> {
     if (!uids.length) return new Map();
     this.counts.statements++;
-    return new Map(execute<{ id: number; uid: string }>(this.store,
-      q`SELECT id, uid FROM ${identifier(table)} WHERE uid IN (SELECT value FROM json_each(${value(JSON.stringify(uids))}))`)
+    const stored = new Map(execute<{ id: number; uid: string }>(this.store,
+      q`SELECT id, uid FROM ${identifier(table)} WHERE uid IN (SELECT value FROM json_each(${value(stringifyExact(uids))}))`)
       .map((r) => [r.uid, r.id] as const));
+    const found = new Map<string, number>();
+    for (const uid of uids) {
+      const rowid = stored.get(uid.toWellFormed());
+      if (rowid !== undefined) found.set(uid, rowid);
+    }
+    return found;
   }
 
   /** Remove a matched vertex's owned rows — everything but the `nodes` row itself and its edges — so
@@ -527,7 +536,7 @@ export class BulkLoader {
     const props = ownerElem === 'edge' ? 'SELECT -id FROM edge_properties WHERE edge' : 'SELECT id FROM vertex_properties WHERE node';
     this.store.query(
       `DELETE FROM property_fts WHERE rowid IN (${props} IN (SELECT value FROM json_each(?)))`,
-      [JSON.stringify([...ids])]);
+      [stringifyExact([...ids])]);
     this.counts.statements++;
   }
 
@@ -572,7 +581,7 @@ export class BulkLoader {
     // the one a user re-running the load will hit first anyway.
     const c = identifier(column);
     const clash = execute<{ v: unknown }>(this.store,
-      q`SELECT MIN(${c}) AS v FROM ${identifier(table)} WHERE ${c} IN (SELECT value FROM json_each(${value(JSON.stringify([...values]))}))`)[0];
+      q`SELECT MIN(${c}) AS v FROM ${identifier(table)} WHERE ${c} IN (SELECT value FROM json_each(${value(stringifyExact([...values]))}))`)[0];
     this.counts.statements++;
     if (clash !== undefined && clash.v !== null)
       throw new Error(`bulk load: ${table} ${column} ${JSON.stringify(clash.v)} already exists in this graph — ${remedy}`);
