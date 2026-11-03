@@ -920,7 +920,13 @@ items that change WHEN a decline fires do not.
   `…V().values('name').mergeV(__.select('k')).option(Merge.onMatch, __.select('j'))` raises over 6 traversers and
   answers over 1, with a constant, idempotent onMatch. The trunk spelling `mergeV([name:'zz']).option(onMatch,[age:1])`
   raises too. Fold it into **o-seqguard** (Writes), which already asks this, and drop its "(verify)".
-- **B4**: `limit(local,1).dedup('b')`/`range(local,1,2).dedup('a')` over a literal now drop rows where the
+- ✅ **B4 map-key collisions explain themselves** LANDED `82805dde`: ONE classifier `mapKeyCollision(key, facts, ctx,
+  liveLabel)` beside `namedBeyondMap` (`rel/lower.ts`) replaces the condition at mapTail `select(k)`, `mapHostChild`
+  and the record optional field, and records an advisory `'map-key-collision'` reason through the Substrate 0 sink,
+  so the decline names the key and the other scope (constant / label / collection) and suggests a rename;
+  `select(k,…)`, keyed `dedup(k)` and format/math tokens note it too. WHEN a decline fires is unchanged (pins in
+  `test/L4-addendum/map-key-facts.feature`, `scalar-map-scope-select.feature`,
+  `test/compiler/map-key-collision.exec.test.ts`). Remains: nothing. Original note: `limit(local,1).dedup('b')`/`range(local,1,2).dedup('a')` over a literal now drop rows where the
   reference raises (`DedupGlobalStep.java:82`, `Scoping.java:141-147`). This matches the existing
   `inject([a:1],[b:1]).dedup('a')`. Add one §17 line. Narrowing `keys` through a literal's known local window is
   compile-time only and turns the `limit(local,1).as('b').select('b')` collisions back into answers. The
