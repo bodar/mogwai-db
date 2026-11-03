@@ -858,6 +858,15 @@ Depth gaps (clean declines, record only):
    jsonb_array`. That is a data-size failure, and an internal error reaching the user. It breaks both rules:
    "a bind serves a user parameter" and "one json_each bind". `has(k, within(ns))` already binds
    `json_each(jsonb(?))`; route inject's list parameter the same way. File it in `docs/outstanding-work.md` §1.
+   ✅ **LANDED (`8a2ac4eb`, `daa577ff`).** An all-constant list (a user list parameter `inject($ns)`, or a literal
+   with no `$x` member) is encoded once in JS into the exact member encoding (`constantListBlob`,
+   `src/compiler/rel/list.ts`; Double spelling shared via `realJsonText`, `src/json-exact.ts`) and crosses as ONE
+   `jsonb(?)` bind under the parameter's name, or `jsonb('<text>')` for a literal; a lone surrogate crosses as
+   U+FFFD (§17). Pinned in `test/compiler/inject-list-param.exec.test.ts`.
+   **Remains (clean declines, no data lost):** (1) a literal lone surrogate in statement text still declines in
+   `src/sql/kernel/q.ts`, as does `addV().property('k', $xs)` for a list holding one, because that path spells the
+   collection as statement text; (2) `inject(ns).local(unfold().sum())` has no lowering (`sum(local)` works).
+   `constant($param)` does not parse, so the constant witness was measured with a literal list.
 3. **Merge `mapDrivers.driving` is K² per driver (major, `4d6be2a9`, 3 reviewers).** The `pick`, a correlated scalar
    that sorts by `cappedCount` with LIMIT 1, sits in a WHERE over the exploded ENTRIES. So a K-entry map pays K²
    capped probes. 30-key maps: 2.6 → 19 s (1k → 8k), trunk 1.4 → 9.7 s. One 1000-entry map spends 1.8 s in the
