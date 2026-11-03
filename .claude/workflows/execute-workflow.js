@@ -51,11 +51,13 @@ mogwai-db (TinkerPop 4 Gremlin compiled to SQLite). CLAUDE.md is injected — it
 // One rubric for every reviewer and the skeptic, so severity cannot drift between prompts.
 const RUBRIC = `
 REACH (state it for every issue, naming the query): common = an ordinary app query (has/out/in/values/project/group/order/dedup/count, select/where over labels, property/addV/addE/mergeV upserts) at realistic sizes; plausible = real but less usual (side effects, map-valued properties, choose/coalesce/optional arms, federate, parameters at depth); contrived = only a constructed composition reaches it (e.g. a label, a map key and a side effect sharing one name; a label bound to null in one arm; sample() under nested coupling barriers). The 2026-11-03 audit found the loop spending ~650 lines and most of its fix-on-fix churn on contrived reach — do not repeat that.
+WHERE PROBES COME FROM: the space of compositions is infinite, so a reviewer can always construct one more — that is the generator, not evidence about the system. Draw probes from (1) the .feature corpus: scenarios that use the changed steps, and their one-step neighbours; (2) ordinary app queries over the feature at realistic sizes; (3) L5 random traversals restricted to realistic shapes. A shape you had to CONSTRUCT (two names colliding, a null bound in one arm, barriers nested for their own sake) is contrived: report it with reach contrived and it is counted and dropped, never recorded as work.
+DESIGN-SMELL SIGNALS (report as major, kind special-case, whatever the reach): a fix that adds a peephole, a next-step lookahead or a hand-written per-shape list where a fact should decide; the same common-reach wrong answer reappearing in a new place; a common query getting slower or gaining a per-row term.
 SEVERITY (use exactly):
-- blocker: a concrete traversal, NEWLY REACHABLE through this change (trunk declined it, answered it correctly, or ran it in linear time), that now gives a genuinely WRONG answer (rows, counts, elements, number class), crashes, leaks an internal or bare Error, declines on data size, or runs SUPER-LINEAR in traverser/row count (scaling probe ratio above ≈16× from N≈1k to N≈8k). Newly reachable is the whole test: it is a blocker EVEN WHEN the root cause predates this commit — this commit is what puts it in front of users. Contrived reach is NEVER a blocker: record it as a minor marked contrived, with the query, unless the fix is a deletion or a consolidation onto an existing authority. Must include the traversal, its reach, and either what we return vs what the reference returns, or the two timings.
+- blocker: a concrete traversal, NEWLY REACHABLE through this change (trunk declined it, answered it correctly, or ran it in linear time), that now gives a genuinely WRONG answer (rows, counts, elements, number class), crashes, leaks an internal or bare Error, declines on data size, or runs SUPER-LINEAR in traverser/row count (scaling probe ratio above ≈16× from N≈1k to N≈8k). Newly reachable is the whole test: it is a blocker EVEN WHEN the root cause predates this commit — this commit is what puts it in front of users. Contrived reach is NEVER a blocker and never a follow-up: report it with reach contrived (it is counted and dropped) unless the fix is a deletion or a consolidation onto an existing authority. Must include the traversal, its reach, and either what we return vs what the reference returns, or the two timings.
 - major: built as a special case where an existing/obvious generic seam was available; duplicates an existing authority; Java-execution emulation with real SQL/JS/runtime cost; a per-row SQL term with no user-visible reason.
 - major also: a fix whose cost is out of proportion to its reach — new per-row SQL, or more than ~100 src lines, for a contrived case.
-- minor: citations, tests, naming, comments, docs; and every contrived-reach wrong answer.
+- minor: citations, tests, naming, comments, docs.
 NOT a defect: a divergence a user would find sensible under JS/SQLite semantics (see §17); a clean decline of a legal-but-unsupported composition (report it as a depth gap, minor).`
 
 const DESIGN = { type: 'object', properties: {
@@ -83,8 +85,10 @@ const BUILD = { type: 'object', properties: {
   needs_item: { type: 'string', description: 'for deferred: key of an item in THIS round that would unblock it, if any' },
   remaining: { type: 'string' }, human_question: { type: 'string' } }, required: ['status', 'summary'] }
 const ISSUES = { type: 'object', properties: { issues: { type: 'array', items: { type: 'object', properties: {
-  severity: { type: 'string', enum: ['blocker', 'major', 'minor'] }, detail: { type: 'string' }, file: { type: 'string' } },
-  required: ['severity', 'detail'] } }, probes_run: { type: 'number' } }, required: ['issues'] }
+  severity: { type: 'string', enum: ['blocker', 'major', 'minor'] }, detail: { type: 'string' }, file: { type: 'string' },
+  reach: { type: 'string', enum: ['common', 'plausible', 'contrived'], description: 'who would write the query that shows it (see REACH)' },
+  kind: { type: 'string', enum: ['wrong-answer', 'super-linear', 'decline', 'special-case', 'other'] } },
+  required: ['severity', 'detail', 'reach', 'kind'] } }, probes_run: { type: 'number' } }, required: ['issues'] }
 const TRIAGE = { type: 'object', properties: { confirmed: { type: 'array', items: { type: 'object', properties: {
   detail: { type: 'string' }, why: { type: 'string' } }, required: ['detail', 'why'] } } }, required: ['confirmed'] }
 const LAND = { type: 'object', properties: { pushed: { type: 'boolean' }, pushed_sha: { type: 'string' }, ci_passed: { type: 'boolean' }, notes: { type: 'string' } }, required: ['pushed', 'notes'] }
@@ -102,7 +106,7 @@ const LENSES = [
   { key: 'depth', prompt: (it, b) => `${PRINCIPLES}${RUBRIC}
 You are the DEPTH reviewer — adversarial. Item: ${it.title}. Commit ${b.sha}; diff \`git -C ${REPO} log -p HEAD..${b.sha}\` (or origin/trunk..). Builder's summary: ${b.summary}
 ${probeCheckout(b.sha)}
-Try to REFUTE it. Embed each newly supported form at depth (the list under GENERIC AT DEPTH), over each traverser shape it admits (element, property, scalar, list, map, path), plus empty input, nulls, self-loops and multiplicity (traversers are multisets). Aim for ~20 probes, and spend at least HALF of them on COMMON shapes at realistic sizes (the ordinary queries a user of this feature writes, at N≈1k and 8k), not on deep compositions. Label each finding's reach. For each that ANSWERS, check the rows against the reference's WHAT (the .feature corpus, then gremlin-core) — not Java's evaluation order. Also: does anything trunk DECLINED now answer differently from the reference?` },
+Try to REFUTE it, with probes drawn as WHERE PROBES COME FROM says. Aim for ~20: at least half ordinary queries a user of this feature writes, at N≈1k and 8k; the rest the corpus scenarios touching the changed steps and their one-step neighbours (one level of the GENERIC AT DEPTH hosts, each traverser shape the step admits, empty input, self-loops, multiplicity). Do not construct name collisions or nest barriers for their own sake. Label each finding's reach. For each that ANSWERS, check the rows against the reference's WHAT (the .feature corpus, then gremlin-core) — not Java's evaluation order. Also: does anything trunk DECLINED now answer differently from the reference?` },
   { key: 'sympathy', prompt: (it, b) => `${PRINCIPLES}${RUBRIC}
 You are the SYMPATHY + SUBSTRATE reviewer. Item: ${it.title}. Commit ${b.sha}; diff \`git -C ${REPO} log -p HEAD..${b.sha}\`. Approved design: seam=${it.seam}; sympathy=${it.sympathy}. Builder's summary: ${b.summary}
 Builder's scaling report: ${b.scaling || 'NONE — treat as unmeasured and measure it yourself'}
@@ -173,8 +177,12 @@ Build at depth in the seam, probe a few deeper compositions, add tests the ladde
       for (let fix = 0; ; fix++) {
         const reviews = await parallel(lenses.map((l) => () => agent(l.prompt(it, b), { label: `review:${l.key}:${it.key}${fix ? '#' + fix : ''}`, phase: 'Review', schema: ISSUES }).then((r) => ({ lens: l, issues: r ? r.issues : [] }))))
         const found = reviews.filter(Boolean)
-        // Majors are all kept; minors are capped so the plan doc does not fill with noise. The cap is logged.
-        const nonBlocking = found.flatMap((r) => r.issues.filter((i) => i.severity !== 'blocker').map((i) => ({ lens: r.lens.key, ...i })))
+        // Contrived reach is counted, not recorded (a design smell is kept whatever its reach). Majors are all kept;
+        // minors are capped so the plan doc does not fill with noise. Both drops are logged.
+        const all = found.flatMap((r) => r.issues.filter((i) => i.severity !== 'blocker').map((i) => ({ lens: r.lens.key, ...i })))
+        const nonBlocking = all.filter((i) => i.reach !== 'contrived' || i.kind === 'special-case')
+        out.contrived = (out.contrived || 0) + all.length - nonBlocking.length
+        if (all.length > nonBlocking.length) log(`${it.key}: dropped ${all.length - nonBlocking.length} contrived-reach finding(s)`)
         const minors = nonBlocking.filter((i) => i.severity === 'minor')
         if (minors.length > MAX_MINORS) log(`${it.key}: kept ${MAX_MINORS} of ${minors.length} minor follow-ups`)
         out.followups.push(...nonBlocking.filter((i) => i.severity === 'major'), ...minors.slice(0, MAX_MINORS))
@@ -241,6 +249,10 @@ ROUND RESULTS:\n${JSON.stringify({ results, notBuilt: notBuilt.map((d) => ({ key
     new_majors: followups.filter((f) => f.severity === 'major').length,
     new_minors: followups.filter((f) => f.severity === 'minor').length,
     new_proposals: sweep ? sweep.proposals.length : 0,
+    // The stopping signal: wrong answers / super-linear routes a real user's query reaches. Zero in a round = converged.
+    real_findings: followups.filter((f) => f.reach !== 'contrived' && (f.kind === 'wrong-answer' || f.kind === 'super-linear')).length,
+    design_smells: followups.filter((f) => f.kind === 'special-case').length,
+    contrived_dropped: results.reduce((n, r) => n + (r.contrived || 0), 0),
   }
   allRounds.push({ round, tally, results, notBuilt, proposals: sweep ? sweep.proposals : [], record })
   log(`round ${round}: landed ${tally.landed.length}/${tally.built}, parked ${tally.parked.length}, deferred ${tally.deferred.length}; added ${tally.new_majors} majors, ${tally.new_proposals} proposals`)
@@ -258,7 +270,8 @@ ${JSON.stringify(allRounds.map((r) => ({ round: r.round, ...r.tally })), null, 1
 CONVERGING looks like: what lands closes more than review and the sweep add (weigh majors and confirmed wrong answers heavily, minors and reuse proposals lightly); prerequisites land and the items waiting on them become unblocked; parked items stop recurring; the confirmed-wrong-answers-on-trunk list shrinks.
 DIVERGING looks like: each round adds more majors/wrong answers than it resolves; the same root cause parks again (reparked is a strong signal); items keep deferring on a prerequisite no round picks; the work drifts out of ${SECTION || 'the plan'} into an ever-wider list.
 Decide:
-- continue=false when the trend is diverging for a second round, when what remains needs a human design decision, or when the section's real work is done (only minors/proposals left). Say which.
+- continue=false, reason "converged", when the latest round's real_findings is 0: no common/plausible wrong answer or super-linear route turned up, so what is left is the contrived tail, and chasing it is drift (contrived_dropped is NOT work remaining). Also continue=false when the trend is diverging for a second round, when what remains needs a human design decision, or when the section's real work is done (only minors/proposals left). Say which.
+- Watch design_smells: special-case fixes recurring, common wrong answers reappearing in new places, or common queries slowing are signs of a missing abstraction — name them in reason for the owner, and stop if they recur across two rounds.
 Surfacing PRE-EXISTING wrong answers on trunk is the run doing its job, not divergence, when they collapse onto a named substrate root with a concrete fix: count that as progress toward maturity. It is divergence only when the new majors are scattered one-offs or the same root keeps parking.
 - continue=true otherwise, with next_batch (1–${MAX_ITEMS}): fill one slot per INDEPENDENT seam — parallel agents are welcome, so be generous. Chaining is NOT a reason to shrink (the round orders items by \`after\` and a dependent simply waits for its prerequisite); shrink only when items parked or two items collided on ONE seam — fold those into one item instead.
 - Rank by REACH: common-reach wrong answers, data-size declines and super-linear routes first; a family whose witnesses are all contrived is low priority however many root causes it surfaces — never the focus.
