@@ -7,6 +7,7 @@ import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, elementCols, eq, labelSetArgs, meta, renumber, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
+import type { ColMeta } from '../../../rel/types.ts';
 import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import type { RelFraming } from '../framing.ts';
@@ -15,6 +16,7 @@ import { CONSTANT } from '../predicate.ts';
 import { extendPath, pathCarried } from '../path.ts';
 import { BULK, ENCOUNTER, encounterOf, FROM_V, fromVOf, type ChainCtx } from './chain.ts';
 import { remintOrder } from '../lower.ts';
+import { ensureBulk } from './branch.ts';
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -29,71 +31,74 @@ export function reSource(
     ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred })
     : seeded.scan;
   // Only the new id crosses the join. Keeping the source row's physical columns would collide with
-  // an element input's `id`/`uid` columns before the payload replacement below.
+  // an element input's `id`/`uid` columns before the payload replacement (`crossCarried`).
   const ids = make.project({
     id: fresh('rs'), input: source, channels: [], type: typeOf(meta('sid', 'int')),
     exprs: [['sid', col(source.id, 'id')]],
   });
-  // GraphStep splits one incoming traverser into element traversers. A scalar parent represents
-  // one implicitly, whereas an element relation must carry it explicitly so a later movement can
-  // collapse correctly. Promote it *before* the join: inventing the channel on the join result is
-  // neither side's contract and leaves an Aggregate with no input bulk to sum.
-  const parent = input.channels.some((channel) => channel.role === 'bulk') ? input : (() => {
-    const channels = withChannel(input.channels, BULK[0]!);
-    const payload = input.type.cols.filter((column) => !input.channels.some((channel) => channel.col === column.name));
-    return make.project({
-      id: fresh('rp'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
-      exprs: [
-        ...payload.map((column) => [column.name, col(input.id, column.name)] as const),
-        ...channels.map((channel) => [channel.col,
-          channel.role === 'bulk' ? compilerInt(1) : col(input.id, channel.col),
-        ] as const),
-      ],
-    });
-  })();
-  const arrivingEncounter = encounterOf(parent.channels);
-  // A re-source with no arriving position is the one position-minting case: GraphStep's iterator
-  // visits the scanned elements in rowid order, so its id is the deterministic base sequence.
-  // Mint AFTER the cross join rather than pretending the parent carried it: the Join contract only
-  // preserves channels from its left input, while Project is the sole node allowed to declare one.
-  // In a child scope this repeats the source sequence per parent, which is exactly what the later
-  // per-origin window reads; a root chain that needs order has already seeded its source position.
-  const channels = !arrivingEncounter && ctx.ordered
-    ? withChannel(parent.channels, ENCOUNTER)
-    : parent.channels;
+  // GraphStep's iterator visits the scanned elements in rowid order, so the source id is the ordinal;
+  // every origin meets every element, so an arriving position is always re-minted (`several`).
+  const parent = ensureBulk(input, fresh);
   const crossed = make.join({
     id: fresh('j'), left: parent, right: ids, join: 'cross', channels: parent.channels,
     type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
-  const project = (): Rel => make.project({
-      id: fresh('c'), input: crossed, channels, type: typeOf(...elementCols(channels)),
-      exprs: [
-        ['id', col(crossed.id, 'sid')],
-        ...channels.map((channel) => [channel.col,
-          channel.role === 'encounter' ? col(crossed.id, 'sid') : col(crossed.id, channel.col),
-        ] as const),
-      ],
-    });
-  if (!arrivingEncounter) return { elem, rel: project() };
-  // Parent outer iteration then source rowid is the iterator order GraphStep realizes. `renumber`
-  // consumes those temporary keys and leaves a single total encounter column on the result.
-  const carried = channels.filter((channel) => channel.role !== 'encounter');
+  return { elem, rel: crossCarried(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, ctx, fresh) };
+}
+
+/**
+ * GRAPHSTEP'S CARRIED-CHANNEL CROSSING — the one contract every re-source keeps (`reSource`'s cross join,
+ * `reSourcedOnce`'s per-origin draw) when an origin traverser splits into the elements it meets: its
+ * CARRIED channels cross, its payload is replaced by the met row's, and its position is re-expressed.
+ *
+ * - `parent` is the origins with their bulk ALREADY promoted (`ensureBulk`). GraphStep splits one
+ *   traverser into element traversers; a scalar parent represents one implicitly, whereas an element
+ *   relation must carry it explicitly so a later movement can collapse correctly. The promotion sits on
+ *   the parent BEFORE any join: inventing the channel on the join result is neither side's contract and
+ *   leaves an Aggregate with no input bulk to sum. `parent` is read only for its channels.
+ * - `met` is the meeting: every parent carried column, the `ordinal` (the met row's place in the
+ *   iterator order GraphStep realizes) and each payload source column.
+ * - `payload` maps each output payload column to its source column on `met`.
+ * - `several`: can one parent row meet several rows? Then an ARRIVING position is re-minted origin-major,
+ *   then by `ordinal` (`renumber`, one window). Otherwise every row keeps its parent's position and no
+ *   window is paid for.
+ *
+ * With no arriving position, the ordinal IS the position where the chain needs one. It is minted AFTER the
+ * join rather than pretending the parent carried it: the Join contract only preserves channels from its
+ * left input, while Project is the sole node allowed to declare one. In a child scope it repeats per
+ * parent, which is exactly what a later per-origin window reads.
+ */
+export function crossCarried(
+  parent: Rel, met: Rel, ordinal: string, payload: readonly (readonly [ColMeta, string])[], several: boolean,
+  ctx: ChainCtx, fresh: Minter,
+): Rel {
+  const arriving = encounterOf(parent.channels);
+  const mint = !arriving && ctx.ordered;
+  const channels = mint ? withChannel(parent.channels, ENCOUNTER) : parent.channels;
+  const out = [...payload.map(([column]) => column), ...carriedCols(channels)];
+  const source = (name: string): Expr => {
+    const paid = payload.find(([column]) => column.name === name);
+    return col(met.id, paid ? paid[1] : mint && name === ENCOUNTER.col ? ordinal : name);
+  };
+  if (!arriving || !several) return make.project({
+    id: fresh('c'), input: met, channels, type: typeOf(...out),
+    exprs: out.map((column) => [column.name, source(column.name)] as const),
+  });
+  // Parent outer iteration, then the ordinal: `renumber` consumes the two keys and leaves a single total
+  // encounter column on the result.
+  const kept = out.filter((column) => column.name !== arriving.col);
   const staged = make.project({
-    id: fresh('c'), input: crossed, channels: [],
-    type: typeOf(meta('id', 'int'), ...carriedCols(carried), meta('parent_encounter', 'int'), meta('source_id', 'int')),
+    id: fresh('c'), input: met, channels: [],
+    type: typeOf(...kept, meta('parent_encounter', 'int'), meta('source_order', 'int')),
     exprs: [
-      ['id', col(crossed.id, 'sid')],
-      ...carried.map((channel) => [channel.col, col(crossed.id, channel.col)] as const),
-      ['parent_encounter', col(crossed.id, arrivingEncounter.col)], ['source_id', col(crossed.id, 'sid')],
+      ...kept.map((column) => [column.name, source(column.name)] as const),
+      ['parent_encounter', col(met.id, arriving.col)], ['source_order', col(met.id, ordinal)],
     ],
   });
-  return {
-    elem,
-    rel: renumber(staged, [
-      { expr: col(staged.id, 'parent_encounter'), dir: 'asc' },
-      { expr: col(staged.id, 'source_id'), dir: 'asc' },
-    ], elementCols(channels), channels, fresh),
-  };
+  return renumber(staged, [
+    { expr: col(staged.id, 'parent_encounter'), dir: 'asc' },
+    { expr: col(staged.id, 'source_order'), dir: 'asc' },
+  ], out, channels, fresh);
 }
 
 /**

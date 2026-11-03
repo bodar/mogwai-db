@@ -39,11 +39,11 @@ import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
-import { BRANCH_HOSTS, sameFraming } from './branch.ts';
+import { BRANCH_HOSTS, ensureBulk, sameFraming } from './branch.ts';
 import { RANDOM_ORDER } from './slice.ts';
-import { BULK, ENCOUNTER, bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
-import { movement } from './movement.ts';
+import { crossCarried, movement } from './movement.ts';
 import { nondeterministic } from '../ranked-order.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
@@ -1655,12 +1655,14 @@ export function reSourcedOnce(
   const size = make.aggregate({ id: fresh('sn'), input: candidates, channels: [], type: typeOf(int(M)), groupBy: [], aggs: [[M, count]] });
 
   // THE ORIGIN ROWS, numbered within their origin and fenced (the draw and the join back both read the
-  // number), and each origin's row count R.
+  // number), and each origin's row count R. Their bulk is promoted HERE, on the origins before any join,
+  // as GraphStep's crossing requires (`crossCarried`).
   const R = 'sample_r', RN = 'sample_rows';
-  const carried = carriedCols(input.channels);
-  const arriving = encounterOf(input.channels);
-  const ranked = rowNumberWindow(input, R, input.channels, {
-    partitionBy: [col(input.id, origin.col)], orderBy: arriving ? [{ expr: col(input.id, arriving.col), dir: 'asc' }] : [],
+  const parent = ensureBulk(input, fresh);
+  const carried = carriedCols(parent.channels);
+  const arriving = encounterOf(parent.channels);
+  const ranked = rowNumberWindow(parent, R, parent.channels, {
+    partitionBy: [col(parent.id, origin.col)], orderBy: arriving ? [{ expr: col(parent.id, arriving.col), dir: 'asc' }] : [],
   }, fresh);
   const rows = fence(project(ranked, [...carried, int(R)]));
   const O = 'sample_o';
@@ -1759,29 +1761,10 @@ export function reSourcedOnce(
     type: typeOf(...row.type.cols, ...candidates.type.cols), on: eq(col(candidates.id, K), col(row.id, KI)),
   });
 
-  // The origins' CARRIED channels cross; their payload is replaced by the candidate's (GraphStep's split).
-  // A bulk is promoted and a position minted where the chain needs one, as `reSource` does.
-  const withBulk = input.channels.some((channel) => channel.role === 'bulk') ? input.channels : withChannel(input.channels, BULK[0]!);
-  const mint = !arriving && ctx.ordered;
-  const channels = mint ? withChannel(withBulk, ENCOUNTER) : withBulk;
-  const cols = [...payload, ...carriedCols(channels)];
-  // Each output column off the meeting: a promoted bulk is 1, a minted position is the candidate's number.
-  const valueOf = (name: string): Expr => input.channels.some((channel) => channel.col === name) || payload.some((column) => column.name === name)
-    ? col(met.id, name) : name === ENCOUNTER.col && mint ? col(met.id, K) : compilerInt(1);
-  // ONE pick per origin keeps its row's position; several re-mint it origin-major, then candidate order —
-  // the iterator order GraphStep realizes (`reSource`).
-  const rel = n > 1 && arriving ? (() => {
-    const staged = make.project({
-      id: fresh('ss'), input: met, channels: [],
-      type: typeOf(...cols.filter((column) => column.name !== arriving.col), meta('parent_encounter', 'int'), int(K)),
-      exprs: [...cols.filter((column) => column.name !== arriving.col).map((column) => [column.name, valueOf(column.name)] as const),
-        ['parent_encounter', col(met.id, arriving.col)], [K, col(met.id, K)]],
-    });
-    return renumber(staged, [{ expr: col(staged.id, 'parent_encounter'), dir: 'asc' }, { expr: col(staged.id, K), dir: 'asc' }], cols, channels, fresh);
-  })() : make.project({
-    id: fresh('sr'), input: met, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, valueOf(column.name)] as const),
-  });
+  // GraphStep's crossing (`crossCarried`): the origins' carried channels cross, their payload is replaced by
+  // the candidate's, and the candidate's number K is the ordinal. ONE pick per origin keeps its row's
+  // position; several re-mint it origin-major, then candidate order.
+  const rel = crossCarried(parent, met, K, payload.map((column) => [column, column.name] as const), n > 1, ctx, fresh);
   return continueAs(rel, rooted.framing, steps, drawAt + 1, bulked, ctx, fresh, labels);
 }
 

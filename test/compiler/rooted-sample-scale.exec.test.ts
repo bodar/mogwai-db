@@ -99,6 +99,26 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(count(store, 'g.V().local(__.V().sample(0)).count()')).toBe(0);
   });
 
+  // The draw and the plain re-source share ONE crossing (`crossCarried`, `rel/lower/movement.ts`): the origin's
+  // bulk is promoted before the join and carried into a later movement, an arriving position is re-minted
+  // origin-major then candidate order, and a carried label survives. n >= the candidates makes it deterministic.
+  test('the draw crosses the origin channels as a re-source does — bulk, position, label', () => {
+    const modern = seededStore();
+    const names = (q: string) => bare(run(modern, q)).map((row: { v: unknown }) => row.v);
+    // Within one origin the draw imposes no order, so each origin's pair is compared as a set.
+    const pairs = (q: string) => {
+      const all = names(q);
+      return Array.from({ length: all.length / 2 }, (_, i) => all.slice(2 * i, 2 * i + 2).sort());
+    };
+    const perOrigin = Array(6).fill(['lop', 'ripple']);
+    expect(pairs("g.V().order().by('name').local(__.V().hasLabel('software').sample(2)).values('name')")).toEqual(perOrigin);
+    expect(pairs("g.V().order().by('name').V().hasLabel('software').values('name')")).toEqual(perOrigin);
+    // Four persons per origin, out('created'): marko 1 + josh 2 + peter 1, six origins — summed through the bulk.
+    expect(count(modern, "g.V().local(__.V().hasLabel('person').sample(4)).out('created').count()")).toBe(24);
+    expect(names("g.V().order().by('name').as('a').local(__.V().hasLabel('software').sample(2)).select('a').values('name')"))
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas'].flatMap((name) => [name, name]));
+  });
+
   test('the draw composes at depth — a branch arm, a union, a scalar prefix, a later hop, an outer label', () => {
     const store = graph(40, 40);
     expect(count(store, "g.V().hasLabel('holder').local(__.union(__.V().hasLabel('person').sample(1), __.V().hasLabel('software').sample(1))).count()")).toBe(80);
