@@ -85,3 +85,24 @@ describe('select(k) over a per-row scalar stream — Map first only where nothin
     expect(bare(run(seededStore(), "g.V().project('name','age').by('name').by('age').select('name')")).length).toBe(6);
   });
 });
+
+// A `choose` arm `select(k)` of a side-effect constant: the constant's presence is its HOST's (`hostPresence`,
+// `constantSelectChild`), so over a host that is always there the arm is `'always'` — the choice's meet
+// answers and no per-row `IS NOT NULL` is spent on a literal. The end-to-end answers, at depth, are
+// test/L4-addendum/side-effect-choose-arm.feature.
+describe('a side-effect constant read in a choose arm', () => {
+  test('over an always-present host: no presence term, and the choice answers', () => {
+    const q = "g.withSideEffect('k',5).V().map(__.choose(__.hasLabel('person'), __.select('k'), __.constant(0)))";
+    expect(read(q).sql).not.toMatch(/IS NOT NULL/i);
+    expect(values(run(seededStore(), q)).sort()).toEqual([0, 0, 5, 5, 5, 5]);
+  });
+
+  test('over a may-be-absent host the arm states its presence, so the choice still declines', () => {
+    expect(() => run(seededStore(),
+      "g.withSideEffect('k',5).V().optional(__.out('knows').as('b')).map(__.select('b').choose(__.hasLabel('person'), __.select('k'), __.constant(0)))",
+    )).toThrow(UnsupportedTraversal);
+    // …while the bare read over the same host keeps answering, gated on the label.
+    expect(bare(run(seededStore(), "g.withSideEffect('k',5).V().optional(__.out('knows').as('b')).project('x').by(__.select('b').select('k'))")))
+      .toHaveLength(7);
+  });
+});

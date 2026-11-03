@@ -2551,11 +2551,17 @@ const constantSelected = (step: IRStep, host: ChildHost, ctx: ChainCtx): Arg | u
 
 /** The body continuing from the constant `c` as ONE `{t,v}` node (`constantNode`, the stored encoding a
  *  selected map entry has), gated on the host so an ABSENT host (an unbound label's NULL) does not produce.
- *  A constant the encoder cannot spell declines. */
+ *  A constant the encoder cannot spell declines, and so does a null one (`constantNode` answers `null`).
+ *
+ *  So the node is non-null EXACTLY where the host is present: its presence is `hostPresence(host)` — the
+ *  authority `gatedByHost` consults — never a per-row `node IS NOT NULL`. Over a host that cannot be absent
+ *  that is `ALWAYS_PRODUCTIVE`, so a `choose` arm reading the constant meets as `'always'` (`meetPresence`);
+ *  over a may-be-absent host it is the host's own predicate. */
 function constantSelectChild(body: readonly IRStep[], host: ChildHost, constant: Arg, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   const value = constantNode(constant.value, constant.type ?? null, constant.name ?? null);
-  const node = value && gatedByHost(host, value);
-  return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+  const held = hostPresence(host);
+  if (!value || !held) return null;
+  return selectedNodeChild(body, caseWhen(held, value), { kind: 'scalar' }, host.row, ctx, fresh, held);
 }
 
 /**
@@ -2611,10 +2617,16 @@ export function readsScopeValue(step: IRStep, host: ChildHost, ctx: ChainCtx): b
 /**
  * The body CONTINUING from one selected `{t,v}` NODE (a NULL node is "no value" — the traverser drops):
  * rerooted to the value side's shape (`sideOf`'s decode) and the rest of the body run against it, with
- * the node's presence threaded onto the result. Shared by the MAP host and the per-row scalar host.
+ * the node's presence threaded onto the result. Shared by the MAP host, the per-row scalar host and a
+ * side-effect constant (`constantSelectChild`).
+ *
+ * `held` is WHERE the node is non-null — the caller's to state, defaulting to the per-row
+ * `node IS NOT NULL` a map entry needs. A caller that knows it passes it (a constant: its host's presence),
+ * and `ALWAYS_PRODUCTIVE` reports `'always'` with no gate at all (`caseWhen` elides it).
  */
 function selectedNodeChild(
   body: readonly IRStep[], node: Expr, valOf: MapOf, row: ChildHost['row'], ctx: ChainCtx, fresh: Minter,
+  held: Expr = isNot(node, compilerNull()),
 ): ChildValue | null {
   // Reroot to the value side's shape (the `sideOf` decode: a `{t,v}` scalar, a list/map blob).
   let reHost: ChildHost;
@@ -2623,9 +2635,9 @@ function selectedNodeChild(
     const vtype = jsonField(node, 't');
     // PRESENCE IS THE NODE, not its value: a Map holding `k` → null is a PRODUCTIVE null
     // (`SelectOneStep.java:62` splits a null traverser), and only a NULL node — no scope held `k` — drops.
-    const held = isNot(node, compilerNull());
+    const keyPresent: Presence = held === ALWAYS_PRODUCTIVE ? 'always' : { when: held };
     if (body.length === 1)
-      return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present: { when: held }, yields: 'one' };
+      return { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, present: keyPresent, yields: 'one' };
     // A body CONTINUING past it runs over a host whose null IS a value (`'always'`), so a null entry
     // reaches `constant('x')`/`fold()` as the reference's null traverser does; the KEY's presence is then
     // gated onto the result — and since the gate is a CASE around the whole recursed value, a tail that
@@ -2637,7 +2649,7 @@ function selectedNodeChild(
     const present = rerooted.present;
     if (present === 'unknown') return null;
     if (present === 'value-nullness') return { ...gated, present };
-    if (present === 'always') return { ...gated, present: { when: held } };
+    if (present === 'always') return { ...gated, present: keyPresent };
     return { ...gated, present: { ...present, when: caseWhen(held, present.when, compilerInt(0)) } };
   } else if (valOf.kind === 'list') {
     reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row };

@@ -443,7 +443,9 @@ lists below. Landed:
 - **C1** `1aeb8683` group's null sort key only where a member can be a productive null. **C2** `024a9440`
   `landedOnce` deleted; a stated `by()` null drops (§17 "A null `by()` value"). **C3** `96bdf92b` a re-sourced
   body's null first value is absent (§17). **C4** `16401f5f` a `V()`/`E()` body over a may-be-absent host declines
-  (`RESOURCE_UNDER_ABSENT`). **C5** `61d41586` a choice's presence is `meetPresence` of its arms.
+  (`RESOURCE_UNDER_ABSENT`). **C5** `61d41586` a choice's presence is `meetPresence` of its arms. (Its commit
+  message says `meetPresence` "now folds a stated arm to 'unknown'"; it already did — C5 deleted only
+  `scalarChoice`'s per-row presence CASE, `choicePresence`.)
 - **D** `7ed8f578` map/set-valued equality operands and merge criteria decline from the query text.
 - **cr-land-once** `5a722faf` `once()` (`rel/build.ts`), math() variables its first consumer — this also
   LANDED **cr-fu1** (the math-variable re-inlining: ten uses 59,949 → 4,665 bytes). **cr-fu2** `39aba300` (with

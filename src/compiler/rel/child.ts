@@ -333,7 +333,10 @@ export const mayBeAbsent = (host: ChildHost | Subject): boolean => presentOfHost
  *  arm `'always'` ⟹ `'always'`; any arm `'unknown'` or STATED (`{ when }`) ⟹ `'unknown'` (the consumer
  *  declines); otherwise the chosen value's nullness. A stated arm cannot fold into the meet — a productive
  *  null under it would read as absent — and keeping it would need a per-row presence CASE mirroring the
- *  value's, so a choice with one declines instead. */
+ *  value's, so a choice with one declines instead. So a PRODUCER whose presence is the constant truth must
+ *  say `'always'`, not `{ when: ALWAYS_PRODUCTIVE }` or a test that folds to it: a side-effect constant over
+ *  an always-present host does (`constantSelectChild`, `lower/reduction.ts`), which is what keeps a
+ *  `choose(…, select(k), …)` arm answering. */
 export const meetPresence = (arms: readonly Presence[]): Presence =>
   arms.every((p) => p === 'always') ? 'always'
     : arms.some((p) => p === 'unknown' || typeof p === 'object') ? 'unknown' : 'value-nullness';
