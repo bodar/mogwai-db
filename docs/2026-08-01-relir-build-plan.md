@@ -547,11 +547,6 @@ F last. Each step lands `mise run ci` green on its own.
   Original spec (r6-fu8 = option C) — decline, from the QUERY TEXT, any mergeV/mergeE match
   criterion or equality predicate (has/is/within/without/eq/neq, `where(eq)`) whose operand is a map- or set-valued
   literal or parameter. Message names map-valued equality and why (entry order). ≈+20, no per-row SQL.
-- **E cleanup-never-bound-label** (verify) — `g.V().select('a')` with no `as('a')`/side effect/collection named `a`
-  anywhere in the query: if it silently returns `[]`, decline from the query text naming the unbound label.
-  **NEEDS-HUMAN (cleanup round, not built):** verified — the empty answer is the reference's own, pinned by 9
-  `Select.feature` scenarios that pass today; declining drops 9 L3 passes. Reviewer recommends CLOSING E. The
-  question is under "Needs a human decision".
 - **F cleanup-plan-doc** (last, docs only) — drop S9 and its tree, r7-fu1 (+r7-reuse2), r7-fu2, r7-fu6 (now
   SUPERSEDED by C2, which made a stated null's drop the §17 rule for order/dedup/where/sack — close it, do not
   build it; likewise re-read rf3-static-null-is against C2), M2,
@@ -564,12 +559,6 @@ F last. Each step lands `mise run ci` green on its own.
 
 ### Needs a human decision
 
-- **E cleanup-never-bound-label** (asked by the cleanup round, verbatim): "The empty answer for `g.V().select('a')`
-  with no as('a') anywhere is the reference's own pinned answer in 9 Select.feature scenarios (g_V_selectXaX,
-  g_V_selectXaX_count, g_V_selectXa_bX and the Pop.first/last/all variants), all passing today. Declining drops 9 L3
-  passes. The reviewer recommends keeping the answer and closing E: it is the specified result, the shape is
-  contrived, and nothing about it is internally inconsistent. Build the decline anyway (moving the L3 baseline), or
-  close E?"
 - **r6-fu8 mergev-canonical-map-equality** — `mergeV` compares a map/set-valued property by raw JSON spelling
   (`g.inject([b:2,a:[x:1,y:2]],[a:[y:2,x:1]]).mergeV()`). Option A: STORE entries in canonical key order (reads
   come back key-sorted, one §17 line, equality and seeks stay index-backed). Option B: keep insertion order and
