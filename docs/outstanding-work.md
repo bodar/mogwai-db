@@ -26,6 +26,12 @@ Remains: nothing.
 UNION ALL of that stream with the literal relation, the injected rows minted as fresh traversers
 (`injectTail`/`injectedRows` in `src/compiler/rel/lower.ts`). L3 1896 → 1904. Remains: nothing.
 
+**List-host member order in a `by()` body (l3-select-mixed-by, ✅ landed, d4e3312f).** `unfold()` of an
+element list inside a `by()`/child body keeps LIST order: the correlated element explode mints the
+json_each `key` as its encounter channel like the scalar/map/list arms (`correlatedListMembers`,
+`src/compiler/rel/list.ts`), so the re-collecting `fold()` and a body `tail(1)` read list order.
+L3 1904 → 1907. Remains: nothing.
+
 ## 1. Wrong answers today
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
