@@ -448,10 +448,10 @@ lists below. Landed:
 - **cr-land-once** `5a722faf` `once()` (`rel/build.ts`), math() variables its first consumer — this also
   LANDED **cr-fu1** (the math-variable re-inlining: ten uses 59,949 → 4,665 bytes). **cr-fu2** `39aba300` (with
   B3). **cr-fu6** `5f50072f` `SHARED_DRAW` only for a many-row host, judged by `rowBounds`.
-- **F** (this edit) the plan folded: S9 and its tree, r7-fu1 (+r7-reuse2), r7-fu2, r7-fu6, M2, r2-gap-S2, S6.1 and
+- ✅ **F** LANDED `5aeb46bf` (docs only; mechanism: this section + "Laws found working this list") — the plan folded: S9 and its tree, r7-fu1 (+r7-reuse2), r7-fu2, r7-fu6, M2, r2-gap-S2, S6.1 and
   r4-ru7 (done) dropped; r4-fu0 folded into rf3-fuse-write; S9's live witnesses promoted; the contrived residue
   moved to its own bucket; both `### Next round` sections folded in. **S9-blk** was re-probed at `5bc85fbd`
-  and is CLOSED: `g.V().project('x').by('age').math('_ + 1').by(select('x'))` answers `[30,28,33,36]`, no raise.
+  and is CLOSED: `g.V().project('x').by('age').math('_ + 1').by(select('x'))` answers `[30,28,33,36]`, no raise. Remains: nothing (Tier B is an owner question under "Needs a human decision").
 - **E** CLOSED by the owner (`f2e6e4c6`): `g.V().select('a')` with no `as('a')` keeps the reference's empty
   answer, pinned by 9 `Select.feature` scenarios; no decline built.
 
