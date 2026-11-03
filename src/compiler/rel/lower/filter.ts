@@ -9,7 +9,7 @@ import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
-import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { MAPPING_TERMINAL, producesWithoutInput } from '../../ir/productivity.ts';
 import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
@@ -559,7 +559,17 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
    * must decline it rather than answer the rows-right/shape-wrong question.
    */
   if (step.name === 'is') {
-    if (subject.kind !== 'scalar' || args.length !== 1 || collectionAssert(step)) return null;
+    // An ELEMENT or PROPERTY traverser's GType is its framing's (`Elem`, the property's owner), so a type
+    // test over one is `typeOfExpr`'s static fold — `V().is(typeOf(GType.VERTEX))`, an edge property's
+    // `PROPERTY` — and anything else `is()` would compare has no value operand here, so it declines.
+    // A subject that is ABSENT on some rows (a label bound on some, `present`) is not certainly of its
+    // kind on those rows, so it declines too rather than fold a type onto a missing traverser.
+    if (subject.kind === 'element' || subject.kind === 'property') {
+      if (subject.kind === 'element' && subject.present) return null;
+      const gtype = subject.kind === 'element' ? subject.elem : subject.ownerElem === 'vertex' ? 'vproperty' : 'property';
+      return framingTypeOf(step, gtype) ?? null;
+    }
+    if (args.length !== 1 || collectionAssert(step)) return null;
     return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh,
       (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
   }

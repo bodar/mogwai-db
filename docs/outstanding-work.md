@@ -312,6 +312,14 @@ Beside the RelIR substrate:
   draw would be right for them. Needs the scalar seam to take its value off `reSourcedOnce`'s per-origin draw
   (a per-host row the value correlates to) — the rows path (`property`, `local`, `flatMap`) already draws
   per origin.
+- **`is(typeOf(LIST|SET))` over a LIST framing** — `fold().is(typeOf(GType.LIST))`,
+  `aggregate('x').cap('x').is(typeOf(GType.SET))`, `inject(['t']).is(typeOf(GType.LIST))`. Every other
+  framing answers through `typeOfExpr`'s static mode (`framingTypeOf`), but a list framing does not name its
+  GType: `cap()` of an undeclared `aggregate`/`store` frames a `BulkSet` (a SET by GType —
+  `BulkSet extends AbstractSet`) as a plain list, and `meetFraming` keeps the first arm's `set` marker.
+  Needs the list framing to carry the collection's GType (List / Set / BulkSet) through `listTail` and the
+  branch meet; folding off today's marker would answer `cap('x').is(typeOf(LIST))` TRUE. The two
+  `…_groupCount` witnesses also need `groupCount()` keyed by a collection value.
 - **`where(without('x'))` after `aggregate('x')`** — lower as `NOT IN (SELECT … FROM <collection>)`.
 - **`choose()` with mixed list-shaped arms** — `choose(hasLabel('person'), out().fold(), values('name').fold())`.
 - **`group().by(k).by(out().limit(1).fold())`** — a per-key `ROW_NUMBER` window.

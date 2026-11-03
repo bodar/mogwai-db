@@ -6,7 +6,7 @@ import { inferredVtype, MIXED_COMPARABLES } from './reducer.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
-import { BigDecimal, Duration, flatType, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
+import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
 /**
@@ -800,7 +800,9 @@ function textSubject(subject: Expr, type: SubjectType): Expr {
  * plausible-looking shortcut would be silently wrong for a whole type family):
  *
  * 1. **compile-time type** → CONSTANT FOLD. `count().is(P.typeOf(GType.LONG))` is `1=1` and
- *    `…(GType.STRING)` is `1=0`; neither needs to touch a row.
+ *    `…(GType.STRING)` is `1=0`; neither needs to touch a row. The same mode answers over a stream whose
+ *    FRAMING names its GType (`lower.ts` `framingTypeFilter`: a map, a path, an element, a property), and
+ *    it compares by GType ASSIGNABILITY (`assignable`, `gremlin/types.ts`), not by name.
  * 2. **per-row `vtype`** → compare it, with the storage class as the fallback for a row whose `vtype`
  *    is NULL (a raw insert). Both halves are needed: the column is the only thing that distinguishes
  *    a `datetime` from a `long`, and the fallback is the only thing that answers for a legacy row.
@@ -816,26 +818,57 @@ function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null
   const raw = gtypeName(arg)?.toLowerCase();
   if (raw === undefined || raw === null) return null;
   if (raw === 'null') return binary('is', subject, compilerNull());
-  const canonical = normalizeTypeName(raw);
-  // A recognized element/token GType (vertex/edge/path/…) is valid Gremlin but a stored property
-  // scalar is never one, so it folds to FALSE. An unrecognized NAME is a real error — which means
-  // declining here, not folding, because folding would answer a question that should have thrown.
-  if (!canonical) return KNOWN_NON_VALUE.has(raw) ? CONSTANT.false : null;
-
-  if (type.kind === 'static') return normalizeTypeName(type.type) === canonical ? CONSTANT.true : CONSTANT.false;
-  const storage = STORAGE_CLASS[canonical];
-  const byStorage: Expr = storage ? binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText(storage)) : CONSTANT.false;
+  // An unrecognized NAME is a real error — which means declining here, not folding, because folding
+  // would answer a question that should have thrown.
+  const asserted = gtypeOf(raw);
+  if (!asserted) return null;
+  // A compile-time GType — a `count()`'s `long`, or the GType a non-scalar FRAMING names (a map, a path,
+  // an element, a property) — answers by assignability alone, so `count().is(typeOf(GType.NUMBER))` folds
+  // TRUE rather than comparing `long` with `number` as names.
+  if (type.kind === 'static') return assignable(asserted, gtypeOf(type.type) ?? type.type) ? CONSTANT.true : CONSTANT.false;
+  // A per-row subject is a stored value, so only a stored value type can match: an element/structure
+  // GType folds to FALSE, and an abstract one (`NUMBER`) matches any of its stored subtypes.
+  const tags = assignableFrom(asserted).filter((t): t is CanonicalType => normalizeTypeName(t) === t);
+  if (!tags.length) return CONSTANT.false;
+  const storage = [...new Set(tags.map((t) => STORAGE_CLASS[t]).filter((s): s is string => s !== null))];
+  const storageClass: Expr = { kind: 'call', fn: 'typeof', args: [subject] };
+  const byStorage: Expr = !storage.length ? CONSTANT.false
+    : storage.length === 1 ? binary('=', storageClass, compilerText(storage[0]!))
+      : { kind: 'in-list', expr: storageClass, values: storage.map(compilerText) };
   if (type.kind === 'unknown') return byStorage;
   return {
     kind: 'case',
-    whens: [[binary('is not', type.vtype, compilerNull()), binary('=', type.vtype, compilerText(canonical))]],
+    whens: [[binary('is not', type.vtype, compilerNull()), tags.length === 1
+      ? binary('=', type.vtype, compilerText(tags[0]!))
+      : { kind: 'in-list', expr: type.vtype, values: tags.map(compilerText) }]],
     else: byStorage,
   };
 }
 
-/** GTypes that name something a stored property value can never be. Valid syntax, so the answer is
- *  FALSE; an unrecognized name is an ERROR instead, and the two must not be confused. */
-const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty', 'property', 'tree', 'graph', 'path', 'binary']);
+/**
+ * `is(typeOf(X))` over a traverser whose GType its FRAMING names — a map, a path, a vertex/edge, a vertex
+ * or edge property: `typeOfExpr`'s static mode with that GType as the subject, so the answer is the ONE
+ * fold (assignability included: a VertexProperty IS a `PROPERTY`) rather than a per-tail comparison.
+ * The connectives compose (`is(P.not(P.typeOf(GType.GRAPH)))`, `typeOf(A).or(typeOf(B))`) because
+ * `predicateExpr` folds them over the same subject; a predicate with any other leaf is a VALUE comparison,
+ * which a non-scalar framing has no operand for.
+ * `undefined` where the step is not such a type test — the tail's other `is()` handling, if it has any,
+ * owns it; `null` where a leaf names no registered type (an error, so decline).
+ *
+ * The subject is a constant NON-NULL: no framing that names a GType holds a null traverser, so
+ * `typeOf(GType.NULL)` — the one leaf that reads the value — folds FALSE with the rest.
+ */
+export function framingTypeOf(step: { readonly name: string; readonly args: readonly Arg[] }, gtype: string): Expr | null | undefined {
+  const pred = step.name === 'is' && step.args.length === 1 ? step.args[0]!.value : undefined;
+  if (!isTypeTest(pred)) return undefined;
+  return predicateExpr(compilerInt(1), pred, { kind: 'static', type: gtype });
+}
+
+/** A `P` tree every leaf of which is a `typeOf` — the predicates `framingTypeOf` answers. */
+const isTypeTest = (pred: unknown): boolean =>
+  isPred(pred) && (pred.op === 'typeOf'
+    || ((pred.op === 'not' || pred.op === 'and' || pred.op === 'or') && pred.operands.length > 0
+      && pred.operands.every((o) => isTypeTest(o.value))));
 
 /**
  * A predicate over `subject`, or `null` to decline.

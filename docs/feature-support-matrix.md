@@ -51,7 +51,8 @@ Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 | `identity()`, `sample(n)` | ✅ | |
 | `simplePath`, `cyclicPath` | ✅ | |
 | `coin(p)` | ❌ | |
-| `typeOf(GType)` over a stored property | ✅ | |
+| `typeOf(GType)` over a stored property | ✅ | `LIST`/`SET`/`MAP` retype the stream to the collection; `NUMBER` covers every numeric type |
+| `is(typeOf(GType))` over a map, record, path, element or property | ✅ | ❌ over a list (`fold()`, `cap()`): the list framing names no List/Set/BulkSet GType yet |
 
 **Predicates (`P`)** — ✅ in every position a predicate is accepted.
 

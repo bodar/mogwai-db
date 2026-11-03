@@ -417,6 +417,47 @@ export function normalizeTypeName(name: string): CanonicalType | null {
   return CANONICAL.has(lc) ? (lc as CanonicalType) : null;
 }
 
+/**
+ * THE GTYPES THAT ARE NOT STORED VALUE TYPES — the structure and abstract members of `GType`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/GType.java`).
+ * A `typeOf` argument names one of these or a `CanonicalType`; anything else is unregistered — an ERROR
+ * (`CompareType.typeOf` throws `… is not a registered type`), never a FALSE. `vertexproperty` is the class's
+ * own simple name, which the registry accepts beside the enum's `VPROPERTY`.
+ */
+const STRUCTURE_GTYPES: Readonly<Record<string, string>> = {
+  vertex: 'vertex', edge: 'edge', vproperty: 'vproperty', vertexproperty: 'vproperty', property: 'property',
+  path: 'path', tree: 'tree', graph: 'graph', binary: 'binary', number: 'number',
+};
+
+/** A `typeOf` argument's GType in lowercase canonical spelling — a stored value type, else a structure
+ *  GType — or `null` for a name no registry entry spells. */
+export function gtypeOf(name: string): string | null {
+  return normalizeTypeName(name) ?? STRUCTURE_GTYPES[name.toLowerCase()] ?? null;
+}
+
+/**
+ * GTYPE ASSIGNABILITY — the GTypes a value of another GType also IS. `CompareType.typeOf` is
+ * `valueClass.isAssignableFrom(first.getClass())`, so a GType answers for its Java SUBCLASSES too, and
+ * among GType's own classes that is exactly three families: `Number` over the eight numeric classes,
+ * `Property` over `VertexProperty`, and `Map` over `Tree` (`Tree extends HashMap`). Every other GType
+ * answers for itself alone (`Set` and `List` are siblings; `Path` is neither).
+ *
+ * ONE table, read by every `typeOf` mode (`predicate.ts`): a compile-time subject asks `assignable`, a
+ * per-row one asks for the stored tags `assignableFrom` lists. It speaks GType, not Java — nothing here
+ * models a class the reference does not name as a GType.
+ */
+const SUBTYPES: Readonly<Record<string, readonly string[]>> = {
+  number: ['byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal'],
+  property: ['vproperty'],
+  map: ['tree'],
+};
+
+/** Every GType a value must have for `typeOf(asserted)` to hold — `asserted` itself and its subtypes. */
+export const assignableFrom = (asserted: string): readonly string[] => [asserted, ...(SUBTYPES[asserted] ?? [])];
+
+/** Does a value of GType `actual` satisfy `typeOf(asserted)`? Both canonical (`gtypeOf`). */
+export const assignable = (asserted: string, actual: string): boolean => assignableFrom(asserted).includes(actual);
+
 /** The canonical type to STORE for a value, given the type its carrying channel
  *  declared (`argType` — a wire DataType name or a parsed literal subtype) and the
  *  materialized JS value. The declared type wins when present (it is the truth the

@@ -15,7 +15,7 @@ import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow } from '../../rel/bounds.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
+import { collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -35,7 +35,7 @@ import { analyzeChain, chainDemandsSlice, type ChainFacts } from '../ir/analyze.
 import { someStepDeep } from '../ir/walk.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
-import { comparabilityClass, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, subjectOperand, type SubjectType, type TypedOperand, valueTheta } from './predicate.ts';
+import { comparabilityClass, CONSTANT, framingTypeOf, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, subjectOperand, type SubjectType, type TypedOperand, valueTheta } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, fencedWhereSelfContained, jsonEachSet, jsonField, jsonOf,
@@ -57,7 +57,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, collectionValue, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -499,6 +499,19 @@ function projectScalar(
   input: Rel, exprs: readonly (readonly [string, Expr])[], cols: readonly ColMeta[], framing: RelFraming, fresh: Minter,
 ): FramedRel {
   return { rel: withPayload(input, exprs, cols, fresh), framing };
+}
+
+/**
+ * `is(typeOf(…))` over a stream whose FRAMING names its GType — `framingTypeOf`'s one fold, as the tail's
+ * relation: unchanged where every row passes (no node, so a redundant assert costs nothing), an empty
+ * filter where none can. `null` declines — an `is()` that is not a type test (a value comparison has no
+ * operand on a map or a path), or a type no registry entry names.
+ */
+function framingTypeFilter(rel: Rel, step: IRStep, gtype: string, fresh: Minter): Rel | null {
+  const pred = framingTypeOf(step, gtype);
+  if (!pred) return null;
+  if (pred === CONSTANT.true) return rel;
+  return make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
 }
 
 function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | null {
@@ -1567,15 +1580,13 @@ function perRowCollectionStep(
   // `IS NOT` is null-safe: an untagged row (infer from the value) is no stored collection.
   const tagIs = (from: Rel, name: string): Expr => eq(col(from.id, tagCol), compilerText(name));
   const tagIsNot = (from: Rel, name: string): Expr => isNot(col(from.id, tagCol), compilerText(name));
-  // The MAP arm: the stored pairs array IS `MAP_COL`'s encoding, and its keys/values are self-describing
-  // `{t,v}` nodes — `selectSideEffectConstant`'s framing for the same encoding — run through `mapTail` for
-  // this ONE step.
+  // The MAP arm: the stored pairs array IS `MAP_COL`'s encoding (`collectionValue`, the one projection a
+  // stored collection retypes through), run through `mapTail` for this ONE step.
   const one = [step];
-  const mapArm = (from: Rel): Tail | null => mapTail(make.project({
-    id: fresh('prm'), input: from, channels: from.channels,
-    type: typeOf(meta(MAP_COL, 'json'), ...carriedCols(from.channels)),
-    exprs: [[MAP_COL, { kind: 'call', fn: 'json', args: [col(from.id, 'v')] }], ...from.channels.map((channel) => [channel.col, col(from.id, channel.col)] as const)],
-  }), { kind: 'scalar' }, { kind: 'scalar' }, one, 0, ctx, fresh, labels);
+  const mapArm = (from: Rel): Tail | null => {
+    const value = collectionValue(from, 'map', fresh);
+    return value.framing.kind === 'map' ? mapTail(value.rel, value.framing.keyOf, value.framing.valOf, one, 0, ctx, fresh, labels) : null;
+  };
   // Rows keep their count and their channels through every arm, so the stream's multiplicity rides on.
   const resume = (tail: Tail | null): Tail | null => tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, tail.aliases ?? labels);
 
@@ -1613,7 +1624,7 @@ function perRowCollectionStep(
   if (!maps) return null;
   const listArm = (kind: 'list' | 'set'): Tail | null => {
     const retyped = collectionRetype(base, tagCol, kind, fresh);
-    return listTail(retyped.rel, retyped.of, one, 0, ctx, fresh, labels, retyped.set);
+    return retyped.framing.kind === 'list' ? listTail(retyped.rel, retyped.framing.of, one, 0, ctx, fresh, labels, !!retyped.framing.set) : null;
   };
   const scalars = where(base, COLLECTION_TAGS.map((name) => tagIsNot(base, name)).reduce(and));
   const arms = [maps, listArm('list'), listArm('set'),
@@ -2201,30 +2212,21 @@ function scalarTail(
     if (step.name === 'is') {
       if (args.length !== 1) return null;
       // `is(typeOf(GType.LIST|SET|MAP))` is a TYPE ASSERT, not a predicate: over a scalar stream
-      // carrying a stored collection it RETYPES the stream to a list or a map, so lowering it as a
-      // filter would return the right rows framed as the wrong shape — a different question, which is
-      // the one thing this module may never answer. `collectionAssert` is the derived view of the
-      // ONE `typeOfAssert` decode (`child-shape.ts`), reused rather than re-recognized: five arms had
-      // already drifted apart decoding this inline, and a sixth copy here would be the same mistake.
-      // A TYPE ASSERT is not a predicate: `is(typeOf(LIST|SET))` RETYPES the stream to a collection, so
-      // lowering it as a filter would return the right ROWS framed as the wrong SHAPE — the one thing
-      // this module may never do. `collectionAssert` is the derived view of the ONE `typeOfAssert`
-      // decode, reused rather than re-recognized. A MAP retype needs the map shape, which this route
-      // does not have; a stream with no per-row stored type has no stored collection at all, and
-      // a generic `is()` static-folds that case.
+      // carrying a stored collection it RETYPES the stream to a list, a set or a map, so lowering it as
+      // a filter would return the right ROWS framed as the wrong SHAPE — the one thing this module may
+      // never do. `collectionAssert` is the derived view of the ONE `typeOfAssert` decode, reused rather
+      // than re-recognized. The rest of the chain re-enters through `continueAs` with the collection's
+      // framing, as `constant([…])`'s retype does, so the collection's own tail serves every follower
+      // (`count(local)`, `select(values)`, `unfold()`) and the SET marker rides through `listTail`'s own
+      // state rather than being re-applied at the end. A COMPILE-TIME scalar (`count()`'s `long`) is never
+      // a collection, so it takes the ordinary `is()` below, which constant-folds it; a stream with no
+      // type fact at all still declines — nothing says its value is not a collection.
       const asserted = collectionAssert(step);
-      if (asserted) {
-        if (asserted === 'map' || !carries('vtype')) return null;
+      if (asserted && carries('vtype')) {
         const retyped = collectionRetype(rel, 'vtype', asserted, fresh);
-        const tail = listTail(retyped.rel, retyped.of, steps, at + 1, ctx, fresh, labels);
-        if (!tail) return null;
-        // The SET marker rides on the framing, not the relation — a set and a list share every member
-        // op and differ only at the wire. So it is applied to whatever the list tail finished as, and
-        // only where that is still a collection.
-        return tail.framing.kind === 'list' && retyped.set
-          ? { ...tail, framing: { ...tail.framing, set: true } }
-          : tail;
+        return continueAs(retyped.rel, retyped.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }
+      if (asserted && subjectType().kind !== 'static') return null;
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
@@ -3006,12 +3008,9 @@ function pathTail(
     if (step.name === 'identity') { if (args.length) return null; continue; }
 
     if (step.name === 'is') {
-      if (assertsGType(step, 'PATH')) continue;
-      if (typeOfAssert(step).kind !== 'gtype') return null;
-      rel = make.filter({
-        id: fresh('f'), input: rel, channels: rel.channels, type: rel.type,
-        pred: eq(compilerInt(0), compilerInt(1)),
-      });
+      const typed = framingTypeFilter(rel, step, 'path', fresh);
+      if (!typed) return null;
+      rel = typed;
       continue;
     }
 
@@ -3137,12 +3136,9 @@ function mapTail(
     }
 
     if (step.name === 'is') {
-      if (assertsGType(step, 'MAP')) continue;
-      if (typeOfAssert(step).kind !== 'gtype') return null;
-      rel = make.filter({
-        id: fresh('f'), input: rel, channels: rel.channels, type: rel.type,
-        pred: eq(compilerInt(0), compilerInt(1)),
-      });
+      const typed = framingTypeFilter(rel, step, 'map', fresh);
+      if (!typed) return null;
+      rel = typed;
       continue;
     }
 
@@ -5634,9 +5630,10 @@ function propertyTail(
   // A CORRELATED FILTER over a property traverser — `where`/`filter`/`not`/`and`/`or`, the SAME
   // `sourceFilter` vocabulary the element and scalar hosts use, reachable now that a property is a
   // `Subject`. It PRESERVES the shape (a filter drops property rows, never retypes them), so it recurses
-  // like a row op. `is` is deliberately NOT in `SCALAR_FILTER_HOSTS` — a property has no single value to
-  // compare, so a value predicate declines rather than answering off the wrong column.
-  if (SCALAR_FILTER_HOSTS.has(step.name)) {
+  // like a row op. `is` joins it for its TYPE tests alone (`is(typeOf(GType.PROPERTY))`, which the
+  // property's owner kind answers statically) — a property has no single value to compare, so a value
+  // predicate declines in `sourceFilter` rather than answering off the wrong column.
+  if (SCALAR_FILTER_HOSTS.has(step.name) || step.name === 'is') {
     const subject: Subject = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, rel };
     const filtered = hostFilter(rel, step, subject, ctx, fresh, labels);
     return filtered ? propertyTail(filtered, elem, steps, from + 1, bulked, ctx, fresh, labels) : null;
@@ -6007,6 +6004,14 @@ function recordTail(
     const host: ChildHost = { kind: 'record', fields, row: { rel, aliases: labels } };
 
     if (step.name === 'identity') { if (step.args.length) return null; continue; }
+
+    // A record IS a map value (`ProjectStep` emits a `LinkedHashMap`), so its type test is the map's.
+    if (step.name === 'is') {
+      const typed = framingTypeFilter(rel, step, 'map', fresh);
+      if (!typed) return null;
+      rel = typed;
+      continue;
+    }
 
     if (step.name === 'as') {
       // `as(label…)` binds the record AS THE MAP it is — collapse it (recordToMap, the same boundary

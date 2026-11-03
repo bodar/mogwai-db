@@ -638,7 +638,6 @@ const DECLINED = [
   // PAIR-lists whose rowids would frame bare (as integers), losing the element objects — a distinct shape.
   'g.V().fold().intersect(__.E().fold())',
   'g.V().fold().product(__.V().fold())',
-  "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and
   // declines the other, because answering off the wrong row is the plausible-wrong-answer class.
   'g.V().order().by(T.key)',          // an element has no key

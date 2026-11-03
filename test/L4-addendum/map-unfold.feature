@@ -178,10 +178,9 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
 
   # ---- Commit C: is(typeOf(MAP)) over a STORED map property → MapStream retype ----
 
-  # A stored map property, retyped by is(typeOf(MAP)), frames whole (terminal) and its
+  # A stored map property, retyped by is(typeOf(MAP)), re-enters the map tail and its
   # followers (count(local)/select(values)/unfold) reuse the blob substrate.
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX
     Given the mapdata graph
     And the traversal of
@@ -194,7 +193,6 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | m[{"a":"d[1].i","b":"d[2].i","c":"d[3].i"}] |
 
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_countXlocalX
     Given the mapdata graph
     And the traversal of
@@ -207,7 +205,6 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | d[3].l |
 
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_selectXvaluesX
     Given the mapdata graph
     And the traversal of
@@ -219,8 +216,10 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | result |
       | l[d[1].i,d[2].i,d[3].i] |
 
+  # `Column.keys` builds a `LinkedHashSet`
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:45),
+  # so the keys frame as a SET — the corpus's own `g_V_valueMap_selectXkeysX_dedup…` reads `s[name,age]`.
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_selectXkeysX
     Given the mapdata graph
     And the traversal of
@@ -230,11 +229,10 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
     When iterated to list
     Then the result should be unordered
       | result |
-      | l[a,b,c] |
+      | s[a,b,c] |
 
   # unfold() explodes the stored map into per-entry size-1 MAPs.
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_unfold
     Given the mapdata graph
     And the traversal of
@@ -250,7 +248,6 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
 
   # unfold().select(keys) reads each entry's key.
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_unfold_selectXkeysX
     Given the mapdata graph
     And the traversal of

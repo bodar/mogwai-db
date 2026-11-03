@@ -490,18 +490,14 @@ export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choo
 export const asBranchKind = (name: string): BranchKind | null =>
   BRANCH_KINDS.has(name) ? name as BranchKind : null;
 
-// ---------- `is(typeOf(GType.X))`: ONE decode, three readings ----------
+// ---------- `is(typeOf(GType.X))` as a RETYPE: the one decode ----------
 //
-// A `typeOf` assert is read by the group, path, list and scalar arms, and before this was one
-// function they had already DRIFTED — the group arm THREW on a non-MAP assert where the path arm
-// returned an empty relation. This is the one decode, and it sits beside `sliceOf` because it is
-// the same kind of thing: THE total decode of one step's arguments, so no consumer re-reads
-// `step.args[0]` for itself.
-//
-// What a NON-matching assert MEANS is deliberately not decided here. It genuinely differs per arm
-// and both answers are defensible — an empty relation (the assert is a filter that matched nothing)
-// or a throw (this arm has no lowering for the shape the caller claims). Naming the decode
-// separately from the policy is what lets the two stop drifting without forcing one on both.
+// A `typeOf` assert is a FILTER wherever the traverser's GType is already known — that is
+// `predicate.ts`'s `typeOfExpr`, one fold for every framing (`framingTypeOf`), so a map or a path
+// no longer decides its own answer. What is decoded HERE is the one reading that is not a filter:
+// over a per-row-typed scalar, `typeOf(LIST|SET|MAP)` RETYPES the stream to the collection
+// (`collectionAssert`). It sits beside `sliceOf` because it is the same kind of thing: THE total
+// decode of one step's arguments, so no consumer re-reads `step.args[0]` for itself.
 
 export type TypeAssert =
   /** `is(typeOf(GType.X))`; `gtype` is X in Gremlin's own UPPERCASE spelling ('MAP', 'PATH', …). */
@@ -522,13 +518,6 @@ export function typeOfAssert(step: IRStep): TypeAssert {
   const name = gtypeName(pred.operands?.[0]?.value);
   return name ? { kind: 'gtype', gtype: name.toUpperCase() } : { kind: 'opaque' };
 }
-
-/** PURE. Does `step` assert exactly this GType? The boolean reading of `typeOfAssert`, for the arms
- *  whose own shape answers exactly one GType (`'MAP'` for map/group/valueMap, `'PATH'` for path). */
-export const assertsGType = (step: IRStep, gtype: string): boolean => {
-  const a = typeOfAssert(step);
-  return a.kind === 'gtype' && a.gtype === gtype;
-};
 
 /** PURE. The COLLECTION reading of `typeOfAssert`: the canonical collection name a scalar value
  *  stream is being retyped to (`is(typeOf(GType.LIST|SET|MAP))`), else null. A derived coarse view

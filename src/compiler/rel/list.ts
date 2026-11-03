@@ -1711,33 +1711,48 @@ function unfoldMapMembers(rel: Rel, of: ListOf & { readonly kind: 'map' }, fresh
   };
 }
 
+/** The stored collection kinds a per-row-typed scalar may hold — `COLLECTION_TYPES`, as a type. */
+export type StoredCollection = 'list' | 'set' | 'map';
+
 /**
- * `is(P.typeOf(LIST|SET))` — a type ASSERT, which RETYPES the stream rather than filtering it.
+ * A STORED COLLECTION VALUE AS THE TRAVERSER — the projection every retype of a per-row-typed scalar into
+ * the collection vocabulary ends with, over rows already known to hold `kind`. The stored value IS the
+ * collection payload's own encoding: a list's or set's self-describing `{t,v}` member tree (a TYPED list,
+ * the SET marker riding on the framing because the member substrate is shared) and a map's
+ * `[[keyNode, valNode], …]` pairs array, whose keys and values are self-describing nodes — the encoding
+ * `MAP_COL` holds for every map producer. So the projection is one `json(v)` either way and only the
+ * framing differs. The ONE copy: `is(typeOf(…))`'s retype and the per-row collection split both read it.
+ */
+export function collectionValue(rel: Rel, kind: StoredCollection, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } {
+  // `'map'` is `MAP_COL`, spelled here for the `map.ts` cycle `unfoldMapMembers` already documents.
+  const payload = kind === 'map' ? 'map' : LIST_COL;
+  return {
+    rel: make.project({
+      id: fresh('cl'), input: rel, channels: rel.channels,
+      type: typeOf(meta(payload, 'json'), ...carriedCols(rel.channels)),
+      exprs: [[payload, { kind: 'call', fn: 'json', args: [col(rel.id, 'v')] }],
+        ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+    }),
+    framing: kind === 'map'
+      ? { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }
+      : { kind: 'list', of: TYPED_MEMBERS, ...(kind === 'set' ? { set: true } : {}) },
+  };
+}
+
+/**
+ * `is(P.typeOf(LIST|SET|MAP))` — a type ASSERT, which RETYPES the stream rather than filtering it.
  *
  * §11's trap in its original form: lowered as a predicate it returns the right ROWS framed as the
  * wrong SHAPE. What it actually means is "keep the rows whose stored value IS a collection, and treat
  * that value as the traverser" — so it needs a per-row stored `vtype` (a computed scalar has no stored
- * collection), and the members are the stored
- * collection's own self-describing `{t,v}` tree, i.e. a TYPED list.
- *
- * A SET differs only in the framing marker: the member substrate is shared, which is exactly why
- * `set` rides on the framing rather than on the relation.
+ * collection), and the value is `collectionValue`'s projection of the rows the tag keeps.
  */
-export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', fresh: Minter): { readonly rel: Rel; readonly of: ListOf; readonly set: boolean } {
+export function collectionRetype(rel: Rel, vtype: string, kind: StoredCollection, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } {
   const matching = make.filter({
     id: fresh('cr'), input: rel, channels: rel.channels, type: rel.type,
     pred: { kind: 'binary', op: '=', left: col(rel.id, vtype), right: compilerText(kind) },
   });
-  return {
-    rel: make.project({
-      id: fresh('cl'), input: matching, channels: rel.channels,
-      type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(rel.channels)),
-      exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(matching.id, 'v')] }],
-        ...rel.channels.map((channel) => [channel.col, col(matching.id, channel.col)] as const)],
-    }),
-    of: TYPED_MEMBERS,
-    set: kind === 'set',
-  };
+  return collectionValue(matching, kind, fresh);
 }
 
 /**
