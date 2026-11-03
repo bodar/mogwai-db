@@ -761,8 +761,10 @@ function idQueryOf(val: unknown, valType: TypeNode | null, valParam: string | nu
     if (a.name != null && Array.isArray(a.value) && !a.members) return true;
     return members.every((v) => typeof v === 'string' || (typeof v === 'number' && !Number.isNaN(v)));
   };
+  // A list among SEVERAL operands is one literal id that matches nothing (`idMembership`), whatever it holds.
+  const listAmongSeveral = (a: Arg, n: number): boolean => n > 1 && (a.members != null || Array.isArray(a.value));
   const members = (ids: readonly Arg[], negated: boolean): IdQuery | null =>
-    ids.length && ids.every(routable) && ids.some((a) => !Array.isArray(a.value) || a.name != null || (a.value as unknown[]).length)
+    ids.length && ids.every((a) => listAmongSeveral(a, ids.length) || routable(a)) && ids.some((a) => !Array.isArray(a.value) || a.name != null || (a.value as unknown[]).length)
       ? { kind: 'members', ids, negated } : null;
   // A BARE value is `eq(value)`; a bare LIST is equality with a list, never membership, so only a scalar.
   if (!isPred(val)) return typeof val === 'number' || typeof val === 'string' ? members([arg(val, valType, valParam)], false) : null;

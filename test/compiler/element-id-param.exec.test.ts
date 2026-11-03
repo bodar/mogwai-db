@@ -177,3 +177,28 @@ describe('hasId / has(T.id) share the V() id routing, parameters included', () =
     expect(await valsIn(s, "g.V().V().has(T.id, lt(5)).values('name')")).toEqual(['B', 'B']);
   });
 });
+
+// A collection is UNROLLED only when it is the SINGLE id argument (TINKERPOP-3273,
+// vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java
+// `hasId`; `GraphStep` for `V()`). Among several arguments a list — literal OR bound — is one literal id,
+// which no element has. HasId.feature `g_VX1X_out_hasIdX2_listXid3_id4XX` pins the corpus case.
+describe('a list among several id arguments matches nothing', () => {
+  const p = { vid1: 1, vid2: 2, xx1: [3, 4], x: [2] };
+  test('hasId / within / has(T.id) keep only the scalar operands', async () => {
+    expect(await vals("g.V(vid1).out().hasId(vid2, xx1).values('name')", p)).toEqual(['vadas']);
+    expect(await vals("g.V().hasId(within(vid2, xx1)).values('name')", p)).toEqual(['vadas']);
+    expect(await vals("g.V().has(T.id, within(vid2, xx1)).values('name')", p)).toEqual(['vadas']);
+    expect(await vals("g.V().hasId(x, 4).values('name')", p)).toEqual(['josh']);
+    expect(await vals("g.V().hasId(x, x).values('name')", p)).toEqual([]);
+  });
+  test('without() over a list among several loses no row', async () => {
+    expect(await vals("g.V().hasId(without(vid2, xx1)).values('name')", p)).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple']);
+    expect(await vals("g.V().hasId(without(x, x)).values('name')", p)).toHaveLength(6);
+  });
+  test('V() follows the same rule; a single collection still unrolls', async () => {
+    expect(await vals("g.V(vid2, xx1).values('name')", p)).toEqual(['vadas']);
+    expect(await vals("g.V(x, x).values('name')", p)).toEqual([]);
+    expect(await vals("g.V(xx1).values('name')", p)).toEqual(['josh', 'lop']);
+    expect(await vals("g.V().hasId(xx1).values('name')", p)).toEqual(['josh', 'lop']);
+  });
+});

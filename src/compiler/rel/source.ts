@@ -239,18 +239,29 @@ export type IdQuery =
  * fetched, so it costs no access path. A numeric user id is stored AS the rowid (`uid` NULL), so
  * `V(100)` is unchanged.
  *
+ * **A collection is UNROLLED only when it is the SINGLE id argument** (TINKERPOP-3273 —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java`
+ * `hasId`, and `GraphStep`'s constructor for `V()`/`E()`): `V([1,2])` ≡ `V(1,2)`, but in `V(1, [2,3])`
+ * the list is ONE literal id, and as an element id is never a list it matches nothing.
+ * `HasId.feature`'s `g_VX1X_out_hasIdX2_listXid3_id4XX` pins it.
+ *
  * Returns the POSITIVE membership, `undefined` for an empty id list (the caller owns what "no ids"
- * means: the whole graph for `V()`, nothing for `hasId`), or `null` where a member is a type this
- * routing cannot place (the caller declines, or falls back to the general comparison).
+ * means: the whole graph for `V()`, nothing for `hasId`), `CONSTANT.false` where every argument is a
+ * list among several (no id can match), or `null` where a member is a type this routing cannot place
+ * (the caller declines, or falls back to the general comparison).
  */
 function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Minter): Expr | null | undefined {
   const inlineNums: number[] = [];
   const inlineStrs: string[] = [];
   const numParams: Expr[] = [];
   const strParams: Expr[] = [];
+  const unroll = ids.length === 1;
   for (const a of ids) {
+    // A list among SEVERAL arguments is one literal id no element has (see above): no clause, whether
+    // it is a literal or a bound collection.
+    if (!unroll && (a.members || Array.isArray(a.value))) continue;
     if (a.name == null) {
-      // A CONSTANT — a bare scalar id or a bracketed list literal (`V(1, [2,3])` ≡ `V(1,2,3)`); the
+      // A CONSTANT — a bare scalar id or the single bracketed list literal (`V([1,2])` ≡ `V(1,2)`); the
       // grammar forbids a param member, so every member is itself a literal that inlines.
       const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
       for (const v of members) {
@@ -286,7 +297,8 @@ function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Min
   if (inlineStrs.length) text.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
   text.push(...strParams);
   const numMatch = disjunction(numeric);
-  return disjunction([...(numMatch ? [and(numMatch, rowidOnly(uidCol))] : []), ...text]);
+  const match = disjunction([...(numMatch ? [and(numMatch, rowidOnly(uidCol))] : []), ...text]);
+  return match ?? (ids.length > 1 ? CONSTANT.false : undefined);
 }
 
 /** `uid IS NULL` — the row's external id IS its rowid (see `idMembership`). */
