@@ -177,7 +177,7 @@ makes a new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 | **`name`** | named CTE vs inlined derived table per shared node, honouring `Materialize`. **The only pass with a production caller** (`lower.ts`) |
 | **`prune`** | column pruning — a walk carries only what its body and its consumer read |
 | **`semijoin`** | the PHYSICAL tier: lift a correlated property `EXISTS` in front of the bare scan it filters, as a DISTINCT relation the plan is DRIVEN from (a semi-join). ONE decorrelation with the access path as a pluggable `OwnerSeek` strategy — `indexSeek` (base `vp_key_value`, switched by `propertySeek`) and `trigramSeek` (the `property_fts` trigram index, switched by `ftsSubstringPredicate`, positive + negative TextP). The caller passes the enabled strategies STRATEGY-MAJOR (trigram before index, so a substring predicate takes the trigram index); the pass reads no config. Formerly two clones, `seek.ts` + `fts.ts` |
-| **`fuse`** | ✅ wired in the read `lowered()` before `semijoin` (`src/rel/passes/fuse.ts`, `a4d38776`): transposes a Filter below a no-PARTITION `row_number` renumber Window when a whole-plan use-analysis shows the minted column is read only as an ORDER position (Calcite `FilterWindowTransposeRule` relaxed only for that case). Not run on the stream feeding a write (see Next round) |
+| **`fuse`** | ✅ wired in the read `lowered()` before `semijoin` (`src/rel/passes/fuse.ts`, `a4d38776`): transposes a Filter below a no-PARTITION `row_number` renumber Window when a whole-plan use-analysis shows the minted column is read only as an ORDER position (Calcite `FilterWindowTransposeRule` relaxed only for that case). Not run on the stream feeding a write (rf3-fuse-write, §10 Performance) |
 | **`flatten`** | ✅ landed by DISSOLUTION, not a pass — the join-flattening / decorrelation legality it needed became `src/rel/block.ts` (`shapeOf`/`fromTree`/`fusedInto`), consumed by `recursive.ts` (P1/barrier laws) and the emitter. No `JoinUnionTranspose` pass was built: a `union`-topped body decorrelates structurally |
 | **`recognize`** | ✅ RETIRED as a distinct pass — "fast paths as plan rewrites" is the physical-rewrite KIND, realised by `semijoin` over the finished algebra, not a tier of its own. Residue is a PERF tail (a nested/param `containing()` takes the correct-but-unindexed generic `LIKE`), gated on a real slow query + EXPLAIN |
 
@@ -815,7 +815,163 @@ the move tables (r2-reuse8) · `thetaOf` (r3-reuse1) · frontend `operandMembers
 
 **Branches:** none is parked. The round-3 resume branches (`wf/alias-presence-binding-3-*`,
 `wf/federate-fresh-param-collision-2-*`, `wf/s9-one-scoping-reader-*`) were removed before the cleanup round; S9
-and r7-fu1 are dropped, r6-fu1 restarts from its description above.
+and r7-fu1 are dropped, r6-fu1 restarts from its description above. The cleanup round's own build branches
+(`wf/{cr-land-once,cr-fu6,cr-fu2,B4,C3,C4,C5,F}-2-0`) all LANDED (every `pushed_sha` is on `origin/trunk`); they
+hold nothing to resume and can be deleted together with their `.claude/worktrees/wf_86c2abc8-d71-*` worktrees.
+
+### Next round (from the cleanup round's reviews — fold into the lists above at the end of the next run)
+
+Nothing was deferred or parked: all eight items landed (cr-fu1 merged into cr-land-once, B3 into cr-fu2), and CI
+is green on every pushed sha. What follows is review follow-ups, ordered so that a prerequisite comes BEFORE what
+it unblocks.
+
+**Shared root cause: declines decided on framing facts cannot explain themselves.** Four follow-ups below come
+from one gap. B4's collision declines say only "no lowering covers"; cr-fu2's `MapScopeDeferral` is thrown from
+inside `lowerToRel`, against `scripts/rel-sweep.ts`'s contract, to get its text out; cr-fu6's `withLocalHint` finds
+its decline by string identity (`e.gremlin === SHARED_DRAW`); C4's `RESOURCE_UNDER_ABSENT` text names `select(…)`
+even when the absence came from a value run. They share one substrate, already listed as **Substrate 0**
+(decline-reason channel). Build it FIRST, and make it a STRUCTURED reason (a kind plus a message), not just a string. Then:
+move `mergedFromMap`'s throw onto it, give `withLocalHint` the kind instead of a string compare, and give the B4
+collisions a message that names the collision. The items under (1) that only reword a message wait on it; the
+items that change WHEN a decline fires do not.
+
+**(1) Major: fix before anything new.**
+
+- **nr-b4-record-alias** REGRESSION, plausible reach (two reviewers). B4 deleted `held` from `recordKeyFacts`.
+  So a `select('a','b')`/`match()` record that is re-entered as a Map (recordTail's `as()` handler and its
+  local-slice handler, `lower.ts` ~:5797/~:5843) now declines `select(k)` of its OWN field. That field is always a
+  live label, because the record exists to name it. Witnesses that answered at `020fecdf`:
+  `g.V().as('a').out().as('b').select('a','b').by('name').as('m').select('m').select('a')` (6 rows),
+  `….as('m').select('m').format('%{a}->%{b}')`, `…select('a','b').by('name').limit(local,2).select('a')`,
+  `…tail(local,1).select('b')`. The reference reads the entry first (`Scoping.java:119-121`). The un-aliased
+  spellings still answer, so this is inconsistent across equivalent forms. Fix inside the MAY-only lattice: a
+  record collapse resolves `select(field)` against its required fields BEFORE it re-enters `mapTail`, because
+  every field of a `select(k…).by()` record is required (an unproductive `by()` filters the row). Do not
+  reintroduce a MUST set into `MapKeyFacts`. Fix the stale recordTail comment and the garbled §17 "Map scope"
+  wording "(a `project()` record collapsed to one included)" at the same time. Pin all four witnesses.
+- **nr-c5-sideeffect-arm** REGRESSION, plausible reach. C5 made a choose arm with stated presence decline. One
+  producer reaches that from a common shape: `selectedNodeChild` returns `{ when: held }` for a single-step
+  `select(k)` of a `withSideEffect` constant. Witnesses that answered at `a8061985` and match the reference
+  (`Scoping.java:126-127`):
+  `g.withSideEffect('k',5).V().map(__.choose(__.hasLabel('person'), __.select('k'), __.constant(0)))` →
+  `[5,5,0,5,0,5]`. The same arm under `project().by`, `local`, `coalesce`, `group().by('name').by(…)`,
+  `order().by(…)`, the option-map form `choose(label()).option('person', select('k'))…`, and a list constant.
+  Fix at the PRODUCER, not by reverting C5: for a constant node over an `'always'` host, `held` is a non-null
+  constant, so report `'always'`. Pin the map/project/option-map forms. Also correct `meetPresence`'s doc and the
+  C5 commit's claim: meetPresence's behaviour did not change. Only `scalarChoice`'s per-row CASE was deleted.
+- **nr-fu2-mapscope-advice** wrong advice on a common idiom. `MapScopeDeferral` (`ir/write-args.ts`
+  `resolveMergeArg` ~:365) fires for EVERY bare `select(k)` over a Map driver, even when no side effect `k` is
+  declared. So TinkerPop's batch-upsert idiom
+  `g.inject([lookup:[name:'x'], create:[…]]).mergeV(__.select('lookup')).option(Merge.onCreate, __.select('create'))`,
+  and `g.V(1).valueMap().mergeV(__.select('name'))`, are told to "name the side effect so no Map key shadows it",
+  although there is no side effect: reading the Map's own entry IS the intent. Raise `MapScopeDeferral` only when
+  `sideEffects` (or a named scope) declares `k`. Otherwise decline plainly ("reading a Map's own 'k' entry as a
+  merge argument is not supported yet"). The SAME rule, inverted: `g.withSideEffect('c',[age:1]).inject([name:'x'])
+  .mergeV().option(Merge.onCreate, __.select('c'))` answered `[1]` before cr-fu2 and now declines, saying the Map
+  holds 'c', which the literal shows it does not. Say "a Map stream MAY hold 'c'". Supporting a Map driver's
+  own-entry `select` (the `unfold().mergeV(__.select('match'))` idiom) is a separate depth gap. Add it to Writes
+  beside R8-res.
+- **nr-once-twins** (also reuse proposals nr-ru1/nr-ru2) the "one owned once-helper" claim does not hold yet.
+  `predicate.ts` `storedCompareOnce` (~:551) is an exact twin of the old `typedNodeOnce`, and `valueTheta` (~:692)
+  hand-rolls a four-cell VALUES. Each has a private `cheap` test, byte-identical to `build.ts` `spelledFreely`.
+  Both become `once(...)` calls, which deletes code and keeps the answers. Reach: every correlated `where()`/`has()`
+  comparison. Do it with Substrate 1, as the same item.
+- **nr-b4-dedup-absent-term** per-row SQL with no user-visible reason. After B4, `mapTail`'s keyed-dedup
+  `mapScope` always emits the `absent` test (`node IS NULL`, plus a CASE in the `row_number` PARTITION BY), even
+  for a key every row of a literal or a record collapse holds: `g.V().constant([a:1,b:2]).dedup('a')`. The cost
+  is linear and small (13 → 16 ms at 8k), but CLAUDE.md requires a reason for a new per-row term. The
+  nr-b4-record-alias required-fields fact removes it for records. For literals, a literal whose every member holds
+  `k` is a compile-time fact the lowering can read without a MUST lattice.
+
+**(2) Moves within the lists (concrete, cheap).**
+
+- **Per-origin deterministic slice** (in "Contrived") is NOT the reference's cost. It is quadratic:
+  `g.V().local(__.V().hasLabel('person').limit(2)).count()` takes 355 ms → 24.6 s at 1k → 8k (69×), while the
+  `sample(1)` sibling is linear (20 → 27 ms). Move it to Performance, and to "Needs a human decision" beside its
+  sibling cr-fu5 (70×). The fix sketch stays: `rootedRead` the origin-independent prefix once.
+
+**(3) Minor follow-ups, grouped by item.**
+
+- **cr-land-once**: rename the exported `once` (`rel/build.ts`). `bun scripts/refs.ts once` resolves it to
+  `src/rel/emit.ts`'s two locals (:288, :581 — the emitter's repeated-subquery hoist), which fails "can it be
+  confused?". `heldOnce`/`evaluateOnce` would avoid that. If emitter-level expression reuse is built later (for
+  `math('_+_')` over an identity `values()`, 9,389 bytes), it should absorb `once`. Pin the exponential-to-linear
+  win: `g.V().values('age').as('a').math('a+1').as('b').math('a+b').as('c').math('a+b+c')` → `[118,110,130,142]`
+  at 15,216 bytes (it was 1.38 MB on trunk, and the next stage was 18 MB), plus the re-bound label
+  `as('a').math('a+1').as('a')…` → `[33,31,36,39]`. A label variable's history fold is still spelled 3× inside
+  the VALUES row (~3.2 KB); hold the node once and extract `v`/`t` in the body. Fix the commit's "raise order
+  unchanged" claim: a raise inside a later variable now fires before an earlier variable's Number test. That
+  error timing is allowed by §17.
+- **cr-fu6**: gate `withLocalHint` on what `reSourcedOnce` accepts (element origins, draw not under a reducer),
+  not on `step.name`. Today it suggests `local(…)` for `g.inject(1,2).map(__.V().sample(1).values('name'))` and
+  `g.V().map(__.V().coin(0.5).count())`, and both of those `local` forms decline too. The text "runs for more than
+  one traverser" is false for the one-host seams that pass no host (`g.V(1).has('age', __.V().sample(1)
+  .values('age'))`, `g.addV('p').addE('x').to(__.V().sample(1))`): say "may run". An element-framed one-host body
+  (`g.V(1).map(__.V().sample(1))`, `g.V(1).project('x').by(__.V().sample(1))`, even `g.V(1).map(__.V().limit(1))`)
+  lost its hint and gets the generic decline. Add it as a depth gap. Pins: two `by()` draws over one host are
+  independent, which guards against a future scalar-subquery CSE; the one-row hosts through a join or limit; and
+  the empty host (`g.V(99).addE('x').to(__.V().sample(1))` → `[]`, no write).
+- **cr-fu2**: `guardMergeInterleaving` (`rel/write.ts`) is still a data-size decline:
+  `…V().values('name').mergeV(__.select('k')).option(Merge.onMatch, __.select('j'))` raises over 6 traversers and
+  answers over 1, with a constant, idempotent onMatch. The trunk spelling `mergeV([name:'zz']).option(onMatch,[age:1])`
+  raises too. Fold it into **o-seqguard** (Writes), which already asks this, and drop its "(verify)".
+- **B4**: `limit(local,1).dedup('b')`/`range(local,1,2).dedup('a')` over a literal now drop rows where the
+  reference raises (`DedupGlobalStep.java:82`, `Scoping.java:141-147`). This matches the existing
+  `inject([a:1],[b:1]).dedup('a')`. Add one §17 line. Narrowing `keys` through a literal's known local window is
+  compile-time only and turns the `limit(local,1).as('b').select('b')` collisions back into answers. The
+  `map-key-facts.feature` header claims the decline "names the collision"; it does not until Substrate 0 exists.
+- **C3**: the §17 "re-sourced body's null first value" line should name `not()`
+  (`g.V().not(__.V().constant(null)).count()` 0 → 6), the `order()` route
+  (`map(__.V().choose(…, __.constant(null)).order().limit(1))`), the `coalesce(…, constant(null))` default idiom,
+  and which seats it covers (map/by/where/not/concat/predicate operands, NOT local/flatMap/property). The concat
+  raise is not Java's behaviour (`ConcatStep.java:88-89` skips a null). Say so in the line.
+- **C4**: the decline message carries "not supported yet", which is wrong for a "probably confused" decline, and
+  it names no step. `g.V().map(__.values('age').math('_ + 1').by(__.V().count()))` (a value-run host) gets advice
+  about `select(…)` that it does not contain. Its faithful answer is cheap: gate on the host (4 rows). Either gate
+  value-run absence or fit the message (the structured reason from Substrate 0). `optional(…as('a')).flatMap(
+  __.select('a').V())` used to answer 24 and now declines, because the scalar route throws before the flatMap
+  rejoin. That is accepted, and recorded here as a depth gap.
+- **C5**: pin one stated-arm choose that still declines, so a later change to the meet is visible. A re-sourced
+  arm that yields a productive null reads as absent inside `choose` (`map(choose(PERSON, __.V().constant(null)
+  .limit(1), …))` → `[]`, ref 4 nulls). This predates C5 and belongs with the Tier B witnesses.
+- **F**: `docs/outstanding-work.md` §4 "So do draw-INDEPENDENT bodies" reads as "they answer", but they DECLINE.
+  Reword it as "decline too, although a shared draw would answer them". Narrow "a one-row host answers" to
+  scalar/row bodies. The `select(k)` law above should state the record arm: over a `project()` record a key
+  beside a live label declines, and a cr-fu11 lift must return the ENTRY (`Scoping.java:119-121`), not the label.
+  Seen while probing, not yet listed: `g.inject(1,2,3).as('i').addV('person').property('age', __.select('i'))`
+  and `g.V().project('a').by(__.out().values('name')).select('a').V().count()` (ref 18) both decline. Add them to
+  Declines to lift.
+
+**(4) Reuse sweep proposals** (each is one authority; verify against current code first):
+
+- **nr-ru1** `storedCompareOnce` → `once([subject, vtype], ([v,t]) => storedCompareOn(t!)(v!), fresh)` (~8 lines;
+  a column-ref tag is no longer copied into the VALUES).
+- **nr-ru2** `valueTheta` → `once([lhs.value, lhs.tag ?? compilerNull('text'), rhs.value, rhs.tag ??
+  compilerNull('text')], …)` (~12 lines; its all-trivial fast path is `once`'s own no-wrapper case).
+- **nr-ru3** one owned one-row relation builder: move `lower.ts` `oneRow` to `build.ts`, add `rowOf(cells, names,
+  fresh)`, and have `once()` use it. That deletes five hand-rolled `VALUES(1)` units (`lower.ts` :2543,
+  `reduction.ts` `hostSelfRow`/`mapEntryChild`/`perRowCollectionChild`, `write.ts` :1349 'pv'), and the three
+  unit→Project seeds become one `(VALUES(k, v))`. `rowBounds` is {1,1} either way. This subsumes r1-reuse4
+  `unitRow` and r6-reuse5 `oneRowValues`.
+- **nr-ru4** one Map-scope `select(k)` classifier: `mapKeyScope(key, facts, ctx, labelLive): 'entry' | {constant}
+  | 'beyond' | 'decline'` in `framing.ts`/`map.ts`, which `mapTail` select(k), `mapTail` dedup MapScope and
+  `reduction.ts` `mapHostChild` dispatch on. `modulator.ts` `mapScopeMayHold`'s map arm becomes
+  `mayHoldKey(host, label)`. This is cr-reuse2 made concrete. Do nr-b4-record-alias first, because the classifier
+  is where its required-fields case lands.
+- **nr-ru5** `write.ts:3027` addV(T.id) one-row admission → `!atMostOneRow(input)` (the rowBounds law;
+  `writeSnapshot` at :3313 stays Values-only). It turns a decline into an answer (`g.V(1).addV().property(T.id,
+  99)`), so the owner must confirm it (below). It belongs with "singleSource over rowBounds" under Writes.
+
+**(5) Needs a human, verbatim from the reviews.**
+
+- (cr-fu2 review) "CLAUDE.md lists 'write … the wrong element' under STILL NEVER, so a human should confirm that
+  'scope wins' is meant to extend to writes." Witness: after `g.V(1).property('m',[k:[name:'own']])`,
+  `g.withSideEffect('k',[name:'zz']).V(1).values('m').mergeV(__.select('k')).values('name')` writes and returns
+  `'zz'`; the reference (`Scoping.java:119-135`) writes `'own'`. The chain spelling `values('m').select('k').mergeV()`
+  already did this before cr-fu2.
+- (reuse sweep, nr-ru5) "No existing answer changes, but the owner should confirm the widening (the source addV
+  id-collision guard has to apply to the mid-chain path)."
+- The per-origin deterministic slice's 69× (above) belongs beside cr-fu5's trade in "Needs a human decision".
 
 ---
 
