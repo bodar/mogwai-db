@@ -869,6 +869,12 @@ Depth gaps (clean declines, record only):
    (`src/compiler/rel/lower/movement.ts:19-97` and `src/compiler/rel/lower/reduction.ts`), and the n>1 arm is
    literally `reSource` over a different right-hand relation. Parameterise `reSource` on its right-hand relation
    (the scan, or the once-lowered candidates) so one function owns how a re-source crosses carried channels.
+   ✅ **LANDED (`d87eddeb`).** The crossing (bulk promotion via branch.ts `ensureBulk`, encounter mint from the met
+   row's ordinal, origin-major renumber) is one function, `crossCarried` (`src/compiler/rel/lower/movement.ts`);
+   `reSource` passes the scan (ordinal = sid), `reSourcedOnce` its meeting (ordinal = K); n == 1 skips the renumber.
+   Pinned in `test/compiler/rooted-sample-scale.exec.test.ts`. **Remains:** the quadratic route on an ordered plain
+   re-source followed by a filter (`V()…order()…V().hasLabel(…)`). It needs a RelIR filter-below-window pushdown,
+   which does not exist yet.
 5. **S8's stated presence re-inlines the body and drops a productive null under `order`/`dedup` `by()` (major,
    `c16d4b52`).** `g.inject(['a':null,'b':1]).unfold().order().by(__.select(values).dedup())` evaluates the `rn10`
    window subquery 3× per row (trunk did 2×). It returns [b:1], while trunk and the reference return both rows, and
