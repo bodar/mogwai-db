@@ -1,6 +1,7 @@
 import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
+import { relChildren } from '../../rel/walk.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
@@ -74,10 +75,11 @@ export interface GraphSource {
    *  element `id`. `labels` is the pre-validated NON-EMPTY label-arg set (the caller owns the null /
    *  all-null / empty cases). `labelCol` is the edge's inline label column when the physical row is in
    *  scope (the source position), letting `BaseGraph` read the covering index directly instead of a
-   *  correlated id-membership subquery. `BaseGraph` resolves names→ids through `labels` and tests the
-   *  side tables (`edges.label` / `vertex_labels`); a landed graph tests membership of its JSON label
-   *  array. */
-  hasLabelPredicate(kind: Elem, id: Expr, labelCol: Expr | undefined, labels: readonly Arg[], fresh: Minter): Expr;
+   *  correlated probe. `row` is the relation the subject lives on: over a vertex SOURCE scan `BaseGraph`
+   *  keeps an uncorrelated membership the planner can drive the scan from, and elsewhere it probes the
+   *  owner's key per row. `BaseGraph` resolves names→ids through `labels` and tests the side tables
+   *  (`edges.label` / `vertex_labels`); a landed graph tests membership of its JSON label array. */
+  hasLabelPredicate(kind: Elem, id: Expr, labelCol: Expr | undefined, labels: readonly Arg[], fresh: Minter, row?: Rel): Expr;
 
   /** `has(key[, value-or-predicate])` over a stored property, as a predicate CORRELATED on the element
    *  `id` — an EXISTS, because a property FILTER asks whether a row is there (a JOIN would multiply the
@@ -359,6 +361,47 @@ export function withExtraBindings(base: GraphSource, extra: readonly Binding[]):
   return { ...base, bindings: (fresh) => [...(base.bindings?.(fresh) ?? []), ...extra] };
 }
 
+/** The `table` SCAN whose own rowid the subject `id` IS — traced through renaming projections and
+ *  row-preserving nodes (`filter`/`sort`/`limit`/`distinct`/`materialize`, a `window`'s pass-through
+ *  columns) and into the one join side that carries the column. The subject is then an element read
+ *  straight off its table (`V()`, a mid-traversal `V()` re-source), not an id an adjacency join
+ *  produced. Only the PLAN depends on the answer, never the result: over its own scan's rowid a
+ *  membership the planner may drive the scan from costs at most the rows the scan yields anyway (and
+ *  `fuse` may push the filter down onto it), while over a joined id — the trailing column of an
+ *  adjacency index — the same membership is expanded into probes per OUTER row. A `union`/`recursive`
+ *  hides its inputs from the enclosing scope, so the trace stops there; any unresolved step answers
+ *  "not its own scan", which only costs the per-row probe. */
+function ownScan(row: Rel | undefined, id: Expr, table: 'nodes' | 'edges'): Extract<Rel, { kind: 'scan' }> | undefined {
+  const find = (r: Rel, rel: string): Rel | undefined => {
+    if (r.id === rel) return r;
+    if (r.kind === 'union' || r.kind === 'recursive') return undefined;
+    for (const child of relChildren(r)) { const hit = find(child, rel); if (hit) return hit; }
+    return undefined;
+  };
+  const resolve = (scope: Rel, ref: Expr): Extract<Rel, { kind: 'scan' }> | undefined => {
+    if (ref.kind !== 'col') return undefined;
+    const at = find(scope, ref.rel);
+    return at && trace(at, ref.name);
+  };
+  const trace = (r: Rel, name: string): Extract<Rel, { kind: 'scan' }> | undefined => {
+    switch (r.kind) {
+      case 'scan': return r.table === table && name === 'id' ? r : undefined;
+      case 'project': {
+        const e = r.exprs.find(([n]) => n === name)?.[1];
+        return e && resolve(r.input, e);
+      }
+      case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': return trace(r.input, name);
+      case 'window': return r.specs.some(([n]) => n === name) ? undefined : trace(r.input, name);
+      case 'join': {
+        const sides = [r.left, r.right].filter((s) => s.type.cols.some((c) => c.name === name));
+        return sides.length === 1 ? trace(sides[0]!, name) : undefined;
+      }
+      default: return undefined;
+    }
+  };
+  return row && resolve(row, id);
+}
+
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
  *  algebra used to spell, moved behind the interface so the vocabulary no longer names a table. */
 export const BaseGraph: GraphSource = {
@@ -432,22 +475,34 @@ export const BaseGraph: GraphSource = {
     return pred === null ? null : { scan, pred };
   },
 
-  hasLabelPredicate: (kind, id, labelCol, labels, fresh) => {
+  hasLabelPredicate: (kind, id, labelCol, labels, fresh, row) => {
     const ids = labelIds(labels, fresh);
-    if (kind === 'edge') {
-      // Direct where the column is physically present (the source scan), and a membership test on the
-      // edge id where it is not (after a movement, the relation is `id` + channels). Same question, and
-      // the first form keeps the covering-index read the source position deserves.
-      if (labelCol) return { kind: 'in-query', expr: labelCol, plan: ids, negated: false };
-      const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('rel'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
-      const matching = make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: { kind: 'in-query', expr: col(e.id, 'label'), plan: ids, negated: false } });
-      const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+    // The edge's own label column, where the physical row is in scope (the source scan): a direct read
+    // the covering index serves.
+    if (kind === 'edge' && labelCol) return { kind: 'in-query', expr: labelCol, plan: ids, negated: false };
+    const owner = kind === 'edge' ? 'id' : 'node';
+    const side = make.scan({
+      id: fresh(kind === 'edge' ? 'el' : 'vl'), table: kind === 'edge' ? 'edges' : 'vertex_labels', alias: fresh(kind === 'edge' ? 'rel' : 'rvl'),
+      channels: [], type: typeOf(meta(owner, 'int'), meta('label', 'int')),
+    });
+    const labelled: Expr = { kind: 'in-query', expr: col(side.id, 'label'), plan: ids, negated: false };
+    // A VERTEX read off its own `nodes` scan (`V()`, a mid-traversal re-source): `id IN (SELECT node
+    // FROM vertex_labels WHERE label IN …)`, evaluated once — the planner may drive the scan from
+    // `vl_label(label, node)`, so a selective label reads only its own vertices.
+    if (kind === 'vertex' && ownScan(row, id, 'nodes')) {
+      const matching = make.filter({ id: fresh('f'), input: side, channels: [], type: side.type, pred: labelled });
+      const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta(owner, 'int')), exprs: [[owner, col(matching.id, owner)]] });
       return { kind: 'in-query', expr: id, plan: owners, negated: false };
     }
-    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
-    const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
-    return { kind: 'in-query', expr: id, plan: owners, negated: false };
+    // Anywhere else the subject is an id a JOIN produced (`out().hasLabel(…)`, a child body's root), so
+    // the test is a CORRELATED probe on the owner's key — `vertex_labels`' PRIMARY KEY (node, label), the
+    // edge rowid — once per row. Never the uncorrelated `id IN (<every element bearing the label>)`:
+    // there the id is the trailing column of an adjacency index (`e_in(tgt, label, src)`, rowid after
+    // `e_out`), and SQLite expands the whole label POPULATION into index probes PER OUTER ROW — measured
+    // 66× for 8× the rows on `out('created').in('created').hasLabel('person')`. A probe costs one seek.
+    const mine = make.filter({ id: fresh('f'), input: side, channels: [], type: side.type, pred: and(eq(col(side.id, owner), id), labelled) });
+    const probe = make.project({ id: fresh('p'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    return { kind: 'exists', plan: probe, negated: false };
   },
 
   hasPropertyPredicate: (kind, id, key, valuePred, fresh) => {
@@ -476,9 +531,12 @@ export const BaseGraph: GraphSource = {
       if (idQuery) {
         // A ROUTED id question (`idMembership`/`idRange`): a rowid or `uid`-UNIQUE seek. Over the subject's
         // OWN scan row (the source position) it is a direct conjunct on that row's columns; elsewhere the
-        // subject is a bare id, and the question becomes an UNCORRELATED membership — `id IN (SELECT id
-        // FROM <table> WHERE …)`, evaluated once, the shape `hasLabelPredicate` uses — never a per-row
-        // EXISTS whose `COALESCE(uid, id)` no index can serve.
+        // subject is a bare id a JOIN produced, and the question becomes a CORRELATED probe that seeks the
+        // subject's own row by rowid and tests the routed predicate on its `id`/`uid` columns — one seek
+        // per row. Never the uncorrelated `id IN (SELECT id FROM <table> WHERE …)`: as the trailing column
+        // of an adjacency index (`e_in(tgt, label, src)`) SQLite expands that whole population into index
+        // probes PER OUTER ROW, so `out().in().hasId(gt(n))` went 72× for 8× the rows (the
+        // `hasLabelPredicate` shape, same cause).
         if (row?.kind === 'scan' && row.table === table && id.kind === 'col' && id.rel === row.id && id.name === 'id') {
           const direct = idQueryOver(id, col(row.id, 'uid'), idQuery, fresh);
           if (direct) return direct;
@@ -486,10 +544,20 @@ export const BaseGraph: GraphSource = {
           const ids = make.scan({ id: fresh('ti'), table, alias: fresh('rti'), channels: [], type: typeOf(...cols) });
           const positive = idQueryOver(col(ids.id, 'id'), col(ids.id, 'uid'), idQuery.kind === 'members' ? { ...idQuery, negated: false } : idQuery, fresh);
           if (positive) {
-            const matching = make.filter({ id: fresh('f'), input: ids, channels: [], type: ids.type, pred: positive });
-            const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
-            // An element id is never NULL and neither is a rowid, so `NOT IN` is the exact complement.
-            return { kind: 'in-query', expr: id, plan: owners, negated: idQuery.kind === 'members' && idQuery.negated };
+            const negated = idQuery.kind === 'members' && idQuery.negated;
+            // The subject traces to its own scan's rowid (a re-source under a renumber): an uncorrelated
+            // membership the planner may drive that scan from. An element id is never NULL and neither is
+            // a rowid, so `NOT IN` is the exact complement.
+            if (ownScan(row, id, table)) {
+              const matching = make.filter({ id: fresh('f'), input: ids, channels: [], type: ids.type, pred: positive });
+              const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+              return { kind: 'in-query', expr: id, plan: owners, negated };
+            }
+            const matching = make.filter({ id: fresh('f'), input: ids, channels: [], type: ids.type, pred: and(eq(col(ids.id, 'id'), id), positive) });
+            const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+            // `NOT EXISTS` of the positive probe is the exact complement — as `NOT IN` was, it holds for
+            // an id no row carries too.
+            return { kind: 'exists', plan: probe, negated };
           }
         }
       }

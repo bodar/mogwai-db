@@ -719,8 +719,10 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, sour
   if (!asked.labels.length) return null;
   // The physical name→id resolution and side-table test are the graph SOURCE's; only the arg
   // normalisation above is the vocabulary's. `subject.label` is the edge's inline label column when
-  // the source scan is in scope, letting `BaseGraph` read the covering index directly.
-  return source.hasLabelPredicate(subject.elem, subject.id, subject.label, asked.labels, fresh);
+  // the source scan is in scope, letting `BaseGraph` read the covering index directly; `subject.rel`
+  // tells it whether the subject is its own source scan (drive from the label index) or a joined id
+  // (probe the label per row).
+  return source.hasLabelPredicate(subject.elem, subject.id, subject.label, asked.labels, fresh, subject.rel);
 }
 
 /**
