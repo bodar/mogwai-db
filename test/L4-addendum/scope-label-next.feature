@@ -170,6 +170,113 @@ Feature: mogwai addendum — a path label is the scope a traverser's own Map fal
       | d[7].i |
       | d[7].i |
 
+  # --- a label BOUND TO NULL on some rows: presence is the BINDING, never the value's nullness ---
+  # `Scoping.getScopeValue` answers `path.get(k)` whenever `path.hasLabel(k)`, null included
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:129-130),
+  # and `SelectOneStep` splits a null traverser rather than filtering it
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectOneStep.java).
+  # So the arm that bound `k` to null yields one null per row; the arm that never bound it drops.
+
+  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_selectXkX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
+      """
+    And the traversal of
+      """
+      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").select("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | null |
+      | null |
+
+  Scenario: g_V_asXvX_chooseXhasXnX_constantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_isX3X_selectXkX_count
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
+      """
+    And the traversal of
+      """
+      g.V().as("v").choose(__.has("n"), __.constant(null).as("k"), __.constant(0)).select("v").values("m").select("k").count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+
+  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_unionXselectXkX_constantX1XX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
+      """
+    And the traversal of
+      """
+      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").union(__.select("k"), __.constant(1))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | null |
+      | null |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+
+  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_mapXselectXkXX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
+      """
+    And the traversal of
+      """
+      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").map(__.select("k"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | null |
+      | null |
+
+  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_whereXselectXkXX_count
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", 3).property("n", 1).addV("p").property("m", 4)
+      """
+    And the traversal of
+      """
+      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").where(__.select("k")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+
+  # A stored Map holding `k` answers its entry on BOTH arms; a non-Map row answers the null binding.
+  Scenario: g_V_asXvX_unionXconstantXnullX_asXkX_constantX0XX_selectXvX_valuesXmX_selectXkX_mapRow
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1]).addV("p").property("m", 4)
+      """
+    And the traversal of
+      """
+      g.V().as("v").union(__.constant(null).as("k"), __.constant(0)).select("v").values("m").select("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | null |
+
   # A map stream whose key some rows only MAY hold (elementMap omits an absent property) behind a VALUE label.
   Scenario: g_V_hasXname_markoX_valuesXageX_asXageX_V_elementMapXageX_selectXageX
     Given the modern graph

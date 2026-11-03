@@ -543,12 +543,16 @@ function scopeValue(
   }
   if (!row) return null;
   const projected = aliasProjection(row.rel, row.aliases, key.label, key.pop);
-  return projected && {
+  if (!projected) return null;
+  // A label bound in a branch arm may be unbound on a row. Its presence is that BINDING (`aliasGuard`),
+  // stated as its own predicate — never the value's nullness, which would read a label bound to `null`
+  // as unbound (`Scoping.java:129-130` answers `path.get(k)` whenever `path.hasLabel(k)`).
+  const guard = aliasGuard(row.rel, projected.entry);
+  return {
     payload: projected.payload,
     framing: readFraming(projected.read),
     optional: projected.entry.binds === undefined,
-    // A label bound in a branch arm may be unbound on a row, which reads as a NULL value.
-    present: aliasGuard(row.rel, projected.entry) ? 'value-nullness' : 'always',
+    present: guard ? { when: guard } : 'always',
   };
 }
 
@@ -721,13 +725,16 @@ export function labelScopeNode(row: { readonly rel: Rel; readonly aliases: Alias
   const projected = aliasProjection(row.rel, row.aliases, label, pop);
   if (!projected) return liveAliases(row.aliases, row.rel).has(label) ? 'opaque' : null;
   if (projected.read.kind !== 'value') return 'opaque';
-  const total = !aliasGuard(row.rel, projected.entry);
+  const guard = aliasGuard(row.rel, projected.entry);
   // The history ENTRY already is the `{t,v}` node (plus its shape `k`), so it is read ONCE rather than
   // re-spelled per field (`aliasEntryNode`); a label whose read is not an entry read builds the node.
-  const value = projected.payload[0]![1];
-  const entry = aliasEntryNode(value);
-  const node = entry ? (total ? entry : caseWhen(isNotNull(value), entry)) : scopedValueNode(projected.payload, projected.read.type, total ? 'always' : 'value-nullness');
-  return { node, total };
+  // PRESENCE is the label's BINDING (`aliasGuard`), never its value's nullness: a label bound to `null` is
+  // a scope holding null (`Scoping.java:129-130` returns `path.get(k)` whenever `path.hasLabel(k)`, and
+  // `SelectOneStep` splits a null traverser), so its node is `{t, v:null}`, not "unbound". The entry read
+  // is already NULL exactly where the history is NULL or empty, so it needs no gate of its own.
+  const entry = aliasEntryNode(projected.payload[0]![1]);
+  const node = entry ?? scopedValueNode(projected.payload, projected.read.type, guard ? { when: guard } : 'always');
+  return { node, total: !guard };
 }
 
 /** A live path label as a next scope (`labelScopeNode`): its value node — `total` where it is bound on
