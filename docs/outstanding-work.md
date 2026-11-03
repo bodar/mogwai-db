@@ -19,19 +19,14 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 - **Untagged whole REAL re-injected by a value barrier frames as an Int** (`lowerValueResume`).
 - **Set-op literal operand loses member class** — `combine([1.0d])` reads a whole Double back as an Int.
 - **Intermediate `sum` overflow not widened** — a running total that leaves the Long range and returns.
-- **A first-value child over a sampled re-source draws ONCE for every host** — `map(__.V().sample(1))`,
-  `project('x').by(__.V().sample(1))`, `where(__.V().sample(1).values('age').is(gt(k)))` all go through
-  `reSourcedValue`, an UNCORRELATED scalar SQLite evaluates once, so every host gets the same draw (and a
-  `where` passes all hosts or none); the reference draws per traverser. Declining there leaves no route.
-  Needs the scalar seam to take its value off `reSourcedOnce`'s per-origin draw (a per-host row the
-  value correlates to) — the rows path (`property`, `local`, `flatMap`) already draws per origin.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
 - **A child `select(k)` of a label BOUND TO NULL in a branch arm drops the row** —
   `g.V().as('v').union(constant(null).as('k'), constant(0)).select('v').map(__.select('k'))` gives `[]`
   and `…where(__.select('k')).count()` gives `0` (reference: `[null, null]` / `2`, `Scoping.java:129-130`);
   the chain `select('k')` already answers. The re-root host's presence is `'value-nullness'`
   (`rerootPresence`), and a `HostPresence` deliberately cannot be a stated `{ when: aliasGuard }`
-  (`child.ts`), so this needs that host-presence substrate rather than a per-shape route.
+  (`child.ts`), so this needs that host-presence substrate rather than a per-shape route. Waits on §2's
+  `PresentWhen` decision, as do the other productive-null chain-vs-child inconsistencies (RelIR plan §10).
 
 ## 2. Needs a human call
 
@@ -42,6 +37,12 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   - a `_gremlin(query:)` raw-Gremlin escape field;
   - mutations generated from the defined schema;
   - measure bind count / 100 KB SQL text for depth-4 selections.
+
+- **Retire `PresentWhen`?** A child body's stated presence (`rel/child.ts`) is the one way a productive NULL
+  survives. Retiring it deletes the arm and makes "a productive null in a child body is absent" one §17 rule;
+  keeping it is the substrate for four chain-vs-child wrong answers. 🔴 Decide — the trade and witnesses are
+  in [RelIR plan](./2026-08-01-relir-build-plan.md) §10 "Needs a human decision", beside the unbound-label
+  question (E) and the `sample(n>1)` 8k×8k cost (cr-fu5).
 
 ## 3. Compounding substrate
 
@@ -82,6 +83,13 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   but `rootedRead` computes the body once for every host, so `readsHostState` declines. Needs that state
   correlated into the body (a per-host read). Tests: `test/L4-addendum/resourced-scalar-value.feature`
   `@gap:resourced-host-state`.
+- **A random draw in a `V()`/`E()` body shared by many hosts** — `map(__.V().sample(1))`,
+  `project('x').by(__.V().sample(1))`, `where(__.V().sample(1)…)` decline (`SHARED_DRAW`): the body is an
+  UNCORRELATED scalar SQLite evaluates once, so every host would share one draw, while the reference draws per
+  traverser. `local(__.V()…sample(1))` and a one-row host answer. So do draw-INDEPENDENT bodies
+  (`project().by(__.V().sample(1).count())`, `local(__.V().sample(1).count())`), which would be right with a
+  shared draw. Needs the scalar seam to take its value off `reSourcedOnce`'s per-origin draw (a per-host row
+  the value correlates to) — the rows path (`property`, `local`, `flatMap`) already draws per origin.
 - **`where(without('x'))` after `aggregate('x')`** — lower as `NOT IN (SELECT … FROM <collection>)`.
 - **`repeat(...).until(where(eq('a')))`.**
 - **`choose()` with mixed list-shaped arms** — `choose(hasLabel('person'), out().fold(), values('name').fold())`.
@@ -160,10 +168,9 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 
 ## 7. Low priority
 
-- **A deterministic per-origin slice over a re-source is O(origins × |V|)** — `local(__.V().hasLabel('person')
-  .limit(2))` (7.5 s at 4k holders) — the reference's own traverser count, so a cost, not a wall. With one
-  row per origin (a body-opening re-source) the prefix THROUGH the slice is origin-independent, so
-  `rootedRead` it once and cross the origins with its (small) result — O(origins × n).
+- **Contrived shapes — build only on a user report.** The RelIR plan §10 bucket of that name (a deterministic
+  per-origin slice over a re-source, `group()` pooled fold value, absent-label reroot depth, map-equality
+  options A/B, …). Real gaps in shapes nobody has been seen to write.
 - **Bulk journal clear in bounded chunks** — `clearBulkJournal` (`src/storage.ts`) is one DELETE.
 - **Nested scalar `reverse()`/`split()`** inside a child body.
 - **Content-demand 3-arg `has`** — `literalKeysOf` (`src/compiler/ir/content-demand.ts`) takes the label as the key.
