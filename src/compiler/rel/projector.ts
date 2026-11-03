@@ -15,7 +15,7 @@ import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
 import { carriedCols, jsonField, meta, once, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
-import { fieldNamed, mapKeyPresence } from './framing.ts';
+import { fieldNamed, mayHoldKey } from './framing.ts';
 
 /**
  * THE PER-TRAVERSER PROJECTORS — `math("<formula>")` and `format("…%{t}…")`.
@@ -121,7 +121,7 @@ const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
  */
 const sideEffectBehindOwnScope = (name: string, host: ChildHost, child: ChildSeam): boolean =>
   (child.sideEffects.has(name) || child.scopeNames.sideEffects.has(name))
-  && (host.kind === 'record' ? !!fieldNamed(host.fields, name)?.optional : host.kind === 'map' && mapKeyPresence(host, name) === 'may');
+  && (host.kind === 'record' ? !!fieldNamed(host.fields, name)?.optional : host.kind === 'map' && mayHoldKey(host, name));
 
 /**
  * The formula as ONE expression over the host traverser, or `null` to decline.
@@ -301,12 +301,11 @@ function formatValue(
     // no minter, so the correlated read is done here where `fresh` is in scope.
     if (host.kind === 'map') {
       if (host.valOf.kind !== 'scalar') return null;
-      const presence = mapKeyPresence(host, part.name);
-      if (presence === 'absent') return null;
+      if (!mayHoldKey(host, part.name)) return null;
       // A row lacking a key it only MAY hold reads the next scope (`FormatStep`'s
       // `getNullableScopeValue`, `Scoping.java:119-135`), so where a path label or side effect may name
-      // the token the drop below would LOSE that row: only a HELD key answers there, else decline.
-      if (presence === 'may' && mayScope(part.name, child)) return null;
+      // the token the drop below would LOSE that row: the collision is in the query text, so decline.
+      if (mayScope(part.name, child)) return null;
       // Rendered INSIDE the correlated read (`over`), so the per-row type test spells the matched pair's
       // column rather than re-running the read once per mention. A per-row tag never declines.
       pieces.push(correlatedMapKey(host.map, part.name, fresh,

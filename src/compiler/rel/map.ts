@@ -1647,10 +1647,10 @@ export const mapSize = (input: Rel, fresh: Minter): Rel =>
   withPayload(input, [['v', { kind: 'call', fn: 'json_array_length', args: [jsonOf(col(input.id, MAP_COL))] }]],
     [meta('v', 'int')], fresh);
 
-/** A local map slice's WINDOW — the one decode both the entry slice (`mapRange`) and its key facts
- *  (`slicedKeyFacts`, framing.ts) read, so the two cannot disagree about which positions survive.
+/** A local map slice's WINDOW — the entry slice's (`mapRange`) decode. A slice only REMOVES entries, so the
+ *  map's key fact (framing.ts `MapKeyFacts`, a MAY set) survives it unchanged and needs no window.
  *  `fromEnd` is `tail`'s LAST-n take. `null` declines; an illegal `range` PROPAGATES its `ValueParseError`. */
-export function mapWindow(step: IRStep): { readonly offset: number; readonly limit: number | null; readonly fromEnd: boolean } | null {
+function mapWindow(step: IRStep): { readonly offset: number; readonly limit: number | null; readonly fromEnd: boolean } | null {
   if (step.name === 'tail') return { offset: 0, limit: countOf(step), fromEnd: true };
   try {
     const { offset, limit } = sliceOf(step);

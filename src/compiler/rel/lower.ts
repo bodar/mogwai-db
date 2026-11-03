@@ -18,7 +18,7 @@ import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
-import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, mapKeyPresence, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, mayHoldKey, meetMapKeyFacts, recordKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, propertyPayload, propertyRowId, propertyValue } from './property.ts';
@@ -57,7 +57,7 @@ import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, ele
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapWindow, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -514,10 +514,10 @@ function constantValue(input: Rel, arg: Arg, fresh: Minter): FramedRel | null {
   // `constant([k:v, …])` — a MAP LITERAL, the per-row twin of `injectMap`. It REPLACES each traverser's
   // value with the same compile-time map (`mapLiteralBlob`, the self-describing pairs blob every map
   // producer shares), so the whole re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold`,
-  // a slice, `as()`) composes over it. Every row holds exactly the literal's string keys, so they are
-  // both key facts (`literalKeyFacts`): a `constant([…]).as(m).select(m).select(k)` resolves like every
-  // other aliased map (G4). A map with a non-string key (a `Direction`/`T.label` token) states only the
-  // keys it holds, so the map tail reads `MAP_COL` for the rest.
+  // a slice, `as()`) composes over it. Every row holds exactly the literal's string keys, so they are its
+  // key fact (`literalKeyFacts`): a `constant([…]).as(m).select(m).select(k)` resolves like every other
+  // aliased map (G4). A map with a non-string key (a `Direction`/`T.label` token) leaves its key set
+  // unknown, so the map tail reads `MAP_COL` for every key.
   if (arg.value instanceof Map) {
     const blob = mapLiteralBlob(arg.value, arg.type ?? null, arg.name);
     if (!blob) return null;
@@ -622,8 +622,8 @@ function terminal(
     // only for the explicit-key form: `valueMap()`/`valueMap(true)` (`asked.all`) reads every property,
     // so the set is data-dependent and stays undefined (the ambiguity holds). Token keys (`T.id`/`T.label`)
     // are never string-equal to an alias name, so the string key set is a sound answer to "can this map
-    // contain string key k" even when tokens are also present. It is a MAY set only — never `held`: the
-    // map omits a property the element lacks.
+    // contain string key k" even when tokens are also present. A MAY set: the map omits a property the
+    // element lacks.
     const keys = asked.all ? undefined : (asked.keys as readonly string[]);
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf, ...(keys ? { keys } : {}) } };
   }
@@ -1721,7 +1721,7 @@ function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
 /**
  * Does a keyed dedup name a SIDE EFFECT its traverser's own scope does not answer on every row? The side
  * effect is read before the path (`Scoping.java:126-127`), so only an own scope that holds the key on
- * every row (a present record field, a map's held key) may be built — reading the label, or
+ * every row (a required record field) may be built — reading the label, or
  * dropping a row lacking the key, would be a wrong answer; the caller declines.
  */
 function sideEffectUnanswered(keys: readonly string[], ctx: ChainCtx, scope: MapScope | undefined): boolean {
@@ -2712,9 +2712,7 @@ function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; f
   const channels = ordered ? withChannel([], ENCOUNTER) : [];
   const rows = (blobs as Expr[]).map((blob, i) => (ordered ? [blob, compilerInt(i + 1)] : [blob]));
   // Each literal states its own key facts exactly as `constant([…])` frames its one literal, and the
-  // stream holds ANY of their rows, so its facts are their MEET — the MAY set is every argument's keys,
-  // the MUST set the keys they all share. A row lacking a key another holds is then a key in `keys` but not
-  // `held`, which `mapTail`'s label select declines rather than drop (`Scoping.java:119-135`).
+  // stream holds ANY of their rows, so its facts are their MEET — the union of every argument's keys.
   const facts = meetMapKeyFacts(step.args.map((a) => literalKeyFacts([...(a.value as Map<unknown, unknown>).keys()])));
   return {
     rel: make.values({
@@ -3030,8 +3028,8 @@ function mapTail(
 ): Tail | null {
   let rel = seed;
   let labels = aliases;
-  // The map's key facts (framing.ts `MapKeyFacts`) — `keys` MAY, `held` MUST. A step below that is not
-  // identity on the entries re-states them soundly or drops them.
+  // The map's key fact (framing.ts `MapKeyFacts`) — the keys a row MAY hold. A step below that may ADD an
+  // entry drops it; one that only removes entries keeps it.
   let facts = mapKeyFacts(seedFacts);
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
@@ -3101,15 +3099,11 @@ function mapTail(
     // insertion order, the map's own `MAP_COL` pairs array sliced like the list-local slice. The map
     // shape is preserved, so the tail continues under the SAME framing. `order`/`dedup`(Scope.local) over
     // a map (by key/value) is a different question and is NOT this arm — it declines below.
-    // The window may REMOVE entries, so the key facts are re-stated through `slicedKeyFacts`: `held`
-    // survives only where it is still true, so `inject([a:1,b:2]).limit(local,1).as('b').select('b')` does
-    // not read the dropped `b` entry as every row's answer.
+    // The window only REMOVES entries, so the key fact (a MAY set) stays a sound upper bound.
     if (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step)) {
-      const window = mapWindow(step);
-      const sliced = window && mapRange(rel, step, fresh);
-      if (!window || !sliced) return null;
+      const sliced = mapRange(rel, step, fresh);
+      if (!sliced) return null;
       rel = sliced;
-      facts = slicedKeyFacts(facts, window);
       continue;
     }
 
@@ -3157,20 +3151,22 @@ function mapTail(
     if (step.name === 'select') {
       const key = selectedKey(step);
       if (key !== null) {
-        const presence = mapKeyPresence(facts, key);
+        const may = mayHoldKey(facts, key);
         const live = liveAliases(labels, rel).has(key);
         // A scope beyond the Map that names `key` is read for a row lacking it, and an entry-or-scope read
-        // per row is not built. So the map's KEY FACTS decide on the query text alone: a key EVERY row holds
-        // (`held`) is the entry for every row; a key NO row holds (outside `keys`) is the named scope for
-        // every row — the collection, the constant, or the label through the ordinary alias read
-        // (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) beside a side-effect constant
+        // per row is not built. So the map's KEY FACT decides on the query text alone: a key NO row holds
+        // (outside `keys`) is the named scope for every row — the collection, the constant, or the label
+        // through the ordinary alias read (`selectKeys`); a key a row MAY hold beside a side-effect constant
         // or a label DECLINES — the answer would depend on which rows hold it, and the query text names the
         // collision. A named COLLECTION a row may shadow keeps the entry and a row lacking it DROPS — a
         // collection beside the entry per row has no framing (§17; `Select.feature`'s
         // `group("a")…select("a").select("a")` reads the entry).
-        if (presence !== 'held' && namedBeyondMap(key, ctx, live)) {
+        if (namedBeyondMap(key, ctx, live)) {
           const constant = sideEffectConstant(key, ctx);
-          if (presence === 'may') {
+          if (may) {
+            // A clean decline (`lowerToRel` never throws — the `rel-sweep` gate). The message is the generic
+            // "no lowering covers …": an explanatory reason needs a decline-with-reason channel out of the
+            // lowering, which does not exist yet.
             if (constant || live || ctx.enclosingLabels?.has(key)) return null;
           } else {
             let scoped = selectCollection(step, rel, ctx, fresh);
@@ -3225,23 +3221,22 @@ function mapTail(
     // `dedup(k)` the MAP may hold reads the map's own value first (its scope wins), keyed like the map's
     // own identity, by the value node's JSON.
     // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
-    const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && mapKeyPresence(facts, a.value) !== 'absent')
+    const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && mayHoldKey(facts, a.value))
       ? fenced(rel, fresh) : rel;
     const mapScope: MapScope = (k) => {
-      const presence = mapKeyPresence(facts, k);
       // A key NO row holds reads a `withSideEffect` CONSTANT for every row (`Scoping.java:126-127`): one
       // literal term, no per-row read.
-      if (presence === 'absent') {
+      if (!mayHoldKey(facts, k)) {
         const constant = sideEffectConstant(k, ctx);
         const term = constant && constantNode(constant.value, constant.type ?? null, constant.name ?? null);
         return term ? { terms: [term], absent: null, mayBeElement: false } : undefined;
       }
       const node = correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node;
-      // Only a HELD key is every row's (`mapKeyPresence`): `keys` is what a map MAY hold —
-      // `elementMap('age')`/`valueMap('age')` omit a property the element lacks — so otherwise the absence
-      // test is per row, and `dedupByLabels` keys a row lacking it on the label only where the two can
-      // never be equal. A side effect the row lacking it would read instead declines (`sideEffectUnanswered`).
-      return { terms: [node], absent: presence === 'held' ? null : { kind: 'binary', op: 'is', left: node, right: compilerNull() }, mayBeElement: valOf.kind === 'elem' };
+      // `keys` is only what a map MAY hold — `elementMap('age')`/`valueMap('age')` omit a property the
+      // element lacks — so the absence test is per row, and `dedupByLabels` keys a row lacking it on the
+      // label only where the two can never be equal. A side effect the row lacking it would read instead
+      // declines (`sideEffectUnanswered`).
+      return { terms: [node], absent: { kind: 'binary', op: 'is', left: node, right: compilerNull() }, mayBeElement: valOf.kind === 'elem' };
     };
     const kd = keyedDedup(step, scoped, labels, ctx, fresh, mapScope);
     if (kd === null) return null;

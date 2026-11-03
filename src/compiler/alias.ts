@@ -110,8 +110,8 @@ export function joinAliasEntry(left: AliasEntry, right: AliasEntry): Omit<AliasE
       : left.shapes.has(shape) ? a : right.shapes.has(shape) ? b : undefined;
   const scalarType = field('value', left.scalarType, right.scalarType, scalar);
   const listOf = field('list', left.listOf, right.listOf, same);
-  // A map's SIDES must agree (they decide how its pairs re-enter); its KEY FACTS meet — the MAY set
-  // unions, the MUST set intersects (`meetMapKeyFacts`) — because the history now holds either side's maps.
+  // A map's SIDES must agree (they decide how its pairs re-enter); its KEY FACT meets — the MAY sets
+  // union (`meetMapKeyFacts`) — because the history now holds either side's maps.
   const mapOf = field('map', left.mapOf, right.mapOf, (a, b) =>
     a && b && same(a.keyOf, b.keyOf) && same(a.valOf, b.valOf)
       ? { keyOf: a.keyOf, valOf: a.valOf, ...meetMapKeyFacts([a, b]) } : undefined);

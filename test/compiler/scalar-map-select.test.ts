@@ -69,8 +69,19 @@ describe('select(k) over a per-row scalar stream — Map first only where nothin
     ]) expect(() => run(seededStore(), q), q).toThrow(UnsupportedTraversal);
   });
 
-  test('a key the map cannot hold reads the side effect for every row; a key it holds on every row reads the entry', () => {
+  test('a key the map cannot hold reads the side effect for every row; a key it may hold declines', () => {
     expect(bare(run(seededStore(), "g.withSideEffect('k',5).inject([j:2]).select('k')"))).toEqual([{ v: 5 }]);
-    expect(bare(run(seededStore(), "g.withSideEffect('k',5).inject([k:1]).select('k')"))).toEqual([{ v: 1, vtype: 'int' }]);
+    // The key fact is a MAY set only, so even a literal holding `k` on every row declines.
+    for (const q of [
+      "g.withSideEffect('k',5).inject([k:1]).select('k')",
+      "g.V().as('name').constant([name:'x']).select('name')",
+      "g.V().as('name').local(constant([name:'x']).select('name'))",
+      "g.V().as('name').union(constant([name:'x']), constant([name:'y'])).select('name')",
+      "g.V().as('name').constant([name:'x']).limit(local, 1).select('name')",
+    ]) expect(() => run(seededStore(), q), q).toThrow(UnsupportedTraversal);
+    // The ordinary forms keep answering: no collision, and the record path is untouched.
+    expect(bare(run(seededStore(), "g.inject([a:1],[b:2]).as('x').select('x').select('a')"))).toEqual([{ v: 1, vtype: 'int' }]);
+    expect(bare(run(seededStore(), "g.V().as('n').constant([name:'x']).select('name')")).length).toBe(6);
+    expect(bare(run(seededStore(), "g.V().project('name','age').by('name').by('age').select('name')")).length).toBe(6);
   });
 });

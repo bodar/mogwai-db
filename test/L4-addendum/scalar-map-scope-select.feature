@@ -266,7 +266,9 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | d[1].i |
       | m[{"b":2}] |
 
-  # Maps sharing ONE key set hold `a` in every row, so the Map answers and the label never does.
+  # Maps that MAY hold `a` beside a same-named label: a collision the query text names, so it declines (the
+  # key fact is a MAY set only, so even maps sharing ONE key set are not read as holding it on every row).
+  @Unsupported
   Scenario: g_injectXa1_a2X_asXaX_selectXaX
     Given the empty graph
     And the traversal of

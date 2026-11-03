@@ -1225,7 +1225,7 @@ export const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
  *
  * `sameFraming` compares what decides the PAYLOAD (the columns and their encodings); it deliberately
  * ignores a map's static key facts, which differ between arms that union perfectly well
- * (`union(constant([a:3]), constant([a:1,b:2]))`). Those facts are a MAY set and a MUST set, so the merge
+ * (`union(constant([a:3]), constant([a:1,b:2]))`). That fact is a MAY set, so the merge
  * is their lattice meet (`meetMapKeyFacts`) — and a record's map-valued FIELD is the same question one
  * level down, so the meet recurses through the fields. Every other kind is equal across admitted arms,
  * which is exactly what `sameFraming` guarantees, so the first arm's framing IS the merged one.

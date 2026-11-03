@@ -442,9 +442,9 @@ export type ChildHost =
    *  JSON (a `LinkedHashMap` in canonical key order compares by entries), and its ORDER declines — a Java
    *  `Map` is not `Comparable`, so every `by()`/order arm below returns `null` for it (there is no scalar
    *  value to project). `map` is the value expression (a JSONB object); `keyOf`/`valOf` its encodings.
-   *  Its KEY FACTS are the framing's (`MapKeyFacts` — `keys` MAY, `held` MUST), which a `select(<key>)`
+   *  Its KEY FACT is the framing's (`MapKeyFacts` — the keys a row MAY hold), which a `select(<key>)`
    *  child body or a `format('%{key}')` needs for TinkerPop's map-key-vs-alias precedence exactly as
-   *  `mapTail`'s chain-level `select` does, read through the one `mapKeyPresence`. */
+   *  `mapTail`'s chain-level `select` does, read through the one `mayHoldKey`. */
   | ({ readonly kind: 'map'; readonly map: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf; readonly row?: HostRow } & MapKeyFacts);
 
 /**

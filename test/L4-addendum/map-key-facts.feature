@@ -1,12 +1,15 @@
-Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` MUST hold
+Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
 
   # `select(k)` over a Map stream resolves `Scoping.getScopeValue`'s precedence — the traverser's own Map,
   # then the side effects, then the path labels
   # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135).
-  # The compiler decides that on two compile-time facts per map stream (src/compiler/rel/framing.ts
-  # `MapKeyFacts`): `keys`, the keys a row MAY hold (a too-narrow set skips a real entry), and `held`, the
-  # keys EVERY row holds (a too-wide set drops a row the next scope answers). A branch merge MEETS them
-  # (keys union, held intersection — `meetFraming`); a local entry slice re-states them (`slicedKeyFacts`).
+  # The compiler decides that on ONE compile-time fact per map stream (src/compiler/rel/framing.ts
+  # `MapKeyFacts`): `keys`, the keys a row MAY hold (a too-narrow set skips a real entry). A branch merge
+  # and an alias history UNION it (`meetMapKeyFacts`); a local entry slice keeps it as an upper bound. A key
+  # outside it reads the next scope for every row; a key inside it beside a same-named side effect or label
+  # DECLINES naming the collision (§17 "Map scope") — there is no MUST set, so this holds even where every
+  # row does hold the key: the collision is in the query text, and the user almost certainly meant one or
+  # the other.
 
   # A branch merge of map arms with DIFFERENT key sets: the merged stream may hold `b` (one arm does), so the
   # row lacking it reads the side effect. Before, the merge kept the FIRST arm's key set and read `7` twice.
@@ -122,7 +125,8 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | d[3].i |
 
-  # Literals sharing a key set HOLD it, so the map's entry answers every row ahead of the same-named label.
+  # Literals sharing a key set, beside a same-named label: a collision the query text names — declines.
+  @Unsupported
   Scenario: g_injectXa1_b2X_a3_b4X_asXaX_selectXaX
     Given the empty graph
     And the traversal of
@@ -135,9 +139,9 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | d[1].i |
       | d[3].i |
 
-  # A LOCAL ENTRY SLICE between a held producer and a same-named label: the window removes the key, so the
-  # label answers (before: every row dropped). A literal's entry order is known, so the facts after the
-  # window are exact and the label is read for every row.
+  # A LOCAL ENTRY SLICE between a map literal and a same-named label: the slice keeps the key set as an
+  # upper bound (it is not re-derived from the window), so the label collision declines.
+  @Unsupported
   Scenario: g_injectXa1_b2X_a3_b4X_limitXlocal_1X_asXbX_selectXbX
     Given the empty graph
     And the traversal of
@@ -150,6 +154,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | m[{"a":"d[1].i"}] |
       | m[{"a":"d[3].i"}] |
 
+  @Unsupported
   Scenario: g_injectXa1_b2X_a3_b4X_tailXlocal_1X_asXaX_selectXaX
     Given the empty graph
     And the traversal of
@@ -162,6 +167,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | m[{"b":"d[2].i"}] |
       | m[{"b":"d[4].i"}] |
 
+  @Unsupported
   Scenario: g_V_asXbX_constantXa1_b2X_limitXlocal_1X_selectXbX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -178,6 +184,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | ripple |
       | peter |
 
+  @Unsupported
   Scenario: g_withSideEffectXm_a1X_injectX1X_selectXmX_limitXlocal_0X_asXaX_selectXaX
     Given the empty graph
     And the traversal of
@@ -189,6 +196,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | m[{}] |
 
+  @Unsupported
   Scenario: g_injectXa1_b2X_rangeXlocal_1_2X_asXaX_selectXaX
     Given the empty graph
     And the traversal of
@@ -200,7 +208,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | m[{"b":"d[2].i"}] |
 
-  # The window keeps `b`, so the map still holds it and answers ahead of the label.
+  @Unsupported
   Scenario: g_injectXa1_b2X_skipXlocal_1X_asXbX_selectXbX
     Given the empty graph
     And the traversal of
@@ -212,7 +220,8 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | d[2].i |
 
-  # The same facts decide the label read inside a child body (an enclosing label) and behind math().
+  # The same fact decides the label read inside a child body (an enclosing label) and behind math().
+  @Unsupported
   Scenario: g_V_asXbX_localXconstantXa1_b2X_limitXlocal_1X_selectXbXX_count
     Given the modern graph
     And the traversal of
@@ -224,6 +233,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | d[6].l |
 
+  @Unsupported
   Scenario: g_V_valuesXageX_asXbX_constantXa1_b2X_limitXlocal_1X_mathXbX
     Given the modern graph
     And the traversal of
@@ -257,7 +267,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | v[lop] |
       | v[ripple] |
 
-  # Literals whose entry ORDERS differ are not exact, so a slice spends `held` and the label select declines.
+  # Literals whose entry ORDERS differ: the slice keeps `b` as a key a row may hold, so the label select declines.
   @Unsupported
   Scenario: g_injectXa1_b2X_b3_a4X_limitXlocal_1X_asXbX_selectXbX
     Given the empty graph
@@ -271,7 +281,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | m[{"a":"d[1].i"}] |
       | d[3].i |
 
-  # EVERY map-first reader reads the facts through the one `mapKeyPresence`, not the chain select alone. After
+  # EVERY map-first reader reads the facts through the one `mayHoldKey`, not the chain select alone. After
   # a merge `b` is a key some rows only MAY hold; `format('%{b}')` reads the path label `b` for a row lacking it
   # (`FormatStep` → `getNullableScopeValue`), and reading the entry would DROP that row — so it declines.
   @Unsupported
@@ -299,7 +309,8 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | d[12].l |
 
-  # A key EVERY row holds answers from the entry even with a same-named label behind it.
+  # A key every row holds beside a same-named label still declines: the key fact is a MAY set only.
+  @Unsupported
   Scenario: g_injectX10X_asXbX_unionXconstantXa3_b5X_constantXa1_b2XX_formatXa_bX
     Given the empty graph
     And the traversal of
@@ -339,7 +350,8 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | result |
       | d[1].l |
 
-  # Every row holds `b`, so the entry is every row's key.
+  # Every row holds `b`, but beside the label `b` the keyed dedup still declines (a MAY set only).
+  @Unsupported
   Scenario: g_injectX10X_asXbX_unionXconstantXa3_b10X_constantXa1_b10XX_dedupXbX_count
     Given the empty graph
     And the traversal of
@@ -365,8 +377,9 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | m[{"x":"d[10].i"}] |
       | m[{"x":"d[2].i"}] |
 
-  # A label read behind a local slice of a record, after a keyed dedup: the label is outside the sliced
-  # key set, so it answers from the path (the element re-entry is an ordered primary-key probe).
+  # A label read behind a local slice of a record, after a keyed dedup: the slice keeps `y` as a key a row
+  # may hold, so the label collision declines.
+  @Unsupported
   Scenario: g_V_asXxX_out_asXyX_selectXx_yX_dedupXxX_limitXlocal_1X_selectXyX_count
     Given the modern graph
     And the traversal of

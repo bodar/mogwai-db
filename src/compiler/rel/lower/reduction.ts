@@ -22,7 +22,7 @@ import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, json
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
-import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../framing.ts';
+import { fieldNamed, framingCols, mayHoldKey, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
 import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, namedBeyondMap, sideEffectConstant, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
@@ -2538,20 +2538,20 @@ function mapHostChild(
   const spec = selectSpec(first);
   if (!spec || spec.labels.length !== 1) return null;
   const key = spec.labels[0]!;
-  const presence = mapKeyPresence(host, key);
+  const may = mayHoldKey(host, key);
   // A scope beyond the Map that names `key` answers a row lacking it (`Scoping.java:119-135`), and an
-  // entry-or-scope read per row is not built — so the KEY FACTS decide (`mapTail`'s rule): a key every row
-  // holds is the entry; a key no row holds is a `withSideEffect` constant's value (`constantSelectChild`)
-  // or, for a label the child seam has no alias vocabulary for here, a decline; a key a row MAY hold beside
-  // a constant or a label declines (the collision is in the query text), and beside a named collection
-  // keeps the entry (a row lacking it drops, §17 "Map scope").
-  if (presence !== 'held' && namedBeyondMap(key, ctx, labelNamed(key, host, ctx))) {
+  // entry-or-scope read per row is not built — so the KEY FACT decides (`mapTail`'s rule): a key no row
+  // holds is a `withSideEffect` constant's value (`constantSelectChild`) or, for a label the child seam has
+  // no alias vocabulary for here, a decline; a key a row MAY hold beside a constant or a label declines
+  // (the collision is in the query text), and beside a named collection keeps the entry (a row lacking it
+  // drops, §17 "Map scope").
+  if (namedBeyondMap(key, ctx, labelNamed(key, host, ctx))) {
     const constant = sideEffectConstant(key, ctx);
-    if (presence === 'absent') return constant ? constantSelectChild(body, host, constant, ctx, fresh) : null;
+    if (!may) return constant ? constantSelectChild(body, host, constant, ctx, fresh) : null;
     if (constant || labelNamed(key, host, ctx) || ctx.enclosingLabels?.has(key)) return null;
   }
   // A key NOT in the static key set cannot be a map key, and no scope names it: every row drops.
-  if (presence === 'absent') return null;
+  if (!may) return null;
   const { node } = correlatedMapKey(host.map, key, fresh);
   return selectedNodeChild(body, node, host.valOf, host.row, ctx, fresh);
 }
