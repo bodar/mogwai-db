@@ -255,8 +255,8 @@ the record and map tails, `foldMaps` collects the per-row pairs array, and a lis
 `project()` field frames through `listNodeExpr` (the self-describing twin of `listPayloadExpr`). So
 `project(k…).by(…).fold()`, `valueMap().fold()`, `group().…fold()`, and a nested
 `project().by(__.…project().fold())` — the depth-2 GraphQL selection — all lower and frame to real
-GraphBinary maps. The owning worklist is the RelIR plan's §10 (its "a list whose members are MAPS"
-bullet); the coverage is `test/compiler/list-of-maps.exec.test.ts` (the corpus underexercises deep
+GraphBinary maps. The owning worklist is `docs/outstanding-work.md` §3 ("List members"); the coverage
+is `test/compiler/list-of-maps.exec.test.ts` (the corpus underexercises deep
 selections, so this is where the shape is checked).
 
 ---
@@ -789,7 +789,8 @@ per-chain answers and the corpus-wide ranking are computed identically and can b
 locations were read at the pin and are cited inline.
 
 Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the precedent front end),
-`docs/2026-08-01-relir-build-plan.md` (where Phase 0 lands, and whose worklist it shares),
+`docs/archive/2026-08-01-relir-build-plan.md` (where Phase 0 landed; the shared worklist is now
+`docs/outstanding-work.md`),
 `docs/archive/2026-08-07-edge-compilation-plan.md` (a finding §5's probes turned up; the plan-stability
 finding has since landed, RelIR plan §1 P4),
 `docs/property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),

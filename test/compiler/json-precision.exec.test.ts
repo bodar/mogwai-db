@@ -2,7 +2,7 @@
 // significant digits, and a JS reader's JSON.parse rounds an INTEGER past 2^53. `jsonMember`
 // (build.ts) is the ONE JSON-entry repair, so any numeric value survives a json_object/json_array/
 // json_group_array at any depth. This pins the REAL half: a computed mean that needs 16-17 digits
-// round-trips exactly through the blob. See docs/2026-08-01-relir-build-plan.md §12.
+// round-trips exactly through the blob. See docs/archive/2026-08-01-relir-build-plan.md §12.
 import { test, expect, describe } from 'bun:test';
 import { run, seededStore } from '../support/harness.ts';
 

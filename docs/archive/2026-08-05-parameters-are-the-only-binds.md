@@ -9,7 +9,7 @@ parameter is the only free-standing bind, and *one* bind whatever its size. So t
 collapsed to two (parameter vs constant), and the leak the plan set out to close is closed: **the 100-bind
 cap is now exactly 100 parameters, with no mystery overhead.** Supersedes the constant-SQL-hygiene campaign
 (`docs/archive/2026-08-05-compiler-constant-sql-hygiene-plan.md`) and reverses a locked decision
-(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). The two exotic gaps this round found were
+(`docs/archive/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). The two exotic gaps this round found were
 each a live *wrong answer / defect*, not a coverage gap, and both LANDED: a decimal/bigint/duration
 **constant** in a static ordering comparison (legacy compared decimal TEXT lexically), and a collection
 **parameter** as a `within`/`without` IN-set (its data was flattened into inline statement text). This doc

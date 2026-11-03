@@ -1,6 +1,6 @@
 # src/compiler — architecture
 
-_Scope: `src/compiler/**`. The algebra it lowers to is `src/rel/` (`docs/2026-08-01-relir-build-plan.md`);
+_Scope: `src/compiler/**`. The algebra it lowers to is `src/rel/` (`docs/archive/2026-08-01-relir-build-plan.md`);
 the SQL kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rules._
 
 `compile()` = `parse → runPasses → analyze → lower to RelIR → emit`. **There is ONE lowering.** The
@@ -79,7 +79,7 @@ while what they operate on keeps TinkerPop's.
   kill bar, so the classifiers stay in the lowering; (2) a designed cross-layer shape *type* — targets
   ~6% of diagnosed defects while structurally blind to the 33% carried-field-at-a-barrier class, which
   is killed instead by channel obligations (`src/rel/obligations.ts`, `CHANNEL_GROUP_POLICY`); (3) a
-  typed core IR — already LAW in `docs/2026-08-01-relir-build-plan.md` §2 (shape never enters the
+  typed core IR — already LAW in `docs/archive/2026-08-01-relir-build-plan.md` §2 (shape never enters the
   `src/rel/` node set). The shape vocabularies themselves landed as that plan's §6·3 three-layer
   boundary (row algebra → payload projection → byte framing). **The burden on any structural proposal
   here is a measurement, not a design sketch** — forward-reasoned "this needs a new substrate" has been

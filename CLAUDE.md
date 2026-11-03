@@ -44,8 +44,7 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   `src/compiler/ir/bulk.ts`, which is how TinkerPop (`Traverser.equals` per traverser class, plus
   `LazyBarrierStrategy` deciding per POSITION where bulking may be introduced) and Calcite
   (`RelMetadataQuery` per node, `SqlSplittableAggFunction` per function) both model it. Its
-  chain-global relaxation stays REFUTED — do not retry it. Residue moved to the RelIR build plan's
-  Phase 3 step 4.
+  chain-global relaxation stays REFUTED — do not retry it. Residue is in `docs/outstanding-work.md` §3.
 - `docs/archive/2026-08-09-named-collections-are-bindings-plan.md` — ✅ **LANDED AND ARCHIVED
   (2026-08-23).** `aggregate("a")` RETAINS a relation under a name; `cap("a")` reduces it, which is why N
   sites are a UNION of relations rather than N−1 list concatenations. The collection substrate is
@@ -55,10 +54,14 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   `cap().unfold()` member re-entry. The one remaining feature — a KEYED-label SEEDED merge — is a
   separate multi-mechanism feature the doc explicitly does not own (tracked in `outstanding-work.md`).
   Read it before touching `collection.ts`
+- `docs/archive/2026-08-01-relir-build-plan.md` — ✅ **LANDED AND ARCHIVED (2026-11-03).** The RelIR
+  algebra (`Step[] → RelIR → SQL`): one spine, the legacy compiler deleted, the node set closed. Read it
+  for §1–§9's LAW and measured facts (the platform envelope, the node set, the disciplines) and §12's
+  traps; its open worklist moved to `docs/outstanding-work.md`.
 - `docs/property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the bright line in `src/compiler/CLAUDE.md` — the
   boundary is the anchor rule, not "shape belongs downstream". The shape vocabularies themselves landed
-  as the RelIR three-layer boundary (`docs/2026-08-01-relir-build-plan.md` §6·3); the durable rule
+  as the RelIR three-layer boundary (`docs/archive/2026-08-01-relir-build-plan.md` §6·3); the durable rule
   (a Pass may CONSULT shape, never CONSTRUCT it) and the refuted cross-layer refactors live in
   `src/compiler/CLAUDE.md`
 
@@ -314,7 +317,7 @@ property.
 - **One spine.** The legacy compiler (`src/compiler/steps/`, `src/compiler/engine/`), its routing
 switch and the whole differential harness (`MOGWAI_RELIR`, `test:legacy-spine`, the two-floor L3
 ratchet, the census's legacy columns) are DELETED. A traversal the RelIR lowering does not cover
-raises `UnsupportedTraversal` — a clear query failure, never a fallback. The RelIR plan records the
+raises `UnsupportedTraversal` — a clear query failure, never a fallback. `docs/outstanding-work.md` §3 holds the
 remaining cross-cutting substrate.
 
 **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule, and is

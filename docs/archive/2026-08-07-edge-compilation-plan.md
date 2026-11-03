@@ -299,7 +299,7 @@ any *successful* compile can produce something the seam cannot take. No traversa
 cannot cross the seam.
 
 The RelIR write path that made this possible landed via `docs/2026-08-01-write-path-plan.md` +
-`docs/2026-08-01-relir-build-plan.md` §8. The phases below are unblocked.
+`docs/archive/2026-08-01-relir-build-plan.md` §8. The phases below are unblocked.
 
 ### Phases
 

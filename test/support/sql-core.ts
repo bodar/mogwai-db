@@ -2,7 +2,7 @@ import type { GraphStore } from '../../src/storage.ts';
 
 /**
  * The two mechanical halves of the RelIR equivalence gate (§5 of
- * `docs/2026-08-01-relir-build-plan.md`): **same results, same access path, never spelling.**
+ * `docs/archive/2026-08-01-relir-build-plan.md`): **same results, same access path, never spelling.**
  *
  * They live in `test/support/` rather than beside one test because the gate is declared for
  * Phases 2–3 as well as for Phase 1's exit criterion, and a comparison two levels need that lives

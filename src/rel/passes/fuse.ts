@@ -41,7 +41,7 @@ import { exprChildren, exprRels, forEachExpr, forEachRel, relChildren, relExprs,
  *   - Collapsing a run of nodes into a `Select` mega-node: REFUSED — it would put the SQL surface
  *     inside the IR and hand every pass two forms of one thing (build-plan §5, §7).
  *
- * Design + run-order: `docs/2026-08-01-relir-build-plan.md` §4. Runs BEFORE the physical `semijoin`
+ * Design + run-order: `docs/archive/2026-08-01-relir-build-plan.md` §4. Runs BEFORE the physical `semijoin`
  * tier, so a pushed label/property predicate reaches the access-path strategies.
  */
 export function fuse(plan: Rel): Rel {

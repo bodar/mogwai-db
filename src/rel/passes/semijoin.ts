@@ -52,7 +52,7 @@ import { exprRels, forEachExpr, mapRelExprs, rewrite, rewriteExpr } from '../wal
  * where `<owner rows>` is `vertex_properties` (`indexSeek`) or the `property_fts` index
  * (`trigramSeek`). On a 4 000-vertex graph this starts at the matching vertices instead of at 4 000
  * (measured 6.2 ms → 0.3 ms for the value seek, with the join order already pinned). The platform
- * reason the plan must not lean on stats instead is `relir-build-plan` §1 P4.
+ * reason the plan must not lean on stats instead is `docs/archive/2026-08-01-relir-build-plan.md` §1 P4.
  *
  * Three properties make it safe rather than clever:
  *

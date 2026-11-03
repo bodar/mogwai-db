@@ -704,7 +704,7 @@ Substrate that unlocks several algorithm families first; leaf, single-algorithm 
    unsupported step after a barrier RAISES, naming the step), and landed rows are DETACHED. What is
    NOT answered is the piece §"the three tails" now names: whether a `decorate`-mode global compute
    can complete in-request, and the retained-binding shape that keeps its stream live.
-2. ✅ **ANSWERED — recursive-term limits are now LAW**, `docs/2026-08-01-relir-build-plan.md` §1: **P1**
+2. ✅ **ANSWERED — recursive-term limits are now LAW**, `docs/archive/2026-08-01-relir-build-plan.md` §1: **P1**
    the recursive reference appears exactly once at the top level of the term's `FROM` ("top level" = the
    join TREE, so `project(join(self, edges))` is legal; `src/rel/block.ts` is the one authority);
    **P2** `NOT EXISTS`, joins against a derived `UNION`, `IN (SELECT …)`, correlated scalars and

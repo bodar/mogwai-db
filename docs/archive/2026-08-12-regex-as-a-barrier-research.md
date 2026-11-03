@@ -220,4 +220,4 @@ decision itself is the gate, and it is a product/correctness call, not an engine
 | Barrier boundary + resume on the RelIR route | `src/compiler/rel/segment.ts` |
 | A data-sized row set crosses as ONE JSON bind | `src/compiler/rel/foreign.ts` (`foreignRelation`) |
 | A detached element has no live adjacency | `detachedTail` in `src/compiler/rel/lower.ts` |
-| Retained binding / `Ref` (the survivor-set shape) | `docs/2026-08-01-relir-build-plan.md` §3.0 |
+| Retained binding / `Ref` (the survivor-set shape) | `docs/archive/2026-08-01-relir-build-plan.md` §3.0 |

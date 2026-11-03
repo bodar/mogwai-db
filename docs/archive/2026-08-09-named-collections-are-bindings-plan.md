@@ -190,6 +190,6 @@ member relations is the correct lowering and no interleave-by-encounter is requi
 
 ## Pointers
 
-`docs/2026-08-01-relir-build-plan.md` — §6·5 (the two reasons a `null` is spelled), §6·6 (a fact the route
+`docs/archive/2026-08-01-relir-build-plan.md` — §6·5 (the two reasons a `null` is spelled), §6·6 (a fact the route
 drops reads as a missing lowering), §3.0 (a named CTE and a prior result are one concept), and Phase 2's gap
 list, which owns the `by(<reducer>)` type gap and the sack merge policy this shares.
