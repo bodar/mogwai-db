@@ -480,10 +480,14 @@ fold it into these lists at the end of the run.
    shows every reader of the minted column uses it only as an ORDER position (Sort key, window/aggregate ORDER BY);
    any value reader or a partition blocks it (`src/rel/passes/fuse.ts`; Calcite `FilterWindowTransposeRule.java`
    relaxed only for that case). The holder→person witness went from 61× to 6.3× over 1k→8k. Remains: nothing.
-4. **scan-bound-metadata** — one metadata query "does this element scan carry an index-usable conjunct" (equality/
-   IN/range on `id`, `uid`, label or any selective indexed column, incl. `hasId(within)` and `has(T.id, gt(n))`,
-   both quadratic today), beside `src/rel/bounds.ts` with `elementScanBehind` (Calcite `RelMdColumnOrigins`).
-   Gates the parked federate re-land (r6-fu1, below).
+4. ✅ **scan-bound-metadata** — LANDED as one id-routing authority (`24340231`, `ccf8a401`). `idMembership`
+   is the single router for `V(ids)`/`E(ids)`, `hasId` and `has(T.id, …)`. A numeric literal becomes
+   `id IN (…) AND uid IS NULL`, a string becomes `uid IN (…)`, and a numeric range becomes `uid IS NULL AND id <op> n`.
+   On a bare id the same router gives an uncorrelated `IN (SELECT id FROM nodes WHERE …)` (`idQueryOf` in
+   `lower/filter.ts`). This also fixes `V(1)` matching a string-uid row. The `hasId(within)` witness went from 57× to
+   ~2× over 1k→8k. The `scanBound` metadata query is deliberately NOT added: no consumer was measured
+   (`V(1,2).has('kind',1)` costs the same at 1k and 8k). It lands with the r6-fu1 federate/correlatedIn re-land, which
+   owns it. Remains: nothing.
 5. **S3 — a write inside a child / multi-arm body** (local/map/flatMap/union/coalesce/optional/choose/
    repeat/sideEffect/where, onMatch). `g.V().local(__.mergeV([name:'x']))`. Unblocks every write-in-arm
    decline below.
