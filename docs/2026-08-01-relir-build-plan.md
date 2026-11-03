@@ -681,7 +681,12 @@ it, and then build the generic fix, not the witness.
 - **cr-fu6 remains** a `where`/`P`-operand body under a one-row host still declines `SHARED_DRAW` (the predicate
   seam names no host row); `g.addV().addE().to(__.V().sample(1))` declines (addV's output is a ref, unbounded).
   **cr-fu15 / A3** draw-independent bodies decline too (`project().by(__.V().sample(1).count())`,
-  `local(__.V().sample(1).count())`) — recorded in `docs/outstanding-work.md` §4.
+  `local(__.V().sample(1).count())`) — recorded in `docs/outstanding-work.md` §4. `g.V(1).map(__.V().sample(1))`
+  (an ELEMENT-framed body under a one-row host) declines "no lowering covers" where `g.V(1).project('x').by(…)`
+  and `g.inject(1).map(__.V().sample(1).values('name'))` answer: the one-host element-valued map body has no
+  scalar route. The `SHARED_DRAW` hint is gated on `reSourcesOncePerOrigin` (`lower/reduction.ts`, the route's
+  own gate), so a `map()` that `local(…)` would not rescue (a scalar host, `coin`, a draw under a `by()`) names
+  no per-row form.
 - **rf3-fed-explicit-params** explicit federate `traversal` referencing an outer user parameter declines
   ("Unbound parameter 'injectedMap'"): the explicit form sends `NO_PARAMS`; forward `boundParams` in both
   (`src/services/catalog/federate.ts`).

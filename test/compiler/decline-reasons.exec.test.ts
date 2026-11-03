@@ -28,8 +28,9 @@ const chainOf = (q: string): IRStep[] => {
 };
 
 const AMBIGUOUS = /^this traversal is ambiguous: V\(\)\/E\(\) inside this body discards the value before it/;
-const SHARED = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body runs '
+const SHARED = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body may run '
   + 'for more than one traverser — it would be drawn once and shared by every row';
+const LOCAL_HINT = (host: string): string => `local(…) draws per row, so use local(__.V()…sample(1)) in place of ${host}(…)`;
 
 describe('the lowering RECORDS a framing-decided decline and returns null — it never throws', () => {
   for (const [q, kind] of [
@@ -48,12 +49,25 @@ describe('the lowering RECORDS a framing-decided decline and returns null — it
 
 describe('a terminal reason is the message, and its prefix is a property of its kind', () => {
   test('a shared draw keeps its reason and a map()/flatMap() host adds the per-row form', () => {
-    const e = declineOf("g.inject(1,2).map(__.V().sample(1).values('name'))");
+    const e = declineOf("g.V().map(__.V().sample(1).values('name'))");
     expect(e.kind).toBe('shared-draw');
-    expect(e.message).toBe(`this traversal is not supported yet: ${SHARED}; use local(__.V()…sample(1)) to draw per row`);
-    // The draw's own host is a by(); the map() around it is what names the per-row form.
-    expect(declineOf("g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))").message)
-      .toBe(`this traversal is not supported yet: ${SHARED}; use local(__.V()…sample(1)) to draw per row`);
+    expect(e.message).toBe(`this traversal is not supported yet: ${SHARED}; ${LOCAL_HINT('map')}`);
+    expect(declineOf("g.V().out().map(__.V().hasLabel('person').sample(1).values('name').fold())").message)
+      .toBe(`this traversal is not supported yet: ${SHARED}; ${LOCAL_HINT('map')}`);
+  });
+
+  test('the per-row form is named only where its own route admits the body (`reSourcesOncePerOrigin`)', () => {
+    // A scalar host has no per-row rejoin, a `coin` is not the per-origin draw, and a draw under a by()
+    // is not at the body's re-source: local(…) declines on each of these too, so suggesting it misleads.
+    for (const q of [
+      "g.inject(1,2).map(__.V().sample(1).values('name'))",
+      "g.V().map(__.V().coin(0.5).count())",
+      "g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))",
+    ]) {
+      const e = declineOf(q);
+      expect(e.kind).toBe('shared-draw');
+      expect(e.message).toBe(`this traversal is not supported yet: ${SHARED}`);
+    }
   });
 
   test('a non-map host names no per-row form', () => {
@@ -90,7 +104,7 @@ describe('a terminal reason is the message, and its prefix is a property of its 
 
   test('a terminal reason recorded while planning a barrier RESUME is that resume\'s decline', () => {
     expect(() => executeFramed(seededStore(), "g.V().has('name', regex('m.*')).map(__.V().sample(1).values('name'))"))
-      .toThrow(`this traversal is not supported yet: ${SHARED}; use local(__.V()…sample(1)) to draw per row`);
+      .toThrow(`this traversal is not supported yet: ${SHARED}; ${LOCAL_HINT('map')}`);
   });
 
   test('a traversal no lowering covers still says so', () => {

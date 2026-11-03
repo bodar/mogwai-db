@@ -290,10 +290,11 @@ export function perTraverserChild(
   }
   const declinedBefore = ctx.declines.terminal();
   const produced = scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh);
-  // A `map()`/`flatMap()` body's `SHARED_DRAW` names the per-row form, which answers there
-  // (`local(__.V().sample(1))` draws per origin through `reSourcedOnce`); every other host's does not.
-  if (!declinedBefore && (step.name === 'map' || step.name === 'flatMap'))
-    ctx.declines.hint('shared-draw', 'use local(__.V()…sample(1)) to draw per row');
+  // A `map()`/`flatMap()` body's `SHARED_DRAW` names the per-row form ONLY where that form's route admits
+  // the same body over the same input (`localDrawsPerRow`). Advice must not send the user to a `local(…)`
+  // that declines too (`inject(1,2)`'s scalar host, a `coin` draw). Every other host's does not.
+  if (!declinedBefore && (step.name === 'map' || step.name === 'flatMap') && localDrawsPerRow(body, rel, framing, bodyCtx))
+    ctx.declines.hint('shared-draw', `local(…) draws per row, so use local(__.V()…sample(1)) in place of ${step.name}(…)`);
   if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
@@ -453,6 +454,20 @@ export function flatMapRejoin(
   const out = step.name === 'local' ? rows.aliases : labels;
   const rejoined = step.name === 'local' ? shed : shedBodyAliases(shed, labels, fresh);
   return continueAs(rejoined, rows.framing, steps, at + 1, bulked, ctx, fresh, out);
+}
+
+/**
+ * Would `local(body)` over this host draw per row? The rejoin's own entry conditions (an ELEMENT host, only
+ * per-origin-safe barriers, `flatMapRejoin`) and the per-origin draw's admission gate
+ * (`reSourcesOncePerOrigin`) at the body's first top-level re-source, asked under the body context the
+ * rejoin lowers it with (`childRows`: `inBody`, unbulked). Sufficient, not necessary: GraphStep's product
+ * may still answer a body this refuses, so it only ever withholds a suggestion, never a route.
+ */
+function localDrawsPerRow(body: readonly IRStep[], rel: Rel, framing: RelFraming, bodyCtx: ChainCtx): boolean {
+  if (framing.kind !== 'elements') return false;
+  if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return false;
+  const at = body.findIndex((s) => s.name === 'V' || s.name === 'E');
+  return at >= 0 && reSourcesOncePerOrigin(body, at, rel, false, inBody(bodyCtx));
 }
 
 /**
@@ -899,7 +914,7 @@ export type RootedHosts = 'one' | 'many';
 export const rootedHosts = (host: Rel | undefined): RootedHosts =>
   host && atMostOneRow(host) && isSelfContained(host) ? 'one' : 'many';
 
-const SHARED_DRAW = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body runs '
+const SHARED_DRAW = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body may run '
   + 'for more than one traverser — it would be drawn once and shared by every row';
 
 /**
@@ -1604,18 +1619,10 @@ export function reSourcedOnce(
   steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | undefined {
   const origin = originOf(input.channels);
-  if (!origin) return undefined;
-  const drawAt = steps.findIndex((step, i) => i > at && step.name === 'sample' && !isLocalScope(step));
-  if (drawAt < 0) return undefined;
+  if (!origin || !reSourcesOncePerOrigin(steps, at, input, bulked, ctx)) return undefined;
+  const drawAt = drawIndex(steps, at);
   const prefix = steps.slice(at, drawAt);
-  const { params } = ctx;
   const draw = steps[drawAt]!;
-  if (bulked || draw.modulators?.length || draw.optionArms
-    || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return undefined;
-  const read = rawBodies(params);
-  const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
-  if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return undefined;
-  if (nondeterministic(prefix, params) || someStepDeep(prefix, read, collectsSideEffect, true)) return undefined;
   const rooted = rootedRead(prefix, ctx, fresh, 'many');
   if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return undefined;
   // Only the payload crosses: a rooted channel other than its position and its (provably unit) bulk —
@@ -1698,6 +1705,33 @@ export function reSourcedOnce(
   // position; several re-mint it origin-major, then candidate order.
   const rel = crossCarried(parent, met, K, payload.map((column) => [column, column.name] as const), n > 1, ctx, fresh);
   return continueAs(rel, rooted.framing, steps, drawAt + 1, bulked, ctx, fresh, labels) ?? undefined;
+}
+
+/** The top-level global `sample` after the re-source at `at`: the draw `reSourcedOnce` makes per origin. */
+const drawIndex = (steps: readonly IRStep[], at: number): number =>
+  steps.findIndex((step, i) => i > at && step.name === 'sample' && !isLocalScope(step));
+
+/**
+ * `reSourcedOnce`'s ADMISSION GATE, mint-free and side-effect-free: may the re-source at `steps[at]` over
+ * `input` draw per origin over ONE evaluation of its prefix? The ONE spelling of that rule. The route asks
+ * it before it builds anything, and a `map()`/`flatMap()` host's `SHARED_DRAW` decline asks it before
+ * suggesting `local(…)` (`localDrawsPerRow`), so the advice cannot name a form the route refuses.
+ * It checks no origin (the per-row rejoin mints one) and lowers nothing (`rootedRead` and the rooted
+ * shape checks stay in `reSourcedOnce`): holding it is necessary for the fast path, and it is the most a
+ * hint can ask without building.
+ */
+export function reSourcesOncePerOrigin(steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx): boolean {
+  const drawAt = drawIndex(steps, at);
+  if (drawAt < 0) return false;
+  const prefix = steps.slice(at, drawAt);
+  const { params } = ctx;
+  const draw = steps[drawAt]!;
+  if (bulked || draw.modulators?.length || draw.optionArms
+    || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return false;
+  const read = rawBodies(params);
+  const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
+  if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return false;
+  return !nondeterministic(prefix, params) && !someStepDeep(prefix, read, collectsSideEffect, true);
 }
 
 /** The filter steps whose child runs PER TRAVERSER (`TraversalUtil.test` on one traverser at a time), so a

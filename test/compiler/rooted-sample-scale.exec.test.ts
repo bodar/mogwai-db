@@ -268,11 +268,13 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
 // endpoint that re-sources (`__.V()…`) is lowered ONCE for every host (`rootedRead`'s 'split' gate), so a
 // `sample`/`coin`/`shuffle` in it would be ONE random choice shared by every row, where the reference draws
 // per traverser. Where the host may be MORE than one row it declines from the query text naming the
-// problem — and, from a `map()`/`flatMap()` body, the per-row form, which answers. Where the host is
-// provably ONE row (`rowBounds`, `src/rel/bounds.ts`: a source `addE`, `g.V(1)`, `g.inject(x)`) one draw IS
-// the per-traverser draw, so it answers.
-const SHARED = /a random draw \(sample\/coin\/shuffle\) inside a V\(\)\/E\(\) body is not supported where the body runs for more than one traverser — it would be drawn once and shared by every row/;
-const LOCAL_HINT = /; use local\(__\.V\(\)…sample\(1\)\) to draw per row$/;
+// problem — and, from a `map()`/`flatMap()` body, the per-row `local(…)` form, but ONLY where that form's
+// per-origin draw admits the same body over the same input (`reSourcesOncePerOrigin`, the route's own gate,
+// `src/compiler/rel/lower/reduction.ts`), so the advice never names a form that declines too. Where the host
+// is provably ONE row (`rowBounds`, `src/rel/bounds.ts`: a source `addE`, `g.V(1)`, `g.inject(x)`) one draw
+// IS the per-traverser draw, so it answers.
+const SHARED = /a random draw \(sample\/coin\/shuffle\) inside a V\(\)\/E\(\) body is not supported where the body may run for more than one traverser — it would be drawn once and shared by every row/;
+const LOCAL_HINT = /; local\(…\) draws per row, so use local\(__\.V\(\)…sample\(1\)\) in place of (map|flatMap)\(…\)$/;
 describe('a draw in a body evaluated once for several hosts declines', () => {
   test.each([
     "g.V().project('x').by(__.V().sample(1).values('name'))",
@@ -290,17 +292,35 @@ describe('a draw in a body evaluated once for several hosts declines', () => {
     "g.V().local(__.V(1).project('x').by(__.V().sample(1).values('name')))",
     "g.V().V(1).project('x').by(__.V().sample(1).values('name'))",
     "g.V(1).out().project('x').by(__.V().sample(1).values('name'))",
+    // A predicate operand is not row-bounded by its host, so even `V(1)`'s MAY run for several.
+    "g.V(1).has('age', __.V().sample(1).values('age'))",
+    // map()/flatMap() hosts whose local(…) form declines too: the advice would be a dead end.
+    // A SCALAR host has no per-row rejoin.
+    "g.inject(1,2).map(__.V().sample(1).values('name'))",
+    "g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))",
+    // `coin` is not the per-origin draw, and a sack rides into the body.
+    "g.V().map(__.V().coin(0.5).count())",
+    "g.withSack(1).V().map(__.V().sample(1))",
+    // The draw sits under a by(), not at the body's re-source.
+    "g.V().flatMap(__.project('x').by(__.V().sample(1).values('name')))",
+    // Sufficient, not necessary: a stream barrier before the draw is outside the per-origin gate, so no
+    // suggestion, though GraphStep's product happens to answer the local(…) form.
+    "g.V().map(__.V().order().by(shuffle).limit(1).values('name'))",
   ])('%s', (q) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).not.toThrow(LOCAL_HINT);
   });
 
+  // One drawn row per host traverser: modern has 6 vertices and 6 out() traversers.
   test.each([
-    "g.V().map(__.V().order().by(shuffle).limit(1).values('name'))",
-    "g.V().map(__.V().coin(0.5).count())",
-  ])('%s names the per-row local() form', (q) => {
+    ["g.V().map(__.V().sample(1).values('name'))", "g.V().local(__.V().sample(1).values('name')).count()", 6],
+    ["g.V().out().map(__.V().hasLabel('person').sample(1).values('name'))", "g.V().out().local(__.V().hasLabel('person').sample(1).values('name')).count()", 6],
+    ["g.V().as('a').map(__.V().sample(1)).select('a')", "g.V().as('a').local(__.V().sample(1)).select('a').count()", 6],
+    ["g.V().map(__.V().sample(1).values('name').fold())", "g.V().local(__.V().sample(1).values('name').fold()).count()", 6],
+  ] as const)('%s names the per-row local() form, and that form answers', (q, local, n) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).toThrow(LOCAL_HINT);
+    expect(count(seededStore(), local)).toBe(n);
   });
 });
 
@@ -322,6 +342,31 @@ describe('a draw in a body evaluated for ONE host answers', () => {
     const [edge] = bare(run(store, "g.V(1).addE('x').to(__.V().sample(1))"));
     expect(edge.src).toBe(1);
     expect(NAMES).toContain(nameOf(store, edge.tgt));
+  });
+
+  test('a ZERO-row host draws nothing and writes nothing', () => {
+    const store = seededStore();
+    const before = count(store, 'g.E().count()');
+    expect(bare(run(store, "g.V(99).addE('x').to(__.V().sample(1))"))).toEqual([]);
+    expect(count(store, 'g.E().count()')).toBe(before);
+    expect(count(store, "g.E().hasLabel('x').count()")).toBe(0);
+  });
+
+  test('two by() draws over one host are INDEPENDENT draws, not one shared pick', () => {
+    // Each by() is its own child traversal, produced per key (`TraversalUtil.produce` in `ProjectStep.map`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java`), so one host
+    // gets two draws. 6 vertices × 40 tries: they coincide every time with probability 6^-40.
+    const store = seededStore();
+    const ids = new Set<number>();
+    let differed = false;
+    for (let i = 0; i < 40; i++) {
+      const [row] = bare(run(store, "g.V(1).project('a','b').by(__.V().sample(1).id()).by(__.V().sample(1).id())"));
+      const [[, a], [, b]] = JSON.parse(row.map) as [unknown, { v: number }][];
+      ids.add(a!.v).add(b!.v);
+      if (a!.v !== b!.v) differed = true;
+    }
+    expect([...ids].every((id) => [1, 2, 3, 4, 5, 6].includes(id))).toBe(true);
+    expect(differed).toBe(true);
   });
 
   test('a drawn endpoint is ONE draw: the absence guard and the insert agree', () => {
