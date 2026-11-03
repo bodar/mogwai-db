@@ -885,6 +885,11 @@ Depth gaps (clean declines, record only):
    the same query without the inner `dedup()` keeps both. A no-op step changes the count. A by() consumer that
    drops nulls should read presence from the node it already computed, not re-inline the value. Pin that
    `order().by(select(values))` and `order().by(select(values).dedup())` agree.
+   ✅ **LANDED (`a37017d9`).** A stated `{ when }` presence over a correlated value lands ONCE as the body's
+   `{t,v}` member node (`landedOnce`, `src/compiler/rel/modulator.ts`); value, tag and presence re-read from it, and
+   `productivityFilter` keeps on the statement. `dedup().by()` hoists keep/key once below filter and window
+   (`keptDedup`, `src/compiler/rel/lower/slice.ts`). Pinned in `test/L4-addendum/by-stated-presence.feature`.
+   **Remains:** nothing.
 6. **Merge guard over key-name POOLS is still super-linear (major, remaining cost; trunk was worse).** A two-pool
    grid `[a{i%s}:1, b{i/s}:1]` takes 0.56 → 10.6 s (19×, ~N^1.5); three pools are ~N^(5/3). Ties pick the lowest
    key name, so √N key sets share one seek. Update `docs/outstanding-work.md`: it names only the power set, not the
