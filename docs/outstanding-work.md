@@ -141,7 +141,7 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   origins × graph product (trunk answered these quadratically through `property()`):
   an alias on the candidate (`__.V().as('x').sample(1).select('x')`) — the rooted read's alias channel and
   `AliasMap` would have to cross into the origins' rows; and a coupling barrier after a fan-out
-  (`__.out().V().dedup().sample(2)`, or one in a `union`/`choose` arm or `repeat` body,
+  (`__.out().V().dedup().sample(2)`, or one in a `union`/`choose`/`option()` arm or `repeat` body,
   `__.out().V().union(__.dedup().id()).sample(100)` — `streamsIntoChildren`) — the barrier sees R
   concatenated copies (`dedup` keeps one, `count` counts R·M), a per-barrier rule over R the draw does not have.
 - **A deterministic per-origin slice over a re-source is O(origins × |V|)** — `local(__.V().hasLabel('person')

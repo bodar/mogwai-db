@@ -7,9 +7,9 @@
 // and 169 s at 8k — passing every six-vertex fixture, a CPU wall only a production-sized DO reaches. The
 // prefix up to the draw is origin-INDEPENDENT, so it is now lowered ONCE (`reSourcedOnce`,
 // `src/compiler/rel/lower/reduction.ts`) and `sample(n)` draws n distinct numbered candidates per origin
-// (Floyd's algorithm where n² <= the origin's rows, else a RANDOM() rank of them) through an equi-join:
-// O(origins · min(n², P log P) + candidates). A prefix that cannot be evaluated
-// once declines rather than falling back to the product.
+// (3n+4 draws with replacement, keeping the first n distinct, where 2n <= the origin's P rows; else a
+// RANDOM() rank of those P < 2n rows) through an equi-join: O(origins · n log n + candidates). A prefix that
+// cannot be evaluated once declines rather than falling back to the product.
 //
 // Assertions of two kinds: the ANSWER (cardinality per origin, the draw lands in the candidate set, draws are
 // independent per origin, a sample of nothing is nothing) and a WALL budget generous enough for a loaded CI
@@ -126,7 +126,7 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     }
     const small = graph(200, 200);
     run(small, "g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person').sample(3).values('age'))");
-    // Three values on every holder, three DIFFERENT persons' ages (Floyd's draw never repeats an index).
+    // Three values on every holder, three DIFFERENT persons' ages (the draw never repeats an index).
     expect(count(small, "g.V().hasLabel('holder').where(__.values('l').dedup().count().is(3)).count()")).toBe(200);
     expect(count(small, "g.V().hasLabel('holder').values('l').is(lte(200)).count()")).toBe(0);
     // n beyond the candidates takes them all: a sample never repeats a traverser.
@@ -143,17 +143,41 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(count(modern, "g.V().local(__.out().V().hasLabel('person').where(__.out().dedup().count().is(gt(0))).sample(30)).count()")).toBe(18);
   });
 
-  test('sample(n) with n at least the candidates stays linear — each origin ranks its own rows, never q² Floyd levels', () => {
-    // 10 origins × M candidates, n ≥ M: q = M, so Floyd's walk would be M² per origin (~1.4 s at M = 8k);
-    // the ranked window is ~0.1 s.
+  test('sample(n) with n at least the candidates stays linear — each origin ranks its own rows', () => {
+    // 10 origins × M candidates, n ≥ M: q = M, the dense route — ranking the origin's own M rows, ~0.1 s.
     const store = graph(10, N);
     const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person','software').sample(100000)).count()");
     expect(rows).toEqual([{ v: 10 * N }]);
     expect(ms).toBeLessThan(BUDGET_MS);
-    // Every candidate at most once per origin, whichever route draws it: q² > P ranks, q² <= P walks.
+    // Every candidate at most once per origin, whichever route draws it: 2q > P ranks, 2q <= P draws.
     const small = graph(5, 40);
     expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(15).dedup()).count()")).toBe(75);
     expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(4).dedup()).count()")).toBe(20);
+    expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(10).dedup()).count()")).toBe(50);
+  });
+
+  test('sample(n) between √P and P stays linear — no origin ranks P rows to keep n << P of them', () => {
+    // The band a q²-vs-P route choice sent to the rank: 2000 origins × 8000 persons, sample(100) (q² > P) —
+    // 16M ranked (origin, candidate) pairs before (9.9 s measured), 200k drawn indexes now (~1 s).
+    const store = graph(2000, 16000);
+    const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(100)).count()");
+    expect(rows).toEqual([{ v: 200_000 }]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+    // ... and n DISTINCT per origin: a per-origin dedup removes none of them.
+    expect(count(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(100).dedup()).count()")).toBe(200_000);
+  });
+
+  test('the draw is a uniform subset — every 2-subset of 4 persons about equally often', () => {
+    // Sparse (2·2 <= 4: draws with replacement, first two distinct) and dense (sample(3): 2·3 > 4, ranked).
+    const store = graph(4000, 8);
+    for (const [n, subsets] of [[2, 6], [3, 4]] as const) {
+      const lists = bare(run(store, `g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(${n}).values('name').order().fold())`));
+      const freq = new Map<string, number>();
+      for (const row of lists) { const key = String(row.list ?? row); freq.set(key, (freq.get(key) ?? 0) + 1); }
+      expect(freq.size).toBe(subsets);
+      // 4000 / 6 ≈ 667 (σ ≈ 24), 4000 / 4 = 1000 (σ ≈ 27): a skew of 7σ fails, chance alone almost never.
+      for (const seen of freq.values()) expect(Math.abs(seen - 4000 / subsets)).toBeLessThan(200);
+    }
   });
 
   test('a shuffle no slice observes is harmless; a host-reading prefix keeps its own product', () => {
@@ -194,6 +218,14 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     "g.V().local(__.out().V().union(__.union(__.dedup())).sample(100)).count()",
     "g.V().local(__.out().V().repeat(__.dedup()).times(1).sample(100)).count()",
     "g.V().has('name','marko').property(list,'c', __.out().V().union(__.dedup().id()).sample(100)).values('c').count()",
+    // An option() arm is a global child of its choose/branch (`BranchStep.getGlobalChildren`) — the same
+    // concatenated stream, one level down.
+    "g.V().has('name','marko').local(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()",
+    "g.V().has('name','marko').flatMap(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()",
+    "g.V().local(__.out().V().choose(__.label()).option('person', __.limit(1)).option(none, __.identity()).sample(100)).count()",
+    "g.V().has('name','marko').local(__.out().V().choose(__.values('age')).option(29, __.dedup()).option(none, __.identity()).sample(100)).count()",
+    "g.V().local(__.out().V().branch(__.label()).option('person', __.dedup()).option(none, __.identity()).sample(100)).count()",
+    "g.V().local(__.V().order().by(shuffle).choose(__.label()).option('person', __.limit(1)).option(none, __.limit(1)).sample(5)).dedup().count()",
     // ... and a slice there observes a shuffle every origin would otherwise share.
     "g.V().local(__.V().order().by(shuffle).union(__.limit(1)).sample(1)).dedup().count()",
     "g.V().local(__.V().order().by(shuffle).choose(__.constant(true), __.limit(1), __.limit(1)).sample(5)).dedup().count()",

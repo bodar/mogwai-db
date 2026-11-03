@@ -448,9 +448,16 @@ export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose'
  * applied once per traverser (`TraversalUtil.apply`). A `choose`'s condition and a `repeat`'s
  * `until`/`emit` are local children the walk enters anyway: over-inclusive, which for a question whose
  * `true` is a refusal is the fail-closed side.
+ *
+ * An `option()` arm is the same global child one level down: `choose(…).option(k, __.dedup())` holds its
+ * arms as `option` steps (folded into `.optionArms` by `absorbOptionArms`), and
+ * `BranchStep.getGlobalChildren` (`BranchStep.java:110`) returns exactly those arm traversals — so the
+ * walk enters an `option` step's body as it enters its host's. Missing it let a `dedup()` in an arm
+ * reduce ONE evaluation where the reference reduces the concatenated stream.
  */
 export const streamsIntoChildren = (s: Step): boolean =>
-  BATCHING_BRANCHES.has(s.name) || s.name === 'branch' || s.name === 'repeat' || s.name === 'match' || !!(s as IRStep).repeatRegion;
+  BATCHING_BRANCHES.has(s.name) || s.name === 'branch' || s.name === 'option' || s.name === 'repeat' || s.name === 'match'
+  || !!(s as IRStep).repeatRegion || !!(s as IRStep).optionArms;
 
 /**
  * The barriers that PRESERVE cardinality but choose or reorder a subset of the whole stream. Every
