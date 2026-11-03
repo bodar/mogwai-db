@@ -456,8 +456,12 @@ F last. Each step lands `mise run ci` green on its own.
   Remains: nothing. Original spec: the once-path takes `sample(1)` only; delete the n>1 draw (`chosen`
   n>1 body, `rankedPairs`, recursive walk, `locate`'s n>1). n>1 pays the product + per-origin RANDOM window
   (uniform). Delete the three n>1 budget tests, keep small-size cardinality/uniformity pins. ≈−95, −6 per-row terms.
-- **A3 cleanup-sample-docs** (after A2) — `reSourcedOnce` doc to ≈12 lines; fix `sliceOp` and `collectsSideEffect`
-  comments. Plus: `reSourcedValue` declines (query text, explanatory) when its prefix holds `sample`/`coin`/shuffle,
+- ✅ **A3 cleanup-sample-docs** — LANDED `a6a5aae8`: `reSourcedOnce`'s doc trimmed; `rootedRead`'s 'split' gate
+  now declines (query text, explanatory: names the shared draw, suggests `local(__.V()…sample(1))`) when a
+  re-sourcing body holds `sample`/`coin`/shuffle; local()/flatMap() bodies try the per-row rejoin before their
+  scalar probe so `local(__.V().sample(1))` keeps answering per row. One shape newly declines:
+  `local(__.V().sample(1).count())`. Remains: nothing. Original spec: `reSourcedOnce` doc to ≈12 lines; fix
+  `sliceOp` and `collectsSideEffect` comments. Plus: `reSourcedValue` declines (query text, explanatory) when its prefix holds `sample`/`coin`/shuffle,
   because every host would share one draw (`project().by(__.V().sample(1))` — a wrong answer today). ≈−15.
 - ✅ **B1 cleanup-mapkey-revert-v1** — LANDED `7b6557cb`: `labelScopeNode`/`LabelScope`/`scopedValueNode` deleted;
   `mapFirstFallback(key, ctx, liveLabel: boolean)` answers `'label'` for any live or enclosing label (`labelNamed`
