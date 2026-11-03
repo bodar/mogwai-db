@@ -519,7 +519,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_V_hasLabelXhabitatX_dedup_byXlabels_order_foldX_localXlabels_order_foldX_multilabel',
     'g_V_hasLabelXhabitatX_order_byXlabels_order_foldX_name_multilabel',
     'g_V_hasXname_rippleX_inXcreatedX_peerPressure_withXedges_outEX_withyXpropertyName_clusterX_repeatXunionXidentity__bothX_timesX2X_dedup_valueMapXname_clusterX',
-    'g_V_in_barrier_localXcountX',
     'g_V_localXout_localXcountXX',
     'g_V_mapXbothE_weight_foldX_order_byXsumXlocalX_descX_byXcountXlocalX_descX',
     'g_V_mapXconstantXnullXX',

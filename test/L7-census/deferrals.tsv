@@ -167,7 +167,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel(
 deferred	this traversal is not supported yet: no lowering covers g.V().hasLabel("song").group().by("name").by(__.properties().groupCount().by(T.label))	g.V().hasLabel("song").group().by("name").by(__.properties().groupCount().by(T.label))
 unbound	Unbound parameter 'xx1'	g.V().hasLabel(xx1).hasLabel("software")
 unbound	Unbound parameter 'xx1'	g.V().hasLabel(xx1,xx2)
-deferred	this traversal is not supported yet: no lowering covers g.V().in().barrier().local(__.count())	g.V().in().barrier().local(__.count())
 unbound	Unbound parameter 'xx1'	g.V().in().hasId(P.neq(xx1))
 deferred	this traversal is not supported yet: no lowering covers g.V().label().groupCount().as("x").select("x") — select("x") is ambiguous here: each Map may hold a key 'x' and a path label 'x' is also bound, so which one is read would depend on the row — rename the label (as('x1')) or the key	g.V().label().groupCount().as("x").select("x")
 unbound	Unbound parameter 'xx1'	g.V().limit(1).mergeE(xx1)

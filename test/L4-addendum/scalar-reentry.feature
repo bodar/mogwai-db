@@ -34,7 +34,6 @@ Feature: mogwai addendum — scalar-stream re-entry
       | PETER |
 
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXcountX
     Given the modern graph
     And the traversal of

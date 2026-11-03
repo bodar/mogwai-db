@@ -6,7 +6,7 @@ import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
-import { exprHasSubquery, forEachRel, isSelfContained } from '../../../rel/walk.ts';
+import { exprHasSubquery, forEachExpr, forEachRel, isSelfContained } from '../../../rel/walk.ts';
 import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
 import type { Elem } from '../../elem.ts';
@@ -1096,13 +1096,22 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
  * impossible — which is exactly why the value used to reach the wire untagged (§6·7).
  */
 
-/** Does `rel`'s `name` column bottom out in a correlated SUBQUERY rather than a column off a table the
- *  relation scans? Follows only the projection chain (project/window/sort/limit/filter/distinct/
- *  materialize are passthroughs for a column they do not compute); reaching any real relation source
- *  (scan/join/values/aggregate/…) means the column is table-backed and the answer is false. Used by the
- *  correlated min/max argmax, whose ORDER BY re-inlines the value and cannot host a second correlation
- *  level — see its call site. */
-export function valueColIsSubquery(rel: Rel, name: string): boolean {
+/** Is the relation `id` defined inside `rel` — a column of it is in scope there, not the outer row's? */
+const reaches = (rel: Rel, id: string): boolean => {
+  let found = false;
+  forEachRel(rel, (r) => { if (r.id === id) found = true; });
+  return found;
+};
+
+/** Is `rel`'s `name` column DETACHED from the tables the relation scans — computed by a correlated
+ *  SUBQUERY, or read off the OUTER row (a scalar host's own value seeding a self root, `hostSelfRow`)?
+ *  Follows only the projection chain (project/window/sort/limit/filter/distinct/materialize are
+ *  passthroughs for a column they do not compute, and a computed column is detached where any column it
+ *  reads is); reaching any real relation source (scan/join/values/aggregate/…) means the column is
+ *  table-backed and the answer is false. Used by the correlated min/max argmax, whose ORDER BY re-inlines
+ *  the value: SQLite resolves neither a second correlation level nor an outer column there (`no such
+ *  column` at run time) — see its call site. */
+function valueColIsDetached(rel: Rel, name: string): boolean {
   let cur: Rel = rel;
   let column = name;
   for (;;) {
@@ -1110,8 +1119,16 @@ export function valueColIsSubquery(rel: Rel, name: string): boolean {
       case 'project': {
         const entry = cur.exprs.find(([n]) => n === column);
         if (!entry) return false;
-        if (entry[1].kind === 'col') { column = entry[1].name; cur = cur.input; continue; }
-        return exprHasSubquery(entry[1]);
+        const input = cur.input;
+        if (entry[1].kind === 'col' && entry[1].rel === input.id) { column = entry[1].name; cur = input; continue; }
+        if (exprHasSubquery(entry[1])) return true;
+        // A COMPUTED column (`math('_+1')` over the value): detached where it reads the outer row directly,
+        // or reads an input column that is itself detached.
+        let detached = false;
+        forEachExpr(entry[1], (node) => {
+          if (node.kind === 'col' && !detached) detached = node.rel === input.id ? valueColIsDetached(input, node.name) : !reaches(input, node.rel);
+        });
+        return detached;
       }
       case 'window':
         if (cur.specs.some(([n]) => n === column)) return false;
@@ -1148,7 +1165,7 @@ export function correlatedReduce(
   // value's nullness — ZERO rows emit NOTHING, an all-NULL input emits ONE null (`ReducingBarrierStep`)
   // — so a per-host EXISTS over the value rows is the `present` signal.
   const last = body.at(-1);
-  if (last && (last.name === 'min' || last.name === 'max') && !last.args.length && !isLocalScope(last) && body.length >= 2) {
+  if (last && (last.name === 'min' || last.name === 'max') && !last.args.length && !isLocalScope(last) && body.length > from) {
     const values = continueAs(root, rootAs, body.slice(0, -1), from, false, inBody(ctx), fresh, NO_ALIASES);
     let fenced = false;
     if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
@@ -1164,7 +1181,7 @@ export function correlatedReduce(
       // `vertex_properties` column) resolves to a local column and is safe. Decline the subquery-valued
       // case rather than emit SQL that fails only in execution — fail closed, the class `capability.test.ts`
       // guards.
-      if (valueColIsSubquery(values.rel, 'v')) return null;
+      if (payloadCols(values.rel).some((column) => valueColIsDetached(values.rel, column.name))) return null;
       // The winner keeps its OWN class (`lower.ts`'s global min/max — a deliberate divergence from
       // NumberHelper's promotion).
       const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
@@ -1282,30 +1299,68 @@ export const selfCollapses = (name: string): boolean => isReducer(name) || name 
  * arm and the collapsing-barrier arm built it identically — two copies of a source shape is two chances
  * to disagree about what a self root IS.
  */
-export function selfRootedReduce(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'element' }>, ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  const selfRow = hostSelfRow(host, fresh);
-  return selfRow && correlatedReduce(selfRow, { kind: 'elements', elem: host.elem }, body, 0, ctx, fresh);
+export function selfRootedReduce(body: readonly IRStep[], host: SelfRootedHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const self = hostSelfRow(host, fresh);
+  return self && correlatedReduce(self.rel, self.framing, body, 0, ctx, fresh);
 }
 
 /**
- * THE ONE-ROW SELF RELATION of an element host — `Values(1)` projected as the host id, the root every
- * self-rooted body continues from (`selfRootedReduce`, the `valueMap()`/`elementMap()` arm).
+ * A body ENDING in a collapsing barrier (`selfCollapses`), reduced over the host's ONE-ROW SELF — whatever
+ * its head. The child traversal begins from the host traverser itself (`hostSelfRow`), so a head that does
+ * not move (`count()`, `fold()`, `sum()`, `identity()…`, a transform run) is simply the first step over
+ * that one row, and a reducer over it follows its own seed rule: `count()` → 1, `fold()` → `[v]`, a numeric
+ * reducer → the value (or nothing where the global reducer answers nothing). ONE route for every
+ * non-moving head over an element or a scalar host — `identity().count()` answered while `count()`
+ * declined only because this gate once asked for a second step. Only a body that actually ENDS in a
+ * collapse: a plain `by(__.values(k))` stays the expression arm, which takes the FIRST value (a different
+ * cardinality, `yields: 'first'`) — that is the whole job of the gate.
+ */
+function selfCollapsed(body: readonly IRStep[], host: SelfRootedHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const terminal = body.at(-1);
+  return terminal && selfCollapses(terminal.name) ? selfRootedReduce(body, host, ctx, fresh) : null;
+}
+
+/** The hosts a body can be SELF-ROOTED at: ONE traverser that is its own one-row relation — an element
+ *  (its rowid) or a scalar (its value, and its per-row tag where it carries one). */
+type SelfRootedHost = Extract<ChildHost, { kind: 'element' } | { kind: 'scalar' }>;
+
+/**
+ * THE ONE-ROW SELF RELATION of a host — `Values(1)` projected as the host's OWN payload columns
+ * (`hostSelf`: an element's `id`, a scalar's `v` plus its `vtype` where it has one), the root every
+ * self-rooted body continues from (`selfRootedReduce`, the `valueMap()`/`elementMap()` arm). It is
+ * `TraversalUtil.apply`'s seed — the child traversal begins from the ONE host traverser at bulk 1
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:185-192`)
+ * — so a body that does not start by moving (`count()`, `identity().fold()`, `sum()` over a number)
+ * reduces exactly that one row, over an element or a scalar alike.
  *
  * It is the ONE place a body's input is built from a host WITHOUT being keyed on the host id, so it is
- * where an ABSENT host (`hostPresence` — a label unbound on this row) empties the input: the root keeps
- * its row only `WHERE id IS NOT NULL`. Over the empty input SQLite's own aggregates answer the seeded
- * tails exactly — `count()` 0, `fold()` `[]`, as `ReducingBarrierStep` emits its seed over no starts
+ * where an ABSENT host (`hostPresence` — a label unbound on this row, an unproductive intermediate value)
+ * empties the input: the root keeps its row only where its payload is present. Over the empty input
+ * SQLite's own aggregates answer the seeded tails exactly — `count()` 0, `fold()` `[]`, as
+ * `ReducingBarrierStep` emits its seed over no starts
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ReducingBarrierStep.java:143-148`)
  * — and every unseeded one answers nothing. A root keyed on the id (a movement) needs no such term: the
  * NULL id already matches nothing. A host that cannot be absent adds no term at all.
  */
-function hostSelfRow(host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Rel | null {
+function hostSelfRow(
+  host: SelfRootedHost, fresh: Minter,
+): { readonly rel: Rel; readonly framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }> } | null {
   const present = hostPresence(host);
-  if (!present) return null;
+  const self = hostSelf(host);
+  const framing = self?.framing;
+  if (!present || !self || (framing?.kind !== 'elements' && framing?.kind !== 'scalar')) return null;
+  // An element's rowid is never NULL on a row the root keeps (an absent host's row is filtered below); a
+  // scalar's value may be — a productive null is a value.
+  const cols = framingCols(framing)?.map((column) => (framing.kind === 'elements' ? { ...column, nullable: false } : column));
+  if (!cols?.length) return null;
   const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-  const selfRow = make.project({ id: fresh('slf'), input: unit, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', host.id]] });
-  return present === ALWAYS_PRODUCTIVE ? selfRow
-    : make.filter({ id: fresh('slp'), input: selfRow, channels: [], type: selfRow.type, pred: presenceOf(host.present!, col(selfRow.id, 'id'))! });
+  const selfRow = make.project({
+    id: fresh('slf'), input: unit, channels: [], type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, self.col(column.name)] as const),
+  });
+  const rel = present === ALWAYS_PRODUCTIVE ? selfRow
+    : make.filter({ id: fresh('slp'), input: selfRow, channels: [], type: selfRow.type, pred: presenceOf(host.present!, col(selfRow.id, cols[0]!.name))! });
+  return { rel, framing };
 }
 
 /** A ChildHost as a filter/branch `Subject` — the inverse of `childHostOf` (`filter.ts`), so a
@@ -1856,7 +1911,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
     // The ONE self root, so an absent host (an unbound label) maps NOTHING rather than `{}`.
     const self = hostSelfRow(host, fresh);
     if (!self) return null;
-    const mapped = elementValueMap(self, host.elem, asked.all ? null : asked.keys,
+    const mapped = elementValueMap(self.rel, host.elem, asked.all ? null : asked.keys,
       first.name === 'elementMap' || tokens, ctx.labelRegime, ctx.source, fresh,
       first.name === 'elementMap' ? { flat: true, endpoints: true } : {});
     const scalar = make.project({
@@ -1943,7 +1998,10 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other
   // way round — the guard exists because an element is not a value, and here there is one.
   if (host.kind === 'scalar' && host.vtype && collectionReaderOf(first)) return perRowCollectionChild(body, { ...host, vtype: host.vtype }, ctx, fresh);
-  if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), ctx.source, fresh);
+  // A body ENDING in a collapse over a scalar host reduces the host's ONE value — the same self seed an
+  // element host's reducer body takes (`selfCollapsed`), so `sum()`, `identity().fold()` and
+  // `math('_+1').sum()` answer as `identity().count()` already did over an element.
+  if (host.kind === 'scalar') return selfCollapsed(body, host, ctx, fresh) ?? scalarHostChild(body, host, childSeam(ctx, fresh), ctx.source, fresh);
   if (host.kind === 'list') return listHostChild(body, host, ctx, fresh);
   // A PROJECTOR body over a RECORD host reads the record's FIELDS as scope variables — `math("a / b")`
   // resolves `a`/`b` against the record's map (`Scoping.getScopeValue`, the same rule the direct chain
@@ -1993,14 +2051,9 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   }
   // The SELF root: no leading hop, so the barrier aggregates/argmaxes/COLLECTS the host's OWN rows
   // exactly as it does an adjacency's — a `values(k)`/`labels()` join against a one-row relation carrying
-  // the host id. Only when the body actually ENDS in a collapsing barrier; a plain `by(__.values(k))`
-  // stays the expression arm below, which takes the FIRST value (a different cardinality,
-  // `yields: 'first'`), and that is the whole job of this gate.
-  const terminal = body.at(-1);
-  if (body.length >= 2 && terminal && selfCollapses(terminal.name)) {
-    const reduced = selfRootedReduce(body, host, ctx, fresh);
-    if (reduced) return reduced;
-  }
+  // the host id (`selfCollapsed`, the scalar host's seed too).
+  const reduced = selfCollapsed(body, host, ctx, fresh);
+  if (reduced) return reduced;
 
   let value: Expr = host.id;
   // WHETHER THIS BODY PRODUCES anything for the host row, where the leading step can say precisely.

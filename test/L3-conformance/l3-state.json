@@ -1,5 +1,5 @@
 {
-  "passing": 1907,
+  "passing": 1908,
   "total": 2270,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -802,6 +802,7 @@
     "g_V_hasXset_typeOfXGType_SETXX_valuesXnameX",
     "g_V_hasXsong_name_MIGHT_AS_WELLX_shortestPath_targetXhasXsong_name_MAYBE_YOU_KNOW_HOW_I_FEELXX_edgesXoutEXfollowedByXX_distanceXweightX",
     "g_V_hasXsong_name_OHBOYX_outXfollowedByX_outXfollowedByX_order_byXperformancesX_byXsongType_descX",
+    "g_V_in_barrier_localXcountX",
     "g_V_in_hasIdXneqX1XX",
     "g_V_injectX127b_1bX_sumXX",
     "g_V_injectX2147483647i_1iX_sumXX",
@@ -2070,7 +2071,6 @@
     "g_V_hasXperson_name_markoX_timesX0X_repeatXoutXcreatedXX_name",
     "g_V_hasXperson_name_withinXvadas_peterXX_groupXaX_by_byXout_orderX_capXaX",
     "g_V_hasXperson_name_withinXvadas_peterXX_group_by_byXout_orderX",
-    "g_V_in_barrier_localXcountX",
     "g_V_label_groupCount_asXxX_selectXxX",
     "g_V_limitX3X_addVXsoftwareX_aggregateXa1X_byXlabelX_aggregateXa2X_byXlabelX_capXa1_a2X_selectXa_bX_byXunfoldX_foldX",
     "g_V_localXaggregateXaXX_bothE_sampleX1X_otherV_localXaggregateXaXX_capXaX_unfold_groupCount_byXlabelX",

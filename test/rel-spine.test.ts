@@ -30,6 +30,8 @@ const store = seededStore();
 const COVERED = [
   'g.V()', 'g.E()', 'g.V(1)', 'g.V(1,2)', 'g.V([1,2])',
   "g.V().local(__.values('name'))",
+  // A reducer-HEADED body reduces the host's one-row self, over an element or a scalar host alike.
+  "g.V().local(__.count())", "g.V().values('age').local(__.fold())", "g.V().values('age').map(__.sum())",
   "g.V().hasLabel('person')", "g.V().hasLabel('person','software')", "g.E().hasLabel('knows')",
   "g.V().has('name')", "g.V().has('name','marko')", "g.V().has('age',29)", "g.E().has('weight',0.5)",
   // A RUN of filters is the shape worth pinning: a per-step lowering would give each its own CTE
@@ -658,11 +660,10 @@ const DECLINED = [
   // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
   'g.V().as("a").out("knows").map(__.select("a").by("name"))',
   // The per-traverser hosts' own refusals, each a CARDINALITY the correlated scalar cannot honour.
-  // A fan-out body has no "first" a correlated subquery can name; a bare `count()` is a barrier
-  // with no movement to correlate. (A per-origin `fold()`/slice now LOWERS — see COVERED — and so does
-  // `local(values(k))`: a multi-valued key's every-result policy takes the rejoin.)
+  // A fan-out body has no "first" a correlated subquery can name. (A per-origin `fold()`/slice now
+  // LOWERS — see COVERED — and so does `local(values(k))`: a multi-valued key's every-result policy takes
+  // the rejoin; and so does a bare `local(count())`, the host's one-row self seed.)
   "g.V().map(__.out())",
-  "g.V().local(__.count())",
 ];
 
 describe('the RelIR spine', () => {

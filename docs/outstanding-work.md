@@ -178,7 +178,14 @@ RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open familie
    correlated list-member body (a bind-budget call); `order`/`range(local)` over list-of-maps, PROPERTY and
    MIXED lists; `select()` in a list-host body.
 8. **Fan-out** — per-origin scalar order (`project().by(values(k).order().fold())`), reductions without
-   fold, scalar-host group reducer, `tail`, child-label escape, `map` first-result window.
+   fold, scalar-host group reducer, `tail`, child-label escape, `map` first-result window. A per-traverser
+   host NESTED in a child body — `local(__.out().local(__.count()))` (L3 `g_V_localXout_localXcountXX`),
+   `values('age').local(__.local(count()))`, `project().by(values(k).local(fold()))`: `valueRun` has no
+   `local`/`map` step and `flatMapRejoin` refuses `local` as a barrier (L4 `nested-local.feature`). A
+   reducer arm of a BATCHED `union` over the one-row self (`local(__.union(__.count()))`, L3
+   `g_VX1_2X_localXunionXcountXX`) is the union-residue. min/max over a SCALAR host's self seed
+   (`values('age').local(max())`) declines: the correlated argmax re-inlines an outer column in its
+   ORDER BY, which SQLite cannot resolve (`valueColIsDetached`).
 9. **Branch / slice** (10 open) — MAP/RECORD/PATH/PROPERTY variant arm, batched `choose`, alias through a
    collapsed arm, nested branch in a sliced arm.
 10. **`repeat()` residue** — an unbounded body whose UNION is not the top node (join-union distribution),
