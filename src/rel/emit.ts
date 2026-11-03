@@ -296,6 +296,53 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     return false;
   };
   /**
+   * THE ALIASES A SCOPE BINDS — every qualifier its relations' spellings name, in `identifier`'s own
+   * spelling. Textual on purpose: an alias is what SQLite resolves a qualifier against, so "is this
+   * name already taken here?" is a question about the rendered text, not about `RelId`s (a fused
+   * relation is spelled through whatever FROM items computed it). The ONE authority for which aliases
+   * are in play: `freshAlias` places a FROM item against it, and `shadowsOuter` and
+   * `unanchoredAggregate` read the same sets. Memoised per scope and per spelling — both are immutable
+   * once built, and a scope is asked once per FROM item placed under it.
+   */
+  const qualifierMemo = new WeakMap<Expression, readonly string[]>();
+  const qualifiersOf = (e: Expression): readonly string[] => {
+    let out = qualifierMemo.get(e);
+    if (!out) qualifierMemo.set(e, out = qualifiers(render(e).sql));
+    return out;
+  };
+  const scopeAliasMemo = new WeakMap<Scope, ReadonlySet<string>>();
+  const scopeAliases = (scope: Scope): ReadonlySet<string> => {
+    let out = scopeAliasMemo.get(scope);
+    if (!out) scopeAliasMemo.set(scope, out = new Set([...scope.values()].flatMap((cols) => [...cols.values()].flatMap(qualifiersOf))));
+    return out;
+  };
+  /** The aliases a block's OWN FROM items take — what a qualifier inside it resolves to first. */
+  const itemAliases = (b: Block): ReadonlySet<string> =>
+    new Set([b.from.alias, ...b.joins.map((join) => join.item.alias)].map((alias) => render(ident(alias)).sql));
+  /**
+   * THE ALIAS A DIRECT-SOURCE FROM ITEM TAKES UNDER `outer` — its fixed one (`aliasOf`) unless an
+   * enclosing scope already binds that name, in which case its `RelId`, which is unique per plan.
+   *
+   * A fixed alias is shared by every scan of a table (`rn` for `nodes`), so a correlated subquery that
+   * scans the same table AGAIN re-declared the enclosing query's alias — and SQLite resolves a qualifier
+   * to the INNERMOST FROM item declaring it, so the body's read of the host row became a read of its own
+   * row: `g.V().hasLabel('person').local(__.values('name').as('e').V().has('name', select('e')).count())`
+   * counted all 6 vertices per person instead of 1. Renaming ONLY on a collision keeps every plan without
+   * one byte-identical; readers resolve through `Cols`, never the alias text, so nothing else moves. (A
+   * join side colliding with its SIBLING is `free`'s concern, `block.ts`.)
+   */
+  const freshAlias = (r: Rel, outer: Scope): string => {
+    const fixed = aliasOf(r);
+    // Every other kind is aliased by its `RelId` already, which is what a rename would give it.
+    if (fixed === r.id) return fixed;
+    // The SAME node re-read inside its own correlated subquery is a different case, and renaming cannot
+    // serve it: the scope is keyed by `RelId`, so the inner FROM item's columns would replace the
+    // enclosing row's for every reader below and the correlation would still be a tautology. It keeps
+    // its alias, and `shadowsOuter` closes the re-read into a derived table where that alias is private.
+    if (outer.has(r.id) || !scopeAliases(outer).has(render(ident(fixed)).sql)) return fixed;
+    return r.id;
+  };
+  /**
    * WOULD FUSING `b` SHADOW A RELATION AN ENCLOSING BLOCK BINDS? A correlated subquery may re-read the
    * very relation its enclosing query ranges over — `TraversalUtil.apply`'s absent-value guard is "the
    * host rows with no value row", and the value rows are the host joined to what its body reads. By the
@@ -313,9 +360,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       const rel = key.slice(0, cut);
       const spelled = rel === input.id ? undefined : outer.get(rel)?.get(key.slice(cut + 1));
       if (!spelled) continue;
-      // Textual, as `unanchoredAggregate` is: an alias is what SQLite resolves a qualifier against.
-      local ??= new Set([b.from.alias, ...b.joins.map((join) => join.item.alias)].map((alias) => render(ident(alias)).sql));
-      if (qualifiers(render(spelled).sql).some((alias) => local!.has(alias))) return true;
+      local ??= itemAliases(b);
+      if (qualifiersOf(spelled).some((alias) => local!.has(alias))) return true;
     }
     return false;
   };
@@ -453,10 +499,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const directSource = (r: Rel, outer: Scope): { item: FromItem; cols: Cols } | undefined => {
     switch (r.kind) {
       case 'ref': return refSource(r);
-      case 'scan': return { item: { text: ident(r.table), alias: aliasOf(r), table: true }, cols: colsOf(aliasOf(r), r) };
+      case 'scan': { const alias = freshAlias(r, outer); return { item: { text: ident(r.table), alias, table: true }, cols: colsOf(alias, r) }; }
       // A recursive reference is a table source, never a derived relation: SQLite requires it exactly
       // once at the recursive term's top-level FROM and reports "circular reference" if it is wrapped.
-      case 'self-ref': return { item: { text: ident(r.name), alias: aliasOf(r) }, cols: colsOf(aliasOf(r), r) };
+      case 'self-ref': { const alias = freshAlias(r, outer); return { item: { text: ident(r.name), alias }, cols: colsOf(alias, r) }; }
       case 'values': {
         // SQLite names anonymous VALUES columns column1, column2, … — EXCEPT one whose FIRST-row expression
         // is a bare column reference, which takes that column's name (measured on 3.51: `(VALUES (m.v, 1))`
@@ -466,9 +512,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         const rows = list(r.rows.map((row, i) => q`(${list(row.map((e) => cell(e, i === 0)))})`));
         // Bind the declared names to those positions here rather than re-projecting, so the row source
         // stays one FROM item.
-        const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, qualified(aliasOf(r), `column${i + 1}`)]));
+        const alias = freshAlias(r, outer);
+        const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, qualified(alias, `column${i + 1}`)]));
         for (const spelled of cols.values()) jsonText.add(spelled);
-        return { item: { text: q`(VALUES ${rows})`, alias: aliasOf(r) }, cols };
+        return { item: { text: q`(VALUES ${rows})`, alias }, cols };
       }
     }
     // `isDirectSource` is the shared classification (`block.ts`); every kind it marks a table source
@@ -652,13 +699,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     const nodes: Expr[] = [];
     aggs.forEach(([, e]) => forEachExpr(e, (node) => { if (node.kind === 'agg' && exprChildren(node).length) nodes.push(node); }));
     if (!nodes.length) return false;
-    const local = new Set([b.from.alias, ...b.joins.map((join) => join.item.alias)].map((alias) => render(ident(alias)).sql));
-    let enclosing: ReadonlySet<string> | undefined;
+    const local = itemAliases(b);
     return nodes.some((node) => {
       const named = qualifiers(render(expr(node, b.scope)).sql);
       if (named.some((alias) => local.has(alias))) return false;
-      enclosing ??= new Set([...outer.values()].flatMap((cols) => [...cols.values()].flatMap((e) => qualifiers(render(e).sql))));
-      return named.some((alias) => enclosing!.has(alias));
+      const enclosing = scopeAliases(outer);
+      return named.some((alias) => enclosing.has(alias));
     });
   };
 
