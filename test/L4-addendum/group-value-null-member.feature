@@ -188,3 +188,29 @@ Feature: mogwai addendum — a group value body's PRODUCTIVE null is a member, n
     Then the result should be unordered
       | result |
       | m[{"a":"d[1].i"}] |
+
+  # `ProductiveByStrategy` makes an absent `values("age")` a PRODUCTIVE null member (lop, ripple), so the
+  # null sort key must stay here although the plain `by(__.values(p))` form drops it. Descending by name,
+  # ripple's null arrives after peter's 35 and lop's null arrives last: neither overwrites, josh holds.
+  Scenario: g_withStrategiesXProductiveByStrategyX_V_order_byXname_descX_group_byXconstantXxXX_byXvaluesXageXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withStrategies(ProductiveByStrategy).V().order().by("name",Order.desc).group().by(__.constant("x")).by(__.values("age"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"d[32].i"}] |
+
+  # Without the strategy the nulls are ABSENT (dropped before the aggregate) and the answer is the same.
+  Scenario: g_V_order_byXname_descX_group_byXconstantXxXX_byXvaluesXageXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by("name",Order.desc).group().by(__.constant("x")).by(__.values("age"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"d[32].i"}] |

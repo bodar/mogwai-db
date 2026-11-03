@@ -14,7 +14,7 @@ import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, presenceFenced, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
-import { byExpr, byNode, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
+import { byExpr, byNode, isProductiveBy, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
@@ -228,6 +228,10 @@ export interface GroupRecipe {
   /** `by(__.tail())`: the single member is the FIRST arrival (`RangeBiOperator(1)` stops adding once the key
    *  holds one), not the last an anonymous child's `Operator.assign` keeps. */
   readonly firstOnly?: boolean;
+  /** A `single` member may be a PRODUCTIVE null, so last-wins must prefer a non-null arrival
+   *  (`collectedValue`'s `nullsFirst`). False where a null value is ABSENT (`'value-nullness'` presence,
+   *  no `ProductiveByStrategy`): the domain filter has already dropped it, so the sort key is dead. */
+  readonly mayYieldNull?: boolean;
   /** The SHAPE of that single value — `{kind:'map', of}` for a MAP-producing child (`by(__.project())`,
    *  a nested `by(__.group())`), `{kind:'scalar'}` otherwise. What makes a `Map<K,Map>`'s `valOf` carry
    *  the inner map instead of collapsing to an opaque scalar. Unused when `single` is false. */
@@ -268,6 +272,7 @@ const elementMembers = (recipe: GroupRecipe): Elem | undefined =>
  *  deliberately does NOT compare `step` — that is the strategy carrier, and one traversal has one. */
 export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
   a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single && !!a.firstOnly === !!b.firstOnly
+  && !!a.mayYieldNull === !!b.mayYieldNull
   && a.memberDrop === b.memberDrop && a.bulkCol === b.bulkCol
   && JSON.stringify(a.singleOf) === JSON.stringify(b.singleOf)
   && JSON.stringify(a.memberOf) === JSON.stringify(b.memberOf)
@@ -488,6 +493,7 @@ export function groupRows(
   // encoding is identical to `byNode`'s (both `producedMemberNode`), so only the shape is new.
   let member: Expr | undefined;
   let singleOf: MapOf = { kind: 'scalar' };
+  let mayYieldNull = false;
   if (valueBy && !lastOnly) {
     if (valueBy.key.kind === 'child') {
       const produced = child.scalar(valueBy.key.body, host);
@@ -504,6 +510,9 @@ export function groupRows(
         : memberNodeOf(produced, source, fresh);
       if (!node) return null;
       member = node;
+      // Under `'value-nullness'` a null is ABSENT and `childValueDrop` below removes it before the
+      // aggregate — unless `ProductiveByStrategy` keeps it. Every other presence keeps a null as a member.
+      mayYieldNull = produced.present !== 'value-nullness' || isProductiveBy(step);
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
       if (produced.framing.kind === 'list') singleOf = { kind: 'list', of: produced.framing.of };
     } else {
@@ -647,6 +656,7 @@ export function groupRows(
       member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
       single: lastOnly || valueBy?.key.kind === 'child',
       ...(lastOnly ? { firstOnly: true } : {}),
+      ...(mayYieldNull ? { mayYieldNull: true } : {}),
       singleOf,
       ...(memberOf ? { memberOf } : {}),
       // A by()-less entry re-group (`memberOf` set) has no value `by()` to be unproductive, and its member
@@ -827,8 +837,9 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
   // (`{t:null}`, or a bare SQL NULL with `ProductiveByStrategy` off) sort first, so `$[#-1]` reads the
   // last non-null member when there is one and the last null otherwise. No second aggregate, no extra
   // pass. A `tail()` value (`firstOnly`) is a traverser, never null, and an element (`rowid`) member is
-  // never null either, so neither carries the key.
-  const nullsFirst = single && !recipe.firstOnly && member?.kind === 'node'
+  // never null either, so neither carries the key. Nor does a body whose null is ABSENT (`mayYieldNull`
+  // false — `group().by(k).by(__.values(p))`): the domain filter already dropped every null member.
+  const nullsFirst = single && !recipe.firstOnly && member?.kind === 'node' && recipe.mayYieldNull
     ? [{ expr: isNot(jsonField(col(rows.id, MEMBER_COL), 't'), compilerNull()), dir: 'asc' as const }]
     : [];
   const memberAggregate: Expr = {

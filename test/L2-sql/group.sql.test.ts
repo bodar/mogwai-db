@@ -322,6 +322,24 @@ describe('group / properties SQL', () => {
     expect(p.sql).not.toContain("'$.t') IS NOT NULL) ASC");
   });
 
+  // The null sort key is spent only where a member CAN be a productive null. A `'value-nullness'` body
+  // (`by(__.values('age'))`) reads a null as ABSENT and the domain filter drops it before the aggregate,
+  // so the key would sort a column with no nulls in it.
+  test('group().by(k).by(__.values(p)) carries no null sort key — its nulls are already dropped', () => {
+    const p = read('g.V().group().by("name").by(__.values("age"))');
+    expect(p.sql).toContain("'$[#-1]'");
+    expect(p.sql).not.toContain("'$.t') IS NOT NULL");
+  });
+
+  test('a body that keeps a productive null still carries the null sort key', () => {
+    // `select(values)` over an entry: a null entry value is a member (GroupStep.java:205-216 keeps the held value).
+    expect(read('g.inject(["a":3],["a":null]).unfold().group().by(keys).by(__.select(values))').sql)
+      .toContain("'$.t') IS NOT NULL) ASC");
+    // `ProductiveByStrategy` turns an absent `values(p)` into a null member, so the key comes back.
+    expect(read('g.withStrategies(ProductiveByStrategy).V().group().by(T.label).by(__.values("age"))').sql)
+      .toContain("'$.t') IS NOT NULL) ASC");
+  });
+
 
 
   test('a sack is an ordinary carried CHANNEL — RelIR', () => {
