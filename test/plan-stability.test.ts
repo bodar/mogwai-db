@@ -23,6 +23,8 @@ const N = 2_000; // 2000 person + 2000 software = 4000 vertices, 10000 edges
 function* vertices(): Iterable<BulkVertex> {
   for (let i = 1; i <= N; i++) yield { id: i, labels: ['person'], properties: [{ key: 'name', value: `p${i}` }] };
   for (let i = 1; i <= N; i++) yield { id: N + i, labels: ['software'], properties: [{ key: 'name', value: `s${i}` }, { key: 'lang', value: 'java' }] };
+  // A few USER-SUPPLIED string ids (the `uid` column) — what `V('u0')`/`E('e0')` seek on.
+  for (let i = 0; i < 10; i++) yield { id: `u${i}`, labels: ['tagged'] };
 }
 
 function* edges(): Iterable<BulkEdge> {
@@ -30,6 +32,7 @@ function* edges(): Iterable<BulkEdge> {
     for (let k = 1; k <= 4; k++) yield { label: 'knows', src: i, tgt: ((i + k - 1) % N) + 1 };
     yield { label: 'created', src: i, tgt: N + (((i - 1) % N) + 1) };
   }
+  for (let i = 0; i < 10; i++) yield { id: `e${i}`, label: 'tags', src: `u${i}`, tgt: i + 1 };
 }
 
 function build(analyze: boolean): GraphStore {
@@ -89,3 +92,42 @@ describe('query-plan stability', () => {
     }
   }
 });
+
+// ID ROUTING — every id question (`V(ids)`, `E(ids)`, `hasId`, `has(T.id, …)`) is ONE authority
+// (`idMembership`, `src/compiler/rel/source.ts`), and its point is that each becomes a rowid or
+// `uid`-UNIQUE SEEK. The `COALESCE(uid, id)` comparison it replaced could only be checked per row, so
+// `hasId(within(1,2,3))` scanned the graph. Asserted over EVERY access, not just the big tables, because
+// the id lookup into `nodes`/`edges` is exactly the access path at stake.
+//
+// The pin is "a SEEK with and without stats", deliberately not plan identity: `uid IS NULL AND id IN (…)`
+// is served cold by the covering `(uid, rowid)` autoindex and warm by the rowid itself — two exact seeks
+// of the same cost, and the kind of blessed-single-path churn RelIR plan §5 warns a gate must not
+// assert. What a young graph must never get is a SCAN, and that is what fails here.
+const ID_SEEKS: Readonly<Record<string, string>> = {
+  'V(uid)': "g.V('u0').id()",
+  'E(uid)': "g.E('e0').id()",
+  'hasId(within)': 'g.V().hasId(within(1,2,3)).count()',
+  'has(T.id, gt)': 'g.V().has(T.id, gt(3990)).count()',
+};
+
+describe('id routing: every id question is a seek', () => {
+  const scans = (paths: readonly string[]) => paths.filter((p) => !p.startsWith('SEARCH') && !p.startsWith('USE TEMP B-TREE'));
+  for (const [name, gremlin] of Object.entries(ID_SEEKS)) {
+    const { sql, binds } = read(gremlin);
+    test(`${name}: every access is a SEARCH (rowid / uid seek), cold and warm`, () => {
+      for (const store of [noStats, withStats]) {
+        const paths = accessPaths(store, sql, binds);
+        expect(paths.length).toBeGreaterThan(0);
+        expect(scans(paths)).toEqual([]);
+      }
+    });
+  }
+  test('a hasId AFTER a hop adds no scan — its membership is an uncorrelated seek, not a per-row EXISTS', () => {
+    const hop = read("g.V().out('knows').count()");
+    const filtered = read("g.V().out('knows').hasId(within(1,2,3)).count()");
+    for (const store of [noStats, withStats]) {
+      expect(scans(accessPaths(store, filtered.sql, filtered.binds))).toEqual(scans(accessPaths(store, hop.sql, hop.binds)));
+    }
+  });
+});
+

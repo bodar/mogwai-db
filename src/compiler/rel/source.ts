@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
@@ -6,9 +6,9 @@ import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
-import { storedCompareOn } from './predicate.ts';
+import { CONSTANT, storedCompareOn } from './predicate.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, or, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -98,10 +98,19 @@ export interface GraphSource {
    *  comparison is the vocabulary's callback, handed the token EXPRESSION (the external id, or the label
    *  name) so the caller owns the `P` semantics; `null` from it declines. `BaseGraph` reads
    *  `nodes`/`edges` and the `labels` side tables; a landed graph reads its landed id / JSON label
-   *  array. */
+   *  array.
+   *
+   *  `idQuery` is the same `T.id` question in a form a source can ROUTE rather than compare: an id
+   *  membership (`hasId(1,'x')`, `has(T.id, without($ids))`) or a numeric range (`has(T.id, lt(4))`),
+   *  classified by the vocabulary (`idQueryOf`, `lower/filter.ts`) and absent for every other predicate.
+   *  A source may answer it instead of `valuePred` — `BaseGraph` turns it into a rowid / `uid` seek
+   *  (`idMembership`), which `COALESCE(uid, id)` can never be — but must answer the SAME question, so
+   *  ignoring it (a landed graph) is always correct. `row` is the subject's relation, which a source may
+   *  read physical columns off when it is its own element scan (the source position). */
   hasTokenPredicate(
     kind: Elem, id: Expr, token: 'id' | 'label',
     valuePred: (tokenExpr: Expr) => Expr | null, fresh: Minter,
+    idQuery?: IdQuery, row?: Rel,
   ): Expr | null;
 
   /** `id()` / `label()` as SCALAR reads over an element relation. `externalId` is `COALESCE(uid, id)`
@@ -206,6 +215,111 @@ export interface GraphSource {
   bindings?(fresh: Minter): readonly Binding[];
 }
 
+/** A `T.id` question a source can ROUTE (see `hasTokenPredicate`). `members` is an id set — exactly the
+ *  argument list `V(…)` takes, so it is answered by the one routing `V(…)` uses — optionally negated
+ *  (`neq`/`without`). `range` is an ordering comparison against a NUMERIC LITERAL; a string or any other
+ *  operand type stays on the general comparison. */
+export type IdQuery =
+  | { readonly kind: 'members'; readonly ids: readonly Arg[]; readonly negated: boolean }
+  | { readonly kind: 'range'; readonly bounds: readonly (readonly ['<' | '<=' | '>' | '>=', number])[]; readonly join: 'and' | 'or' };
+
+/**
+ * ONE ID-ROUTING AUTHORITY — `V(ids)`/`E(ids)`, `hasId(…)` and `has(T.id, …)` all ask "is this row one
+ * of these ids?", and this is the only place that answers it over the base schema.
+ *
+ * Ids span two provenances and two columns. PROVENANCE decides bind-vs-inline: a parsed LITERAL id is a
+ * constant bounded by the QUERY TEXT and INLINES (a rowid `int`, a uid `text`); a wire PARAMETER
+ * (`V($x)`) BINDS, so its value never enters the statement text — a scalar as one `?`, a bound
+ * collection (`V($ids)`) as ONE `jsonb(?)` exploded by `json_each`. COLUMN follows the value's type: a
+ * number matches the rowid `id`, a string the `uid`.
+ *
+ * **A number matches the rowid only on a row WITHOUT a `uid`.** The external id is `COALESCE(uid, id)`,
+ * so a vertex created with `property(T.id, 'x')` has the id `'x'` and NOT its rowid; `V(1)` must not
+ * return it (it did — a wrong element). `uid IS NULL` reads a column of the row the rowid seek already
+ * fetched, so it costs no access path. A numeric user id is stored AS the rowid (`uid` NULL), so
+ * `V(100)` is unchanged.
+ *
+ * Returns the POSITIVE membership, `undefined` for an empty id list (the caller owns what "no ids"
+ * means: the whole graph for `V()`, nothing for `hasId`), or `null` where a member is a type this
+ * routing cannot place (the caller declines, or falls back to the general comparison).
+ */
+function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Minter): Expr | null | undefined {
+  const inlineNums: number[] = [];
+  const inlineStrs: string[] = [];
+  const numParams: Expr[] = [];
+  const strParams: Expr[] = [];
+  for (const a of ids) {
+    if (a.name == null) {
+      // A CONSTANT — a bare scalar id or a bracketed list literal (`V(1, [2,3])` ≡ `V(1,2,3)`); the
+      // grammar forbids a param member, so every member is itself a literal that inlines.
+      const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
+      for (const v of members) {
+        if (typeof v === 'number' && !Number.isNaN(v)) inlineNums.push(v);
+        else if (typeof v === 'string') inlineStrs.push(v);
+        else return null;
+      }
+    } else if (Array.isArray(a.value)) {
+      // A bound COLLECTION of ids → ONE `jsonb(?)` bind, exploded and routed per member by its json
+      // type. The two clauses share the parameter NAME, so the render dedups them to a single bind.
+      numParams.push({ kind: 'in-query', expr: idCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_NUMERIC_TYPES), negated: false });
+      strParams.push({ kind: 'in-query', expr: uidCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_TEXT_TYPES), negated: false });
+    } else if (typeof a.value === 'number') {
+      numParams.push(eq(idCol, param(a.value, a.name)));
+    } else if (typeof a.value === 'string') {
+      strParams.push(eq(uidCol, param(a.value, a.name, 'text')));
+    } else return null; // a bound id of another shape, as its inline sibling
+  }
+  // Inline lists first so a param-free id set renders the same list it always did. `constLit` may DECLINE
+  // a value it cannot spell (`null`), and that decline is honoured HERE, at the one site.
+  const numeric: Expr[] = [];
+  if (inlineNums.length) {
+    const values: Expr[] = [];
+    for (const n of inlineNums) {
+      const v = constLit(arg(n, 'long'));
+      if (v == null) return null;
+      values.push(v);
+    }
+    numeric.push({ kind: 'in-list', expr: idCol, values });
+  }
+  numeric.push(...numParams);
+  const text: Expr[] = [];
+  if (inlineStrs.length) text.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
+  text.push(...strParams);
+  const numMatch = disjunction(numeric);
+  return disjunction([...(numMatch ? [and(numMatch, rowidOnly(uidCol))] : []), ...text]);
+}
+
+/** `uid IS NULL` — the row's external id IS its rowid (see `idMembership`). */
+const rowidOnly = (uidCol: Expr): Expr => ({ kind: 'binary', op: 'is', left: uidCol, right: compilerNull() });
+
+const disjunction = (clauses: readonly Expr[]): Expr | undefined =>
+  clauses.reduce<Expr | undefined>((left, right) => or(left, right), undefined);
+
+/** A `T.id` RANGE over the base schema: `uid IS NULL AND id <op> n`. Equal to comparing
+ *  `COALESCE(uid, id)` against a NUMBER, because a uid is TEXT and the numeric comparison is confined to
+ *  the number type space (`typeSpaced`), so a uid row never satisfies a numeric bound — and unlike the
+ *  COALESCE form it is a rowid RANGE seek. */
+function idRange(idCol: Expr, uidCol: Expr, q: Extract<IdQuery, { kind: 'range' }>): Expr | null {
+  const bounds: Expr[] = [];
+  for (const [op, n] of q.bounds) {
+    const v = constLit(arg(n, 'long'));
+    if (v == null) return null;
+    bounds.push({ kind: 'binary', op, left: idCol, right: v });
+  }
+  const joined = bounds.reduce((left, right) => ({ kind: 'binary', op: q.join, left, right }));
+  return and(rowidOnly(uidCol), joined);
+}
+
+/** The routed `T.id` question over a base element row's own `id`/`uid` columns, or `null` to fall back. */
+function idQueryOver(idCol: Expr, uidCol: Expr, q: IdQuery, fresh: Minter): Expr | null {
+  if (q.kind === 'range') return idRange(idCol, uidCol, q);
+  const member = idMembership(idCol, uidCol, q.ids, fresh);
+  if (member === null) return null;
+  // An EMPTY set is never matched; its complement always is.
+  const positive: Expr = member ?? CONSTANT.false;
+  return q.negated ? isNot(positive, compilerInt(1)) : positive;
+}
+
 /** A `GraphSource` that DECLARES extra Plan bindings beyond whatever `base` already declares — the
  *  landed CTEs a nested-branch federate segment accumulates as it lands each arm's graph. Mirrors
  *  `decorateGraph`'s bindings stack (`decorate.ts`): `lowered()` calls `bindings(fresh)` ONCE and
@@ -286,58 +400,10 @@ export const BaseGraph: GraphSource = {
       id: fresh('src'), table: kind === 'edge' ? 'edges' : 'nodes', alias: kind === 'edge' ? 're' : 'rn', channels: [],
       type: typeOf(...(kind === 'edge' ? EDGE_COLS : NODE_COLS)),
     });
-
-    // Ids span two provenances and two columns. PROVENANCE decides bind-vs-inline: a parsed LITERAL id
-    // is a constant bounded by the QUERY TEXT and INLINES (a rowid `int`, a uid `text`); a wire
-    // PARAMETER (`V($x)`) BINDS, so its value never enters the statement text — a scalar as one `?`, a
-    // bound collection (`V($ids)`) as ONE `jsonb(?)` exploded by `json_each`. COLUMN follows the value's
-    // type: a number matches the rowid `id`, a string the `uid`.
-    const idCol = col(scan.id, 'id');
-    const uidCol = col(scan.id, 'uid');
-    const inlineNums: number[] = [];
-    const inlineStrs: string[] = [];
-    const paramClauses: Expr[] = [];
-    const inlineOne = (v: unknown): boolean => {
-      if (typeof v === 'number') { inlineNums.push(v); return true; }
-      if (typeof v === 'string') { inlineStrs.push(v); return true; }
-      return false; // an id that is neither declines — a hard error, not a value this route can inline
-    };
-    for (const a of args) {
-      if (a.name == null) {
-        // A CONSTANT — a bare scalar id or a bracketed list literal (`V(1, [2,3])` ≡ `V(1,2,3)`); the
-        // grammar forbids a param member, so every member is itself a literal that inlines.
-        const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
-        for (const v of members) if (!inlineOne(v)) return null;
-      } else if (Array.isArray(a.value)) {
-        // A bound COLLECTION of ids → ONE `jsonb(?)` bind, exploded and routed per member by its json
-        // type. The two clauses share the parameter NAME, so the render dedups them to a single bind.
-        paramClauses.push({ kind: 'in-query', expr: idCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_NUMERIC_TYPES), negated: false });
-        paramClauses.push({ kind: 'in-query', expr: uidCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_TEXT_TYPES), negated: false });
-      } else if (typeof a.value === 'number') {
-        paramClauses.push(eq(idCol, param(a.value, a.name)));
-      } else if (typeof a.value === 'string') {
-        paramClauses.push(eq(uidCol, param(a.value, a.name, 'text')));
-      } else return null; // a bound id of another shape declines, as its inline sibling does
-    }
-
-    // Inline lists first so a param-free `V(...)` renders byte-for-byte as before. `constLit` may DECLINE a
-    // value it cannot spell (`null`), and that decline is honoured HERE, at the one site, rather than asserted
-    // away: the whole id route declines. (A NaN id never reaches it: `ir/uncarried-literal.ts` declines first.)
-    const clauses: Expr[] = [];
-    if (inlineNums.length) {
-      const values: Expr[] = [];
-      for (const n of inlineNums) {
-        const v = constLit(arg(n, 'long'));
-        if (v == null) return null;
-        values.push(v);
-      }
-      clauses.push({ kind: 'in-list', expr: idCol, values });
-    }
-    if (inlineStrs.length) clauses.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
-    clauses.push(...paramClauses);
-    const pred = clauses.reduce<Expr | undefined>((left, right) =>
-      left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
-    return { scan, pred };
+    // The id routing is `idMembership`'s — the one authority `hasId`/`has(T.id, …)` share. `null` (an id
+    // of a shape it cannot place) declines the whole source; no ids is the whole graph.
+    const pred = idMembership(col(scan.id, 'id'), col(scan.id, 'uid'), args, fresh);
+    return pred === null ? null : { scan, pred };
   },
 
   hasLabelPredicate: (kind, id, labelCol, labels, fresh) => {
@@ -377,10 +443,31 @@ export const BaseGraph: GraphSource = {
     return { kind: 'exists', plan: probe, negated: false };
   },
 
-  hasTokenPredicate: (kind, id, token, valuePred, fresh) => {
+  hasTokenPredicate: (kind, id, token, valuePred, fresh, idQuery, row) => {
     if (token === 'id') {
+      const table = kind === 'edge' ? 'edges' : 'nodes';
       const cols = kind === 'edge' ? EDGE_COLS : NODE_COLS;
-      const scan = make.scan({ id: fresh('ti'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
+      if (idQuery) {
+        // A ROUTED id question (`idMembership`/`idRange`): a rowid or `uid`-UNIQUE seek. Over the subject's
+        // OWN scan row (the source position) it is a direct conjunct on that row's columns; elsewhere the
+        // subject is a bare id, and the question becomes an UNCORRELATED membership — `id IN (SELECT id
+        // FROM <table> WHERE …)`, evaluated once, the shape `hasLabelPredicate` uses — never a per-row
+        // EXISTS whose `COALESCE(uid, id)` no index can serve.
+        if (row?.kind === 'scan' && row.table === table && id.kind === 'col' && id.rel === row.id && id.name === 'id') {
+          const direct = idQueryOver(id, col(row.id, 'uid'), idQuery, fresh);
+          if (direct) return direct;
+        } else {
+          const ids = make.scan({ id: fresh('ti'), table, alias: fresh('rti'), channels: [], type: typeOf(...cols) });
+          const positive = idQueryOver(col(ids.id, 'id'), col(ids.id, 'uid'), idQuery.kind === 'members' ? { ...idQuery, negated: false } : idQuery, fresh);
+          if (positive) {
+            const matching = make.filter({ id: fresh('f'), input: ids, channels: [], type: ids.type, pred: positive });
+            const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+            // An element id is never NULL and neither is a rowid, so `NOT IN` is the exact complement.
+            return { kind: 'in-query', expr: id, plan: owners, negated: idQuery.kind === 'members' && idQuery.negated };
+          }
+        }
+      }
+      const scan = make.scan({ id: fresh('ti'), table, alias: fresh('rti'), channels: [], type: typeOf(...cols) });
       const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
       const matches = valuePred(external);
       if (!matches) return null;

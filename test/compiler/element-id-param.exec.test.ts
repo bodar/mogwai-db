@@ -142,3 +142,38 @@ describe('label PARAMETER → bind, never inline', () => {
     expect(plan("g.V().hasLabel('person').count()").sql).toContain("IN ('person')");
   });
 });
+
+// `hasId`/`has(T.id, …)` ask the SAME id question `V(ids)` does, so they go through the same routing
+// (`idMembership`, `src/compiler/rel/source.ts`) — parameters included: a scalar binds as one `?`, a
+// bound collection as one `jsonb(?)`, numbers to the rowid (on a row with no `uid`), strings to `uid`.
+describe('hasId / has(T.id) share the V() id routing, parameters included', () => {
+  // rowid 1 carries the user id 'x' (so it does NOT answer to 1); rowid 2 is a plain vertex.
+  const s = seeded(["g.addV('a').property(T.id,'x').property('name','X')", "g.addV('b').property('name','B')"]);
+
+  test('hasId($xs) is ONE jsonb(?) bind and matches V($xs)', async () => {
+    const g = "g.V().hasId(xs).values('name')";
+    const p = plan(g, { xs: [1, 2, 'x'] });
+    expect(p.binds).toHaveLength(1);
+    expect(await valsIn(s, g, { xs: [1, 2, 'x'] })).toEqual(['B', 'X']);
+    expect(await valsIn(s, g, { xs: [1, 2, 'x'] })).toEqual(await valsIn(s, "g.V(xs).values('name')", { xs: [1, 2, 'x'] }));
+  });
+
+  test('has(T.id, $x) binds the scalar; a number never names a uid vertex by its rowid', async () => {
+    const p = plan("g.V().has(T.id, x).values('name')", { x: 1 });
+    expect(p.binds).toEqual([1]);
+    expect(await valsIn(s, "g.V().has(T.id, x).values('name')", { x: 1 })).toEqual([]);
+    expect(await valsIn(s, "g.V().has(T.id, x).values('name')", { x: 2 })).toEqual(['B']);
+    expect(await valsIn(s, "g.V().has(T.id, x).values('name')", { x: 'x' })).toEqual(['X']);
+  });
+
+  test('without($xs) is the exact complement, uid rows included', async () => {
+    expect(await valsIn(s, "g.V().hasId(without(xs)).values('name')", { xs: [1] })).toEqual(['B', 'X']);
+    expect(await valsIn(s, "g.V().hasId(without(xs)).values('name')", { xs: [2] })).toEqual(['X']);
+    expect(await valsIn(s, "g.V().V().hasId(without(xs)).values('name')", { xs: ['x'] })).toEqual(['B', 'B']);
+  });
+
+  test('after a re-source the routing is an uncorrelated membership, same answer', async () => {
+    expect(await valsIn(s, "g.V().V().hasId(xs).values('name')", { xs: [1, 2] })).toEqual(['B', 'B']);
+    expect(await valsIn(s, "g.V().V().has(T.id, lt(5)).values('name')")).toEqual(['B', 'B']);
+  });
+});

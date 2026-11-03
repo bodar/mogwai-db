@@ -4,7 +4,7 @@ import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
 import { and, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
-import type { GraphSource } from '../source.ts';
+import type { GraphSource, IdQuery } from '../source.ts';
 import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
@@ -15,7 +15,7 @@ import { MAPPING_TERMINAL } from '../../ir/productivity.ts';
 import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
 import { scopeKeyReads } from '../../ir/labels.ts';
 import type { AliasMap } from '../../alias.ts';
-import { isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
+import { arg, isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
@@ -735,5 +735,50 @@ function hasTokenClause(token: string, val: unknown, subject: ElementSubject, so
   const valuePred = name === 'id'
     ? (external: Expr): Expr | null => predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh, resolveListSet, resolveScalar)
     : (nameCol: Expr): Expr | null => predicateExpr(nameCol, val, SUBJECT_UNKNOWN, valType, valParam, fresh);
-  return source.hasTokenPredicate(subject.elem, subject.id, name, valuePred, fresh);
+  const idQuery = name === 'id' ? idQueryOf(val, valType, valParam) : null;
+  return source.hasTokenPredicate(subject.elem, subject.id, name, valuePred, fresh, idQuery ?? undefined, subject.rel);
+}
+
+const RANGE_OPS = { lt: '<', lte: '<=', gt: '>', gte: '>=' } as const;
+
+/**
+ * The `T.id` predicate as a question a source can ROUTE (`IdQuery`, `source.ts`), or `null` where it is
+ * not one and the general `COALESCE(uid, id)` comparison answers it.
+ *
+ * A MEMBERSHIP is `eq`/`within` (and their complements `neq`/`without`) over literal or parameter ids —
+ * the very argument list `V(…)` takes, so it is answered by the same routing. A RANGE is
+ * `lt`/`lte`/`gt`/`gte`/`between`/`inside`/`outside` over NUMERIC LITERALS (`P.java`'s `between` is
+ * `[lo, hi)`, `inside` `(lo, hi)`, `outside` the complement of `inside`). Anything else — a nested
+ * traversal operand, a null or NaN member, a string range, a `P.not`/`and`/`or` composition — stays on
+ * the comparison, whose answer this must equal wherever it applies.
+ */
+function idQueryOf(val: unknown, valType: TypeNode | null, valParam: string | null): IdQuery | null {
+  const routable = (a: Arg): boolean => {
+    if (isNested(a.value) || isPred(a.value)) return false;
+    const members: unknown[] = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
+    // A bound collection is routed per json member type (`idMembership`); its other members can match
+    // no element id, exactly as the comparison's `json_each` set does.
+    if (a.name != null && Array.isArray(a.value) && !a.members) return true;
+    return members.every((v) => typeof v === 'string' || (typeof v === 'number' && !Number.isNaN(v)));
+  };
+  const members = (ids: readonly Arg[], negated: boolean): IdQuery | null =>
+    ids.length && ids.every(routable) && ids.some((a) => !Array.isArray(a.value) || a.name != null || (a.value as unknown[]).length)
+      ? { kind: 'members', ids, negated } : null;
+  // A BARE value is `eq(value)`; a bare LIST is equality with a list, never membership, so only a scalar.
+  if (!isPred(val)) return typeof val === 'number' || typeof val === 'string' ? members([arg(val, valType, valParam)], false) : null;
+  const { op, operands } = val;
+  if (op === 'eq' || op === 'neq') return operands.length === 1 && !Array.isArray(operands[0]!.value) ? members(operands, op === 'neq') : null;
+  if (op === 'within' || op === 'without') return members(operands, op === 'without');
+  const numeric = (a: Arg | undefined): number | null =>
+    a && a.name == null && typeof a.value === 'number' && !Number.isNaN(a.value) ? a.value : null;
+  const single = op in RANGE_OPS && operands.length === 1 ? numeric(operands[0]) : null;
+  if (single != null) return { kind: 'range', bounds: [[RANGE_OPS[op as keyof typeof RANGE_OPS], single]], join: 'and' };
+  if (op === 'between' || op === 'inside' || op === 'outside') {
+    const bounds = operands.length === 1 && operands[0]!.members ? operands[0]!.members : operands;
+    const [lo, hi] = [numeric(bounds[0]), numeric(bounds[1])];
+    if (bounds.length !== 2 || lo == null || hi == null) return null;
+    if (op === 'outside') return { kind: 'range', bounds: [['<', lo], ['>', hi]], join: 'or' };
+    return { kind: 'range', bounds: [[op === 'inside' ? '>' : '>=', lo], ['<', hi]], join: 'and' };
+  }
+  return null;
 }
