@@ -122,7 +122,10 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   a power set of k keys is 3^k pairs over 2^k maps (N^1.58). Finding the containment is a set-containment
   join over the DISTINCT key sets: each probes the strictly LONGER key sets holding its rarest key, so data
   key NAMES whose every key many longer key sets share cost N × those holders (all inside the guard's one
-  statement, never a bind). Measure before touching; no real batch seen.
+  statement, never a bind). Measure before touching; no real batch seen. The pool / k-subset family is
+  measured LINEAR (`test/compiler/merge-scale.exec.test.ts`): the two-pool grid `[a{i%s}:1,b{i/s}:1]`
+  128 ms → 863 ms from 1k to 8k maps, 30-entry maps 1k → 8k at 8.2×, and one map's width no longer
+  matters (`mapDrivers` picks its driving entry once per driver: 1000 entries 107 ms, was 1.9 s).
 - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts`) — extracting
   `pathPositionProjection` also fixes a mid-path value/list/map position read as a vertex.
 - **Four copied blocks in `write.ts`** (carrier reproject, merged-create spread, alias-carry, nested-spec decline).

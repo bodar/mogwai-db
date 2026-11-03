@@ -3903,7 +3903,7 @@ function propertySeeks(
 
 /** The columns a property seek reads per driver, PROJECTED ONCE into the retained drivers — the key, the
  *  value's vtype and its `typedValueKey` compare form — so no arm re-spells the extraction. */
-const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x';
+const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x', SEEK_ORD = 'sk_o';
 
 /**
  * THE DECIMAL-TEXT tail of a NUMERIC criterion — the stored TEXT rows (`storedScalar`'s exact tail, always a
@@ -4084,16 +4084,15 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
   };
   const always = eq(compilerInt(1), compilerInt(1));
   // The driving entry per driver, chosen ONCE and retained: its most selective STRING entry
-  // (`cappedCount`), ties to the map's own order — `[tenant:'acme', email:x]` seeks by `email`.
+  // (`cappedCount`), ties to the map's own order — `[tenant:'acme', email:x]` seeks by `email`. The pick
+  // correlates to the DRIVER — projected beside it and MATERIALIZED before the map is exploded. Picked
+  // inside the explode it correlated to each exploded ROW, so a K-entry map probed its entries K times
+  // over for its one choice (K², measured 1.9 s for a single 1000-entry map).
   let chosen: Rel | null = null;
   const driving = (): Rel => {
     if (chosen) return make.ref({ id: fresh('r'), name: (chosen as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: chosen.type });
     const drivers = ref();
-    const exploded = make.explode({
-      id: fresh('ex'), input: drivers, expr: col(drivers.id, MAP_COL), channels: [], as: PAIR,
-      type: typeOf(...drivers.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
-    });
-    const others = stringPairs(exploded.id);
+    const others = stringPairs(drivers.id);
     const side = (which: 'keys' | 'values', path: string): Expr =>
       ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(others.id, PAIR.value), which), compilerText(path)] });
     const ranked = make.sort({
@@ -4105,9 +4104,17 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
       id: fresh('li'), channels: [], type: typeOf(meta('o', 'int')), count: compilerInt(1),
       input: make.project({ id: fresh('p'), input: ranked, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(ranked.id, PAIR.ord)]] }),
     });
+    const ordered = bind(make.project({
+      id: fresh('p'), input: drivers, channels: [], type: typeOf(...drivers.type.cols, meta(SEEK_ORD, 'int', true)),
+      exprs: [...drivers.type.cols.map((column) => [column.name, col(drivers.id, column.name)] as const), [SEEK_ORD, { kind: 'scalar', plan: pick }]],
+    }), true);
+    const exploded = make.explode({
+      id: fresh('ex'), input: ordered, expr: col(ordered.id, MAP_COL), channels: [], as: PAIR,
+      type: typeOf(...ordered.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+    });
     const picked = make.filter({
       id: fresh('f'), input: exploded, channels: [], type: exploded.type,
-      pred: and(stringKey(col(exploded.id, PAIR.value)), eq(col(exploded.id, PAIR.ord), { kind: 'scalar', plan: pick })),
+      pred: and(stringKey(col(exploded.id, PAIR.value)), eq(col(exploded.id, PAIR.ord), col(exploded.id, SEEK_ORD))),
     });
     const entry = (which: 'keys' | 'values', path: string): Expr =>
       ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(picked.id, PAIR.value), which), compilerText(path)] });

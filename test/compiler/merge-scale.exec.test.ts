@@ -166,6 +166,43 @@ describe(`a merge search over ${N} traversers seeks its most selective criterion
   }
 });
 
+// A MAP DRIVER PICKS ITS DRIVING ENTRY ONCE — K capped probes per driver, not K². The pick (the map's most
+// selective string entry, `cappedCount`) once correlated to each EXPLODED ENTRY rather than to its driver,
+// so one 1000-entry map took 1.9 s (250 entries: 0.25 s), and N 30-entry maps paid 900 probes apiece.
+// Now `mapDrivers` projects the pick beside the driver, materialized, before the map is exploded. Ratios
+// are of the merge's own run (`runRecorded` times execution, not the parse of a large literal).
+describe('a map-valued merge picks its driving entry once per driver', () => {
+  const wide = (k: number): string => `g.inject([${Array.from({ length: k }, (_, i) => `k${i}:${i}`).join(',')}]).mergeV().count()`;
+  const thirty = (n: number): string =>
+    `g.inject(${Array.from({ length: n }, (_, i) => `[${Array.from({ length: 30 }, (_, j) => `p${j}:${i * 30 + j}`).join(',')}]`).join(',')}).mergeV().count()`;
+  const timed = (q: string, traversers: number, check: string, read: number): number => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    const { rows, ms, statements } = runRecorded(store, q);
+    expect(rows.map((row) => row.v)).toEqual([traversers]);
+    expect(run(store, check).map((row: any) => row.v)).toEqual([read]);
+    expect(innerScans(store, statements)).toEqual([]);
+    return ms;
+  };
+  test('one 1000-entry map costs well under 20× one 250-entry map', () => {
+    const small = timed(wide(250), 1, "g.V().has('k249',249).count()", 1);
+    const large = timed(wide(1000), 1, "g.V().has('k999',999).count()", 1);
+    expect(large).toBeLessThan(20 * Math.max(small, 5));
+  });
+  test('30-entry maps grow linearly from 1k to 8k drivers', () => {
+    const k1 = timed(thirty(1000), 1000, "g.V().has('p17',17).count()", 1);
+    const k8 = timed(thirty(8000), 8000, "g.V().has('p29',239999).count()", 1);
+    expect(k8).toBeLessThan(16 * Math.max(k1, 50));
+    expect(k8).toBeLessThan(5 * BUDGET_MS);
+  }, 120_000);
+  // The two-pool grid — N maps `[a{i%s}:1, b{i/s}:1]`, every key shared by √N maps: N distinct key sets
+  // drawn from two pools of √N keys, a regression guard on the guard's key-set containment at 8k.
+  test('the two-pool grid at 8k drivers', () => {
+    const n = 8000, s = Math.round(Math.sqrt(n));
+    const q = `g.inject(${Array.from({ length: n }, (_, i) => `[a${i % s}:1,b${Math.floor(i / s)}:1]`).join(',')}).mergeV().count()`;
+    expect(timed(q, n, 'g.V().count()', n)).toBeLessThan(BUDGET_MS);
+  }, 60_000);
+});
+
 // A SEEK ONLY NARROWS — whichever arm a numeric driver takes, the merge search finds exactly what `has()`
 // finds over decimal TEXT a number's cast lands on: a BigDecimal rounding up to the next integer, a value
 // underflowing to zero, longs past 2^53 by the INT cast and a BigDecimal by the REAL one, a magnitude whose
