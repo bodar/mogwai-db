@@ -53,9 +53,9 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   // `LocalStep`, a `by()` child), so each traverser draws its OWN n. One window over the whole
   // post-fan-out stream drew n across ALL traversers: a property() body
   // `coalesce(values('nope'), constant(null)).sample(1)` removed the key from ONE of N vertices. At the
-  // top level there is no origin and the partition is empty. A RE-SOURCED body's `__.V()…sample(n)` never
-  // reaches this window over the origins × graph product where its prefix is origin-independent — it draws
-  // per origin (`reSourcedOnce`); any other prefix is GraphStep's product, the reference's own traversers.
+  // top level there is no origin and the partition is empty. A RE-SOURCED body's `__.V()…sample(n)` over an
+  // origin-independent prefix draws per origin over ONE evaluation of it (`reSourcedOnce`); any other prefix
+  // reaches this window over GraphStep's product, the reference's own traversers.
   const origin = originOf(input.channels);
   if (step.name === 'sample') {
     if (bulked) return null;

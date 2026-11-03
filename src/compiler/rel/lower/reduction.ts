@@ -44,6 +44,7 @@ import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES,
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
 import { nondeterministic } from '../ranked-order.ts';
+import { UnsupportedTraversal } from '../../unsupported.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -276,6 +277,14 @@ export function perTraverserChild(
   // (`ChainCtx.traversal`), and a merge before the host changes nothing a per-row body answers.
   const bodyCtx: ChainCtx = { ...ctx, traversal: { steps: body, rooted: false } };
 
+  // A re-source that DRAWS (at any depth of the body) is one shared evaluation on the scalar route
+  // (`rootedRead` refuses it), so `local`/`flatMap`, which emit every result, draw per row through the
+  // rejoin first (`reSourcedOnce`, GraphStep's product).
+  if (step.name !== 'map' && nondeterministic(body, ctx.params)
+    && someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true)) {
+    const perRow = flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
+    if (perRow) return perRow;
+  }
   const produced = scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh);
   if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
@@ -865,6 +874,9 @@ function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
   });
 }
 
+const SHARED_DRAW = 'a random draw (sample/coin/shuffle) in a body that re-reads the graph with V()/E() is drawn once and '
+  + 'shared by every row; use local(__.V()…sample(1)) to draw per row';
+
 /**
  * A rooted chain lowered as one relation, or `null` to decline.
  *
@@ -875,10 +887,16 @@ function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
  * answers 3, `out().map(__.V().simplePath().count())` 6 where it answers 4, and
  * `as('x').map(__.V().as('y').select('x').count())` 0 where it answers 6. Correlating that state per
  * host would re-read the graph per traverser, which is unbuilt.
+ *
+ * For the same reason it cannot hold a DRAW (`nondeterministic`: `sample`, `coin`, a `shuffle`, at any
+ * depth): evaluated once, every host would share one random choice where the reference draws per host
+ * (`project('x').by(__.V().sample(1))` gave every row one name). The likely intent, a per-row draw, already
+ * answers through `local(__.V()…sample(1))`, so this declines from the query text naming it.
  */
 export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter, start: RootedStart = 'split'): RootedRead | null {
   if (!steps.length) return null;
   if (start === 'split' && readsHostState(steps, ctx)) return null;
+  if (start === 'split' && nondeterministic(steps, ctx.params)) throw UnsupportedTraversal.because(SHARED_DRAW);
   const chain = lowerChain(steps, {
     params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
     labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,
@@ -1560,41 +1578,17 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
 }
 
 /**
- * A RE-SOURCE INSIDE A PER-TRAVERSER BODY THAT IS SAMPLED — `property('c', __.V().hasLabel('person')
- * .sample(1).values('name'))`, `local(__.V().sample(2))` — with the origin-independent prefix evaluated
- * ONCE and the draw made per origin: the draw's `Tail`, or `undefined` where this FAST PATH does not take
- * the shape. It never declines: GraphStep's cross join (`reSource`, `lower.ts` `reSourceTail`) answers
- * whatever it leaves, as the reference does and at the reference's own cost — origins × candidates
- * traversers. A fast path falls through; it never refuses what the general route answers.
- *
- * A mid-traversal GraphStep emits the graph per incoming traverser
+ * A SAMPLED RE-SOURCE IN A PER-TRAVERSER BODY — `property('c', __.V().hasLabel('person').sample(1)…)`,
+ * `local(__.V().sample(2))` — with the prefix before the draw evaluated ONCE and the draw made per origin.
+ * GraphStep emits the graph per incoming traverser
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java`),
- * so R copies of ONE evaluation of the prefix equal the reference's R concatenated candidate streams
- * exactly when the prefix is a top-level WHITELIST (`evaluableOnce`): no step is a stream barrier (a
- * `dedup`/slice/reducer/`order` over the concatenation is not R copies of one), and each step is
- * childless or a per-traverser filter host (`ONCE_FILTER_HOSTS`: its child runs per row and couples
- * nothing). Below the top level the prefix holds no DRAW (`coin`, a nested `sample`, a `shuffle` —
- * evaluated once, every origin would share one random choice) and no side-effect COLLECTOR
- * (`collectsSideEffect`: `GroupCountSideEffectStep` records every traverser it meets, so a once-evaluated
- * prefix would count each vertex once rather than once PER origin); and it reads no HOST state
- * (`readsHostState`: its candidates differ per origin).
- *
- * Otherwise origin `o`'s stream is R_o copies of the M candidates, and `sample(n)` is a uniform n-subset of
- * those P = R_o·M rows: `SampleGlobalStep` is a weighted reservoir and, with no `by()`, every weight is 1.
- * - `sample(1)`: ONE index in 1..P per origin — index p names origin row ⌈p/M⌉ and candidate
- *   ((p-1) mod M)+1, both equi-joined — so an origin costs O(1) + M log M once, never its P rows. The index
- *   is `((random() % P) + P) % P + 1`, never `abs(random()) % P` — SQLite's `abs(-9223372036854775808)`
- *   raises "integer overflow" — and is FENCED so no join probe redraws it.
- * - `sample(n > 1)`: each origin's P (row, candidate) pairs ranked by RANDOM(), keeping rn <= n — the fenced
- *   `perOriginWindow` `sliceOp` draws a top-level sample with, SQLite's natural uniform n-subset. That is the
- *   P = origins × candidates traversers the reference streams, linear in them; an owner's trade against the
- *   O(n log n)-per-origin with-replacement walk it replaces (measured at 1k origins × 1k candidates:
- *   ~18 ms → ~0.3–0.7 s). It stays HERE rather than falling to GraphStep's product (`reSource`) because the
- *   prefix is still evaluated once: in a positioned context (a `property()` body) the product re-mints its
- *   position over origins × the whole GRAPH before the prefix's filter can run, origins × |V| rather than
- *   origins × candidates (measured: 0.47 s → 32 s at 1k → 8k holders over 8 candidates).
- * M = 0 seeds nothing: a sample of nothing is nothing. The picks' ORDER is not the reservoir's, only their
- * distribution — §17 "Unordered slices".
+ * so origin `o`'s stream is R_o copies of the M candidates — R copies of ONE evaluation only for a top-level
+ * WHITELIST (`evaluableOnce`: no stream barrier, each step childless or a filter host) holding no draw,
+ * collector or host-state read at any depth. `sample(1)` is one fenced index in 1..P (P = R_o·M) per origin,
+ * equi-joined back, O(origins + M log M); `sample(n > 1)` ranks the P pairs by RANDOM() (`perOriginWindow`),
+ * linear in the traversers the reference streams. A FAST PATH: `undefined` falls through to GraphStep's
+ * product (`reSource`), which answers whatever this leaves; it never declines. Only the picks'
+ * distribution is the reservoir's, not their order — §17 "Unordered slices".
  */
 export function reSourcedOnce(
   steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,

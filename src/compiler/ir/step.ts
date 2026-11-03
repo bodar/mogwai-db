@@ -185,8 +185,8 @@ export const isLocalScope = (s: IRStep): boolean =>
  * one past its bound) and `cap('a')` holds two members, where the plan aggregates all six. So the walk
  * counts it as an effect, and the per-traverser parent's slice declines — the same rule as for a write.
  * A bare `group()`/`groupCount()`/`tree()` is a REDUCER, not a side effect. A step-vocabulary fact because
- * two lowerings ask it: the write walk (`rel/write.ts`), and `reSourcedOnce`, which must not evaluate a
- * collector ONCE where the reference runs it per traverser.
+ * two lowerings ask it: the write walk (`rel/write.ts`), and `reSourcedOnce`, which falls through to
+ * GraphStep's product rather than evaluate a collector ONCE where the reference runs it per traverser.
  */
 const SIDE_EFFECT_COLLECTORS: ReadonlySet<string> = new Set(['aggregate', 'subgraph']);
 const KEYED_REDUCERS: ReadonlySet<string> = new Set(['group', 'groupCount', 'tree']);

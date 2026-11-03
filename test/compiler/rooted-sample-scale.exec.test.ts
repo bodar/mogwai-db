@@ -263,3 +263,32 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(() => compile(q, {})).toThrow(/not supported/);
   });
 });
+
+// A DRAW IN A ONCE-EVALUATED SPLIT READ. A `by()`/`map()` value, a `P` operand, a list operand or a write
+// endpoint that re-sources (`__.V()…`) is lowered ONCE for every host (`rootedRead`'s 'split' gate), so a
+// `sample`/`coin`/`shuffle` in it would be ONE random choice shared by every row, where the reference draws
+// per traverser. It declines from the query text naming the problem and the per-row form, which answers.
+describe('a draw in a body evaluated once for every host declines with the per-row form', () => {
+  test.each([
+    "g.V().project('x').by(__.V().sample(1).values('name'))",
+    "g.V().map(__.V().order().by(shuffle).limit(1).values('name'))",
+    "g.V().order().by(__.V().order().by(shuffle).values('name'))",
+    "g.V().values('age').is(gt(__.V().sample(1).values('age')))",
+    "g.V().has('age', __.V().sample(1).values('age'))",
+    "g.V().values('name').is(within(__.V().sample(1).values('name').fold()))",
+    "g.V().where(__.V().sample(1).values('age').is(29))",
+    "g.V().map(__.V().coin(0.5).count())",
+    "g.V().group().by(__.V().sample(1).values('name'))",
+    "g.V().addE('x').to(__.V().sample(1))",
+  ])('%s', (q) => {
+    expect(() => compile(q, {})).toThrow(/drawn once and shared by every row; use local\(__\.V\(\)…sample\(1\)\) to draw per row/);
+  });
+
+  test('the per-row forms keep answering, one draw per traverser', () => {
+    const store = graph(30, 30);
+    expect(count(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).count()")).toBe(30);
+    expect(count(store, "g.V().hasLabel('holder').flatMap(__.V().hasLabel('person').order().by(shuffle).limit(1)).count()")).toBe(30);
+    expect(count(store, "g.V().hasLabel('holder').property('c', __.V().hasLabel('person').sample(1).values('name')).values('c').dedup().count()"))
+      .toBeGreaterThan(1);
+  });
+});
