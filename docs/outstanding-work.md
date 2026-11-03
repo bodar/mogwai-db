@@ -17,6 +17,11 @@ excluded as GLV-lossy, DERIVED from gremlin.js + the corpus (`GLV_LOSSY`, `test/
 The ledger must equal the failing set (`l3-state.test.ts`, `l3.test.ts`). Remains: nothing — the ledgered
 defects are §1 items; a fix deletes its names from the ledger.
 
+**Edge Property framing (l3-edge-prop-frame, ✅ landed, 781a352c).** An edge's property is framed as a
+plain `Property`, not a `VertexProperty`: the class rides a compile-time owner discriminant (`Shape`/
+`ListOf` `elem`, node tag via `propertyTag`) into `framePropertyRow` (`src/execute.ts`). L3 1890 → 1896.
+Remains: nothing.
+
 ## 1. Wrong answers today
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
