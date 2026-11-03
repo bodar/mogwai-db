@@ -209,11 +209,12 @@ export function rewriteExpr(e: Expr, f: (node: Expr) => Expr, rel: (plan: Rel) =
 /** Substitute one relation id for another throughout an expression, INCLUDING correlated subplans —
  *  a `simplePath()` filter's `COUNT(DISTINCT)` reads the body's path column through a scalar subquery,
  *  so a rewrite that reparents the expression must follow the reference into that subquery, or the
- *  moved copy still reads a column from the relation it was lifted off of. */
-export function substRelId(e: Expr, from: RelId, to: RelId): Expr {
+ *  moved copy still reads a column from the relation it was lifted off of. `rename` maps a column name
+ *  of `from` to its name in `to`, for a move through a renaming projection (`fuse`'s filter transpose). */
+export function substRelId(e: Expr, from: RelId, to: RelId, rename: (name: string) => string = (name) => name): Expr {
   const inSubplan = (plan: Rel): Rel =>
-    mapRelExprs(mapRelChildren(plan, inSubplan), (x) => substRelId(x, from, to));
-  return rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node), inSubplan);
+    mapRelExprs(mapRelChildren(plan, inSubplan), (x) => substRelId(x, from, to, rename));
+  return rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to, name: rename(node.name) } : node), inSubplan);
 }
 
 /**

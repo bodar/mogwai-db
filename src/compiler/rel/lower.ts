@@ -7,6 +7,7 @@ import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
+import { fuse } from '../../rel/passes/fuse.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
@@ -3879,7 +3880,9 @@ const lowered = (
   // a pass is a total function of its input, so a config can only change which access-path STRATEGIES
   // are offered, never whether the plan exists. Order is load-bearing: `trigramSeek` before
   // `indexSeek` gives a substring predicate the trigram index rather than a base-table `LIKE`.
-  const named = nameBindings(semijoin(wire.rel, [
+  // `fuse` (the SEMANTIC tier) runs first, so a filter it pushes below a renumber reaches `semijoin`'s
+  // access-path strategies over the base relation it now sits on.
+  const named = nameBindings(semijoin(fuse(wire.rel), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
   ]), () => fresh('r'));
