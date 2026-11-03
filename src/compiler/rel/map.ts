@@ -1909,8 +1909,8 @@ const SCOPE_NODE = 'snode';
  * The node is landed in ONE column and the presence test, the value and its tag all read that column;
  * `presenceFenced` keeps the assembler from re-inlining the correlated read at each reader.
  */
-export function scalarMapKey(input: Rel, vtype: string, key: string, fallback: Expr | null, fresh: Minter): Rel {
-  return scopedKey(input, { map: col(input.id, 'v'), when: eq(col(input.id, vtype), compilerText('map')) }, key, fallback, fresh);
+export function scalarMapKey(input: Rel, vtype: string, key: string, fallback: Expr | null, fresh: Minter, total = true): Rel {
+  return scopedKey(input, { map: col(input.id, 'v'), when: eq(col(input.id, vtype), compilerText('map')) }, key, fallback, fresh, total);
 }
 
 /**
@@ -1921,23 +1921,25 @@ export function scalarMapKey(input: Rel, vtype: string, key: string, fallback: E
  * every row answers the constant. The value side is a per-row scalar, so a list/map `valOf` that may
  * hold `key` is the caller's to decline — the entry and the constant would need two framings.
  */
-export function mapKeyOr(input: Rel, key: string, fallback: Expr, mayHold: boolean, fresh: Minter): Rel {
-  // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
+export function mapKeyOr(input: Rel, key: string, fallback: Expr, mayHold: boolean, fresh: Minter, total = true): Rel {
+  // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it. A fallback read
+  // off the row (a path label) must be spelled over THIS relation, so the caller fences first (idempotent).
   const rel = mayHold ? fenced(input, fresh) : input;
-  return scopedKey(rel, mayHold ? { map: col(rel.id, MAP_COL), when: null } : null, key, fallback, fresh);
+  return scopedKey(rel, mayHold ? { map: col(rel.id, MAP_COL), when: null } : null, key, fallback, fresh, total);
 }
 
 /** The shared body: the map's entry at `key` (behind `when`, NULL elsewhere; no read at all for a `null`
- *  map), else `fallback`, landed ONCE in `SCOPE_NODE` and decoded to `v`/`vtype`. With no fallback a row
- *  no scope holds `key` for DROPS. */
+ *  map), else `fallback`, landed ONCE in `SCOPE_NODE` and decoded to `v`/`vtype`. With no fallback — or one
+ *  that is not `total` (a path label unbound on some row) — a row no scope holds `key` for DROPS. */
 function scopedKey(
   input: Rel, map: { readonly map: Expr; readonly when: Expr | null } | null, key: string, fallback: Expr | null, fresh: Minter,
+  total = true,
 ): Rel {
   const node = map && correlatedMapKey(map.map, key, fresh).node;
   const entry: Expr | null = node && map.when ? { kind: 'case', whens: [[map.when, node]], else: compilerNull() } : node;
   const resolved = entry && fallback ? coalesce(entry, fallback) : entry ?? fallback ?? compilerNull();
   const read = presenceFenced(withPayload(input, [[SCOPE_NODE, resolved]], [meta(SCOPE_NODE, 'json', true)], fresh), resolved, fresh);
-  const kept = fallback ? read : make.filter({
+  const kept = fallback && total ? read : make.filter({
     id: fresh('smk'), input: read, channels: read.channels, type: read.type,
     pred: { kind: 'binary', op: 'is not', left: col(read.id, SCOPE_NODE), right: compilerNull() },
   });

@@ -200,8 +200,10 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
 
   # THE TRAVERSER'S OWN MAP WINS. A key the Map holds is read from the Map, never from a same-named side
   # effect or path label. A key the Map LACKS reads a same-named SIDE EFFECT next, as the reference does
-  # (Scoping.java:119-135), or refuses where that is not built; with only a PATH LABEL of that name it
-  # drops the row — a deliberate divergence (docs/feature-support-matrix.md §17, "Map scope").
+  # (Scoping.java:119-135), or refuses where that is not built; with only a PATH LABEL of that name the
+  # single-key select reads the label (lop has no age, so its map lacks "x" and the label's vertex answers).
+  # The MULTI-key select still drops that row — a deliberate divergence (docs/feature-support-matrix.md
+  # §17, "Map scope").
   Scenario: g_VX1X_out_asXxX_projectXxX_byXageX_selectXxX
     Given the modern graph
     And the traversal of
@@ -213,6 +215,7 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | result |
       | d[27].i |
       | d[32].i |
+      | v[lop] |
 
   Scenario: g_VX1X_out_asXxX_projectXx_nX_byXageX_byXnameX_selectXx_nX
     Given the modern graph

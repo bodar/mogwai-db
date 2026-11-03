@@ -11,7 +11,8 @@ import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts
 import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
-import { aliasEntryNode, aliasGuard, aliasProjection, readFraming, type Pop } from './alias.ts';
+import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
+import type { AliasMap } from '../alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './receiver.ts';
@@ -689,6 +690,50 @@ function gatedOn(present: Presence, value: Expr, member: Expr): Expr {
   return caseWhen(present === 'always' ? ALWAYS_PRODUCTIVE : typeof present === 'object' ? statedPresence(present, value) : isNotNull(value), member);
 }
 
+/**
+ * A VALUE read off a scope (a label's payload, a record field's columns) as ONE `{t,v}` node, gated on its
+ * presence so an unbound label is a SQL NULL ("produced nothing"), never a `{t:null, v:null}` node.
+ * A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row `vtype`
+ * COLUMN survives becoming JSON. A STATIC recorded type rides on the framing, not a payload column, and is
+ * the node's tag: dropped to NULL ("infer"), the value reached `json_object` bare, whose writer keeps only
+ * 15 digits. A FLOATING one reuses the entry the `as()` site already spelled exactly (`aliasEntryNode`)
+ * rather than reading the REAL back and repairing it a second time.
+ */
+function scopedValueNode(payload: readonly (readonly [ColMeta, Expr])[], type: ScalarType, present: Presence): Expr {
+  const value = payload[0]![1], tag = payload[1]?.[1];
+  const recorded = staticTypeOf(type);
+  const entryNode = !tag && recorded && FLOATING_TAGS.has(recorded) ? aliasEntryNode(value) : null;
+  return gatedOn(present, value, entryNode ?? typedNode(value, tag ?? (recorded ? compilerText(recorded) : compilerNull('text'))));
+}
+
+/**
+ * A LIVE PATH LABEL as the NEXT SCOPE a map-first reader falls back to (`mapFirstFallback`) — the label's
+ * last value as a `{t,v}` node read off `row`, the same self-describing encoding a stored Map's entry
+ * carries, so ONE decode reads the entry or the label per row and the stream stays one per-row scalar.
+ * NULL on a row the label is unbound on (a branch-arm `as()`), which is no scope there.
+ *
+ * `'opaque'` for a label holding an ELEMENT or a collection: entry-or-element per row has no framing yet
+ * (the §17 "Map scope" divergence keeps that label's own answer). `null` where `label` is not live.
+ */
+export function labelScopeNode(row: { readonly rel: Rel; readonly aliases: AliasMap }, label: string, pop: Pop = 'last'): LabelScope {
+  // A `Pop` names an end of the path HISTORY only (`Scoping.java:129-130`); the Map and side-effect scopes
+  // ignore it. A list-valued Pop is a collection read here (no minter), so `'opaque'`.
+  const projected = aliasProjection(row.rel, row.aliases, label, pop);
+  if (!projected) return liveAliases(row.aliases, row.rel).has(label) ? 'opaque' : null;
+  if (projected.read.kind !== 'value') return 'opaque';
+  const total = !aliasGuard(row.rel, projected.entry);
+  // The history ENTRY already is the `{t,v}` node (plus its shape `k`), so it is read ONCE rather than
+  // re-spelled per field (`aliasEntryNode`); a label whose read is not an entry read builds the node.
+  const value = projected.payload[0]![1];
+  const entry = aliasEntryNode(value);
+  const node = entry ? (total ? entry : caseWhen(isNotNull(value), entry)) : scopedValueNode(projected.payload, projected.read.type, total ? 'always' : 'value-nullness');
+  return { node, total };
+}
+
+/** A live path label as a next scope (`labelScopeNode`): its value node — `total` where it is bound on
+ *  every row, so the node is never NULL — or `'opaque'` (an element/collection label), or `null` (not live). */
+export type LabelScope = { readonly node: Expr; readonly total: boolean } | 'opaque' | null;
+
 export function byNode(modulation: Modulation, host: ChildHost, source: GraphSource, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
 
@@ -729,16 +774,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // Anything else — a LIST, a nested RECORD — needs a member encoding a `{t,v}` node cannot carry
     // from here, so it declines and stays the FIELD vocabulary's business.
     if (scoped.framing.kind !== 'scalar') return null;
-    // A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row
-    // `vtype` COLUMN survives becoming JSON.
-    // A STATIC recorded type rides on the framing, not a payload column, and is the node's tag: dropped to
-    // NULL ("infer"), the value reached `json_object` bare, whose writer keeps only 15 digits. A FLOATING
-    // one reuses the entry the `as()` site already spelled exactly (`aliasEntryNode`) rather than reading
-    // the REAL back and repairing it a second time.
-    const value = scoped.payload[0]![1], tag = scoped.payload[1]?.[1];
-    const recorded = staticTypeOf(scoped.framing.type);
-    const entryNode = !tag && recorded && FLOATING_TAGS.has(recorded) ? aliasEntryNode(value) : null;
-    return gatedOn(scoped.present, value, entryNode ?? typedNode(value, tag ?? (recorded ? compilerText(recorded) : compilerNull('text'))));
+    return scopedValueNode(scoped.payload, scoped.framing.type, scoped.present);
   }
 
   if (host.kind === 'scalar') {

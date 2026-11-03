@@ -21,7 +21,7 @@ import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
 import { BULK, NO_ALIASES, bodyOf, elementSubject, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
-import { foldedListSet, nestedFirstValue, scalarChild } from './reduction.ts';
+import { foldedListSet, nestedFirstValue, readsMapFirst, scalarChild } from './reduction.ts';
 
 // FILTER / PREDICATE FAMILY — a step or a sub-traversal body lowered to a boolean `Expr`:
 // correlatedExists (a body as EXISTS), bodyPredicate/childPredicate/valuePredicate (the three shapes a
@@ -243,6 +243,13 @@ export function childPredicate(
   // A continuation is NOT conjoined with that presence: it already sees an empty subject where the label
   // is unbound, and a conjunct would veto a seeded body (`select('a').count().is(0)`) that keeps it.
   if (body[0]?.name === 'select') {
+    // …except over a per-row scalar that MAY BE A MAP: its own entry is the first scope, then a side effect
+    // or a VALUE label (`readsMapFirst`) — one `{t,v}` node the value seam reads, so the body's productivity
+    // is that seam's presence (`projectionProductive`).
+    if (readsMapFirst(body[0]!, childHostOf(subject, aliases), ctx)) {
+      const present = projectionProductive(body, subject, fresh, ctx, aliases);
+      return present && (negated ? notProduced(present) : present);
+    }
     const re = selectRerootSubject(body[0]!, subject, aliases, fresh);
     if (!re) return null;
     if (body.length === 1) {

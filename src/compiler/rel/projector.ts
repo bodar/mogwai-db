@@ -7,7 +7,7 @@ import { STATIC } from '../../sql/kernel/render.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SqlType } from '../../rel/types.ts';
 import type { IRStep } from '../ir/step.ts';
-import type { ChildHost, ChildSeam } from './child.ts';
+import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
 import { asStringOf, evidenceOf, mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
@@ -138,6 +138,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
   if (!ring) return null;
   const resolved = new Map<string, Expr>();
   const offences: (readonly [Expr, string])[] = [];
+  const slots = scopeSlots(fresh);
   const vars = mathVars(formula);
   for (const [at, name] of vars.entries()) {
     // The ring advances ONCE PER VARIABLE, in first-seen order, and wraps — so one `by()` feeds every
@@ -154,7 +155,14 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
         ? sideEffectConst(name, child) : null;
       if (!behind) return null;
     }
-    const varHost = name === CURRENT ? host : scopedHost(name, host, true);
+    // A named variable over a host that MAY BE A MAP reads the row's own entry first, then the next scope
+    // (`ChildSeam.scopeNode` — the reader a child `select(name)` uses, `Scoping.java:119-135`). Its node is
+    // landed ONCE (`scopeSlots`), so every mention of the variable reads a column of it.
+    const own = name === CURRENT ? 'pass' : child.scopeNode(name, host);
+    if (own === null) return null;
+    const varHost: ChildHost | null = name === CURRENT ? host
+      : own !== 'pass' ? slots.host(own, host)
+        : scopedHost(name, host, true);
     if (!varHost) {
       // A side-effect CONSTANT (`withSideEffect('x', 100)` in `math('_ + x')`) resolves to an inlined
       // literal, taking no `by()`. Only after a path-label miss (see `sideEffectConst`).
@@ -188,7 +196,34 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     resolved.set(name, behind ? { kind: 'call', fn: 'COALESCE', args: [typed.value, behind] } : typed.value);
   }
   // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
-  return raisingWhen(offences, nanDeferred(compileMath(formula, relMathOps((name) => resolved.get(name)!)), [...resolved.values()]));
+  return slots.over(raisingWhen(offences, nanDeferred(compileMath(formula, relMathOps((name) => resolved.get(name)!)), [...resolved.values()])), 'real');
+}
+
+/**
+ * SCOPE NODES LANDED ONCE — a projector's named variables read off a per-row scope node
+ * (`ChildSeam.scopeNode`) are each a correlated entry read, and the formula, its Number test and its NaN
+ * guard each mention a variable, so SQL with no `let` would spell the read once per mention. Instead each
+ * node is one column of a ONE-ROW `VALUES` and the projector's whole value is read over it — the same
+ * one-row subquery `producedMemberNode` names a gated value in. `over` is the identity where no variable
+ * took a slot, so a formula with none is unchanged.
+ */
+function scopeSlots(fresh: Minter) {
+  // Minted on first use, so a formula with no slot spends no relation id (its SQL is byte-identical).
+  let id: ReturnType<Minter> | undefined;
+  const nodes: Expr[] = [];
+  return {
+    /** The variable's host: the slot's decoded value and tag, a NEW traverser (`MathStep.java:73`). */
+    host(node: Expr, over: ChildHost): ChildHost {
+      id ??= fresh('psn');
+      const slot = col(id, `n${nodes.push(node) - 1}`);
+      return { kind: 'scalar', value: jsonField(slot, 'v'), vtype: jsonField(slot, 't'), ...(over.row ? { row: freshTraverserRow(over.row.rel) } : {}) };
+    },
+    over(value: Expr, type: SqlType): Expr {
+      if (!id) return value;
+      const one = make.values({ id, channels: [], type: typeOf(...nodes.map((_, i) => meta(`n${i}`, 'json', true))), rows: [nodes] });
+      return { kind: 'scalar', plan: make.project({ id: fresh('psp'), input: one, channels: [], type: typeOf(meta('v', type, true)), exprs: [['v', value]] }) };
+    },
+  };
 }
 
 /** The deferral a formula whose answer SQLite leaves NULL raises (`nanDeferred`) — a NaN, or an infinity

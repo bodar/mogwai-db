@@ -18,7 +18,7 @@ import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, streamsIntoChildren, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { someStepDeep } from '../../ir/walk.ts';
-import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
+import { aliasProjection, rerootPresence, selectSpec, type Pop } from '../alias.ts';
 import { and, carriedCols, coalesce, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
@@ -27,7 +27,7 @@ import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../fra
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
 import { comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
-import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
+import { byExpr, byNode, labelScopeNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost, type LabelScope } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, subPathMembers } from '../path.ts';
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
@@ -66,6 +66,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   scopeNames: ctx.scopeNames,
   writes: ctx.writes,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
+  scopeNode: (key, host) => (host.kind === 'scalar' ? scalarMapFirstNode(key, host, ctx, fresh) : 'pass'),
   // THE ONE predicate entry `where()`/`filter()`/`not()` already use, so a body lowered through the seam
   // gets the same `select(<label>)` re-root over the row's aliases — not a second, scope-less ladder.
   predicate: (body, subject, negated, aliases) => childPredicate(body, subject, fresh, ctx, negated, aliases),
@@ -2540,8 +2541,10 @@ function mapHostChild(
   // next scope where one is live on the host's row (or, with no row to ask, anywhere in the program):
   // the entry-or-label read has no framing here, so a key the Map only MAY hold declines rather than
   // drop the rows the label answers.
-  const liveLabel = host.row ? liveAliases(host.row.aliases, host.row.rel).has(key) : ctx.scopeNames.labels.has(key);
-  const fallback = mapFirstFallback(key, ctx, liveLabel);
+  // A VALUE label read off the host's row is a `{t,v}` node beside the entry (`labelScopeNode`), so it is the
+  // constant's case below; an element/collection label is not.
+  const label: LabelScope = host.row ? labelScopeNode(host.row, key) : ctx.scopeNames.labels.has(key) ? 'opaque' : null;
+  const fallback = mapFirstFallback(key, ctx, label);
   if (fallback === null) return null;
   if (fallback === 'label' && presence === 'may') return null;
   if (typeof fallback === 'object' && fallback.node) {
@@ -2561,25 +2564,71 @@ function mapHostChild(
  * `select(k)` as a child body over a PER-ROW SCALAR host — the child-seam twin of the chain's
  * `selectMapFirst`: the host value may be a MAP (a map-valued stored property), whose own entry is the
  * first scope (`Scoping.java:121-122`), read behind `CASE WHEN vtype = 'map'` so a non-Map row opens no
- * `json_each`. The fallback is `mapFirstFallback`'s — a `withSideEffect` constant node, or nothing (the
- * row drops) — and `'pass'` hands a label/collection key to the alias re-root unchanged.
+ * `json_each`. The fallback is `mapFirstFallback`'s — a `withSideEffect` constant or a VALUE path label as a
+ * node, or nothing (the row drops) — and `'pass'` hands an element/collection key to the alias re-root.
  */
 function scalarMapFirstChild(
   body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null | 'pass' {
-  const first = body[0]!;
-  if (!host.vtype || first.modulators?.length || first.optionArms) return 'pass';
-  const spec = selectSpec(first);
-  if (!spec || spec.labels.length !== 1) return 'pass';
-  const key = spec.labels[0]!;
-  const fallback = mapFirstFallback(key, ctx, false);
+  const read = mapFirstSelect(body[0]!, host);
+  if (!read) return 'pass';
+  const node = scalarMapFirstNode(read.key, host, ctx, fresh, read.pop);
+  if (node === null || node === 'pass') return node;
+  return selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+}
+
+/** The single-key `select(k)` a map-first reader can take over `host` — a per-row scalar that may be a Map
+ *  (it carries a tag) — or `null`. Mint-free. */
+function mapFirstSelect(step: IRStep, host: ChildHost): { readonly key: string; readonly pop: Pop } | null {
+  if (step.name !== 'select' || host.kind !== 'scalar' || !mayBeMapTag(host.vtype) || step.modulators?.length || step.optionArms) return null;
+  const spec = selectSpec(step);
+  return spec && spec.labels.length === 1 ? { key: spec.labels[0]!, pop: spec.pop } : null;
+}
+
+/** May a row with this tag be a Map? A per-row tag may; a LITERAL tag (a `constant()`'s static class) says
+ *  which class every row is, so only the literal `'map'` may — the probe costs nothing to skip there. */
+const mayBeMapTag = (vtype: Expr | undefined): vtype is Expr =>
+  !!vtype && (vtype.kind !== 'lit' || vtype.value === 'map');
+
+/** The next scope a row lacking `key` reads (`mapFirstFallback`), a VALUE label read off the host's row. */
+const nextScopeOf = (key: string, host: ChildHost, ctx: ChainCtx, pop: Pop) =>
+  mapFirstFallback(key, ctx, host.row ? labelScopeNode(host.row, key, pop) : null);
+
+/**
+ * WILL a body leading with `step` over `host` read the host's OWN Map first (`scalarMapFirstChild` answers
+ * rather than passing)? Asked by a reader with its own route for the label case — the predicate seam's
+ * subject re-root — so the map-first value seam takes the body exactly where it would answer. Mint-free.
+ */
+export function readsMapFirst(step: IRStep, host: ChildHost, ctx: ChainCtx): boolean {
+  const read = mapFirstSelect(step, host);
+  if (!read) return false;
+  const next = nextScopeOf(read.key, host, ctx, read.pop);
+  // NO scope is proven only where no path label of that name exists anywhere: a caller that hands no alias
+  // map (a branch's exhaustion probe) cannot show a label the row does carry, and "drop" would be wrong.
+  if (next && typeof next === 'object' && !next.node && ctx.scopeNames.labels.has(read.key)) return false;
+  // `typeof null` is 'object' on purpose: a constant the encoder cannot spell declines in the value seam too.
+  return typeof next === 'object';
+}
+
+/**
+ * THE SCOPE VALUE of `key` over a PER-ROW SCALAR host as ONE `{t,v}` node (NULL where no scope holds it):
+ * the host's own Map entry where the row is a Map holding `key` (`Scoping.java:121-122`), else the next scope
+ * `mapFirstFallback` names — a `withSideEffect` constant, or a VALUE path label live on the host's row
+ * (`labelScopeNode`). The one reader `select(k)` as a child body and `math()`'s named variables share
+ * (`ChildSeam.scopeNode`). `'pass'` where the host carries no per-row tag (it cannot be a Map) or the next
+ * scope is an element/collection label or a named collection — each keeps its own reader; `null` declines.
+ */
+function scalarMapFirstNode(
+  key: string, host: Extract<ChildHost, { kind: 'scalar' }>, ctx: ChainCtx, fresh: Minter, pop: Pop = 'last',
+): Expr | null | 'pass' {
+  if (!mayBeMapTag(host.vtype)) return 'pass';
+  const fallback = nextScopeOf(key, host, ctx, pop);
   if (fallback === null) return null;
   if (typeof fallback === 'string') return 'pass';
   const isMap: Expr = { kind: 'binary', op: '=', left: host.vtype, right: compilerText('map') };
   const entry: Expr = { kind: 'case', whens: [[isMap, correlatedMapKey(host.value, key, fresh).node]], else: compilerNull() };
-  // A constant fallback would make an ABSENT host (an unbound label's NULL) produce: gate it on the host.
-  const node = fallback.node ? gatedByHost(host, coalesce(entry, fallback.node)) : entry;
-  return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+  // A fallback would make an ABSENT host (an unbound label's NULL) produce: gate it on the host.
+  return fallback.node ? gatedByHost(host, coalesce(entry, fallback.node)) : entry;
 }
 
 /**
