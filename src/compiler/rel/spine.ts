@@ -8,6 +8,7 @@ import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
 import type { MergePolicy, SideEffectConstants } from '../../gremlin/frontend.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
+import type { Declines } from '../unsupported.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
 /**
@@ -54,6 +55,10 @@ export interface RelRequest {
   /** Every side-effect key and path label of the WHOLE traversal (`programScopeNames`), settled before
    *  the lowering so a resume's tail sees the keys its head declared. Absent: derived from the chain. */
   readonly scopeNames?: ProgramScopeNames;
+  /** The compile's ONE decline-reason sink (`Declines`), created by `compilePlan`. Not a settled value
+   *  but per-compile STATE, carried so every lowering this request starts (the wire read, a segment head,
+   *  a resume) records into the same one. Absent: each lowering gets a fresh sink nobody reads. */
+  readonly declines?: Declines;
 }
 
 /**
@@ -150,6 +155,7 @@ export function loweringOptions(
     sack: request.sack,
     sideEffectPolicies: request.sideEffectPolicies,
     ...(request.scopeNames ? { scopeNames: request.scopeNames } : {}),
+    ...(request.declines ? { declines: request.declines } : {}),
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that this value was not handed to the lowering when one was declared, so the whole

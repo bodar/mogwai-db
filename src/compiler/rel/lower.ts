@@ -55,7 +55,7 @@ import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, inferredVtype, isL
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { UnsupportedTraversal } from '../unsupported.ts';
+import { Declines } from '../unsupported.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
@@ -3533,6 +3533,13 @@ export interface Lowering {
    * comparator.
    */
   readonly rankedOrders?: RankedOrders;
+  /**
+   * THE COMPILE'S DECLINE-REASON SINK (`Declines`, `unsupported.ts`) — created once in `compilePlan` and
+   * carried here so every segment, barrier and resume lowering records into the same one. A decline the
+   * lowering decides on a framing fact is recorded here and the lowering returns `null`; it never throws.
+   * Absent, a fresh sink nobody reads (an instrument or a test lowering).
+   */
+  readonly declines?: Declines;
 }
 
 /**
@@ -3566,6 +3573,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   writes: opts.writes ?? null,
   scopeNames: opts.scopeNames ?? null,
   rankedOrders: opts.rankedOrders ?? NO_RANKED_ORDERS,
+  declines: opts.declines ?? new Declines(),
 });
 
 /** No `order()` ranked through JS — every lowering but a ranked-order barrier's two statements. */
@@ -4445,7 +4453,7 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, wireTerminal } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, wireTerminal } = settle(opts);
   const facts = analyzeChain(steps as IRStep[], { wireTerminal });
   return {
     facts,
@@ -4457,6 +4465,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
       writes: writes ?? programWrites(steps, params),
       scopeNames: scopeNames ?? programScopeNames(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]),
       rankedOrders,
+      declines,
     },
   };
 }
@@ -6200,11 +6209,12 @@ function mergedFromMap(
   let maps: MergeMaps;
   // The driver IS Map-framed here (`MergeTraverser`), so a `select(k)` in the argument or an option arm
   // reads the Map's own entry before any side effect: no compile-time constant answers it, and the shape
-  // signals a confused query, so it declines with the reason (`MapScopeDeferral`) rather than "no lowering".
+  // signals a confused query, so it declines with the reason (`MapScopeDeferral`, recorded into the
+  // compile's `Declines`) rather than "no lowering".
   try { maps = mergeMaps(steps[at]!, arms, op, child.sideEffects, child.params, 'map'); }
   catch (e) {
-    if (e instanceof MapScopeDeferral) throw UnsupportedTraversal.because(e.message);
-    if (!(e instanceof Deferral)) throw e;
+    if (e instanceof MapScopeDeferral) ctx.declines.note({ kind: 'map-scope-shadow', message: e.message, terminal: true });
+    else if (!(e instanceof Deferral)) throw e;
     return null;
   }
   if (!maps.matchFromDriver) return null;

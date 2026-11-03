@@ -5,14 +5,14 @@ import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
 import { UNCOMPARABLE_LITERAL, uncarriedLiteral, uncomparableLiteral } from './ir/uncarried-literal.ts';
 import { type Executable } from '../sql/kernel/render.ts';
-import { type Plan } from './segment.ts';
+import { type AsyncSegmentPlan, type Plan, type SyncSegmentPlan } from './segment.ts';
 import { labelRegime } from '../api.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
 import { compileViaRel, loweringOptions } from './rel/spine.ts';
 import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
-import { UnsupportedTraversal } from './unsupported.ts';
+import { Declines, UnsupportedTraversal } from './unsupported.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, Executable, Program, Shape, ValueType, ListOf, MapOf } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, perRowColumn, hasTypedMembers, memberTypeOf, withMemberType, isPerRow, SCALAR_MEMBERS, TYPED_MEMBERS, PER_ROW, PER_ROW_ENVELOPE, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -103,8 +103,12 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   // WHAT THE LOWERING GETS FROM THE REQUEST, and the whole of it: two strategy switches, the label
   // regime the source options declared, the services this chain names (resolved HERE — the registry is
   // an ambient capability and stops at this boundary), and the two settled policies the front end
-  // extracted. Everything is a VALUE; nothing ambient crosses.
+  // extracted. Everything is a VALUE; nothing ambient crosses. The one piece of per-compile STATE beside
+  // them is the decline-reason sink, created ONCE here so every route below (the wire read, each segment
+  // head and resume, the ranked-order probe) records into the same one.
+  const declines = new Declines();
   const relRequest = {
+    declines,
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,
@@ -125,21 +129,56 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
     services: relRequest.services, params: request.params, federationDepth: request.federationDepth,
     lowering: loweringOptions(relRequest, request.params, sideEffects),
   };
-  const segment = segmentPlan(steps, segmentRequest);
-  if (segment) return segment;
+  // A TERMINAL decline recorded anywhere below wins over whatever else the compile finds, a covered
+  // sibling route included — it is checked after every route, and preferred over anything thrown after
+  // it was recorded (`underDeclines`).
+  return underDeclines(declines, () => {
+    const segment = segmentPlan(steps, segmentRequest);
+    declines.raiseTerminal();
+    if (segment) return resumesUnder(segment, declines);
 
-  const compiled = compileViaRel(relRequest, steps, request.params, sideEffects);
-  // A GLOBAL `order()` whose key SQL has no comparator for (a list/map/path — TinkerPop 4 ORDERABILITY)
-  // is a ranked-order BARRIER, asked only now so no chain SQL already answers changes plan. A `discard()`
-  // is applied to a single statement, which a segment is not, so it keeps declining.
-  const ranked = compiled || discard ? null : rankedOrderPlan(steps, segmentRequest);
-  if (ranked) return ranked;
-  // A DECLINE IS NOW THE ANSWER, not a route change. While two spines existed a `null` here meant
-  // "the other one owns this"; with one spine it means the compiler cannot lower this traversal, and
-  // saying so plainly is the only honest thing left to do with it. It is an ordinary query failure —
-  // returned to the client on the trailer, not logged as an incident (root CLAUDE.md).
-  if (!compiled) throw new UnsupportedTraversal(gremlin);
-  return { kind: 'sql', compiled: discard ? applyDiscard(compiled) : compiled };
+    const compiled = compileViaRel(relRequest, steps, request.params, sideEffects);
+    declines.raiseTerminal();
+    // A GLOBAL `order()` whose key SQL has no comparator for (a list/map/path — TinkerPop 4 ORDERABILITY)
+    // is a ranked-order BARRIER, asked only now so no chain SQL already answers changes plan. A `discard()`
+    // is applied to a single statement, which a segment is not, so it keeps declining.
+    const ranked = compiled || discard ? null : rankedOrderPlan(steps, segmentRequest);
+    declines.raiseTerminal();
+    if (ranked) return resumesUnder(ranked, declines);
+    // A DECLINE IS NOW THE ANSWER, not a route change. While two spines existed a `null` here meant
+    // "the other one owns this"; with one spine it means the compiler cannot lower this traversal, and
+    // saying so plainly is the only honest thing left to do with it. It is an ordinary query failure —
+    // returned to the client on the trailer, not logged as an incident (root CLAUDE.md). An advisory
+    // reason the lowering recorded rides along as a hint; it never replaces "no lowering covers".
+    if (!compiled) throw declines.uncovered(gremlin);
+    return { kind: 'sql', compiled: discard ? applyDiscard(compiled) : compiled };
+  });
+}
+
+/**
+ * Run one stretch of the compile under the decline sink. A terminal reason is the decline: it wins over
+ * what the stretch returned, and over anything it THREW after the reason was recorded — the throw the
+ * reason replaced would have stopped the compile before that later throw could happen.
+ */
+function underDeclines<T>(declines: Declines, stretch: () => T): T {
+  let result: T;
+  try { result = stretch(); } catch (error) { throw declines.terminalError() ?? error; }
+  declines.raiseTerminal();
+  return result;
+}
+
+/** A segment's RESUMES lower at execute time into the same sink, so each is read under it too — a
+ *  terminal reason recorded while planning a resume is that resume's decline, exactly as at compile time. */
+function resumesUnder(plan: Plan, declines: Declines): Plan {
+  if (plan.kind !== 'segment') return plan;
+  if (plan.mode === 'sync') {
+    const { resume } = plan;
+    const guarded: SyncSegmentPlan['resume'] = (rows) => resumesUnder(underDeclines(declines, () => resume(rows)), declines);
+    return { ...plan, resume: guarded };
+  }
+  const { resume } = plan;
+  const guarded: AsyncSegmentPlan['resume'] = (out, rows) => resumesUnder(underDeclines(declines, () => resume(out, rows)), declines);
+  return { ...plan, resume: guarded };
 }
 
 export { UnsupportedTraversal };

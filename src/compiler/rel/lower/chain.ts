@@ -13,6 +13,7 @@ import type { LabelRegime } from '../../../api.ts';
 import type { ChainRead, Subject } from '../child.ts';
 import type { ProgramWrites } from '../write.ts';
 import type { ProgramScopeNames } from '../../ir/labels.ts';
+import type { Declines } from '../../unsupported.ts';
 
 // THE SHARED VOCABULARY OF THE CHAIN FOLD — the types every tail returns, the context every tail
 // threads, and the carried-channel constants the whole lowering mints and reads. It lives in its own
@@ -231,7 +232,26 @@ export interface ChainCtx extends FilterCtx {
   /** The `order()` steps ranked through JS rather than sorted in SQL — see `Lowering.rankedOrders`
    *  (`ranked-order.ts`). Keyed by step identity, so a body's own `order()` never matches. */
   readonly rankedOrders?: import('../ranked-order.ts').RankedOrders;
+  /** The compile's decline-reason sink — see `Lowering.declines`. A decline decided here on a framing
+   *  fact is recorded into it, and the lowering returns `null`. */
+  readonly declines: Declines;
 }
+
+/**
+ * THE PER-COMPILE SETTLED VALUES of a chain, as the `Lowering` a nested ROOTED chain re-enters the fold
+ * with (`rootedRead`). One helper rather than a field-by-field literal at each re-entry, so a new
+ * per-compile value cannot be silently left behind: a rooted arm handed LESS than the chain around it
+ * declines for want of a fact the compile already held (§6·6).
+ *
+ * What it deliberately does NOT carry is chain-LOCAL: the graph `source` (a rooted body reads the base
+ * graph), `rankedOrders` (keyed by the outer chain's step identity), and the head/resume-only flags.
+ */
+export const settledOf = (ctx: ChainCtx) => ({
+  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
+  labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects, sideEffectPolicies: ctx.sideEffectPolicies,
+  services: ctx.services, sack: ctx.sack, collections: ctx.collections,
+  writes: ctx.writes, scopeNames: ctx.scopeNames, declines: ctx.declines,
+}) as const;
 
 /**
  * THE FOLD RE-ENTERED OVER A BODY rather than over the root chain, and the one thing that changes is

@@ -39,11 +39,10 @@ import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
 import { RANDOM_ORDER } from './slice.ts';
-import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
 import { nondeterministic } from '../ranked-order.ts';
-import { UnsupportedTraversal } from '../../unsupported.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -284,7 +283,12 @@ export function perTraverserChild(
     const perRow = flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
     if (perRow) return perRow;
   }
-  const produced = withLocalHint(step.name, () => scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh));
+  const declinedBefore = ctx.declines.terminal();
+  const produced = scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh);
+  // A `map()`/`flatMap()` body's `SHARED_DRAW` names the per-row form, which answers there
+  // (`local(__.V().sample(1))` draws per origin through `reSourcedOnce`); every other host's does not.
+  if (!declinedBefore && (step.name === 'map' || step.name === 'flatMap'))
+    ctx.declines.hint('shared-draw', 'use local(__.V()…sample(1)) to draw per row');
   if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
@@ -893,18 +897,6 @@ export const rootedHosts = (host: Rel | undefined): RootedHosts =>
 const SHARED_DRAW = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body runs '
   + 'for more than one traverser — it would be drawn once and shared by every row';
 
-/** A `map()`/`flatMap()` body's `SHARED_DRAW` names the per-row form, which answers there
- *  (`local(__.V().sample(1))` draws per origin through `reSourcedOnce`); every other host's does not. */
-function withLocalHint<T>(host: string, lower: () => T): T {
-  try {
-    return lower();
-  } catch (e) {
-    if ((host === 'map' || host === 'flatMap') && e instanceof UnsupportedTraversal && e.gremlin === SHARED_DRAW)
-      throw UnsupportedTraversal.because(`${SHARED_DRAW}; use local(__.V()…sample(1)) to draw per row`);
-    throw e;
-  }
-}
-
 /**
  * A rooted chain lowered as one relation, or `null` to decline.
  *
@@ -924,27 +916,24 @@ function withLocalHint<T>(host: string, lower: () => T): T {
  * several it declines from the query text (`SHARED_DRAW`); a per-row draw already answers through
  * `local(__.V()…sample(1))`.
  *
- * It THROWS rather than returning `null` for that decline, so a caller lowering it inside a speculative
- * probe (one whose `null` would fall through to another route) sees the throw too — that is intended:
- * every route over the same rooted body shares the one evaluation.
+ * That decline is TERMINAL (recorded into the compile's `Declines` with `terminal: true`), so a caller
+ * lowering it inside a speculative probe (one whose `null` would fall through to another route) cannot
+ * answer around it — that is intended: every route over the same rooted body shares the one evaluation.
  */
 export function rootedRead(
   steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter, hosts: RootedHosts, start: RootedStart = 'split',
 ): RootedRead | null {
   if (!steps.length) return null;
   if (start === 'split' && readsHostState(steps, ctx)) return null;
-  if (start === 'split' && hosts === 'many' && nondeterministic(steps, ctx.params)) throw UnsupportedTraversal.because(SHARED_DRAW);
-  const chain = lowerChain(steps, {
-    params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
-    labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,
-    // The SETTLED values ride into a rooted chain too, and their absence was a silent narrowing: a
-    // rooted arm naming a service, a sack or a reducer-form side effect was being handed LESS than
-    // the chain around it, so it declined for want of a fact the compile already held. §6·6's
-    // lesson at a second seam — coverage must measure what the algebra can express, never what the
-    // caller remembered to pass.
-    services: ctx.services, sack: ctx.sack, sideEffectPolicies: ctx.sideEffectPolicies, collections: ctx.collections,
-    writes: ctx.writes, scopeNames: ctx.scopeNames,
-  }, fresh);
+  if (start === 'split' && hosts === 'many' && nondeterministic(steps, ctx.params)) {
+    ctx.declines.note({ kind: 'shared-draw', message: SHARED_DRAW, terminal: true });
+    return null;
+  }
+  // The SETTLED values ride into a rooted chain too (`settledOf`), and their absence was a silent
+  // narrowing: a rooted arm handed LESS than the chain around it declined for want of a fact the compile
+  // already held. §6·6's lesson at a second seam — coverage must measure what the algebra can express,
+  // never what the caller remembered to pass.
+  const chain = lowerChain(steps, settledOf(ctx), fresh);
   if (!chain) return null;
   const read = { rel: chain.rel, framing: chain.framing, bulked: chain.bulked };
   return chain.effects ? { ...read, effects: chain.effects } : read;
@@ -1538,7 +1527,7 @@ const READS_THROUGH_ID: ReadonlySet<string> = new Set(['values', 'label', 'id'])
 
 const RESOURCE_UNDER_ABSENT = 'V()/E() inside this body discards the value before it, and that value is missing on some rows '
   + '(an unbound label, an absent property or key), so the answer would depend on which rows matched — did you mean '
-  + 'select(…).out()/in() from that value, or V().has(…, select(…)) to filter by it?';
+  + 'to traverse FROM that value (out()/in()) or to filter by it (V().has(…, …))?';
 
 /**
  * A RE-SOURCING body (`__.V()…`, `__.E()…`) as ONE value per host row — or `null` to decline.
@@ -1557,7 +1546,10 @@ const RESOURCE_UNDER_ABSENT = 'V()/E() inside this body discards the value befor
  * (`map(__.V().count())`, a `select('a')` the row was already filtered by) answers.
  */
 function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  if (mayBeAbsent(host)) throw UnsupportedTraversal.because(RESOURCE_UNDER_ABSENT);
+  if (mayBeAbsent(host)) {
+    ctx.declines.note({ kind: 'resource-under-absent', message: RESOURCE_UNDER_ABSENT, terminal: true });
+    return null;
+  }
   return reSourcedValue(body, ctx, fresh, rootedHosts(host.row?.rel));
 }
 
