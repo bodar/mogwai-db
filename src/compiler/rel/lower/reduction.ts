@@ -1560,18 +1560,19 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
   // a `ScalarMapStep`, `vendor/tinkerpop/gremlin-core/.../P.java` `tv.next()`), and where the body ends
   // in `order()` the first is the ORDERED first, which `firstRootedValue` reads off the encounter
   // channel (`build.ts` — the one authority the predicate/list operand seams share). An EMPTY re-source
-  // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"), so
-  // productivity is an EXISTS over the rooted rows — the concat/dateDiff empty-operand guard raises on
-  // it, never silently skipping. `yields:'first'` because several rows collapse to their first.
-  // That EXISTS is STATED (`{ when }`), not read off the value: a first value that is a productive null
-  // (`__.V().constant(null)`, a `choose`/`coalesce` arm answering null, sorted first by `order()`) is
-  // still the answer, and reading it as absent dropped the host row.
+  // (`__.V(99999)`) maps to NO value (`TraversalUtil.apply` throws "does not map to a value"): a scalar
+  // subquery over no rows is NULL, so productivity is the value's nullness — the concat/dateDiff
+  // empty-operand guard raises on it, never silently skipping. `yields:'first'` because several rows
+  // collapse to their first. A first value that is a PRODUCTIVE null (`__.V().constant(null)`, a null arm
+  // sorted first by `order()`) reads as nothing too: SQLite's one-column scalar subquery cannot tell the
+  // two apart, and the reference's hasNext()/next() distinction (`step/map/TraversalMapStep.java`) is not
+  // worth a second EXISTS per read — docs/feature-support-matrix.md §17.
   // A PER-ROW type is the first row's own tag, read beside its value from the same fenced row, and the
   // framing names the `ChildValue.vtype` slot every consumer projects (`reductionTail`, a coalesce arm)
   // — never the rooted relation's `vtype`/`vt` column, which is not in the host's scope.
   const first = firstRootedValue(rooted, fresh, true);
   if (!first) return null;
-  const present: Presence = { when: first.exists };
+  const present = 'value-nullness';
   return first.vtype
     ? { expr: first.value, vtype: first.vtype, framing: { kind: 'scalar', type: PER_ROW('vtype') }, present, yields: 'first' }
     : { expr: first.value, framing: rooted.framing, present, yields: 'first' };

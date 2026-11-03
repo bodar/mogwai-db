@@ -238,9 +238,10 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | d[1].i |
       | d[1].i |
 
-  # A first value that is a PRODUCTIVE null is still the answer: `TraversalMapStep` emits `iterator.next()`
-  # whenever `hasNext()` (step/map/TraversalMapStep.java), Map.feature g_V_mapXconstantXnullXX keeps 6 nulls,
-  # and Order.feature sorts null first. Presence is the first row's EXISTENCE, not its value's nullness.
+  # A re-sourced body whose FIRST value is null reads as producing nothing (docs/feature-support-matrix.md
+  # §17): SQLite's scalar subquery cannot tell a productive null from no row, so presence is the value's
+  # nullness. Java answers 6 nulls here (`TraversalMapStep` emits `iterator.next()` whenever `hasNext()`,
+  # step/map/TraversalMapStep.java, and Order.feature sorts null first) — an accepted divergence.
   Scenario: g_V_mapXV_chooseXhasLabelXpersonX_valuesXageX_constantXnullXX_order_limitX1XX
     Given the modern graph
     And the traversal of
@@ -248,14 +249,7 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       g.V().map(__.V().choose(__.hasLabel("person"), __.values("age"), __.constant(null)).order().limit(1))
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | null |
-      | null |
-      | null |
-      | null |
-      | null |
-      | null |
+    Then the result should be empty
 
   Scenario: g_V_mapXcoalesceXvaluesXageX_V_constantXnullX_limitX1XXX
     Given the modern graph
@@ -270,5 +264,3 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | d[27].i |
       | d[32].i |
       | d[35].i |
-      | null |
-      | null |

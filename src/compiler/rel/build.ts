@@ -799,8 +799,9 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
  * row as a materialized relation both subqueries read: the rooted read runs once per statement, and
  * each uncorrelated subquery over it is O(1) in the host's traverser count. A STATIC type is a compiler
  * literal and needs no second subquery, so it comes back as `vtype: undefined` and the caller keeps the
- * read's own static framing. The typed form also answers the row's EXISTENCE (`exists`), an EXISTS over
- * the same fenced row: whether the body produced is not whether its first value is null.
+ * read's own static framing. Whether the body PRODUCED is read off the value's nullness by the caller
+ * (`ChildValue.present` `'value-nullness'`): a scalar subquery over no rows is NULL, and a productive-null
+ * first value reads the same (docs/feature-support-matrix.md §17), so no second EXISTS is spent on it.
  */
 export function firstRootedValue(read: RootedRead, fresh: Minter, typed?: false): { readonly value: Expr } | null;
 export function firstRootedValue(read: RootedRead, fresh: Minter, typed: true): FirstRootedRow | null;
@@ -825,13 +826,7 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
     const readOne = (name: 'v' | 't', type: SqlType): Expr => ({ kind: 'scalar', plan: make.project({
       id: fresh('rfv'), input: row, channels: [], type: typeOf(meta(name, type, true)), exprs: [[name, col(row.id, name)]],
     }) });
-    // WHETHER there was a first row is that row's EXISTENCE, not its value's nullness: a first value
-    // that is a productive null (`__.V().constant(null)`) is still the answer (`TraversalMapStep` emits
-    // `iterator.next()` whenever `hasNext()`, `vendor/tinkerpop/gremlin-core/.../step/map/TraversalMapStep.java`).
-    const exists: Expr = { kind: 'exists', negated: false, plan: make.project({
-      id: fresh('rfe'), input: row, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
-    }) };
-    return { value: readOne('v', 'any'), ...(perRow ? { vtype: readOne('t', 'text') } : {}), exists };
+    return { value: readOne('v', 'any'), ...(perRow ? { vtype: readOne('t', 'text') } : {}) };
   }
   const ordered = encounter
     ? make.limit({
@@ -847,9 +842,9 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
   }) } };
 }
 
-/** A rooted body's FIRST ROW, read off one fenced row (`firstRootedValue`'s typed form): its value, its
- *  per-row type where the type is not static, and whether the row exists at all. */
-export interface FirstRootedRow { readonly value: Expr; readonly vtype?: Expr; readonly exists: Expr }
+/** A rooted body's FIRST ROW, read off one fenced row (`firstRootedValue`'s typed form): its value and
+ *  its per-row type where the type is not static. */
+export interface FirstRootedRow { readonly value: Expr; readonly vtype?: Expr }
 
 /**
  * RENUMBER the emission order — `ROW_NUMBER()` into the `encounter` channel's own column, over

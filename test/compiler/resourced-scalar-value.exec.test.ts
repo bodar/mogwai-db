@@ -60,31 +60,35 @@ describe('an order-pinned or reduced re-sourced value is exact', () => {
   test('an empty body maps to nothing', () => expect(rows("g.V().map(__.V().values('age').is(gt(100)))")).toEqual([]));
 });
 
-// WHETHER the body produced is the first ROW's existence, not its value's nullness: `TraversalMapStep`
-// emits `iterator.next()` whenever `hasNext()` (step/map/TraversalMapStep.java), a null included, and
-// Order.feature sorts null first. `reSourcedValue` states its presence as an EXISTS over the fenced row.
-describe('a re-sourced first value that is a productive null is kept', () => {
-  const nulls = (g: string, n: number): void => expect(rows(g).map((r) => r.v)).toEqual(Array(n).fill(null));
+// WHETHER the body produced is read off its first value's NULLNESS: a scalar subquery over no rows is NULL,
+// and SQLite cannot tell that from a productive-null first value, so a re-sourced body whose first value is
+// null reads as producing nothing (docs/feature-support-matrix.md §17 — the reference's TraversalMapStep
+// hasNext()/next() distinction, step/map/TraversalMapStep.java, is not worth an EXISTS per read).
+describe('a re-sourced first value that is null reads as nothing (§17)', () => {
+  const none = (g: string): void => expect(rows(g)).toEqual([]);
   const CHOOSE = "__.V().choose(__.hasLabel('person'), __.values('age'), __.constant(null)).order().limit(1)";
-  test('choose(…, constant(null)).order().limit(1)', () => nulls(`g.V().map(${CHOOSE})`, 6));
-  test('it agrees with local()', () => nulls(`g.V().local(${CHOOSE})`, 6));
+  test('choose(…, constant(null)).order().limit(1)', () => none(`g.V().map(${CHOOSE})`));
   test('coalesce(values(age), constant(null))', () =>
-    nulls("g.V().map(__.V().coalesce(__.values('age'), __.constant(null)).order().limit(1))", 6));
+    none("g.V().map(__.V().coalesce(__.values('age'), __.constant(null)).order().limit(1))"));
   test('union(values(age), constant(null))', () =>
-    nulls("g.V().map(__.V().union(__.values('age'), __.constant(null)).order().limit(1))", 6));
-  test('an inject host', () => nulls(`g.inject(1).map(${CHOOSE})`, 1));
-  test('constant(null).limit(1)', () => nulls('g.V().map(__.V().constant(null).limit(1))', 6));
-  test('under an absent-able host', () => nulls(`g.V().optional(__.out().as('a')).map(__.select('a').${CHOOSE.slice(3)})`, 6));
-  test('inside local(map())', () => nulls(`g.V().local(__.map(${CHOOSE}))`, 6));
-  test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null).limit(1)).count()')[0].v).toBe(6));
-  test('a where() body over it passes', () => expect(rows('g.V().where(__.V().constant(null).limit(1))')).toHaveLength(6));
-  test('an EMPTY re-source still drops the row', () => expect(rows('g.V().map(__.V(99).constant(null))')).toEqual([]));
-  // A re-sourced FINAL coalesce arm states its own presence; an earlier arm's value still answers.
+    none("g.V().map(__.V().union(__.values('age'), __.constant(null)).order().limit(1))"));
+  test('an inject host', () => none(`g.inject(1).map(${CHOOSE})`));
+  test('constant(null)', () => none('g.V().map(__.V().constant(null))'));
+  test('under an absent-able host', () => none(`g.V().optional(__.out().as('a')).map(__.select('a').${CHOOSE.slice(3)})`));
+  test('inside local(map())', () => none(`g.V().local(__.map(${CHOOSE}))`));
+  test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null).limit(1)).count()')[0].v).toBe(0));
+  test('a where() body over it drops the row', () => none('g.V().where(__.V().constant(null).limit(1))'));
+  test('a concat() operand raises as an empty one does', () =>
+    expect(() => run(s, "g.V().values('name').concat(__.V().constant(null))")).toThrow('does not map to a value'));
+  test('an EMPTY re-source still drops the row', () => none('g.V().map(__.V(99).constant(null))'));
+  test('a non-null first value is unaffected', () =>
+    expect(rows("g.V().map(__.V().values('age').order().limit(1))").map((r) => r.v)).toEqual(Array(6).fill(27)));
+  // A re-sourced FINAL coalesce arm reads its own presence; an earlier arm's value still answers.
   test('a re-sourced coalesce fallback keeps the earlier arm', () =>
     expect(bagOf(rows("g.V().map(__.coalesce(__.values('age'), __.V(99).values('name')))").map((r) => r.v))).toEqual([27, 29, 32, 35]));
-  test('a re-sourced coalesce fallback that is a productive null', () =>
+  test('a re-sourced coalesce fallback that is null is no fallback', () =>
     expect(bagOf(rows("g.V().map(__.coalesce(__.values('age'), __.V().constant(null).limit(1)))").map((r) => r.v)))
-      .toEqual(bagOf([29, 27, 32, 35, null, null])));
+      .toEqual([27, 29, 32, 35]));
   // A null `by()` value is absent (docs/feature-support-matrix.md §17): `project()` omits the key.
   test('a by() null is absent (§17)', () => expect(rows(`g.V().project('a').by(${CHOOSE})`).map((r) => r.map)).toEqual(Array(6).fill('[]')));
   // A write applies a productive null rather than skipping it: the reference REMOVES the key.
@@ -124,10 +128,9 @@ describe('a SOURCE union arm starts fresh', () => {
     oneRepeated("g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().values('name').order().limit(1))", 6, ['josh'], 'string'));
 });
 
-// A CHOOSE with a re-sourced arm: the arm STATES its presence (an uncorrelated EXISTS over the one fenced
-// row it read), so the choice's presence is a CASE over the SAME guards as its value — `choicePresence`
+// A CHOOSE with a re-sourced arm: the arm's presence is its value's nullness, so the choice's presence is a CASE over the SAME guards as its value — `choicePresence`
 // (`rel/child.ts`), built with the value and type CASEs from one branches array (`scalarChoice`,
-// `rel/lower/reduction.ts`). The chosen arm decides: a productive null keeps its row, an unproductive
+// `rel/lower/reduction.ts`). The chosen arm decides: a productive arm keeps its row, an unproductive
 // chosen arm drops it (TraversalMapStep over BranchStep's chosen branch,
 // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java).
 const vals = (g: string): unknown[] => rows(g).map((r) => r.v);
@@ -140,10 +143,10 @@ describe('a choose whose arm is a re-sourced value', () => {
     expect(vals(`${O}.map(__.choose(${PERSON}, ${FIRST_NAME}, __.constant('x')))`)).toEqual(['josh', 'x', 'josh', 'josh', 'x', 'josh']));
   test('a reduced value vs a constant', () =>
     expect(vals(`${O}.map(__.choose(${PERSON}, __.V().values('age').sum(), __.constant(0)))`)).toEqual([123, 0, 123, 123, 0, 123]));
-  test('a productive null keeps its row; an empty chosen arm drops it', () =>
-    expect(vals(`${O}.map(__.choose(${PERSON}, __.V().constant(null).limit(1), __.V(99).values('name')))`)).toEqual([null, null, null, null]));
+  test('a productive arm keeps its row; an empty chosen arm drops it', () =>
+    expect(vals(`${O}.map(__.choose(${PERSON}, ${FIRST_NAME}, __.V(99).values('name')))`)).toEqual(['josh', 'josh', 'josh', 'josh']));
   test('where() keeps exactly the rows whose chosen arm produced', () => {
-    const W = `__.choose(${PERSON}, __.V().constant(null).limit(1), __.V(99).values('name'))`;
+    const W = `__.choose(${PERSON}, ${FIRST_NAME}, __.V(99).values('name'))`;
     expect(bagOf(vals(`g.V().where(${W}).values('name')`))).toEqual(bagOf(['marko', 'vadas', 'josh', 'peter']));
     expect(bagOf(vals(`g.V().not(${W}).values('name')`))).toEqual(bagOf(['lop', 'ripple']));
   });
@@ -173,13 +176,14 @@ describe('a choose whose arm is a re-sourced value', () => {
 });
 
 // `reSourcedUnder`'s case 3 — the body over the graph vs over an empty input — chooses its presence through
-// the same `choicePresence`. Both of its arms STATE their presence, so it spends no `value IS NOT NULL` term:
-// the presence column is the CASE of the two EXISTS, and the filter reads it alone.
-test('a re-sourced body under an absent-able host: a CASE of the two stated presences, no value term', () => {
+// the same `choicePresence`. Both of its arms read presence as value nullness, so the choice does too: the
+// filter is the chosen value's `IS NOT NULL`, with no EXISTS and no presence column. The empty-input arm's
+// null (`count()` is 0 there) therefore reads as nothing (§17), so the unbound hosts drop.
+test('a re-sourced body under an absent-able host: presence is the chosen value, no EXISTS', () => {
   const g = "g.V().optional(__.out().as('a')).map(__.select('a').V().count().choose(__.is(0), __.constant(null), __.constant(1)))";
-  expect(bagOf(vals(g))).toEqual(bagOf([1, 1, 1, 1, 1, 1, null, null, null]));
+  expect(vals(g)).toEqual([1, 1, 1, 1, 1, 1]);
   const plan = compile(g, {});
   if (plan.kind !== 'read') throw new Error('expected read plan');
-  expect(plan.sql).toMatch(/ THEN EXISTS \(SELECT 1 AS one FROM r\d+ rfm\d+\) ELSE EXISTS \(SELECT 1 AS one FROM r\d+ rfm\d+\) END AS mpw /);
-  expect(plan.sql).toMatch(/WHERE mc\d+\.mpw$/);
+  expect(plan.sql).not.toContain('EXISTS (SELECT 1 AS one');
+  expect(plan.sql).toMatch(/WHERE \(fm\d+\.v IS NOT NULL\)$/);
 });

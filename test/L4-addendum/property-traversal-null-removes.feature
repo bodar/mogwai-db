@@ -11,11 +11,11 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
   # Previously each of these was REFUSED at run time — a refusal that depended on what the data held.
 
   @gap:property-traversal-null
-  Scenario: g_V_propertyXx_coalesceXvaluesXageX_V_constantXnullX_limitX1XXX_valuesXxX
+  Scenario: g_V_propertyXx_coalesceXvaluesXageX_constantXnullXXX_valuesXxX
     Given the modern graph
     And the traversal of
       """
-      g.V().property("x", __.coalesce(__.values("age"), __.V().constant(null).limit(1))).values("x")
+      g.V().property("x", __.coalesce(__.values("age"), __.constant(null))).values("x")
       """
     When iterated to list
     Then the result should be unordered
@@ -27,11 +27,11 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
     And the graph should return 2 for count of "g.V().hasLabel(\"software\").not(__.has(\"x\"))"
 
   @gap:property-traversal-null
-  Scenario: g_V_propertyXx_coalesceXvaluesXageX_V_constantXnullX_limitX1XXX_count
+  Scenario: g_V_propertyXx_coalesceXvaluesXageX_constantXnullXXX_count
     Given the modern graph
     And the traversal of
       """
-      g.V().property("x", __.coalesce(__.values("age"), __.V().constant(null).limit(1))).count()
+      g.V().property("x", __.coalesce(__.values("age"), __.constant(null))).count()
       """
     When iterated to list
     Then the result should be unordered
@@ -40,11 +40,11 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
 
   # A null AFTER a value on one element: the later null wins, so nothing is left.
   @gap:property-traversal-null
-  Scenario: g_V_hasXname_markoX_propertyXx_1X_propertyXx_coalesceXvaluesXnopeX_V_constantXnullX_limitX1XXX_valuesXxX
+  Scenario: g_V_hasXname_markoX_propertyXx_1X_propertyXx_coalesceXvaluesXnopeX_constantXnullXXX_valuesXxX
     Given the modern graph
     And the traversal of
       """
-      g.V().has("name","marko").property("x", 1).property("x", __.coalesce(__.values("nope"), __.V().constant(null).limit(1))).values("x")
+      g.V().has("name","marko").property("x", 1).property("x", __.coalesce(__.values("nope"), __.constant(null))).values("x")
       """
     When iterated to list
     Then the result should be empty
@@ -52,11 +52,11 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
 
   # Two traversers on ONE element, the first resolving null and the second a value: the value survives.
   @gap:property-traversal-null
-  Scenario: g_injectX27_32X_asXaX_V_hasXname_markoX_propertyXsingle_z_coalesceXselectXaX_isX32X_nullXX
+  Scenario: g_injectX27_32X_asXaX_V_hasXname_markoX_propertyXsingle_z_selectXaX_chooseXisX32X_identity_nullXX
     Given the modern graph
     And the traversal of
       """
-      g.inject(27, 32).as("a").V().has("name","marko").property(Cardinality.single, "z", __.coalesce(__.select("a").is(32), __.V().constant(null).limit(1)))
+      g.inject(27, 32).as("a").V().has("name","marko").property(Cardinality.single, "z", __.select("a").choose(__.is(32), __.identity(), __.constant(null)))
       """
     When iterated to list
     Then the result should have a count of 2
@@ -65,11 +65,11 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
 
   # ...and the other way round: the value comes first, the later null removes it.
   @gap:property-traversal-null
-  Scenario: g_injectX32_27X_asXaX_V_hasXname_markoX_propertyXsingle_z_coalesceXselectXaX_isX32X_nullXX
+  Scenario: g_injectX32_27X_asXaX_V_hasXname_markoX_propertyXsingle_z_selectXaX_chooseXisX32X_identity_nullXX
     Given the modern graph
     And the traversal of
       """
-      g.inject(32, 27).as("a").V().has("name","marko").property(Cardinality.single, "z", __.coalesce(__.select("a").is(32), __.V().constant(null).limit(1)))
+      g.inject(32, 27).as("a").V().has("name","marko").property(Cardinality.single, "z", __.select("a").choose(__.is(32), __.identity(), __.constant(null)))
       """
     When iterated to list
     Then the result should have a count of 2
@@ -77,11 +77,11 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
 
   # LIST cardinality: a null removes every value the element held, and a value after it is appended.
   @gap:property-traversal-null
-  Scenario: g_V_propertyXlist_y_coalesceXvaluesXageX_V_constantXnullX_limitX1XXX_valuesXyX_count
+  Scenario: g_V_propertyXlist_y_coalesceXvaluesXageX_constantXnullXXX_valuesXyX_count
     Given the modern graph
     And the traversal of
       """
-      g.V().property(Cardinality.list, "y", __.coalesce(__.values("age"), __.V().constant(null).limit(1))).values("y").count()
+      g.V().property(Cardinality.list, "y", __.coalesce(__.values("age"), __.constant(null))).values("y").count()
       """
     When iterated to list
     Then the result should be unordered
@@ -95,7 +95,7 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
       """
       g.V().has("name","marko").property(Cardinality.list, "y", 1).property(Cardinality.list, "y", 2).
         union(__.constant(0), __.constant(5)).as("a").
-        V().has("name","marko").property(Cardinality.list, "y", __.coalesce(__.select("a").is(5), __.V().constant(null).limit(1)))
+        V().has("name","marko").property(Cardinality.list, "y", __.select("a").choose(__.is(5), __.identity(), __.constant(null)))
       """
     When iterated to list
     Then the result should have a count of 2
@@ -109,7 +109,7 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
     And the traversal of
       """
       g.V().has("name","marko").property(Cardinality.set, "s", 32).property(Cardinality.set, "s", 7).
-        property(Cardinality.set, "s", __.coalesce(__.values("nope"), __.V().constant(null).limit(1)))
+        property(Cardinality.set, "s", __.coalesce(__.values("nope"), __.constant(null)))
       """
     When iterated to list
     Then the result should have a count of 1
@@ -121,7 +121,7 @@ Feature: mogwai addendum — a property() traversal that resolves to null remove
     Given the modern graph
     And the traversal of
       """
-      g.V().has("name","marko").outE("knows").property("weight", __.coalesce(__.inV().values("age").is(32), __.V().constant(null).limit(1)))
+      g.V().has("name","marko").outE("knows").property("weight", __.coalesce(__.inV().values("age").is(32), __.constant(null)))
       """
     When iterated to list
     Then the result should have a count of 2
