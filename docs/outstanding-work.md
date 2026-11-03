@@ -140,17 +140,10 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
 
 ## 7. Low priority
 
-- **A sampled re-source `reSourcedOnce` cannot evaluate once DECLINES** rather than paying the
-  origins × graph product (trunk answered these quadratically through `property()`):
-  an alias on the candidate (`__.V().as('x').sample(1).select('x')`) — the rooted read's alias channel and
-  `AliasMap` would have to cross into the origins' rows; and a coupling barrier after a fan-out
-  (`__.out().V().dedup().sample(2)`, or one in a `union`/`choose`/`option()` arm or `repeat` body,
-  `__.out().V().union(__.dedup().id()).sample(100)` — `streamsIntoChildren`) — the barrier sees R
-  concatenated copies (`dedup` keeps one, `count` counts R·M), a per-barrier rule over R the draw does not have.
 - **A deterministic per-origin slice over a re-source is O(origins × |V|)** — `local(__.V().hasLabel('person')
-  .limit(2))` (7.5 s at 4k holders). Same root as the sampled case: with one row per origin
-  (`ChainCtx.originRows`) the prefix THROUGH the slice is origin-independent, so `rootedRead` it once and
-  cross the origins with its (small) result — O(origins × n).
+  .limit(2))` (7.5 s at 4k holders) — the reference's own traverser count, so a cost, not a wall. With one
+  row per origin (a body-opening re-source) the prefix THROUGH the slice is origin-independent, so
+  `rootedRead` it once and cross the origins with its (small) result — O(origins × n).
 - **Bulk journal clear in bounded chunks** — `clearBulkJournal` (`src/storage.ts`) is one DELETE.
 - **Nested scalar `reverse()`/`split()`** inside a child body.
 - **Content-demand 3-arg `has`** — `literalKeysOf` (`src/compiler/ir/content-demand.ts`) takes the label as the key.

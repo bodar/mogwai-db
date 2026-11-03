@@ -154,14 +154,14 @@ export interface RelLowering {
  */
 
 /** A non-start `V()`/`E()` at `steps[at]` and the rest of the chain after it — the ONE re-source every
- *  tail dispatches to. A sampled re-source inside a per-traverser body evaluates its origin-independent
- *  prefix once (`reSourcedOnce`) or declines — never the origins × graph product a prefix that does not
- *  depend on the origin has no reason to pay; everything else is GraphStep's cross join (`reSource`). */
+ *  tail dispatches to. A sampled re-source inside a per-traverser body whose prefix is origin-independent
+ *  takes the fast path (`reSourcedOnce`: the prefix evaluated once, the draw per origin); everything it
+ *  leaves falls through to GraphStep's cross join (`reSource`) — a fast path never declines. */
 function reSourceTail(
   steps: readonly IRStep[], at: number, rel: Rel, framing: RelFraming, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   const once = reSourcedOnce(steps, at, rel, bulked, ctx, fresh, labels);
-  if (once !== undefined) return once;
+  if (once) return once;
   const reSourced = reSource(steps[at]!, rel, framing, ctx, fresh);
   return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
 }

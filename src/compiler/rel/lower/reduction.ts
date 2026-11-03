@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import { withChannel } from '../../../channels.ts';
-import { arg, isColumnArg, isNested, isOrderArg, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
+import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp, type Expr } from '../../../rel/expr.ts';
 import { recursiveViolation } from '../../../rel/recursive.ts';
 import * as make from '../../../rel/factory.ts';
@@ -15,9 +15,9 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { normalize } from '../../ir/passes.ts';
 import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
-import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, streamsIntoChildren, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
-import { someStepDeep } from '../../ir/walk.ts';
+import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, rerootPresence, selectSpec, type Pop } from '../alias.ts';
 import { and, carriedCols, coalesce, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
@@ -669,7 +669,7 @@ export function childRows(
   // traversal (`ChainCtx.traversal`); a per-row `local`/`flatMap` body says so through its own `ctx`.
   const scoped: ChainCtx = originFrom !== 'id' && ctx.traversal?.steps !== body ? { ...ctx, traversal: { steps: body, rooted: false } } : ctx;
   const baseCtx = needsFromV ? { ...inBody(scoped), needsFromV: true } : inBody(scoped);
-  const bodyCtx = { ...baseCtx, originDomain: originDomainOf(seeded, fresh), originRows: perRow || originFrom !== 'id' ? seeded : undefined };
+  const bodyCtx = { ...baseCtx, originDomain: originDomainOf(seeded, fresh) };
   const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, bodyCtx, fresh, aliases);
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.
@@ -1564,33 +1564,22 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
 /**
  * A RE-SOURCE INSIDE A PER-TRAVERSER BODY THAT IS SAMPLED — `property('c', __.V().hasLabel('person')
  * .sample(1).values('name'))`, `local(__.V().sample(2))` — with the origin-independent prefix evaluated
- * ONCE and the draw made per origin. Three answers:
- *
- * - `undefined` — not this shape (no origin, no stream `sample` after the re-source), or a prefix that
- *   reads HOST state (`readsHostState`): its candidates differ per origin, the origins × candidates
- *   product is the query's own row count, and the ordinary cross-join re-source (`reSource`) answers.
- * - `null` — this shape, but a prefix the once-evaluation cannot take: DECLINE. Falling back to the
- *   product would be O(origins × |V|) for a prefix that does not depend on the origin — a CPU wall only a
- *   production-sized graph reaches — and the query text alone decides it.
- * - the draw's `Tail`.
+ * ONCE and the draw made per origin: the draw's `Tail`, or `undefined` where this FAST PATH does not take
+ * the shape. It never declines: GraphStep's cross join (`reSource`, `lower.ts` `reSourceTail`) answers
+ * whatever it leaves, as the reference does and at the reference's own cost — origins × candidates
+ * traversers. A fast path falls through; it never refuses what the general route answers.
  *
  * A mid-traversal GraphStep emits the graph per incoming traverser
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java`),
- * so the prefix up to the draw is the SAME relation for every origin row — unless it holds:
- *
- * - a DRAW (`coin`, a nested `sample`), or a shuffle a slice observes: evaluated once, every origin would
- *   share one random choice. A shuffle nothing slices only orders the stream, and the draw is uniform
- *   whatever the order;
- * - a side-effect COLLECTOR (`collectsSideEffect`): `LocalStep`/`AddPropertyStep` re-run the child per
- *   traverser and `GroupCountSideEffectStep` records every traverser it meets, so
- *   `local(__.V().groupCount('x').sample(1))` counts each vertex once PER origin, where a once-evaluated
- *   prefix would count it once;
- * - a COUPLING barrier (`dedup`, a slice, a reducer, `fold`) over an origin with several rows: the
- *   reference applies it to the CONCATENATION of their candidate streams (`dedup` keeps one copy, `count()`
- *   counts R·M), which R copies of one evaluation are not. Only a body-opening re-source promises one
- *   row per origin (`onePerOrigin`). At ANY depth the stream reaches — a `union`/`choose` arm, a
- *   `repeat` body (`streamsIntoChildren`) — not only at the top level; a per-traverser child (`local`,
- *   `where`, a `by()`) runs per row and couples nothing.
+ * so R copies of ONE evaluation of the prefix equal the reference's R concatenated candidate streams
+ * exactly when the prefix is a top-level WHITELIST (`evaluableOnce`): no step is a stream barrier (a
+ * `dedup`/slice/reducer/`order` over the concatenation is not R copies of one), and each step is
+ * childless or a per-traverser filter host (`ONCE_FILTER_HOSTS`: its child runs per row and couples
+ * nothing). Below the top level the prefix holds no DRAW (`coin`, a nested `sample`, a `shuffle` —
+ * evaluated once, every origin would share one random choice) and no side-effect COLLECTOR
+ * (`collectsSideEffect`: `GroupCountSideEffectStep` records every traverser it meets, so a once-evaluated
+ * prefix would count each vertex once rather than once PER origin); and it reads no HOST state
+ * (`readsHostState`: its candidates differ per origin).
  *
  * Otherwise origin `o`'s stream is R_o copies of the M candidates, and `sample(n)` is a uniform n-subset of
  * those P = R_o·M rows: `SampleGlobalStep` is a weighted reservoir and, with no `by()`, every weight is 1.
@@ -1615,29 +1604,25 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
  */
 export function reSourcedOnce(
   steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): Tail | null | undefined {
+): Tail | undefined {
   const origin = originOf(input.channels);
   if (!origin) return undefined;
   const drawAt = steps.findIndex((step, i) => i > at && step.name === 'sample' && !isLocalScope(step));
   if (drawAt < 0) return undefined;
   const prefix = steps.slice(at, drawAt);
   const { params } = ctx;
-  if (readsHostState(prefix, ctx)) return undefined;
   const draw = steps[drawAt]!;
   if (bulked || draw.modulators?.length || draw.optionArms
-    || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
-  // AT ANY DEPTH a stream reaches: a barrier in a `union`/`choose` arm or a `repeat` body reduces over every
-  // start fed into it (`streamsIntoChildren`), so it couples the R copies exactly as a top-level one does.
-  const coupled = someStepDeep(prefix, params, (step) => isStreamBarrier(step as IRStep) && !ORDER_ONLY_BARRIERS.has(step.name), true, streamsIntoChildren);
-  if (coupled && !onePerOrigin(input, ctx)) return null;
-  const unshuffled = prefix.filter((step) => !isShuffle(step));
-  if (nondeterministic(unshuffled, params) || (coupled && unshuffled.length < prefix.length)) return null;
-  if (someStepDeep(prefix, params, collectsSideEffect, true)) return null;
+    || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return undefined;
+  const read = rawBodies(params);
+  const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
+  if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return undefined;
+  if (nondeterministic(prefix, params) || someStepDeep(prefix, read, collectsSideEffect, true)) return undefined;
   const rooted = rootedRead(prefix, ctx, fresh);
-  if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return null;
+  if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return undefined;
   // Only the payload crosses: a rooted channel other than its position and its (provably unit) bulk —
   // an alias, a path — is a fact about the candidate that the origins' channels have no slot for.
-  if (rooted.rel.channels.some((channel) => channel.role !== 'encounter' && channel.role !== 'bulk')) return null;
+  if (rooted.rel.channels.some((channel) => channel.role !== 'encounter' && channel.role !== 'bulk')) return undefined;
 
   const int = (name: string): ColMeta => meta(name, 'int');
   const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
@@ -1703,7 +1688,7 @@ export function reSourcedOnce(
     return perOriginWindow(keyed, col(keyed.id, O), [RANDOM_ORDER], { scope: 'global', offset: 0, limit: n }, fresh, true);
   };
 
-  const chosen = ((): Rel | null => {
+  const chosen = ((): Rel | undefined => {
     // `sample(1)`: one uniform index per origin, fenced so the join probes read it rather than redraw it.
     if (n === 1) return locate(fence(project(drawing, [int(O), int(M), int(D)], (name) => name === D ? uniform(col(drawing.id, P)) : col(drawing.id, name))), D);
     const sparseBand = (pick: boolean): Expr => bin(pick ? '<=' : '>', bin('*', col(drawing.id, Q), compilerInt(2)), col(drawing.id, P));
@@ -1723,7 +1708,7 @@ export function reSourcedOnce(
           : name === T ? uniform(col(deeper.id, P)) : col(deeper.id, name));
       },
     });
-    if (walk.kind === 'recursive' && recursiveViolation(walk)) return null;
+    if (walk.kind === 'recursive' && recursiveViolation(walk)) return undefined;
     // Each distinct index at its FIRST draw — fenced: it is read twice, and both reads must see one walk.
     const firsts = fence(make.aggregate({
       id: fresh('sa'), input: walk, channels: [], type: typeOf(int(O), int(M), int(Q), int(T), int(F)),
@@ -1751,7 +1736,7 @@ export function reSourcedOnce(
     const sparsePicks = locate(kept, T);
     return make.union({ id: fresh('su'), inputs: [sparsePicks, rankedPairs(wide)], all: true, channels: [], type: sparsePicks.type });
   })();
-  if (!chosen) return null;
+  if (!chosen) return undefined;
   const row = make.join({
     id: fresh('sx'), left: chosen, right: rows, join: 'inner', ordered: true, channels: [],
     type: typeOf(...chosen.type.cols, ...rows.type.cols),
@@ -1766,28 +1751,19 @@ export function reSourcedOnce(
   // the candidate's, and the candidate's number K is the ordinal. ONE pick per origin keeps its row's
   // position; several re-mint it origin-major, then candidate order.
   const rel = crossCarried(parent, met, K, payload.map((column) => [column, column.name] as const), n > 1, ctx, fresh);
-  return continueAs(rel, rooted.framing, steps, drawAt + 1, bulked, ctx, fresh, labels);
+  return continueAs(rel, rooted.framing, steps, drawAt + 1, bulked, ctx, fresh, labels) ?? undefined;
 }
 
-/** The stream barriers that only ORDER the stream — concatenated copies of one evaluation are the same
- *  multiset under them, so a once-evaluated prefix holding one needs no single-row origin. */
-const ORDER_ONLY_BARRIERS: ReadonlySet<string> = new Set(['order', 'barrier']);
+/** The filter steps whose child runs PER TRAVERSER (`TraversalUtil.test` on one traverser at a time), so a
+ *  prefix holding one is still R copies of one evaluation. */
+const ONCE_FILTER_HOSTS: ReadonlySet<string> = new Set(['has', 'where', 'not', 'filter', 'is', 'and', 'or']);
 
-/** Is this a global `order()` whose every modulator is a bare `shuffle` — a draw only a slice observes? */
-const isShuffle = (step: IRStep): boolean => step.name === 'order' && !isLocalScope(step) && !!step.modulators?.length
-  && step.modulators.every((by) => by.length === 1 && shuffleArg(by[0]));
-const shuffleArg = (by: unknown): boolean => {
-  const value = by && typeof by === 'object' && 'value' in by ? (by as { value: unknown }).value : by;
-  return isOrderArg(value) && value.order === 'shuffle';
+/** Does this step hold a child traversal? An unreadable body counts as one. */
+const hasChild = (step: IRStep, read: BodyReader): boolean => {
+  let found = false;
+  eachChildChain(step, read, () => { found = true; }, () => { found = true; });
+  return found;
 };
-
-/** Does every origin of `rel` hold at most ONE row? Provable only where `rel` is the body's opening rows
- *  (`ChainCtx.originRows`) seen through row-preserving and row-removing nodes. */
-function onePerOrigin(rel: Rel, ctx: ChainCtx): boolean {
-  let at = rel;
-  while (at !== ctx.originRows && (at.kind === 'project' || at.kind === 'filter' || at.kind === 'materialize')) at = at.input;
-  return at === ctx.originRows;
-}
 
 /** A rooted read that ends in `count()` and collapses to at most one row, as its one value — or `null`
  *  where it is not that shape. Present `'always'` only where the relation is EXACTLY one row

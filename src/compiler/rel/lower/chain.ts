@@ -198,14 +198,6 @@ export interface ChainCtx extends FilterCtx {
    */
   readonly originDomain?: Rel;
   /**
-   * THE ROWS THE CURRENT PER-ORIGIN BODY OPENS ON, where they hold ONE row per origin — `childRows`' seeded
-   * relation when its origin is a per-row number or a traverser position, absent where it is a host rowid
-   * (two traversers on one element share it). A relation reached from it through projections and filters
-   * alone still holds at most one row per origin, which is what `reSourcedOnce` must know before it
-   * evaluates a coupling barrier once for every origin.
-   */
-  readonly originRows?: Rel;
-  /**
    * THE PATH LABELS AN ENCLOSING SCOPE BOUND that this body may have been handed NO alias channel for —
    * set where a correlated child is rooted afresh (`scalarChild`: a self row or an adjacency hop under
    * `local(…count())`, `by(…)`, …), which re-enters the fold with an empty alias map. TinkerPop's child

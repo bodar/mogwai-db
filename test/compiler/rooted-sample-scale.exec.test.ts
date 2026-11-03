@@ -9,7 +9,8 @@
 // `src/compiler/rel/lower/reduction.ts`) and `sample(n)` draws n distinct numbered candidates per origin
 // (3n+4 draws with replacement, keeping the first n distinct, where 2n <= the origin's P rows; else a
 // RANDOM() rank of those P < 2n rows) through an equi-join: O(origins · n log n + candidates). A prefix that
-// cannot be evaluated once declines rather than falling back to the product.
+// cannot be evaluated once (a barrier, a branch, a label, a draw, a collector) is not this fast path's: it
+// falls through to GraphStep's cross join, the reference's own origins × candidates traversers.
 //
 // Assertions of two kinds: the ANSWER (cardinality per origin, the draw lands in the candidate set, draws are
 // independent per origin, a sample of nothing is nothing) and a WALL budget generous enough for a loaded CI
@@ -200,55 +201,76 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     }
   });
 
-  test('a shuffle no slice observes is harmless; a host-reading prefix keeps its own product', () => {
-    const store = graph(N, N);
-    const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().order().by(shuffle).sample(1)).count()");
-    expect(rows).toEqual([{ v: N }]);
-    expect(ms).toBeLessThan(BUDGET_MS);
+  test('a barrier or a host-reading prefix keeps its own product', () => {
     const small = graph(30, 30);
+    expect(count(small, "g.V().hasLabel('holder').local(__.V().order().by(shuffle).sample(1)).count()")).toBe(30);
     expect(count(small, "g.V().hasLabel('holder').as('h').local(__.V().where(neq('h')).sample(1)).count()")).toBe(30);
-    // A body-opening re-source has one row per origin, so a coupling barrier before the draw is evaluated once.
-    // The two youngest persons are ids (= ages) 32 and 34.
+    // The slice runs per origin over that origin's own copy of the graph. The two youngest persons are ids
+    // (= ages) 32 and 34.
     const youngest = "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').limit(2).sample(1)).values('age')";
     expect(count(small, `${youngest}.count()`)).toBe(30);
     expect(count(small, `${youngest}.is(gt(34)).count()`)).toBe(0);
   });
 
-  // What a once-evaluated prefix cannot be, the draw DECLINES rather than answering wrong or crossing the
-  // origins with the graph: a side-effect collector counts PER origin in the reference (6 × 6 on the
-  // modern graph, where one evaluation counts each vertex once), a draw or a sliced shuffle would be
-  // shared by every origin, and a coupling barrier after a fan-out sees R concatenated copies.
+
+  // What a once-evaluated prefix cannot be — a stream barrier, a branch, a label, a slice over a shuffle — is
+  // not the fast path's, and it FALLS THROUGH to GraphStep's cross join rather than declining: the reference
+  // streams R concatenated copies of the graph per origin (`GraphStep.java`), and the product route is that
+  // stream. Modern graph: out() gives marko/josh/peter R = 3/2/1 rows, every other origin none. A barrier in a
+  // union/choose/option arm or a repeat body sees all R copies (`BranchStep.java:168`), so a dedup there keeps
+  // one; an unproductive choice goes to `none` (`BranchStep.pickBranches`).
+  test.each([
+    ["g.V().local(__.out().V().dedup().sample(100)).count()", 18],
+    ["g.V().local(__.out().V().dedup().sample(2)).count()", 6],
+    ["g.V().local(__.V().order().by(shuffle).limit(2).sample(100)).count()", 12],
+    ["g.V().local(__.V().order().by(shuffle).limit(2).sample(1)).count()", 6],
+    ["g.V().local(__.V().as('x').sample(100).select('x')).count()", 36],
+    ["g.V().local(__.V().as('x').sample(1).select('x')).count()", 6],
+    ["g.V().has('name','marko').local(__.out().V().union(__.dedup()).sample(100)).count()", 6],
+    ["g.V().local(__.out().V().union(__.dedup(), __.identity()).sample(100)).count()", 54],
+    ["g.V().local(__.out().V().union(__.limit(1), __.identity()).sample(100)).count()", 39],
+    ["g.V().local(__.out().V().choose(__.constant(true), __.dedup(), __.identity()).sample(100)).count()", 18],
+    ["g.V().local(__.out().V().union(__.union(__.dedup())).sample(100)).count()", 18],
+    ["g.V().local(__.out().V().repeat(__.dedup()).times(1).sample(100)).count()", 18],
+    ["g.V().has('name','marko').property(list,'c', __.out().V().union(__.dedup().id()).sample(100)).values('c').count()", 6],
+    ["g.V().has('name','marko').local(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()", 10],
+    ["g.V().has('name','marko').flatMap(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()", 10],
+    ["g.V().local(__.out().V().choose(__.label()).option('person', __.limit(1)).option(none, __.identity()).sample(100)).count()", 15],
+    ["g.V().has('name','marko').local(__.out().V().choose(__.values('age')).option(29, __.dedup()).option(none, __.identity()).sample(100)).count()", 16],
+    // ... at depth: inside a union arm, a flatMap, after an outer label.
+    ["g.V().union(__.local(__.out().V().dedup().sample(100))).count()", 18],
+    ["g.V().flatMap(__.out().V().dedup().sample(100)).count()", 18],
+    ["g.V().as('a').local(__.out().V().dedup().sample(100)).select('a').dedup().count()", 3],
+    ["g.V().local(__.out().V().as('x').sample(100).select('x').dedup()).count()", 18],
+  ] as const)('falls through to the product: %s', (q, expected) => {
+    expect(count(seededStore(), q)).toBe(expected);
+  });
+
+  // A slice over a shuffle draws per origin: how many distinct vertices six origins land on is a range.
+  test.each([
+    ["g.V().local(__.V().order().by(shuffle).choose(__.label()).option('person', __.limit(1)).option(none, __.limit(1)).sample(5)).dedup().count()", 2, 6],
+    ["g.V().local(__.V().order().by(shuffle).union(__.limit(1)).sample(1)).dedup().count()", 1, 6],
+    ["g.V().local(__.V().order().by(shuffle).choose(__.constant(true), __.limit(1), __.limit(1)).sample(5)).dedup().count()", 1, 6],
+  ] as const)('falls through to the product, drawn per origin: %s', (q, low, high) => {
+    const seen = count(seededStore(), q);
+    expect(seen).toBeGreaterThanOrEqual(low);
+    expect(seen).toBeLessThanOrEqual(high);
+  });
+
+  // What the product route ITSELF does not lower yet stays a clear refusal — a side-effect collector, a coin
+  // (at any depth of the prefix), a reducer in a union arm, a branch() over options. Depth gaps of the
+  // general route, not of this fast path.
   test.each([
     "g.V().local(__.V().groupCount('x').sample(1)).cap('x')",
     "g.V().local(__.V().group('x').by(label).sample(2)).cap('x')",
     "g.V().property('c', __.V().groupCount('x').sample(1).id()).cap('x').select(values).unfold().sum()",
     "g.V().local(__.V().aggregate('a').sample(1)).cap('a')",
     "g.V().local(__.V().sideEffect(__.groupCount('a')).sample(1)).count()",
+    "g.V().local(__.V().where(__.aggregate('x')).sample(100)).count()",
     "g.V().local(__.V().coin(0.5).sample(1)).count()",
-    "g.V().local(__.V().order().by(shuffle).limit(2).sample(1)).count()",
-    "g.V().local(__.out().V().dedup().sample(2)).count()",
-    "g.V().local(__.V().as('x').sample(1).select('x')).count()",
-    // A barrier in a union/choose arm or a repeat body sees every start fed into it — the R concatenated
-    // copies — exactly as a top-level one does (`BranchStep.java:168`), so it couples them too.
-    "g.V().has('name','marko').local(__.out().V().union(__.dedup()).sample(100)).count()",
-    "g.V().local(__.out().V().union(__.dedup(), __.identity()).sample(100)).count()",
-    "g.V().local(__.out().V().union(__.limit(1), __.identity()).sample(100)).count()",
+    "g.V().local(__.V().where(__.coin(0.5)).sample(100)).count()",
     "g.V().local(__.out().V().union(__.count(), __.constant(0)).sample(100)).count()",
-    "g.V().local(__.out().V().choose(__.constant(true), __.dedup(), __.identity()).sample(100)).count()",
-    "g.V().local(__.out().V().union(__.union(__.dedup())).sample(100)).count()",
-    "g.V().local(__.out().V().repeat(__.dedup()).times(1).sample(100)).count()",
-    "g.V().has('name','marko').property(list,'c', __.out().V().union(__.dedup().id()).sample(100)).values('c').count()",
-    // An option() arm is a global child of its choose/branch (`BranchStep.getGlobalChildren`) — the same
-    // concatenated stream, one level down.
-    "g.V().has('name','marko').local(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()",
-    "g.V().has('name','marko').flatMap(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()",
-    "g.V().local(__.out().V().choose(__.label()).option('person', __.limit(1)).option(none, __.identity()).sample(100)).count()",
-    "g.V().has('name','marko').local(__.out().V().choose(__.values('age')).option(29, __.dedup()).option(none, __.identity()).sample(100)).count()",
     "g.V().local(__.out().V().branch(__.label()).option('person', __.dedup()).option(none, __.identity()).sample(100)).count()",
-    "g.V().local(__.V().order().by(shuffle).choose(__.label()).option('person', __.limit(1)).option(none, __.limit(1)).sample(5)).dedup().count()",
-    // ... and a slice there observes a shuffle every origin would otherwise share.
-    "g.V().local(__.V().order().by(shuffle).union(__.limit(1)).sample(1)).dedup().count()",
-    "g.V().local(__.V().order().by(shuffle).choose(__.constant(true), __.limit(1), __.limit(1)).sample(5)).dedup().count()",
   ])('declines %s', (q) => {
     expect(() => compile(q, {})).toThrow(/not supported/);
   });

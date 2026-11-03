@@ -54,8 +54,8 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   // post-fan-out stream drew n across ALL traversers: a property() body
   // `coalesce(values('nope'), constant(null)).sample(1)` removed the key from ONE of N vertices. At the
   // top level there is no origin and the partition is empty. A RE-SOURCED body's `__.V()…sample(n)` never
-  // reaches this window over the origins × graph product — it draws per origin (`reSourcedOnce`), or
-  // declines, unless its candidates read the host (then the product is the query's own row count).
+  // reaches this window over the origins × graph product where its prefix is origin-independent — it draws
+  // per origin (`reSourcedOnce`); any other prefix is GraphStep's product, the reference's own traversers.
   const origin = originOf(input.channels);
   if (step.name === 'sample') {
     if (bulked) return null;
