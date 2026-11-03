@@ -55,7 +55,6 @@ export const REASONS = {
   'oncreate-override': { kind: 'divergence', why: 'an onCreate map that changes a merge key is refused when the query compiles (eager error timing), though here the edge exists and onCreate never runs', cite: ['docs/feature-support-matrix.md', '| Error timing |'] },
   // ── defect ──
   'binary-as-string': { kind: 'defect', why: 'a `Binary(…)` literal answers its base64 text, not a binary value', cite: ['docs/outstanding-work.md', '(l3-binary)'] },
-  'edge-property-framing': { kind: 'defect', why: 'an edge `Property` is framed as a VertexProperty (synthetic `owner:key` id)', cite: ['docs/outstanding-work.md', '(l3-edge-prop-frame)'] },
   'call-traversal-params': { kind: 'defect', why: '`call(service, map, traversal)` ignores the traversal\'s parameter map', cite: ['docs/outstanding-work.md', '(l3-call-trav-params)'] },
   'select-mixed-by': { kind: 'defect', why: '`select(Pop.mixed, k).by(…)` over a repeated label answers the wrong values', cite: ['docs/outstanding-work.md', '(l3-select-mixed-by)'] },
   'multilabel-edge-label': { kind: 'defect', why: '`with(\'multilabel\')` frames an edge\'s own label as a String, not a Set', cite: ['docs/outstanding-work.md', '(l3-multilabel-edge-label)'] },
@@ -140,14 +139,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_injectXBinaryXAQIDXX_isXeqXBinaryXAQIDXXX',
     'g_injectXBinaryXemptyXX',
     'g_valuesXblobX_isXtypeOfXGType_BINARYXX',
-  ],
-  'edge-property-framing': [
-    'g_E_properties',
-    'g_E_propertiesXsinceX',
-    'g_E_propertiesXweightX',
-    'g_E_properties_multi_edges',
-    'g_E_properties_order',
-    'g_E_properties_order_byXdescX',
   ],
   'call-traversal-params': [
     'g_V_callXdc_map_traversalX',

@@ -8,6 +8,7 @@ import { storedCompareOn, valueSet } from './predicate.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RelFraming } from './framing.ts';
 import type { Elem } from '../elem.ts';
+import { propertyTag } from '../../gremlin/types.ts';
 
 // ---------- the PROPERTY shape: a traverser that IS a property, not its value ----------
 //
@@ -150,8 +151,9 @@ export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: re
  * subquery per row. Projecting it here would compute it for every property stream that never asks,
  * so it joins when `element()` lands rather than now.
  *
- * `vpid` is the property's own rowid on a vertex and NULL on an edge, which the framer turns into the
- * synthetic `owner:pk` — an edge Property has no identity of its own to give.
+ * `vpid` is the property's own rowid on a vertex and NULL on an edge — an edge Property has no identity
+ * of its own to give. Which CLASS a row frames as is not read off that null: the owner kind rides the
+ * result `Shape` (`{ kind: 'property', elem }`), a compile-time fact.
  */
 export function propertyPayload(input: Rel, elem: Elem, fresh: Minter): Rel {
   const { owner } = PROPERTIES[elem];
@@ -388,8 +390,9 @@ function propertyRow(rowid: Expr, ownerElem: Elem, fresh: Minter): { readonly re
  * payload vocabulary: the typed tree is SELF-DESCRIBING, so a property as a group key, a group member
  * or a record field all frame by that one rule at whatever depth they appear.
  *
- * `vpid` is NULL on an edge exactly as `propertyPayload` nulls it — a Gremlin edge `Property` has no
- * identity of its own to give, and the framer synthesises `owner:pk` for it.
+ * The node's TAG is the owner's class (`propertyTag`): `vertexProperty` or `property`, a compile-time
+ * constant, so the wire frames an edge's plain `Property` without inferring it from the row. `vpid` is
+ * NULL on an edge exactly as `propertyPayload` nulls it — a Gremlin edge `Property` has no identity.
  */
 export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr {
   const { rel, owner } = propertyRow(rowid, ownerElem, fresh);
@@ -409,7 +412,7 @@ export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr 
   };
   const only = make.project({
     id: fresh('pnp'), input: rel, channels: [], type: typeOf(meta('n', 'json', true)),
-    exprs: [['n', { kind: 'json-object', entries: [['t', compilerText('property')], ['v', payload]], binary: false }]],
+    exprs: [['n', { kind: 'json-object', entries: [['t', compilerText(propertyTag(ownerElem))], ['v', payload]], binary: false }]],
   });
   return { kind: 'scalar', plan: only };
 }

@@ -4,7 +4,7 @@ A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only wh
 note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
 Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
-**L3 conformance: <!-- L3:passing -->1,890<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,896<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -316,7 +316,7 @@ wrong number class.
 | `format()` over a multi-valued property | uses the first value (Java throws) |
 | A non-String text receiver | the error names the value (`encountered 1.`), not its Java class — a non-String computed label too (`Label traversal must produce a String, but got 29`); a list or map is named by its JSON, a datetime by its ISO text, a merge map's `T.label` by the value its `found: %s` names the class of |
 | Untyped JSON map keys | one total spelling rule; colliding keys render as `[key, value]` entries so nothing is lost; NaN/Infinity as name strings |
-| Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`; an edge endpoint is its bare id |
+| Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`, an edge's Property `{key, value}`; an edge endpoint is its bare id |
 | Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |
 | Map scope | `select(k)` (chain, child body, `where()`, a `math()`/`format()` variable) over a value stream that may hold stored Maps (`values('m')`) reads a `withSideEffect` constant, named collection or path label `k` where one exists — that scope WINS and no row is probed for a same-named key of a stored Map — else the row's own `k`, else drops the row; a merge follows the same rule in both spellings (`values('m').mergeV(__.select(k))` merges by the side effect exactly as `values('m').select(k).mergeV()`), while a `select(k)` merge argument or option arm over a stream of Maps (`inject([…]).mergeV().option(onCreate, __.select(k))`) reads the side effect where no Map can hold `k`, declines naming the collision where one MAY hold `k` beside a side effect `k`, and otherwise declines as an unsupported own-entry merge argument. Over a map (a `project()` record collapsed to one included): a key no row can hold is the named scope, and ANY key a row may hold beside a same-named side-effect constant or path label declines — even a key every row holds (a map literal's), since the key fact is a MAY set only — in every form (`select(k)`, `select(k, …)`, `by(select(k))`, `dedup(k)`, `math()`, `format()`) with the reason appended to the decline (`select('name') is ambiguous here: each Map may hold a key 'name' and a path label 'name' is also bound …`, one classifier `mapKeyCollision`), and beside a named collection keeps the entry and drops a row lacking it. `select(keys)` over a row that is no Map raises `does not have accessible keys` without the Java class; `values('m').unfold()` and `format()` over such a stream still decline |
 | Side-effect reads | a side-effect read sees the completed collection (`local(aggregate('a')).select('a').count(local)` is `6` each time) |

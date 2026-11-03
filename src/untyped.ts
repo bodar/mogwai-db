@@ -80,6 +80,7 @@ export function untyped(node: FrameNode): unknown {
       return untypedVertex(node.v as Record<string, any>);
     case 'edge':
       return untypedEdge(node.v as Record<string, any>);
+    case 'vertexProperty':
     case 'property':
       return untypedProperty(node.v as Record<string, any>);
     // A PATH (`PathJacksonSerializer`) → `{ labels, objects }`, one label set per position (empty —
@@ -133,10 +134,14 @@ function untypedMapKey(k: FrameNode): string {
     case 'vertex':
     case 'edge':
       return String((k.v as Record<string, unknown>).id);
-    case 'property': {
+    // A VertexProperty keys by its id, as an element does (a lossy landing without one falls back to its
+    // rendering); an edge's plain Property has no id, so it keys by its untyped rendering.
+    case 'vertexProperty': {
       const vpid = (k.v as Record<string, unknown>).vpid;
       return vpid == null ? JSON.stringify(untyped(k)) : String(vpid);
     }
+    case 'property':
+      return JSON.stringify(untyped(k));
     case 'list':
     case 'set':
     case 'map':
@@ -185,7 +190,8 @@ function untypedEdge(v: Record<string, any>): unknown {
 }
 
 /** A property payload (`{ vpid, owner, pk, pv, pvtype, pmeta }`, the tuple `framePropertyRow` reads) →
- *  `{ id?, key, value }`. The stored `(pv, pvtype)` pair reconstructs its value node via the one
+ *  `{ id, key, value }` for a VertexProperty and `{ key, value }` for an edge's plain Property (§17
+ *  *Untyped JSON result shapes*) — an edge row's `vpid` is always NULL, so its id is simply absent. The stored `(pv, pvtype)` pair reconstructs its value node via the one
  *  `valueNodeFromStored` rule the framer uses, so a typed/collection value renders correctly. */
 function untypedProperty(v: Record<string, any>): unknown {
   const out: Record<string, unknown> = { key: v.pk, value: untyped(valueNodeFromStored(v.pv, v.pvtype ?? null)) };

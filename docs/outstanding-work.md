@@ -69,9 +69,6 @@ refusal comes first: it is a production outage.
   - **`Binary(…)` is carried as its base64 String (l3-binary)** — `g.inject(Binary('AQID'))` answers
     `'AQID'`, and `values('blob').is(typeOf(GType.BINARY))` matches nothing: no binary value class exists
     end to end (literal, storage, GraphBinary `BINARY`). `data/Binary.feature`, 5 scenarios.
-  - **An edge `Property` frames as a VertexProperty (l3-edge-prop-frame)** — `g.E().properties()` sends a
-    VertexProperty with a synthetic `owner:key` id (`framePropertyRow`, `src/execute.ts`) where the
-    reference sends a `Property` (`propertyFrame` already exists). 6 scenarios.
   - **`call(service, map, traversal)` ignores the traversal's map (l3-call-trav-params)** —
     `call('tinker.degree.centrality', ['x':'y'], __.project('direction').by(constant(Direction.OUT)))`
     answers the default direction, and `call('--list', …, project('service')…)` lists every service. 2.

@@ -5,7 +5,7 @@ import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRo
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
-import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { hasSerializer, isCollectionType, propertyTag, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
@@ -187,10 +187,12 @@ function frameTypedNode(node: FrameNode): Buffer {
   if (node.t === 'vertex') return rowVertex(node.v);
   if (node.t === 'edge') return rowEdge(node.v);
   // A PROPERTY member, the element arm's third kind. `v` is the same `{vpid,owner,pk,pv,pvtype,pmeta}`
-  // tuple the top-level property stream and the property-membered list already frame, so this is one
-  // arm and not a payload vocabulary: `g.V().properties().group().by(…).by(__.tail())` puts a
-  // VertexProperty in a map value, and it frames by the rule that already framed it in a list.
-  if (node.t === 'property') return framePropertyRow(node.v);
+  // tuple the top-level property stream and the property-membered list already frame, so these are the
+  // same arm and not a payload vocabulary: `g.V().properties().group().by(…).by(__.tail())` puts a
+  // VertexProperty in a map value, and it frames by the rule that already framed it in a list. The tag
+  // names the class (`propertyTag`), so an edge's `Property` frames as one at every depth.
+  if (node.t === 'vertexProperty') return framePropertyRow(node.v, 'vertex');
+  if (node.t === 'property') return framePropertyRow(node.v, 'edge');
   // A PATH — its positions, each framed by this same rule, so an element position keeps its properties.
   if (node.t === 'path') return framePath(node.v.map(frameTypedNode));
   // A `T` TOKEN, which is a GraphBinary type of its own rather than the string it prints as — a
@@ -230,12 +232,17 @@ function typedMapBuffer(pairs: [FrameNode, FrameNode][]): Buffer {
 // gremlin-types) and frame the tree — a scalar leaf routes to frameValue via frameTypedNode.
 const frameStoredValue = (raw: any, vtype: string | null): Buffer => frameTypedNode(valueNodeFromStored(raw, vtype));
 
-// Frame one VertexProperty from a property-payload row ({vpid,owner,pk,pv,pvtype,pmeta}) —
-// shared by the top-level property stream and the two list-of-property paths. Edge Property
-// has no vpid → synthesise `owner:pk`. pmeta may arrive as a JSON string (list paths) or an
-// already-parsed object (row path); normalise both.
-const framePropertyRow = (x: any): Buffer =>
-  vertexPropertyBuffer(
+// Frame one property from a property-payload row ({vpid,owner,pk,pv,pvtype,pmeta}) — shared by the
+// top-level property stream, the property-membered list and the property node. The OWNER decides the
+// class and the caller STATES it (the stream's `Shape`, the list's `ListOf`, the node's tag) rather than
+// it being inferred from the row: a vertex's property is a VertexProperty — id, key, value, meta — and an
+// edge's is a plain `Property`, key and value only, which is what upstream sends for `g.E().properties()`
+// (`vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/map/Properties.feature`,
+// `prop[weight,d[0.5].d]`). A vertex row with no `vpid` (a lossy landing) keeps the synthetic `owner:pk`
+// id. pmeta may arrive as a JSON string (list paths) or an already-parsed object (row path).
+const framePropertyRow = (x: any, owner: Elem): Buffer => owner === 'edge'
+  ? propertyFrame(x.pk, frameStoredValue(x.pv, x.pvtype ?? null))
+  : vertexPropertyBuffer(
     x.vpid ?? `${x.owner}:${x.pk}`, x.pk, frameStoredValue(x.pv, x.pvtype ?? null),
     x.pmeta ? (typeof x.pmeta === 'string' ? JSON.parse(x.pmeta) : x.pmeta) : null,
   );
@@ -395,7 +402,7 @@ function scalarCellNode(v: any, row: any, type: ScalarType, at: string): FrameNo
 function listMemberNodes(items: any[], of: ListOf): FrameNode[] {
   switch (of.kind) {
     case 'elem': return items.map((it) => elementNode(it, of.elem));
-    case 'property': return items.map((it) => ({ t: 'property' as const, v: it }));
+    case 'property': return items.map((it) => ({ t: propertyTag(of.elem), v: it }));
     case 'scalar': {
       if (hasTypedMembers(of)) return items;
       const as = staticTypeOf(of.type);
@@ -453,8 +460,9 @@ function valueNodes(shape: Shape, rows: any[]): FrameNode[] {
     // A Map.Entry frames as a size-1 map (TINKERPOP-3104: a remote Map.Entry is a one-entry Map).
     case 'mapEntry': return rows.map((r) => ({ t: 'map', v: [[mapSideNode(r.mk, shape.keyOf), mapSideNode(r.mv, shape.valOf)]] }));
     case 'typedNode': return rows.map((r) => (r.node == null ? null : parseExactJson(r.node)));
-    // A VertexProperty with its real id + meta-properties (vpid null on edges → synthetic).
-    case 'property': return rows.map((r) => ({ t: 'property', v: r }));
+    // A property stream: a VertexProperty (its real id + meta-properties) or an edge's plain Property,
+    // as the shape's owner kind says.
+    case 'property': return rows.map((r) => ({ t: propertyTag(shape.elem), v: r }));
     case 'jsonbList': return rows.map((r) => listColumnNode(r.list, shape.items));
     case 'jsonbSet': return rows.map((r) => listColumnNode(r.list, shape.items, 'set'));
     case 'jsonbPath': return rows.map((r) => listColumnNode(r.list, shape.items, 'path'));

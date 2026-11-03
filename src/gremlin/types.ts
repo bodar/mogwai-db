@@ -539,16 +539,27 @@ export type FrameNode =
   | { t: 'list' | 'set'; v: FrameNode[] }
   | { t: 'map'; v: [FrameNode, FrameNode][] }
   // A PROPERTY is the element arm's third kind and rides the same way — `v` is the
-  // `{vpid, owner, pk, pv, pvtype, pmeta}` tuple `framePropertyRow` reads, already expanded by SQL. A
-  // VertexProperty IS an Element and an edge `Property` is not, but they frame identically here (the
-  // synthetic `owner:pk` id is the framer's, not the tree's), so one arm serves both.
-  | { t: 'vertex' | 'edge' | 'property'; v: Record<string, any> }
+  // `{vpid, owner, pk, pv, pvtype, pmeta}` tuple `framePropertyRow` reads, already expanded by SQL. The
+  // TAG names the class, because they are two GraphBinary types: a `vertexProperty` (a VertexProperty —
+  // an Element, with an id and meta-properties) or a `property` (an edge's plain `Property`: key and
+  // value only). `propertyTag` is the one spelling of that choice.
+  | { t: 'vertex' | 'edge' | PropertyTag; v: Record<string, any> }
   // A PATH — its positions in traversal order (labels-on-path deferred). A first-class GraphBinary type,
   // distinct from a list.
   | { t: 'path'; v: FrameNode[] }
   | { t: 'T'; v: TokenName }
   | { t: 'D'; v: DirectionName }
   | null | string | number | boolean | FrameNode[];
+
+/** A property node's tag — the class the OWNER decides. Upstream draws the line once: a vertex's
+ *  property is a `VertexProperty`, which IS an `Element`; an edge's is a plain `Property`, which is not
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/VertexProperty.java`,
+ *  `.../structure/Property.java`). */
+export type PropertyTag = 'vertexProperty' | 'property';
+
+/** The tag of a property owned by an `owner` element — the ONE spelling of the owner → class rule, read
+ *  by the SQL node builder (`propertyNode`) and the wire's own list/row framing alike. */
+export const propertyTag = (owner: 'vertex' | 'edge'): PropertyTag => (owner === 'vertex' ? 'vertexProperty' : 'property');
 
 /** The `T` tokens a map key can be. TinkerPop's enum, minus nothing — `id`/`label` come from an
  *  element and `key`/`value` from a VertexProperty (`PropertyMapStep.addIncludedOptions`). */

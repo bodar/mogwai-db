@@ -3751,7 +3751,7 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElem
     case 'record': return recordPayload(chain.rel, framing.fields, source, fresh);
     case 'property': return {
       rel: propertyPayload(chain.rel, framing.ownerElem, fresh),
-      shape: { kind: 'property' },
+      shape: { kind: 'property', elem: framing.ownerElem },
     };
     // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing

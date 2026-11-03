@@ -175,6 +175,11 @@ describe('every result shape renders as JSON', () => {
     for (const p of props) expect(p.id).toBeDefined();
   });
 
+  test('an edge\'s properties() → one { key, value } per Property, with no id', async () => {
+    const props = await jsonResults(await post('g.E(7).properties()'));
+    expect(props).toEqual([{ key: 'weight', value: 0.5 }]);
+  });
+
   test('iterate() → an empty array, and the write runs exactly ONCE', async () => {
     expect(await jsonResults(await post('g.addV("probe").property("name","once").iterate()'))).toEqual([]);
     expect(await jsonResults(await post('g.V().has("probe","name","once").count()'))).toEqual([1]);

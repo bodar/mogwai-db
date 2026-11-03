@@ -305,7 +305,9 @@ export type VariantShapeArm =
 export type Shape =
   | { kind: 'vertex' }
   | { kind: 'edge' }
-  | { kind: 'property' } // properties(): VertexProperty elements (vpid/owner/pk/pv/pmeta cols)
+  // properties(): one property per row (vpid/owner/pk/pv/pvtype/pmeta cols). `elem` is the OWNER kind,
+  // which decides the wire class — a vertex's VertexProperty or an edge's plain Property.
+  | { kind: 'property'; elem: Elem }
   // The ONE type channel at the render boundary (`type`), replacing the former `as?` xor
   // `perRowType?` pair — the same two-optionals-plus-implicit-third trap ScalarStream had.
   // perRow → frame each row by its own stored `vtype` column (values() of typed props; a

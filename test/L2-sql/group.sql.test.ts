@@ -265,7 +265,7 @@ describe('group / properties SQL', () => {
     const p = read('g.V().properties()');
     expect(p.sql).toMatch(/INNER JOIN vertex_properties \w+ ON|JOIN vertex_properties \w+ ON/);
     expect(p.sql).toMatch(/\bnode\b\s*=/);
-    expect(p.shape).toEqual({ kind: 'property' });
+    expect(p.shape).toEqual({ kind: 'property', elem: 'vertex' });
 
     // The key filter is an extra JOIN condition. A key written in the traversal text is a parsed
     // LITERAL, i.e. a constant the compiler already holds, so the lowering inlines it as a typed SQL
@@ -428,8 +428,8 @@ describe('group / properties SQL', () => {
     // over the edge stream above.
     expect(p.sql).toContain("json_object('t', 'map', 'v'");
     expect(p.sql).toContain('FROM vertex_properties');
-    // The group's members are the PROPERTIES themselves — the typed tree's third element kind.
-    expect(p.sql).toContain("'t', 'property'");
+    // The group's members are the PROPERTIES themselves — the typed tree's third element kind, tagged with the owner's class.
+    expect(p.sql).toContain("'t', 'vertexProperty'");
 
     const store = seededStore();
     const pairs = JSON.parse(run(store, gremlin)[0]!.map) as [any, any][];
@@ -444,7 +444,7 @@ describe('group / properties SQL', () => {
       [{ t: 'string', v: 'v' }, { t: 'int', v: 29 }],
     ] });
     // The VALUE is the VertexProperty itself — the typed tree's third element kind.
-    expect(markoAge![1]).toEqual({ t: 'property', v: { vpid: 2, owner: 1, pk: 'age', pv: 29, pvtype: 'int', pmeta: null } });
+    expect(markoAge![1]).toEqual({ t: 'vertexProperty', v: { vpid: 2, owner: 1, pk: 'age', pv: 29, pvtype: 'int', pmeta: null } });
   });
 
   // The NEIGHBOURING combinations of the two shapes above. Neither is in the corpus and both are

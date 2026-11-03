@@ -6,6 +6,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 import { grouped, run, seededStore } from '../support/harness.ts';
+import { Property, VertexProperty } from '../../src/io.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -112,6 +113,45 @@ test('a RECORD-keyed group over a PROPERTY stream frames VertexProperties (upstr
   // The `age` key kept its stored INT type through the record field — `getVertexPropertyKey` renders
   // it `d[29].i`, which it can only do because the value did not become a string on the way out.
   expect(keyed.get('marko-age->29').value).toBe(29);
+});
+
+// An EDGE's property is a plain `Property` — key and value, no id, no meta — not a VertexProperty
+// (`Properties.feature` `g_E_properties`: `prop[weight,d[0.5].d]`). The class is the OWNER's and is stated
+// by the lowering at every position a property reaches, so it holds as a stream, as a group value (a
+// list member) and as a groupCount KEY (a self-describing node), while a vertex's stays a VertexProperty.
+describe('the wire class of a property is its owner\'s', () => {
+  const store = seededStore();
+  const decoded = async (q: string) => decodeAll(executeQuery(store, q, {}));
+  const isEdgeProperty = (p: any) => p instanceof Property && !(p instanceof VertexProperty);
+
+  test.each([
+    ['a stream', 'g.E(7).properties()'],
+    ['a filtered, ordered stream', 'g.E().properties("weight").where(__.value().is(P.gt(0.1))).order().by(__.value())'],
+    ['inside local()', 'g.E().local(__.properties("weight"))'],
+  ])('%s of edge properties frames each as a Property', async (_, q) => {
+    const out = await decoded(q);
+    expect(out.length).toBeGreaterThan(0);
+    for (const p of out) expect(isEdgeProperty(p)).toBe(true);
+    expect(out[0].key).toBe('weight');
+  });
+
+  test('a group VALUE and a groupCount KEY frame an edge Property too', async () => {
+    const [grouped] = await decoded('g.E(7).properties().group().by(__.key())');
+    expect(isEdgeProperty(grouped.get('weight')[0])).toBe(true);
+    expect(grouped.get('weight')[0].value).toBe(0.5);
+    const [counted] = await decoded('g.E(7).properties().groupCount()');
+    const [key] = [...counted.keys()];
+    expect(isEdgeProperty(key)).toBe(true);
+    expect([key.key, key.value]).toEqual(['weight', 0.5]);
+  });
+
+  test('a vertex property stays a VertexProperty with its own id, at the same positions', async () => {
+    const [stream] = await decoded('g.V(1).properties("name")');
+    expect(stream).toBeInstanceOf(VertexProperty);
+    expect(typeof stream.id).toBe('number');
+    const [counted] = await decoded('g.V(1).properties("name").groupCount()');
+    expect([...counted.keys()][0]).toBeInstanceOf(VertexProperty);
+  });
 });
 });
 
