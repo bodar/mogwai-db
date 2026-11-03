@@ -6,9 +6,10 @@
 // `hasLabel` applied above the product. Measured on trunk: 1.8 s at 1k holders × 1k candidates, 28 s at 4k
 // and 169 s at 8k — passing every six-vertex fixture, a CPU wall only a production-sized DO reaches. The
 // prefix up to the draw is origin-INDEPENDENT, so it is now lowered ONCE (`reSourcedOnce`,
-// `src/compiler/rel/lower/reduction.ts`) and `sample(n)` draws n distinct numbered candidates per origin
-// (3n+4 draws with replacement, keeping the first n distinct, where 2n <= the origin's P rows; else a
-// RANDOM() rank of those P < 2n rows) through an equi-join: O(origins · n log n + candidates). A prefix that
+// `src/compiler/rel/lower/reduction.ts`): `sample(1)` draws ONE numbered candidate per origin through an
+// equi-join, O(origins + candidates); `sample(n > 1)` ranks each origin's (row, candidate) pairs by RANDOM()
+// and keeps n — origins × CANDIDATES, the traversers the reference streams (an owner's trade for deleting a
+// with-replacement walk), never origins × the whole graph. A prefix that
 // cannot be evaluated once (a barrier, a branch, a label, a draw, a collector) is not this fast path's: it
 // falls through to GraphStep's cross join, the reference's own origins × candidates traversers.
 //
@@ -135,17 +136,10 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(count(store, "g.V().hasLabel('person').sample(3).fold().count(local)")).toBe(3);
   });
 
-  test('sample(n > 1) is linear too — n DISTINCT picks per origin, each a candidate', () => {
-    const store = graph(N, N);
-    for (const q of [
-      "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(2)).count()",
-      "g.V().hasLabel('holder').flatMap(__.V().sample(2)).hasLabel('person','software','holder').count()",
-    ]) {
-      const { rows, ms } = timed(store, q);
-      expect(rows).toEqual([{ v: 2 * N }]);
-      expect(ms).toBeLessThan(BUDGET_MS);
-    }
+  test('sample(n > 1) — n DISTINCT picks per origin, each a candidate', () => {
     const small = graph(200, 200);
+    expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(2)).count()")).toBe(400);
+    expect(count(small, "g.V().hasLabel('holder').flatMap(__.V().sample(2)).hasLabel('person','software','holder').count()")).toBe(400);
     run(small, "g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person').sample(3).values('age'))");
     // Three values on every holder, three DIFFERENT persons' ages (the draw never repeats an index).
     expect(count(small, "g.V().hasLabel('holder').where(__.values('l').dedup().count().is(3)).count()")).toBe(200);
@@ -164,32 +158,26 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(count(modern, "g.V().local(__.out().V().hasLabel('person').where(__.out().dedup().count().is(gt(0))).sample(30)).count()")).toBe(18);
   });
 
-  test('sample(n) with n at least the candidates stays linear — each origin ranks its own rows', () => {
-    // 10 origins × M candidates, n ≥ M: q = M, the dense route — ranking the origin's own M rows, ~0.1 s.
-    const store = graph(10, N);
-    const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person','software').sample(100000)).count()");
-    expect(rows).toEqual([{ v: 10 * N }]);
-    expect(ms).toBeLessThan(BUDGET_MS);
-    // Every candidate at most once per origin, whichever route draws it: 2q > P ranks, 2q <= P draws.
+  test('sample(n) keeps every candidate at most once per origin, n below or beyond the candidates', () => {
+    expect(count(graph(10, 100), "g.V().hasLabel('holder').local(__.V().hasLabel('person','software').sample(100000)).count()")).toBe(1000);
     const small = graph(5, 40);
     expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(15).dedup()).count()")).toBe(75);
     expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(4).dedup()).count()")).toBe(20);
     expect(count(small, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(10).dedup()).count()")).toBe(50);
   });
 
-  test('sample(n) between √P and P stays linear — no origin ranks P rows to keep n << P of them', () => {
-    // The band a q²-vs-P route choice sent to the rank: 2000 origins × 8000 persons, sample(100) (q² > P) —
-    // 16M ranked (origin, candidate) pairs before (9.9 s measured), 200k drawn indexes now (~1 s).
-    const store = graph(2000, 16000);
-    const { rows, ms } = timed(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(100)).count()");
-    expect(rows).toEqual([{ v: 200_000 }]);
+  // A positioned body (`property()`) must not take GraphStep's product for n > 1: that re-mints a position over
+  // origins × the whole GRAPH before the candidate filter runs (32 s at 8k holders). Origins × candidates here.
+  test('property(list, k, __.V()…sample(2)…) over many holders and few candidates runs inside the budget', () => {
+    const store = graph(N, 8);
+    const { rows, ms } = timed(store, "g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person').sample(2).values('age')).count()");
+    expect(rows).toEqual([{ v: N }]);
     expect(ms).toBeLessThan(BUDGET_MS);
-    // ... and n DISTINCT per origin: a per-origin dedup removes none of them.
-    expect(count(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(100).dedup()).count()")).toBe(200_000);
+    expect(count(store, "g.V().hasLabel('holder').where(__.values('l').dedup().count().is(2)).count()")).toBe(N);
   });
 
   test('the draw is a uniform subset — every 2-subset of 4 persons about equally often', () => {
-    // Sparse (2·2 <= 4: draws with replacement, first two distinct) and dense (sample(3): 2·3 > 4, ranked).
+    // Each origin's (row, candidate) pairs ranked by RANDOM(): 4000 holders × 8 candidates is 32k pairs.
     const store = graph(4000, 8);
     for (const [n, subsets] of [[2, 6], [3, 4]] as const) {
       const lists = bare(run(store, `g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(${n}).values('name').order().fold())`));

@@ -2,7 +2,6 @@ import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import { withChannel } from '../../../channels.ts';
 import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp, type Expr } from '../../../rel/expr.ts';
-import { recursiveViolation } from '../../../rel/recursive.ts';
 import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -1582,24 +1581,20 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): 
  *
  * Otherwise origin `o`'s stream is R_o copies of the M candidates, and `sample(n)` is a uniform n-subset of
  * those P = R_o·M rows: `SampleGlobalStep` is a weighted reservoir and, with no `by()`, every weight is 1.
- * Each origin takes q = min(n, P) DISTINCT indexes in 1..P — index p names origin row ⌈p/M⌉ and candidate
- * ((p-1) mod M)+1, both equi-joined — by a draw whose cost is O(q log q), never O(P):
- * - `sample(1)`: one uniform index.
- * - SPARSE (2q <= P): k = 3q+4 indexes drawn WITH replacement (a walk of k levels per origin), and the
- *   first q DISTINCT ones in draw order. That is a uniform q-subset: the draw sequence's law is invariant
- *   under any relabelling of 1..P, and so are "at least q distinct" and "the first q distinct", so given
- *   at least q distinct the subset is uniform. The rare origin with fewer (k draws average 0.78P distinct
- *   at the band's edge, against q <= P/2) is redrawn by the dense route with fresh randomness — and a
- *   mixture of uniform draws is uniform.
- * - DENSE (2q > P, and the redraws): the origin's P (row, candidate) pairs ranked by RANDOM(), keeping
- *   rn <= n — `perOriginWindow`, fenced, as `sliceOp` draws a top-level sample. P < 2q, so P log P is
- *   O(q log q) here.
- * So an origin costs O(q log q) + M log M once — the rows it emits, never the P rows the reference streams
- * through it (a rank of P where q << P was the origins × candidates product again). Each index is
- * `((random() % P) + P) % P + 1`, never `abs(random()) % P` — SQLite's `abs(-9223372036854775808)` raises
- * "integer overflow" — computed once per walk row, and every relation that reads a draw twice is FENCED so
- * no join probe re-evaluates it. M = 0 seeds nothing: a sample of nothing is nothing. The picks' ORDER is
- * not the reservoir's, only their distribution — §17 "Unordered slices".
+ * - `sample(1)`: ONE index in 1..P per origin — index p names origin row ⌈p/M⌉ and candidate
+ *   ((p-1) mod M)+1, both equi-joined — so an origin costs O(1) + M log M once, never its P rows. The index
+ *   is `((random() % P) + P) % P + 1`, never `abs(random()) % P` — SQLite's `abs(-9223372036854775808)`
+ *   raises "integer overflow" — and is FENCED so no join probe redraws it.
+ * - `sample(n > 1)`: each origin's P (row, candidate) pairs ranked by RANDOM(), keeping rn <= n — the fenced
+ *   `perOriginWindow` `sliceOp` draws a top-level sample with, SQLite's natural uniform n-subset. That is the
+ *   P = origins × candidates traversers the reference streams, linear in them; an owner's trade against the
+ *   O(n log n)-per-origin with-replacement walk it replaces (measured at 1k origins × 1k candidates:
+ *   ~18 ms → ~0.3–0.7 s). It stays HERE rather than falling to GraphStep's product (`reSource`) because the
+ *   prefix is still evaluated once: in a positioned context (a `property()` body) the product re-mints its
+ *   position over origins × the whole GRAPH before the prefix's filter can run, origins × |V| rather than
+ *   origins × candidates (measured: 0.47 s → 32 s at 1k → 8k holders over 8 candidates).
+ * M = 0 seeds nothing: a sample of nothing is nothing. The picks' ORDER is not the reservoir's, only their
+ * distribution — §17 "Unordered slices".
  */
 export function reSourcedOnce(
   steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -1637,7 +1632,6 @@ export function reSourcedOnce(
   const numbered = rowNumberWindow(rooted.rel, K, rooted.rel.channels,
     { partitionBy: [], orderBy: position ? [{ expr: col(rooted.rel.id, position.col), dir: 'asc' }] : [] }, fresh);
   const candidates = fence(project(numbered, [...payload, int(K)]));
-  const size = make.aggregate({ id: fresh('sn'), input: candidates, channels: [], type: typeOf(int(M)), groupBy: [], aggs: [[M, count]] });
 
   // THE ORIGIN ROWS, numbered within their origin and fenced (the draw and the join back both read the
   // number), and each origin's row count R. Their bulk is promoted HERE, on the origins before any join,
@@ -1650,92 +1644,41 @@ export function reSourcedOnce(
     partitionBy: [col(parent.id, origin.col)], orderBy: arriving ? [{ expr: col(parent.id, arriving.col), dir: 'asc' }] : [],
   }, fresh);
   const rows = fence(project(ranked, [...carried, int(R)]));
-  const O = 'sample_o';
-  const perOrigin = make.aggregate({
-    id: fresh('sa'), input: rows, channels: [], type: typeOf(int(origin.col), int(RN)),
-    groupBy: [col(rows.id, origin.col)], aggs: [[RN, count]],
-  });
-  const sized = make.join({ id: fresh('sj'), left: perOrigin, right: size, join: 'cross', channels: [], type: typeOf(int(origin.col), int(RN), int(M)) });
+  const O = 'sample_o', RI = 'sample_ri', KI = 'sample_ki';
 
-  // One row per origin: (origin, M, P = R·M, q = min(n, P)), fenced so every draw below reads it as columns.
-  const n = countOf(draw);
-  const P = 'sample_p', Q = 'sample_q', I = 'sample_i', T = 'sample_t', D = 'sample_d', F = 'sample_f', C = 'sample_c';
-  const uniform = (p: Expr): Expr => bin('+', bin('%', bin('+', bin('%', { kind: 'call', fn: 'RANDOM', args: [] }, p), p), p), compilerInt(1));
-  const spanned = project(sized, [int(O), int(M), int(P), int(Q)], (name) => name === O ? col(sized.id, origin.col)
-    : name === P ? bin('*', col(sized.id, RN), col(sized.id, M))
-      : name === Q ? { kind: 'call', fn: 'min', args: [bin('*', col(sized.id, RN), col(sized.id, M)), compilerInt(n)] }
-        : col(sized.id, name));
-  const drawing = fence(make.filter({ id: fresh('sq'), input: spanned, channels: [], type: spanned.type, pred: bin('>', col(spanned.id, Q), compilerInt(0)) }));
-  const RI = 'sample_ri', KI = 'sample_ki';
-  /** An index's (origin row, candidate) coordinates. */
-  const locate = (picks: Rel, index: string): Rel => {
-    const offset = bin('-', col(picks.id, index), compilerInt(1));
+  /** `sample(1)`: ONE uniform index D in 1..P = R·M per origin that has rows to draw from, located as its
+   *  (origin row, candidate) coordinates. Both the span and the draw are fenced: the draw reads P three
+   *  times, and the join probes below must read the draw rather than redraw it. */
+  const drawOne = (): Rel => {
+    const P = 'sample_p', D = 'sample_d';
+    const size = make.aggregate({ id: fresh('sn'), input: candidates, channels: [], type: typeOf(int(M)), groupBy: [], aggs: [[M, count]] });
+    const perOrigin = make.aggregate({
+      id: fresh('sa'), input: rows, channels: [], type: typeOf(int(origin.col), int(RN)),
+      groupBy: [col(rows.id, origin.col)], aggs: [[RN, count]],
+    });
+    const sized = make.join({ id: fresh('sj'), left: perOrigin, right: size, join: 'cross', channels: [], type: typeOf(int(origin.col), int(RN), int(M)) });
+    const spanned = project(sized, [int(O), int(M), int(P)], (name) => name === O ? col(sized.id, origin.col)
+      : name === P ? bin('*', col(sized.id, RN), col(sized.id, M)) : col(sized.id, name));
+    const drawing = fence(make.filter({ id: fresh('sq'), input: spanned, channels: [], type: spanned.type, pred: bin('>', col(spanned.id, P), compilerInt(0)) }));
+    const random: Expr = { kind: 'call', fn: 'RANDOM', args: [] };
+    const span = col(drawing.id, P);
+    const picks = fence(project(drawing, [int(O), int(M), int(D)], (name) => name === D
+      ? bin('+', bin('%', bin('+', bin('%', random, span), span), span), compilerInt(1)) : col(drawing.id, name)));
+    const offset = bin('-', col(picks.id, D), compilerInt(1));
     return project(picks, [int(O), int(RI), int(KI)], (name) => name === RI ? bin('+', bin('/', offset, col(picks.id, M)), compilerInt(1))
       : name === KI ? bin('+', bin('%', offset, col(picks.id, M)), compilerInt(1)) : col(picks.id, name));
   };
-  /** THE RANKED ORIGINS: each `wide` origin's P = R·M (row, candidate) pairs ranked by RANDOM() — the FENCED
-   *  `perOriginWindow` `sliceOp` draws a top-level `sample(n)` with — keeping rn <= n. */
-  const rankedPairs = (wide: Rel): Rel => {
-    const spread = make.join({
-      id: fresh('sj'), left: wide, right: rows, join: 'inner', channels: [], type: typeOf(...wide.type.cols, ...rows.type.cols),
-      on: eq(col(rows.id, origin.col), col(wide.id, O)),
-    });
+  /** `sample(n > 1)`: each origin's R·M (row, candidate) pairs ranked by RANDOM(), keeping rn <= n — the FENCED
+   *  `perOriginWindow` `sliceOp` draws a top-level `sample(n)` with, SQLite's natural uniform n-subset. */
+  const rankPairs = (): Rel => {
     const pairs = make.join({
-      id: fresh('sj'), left: spread, right: candidates, join: 'cross', channels: [], type: typeOf(...spread.type.cols, ...candidates.type.cols),
+      id: fresh('sj'), left: rows, right: candidates, join: 'cross', channels: [], type: typeOf(...rows.type.cols, ...candidates.type.cols),
     });
-    const keyed = project(pairs, [int(O), int(RI), int(KI)], (name) => col(pairs.id, name === RI ? R : name === KI ? K : name));
+    const keyed = project(pairs, [int(O), int(RI), int(KI)], (name) => col(pairs.id, name === O ? origin.col : name === RI ? R : K));
     return perOriginWindow(keyed, col(keyed.id, O), [RANDOM_ORDER], { scope: 'global', offset: 0, limit: n }, fresh, true);
   };
-
-  const chosen = ((): Rel | undefined => {
-    // `sample(1)`: one uniform index per origin, fenced so the join probes read it rather than redraw it.
-    if (n === 1) return locate(fence(project(drawing, [int(O), int(M), int(D)], (name) => name === D ? uniform(col(drawing.id, P)) : col(drawing.id, name))), D);
-    const sparseBand = (pick: boolean): Expr => bin(pick ? '<=' : '>', bin('*', col(drawing.id, Q), compilerInt(2)), col(drawing.id, P));
-    const sparse = make.filter({ id: fresh('sq'), input: drawing, channels: [], type: drawing.type, pred: sparseBand(true) });
-    // THE WALK: k = 3q+4 levels per sparse origin, one index drawn with replacement at each.
-    const level = [int(O), int(M), int(P), int(Q), int(I), int(T)];
-    const seed = project(sparse, level, (name) => name === I ? compilerInt(1) : name === T ? uniform(col(sparse.id, P)) : col(sparse.id, name));
-    const walkId = fresh('sw');
-    const walk = make.recursive({
-      id: walkId, name: `sw_${walkId}`, channels: [], type: typeOf(...level), cols: level.map((column) => column.name), seed,
-      step: (self) => {
-        const deeper = make.filter({
-          id: fresh('sl'), input: self, channels: [], type: self.type,
-          pred: bin('<', col(self.id, I), bin('+', bin('*', col(self.id, Q), compilerInt(3)), compilerInt(4))),
-        });
-        return project(deeper, level, (name) => name === I ? bin('+', col(deeper.id, I), compilerInt(1))
-          : name === T ? uniform(col(deeper.id, P)) : col(deeper.id, name));
-      },
-    });
-    if (walk.kind === 'recursive' && recursiveViolation(walk)) return undefined;
-    // Each distinct index at its FIRST draw — fenced: it is read twice, and both reads must see one walk.
-    const firsts = fence(make.aggregate({
-      id: fresh('sa'), input: walk, channels: [], type: typeOf(int(O), int(M), int(Q), int(T), int(F)),
-      groupBy: [col(walk.id, O), col(walk.id, M), col(walk.id, Q), col(walk.id, T)], aggs: [[F, { kind: 'agg', fn: 'min', args: [col(walk.id, I)] }]],
-    }));
-    const distinct = make.aggregate({
-      id: fresh('sa'), input: firsts, channels: [], type: typeOf(int(O), int(Q), int(C)),
-      groupBy: [col(firsts.id, O), col(firsts.id, Q)], aggs: [[C, count]],
-    });
-    const complete = fence(make.filter({ id: fresh('sq'), input: distinct, channels: [], type: distinct.type, pred: bin('>=', col(distinct.id, C), col(distinct.id, Q)) }));
-    // The first q distinct, in draw order, of each origin that drew q.
-    const numbered = rowNumberWindow(firsts, I, [], { partitionBy: [col(firsts.id, O)], orderBy: [{ expr: col(firsts.id, F), dir: 'asc' }] }, fresh);
-    const firstQ = make.filter({ id: fresh('sq'), input: numbered, channels: [], type: numbered.type, pred: bin('<=', col(numbered.id, I), col(numbered.id, Q)) });
-    const kept = make.join({
-      id: fresh('sj'), left: firstQ, right: complete, join: 'semi', channels: [], type: firstQ.type,
-      on: eq(col(complete.id, O), col(firstQ.id, O)),
-    });
-    // The dense origins, and the sparse ones whose k draws held fewer than q distinct, are ranked afresh.
-    const dense = make.filter({ id: fresh('sq'), input: drawing, channels: [], type: drawing.type, pred: sparseBand(false) });
-    const redrawn = make.join({
-      id: fresh('sj'), left: sparse, right: complete, join: 'anti', channels: [], type: sparse.type,
-      on: eq(col(complete.id, O), col(sparse.id, O)),
-    });
-    const wide = make.union({ id: fresh('su'), inputs: [dense, redrawn], all: true, channels: [], type: drawing.type });
-    const sparsePicks = locate(kept, T);
-    return make.union({ id: fresh('su'), inputs: [sparsePicks, rankedPairs(wide)], all: true, channels: [], type: sparsePicks.type });
-  })();
-  if (!chosen) return undefined;
+  const n = countOf(draw);
+  const chosen = n === 1 ? drawOne() : rankPairs();
   const row = make.join({
     id: fresh('sx'), left: chosen, right: rows, join: 'inner', ordered: true, channels: [],
     type: typeOf(...chosen.type.cols, ...rows.type.cols),
