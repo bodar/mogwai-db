@@ -1079,6 +1079,14 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
   → ref [1, v2, v3]): needs a VARIANT (element-or-value) per-row stream framing that continues through followers —
   element-requiring steps apply to element rows; shape-agnostic steps (count/fold/dedup/as/select) carry the
   `{t,v}`/element node. Also the clean answer for S9 re-land item 5.
+- ✅ **V2 LANDED (bb83c512, cc78f7ec, 2fa1152a, 2026-11-03) — a per-row `{t,v}` map/list scalar re-enters the
+  map/list readers** `count(local)`, `limit`/`range`/`skip`/`tail(local)`, `select(keys|values)` and multi-key
+  `select`, chain and child (`map()`/`local()`/`where()` bodies). `perRowCollectionStep` (`src/compiler/rel/lower.ts`)
+  splits ONE hard-fenced relation by the stored tag into `mapTail`/`listTail`/scalar arms merged via `mergeArms`
+  (linear, no join between arms); `select(Column)` over a non-Map row is a WHERE raise; the fence now also stands
+  downstream of a closed `emit()`/`until()` walk (`isSelfContained`, `src/rel/walk.ts`). Remains: nothing for this
+  item — `unfold()` and `format()` over such a stream still decline by design (an entry has no node encoding to merge
+  on; §17 "Map-valued property stream").
 - **Prereq V2 → `per-row-map-reenters-map-tail`.** A per-row `{t,v}` map/list scalar re-enters the map/list followers
   (`unfold`, `select(keys)`, `count(local)`, `select(k1,k2)`, `format`, `mergeV`): decode a stored or scope-read
   `{t,v}` map/list into the map/list framing so `g.V().values('m').unfold()` and siblings answer. Unblocks the
