@@ -448,7 +448,12 @@ F last. Each step lands `mise run ci` green on its own.
   (`test/compiler/rooted-sample-scale.exec.test.ts`): the `declines %s` table becomes answer pins on modern with
   `sample(100)` (measured unsampled: 18/54/39/10/6 — RUN each); collector rows stay declines; delete the timed
   shuffle budget. ≈−60.
-- **A2 cleanup-sample-n1-only** (after A1) — the once-path takes `sample(1)` only; delete the n>1 draw (`chosen`
+- ✅ **A2 cleanup-sample-n1-only** — LANDED `3bf01eda`: the once-path's n>1 with-replacement recursive walk is
+  deleted; `sample(1)` keeps its one-index draw, `sample(n>1)` ranks each origin's (row, candidate) pairs by
+  RANDOM() and keeps rn ≤ n inside `reSourcedOnce` (`lower/reduction.ts`, the `perOriginWindow` sliceOp) — still
+  prefix-once, origins×candidates, not GraphStep's product (measured 67× super-linear in a positioned body). Three
+  n>1 budget tests replaced by one property(list) scaling pin; cardinality/uniformity pins kept. No baseline moved.
+  Remains: nothing. Original spec: the once-path takes `sample(1)` only; delete the n>1 draw (`chosen`
   n>1 body, `rankedPairs`, recursive walk, `locate`'s n>1). n>1 pays the product + per-origin RANDOM window
   (uniform). Delete the three n>1 budget tests, keep small-size cardinality/uniformity pins. ≈−95, −6 per-row terms.
 - **A3 cleanup-sample-docs** (after A2) — `reSourcedOnce` doc to ≈12 lines; fix `sliceOp` and `collectsSideEffect`
