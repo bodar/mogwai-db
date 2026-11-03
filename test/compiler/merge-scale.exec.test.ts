@@ -144,6 +144,12 @@ describe(`a merge search over ${N} traversers seeks its most selective criterion
     // A composite key whose every ENTRY hundreds of maps share; a batch of two key sets, one containing the other.
     [`g.inject(${maps((i) => `[x:${i % 20},y:${Math.floor(i / 20) % 20},z:${Math.floor(i / 400)}]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
     [`g.inject(${maps((i) => i % 2 ? `[a:${i % 20},b:${Math.floor(i / 20)},e:${i}]` : `[a:${i % 20},b:${Math.floor(i / 20) + N}]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
+    // KEY NAMES THAT ARE DATA: N distinct key sets, each key shared by N^(2/3) of them — the containment
+    // between key sets is asked of the DISTINCT key sets and kept exact, inside the guard's one statement
+    // (crossing every tuple with each key set sharing its rarest key was a 52 MB bind at 1k maps and a bare
+    // `string or blob too big` at 8k); and half the maps' key sets strictly inside the other half's.
+    [`g.inject(${maps((i) => `[a${i % 19}:1,b${Math.floor(i / 19) % 19}:1,c${Math.floor(i / 361)}:1]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
+    [`g.inject(${maps((i) => i % 2 ? `[a${i % 50}:1,b${i}:1]` : `[a${(i + 1) % 50}:1,b${i + 1}:2,c:1]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
     // N edges out of one hub, re-upserted.
     [`g.inject(${maps((i) => `[(T.label):'x',(Direction.OUT):${N + 1},(Direction.IN):${i}]`)}).mergeE().count()`, () => shaped(N, () => [], true), N, "g.E().count()", N],
   ] as const) {
@@ -154,6 +160,8 @@ describe(`a merge search over ${N} traversers seeks its most selective criterion
       expect(run(graphed, check).map((row: any) => row.v)).toEqual([read]);
       expect(innerScans(graphed, statements)).toEqual([]);
       expect(ms).toBeLessThan(BUDGET_MS);
+      // No value crossing a statement seam outgrows the traversers: a few hundred bytes each, never a cross.
+      expect(Math.max(...statements.flatMap(({ binds }) => binds.map((bind) => (typeof bind === 'string' ? bind.length : 0))))).toBeLessThan(N * 1024);
     });
   }
 });
@@ -252,6 +260,8 @@ describe('a map-valued merge guard finds a later map an earlier creation contain
     'g.inject([a:1,b:2],[:]).mergeV().count()',
     "g.inject(['':1,b:2],['':1]).mergeV().count()",
     "g.inject([a:1,(T.label):'x'],[a:1]).mergeV().count()",
+    // Contained in a LONGER key set its rarest key finds, among key sets that only share a key with it.
+    'g.inject([a:1,b:1,e:1],[b:1,c:1,d:1],[b:1,c:2],[a:1,b:1]).mergeV().count()',
   ]) test(`refuses: ${q}`, () => expect(() => run(new GraphStore(new BunSqlite(':memory:')), q)).toThrow(later));
   for (const [q, vertices] of [
     ['g.inject([a:1],[a:1,b:2]).mergeV().count()', 2],
@@ -259,9 +269,11 @@ describe('a map-valued merge guard finds a later map an earlier creation contain
     ['g.inject([:],[a:1]).mergeV().count()', 2],
     ['g.inject([a:1,b:2,c:3],[c:3,a:2]).mergeV().count()', 2],
     ['g.inject([a:1],[a:1]).mergeV().count()', 1],
+    // `[a,b]`'s rarest key `b` is held by the longer `[b,c,d]`, which lacks `a` — a candidate, not contained.
+    ['g.inject([b:1,c:1,d:1],[a:1,c:1,d:1],[a:1,c:1,e:1],[a:1,b:1]).mergeV().count()', 4],
   ] as const) test(`answers: ${q}`, () => {
     const store = new GraphStore(new BunSqlite(':memory:'));
-    expect(run(store, q).map((row: any) => row.v)).toEqual([2]);
+    expect(run(store, q).map((row: any) => row.v)).toEqual([q.match(/\[[^\]]*\]/g)!.length]);
     expect(run(store, 'g.V().count()').map((row: any) => row.v)).toEqual([vertices]);
   });
 });

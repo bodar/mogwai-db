@@ -3635,8 +3635,10 @@ const MERGE_CK = 'g_ck', MERGE_FIRST = 'g_first', MERGE_LAST = 'g_last';
  *    crossed with the key sets present that it contains — not every key set, which was N shapes for N maps
  *    of different keys — and meets the later tuple on `(key set, signature)`: the WHOLE equi key, so a
  *    batch on a composite natural key (`[tenant, region, sku]`) meets one earlier tuple per later one, however
- *    many share each entry. Which key sets a key set is contained in is asked once over the DISTINCT key
- *    sets, seeking by its rarest key (`containing`). An entry is `(key, family, value)` with a `Number`
+ *    many share each entry. Its own key set it meets directly; which LONGER key sets a key set is contained
+ *    in is asked once over the DISTINCT key sets, seeking by its rarest key and kept EXACT (`containing`) —
+ *    a superset there would be crossed with every tuple. All of it is spooled inside the guard's one
+ *    statement: a retained cross would leave SQLite as one bind the size of the cross. An entry is `(key, family, value)` with a `Number`
  *    normalised to REAL (`typedValueEq` meets `30` and `30.0`; the REAL form is a SUPERSET of its equality,
  *    so it only narrows), a signature the sorted entries — equal entry sets spell one text. A later map with
  *    no searched entry has the empty key set, contained in every one. An `onCreate` key is left out of
@@ -3682,48 +3684,73 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
   const membersOf = (keys: Expr, fresh: Minter): Rel =>
     make.explode({ id: fresh('ex'), expr: keys, channels: [], as: { value: 'g_kv' }, type: typeOf(text('g_kv')) });
   /**
-   * `(g_ks, g_kl)` for every key set `g_ks` present and every key set `g_kl` present that it CONTAINS —
-   * each DISTINCT key set seeks the key sets holding its RAREST key (the fewest key sets hold it, ties to
-   * the lowest), the empty key set every one through its `''` row. It may admit a key set that only shares
-   * that key: a superset of the containment, so it only narrows — the signature join that reads it decides.
+   * A relation computed ONCE inside the one statement that reads it — a fenced CTE (`AS MATERIALIZED`), not
+   * a retained binding. What the guard derives is read by the guard's statement alone, so retaining it
+   * would only carry it out of SQLite as one JSON bind and back in: a bind whose size is the derived
+   * relation's, which is how a cross of tuples with key sets became a 52 MB value at 1k maps.
+   */
+  const spool = (rel: Rel, fresh: Minter, bind: Binder): Rel =>
+    bind(make.materialize({ id: fresh('m'), input: rel, channels: [], type: rel.type, fenced: true }));
+  /**
+   * `(g_ks, g_kl)` for every key set `g_kl` present and every LARGER key set `g_ks` present that CONTAINS it
+   * — exactly the strict containment between the DISTINCT key sets, so what it returns is bounded by the
+   * data's own containment, never by how many key sets share a key. Each key set seeks the strictly
+   * LONGER key sets holding its RAREST key (the fewest key sets hold it, ties to the lowest; the empty
+   * key set every one through its `''` row) and keeps those holding every one of its keys. Equal key sets
+   * are not here: `pairs` meets them on the whole key set directly.
    */
   const containing = (keyed: Rel, fresh: Minter, bind: Binder): Rel => {
+    const LEN = 'g_ksn', SUB_LEN = 'g_kln', MEMBER = 'g_kv', PICK = 'g_pick';
+    const length = (keys: Expr): Expr => ({ kind: 'call', fn: 'json_array_length', args: [keys] });
     const source = refOf(keyed, fresh);
-    const sets = bind(make.distinct({
-      id: fresh('d'), channels: [], type: typeOf(text(KEYS)),
-      input: make.project({ id: fresh('p'), input: source, channels: [], type: typeOf(text(KEYS)), exprs: [[KEYS, col(source.id, KEYS)]] }),
-    }), true);
+    const sets = spool(make.distinct({
+      id: fresh('d'), channels: [], type: typeOf(text(KEYS), meta(LEN, 'int')),
+      input: make.project({ id: fresh('p'), input: source, channels: [], type: typeOf(text(KEYS), meta(LEN, 'int')),
+        exprs: [[KEYS, col(source.id, KEYS)], [LEN, length(col(source.id, KEYS))]] }),
+    }), fresh, bind);
     const held = (): Rel => {
       const own = refOf(sets, fresh);
-      const members = make.explode({ id: fresh('ex'), input: own, expr: col(own.id, KEYS), channels: [], as: { value: 'g_kv' }, type: typeOf(text(KEYS), text('g_kv')) });
+      const type = typeOf(text(KEYS), meta(LEN, 'int'), text(MEMBER));
+      const members = make.explode({ id: fresh('ex'), input: own, expr: col(own.id, KEYS), channels: [], as: { value: MEMBER }, type });
       const bare = refOf(sets, fresh);
-      return make.union({ id: fresh('u'), all: true, channels: [], type: members.type, inputs: [members,
-        make.project({ id: fresh('p'), input: bare, channels: [], type: members.type, exprs: [[KEYS, col(bare.id, KEYS)], ['g_kv', compilerText('')]] })] });
+      return make.union({ id: fresh('u'), all: true, channels: [], type, inputs: [members,
+        make.project({ id: fresh('p'), input: bare, channels: [], type, exprs: [...keep(bare), [MEMBER, compilerText('')]] })] });
     };
-    const holders = bind(held(), true);
+    const holders = spool(held(), fresh, bind);
     const tallied = refOf(holders, fresh);
-    const counts = bind(make.aggregate({
-      id: fresh('ag'), input: tallied, channels: [], type: typeOf(text('g_kv'), meta('g_n', 'int')),
-      groupBy: [col(tallied.id, 'g_kv')], aggs: [['g_n', { kind: 'agg', fn: 'count', args: [] }]],
-    }), true);
+    const counts = spool(make.aggregate({
+      id: fresh('ag'), input: tallied, channels: [], type: typeOf(text(MEMBER), meta('g_n', 'int')),
+      groupBy: [col(tallied.id, MEMBER)], aggs: [['g_n', { kind: 'agg', fn: 'count', args: [] }]],
+    }), fresh, bind);
     const own = refOf(sets, fresh);
     const mine = membersOf(col(own.id, KEYS), fresh);
     const tally = refOf(counts, fresh);
-    const hit = make.filter({ id: fresh('f'), input: tally, channels: [], type: tally.type, pred: eq(col(tally.id, 'g_kv'), col(mine.id, 'g_kv')) });
+    const hit = make.filter({ id: fresh('f'), input: tally, channels: [], type: tally.type, pred: eq(col(tally.id, MEMBER), col(mine.id, MEMBER)) });
     const carried: Expr = { kind: 'scalar', plan: make.project({ id: fresh('p'), input: hit, channels: [], type: typeOf(meta('g_n', 'int')), exprs: [['g_n', col(hit.id, 'g_n')]] }) };
     const rarest = make.sort({ id: fresh('so'), input: mine, channels: [], type: mine.type,
-      terms: [{ expr: { kind: 'call', fn: 'coalesce', args: [carried, compilerInt(0)] }, dir: 'asc' }, { expr: col(mine.id, 'g_kv'), dir: 'asc' }] });
-    const pick = make.limit({ id: fresh('li'), channels: [], type: typeOf(text('g_pick')), count: compilerInt(1),
-      input: make.project({ id: fresh('p'), input: rarest, channels: [], type: typeOf(text('g_pick')), exprs: [['g_pick', col(rarest.id, 'g_kv')]] }) });
-    const picked = bind(make.project({
-      id: fresh('p'), input: own, channels: [], type: typeOf(text(SUB), text('g_pick')),
-      exprs: [[SUB, col(own.id, KEYS)], ['g_pick', { kind: 'call', fn: 'coalesce', args: [{ kind: 'scalar', plan: pick }, compilerText('')] }]],
-    }), true);
+      terms: [{ expr: { kind: 'call', fn: 'coalesce', args: [carried, compilerInt(0)] }, dir: 'asc' }, { expr: col(mine.id, MEMBER), dir: 'asc' }] });
+    const pick = make.limit({ id: fresh('li'), channels: [], type: typeOf(text(PICK)), count: compilerInt(1),
+      input: make.project({ id: fresh('p'), input: rarest, channels: [], type: typeOf(text(PICK)), exprs: [[PICK, col(rarest.id, MEMBER)]] }) });
+    const picked = spool(make.project({
+      id: fresh('p'), input: own, channels: [], type: typeOf(text(SUB), meta(SUB_LEN, 'int'), text(PICK)),
+      exprs: [[SUB, col(own.id, KEYS)], [SUB_LEN, col(own.id, LEN)], [PICK, { kind: 'call', fn: 'coalesce', args: [{ kind: 'scalar', plan: pick }, compilerText('')] }]],
+    }), fresh, bind);
     const sub = refOf(picked, fresh), sup = refOf(holders, fresh);
-    const met = make.join({ id: fresh('j'), left: sub, right: sup, join: 'inner', channels: [], on: eq(col(sup.id, 'g_kv'), col(sub.id, 'g_pick')),
+    const candidate = make.join({ id: fresh('j'), left: sub, right: sup, join: 'inner', channels: [],
+      on: and(eq(col(sup.id, MEMBER), col(sub.id, PICK)), { kind: 'binary', op: '>', left: col(sup.id, LEN), right: col(sub.id, SUB_LEN) }),
       type: typeOf(...sub.type.cols, ...sup.type.cols) });
+    // Exact: no key of the smaller set that the larger one does not hold.
+    const missing = ((): Rel => {
+      const members = membersOf(col(candidate.id, SUB), fresh);
+      const other = refOf(holders, fresh);
+      const found = make.filter({ id: fresh('f'), input: other, channels: [], type: other.type,
+        pred: and(eq(col(other.id, KEYS), col(candidate.id, KEYS)), eq(col(other.id, MEMBER), col(members.id, MEMBER))) });
+      return make.filter({ id: fresh('f'), input: members, channels: [], type: members.type, pred: { kind: 'exists', plan: found, negated: true } });
+    })();
+    const contained = make.filter({ id: fresh('f'), input: candidate, channels: [], type: candidate.type, pred: { kind: 'exists', plan: missing, negated: true } });
+    // DISTINCT: a key set holding the key `''` meets the empty key set's `''` pick twice.
     return make.distinct({ id: fresh('d'), channels: [], type: typeOf(text(KEYS), text(SUB)),
-      input: make.project({ id: fresh('p'), input: met, channels: [], type: typeOf(text(KEYS), text(SUB)), exprs: [[KEYS, col(met.id, KEYS)], [SUB, col(met.id, SUB)]] }) });
+      input: make.project({ id: fresh('p'), input: contained, channels: [], type: typeOf(text(KEYS), text(SUB)), exprs: [[KEYS, col(contained.id, KEYS)], [SUB, col(contained.id, SUB)]] }) });
   };
   return {
     columns: (rel) => fixed.flatMap((key, i) => [
@@ -3736,20 +3763,21 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
       // candidate and `couldMatch` decides alone: the pair test stays exact, it simply has no seek.
       if (!maskCols.length && !map) return { left: earlier, right: later, on: eq(compilerInt(1), compilerInt(1)) };
       const arity = fixed.map((key) => key.key(earlier.id).length);
-      // Each tuple's key set and signature, computed once and read by both sides.
+      // Each tuple's key set and signature, computed once and read by both sides — and by `containing`, so
+      // the earlier tuples are decoded once for the statement.
       let keyed: Rel = earlier;
       if (map) {
         const source = refOf(earlier, fresh);
-        keyed = bind(make.project({
+        keyed = spool(make.project({
           id: fresh('p'), input: source, channels: [], type: typeOf(...source.type.cols, text(KEYS), text(SIG)),
           exprs: [...keep(source),
             [KEYS, overEntries(col(source.id, MAP_COL), 'json_group_array', ENTRY_KEY, '[]', fresh)],
             [SIG, overEntries(col(source.id, MAP_COL), 'group_concat', ENTRY, '', fresh)]],
-        }), true);
+        }), fresh, bind);
       }
       let left: Rel = map ? refOf(keyed, fresh) : earlier;
       if (maskCols.length) {
-        const source = refOf(earlier, fresh);
+        const source = refOf(keyed, fresh);
         const maskType = typeOf(...maskCols.map((name) => ({ ...earlier.type.cols.find((column) => column.name === name)!, name: `m_${name}` })));
         const masks = make.distinct({
           id: fresh('d'), channels: [], type: maskType,
@@ -3768,20 +3796,27 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
       }
       const right: Rel = map ? refOf(keyed, fresh) : later;
       if (map) {
-        // Each earlier tuple × each present key set it contains, its entries restricted to that key set.
+        // Each earlier tuple under its OWN key set (its signature as computed), plus each present key set
+        // it strictly contains, its entries restricted to that key set.
+        const base = maskCols.length ? spool(left, fresh, bind) : keyed;
+        const whole = refOf(base, fresh);
+        const own = make.project({ id: fresh('p'), input: whole, channels: [], type: typeOf(...whole.type.cols, text(SUB), text(SUB_SIG)),
+          exprs: [...keep(whole), [SUB, col(whole.id, KEYS)], [SUB_SIG, col(whole.id, SIG)]] });
         const subsets = containing(keyed, fresh, bind);
-        const met = make.join({ id: fresh('j'), left, right: subsets, join: 'inner', channels: [], on: eq(col(subsets.id, KEYS), col(left.id, KEYS)),
-          type: typeOf(...left.type.cols, text(`s_${KEYS}`), text(SUB)) });
+        const tuples = refOf(base, fresh);
+        const met = make.join({ id: fresh('j'), left: tuples, right: subsets, join: 'inner', channels: [], on: eq(col(subsets.id, KEYS), col(tuples.id, KEYS)),
+          type: typeOf(...tuples.type.cols, text(`s_${KEYS}`), text(SUB)) });
         const within = (entry: RelId): Expr => ({ kind: 'exists', negated: false, plan: ((): Rel => {
           const members = membersOf(col(met.id, SUB), fresh);
           return make.filter({ id: fresh('f'), input: members, channels: [], type: members.type, pred: eq(col(members.id, 'g_kv'), col(entry, ENTRY_KEY)) });
         })() });
-        // Retained, so the pair join meets two spooled relations by an equi key — SQLite's automatic index.
-        left = bind(make.project({
-          id: fresh('p'), input: met, channels: [], type: typeOf(...left.type.cols, text(SUB), text(SUB_SIG)),
-          exprs: [...left.type.cols.map((column) => [column.name, col(met.id, column.name)] as const), [SUB, col(met.id, SUB)],
+        const restricted = make.project({
+          id: fresh('p'), input: met, channels: [], type: own.type,
+          exprs: [...tuples.type.cols.map((column) => [column.name, col(met.id, column.name)] as const), [SUB, col(met.id, SUB)],
             [SUB_SIG, overEntries(col(met.id, MAP_COL), 'group_concat', ENTRY, '', fresh, within)]],
-        }), true);
+        });
+        // Spooled, so the pair join meets two materialized relations by an equi key — SQLite's automatic index.
+        left = spool(make.union({ id: fresh('u'), all: true, channels: [], type: own.type, inputs: [own, restricted] }), fresh, bind);
       }
       const on = [
         ...maskCols.map((name) => eq(col(left.id, `m_${name}`), col(right.id, name))),

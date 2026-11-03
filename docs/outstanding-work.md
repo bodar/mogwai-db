@@ -113,7 +113,10 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   decimal-TEXT-prefix access paths. Move them there once `semijoin.ts` seeks under a correlated join.
 - **The map merge guard's key-set containment** (`searchKeying`, `write.ts`) crosses each earlier map with
   every PRESENT key set it contains — linear for any batch of a few key sets, but a batch that is itself
-  a power set of k keys is 3^k pairs over 2^k maps (N^1.58). Measure before touching; no real batch seen.
+  a power set of k keys is 3^k pairs over 2^k maps (N^1.58). Finding the containment is a set-containment
+  join over the DISTINCT key sets: each probes the strictly LONGER key sets holding its rarest key, so data
+  key NAMES whose every key many longer key sets share cost N × those holders (all inside the guard's one
+  statement, never a bind). Measure before touching; no real batch seen.
 - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts`) — extracting
   `pathPositionProjection` also fixes a mid-path value/list/map position read as a vertex.
 - **Four copied blocks in `write.ts`** (carrier reproject, merged-create spread, alias-carry, nested-spec decline).

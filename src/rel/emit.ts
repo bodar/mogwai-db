@@ -8,7 +8,7 @@ import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
-import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
+import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, refNames, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
 import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 
@@ -1031,10 +1031,22 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    */
   const parts = (input: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } => {
     const effects: Step[] = [];
-    const ctes: Expression[] = [];
+    const definitions: { readonly name: string; readonly reads: ReadonlySet<string>; readonly sql: Expression }[] = [];
     // ONE `WITH` list, so a single recursive member makes the whole list RECURSIVE — SQLite's keyword
     // is a property of the list, not of the member that needs it.
     let recursiveList = false;
+    // THE CTEs A STEP READS, transitively — not every one bound before it. A plain binding is a CTE the
+    // steps after it see, and spelled into every later step it is that step's bytes and binds although
+    // nothing there names it: a merge guard's derived relations rode along into each write after it. A
+    // definition reads only those before it, so one backward pass closes the set. A recursive list is
+    // kept whole — its members are bound to each other by the one `RECURSIVE` keyword.
+    const ctesFor = (node: Rel | Stmt): Expression[] => {
+      if (recursiveList) return definitions.map((definition) => definition.sql);
+      const wanted = new Set(refNames(node));
+      for (let i = definitions.length - 1; i >= 0; i--)
+        if (wanted.has(definitions[i]!.name)) definitions[i]!.reads.forEach((name) => wanted.add(name));
+      return definitions.filter((definition) => wanted.has(definition.name)).map((definition) => definition.sql);
+    };
     const resultBinding = input.result.kind === 'ref' ? bindings.get(input.result.name) : undefined;
     const lastRetained = resultBinding && retained(resultBinding) ? resultBinding.name : undefined;
     for (const binding of input.bindings) {
@@ -1045,7 +1057,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         const local = spools(node);
         const body = render();
         spooled = new Set();
-        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes([...ctes, ...local], body, recursiveList)) });
+        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes([...ctesFor(node), ...local], body, recursiveList)) });
       };
       // `isStmt` first because it NARROWS the union `retained` only answers a question about, so the
       // CTE arm below has a `Rel`. Then `retained`, not `binding.snapshot`: this is the STEP
@@ -1062,14 +1074,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // and it is what makes the walk's own name load-bearing (`name.ts` binds it under that name).
       if (node.kind === 'recursive') {
         recursiveList = true;
-        ctes.push(recursiveDefinition(node, EMPTY_SCOPE));
+        definitions.push({ name: binding.name, reads: refNames(node), sql: recursiveDefinition(node, EMPTY_SCOPE) });
         continue;
       }
-      ctes.push(cteDefinition(binding.name, node));
+      definitions.push({ name: binding.name, reads: refNames(node), sql: cteDefinition(binding.name, node) });
     }
     if (lastRetained) return { effects };
     const local = spools(input.result);
-    const all = [...ctes, ...local];
+    const all = [...ctesFor(input.result), ...local];
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.
     const result = input.result.kind === 'recursive' && all.length
       ? q`WITH RECURSIVE ${list([...all, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
