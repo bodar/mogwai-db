@@ -936,7 +936,12 @@ in the Cleanup list. No branch is parked: every round branch landed and was prun
 correlated `by()` and rf3-is-chain-size all RE-INLINE a per-row expression at each use (a `CASE` tower, a correlated
 windowed subquery) because the lowering has no general "land this per-row value once" step: the only instances were
 point mechanisms (math's one-row `VALUES` `scopeSlots`, `landedOnce`), and the cleanup deleted them together with the
-semantics they carried. **cr-land-once** (Substrate, before cr-fu1/cr-fu6/rf3-is-chain-size): one helper that lands a
+semantics they carried. ✅ **cr-land-once** — LANDED `5a722faf`: `once(values, body, fresh, type)` in
+`rel/build.ts` holds each non-trivial value as a cell of a one-row `VALUES` (exact storage class, no JSON
+transport) and projects the body over its column reads; `typedNodeOnce`/`producedMemberNode` go through it, the
+orphan `letValues` is deleted, and `mathValue` is its first consumer (ten uses 59,949 → 4,665 bytes, pinned under
+`CfLimitedSql` in `test/compiler/math-once.exec.test.ts`). Remains: nothing for this item — the modulator and
+value-run `is()` consumers are cr-fu6 / rf3-is-chain-size. Original spec: **cr-land-once** (Substrate, before cr-fu1/cr-fu6/rf3-is-chain-size): one helper that lands a
 per-row expression read N>1 times as ONE projected column (or `MATERIALIZED` hop), owned by `rel/build.ts` beside
 `fenced`, and called by `scopedHost` (math variables), `projectionOf`/`typedOf` (`rel/modulator.ts`) and value-run
 `is()`. Semantics-free — it must not bring back the Map probe or `landedOnce`'s presence half. Done when
