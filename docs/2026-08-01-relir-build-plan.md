@@ -745,6 +745,235 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
 - **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive` are
   distinguishable no other way, and a body that cannot report it DECLINES.
 
+### Next round (from the 2026-11-03 seventh round — read before picking items)
+
+Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed", and green on GitHub CI
+(runs 41576533343, 41577674363, 41578854339, 41580614786, 41581459034, 41582410297, 41585445922):
+- `3b5cb096`: group() last-wins value skips a later productive null (sixth-round follow-up 7).
+- `d87eddeb`: `crossCarried` — one carried-channel crossing for `reSource` and `reSourcedOnce` (sixth-round follow-up 4).
+- `1408c320`: merge seeks pick the driving entry once per driver (sixth-round follow-up 3).
+- `a37017d9`: order()/dedup() `by()` stated presence landed once (sixth-round follow-up 5).
+- `8a2ac4eb`, `daa577ff`: a list parameter/literal crosses as ONE `jsonb` value; lone surrogates cross as U+FFFD
+  (sixth-round follow-up 2).
+- `b549cc3a`, `f91e0943`: V1 buildable half (scalar-label next scope; record optional field beside a live label).
+- `bb83c512`, `cc78f7ec`, `2fa1152a`: V2 per-row `{t,v}` map/list re-enters the map/list readers; `isSelfContained`
+  (`src/rel/walk.ts`) is now the one fence predicate, so a fence also stands downstream of a closed `emit()`/`until()`.
+
+**PARKED — `federate-fresh-param-collision` (sixth-round follow-up 1). Resume point: branch
+`wf/federate-fresh-param-collision-2-4` (`12133bec`, series `2c64d6a9..12133bec` on `808bade2`, NOT on trunk).**
+The item grew: `2c64d6a9` is the actual collision fix (`segment.ts` `freshMapValuesParam` tests
+`params.values`, 40 lines, with a pin); `d6722340..12133bec` added a correlated owner-list IN rewrite
+(`correlatedIn`, `src/rel/passes/semijoin.ts`) to make the per-parent injection linear. The blocker is in the rewrite.
+- **BLOCKER (reproduced): a string vertex id is not a bound.** `boundsRowid`/`drivenElementScan` recognise only a
+  constraint on `id`; `V('u0')` lowers to `rn.uid IN ('u0')`, so the scan reads as unbounded and the correlated IN
+  drives the loop instead of the unique uid index. `g.V().values('kind').as('e').V('u0').has('kind', select('e')).count()`:
+  trunk 16.4 → 11.6 ms (1k → 8k), `12133bec` 108 → 6,658 ms (61×); `V('u0','u1')` 23.5 → 17.8 ms vs 199 → 13,733 ms
+  (69×). Same answers. `E('…')` string ids reach the same code.
+- **Resume order:**
+  1. **Land `2c64d6a9` ALONE first** (cherry-pick, re-run CI). It is the regression fix the item names and does not
+     depend on the rewrite. Narrow its test comment: it pins only that the fresh suffix `injectedMap_` is absent, not
+     that the user sees their own tail (a sibling-side decline still leaks `g.inject(injectedMap).unfold().group()…`,
+     outstanding-work §6).
+  2. **NEW prereq `scan-bound-metadata` (ordered BEFORE the `correlatedIn` re-land).** One metadata query "does this
+     element scan carry a conjunct an index can use" — an equality/IN/range on `id`, `uid`, or any uniquely or
+     selectively indexed column (label too), and `hasId(within)`/`has(T.id, gt(n))` which today are not treated as
+     rowid bounds at all (quadratic on trunk too, while `V(1,2,3)` is linear). Place it beside `src/rel/bounds.ts`
+     with `elementScanBehind` (the column-origin tracer the branch adds; Calcite analogue
+     `vendor/calcite/core/src/main/java/org/apache/calcite/rel/metadata/RelMdColumnOrigins.java`). `correlatedIn`
+     fires only when that query says the scan is unbounded.
+  3. **Then re-land `d6722340..12133bec` on it**, fixing the review majors that ride with it:
+     - A shared `EXISTS` term (`choose(has(k,v), A, B)` puts it in both arms) makes the reused scan RelId appear
+       twice, so `nameBindings` hoists a CTE over the WHOLE property table. Rebuild the scan with a fresh id (as
+       `indexSeek` does) or skip a term whose `EXISTS` is shared.
+     - A selective constant seek beside a correlated one: `…V().has('name','p7').has('grp', select('e')).count()`
+       25 → 1,124 ms (45×; trunk was also quadratic, 241 → 16,681 ms). The order is fixed by syntax; a constant
+       equality must outrank a correlated one. Keep the outstanding-work §5 super-linear entry; do not remove it.
+     - The `correlatedIn` doc's "only where it strictly improves" bounds rows visited, not cost: four
+       already-quadratic shapes regress 1.15–1.45× (`not(hasLabel)`, `hasId(within)`, `has(T.id,gt)`, `or(…)`).
+     - The outstanding-work entry "an UNCORRELATED `has(k,v)` on a non-start `V()` is O(parents × |V|) …
+       (pre-existing)" is misattributed — the branch introduced it (flat 1.6 ms at `d6722340`'s parent); the
+       plan-stability pin `ownerLists == []` for `g.V().has('name','p7').V().has('lang','java').limit(1)` locks the
+       quadratic plan in.
+     - `GATE_ONLY_FAST_PATHS` `propertySeek` equivalence text (`src/compiler/options/fast-paths.ts`) still says the
+       EXISTS stays; `correlatedIn` replaces it. Switch it on as its own `OwnerSeek` strategy chosen in `lower.ts`,
+       not by `strategies.includes(indexSeek)` identity.
+     - `mapValueElem` (`src/compiler/rel/segment.ts`) now throws a bare `Error` for a non-ordinal key; make it a typed
+       internal error.
+     - Pins: a uid `V('u0')` and an `E('…')` witness, and a multi-conjunct (label/constant `has()` before the
+       correlated `has`) witness in `test/plan-stability.test.ts`.
+
+**DEFERRED (decided not to build this round; prerequisite ordered first). Two of them share ONE root cause: the
+per-row `{t,v}` node vocabulary is not closed over every shape a row may hold.** V2 gave map/list/set rows a node,
+but a Map.Entry and an element have none on the per-row stream, so a follower that may receive one cannot merge its
+arms. Propose ONE substrate item, ordered before both:
+- **NEW substrate `per-row-node-vocabulary-closed`.** Every shape a per-row scalar stream may carry has a `{t,v}` node
+  and a framing arm: add `{t:'entry', v:[[k,v]]}` (framed as a size-1 GraphBinary map, as `execute.ts` `mapEntry`
+  already does; `producedMemberNode` builds it from a `mapEntry` framing; the Column/select/count(local) followers
+  read it as `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:46-47,
+  62-63`), and an element arm whose node carries the id. Followers dispatch on the tag; a follower that cannot read an
+  arm raises the reference's per-row error through `src/rel/raise.ts`.
+  - Unblocks **`per-row-unfold-entry-node`**: `unfold()` (and `format()`) over a per-row scalar that may be a Map.
+    Today both decline (§17 "Map-valued property stream").
+  - Unblocks **`scope-element-label-over-map-row`** (V1's deferred half): an element/collection label behind a
+    per-row value that may be a Map holding the same key (`g.V().as('k').values('m').select('k')` → ref [1, v2, v3]).
+    On top of the closed vocabulary it needs a variant continuation: `variantTail` carries a `{scalar|list, elements}`
+    variant through element- and collection-reading followers (out/values/by/as/select/unfold), each applying to
+    the arm it reads. Measure the has-key probe as no L3/census regression on the `values(x).select(label)` corpus
+    pattern. This is also the clean answer for S9 re-land item 5.
+- **`mergev-canonical-map-equality`** (sixth-round follow-up 8) — **needs a human decision** (below). Once decided:
+  option A writes map/set entries in canonical key order (one §17 line; equality and seeks stay index-backed); option B
+  canonicalises at every comparison in `couldMatch` and the map-guard signature (`src/compiler/rel/write.ts`).
+
+**Follow-ups from review of the landed items (major first):**
+1. **WRONG (pre-existing, same family as V1; also reuse proposal 2): a value label bound to null inside a branch reads
+   as unbound on every reader except the two `f91e0943` fixed.** `f91e0943` patched `scopeValue` and `labelScopeNode`
+   in `modulator.ts` locally; the shared authority `aliasPresence` (`src/compiler/rel/alias.ts:338`) and
+   `rerootPresence` (390-396) still state 'value-nullness'. Witnesses: `g.V().as('v').union(constant(null).as('k'),
+   constant(0)).select('v').map(select('k')).count()` → 0, ref 6 (`Scoping.java:129-130` returns `path.get(k)` when
+   `path.hasLabel(k)`, null included); `where/local/out().map(select('k'))` on the same stream → 0;
+   `g.inject(1,2).choose(__.is(1), __.constant(null).as('c'), __.constant(5).as('c')).where(__.select('c').is(P.eq(null))).count()`
+   → 0, ref 1. Fix in the authority: the scalar arm states `{when: aliasGuard(rel, entry)}` (the element arm may keep
+   'value-nullness'); `HostPresence` (`src/compiler/rel/child.ts:274`) admits `PresentWhen`. Then delete the two local
+   copies in `modulator.ts`. Pin the element-stream forms and a null bound on only some rows of a scalar stream.
+2. **REGRESSION TO DECLINE (`b549cc3a`): a record's optional field beside a live label is now a `{scalar, elements}`
+   variant most continuations cannot read.** `g.V().hasLabel('person').as('age').project('age','n').by(values('age'))
+   .by('name').select('age').is(gt(28))` gave [29,32,35] on trunk (= ref) and now declines; so do `.fold()`, `.sum()`,
+   `.order()`, `.where(is(gt(28))).count()`. Trunk was wrong for `.dedup()/.groupCount()/.math()/.as('z').select('z')`
+   (software rows dropped), so those declines improved. Fix: keep the stream scalar when the label's read has the same
+   storage class (every record holds the field), or admit predicate/reducer continuations over the variant (the
+   `per-row-node-vocabulary-closed` element arm gives them a node). Also: `recordTail` decides next-scope on its own
+   (`namedElsewhere` + `liveAliases`) instead of through `mapFirstFallback`, so it ignores `ctx.enclosingLabels` and a
+   `withSideEffect` constant (`g.withSideEffect('age',1).V().as('age').project(…).select('age')` declines); route it
+   through the one authority. Pin `is/fold/sum/order` after a record select.
+3. **WRONG (pre-existing): a re-source inside `local()`/`map()` resolves the outer alias to the inner candidate.**
+   `g.V().hasLabel('person').local(__.values('name').as('e').V().has('name', select('e')).count())` → 6 (= |V|) per
+   person on modern, 13 on zoo; ref 1 (`GraphTraversal.java:2807-2812`, `has(key, traversal)` is
+   `HasContainer(key, P.eq(traversal))` against the current traverser). `src/rel/emit.ts` reuses alias `rn` for the
+   inner `CROSS JOIN nodes rn` and the outer `FROM nodes rn`; `rp14.node = rn.id` binds the inner one. Emitter alias
+   freshness, not a lowering gap. group/union/flatMap child forms are not affected.
+4. **WRONG (pre-existing): group()'s pooled fold value.** `g.inject(['a':3],['a':null]).unfold().group().by(keys)
+   .by(__.select(values).fold())` → {a:[null]}, ref {a:[3,null]}. Under `withStrategies(ProductiveByStrategy)`,
+   `…group().by(constant('k')).by(values('age').fold())` → 5 nulls + 3 ages; ref [29,27,32]
+   (`ProductiveByStrategy.java` `apply()` skips a child ending in a `ReducingBarrierStep`). Also the per-origin path
+   drops a key whose only value is a productive null (`V().local(both()…group().by(constant('k')).by(values('age')))`
+   → {} for v[6], ref {k:null}). `src/compiler/rel/map.ts`.
+5. **WRONG (pre-existing): a dedup key collapses a Long above 2^53 with a numeric String.**
+   `g.inject(['a':9007199254740993L,'b':'9007199254740993']).unfold().dedup().by(__.select(values)).count()` → 1,
+   ref 2. The node writes `CAST AS TEXT` for |v| > 2^53 and the dedup PARTITION's tag-class CASE maps string and long
+   both to NULL (`src/compiler/rel/lower/slice.ts`). Give the tag class a long arm.
+6. **WRONG, mislabelled as a divergence: `where().by()` and `sack().by()` with a stated presence.** `…where('a',
+   eq('b')).by(__.V().has('name','marko').constant(null)).count()` → 0, ref 4 (Compare.eq null==null);
+   `sack(assign).by(<productive null>).sack()` → [], ref [null,null]. These are wrong counts, not JS/SQLite
+   divergences: take them out of the §17 line `a37017d9` widened and file them in outstanding-work.
+7. **DATA-DEPENDENT DECLINE (pre-existing): federate over an EMPTY parent stream.**
+   `g.V().has("name","nobody").values("name").as("e").call("federate",["graph":"crew"]).V().has("name",select("e")).count()`
+   raises UnsupportedTraversal; ref [0] (and `[]` for `.values("name")`). The same query answers when parents exist.
+   `apply()` (`src/services/catalog/federate.ts`) routes `rows.length === 0` to the SOURCE form before checking
+   `mapValues`; an empty-parent `mapValues` call returns the empty/identity result. Independent of the parked branch.
+8. **PRODUCTION-SIZE COST (pre-existing): the ordered plain re-source followed by a filter is quadratic.**
+   `g.V().hasLabel('holder').order().by('name').V().hasLabel('person').values('name').count()` 493 → 32,631 ms
+   (66×); `…choose(has('name'), V().hasLabel('person').sample(2), identity()).out('knows').count()` 649 → 47,177 ms
+   (73×, the arm's sample is global over N × |V|). reSource's renumber window runs over origins × |V| before the
+   filter. **NEW substrate `filter-below-window` (ordered before both):** a RelIR pass that pushes a Filter below a
+   Window when the filter does not read the window's column (`src/rel/passes/fuse.ts` is the empty slot; Calcite
+   `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/FilterWindowTransposeRule.java` is the prior art
+   for the transpose).
+9. **PRODUCTION-SIZE COST (pre-existing, not newly reachable): other super-linear routes found while probing.**
+   Record each in outstanding-work §5/§6:
+   - one K-entry map driver: `g.inject([k0:0,…]).mergeV().count()` 63 → 3,484 ms (K 1k → 8k, 55×), in the
+     `vertex_properties` INSERT over `json_each(json_extract(r.value,'$[2]'))` and the key-set guard CTE — likely
+     `json_extract(outer,'$[i]')` re-reading the K-entry JSON per exploded entry (`src/compiler/rel/write.ts`);
+   - a child seek does not reach a `fold()` reducer: `group().by('name').by(values('name').as('e').V().has('name',
+     select('e')).values('age').fold())` 1.87 → 127.5 s (68×; the `sum()` twin is flat);
+   - `hasLabel` after an equi-joined hop in a re-source (`…V().has('name', select('e')).in('knows').hasLabel('person')`,
+     16× for 4×) and `V().out('knows').has('name', select('e'))` 4.2 → 253 s.
+10. **Two JS→JSON encoders for one literal (`8a2ac4eb`).** `operandList`'s `literal` arm (`src/compiler/rel/list.ts`
+    ~1397-1410, `valueNodeOf` + `stringifyExact`) and the new `constantListBlob` (`constLit` + `constantJsonText`,
+    hand-built envelope) disagree on Double spelling (`2` vs `2.0`) and boolean admission. Point `operandList` at
+    `constantListBlob` and build the envelope through `valueNodeOf`; one encoder, one bind-key rule. Delete
+    `listLiteralBlob`'s per-member `$x` path: `Gremlin.g4:1650-1709` gives a collection literal no variable member,
+    so it is unreachable.
+11. **Label-only multi-driver mergeV with different labels declines (pre-existing).** `g.inject([(T.label):'q0'],
+    [(T.label):'q1']).mergeV()` raises "a later traverser would match what an earlier one created" though neither
+    can match the other; a 1k/8k mixed batch declines the same way. The interleaving guard for `without` drivers is
+    too coarse (`src/compiler/rel/write.ts`).
+Minor (cheap, concrete):
+- `perRowCollectionStep` re-parses JSON per row: `mapArm` wraps an already-`json()` value in `json(v)`, `mapTail`'s
+  count adds a third (`json_array_length(json(json(x.v)))`); and `reNoded` builds `json_object('t',…,'v',col)` then
+  reads `$.v`/`$.t` back. Use the arm's column and its constant tag directly, as the Set arm does (four reviewers).
+- `select(Column)` in `lower.ts` re-spells `freeRelIds(input).size === 0 && !containsSelfRef(input)` beside
+  `fencedWhereSelfContained`; fold into reuse proposal 1.
+- Stale comments: `src/compiler/rel/sack.ts` ("as `record.ts` gates it" with `freeRelIds`); `src/rel/walk.ts`
+  `containsSelfRef` doc (the rule lives in `src/rel/recursive.ts` `fencedSelf`, keyed to the walk's own name — that is
+  why a fence over a CLOSED walk is legal); `MapDrivers`/`mapEntrySeeks` docs in `write.ts` ("FIRST such entry"; it is
+  the most selective string entry by `cappedCount`, ties to map order).
+- V2's title and feature header list `format()` among re-entered followers; it still declines. Drop the claim.
+- Pin the working V2 compositions after a walk that have no test: `where(count(local).is(3))`, `project().by(count(local))`,
+  `choose(count(local).is(1),…)`, `optional(limit(local,1))`.
+- `dedupBy` still passes `shape.tie` (= `payloadCols(domain)`), so the landed node column is an extra sort term; tie
+  on `payloadCols(input)` as the payload is narrowed (`src/compiler/rel/lower/slice.ts`).
+- §17 NUL/surrogate lines: name `containing`/`endingWith` (instr) under "NUL in string data"; add that distinct lone
+  surrogates compare equal after U+FFFD; note that a list member now crosses the JSON way while a scalar literal NUL
+  still declines (`src/sql/kernel/q.ts`). Pin the NUL list-member behaviour. A scalar PARAMETER holding a lone
+  surrogate in `addV().property('name', x)` is inlined as statement text and declines — a gap in the bind rule.
+- Tests: the bind-key positive case (a plain-JSON list shares ONE bind with `within($xs)`); a merge whose driving
+  entry is shared by many existing vertices (`[tenant:'acme', name:x]`); `crossCarried`'s n == 1 arriving-position
+  branch and the `property()` seam; group single-arm `ProductiveByStrategy`, filtering value child and non-scalar
+  winner; `test/federation.test.ts` decline assertion (see the parked item).
+- `reSourcedOnce`'s `ensureBulk` puts a dead `1 AS bulk` in the fenced origin CTE on the `property()` path; say so in
+  a comment.
+- `1.0e-300d` reads back as `9.999999999999999e-301d` (SQLite's decimal reader); a §17 line or outstanding-work entry.
+- The sql-hygiene re-record in `3b5cb096` also moved `sample`/`value` down from earlier commits; future re-records
+  name inherited drift separately.
+Depth gaps (clean declines, record only):
+- V2: Column/multi-key select inside union/optional/where/not/choose/project-by/map arms; a child body with more than
+  one reader (`local(limit(local,1).count(local))`); a per-row collection via `inject`/`constant`
+  (`g.inject([a:1],[1,2],'x',4).count(local)`); multi-key select with a live label; `g.V().map(values('m').count(local))`,
+  `where(values('m').count(local).is(2))`, `project().by(values('m').count(local))`; `flatMap`/`map` over a filtered
+  reader after a walk; `count(local).count(local)`, `limit(local,1).path()`.
+- V1: `optional/coalesce/choose/repeat/sideEffect` bodies with `select(k)` over a Map-capable scalar;
+  `select(all,'k')` over a Map row (ref reads the Map first even for `Pop.all`); behind an ELEMENT label,
+  `g.V().as('k').V().values('m').select('k')` answers the label on all rows (ref 1 on `{k:1}` rows; §17 "Map scope"
+  says it declines — correct the line, this is the `scope-element-label-over-map-row` case);
+  `where(select('k').is(null))` over a null-bound label.
+- Federate: per-parent tails other than values/count/order; `has(k, select(e))` inside local/map/where/coalesce.
+- inject list: nested-list/map members; `constant([…])` inside where/filter/not/project-by/group-by/repeat; a
+  mid-traversal `inject(xs)`; `inject(ns).local(unfold().sum())`.
+- Stated presence: `by()` inside local/map/optional/coalesce/repeat dedup, `sample().by`, `dedup(label).by` over a
+  map-entry stream.
+- Re-source: `map/where/repeat(__.V().sample(1))`, `local(V().sample(2))` over scalar/list/map/path traversers.
+- merge: `inject(map).as('m').mergeV().as('v').select('m','v')`, `V().project(…).mergeV()`, `union(mergeV(), mergeV())`.
+- `project().by(…)` after an `emit().repeat(out().simplePath())` walk declines while the `until(loops())` walk answers.
+
+**Reuse-sweep proposals (next round):**
+1. **Route every hand-rolled self-contained fence through `build.ts` `fenced`/`fencedWhereSelfContained` (and export
+   `hardFenced`).** `2fa1152a` made `isSelfContained` the one test, but `record.ts` (203-204, 379-381) and `sack.ts`
+   (210-212) still spell `isSelfContained(x) ? make.materialize({…}) : x`, and seven or eight more sites spell `fenced`
+   or `hardFenced` by hand: `path.ts:pathPositions` (329-331), `map.ts` group key `gm` (593), `lower/branch.ts` `om`
+   (812), `lower.ts` CLAUSE_READERS (1821), `lower/reduction.ts:perOriginWindow` `sm` (497), and the hard fences at
+   `lower/slice.ts:158`, `reduction.ts:1647`, `write.ts:3673`. ~25 lines gone, one fence decision (no copy can drift
+   back to `freeRelIds`-only, the bug `2fa1152a` fixed), stale `record.ts:376` comment gone. Same answers; SQL
+   identical except an input that is already a Materialize no longer gets a second CTE. Fold with sixth-round reuse 3.
+2. **`aliasPresence`/`rerootPresence`: a value label's presence is its BINDING** — this is follow-up 1 above (it
+   changes a wrong answer); land it as that item.
+3. **Data-string `json_each` binds go through `stringifyExact`** — `src/bulk.ts` `BatchingLoader.existingUid` (502),
+   the uniqueness clash check (575), `existing` (493); `src/setwrite.ts` `deleteMembers`/`markDirty` (105, 116),
+   `updateSet` (150). They call bare `JSON.stringify` while the writes go through `src/program.ts` `transportable` →
+   `stringifyExact`, which writes a lone surrogate as U+FFFD since `daa577ff`. Verified on bun:sqlite: a uid stored as
+   `'a\ud800b'.toWellFormed()` is NOT found by the bare-stringify lookup. So a GraphSON reload of such a vertex
+   duplicates it or hits a raw UNIQUE error (wrong element written, or a bare Error). One encoder, no SQL change.
+   Rank it with the majors.
+
+Still open: the federate re-land (parked above, behind `scan-bound-metadata`); `per-row-node-vocabulary-closed` and
+its two dependants; `filter-below-window`; S9 re-land (sixth round, parked) and its two deferred dependants; sixth-round
+follow-up 6 and the minors, reuse 1–5; fifth-round follow-ups 4–8 and reuse 2; fourth-round S11, follow-ups 3, 5, 6,
+8, 9, reuse 2–8, and S6's multi-driver mergeV lift; and from earlier rounds M1, M2, S3, R13–R18, F8, F11–F13 and F14b.
+
+**Needs-human questions:**
+- (`mergev-canonical-map-equality`) "For a map-valued (or set-valued) property, may we STORE its entries in canonical
+  key order? A read would then return the entries key-sorted, recorded as one §17 divergence, and equality and seeks
+  stay index-backed. The alternative keeps insertion order and canonicalises at every comparison, which costs
+  per-row SQL and loses the index seek for map-valued merge criteria."
 
 ### Next round (from the 2026-11-03 sixth round — read before picking items)
 
@@ -848,6 +1077,8 @@ Depth gaps (clean declines, record only):
 
 **Follow-ups from review of the landed items (major first):**
 1. **REGRESSION (major, `4edf3f20`): a user parameter named `injectedMap` collides with federate's fresh name.**
+   🅿️ **PARKED (seventh round)** — resume `wf/federate-fresh-param-collision-2-4`; land `2c64d6a9` alone first. See the
+   seventh-round PARKED entry.
    `src/compiler/rel/segment.ts` `freshMapValuesParam` still tests `Object.hasOwn(params, param)`, but `params` is
    now `{values, types}`. So `g.V()…call("federate", ["graph":"crew"]).V().has("name", injectedMap)…` with
    `{injectedMap:'marko'}` declines, and the message leaks the internal sibling rewrite. Trunk answered [1].
@@ -914,6 +1145,7 @@ Depth gaps (clean declines, record only):
    The last-wins pick `json_group_array(gt ORDER BY go) FILTER (WHERE gt IS NOT NULL)` treats `{t:null}` as a value.
    S8 makes more productive nulls reach it. Filter on the node's value, not on the node.
 8. **WRONG (pre-existing): mergeV compares a map-valued property by its raw JSON spelling.**
+   ⏸️ **NEEDS HUMAN (seventh round, `mergev-canonical-map-equality`)** — stored entry-order policy; see that round's question.
    `g.inject([b:2, a:[x:1,y:2]],[a:[y:2,x:1]]).mergeV()` creates 2 vertices; Java Map equality ignores entry order.
    This affects `couldMatch` and the map-guard signature (`src/compiler/rel/write.ts`). It needs a canonical
    (key-sorted) map spelling at the comparison seam.
@@ -1079,6 +1311,8 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
   → ref [1, v2, v3]): needs a VARIANT (element-or-value) per-row stream framing that continues through followers —
   element-requiring steps apply to element rows; shape-agnostic steps (count/fold/dedup/as/select) carry the
   `{t,v}`/element node. Also the clean answer for S9 re-land item 5.
+  ⏸️ Deferred again in the seventh round as `scope-element-label-over-map-row`, behind the NEW substrate
+  `per-row-node-vocabulary-closed` (seventh round).
 - ✅ **V2 LANDED (bb83c512, cc78f7ec, 2fa1152a, 2026-11-03) — a per-row `{t,v}` map/list scalar re-enters the
   map/list readers** `count(local)`, `limit`/`range`/`skip`/`tail(local)`, `select(keys|values)` and multi-key
   `select`, chain and child (`map()`/`local()`/`where()` bodies). `perRowCollectionStep` (`src/compiler/rel/lower.ts`)
