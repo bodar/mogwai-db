@@ -423,6 +423,86 @@ worklists fail loudly when a shape lands (`test/rel-spine.test.ts` `DECLINED`, `
 already be fixed; check before building. A run appends its findings as ONE new `### Next round` section;
 fold it into these lists at the end of the run.
 
+### Cleanup — DECIDED by the owner (2026-11-03), do first
+
+An audit of rounds 1–7 found the loop drifting into reviewer-CONSTRUCTED compositions: hundreds of src lines,
+new per-row SQL on COMMON queries, and correct answers turned into declines, all to serve shapes nobody writes.
+These steps are owner decisions — build them, do not relitigate them, and do not "fix" a resulting decline back
+into machinery. A contrived shape gets a clean query-text decline (EXPLAIN, DON'T BAFFLE: the message names
+the problem and suggests the likely intent) or the simpler natural answer; a common/plausible shape keeps its
+correct answer. This list SUPERSEDES the items below that it touches (r7-fu1 "re-land first", S9, r6-fu8).
+Chains: A1→A2→A3, B1→B2→B3→B4, C1→C2→C3→C4→C5 (the chains are independent of each other); D, E standalone;
+F last. Each step lands `mise run ci` green on its own.
+
+- **A1 cleanup-sample-fallthrough** — `reSourcedOnce` (`lower/reduction.ts`): replace the coupling/onePerOrigin/
+  shuffle/deep-collector gates with ONE top-level whitelist (each prefix step: not `isStreamBarrier`, not
+  `collectsSideEffect`, not nondeterministic; childless or a per-traverser filter-child host). Every former
+  `return null` decline becomes "not taken" so GraphStep's product route answers (correct, O(origins×candidates),
+  the reference's own cost — never a data-size decline). `reSourceTail` back to two-state. Delete
+  `streamsIntoChildren` (`ir/step.ts`), the `enters` param (`ir/walk.ts`), `ChainCtx.originRows`, `onePerOrigin`,
+  `ORDER_ONLY_BARRIERS`, `isShuffle`/`shuffleArg`. Keep `crossCarried`, the `perOriginWindow` sample arm,
+  `PER_ORIGIN_SAFE_BARRIER`, 4a0530df, b162ce31, `collectsSideEffect`'s move. Tests
+  (`test/compiler/rooted-sample-scale.exec.test.ts`): the `declines %s` table becomes answer pins on modern with
+  `sample(100)` (measured unsampled: 18/54/39/10/6 — RUN each); collector rows stay declines; delete the timed
+  shuffle budget. ≈−60.
+- **A2 cleanup-sample-n1-only** (after A1) — the once-path takes `sample(1)` only; delete the n>1 draw (`chosen`
+  n>1 body, `rankedPairs`, recursive walk, `locate`'s n>1). n>1 pays the product + per-origin RANDOM window
+  (uniform). Delete the three n>1 budget tests, keep small-size cardinality/uniformity pins. ≈−95, −6 per-row terms.
+- **A3 cleanup-sample-docs** (after A2) — `reSourcedOnce` doc to ≈12 lines; fix `sliceOp` and `collectsSideEffect`
+  comments. Plus: `reSourcedValue` declines (query text, explanatory) when its prefix holds `sample`/`coin`/shuffle,
+  because every host would share one draw (`project().by(__.V().sample(1))` — a wrong answer today). ≈−15.
+- **B1 cleanup-mapkey-revert-v1** — revert b549cc3a and f91e0943's `labelScopeNode` half: delete
+  `labelScopeNode`/`LabelScope`; `mapFirstFallback` → `'label'` for any live/enclosing label (the label wins, §17);
+  restore the pre-V1 math-variable reader (no one-row VALUES); mapTail `'may'` + value label declines; record
+  optional field + same-named live label declines in every form (drop the two-Filter variant merge). KEEP
+  `scopeValue` `{when: aliasGuard}` and all of V2 (bb83c512/cc78f7ec/2fa1152a). Verify
+  `values('age').as('a').math('a + 1')` SQL has no `vtype = 'map'`. Re-expect `scope-label-next`,
+  `record-scope-select`, `scalar-map-scope-select` features; both §17 map lines. ≈−165, −3 per-row terms.
+- **B2 cleanup-mapkey-scope-wins** (after B1) — `mapFirstFallback` becomes a predicate "a scope beyond the Map
+  names `k`"; delete `constantNode`, `mapKeyOr`, `scopedKey`'s `fallback`/`total`; `scalarMapKey` is
+  entry-else-drop. Per-row scalar stream: a named side effect/collection/label WINS (one §17 line). Map/record host:
+  `k ∉ keys` → existing `selectSideEffectConstant`/`selectCollection`; may-held `k` + same-named side effect/label →
+  decline naming the label/side effect and the key; collection keeps entry-else-drop (L3
+  `Select.feature` `g_VX1X_groupXaX_byXconstantXaXX_byXnameX_selectXaX_selectXaX` must still answer). Drop the
+  keyed-dedup COALESCE key, math COALESCE, projector/record side-effect arms. `values(<maybe-Map>).mergeV(__.select(k))`
+  with a side effect `k` declines (closes r4-fu3). ≈−80, −3 per-row terms.
+- **B3 cleanup-mapkey-merge-keys** (after B2) — remove `MergeTraverser`'s `MapWithKeys`/`mayHoldKey` and
+  `mergedFromMap`'s `keys` arg; an inject-literal driver whose onCreate `select('k')`s a key it lacks declines as
+  before S6. Keep 70c36a6f and 18c5871a's write half. Confirm `test/compiler/merge-scale.exec.test.ts`. ≈−25.
+- **B4 cleanup-mapkey-may-set** (after B3) — `MapKeyFacts` = `keys` only, a sound MAY set; ONE union meet
+  (unknown if any side unknown) in `mergeArms` and the alias join; delete `held`, `exact`, `slicedKeyFacts`, the
+  held halves of `literalKeyFacts`/`recordKeyFacts`, the record recursion in `meetFraming`; `mapKeyPresence` →
+  boolean `mayHoldKey`; `injectMap` → union. Keep `MapScope.mayBeElement` and the `ordered` element join. If L3
+  moves, keep `held` for `recordKeyFacts` only. ≈−95.
+- **C1 cleanup-presence-group-key** — gate 3b5cb096's `$.t IS NOT NULL` sort key (`map.ts` `collectedValue`) on a
+  `GroupRecipe` flag set only where the value body STATES its presence; common `group().by(k).by(child)` goes back
+  to pre-3b5cb096 SQL (`test/L2-sql/group.sql.test.ts`), `sql-hygiene-record` (group goes down). +4, −1 common term.
+- **C2 cleanup-presence-by-plain** (after C1) — revert a37017d9's semantic half: delete `landedOnce`;
+  `productivityFilter` reads `{when}` as value-nullness. KEEP `keptDedup`. Restore §17 line "a null `by()` value is
+  absent" to its plain rule. `by-stated-presence.feature` moves to that answer. ≈−30.
+- **C3 cleanup-presence-first-value** (after C2) — revert 6bb959c8's producer: `reSourcedValue` answers
+  `'value-nullness'`; `firstRootedValue` drops `exists`. One §17 line: a re-sourced body's null first value is
+  absent. ≈−13, −1 column on the plausible `map(__.V().values('name').order().limit(1))`.
+- **C4 cleanup-presence-resource-decline** (after C3) — `reSourcedUnder`: `if (mayBeAbsent(host))` decline FIRST;
+  delete case 2, case 3, `yieldsNothingFromEmpty`/`EMITS_FROM_NOTHING`. Message (explanatory): the label is not
+  bound on every row and `V()`/`E()` discards the selected value, so the answer would depend on which rows matched;
+  suggest `select('a').out()…` or `V().has(…, select('a'))`. Tag the 12 shapes `@Unsupported` (`absent-label-body-input`,
+  `resourced-scalar-value` features); exec test → refusal assertions. ≈−70, −3 per-row terms.
+- **C5 cleanup-presence-choice-meet** (after C4) — `scalarChoice` presence = `meetPresence(...)`; delete
+  `choicePresence`, `ChoiceArm`, `NEVER_PRODUCTIVE`. ≈−28.
+- **D cleanup-map-equality-decline** (r6-fu8 = option C) — decline, from the QUERY TEXT, any mergeV/mergeE match
+  criterion or equality predicate (has/is/within/without/eq/neq, `where(eq)`) whose operand is a map- or set-valued
+  literal or parameter. Message names map-valued equality and why (entry order). ≈+20, no per-row SQL.
+- **E cleanup-never-bound-label** (verify) — `g.V().select('a')` with no `as('a')`/side effect/collection named `a`
+  anywhere in the query: if it silently returns `[]`, decline from the query text naming the unbound label.
+- **F cleanup-plan-doc** (last, docs only) — drop S9 and its tree, r7-fu1 (+r7-reuse2), r7-fu2, r7-fu6, M2,
+  r2-gap-S2, S6.1, r4-ru7 (done), r4-fu0 (fold into filter-below-window if open); promote S9-blk, S9.9, r4-fu4 to
+  Wrong answers, r6-s9-4/S9.8/r6-s9-6/r5-fu2/r6-m-orderby to Performance, r6-s9-1/r6-s9-5 to Hygiene; move r7-fu4,
+  M1, r1-gap-reroot/r1101-ab, r6-m-sample, the per-origin deterministic-slice item, and r6-fu8 options A/B/JS-barrier
+  to a new "Contrived — build only on a user report" bucket. Laws: "a fast path falls through; it never declines
+  what the general route answers"; "`keys` is a sound MAY set merged by union"; "a re-sourcing arm under a
+  may-be-absent host declines". Then decide Tier B (retire `PresentWhen`) with the owner.
+
 ### Needs a human decision
 
 - **r6-fu8 mergev-canonical-map-equality** — `mergeV` compares a map/set-valued property by raw JSON spelling
