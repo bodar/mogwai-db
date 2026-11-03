@@ -202,3 +202,50 @@ describe('a list among several id arguments matches nothing', () => {
     expect(await vals("g.V().hasId(xx1).values('name')", p)).toEqual(['josh', 'lop']);
   });
 });
+
+// A NULL id is one no element has (`Vertex.feature` `g_VXnullX`/`g_VX1_nullX`, `Edge.feature`
+// `g_EX11_nullX`): it contributes no clause, and a set whose only member is null matches NOTHING. The
+// trap is the lone null — `undefined` from `idMembership` means "no ids", i.e. the WHOLE graph — so
+// `V(null)` and `V($x)` with x = null must be EMPTY, not `V()`. An app passing a nullable id parameter
+// is the reach.
+describe('a null id matches nothing — never the whole graph', () => {
+  test('a lone literal null is empty, not V()', async () => {
+    expect(await vals("g.V(null).values('name')")).toEqual([]);
+    expect(await vals('g.E(null).count()')).toEqual(['0']);
+    expect(await vals('g.V(null, null).count()')).toEqual(['0']);
+    expect(await vals('g.V([null]).count()')).toEqual(['0']);
+  });
+
+  test('a null beside a real id drops out', async () => {
+    expect(await vals("g.V(1, null).values('name')")).toEqual(['marko']);
+    expect(await vals("g.inject(1).V(1, null).values('name')")).toEqual(['marko']);
+    expect(await vals('g.E(11, null).count()')).toEqual(['1']);
+  });
+
+  test('a bound scalar id whose value is null is empty, not V(), and spends no bind', async () => {
+    expect(plan("g.V(x).values('name')", { x: null }).binds).toEqual([]);
+    expect(await vals("g.V(x).values('name')", { x: null })).toEqual([]);
+    expect(await vals("g.V(x, 1).values('name')", { x: null })).toEqual(['marko']);
+    expect(await vals('g.V().hasId(x).count()', { x: null })).toEqual(['0']);
+    expect(await vals("g.V(xs).values('name')", { xs: [1, null] })).toEqual(['marko']);
+  });
+
+  test('composes as a mid-traversal source and under the id predicates', async () => {
+    expect(await vals('g.V().local(__.V(null)).count()')).toEqual(['0']);
+    expect(await vals("g.V(1).union(__.V(null), __.V(2, null)).values('name')")).toEqual(['vadas']);
+    expect(await vals("g.V(1).repeat(__.out().hasId(2, null)).times(1).values('name')")).toEqual(['vadas']);
+    expect(await vals('g.V().has(T.id, neq(null)).count()')).toEqual(['6']);
+    expect(await vals('g.V().has(T.id, without(null, 1)).count()')).toEqual(['5']);
+  });
+
+  test('a null member adds no SQL: routed exactly as the id set without it', () => {
+    expect(plan('g.V(1, null)').sql).toBe(plan('g.V(1)').sql);
+    // Not the per-row `COALESCE(uid, id)` comparison a null member used to fall back to.
+    expect(plan('g.V().out().hasId(2, null).count()').sql).toBe(plan('g.V().out().hasId(2).count()').sql);
+    expect(plan('g.V().has(T.id, without(null, 1)).count()').sql).toBe(plan('g.V().has(T.id, without(1)).count()').sql);
+  });
+
+  test('another unplaceable id shape still declines', () => {
+    expect(() => compile('g.V(true)', {})).toThrow(/not supported/);
+  });
+});

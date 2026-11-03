@@ -7,7 +7,7 @@ import { and, eq, jsonExtract, meta, rowNumberWindow, typeOf, VALUEMAP_PAIR, typ
 import type { Binding } from '../../rel/plan.ts';
 import { foreignPayloadCols, landedCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
-import { storedCompareOn } from './predicate.ts';
+import { CONSTANT, storedCompareOn } from './predicate.ts';
 import type { GraphSource } from './source.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 
@@ -103,14 +103,20 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
     elementScan(kind, args, fresh) {
       const scan = cteOf(kind, fresh);
       const ids: unknown[] = [];
+      let nonEmpty = false;
       for (const a of args) {
         if (a.name != null) return null; // a bound id PARAMETER is not modelled over a landed relation
         const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
-        for (const v of members) ids.push(v);
+        for (const v of members) {
+          nonEmpty = true;
+          // A `null` id is one no element has — no clause, as `BaseGraph`'s `idMembership` (not the
+          // text `'null'`, which a landed uid could be). So `V(null)` is empty, never `V()`.
+          if (v !== null) ids.push(v);
+        }
       }
       const pred = ids.length
         ? { kind: 'in-list' as const, expr: col(scan.id, 'id'), values: ids.map(idLit) }
-        : undefined;
+        : nonEmpty ? CONSTANT.false : undefined;
       return { scan, pred };
     },
 

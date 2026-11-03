@@ -245,10 +245,17 @@ export type IdQuery =
  * the list is ONE literal id, and as an element id is never a list it matches nothing.
  * `HasId.feature`'s `g_VX1X_out_hasIdX2_listXid3_id4XX` pins it.
  *
- * Returns the POSITIVE membership, `undefined` for an empty id list (the caller owns what "no ids"
- * means: the whole graph for `V()`, nothing for `hasId`), `CONSTANT.false` where every argument is a
- * list among several (no id can match), or `null` where a member is a type this routing cannot place
- * (the caller declines, or falls back to the general comparison).
+ * **A `null` member is an id no element has** (an element id is never null), so it contributes no
+ * clause — SQL's own `NULL` non-membership. `V(1, null)` ≡ `V(1)`, and `V(null)` matches NOTHING
+ * (`Vertex.feature` `g_VXnullX`/`g_VX1_nullX`/`g_VXlistXnullXX`, `Edge.feature` `g_EX11_nullX`). The
+ * same holds for a bound scalar parameter whose value is null (an app's nullable id), and for a null
+ * inside a bound collection, which the `json_each` type filter already drops.
+ *
+ * Returns the POSITIVE membership; `undefined` ONLY for an EMPTY id set (the caller owns what "no ids"
+ * means: the whole graph for `V()`, nothing for `hasId`); `CONSTANT.false` where the set has members
+ * but none can match (a `null`, a list among several) — so a lone `V(null)` is NOT `V()`; or `null`
+ * where a member is a type this routing cannot place (the caller declines, or falls back to the
+ * general comparison).
  */
 function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Minter): Expr | null | undefined {
   const inlineNums: number[] = [];
@@ -256,19 +263,26 @@ function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Min
   const numParams: Expr[] = [];
   const strParams: Expr[] = [];
   const unroll = ids.length === 1;
+  // Whether the id set has ANY member — what separates "no ids" (`undefined`, e.g. `V()`/`V([])`) from
+  // "ids, none of which can match" (`CONSTANT.false`, e.g. `V(null)`).
+  let nonEmpty = false;
   for (const a of ids) {
     // A list among SEVERAL arguments is one literal id no element has (see above): no clause, whether
     // it is a literal or a bound collection.
-    if (!unroll && (a.members || Array.isArray(a.value))) continue;
+    if (!unroll && (a.members || Array.isArray(a.value))) { nonEmpty = true; continue; }
     if (a.name == null) {
       // A CONSTANT — a bare scalar id or the single bracketed list literal (`V([1,2])` ≡ `V(1,2)`); the
       // grammar forbids a param member, so every member is itself a literal that inlines.
       const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
       for (const v of members) {
+        nonEmpty = true;
+        if (v === null) continue; // an id no element has (see above)
         if (typeof v === 'number' && !Number.isNaN(v)) inlineNums.push(v);
         else if (typeof v === 'string') inlineStrs.push(v);
         else return null;
       }
+    } else if (a.value === null) {
+      nonEmpty = true; // a bound scalar id whose value is null: no element has it (see above)
     } else if (Array.isArray(a.value)) {
       // A bound COLLECTION of ids → ONE `jsonb(?)` bind, exploded and routed per member by its json
       // type. The two clauses share the parameter NAME, so the render dedups them to a single bind.
@@ -298,7 +312,7 @@ function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Min
   text.push(...strParams);
   const numMatch = disjunction(numeric);
   const match = disjunction([...(numMatch ? [and(numMatch, rowidOnly(uidCol))] : []), ...text]);
-  return match ?? (ids.length > 1 ? CONSTANT.false : undefined);
+  return match ?? (nonEmpty ? CONSTANT.false : undefined);
 }
 
 /** `uid IS NULL` — the row's external id IS its rowid (see `idMembership`). */

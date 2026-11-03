@@ -774,6 +774,13 @@ describe('federate — SUBGRAPH aggregation (group/order/project via the main fo
     (await Promise.all((await mgr.executor(on).framedAsync(g, {})).map(dec)));
   const crewBoth = 'g.V().hasLabel("person").outE("develops").bothV().dedup()';
 
+  // A null id over the LANDED graph is one no element has, exactly as over the base schema — not the
+  // text 'null' (a landed uid could be that), and a lone null is never "no ids" (the whole subgraph).
+  test('V(null) over the subgraph matches nothing; a null beside V() ids drops out', async () => {
+    expect(await one(sg('.V(null).count()'))).toEqual(0);
+    expect(await one(sg('.V(null, null).count()'))).toEqual(0);
+  });
+
   test('order().by(name) over the subgraph vertices', async () => {
     expect(await list(sg('.V().order().by("name").values("name")')))
       .toEqual(await list(`${crewBoth}.order().by("name").values("name")`, 'crew'));

@@ -99,3 +99,85 @@ Feature: mogwai addendum — a numeric id names the element whose id IS that num
       """
     When iterated to list
     Then the result should be empty
+
+  # A NULL id is one no element has, so it contributes nothing to the id set — and a set whose only
+  # member is null matches NOTHING. The trap is the lone null: "no ids" (`V()`) is the whole graph, so
+  # `V(null)` must not fall back to it. Corpus: `g_VXnullX`, `g_VX1_nullX`, `g_EX11_nullX`.
+  @gap:id-routing
+  Scenario: g_VXnullX_count_is_not_the_whole_graph
+    And the traversal of
+      """
+      g.V(null).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  @gap:id-routing
+  Scenario: g_VXnull_nullX_count
+    And the traversal of
+      """
+      g.V(null, null).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  @gap:id-routing
+  Scenario: g_EXnull_exX_id
+    And the traversal of
+      """
+      g.E(null, "ex").id()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | ex |
+
+  @gap:id-routing
+  Scenario: g_V_localXVXnullXX_count
+    And the traversal of
+      """
+      g.V().local(__.V(null)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  @gap:id-routing
+  Scenario: g_V_unionXVXnullX_VX2_nullXX_id
+    And the traversal of
+      """
+      g.V().union(__.V(null), __.V(2, null)).id()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+      | d[2].l |
+
+  @gap:id-routing
+  Scenario: g_V_hasIdXnullX_count
+    And the traversal of
+      """
+      g.V().hasId(null).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0].l |
+
+  @gap:id-routing
+  Scenario: g_V_hasIdXwithoutXnullXX_id
+    And the traversal of
+      """
+      g.V().hasId(without(null)).id()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | x |
+      | d[2].l |

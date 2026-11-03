@@ -750,7 +750,7 @@ const RANGE_OPS = { lt: '<', lte: '<=', gt: '>', gte: '>=' } as const;
  * the very argument list `V(…)` takes, so it is answered by the same routing. A RANGE is
  * `lt`/`lte`/`gt`/`gte`/`between`/`inside`/`outside` over NUMERIC LITERALS (`P.java`'s `between` is
  * `[lo, hi)`, `inside` `(lo, hi)`, `outside` the complement of `inside`). Anything else — a nested
- * traversal operand, a null or NaN member, a string range, a `P.not`/`and`/`or` composition — stays on
+ * traversal operand, a NaN member, a string range, a `P.not`/`and`/`or` composition — stays on
  * the comparison, whose answer this must equal wherever it applies.
  */
 function idQueryOf(val: unknown, valType: TypeNode | null, valParam: string | null): IdQuery | null {
@@ -760,7 +760,8 @@ function idQueryOf(val: unknown, valType: TypeNode | null, valParam: string | nu
     // A bound collection is routed per json member type (`idMembership`); its other members can match
     // no element id, exactly as the comparison's `json_each` set does.
     if (a.name != null && Array.isArray(a.value) && !a.members) return true;
-    return members.every((v) => typeof v === 'string' || (typeof v === 'number' && !Number.isNaN(v)));
+    // A `null` member is an id no element has, which `idMembership` drops (its complement keeps every row).
+    return members.every((v) => v === null || typeof v === 'string' || (typeof v === 'number' && !Number.isNaN(v)));
   };
   // A list among SEVERAL operands is one literal id that matches nothing (`idMembership`), whatever it holds.
   const listAmongSeveral = (a: Arg, n: number): boolean => n > 1 && (a.members != null || Array.isArray(a.value));
@@ -768,7 +769,7 @@ function idQueryOf(val: unknown, valType: TypeNode | null, valParam: string | nu
     ids.length && ids.every((a) => listAmongSeveral(a, ids.length) || routable(a)) && ids.some((a) => !Array.isArray(a.value) || a.name != null || (a.value as unknown[]).length)
       ? { kind: 'members', ids, negated } : null;
   // A BARE value is `eq(value)`; a bare LIST is equality with a list, never membership, so only a scalar.
-  if (!isPred(val)) return typeof val === 'number' || typeof val === 'string' ? members([arg(val, valType, valParam)], false) : null;
+  if (!isPred(val)) return val === null || typeof val === 'number' || typeof val === 'string' ? members([arg(val, valType, valParam)], false) : null;
   const { op, operands } = val;
   if (op === 'eq' || op === 'neq') return operands.length === 1 && !Array.isArray(operands[0]!.value) ? members(operands, op === 'neq') : null;
   if (op === 'within' || op === 'without') return members(operands, op === 'without');
