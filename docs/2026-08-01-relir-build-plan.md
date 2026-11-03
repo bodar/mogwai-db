@@ -477,7 +477,13 @@ F last. Each step lands `mise run ci` green on its own.
   `scopeValue` `{when: aliasGuard}` and all of V2 (bb83c512/cc78f7ec/2fa1152a). Verify
   `values('age').as('a').math('a + 1')` SQL has no `vtype = 'map'`. Re-expect `scope-label-next`,
   `record-scope-select`, `scalar-map-scope-select` features; both §17 map lines. ≈−165, −3 per-row terms.
-- **B2 cleanup-mapkey-scope-wins** (after B1) — `mapFirstFallback` becomes a predicate "a scope beyond the Map
+- ✅ **B2 cleanup-mapkey-scope-wins** — LANDED `2d11a73b`: a named scope (side effect/collection/label) beyond a
+  maybe-Map value WINS (one §17 line); `constantNode`, `mapKeyOr` and `scopedKey`'s fallback are deleted, and a map
+  host's may-held key colliding with a same-named scope declines naming both (`lower/reduction.ts`). Remains: two
+  follow-ups in `docs/outstanding-work.md` — (1) a decline-reason channel so these collision and merge declines
+  can explain themselves; (2) child bodies other than `select(k)` over a map host, e.g. `map(__.count(local))`.
+  The pre-existing O(N²) re-read of a shared collection value per traverser is recorded in §6. B3 builds on it.
+  Original spec — `mapFirstFallback` becomes a predicate "a scope beyond the Map
   names `k`"; delete `constantNode`, `mapKeyOr`, `scopedKey`'s `fallback`/`total`; `scalarMapKey` is
   entry-else-drop. Per-row scalar stream: a named side effect/collection/label WINS (one §17 line). Map/record host:
   `k ∉ keys` → existing `selectSideEffectConstant`/`selectCollection`; may-held `k` + same-named side effect/label →
