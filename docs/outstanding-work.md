@@ -22,6 +22,10 @@ plain `Property`, not a `VertexProperty`: the class rides a compile-time owner d
 `ListOf` `elem`, node tag via `propertyTag`) into `framePropertyRow` (`src/execute.ts`). L3 1890 → 1896.
 Remains: nothing.
 
+**Mid-traversal `inject(xs)` (✅ landed, 90518dfa).** On the root chain, `inject(xs)` after a stream is a
+UNION ALL of that stream with the literal relation, the injected rows minted as fresh traversers
+(`injectTail`/`injectedRows` in `src/compiler/rel/lower.ts`). L3 1896 → 1904. Remains: nothing.
+
 ## 1. Wrong answers today
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
