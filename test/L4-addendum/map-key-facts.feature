@@ -10,6 +10,9 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
 
   # A branch merge of map arms with DIFFERENT key sets: the merged stream may hold `b` (one arm does), so the
   # row lacking it reads the side effect. Before, the merge kept the FIRST arm's key set and read `7` twice.
+  # Entry-or-side-effect per row is a collision the query text names, so these DECLINE (§17 "Map scope") —
+  # and still pin the meet: a meet that lost `b` from `keys` would answer `7` for every row instead.
+  @Unsupported
   Scenario: g_withSideEffectXb_7X_injectX1X_unionXconstantXa3X_constantXa1_b2XX_selectXbX
     Given the empty graph
     And the traversal of
@@ -22,6 +25,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | d[7].i |
       | d[2].i |
 
+  @Unsupported
   Scenario: g_withSideEffectXb_7X_injectX1X_unionXconstantXa1_b2X_constantXa3XX_selectXbX
     Given the empty graph
     And the traversal of
@@ -34,6 +38,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | d[2].i |
       | d[7].i |
 
+  @Unsupported
   Scenario: g_withSideEffectXb_7X_V_chooseXhasLabelXpersonX_constantXa1_b2X_constantXa3XX_selectXbX
     Given the modern graph
     And the traversal of
@@ -51,6 +56,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | d[7].i |
 
   # The merged facts ride an as() label too.
+  @Unsupported
   Scenario: g_withSideEffectXb_7X_injectX1X_unionXconstantXa3X_constantXa1_b2XX_asXmX_selectXmX_selectXbX
     Given the empty graph
     And the traversal of
@@ -65,6 +71,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
 
   # The record-field twin: two record arms whose map-valued FIELD has different key sets. The meet recurses
   # through the record's fields, in either arm order.
+  @Unsupported
   Scenario: g_withSideEffectXage_7X_V_hasLabelXpersonX_unionXprojectXmX_byXelementMapXnameXX_projectXmX_byXelementMapXname_ageXXX_selectXmX_selectXageX
     Given the modern graph
     And the traversal of
@@ -83,6 +90,7 @@ Feature: mogwai addendum — a map's static key facts: `keys` MAY hold, `held` M
       | d[32].i |
       | d[35].i |
 
+  @Unsupported
   Scenario: g_withSideEffectXage_7X_V_hasLabelXpersonX_unionXprojectXmX_byXelementMapXname_ageXX_projectXmX_byXelementMapXnameXXX_selectXmX_selectXageX
     Given the modern graph
     And the traversal of

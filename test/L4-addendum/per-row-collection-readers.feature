@@ -151,6 +151,26 @@ Feature: mogwai addendum — a per-row-typed stream whose rows may be collection
       | result |
       | l[m[{"x":"d[2].i"}]] |
 
+  Scenario: g_V_valuesXmX_mapXcountXlocalXX_mixed_rows
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["x": 1, "y": 2]).addV("p").property("m", "text")
+      """
+    And the traversal of
+      """
+      g.V().values("m").map(__.count(local))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+      | d[1].l |
+
+  # A side-effect constant WINS over a per-row scalar stream (§17 "Map scope"), so `select("k")` here is the
+  # constant map itself — a MAP stream, whose `map()` child body is not built yet (as for
+  # `inject([x:1]).map(__.count(local))`).
+  @Unsupported
   Scenario: g_withSideEffectXk_mapX_V_valuesXnameX_selectXkX_mapXcountXlocalXX
     Given the empty graph
     And the graph initializer of

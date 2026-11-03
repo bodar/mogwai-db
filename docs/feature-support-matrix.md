@@ -4,7 +4,7 @@ A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only wh
 note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
 Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
-**L3 conformance: <!-- L3:passing -->1,889<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,890<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -314,7 +314,6 @@ wrong number class.
 | Untyped JSON map keys | one total spelling rule; colliding keys render as `[key, value]` entries so nothing is lost; NaN/Infinity as name strings |
 | Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`; an edge endpoint is its bare id |
 | Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |
-| Map scope | a key the traverser's own map holds wins, then a `withSideEffect` constant; a key neither holds drops the row where Java falls through to a named collection of that name. A same-named PATH LABEL (live, or bound by an enclosing scope) is read as the label, never as a per-row probe of the map: the chain `select(k)` over a map stream reads the map where every row holds `k`, the label where none can, and otherwise declines (`elementMap('age').select('age')` after `as('age')`); over a record, a field some rows may lack beside a same-named label declines in every form (`select(k)`, `select(k, …)`, `by(select(k))`) |
-| Map-valued property stream | `values('m').select(k)` (chain, child body, `where()`) reads `m`'s own `k`, then a `withSideEffect` constant `k`, else drops the row; where `k` is a path label or a named collection, or the reader is `math()`'s variable `k`, a `by(select(k))` modulator or a `format()` token, it reads that scope and not a same-named key of the map, and `values('m').mergeV(__.select(k))` merges by the side effect; `select(keys)` over a row that is no Map raises `does not have accessible keys` without the Java class; `values('m').unfold()` and `format()` over such a stream still decline |
+| Map scope | `select(k)` (chain, child body, `where()`, a `math()`/`format()` variable) over a value stream that may hold stored Maps (`values('m')`) reads a `withSideEffect` constant, named collection or path label `k` where one exists — that scope WINS and no row is probed for a same-named key of a stored Map — else the row's own `k`, else drops the row; `values('m').mergeV(__.select(k))` over a side effect `k` declines (it could write the wrong element). Over a map or `project()` record: a key every row holds is the entry and a key no row can hold is the named scope; a key some rows MAY hold beside a same-named side-effect constant or path label declines, in every form (`select(k)`, `select(k, …)`, `by(select(k))`, `dedup(k)`, `math()`), and beside a named collection keeps the entry and drops a row lacking it. `select(keys)` over a row that is no Map raises `does not have accessible keys` without the Java class; `values('m').unfold()` and `format()` over such a stream still decline |
 | Side-effect reads | a side-effect read sees the completed collection (`local(aggregate('a')).select('a').count(local)` is `6` each time) |
 | Path entries of a re-bound label | a label re-bound after a branch host may appear once more (or fewer) in `select(Pop.all, k)` than in Java |

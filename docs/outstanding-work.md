@@ -58,6 +58,12 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   can't go through SQL `sum`); `fold(seed, Operator.x)` declines classes outside int/long/double.
 - **Path as a value.** `path().order()`, `path().group()` (needs a `{t:'path'}` arm in
   `frameTypedNode`/`listNodeExpr`), `path().fold().unfold()`.
+- **An explanatory decline from the lowering.** `lowerToRel` must return `null`, never throw
+  (`scripts/rel-sweep.ts`), so a decline decided on framing facts — not the query text alone — can only
+  say "no lowering covers …". The Map-scope collision (a map or record that MAY hold `k` beside a
+  same-named side-effect constant or path label; `values('m').mergeV(__.select('k'))` over a side effect)
+  should name both and suggest a rename. Needs a per-compile decline-reason channel the lowering records
+  into and `compilePlan` reads when the result is `null`.
 - **Per-origin slice in a batched `union`/`choose` arm or bounded-`repeat` body** under an outer
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
 
@@ -85,6 +91,10 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   `collection.ts` `registerGrouping`).
 - **Bare-list `[1L]`/`[1.0f]` literal** declines at `listLiteralBlob`.
 - **`filter(__.identity())`** — the one lattice gap L5 names.
+- **A MAP stream's child bodies beyond `select(k)`** — `inject([x:1]).map(__.count(local))`,
+  `valueMap().project('c').by(__.count(local))`, `withSideEffect('k',[x:1]).V().values('n').select('k')
+  .map(__.count(local))` (`mapHostChild` reads only `select(k)`). Tests:
+  `test/L4-addendum/per-row-collection-readers.feature` (the `@Unsupported` side-effect form).
 - **`property(T.label)` on an existing element** (label append) — genuine future work; see debt for `T.id`.
 
 ## 5. Product capabilities
@@ -132,6 +142,11 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   measured LINEAR (`test/compiler/merge-scale.exec.test.ts`): the two-pool grid `[a{i%s}:1,b{i/s}:1]`
   128 ms → 863 ms from 1k to 8k maps, 30-entry maps 1k → 8k at 8.2×, and one map's width no longer
   matters (`mapDrivers` picks its driving entry once per driver: 1000 entries 107 ms, was 1.9 s).
+- **A collection read per traverser re-parses the whole collection** — `g.V().group('a').by(constant('a'))
+  .by('age').select('a').select('a').count()` is 57 ms at 1k vertices and 3.4 s at 8k (59×): each of N rows
+  re-reads an N-member group value through `json_each`/`json_extract`. Java shares one reference. The value
+  is the same for every row, so read the key once (one MATERIALIZED relation) and cross-join it. Measured
+  2026-11-03; unchanged by the Map-scope work.
 - **Path-position `by()` dispatch built twice** (`src/compiler/rel/path.ts`) — extracting
   `pathPositionProjection` also fixes a mid-path value/list/map position read as a vertex.
 - **Four copied blocks in `write.ts`** (carrier reproject, merged-create spread, alias-carry, nested-spec decline).

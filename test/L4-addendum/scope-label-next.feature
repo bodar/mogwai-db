@@ -171,8 +171,8 @@ Feature: mogwai addendum — a path label beside a traverser's own Map is read a
       | d[7].i |
       | d[7].i |
 
-  # With no label of that name the stream's own Map is the first scope, then a side-effect constant; a row
-  # no scope holds `k` for drops (Select.feature:578-596).
+  # With no label or side effect of that name the stream's own Map is the only scope; a row it does not hold
+  # `k` for drops (Select.feature:578-596). A side-effect constant `k` WINS, like a label (§17 "Map scope").
   Scenario: g_V_valuesXmX_selectXkX
     Given the empty graph
     And the graph initializer of
@@ -201,7 +201,7 @@ Feature: mogwai addendum — a path label beside a traverser's own Map is read a
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[1].i |
+      | d[5].i |
       | d[5].i |
       | d[5].i |
 

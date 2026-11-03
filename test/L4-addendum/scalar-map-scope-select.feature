@@ -2,14 +2,14 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
 
   # `Scoping.getScopeValue` asks the traverser's OWN Map first, then the side effects, then the path
   # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135).
-  # A stored map property read by `values('m')` is a per-row scalar stream whose rows MAY be Maps, so a
-  # `select(k)` over it reads the row's own `k` where the row is a Map holding it, and otherwise the
-  # `withSideEffect` constant `k` — or, with no scope holding `k`, drops the row (Select.feature:578-596).
-  # Before: the side-effect map answered over a Map holding `k` (wrong), and the other forms declined.
+  # A stored map property read by `values('m')` is a per-row scalar stream whose rows MAY be Maps, so where
+  # no other scope names `k` a `select(k)` over it reads the row's own `k` where the row is a Map holding
+  # it, and otherwise drops the row (Select.feature:578-596).
   #
-  # A path label (of any kind) or a named collection `k` keeps its own answer without reading the Map's
-  # key — a path-label read stays a column read (scope-label-next.feature), a §17 divergence
-  # (docs/feature-support-matrix.md, "Map-valued property stream").
+  # A `withSideEffect` constant, a path label (of any kind) or a named collection `k` WINS: it keeps its own
+  # answer without reading the Map's key, so no row pays a per-row Map probe — a §17 divergence
+  # (docs/feature-support-matrix.md, "Map scope"). A merge driven by such a select declines: writing by the
+  # side effect where the row's own Map holds `k` would write the wrong element.
 
   Scenario: g_withSideEffectXk_mapX_VX1X_propertyXm_mapX_valuesXmX_selectXkX
     Given the empty graph
@@ -24,7 +24,7 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
     When iterated to list
     Then the result should be unordered
       | result |
-      | mm |
+      | m[{"name":"se"}] |
 
   Scenario: g_V_valuesXmX_selectXkX_no_scope
     Given the empty graph
@@ -41,7 +41,7 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | mm |
 
-  Scenario: g_withSideEffectXk_seX_V_valuesXmX_selectXkX_falls_through
+  Scenario: g_withSideEffectXk_seX_V_valuesXmX_selectXkX_side_effect_wins
     Given the empty graph
     And the graph initializer of
       """
@@ -55,10 +55,10 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
     Then the result should be unordered
       | result |
       | se |
-      | mm |
+      | se |
       | se |
 
-  # The side-effect constant can itself be a map: it frames as a map where the row is no Map holding k.
+  # The side-effect constant can itself be a map, and it frames as one.
   Scenario: g_withSideEffectXk_mapX_V_valuesXmX_selectXkX_map_fallback
     Given the empty graph
     And the graph initializer of
@@ -88,8 +88,20 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
     When iterated to list
     Then the result should be unordered
       | result |
-      | mm |
       | se |
+      | se |
+
+  # …and the side effect reaches every host the child seam has, not only a value that may be a Map.
+  Scenario: g_withSideEffectXk_seX_V_whereXselectXkX_isXseXX_mapXselectXkXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("k", "se").V().where(__.select("k").is("se")).map(__.select("k")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
 
   Scenario: g_V_valuesXmX_localXselectXkX_selectXjXX
     Given the empty graph
@@ -146,7 +158,9 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
       | result |
       | d[6].l |
 
-  # A side-effect map merged over a value stream still folds (no decline) — the regression guard.
+  # A side-effect map merged over a value stream that may hold stored Maps DECLINES: a row whose own Map
+  # holds `k` would merge by that entry, so writing by the side effect could write the wrong element.
+  @Unsupported
   Scenario: g_withSideEffectXk_mapX_V_valuesXnameX_mergeVXselectXkXX_count
     Given the modern graph
     And the traversal of
@@ -220,7 +234,7 @@ Feature: mogwai addendum — a map-valued property stream is the first scope sel
     When iterated to list
     Then the result should be unordered
       | result |
-      | null |
+      | se |
       | se |
 
   # A body continuing past the select sees the null entry as a null traverser; a row with no scope

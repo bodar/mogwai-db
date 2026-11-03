@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import { withChannel } from '../../../channels.ts';
-import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type SideEffectConstants } from '../../../gremlin/frontend.ts';
+import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type Arg, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
@@ -18,14 +18,14 @@ import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamB
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, coalesce, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
-import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
-import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
+import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, minMaxOrder, namedBeyondMap, sideEffectConstant, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, subPathMembers } from '../path.ts';
@@ -1847,6 +1847,13 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // value/token/property to project; a rooted `V()`/`E()` body was handled above).
   if (host.kind === 'map') return mapHostChild(body, host, ctx, fresh);
 
+  // A `select(k)` of a `withSideEffect` CONSTANT is that constant over any element or scalar host
+  // (`sideEffectSelectChild`) — the scope a non-Map traverser reads before the path.
+  if (first.name === 'select') {
+    const constant = sideEffectSelectChild(body, host, ctx, fresh);
+    if (constant !== 'pass') return constant;
+  }
+
   // A `select(<label>)` RE-ROOT — the alias analogue of the endpoint/owner reroots above, so a child
   // body may read a bound label and continue against it. A bare `select('a')` yields the aliased
   // traverser itself (an element or a value); a chain past it continues against the new host.
@@ -2492,50 +2499,68 @@ function mapHostChild(
   if (!spec || spec.labels.length !== 1) return null;
   const key = spec.labels[0]!;
   const presence = mapKeyPresence(host, key);
-  const mayHold = presence !== 'absent';
-  // The NEXT scope (`mapFirstFallback`, `Scoping.java:119-135`): a row whose Map lacks `key` reads a
-  // `withSideEffect` constant — gated on the host, so an ABSENT host does not produce — and the entry and
-  // the constant are one per-row scalar node only where the value side IS scalar. A PATH LABEL is the
-  // next scope where one is live on the host's row (or, with no row to ask, anywhere in the program):
-  // the entry-or-label read has no framing here, so a key the Map only MAY hold declines rather than
-  // drop the rows the label answers.
-  const fallback = mapFirstFallback(key, ctx, labelNamed(key, host, ctx));
-  if (fallback === null) return null;
-  if (fallback === 'label' && presence === 'may') return null;
-  if (typeof fallback === 'object' && fallback.node) {
-    if (mayHold && host.valOf.kind !== 'scalar') return null;
-    const scoped = mayHold ? coalesce(correlatedMapKey(host.map, key, fresh).node, fallback.node) : fallback.node;
-    const node = gatedByHost(host, scoped);
-    return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+  // A scope beyond the Map that names `key` answers a row lacking it (`Scoping.java:119-135`), and an
+  // entry-or-scope read per row is not built — so the KEY FACTS decide (`mapTail`'s rule): a key every row
+  // holds is the entry; a key no row holds is a `withSideEffect` constant's value (`constantSelectChild`)
+  // or, for a label the child seam has no alias vocabulary for here, a decline; a key a row MAY hold beside
+  // a constant or a label declines (the collision is in the query text), and beside a named collection
+  // keeps the entry (a row lacking it drops, §17 "Map scope").
+  if (presence !== 'held' && namedBeyondMap(key, ctx, labelNamed(key, host, ctx))) {
+    const constant = sideEffectConstant(key, ctx);
+    if (presence === 'absent') return constant ? constantSelectChild(body, host, constant, ctx, fresh) : null;
+    if (constant || labelNamed(key, host, ctx) || ctx.enclosingLabels?.has(key)) return null;
   }
-  // Map-key-vs-alias precedence (`Scoping`): a key NOT in the static key set cannot be a map key. The
-  // child seam has no alias vocabulary here, so it declines rather than guessing (fail-closed).
-  if (!mayHold) return null;
+  // A key NOT in the static key set cannot be a map key, and no scope names it: every row drops.
+  if (presence === 'absent') return null;
   const { node } = correlatedMapKey(host.map, key, fresh);
   return selectedNodeChild(body, node, host.valOf, host.row, ctx, fresh);
+}
+
+/**
+ * `select(k)` of a `withSideEffect(k, c)` CONSTANT as a child body — the child-seam twin of the chain's
+ * `selectSideEffectConstant`. Over an element or a scalar host the side effect is the scope a non-Map
+ * traverser reads (`Scoping.java:126-127`); over a per-row scalar that may itself be a stored Map it WINS
+ * over a same-named entry (§17 "Map scope"), so no row is probed. `'pass'` where `k` names no constant.
+ */
+function sideEffectSelectChild(
+  body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter,
+): ChildValue | null | 'pass' {
+  const constant = constantSelected(body[0]!, host, ctx);
+  return constant ? constantSelectChild(body, host, constant, ctx, fresh) : 'pass';
+}
+
+/** The constant a `select(k)` leading a body over an ELEMENT or SCALAR host reads — or `undefined`. Mint-free. */
+const constantSelected = (step: IRStep, host: ChildHost, ctx: ChainCtx): Arg | undefined => {
+  if (step.name !== 'select' || (host.kind !== 'element' && host.kind !== 'scalar') || step.modulators?.length || step.optionArms) return undefined;
+  const spec = selectSpec(step);
+  return spec && spec.labels.length === 1 ? sideEffectConstant(spec.labels[0]!, ctx) : undefined;
+};
+
+/** The body continuing from the constant `c` as ONE `{t,v}` node (`constantNode`, the stored encoding a
+ *  selected map entry has), gated on the host so an ABSENT host (an unbound label's NULL) does not produce.
+ *  A constant the encoder cannot spell declines. */
+function constantSelectChild(body: readonly IRStep[], host: ChildHost, constant: Arg, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const value = constantNode(constant.value, constant.type ?? null, constant.name ?? null);
+  const node = value && gatedByHost(host, value);
+  return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
 }
 
 /**
  * `select(k)` as a child body over a PER-ROW SCALAR host — the child-seam twin of the chain's
  * `selectMapFirst`: the host value may be a MAP (a map-valued stored property), whose own entry is the
  * first scope (`Scoping.java:121-122`), read behind `CASE WHEN vtype = 'map'` so a non-Map row opens no
- * `json_each`. The fallback is `mapFirstFallback`'s — a `withSideEffect` constant node, or nothing (the
- * row drops) — and `'pass'` hands a path-label or collection key to the alias re-root unchanged: the label
- * wins over a same-named Map key (§17 "Map scope"), so a label read stays a column read.
+ * `json_each`; a row that is no Map holding `k` drops. Built only where no scope beyond the Map names `k`
+ * (`namedBeyondMap`): `'pass'` hands a constant to `sideEffectSelectChild` and a path-label or collection
+ * key to the alias re-root unchanged — the named scope wins over a same-named Map key (§17 "Map scope").
  */
 function scalarMapFirstChild(
   body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null | 'pass' {
   const key = mapFirstSelect(body[0]!, host);
-  if (key === null) return 'pass';
-  const fallback = mapFirstFallback(key, ctx, labelNamed(key, host, ctx));
-  if (fallback === null) return null;
-  if (typeof fallback === 'string') return 'pass';
+  if (key === null || namedBeyondMap(key, ctx, labelNamed(key, host, ctx))) return 'pass';
   const isMap: Expr = { kind: 'binary', op: '=', left: host.vtype!, right: compilerText('map') };
   const entry: Expr = { kind: 'case', whens: [[isMap, correlatedMapKey(host.value, key, fresh).node]], else: compilerNull() };
-  // A constant fallback would make an ABSENT host (an unbound label's NULL) produce: gate it on the host.
-  const node = fallback.node ? gatedByHost(host, coalesce(entry, fallback.node)) : entry;
-  return node && selectedNodeChild(body, node, { kind: 'scalar' }, host.row, ctx, fresh);
+  return selectedNodeChild(body, entry, { kind: 'scalar' }, host.row, ctx, fresh);
 }
 
 /** The single key of a `select(k)` a map-first reader can take over `host` — a per-row scalar that may be a
@@ -2547,7 +2572,7 @@ function mapFirstSelect(step: IRStep, host: ChildHost): string | null {
 }
 
 /** Is `key` a PATH LABEL for a reader over `host` — live on the host's row, or, with no row to ask, bound
- *  anywhere in the program? (`mapFirstFallback`'s `liveLabel`.) */
+ *  anywhere in the program? (`namedBeyondMap`'s `liveLabel`.) */
 const labelNamed = (key: string, host: ChildHost, ctx: ChainCtx): boolean =>
   host.row ? liveAliases(host.row.aliases, host.row.rel).has(key) : ctx.scopeNames.labels.has(key);
 
@@ -2557,19 +2582,17 @@ const mayBeMapTag = (vtype: Expr | undefined): vtype is Expr =>
   !!vtype && (vtype.kind !== 'lit' || vtype.value === 'map');
 
 /**
- * WILL a body leading with `step` over `host` read the host's OWN Map first (`scalarMapFirstChild` answers
- * rather than passing)? Asked by a reader with its own route for the label case — the predicate seam's
- * subject re-root — so the map-first value seam takes the body exactly where it would answer. Mint-free.
+ * WILL the VALUE seam answer a body leading with `step` over `host` — a `withSideEffect` constant
+ * (`sideEffectSelectChild`) or the host's OWN Map read first (`scalarMapFirstChild`)? Asked by a reader with
+ * its own route for the label case — the predicate seam's subject re-root — so the value seam takes the
+ * body exactly where it would answer. Mint-free.
  */
-export function readsMapFirst(step: IRStep, host: ChildHost, ctx: ChainCtx): boolean {
+export function readsScopeValue(step: IRStep, host: ChildHost, ctx: ChainCtx): boolean {
+  if (constantSelected(step, host, ctx)) return true;
   const key = mapFirstSelect(step, host);
-  if (key === null) return false;
-  const next = mapFirstFallback(key, ctx, labelNamed(key, host, ctx));
   // NO scope is proven only where no path label of that name exists anywhere: a caller that hands no alias
   // map (a branch's exhaustion probe) cannot show a label the row does carry, and "drop" would be wrong.
-  if (next && typeof next === 'object' && !next.node && ctx.scopeNames.labels.has(key)) return false;
-  // `typeof null` is 'object' on purpose: a constant the encoder cannot spell declines in the value seam too.
-  return typeof next === 'object';
+  return key !== null && !namedBeyondMap(key, ctx, labelNamed(key, host, ctx)) && !ctx.scopeNames.labels.has(key);
 }
 
 /**

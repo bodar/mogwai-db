@@ -275,7 +275,9 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | 32 |
       | 7 |
 
-  # `math` builds the same fallthrough for a Number constant: the field, else the side effect.
+  # `math` reads the same scopes: the field, else the side effect — a field-or-side-effect per row, which
+  # declines (§17 "Map scope"), as `format` and `select` do.
+  @Unsupported
   Scenario: g_withSideEffectXx_7X_VX1X_out_projectXxX_byXageX_mathXx_plus_1X
     Given the modern graph
     And the traversal of
@@ -289,6 +291,7 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
       | d[33.0].d |
       | d[8.0].d |
 
+  @Unsupported
   Scenario: g_withSideEffectXage_7X_VX1X_out_elementMapXageX_selectXageX
     Given the modern graph
     And the traversal of
@@ -313,7 +316,9 @@ Feature: mogwai addendum — a project() record is the traverser's MAP, the firs
     When iterated to list
     Then the result should be empty
 
-  # math() reads a PRESENT field, never the side effect behind it (`mapScopeMayHold`): [8,8] was wrong.
+  # math() reads a PRESENT field, never the side effect behind it: [8,8] was wrong. A field the static
+  # facts cannot show present beside a same-named side effect declines.
+  @Unsupported
   Scenario: g_withSideEffectXx_7X_VX1X_out_hasLabelXpersonX_projectXxX_byXageX_mathXx_plus_1X
     Given the modern graph
     And the traversal of

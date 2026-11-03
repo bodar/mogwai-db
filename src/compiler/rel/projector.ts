@@ -121,7 +121,7 @@ const sideEffectConst = (name: string, child: ChildSeam): Expr | null =>
  */
 const sideEffectBehindOwnScope = (name: string, host: ChildHost, child: ChildSeam): boolean =>
   (child.sideEffects.has(name) || child.scopeNames.sideEffects.has(name))
-  && (host.kind === 'record' ? !!fieldNamed(host.fields, name)?.optional : host.kind === 'map' && mapScopeMayHold(host, name));
+  && (host.kind === 'record' ? !!fieldNamed(host.fields, name)?.optional : host.kind === 'map' && mapKeyPresence(host, name) === 'may');
 
 /**
  * The formula as ONE expression over the host traverser, or `null` to decline.
@@ -144,18 +144,11 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     // variable and N by()s feed N variables (`TraversalRing.next()`).
     const modulation: Modulation = ring.length ? ring[at % ring.length]! : { key: { kind: 'identity' } };
     if (modulation.order !== undefined) return null;
-    // An OPTIONAL record field a side-effect CONSTANT stands behind is that field, else the constant —
-    // `COALESCE`, since an optional field's absence is its value's nullness (`fieldPresence`). Built for a
-    // bare variable over a Number constant; every other entry-or-side-effect form declines.
-    let behind: Expr | null = null;
-    if (name !== CURRENT && sideEffectBehindOwnScope(name, host, child)) {
-      const seeded = child.sideEffects.get(name)?.value;
-      behind = host.kind === 'record' && modulation.key.kind === 'identity' && (typeof seeded === 'number' || typeof seeded === 'bigint')
-        ? sideEffectConst(name, child) : null;
-      if (!behind) return null;
-    }
+    // An OPTIONAL record field or a Map entry some rows may lack, beside a same-named side effect: the
+    // field-or-side-effect read per row is not built, and the query text names both: decline.
+    if (name !== CURRENT && sideEffectBehindOwnScope(name, host, child)) return null;
     // A named variable is the direct scope read — a path label's column, a record field — and never a
-    // per-row probe of a scalar row that may be a stored Map (§17 "Map-valued property stream").
+    // per-row probe of a scalar row that may be a stored Map (§17 "Map scope").
     const varHost = name === CURRENT ? host : scopedHost(name, host, true);
     if (!varHost) {
       // A side-effect CONSTANT (`withSideEffect('x', 100)` in `math('_ + x')`) resolves to an inlined
@@ -184,10 +177,8 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     if (!typed) return null;
     const offends = receiverOffence('number', typed.value, typed.evidence, typed.productiveNull);
     if (offends === false) return null;
-    // …and only a PRESENT field is tested: an absent one is the constant, a Number by the check above.
-    const held: Expr = { kind: 'binary', op: 'is not', left: typed.value, right: compilerNull() };
-    if (offends) offences.push([behind ? { kind: 'binary', op: 'and', left: held, right: offends } : offends, mathVariableMessage(name)]);
-    resolved.set(name, behind ? { kind: 'call', fn: 'COALESCE', args: [typed.value, behind] } : typed.value);
+    if (offends) offences.push([offends, mathVariableMessage(name)]);
+    resolved.set(name, typed.value);
   }
   // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
   return raisingWhen(offences, nanDeferred(compileMath(formula, relMathOps((name) => resolved.get(name)!)), [...resolved.values()]));

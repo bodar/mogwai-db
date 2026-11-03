@@ -56,7 +56,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, mergeMaps, type MergeMaps, type MergeTraverser } from '../ir/write-args.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapKeyOr, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapWindow, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapWindow, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -501,18 +501,26 @@ function projectScalar(
 
 function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | null {
   if ((step.args ?? []).length !== 1 || step.modulators?.length || step.optionArms) return null;
-  const arg = step.args[0]!;
+  return constantValue(input, step.args[0]!, fresh);
+}
+
+/**
+ * Each traverser's value REPLACED by one compile-time value — `constant(c)`'s body, and a `select(k)` of a
+ * `withSideEffect(k, c)` constant (`selectSideEffectConstant`), which is the same retype. `null` declines a
+ * value the stored encoding cannot spell.
+ */
+function constantValue(input: Rel, arg: Arg, fresh: Minter): FramedRel | null {
   // `constant([k:v, …])` — a MAP LITERAL, the per-row twin of `injectMap`. It REPLACES each traverser's
   // value with the same compile-time map (`mapLiteralBlob`, the self-describing pairs blob every map
   // producer shares), so the whole re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold`,
   // a slice, `as()`) composes over it. Every row holds exactly the literal's string keys, so they are
   // both key facts (`literalKeyFacts`): a `constant([…]).as(m).select(m).select(k)` resolves like every
-  // other aliased map (G4).
+  // other aliased map (G4). A map with a non-string key (a `Direction`/`T.label` token) states only the
+  // keys it holds, so the map tail reads `MAP_COL` for the rest.
   if (arg.value instanceof Map) {
     const blob = mapLiteralBlob(arg.value, arg.type ?? null, arg.name);
     if (!blob) return null;
     const keys = [...(arg.value as Map<unknown, unknown>).keys()];
-    if (!keys.every((k): k is string => typeof k === 'string')) return null;
     const rel = make.project({
       id: fresh('cm'), input, channels: input.channels,
       type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(input.channels)),
@@ -1282,14 +1290,14 @@ function collectionArm(
     const collectSelect = selectCollection(step, rel, ctx, fresh);
     if (collectSelect !== 'pass')
       return { tail: collectSelect && continueAs(collectSelect.rel, collectSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
-    // A PER-ROW SCALAR stream may hold MAPS, whose own entry is the FIRST scope — read before the side
-    // effect a constant names, or in place of the empty answer an unbound key has (`selectMapFirst`).
+    // A PER-ROW SCALAR stream may hold MAPS, whose own entry is the FIRST scope where no other scope names
+    // the key — in place of the empty answer an unbound key has (`selectMapFirst`).
     const mapFirst = selectMapFirst(step, rel, framing, labels, ctx, fresh);
     if (mapFirst !== 'pass')
-      return { tail: mapFirst && continueAs(mapFirst.rel, mapFirst.framing, steps, at + 1, bulked, ctx, fresh, labels) };
-    // A `withSideEffect` CONSTANT MAP resolves through the side effects before the path labels, so it is
-    // consulted before `selectKeys` (which sees only the alias map) — the map-producing scope read that
-    // feeds the map-valued merge driver.
+      return { tail: continueAs(mapFirst.rel, mapFirst.framing, steps, at + 1, bulked, ctx, fresh, labels) };
+    // A `withSideEffect` CONSTANT resolves through the side effects before the path labels, so it is
+    // consulted before `selectKeys` (which sees only the alias map) — the map-producing form is the scope
+    // read that feeds the map-valued merge driver.
     const constSelect = selectSideEffectConstant(step, rel, ctx, fresh);
     if (constSelect !== 'pass')
       return { tail: constSelect && continueAs(constSelect.rel, constSelect.framing, steps, at + 1, false, ctx, fresh, labels) };
@@ -1453,37 +1461,23 @@ function selectCollection(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter):
 }
 
 /**
- * `select(name)` where `name` is a `withSideEffect` CONSTANT MAP — the map-producing form of a scope
- * read. `getScopeValue` consults the traverser's side effects before the path labels
- * (`Scoping.java:126-127`), so a `withSideEffect("m", [k:v,…])` resolves here to that constant per
- * surviving traverser — the map-VALUED twin of `constantRetype`'s `constant([k:v])`. It is what lets
+ * `select(name)` where `name` is a `withSideEffect` CONSTANT — a scope read whose answer is the same
+ * compile-time value for every traverser. `getScopeValue` consults the traverser's side effects before the
+ * path labels (`Scoping.java:126-127`), so `withSideEffect("m", c)` resolves here to `c` per surviving
+ * traverser: `constant(c)`'s retype (`constantValue`). A map constant is what lets
  * `g.inject(1).select("m").mergeE()` (`MergeEdge.feature`) feed the map-valued merge driver
  * (`mergeEFromMap`/`mergeVFromMap`), so the map's `Direction`/`T.label`/string entries reach the search.
  *
- * `'pass'` for anything but a single-key `select` of a constant MAP side effect — a scalar/list constant
- * or an unresolvable name falls through to `selectKeys`, and a value/key the blob cannot encode DECLINES
- * (fail closed, `mapLiteralBlob` `null`). A map with non-string keys carries no STATIC key set (its
- * `Direction`/`T.label` keys are not property names), so the framing omits `keys` and the map tail reads
- * `MAP_COL` dynamically.
+ * `'pass'` for anything but a single-key `select` of a constant side effect; a value the stored encoding
+ * cannot spell DECLINES. A caller over a traverser that may itself be a Map holding `name` asks first
+ * (`mapTail`, `namedBeyondMap`) — this read never looks at the traverser.
  */
 function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter): FramedRel | null | 'pass' {
   if (step.modulators?.length || step.optionArms) return 'pass';
   const spec = selectSpec(step);
   if (!spec || spec.labels.length !== 1) return 'pass';
-  const name = spec.labels[0]!;
-  if (!ctx.sideEffects.has(name)) return 'pass';
-  const { value, type } = ctx.sideEffects.get(name)!;
-  if (!(value instanceof Map)) return 'pass';
-  const blob = mapLiteralBlob(value, type, null);
-  if (!blob) return null;
-  // The constant REPLACES each traverser's value with the same map — one row per surviving traverser,
-  // channels intact (a barrier below still sorts by the emission order), exactly `constantRetype`'s shape.
-  const out = make.project({
-    id: fresh('sec'), input: rel, channels: rel.channels,
-    type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(rel.channels)),
-    exprs: [[MAP_COL, blob], ...rel.channels.map((ch) => [ch.col, col(rel.id, ch.col)] as const)],
-  });
-  return { rel: out, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...literalKeyFacts([...(value as Map<unknown, unknown>).keys()]) } };
+  const constant = sideEffectConstant(spec.labels[0]!, ctx);
+  return constant ? constantValue(rel, constant, fresh) : 'pass';
 }
 
 /**
@@ -1493,32 +1487,24 @@ function selectSideEffectConstant(step: IRStep, rel: Rel, ctx: ChainCtx, fresh: 
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`),
  * so per row the answer is the Map's entry where the row is a Map holding `k`, else the next scope's.
  *
- * Built only where the next scope is a value a `{t,v}` node can carry beside the entry
- * (`scalarMapKey`), so the stream stays ONE per-row scalar:
- * - a `withSideEffect(k, constant)` — scalar, list or map — is the fallback node (`constantNode`, the
- *   stored encoding); a constant the encoder cannot spell DECLINES;
- * - NO scope at all (no collection, side effect or live/enclosing label `k`) — a row whose Map lacks `k`
- *   DROPS, the empty answer `selectKeys` gives a non-Map stream (`Select.feature:578-596`).
- *
- * `'pass'` everywhere else, and deliberately where `k` is a LIVE (or enclosing) PATH LABEL or a named
- * collection: those keep their own answer with no per-row probe — a path-label read is a column read, and
- * the probe would land on every `values(x).as('a')…select('a')`. That a same-named key of a stored Map is
- * not read there is a §17 divergence (`docs/feature-support-matrix.md`, "Map scope"). A static scalar
- * (`count()`, a typed literal) is never a Map, and a MAP/RECORD stream reads its own keys in its own tail,
- * so neither reaches this.
+ * Built only where NO scope beyond the Map names `k` (`namedBeyondMap`): a row whose Map lacks `k` then
+ * DROPS, the empty answer `selectKeys` gives a non-Map stream (`Select.feature:578-596`), and the entry
+ * read is `scalarMapKey`. `'pass'` where a side effect, collection or LIVE (or enclosing) PATH LABEL names
+ * `k`: that scope WINS and keeps its own answer with no per-row probe — a constant is a literal, a
+ * path-label read a column read, and the probe would land on every `values(x).as('a')…select('a')`. That a
+ * same-named key of a stored Map is not read there is a §17 divergence (`docs/feature-support-matrix.md`,
+ * "Map scope"). A static scalar (`count()`, a typed literal) is never a Map, and a MAP/RECORD stream reads
+ * its own keys in its own tail, so neither reaches this.
  */
 function selectMapFirst(
   step: IRStep, rel: Rel, framing: RelFraming, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
-): FramedRel | null | 'pass' {
+): FramedRel | 'pass' {
   if (framing.kind !== 'scalar' || step.optionArms) return 'pass';
   const vtype = perRowColumnOf(framing.type);
   if (!vtype || !rel.type.cols.some((column) => column.name === vtype)) return 'pass';
   const key = selectedKey(step);
-  if (key === null) return 'pass';
-  const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
-  if (fallback === null) return null;
-  if (typeof fallback === 'string') return 'pass';
-  return { rel: scalarMapKey(rel, vtype, key, fallback.node, fresh), framing: { kind: 'scalar', type: PER_ROW('vtype') } };
+  if (key === null || namedBeyondMap(key, ctx, liveAliases(labels, rel).has(key))) return 'pass';
+  return { rel: scalarMapKey(rel, vtype, key, fresh), framing: { kind: 'scalar', type: PER_ROW('vtype') } };
 }
 
 /** The tags a per-row scalar's collection rows carry — the stored encoding's own (`valueNodeOf`). */
@@ -1691,30 +1677,25 @@ function reNoded(arms: readonly Tail[], source: GraphSource, fresh: Minter): rea
 }
 
 /**
- * The scope a `select(key)` falls back to when the traverser is no Map holding `key` — the ONE decision
- * every map-first reader shares: the chain over a per-row scalar (`selectMapFirst`) and over a map
- * (`mapTail`), and the child seam over either host (`scalarMapFirstChild`, `mapHostChild`). In the
- * reference's order (`Scoping.java:119-135` — the Map, then the side effects, then the path):
- * `{node}` is a `withSideEffect` constant as a `{t,v}` node; `{node: null}` is NO scope (the row drops);
- * `'collection'` is a named collection (or a keyed side-effect writer), `'label'` a path label of ANY kind
- * (`liveLabel` on the reader's row, or bound by an enclosing scope) — each keeps its own answer where the
- * reader can give it; `null` declines a constant the stored encoding cannot spell. A label is never read
- * per row beside a Map's entry: the label wins (§17 "Map scope", `docs/feature-support-matrix.md`).
+ * DOES A SCOPE BEYOND THE TRAVERSER'S OWN MAP NAME `key`? — a side effect (a `withSideEffect` constant, a
+ * named collection, a keyed writer anywhere in the program) or a path label (`liveLabel` on the reader's
+ * row, or bound by an enclosing scope). The ONE question every map-first reader asks: the chain over a
+ * per-row scalar (`selectMapFirst`) and over a map (`mapTail`), the child seam over either host
+ * (`scalarMapFirstChild`, `mapHostChild`). Where it is false a row whose Map lacks `key` has no scope
+ * holding it and drops (`Scoping.java:119-135`). Where it is true over a per-row scalar the named scope
+ * WINS — no row is probed for a same-named Map entry (§17 "Map scope", `docs/feature-support-matrix.md`);
+ * over a map or record whose key set may hold `key` the reader declines (the collision is in the query text).
  */
-export function mapFirstFallback(
-  key: string, ctx: ChainCtx, liveLabel: boolean,
-): { readonly node: Expr | null } | null | 'collection' | 'label' {
+export const namedBeyondMap = (key: string, ctx: ChainCtx, liveLabel: boolean): boolean =>
+  liveLabel || !!ctx.enclosingLabels?.has(key) || namedElsewhere(ctx)(key);
+
+/** The `withSideEffect(key, constant)` a `select(key)` reads — its declaring `Arg` — or `undefined` where
+ *  `key` names no plain constant. The CONSTANT form declares a policy too (`sideEffectPolicies`); only a
+ *  REDUCER form's operator, or a collection of that name, makes it a merged collection instead. */
+export const sideEffectConstant = (key: string, ctx: ChainCtx): Arg | undefined => {
   const constant = ctx.sideEffects.get(key);
-  // The CONSTANT form declares a policy too (`sideEffectPolicies`); only a REDUCER form's operator makes
-  // the name a merged collection rather than a value to substitute.
-  if (constant && !ctx.sideEffectPolicies.get(key)?.operator && !ctx.collections.has(key)) {
-    const node = constantNode(constant.value, constant.type ?? null, constant.name ?? null);
-    return node && { node };
-  }
-  if (namedElsewhere(ctx)(key)) return 'collection';
-  if (liveLabel || ctx.enclosingLabels?.has(key)) return 'label';
-  return { node: null };
-}
+  return constant && !ctx.sideEffectPolicies.get(key)?.operator && !ctx.collections.has(key) ? constant : undefined;
+};
 
 /**
  * A KEYED `dedup(label…)[.by()]` — it reads each label's `Pop.last` off the path and ranks the
@@ -1739,7 +1720,7 @@ function keyedDedup(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
 /**
  * Does a keyed dedup name a SIDE EFFECT its traverser's own scope does not answer on every row? The side
  * effect is read before the path (`Scoping.java:126-127`), so only an own scope that holds the key on
- * every row (a present record field, a map's entry-else-constant) may be built — reading the label, or
+ * every row (a present record field, a map's held key) may be built — reading the label, or
  * dropping a row lacking the key, would be a wrong answer; the caller declines.
  */
 function sideEffectUnanswered(keys: readonly string[], ctx: ChainCtx, scope: MapScope | undefined): boolean {
@@ -2476,16 +2457,16 @@ function scalarTail(
     // own rule (`AddEdgeStartStep` defaults both ends to `null` and raises).
     if (step.name === 'addV' || step.name === 'addE' || step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
+      const tagCol = out.kind === 'scalar' ? perRowColumnOf(out.type) : undefined;
+      const mayBeMap = !!tagCol && carries(tagCol);
       const written = step.name === 'addV' ? addedVertices(rel, steps, at, ctx, fresh)
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
-          // A STATIC scalar can never be a Map (`ValueType` excludes the containers), so the fold is
-          // exact. A per-row scalar MAY hold one (a map-valued property), whose own `k` precedes the side
-          // effect — and this tail's `select(k)` now reads it (`selectMapFirst`) — but the general-body
-          // merge (`mergeFromTraversal`) needs an ELEMENT driver to root the body at, so carrying the
-          // select as a body here would DECLINE `values('name').mergeV(__.select('k'))`, which the fold
-          // answers correctly for every non-Map row. The fold stays; a Map row merging by the side
-          // effect rather than its own entry is a §17 divergence (`docs/feature-support-matrix.md`).
-          : mergedElements(rel, steps, at, labels, 'cannotBeMap', ctx, fresh);
+          // A scalar with no per-row tag is never a stored Map (`ValueType` excludes the containers), so a whole-arg
+          // `select(k)` folds to its side effect exactly. A per-row scalar MAY hold one (a map-valued
+          // property) whose own `k` precedes the side effect, and a merge that wrote by the side effect
+          // there would write the wrong element — so the select stays a general body, which needs an
+          // ELEMENT driver and declines (`values('m').mergeV(__.select('k'))`).
+          : mergedElements(rel, steps, at, labels, mayBeMap ? 'mayBeMap' : 'cannotBeMap', ctx, fresh);
       if (!written) return null;
       return afterWrite(ctx.writes, rel, steps, at, written.at, written.effects.bindings, ctx.params, fresh, () => elementTail(
         written.effects.result, step.name === 'addE' || step.name === 'mergeE' ? 'edge' : 'vertex',
@@ -3179,34 +3160,27 @@ function mapTail(
       const key = selectedKey(step);
       if (key !== null) {
         const presence = mapKeyPresence(facts, key);
-        const mayHold = presence !== 'absent';
-        const fallback = mapFirstFallback(key, ctx, liveAliases(labels, rel).has(key));
-        if (fallback === null) return null;
-        // A LIVE (or enclosing) LABEL is the scope a row lacking `key` reads next, and an entry-or-label
-        // read per row is not built (a path-label read stays a column read). So the map's KEY FACTS decide
-        // on the query text alone: a key EVERY row holds (`held`) is the entry for every row; a key NO row
-        // holds (outside `keys`) is the label for every row, read through the ordinary alias read
-        // (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) DECLINES — reading the
-        // entry would drop exactly the rows the label answers, and the query text names the collision.
-        if (fallback === 'label' && presence !== 'held') {
-          if (presence === 'may' || !liveAliases(labels, rel).has(key)) return null;
-          const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
-            { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) });
-          return selected && continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
-        }
-        // A row whose Map lacks `key` falls through to the SIDE EFFECTS before it drops
-        // (`mapFirstFallback`): a `withSideEffect` constant is a `{t,v}` node read beside the entry
-        // (`mapKeyOr`) wherever the value side is scalar. A named collection is every row's answer where the
-        // static key set excludes `key`; where the Map may hold it, the entry answers and a row lacking it
-        // DROPS — a collection beside the entry per row has no framing (§17; `Select.feature`'s
+        const live = liveAliases(labels, rel).has(key);
+        // A scope beyond the Map that names `key` is read for a row lacking it, and an entry-or-scope read
+        // per row is not built. So the map's KEY FACTS decide on the query text alone: a key EVERY row holds
+        // (`held`) is the entry for every row; a key NO row holds (outside `keys`) is the named scope for
+        // every row — the collection, the constant, or the label through the ordinary alias read
+        // (`selectKeys`); a key a row MAY hold (`keys \ held`, or unknown keys) beside a side-effect constant
+        // or a label DECLINES — the answer would depend on which rows hold it, and the query text names the
+        // collision. A named COLLECTION a row may shadow keeps the entry and a row lacking it DROPS — a
+        // collection beside the entry per row has no framing (§17; `Select.feature`'s
         // `group("a")…select("a").select("a")` reads the entry).
-        if (fallback === 'collection' && !mayHold) {
-          const collected = selectCollection(step, rel, ctx, fresh);
-          return collected === 'pass' ? null : collected && continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, labels);
-        }
-        if (typeof fallback === 'object' && fallback.node) {
-          if (mayHold && valOf.kind !== 'scalar') return null;
-          return scalarTail(mapKeyOr(rel, key, fallback.node, mayHold, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+        if (presence !== 'held' && namedBeyondMap(key, ctx, live)) {
+          const constant = sideEffectConstant(key, ctx);
+          if (presence === 'may') {
+            if (constant || live || ctx.enclosingLabels?.has(key)) return null;
+          } else {
+            let scoped = selectCollection(step, rel, ctx, fresh);
+            if (scoped === 'pass') scoped = selectSideEffectConstant(step, rel, ctx, fresh);
+            if (scoped === 'pass') scoped = live ? selectKeys(step, rel, labels, childSeam(ctx, fresh), ctx.source, fresh,
+              { framing: { kind: 'map', keyOf, valOf, ...facts }, ...selectScope(ctx) }) : null;
+            return scoped && continueAs(scoped.rel, scoped.framing, steps, at + 1, false, ctx, fresh, labels);
+          }
         }
         const keyed = mapKey(rel, key, valOf, fresh);
         if (!keyed) return null;
@@ -3223,7 +3197,7 @@ function mapTail(
       // select never reaches here (the loop head refuses one).
       const spec = selectSpec(step);
       if (!spec || spec.labels.length < 2) return null;
-      // …as does one naming a SIDE EFFECT, the next scope a row lacking it would read (`mapFirstFallback`).
+      // …as does one naming a SIDE EFFECT, the next scope a row lacking it would read (`namedBeyondMap`).
       if (spec.labels.some((k) => liveAliases(labels, rel).has(k) || namedElsewhere(ctx)(k))) return null;
       const selected = mapSelect(rel, spec.labels, valOf, fresh);
       return selected && continueAs(selected.rel, { kind: 'map', keyOf: selected.keyOf, valOf: selected.valOf }, steps, at + 1, false, ctx, fresh, labels);
@@ -3256,20 +3230,20 @@ function mapTail(
     const scoped = step.name === 'dedup' && step.args.some((a) => typeof a.value === 'string' && mapKeyPresence(facts, a.value) !== 'absent')
       ? fenced(rel, fresh) : rel;
     const mapScope: MapScope = (k) => {
-      // A map lacking `k` reads a `withSideEffect` CONSTANT next (`mapFirstFallback`), the same for every
-      // such row — so the key term is the entry, else the constant, and no row is absent.
-      const fallback = mapFirstFallback(k, ctx, false);
-      const constant = fallback && typeof fallback === 'object' ? fallback.node : null;
       const presence = mapKeyPresence(facts, k);
-      if (presence === 'absent') return constant ? { terms: [constant], absent: null, mayBeElement: false } : undefined;
+      // A key NO row holds reads a `withSideEffect` CONSTANT for every row (`Scoping.java:126-127`): one
+      // literal term, no per-row read.
+      if (presence === 'absent') {
+        const constant = sideEffectConstant(k, ctx);
+        const term = constant && constantNode(constant.value, constant.type ?? null, constant.name ?? null);
+        return term ? { terms: [term], absent: null, mayBeElement: false } : undefined;
+      }
       const node = correlatedMapKey(col(scoped.id, MAP_COL), k, fresh).node;
-      const mayBeElement = valOf.kind === 'elem';
-      if (constant) return { terms: [{ kind: 'call', fn: 'COALESCE', args: [node, constant] }], absent: null, mayBeElement };
       // Only a HELD key is every row's (`mapKeyPresence`): `keys` is what a map MAY hold —
       // `elementMap('age')`/`valueMap('age')` omit a property the element lacks — so otherwise the absence
       // test is per row, and `dedupByLabels` keys a row lacking it on the label only where the two can
-      // never be equal.
-      return { terms: [node], absent: presence === 'held' ? null : { kind: 'binary', op: 'is', left: node, right: compilerNull() }, mayBeElement };
+      // never be equal. A side effect the row lacking it would read instead declines (`sideEffectUnanswered`).
+      return { terms: [node], absent: presence === 'held' ? null : { kind: 'binary', op: 'is', left: node, right: compilerNull() }, mayBeElement: valOf.kind === 'elem' };
     };
     const kd = keyedDedup(step, scoped, labels, ctx, fresh, mapScope);
     if (kd === null) return null;
@@ -5847,13 +5821,11 @@ function recordTail(
         ? fieldNamed(fields, spec.labels[0]!)
         : undefined;
       if (field) {
-        // An OPTIONAL field a row may lack reads a same-named SIDE EFFECT there (`mapFirstFallback`'s
-        // order, `Scoping.java:119-135`) — a field-or-constant value this read does not build: decline.
-        // …and so does a same-named PATH LABEL (`Scoping.java:129-130`; `ProjectStep.java:66` omits an
-        // unproductive key), live here or bound by an enclosing scope. Field-or-label per row is a collision
-        // the query text names, so it declines rather than drop the rows the label answers (§17 "Map scope").
-        if (field.optional && (namedElsewhere(ctx)(field.key) || liveAliases(labels, rel).has(field.key)
-          || ctx.enclosingLabels?.has(field.key))) return null;
+        // An OPTIONAL field a row may lack reads a same-named SIDE EFFECT or PATH LABEL there
+        // (`Scoping.java:119-135`; `ProjectStep.java:66` omits an unproductive key) — field-or-scope per row
+        // is a collision the query text names, so it declines rather than drop the rows the other scope
+        // answers (`namedBeyondMap`, §17 "Map scope").
+        if (field.optional && namedBeyondMap(field.key, ctx, liveAliases(labels, rel).has(field.key))) return null;
         const entered = recordField(rel, field, fresh);
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }

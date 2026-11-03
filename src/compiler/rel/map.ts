@@ -1902,53 +1902,28 @@ export function correlatedMapKey(
   return { node };
 }
 
-/** The one column `scalarMapKey` lands the resolved `{t,v}` node in, so its three readers share one read. */
+/** The one column `scalarMapKey` lands the entry's `{t,v}` node in, so its three readers share one read. */
 const SCOPE_NODE = 'snode';
 
 /**
  * `select(<key>)` over a PER-ROW SCALAR stream whose rows MAY be Maps — a map-valued stored property
- * (`values('m')`), a map value decoded out of another map. `Scoping.getScopeValue` asks the traverser's
- * OWN Map first (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:121-122`),
+ * (`values('m')`), a map value decoded out of another map — where NO scope beyond the Map names `key`
+ * (`namedBeyondMap`; a named scope wins over a same-named key of a stored Map, §17 "Map scope").
+ * `Scoping.getScopeValue` asks the traverser's OWN Map first
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:121-122`),
  * and only a row whose `vtype` says `map` can be one, so the entry read is `correlatedMapKey` behind
  * `CASE WHEN vtype = 'map'` — SQLite's CASE short-circuits, so a non-Map row never opens a `json_each`.
- *
- * `fallback` is the next scope's answer as a `{t,v}` NODE (a `withSideEffect` constant, `constantNode`)
- * — the same self-describing encoding the stored map's entries carry, so one decode reads both. With no
- * fallback a row whose Map lacks the key (or that is no Map) has NO scope holding it and DROPS
- * (`SelectOneStep` emits nothing for a `KeyNotFoundException`, `Select.feature:578-596`).
+ * A row whose Map lacks the key, or that is no Map, has no scope holding it and DROPS (`SelectOneStep`
+ * emits nothing for a `KeyNotFoundException`, `Select.feature:578-596`).
  *
  * The node is landed in ONE column and the presence test, the value and its tag all read that column;
  * `presenceFenced` keeps the assembler from re-inlining the correlated read at each reader.
  */
-export function scalarMapKey(input: Rel, vtype: string, key: string, fallback: Expr | null, fresh: Minter): Rel {
-  return scopedKey(input, { map: col(input.id, 'v'), when: eq(col(input.id, vtype), compilerText('map')) }, key, fallback, fresh);
-}
-
-/**
- * `select(<key>)` over a MAP stream whose key's NEXT scope is a `withSideEffect` CONSTANT — `mapKey`'s
- * twin for the one fallback a `{t,v}` node can carry beside the entry. The reference asks the Map first
- * and only then the side effects (`Scoping.java:121-127`), so a row whose Map lacks `key` takes the
- * constant rather than dropping. `mayHold` false (a STATIC key set without `key`) skips the entry read:
- * every row answers the constant. The value side is a per-row scalar, so a list/map `valOf` that may
- * hold `key` is the caller's to decline — the entry and the constant would need two framings.
- */
-export function mapKeyOr(input: Rel, key: string, fallback: Expr, mayHold: boolean, fresh: Minter): Rel {
-  // FENCED, `mapKey`'s reason: the map column may still be the aggregate that builds it.
-  const rel = mayHold ? fenced(input, fresh) : input;
-  return scopedKey(rel, mayHold ? { map: col(rel.id, MAP_COL), when: null } : null, key, fallback, fresh);
-}
-
-/** The shared body: the map's entry at `key` (behind `when`, NULL elsewhere; no read at all for a `null`
- *  map), else `fallback`, landed ONCE in `SCOPE_NODE` and decoded to `v`/`vtype`. With no fallback a row
- *  no scope holds `key` for DROPS. */
-function scopedKey(
-  input: Rel, map: { readonly map: Expr; readonly when: Expr | null } | null, key: string, fallback: Expr | null, fresh: Minter,
-): Rel {
-  const node = map && correlatedMapKey(map.map, key, fresh).node;
-  const entry: Expr | null = node && map.when ? { kind: 'case', whens: [[map.when, node]], else: compilerNull() } : node;
-  const resolved = entry && fallback ? coalesce(entry, fallback) : entry ?? fallback ?? compilerNull();
-  const read = presenceFenced(withPayload(input, [[SCOPE_NODE, resolved]], [meta(SCOPE_NODE, 'json', true)], fresh), resolved, fresh);
-  const kept = fallback ? read : make.filter({
+export function scalarMapKey(input: Rel, vtype: string, key: string, fresh: Minter): Rel {
+  const isMap = eq(col(input.id, vtype), compilerText('map'));
+  const entry: Expr = { kind: 'case', whens: [[isMap, correlatedMapKey(col(input.id, 'v'), key, fresh).node]], else: compilerNull() };
+  const read = presenceFenced(withPayload(input, [[SCOPE_NODE, entry]], [meta(SCOPE_NODE, 'json', true)], fresh), entry, fresh);
+  const kept = make.filter({
     id: fresh('smk'), input: read, channels: read.channels, type: read.type,
     pred: { kind: 'binary', op: 'is not', left: col(read.id, SCOPE_NODE), right: compilerNull() },
   });
@@ -1959,8 +1934,8 @@ function scopedKey(
 
 /**
  * A COMPILE-TIME value as ONE `{t,v}` node — the exact encoding a stored property's value takes
- * (`valueNodeOf`, which the write path stores), so a constant can stand where a stored map's entry would
- * and be decoded by the same reader. `null` when the encoder cannot spell the value (an enum leaf, a
+ * (`valueNodeOf`, which the write path stores), so a `withSideEffect` constant a child body `select`s is
+ * decoded by the same reader a selected map entry is (`selectedNodeChild`). `null` when the encoder cannot spell the value (an enum leaf, a
  * token map key) or it is a bare `null` — the caller declines rather than store a different value.
  */
 export function constantNode(value: unknown, type: TypeNode | null, paramName: string | null): Expr | null {

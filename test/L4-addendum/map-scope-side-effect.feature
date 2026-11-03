@@ -2,9 +2,10 @@ Feature: mogwai addendum — a Map traverser lacking select()'s key reads the si
 
   # `Scoping.getScopeValue` asks the traverser's OWN Map first, then the side effects, then the path
   # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135).
-  # So over a MAP stream (an injected map, a `valueMap()`, a `group()`), a row whose Map lacks `k` takes the
-  # `withSideEffect` constant `k` rather than dropping. Before: the row dropped — `[]` for a lone map.
-  # Only a PATH LABEL fallthrough still drops (docs/feature-support-matrix.md §17, "Map scope").
+  # So over a MAP stream (an injected map, a `valueMap()`, a `group()`) whose key set excludes `k`, every row
+  # takes the `withSideEffect` constant `k`. Where the key set says only that a row MAY hold `k`, the answer
+  # would silently depend on which rows hold it, a collision the query text names: the query declines
+  # (docs/feature-support-matrix.md §17, "Map scope"). The `@Unsupported` scenarios keep the reference's answer.
 
   Scenario: g_withSideEffectXb_5X_injectXa1X_asXxX_selectXxX_selectXbX
     Given the empty graph
@@ -17,6 +18,7 @@ Feature: mogwai addendum — a Map traverser lacking select()'s key reads the si
       | result |
       | d[5].i |
 
+  @Unsupported
   Scenario: g_withSideEffectXb_5X_injectXa1_b2X_selectXbX
     Given the empty graph
     And the traversal of
@@ -41,7 +43,9 @@ Feature: mogwai addendum — a Map traverser lacking select()'s key reads the si
       | result |
       | d[1].i |
 
-  # A keyed dedup reads the same scope: `[a:1]` and `[a:3]` both key on the side effect's 5.
+  # A keyed dedup reads the same scope: `[a:1]` and `[a:3]` both key on the side effect's 5. A key the maps
+  # may hold declines there too.
+  @Unsupported
   Scenario: g_withSideEffectXb_5X_injectXa1_b2_a3X_dedupXbX_count
     Given the empty graph
     And the traversal of
@@ -53,6 +57,7 @@ Feature: mogwai addendum — a Map traverser lacking select()'s key reads the si
       | result |
       | d[2].l |
 
+  @Unsupported
   Scenario: g_withSideEffectXb_5X_injectXa1_b5_a3_b6X_dedupXbX_count
     Given the empty graph
     And the traversal of
