@@ -712,3 +712,68 @@ Feature: mogwai addendum — a merge runs ONE TRAVERSER AT A TIME, so a later tr
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (w, z)"
+
+  # A MAP-VALUED driver's search reads only the keys its maps hold, and the stream's MAY key set bounds
+  # those at compile time (`mapSearchedKeys`, src/compiler/rel/write.ts). An onMatch or property() write to
+  # a key outside it cannot hide or reveal a vertex to a later traverser's search, so one-at-a-time and the
+  # set-based merge agree, and the merge answers. Each driver here matches its own vertex.
+  Scenario: g_injectXname_marko_name_vadasX_mergeV_optionXonMatch_seen_trueX_values_seen
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([name:"marko"],[name:"vadas"]).mergeV().option(Merge.onMatch,[seen:true]).values("seen")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | true |
+      | true |
+    And the graph should return 2 for count of "g.V().has(\"seen\",true)"
+
+  # The same with the onMatch map read from a side effect: `c` is no key a driver map can hold, so the
+  # select reads the side effect (Scoping.getScopeValue, vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135).
+  Scenario: g_withSideEffectXc_seen_trueX_injectXname_marko_name_vadasX_mergeV_optionXonMatch_selectXcXX_values_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("c",[seen:true]).inject([name:"marko"],[name:"vadas"]).mergeV().option(Merge.onMatch,__.select("c")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+    And the graph should return 2 for count of "g.V().has(\"seen\",true)"
+
+  # A property() tail to an unsearched key, and a computed project() map whose one key is name.
+  Scenario: g_V_hasLabelXpersonX_mergeVXproject_name_byXnameXX_propertyXseen_1X_values_seen
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").mergeV(__.project("name").by("name")).property("seen",1).values("seen")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+      | d[1].i |
+    And the graph should return 4 for count of "g.V().has(\"seen\",1)"
+
+  # A write to a key the maps DO hold still refuses. Here the two drivers' names differ, so the reference
+  # answer below is also the snapshot's, but the guard cannot see that at compile time (the key SET is
+  # bounded, the VALUES are data), so it refuses rather than risk hiding a vertex from a later search.
+  @gap:merge-one-traverser-at-a-time
+  @Unsupported
+  Scenario: g_injectXname_marko_name_vadasX_mergeV_optionXonMatch_name_zzX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([name:"marko"],[name:"vadas"]).mergeV().option(Merge.onMatch,[name:"zz"]).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+    And the graph should return 2 for count of "g.V().has(\"name\",\"zz\")"

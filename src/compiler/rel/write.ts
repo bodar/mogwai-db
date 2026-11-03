@@ -32,7 +32,7 @@ import { presenceOf, statedPresence, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
-import { fieldCol, framingCols, type RelFraming } from './framing.ts';
+import { fieldCol, framingCols, type MapKeyFacts, type RelFraming } from './framing.ts';
 import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
@@ -4293,8 +4293,15 @@ interface MergeWriteFacts {
   readonly onMatchShareable: boolean;
 }
 
+/** WHICH PROPERTY KEYS A MAP-VALUED DRIVER'S SEARCH MAY READ: the stream's static MAY set (`MapKeyFacts`).
+ *  Every entry of a driver's map is a search criterion, and no row holds a key outside `keys`, so a write
+ *  to any other key cannot change what a later driver's search finds. `null` (any key) when the set is
+ *  unknown. A token key (`T.label`, a `Direction`) leaves `keys` unknown (`literalKeyFacts`), and is never
+ *  a PROPERTY key a write could touch anyway. */
+const mapSearchedKeys = (keys: MapKeyFacts): ReadonlySet<string> | null => (keys.keys ? new Set(keys.keys) : null);
+
 /** `MergeWriteFacts` from a host's parsed writes. `searched` is the set of property keys the search reads,
- *  `null` when that set is DATA (a map-valued driver) and so any written key may be one.
+ *  `null` when nothing bounds it (a map-valued driver whose key set is unknown) and so any written key may be one.
  *
  *  **A vertex write with NO stated cardinality repeats.** `cardinality === null` is "the traversal named
  *  none", resolved only at the element (`PropertySet.cardinality`), and that resolution here APPENDS:
@@ -5130,7 +5137,7 @@ function mergeVComputed(
  * arm value, which roots at the (map) driver and needs a map host.
  */
 export function mergeVFromMap(
-  input: Rel, maps: MergeMaps, valOf: MapOf, propertySteps: readonly IRStep[],
+  input: Rel, maps: MergeMaps, valOf: MapOf, keys: MapKeyFacts, propertySteps: readonly IRStep[],
   ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (valOf.kind !== 'scalar') return null;
@@ -5250,12 +5257,12 @@ export function mergeVFromMap(
   const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, mapDriverEntry(fresh), guard, fresh);
   if (!createOwners) return null;
   onCreateLabelGuard(unmatched, mapLabelScalar(col(unmatched.id, MAP_COL)), (onCreate?.label as string[] | null) ?? [], guard, fresh);
-  // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`). The search's key set is DATA, so
-  // any onMatch key may be searched (`null`), and a driver's `[name:x]` finds another's `[name:x, age:1]`
-  // creation — `mapCouldMatch`.
+  // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`). The search's key set is DATA,
+  // bounded by the stream's MAY set (`mapSearchedKeys`), and a driver's `[name:x]` finds another's
+  // `[name:x, age:1]` creation — `mapCouldMatch`.
   guardMergeInterleaving('mergeV', incoming, matched,
     { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, fresh), keying: searchKeying([], { excluded: Object.keys(onCreate?.props ?? {}) }) },
-    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, null, propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
+    { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, mapSearchedKeys(keys), propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched vertices (runtime declined above, so the callback is never
   // reached). Shared with the other vertex-merge paths.
   if (!applyMergeOnMatch(idsOf(matched, fresh), appended, matchWrites, () => false, bind, guard, fresh, child)) return null;
@@ -5367,7 +5374,7 @@ const NUMERIC_ID_VTYPES: readonly string[] = ['byte', 'short', 'int', 'long', 'b
  * here); a RUNTIME arm value (roots at the map driver, needs a map host).
  */
 export function mergeEFromMap(
-  input: Rel, maps: MergeMaps, valOf: MapOf, propertySteps: readonly IRStep[],
+  input: Rel, maps: MergeMaps, valOf: MapOf, keys: MapKeyFacts, propertySteps: readonly IRStep[],
   ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (valOf.kind !== 'scalar') return null;
@@ -5568,7 +5575,7 @@ export function mergeEFromMap(
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [col(rel, 'src'), col(rel, 'tgt'), jsonText(col(rel, MAP_COL))] }),
     couldMatch: (earlier, later) => and(mapCould(earlier, later), and(sameSide(earlier, later, 'hasOut', 'src'), sameSide(earlier, later, 'hasIn', 'tgt'))),
     keying: searchKeying(([['hasOut', 'src'], ['hasIn', 'tgt']] as const).map(([has, side]) => ({ present: (rel: RelId) => col(rel, has), key: (rel: RelId) => [col(rel, side)] })), { excluded: Object.keys(onCreate?.props ?? {}) }),
-  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, null, propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
+  }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, mapSearchedKeys(keys), propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched edges (runtime declined above). Empty on the create path.
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;
   if (matchWrites.length || tailWrites.length) bind(markDirty('edge', idsOf(matched, fresh), fresh));

@@ -6194,15 +6194,18 @@ function mergeFromTraversal(
   // cannot compare against a stored property, so it declines rather than always-create.
   let mapRel: Rel;
   let valOf: MapOf;
+  let keys: MapKeyFacts;
   if (resolved.framing.kind === 'record') {
     if (!resolved.framing.fields.every((field) => field.framing.kind === 'scalar')) return null;
     const mapped = recordToMap(resolved.rel, resolved.framing.fields, ctx.source, fresh);
     if (!mapped) return null;
     mapRel = mapped.rel;
     valOf = mapped.valOf;
+    keys = recordKeyFacts(resolved.framing.fields);
   } else if (resolved.framing.kind === 'map') {
     mapRel = resolved.rel;
     valOf = resolved.framing.valOf;
+    keys = mapKeyFacts(resolved.framing);
   } else return null;
   const originCol = resolved.origin;
   // THE FIRST MAP PER DRIVER — `materializeMap` = `.next()`. Rank the body's maps within each driver by
@@ -6244,8 +6247,8 @@ function mergeFromTraversal(
     node: make.limit({ id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
       input: make.project({ id: fresh('p'), input: misses, channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]] }) }) });
   const effects = op === 'mergeE'
-    ? mergeEFromMap(streamRef, maps, valOf, tail, ctx.ordered, child, fresh)
-    : mergeVFromMap(streamRef, maps, valOf, tail, ctx.ordered, child, fresh);
+    ? mergeEFromMap(streamRef, maps, valOf, keys, tail, ctx.ordered, child, fresh)
+    : mergeVFromMap(streamRef, maps, valOf, keys, tail, ctx.ordered, child, fresh);
   return effects && { bindings: [...bindings, ...effects.bindings], result: effects.result };
 }
 
@@ -6279,7 +6282,7 @@ function mergedFromMap(
   }
   if (!maps.matchFromDriver) return null;
   const effects = op === 'mergeV'
-    ? mergeVFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh)
-    : mergeEFromMap(input, maps, valOf, tail, ctx.ordered, child, fresh);
+    ? mergeVFromMap(input, maps, valOf, facts, tail, ctx.ordered, child, fresh)
+    : mergeEFromMap(input, maps, valOf, facts, tail, ctx.ordered, child, fresh);
   return effects && { effects, at: end };
 }

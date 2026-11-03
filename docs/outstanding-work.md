@@ -79,6 +79,10 @@ Each is a lost or duplicated row, a wrong number class, or a wrong value.
   computed per driver. Beside it: an explicit whole-arg map over a Map driver
   (`inject([a:1]).mergeV([name:'q'])`, or a side-effect `select(k)` no Map holds) is a mere multiplier
   `mergedFromMap` does not route yet.
+- **Map-driver `mergeE` over several traversers with an `onMatch`/`property()` write** raises the
+  one-at-a-time guard for ANY key: an edge map holds `Direction` tokens, which leave `MapKeyFacts.keys`
+  unknown (`literalKeyFacts`), so `mapSearchedKeys` cannot bound the search. `mergeV` is bounded by the
+  stream's MAY set. Fix: a key fact that records the STRING keys beside token keys.
 - **Merge residue.** Explicit list/set cardinality on a runtime merge arm; map-driver merge holding
   `T.id`, a list-valued map (e.g. from `valueMap()`) or a multi-label map; map-driver `mergeE` with
   `option(Merge.outV/inV)` or an onCreate endpoint; `mergeE` over an incoming vertex stream
