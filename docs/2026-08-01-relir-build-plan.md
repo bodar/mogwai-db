@@ -495,7 +495,10 @@ F last. Each step lands `mise run ci` green on its own.
   `resourced-scalar-value` features); exec test → refusal assertions. ≈−70, −3 per-row terms.
 - **C5 cleanup-presence-choice-meet** (after C4) — `scalarChoice` presence = `meetPresence(...)`; delete
   `choicePresence`, `ChoiceArm`, `NEVER_PRODUCTIVE`. ≈−28.
-- **D cleanup-map-equality-decline** (r6-fu8 = option C) — decline, from the QUERY TEXT, any mergeV/mergeE match
+- ✅ **D cleanup-map-equality-decline** — LANDED `7ed8f578`: `uncomparableLiteral` (`ir/uncarried-literal.ts`, sibling
+  of `uncarriedLiteral`, same OPERAND_STEPS/valueNodes/eachChainDeep walk) declines at any depth a map/set equality
+  operand and a mergeV/mergeE match criterion (own map, `$m`, inject-fed); no per-row SQL. Remains: nothing.
+  Original spec (r6-fu8 = option C) — decline, from the QUERY TEXT, any mergeV/mergeE match
   criterion or equality predicate (has/is/within/without/eq/neq, `where(eq)`) whose operand is a map- or set-valued
   literal or parameter. Message names map-valued equality and why (entry order). ≈+20, no per-row SQL.
 - **E cleanup-never-bound-label** (verify) — `g.V().select('a')` with no `as('a')`/side effect/collection named `a`
