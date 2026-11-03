@@ -100,10 +100,73 @@ describe('is(typeOf(X)) over a framing whose GType is known folds at compile tim
   });
 });
 
+describe('a SET retyped by is(typeOf(SET)) stays a Set wherever the value travels', () => {
+  // SelectStep and fold/unfold hand the object back unchanged, so the value's own class survives:
+  // the set marker rides on a label's history entry and on a folded member, not only on the stream.
+  const withSet = () => {
+    const store = heterogeneous();
+    executeQuery(store, "g.addV('d').property('name','t').property('m',{'x','y'})", {});
+    return store;
+  };
+  const isSetOf = (v: unknown, members: unknown[]) => {
+    expect(v instanceof Set).toBe(true);
+    expect([...(v as Set<unknown>)]).toEqual(members);
+  };
+
+  test('through as()/select(), a record field, and select(all)', async () => {
+    const store = withSet();
+    isSetOf((await values(store, "g.V().values('m').is(typeOf(GType.SET)).as('a').select('a')"))[0], ['x', 'y']);
+    isSetOf((await values(store, "g.V().as('v').values('m').is(typeOf(GType.SET)).as('a').select('v','a').select('a')"))[0], ['x', 'y']);
+    const [all] = await values(store, "g.V().values('m').is(typeOf(GType.SET)).as('a').select(all, 'a')");
+    isSetOf((all as unknown[])[0], ['x', 'y']);
+  });
+
+  test('through fold() and back out of unfold(), at any depth', async () => {
+    const store = withSet();
+    isSetOf(((await values(store, "g.V().values('m').is(typeOf(GType.SET)).fold()"))[0] as unknown[])[0], ['x', 'y']);
+    isSetOf((await values(store, "g.V().values('m').is(typeOf(GType.SET)).fold().unfold()"))[0], ['x', 'y']);
+    isSetOf((await values(store, "g.V().values('m').is(typeOf(GType.SET)).fold().fold().unfold().unfold()"))[0], ['x', 'y']);
+    isSetOf((await values(store, "g.V().values('m').is(typeOf(GType.SET)).fold().as('a').select('a').unfold()"))[0], ['x', 'y']);
+    // `dedup(local)` makes a set (`DedupLocalStep` yields a LinkedHashSet): the same marker, the same road.
+    expect((await values(seededStore(), "g.V().values('name').fold().dedup(local).fold().unfold()"))[0] instanceof Set).toBe(true);
+  });
+
+  test('a LIST stays a List on the same road', async () => {
+    const store = withSet();
+    expect(await values(store, "g.V().values('m').is(typeOf(GType.LIST)).as('a').select('a')")).toEqual([['x', 'y']]);
+    expect(await values(store, "g.V().values('m').is(typeOf(GType.LIST)).fold().unfold()")).toEqual([['x', 'y']]);
+  });
+
+  test('a branch whose arms disagree on Set vs List declines rather than framing both as the first', () => {
+    const store = withSet();
+    expect(() => executeQuery(store, "g.V().union(__.values('m').is(typeOf(GType.SET)), __.values('m').is(typeOf(GType.LIST)))", {})).toThrow(UnsupportedTraversal);
+    expect(() => executeQuery(store, "g.V().coalesce(__.values('m').is(typeOf(GType.LIST)), __.values('m').is(typeOf(GType.SET)))", {})).toThrow(UnsupportedTraversal);
+  });
+
+  test('a per-traverser map() body yields the stored collection itself', async () => {
+    const store = withSet();
+    expect(bagOf((await values(store, "g.V().map(__.values('m'))")).map((v) => v instanceof Set ? `set:${[...v]}` : v instanceof Map ? 'map' : JSON.stringify(v))))
+      .toEqual(bagOf(['map', '"text"', '["x","y"]', 'set:x,y', '7']));
+    isSetOf((await values(store, "g.V().map(__.values('m').is(typeOf(GType.SET)))"))[0], ['x', 'y']);
+  });
+});
+
+describe('count(local) is a per-traverser map, not a seeded barrier', () => {
+  // `CountLocalStep extends ScalarMapStep`: over an empty arm it emits nothing, so a coalesce falls
+  // through to its fallback (only a GLOBAL count()/fold() seeds an answer from nothing).
+  test('a coalesce arm ending in count(local) does not swallow the fallback', async () => {
+    expect(bagOf(await values(heterogeneous(), "g.V().coalesce(__.values('m').is(typeOf(GType.MAP)).count(local), __.constant(-1))"))).toEqual(bagOf([3, -1, -1, -1]));
+    expect(bagOf(await values(seededStore(), "g.V().coalesce(__.values('age').count(local), __.constant(-1))"))).toEqual(bagOf([1, 1, 1, 1, -1, -1]));
+    expect(bagOf(await values(seededStore(), "g.V().coalesce(__.values('age').is(typeOf(GType.NUMBER)).count(local), __.constant(-1))"))).toEqual(bagOf([1, 1, 1, 1, -1, -1]));
+    // A GLOBAL count still seeds 0 and exhausts the coalesce.
+    expect(bagOf(await values(seededStore(), "g.V().coalesce(__.values('age').count(), __.constant(-1))"))).toEqual(bagOf([1, 1, 0, 1, 0, 1]));
+  });
+});
+
 describe('is(typeOf(LIST|SET)) over a LIST framing stays a decline', () => {
   // The list framing does not name its GType: `cap()` of an undeclared `aggregate` frames a BulkSet — a
-  // SET by GType (`BulkSet extends AbstractSet`) — as a plain list, and a branch merge keeps the first
-  // arm's `set` marker. Folding off the framing would answer `cap('x').is(typeOf(LIST))` TRUE where the
+  // SET by GType (`BulkSet extends AbstractSet`) — as a plain list. Folding off the framing would answer
+  // `cap('x').is(typeOf(LIST))` TRUE where the
   // reference answers nothing, so it declines until the framing carries the collection's GType.
   test('fold and cap decline rather than guess', () => {
     const store = seededStore();

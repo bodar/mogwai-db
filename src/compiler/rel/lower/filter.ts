@@ -11,7 +11,7 @@ import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
-import { MAPPING_TERMINAL, producesWithoutInput } from '../../ir/productivity.ts';
+import { isMappingTerminal, producesWithoutInput } from '../../ir/productivity.ts';
 import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
 import { scopeKeyReads } from '../../ir/labels.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -345,7 +345,7 @@ function selectRerootSubject(step: IRStep, subject: Subject, aliases: AliasMap, 
  */
 const withoutMappingTerminal = (body: readonly IRStep[]): readonly IRStep[] | null => {
   const last = body.at(-1);
-  return last && body.length > 1 && MAPPING_TERMINAL.has(last.name) ? body.slice(0, -1) : null;
+  return last && body.length > 1 && isMappingTerminal(last) ? body.slice(0, -1) : null;
 };
 
 /** The three shapes tried in order, unchanged — split out so the mapping-terminal fallback above can

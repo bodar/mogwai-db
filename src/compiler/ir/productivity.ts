@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
-import { SCALAR_TRANSFORMS } from './step.ts';
+import { isLocalScope, SCALAR_TRANSFORMS } from './step.ts';
 
 // ---------- productivity: does a child body ALWAYS yield a traverser? ----------
 //
@@ -24,8 +24,15 @@ import { SCALAR_TRANSFORMS } from './step.ts';
  * `sum`/`min`/`max`/`mean` are deliberately NOT here: TinkerPop emits NOTHING for them on empty input
  * (`SumGlobalStep` overrides `processAllStarts` rather than supplying a seed), so they can be
  * unproductive even as barriers.
+ *
+ * GLOBAL SCOPE ONLY. The seed belongs to the reducing BARRIER, and `count(Scope.local)` is not one: it is
+ * `CountLocalStep`, a `ScalarMapStep` sizing each incoming traverser's collection
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CountLocalStep.java:37`),
+ * so over an empty arm it emits nothing. Reading the NAME alone claimed `values('m').count(local)` always
+ * fires, which exhausted a `coalesce` and dropped its fallback for every traverser the arm skipped.
  */
 const SEEDED_TERMINAL: ReadonlySet<string> = new Set(['count', 'fold']);
+const seededTerminal = (step: Step): boolean => SEEDED_TERMINAL.has(step.name) && !isLocalScope(step);
 
 /**
  * The REVERSE question, "can this step yield a traverser when NO traverser reaches it", is a superset of
@@ -75,7 +82,13 @@ export function producesWithoutInput(body: readonly { readonly name: string }[])
  * (`SelectStep.java:65-90`), dropping the traverser even with an input. Same substrate, opposite host
  * rule — the asymmetry `record.ts`'s header records.
  */
-export const MAPPING_TERMINAL: ReadonlySet<string> = new Set(['constant', 'project', 'valueMap', 'elementMap']);
+const MAPPING_TERMINAL: ReadonlySet<string> = new Set(['constant', 'project', 'valueMap', 'elementMap']);
+
+/** A mapping terminal, by STEP: the named set plus `count(Scope.local)`. `CountLocalStep` is a
+ *  `ScalarMapStep` too (one size per incoming traverser, never a drop), which its GLOBAL namesake, a
+ *  seeded barrier, is not; scope is an argument, so a name-keyed set cannot say this alone. */
+export const isMappingTerminal = (step: Step): boolean =>
+  MAPPING_TERMINAL.has(step.name) || (step.name === 'count' && isLocalScope(step));
 
 /**
  * Steps that touch state beyond their own traverser stream, keyed by the arity that makes them do so.
@@ -162,9 +175,9 @@ export function bodyAlwaysProduces(nested: any, params: ParamEnv): boolean {
  * through to `childPredicate` or declines. Fail closed, and never a claim that a filtered body cannot
  * filter.
  */
-export function alwaysProduces(body: readonly { readonly name: string }[]): boolean {
+export function alwaysProduces(body: readonly Step[]): boolean {
   const last = body.at(-1);
   if (!last) return false;
-  if (SEEDED_TERMINAL.has(last.name)) return true;
-  return MAPPING_TERMINAL.has(last.name) && body.length === 1;
+  if (seededTerminal(last)) return true;
+  return isMappingTerminal(last) && body.length === 1;
 }

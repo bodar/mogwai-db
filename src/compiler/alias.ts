@@ -38,6 +38,9 @@ export type AliasEntry = {
   /** Member descriptor for a list value held in history. Deliberately alias-local: it says how to
    *  re-enter THIS JSON list, not what a Stream is. */
   listOf?: ListOf;
+  /** The list value was a SET (`RelFraming`'s `list.set`) — how a `select()` frames it back. Joined with
+   *  `listOf` as ONE descriptor: a label holding a set beside a list has no single re-entry. */
+  listSet?: true;
   /** Key/value shape for a MAP value held in history — how to re-enter THIS map's pairs array
    *  (`mapTail`'s `keyOf`/`valOf`, plus the static `keys` where the producer knew them), the `listOf`
    *  analogue one collection along. `keys` lets a `select(m).select(k)` resolve `k` against the map's
@@ -109,7 +112,8 @@ export function joinAliasEntry(left: AliasEntry, right: AliasEntry): Omit<AliasE
     left.shapes.has(shape) && right.shapes.has(shape) ? join(a, b)
       : left.shapes.has(shape) ? a : right.shapes.has(shape) ? b : undefined;
   const scalarType = field('value', left.scalarType, right.scalarType, scalar);
-  const listOf = field('list', left.listOf, right.listOf, same);
+  // A list's member shape and its SET marker are one descriptor: both sides must agree on both.
+  const list = field('list', left.listOf && { of: left.listOf, set: !!left.listSet }, right.listOf && { of: right.listOf, set: !!right.listSet }, same);
   // A map's SIDES must agree (they decide how its pairs re-enter); its KEY FACT meets — the MAY sets
   // union (`meetMapKeyFacts`) — because the history now holds either side's maps.
   const mapOf = field('map', left.mapOf, right.mapOf, (a, b) =>
@@ -119,7 +123,7 @@ export function joinAliasEntry(left: AliasEntry, right: AliasEntry): Omit<AliasE
   return {
     shapes: new Set([...left.shapes, ...right.shapes]),
     ...(scalarType ? { scalarType } : {}),
-    ...(listOf ? { listOf } : {}),
+    ...(list ? { listOf: list.of, ...(list.set ? { listSet: true as const } : {}) } : {}),
     ...(mapOf ? { mapOf } : {}),
     ...(propertyElem ? { propertyElem } : {}),
   };

@@ -316,9 +316,9 @@ Beside the RelIR substrate:
   `aggregate('x').cap('x').is(typeOf(GType.SET))`, `inject(['t']).is(typeOf(GType.LIST))`. Every other
   framing answers through `typeOfExpr`'s static mode (`framingTypeOf`), but a list framing does not name its
   GType: `cap()` of an undeclared `aggregate`/`store` frames a `BulkSet` (a SET by GType —
-  `BulkSet extends AbstractSet`) as a plain list, and `meetFraming` keeps the first arm's `set` marker.
-  Needs the list framing to carry the collection's GType (List / Set / BulkSet) through `listTail` and the
-  branch meet; folding off today's marker would answer `cap('x').is(typeOf(LIST))` TRUE. The two
+  `BulkSet extends AbstractSet`) as a plain list. (The `set` marker itself now rides through labels and
+  folded members, and a branch meet no longer merges a Set arm with a List arm.) Needs the list framing to
+  carry the collection's GType (List / Set / BulkSet) from every producer; folding off today's marker would answer `cap('x').is(typeOf(LIST))` TRUE. The two
   `…_groupCount` witnesses also need `groupCount()` keyed by a collection value.
 - **`where(without('x'))` after `aggregate('x')`** — lower as `NOT IN (SELECT … FROM <collection>)`.
 - **`choose()` with mixed list-shaped arms** — `choose(hasLabel('person'), out().fold(), values('name').fold())`.

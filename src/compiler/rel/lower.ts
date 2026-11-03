@@ -2823,7 +2823,7 @@ function listTail(
     // the entry, which is what lets `fold().as('a').select('a').unfold()` re-enter the member frame
     // with the encoding the fold actually produced rather than a guess at it.
     if (step.name === 'as') {
-      const bound = bindAliases(step, rel, labels, { kind: 'list', list: col(rel.id, LIST_COL), of: items }, fresh);
+      const bound = bindAliases(step, rel, labels, { kind: 'list', list: col(rel.id, LIST_COL), of: items, ...(set ? { set } : {}) }, fresh);
       if (!bound) return null;
       rel = bound.rel;
       labels = bound.aliases;
@@ -2875,7 +2875,7 @@ function listTail(
       if (unfolded.nodes) return continueAs(positioned, { kind: 'typedNode' }, steps, at + 1, false, ctx, fresh, labels);
       // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
       // than entering the scalar one — the same explode, a different payload.
-      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, ctx, fresh, labels);
+      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, ctx, fresh, labels, !!unfolded.memberSet);
       // A MAP-membered list's members are MAPS, so each unfolds to a map traverser and re-enters
       // `mapTail`. The key side is self-describing (`{kind:'scalar'}` — a map key states its own type);
       // the value side is whatever the list member carried (`mapVal`). This closes the
@@ -2917,7 +2917,7 @@ function listTail(
     // only (a `fold(Scope.local)` is not a step); the encounter orders the members.
     if (step.name === 'fold' && foldDeclared(step) === PLAIN_FOLD && !isLocalScope(step)) {
       const encounter = encounterOf(rel.channels);
-      const folded = foldLists(rel, items, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
+      const folded = foldLists(rel, items, { ...(encounter ? { order: [encounter.col] } : {}), ...(set ? { set } : {}) }, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 

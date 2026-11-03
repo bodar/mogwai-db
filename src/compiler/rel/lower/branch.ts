@@ -1168,7 +1168,7 @@ export function chooseArms(
  *  is why this is an equality rather than a merge. */
 export const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
   left.kind === 'elements' ? right.kind === 'elements' && left.elem === right.elem
-    : left.kind === 'list' ? right.kind === 'list' && JSON.stringify(left.of) === JSON.stringify(right.of)
+    : left.kind === 'list' ? right.kind === 'list' && !!left.set === !!right.set && JSON.stringify(left.of) === JSON.stringify(right.of)
       // A path arm compares `scalars` as well as the member encoding, and it has to: two arms whose positions
       // are elements in one and projected values in the other agree on `of` (both are typed trees) and
       // disagree about whether the merged path may re-enter the list vocabulary.

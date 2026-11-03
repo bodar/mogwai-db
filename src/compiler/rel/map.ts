@@ -514,7 +514,7 @@ export function groupRows(
       // aggregate — unless `ProductiveByStrategy` keeps it. Every other presence keeps a null as a member.
       mayYieldNull = produced.present !== 'value-nullness' || isProductiveBy(step);
       if (produced.framing.kind === 'map') singleOf = { kind: 'map', of: produced.framing.valOf };
-      if (produced.framing.kind === 'list') singleOf = { kind: 'list', of: produced.framing.of };
+      if (produced.framing.kind === 'list') singleOf = { kind: 'list', of: produced.framing.of, ...(produced.framing.set ? { set: true } : {}) };
     } else {
       const node = byNode(valueBy, host, source, fresh, child);
       if (!node) return null;

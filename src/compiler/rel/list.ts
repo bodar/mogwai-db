@@ -895,7 +895,7 @@ export const NODE_COL = 'node';
 
 export function unfoldList(
   rel: Rel, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly mapVal?: MapOf; readonly elem?: Elem; readonly nodes?: readonly MixedArm[] } | null {
+): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly memberSet?: boolean; readonly mapVal?: MapOf; readonly elem?: Elem; readonly nodes?: readonly MixedArm[] } | null {
   // A NESTED list unfolds into one LIST traverser per member (a `product()`'s pair-lists), which is
   // the same explode with a different payload column — so it is one arm rather than a second function.
   if (of.kind === 'list') return unfoldNested(rel, of, fresh);
@@ -1008,7 +1008,7 @@ export function correlatedListMembers(
       }),
       framing: of.kind === 'map'
         ? { kind: 'map', keyOf: { kind: 'scalar' }, valOf: of.of }
-        : { kind: 'list', of: of.of },
+        : { kind: 'list', of: of.of, ...(of.set ? { set: true } : {}) },
     };
   }
   if (isBareList(of)) {
@@ -1246,9 +1246,9 @@ export function foldMaps(
  * order is `foldMaps`' exactly: the caller's encounter, always present for a `fold()`.
  */
 export function foldLists(
-  input: Rel, of: ListOf, opts: { readonly order?: readonly string[] }, fresh: Minter,
+  input: Rel, of: ListOf, opts: { readonly order?: readonly string[]; readonly set?: boolean }, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  return foldNested(input, LIST_COL, { kind: 'list', of }, opts.order, fresh);
+  return foldNested(input, LIST_COL, { kind: 'list', of, ...(opts.set ? { set: true } : {}) }, opts.order, fresh);
 }
 
 /** Fold a PATH stream into one `List<Path>` — each path (its `LIST_COL` positions) becomes a MEMBER of
@@ -1687,13 +1687,15 @@ export function listSetOp(
 /** `unfold()` over a list whose MEMBERS are lists: each member becomes a list traverser of its own,
  *  written back WHOLE (`json(…)`) so a nested JSON array stays an array rather than being re-encoded
  *  as a string. Its own members keep the inner encoding, which is what `member` reports. */
-function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member: ListOf } {
+function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member: ListOf; readonly memberSet: boolean } {
   const { exploded, project } = explodeMembers(rel, LIST_COL, MEMBER, fresh);
   return {
     rel: project([[LIST_COL, { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }]], [meta(LIST_COL, 'json')]),
     ord: MEMBER.ord,
     typed: false,
     member: of.of,
+    // A SET member stays a set traverser out of the explode — the marker `foldLists` put on the member.
+    memberSet: !!of.set,
   };
 }
 
@@ -1877,7 +1879,7 @@ export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh:
  *  unchanged, making this a no-op for a scalar-membered nested list — the established path is byte-stable). */
 export function demoteElementLeaves(of: ListOf): ListOf {
   if (of.kind === 'elem') return SCALAR_MEMBERS;
-  if (of.kind === 'list') return { kind: 'list', of: demoteElementLeaves(of.of) };
+  if (of.kind === 'list') return { ...of, of: demoteElementLeaves(of.of) };
   return of;
 }
 

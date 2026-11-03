@@ -28,7 +28,10 @@ export type ListOf =
   // reduction over these members is a REAL result (`ProductiveByStrategy`) or the framer's signal
   // to emit nothing. Use `withMemberType` to change one without dropping the other.
   | { kind: 'scalar'; type: ScalarType; productiveNull: boolean }
-  | { kind: 'list'; of: ListOf }
+  // A list whose members are LISTS. `set` marks members that are SETS: the stream-level marker
+  // (`RelFraming`'s `list.set`), carried one level down when a set becomes a member (`fold()`) so it
+  // survives the round trip back out (`unfold()`) and frames as a GraphBinary Set rather than a List.
+  | { kind: 'list'; of: ListOf; set?: boolean }
   // A list whose members are PATHS — `path().fold()`, a Path in a group value. A Path is a first-class
   // GraphBinary type (`GremlinValueComparator.Type.Path`), distinct from a plain list, so a member
   // framed by this arm serializes as a PATH (labels + objects, `execute.ts` `framePath`) rather than a

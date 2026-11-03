@@ -412,7 +412,7 @@ function listMemberNodes(items: any[], of: ListOf): FrameNode[] {
     case 'mixed': return items;
     case 'map': return items.map((pairs) => ({ t: 'map' as const, v: pairs }));
     case 'path': return items.map((inner) => ({ t: 'path' as const, v: listMemberNodes(inner, of.of) }));
-    case 'list': return items.map((inner) => (inner == null ? null : { t: 'list' as const, v: listMemberNodes(inner, of.of) }));
+    case 'list': return items.map((inner) => (inner == null ? null : { t: of.set ? 'set' as const : 'list' as const, v: listMemberNodes(inner, of.of) }));
   }
 }
 

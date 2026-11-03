@@ -17,7 +17,7 @@ import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamB
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -196,6 +196,18 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
   if (!payload) return null;
   const channels = rel.channels;
   const cols = [...payload.cols.map(([column]) => column), ...carriedCols(channels)];
+  // A PER-ROW value may be a STORED COLLECTION (`map(__.values('m'))` over a list-valued property), whose
+  // `value` column is JSONB — and a scalar row carries a collection as JSON TEXT (`storedValueOn`, what
+  // `values()` projects), so the framer read raw JSONB bytes as a list and crashed. Recovered over the
+  // projected COLUMNS, once, so the correlated read is not spelled again in the CASE.
+  const done = (out: Rel): Tail => {
+    if (payload.framing.kind !== 'scalar' || payload.framing.type.kind !== 'perRow') return { rel: out, framing: payload.framing, aliases: labels, bulked };
+    const recovered = make.project({
+      id: fresh('mcv'), input: out, channels, type: out.type,
+      exprs: out.type.cols.map((column) => [column.name, column.name === 'v' ? storedValueOn(col(out.id, 'v'), col(out.id, 'vtype')) : col(out.id, column.name)] as const),
+    });
+    return { rel: recovered, framing: payload.framing, aliases: labels, bulked };
+  };
   const exprs = [
     ...payload.cols.map(([column, expression]) => [column.name, expression] as const),
     ...channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
@@ -216,16 +228,16 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
       id: fresh('mc'), input: kept, channels, type: typeOf(...cols),
       exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
     });
-    return { rel: shed, framing: payload.framing, aliases: labels, bulked };
+    return done(shed);
   }
   const projected = make.project({ id: fresh('mc'), input: rel, channels, type: typeOf(...cols), exprs });
-  if (produced.present === 'always') return { rel: projected, framing: payload.framing, aliases: labels, bulked };
+  if (produced.present === 'always') return done(projected);
   const named = presenceFenced(projected, produced.expr, fresh);
   const kept = make.filter({
     id: fresh('mf'), input: named, channels, type: named.type,
     pred: presenceOf('value-nullness', col(named.id, payload.cols[0]![0].name))!,
   });
-  return { rel: kept, framing: payload.framing, aliases: labels, bulked };
+  return done(kept);
 }
 
 /**

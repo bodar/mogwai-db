@@ -28,7 +28,8 @@ import { exactRealEntry } from './build.ts';
 export type TraverserObject =
   | { readonly kind: 'element'; readonly elem: Elem; readonly id: Expr }
   | { readonly kind: 'value'; readonly value: Expr; readonly type: ScalarType; readonly vtype?: Expr }
-  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf }
+  // `set` is the stream's SET marker (`RelFraming`'s), which a label must hand back on `select()`.
+  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf; readonly set?: boolean }
   // A MAP traverser (a `group()`/`valueMap()`/`project()`/`select(k…)` result bound to a label). Its
   // blob is the self-describing pairs array (`MAP_COL`), stored like a list's — the re-entry shape
   // (`keyOf`/`valOf`, and the static `keys` where known) rides on the alias entry so `select(label)`

@@ -183,7 +183,7 @@ export function bindAliases(
       col: column,
       shapes: new Set([shape]),
       ...(bound.kind === 'value' ? { scalarType: aliasScalarTypeOf(bound.type) } : {}),
-      ...(bound.kind === 'list' ? { listOf: bound.of } : {}),
+      ...(bound.kind === 'list' ? { listOf: bound.of, ...(bound.set ? { listSet: true as const } : {}) } : {}),
       ...(bound.kind === 'map' ? { mapOf: { keyOf: bound.keyOf, valOf: bound.valOf, ...mapKeyFacts(bound) } } : {}),
     };
     // A REBIND APPENDS, so the label's description is the JOIN of what it held and this binding —
@@ -262,7 +262,7 @@ export function seedOuterAliases(
 export type AliasRead =
   | { readonly kind: 'element'; readonly elem: Elem }
   | { readonly kind: 'value'; readonly type: ScalarType }
-  | { readonly kind: 'list'; readonly of: ListOf }
+  | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean }
   | ({ readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf } & MapKeyFacts);
 
 /** A single-shape history, read. A MIXED history declines: it has no single re-entry — it would be a
@@ -276,7 +276,7 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
     // No `scalarType` on a value-shaped history is the CONFLICT `joinAliasEntry` leaves (an untagged
     // entry beside a differently-typed one): there is no single class to frame by, so the read declines.
     case 'value': return entry.scalarType ? { kind: 'value', type: scalarTypeOfAlias(entry.scalarType, vtype) } : null;
-    case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
+    case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf, ...(entry.listSet ? { set: true } : {}) } : null;
     case 'map': return entry.mapOf ? { kind: 'map', keyOf: entry.mapOf.keyOf, valOf: entry.mapOf.valOf, ...mapKeyFacts(entry.mapOf) } : null;
     default: return null;
   }
@@ -300,7 +300,7 @@ const historyListOf = (entry: AliasEntry): ListOf | null => {
       const type = entry.scalarType;
       return type ? withMemberType(SCALAR_MEMBERS, type.kind === 'perRow' ? PER_ROW_ENVELOPE : type) : null;
     }
-    case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
+    case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf, ...(entry.listSet ? { set: true } : {}) } : null;
     default: return null;
   }
 };
@@ -482,7 +482,7 @@ export function aliasProjection(
  *  identical mapping, and the alias vocabulary is what owns it. */
 export const readFraming = (read: AliasRead): RelFraming =>
   read.kind === 'element' ? { kind: 'elements', elem: read.elem }
-    : read.kind === 'list' ? { kind: 'list', of: read.of }
+    : read.kind === 'list' ? { kind: 'list', of: read.of, ...(read.set ? { set: true } : {}) }
       : read.kind === 'map' ? { kind: 'map', keyOf: read.keyOf, valOf: read.valOf, ...mapKeyFacts(read) }
         // The label's own recorded type, restored by `aliasProjection` (a per-row type lands in `vtype`).
         : { kind: 'scalar', type: read.type };
