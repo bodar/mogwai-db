@@ -1,7 +1,7 @@
 import { NO_PARAMS, type ParamEnv } from '../../gremlin/param-env.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, compilerParamName, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, compilerParamName, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -12,10 +12,11 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow } from '../../rel/bounds.ts';
 import type { Rel } from '../../rel/rel.ts';
+import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
-import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, mapKeyPresence, meetMapKeyFacts, recordKeyFacts, slicedKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
@@ -36,7 +37,7 @@ import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
 import { comparabilityClass, CONSTANT, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, subjectOperand, type SubjectType, type TypedOperand, valueTheta } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, elementCols, eq, fenced, jsonEachSet, jsonOf,
+    and, byEncounter, carriedCols, elementCols, eq, fenced, fencedWhereSelfContained, jsonEachSet, jsonField, jsonOf,
     labelSetArgs,
     meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
@@ -45,7 +46,7 @@ import {
 } from './build.ts';
 import { aliasElementHost, aliasGuard, aliasIdAt, aliasProjection, aliasOperandAt, bindAliases, isElementAlias, liveAliases, selectSpec, type AliasProjection, type ElementAliasProjection } from './alias.ts';
 import type { AliasMap } from '../alias.ts';
-import { byExpr, byProjection, isProductiveBy, labelScopeNode, modulations, productivityFilter, type LabelScope, type Modulation } from './modulator.ts';
+import { byExpr, byProjection, isProductiveBy, labelScopeNode, modulations, producedMemberNode, productivityFilter, type LabelScope, type Modulation } from './modulator.ts';
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
@@ -76,7 +77,7 @@ import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild } from './lower/reduction.ts';
-import { BRANCH_HOSTS, branchArms, mergeArms, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
+import { BRANCH_HOSTS, branchArms, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -1522,6 +1523,171 @@ function selectMapFirst(
   return { rel: scalarMapKey(rel, vtype, key, fallback.node, fresh, fallback.total), framing: { kind: 'scalar', type: PER_ROW('vtype') } };
 }
 
+/** The tags a per-row scalar's collection rows carry — the stored encoding's own (`valueNodeOf`). */
+const COLLECTION_TAGS = ['map', 'list', 'set'] as const;
+
+/** Which of `perRowCollectionStep`'s compound readers `step` is, or `null` — ONE recognizer, so the chain
+ *  and the child seam (`perRowCollectionChild`) agree about which steps re-enter the collection tails. */
+export function collectionReaderOf(step: IRStep | undefined): 'count' | 'slice' | 'column' | 'submap' | null {
+  if (!step || step.optionArms || step.modulators?.length) return null;
+  const local = isLocalScope(step);
+  return step.name === 'count' && local ? 'count'
+    : MAP_LOCAL_SLICE.has(step.name) && local ? 'slice'
+      : selectedColumn(step) ? 'column'
+        : step.name === 'select' && (selectSpec(step)?.labels.length ?? 0) >= 2 ? 'submap'
+          : null;
+}
+
+/**
+ * A COMPOUND READER over a PER-ROW-TYPED SCALAR stream whose rows MAY be collections — a map/list-valued
+ * stored property (`values('m')`), a side-effect constant read by `select(k)`, a merged arm. The reference
+ * dispatches each of these on the traverser's RUNTIME class, so the answer is decided PER ROW:
+ *
+ * - `count(local)` — `CountLocalStep.map`: a Map's or a Collection's size, else `1` (a non-iterable item is
+ *   a one-element iterator, `IteratorUtils.asIterator`) —
+ *   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CountLocalStep.java`;
+ * - `limit`/`range`/`skip`/`tail(local)` — `RangeLocalStep.applyRange`: a Map keeps a window of its entries,
+ *   a Set stays a Set, a List a List, and anything else passes through UNCHANGED (`RangeLocalStep.java:84-95`;
+ *   `TailLocalStep` delegates to it);
+ * - `select(Column.keys|values)` — `Column.apply`: a Map's side, else `IllegalArgumentException`
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:41-68`);
+ * - a multi-key `select(k1, k2…)` — reads the traverser's Map first (`Scoping.getScopeValue`), so a row that is
+ *   no Map and has no other scope for the keys DROPS (`SelectStep.processNextStart`'s `EmptyTraverser`).
+ *
+ * `format()` is NOT here yet: its Map arm reads a token the row MAY hold, and the non-Map arm would have to DROP
+ * a token no scope names (`FormatStep`'s unproductive token), which the scalar format declines today.
+ *
+ * So the stream is split by its stored tag over ONE fenced relation — each row enters exactly one arm, a
+ * `Filter` keyed on the tag, so the cost is linear with no join between arms — and each arm is the EXISTING
+ * tail for its shape, run for this one step: `mapTail` for a Map, `listTail` for a List or Set, the scalar
+ * answer otherwise. Arms that agree on their framing merge directly (`count(local)` is a `long` everywhere);
+ * arms that do not are RE-NODED to one per-row `{t,v}` scalar (`producedMemberNode`, the one framing→node
+ * authority) and merge on `MERGED_VTYPE`. The rest of the chain continues ONCE over the merged stream.
+ *
+ * `null` where no split applies or an arm declines — the caller then takes its ordinary route, so a step that
+ * route already answered keeps its answer. `unfold()` is NOT here: an ENTRY has no node encoding to merge on.
+ */
+function perRowCollectionStep(
+  step: IRStep, input: Rel, framing: RelFraming, steps: readonly IRStep[], at: number,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if (framing.kind !== 'scalar' || step.optionArms) return null;
+  const tagCol = ['vtype', perRowColumnOf(framing.type)].find((name) => name && input.type.cols.some((column) => column.name === name));
+  if (!tagCol) return null;
+  const reader = collectionReaderOf(step);
+  if (!reader) return null;
+  const where = (from: Rel, pred: Expr): Rel => make.filter({ id: fresh('prc'), input: from, channels: from.channels, type: from.type, pred });
+  // `IS NOT` is null-safe: an untagged row (infer from the value) is no stored collection.
+  const tagIs = (from: Rel, name: string): Expr => eq(col(from.id, tagCol), compilerText(name));
+  const tagIsNot = (from: Rel, name: string): Expr => isNot(col(from.id, tagCol), compilerText(name));
+  // The MAP arm: the stored pairs array IS `MAP_COL`'s encoding, and its keys/values are self-describing
+  // `{t,v}` nodes — `selectSideEffectConstant`'s framing for the same encoding — run through `mapTail` for
+  // this ONE step.
+  const one = [step];
+  const mapArm = (from: Rel): Tail | null => mapTail(make.project({
+    id: fresh('prm'), input: from, channels: from.channels,
+    type: typeOf(meta(MAP_COL, 'json'), ...carriedCols(from.channels)),
+    exprs: [[MAP_COL, { kind: 'call', fn: 'json', args: [col(from.id, 'v')] }], ...from.channels.map((channel) => [channel.col, col(from.id, channel.col)] as const)],
+  }), { kind: 'scalar' }, { kind: 'scalar' }, one, 0, ctx, fresh, labels);
+  // Rows keep their count and their channels through every arm, so the stream's multiplicity rides on.
+  const resume = (tail: Tail | null): Tail | null => tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, tail.aliases ?? labels);
+
+  if (reader === 'column') {
+    // A non-Map row is `Column.apply`'s IllegalArgumentException — a WHERE raise (`raisingRows`), so a
+    // position that reads only existence (`count()`) raises too, and is never a drop. Every other row is a Map.
+    // Behind a HARD fence (`AS MATERIALIZED`, which SQLite may not flatten) first: it orders a WHERE's terms
+    // by cost, not as written, so a raise fused beside an earlier filter (`where(count(local).is(2))`, a
+    // subquery) would fire on a row that filter drops. A correlated input cannot be hoisted and stays as is.
+    const selfContained = freeRelIds(input).size === 0 && !containsSelfRef(input);
+    const fencedInput = selfContained
+      ? make.materialize({ id: fresh('prf'), input, channels: input.channels, type: input.type, fenced: true }) : input;
+    return resume(mapArm(raisingRows(fencedInput, [[tagIsNot(fencedInput, 'map'), COLUMN_OF_NON_MAP]], fresh)));
+  }
+  if (reader === 'submap') {
+    // A key a path label, side effect or enclosing scope may answer is the scope a non-Map row reads next —
+    // not a drop — so only a key NO scope names takes this route; a non-Map row then has none, and drops.
+    const named = namedElsewhere(ctx);
+    const live = liveAliases(labels, input);
+    if (selectSpec(step)!.labels.some((key) => live.has(key) || named(key) || ctx.enclosingLabels?.has(key))) return null;
+    return resume(mapArm(where(input, tagIs(input, 'map'))));
+  }
+
+  // SEVERAL ARMS over ONE fenced relation — one scan per arm, never re-computing the upstream. Where a later
+  // step reads the arrival order the input is POSITIONED first (the branch merge's own rule,
+  // `branchOrderOwed`/`positioned`): every arm carries the position through, so the merged stream is in its
+  // input's order rather than arm-major.
+  const base = fencedWhereSelfContained(branchOrderOwed(ctx, { steps, at }, input) ? positioned(input, fresh) : input, fresh);
+  // The Map arm first: where the map vocabulary cannot answer the step, nothing else is built.
+  const maps = mapArm(where(base, tagIs(base, 'map')));
+  if (!maps) return null;
+  const listArm = (kind: 'list' | 'set'): Tail | null => {
+    const retyped = collectionRetype(base, tagCol, kind, fresh);
+    return listTail(retyped.rel, retyped.of, one, 0, ctx, fresh, labels, retyped.set);
+  };
+  const scalars = where(base, COLLECTION_TAGS.map((name) => tagIsNot(base, name)).reduce(and));
+  const arms = [maps, listArm('list'), listArm('set'),
+    // A non-collection's local slice is the row itself (`applyRange` returns `start`).
+    reader === 'count' ? countedScalar(scalars, fresh, labels) : { rel: scalars, framing, aliases: labels, bulked }];
+  if (arms.some((arm) => !arm || arm.effects?.length)) return null;
+  const met = reNoded(arms as Tail[], ctx.source, fresh);
+  const merged = met && mergeArms(met, labels, ctx.source, fresh);
+  return merged && resume({ ...merged, bulked });
+}
+
+/** `Column.apply`'s message over a traverser with no keys (`Column.java:51,67`). The trailing Java class is
+ *  per row and is not interpolated, as `stringReceiverMessage` does not interpolate its class. */
+const COLUMN_OF_NON_MAP = 'The provided object does not have accessible keys';
+
+/** `count(local)` of a NON-ITERABLE row is `1` (`CountLocalStep` → `IteratorUtils.asIterator(item)`, a
+ *  one-element iterator for any non-collection — a null included), framed as the map/list arms' count is. */
+function countedScalar(rel: Rel, fresh: Minter, labels: AliasMap): Tail {
+  return {
+    rel: make.project({
+      id: fresh('prn'), input: rel, channels: rel.channels, type: typeOf(meta('v', 'int'), ...carriedCols(rel.channels)),
+      exprs: [['v', compilerInt(1)], ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+    }),
+    framing: { kind: 'scalar', type: STATIC('long'), result: 'count' }, aliases: labels, bulked: false,
+  };
+}
+
+/**
+ * Arms that DISAGREE on their framing (a sliced Map beside a sliced List beside an untouched scalar) as ONE
+ * per-row `{t,v}` scalar each: a collection arm's value is re-noded through `producedMemberNode` — a Map
+ * `{t:'map'}`, a List `{t:'list'}`, a Set `{t:'set'}` — and decoded to `v` + its tag, the stored encoding a
+ * map/list-valued property already has. A scalar arm is left as it is (`mergeArms` meets scalar tags). Arms
+ * that already agree are returned unchanged.
+ */
+function reNoded(arms: readonly Tail[], source: GraphSource, fresh: Minter): readonly Tail[] | null {
+  if (arms.every((arm) => sameFraming(arms[0]!.framing, arm.framing))) return arms;
+  const out: Tail[] = [];
+  for (const arm of arms) {
+    const f = arm.framing;
+    if (f.kind === 'scalar') { out.push(arm); continue; }
+    const value = f.kind === 'map' ? col(arm.rel.id, MAP_COL) : f.kind === 'list' ? col(arm.rel.id, LIST_COL) : null;
+    const node = value && producedMemberNode(value, f, source, fresh, 'always');
+    if (!node) return null;
+    const channels = arm.rel.channels;
+    // The node is landed ONCE and fenced, so its two decodes read a column rather than rebuilding it.
+    const landed = fencedWhereSelfContained(make.project({
+      id: fresh('prk'), input: arm.rel, channels, type: typeOf(meta('n', 'json', true), ...carriedCols(channels)),
+      exprs: [['n', node], ...channels.map((channel) => [channel.col, col(arm.rel.id, channel.col)] as const)],
+    }), fresh);
+    const n = col(landed.id, 'n');
+    const set = f.kind === 'list' && !!f.set;
+    out.push({
+      ...arm,
+      rel: make.project({
+        id: fresh('prd'), input: landed, channels,
+        type: typeOf(meta('v', 'any', true), meta(MERGED_VTYPE, 'text', true), ...carriedCols(channels)),
+        exprs: [['v', jsonField(n, 'v')], [MERGED_VTYPE, set ? compilerText('set') : jsonField(n, 't')],
+          ...channels.map((channel) => [channel.col, col(landed.id, channel.col)] as const)],
+      }),
+      framing: { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) },
+    });
+  }
+  return out;
+}
+
 /**
  * The scope a `select(key)` falls back to when the traverser is no Map holding `key` — the ONE decision
  * every map-first reader shares: the chain over a per-row scalar (`selectMapFirst`) and over a map
@@ -1713,6 +1879,12 @@ function scalarTail(
       labels = bound.aliases;
       continue;
     }
+
+    // A COMPOUND READER over a stream whose rows MAY be collections — re-enters the map/list vocabulary
+    // for this ONE step, split by the per-row tag. Where that split declines, the step falls through to
+    // the ordinary scalar route below, so no answer that route already gave is lost.
+    const reEntered = perRowCollectionStep(step, rel, out, steps, at, bulked, ctx, fresh, labels);
+    if (reEntered) return reEntered;
 
     // THE SHARED COLLECTION VOCABULARY — `select` (which may re-root to an ELEMENT, the whole reason
     // `elementTail` is a function), `group`/`groupCount`, `aggregate`, `cap`, `project` — all lowered by

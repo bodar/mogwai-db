@@ -25,7 +25,7 @@ import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mapKeyPresence, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
-import { comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, mapFirstFallback, minMaxOrder, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
 import { correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, labelScopeNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost, type LabelScope } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
@@ -1979,6 +1979,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // (`by(__.math('_ * 10'))`, `by(dateAdd(DT.day, 1))`) is well-formed rather than the nonsense it
   // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other
   // way round — the guard exists because an element is not a value, and here there is one.
+  if (host.kind === 'scalar' && host.vtype && collectionReaderOf(first)) return perRowCollectionChild(body, { ...host, vtype: host.vtype }, ctx, fresh);
   if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), ctx.source, fresh);
   if (host.kind === 'list') return listHostChild(body, host, ctx, fresh);
   // A PROJECTOR body over a RECORD host reads the record's FIELDS as scope variables — `math("a / b")`
@@ -2320,7 +2321,52 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     };
   }
   const tail = continueAs(root, { kind: 'mapEntry', keyOf: host.entry.keyOf, valOf: host.entry.valOf }, body, 0, false, inBody(ctx), fresh, NO_ALIASES);
-  if (!tail || !atMostOneRow(tail.rel)) return null;
+  return tail && oneRowValue(tail, fresh);
+}
+
+/**
+ * A PER-ROW-TYPED scalar host whose body opens with a compound reader (`collectionReaderOf` —
+ * `count(local)`, a local slice, `select(Column)`, a multi-key `select`): the host may be a Map,
+ * a List or neither, decided by its tag. Seeded as a ONE-ROW relation `(v, vtype)` and handed to the ordinary
+ * fold, whose scalar tail splits that one row by its tag (`perRowCollectionStep`) — so the chain and the child
+ * answer the same question through one lowering. Each row enters exactly one arm, so the merged answer is
+ * still at most one row; the `Limit` says so to `atMostOneRow`.
+ */
+function perRowCollectionChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly vtype: Expr }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const unit = make.values({ id: fresh('pu'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
+  const seeded = make.project({
+    id: fresh('ps'), input: unit, channels: [], type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true)),
+    exprs: [['v', host.value], ['vtype', host.vtype]],
+  });
+  // A host whose NULL means "nothing" (`host.present`) seeds no row there.
+  const present = host.present && host.present !== 'always' ? presenceOf(host.present, col(seeded.id, 'v')) : null;
+  const root = present ? make.filter({ id: fresh('pp'), input: seeded, channels: [], type: seeded.type, pred: present }) : seeded;
+  // The READER alone first, so the `Limit` states the one-row fact of the split and nothing after it: a
+  // body that fans out past it (`select(keys).unfold()`) is still seen to, and declines.
+  const bodyCtx = inBody(ctx);
+  const split = continueAs(root, { kind: 'scalar', type: PER_ROW('vtype') }, body.slice(0, 1), 0, false, bodyCtx, fresh, NO_ALIASES);
+  if (!split || split.effects?.length) return null;
+  const one = make.limit({ id: fresh('pl'), input: split.rel, channels: split.rel.channels, type: split.rel.type, count: compilerInt(1) });
+  const tail = continueAs(one, split.framing, body, 1, false, bodyCtx, fresh, NO_ALIASES);
+  const value = tail && !tail.effects?.length ? oneRowValue(tail, fresh) : null;
+  // A bare `count(local)` or local slice is ONE-TO-ONE: every seeded row enters exactly one arm and leaves
+  // it, so the body produces exactly where the host does — stated, rather than the `EXISTS` a union of
+  // filtered arms otherwise needs, which would spell the whole split a second time per row.
+  const reader = collectionReaderOf(body[0]);
+  if (!value || body.length !== 1 || (reader !== 'count' && reader !== 'slice')) return value;
+  return {
+    expr: value.expr, framing: value.framing, ...(value.vtype ? { vtype: value.vtype } : {}),
+    present: present ? 'value-nullness' : 'always', yields: value.yields,
+  };
+}
+
+/**
+ * A body lowered over a ONE-ROW correlated root, as the child value it is — the shared exit of every child
+ * that seeds its host as a relation and hands the WHOLE body to the ordinary framing dispatcher
+ * (`mapEntryChild`, `perRowCollectionChild`). `null` unless the tail is still at most one row.
+ */
+function oneRowValue(tail: Tail, fresh: Minter): ChildValue | null {
+  if (!atMostOneRow(tail.rel)) return null;
   const scalarOf = (column: string): Expr => ({ kind: 'scalar', plan: make.project({
     id: fresh('ev'), input: tail.rel, channels: [], type: typeOf(meta(column, 'any', true)), exprs: [[column, col(tail.rel.id, column)]],
   }) });

@@ -189,7 +189,12 @@ export const fenced = (rel: Rel, fresh: Minter): Rel =>
  * fence would hoist to a CTE that cannot see the outer row (`freeRelIds`) or the walk (`containsSelfRef`).
  */
 export const presenceFenced = (rel: Rel, value: Expr, fresh: Minter): Rel =>
-  (exprHasSubquery(value) && freeRelIds(rel).size === 0 && !containsSelfRef(rel) ? fenced(rel, fresh) : rel);
+  (exprHasSubquery(value) ? fencedWhereSelfContained(rel, fresh) : rel);
+
+/** `fenced` where a fence CAN stand — a self-contained relation. A correlated or recursive one is left
+ *  as it is: its CTE could not see the outer row (`freeRelIds`) or the walk (`containsSelfRef`). */
+export const fencedWhereSelfContained = (rel: Rel, fresh: Minter): Rel =>
+  (freeRelIds(rel).size === 0 && !containsSelfRef(rel) ? fenced(rel, fresh) : rel);
 
 /** Physical columns of the two element tables, as `Scan` must declare them. `Scan` is the one node
  *  that names the physical schema (§3.3), so this list IS the algebra's view of storage. */
