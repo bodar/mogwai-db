@@ -1,6 +1,6 @@
 import type { Step } from '../../gremlin/frontend.ts';
 import type { SegmentPlan } from '../segment.ts';
-import { lowerToRel, lowerValueResume, type Lowering } from './lower.ts';
+import { lowerToRel, lowerTypedValueResume, type Lowering, type TypedDatum } from './lower.ts';
 import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
 
 // ---------- reverse() as a value-transform BARRIER — substrate A ----------
@@ -16,7 +16,7 @@ import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
 // design.md`), the same shape as regex: a SYNC barrier over the value stream. The head is the value
 // stream up to `reverse()`; the transform reverses each value in trivial JS (correct for strings AND
 // lists, and identity otherwise); the survivors — here, the transformed values — re-inject through
-// `lowerValueResume` as ONE `json_each` bind that seeds the resumed stream. The messy semantics live in
+// `lowerTypedValueResume` as ONE `json_each` bind that seeds the resumed stream. The messy semantics live in
 // one line of JS; the SQL is a flat read plus a `json_each` source. It is SYNCHRONOUS (no async work,
 // atomic, DO-local — see `compiler/segment.ts`).
 //
@@ -25,12 +25,15 @@ import { buildValueTransformSegment, valueHead } from './barrier-value.ts';
 // (a list-shaped stream, `fold().reverse()`) DECLINES here and the fold's remaining reverse handling
 // takes it — no regression while the list arm is built out.
 
-/** Reverse one traverser value: a string char-by-char (by code point), a list in place, everything else
- *  (null, numbers, …) unchanged — `ReverseStep.map`. */
-const reverseValue = (value: unknown): unknown =>
-  typeof value === 'string' ? [...value].reverse().join('')
-    : Array.isArray(value) ? [...value].reverse()
-      : value;
+/** Reverse one traverser value: a STRING char-by-char (by code point), everything else (null, a number, a
+ *  UUID, a Char, a Binary — `ReverseStep.map`'s `instanceof String` is false for each) unchanged. The
+ *  value's TYPE decides, not the JS class of its carrier: a UUID or a Binary rides as TEXT, and reversing
+ *  that text answered a String nobody stored. The type travels on with the value (a typed datum), so an
+ *  unchanged Long, UUID or Binary keeps its class through the resume. */
+const reverseValue = (value: unknown, _text?: string, type?: string | null): TypedDatum => [
+  typeof value === 'string' && (type == null || type === 'string') ? [...value].reverse().join('') : value as TypedDatum[0],
+  type ?? null,
+];
 
 /** THE FIRST `reverse()` in the chain, or `null`. Asked in `segmentPlan` beside the other barrier
  *  finders so the earliest boundary wins. */
@@ -42,15 +45,15 @@ export function reverseBarrierIn(steps: readonly Step[]): number | null {
 /**
  * Plan `reverse()` as a SYNC value-transform barrier, or `null` to decline (the fold then lowers reverse
  * its own way — no regression). The head must be a SCALAR `value` read; the reversed values re-inject as
- * a value stream (`lowerValueResume`). The shared `buildValueTransformSegment` shell is what `split()`
+ * a value stream (`lowerTypedValueResume`). The shared `buildValueTransformSegment` shell is what `split()`
  * uses too — reverse and split differ only in the transform and the resume lowering.
  */
 export function buildReverseSegment(steps: readonly Step[], at: number, lowering: Lowering): SegmentPlan | null {
   // `valueHead` now also admits a `jsonbList` head (for the order/dedup barrier), but reverse's resume is
-  // SCALAR (`lowerValueResume`), so a LIST-framed `reverse()` must stay on the INLINE `listMemberOp` path
+  // SCALAR (`lowerTypedValueResume`), so a LIST-framed `reverse()` must stay on the INLINE `listMemberOp` path
   // (which reverses a list — and a nested list — in place). Decline a non-scalar head here so the fold
   // keeps it, rather than framing the list as its JSON text.
   const head = valueHead(lowerToRel(steps.slice(0, at), lowering));
   if (head && head.shape.kind !== 'value') return null;
-  return buildValueTransformSegment(steps, at, lowering, reverseValue, lowerValueResume, 'reverse');
+  return buildValueTransformSegment(steps, at, lowering, reverseValue, lowerTypedValueResume, 'reverse');
 }

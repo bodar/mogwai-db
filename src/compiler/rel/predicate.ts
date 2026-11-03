@@ -289,6 +289,11 @@ const ordered = (
     const canonical = flatType(boundType);
     return canonical === 'datetime' || canonical === 'duration' ? canonical : null;
   })();
+  // A TEXT bound orders only within its own Gremlin type — a String among Strings, a UUID among UUIDs, a
+  // Binary among Binaries (whose hex carrier orders as unsigned bytes) — `comparableTheta`'s same-bucket
+  // rule. Reading only the bound's VALUE put a UUID bound in the String space, so `values(<uuid>)
+  // .is(P.gt(UUID(…)))` matched no stored UUID at all.
+  const textSpace = textCarriedType(boundType) ?? 'string';
   const intVtypes = temporal ? [temporal] : NUMERIC_CAST_TO_INT;
   const realVtypes = temporal ? [] : CAST_TO_REAL;
   // The exact tail rides as decimal TEXT, so its ORDERING bound is cast to the column's numeric class
@@ -332,13 +337,17 @@ const ordered = (
     if (numericBound && canonical !== null && STATIC_ORDERING_DECLINE.has(canonical)) return null;
     const agrees = numericBound
       ? canonical !== null && (temporal ? canonical === temporal : NUMERIC_VTYPES.includes(canonical))
-      : canonical === 'string';
+      : canonical === textSpace;
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
   if (numericBound) return byValue(op, subject, type, wide ?? castBound, value, wide !== null, atInt64Edge(value), compilerFalse, intVtypes, realVtypes);
-  return type.kind === 'perRow'
-    ? { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse }
-    : { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
+  if (type.kind === 'perRow')
+    return { kind: 'case', whens: [[binary('=', type.vtype, compilerText(textSpace)), binary(op, subject, bound)]], else: compilerFalse };
+  // A subject with NO tag is framed by inference — its TEXT is a String — so it is never in a UUID's or a
+  // Binary's space; a tag that is NULL on this row says the same.
+  if (textSpace !== 'string')
+    return type.tag ? { kind: 'case', whens: [[binary('=', type.tag, compilerText(textSpace)), binary(op, subject, bound)]], else: compilerFalse } : compilerFalse;
+  return { kind: 'case', whens: [[binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
 };
 
 /**
@@ -405,12 +414,21 @@ function typeSpaced(equal: Expr, value: unknown, type: SubjectType, boundType: T
   } });
 }
 
+/** The VALUE types that ride as TEXT under a tag of their own — a UUID (its canonical form) and a Binary
+ *  (its hex carrier, `binaryCarrier`). A bound DECLARED as one of them meets only its own type. */
+const TEXT_CARRIED_TYPES: readonly string[] = ['uuid', 'binary'];
+const textCarriedType = (t: TypeNode | null | undefined): string | null => {
+  const flat = flatType(t);
+  return flat !== null && TEXT_CARRIED_TYPES.includes(flat) ? flat : null;
+};
+
 /** The per-row vtypes whose value rides as TEXT, whose Gremlin `Type` is not String, and whose text `bound`
- *  could be: a `T` token's name, a `Direction`'s, a UUID's canonical form. */
+ *  could be: a `T` token's name, a `Direction`'s, a UUID's canonical form, a Binary's hex carrier. */
 const textCarriedOthers = (bound: string): readonly string[] => [
   ...(['id', 'label', 'key', 'value'].includes(bound) ? ['T'] : []),
   ...(['IN', 'OUT', 'BOTH'].includes(bound) ? ['D'] : []),
   ...(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bound) ? ['uuid'] : []),
+  ...(/^(?:[0-9A-F]{2})*$/.test(bound) ? ['binary'] : []),
 ];
 
 /**
@@ -421,8 +439,8 @@ const textCarriedOthers = (bound: string): readonly string[] => [
  * so `elementMap().unfold().select(keys).is('label')` is empty, not `T.label`, and a String that spells a
  * UUID never meets a stored UUID. The subject's own type fact decides, exactly as `typeSpaced` does for
  * the non-text spaces:
- * - a UUID bound (`uuid` — its DECLARED type: a UUID parameter, a `UUID(...)` literal, a UUID member)
- *   meets only a subject whose tag NAMES `uuid`, never one whose tag names another type;
+ * - a UUID or Binary bound (`own` — its DECLARED type: a parameter, a `UUID(...)`/`Binary(...)` literal,
+ *   a typed member) meets only a subject whose tag NAMES that type, never one whose tag names another;
  * - a String bound excludes the TEXT-carried vtypes its text could spell (`others`) — only a bound that
  *   IS some such value's text pays for the guard.
  * A subject with NO type fact — an UNKNOWN with no tag, or a tag that is NULL on this row — says nothing
@@ -432,15 +450,16 @@ const textCarriedOthers = (bound: string): readonly string[] => [
  * (`inject([UUID(u)]).unfold().is(UUID(u))` is 1, its `neq` 0). The price is that, on that untyped path
  * only, a String spelling a UUID equals the UUID (`docs/feature-support-matrix.md` §17).
  */
-function textSpaced(equal: Expr, type: SubjectType, uuid: boolean, others: readonly string[]): Expr {
+function textSpaced(equal: Expr, type: SubjectType, own: string | null, others: readonly string[]): Expr {
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
-    return canonical !== null && (uuid || canonical === 'uuid') && !(uuid && canonical === 'uuid') ? CONSTANT.false : equal;
+    const carried = own !== null || (canonical !== null && TEXT_CARRIED_TYPES.includes(canonical));
+    return canonical !== null && carried && own !== canonical ? CONSTANT.false : equal;
   }
   const tag = type.kind === 'perRow' ? type.vtype : type.tag;
   if (!tag) return equal;
   // A NULL tag on this row is "no fact" — coalesced to each direction's own passing value.
-  if (uuid) return binary('and', equal, binary('=', { kind: 'call', fn: 'coalesce', args: [tag, compilerText('uuid')] }, compilerText('uuid')));
+  if (own) return binary('and', equal, binary('=', { kind: 'call', fn: 'coalesce', args: [tag, compilerText(own)] }, compilerText(own)));
   return others.length
     ? binary('and', equal, { kind: 'unary', op: 'not', arg: {
       kind: 'in-list', expr: { kind: 'call', fn: 'coalesce', args: [tag, compilerText('')] }, values: others.map(compilerText) } })
@@ -449,30 +468,31 @@ function textSpaced(equal: Expr, type: SubjectType, uuid: boolean, others: reado
 
 /**
  * `textSpaced` for a bound LIST-PARAMETER's `json_each` set, whose members cannot each carry their own
- * guard: the set's declared item types decide it once. A set with no UUID member excludes whatever its
- * String members' text could spell; a set of UUIDs only meets UUIDs. A set MIXING UUID members with
- * other members keeps the raw membership — a per-member type would have to ride the bind's JSON.
+ * guard: the set's declared item types decide it once. A set with no UUID/Binary member excludes whatever
+ * its String members' text could spell; a set all of ONE such type only meets that type. Any other mix
+ * keeps the raw membership — a per-member type would have to ride the bind's JSON.
  */
 function textSpacedSet(member: Expr, values: readonly unknown[], setType: TypeNode | null, type: SubjectType): Expr {
   const items = setType !== null && typeof setType === 'object' && 'items' in setType ? setType.items : [];
-  const present = values.map((v, i) => ({ v, uuid: flatType(items[i]) === 'uuid' })).filter(({ v }) => v !== null);
-  const uuids = present.filter(({ uuid }) => uuid).length;
-  if (uuids === 0) return textSpaced(member, type, false, [...new Set(present.flatMap(({ v }) => typeof v === 'string' ? textCarriedOthers(v) : []))]);
-  return uuids === present.length ? textSpaced(member, type, true, []) : member;
+  const present = values.map((v, i) => ({ v, own: textCarriedType(items[i]) })).filter(({ v }) => v !== null);
+  if (!present.some(({ own }) => own)) return textSpaced(member, type, null, [...new Set(present.flatMap(({ v }) => typeof v === 'string' ? textCarriedOthers(v) : []))]);
+  const owns = new Set(present.map(({ own }) => own));
+  const [only] = owns;
+  return owns.size === 1 && only ? textSpaced(member, type, only, []) : member;
 }
 
 const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: SubjectType, boundType: TypeNode | null): Expr | null => {
   const raw = binary('=', subject, bound);
   if (typeof value === 'string') {
-    const uuid = flatType(boundType) === 'uuid';
-    if (!uuid && type.kind === 'static') {
+    const own = textCarriedType(boundType);
+    if (!own && type.kind === 'static') {
       const canonical = normalizeTypeName(type.type);
       if (canonical !== null && (NUMERIC_VTYPES.includes(canonical) || canonical === 'duration')) return CONSTANT.false;
     }
     // A NULL vtype is "read the value", and a TEXT value read that way is a String.
-    if (!uuid && type.kind === 'perRow' && numberSpelling(value))
+    if (!own && type.kind === 'perRow' && numberSpelling(value))
       return binary('and', raw, binary('=', { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('string')] }, compilerText('string')));
-    return textSpaced(raw, type, uuid, uuid ? [] : textCarriedOthers(value));
+    return textSpaced(raw, type, own, own ? [] : textCarriedOthers(value));
   }
   const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
   if (temporal || !(typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal)) return raw;
@@ -603,6 +623,8 @@ export const comparableTheta = (
       [bothIn(['string', 'char']), binary(op, valA, valB)],
       [bothEq('boolean'), binary(op, valA, valB)],
       [bothEq('uuid'), binary(op, valA, valB)],
+      // A Binary's hex carrier orders as its unsigned bytes (`binaryCarrier`).
+      [bothEq('binary'), binary(op, valA, valB)],
     ],
     else: compilerFalse,
   };

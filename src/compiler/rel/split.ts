@@ -35,10 +35,12 @@ const WHITESPACE_RUN = new RegExp(`[${JAVA_WHITESPACE}]+`);
  *  separator splits into characters (`"ab cd"` → `["a","b"," ","c","d"]`); a NULL separator splits on
  *  whitespace; any other separator is a whole-separator split with the leading and adjacent empty tokens
  *  removed and a trailing one kept (`wholeSeparatorSplit`). */
-const splitValue = (value: unknown, separator: string | null): unknown => {
+const splitValue = (value: unknown, separator: string | null, type?: string | null): unknown => {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'string')
     throw new RaisedByQuery(`The split() step can only take string as argument, encountered ${value}.`);
+  // TEXT whose TYPE is not String — a UUID, a Char, a Binary's hex carrier — is no String either.
+  if (type != null && type !== 'string') throw new RaisedByQuery('The split() step can only take string as argument');
   // Java's `"".split("")` is `[""]` (an input with no match is itself), where JS answers `[]`.
   if (separator === '') return value === '' ? [''] : value.split('');
   if (separator === null) return value.split(WHITESPACE_RUN).filter((t) => t !== '');
@@ -95,5 +97,5 @@ export function buildSplitSegment(
   // The value twin of `reverse()` on the shared shell: each string splits into a LIST, so the survivors
   // re-inject through `lowerListResume` (reverse uses `lowerValueResume`). The separator is bound into
   // the per-value transform here.
-  return buildValueTransformSegment(steps, at, lowering, (value) => splitValue(value, separator), lowerListResume, 'split');
+  return buildValueTransformSegment(steps, at, lowering, (value, _text, type) => splitValue(value, separator, type), lowerListResume, 'split');
 }

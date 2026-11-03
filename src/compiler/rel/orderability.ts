@@ -64,6 +64,8 @@ function kindOf(v: unknown): Kind {
       // A `T`/`Direction` TOKEN is a Java enum — none of the ladder's classes, so `Type.Unknown`
       // (`GremlinValueComparator.java:243-255`, `type()` falls through to `Object.class`).
       if (t in TOKEN_ORDINALS) return 'unknown';
+      // So is a Binary (a `ByteBuffer`, no rung of its own).
+      if (t === 'binary') return 'unknown';
       throw unclassified(`a '${t}' member`);
     }
     // An expanded ELEMENT (`{id,label,props}`) — `out().fold()` inside a map value.
@@ -298,8 +300,14 @@ export function orderabilityCompare(first: unknown, second: unknown): number {
     case 'vertex': case 'edge': case 'vertexproperty': case 'property': return orderabilityCompare(fp, sp);
     case 'list': return cmpIterable(fp as unknown[], sp as unknown[]);
     case 'set': case 'map': return cmpUnordered(fp as unknown[], sp as unknown[]);
-    // Unknown: the only members `kindOf` lets onto this rung are TOKENS (`tokenClass`).
+    // Unknown: the members `kindOf` lets onto this rung are TOKENS (`tokenClass`) and BINARIES. Classes
+    // order by NAME (`unknownTypeComparator`), so `java.nio.HeapByteBuffer` precedes every token's
+    // `org.apache.…` class; two binaries compare naturally — by their hex carriers, which is unsigned byte
+    // order (`binaryCarrier`; Java's `ByteBuffer.compareTo` is signed, `docs/feature-support-matrix.md` §17).
     default: {
+      const fb = (f as { t: string }).t === 'binary';
+      const sb = (s as { t: string }).t === 'binary';
+      if (fb || sb) return fb && sb ? cmpNatural(fp, sp) : fb ? -1 : 1;
       const a = tokenClass(f as { t: string }, fp);
       const b = tokenClass(s as { t: string }, sp);
       return a.name < b.name ? -1 : a.name > b.name ? 1 : a.ordinal - b.ordinal;

@@ -14,7 +14,7 @@
 //  | our type / shape                            | CSV                     | this module        |
 //  |---------------------------------------------|-------------------------|--------------------|
 //  | string boolean byte short int long float double datetime | a native column type | round-trips  |
-//  | bigint bigdecimal uuid char duration        | no column type exists   | WIDENED to String  |
+//  | bigint bigdecimal uuid char duration binary | no column type exists   | WIDENED to String  |
 //  | list/map/set VALUE (a typed collection)     | nothing                 | FAILS CLOSED       |
 //  | meta-properties (`gcrew`)                   | nothing                 | FAILS CLOSED       |
 //
@@ -41,7 +41,7 @@
 import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
-import { BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
+import { base64OfBinary, BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 import { execute, identifier, q, type Expression } from '../sql/kernel/q.ts';
@@ -183,7 +183,7 @@ const CSV_TYPES: Record<string, CanonicalType> = {
   duration: 'duration',
 };
 
-/** The inverse, for the writer: Neptune's spellings. The five absent types are the widened set. */
+/** The inverse, for the writer: Neptune's spellings. The six absent types are the widened set. */
 const CSV_NAMES: Partial<Record<CanonicalType, string>> = {
   string: 'String', boolean: 'Bool', byte: 'Byte', short: 'Short', int: 'Int', long: 'Long',
   float: 'Float', double: 'Double', datetime: 'DateTime',
@@ -191,7 +191,7 @@ const CSV_NAMES: Partial<Record<CanonicalType, string>> = {
 
 /** The types with no CSV column type, which the writer declares as `String`. Exact as TEXT in every
  *  case (that is why the widening is honest) but read back as `string` — the documented loss. */
-const WIDENED = new Set<CanonicalType>(['bigint', 'bigdecimal', 'uuid', 'char', 'duration']);
+const WIDENED = new Set<CanonicalType>(['bigint', 'bigdecimal', 'uuid', 'char', 'duration', 'binary']);
 
 /** A file is a vertex file or an edge file; the header says which. */
 type CsvKind = 'vertices' | 'edges';
@@ -496,7 +496,7 @@ function csvTypeName(key: string, vtype: CanonicalType | null): string {
 }
 
 /** One stored scalar → its CSV text. The inverse of `csvScalar`, and exact in every case including
- *  the widened five — a widened value loses its TYPE TAG, never its digits or characters. */
+ *  the widened six — a widened value loses its TYPE TAG, never its digits or characters. */
 function csvText(vtype: CanonicalType | null, stored: unknown): string {
   switch (vtype) {
     // Stored as 1/0 (coerceBindValue — DO SQLite rejects a boolean bind).
@@ -504,6 +504,8 @@ function csvText(vtype: CanonicalType | null, stored: unknown): string {
     case 'datetime': return dateOfMillis(stored).toISOString();
     // Stored as total nanos; every external format spells a duration ISO-8601.
     case 'duration': return Duration.from(String(stored)).toIso();
+    // Stored as its hex carrier; every text format spells a Binary base64.
+    case 'binary': return base64OfBinary(String(stored));
     default: return String(stored);
   }
 }

@@ -129,6 +129,9 @@ function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string
   const bd = t.match(/^bd\[(.+)\]$/); if (bd) return 'BD' + bd[1];
   const dt = t.match(/^dt\[(.+)\]$/); if (dt) return 'DT' + new Date(dt[1]).toISOString();
   const du = t.match(/^du\[(.+)\]$/); if (du) return 'DU' + du[1];
+  // bin[…] — a Binary, as base64, compared by its bytes
+  // (vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/feature-steps.js:50,571).
+  const bin = t.match(/^bin\[(.*)\]$/); if (bin) return 'B' + Buffer.from(bin[1]!, 'base64').toString('base64');
   // A SET compares unordered (sorted); a LIST keeps its written order.
   if (t.startsWith('s[') && t.endsWith(']')) {
     const inner = t.slice(2, -1);
@@ -173,6 +176,8 @@ function canon(v: unknown): string {
   if (v instanceof BigDecimal) return 'BD' + v.toString();
   if (v instanceof Duration) return 'DU' + v.toString();
   if (v instanceof Date) return 'DT' + v.toISOString();
+  // A decoded GraphBinary `BINARY` is the client's `Buffer`.
+  if (v instanceof Uint8Array) return 'B' + Buffer.from(v).toString('base64');
   if (v && typeof v === 'object' && Array.isArray((v as { objects?: unknown }).objects))
     return 'p[' + (v as { objects: unknown[] }).objects.map(canon).join(',') + ']';
   // A decoded Map (group()/project()/valueMap() etc.) — entries key-sorted so compare is

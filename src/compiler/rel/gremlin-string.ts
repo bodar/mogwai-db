@@ -92,8 +92,9 @@ export function gremlinString(node: unknown): string {
       // `true`/`false`), and a Date/Duration as epoch millis, whose `OffsetDateTime`/`Duration.toString`
       // this renderer does not reproduce — a deferral, never the millis as if they were the answer.
       if (t === 'boolean') return o.v === null ? 'null' : o.v === 0 || o.v === false ? 'false' : 'true';
-      if ((t === 'datetime' || t === 'duration') && o.v !== null)
-        throw new RaisedByQuery('asString() of a Date or Duration value is not supported yet');
+      // A Binary rides as its hex carrier, which is not its String either.
+      if ((t === 'datetime' || t === 'duration' || t === 'binary') && o.v !== null)
+        throw new RaisedByQuery('asString() of a Date, Duration or Binary value is not supported yet');
       // A Double or Float is its floating text whatever it was stored as — a Double held
       // whole (the INTEGER 1) is `1.0`.
       // A BigDecimal is the plain decimal text of the value its carrier IS, scale included

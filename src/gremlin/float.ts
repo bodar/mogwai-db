@@ -1,4 +1,4 @@
-import { BigDecimal, mapSlot, type TypeNode } from './types.ts';
+import { BigDecimal } from './types.ts';
 import { exactNumberOf, isExactNumber, type ExactNumber } from '../json-exact.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 
@@ -26,27 +26,6 @@ export function floatCanonical(x: number): number {
     if (Math.fround(c) === f) return c;
   }
   return Number(f.toPrecision(9));
-}
-
-/** A request's parameters with every value the wire TYPED as a Float — at any depth of a collection —
- *  landed on its carrier (`floatCanonical`). Every other value is returned as it came. */
-export function canonicalFloatParams(params: Record<string, any>, paramTypes: Record<string, TypeNode>): Record<string, any> {
-  const land = (v: any, t: TypeNode | null | undefined): any => {
-    if (v == null || t == null) return v;
-    if (t === 'float') return typeof v === 'number' ? floatCanonical(v) : v;
-    if (typeof t !== 'object') return v;
-    if (t.t === 'map') return v instanceof Map
-      ? new Map([...v].map(([k, x]) => [land(k, t.entries[mapSlot(k)]?.key), land(x, t.entries[mapSlot(k)]?.value)]))
-      : v;
-    if (Array.isArray(v)) return v.map((x, i) => land(x, t.items[i]));
-    if (v instanceof Set) return new Set([...v].map((x, i) => land(x, t.items[i])));
-    return v;
-  };
-  const typed = Object.keys(paramTypes).filter((k) => k in params);
-  if (typed.length === 0) return params;
-  const out = { ...params };
-  for (const k of typed) out[k] = land(params[k], paramTypes[k]);
-  return out;
 }
 
 /** `new BigDecimal(s)` over a decimal spelling (sign, digits, optional '.', optional exponent): its

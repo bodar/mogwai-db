@@ -115,9 +115,6 @@ refusal comes first: it is a production outage.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
 - **L3-ledgered wrong answers** — each is a `defect` in `test/L3-conformance/expected-outcomes.ts`; the
   fix deletes its names there.
-  - **`Binary(…)` is carried as its base64 String (l3-binary)** — `g.inject(Binary('AQID'))` answers
-    `'AQID'`, and `values('blob').is(typeOf(GType.BINARY))` matches nothing: no binary value class exists
-    end to end (literal, storage, GraphBinary `BINARY`). `data/Binary.feature`, 5 scenarios.
   - **`call(service, map, traversal)` ignores the traversal's map (l3-call-trav-params)** —
     `call('tinker.degree.centrality', ['x':'y'], __.project('direction').by(constant(Direction.OUT)))`
     answers the default direction, and `call('--list', …, project('service')…)` lists every service. 2.

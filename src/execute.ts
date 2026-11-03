@@ -5,7 +5,7 @@ import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRo
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
-import { hasSerializer, isCollectionType, propertyTag, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { binaryBytes, hasSerializer, isCollectionType, propertyTag, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
@@ -339,6 +339,8 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
     // pick String, but the stored vtype lets uuid win over a look-alike string).
     case 'string': return ioc.stringSerializer.serialize(String(v), true);
     case 'uuid': return ioc.uuidSerializer.serialize(String(v), true);
+    // A Binary rides as its hex carrier (`binaryCarrier`) and frames as GraphBinary `Binary` bytes.
+    case 'binary': return ioc.binarySerializer.serialize(binaryBytes(String(v)), true);
     // The exact tail: the value is a stored canonical TEXT string. serialize() parses it
     // (BigDecimal.fromText / Duration total-nanos / 1-codepoint char) → exact GraphBinary.
     // Every carrier — decimal TEXT, an INTEGER, a REAL, a list member's raw JSON spelling — is read by the
@@ -721,12 +723,14 @@ export function readSegmentHead(store: GraphStore, head: Compiled): BarrierInput
   // A SCALAR head is the injected VALUE itself, one row per parent — everything a barrier reads of
   // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
   // materialized the whole parent tuple to reach the same one field.
-  // A per-row typed head also delivers the row's TAG, which is what tells a Boolean (0/1) or a Date (epoch
-  // millis) from the number it is stored as (`BarrierInput.injectedType`).
+  // A typed head also delivers the row's TAG — its own per-row tag, or the stream's static one — which is
+  // what tells a Boolean (0/1) or a Date (epoch millis) from the number it is stored as, and a UUID or a
+  // Binary from the String its TEXT spells (`BarrierInput.injectedType`).
   if (head.shape.kind === 'value') {
     const tagCol = perRowColumnOf(head.shape.type);
+    const fixed = staticTypeOf(head.shape.type);
     return rows.map((r) => (tagCol ? { injectedValue: r.v, injectedType: r[tagCol] ?? null }
-      : { injectedValue: r.v }));
+      : fixed ? { injectedValue: r.v, injectedType: fixed } : { injectedValue: r.v }));
   }
   if (head.shape.kind === 'jsonbList') return rows.map((r) => ({ injectedValue: JSON.parse(r.list), injectedText: r.list }));
   // A `mapValue` head delivers each traverser's map as its PAIRS array `[[keyNode,valNode],…]` — the same

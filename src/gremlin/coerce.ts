@@ -64,8 +64,12 @@ export class VerificationException extends ValueParseError {
  *  raised from SQL, and every reachable input is an inject() literal, so evaluate
  *  here. Number: NaN/0/-0 → false, else true. String: "true"/"false"
  *  (case-insensitive); anything else throws. */
-export function asBoolConst(v: any): boolean {
+export function asBoolConst(v: any, sourceType: string | null = null): boolean {
   if (typeof v === 'boolean') return v;
+  // A TEXT- or number-carried value of another class (a UUID, a Char, a Binary, a Duration) is not the
+  // String or Number its carrier spells — it raises by its class, never parses its carrier.
+  const javaName = sourceType === 'boolean' ? undefined : UNPARSEABLE_TAGS[sourceType ?? ''];
+  if (javaName && v !== null && v !== undefined) throw new ValueParseError(`Can't parse ${javaName} as Boolean.`);
   if (typeof v === 'number') return !Number.isNaN(v) && v !== 0;
   if (typeof v === 'bigint') return v !== 0n;
   if (typeof v === 'string') {
@@ -169,6 +173,10 @@ function javaNumber(v: any, sourceType: string | null): JavaNumber {
     const cls = CLASS_NAME[sourceType ?? ''] ?? CLASS_NAME[numberClassOf(v)]!;
     return cls === 'Float' || cls === 'Double' ? { cls, real: v } : { cls, real: v, int: BigInt(Math.trunc(v)) };
   }
+  // A TEXT-carried value of another class (a UUID, a Char, a Binary) is never PARSED as the String its
+  // carrier spells — `AsNumberStep.map` raises by its class.
+  const javaName = UNPARSEABLE_TAGS[sourceType ?? ''];
+  if (javaName) throw new ValueParseError(`Can't parse type ${javaName} as number.`);
   if (typeof v === 'string') return createNumber(v);
   throw new ValueParseError(`Can't parse type ${javaTypeName(v)} as number.`);
 }
@@ -399,7 +407,9 @@ export function asNumberBare(v: any, subtype: string | null): { val: any; as: Va
 /** The Java simple class name of each Gremlin type a STORED value carries that `AsNumberStep.map` neither
  *  parses (a String) nor returns as-is (a Number) nor converts (a Date) — so it raises `Can't parse type
  *  <name> as number.` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/AsNumberStep.java:55-71`). */
-export const UNPARSEABLE_TAGS: Readonly<Record<string, string>> = { boolean: 'Boolean', duration: 'Duration', uuid: 'UUID', char: 'Character' };
+export const UNPARSEABLE_TAGS: Readonly<Record<string, string>> = {
+  boolean: 'Boolean', duration: 'Duration', uuid: 'UUID', char: 'Character', binary: 'HeapByteBuffer',
+};
 
 /**
  * Bare `asNumber()` over a RUN-TIME value whose Gremlin TYPE rides beside it (a stored `vtype`, a branch's
@@ -477,6 +487,10 @@ export function dateOfMillis(ms: unknown): Date {
  *  list, or null raises TinkerPop's "Can't parse" (SQL can't raise it, and every
  *  reachable inject input is a literal). */
 export function asDateConst(v: any, subtype: string | null): number {
+  // A TEXT- or number-carried value of another class (a UUID, a Char, a Binary, a Duration, a Boolean)
+  // raises by its class — its carrier is not the ISO text or epoch it might spell.
+  const javaName = UNPARSEABLE_TAGS[subtype ?? ''];
+  if (javaName && v !== null && v !== undefined) throw new ValueParseError(`Can't parse ${javaName} as a Date.`);
   if (typeof v === 'number') {
     if (subtype === 'float' || subtype === 'double' || subtype === 'bigdecimal' || !Number.isInteger(v))
       throw new ValueParseError(`Can't parse ${v} as a Date: a floating-point epoch is not allowed.`);
@@ -549,7 +563,7 @@ export const asDateSql = (e: Expression): Expression =>
  *  32-bit precision, so `fold(0, Operator.sum)` over an undeclared `0.1f, 0.2f` would add doubles.
  *  Everything else is recoverable from the value, so declaring it buys nothing. */
 const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
-  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'boolean', 'byte', 'short', 'float', 'double',
+  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid', 'binary', 'boolean', 'byte', 'short', 'float', 'double',
 ]);
 
 /** The declared framing tag of EACH of a bare inject's first `count` arguments — `null` where the
@@ -621,7 +635,7 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
     // for the scalar dispatcher, which provisions the correlated child scope.
     if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, NO_PARAMS)) break;
     if (step.name === 'asBool') {
-      for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
+      for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i], at === 1 ? flatType(steps[0].args[i]?.type) : null);
       as = 'boolean';
       continue;
     }

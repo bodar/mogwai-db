@@ -33,7 +33,7 @@ import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
-    BigDecimal, Duration, exactInteger, gremlinTypeOf, mapSlot, valueNodeFromStored,
+    base64OfBinary, BigDecimal, binaryOfBase64, Duration, exactInteger, gremlinTypeOf, mapSlot, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
 import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
@@ -41,7 +41,7 @@ import { q, type Expression } from '../sql/kernel/q.ts';
 import { edges } from '../sql/schema.ts';
 
 /**
- * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).
+ * GraphSON's `@type` names → our canonical type vocabulary, one for each (plan doc §4b).
  *
  * Not luck: `CanonicalType` was derived from the v4 wire type channel, and GraphSON and GraphBinary
  * are two encodings of the SAME type system. The `g:` names come from `GraphSONModule`, the `gx:` set
@@ -65,6 +65,9 @@ const GRAPHSON_TYPES: Record<string, CanonicalType> = {
   'g:BigDecimal': 'bigdecimal', 'gx:BigDecimal': 'bigdecimal',
   'g:DateTime': 'datetime', 'gx:DateTime': 'datetime',
   'g:Duration': 'duration', 'gx:Duration': 'duration',
+  // A `ByteBuffer`, base64 text in both: V4 names it `Binary`, V3 `ByteBuffer`
+  // (`GraphSONXModuleV4.java:51`, `GraphSONXModuleV3.java:51`).
+  'g:Binary': 'binary', 'gx:ByteBuffer': 'binary',
   // v3-only spellings that predate the V4 pruning of the eleven java.time variants.
   'gx:Instant': 'datetime', 'g:Date': 'datetime', 'g:Timestamp': 'datetime',
 };
@@ -77,6 +80,7 @@ const GRAPHSON_NAMES: Partial<Record<CanonicalType, string>> = {
   list: 'g:List', map: 'g:Map', set: 'g:Set',
   byte: 'g:Byte', short: 'g:Int16', char: 'g:Char',
   bigint: 'g:BigInteger', bigdecimal: 'g:BigDecimal', datetime: 'g:DateTime', duration: 'g:Duration',
+  binary: 'g:Binary',
 };
 
 /**
@@ -177,6 +181,13 @@ function scalarOf(type: CanonicalType, raw: unknown): unknown {
     case 'duration': return graphsonDuration(String(raw));
     // Internally a datetime is epoch-millis (gremlin/types leafStore, and the `datetime('…')` literal).
     case 'datetime': return typeof raw === 'number' ? raw : Date.parse(String(raw));
+    // Base64 text → its carrier; a spelling that is not base64 fails closed rather than storing bytes
+    // nobody wrote.
+    case 'binary': {
+      const carrier = binaryOfBase64(String(raw));
+      if (carrier === null) throw new Error(`GraphSON: unparseable g:Binary "${String(raw)}"`);
+      return carrier;
+    }
     default: return raw;
   }
 }
@@ -420,6 +431,7 @@ function leafJson(type: CanonicalType | null, stored: unknown): unknown {
     // Stored as total nanos (TEXT) / epoch millis; GraphSON wants ISO-8601 for both.
     case 'duration': return Duration.from(String(stored)).toIso();
     case 'datetime': return dateOfMillis(stored).toISOString();
+    case 'binary': return base64OfBinary(String(stored));
     default: return stored;
   }
 }

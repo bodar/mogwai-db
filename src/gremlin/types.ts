@@ -147,7 +147,7 @@ export class Duration {
 export type CanonicalType =
   | 'string' | 'boolean'
   | 'byte' | 'short' | 'int' | 'long' | 'bigint' | 'float' | 'double' | 'bigdecimal'
-  | 'datetime' | 'uuid' | 'char' | 'duration'
+  | 'datetime' | 'uuid' | 'char' | 'duration' | 'binary'
   | 'list' | 'map' | 'set';
 
 /**
@@ -242,6 +242,7 @@ export const WIRE_TYPE_TO_NAME: Record<number, CanonicalType> = {
   [ioc.DataType.UUID]: 'uuid',
   [ioc.DataType.CHAR]: 'char',
   [ioc.DataType.DURATION]: 'duration',
+  [ioc.DataType.BINARY]: 'binary',
   [ioc.DataType.LIST]: 'list',
   [ioc.DataType.MAP]: 'map',
   [ioc.DataType.SET]: 'set',
@@ -257,7 +258,7 @@ const ALIASES: Record<string, CanonicalType> = {
 
 const CANONICAL = new Set<string>([
   'string', 'boolean', 'byte', 'short', 'int', 'long', 'bigint', 'float', 'double',
-  'bigdecimal', 'datetime', 'uuid', 'char', 'duration', 'list', 'map', 'set',
+  'bigdecimal', 'datetime', 'uuid', 'char', 'duration', 'binary', 'list', 'map', 'set',
 ]);
 
 /**
@@ -266,7 +267,7 @@ const CANONICAL = new Set<string>([
  *
  * This is the fallback `typeOf` resolves through when a row carries no stored `vtype` — a raw insert,
  * or a computed scalar with no type tag. `null` means "collapses into another class": a boolean, a
- * datetime, a uuid, a char and a duration are all `integer` or `text` on disk, so a storage-class test
+ * datetime, a uuid, a char, a duration and a binary are all `integer` or `text` on disk, so a storage-class test
  * cannot answer for them and the honest fallback is FALSE. The stored `vtype` column is what recovers
  * those, and it is why it exists.
  *
@@ -281,7 +282,7 @@ export const STORAGE_CLASS: Readonly<Record<CanonicalType, string | null>> = {
   byte: 'integer', bigint: 'integer',
   double: 'real', float: 'real', bigdecimal: 'real',
   boolean: null, char: null, uuid: null, datetime: null,
-  duration: null, list: null, map: null, set: null,
+  duration: null, binary: null, list: null, map: null, set: null,
 };
 
 /**
@@ -326,6 +327,38 @@ export const exactInteger = (digits: string | bigint): number | bigint => {
   return fitsSafeInteger(b) ? Number(b) : b;
 };
 
+/**
+ * A BINARY's carrier — its bytes as UPPERCASE HEX TEXT, tagged `binary`, the way a uuid or a char rides
+ * as TEXT tagged by its type.
+ *
+ * TEXT because a BLOB cannot cross the `json_each` seam (a retained binding, a collection member, a JSON
+ * bind), and the tag is what tells it from a String. HEX rather than the base64 a `Binary("…")` literal
+ * spells, because hex TEXT order IS unsigned lexicographic byte order — so `order()`, a range predicate
+ * and `min`/`max` over binaries need no per-row term — and every byte string has exactly one spelling,
+ * so equality of carriers is equality of bytes (the padded `AA==` and the unpadded `AA` land on one carrier).
+ * Uppercase is SQLite's own `hex()` spelling.
+ */
+export const binaryCarrier = (bytes: Uint8Array): string =>
+  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('hex').toUpperCase();
+
+/** A carrier's bytes — what the GraphBinary `Binary` serializer frames. */
+export const binaryBytes = (carrier: string): Buffer => Buffer.from(carrier, 'hex');
+
+/** A carrier spelled as base64 — what every TEXT format (GraphSON, CSV, the readable JSON response)
+ *  writes a Binary as. */
+export const base64OfBinary = (carrier: string): string => binaryBytes(carrier).toString('base64');
+
+/** A base64 spelling's carrier, or `null` when it is not base64. Strict where `Buffer.from(…,'base64')`
+ *  is lenient (it skips stray characters): RFC 4648's alphabet, padding optional but only at the end and
+ *  only to a whole quantum, never a dangling single character — what `java.util.Base64`'s basic decoder
+ *  accepts (`GenericLiteralVisitor.visitBinaryLiteral`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/grammar/GenericLiteralVisitor.java:587-595`). */
+export function binaryOfBase64(text: string): string | null {
+  const m = /^([A-Za-z0-9+/]*)(={0,2})$/.exec(text);
+  if (!m || m[1]!.length % 4 === 1 || (m[2] && text.length % 4 !== 0)) return null;
+  return binaryCarrier(Buffer.from(m[1]!, 'base64'));
+}
+
 /** Normalize ANY value to a lossless SQLite bind at the one seam both runtimes cross
  *  (storage.ts coerceBind). A bigint binds as a JS number while it fits ±2^53 exactly,
  *  else as its decimal string (a raw bigint bind throws on the DO; Number() truncates —
@@ -360,6 +393,8 @@ export function storedScalar(val: any, vtype: CanonicalType | null): any {
     case 'bigdecimal': return BigDecimal.from(val).toString();
     case 'duration': return Duration.from(val).toString();
     case 'char': return String(val);
+    // Bytes (a wire `Buffer`, a GraphSON or federated decode) land on their carrier; a carrier is itself.
+    case 'binary': return val instanceof Uint8Array ? binaryCarrier(val) : val;
     // A Float lands on its carrier (`floatCanonical`) whichever reader produced it — CSV, GraphSON, a
     // federated sibling's float32.
     case 'float': return typeof val === 'number' ? floatCanonical(val) : val;
@@ -426,7 +461,7 @@ export function normalizeTypeName(name: string): CanonicalType | null {
  */
 const STRUCTURE_GTYPES: Readonly<Record<string, string>> = {
   vertex: 'vertex', edge: 'edge', vproperty: 'vproperty', vertexproperty: 'vproperty', property: 'property',
-  path: 'path', tree: 'tree', graph: 'graph', binary: 'binary', number: 'number',
+  path: 'path', tree: 'tree', graph: 'graph', number: 'number',
 };
 
 /** A `typeOf` argument's GType in lowercase canonical spelling — a stored value type, else a structure
@@ -480,6 +515,7 @@ export function gremlinTypeOf(jsValue: any, argType?: TypeNode | null): Canonica
   if (Array.isArray(jsValue)) return 'list';
   if (jsValue instanceof Map) return 'map';
   if (jsValue instanceof Set) return 'set';
+  if (jsValue instanceof Uint8Array) return 'binary';
   switch (typeof jsValue) {
     case 'boolean': return 'boolean';
     case 'string': return 'string';

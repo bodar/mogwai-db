@@ -1328,11 +1328,13 @@ const SET_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'merg
  * Does a LIST LITERAL's member need a `{t,v}` envelope to keep its CLASS (§6·7: the class is carried,
  * never re-guessed)? Yes for a Number its storage class cannot name back — a Byte, a Short or a Long is
  * an INTEGER that reads back an Int, a Float a REAL that reads back a Double, and a WHOLE Double (`2.0d`)
- * a JSON number that reads back as the JS integer an Int is. The ONE rule for every literal list,
- * whichever position it is written at (an `inject([…])`/`constant([…])` blob, a set-op operand).
+ * a JSON number that reads back as the JS integer an Int is — and for a Binary, whose hex carrier
+ * (`binaryCarrier`) a bare member reads back as a String spelling other characters. The ONE rule for
+ * every literal list, whichever position it is written at (an `inject([…])`/`constant([…])` blob, a
+ * set-op operand).
  */
 export const literalMemberEnvelopes = (declared: string | null, value: unknown): boolean =>
-  declared !== null && (['byte', 'short', 'long', 'float'].includes(declared)
+  declared !== null && (['byte', 'short', 'long', 'float', 'binary'].includes(declared)
     || (declared === 'double' && typeof value === 'number' && Number.isInteger(value)));
 
 /** The four whose result is a SET rather than a list — deduped content, and it frames as a

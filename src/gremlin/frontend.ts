@@ -2,7 +2,7 @@ import { NO_PARAMS, type ParamEnv } from './param-env.ts';
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
-import { fitsSafeInteger, BigDecimal, Duration, mapSlot, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
+import { binaryOfBase64, fitsSafeInteger, BigDecimal, Duration, mapSlot, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 import { floatCanonical } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 import { ValueParseError } from './coerce.ts';
@@ -635,6 +635,15 @@ function walkArgs(node: any, out: Arg[], params: ParamEnv): void {
   if (cls === 'UuidLiteralContext') {
     const s = node.stringLiteral();
     if (s) { emit(unquote(s.getText()), 'uuid'); return; }
+  }
+  // Binary('…base64…') → its carrier (`binaryCarrier`: the bytes as hex TEXT) tagged `binary`. Without
+  // this case the generic recursion surfaced the inner string literal, and the bytes answered as a String.
+  if (cls === 'BinaryLiteralContext') {
+    const base64 = unquote(node.stringLiteral().getText());
+    const carrier = binaryOfBase64(base64);
+    // The reference's own refusal, verbatim (`GenericLiteralVisitor.visitBinaryLiteral`).
+    if (carrier === null) throw new ValueParseError(`Invalid Binary literal: '${base64}' is not valid base64`);
+    emit(carrier, 'binary'); return;
   }
   if (cls === 'NullLiteralContext') { emit(null); return; }
   if (cls === 'VariableContext') {

@@ -27,7 +27,7 @@
 // (`src/formats/graphson.ts`) is the io/adjacency form and is deliberately NOT reused here; this is a
 // different, response-shaped rendering.
 import type { FrameNode, ValueNode } from './gremlin/types.ts';
-import { numberClassOf, valueNodeFromStored } from './gremlin/types.ts';
+import { base64OfBinary, numberClassOf, valueNodeFromStored } from './gremlin/types.ts';
 import { exactNumberOf, isExactNumber, type ExactNumber } from './json-exact.ts';
 
 const rawJson = JSON as unknown as { rawJSON?: (text: string) => unknown };
@@ -57,6 +57,8 @@ function untypedLeaf(tag: string | null, v: unknown): unknown {
   if (typeof v === 'number') return untypedNumber(v);
   if (typeof v === 'bigint') return untypedInteger(v);
   if (typeof v === 'string' && INTEGRAL_TAGS.has(tag) && DECIMAL_INTEGER.test(v)) return untypedInteger(BigInt(v));
+  // A Binary is base64 text, as Jackson writes a `ByteBuffer` — never its hex carrier.
+  if (typeof v === 'string' && tag === 'binary') return base64OfBinary(v);
   return v;
 }
 
@@ -164,7 +166,7 @@ function scalarKey(tag: string | null, v: unknown): string {
     const text = String(v);
     return /^-?\d+$/.test(text) ? `${text}.0` : text;
   }
-  return String(v);
+  return String(tag === 'binary' && typeof v === 'string' ? base64OfBinary(v) : v);
 }
 
 /** A vertex payload (`{ id, label, props }`, as `elementNode` builds it — `label` already the
