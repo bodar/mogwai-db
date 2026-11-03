@@ -3,7 +3,7 @@ import { type TypeNode } from '../gremlin/types.ts';
 import { paramEnv } from '../gremlin/param-env.ts';
 import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
-import { uncarriedLiteral } from './ir/uncarried-literal.ts';
+import { UNCOMPARABLE_LITERAL, uncarriedLiteral, uncomparableLiteral } from './ir/uncarried-literal.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { labelRegime } from '../api.ts';
@@ -88,6 +88,9 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   if (unlocatableSubPath(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
   // A NaN literal VALUE (SQLite stores it as NULL) declines here, once, at every depth (`uncarriedLiteral`).
   if (uncarriedLiteral(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
+  // A map- or set-valued EQUALITY operand or merge criterion (stored as JSON text, whose entry order is
+  // not canonical) declines here, once, at every depth, naming why (`uncomparableLiteral`).
+  if (uncomparableLiteral(steps, params) !== null) throw UnsupportedTraversal.because(UNCOMPARABLE_LITERAL);
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /
   // nothing) and the REQUEST scope this traversal fixes — its bound params, its federation hop depth,

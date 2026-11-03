@@ -187,6 +187,7 @@ stream frames each value by its own tag.
 | int64 overflow | raises |
 | 32-bit float arithmetic | SQLite REAL is always a double (§17 Float) |
 | `NaN` values | SQLite stores NaN as NULL, so a NaN literal in a value position (`inject`, `constant`, collection member, property) declines. A NaN predicate operand works; `±Infinity` works. A run-time NaN from `math()` or a sack raises; a NaN `sum()`/`mean()` is `null` (§17) |
+| Map/set equality | a map or set is stored and compared as JSON text whose entry order is not canonical, so an equality operand (`has(k, [a:1])`, `is`, `eq`/`neq`, a `within`/`without` member) or a `mergeV`/`mergeE` match criterion (its own map, a `$m` parameter, or the maps an `inject(…)`/`inject(…).unfold()` drives it with) holding one declines from the query text, saying why, at any depth. A list operand works; an `onCreate`/`onMatch` map is written, not compared, and works. A run-time driver (`values('m').mergeV()`) is not checked (`uncomparableLiteral`) |
 
 ## 11. Writes
 

@@ -151,6 +151,10 @@ Feature: mogwai addendum — onCreate may restate a per-driver merge map, never 
     When iterated to list
     Then the traversal will raise an error with message containing text of "option(onCreate) cannot override values from merge() argument: (l, [b, a])"
 
+  # A map-valued MATCH criterion declines (`uncomparableLiteral`): a map is stored and compared as JSON text
+  # whose entry order is not canonical, so the match itself could miss an equal map written in another
+  # order. These two pin that refusal; the day map equality is canonical they answer and the tag drops.
+  @Unsupported
   Scenario: g_injectXmap_mapX_mergeV_optionXonCreate_reordered_mapX_count
     Given the empty graph
     And the traversal of
@@ -162,6 +166,7 @@ Feature: mogwai addendum — onCreate may restate a per-driver merge map, never 
       | result |
       | d[1].l |
 
+  @Unsupported
   Scenario: g_injectXmap_mapX_mergeV_optionXonCreate_other_mapX_raises
     Given the empty graph
     And the traversal of

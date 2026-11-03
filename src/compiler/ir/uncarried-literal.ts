@@ -97,3 +97,85 @@ export function uncarriedLiteral(steps: readonly Step[], params: ParamEnv): Step
   });
   return found;
 }
+
+// ---------- uncomparable-literal: a literal the substrate has no EQUALITY for ----------
+//
+// A map- or set-valued value is stored and compared as its JSON text, and a JSON object's entry order is
+// the order the map was WRITTEN in — so `[a:1, b:2]` and `[b:2, a:1]`, one value to the reference
+// (`LinkedHashMap.equals`/`AbstractSet.equals` are order-free, and `GremlinValueComparator` defers to them,
+// `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`),
+// are two to SQL. An equality against one silently misses: `g.inject([b:2,a:[x:1,y:2]],[a:[y:2,x:1]])
+// .mergeV()` created two vertices where the reference creates one. No canonicalising SQL is carried for it
+// (a per-row re-sort of every stored map would also cost the index seek), so the QUERY TEXT that asks for
+// such an equality declines, with the reason. A list is ordered both ways, so a list operand stays; only a
+// map or set inside it declines. A parameter's value is resolved into its `Arg` through the `ParamEnv`, so
+// `$m` is checked exactly like a literal — its content is the request, not the graph's size or contents.
+// A value that arrives at RUN time (`values('m').mergeV()`) is not query text and is not seen here.
+
+/** The explanatory decline a non-null `uncomparableLiteral` raises (`compiler.ts`). */
+export const UNCOMPARABLE_LITERAL =
+  'comparing a map- or set-valued value for equality is not supported: map entry order is not canonical, so equal maps written in different orders would not match';
+
+/** Does this value hold — at any depth — a map or a set? */
+const uncomparable = (value: unknown): boolean => [...valueNodes(value)].some((n) => n instanceof Map || n instanceof Set);
+
+/** A bare collection argument of these steps is a MEMBERSHIP list, unrolled to its members
+ *  (`GraphTraversal.hasId`/`hasValue`/`hasLabel`/`hasKey`), never one value compared whole. */
+const MEMBERSHIP_STEPS: ReadonlySet<string> = new Set(['hasId', 'hasValue', 'hasLabel', 'hasKey']);
+
+/** A list's or set's members; any other value as its own single member. */
+const members = (value: unknown): unknown[] => (Array.isArray(value) || value instanceof Set ? [...value] : [value]);
+
+/** Does predicate `p` compare an uncomparable operand for equality — an `eq`/`neq` operand, a
+ *  `within`/`without` MEMBER (the collection itself is the membership list) — through its connectives? */
+function comparesUncomparable(p: unknown): boolean {
+  if (!isPred(p)) return false;
+  switch (p.op) {
+    case 'and': case 'or': case 'not': return p.operands.some((a) => comparesUncomparable(a.value));
+    case 'eq': case 'neq': return p.operands.some((a) => uncomparable(a.value));
+    case 'within': case 'without': {
+      const only = p.operands.length === 1 ? p.operands[0]! : null;
+      const list = only && (only.members || Array.isArray(only.value) || only.value instanceof Set)
+        ? (only.value instanceof Set ? [...only.value] : collectionMembers(only).map((a) => a.value))
+        : p.operands.map((a) => a.value);
+      return list.some(uncomparable);
+    }
+    default: return false;
+  }
+}
+
+/** Does a merge's MATCH criterion compare an uncomparable PROPERTY value? The criterion map itself is
+ *  matched entry by entry, so only what an entry compares counts — and only a property (String-keyed)
+ *  entry is a value comparison: a `T.label` Set is a label MEMBERSHIP list, a `T.id`/`Direction` entry an
+ *  element. */
+const criterionUncomparable = (criterion: unknown): boolean =>
+  criterion instanceof Map && [...criterion].some(([k, v]) => typeof k === 'string' && uncomparable(v));
+
+/** The match criteria a BARE `mergeV()`/`mergeE()` at `chain[i]` takes from the query text: each map an
+ *  `inject(…)` right before it emits, or (through `unfold()`) each member of an injected list. */
+function injectedCriteria(chain: readonly Step[], i: number): unknown[] {
+  const prev = chain[i - 1];
+  if (prev?.name === 'inject') return prev.args.map((a) => a.value);
+  const source = chain[i - 2];
+  if (prev?.name === 'unfold' && source?.name === 'inject') return source.args.flatMap((a) => members(a.value));
+  return [];
+}
+
+/** The first step, at any depth, that compares a map- or set-valued literal or parameter for equality —
+ *  `null` when there is none. A non-null answer is a DECLINE with `UNCOMPARABLE_LITERAL` (`compiler.ts`).
+ *  Only a merge's MATCH criterion is read; an `onCreate`/`onMatch` map is written, never compared. */
+export function uncomparableLiteral(steps: readonly Step[], params: ParamEnv): Step | null {
+  let found: Step | null = null;
+  eachChainDeep(steps, rawBodies(params), (chain) => {
+    chain.forEach((s, i) => {
+      if (found) return;
+      const values = s.args.map((a) => a.value);
+      const bare = OPERAND_STEPS.has(s.name)
+        ? values.filter((v) => !isPred(v)).flatMap((v) => (MEMBERSHIP_STEPS.has(s.name) ? members(v) : [v])) : [];
+      const criteria = s.name === 'mergeV' || s.name === 'mergeE'
+        ? (s.args.length === 0 ? injectedCriteria(chain, i) : values.slice(0, 1)) : [];
+      if (values.some(comparesUncomparable) || bare.some(uncomparable) || criteria.some(criterionUncomparable)) found = s;
+    });
+  });
+  return found;
+}
