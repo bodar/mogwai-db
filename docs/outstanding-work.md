@@ -32,6 +32,17 @@ json_each `key` as its encounter channel like the scalar/map/list arms (`correla
 `src/compiler/rel/list.ts`), so the re-collecting `fold()` and a body `tail(1)` read list order.
 L3 1904 → 1907. Remains: nothing.
 
+**Reducer-headed child body (✅ landed, 202bdbce).** A per-traverser child body whose head is a reducer
+(`local(count())`, `values('age').local(sum())`) reduces the host's one-row self at bulk 1, exactly as
+`identity()` does (`TraversalUtil.apply`): `hostSelfRow` seeds element AND scalar hosts through one gate,
+`selfCollapsed` (`src/compiler/rel/lower/reduction.ts`). L3 1907 → 1908. Remains (§3.8): a `local`/`map`
+nested inside a child body (`g_V_localXout_localXcountXX`, also `values('age').local(local(count()))`,
+`project().by(values(k).local(fold()))`; L4 `nested-local.feature`) — `valueRun` has no local/map step and
+`flatMapRejoin` refuses `local` as a barrier; a reducer arm of a batched `union` over the one-row seed
+(`g_VX1_2X_localXunionXcountXX`, the union-residue family); min/max over a scalar host's self seed
+(`values('age').local(max())`) declines until the argmax ORDER BY stops repeating an outer column — an
+emitter change, pinned by an `@Unsupported` L4 scenario.
+
 ## 1. Wrong answers today
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
