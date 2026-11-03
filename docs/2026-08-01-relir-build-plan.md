@@ -434,7 +434,10 @@ correct answer. This list SUPERSEDES the items below that it touches (r7-fu1 "re
 Chains: A1→A2→A3, B1→B2→B3→B4, C1→C2→C3→C4→C5 (the chains are independent of each other); D, E standalone;
 F last. Each step lands `mise run ci` green on its own.
 
-- **A1 cleanup-sample-fallthrough** — `reSourcedOnce` (`lower/reduction.ts`): replace the coupling/onePerOrigin/
+- ✅ **A1 cleanup-sample-fallthrough** — LANDED `1e561929`: `reSourcedOnce` (`lower/reduction.ts`) takes a prefix
+  once only under ONE top-level whitelist (no stream barrier; each step childless or a per-traverser filter host);
+  anything else returns undefined and GraphStep's product route answers it. Remains: nothing. Original spec:
+  `reSourcedOnce` (`lower/reduction.ts`): replace the coupling/onePerOrigin/
   shuffle/deep-collector gates with ONE top-level whitelist (each prefix step: not `isStreamBarrier`, not
   `collectsSideEffect`, not nondeterministic; childless or a per-traverser filter-child host). Every former
   `return null` decline becomes "not taken" so GraphStep's product route answers (correct, O(origins×candidates),
