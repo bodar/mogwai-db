@@ -507,6 +507,14 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args.map((a) => a.value);
 
+  // THE TWO CONSTANT FILTERS, over any subject. `identity()` keeps every traverser, so as a filter it
+  // is true — `not(__.identity())` is then `NOT true` through the ordinary negation. A non-terminal
+  // `discard()` is a `FilterStep` whose `filter` returns false for every traverser
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/
+  // filter/DiscardStep.java); a TERMINAL one never reaches here (`stripTerminal` makes it a flag).
+  if (step.name === 'identity' && !args.length) return CONSTANT.true;
+  if (step.name === 'discard' && !args.length) return CONSTANT.false;
+
   if (step.name === 'hasLabel') {
     // `hasLabelClause` validates and lowers each label `Arg` — an inline name inlines, a `$label`
     // scalar / `$labels` collection binds — so a wire parameter's data never enters the statement text.

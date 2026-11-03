@@ -6,7 +6,7 @@ import {
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, plainFoldSpelling, dropRedundantOrder, mergeStepLabels,
-    injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
+    injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, dropEffectFreeSideEffect, verify,
     inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
@@ -176,6 +176,14 @@ const SIMPLIFY: Pass[] = group('simplify', [
     name: 'isAlwaysProductiveFilterNoOp',
     applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
     run: (steps, ctx) => isAlwaysProductiveFilterNoOp(steps, ctx.params) as IRStep[],
+  },
+  // The same category of fact: a `sideEffect()` whose drained body writes, collects and raises nothing
+  // is the identity on the stream. Before the label retractions for `isAlwaysProductiveFilterNoOp`'s
+  // reason — it deletes a body that may read a label.
+  {
+    name: 'dropEffectFreeSideEffect',
+    applies: (steps) => steps.some((s) => s.name === 'sideEffect'),
+    run: (steps, ctx) => dropEffectFreeSideEffect(steps, ctx.params) as IRStep[],
   },
   // THE TWO LABEL RETRACTIONS, and the order between them is one-directional rather than a fixpoint:
   // retracting a `select` can make a label unread, while retracting an `as` never manufactures a

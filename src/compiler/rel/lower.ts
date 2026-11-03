@@ -886,9 +886,10 @@ export function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
  * `where` is here in its BODY form only (`where(__.…)`); the predicate form (`where(P.eq(__.const(29)))`)
  * needs a correlated operand `predicateExpr` has no arm for, and declines inside `sourceFilter` like
  * any other unlearned shape. `has`/`hasLabel`/`hasId` are deliberately absent: they read a property or
- * label row, which a scalar traverser does not have.
+ * label row, which a scalar traverser does not have. A non-terminal `discard()` is the constant-false
+ * filter (`sourceFilter`), so a value stream hosts it like any other filter.
  */
-const SCALAR_FILTER_HOSTS = new Set(['and', 'or', 'not', 'filter', 'where']);
+const SCALAR_FILTER_HOSTS = new Set(['and', 'or', 'not', 'filter', 'where', 'discard']);
 /** The Scope.local POSITION slices over a MAP entry order — the subset of `LIST_LOCAL_TX` that keeps the
  *  entries in place (a window), NOT `order`/`dedup`, which re-key the map and are a different question. */
 const MAP_LOCAL_SLICE = new Set(['limit', 'range', 'skip', 'tail']);
@@ -905,7 +906,7 @@ const namesALiveLabel = (pred: unknown, labels: AliasMap): boolean =>
  *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`.
  *  The connectives are here for the same reason `is` is, and more so: each ARM re-inlines the value
  *  expression, so an unfenced `and(is(…), is(…))` pays the projection twice over. */
-const CLAUSE_READERS = new Set(['is', 'order', ...SCALAR_FILTER_HOSTS]);
+const CLAUSE_READERS = new Set(['is', 'order', ...[...SCALAR_FILTER_HOSTS].filter((name) => name !== 'discard')]);
 
 /**
  * The tail steps that HOST a `by()` — `BY_HOSTS` itself, imported rather than restated.

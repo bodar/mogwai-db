@@ -4,7 +4,7 @@ import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
-import { type IRStep } from './step.ts';
+import { collectsSideEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -218,6 +218,36 @@ export function isAlwaysProductiveFilterNoOp(steps: Step[], params: ParamEnv): S
     }
     return out;
   });
+}
+
+/** Steps that may RAISE, or whose effect the IR cannot see — a service runs arbitrary code (and `io()`
+ *  and the graph algorithms desugar to one), and `fail()` is an explicit raise rather than an erroneous
+ *  value nothing reads. A drained body holding one is not inert. */
+const OPAQUE_OR_RAISING: ReadonlySet<string> = new Set(['fail', 'call', 'io', 'pageRank', 'peerPressure', 'connectedComponent', 'shortestPath']);
+
+/**
+ * Remove a `sideEffect(body)` whose body has NO EFFECT — no write, no keyed collector, no raise.
+ *
+ * `TraversalSideEffectStep` drains its body for each traverser and passes the traverser on unchanged
+ * (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/
+ * sideEffect/TraversalSideEffectStep.java), and the body runs on a SPLIT of the traverser
+ * (`TraversalUtil.apply`), so nothing it does to its own traverser — a sack, a label, a path — comes back.
+ * Without a write (`MUTATING_STEPS`), a side-effect collector (`collectsSideEffect`) or a raise
+ * (`OPAQUE_OR_RAISING`) at any depth, what the body computes is read by nothing, so the step is the
+ * identity on the stream; an erroneous value inside it is §17's "unread erroneous values". An unreadable
+ * body counts as an effect (fail closed: the step stays and the lowering answers for it).
+ */
+export function dropEffectFreeSideEffect(steps: Step[], params: ParamEnv): Step[] {
+  const read = rawBodies(params);
+  const hasEffect = (s: Step): boolean => MUTATING_STEPS.has(s.name) || collectsSideEffect(s) || OPAQUE_OR_RAISING.has(s.name);
+  const kept = steps.filter((s) => {
+    if (s.name !== 'sideEffect' || s.args.length !== 1 || !isNested(s.args[0]!.value)) return true;
+    const body = read(s.args[0]!.value.nested);
+    return body === null || someStepDeep(body, read, hasEffect, true);
+  });
+  // A body that WAS only such steps is the identity traversal — spelled as one, as `tryUnroll` spells
+  // its level-0 arm, because an empty chain is no body at all to the hosts that lower one.
+  return kept.length || !steps.length ? kept : [{ name: 'identity', args: [], ctx: steps[0]!.ctx }];
 }
 
 /** Steps whose output traverser is a vertex (a partition/subgraph vertex filter is
@@ -861,6 +891,33 @@ function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | und
 }
 
 /**
+ * **An `emit()`/`until()`/`times()` with no `repeat()` to modulate** — `g.V().emit()`. Each of the
+ * three attaches to the END step when that is a `RepeatStep` and otherwise adds a new one, and
+ * `repeat()` fills the end step's body when it has none (`RepeatStep.addRepeatToTraversal` /
+ * `addEmitToTraversal` / `addUntilToTraversal`, each only into an EMPTY slot — and `times(n)` fills
+ * the until slot, as `until(loops() >= n)`); a `RepeatStep` left without a body is invalid Gremlin
+ * (`StandardVerificationStrategy.java:83-85`, "prevents silly stuff like g.V().emit()"). That grouping
+ * is replayed here over the authored chain; an `as()` labels the end step rather than adding one, so
+ * it does not end a group. Said as invalid rather than "not supported yet", because no lowering ever
+ * will accept it.
+ */
+function verifyRepeatDefined(chain: readonly Step[]): void {
+  let open: Set<string> | null = null; // the filled slots of the RepeatStep at the chain's end, if any
+  const close = () => {
+    if (open && !open.has('repeat')) throw new VerificationException('The repeat()-traversal was not defined');
+    open = null;
+  };
+  for (const s of chain) {
+    if (s.name === 'as') continue;
+    if (!REPEAT_CLUSTER.has(s.name)) { close(); continue; }
+    const slot = s.name === 'times' ? 'until' : s.name;
+    if (open?.has(slot) !== false) { close(); open = new Set(); }
+    open!.add(slot);
+  }
+  close();
+}
+
+/**
  * TinkerPop's `StandardVerificationStrategy`, as much of it as our language surface can violate.
  *
  * ONE pre-order walk. The clauses the reference has that we cannot violate are absent rather than
@@ -888,6 +945,7 @@ function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | und
  */
 export function verifyStandard(steps: IRStep[], params: ParamEnv): void {
   const scan = (chain: readonly Step[], underRepeat: boolean) => {
+    verifyRepeatDefined(chain);
     for (const s of chain) {
       if (underRepeat && s.name === 'inject')
         throw new VerificationException('The parent of inject()-step can not be repeat()-step');
@@ -1429,9 +1487,19 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // union of level-prefixes cannot express (each arm would need the predicate as a trailing filter, and
   // the emit-first/last position interacts with it). Bare `emit()` is a constant-true predicate and IS a
   // union of prefixes; a predicate emit declines here (fail closed) and reaches the walk or a refusal.
+  // (Unless the region never iterates at all — the `times(n ≤ 0)`-first case just below.)
+  const count = (times.args ?? [])[0]?.value;
+  if (typeof count !== 'number' || !Number.isInteger(count)) return null;
+  // `times(n ≤ 0)` is `until(loops() >= n)` already true at loop 0, and WHERE the until sits decides
+  // what that means (RepeatStep.java:265-278 / :334-341). Until FIRST (`times(0).repeat(b)`): the
+  // entry test fires before the body and before any emit, so every traverser leaves unchanged — the
+  // region is the identity. Until LAST (`repeat(b).times(0)`): the body runs once before the
+  // do-while's first test, which then holds — exactly `times(1)` (`Repeat.feature`
+  // g_V_hasXperson_name_markoX_{repeat…timesX0X, timesX0X_repeat…}). The grammar admits only an integer
+  // LITERAL for `times` (`Gremlin.g4` `traversalMethod_times`), so the count is always known here.
+  if (count < 1 && region.indexOf(times) < region.indexOf(rep)) return [{ name: 'identity', args: [], ctx: rep.ctx }];
+  const n = Math.max(count, 1);
   if (emit && (emit.args ?? []).length) return null;
-  const n = (times.args ?? [])[0]?.value;
-  if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) return null;
   // A named `repeat("a", body)` carries a loop counter `loops("a")` can read from arbitrarily deep
   // inside the body, including from a NESTED repeat's — so the phases have no counter to attach it to
   // and unrolling silently drops the identity. §3.4: this refusal must stay a refusal.
@@ -1550,7 +1618,7 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   if (arms.length > 1 && body.some((s) => s.name in SIDE_EFFECT_BARRIERS)) return null;
   // A single level is just that arm spliced inline — a one-arm `union` is not a thing the lowering
   // accepts (`unionArms` requires ≥2), and it would mean the same rows anyway. Two or more levels are a
-  // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` declined above).
+  // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` is normalised above).
   return arms.length === 1 ? arms[0]! : [{ name: 'union', args: arms.map((a) => arg({ nested: a })), ctx: rep.ctx }];
 }
 

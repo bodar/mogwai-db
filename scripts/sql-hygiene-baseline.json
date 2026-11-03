@@ -149,6 +149,12 @@
     "compiler": 128,
     "bound": 0
   },
+  "discard": {
+    "binds": 0,
+    "bytes": 1188,
+    "compiler": 16,
+    "bound": 0
+  },
   "disjunct": {
     "binds": 0,
     "bytes": 7212,
@@ -428,7 +434,7 @@
   "out": {
     "binds": 0,
     "bytes": 1439,
-    "compiler": 14,
+    "compiler": 16,
     "bound": 0
   },
   "outV": {
