@@ -198,9 +198,16 @@ function barrierIn(steps: readonly IRStep[], request: SegmentRequest): Barrier |
     // "facts about this call site", NOT through `params` (a user channel) or the `apply` closure.
     const site: CallSite = {
       params: spec.params, boundParams: request.params, federationDepth: request.federationDepth,
+      // The same position test `segmentPlan` routes on (`sourceSegment` vs `midSegment`): a call at 0 has
+      // no head.
+      form: at === 0 ? 'source' : 'mid',
       mapValues: injectionLabel ? { param: freshMapValuesParam(request.params), label: injectionLabel, ...(reduce ? { reduce } : {}) } : undefined,
       tailDemand: contentDemand(steps, suffixFrom),
-      pushdown: pushdown ? { siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces } : undefined,
+      pushdown: pushdown ? {
+        siblingGremlin: pushdown.siblingGremlin, suffixFrom, reduces: pushdown.reduces,
+        // The pushed terminal IS the reducer (`isBareReducer`), and every reducer has a table entry.
+        ...(pushdown.reduces ? { empty: reducerOf(steps[suffixFrom - 1]!.name)?.empty } : {}),
+      } : undefined,
     };
     const contribution = service.resolve(site);
     if (contribution.kind !== 'barrier') continue;   // a `rel` service lowers inline; not a boundary
@@ -407,9 +414,10 @@ function stampLocalArm<T extends { readonly value: unknown }>(arg: T, params: Pa
 /** Pick an ordinary sibling variable that cannot shadow a user binding carried into the pushed tail. */
 function freshMapValuesParam(params: ParamEnv): string {
   // `map` itself is a Gremlin GType token, not a VariableContext, so use an ordinary identifier
-  // that cannot be parsed as a grammar keyword.
+  // that cannot be parsed as a grammar keyword. The user's names are the keys of the env's `values`
+  // record (`ParamEnv`), never of the env object itself.
   let param = 'injectedMap';
-  while (Object.hasOwn(params, param)) param += '_';
+  while (Object.hasOwn(params.values, param)) param += '_';
   return param;
 }
 

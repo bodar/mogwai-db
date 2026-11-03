@@ -456,7 +456,7 @@ describe('barrier source form via Executor (stub source → drive → land → f
 // yet (the Worker-driven drive loop is Phase 2); the test pins the declared answer so a later change
 // cannot silently reclassify which barrier leaves.
 describe('barrier residency', () => {
-  const site = (params: Record<string, unknown>) => ({ params, boundParams: NO_PARAMS, federationDepth: 0 });
+  const site = (params: Record<string, unknown>) => ({ params, boundParams: NO_PARAMS, federationDepth: 0, form: 'source' as const });
 
   test('federate is a worker barrier (remote wait), io is a do barrier (store-bound)', () => {
     const fed = createFederateService(undefined).resolve(site({ graph: 'crew', traversal: 'g.V()' }));

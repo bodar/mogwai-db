@@ -824,7 +824,7 @@ function serviceRelation(
   const service = ctx.services.get(spec.serviceName);
   if (!service) return null;
   const site: RelCallSite = {
-    params: spec.params, boundParams: ctx.params, federationDepth: 0, fresh,
+    params: spec.params, boundParams: ctx.params, federationDepth: 0, form: 'mid', fresh,
     host: elementHost(input, elem, aliases), child: childSeam(ctx, fresh),
     stream: { input, elem, source: ctx.source },
   };
@@ -859,7 +859,7 @@ export function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   const service = ctx.services.get(spec.serviceName);
   if (!service) return null;
   const site: RelCallSite = {
-    params: spec.params, boundParams: ctx.params, federationDepth: 0, fresh,
+    params: spec.params, boundParams: ctx.params, federationDepth: 0, form: 'mid', fresh,
     host, child: childSeam(ctx, fresh),
   };
   const contribution = service.resolve(site);
@@ -4626,7 +4626,7 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
     const service = ctx.services.get(spec.serviceName);
     if (!service) return null;
     const site: RelCallSite = {
-      params: spec.params, boundParams: params, federationDepth: 0, fresh,
+      params: spec.params, boundParams: params, federationDepth: 0, form: 'source', fresh,
     };
     // A SERVICE'S OWN THROW IS NOT CAUGHT, and that is §6·5's distinction rather than an oversight.
     // Two facts wear a `null` in this module — "not learned yet" and "the answer is an ERROR" — and a

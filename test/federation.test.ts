@@ -212,6 +212,58 @@ describe('federate — standard as()/select() MID injection', () => {
     expect(await runNames(explicit)).toEqual(await runNames(argless));
   });
 
+  test('a user parameter named injectedMap answers the same as its nm-named twin', async () => {
+    // The arg-less rewrite mints a sibling variable for the injected per-parent map; the name is chosen
+    // against the user's parameter names, so a user parameter literally called `injectedMap` is not
+    // shadowed by it.
+    const tail = (p: string) => `g.V().hasLabel("person").values("name").as("e").call("federate", ["graph":"crew"]).V().has("name", ${p}).has("name", select("e")).count()`;
+    const answer = async (q: string, params: Record<string, unknown>) =>
+      (await Promise.all((await mgr.executor('home').framedAsync(q, params)).map(dec))).map(Number);
+    expect(await answer(tail('injectedMap'), { injectedMap: 'marko' })).toEqual([1]);
+    expect(await answer(tail('nm'), { nm: 'marko' })).toEqual([1]);
+    expect(await answer(tail('injectedMap_'), { injectedMap: 'stephen', injectedMap_: 'marko' })).toEqual([1]);
+  });
+
+  // A MID call whose head yields NO parents runs its sub-traversal zero times. The planner tells the
+  // service the call's FORM, so it is not mistaken for a SOURCE call (which runs once over nothing).
+  describe('a mid call with no parents', () => {
+    const nobody = 'g.V().has("name","nobody")';
+    const fed = 'call("federate", ["graph":"crew"])';
+    const read = async (q: string) => (await Promise.all((await mgr.executor('home').framedAsync(q, {})).map(dec)));
+    test('a non-injecting pushed count() answers 0, not the whole sibling count', async () => {
+      expect((await read(`${nobody}.${fed}.V().count()`)).map(Number)).toEqual([0]);
+    });
+    test('a non-injecting value / element / semigroup tail answers nothing', async () => {
+      expect(await read(`${nobody}.${fed}.V().values("name")`)).toEqual([]);
+      expect(await read(`${nobody}.${fed}.V()`)).toEqual([]);
+      expect(await read(`${nobody}.${fed}.V().values("age").sum()`)).toEqual([]);
+    });
+    test('an explicit sub-traversal lands nothing, so a local count() answers 0', async () => {
+      expect((await read(`${nobody}.${fed}.with("traversal", __.V()).count()`)).map(Number)).toEqual([0]);
+      expect(await read(`${nobody}.${fed}.with("traversal", __.V())`)).toEqual([]);
+    });
+    test('the mapValues injection forms answer their empty terminal', async () => {
+      const head = `${nobody}.values("name").as("e").${fed}.V().has("name", select("e"))`;
+      expect((await read(`${head}.count()`)).map(Number)).toEqual([0]);
+      expect(await read(`${head}.values("name")`)).toEqual([]);
+      expect(await read(`${head}.sum()`)).toEqual([]);
+      expect(await read(head)).toEqual([]);
+      const explicitHead = `${nobody}.values("name").as("e").call("federate", ["graph":"crew", "traversal": __.V().has("name", select("e"))])`;
+      expect((await read(`${explicitHead}.count()`)).map(Number)).toEqual([0]);
+    });
+    test('no sibling round trip is made', async () => {
+      let calls = 0;
+      const contribution: any = createFederateService({
+        executor: () => ({ runForeign: () => { calls++; return Promise.resolve({ kind: 'elements', rows: [] }); } }),
+      } as any).resolve({
+        params: { graph: 'crew' }, boundParams: NO_PARAMS, federationDepth: 0, form: 'mid',
+        pushdown: { siblingGremlin: 'g.V().count()', suffixFrom: 3, reduces: true, empty: 'zero' },
+      });
+      expect(await contribution.apply([])).toEqual({ kind: 'barrier-scalar', value: { t: 'long', v: 0 } });
+      expect(calls).toBe(0);
+    });
+  });
+
   test('a parent with no sibling match drops from the flatMap result', async () => {
     const result = await Promise.all((await mgr.executor('home').framedAsync(argless, {})).map(dec));
     expect(result).toHaveLength(1);
@@ -297,7 +349,7 @@ describe('federate — standard as()/select() MID injection', () => {
       }),
     } as any).resolve({
       params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
-      boundParams: NO_PARAMS, federationDepth: 0,
+      boundParams: NO_PARAMS, federationDepth: 0, form: 'mid',
       mapValues: { param: 'injectedMap', label: 'e' },
     });
     await contribution.apply([
@@ -320,7 +372,7 @@ describe('federate — standard as()/select() MID injection', () => {
       }),
     } as any).resolve({
       params: { graph: 'crew', traversal: subTraversal('g.V().has("name", select("e"))') },
-      boundParams: NO_PARAMS, federationDepth: 0,
+      boundParams: NO_PARAMS, federationDepth: 0, form: 'mid',
       mapValues: { param: 'injectedMap', label: 'e', reduce: { partial: 'count', combine: 'sum', empty: 'zero' } },
     });
     const result = await contribution.apply([
@@ -488,7 +540,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
     };
     const contribution: any = createFederateService(spySource).resolve({
       params: { graph: 'crew', subgraph: true, traversal: subTraversal('g.V().hasLabel("person").outE("develops")') },
-      federationDepth: 0,
+      federationDepth: 0, form: 'source',
     } as any);
     await contribution.apply([]); // source form → run sub-traversal once, then fetch endpoints
     expect(hops.length).toBe(2);
@@ -510,7 +562,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
     };
     const contribution: any = createFederateService(spySource).resolve({
       params: { graph: 'crew', subgraph: true, traversal: subTraversal('g.V().hasLabel("person").outE("develops")') },
-      federationDepth: 0,
+      federationDepth: 0, form: 'source',
       tailDemand: { reachesElements: false, reachesAdjacency: false, keys: new Set(), handoffDenied: false },
     } as any);
     await contribution.apply([]);
@@ -526,7 +578,7 @@ describe('federate — SUBGRAPH form (traverse a fetched subgraph locally)', () 
     };
     const contribution: any = createFederateService(spySource).resolve({
       params: { graph: 'crew', subgraph: true, traversal: subTraversal('g.V().hasLabel("person").outE("develops")') },
-      federationDepth: 0,
+      federationDepth: 0, form: 'source',
       tailDemand: { reachesElements: true, reachesAdjacency: true, keys: 'all', handoffDenied: false },
     } as any);
     await contribution.apply([]);

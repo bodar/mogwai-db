@@ -1,4 +1,4 @@
-import type { Service, CallParams, BarrierOutput } from '../spi/types.ts';
+import type { Service, CallParams, CallSite, BarrierOutput } from '../spi/types.ts';
 import type { ForeignResult, ForeignRow, ForeignTerminal } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
@@ -8,6 +8,7 @@ import { guardFederationDepth } from '../params/federation-depth.ts';
 import { ENDPOINT_IDS_KEY } from '../../compiler/ir/injection.ts';
 import { UnsupportedTraversal } from '../../compiler/compiler.ts';
 import { NO_PARAMS } from '../../gremlin/param-env.ts';
+import type { ValueNode } from '../../gremlin/types.ts';
 
 const mapValuesGremlin = (gremlin: string, label: string, param: string, reducer?: string): string | null => {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -107,6 +108,24 @@ const elementsOf = (r: ForeignResult): readonly ForeignRow[] => {
   return r.rows;
 };
 
+/** A MID call's result over ZERO parents, by the form of its terminal — what each route the resume
+ *  takes (`segment.ts`'s `resumed`) answers over an empty input:
+ *   - a reducing tail (a per-parent injected `reduce`, or a pushed bare reducer) → its EMPTY seed on the
+ *     scalar path: `count` is the monoid and answers 0, `sum`/`min`/`max` are semigroups and emit
+ *     nothing (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CountGlobalStep.java`,
+ *     `…/SumGlobalStep.java` `processAllStarts`). An injected reduce combines an empty partial map.
+ *   - a mapValues injection → an empty per-parent map.
+ *   - any other tail → no detached rows; the LOCAL suffix then runs over the empty stream (a local
+ *     `count()` answers 0, a `values(k)` nothing). A value terminal needs no `barrier-values` of its
+ *     own: an empty stream frames as no traversers whichever route carries it. */
+function noParents(mapValues: CallSite['mapValues'], pushdown: CallSite['pushdown']): BarrierOutput {
+  const emptyMap: Extract<ValueNode, { readonly t: 'map' }> = { t: 'map', v: [] };
+  if (mapValues?.reduce) return { kind: 'barrier-scalar', value: emptyMap };
+  if (mapValues) return { kind: 'barrier-map', value: emptyMap };
+  if (pushdown?.reduces) return { kind: 'barrier-scalar', value: pushdown.empty === 'zero' ? { t: 'long', v: 0 } : { t: null, v: null } };
+  return [];
+}
+
 /** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
  *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
  *  already lived; the per-call values (params, this hop's depth) come from the CallSite
@@ -122,7 +141,7 @@ export const createFederateService = (source: FederationSource | undefined): Ser
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: ({ params, boundParams, federationDepth: depth, tailDemand, pushdown, mapValues }) => ({
+  resolve: ({ params, boundParams, federationDepth: depth, form, tailDemand, pushdown, mapValues }) => ({
     kind: 'barrier',
     // The one barrier that leaves the DO: a per-request sibling hop is a REMOTE WAIT, and the Worker
     // driving it frees the DO across that wait (§4·3). `apply` is store-free — it closes over the
@@ -146,9 +165,11 @@ export const createFederateService = (source: FederationSource | undefined): Ser
       if (!source) throw new Error('federate: no federation source is wired into this graph\'s app scope');
       const ex = source.executor(graph);
 
-      // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound. The
-      // traversal's own bound params ride along so a pushed `has("age", gt(x))` resolves `x` sibling-side.
-      if (rows.length === 0) {
+      // SOURCE form (g.call(...)): no head, so no local input rows — run the sub-traversal ONCE, unbound.
+      // The traversal's own bound params ride along so a pushed `has("age", gt(x))` resolves `x`
+      // sibling-side. The FORM decides this, never `rows.length`: a MID call whose head produced no
+      // parents also arrives with `[]`, and it asks a different question.
+      if (form === 'source') {
         // The pushed terminal's SHAPE decides the result, and `runForeign` reports it AUTHORITATIVELY from
         // the sibling's own `plan.shape` — `apply` does not predict it. The ONE thing shape cannot express
         // is reducer-vs-stream semantics (a `count()` and a `values(k)` both compile to `value`), so the
@@ -165,6 +186,10 @@ export const createFederateService = (source: FederationSource | undefined): Ser
         if (out.kind === 'map') throw new Error('federate: source form returned an internal mapValues result');
         return wantEndpoints ? withEndpoints(ex, out.rows, depth) : out.rows;
       }
+
+      // A MID call with NO parents: the sub-traversal runs once per parent, so it runs zero times — no
+      // sibling round trip. What reaches the resume is the empty answer in the SHAPE its terminal takes.
+      if (rows.length === 0) return noParents(mapValues, pushdown);
 
       // STANDARD mapValues injection for `as()/select()`: the parent identity is the ordinary map
       // KEY, so equal injected values remain distinct without a hidden correlation channel. The sibling

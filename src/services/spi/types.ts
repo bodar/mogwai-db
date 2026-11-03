@@ -8,6 +8,7 @@ import type { Elem } from '../../compiler/elem.ts';
 import type { GraphSource } from '../../compiler/rel/source.ts';
 import type { ReconstructConfig } from '../../compiler/rel/shortestpath.ts';
 import type { ContentDemand } from '../../compiler/ir/content-demand.ts';
+import type { EmptyResult } from '../../compiler/ir/reducers.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
 
 // ---------- the call() service seam ----------
@@ -56,12 +57,18 @@ export interface CallSite {
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;
+  /** WHERE the call sits, decided by the planner from the chain's TEXT: `'source'` (`g.call(…)`, and the
+   *  `io()` step the IR normalizes into one) has no head, so a barrier's `apply` runs over nothing;
+   *  `'mid'` (`….call(…)`) has a head yielding one row per parent. A fact about the call site, not the
+   *  data — `apply`'s rows cannot carry it, because an empty array cannot tell "no head" from "a head
+   *  that produced no parents", and the two answer different questions (a whole read vs nothing). */
+  readonly form: 'source' | 'mid';
   /** Standard bound parameter used by federate's mapValues injection. It is a call-site input,
    *  rather than a service-private params entry: the synthesized sibling Gremlin names it directly. */
   readonly mapValues?: {
     readonly param: string;
     readonly label: string;
-    readonly reduce?: { readonly partial: string; readonly combine: 'sum' | 'min' | 'max'; readonly empty: 'zero' | 'nothing' };
+    readonly reduce?: { readonly partial: string; readonly combine: 'sum' | 'min' | 'max'; readonly empty: EmptyResult };
   };
   /** What the LOCAL TAIL after this barrier consumes from the result — a fact ABOUT this call site,
    *  known once at plan time (the tail is right there in the chain), the same category as
@@ -83,6 +90,10 @@ export interface CallSite {
     readonly siblingGremlin: string;
     readonly suffixFrom: number;
     readonly reduces: boolean;
+    /** What that reducer emits over NO input (`reducers.ts`): `'zero'` for the monoid `count`,
+     *  `'nothing'` for a semigroup. Present iff `reduces`, so a MID call with no parents can answer it
+     *  without a sibling round trip. */
+    readonly empty?: EmptyResult;
   };
 }
 
