@@ -241,9 +241,8 @@ export interface ChildValue {
    *   test on its own: a re-sourced body's first value (`map(__.V().choose(…, constant(null)).order()
    *   .limit(1))`), whose presence is an uncorrelated EXISTS over the one fenced row it read the value
    *   from. A consumer that keeps productive nulls (`map()`, a write, a `group()` member node —
-   *   `gatedOn`, `modulator.ts`) filters on `when`; one that reads `presenceOf` gets it for free; a `by()`
-   *   that drops an unproductive traverser (`order`, `dedup`, `where`) keeps on `when` too
-   *   (`productivityFilter`), over the value and presence landed as one node read (`landedOnce`).
+   *   `gatedOn`, `modulator.ts`) filters on `when`; one that reads `presenceOf` gets it for free; one that
+   *   drops a null value anyway (an ordering/dedup `by()`, §17) still may.
    *
    * REQUIRED, as `yields` and `framing` are: only the arm that built the expression knows, and an
    * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence.

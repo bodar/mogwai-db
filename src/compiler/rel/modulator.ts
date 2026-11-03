@@ -277,17 +277,11 @@ function projectionOf(
     // result is an ELEMENT hands back a rowid and one that is a RECORD hands back a map node — neither
     // is a comparable value, and ordering by either would be a plausible-looking answer to a traversal
     // TinkerPop rejects. The body's own PRESENCE rides out — the seam's claim, never re-derived here.
-    const scalar = child.scalar(key.body, host);
-    if (!scalar || scalar.framing.kind !== 'scalar') return null;
-    const produced = landedOnce(scalar, source, fresh);
+    const produced = child.scalar(key.body, host);
     if (!produced || produced.framing.kind !== 'scalar') return null;
     const tag = ordering ? hostTag(produced.framing.type, produced.vtype) : undefined;
-    // A LANDED value and tag are reads of ONE node, which the consumer computes once (`withSubqueryColumns`),
-    // so the compare key is spelled over them directly — a `VALUES` row around them would be a second
-    // subquery hiding the node from that hoist.
-    const compared = tag && (produced === scalar ? storedCompareOnce(tag, produced.expr, fresh) : storedCompareOn(tag)(produced.expr));
-    return compared
-      ? { value: compared, present: produced.present, raw: produced.expr }
+    return tag
+      ? { value: storedCompareOnce(tag, produced.expr, fresh), present: produced.present, raw: produced.expr }
       : { value: produced.expr, present: produced.present };
   }
 
@@ -372,33 +366,6 @@ function projectionOf(
 
 const isNotNull = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: value, right: compilerNull() });
 
-/**
- * A child `by()` whose presence is STATED (`{ when }`) and whose value is a correlated read, LANDED as ONE
- * read — its `{t,v}` member node (`memberNodeOf`: the producer's own one-read node where it built one, else
- * the gated node over one `VALUES` row) — and re-read from it: the value is the node's `v`, the tag its `t`,
- * and the presence the node's own non-nullness. The node is NULL exactly where the body produced nothing and
- * `{t, v:null}` where it produced a null, so a productive null stays a value (`TraversalProduct`) and sorts
- * and keys as null, while the consumer that hoists the node into a column (`withSubqueryColumns`) computes
- * the body once per row where value, tag and presence each read it again.
- *
- * Anything else comes back as it was: a presence read off the value costs nothing to restate, and a stated
- * one over a cheap value is tested as stated (`productivityFilter`). `null` where no node can carry it.
- */
-function landedOnce(produced: ChildValue, source: GraphSource, fresh: Minter): ChildValue | null {
-  if (typeof produced.present !== 'object') return produced;
-  if (!produced.node && !exprHasSubquery(produced.expr) && !(produced.vtype && exprHasSubquery(produced.vtype))) return produced;
-  const node = memberNodeOf(produced, source, fresh);
-  if (!node) return null;
-  return {
-    ...produced,
-    expr: jsonField(node, 'v'),
-    // The node's `t` is the per-row tag where there was one; a static type stays the framing's to name.
-    ...(produced.vtype ? { vtype: jsonField(node, 't') } : {}),
-    node,
-    present: { when: isNotNull(node) },
-  };
-}
-
 /** `byProjection`'s VALUE alone — for a consumer that owes no productivity drop (a token read, a key whose
  *  presence another column already answers). A consumer that DROPS on an unproductive `by()` takes
  *  `byProjection` and hands its `present` to `productivityFilter`. */
@@ -441,9 +408,7 @@ function typedOf(
   if (key.kind === 'child') {
     // Lowered ONCE here rather than through `byExpr`, which would lower the same body a second time.
     if (!child) return null;
-    const scalar = child.scalar(key.body, host);
-    if (!scalar || scalar.framing.kind !== 'scalar') return null;
-    const produced = landedOnce(scalar, source, fresh);
+    const produced = child.scalar(key.body, host);
     if (!produced || produced.framing.kind !== 'scalar') return null;
     return {
       value: produced.expr,
@@ -1030,14 +995,13 @@ export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'ele
  * TinkerPop's default `by()` productivity, as a predicate over the host — the ONE authority every `by()`
  * consumer that DROPS an unproductive traverser asks: `order`, `dedup`, `sack`, `where`, `aggregate`,
  * `group`/`groupCount`. A NULL value is an ABSENT one (`ChildValue.present`), so the drop is the value's
- * non-nullness — except under a STATED presence (`{ when }`), whose NULL is a productive null and whose
- * drop is the statement.
+ * non-nullness — under a STATED presence (`{ when }`) too: its null is absent as well (§17).
  *
  * - `{}` — no drop owed: the projection is `'always'` (a token, the traverser itself — which is also why
  *   `order().by(T.label)` and a bare `by()` never filter), or `ProductiveByStrategy` asked for the
  *   null-keeping behaviour, under which an unproductive `by()` is a null and nothing is dropped;
  * - `{ keep }` — `value IS NOT NULL`, over whatever column or expression the consumer named the value
- *   (or its member node) into — or, for a stated presence, its `when` (`statedPresence`);
+ *   (or its member node) into;
  * - `null` — DECLINE: the producer said `'unknown'`.
  *
  * A projection (`byProjection`/`byTyped`/`byEqualityKey`) is passed WHOLE rather than its `present`,
@@ -1052,11 +1016,9 @@ export const productivityFilter = (
 ): { readonly keep?: Expr } | null => {
   const { present, hostKeep } = typeof by === 'string' || 'when' in by ? { present: by, hostKeep: undefined } : by;
   if (present === 'unknown' && !isProductiveBy(step)) return null;
-  // A STATED `{ when }` is the keep itself: a NULL value under it is a PRODUCTIVE null, which orders and
-  // keys as null. A child `by()` lands it beside its value as one read (`landedOnce`), so `when` names the
-  // same scope `value` does. Every other null `by()` value is absent (§17).
-  const valueKeep = isProductiveBy(step) || present === 'always' ? undefined
-    : typeof present === 'object' ? statedPresence(present, value) : isNotNull(value);
+  // A STATED `{ when }` is read as its value's nullness here: `value` is the caller's column, in whatever
+  // scope the caller filters, and `when` may name the host's. A null `by()` value is absent (§17).
+  const valueKeep = isProductiveBy(step) || present === 'always' ? undefined : isNotNull(value);
   const keep = hostKeep && valueKeep ? and(hostKeep, valueKeep) : hostKeep ?? valueKeep;
   return keep ? { keep } : {};
 };

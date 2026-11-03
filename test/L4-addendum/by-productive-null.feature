@@ -5,7 +5,7 @@ Feature: mogwai addendum — a by() that yields a NULL is ABSENT at every consum
   # `TraversalProduct`, which keeps a literal null (`constant([null]).unfold().sum()`) as a PRODUCTIVE value
   # (docs/feature-support-matrix.md, Deliberate divergences). Stored properties are never null, so this
   # only differs from the reference where a body manufactures a null from a literal. A body that STATES its
-  # presence keeps a productive null instead (`by-stated-presence.feature`).
+  # presence drops its null the same way (`by-stated-presence.feature`).
   #
   # Each consumer drops the same way: project() omits the key, select()/order()/dedup()/sack()/where()
   # drop the traverser, aggregate() collects nothing, coalesce() falls through to its next arm.

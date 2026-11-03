@@ -4,7 +4,7 @@
 //   - 'always' / ProductiveByStrategy → no drop (a token, the traverser itself);
 //   - 'value-nullness' → drop where the value IS NULL;
 //   - 'unknown' → DECLINE;
-//   - a STATED { when } → keep on the statement, so a NULL value under it is a productive null.
+//   - a STATED { when } → still the value's nullness: its null is absent too (§17).
 import { test, expect, describe } from 'bun:test';
 import { productivityFilter } from '../../src/compiler/rel/modulator.ts';
 import { col, type Expr } from '../../src/rel/expr.ts';
@@ -24,10 +24,11 @@ describe('productivityFilter — by()-productivity is value nullness, one author
   test('a producer that cannot say DECLINES', () => {
     expect(productivityFilter(step(), 'unknown', value)).toBeNull();
   });
-  test('a STATED presence keeps on its statement, not on the value', () => {
+  test('a STATED presence drops a NULL value too — its null is absent (§17)', () => {
     const when: Expr = col('r1' as RelId, 'p');
-    expect(productivityFilter(step(), { when }, value)).toEqual({ keep: when });
-    expect(productivityFilter(step(), { present: { when } }, value)).toEqual({ keep: when });
+    const keep = { keep: { kind: 'binary', op: 'is not', left: value, right: expect.anything() } as unknown as Expr };
+    expect(productivityFilter(step(), { when }, value)).toEqual(keep);
+    expect(productivityFilter(step(), { present: { when } }, value)).toEqual(keep);
   });
   test('ProductiveByStrategy drops nothing, even where presence is unknown', () => {
     expect(productivityFilter(step(true), 'value-nullness', value)).toEqual({});
