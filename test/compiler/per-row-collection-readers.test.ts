@@ -22,6 +22,17 @@ describe('per-row collection readers — shape', () => {
     }
   });
 
+  test('a closed walk upstream is self-contained: the hard fence still stands behind an emit()/until() repeat', () => {
+    for (const q of [
+      "g.V().emit().repeat(out().simplePath()).values('m').is(neq('text')).count(local)",
+      "g.V().repeat(out().simplePath()).emit().values('m').is(neq('text')).limit(local,1)",
+    ]) {
+      const sql = read(q).sql;
+      expect(sql).toMatch(/WITH RECURSIVE/);
+      expect(sql).toMatch(/AS MATERIALIZED/);
+    }
+  });
+
   test('select(keys) over a non-Map row is a raise behind a hard fence, never a drop', () => {
     const sql = read("g.V().values('m').where(__.count(local).is(2)).select(keys)").sql;
     expect(sql).toMatch(/AS MATERIALIZED/);

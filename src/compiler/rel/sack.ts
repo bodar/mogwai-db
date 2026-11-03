@@ -3,7 +3,7 @@ import { withChannel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerReal, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
+import { isSelfContained } from '../../rel/walk.ts';
 import { MERGED_VTYPE, PER_ROW, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { SACK_OPS } from '../ir/step.ts';
@@ -205,9 +205,9 @@ export function sackMutate(
   // times — the tag, each raise test, a `div`'s value — so a CHAIN of folds grows geometrically in statement
   // text (measured, four `div` folds inside `local()`: 12 KB fenced, 127 KB not). Behind the fence each is
   // a plain column. Not over a correlated or recursive input — a fence hoists to a CTE, where an outer
-  // reference resolves to nothing (`freeRelIds`, as `record.ts` gates it) and a walk's own reference is
-  // refused (`containsSelfRef`).
-  const base = freeRelIds(named).size === 0 && !containsSelfRef(named)
+  // reference resolves to nothing (`freeRelIds`, as `record.ts` gates it) and a reference to a walk it does not define is
+  // refused (`isSelfContained` asks both).
+  const base = isSelfContained(named)
     ? make.materialize({ id: fresh('skz'), input: named, channels: named.channels, type: named.type })
     : named;
   const kept = drop.keep

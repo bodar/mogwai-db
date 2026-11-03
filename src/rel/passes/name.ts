@@ -1,7 +1,7 @@
 import { ref } from '../factory.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
-import { exprRels, forEachExpr, freeRelIds, hasFreeSelfRef, relChildren, relExprs, rewriteRels } from '../walk.ts';
+import { exprRels, forEachExpr, isSelfContained, relChildren, relExprs, rewriteRels } from '../walk.ts';
 
 /**
  * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
@@ -74,7 +74,7 @@ export function name(root: Rel, mint: () => string): Plan {
    * spelled, and computed, once per occurrence (`hasFreeSelfRef` carries the measurement). */
   const binds = (rel: Rel): boolean =>
     rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
-    && freeRelIds(rel).size === 0 && !hasFreeSelfRef(rel);
+    && isSelfContained(rel);
 
   const bindings: Binding[] = [];
   // Bottom-up and memoised, so a binding is pushed after every binding it depends on, and the

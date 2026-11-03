@@ -345,6 +345,17 @@ export function hasFreeSelfRef(plan: Rel): boolean {
   return [...referenced].some((name) => !bound.has(name));
 }
 
+/**
+ * Can this subtree stand as its OWN CTE — the one "is it self-contained" question every hoist asks
+ * (`name`'s binding, a lowering's fence). Nothing in it resolves against a relation it left behind:
+ * no outer row (`freeRelIds`) and no walk defined outside it (`hasFreeSelfRef`). A CLOSED walk — a
+ * whole `Recursive` node — is self-contained: it binds its own reference, so asking `containsSelfRef`
+ * instead refused every fence downstream of an `emit()`/`until()` walk, and a reader that needed its
+ * fence for CORRECTNESS (a tag test SQLite would otherwise fold into `json(value)`) leaked a bare
+ * `malformed JSON`.
+ */
+export const isSelfContained = (plan: Rel): boolean => freeRelIds(plan).size === 0 && !hasFreeSelfRef(plan);
+
 /** Visit every relation in the DAG once, plus every relation correlated from an expression. */
 export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
   const seen = new Set<Rel>();

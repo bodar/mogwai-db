@@ -8,7 +8,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType, type WindowSpec } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RootedRead } from './child.ts';
-import { containsSelfRef, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, mapExprChildren, substRelId } from '../../rel/walk.ts';
+import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapExprChildren, substRelId } from '../../rel/walk.ts';
 import { exprMayAbort } from '../../rel/raise.ts';
 
 /**
@@ -186,13 +186,13 @@ export const fenced = (rel: Rel, fresh: Minter): Rel =>
  * nullness, `ChildValue.present`), FENCED where the value is a correlated read and the relation is
  * self-contained — the assembler otherwise re-inlines the column as the expression that computes it, and
  * the filter would spell the whole read a second time. Not over a correlated or recursive input, where a
- * fence would hoist to a CTE that cannot see the outer row (`freeRelIds`) or the walk (`containsSelfRef`).
+ * fence would hoist to a CTE that cannot see the outer row or a walk it does not define (`isSelfContained`).
  */
 export const presenceFenced = (rel: Rel, value: Expr, fresh: Minter): Rel =>
   (exprHasSubquery(value) ? fencedWhereSelfContained(rel, fresh) : rel);
 
 /** `fenced` where a fence CAN stand — a self-contained relation. A correlated or recursive one is left
- *  as it is: its CTE could not see the outer row (`freeRelIds`) or the walk (`containsSelfRef`).
+ *  as it is: its CTE could not see the outer row or a walk it does not define (`isSelfContained`).
  *
  *  `hard` asks for the `AS MATERIALIZED` barrier (`Rel.materialize.fenced`) rather than a CTE SQLite may
  *  flatten — for a relation whose READERS filter it on a tag and then compute something defined only
@@ -202,7 +202,7 @@ export const presenceFenced = (rel: Rel, value: Expr, fresh: Minter): Rel =>
  *  value filter (`is(neq('text'))`) still sees raises `malformed JSON`. Only the barrier keeps the input's
  *  terms evaluated per row, ahead of any reader's. */
 export const fencedWhereSelfContained = (rel: Rel, fresh: Minter, hard = false): Rel =>
-  (freeRelIds(rel).size === 0 && !containsSelfRef(rel) ? (hard ? hardFenced(rel, fresh) : fenced(rel, fresh)) : rel);
+  (isSelfContained(rel) ? (hard ? hardFenced(rel, fresh) : fenced(rel, fresh)) : rel);
 
 /** An `AS MATERIALIZED` CTE over `rel` — one already hard-fenced is itself. */
 const hardFenced = (rel: Rel, fresh: Minter): Rel =>

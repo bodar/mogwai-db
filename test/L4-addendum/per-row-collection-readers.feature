@@ -248,3 +248,91 @@ Feature: mogwai addendum — a per-row-typed stream whose rows may be collection
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "does not have accessible keys"
+
+  # The same filter-then-reader DOWNSTREAM OF A CLOSED WALK (an `emit()`/`until()` repeat lowers to a
+  # `Recursive`). A whole walk binds its own reference, so it is self-contained and the reader's hard fence
+  # still stands (`isSelfContained`, src/rel/walk.ts) — asking whether the input merely CONTAINS a walk
+  # reference refused the fence and leaked a bare `malformed JSON` on the 'text' row.
+  Scenario: g_V_emit_repeatXout_simplePathX_valuesXmX_isXneqXtextXX_countXlocalX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).as("a").addV("p").property("m", "text").as("b").addV("p").property("m", [7, 8, 9]).as("c").addV("p").property("m", 5).as("d").addE("e").from("a").to("b").addE("e").from("b").to("c").addE("e").from("c").to("d").addE("e").from("a").to("a").addE("e").from("a").to("c")
+      """
+    And the traversal of
+      """
+      g.V().emit().repeat(__.out().simplePath()).values("m").is(P.neq("text")).count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+      | d[3].l |
+      | d[3].l |
+      | d[3].l |
+      | d[3].l |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+
+  Scenario: g_V_repeatXout_simplePathX_emit_valuesXmX_isXneqXtextXX_limitXlocal_1X
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).as("a").addV("p").property("m", "text").as("b").addV("p").property("m", [7, 8, 9]).as("c").addV("p").property("m", 5).as("d").addE("e").from("a").to("b").addE("e").from("b").to("c").addE("e").from("c").to("d").addE("e").from("a").to("a").addE("e").from("a").to("c")
+      """
+    And the traversal of
+      """
+      g.V().repeat(__.out().simplePath()).emit().values("m").is(P.neq("text")).limit(local, 1)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[d[7].i] |
+      | l[d[7].i] |
+      | l[d[7].i] |
+      | d[5].i |
+      | d[5].i |
+      | d[5].i |
+      | d[5].i |
+
+  Scenario: g_V_emit_repeatXout_simplePathX_valuesXmX_whereXisXneqXtextXXX_selectXk_xX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).as("a").addV("p").property("m", "text").as("b").addV("p").property("m", [7, 8, 9]).as("c").addV("p").property("m", 5).as("d").addE("e").from("a").to("b").addE("e").from("b").to("c").addE("e").from("c").to("d").addE("e").from("a").to("a").addE("e").from("a").to("c")
+      """
+    And the traversal of
+      """
+      g.V().emit().repeat(__.out().simplePath()).values("m").where(__.is(P.neq("text"))).select("k", "x")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"k":"d[1].i", "x":"d[2].i"}] |
+
+  Scenario: g_V_emit_repeatXout_simplePathX_valuesXmX_notXisXtextXX_tailXlocal_1X
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).as("a").addV("p").property("m", "text").as("b").addV("p").property("m", [7, 8, 9]).as("c").addV("p").property("m", 5).as("d").addE("e").from("a").to("b").addE("e").from("b").to("c").addE("e").from("c").to("d").addE("e").from("a").to("a").addE("e").from("a").to("c")
+      """
+    And the traversal of
+      """
+      g.V().emit().repeat(__.out().simplePath()).values("m").not(__.is("text")).tail(local, 1)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"d[2].i"}] |
+      | l[d[9].i] |
+      | l[d[9].i] |
+      | l[d[9].i] |
+      | l[d[9].i] |
+      | d[5].i |
+      | d[5].i |
+      | d[5].i |
+      | d[5].i |
+      | d[5].i |

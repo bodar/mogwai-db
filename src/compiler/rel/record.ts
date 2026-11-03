@@ -8,7 +8,7 @@ import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeO
 import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
-import { containsSelfRef, exprHasSubquery, freeRelIds } from '../../rel/walk.ts';
+import { exprHasSubquery, isSelfContained } from '../../rel/walk.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -199,8 +199,8 @@ export function recordOf(
   // A field that READS A SUBPLAN is computed ONCE: a reader of the record (a field re-entry, a nested
   // record's `select`) inlines a `Project`'s column definition at every reference, so a nested
   // `project().by(project().by(…max()))` re-spelled the inner reducer per mention (281 KB → 3.4 MB). The
-  // same self-containment gate as `recordToMap`'s fence (`freeRelIds`; a walk's own reference cannot be hoisted).
-  const fence = freeRelIds(record).size === 0 && !containsSelfRef(record) && payload.some(([, e]) => exprHasSubquery(e));
+  // same self-containment gate as `recordToMap`'s fence (`isSelfContained`).
+  const fence = isSelfContained(record) && payload.some(([, e]) => exprHasSubquery(e));
   return { rel: fence ? make.materialize({ id: fresh('rcm'), input: record, channels: record.channels, type: record.type }) : record, fields };
 }
 
@@ -376,7 +376,7 @@ export function recordToMap(
   // self-contained", shared with `name`/`flatten`, so the gate cannot disagree with what the emitter will
   // accept. Measured: `project('n').by('name')` 2570 → 1243 bytes; correlated folds stay unfenced and
   // unchanged.
-  const base = freeRelIds(rel).size === 0
+  const base = isSelfContained(rel)
     ? make.materialize({ id: fresh('rmf'), input: rel, channels: rel.channels, type: rel.type })
     : rel;
   const value = recordPairs(readingRel(base, ''), fields, source, fresh);
