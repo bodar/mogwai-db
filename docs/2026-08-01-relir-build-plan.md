@@ -880,7 +880,7 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
 3. **Retire the stale untyped-parameter comments** (`src/wire.ts:131`, `gremlinTypeOf`'s doc) — point at
    `declaredParamTypes`. Bundle with 1.
 
-Still open from the fourth round (below): S10, S11, follow-ups 2–6, 8, 9, reuse 2–8, and S6's multi-driver mergeV
+Still open from the fourth round (below): S11, follow-ups 2–6, 8, 9, reuse 2–8, and S6's multi-driver mergeV
 lift (S9's entry-or-side-effect residual now waits on S9a → S9). From earlier rounds: S8, M1, M2, S3, R13–R18, F8,
 F11–F13, F14b.
 
@@ -960,6 +960,15 @@ wrapping `V().sample(1)`, and `property(...max())` over a re-sourced `V()`, rais
      `inject([a:1],[b:2]).as('b').select('b')` → [2] where the reference gives [{a:1},2] (newly reachable instance of
      §17 "Map scope" from the key-set union) — note it in the L4 file.
   S9 absorbs reuse proposal 1 below. Add L4 scenarios for every witness above.
+- ✅ **S10 LANDED (4d6be2a9, 2b02dbf8, 17fa6316, 2026-11-03).** Each merge driver now seeks its most selective key
+  (`cappedCount`, LIMIT 64), a numeric search reads only the decimal TEXTs its cast can land on (`decimalTextSeeks`),
+  `endpointSeek` takes the whole (src, label, tgt) key, and the map guard (`searchKeying`) crosses each earlier map
+  only with the key sets it exactly contains, all as fenced MATERIALIZED CTEs of ONE statement (`emit.ts` `parts`
+  now carries only the CTEs a step reads); item 5 measured a no-op. All six shapes are ~linear (1k → 8k ≤ 8.8×),
+  pinned in `test/compiler/merge-scale.exec.test.ts`. **Remains:** the containment worst case — data key names
+  where every key is shared by many longer key sets cost N × those holders — is in `docs/outstanding-work.md`; it
+  now runs entirely inside one statement and never becomes a bind. The generic home for these seeks is still a
+  correlated-join `OwnerSeek` in `src/rel/passes/semijoin.ts` (also noted there). Original item:
 - **S10. The merge search seeks the CONJUNCTION, not the first key** (`seekedSearch`/`computedMatch`/`propertySeeks`/
   `mapEntrySeeks`/`endpointSeek`/`searchKeying`, `src/compiler/rel/write.ts`). R10/F7 is linear only for a selective
   first key, one map shape and no hub; four shapes stay super-linear (all equally quadratic on the parent, so none is a
