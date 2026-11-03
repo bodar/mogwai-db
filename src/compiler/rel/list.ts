@@ -1934,7 +1934,7 @@ export function listLiteralBlob(listArg: Arg, values: readonly ArgValue[]): { re
 const constantJsonText = (e: Expr | null): string | null => {
   if (e?.kind !== 'lit') return null;
   switch (e.source) {
-    case 'compiler-text': return JSON.stringify(e.value);
+    case 'compiler-text': return stringifyExact(e.value);
     case 'compiler-int': return String(e.value);
     case 'compiler-real': return realJsonText(e.value as number);
     case 'compiler-null': return 'null';

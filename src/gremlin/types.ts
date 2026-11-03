@@ -335,6 +335,10 @@ export const exactInteger = (digits: string | bigint): number | bigint => {
  *  precision-safe, not just the write path (storedScalar). */
 export function coerceBindValue(value: unknown): unknown {
   if (typeof value === 'boolean') return value ? 1 : 0;
+  // A lone surrogate has no UTF-8 form, and a driver's encoding of one is its own (bun:sqlite fuses
+  // `'a\ud800b'` into ONE other code point, `'a𐁢'`): it binds as U+FFFD, the same well-formed form a JSON
+  // bind carries (`stringifyExact`, json-exact.ts), so both runtimes and both bind shapes agree.
+  if (typeof value === 'string') return value.toWellFormed();
   if (typeof value === 'bigint') return fitsSafeInteger(value) ? Number(value) : value.toString();
   if (value instanceof BigDecimal || value instanceof Duration) return value.toString();
   return value;

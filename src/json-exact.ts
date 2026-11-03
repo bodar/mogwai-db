@@ -66,6 +66,16 @@ export function stringifyExact(value: unknown): string {
     // one as a safe number or decimal TEXT), and no JSON spelling of it is safe: SQLite reads an integer past
     // 2^63 as a REAL. `JSON.stringify` would throw its raw TypeError; a producer that leaked one declines here.
     if (typeof member === 'bigint') throw UnsupportedTraversal.because('a value with no exact JSON leaf form (a raw bigint) cannot cross into SQLite');
+    // An UNPAIRED SURROGATE has no UTF-8 form. `JSON.stringify` writes it as a `\udXXX` escape, which SQLite's
+    // JSON decoder turns into an EMPTY string — the member's whole content lost, `'a\ud800b'` reading back as
+    // `''`. A JS string reaches here holding one from a JSON request (`router.ts` parses `"\ud800"` legally),
+    // so it crosses in its well-formed form — each lone surrogate U+FFFD, exactly what a scalar bind becomes
+    // (`coerceBindValue`, gremlin/types.ts) — keys included.
+    if (typeof member === 'string') return member.toWellFormed();
+    if (member !== null && typeof member === 'object' && !Array.isArray(member) && !isExactNumber(member)
+      && Object.keys(member).some((key) => !key.isWellFormed())) {
+      return Object.fromEntries(Object.entries(member).map(([key, inner]) => [key.toWellFormed(), inner]));
+    }
     const spelled = typeof member === 'number' ? exactSpelling(member) : undefined;
     if (spelled === undefined) return member;
     if (rawJson.rawJSON) return rawJson.rawJSON(spelled);

@@ -16,6 +16,7 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll, typedAll } from '../support/decode.ts';
 import type { TypeNode } from '../../src/gremlin/types.ts';
+import { stringifyExact } from '../../src/json-exact.ts';
 
 const limited = () => {
   const store = new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')));
@@ -119,4 +120,27 @@ describe('a LITERAL list of constants past SQLite\'s function-argument cap', () 
   test('a typed literal keeps its envelopes and spellings', async () =>
     expect(typed('g.inject([1, 2.0d, 3L, 0.30000000000000004d, 1.5f, null, "a"])')).toEqual(
       ['[1i,2d,3L,0.30000000000000004d,1.5f,null,"a"]']));
+});
+
+// A JSON request (`router.ts`) can carry `"\ud800"` legally, so a string member can hold an UNPAIRED
+// SURROGATE. It has no UTF-8 form: `JSON.stringify` writes it as a `\ud800` escape, which SQLite's JSON
+// decoder reads back as an EMPTY string, so `'a\ud800b'` unfolded to `''`. Every JSON value headed into
+// SQLite (`stringifyExact`) and every scalar bind (`coerceBindValue`) carries the well-formed form instead —
+// U+FFFD — so the list, its unfolded members, a scalar bind and a within() set all read the same string.
+describe('an unpaired surrogate in a string member', () => {
+  const xs = ['a\ud800b', 'c'];
+  test('unfold() keeps the member\'s content', async () =>
+    expect(await values('g.inject(xs).unfold()', { xs })).toEqual(['a�b', 'c']));
+  test('the list whole agrees with its unfolded members', async () =>
+    expect(await values('g.inject(xs)', { xs })).toEqual([['a�b', 'c']]));
+  test('a scalar bind agrees too (bun:sqlite fused it into another code point)', async () =>
+    expect(await values('g.inject(x)', { x: 'a\ud800b' })).toEqual(['a�b']));
+  test('within($xs) matches the member it names, and no empty string', async () => {
+    expect(await values('g.inject(xs).unfold().is(within(xs))', { xs })).toEqual(['a�b', 'c']);
+    expect(await values("g.inject('').is(within(ys))", { ys: ['\ud800'] })).toEqual([]);
+  });
+  test('a fold() of the unfolded members round-trips', async () =>
+    expect(await values('g.inject(xs).unfold().fold().unfold()', { xs })).toEqual(['a�b', 'c']));
+  test('stringifyExact makes keys well-formed as well as values', () =>
+    expect(stringifyExact({ 'k\udc00': ['\ud800'] })).toBe('{"k�":["�"]}'));
 });

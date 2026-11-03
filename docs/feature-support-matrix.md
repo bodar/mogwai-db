@@ -278,7 +278,7 @@ wrong number class.
 | Case mapping | `toUpper`/`toLower` map ASCII only |
 | String length and indices | `length()`/`substring()` count code points: `'😀'.length()` is 1 |
 | NUL in string data | carried whole, but `length`/`substr`/`like`/`tinker.search` stop at it. A NUL in statement text declines |
-| Lone surrogate in a parameter or JSON | reaches SQLite as `''` or U+FFFD (in statement text it declines) |
+| Lone surrogate in a parameter or JSON | becomes U+FFFD, the rest of the string kept (`'a\ud800b'` is `'a�b'`), whether it binds as a scalar or inside a list/set/map; in statement text it declines |
 | Write visibility | a write step sees a snapshot of its input; later steps see all its writes (`g.V().not(out()).drop()` drops exactly the leaves) |
 | Error timing | errors are eager: a type error may raise where Java's lazy pull would stop first (`limit(0)` still answers `[]` for a value computed per row). A CONSTANT name in the query text — a label or property key (`addLabel(constant(5))`, `dropLabel(constant(null))`, `mergeV([(T.label): 5])`, `property(constant(5), 1)`) — is judged at compile time, so it raises even over a stream that turns out empty (`V().limit(0).addLabel(constant(5))`) or a statically dead `choose` arm |
 | Error vs filter order | a later filter may drop a row before its type error is evaluated (`inject(1).toUpper().is('x')` is `[]`) |
