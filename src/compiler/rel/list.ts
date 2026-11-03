@@ -975,9 +975,17 @@ export function correlatedListMembers(
   if (of.kind === 'elem') {
     return {
       rel: make.project({
-        id: fresh('cue'), input: exploded, channels: [], type: typeOf(meta('id', 'int')),
+        // The member POSITION rides as the ENCOUNTER channel — the scalar arm's reason, for elements: a
+        // re-collecting `fold()` (`foldElements`/`foldScalars` after a `values()` hop, which refines the
+        // encounter by `pord` rather than replacing it) orders by the encounter when there is one, so
+        // without it `select(Pop.all,'a').by(__.unfold().values('name').fold())` folded the members in
+        // VALUE (or scan) order rather than list order. `UnfoldStep` iterates the List in order
+        // (`vendor/tinkerpop/gremlin-core/.../step/flatMap/UnfoldStep.java`).
+        id: fresh('cue'), input: exploded, channels: [{ col: MEMBER.ord, role: 'encounter' }],
+        type: typeOf(meta('id', 'int'), meta(MEMBER.ord, 'int')),
         // The same rowid CAST the relation-level element unfold states, for the same reason.
-        exprs: [['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }]],
+        exprs: [['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }],
+          [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
       }),
       framing: { kind: 'elements', elem: of.elem },
     };

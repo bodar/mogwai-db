@@ -56,7 +56,6 @@ export const REASONS = {
   // ── defect ──
   'binary-as-string': { kind: 'defect', why: 'a `Binary(…)` literal answers its base64 text, not a binary value', cite: ['docs/outstanding-work.md', '(l3-binary)'] },
   'call-traversal-params': { kind: 'defect', why: '`call(service, map, traversal)` ignores the traversal\'s parameter map', cite: ['docs/outstanding-work.md', '(l3-call-trav-params)'] },
-  'select-mixed-by': { kind: 'defect', why: '`select(Pop.mixed, k).by(…)` over a repeated label answers the wrong values', cite: ['docs/outstanding-work.md', '(l3-select-mixed-by)'] },
   'multilabel-edge-label': { kind: 'defect', why: '`with(\'multilabel\')` frames an edge\'s own label as a String, not a Set', cite: ['docs/outstanding-work.md', '(l3-multilabel-edge-label)'] },
   't-token-order': { kind: 'defect', why: '`order(local).by(keys)` sorts `T.id`/`T.label` keys after every String instead of by name', cite: ['docs/outstanding-work.md', '(l3-t-token-order)'] },
   'map-merge': { kind: 'defect', why: 'a `merge()` over an incoming Map raises a type error instead of merging', cite: ['docs/outstanding-work.md', '(l3-map-merge)'] },
@@ -143,11 +142,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
   'call-traversal-params': [
     'g_V_callXdc_map_traversalX',
     'g_callXlist_map_traversalX',
-  ],
-  'select-mixed-by': [
-    'g_V_asXaX_out_asXaX_out_asXaX_selectXmixed_aX_byXunfold_valuesXnameX_foldX_tailXlocalX_unfold',
-    'g_V_asXaX_out_asXaX_out_asXaX_selectXmixed_aX_byXunfold_valuesXnameX_foldX_tailXlocal_1X_unfold',
-    'g_V_asXaX_out_asXaX_out_asXaX_selectXmixed_aX_byXunfold_valuesXnameX_foldX_tailXlocal_2X',
   ],
   'multilabel-edge-label': [
     'g_withXmultilabelX_E_elementMap',

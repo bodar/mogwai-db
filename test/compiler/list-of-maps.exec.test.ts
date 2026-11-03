@@ -131,8 +131,9 @@ describe('a by() body over a LIST host — the list ChildHost', () => {
     // Each 'a' position holds the WHOLE history (a list of elements); the by() body unfolds it and
     // re-collects the names, so every result is one list per traverser.
     const r = await decoded("g.V().as('a').out().as('a').out().as('a').select(Pop.all,'a').by(__.unfold().values('name').fold())");
-    // Two length-3 paths from marko: [marko,josh,lop] and [marko,josh,ripple], names sorted per list.
-    expect(bagOf(r)).toEqual([['josh', 'lop', 'marko'], ['josh', 'marko', 'ripple']]);
+    // Two length-3 paths from marko: [marko,josh,lop] and [marko,josh,ripple], names in LIST order —
+    // `UnfoldStep` iterates the history in order, so the re-collecting fold keeps it.
+    expect(bagOf(r)).toEqual(bagOf([['marko', 'josh', 'lop'], ['marko', 'josh', 'ripple']]));
   });
 
   test('select(Pop.all).by(__.unfold().count()) counts the collection', async () => {
@@ -142,8 +143,8 @@ describe('a by() body over a LIST host — the list ChildHost', () => {
 
   test('the Pop.all history accumulates per traverser, and the by() body reduces each', async () => {
     // marko is bound to 'a', then each knows-target appends: history [marko,vadas] and [marko,josh].
-    // Two traversers, each unfolded and its names re-collected (sorted per list).
+    // Two traversers, each unfolded and its names re-collected in history (list) order.
     const r = await decoded("g.V().has('name','marko').as('a').out('knows').as('a').select(Pop.all,'a').by(__.unfold().values('name').fold())");
-    expect(bagOf(r)).toEqual(bagOf([['marko', 'vadas'], ['josh', 'marko']]));
+    expect(bagOf(r)).toEqual(bagOf([['marko', 'vadas'], ['marko', 'josh']]));
   });
 });

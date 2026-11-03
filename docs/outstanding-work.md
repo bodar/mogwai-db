@@ -81,9 +81,6 @@ refusal comes first: it is a production outage.
   - **`call(service, map, traversal)` ignores the traversal's map (l3-call-trav-params)** —
     `call('tinker.degree.centrality', ['x':'y'], __.project('direction').by(constant(Direction.OUT)))`
     answers the default direction, and `call('--list', …, project('service')…)` lists every service. 2.
-  - **`select(Pop.mixed, k).by(…)` answers wrong values (l3-select-mixed-by)** —
-    `V().as('a').out().as('a').out().as('a').select(mixed,'a').by(unfold().values('name').fold()).tail(local,1)`;
-    the matrix lists dynamic-shape `Pop.mixed` as unsupported, yet it answers. 3.
   - **`with('multilabel')` frames an edge's own label as a String (l3-multilabel-edge-label)** —
     `E().elementMap()` gives its endpoints' labels as Sets but its own as a String. 1.
   - **`order(local).by(keys)` sorts `T` keys after every String (l3-t-token-order)** —
