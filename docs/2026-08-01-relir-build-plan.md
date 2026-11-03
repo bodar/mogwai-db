@@ -519,9 +519,9 @@ fold it into these lists at the end of the run.
   wrong counts, not divergences — take them out of the §17 line `a37017d9` widened.
 - **r7-fu7** DATA-DEPENDENT DECLINE: federate over an EMPTY parent stream raises; ref `[0]`. `federate.ts` `apply()`
   routes `rows.length === 0` to the source form before checking `mapValues`.
-- **r7-reuse3** data-string `json_each` binds in `src/bulk.ts`/`src/setwrite.ts` use bare `JSON.stringify`, writes use
-  `stringifyExact` (lone surrogate → U+FFFD): a GraphSON reload duplicates such a vertex or hits a raw UNIQUE
-  error. One encoder.
+- ✅ **r7-reuse3** LANDED `59cf3c7d`: every data-sized `json_each` bind in `src/bulk.ts`/`src/setwrite.ts` goes
+  through `stringifyExact` (one encoder); `existingUid` maps the landed uid back, replace dedup keys by landed
+  form. Remains: nothing.
 - **r6-fu1** REGRESSION: a user param named `injectedMap` collides with federate's fresh name. PARKED on
   `wf/federate-fresh-param-collision-2-4` (`12133bec`). Resume: land `2c64d6a9` (the fix) ALONE first; then
   scan-bound-metadata; then re-land `d6722340..12133bec` (`correlatedIn`, `rel/passes/semijoin.ts`) fixing its
