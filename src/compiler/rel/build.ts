@@ -353,25 +353,6 @@ export function jsonEachSet(name: string, value: readonly unknown[], fresh: Mint
   return make.project({ id: fresh('jesp'), input: kept, channels: [], type: typeOf(meta('sv', 'any', true)), exprs: [['sv', col(kept.id, 'sv')]] });
 }
 
-/**
- * `body(values…)` with each value SPELLED ONCE — SQL has no LET, and a fused projection re-inlines a named
- * column at every read, so an expression that reads an operand five times (a class test over a correlated
- * read) would spell that read five times. The operands ride as one JSON array through a one-row
- * `json_each`, and the body reads each back by position (`json_extract(value, '$[i]')`): a scalar
- * subquery correlated to the row, which a recursive term may hold as well (it names no relation).
- *
- * ⚠️ JSON carries a REAL to 15 significant digits, so the body may read only what survives that — a
- * value's storage class, its sign, its magnitude against a bound — never its exact digits.
- */
-export function letValues(values: readonly Expr[], body: (read: readonly Expr[]) => Expr, fresh: Minter): Expr {
-  const exploded = make.explode({
-    id: fresh('let'), channels: [], type: typeOf(meta('lv', 'any', true)), as: { value: 'lv' },
-    expr: { kind: 'call', fn: 'json_array', args: [{ kind: 'call', fn: 'json_array', args: [...values] }] },
-  });
-  const read = values.map((_, i): Expr => ({ kind: 'call', fn: 'json_extract', args: [col(exploded.id, 'lv'), compilerText(`$[${i}]`)] }));
-  return { kind: 'scalar', plan: make.project({ id: fresh('letp'), input: exploded, channels: [], type: typeOf(meta('lr', 'any', true)), exprs: [['lr', body(read)]] }) };
-}
-
 /** The json_each `type` names for a JSON number and a JSON string — a `V()`/`E()` id list routes the
  *  first to the rowid column and the second to `uid`, exactly the asymmetry the inline id path draws. */
 export const JSON_NUMERIC_TYPES = ['integer', 'real'] as const;
@@ -665,19 +646,40 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
   binary: false,
 });
 
+/** A value cheap enough to spell at every use — a column read or a literal — which `once` passes through. */
+const spelledFreely = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
+
+/**
+ * `body(values…)` with each value EVALUATED AND SPELLED ONCE — SQLite has no LET, and a fused projection
+ * re-inlines an expression at every read, so a body that reads an operand N times (a `{t,v}` node's
+ * per-tag `CASE`, a `math()` formula naming a variable once per use plus its Number test and NaN guard)
+ * would spell that operand N times: statement text O(uses × expression), which the DO's 100 KB statement
+ * cap turns into a production-only wall. The values ride as the ONE ROW of a `VALUES`, the body is
+ * projected over it reading each back as a column, and the whole is a scalar subquery correlated to the
+ * row — linear per row, text O(plan). A `VALUES` cell keeps its EXACT storage class (no JSON transport, so a
+ * REAL keeps all 17 digits), and the relation names no table, so a recursive term may hold it.
+ *
+ * A value already free to repeat (`spelledFreely`) is handed to `body` as it is, and where every value is,
+ * there is no wrapper at all — the common path's SQL is untouched.
+ */
+export function once(values: readonly Expr[], body: (reads: readonly Expr[]) => Expr, fresh: Minter, type: SqlType = 'any'): Expr {
+  const held = values.flatMap((value, i) => (spelledFreely(value) ? [] : [i]));
+  if (!held.length) return body(values);
+  const one = make.values({
+    id: fresh('once'), channels: [], type: typeOf(...held.map((_, k) => meta(`o${k}`, 'any', true))), rows: [held.map((i) => values[i]!)],
+  });
+  const reads = [...values];
+  held.forEach((i, k) => { reads[i] = col(one.id, `o${k}`); });
+  return { kind: 'scalar', plan: make.project({ id: fresh('oncep'), input: one, channels: [], type: typeOf(meta('n', type, true)), exprs: [['n', body(reads)]] }) };
+}
+
 /**
  * `typedNode` for a value or tag that is EXPENSIVE to spell — a correlated read, which `jsonMember`'s
  * per-tag `CASE` would repeat once per mention (measured, spelling the full node inline took
- * `group().by(values('name'))` from 1,700 to 5,540 statement bytes). So each is evaluated ONCE, as the one
- * row of a `VALUES` the node is projected over.
+ * `group().by(values('name'))` from 1,700 to 5,540 statement bytes). `once`, over the value and its tag.
  */
-export const typedNodeOnce = (value: Expr, vtype: Expr, fresh: Minter): Expr => {
-  const one = make.values({ id: fresh('tno'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)), rows: [[value, vtype]] });
-  return { kind: 'scalar', plan: make.project({
-    id: fresh('tnp'), input: one, channels: [], type: typeOf(meta('n', 'json', true)),
-    exprs: [['n', typedNode(col(one.id, 'v'), col(one.id, 't'))]],
-  }) };
-};
+export const typedNodeOnce = (value: Expr, vtype: Expr, fresh: Minter): Expr =>
+  once([value, vtype], ([v, t]) => typedNode(v!, t!), fresh, 'json');
 
 /**
  * The DETACHED-transfer member node — `{t, v, vpid, meta}`, the `{t,v}` node plus the two facts a

@@ -10,10 +10,10 @@ import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
 import { byTyped, mapScopeMayHold, modulations, scopedHost, type Modulation } from './modulator.ts';
-import { asStringOf, evidenceOf, mathVariableMessage, raisingWhen, receiverOffence } from './receiver.ts';
+import { asStringOf, evidenceOf, mathVariableMessage, raisingWhen, receiverOffence, type ValueEvidence } from './receiver.ts';
 import { deferralExpr, raiseInRow } from '../../rel/raise.ts';
 import type { GraphSource } from './source.ts';
-import { carriedCols, jsonField, meta, typeOf, type Minter } from './build.ts';
+import { carriedCols, jsonField, meta, once, typeOf, type Minter } from './build.ts';
 import { correlatedMapKey } from './map.ts';
 import { fieldNamed, mapKeyPresence } from './framing.ts';
 
@@ -136,8 +136,10 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
   if (typeof formula !== 'string' || extra !== undefined || step.optionArms) return null;
   const ring = modulations(step, (step.modulators ?? []).length, child);
   if (!ring) return null;
-  const resolved = new Map<string, Expr>();
-  const offences: (readonly [Expr, string])[] = [];
+  // Each variable's value — and, where it owes a per-row Number test, that test's inputs — in first-seen
+  // order. The formula spells a variable once per use, its test and the NaN guard spell it again, so all
+  // of them are built over `once`'s reads rather than over the values themselves.
+  const resolved = new Map<string, { readonly value: Expr; readonly tested?: NumberTest }>();
   const vars = mathVars(formula);
   for (const [at, name] of vars.entries()) {
     // The ring advances ONCE PER VARIABLE, in first-seen order, and wraps — so one `by()` feeds every
@@ -162,7 +164,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
       // else is the reference's raise, and declining is the fail-closed half of it.
       const seeded = child.sideEffects.get(name)?.value;
       if (typeof seeded !== 'number' && typeof seeded !== 'bigint') return null;
-      resolved.set(name, se);
+      resolved.set(name, { value: se });
       continue;
     }
     // An identity projection over an ELEMENT or a RECORD is the traverser itself, which is not a
@@ -177,12 +179,29 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, sourc
     if (!typed) return null;
     const offends = receiverOffence('number', typed.value, typed.evidence, typed.productiveNull);
     if (offends === false) return null;
-    if (offends) offences.push([offends, mathVariableMessage(name)]);
-    resolved.set(name, typed.value);
+    resolved.set(name, offends ? { value: typed.value, tested: { evidence: typed.evidence, productiveNull: typed.productiveNull } } : { value: typed.value });
   }
-  // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
-  return raisingWhen(offences, nanDeferred(compileMath(formula, relMathOps((name) => resolved.get(name)!)), [...resolved.values()]));
+  const names = [...resolved.keys()], entries = [...resolved.values()];
+  // What `once` holds: every variable's value, then the per-row TAG of each tested variable whose evidence
+  // reads one (a label's tag is as costly a read as its value).
+  const tags = entries.flatMap((entry) => (entry.tested?.evidence.kind === 'tag' ? [entry.tested.evidence.tag] : []));
+  return once([...entries.map((entry) => entry.value), ...tags], (reads) => {
+    const values = reads.slice(0, entries.length);
+    let tagAt = entries.length;
+    const offences = entries.flatMap((entry, i): (readonly [Expr, string])[] => {
+      if (!entry.tested) return [];
+      const { evidence, productiveNull } = entry.tested;
+      const read: ValueEvidence = evidence.kind === 'tag' ? { ...evidence, tag: reads[tagAt++]! } : evidence;
+      const offends = receiverOffence('number', values[i]!, read, productiveNull);
+      return offends ? [[offends, mathVariableMessage(names[i]!)]] : [];
+    });
+    // Total by construction: every variable `compileMath` can ask for is one `mathVars` reported.
+    return raisingWhen(offences, nanDeferred(compileMath(formula, relMathOps((name) => values[names.indexOf(name)]!)), values));
+  }, fresh, 'real');
 }
+
+/** A variable's per-row Number test, held until it is spelled over `once`'s reads (`receiverOffence`). */
+interface NumberTest { readonly evidence: ValueEvidence; readonly productiveNull: boolean }
 
 /** The deferral a formula whose answer SQLite leaves NULL raises (`nanDeferred`) — a NaN, or an infinity
  *  SQLite does not compute (`log(0)` is `-Infinity` in exp4j, NULL in SQLite). */
