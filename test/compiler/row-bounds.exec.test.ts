@@ -48,6 +48,23 @@ describe('rowBounds', () => {
     expect(rowBounds(limit({ id: relId('l'), input: scan, channels, type: scan.type, count: param(1, 'n', 'int') }))).toEqual({ min: 0, max: Infinity });
   });
 
+  test('a filter pinning a unique key over an element scan holds at most as many rows as it names', () => {
+    const key = (name: string) => col(scan.id, name);
+    const ids = (n: number) => ({ kind: 'in-list', expr: key('id'), values: Array.from({ length: n }, (_, i) => compilerInt(i + 1)) }) as const;
+    const rowidOnly = { kind: 'binary', op: 'is', left: key('uid'), right: lit(null) } as const;
+    const over = (pred: any) => rowBounds(filter({ id: relId('f'), input: scan, channels, type: scan.type, pred }));
+    // `V(1)`, `V(1, 2)`, `V('a')`, `V(1, 'a')`, `V($x)` — `idMembership`'s shapes.
+    expect(over({ kind: 'binary', op: 'and', left: ids(1), right: rowidOnly })).toEqual({ min: 0, max: 1 });
+    expect(over({ kind: 'binary', op: 'and', left: ids(2), right: rowidOnly })).toEqual({ min: 0, max: 2 });
+    expect(over({ kind: 'in-list', expr: key('uid'), values: [lit('a', 'text')] })).toEqual({ min: 0, max: 1 });
+    expect(over({ kind: 'binary', op: 'or', left: { kind: 'binary', op: 'and', left: ids(1), right: rowidOnly }, right: { kind: 'in-list', expr: key('uid'), values: [lit('a', 'text')] } }))
+      .toEqual({ min: 0, max: 2 });
+    expect(over({ kind: 'binary', op: '=', left: key('id'), right: param(1, 'x', 'int') })).toEqual({ min: 0, max: 1 });
+    // A disjunct that pins nothing, or a non-key column, bounds nothing.
+    expect(over({ kind: 'binary', op: 'or', left: ids(1), right: truthy })).toEqual({ min: 0, max: Infinity });
+    expect(over({ kind: 'in-list', expr: key('label'), values: [compilerInt(1)] })).toEqual({ min: 0, max: Infinity });
+  });
+
   test('a join multiplies; only an ON that always holds keeps a floor; union all sums', () => {
     const [a, b] = [row('a', 2), row('b', 3)];
     const type = { cols: [one.cols[0], { ...one.cols[0], name: 'w' }] } as const;

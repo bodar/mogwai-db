@@ -16,6 +16,34 @@ const literalCount = (expr: Expr): number | null =>
 const provablyTrue = (on: Expr | undefined): boolean =>
   !on || (on.kind === 'lit' && on.source !== 'parameter' && (on.value === true || on.value === 1));
 
+/** The element tables whose `id` (the rowid) and `uid` (`UNIQUE`) are each a unique key (`src/storage.ts`). */
+const UNIQUE_KEYED: ReadonlySet<string> = new Set(['nodes', 'edges']);
+
+/**
+ * At most how many rows of `scan` satisfy `pred` because it pins a UNIQUE KEY to a fixed number of
+ * values, or `null` where it does not. The shape is `idMembership`'s (`src/compiler/rel/source.ts`):
+ * `V(1, 2)` is `id IN (1, 2) AND uid IS NULL`, `V('a')` is `uid IN ('a')`, `V(1, 'a')` their `OR`, and a
+ * scalar parameter `V($x)` an `=`. Over a unique key, `k IN (v1…vk)` holds for at most k rows WHATEVER
+ * the values are, so the count is the query text's even where a value is a parameter. A bound
+ * COLLECTION (`V($ids)`) is an `in-query` over `json_each` — sized by data — and stays unbounded.
+ */
+function uniqueKeyMatches(pred: Expr, scan: Extract<Rel, { readonly kind: 'scan' }>): number | null {
+  if (!UNIQUE_KEYED.has(scan.table)) return null;
+  const isKey = (e: Expr): boolean => e.kind === 'col' && e.rel === scan.id && (e.name === 'id' || e.name === 'uid');
+  const walk = (e: Expr): number | null => {
+    if (e.kind === 'in-list') return isKey(e.expr) ? e.values.length : null;
+    if (e.kind !== 'binary') return null;
+    if (e.op === '=') return isKey(e.left) && e.right.kind === 'lit' ? 1 : null;
+    if (e.op !== 'and' && e.op !== 'or') return null;
+    const left = walk(e.left), right = walk(e.right);
+    // A conjunction holds only where EACH side does, so either side's count bounds it; a disjunction
+    // is bounded only when both sides are, by their sum.
+    if (e.op === 'and') return left === null ? right : right === null ? left : Math.min(left, right);
+    return left === null || right === null ? null : left + right;
+  };
+  return walk(pred);
+}
+
 /**
  * THE ROW-COUNT AUTHORITY — the bounds on how many rows `rel` yields, as compile-time metadata over the
  * closed node set. Calcite's `RelMdMinRowCount`/`RelMdMaxRowCount` (`vendor/calcite/core/src/main/java/org/
@@ -52,7 +80,13 @@ export function rowBounds(rel: Rel): RowBounds {
       if (offset === null) return { min: 0, max: Math.min(count, input.max) };
       return { min: Math.min(count, Math.max(0, input.min - offset)), max: Math.min(count, Math.max(0, input.max - offset)) };
     }
-    case 'filter': return { min: 0, max: rowBounds(rel.input).max };
+    // A filter keeps at most its input's rows — and, directly over an element scan, at most as many as
+    // a unique-key membership it states (`uniqueKeyMatches`), which is how `V(1)` is known to be one row.
+    case 'filter': {
+      const input = rowBounds(rel.input).max;
+      const keyed = rel.input.kind === 'scan' ? uniqueKeyMatches(rel.pred, rel.input) : null;
+      return { min: 0, max: keyed === null ? input : Math.min(keyed, input) };
+    }
     case 'project': case 'sort': case 'window': case 'materialize': return rowBounds(rel.input);
     case 'join': {
       const left = rowBounds(rel.left);

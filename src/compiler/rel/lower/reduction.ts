@@ -6,7 +6,7 @@ import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../../rel/types.ts';
-import { exprHasSubquery, forEachRel } from '../../../rel/walk.ts';
+import { exprHasSubquery, forEachRel, isSelfContained } from '../../../rel/walk.ts';
 import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
 import type { Elem } from '../../elem.ts';
@@ -69,7 +69,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // THE ONE predicate entry `where()`/`filter()`/`not()` already use, so a body lowered through the seam
   // gets the same `select(<label>)` re-root over the row's aliases — not a second, scope-less ladder.
   predicate: (body, subject, negated, aliases) => childPredicate(body, subject, fresh, ctx, negated, aliases),
-  rooted: (steps) => rootedRead(steps, ctx, fresh),
+  rooted: (steps, host) => rootedRead(steps, ctx, fresh, rootedHosts(host)),
   anchored: (elem, id) => ({ rel: anchoredSeed(ctx.source, elem, id, fresh), framing: { kind: 'elements', elem } }),
   rows: (body, input, elem, aliases, originFrom) => childRows(body, input, elem, aliases, ctx, fresh, false, false, originFrom),
   // `bulked: false` is a fold RESET, and it is safe for a reason worth naming rather than trusting:
@@ -285,7 +285,7 @@ export function perTraverserChild(
     const perRow = flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
     if (perRow) return perRow;
   }
-  const produced = scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh);
+  const produced = withLocalHint(step.name, () => scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh));
   if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
@@ -742,7 +742,7 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
   // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.
   const steps = rootedSteps(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!steps) return null;
-  const read = rootedRead(steps, ctx, fresh);
+  const read = rootedRead(steps, ctx, fresh, 'many');
   if (!read || read.effects?.length || read.framing.kind !== 'list') return null;
   const listValue: Expr = { kind: 'scalar', plan: make.project({
     id: fresh('wls'), input: read.rel, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
@@ -786,7 +786,7 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   if (ctx.entryValue && body.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
     && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') return ctx.entryValue;
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
-    const read = rootedRead(body, ctx, fresh);
+    const read = rootedRead(body, ctx, fresh, rootedHosts(host?.rel));
     if (!read) return null;
     // `P.resolve(traverser)` takes the operand's FIRST result (ORDER BY encounter, LIMIT 1); the whole
     // rule — and the decline for an effectful or non-scalar body — is `firstRootedValue` (`build.ts`),
@@ -874,8 +874,37 @@ function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
   });
 }
 
-const SHARED_DRAW = 'a random draw (sample/coin/shuffle) in a body that re-reads the graph with V()/E() is drawn once and '
-  + 'shared by every row; use local(__.V()…sample(1)) to draw per row';
+/**
+ * HOW MANY TRAVERSERS a rooted read is evaluated for. `'one'` only where the statement provably reads it
+ * for at most ONE host — then the one uncorrelated evaluation IS the reference's per-host one. Anything
+ * a caller cannot name is `'many'`.
+ */
+export type RootedHosts = 'one' | 'many';
+
+/**
+ * The hosts a rooted read under `host` serves — `rowBounds` (`src/rel/bounds.ts`) is the one authority:
+ * `'one'` where the host relation holds at most one row (a source `addE`'s one-row `Values`, `g.V(1)`,
+ * `g.inject(x)`). It must also be SELF-CONTAINED: a host that reads an enclosing row is itself evaluated
+ * per enclosing traverser, while the uncorrelated rooted read under it is evaluated once per statement
+ * (SQLite runs an uncorrelated subquery once), so a one-row host inside a per-row body is still many.
+ */
+export const rootedHosts = (host: Rel | undefined): RootedHosts =>
+  host && atMostOneRow(host) && isSelfContained(host) ? 'one' : 'many';
+
+const SHARED_DRAW = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body runs '
+  + 'for more than one traverser — it would be drawn once and shared by every row';
+
+/** A `map()`/`flatMap()` body's `SHARED_DRAW` names the per-row form, which answers there
+ *  (`local(__.V().sample(1))` draws per origin through `reSourcedOnce`); every other host's does not. */
+function withLocalHint<T>(host: string, lower: () => T): T {
+  try {
+    return lower();
+  } catch (e) {
+    if ((host === 'map' || host === 'flatMap') && e instanceof UnsupportedTraversal && e.gremlin === SHARED_DRAW)
+      throw UnsupportedTraversal.because(`${SHARED_DRAW}; use local(__.V()…sample(1)) to draw per row`);
+    throw e;
+  }
+}
 
 /**
  * A rooted chain lowered as one relation, or `null` to decline.
@@ -890,13 +919,22 @@ const SHARED_DRAW = 'a random draw (sample/coin/shuffle) in a body that re-reads
  *
  * For the same reason it cannot hold a DRAW (`nondeterministic`: `sample`, `coin`, a `shuffle`, at any
  * depth): evaluated once, every host would share one random choice where the reference draws per host
- * (`project('x').by(__.V().sample(1))` gave every row one name). The likely intent, a per-row draw, already
- * answers through `local(__.V()…sample(1))`, so this declines from the query text naming it.
+ * (`project('x').by(__.V().sample(1))` gave every row one name) — UNLESS there is only one host
+ * (`hosts`, the caller's `rootedHosts`), where one draw and a per-host draw are the same thing:
+ * `g.addE('r').from(__.V().sample(1))`, `g.V(1).project('x').by(__.V().sample(1))`. Where there may be
+ * several it declines from the query text (`SHARED_DRAW`); a per-row draw already answers through
+ * `local(__.V()…sample(1))`.
+ *
+ * It THROWS rather than returning `null` for that decline, so a caller lowering it inside a speculative
+ * probe (one whose `null` would fall through to another route) sees the throw too — that is intended:
+ * every route over the same rooted body shares the one evaluation.
  */
-export function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter, start: RootedStart = 'split'): RootedRead | null {
+export function rootedRead(
+  steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter, hosts: RootedHosts, start: RootedStart = 'split',
+): RootedRead | null {
   if (!steps.length) return null;
   if (start === 'split' && readsHostState(steps, ctx)) return null;
-  if (start === 'split' && nondeterministic(steps, ctx.params)) throw UnsupportedTraversal.because(SHARED_DRAW);
+  if (start === 'split' && hosts === 'many' && nondeterministic(steps, ctx.params)) throw UnsupportedTraversal.because(SHARED_DRAW);
   const chain = lowerChain(steps, {
     params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
     labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,
@@ -1525,7 +1563,8 @@ const READS_THROUGH_ID: ReadonlySet<string> = new Set(['values', 'label', 'id'])
  * of the query text.
  */
 function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  const value = reSourcedValue(body, ctx, fresh);
+  const hosts = rootedHosts(host.row?.rel);
+  const value = reSourcedValue(body, ctx, fresh, hosts);
   if (!value || !mayBeAbsent(host)) return value;
   const present = hostPresence(host);
   if (!present) return null;
@@ -1538,7 +1577,7 @@ function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx,
       : meetPresence([value.present, presentOfHost(host)]);
     return expr && { ...value, expr, ...(vtype ? { vtype } : {}), present: produced };
   }
-  const empty = reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh);
+  const empty = reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh, hosts);
   if (!empty || !sameFraming(empty.framing, value.framing) || !value.vtype !== !empty.vtype) return null;
   // The presence is chosen per row exactly as the value is — a choice between the two arms (`choicePresence`).
   return {
@@ -1550,8 +1589,8 @@ function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx,
 }
 
 /** A re-sourcing body's value over the graph, whoever the host — `reSourcedUnder`'s one lowering. */
-function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  const rooted = rootedRead(body, ctx, fresh);
+function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter, hosts: RootedHosts): ChildValue | null {
+  const rooted = rootedRead(body, ctx, fresh, hosts);
   if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar') return null;
   // A reducing barrier (`__.V().count()`) collapses to EXACTLY one row and is always productive.
   const counted = rootedCount(rooted, fresh);
@@ -1607,7 +1646,7 @@ export function reSourcedOnce(
   const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
   if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return undefined;
   if (nondeterministic(prefix, params) || someStepDeep(prefix, read, collectsSideEffect, true)) return undefined;
-  const rooted = rootedRead(prefix, ctx, fresh);
+  const rooted = rootedRead(prefix, ctx, fresh, 'many');
   if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return undefined;
   // Only the payload crosses: a rooted channel other than its position and its (provably unit) bulk —
   // an alias, a path — is a fact about the candidate that the origins' channels have no slot for.
@@ -2190,7 +2229,7 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
     // A reducing rooted read has one value independently of the entry, exactly the ordinary
     // scalar-child V()/E() arm. Keep it scalar; only the unreduced fan-out below becomes the
     // group's List value.
-    const rooted = rootedRead(body, ctx, fresh);
+    const rooted = rootedRead(body, ctx, fresh, 'many');
     const counted = rooted && rootedCount(rooted, fresh);
     if (counted) return counted;
     const elem = first.name === 'V' ? 'vertex' : 'edge';

@@ -90,8 +90,11 @@ export interface ChildSeam {
    *  re-roots off it (`childPredicate`), so a caller holding a carrying table passes its labels and a
    *  body reading an outer label is answered rather than read as unbound. Absent = no labels in scope. */
   readonly predicate: (body: readonly IRStep[], subject: Subject, negated: boolean, aliases?: AliasMap) => Expr | null;
-  /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
-  readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
+  /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. `host`
+   *  is the relation whose rows the chain is read FOR (a write's input, a by()'s host stream), where the
+   *  caller can name one: a host of at most one row lets a random draw in the chain answer
+   *  (`rootedHosts`). Absent = many hosts. */
+  readonly rooted: (steps: readonly IRStep[], host?: Rel) => RootedRead | null;
   /** The ONE element an outer `id` names, as a fold-ready element source CORRELATED to the outer row
    *  (`anchoredSeed`) — what a body that must start AT a bound element walks from, inside an `exists`
    *  subplan. `rooted([V()])` joined back on the id is the same rows at ~N² cost. */

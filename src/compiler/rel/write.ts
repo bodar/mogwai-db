@@ -4485,7 +4485,7 @@ export function elementAddE(
   for (const member of cluster) {
     if (member.name === 'property') { propertySteps.push(member); continue; }
     if (member.modulators?.length || member.optionArms) return null;
-    const parsed = endpointOf((member.args ?? [])[0]?.value, child, fresh);
+    const parsed = endpointOf((member.args ?? [])[0]?.value, child, fresh, input);
     if (!parsed) return null;
     if (member.name === 'from') from = parsed; else to = parsed;
   }
@@ -4534,6 +4534,16 @@ export function elementAddE(
   // different end than marko's; the plan resolves every traverser's endpoint before any insert. The same
   // race guard every `property(k, <traversal>)` site runs (`sequentialGuard`), over the endpoint bodies.
   resolvedBodyGuard(incoming, [from, to].flatMap((end) => (end.kind === 'read' ? [end.body] : [])), child, guard, fresh);
+  // A DRAWN endpoint (`to(__.V().sample(1).out())`, admitted only over one host — `rootedHosts`) is read
+  // by the absence guard below AND by the insert, two statements: spelled at each, they drew twice, so
+  // the guard passed on one draw while the insert wrote another's NULL end. Its first row is bound ONCE.
+  const drawnOnce = (end: Endpoint): Endpoint => {
+    if (end.kind !== 'read' || !nondeterministic(end.body, child.params)) return end;
+    const first = make.limit({ id: fresh('li'), input: end.rel, channels: end.rel.channels, type: end.rel.type, count: compilerInt(1) });
+    return { ...end, rel: bind(first, true, [], true) };
+  };
+  from = drawnOnce(from);
+  to = drawnOnce(to);
 
   const src = endpointExpr(from, incoming, aliases, fresh);
   const tgt = endpointExpr(to, incoming, aliases, fresh);
@@ -4663,7 +4673,7 @@ export function elementAddE(
 /** One `from()`/`to()` argument → the endpoint it names, or `null` for a form this route declines
  *  (`__.addV(…)`, which CREATES its endpoint as a side effect of resolving it, and anything whose
  *  nested chain the read fold does not cover). */
-function endpointOf(value: unknown, child: ChildSeam, fresh: Minter, ids = false): Endpoint | null {
+function endpointOf(value: unknown, child: ChildSeam, fresh: Minter, host?: Rel, ids = false): Endpoint | null {
   // A bare STRING is an `as()` label to `from()`/`to()`, and a public vertex id to a merge map's
   // endpoint option — the same characters meaning different things because the two hosts declare
   // different vocabularies. `ids` is which host is asking, stated rather than sniffed.
@@ -4675,7 +4685,7 @@ function endpointOf(value: unknown, child: ChildSeam, fresh: Minter, ids = false
   // `__.select("a")` IS the bare label, spelled longhand.
   if (inner.length === 1 && inner[0]!.name === 'select' && typeof inner[0]!.args?.[0]?.value === 'string')
     return { kind: 'alias', label: inner[0]!.args[0].value as string };
-  const read = rootedVertices(inner, child, fresh);
+  const read = rootedVertices(inner, child, fresh, host);
   return read && { kind: 'read', rel: read, body: inner };
 }
 
@@ -4687,9 +4697,12 @@ function endpointOf(value: unknown, child: ChildSeam, fresh: Minter, ids = false
  * edge can attach to), and a rooted chain with EFFECTS of its own is refused rather than spliced —
  * that endpoint is `__.addV(…)`, whose creation has to be ORDERED against the edge insert, and whose
  * statements are `Plan` bindings a spliced relation would silently drop.
+ *
+ * `host` is the write's INPUT — the rows the endpoint is read FOR. Where it is one row (a source `addE`,
+ * `g.V(1).addE(…)`) a drawn endpoint (`to(__.V().sample(1))`) answers: one draw IS the per-traverser draw.
  */
-function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minter): Rel | null {
-  const read = child.rooted(steps);
+function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minter, host?: Rel): Rel | null {
+  const read = child.rooted(steps, host);
   if (!read || read.effects?.length || read.framing.kind !== 'elements' || read.framing.elem !== 'vertex') return null;
   return make.project({ id: fresh('ep'), input: read.rel, channels: [], type: ID_TYPE, exprs: [['id', col(read.rel.id, 'id')]] });
 }
@@ -6393,7 +6406,7 @@ function endpointSlot(
   // "mentioned, and this route cannot express it", which is a decline.
   if (named === undefined) return undefined;
   if (named !== null && typeof named === 'object' && (named as { incoming?: unknown }).incoming !== undefined)
-    return option === undefined ? null : endpointOf(option, child, fresh, true);
+    return option === undefined ? null : endpointOf(option, child, fresh, undefined, true);
   return typeof named === 'string' || typeof named === 'number' ? { kind: 'vertex', uid: named } : null;
 }
 

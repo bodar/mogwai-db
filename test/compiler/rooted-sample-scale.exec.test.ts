@@ -267,22 +267,88 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
 // A DRAW IN A ONCE-EVALUATED SPLIT READ. A `by()`/`map()` value, a `P` operand, a list operand or a write
 // endpoint that re-sources (`__.V()…`) is lowered ONCE for every host (`rootedRead`'s 'split' gate), so a
 // `sample`/`coin`/`shuffle` in it would be ONE random choice shared by every row, where the reference draws
-// per traverser. It declines from the query text naming the problem and the per-row form, which answers.
-describe('a draw in a body evaluated once for every host declines with the per-row form', () => {
+// per traverser. Where the host may be MORE than one row it declines from the query text naming the
+// problem — and, from a `map()`/`flatMap()` body, the per-row form, which answers. Where the host is
+// provably ONE row (`rowBounds`, `src/rel/bounds.ts`: a source `addE`, `g.V(1)`, `g.inject(x)`) one draw IS
+// the per-traverser draw, so it answers.
+const SHARED = /a random draw \(sample\/coin\/shuffle\) inside a V\(\)\/E\(\) body is not supported where the body runs for more than one traverser — it would be drawn once and shared by every row/;
+const LOCAL_HINT = /; use local\(__\.V\(\)…sample\(1\)\) to draw per row$/;
+describe('a draw in a body evaluated once for several hosts declines', () => {
   test.each([
     "g.V().project('x').by(__.V().sample(1).values('name'))",
-    "g.V().map(__.V().order().by(shuffle).limit(1).values('name'))",
     "g.V().order().by(__.V().order().by(shuffle).values('name'))",
     "g.V().values('age').is(gt(__.V().sample(1).values('age')))",
     "g.V().has('age', __.V().sample(1).values('age'))",
     "g.V().values('name').is(within(__.V().sample(1).values('name').fold()))",
     "g.V().where(__.V().sample(1).values('age').is(29))",
-    "g.V().map(__.V().coin(0.5).count())",
     "g.V().group().by(__.V().sample(1).values('name'))",
     "g.V().addE('x').to(__.V().sample(1))",
+    // Two literal ids are two hosts, whatever the graph holds.
+    "g.V(1,1).addE('x').to(__.V().sample(1))",
+    "g.V(1,2).project('x').by(__.V().sample(1).values('name'))",
+    // A one-row host INSIDE a per-row body is still evaluated once per statement.
+    "g.V().local(__.V(1).project('x').by(__.V().sample(1).values('name')))",
+    "g.V().V(1).project('x').by(__.V().sample(1).values('name'))",
+    "g.V(1).out().project('x').by(__.V().sample(1).values('name'))",
   ])('%s', (q) => {
-    expect(() => compile(q, {})).toThrow(/drawn once and shared by every row; use local\(__\.V\(\)…sample\(1\)\) to draw per row/);
+    expect(() => compile(q, {})).toThrow(SHARED);
+    expect(() => compile(q, {})).not.toThrow(LOCAL_HINT);
   });
+
+  test.each([
+    "g.V().map(__.V().order().by(shuffle).limit(1).values('name'))",
+    "g.V().map(__.V().coin(0.5).count())",
+  ])('%s names the per-row local() form', (q) => {
+    expect(() => compile(q, {})).toThrow(SHARED);
+    expect(() => compile(q, {})).toThrow(LOCAL_HINT);
+  });
+});
+
+describe('a draw in a body evaluated for ONE host answers', () => {
+  const NAMES = ['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter'];
+  const nameOf = (store: GraphStore, id: unknown): string => bare(run(store, `g.V(${id}).values('name')`))[0].v;
+
+  test('a source addE draws each endpoint from the graph', () => {
+    const store = seededStore();
+    const [edge] = bare(run(store, "g.addE('rnd').from(__.V().sample(1)).to(__.V().sample(1))"));
+    expect(edge.label).toBe('rnd');
+    expect(NAMES).toContain(nameOf(store, edge.src));
+    expect(NAMES).toContain(nameOf(store, edge.tgt));
+    expect(count(store, "g.E().hasLabel('rnd').count()")).toBe(1);
+  });
+
+  test('a one-vertex addE draws its other end', () => {
+    const store = seededStore();
+    const [edge] = bare(run(store, "g.V(1).addE('x').to(__.V().sample(1))"));
+    expect(edge.src).toBe(1);
+    expect(NAMES).toContain(nameOf(store, edge.tgt));
+  });
+
+  test('a drawn endpoint is ONE draw: the absence guard and the insert agree', () => {
+    // Half the vertices have no `created` out-edge. Drawn separately by the guard and the insert, the
+    // insert hit NOT NULL on a draw the guard never saw; drawn once, it either writes or refuses cleanly.
+    const store = seededStore();
+    for (let i = 0; i < 20; i++) {
+      try {
+        const [edge] = bare(run(store, "g.V(1).addE('x').to(__.V().sample(1).out('created'))"));
+        expect([3, 5]).toContain(edge.tgt);
+      } catch (e) {
+        expect((e as Error).message).toMatch(/to\(\) traversal \(which should give a Vertex\) failed/);
+      }
+    }
+  });
+
+  test.each([
+    ["g.V(1).project('x').by(__.V().sample(1).values('name'))", (rows: any[]) => JSON.parse(rows[0].map)[0][1].v],
+    ["g.inject(1).map(__.V().sample(1).values('name'))", (rows: any[]) => rows[0].v],
+    ["g.V().hasId(1).map(__.V().sample(1).values('name'))", (rows: any[]) => rows[0].v],
+    ["g.V().count().project('x').by(__.V().sample(1).values('name'))", (rows: any[]) => JSON.parse(rows[0].map)[0][1].v],
+  ] as const)('%s', (q, valueOf) => {
+    const rows = bare(run(seededStore(), q));
+    expect(rows).toHaveLength(1);
+    expect(NAMES).toContain(valueOf(rows));
+  });
+
 
   test('the per-row forms keep answering, one draw per traverser', () => {
     const store = graph(30, 30);

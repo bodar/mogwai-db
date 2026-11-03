@@ -444,7 +444,7 @@ export function sourceUnion(
     if (!body?.length) return null;
     const { held, inMap } = rootedLabelsOut(body, ctx.params);
     if (readsPathLabel(held, reads) || readsPathLabel(inMap, laterReads)) return null;
-    const read = rootedRead(body, ctx, fresh, 'source');
+    const read = rootedRead(body, ctx, fresh, 'one', 'source');
     if (!read) return null;
     if (read.effects?.length) effects.push(...read.effects);
     arms.push({ rel: read.rel, framing: read.framing, aliases: NO_ALIASES, bulked: ctx.collapse });
