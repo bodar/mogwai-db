@@ -19,7 +19,7 @@ Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
 | Step | | Notes |
 |---|:--:|---|
-| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | ❌ a mid-traversal `V()` after `path()`/`sack()` |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | ❌ a mid-traversal `V()` after `path()`/`sack()`; a child body that re-sources (`V()`/`E()`) right after a value that may be missing on some rows (`optional(…as('a')).map(__.select('a').V()…)`) declines with an explanation — the value is discarded, so the answer would only reflect which rows bound it |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | |
 | `otherV` | ✅ | ❌ `E().otherV()` (no entering vertex); a mixed vertex/edge branch (`union(outE(), out()).otherV()`) |
 | `inject(…)` | ✅ | ❌ a list appended to a scalar stream |

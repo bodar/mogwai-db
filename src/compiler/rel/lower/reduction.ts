@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import { withChannel } from '../../../channels.ts';
-import { arg, isColumnArg, isNested, isPopArg, isPred, stepChain, type Arg, type SideEffectConstants } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPopArg, isPred, stepChain, type Arg, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
@@ -13,13 +13,12 @@ import type { Elem } from '../../elem.ts';
 import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { normalize } from '../../ir/passes.ts';
-import { yieldsNothingFromEmpty } from '../../ir/productivity.ts';
 import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, typeOf, type Minter } from '../build.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, choicePresence, gatedByHost, hostPresence, hostTag, mayBeAbsent, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, type RelFraming } from '../framing.ts';
@@ -38,7 +37,7 @@ import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
-import { BRANCH_HOSTS, ensureBulk, sameFraming } from './branch.ts';
+import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
 import { RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
@@ -1538,54 +1537,29 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
  *  id (an absent host) already reads NULL and owes no `gatedByHost` term. */
 const READS_THROUGH_ID: ReadonlySet<string> = new Set(['values', 'label', 'id']);
 
+const RESOURCE_UNDER_ABSENT = 'V()/E() inside this body discards the value before it, and that value is missing on some rows '
+  + '(an unbound label, an absent property or key), so the answer would depend on which rows matched — did you mean '
+  + 'select(…).out()/in() from that value, or V().has(…, select(…)) to filter by it?';
+
 /**
  * A RE-SOURCING body (`__.V()…`, `__.E()…`) as ONE value per host row — or `null` to decline.
  *
  * A mid-traversal GraphStep emits the graph PER INCOMING TRAVERSER
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java`),
  * so its rows do not depend on the host's VALUE and the body lowers once as an ordinary rooted read whose
- * one-row result is an UNCORRELATED scalar SQLite evaluates once. They do depend on the host's PRESENCE:
- * an absent host (a label unbound on this row — `hostPresence`) is an EMPTY INPUT, and the body over an
- * empty input is not the body over the graph (`select('a').V().count()` is `0` there, `.values('name')`
- * is nothing). That is the rule every other arm of this seam keeps — absent host ⟹ the body's INPUT is
- * empty — applied to the one arm whose read never goes through the host. Three cases:
+ * one-row result is an UNCORRELATED scalar SQLite evaluates once.
  *
- * 1. a host that cannot be absent — the rooted value unchanged, so a statically bound label's SQL is
- *    byte-identical;
- * 2. a body that yields nothing from nothing (`yieldsNothingFromEmpty`) — the value gated by the host,
- *    NULL (nothing) where it is absent;
- * 3. otherwise the empty-input value is the body's OWN lowering over an empty input (`[V, limit(0),
- *    …tail]`, a second uncorrelated scalar), chosen per row. No seed table: `count().math('_+1')` answers
- *    `1.0` there because that is what that tail answers over nothing.
- *
- * An OUTPUT gate keyed on the tail's seed is the refuted alternative — it is wrong as soon as any step
- * follows the reduction. A body whose empty form `rootedRead` cannot lower declines, which is a property
- * of the query text.
+ * A host that MAY BE ABSENT (`mayBeAbsent` — a label unbound on some rows, a missing property or map key)
+ * DECLINES with an explanation, a property of the query text. The re-source discards the host's value, so
+ * all the host still contributes is WHETHER it exists on a row: the reference answers the body over an
+ * EMPTY input there (`select('a').V().count()` is `0` on an unbound row, the graph's count elsewhere).
+ * That answer is faithful but baffling — the shape almost always means `select('a').out()` or
+ * `V().has(…, select('a'))` — so it is explained rather than computed. An always-present host
+ * (`map(__.V().count())`, a `select('a')` the row was already filtered by) answers.
  */
 function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  const hosts = rootedHosts(host.row?.rel);
-  const value = reSourcedValue(body, ctx, fresh, hosts);
-  if (!value || !mayBeAbsent(host)) return value;
-  const present = hostPresence(host);
-  if (!present) return null;
-  if (yieldsNothingFromEmpty(body.slice(1))) {
-    const expr = gatedByHost(host, value.expr);
-    // The TAG is gated with the value — a NULL value is "nothing", whatever its row's type was.
-    const vtype = value.vtype && gatedByHost(host, value.vtype);
-    // A STATED presence is conjoined with the host's: the body produced where both did.
-    const produced: Presence = typeof value.present === 'object' ? { ...value.present, when: and(present, value.present.when) }
-      : meetPresence([value.present, presentOfHost(host)]);
-    return expr && { ...value, expr, ...(vtype ? { vtype } : {}), present: produced };
-  }
-  const empty = reSourcedValue([body[0]!, { name: 'limit', args: [arg(0)] } as IRStep, ...body.slice(1)], ctx, fresh, hosts);
-  if (!empty || !sameFraming(empty.framing, value.framing) || !value.vtype !== !empty.vtype) return null;
-  // The presence is chosen per row exactly as the value is — a choice between the two arms (`choicePresence`).
-  return {
-    expr: caseWhen(present, value.expr, empty.expr), framing: value.framing,
-    ...(value.vtype && empty.vtype ? { vtype: caseWhen(present, value.vtype, empty.vtype) } : {}),
-    present: choicePresence([{ when: present, present: value.present }], empty.present),
-    yields: value.yields === 'one' && empty.yields === 'one' ? 'one' : 'first',
-  };
+  if (mayBeAbsent(host)) throw UnsupportedTraversal.because(RESOURCE_UNDER_ABSENT);
+  return reSourcedValue(body, ctx, fresh, rootedHosts(host.row?.rel));
 }
 
 /** A re-sourcing body's value over the graph, whoever the host — `reSourcedUnder`'s one lowering. */
@@ -1817,7 +1791,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   }
 
   // A GraphStep inside a per-traverser child RE-SOURCES the graph: its answer is independent of WHICH
-  // host triggered it, but not of WHETHER one did (`reSourcedUnder`). This is the `map(__.V().count())`
+  // host triggered it, and a host that may be absent declines (`reSourcedUnder`). This is the `map(__.V().count())`
   // half of re-sourcing; fan-out `flatMap(__.V()…)` is the general child rejoin's (`flatMapRejoin`),
   // rather than abusing a scalar subquery's arbitrary-first-row behaviour.
   if (first.name === 'V' || first.name === 'E') return reSourcedUnder(host, body, ctx, fresh);
@@ -2679,7 +2653,7 @@ function selectedNodeChild(
   // Thread the key's presence onto the recursed value: an absent key (a NULL node) means the whole child
   // produced nothing. A tail whose presence is its value's nullness is already NULL over an absent key;
   // one that ALWAYS produces (`count()` seeds 0) is gated on the key. A STATED presence already reads the
-  // key through `reHost`'s own presence (`reSourcedUnder`), so it rides out as it is.
+  // key through `reHost`'s own presence, so it rides out as it is.
   if (typeof rerooted.present === 'object') return rerooted;
   if (rerooted.present !== 'always') return { ...rerooted, present: 'value-nullness' };
   const gated: Expr = { kind: 'case', whens: [[isNot(node, compilerNull()), rerooted.expr]], else: compilerNull() };

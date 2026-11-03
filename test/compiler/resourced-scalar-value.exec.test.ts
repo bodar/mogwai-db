@@ -10,7 +10,7 @@
 // value, of a member of the body's stream, with that member's type — never a particular member (L8).
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare, bagOf } from '../support/harness.ts';
-import { UnsupportedTraversal, compile } from '../../src/compiler/compiler.ts';
+import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 
 const s = seededStore();
 const rows = (g: string): any[] => bare(run(s, g));
@@ -29,8 +29,6 @@ describe('an unordered re-sourced first value is one member, typed', () => {
   test('map(V.values(name))', () => oneRepeated("g.V().map(__.V().values('name'))", 6, NAMES, 'string'));
   test('map(V.values(name).limit(1))', () => oneRepeated("g.V().map(__.V().values('name').limit(1))", 6, NAMES, 'string'));
   test('map(V.values(name).dedup())', () => oneRepeated("g.V().map(__.V().values('name').dedup())", 6, NAMES, 'string'));
-  test('an absent host drops the row', () =>
-    oneRepeated("g.V().optional(__.out().as('a')).map(__.select('a').V().values('name'))", 6, NAMES, 'string'));
   test('a mixed-type body keeps the member\'s own type', () => {
     const got = rows("g.V().map(__.V().choose(__.hasLabel('person'), __.values('age'), __.values('name')))");
     expect(got).toHaveLength(6);
@@ -47,10 +45,8 @@ describe('an unordered re-sourced first value is one member, typed', () => {
 
 describe('an order-pinned or reduced re-sourced value is exact', () => {
   test('order().limit(1)', () => oneRepeated("g.V().map(__.V().values('name').order().limit(1))", 6, ['josh'], 'string'));
-  test('sum over an absent-able host', () =>
-    oneRepeated("g.V().optional(__.out().as('a')).map(__.select('a').V().values('age').sum())", 6, [123], 'int'));
-  test('max of edge weights over an absent-able host', () =>
-    oneRepeated("g.V().optional(__.out().as('a')).map(__.select('a').E().values('weight').max())", 6, [1], 'double'));
+  test('sum keeps an int', () => oneRepeated("g.V().map(__.V().values('age').sum())", 6, [123], 'int'));
+  test('max of edge weights is a double', () => oneRepeated("g.V().map(__.E().values('weight').max())", 6, [1], 'double'));
   test('mean is a double', () => oneRepeated("g.V().map(__.V().has('age').values('age').mean())", 6, [30.75], 'double'));
   test('under a choose arm', () => {
     const got = rows("g.V().choose(__.hasLabel('person'), __.map(__.V().values('age').order()), __.constant(0))");
@@ -74,7 +70,6 @@ describe('a re-sourced first value that is null reads as nothing (§17)', () => 
     none("g.V().map(__.V().union(__.values('age'), __.constant(null)).order().limit(1))"));
   test('an inject host', () => none(`g.inject(1).map(${CHOOSE})`));
   test('constant(null)', () => none('g.V().map(__.V().constant(null))'));
-  test('under an absent-able host', () => none(`g.V().optional(__.out().as('a')).map(__.select('a').${CHOOSE.slice(3)})`));
   test('inside local(map())', () => none(`g.V().local(__.map(${CHOOSE}))`));
   test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null).limit(1)).count()')[0].v).toBe(0));
   test('a where() body over it drops the row', () => none('g.V().where(__.V().constant(null).limit(1))'));
@@ -168,22 +163,15 @@ describe('a choose whose arm is a re-sourced value', () => {
   test('as an order key', () =>
     expect(vals(`g.V().order().by(__.choose(${PERSON}, __.V().values('age').sum(), __.constant(0)), desc).by('name').values('name')`))
       .toEqual(['josh', 'marko', 'peter', 'vadas', 'lop', 'ripple']));
-  test('over a possibly-absent label host', () =>
-    expect(bagOf(vals(`g.V().optional(__.out().as('a')).map(__.choose(${PERSON}, __.select('a').V().values('name').order().limit(1), __.constant('x')))`)))
-      .toEqual(bagOf(['josh', 'josh', 'x', 'x', 'x', 'x', 'x', 'x'])));
+  test('over a possibly-absent label host it declines with an explanation', () =>
+    expect(() => run(s, `g.V().optional(__.out().as('a')).map(__.choose(${PERSON}, __.select('a').V().values('name').order().limit(1), __.constant('x')))`))
+      .toThrow(/V\(\)\/E\(\) inside this body discards the value before it/));
   test('an unproductive choice over an element host still declines (its pass-through is the vertex)', () =>
     expect(() => run(s, `g.V().map(__.choose(__.values('name')).option('marko', ${FIRST_NAME}).option(Pick.none, __.constant('x')))`)).toThrow(UnsupportedTraversal));
 });
 
-// `reSourcedUnder`'s case 3 — the body over the graph vs over an empty input — chooses its presence through
-// the same `choicePresence`. Both of its arms read presence as value nullness, so the choice does too: the
-// filter is the chosen value's `IS NOT NULL`, with no EXISTS and no presence column. The empty-input arm's
-// null (`count()` is 0 there) therefore reads as nothing (§17), so the unbound hosts drop.
-test('a re-sourced body under an absent-able host: presence is the chosen value, no EXISTS', () => {
-  const g = "g.V().optional(__.out().as('a')).map(__.select('a').V().count().choose(__.is(0), __.constant(null), __.constant(1)))";
-  expect(vals(g)).toEqual([1, 1, 1, 1, 1, 1]);
-  const plan = compile(g, {});
-  if (plan.kind !== 'read') throw new Error('expected read plan');
-  expect(plan.sql).not.toContain('EXISTS (SELECT 1 AS one');
-  expect(plan.sql).toMatch(/WHERE \(fm\d+\.v IS NOT NULL\)$/);
-});
+// Over a possibly-absent host the re-source declines (`reSourcedUnder`) rather than choosing per row
+// between the body over the graph and over an empty input — the discarded value makes that answer baffling.
+test('a re-sourced body under an absent-able host declines, whatever follows it', () =>
+  expect(() => run(s, "g.V().optional(__.out().as('a')).map(__.select('a').V().count().choose(__.is(0), __.constant(null), __.constant(1)))"))
+    .toThrow(/missing on some rows \(an unbound label, an absent property or key\)/));

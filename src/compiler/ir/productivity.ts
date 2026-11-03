@@ -1,7 +1,6 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
-import { SCALAR_TRANSFORMS, type IRStep } from './step.ts';
-import { someValueNode } from './walk.ts';
+import { SCALAR_TRANSFORMS } from './step.ts';
 
 // ---------- productivity: does a child body ALWAYS yield a traverser? ----------
 //
@@ -139,32 +138,4 @@ export function alwaysProduces(body: readonly { readonly name: string }[]): bool
   if (!last) return false;
   if (SEEDED_TERMINAL.has(last.name)) return true;
   return MAPPING_TERMINAL.has(last.name) && body.length === 1;
-}
-
-/**
- * The steps that can EMIT FROM AN EMPTY INPUT — a reducing or supplying barrier carrying a seed
- * (`count()` is 0, `fold()` is `[]`, `group()`/`groupCount()`/`tree()` are `{}` over nothing:
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ReducingBarrierStep.java`
- * emits its seed when it has processed no start), `cap()` (a `SupplyingBarrierStep` reads its side effect
- * however few starts arrived), and `inject()` (adds its own starts). Every other step is per-traverser
- * or a seedless barrier (`sum`/`min`/`max`/`mean` emit nothing on empty, `SumGlobalStep` overrides
- * `processAllStarts`) and so answers nothing for nothing.
- */
-const EMITS_FROM_NOTHING: ReadonlySet<string> = new Set(['count', 'fold', 'group', 'groupCount', 'tree', 'cap', 'inject']);
-
-/**
- * Does this chain, handed an EMPTY input, produce NOTHING — the question an absent host (a label unbound on
- * this row) asks of a body that re-sources the graph (`select('a').V().count()` is `0` there, not the whole
- * graph's count, and `select('a').V().values('name')` is nothing).
- *
- * A SUFFICIENT test, and the direction is the safe one: `true` only where no step can emit from nothing —
- * no seeded barrier (`EMITS_FROM_NOTHING`) and no step that holds a child chain (a `union` whose arm reduces
- * may still emit its arm's seed; conservatively, any child position counts). A `false` costs the caller
- * the exact answer's longer form (it lowers the body over an empty input), never a wrong one.
- */
-export function yieldsNothingFromEmpty(chain: readonly Step[]): boolean {
-  return chain.every((s) => {
-    const ir = s as IRStep;
-    return !EMITS_FROM_NOTHING.has(s.name) && !ir.repeatRegion && !ir.optionArms && !someValueNode(s, isNested);
-  });
 }

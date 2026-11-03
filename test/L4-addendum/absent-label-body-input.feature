@@ -185,7 +185,11 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
   # input there: a mid-traversal GraphStep emits once PER incoming traverser (step/map/GraphStep.java),
   # so nothing for none. Its answer on those rows is the body's own answer over nothing — a seeded
   # `count()` is 0, a continuation after it computes on that 0, an unseeded tail is nothing at all —
-  # never the whole graph's answer.
+  # never the whole graph's answer. The re-source DISCARDS the selected value, so that answer depends only
+  # on which rows bound `a` — faithful but baffling; the shape almost always means `select("a").out()` or
+  # `V().has(…, select("a"))`. So these DECLINE with that explanation (`reSourcedUnder`,
+  # src/compiler/rel/lower/reduction.ts) and keep the reference answer under @Unsupported.
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_countX
     Given the modern graph
     And the traversal of
@@ -205,6 +209,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | d[0].l |
       | d[0].l |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_count_mathX_plus_1XX
     Given the modern graph
     And the traversal of
@@ -224,6 +229,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | d[1.0].d |
       | d[1.0].d |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_valuesXnameXX_count
     Given the modern graph
     And the traversal of
@@ -235,6 +241,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | result |
       | d[6].l |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_localXselectXaX_V_countX
     Given the modern graph
     And the traversal of
@@ -254,6 +261,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | d[0].l |
       | d[0].l |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_localXselectXaX_E_countX
     Given the modern graph
     And the traversal of
@@ -273,6 +281,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | d[0].l |
       | d[0].l |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_projectXxX_byXselectXaX_V_countX
     Given the modern graph
     And the traversal of
@@ -292,6 +301,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | m[{"x":"d[0].l"}] |
       | m[{"x":"d[0].l"}] |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_order_byXselectXaX_V_countX_byXnameX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -311,6 +321,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | ripple |
       | vadas |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_localXmapXselectXaX_E_count_mathX_times_2XXX
     Given the modern graph
     And the traversal of
@@ -411,6 +422,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | result |
       | d[0].l |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_count_isX6XX_count
     Given the modern graph
     And the traversal of
@@ -422,6 +434,7 @@ Feature: mogwai addendum — a child body rerooted at an UNBOUND label has an em
       | result |
       | d[6].l |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_orderXX_byXselectXaX_V_count_isX6XX_count
     Given the modern graph
     And the traversal of

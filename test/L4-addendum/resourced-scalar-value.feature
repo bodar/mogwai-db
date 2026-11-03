@@ -36,6 +36,9 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | result |
       | d[6].l |
 
+  # Over a possibly-unbound label the re-source discards the selected value, so these DECLINE with an
+  # explanation (see absent-label-body-input.feature); the reference answer is kept.
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_V_valuesXageX_sumX
     Given the modern graph
     And the traversal of
@@ -52,6 +55,7 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | d[123].i |
       | d[123].i |
 
+  @Unsupported
   Scenario: g_V_optionalXout_asXaXX_mapXselectXaX_E_valuesXweightX_maxX
     Given the modern graph
     And the traversal of

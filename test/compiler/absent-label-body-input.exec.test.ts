@@ -10,7 +10,7 @@
 // through `hostPresence` by the one self-rooted constructor (`hostSelfRow`) and the expression arms.
 // Over the modern graph `g.V().optional(__.out().as('a'))` is 9 rows: 6 bind `a`, 3 (the leaves) do not.
 import { test, expect, describe } from 'bun:test';
-import { compile } from '../../src/compiler/compiler.ts';
+import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { seededStore, run, bare } from '../support/harness.ts';
 
 const s = seededStore();
@@ -91,22 +91,32 @@ describe('a value label bound in a union arm', () => {
   test('not(select.constant)', () => expect(vals(`${U}.not(__.select('a').constant(1))`)).toEqual([2]));
 });
 
-// A RE-SOURCING body (`select('a').V()…`) never reads through the host, so its input is emptied by
-// `reSourcedUnder` (`rel/lower/reduction.ts`): a mid-traversal GraphStep emits once per incoming traverser
-// (step/map/GraphStep.java), so over an unbound label the body answers what it answers over NOTHING.
-describe('a re-sourcing body over an unbound label sees an empty input', () => {
-  test('map(select.V.count) is 0 there', () => expect(sorted(vals(`${OPT}.map(__.select('a').V().count())`))).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]));
-  test('a continuation after the seed computes on it', () =>
-    expect(sorted(vals(`${OPT}.map(__.select('a').V().count().math('_+1'))`))).toEqual([1, 1, 1, 7, 7, 7, 7, 7, 7]));
-  test('an unseeded tail is nothing', () => expect(count(`${OPT}.map(__.select('a').V().values('name')).count()`)).toBe(6));
-  test('local(select.E.count)', () => expect(sorted(vals(`${OPT}.local(__.select('a').E().count())`))).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]));
-  test('local(select.V.fold).count(local)', () =>
-    expect(sorted(vals(`${OPT}.local(__.select('a').V().fold()).count(local)`))).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]));
-  test('flatMap(select.V) fans out only from bound rows', () => expect(count(`${OPT}.flatMap(__.select('a').V()).count()`)).toBe(36));
-  test('project().by(select.V.count) is 0 there', () => {
-    const xs = rows(`${OPT}.project('x').by(__.select('a').V().count())`).map((r) => JSON.parse(r.map)[0][1].v);
-    expect(sorted(xs)).toEqual([0, 0, 0, 6, 6, 6, 6, 6, 6]);
-  });
+// A RE-SOURCING body (`select('a').V()…`) DISCARDS the selected value, so over a possibly-unbound label
+// all it would still read is WHETHER the label is bound on the row — the reference answers the body over
+// an empty input there (step/map/GraphStep.java emits per incoming traverser). Faithful but baffling: the
+// shape almost always means `select('a').out()` or `V().has(…, select('a'))`, so `reSourcedUnder`
+// (`rel/lower/reduction.ts`) DECLINES with that explanation, at every host step.
+describe('a re-sourcing body over an unbound label declines with an explanation', () => {
+  const explains = (g: string): void => {
+    expect(() => run(s, g)).toThrow(UnsupportedTraversal);
+    expect(() => run(s, g)).toThrow(/V\(\)\/E\(\) inside this body discards the value before it.*missing on some rows/);
+  };
+  test('map(select.V.count)', () => explains(`${OPT}.map(__.select('a').V().count())`));
+  test('a continuation after the seed', () => explains(`${OPT}.map(__.select('a').V().count().math('_+1'))`));
+  test('an unseeded tail', () => explains(`${OPT}.map(__.select('a').V().values('name')).count()`));
+  test('local(select.E.count)', () => explains(`${OPT}.local(__.select('a').E().count())`));
+  test('local(select.V.fold)', () => explains(`${OPT}.local(__.select('a').V().fold()).count(local)`));
+  test('flatMap(select.V)', () => explains(`${OPT}.flatMap(__.select('a').V()).count()`));
+  test('project().by(select.V.count)', () => explains(`${OPT}.project('x').by(__.select('a').V().count())`));
+  test('order().by(select.V.count)', () => explains(`${OPT}.order().by(__.select('a').V().count())`));
+  test('where(select.V.count.is)', () => explains(`${OPT}.where(__.select('a').V().count().is(6)).count()`));
+  test('coalesce arm', () => explains(`${OPT}.coalesce(__.select('a').V().count(), __.constant(9))`));
+  test('local(map(select.E…))', () => explains(`${OPT}.local(__.map(__.select('a').E().count().math('_*2')))`));
+  test('a union-bound label', () => explains("g.V().union(__.as('a'), __.out()).map(__.select('a').V().count())"));
+  // The host present on every row the body sees keeps answering: the row was filtered by the select.
+  test('select first, then map(V.count)', () =>
+    expect(vals(`${OPT}.select('a').map(__.V().count())`)).toEqual([6, 6, 6, 6, 6, 6]));
+  test('an always-present host', () => expect(vals('g.V().map(__.V().count())')).toEqual([6, 6, 6, 6, 6, 6]));
   test('a statically bound label keeps the plain rooted read', () => {
     const plan = compile("g.V().as('a').out().map(__.select('a').V().count())", {});
     if (plan.kind !== 'read') throw new Error('expected read plan');
