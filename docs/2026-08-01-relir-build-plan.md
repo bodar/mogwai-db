@@ -746,6 +746,232 @@ input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()
   distinguishable no other way, and a body that cannot report it DECLINES.
 
 
+### Next round (from the 2026-11-03 sixth round — read before picking items)
+
+Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed", and green on GitHub CI
+(runs 41549372469, 41557271336, 41542415028, 41558831375, 41548206239):
+- `7f3a5996`, `c682a953`: onCreate `null` override (fourth-round follow-up 2). `c682a953` is a test-only L5 oracle fix:
+  a window nested in a step argument has an undetermined count once the enclosing step is followed.
+- `c9b06ee8`, `c16d4b52`: S8, `rowBounds`.
+- `4edf3f20`, `745e65ef`, `0200909d`: one `ParamEnv` (fifth-round follow-up 3, reuse 1–3) and UUID-bound text equality.
+- `4d6be2a9`, `2b02dbf8`, `17fa6316`: S10, the merge search seeks.
+- `c4b1f4ef`, `22e3293d`, `839fbd1f`, `9e0d5ab1`: per-traverser `sample()` over a rooted body (fifth-round follow-up 1).
+
+**PARKED — S9 re-land (ONE per-row Scoping reader). Resume point: branch `wf/s9-one-scoping-reader-reland-1-4`
+(`e2c0704f`, series `4db1411c..e2c0704f` on merge-base `bea020a3`, NOT on trunk). The older resume point
+`wf/s9-one-scoping-reader-4-4` is superseded by it.** Two things block it.
+- **BLOCKER (reproduced): `math(…).by(__.select(k))` now RAISES where the row lacks `k` and no side effect is named
+  `k`.** The error is "The variable _ for math() step must resolve to a Number". The reference FILTERS that row:
+  `SelectOneStep.java:65,71-72` returns an EmptyTraverser, and `MathStep` drops a traverser whose variable is
+  unproductive. It throws only for a productive non-Number. Paths are under
+  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/`.
+  Witnesses (modern):
+  - `g.V().project('x').by('age').math('_ + 1').by(select('x'))`: trunk [30,28,33,36]; it raises at `e2c0704f`.
+  - the `project('x','n')`, `local(…).count()` [4] and `union(…, constant(0)).count()` [10] twins: same failure.
+  - `g.V().elementMap('age').math('_ + 1').by(select('age'))`: declined on trunk, raises at `e2c0704f`; ref
+    [30,28,33,36].
+  It entered at `4db1411c` or later (`12025cc9` raises too). Fix: carry `ScopedNode.held` from `scopeHost` into the
+  variable's productivity (`src/compiler/rel/projector.ts` `mathValue`). Add an L4 pin with no side effect.
+- **Stale base:** `git merge-tree` against trunk conflicts in `src/compiler/rel/lower/reduction.ts` and
+  `src/compiler/rel/modulator.ts`. Rebase it, then re-run the record-host label probes and the sql-hygiene baseline.
+  The current "CI passed" and its baselines describe a tree that will not land.
+
+**Several S9 review majors share ONE root cause.** The reader picks its scope by a hand-written PEEPHOLE, not by the
+framing its consumers need. Three spellings of it:
+- `readsCompoundVocabulary` (`lower.ts` `selectMapFirst`) looks only at `steps[at+1]`. So `select('k').unfold()`
+  answers while `select('k').identity().unfold()`, `.limit(2).unfold()`, `.dedup().unfold().count()` and
+  `.map(count(local))` decline (trunk answered several of them). Over `aggregate('k').by('age').values('m')`,
+  `select('k').unfold()` gives the collection even where row 1's own Map holds `k:10`.
+- The chain `recordTail` `select(field)` checks only `namedElsewhere`, never `labelMayBeBound`. So
+  `g.V().as('age').project('age','n').by(values('age')).by('name').select('age')` gives 4 rows, where the reference
+  gives 6 (`ProjectStep.java:66` omits the key; `Scoping.java:119-135` then reads the label). The child forms decline.
+- Each `by(select(k))` consumer decides for itself whether to land the scope node, so most re-inline it.
+So the substrate goes FIRST, ordered before the S9 re-land:
+1. **Prereq V2 `per-row-map-reenters-map-tail`** (fifth round, below). Once a per-row `{t,v}` map/list re-enters the
+   map/list followers, the peephole can go: the per-row node becomes the default framing, and no next-step list is
+   needed. Until V2 lands, decline a compound reader after a possible own entry on the query text. Do not switch
+   scope by lookahead.
+2. **Prereq V1 `scope-variant-label-arm`** (fifth round, below). Until V1 lands, the chain `recordTail`/`mapTail`
+   `select` takes the SAME positional `labelMayBeBound` decline that `mapTail` uses (`fallback === 'label'`), so the
+   chain and child forms agree.
+3. **NEW prereq `scope-collection-by-reference`.** A Scoping reader over a row that MAY be a Map reads the row's own
+   entry before a collection (`Scoping.java:119-122`), for every follower. Today
+   `g.V().aggregate('k').by(constant(9)).values('m').select('k')` gives [[9,9],[9,9]]; the reference gives [1,[9,9]].
+   `test/L4-addendum/one-scoping-reader.feature:1070` (on the branch) pins this as an answer. Re-tag it `@Unsupported`
+   with the reference answer, and do NOT cover it in §17 "Map-valued property stream". It is a wrong value, not a
+   JS/SQLite divergence. The same goes for a path label that hides a stored Map's own key
+   (`g.V().constant(7).as('k').V().values('m').math('k + 1')`: ref 3×2.0 + 6×8.0): record it as a known wrong answer
+   waiting on V1, not as accepted.
+4. **NEW: compute the scope node ONCE in every by() consumer.** Land `ChildValue.shared` through the existing
+   `landedChild`/`landShared` in the group/groupCount key, the project field, the dedup key, order, and math.
+   - Measured: `withSideEffect('k',5).V().values('m').groupCount().by(select('k'))` emits 15 json_each subqueries
+     (8.3 KB of SQL); `group()` emits 16; `map(select)` emits 1.
+   - `order().by(select('k'))` writes `COALESCE(CASE WHEN vtype='map' …, json('{…}'))` about 12× per row.
+   - The own-entry probe runs twice, as `f23_s0` and `rn24_s0`.
+   - `format('%{k}%{k}%{k}')` mints a key per token, so memoise `scopeHost` by name in `formatValue`.
+   Add `groupCount().by(select('k'))`, `project('z').by(select('k'))`, `order().by(select)` over a map, and
+   `values(x).select(<element collection>).limit(n)` to `ADDENDUM_SHAPES`. sql-hygiene sees none of these: none is a
+   duplicated subquery.
+5. **One decode helper.** `map.ts:scopeNode`/`fallbackExpr` and `reduction.ts:childScopeNode` (`either`/`read`)
+   each write out the own-entry/held/next CASE. Make the chain twin and the child twin call one function.
+6. **Do not round-trip a record field with no reachable fallback.** `childScopeNode` returns `decodedNode(own…)` even
+   with no next scope, so every row encodes a `{t,v}` and decodes it again. That is 3.3× slower for
+   `project('a').by('x').math('_ + 1').by(select('a')).sum()` (20 → 66 ms at 8k) and doubles the `format` SQL. With no
+   fallback, return `'pass'` (trunk's direct field read). With a scalar constant behind the field, COALESCE the typed
+   column pair.
+Minors with the re-land:
+- The `collectionNode` doc claims the node is built once, but the emitted SQL rebuilds it per row. Fence it or fix
+  the comment.
+- `selectMapFirst`'s comment cites a §17 wording that has since been reverted.
+- The select-family sql-hygiene reason in the `4db1411c` message (175 → 176) is stale since `12025cc9`. Restate it.
+- Add an element-collection witness (`aggregate('k')` with no `by()`) to the scaling set and to the L4 scenarios.
+- `src/rel/walk.ts` `rewrite`: each rewritten spine node clears all of `reach`/`shared`. The cost is quadratic in
+  plan size; it is bounded by the query text, but either comment it or invalidate more cheaply. Also assert the
+  invariant that a subplan reads only descendants of its host.
+- Keep pinning `inject([a:1],[b:2]).dedup('z')` → [] as its §17 line.
+Depth gaps (clean declines, record only):
+- Hosts: `where/not/filter/coalesce/optional/repeat/sideEffect(select(k))`, `map(map|union(select(k)))`,
+  `map(select(k).as('x').select('x'))`, `select('k','j')`, `local(select(k).fold())`.
+- `inject()` map literals under union/choose/order/dedup/project/group `by()`.
+- An element-stream or inject source `aggregate('k').map(select('k'))`, and `aggregate('k').format('%{k}')`.
+- `as('k')` together with `aggregate('k')` on one name.
+- Record hosts whose label only some rows carry: `where/not/optional/coalesce/choose/project().by(select('q'))`,
+  `select(all,'q')`, `fold().unfold().map(select('q'))`.
+
+**DEFERRED (prerequisite S9 re-land did not land; S9 is ordered BEFORE each):**
+- **`project-productive-null-entry`.** Fourth-round follow-up 4: `project()` keeps a productive-null `by()` entry,
+  for both the read and the `property(map)` write. It needs the S9 per-row scope node so that the record framing can
+  carry a present-null field.
+- **`alias-operand-once`.** Fifth-round follow-up 2: an alias/where operand and its tag are projected once at the
+  `as()` site. It shares the scope node's compute-once landing (item 4 above), so it lands after S9, or together
+  with S9's item 4.
+
+**Follow-ups from review of the landed items (major first):**
+1. **REGRESSION (major, `4edf3f20`): a user parameter named `injectedMap` collides with federate's fresh name.**
+   `src/compiler/rel/segment.ts` `freshMapValuesParam` still tests `Object.hasOwn(params, param)`, but `params` is
+   now `{values, types}`. So `g.V()…call("federate", ["graph":"crew"]).V().has("name", injectedMap)…` with
+   `{injectedMap:'marko'}` declines, and the message leaks the internal sibling rewrite. Trunk answered [1].
+   Fix: `Object.hasOwn(params.values, param)`. Add a collision pin.
+2. **Data-size wall (major, pre-existing, flagged by 3 reviewers): a user LIST parameter under `inject()` is inlined
+   as `jsonb_array(1, 2, …)`.** The read is `FROM (VALUES (jsonb_array(…)))` with binds `[]`. Above ~1000 elements,
+   `g.inject(ns).unfold().count()` / `.addV()` fail with a bare `SQLiteError: too many arguments on function
+   jsonb_array`. That is a data-size failure, and an internal error reaching the user. It breaks both rules:
+   "a bind serves a user parameter" and "one json_each bind". `has(k, within(ns))` already binds
+   `json_each(jsonb(?))`; route inject's list parameter the same way. File it in `docs/outstanding-work.md` §1.
+3. **Merge `mapDrivers.driving` is K² per driver (major, `4d6be2a9`, 3 reviewers).** The `pick`, a correlated scalar
+   that sorts by `cappedCount` with LIMIT 1, sits in a WHERE over the exploded ENTRIES. So a K-entry map pays K²
+   capped probes. 30-key maps: 2.6 → 19 s (1k → 8k), trunk 1.4 → 9.7 s. One 1000-entry map spends 1.8 s in the
+   driving statement alone; trunk spent <20 ms. Project the pick once per driver (or use one
+   `row_number() OVER (PARTITION BY driver ORDER BY cappedCount, ord)`), then filter on `ord = picked`. Add a
+   map-WIDTH witness (~30 entries) to `test/compiler/merge-scale.exec.test.ts`.
+4. **`reSourcedOnce` re-implements `reSource`'s join contract (major, `c4b1f4ef`).** Both the bulk promotion, the
+   encounter mint and the origin-major `parent_encounter` renumber are written twice
+   (`src/compiler/rel/lower/movement.ts:19-97` and `src/compiler/rel/lower/reduction.ts`), and the n>1 arm is
+   literally `reSource` over a different right-hand relation. Parameterise `reSource` on its right-hand relation
+   (the scan, or the once-lowered candidates) so one function owns how a re-source crosses carried channels.
+5. **S8's stated presence re-inlines the body and drops a productive null under `order`/`dedup` `by()` (major,
+   `c16d4b52`).** `g.inject(['a':null,'b':1]).unfold().order().by(__.select(values).dedup())` evaluates the `rn10`
+   window subquery 3× per row (trunk did 2×). It returns [b:1], while trunk and the reference return both rows, and
+   the same query without the inner `dedup()` keeps both. A no-op step changes the count. A by() consumer that
+   drops nulls should read presence from the node it already computed, not re-inline the value. Pin that
+   `order().by(select(values))` and `order().by(select(values).dedup())` agree.
+6. **Merge guard over key-name POOLS is still super-linear (major, remaining cost; trunk was worse).** A two-pool
+   grid `[a{i%s}:1, b{i/s}:1]` takes 0.56 → 10.6 s (19×, ~N^1.5); three pools are ~N^(5/3). Ties pick the lowest
+   key name, so √N key sets share one seek. Update `docs/outstanding-work.md`: it names only the power set, not the
+   general k-subset or pool-product family. A tie-break that spreads the seeks, or the multi-key `OwnerSeek`
+   intersection (outstanding-work §6), closes it. Add a grid witness `[a:i,b:j,c:k]` at N≈8k.
+7. **WRONG (pre-existing, not newly reachable): a group value with no barrier lets a later null overwrite a
+   value.** `g.inject(['a':3],['a':null]).unfold().group().by(keys).by(__.select(values))` → {a:null}, but the
+   reference gives {a:3}: `GroupStep.GroupBiOperator.apply` never lets a null objectB win
+   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java`).
+   The last-wins pick `json_group_array(gt ORDER BY go) FILTER (WHERE gt IS NOT NULL)` treats `{t:null}` as a value.
+   S8 makes more productive nulls reach it. Filter on the node's value, not on the node.
+8. **WRONG (pre-existing): mergeV compares a map-valued property by its raw JSON spelling.**
+   `g.inject([b:2, a:[x:1,y:2]],[a:[y:2,x:1]]).mergeV()` creates 2 vertices; Java Map equality ignores entry order.
+   This affects `couldMatch` and the map-guard signature (`src/compiler/rel/write.ts`). It needs a canonical
+   (key-sorted) map spelling at the comparison seam.
+Minor (cheap, concrete):
+- Merge vs `has()` disagree on Long.MAX against its nearest double
+  (`addV().property('x',9223372036854775807L)`, then `inject([x:9.223372036854776E18d]).mergeV()` creates a vertex).
+  Add the pair to the merge-finds-what-has-finds table, or make one numeric-equality authority serve both.
+- The fallback arm `['-', ':')` of `decimalTextSeeks` is still quadratic for |c| ≥ 9e18, for ends of different
+  lengths, and for string keys whose text begins with the driver's integer part (the prefix range ignores `vtype`).
+  Name these in the doc comment and in outstanding-work. A length-keyed bound or a vtype-aware range would close
+  them. `spans(c)` and `end(c,±)` are inlined about 3×, so project them once. Cite OUR `BigDecimal.toString`
+  (`src/gremlin/types.ts`) for "no exponent", not Java's.
+- Federate: the parameter types reach only in-process Bun siblings. `CloudflareGraphManager.runForeign` (`_paramTypes`
+  ignored), `GraphStoreDO.runForeign` and `HttpForeignExecutor` (`src/http-federation.ts:88`) drop them. Either
+  thread the types through the DO RPC and the GraphBinary bindings, or narrow the commit and comment claims.
+- UUID type spaces:
+  - `inject('<u>').is(UUID('<u>'))` → 1L, ref 0L. inject's scalar subject is UNKNOWN even when `Arg.type` is
+    settled; give the inject source `STATIC(Arg.type)` the way `constant()` has.
+  - Mixed UUID/String list-parameter membership (`within(mx)`) disagrees with the vararg form. Record it in §17 or
+    outstanding-work.
+  - The ordering predicates (`gte(x)` with a UUID) ignore type space. Reuse the `textSpaced` authority.
+  - Fold `sameSpaceEquality`'s static early-return into `textSpaced`.
+  - Add `inject([UUID]).unfold().is(x)` and a mixed NULL-tag arm to `test/compiler/param-env-depth.exec.test.ts`,
+    plus non-union depth pins: a PartitionStrategy write, `property(list)`, a list param, `mergeV(map param)`, and
+    short/byte/float/uuid params.
+- Rooted `sample()`:
+  - Some answers became declines and the commit message does not say so: `property('c', __.out().V().dedup()
+    .sample(1).id())`, `property(list,'c', __.V().as('x').sample(1).select('x').id())`, and
+    `property('c', __.V().order().by(shuffle).limit(2).sample(1).id())`. Add the shuffle-before-slice form to
+    outstanding-work §7.
+  - `dedup()` not followed by a slice or reducer does not couple across R copies, so treating it as non-coupling
+    re-answers `__.out().V().dedup().sample(2)`.
+  - The host-state route (`readsHostState`, e.g. `as('h').local(__.V().where(neq('h')).sample(1))`) costs
+    origins × |V|. It is newly answered and correct, but put it in the §7 entry.
+  - `project().by(__.V().sample(1))` gives every traverser one draw (§1). Route the by() rooted child through the
+    per-origin draw.
+  - Skip the per-origin RANDOM window when the re-source is the body's first step.
+  - Comment, or assert in a plan test, that the equi-join relies on SQLite's AUTOMATIC COVERING INDEX.
+  - Name the "no effect" guard precisely: writes only, not side-effect collections.
+  - Make `streamsIntoChildren`'s doc and its name-based predicate agree about `optionArms`.
+  - De-duplicate `ORDER_ONLY_BARRIERS` against `ir/bulk.ts` `REORDERS`, and `isShuffle` against `ranked-order.ts`.
+  - Tests: n>1 scale, the sparse-redraw route, and declines for option() and branch() arms.
+- S8:
+  - `rowBounds` over a `ROW_NUMBER` + `rn=1` filter (dedup) and over a groupBy-less Aggregate with
+    `HAVING count(1)>0` is wider than needed. Correct the doc's claim that a too-wide bound "costs only a guard".
+  - Pin the `recursive` arm.
+  - Retire the ad-hoc one-row checks (`write.ts` supplied-id addV, `lower.ts` `oneDriver`); see reuse 5.
+- onCreate:
+  - Add one L4 scenario for a side-effect onCreate map (`withSideEffect("c",["age":null])…option(onCreate,
+    __.select("c"))`, the shape of `MergeVertex.feature:640`).
+  - Cite `MergeElementStep.java:452` (`validateStaticNoOverrides`) next to `validateNoOverrides`, so the static
+    raise on an existing vertex is not "fixed" into a create-only check.
+- Telemetry: the census "encountered" wording changed ('integer' → 'int'/'long', 6 messages) and has not been
+  re-recorded. Say so at the next census refresh.
+- `order().by(<may-be-empty body>)` emits the body twice (sort key + presence). This pre-dates S8; fix it under
+  "computed once".
+
+**Reuse-sweep proposals (next round):**
+1. **`slicesAcrossStarts` becomes `someStepDeep(…, streamsIntoChildren)`.** Delete `STREAM_CHILD_HOSTS` in
+   `src/compiler/rel/lower/branch.ts`. It is a private recursive walk that misses `branch`, a bare `option` and
+   `match` (the same miss `9e0d5ab1` fixed, `BranchStep.java:110`). Use the predicate
+   `(SUBSET_SLICES.has(s.name) || selfCollapses(s.name)) && !isLocalScope(s)`, and keep `true` for an unreadable
+   body. Pin the newly reached coalesce/optional + branch().option forms as declines.
+2. **One transitive-CTE-reads authority.** `src/rel/emit.ts` `ctesFor` (`17fa6316`) and `src/rel/check.ts`
+   `checkSnapshots.reads` now agree by coincidence. Move a shared `stepReads(node, declared)` into
+   `src/rel/plan.ts`; emit keeps its recursive-list rule on top. No SQL change.
+3. **One pair of materialize builders, `materialized(rel)` and `fence(rel)`.** Retire `write.ts` `spool`, the local
+   fence in `reSourcedOnce`, and ~5 inline `make.materialize({…, fenced:true})` spellings. Also fix the trap that
+   `build.ts` `fenced()` does NOT emit AS MATERIALIZED. Check the `channels: []` vs `rel.channels` override at each
+   site. No SQL change.
+4. **Build the scalar member node inside its one relation for every one-row scalar producer.** Extract the
+   construction `c16d4b52` uses in `mapEntryChild` (with the value-nullness gate kept inside the relation) and use
+   it in the seeded-fold arm, the numeric-reducer arm and `rootedCount`. Measured:
+   `project('s').by(__.outE().values('weight').sum())` reads edge_properties 2× per host row, and `.max()` 3×.
+   This retires `producedMemberNode`'s pmv/pmp wrapper and the three local `scalarOf` helpers.
+5. **Name `oneRowValues(rel)` beside `writeSnapshot`** (`src/compiler/rel/write.ts`). Use it for the supplied-id addV
+   check and `lower.ts` `oneDriver`. Do NOT substitute `bounds.ts` `atMostOneRow`, because a one-row aggregate over
+   `nodes` still reads the table being written.
+
+Still open: S9 re-land (parked above) and its two deferred dependants; fifth-round follow-ups 4–8 and reuse 2;
+fourth-round S11, follow-ups 3, 5, 6, 8, 9, reuse 2–8, and S6's multi-driver mergeV lift; and from earlier rounds
+M1, M2, S3, R13–R18, F8, F11–F13 and F14b.
+
+**Needs-human questions:** none raised this round.
+
 ### Next round (from the 2026-11-02 fifth round — read before picking items)
 
 Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI passed", and green on GitHub CI:
@@ -753,7 +979,7 @@ Landed this round, each on trunk after an unpiped `mise run ci` that printed "CI
 - `fb030364..00256441` — R11 follow-ups 1 + 7 (scalar `aliasWhere` arm via `valueTheta`; `declaredParamTypes` at the
   compile seam; `correlatedExists` seeds `seedOuterAliases`).
 
-**PARKED — S9 (ONE Scoping reader). Resume point: branch `wf/s9-one-scoping-reader-4-4` (`0f2180e6`, 4 commits
+**PARKED — S9 (ONE Scoping reader). [Superseded by the sixth round's `wf/s9-one-scoping-reader-reland-1-4`, above.] Resume point: branch `wf/s9-one-scoping-reader-4-4` (`0f2180e6`, 4 commits
 `3cb9b019..0f2180e6`, not on trunk).** It answers every fourth-round S9 witness, scales linearly (1k→8k ≤4.7×), and
 its CI was green, but review found a REGRESSION it cannot ship with: S9 makes every reader TRUST the framing's `held`
 set (keys the row is guaranteed to hold), and `held` has writers that over-claim. Witnesses (modern graph; trunk was
