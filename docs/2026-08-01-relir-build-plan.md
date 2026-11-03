@@ -1069,6 +1069,12 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
   child form answers).
 
 **Deferred (decided not to build this round; prerequisite ordered first):**
+- ✅ **V1 buildable half LANDED (b549cc3a, f91e0943, 2026-11-03) — a map-first select whose next scope is a SCALAR
+  label, and a record's optional field beside a live label.** `mapFirstFallback` reads a VALUE label as a `{t,v}` node
+  off the row (`labelScopeNode`), so entry-else-label stays one per-row scalar; `math()` reads its variables through
+  the same `ChildSeam.scopeNode`; a record's optional field and the label are two Filters merged via `mergeArms`; a
+  label bound to null is a scope holding null. Remains: nothing for this half (the element-label variant arm below is
+  the separate, unbuilt half; §17 "Map scope" narrowed accordingly).
 - **Prereq V1 → `scope-variant-label-arm`.** Path-label scope behind a row that may be a Map (`g.V().as('k').values('m').select('k')`
   → ref [1, v2, v3]): needs a VARIANT (element-or-value) per-row stream framing that continues through followers —
   element-requiring steps apply to element rows; shape-agnostic steps (count/fold/dedup/as/select) carry the
