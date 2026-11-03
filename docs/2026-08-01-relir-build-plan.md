@@ -880,8 +880,11 @@ Depth gaps (clean declines, record only):
    key name, so √N key sets share one seek. Update `docs/outstanding-work.md`: it names only the power set, not the
    general k-subset or pool-product family. A tie-break that spreads the seeks, or the multi-key `OwnerSeek`
    intersection (outstanding-work §6), closes it. Add a grid witness `[a:i,b:j,c:k]` at N≈8k.
-7. **WRONG (pre-existing, not newly reachable): a group value with no barrier lets a later null overwrite a
-   value.** `g.inject(['a':3],['a':null]).unfold().group().by(keys).by(__.select(values))` → {a:null}, but the
+7. ✅ (`3b5cb096`) **WRONG (pre-existing, not newly reachable): a group value with no barrier lets a later null overwrite a
+   value.** LANDED: `collectedValue` (`src/compiler/rel/map.ts`) adds a leading sort key
+   `json_extract(member,'$.t') IS NOT NULL` to the arm's one aggregate, so `$[#-1]` reads the last non-null member
+   (or the last null when only nulls arrived); not applied to `by(tail())`. Pinned by L4
+   `group-value-null-member.feature` + L2 `group.sql`. Remains: nothing. Original record: `g.inject(['a':3],['a':null]).unfold().group().by(keys).by(__.select(values))` → {a:null}, but the
    reference gives {a:3}: `GroupStep.GroupBiOperator.apply` never lets a null objectB win
    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java`).
    The last-wins pick `json_group_array(gt ORDER BY go) FILTER (WHERE gt IS NOT NULL)` treats `{t:null}` as a value.
