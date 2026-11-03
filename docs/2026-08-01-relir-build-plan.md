@@ -851,7 +851,10 @@ items that change WHEN a decline fires do not.
   every field of a `select(k…).by()` record is required (an unproductive `by()` filters the row). Do not
   reintroduce a MUST set into `MapKeyFacts`. Fix the stale recordTail comment and the garbled §17 "Map scope"
   wording "(a `project()` record collapsed to one included)" at the same time. Pin all four witnesses.
-- **nr-c5-sideeffect-arm** REGRESSION, plausible reach. C5 made a choose arm with stated presence decline. One
+- ✅ **nr-c5-sideeffect-arm** LANDED `a4c62a20`: `selectedNodeChild` takes the node's presence from its caller and
+  `constantSelectChild` passes `hostPresence(host)`, so a side-effect constant over an `'always'` host reports
+  `'always'` and the choice's meet answers (`rel/lower/reduction.ts`; pins in
+  `test/L4-addendum/side-effect-choose-arm.feature`). Remains: nothing. Original note: REGRESSION, plausible reach. C5 made a choose arm with stated presence decline. One
   producer reaches that from a common shape: `selectedNodeChild` returns `{ when: held }` for a single-step
   `select(k)` of a `withSideEffect` constant. Witnesses that answered at `a8061985` and match the reference
   (`Scoping.java:126-127`):
