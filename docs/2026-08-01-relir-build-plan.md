@@ -430,6 +430,21 @@ natural answer, never machinery. A common or plausible shape keeps its correct a
 
 ### Needs a human decision
 
+- **nr-b4-record-alias — accept the decline, or a required-fields provenance fact?** (parked 2026-11-03; no
+  branch — not built). Owner's question, verbatim: "The plan rates nr-b4-record-alias '(1) Major, plausible
+  reach', but on trunk `select('a','b').by('name').as('m').select('a')` and `….as('m').format('%{a}->%{b}')`
+  answer. Only the self round trip `as('m').select('m').select('a')` and a local slice before select decline,
+  cleanly. Accept the decline (contrived), or admit a required-fields provenance fact on record-born maps,
+  which also kills nr-b4-dedup-absent-term's per-row term for records?" Prerequisite if admitted (a plan item
+  ordered BEFORE nr-b4-record-alias): **record-required-fields** — a record-born map carries its required-field
+  list as a PROVENANCE fact, dropped at every union/merge, never a lattice element (B4's no-MUST law holds), read
+  by `mapTail`'s `select` and keyed `dedup`.
+- **C4 — narrow the re-source-under-absent law to label-sourced absence?** (merged into Substrate 0's wording
+  work; not urgent). Verbatim: "C4 declines a re-sourcing body over a VALUE-RUN host
+  (`map(__.values('age')…by(__.V().count()))`). There, a missing property simply yields no traverser, which is
+  ordinary filter semantics and not the baffling select('a').V() case, so a gated answer (4 rows) would be the
+  natural one. Should C4's law be narrowed to label-sourced absence? Contrived reach, so it is not urgent."
+
 - **Tier B — retire `PresentWhen`?** `PresentWhen` (`rel/child.ts`, the `{ when, orValue? }` arm of
   `Presence`) is the one way a child body says "I produced, and my value is NULL" (a PRODUCTIVE null). It has four
   remaining producers:
@@ -519,6 +534,15 @@ fix.
   `addV('b')`. Then `g.mergeE([(T.label):'k',(OUT):1,(IN):2])` writes an edge from `'x'`, although `g.V(1)` is
   `[]` (ref: "Vertex does not exist for mergeE"). Fix: export `externalIdIs(idCol, uidCol, v)` from `rowidOnly`;
   it costs one `uid IS NULL` on a row the seek already fetched. Leave `elementIdGuard` alone.
+- **nr-fu-null-dup-create** WRONG COUNT OF CREATED ELEMENTS. Reach: plausible (a batch with a duplicate row and
+  a null optional field). `g.inject([name:'a',age:null],[name:'a',age:null]).mergeV().id()` gives `[7,7]` and
+  creates ONE vertex; mergeE with `[…,w:null]`×2 gives `[13,13]`. The reference creates TWO: the second
+  driver's search is `has('age', null)` (`MergeElementStep.searchVertices` → `HasContainer.test`, which needs a
+  present property) and a null is never stored (`ElementHelper.attachProperties`, `ElementHelper.java:348-352`),
+  so it cannot match the first creation. Our own separate-query search already agrees (two runs of
+  `g.mergeV([name:'a',age:null])` give 7 then 8); only the in-traversal `createKey`/`mapCouldMatch` collapse in
+  `rel/write.ts` disagrees. Fix: a driver map holding a null entry never collapses with another (its search can
+  match no element it created). Predates 5fbebe54; that commit made it visible.
 - **rf3-bulk-remap-replace** `{idPolicy:'remap', onCollision:'replace'}`: `resolveReplace` ignores `idPolicy`,
   so `V(1)` lands as rowid 1 with uid NULL (a wrong element id). `src/bulk.ts`.
 - **rf3-bulk-dup-uid** `loadBulk` APPEND with one uid twice in ONE batch surfaces SQLite's raw "UNIQUE constraint
@@ -583,6 +607,24 @@ fix.
   - label-only multi-driver `mergeV` with different labels declines (r7-fu11).
 
   Each must answer: the write sees a SNAPSHOT of its input.
+- **nr-fu-token-keys** Reach: common (label plus key is the usual upsert map). `literalKeyFacts`
+  (`rel/framing.ts`) gives up on any non-string key, so a Map driver holding `T.label`/`Direction` has UNKNOWN
+  keys: `mapSearchedKeys` returns null (the one-at-a-time guard refuses any onMatch/`property()` write) and
+  `mayHold` is always true (a side-effect `select(k)` arm declines `merge-map-scope` though no map can hold
+  `k`). Witnesses: `g.inject([(T.label):'person',name:'marko'],[(T.label):'person',name:'vadas']).mergeV()
+  .option(Merge.onMatch,[seen:true])` declines "write to a key a per-traverser search reads";
+  `g.withSideEffect('upd',[w:1.0]).inject([(T.label):'knows',(Direction.OUT):1,(Direction.IN):2]).mergeE()
+  .option(Merge.onMatch, __.select('upd'))` declines while the literal `mergeE([...])` form answers 1.0. Fix:
+  record the STRING keys beside the token keys; a string `select(k)`/`has(k)` never hits a token key
+  (`Scoping.java:119-121`, `Map.containsKey`). This makes the edge half of nr-fu2 real.
+- **nr-fu-onmatch-scope** LATENT WRONG ANSWER behind a decline. `mergeMaps` (`ir/write-args.ts` ~:783) resolves
+  every option arm with the Map as its traverser, but the reference re-points an onMatch arm at the MATCHED
+  ELEMENT first (`MergeVertexStep.java:100`, `MergeEdgeStep.java:279`: `traverser.set(v)` before
+  `materializeMap`); only onCreate and the main argument see the Map. Today
+  `g.withSideEffect('age',[seen:true]).inject([name:'marko',age:29]).mergeV().option(Merge.onMatch,
+  __.select('age'))` declines with an untrue reason (the reference reads the side effect and sets seen=true). If
+  `merge-own-entry` is ever filled through this seam, onMatch would read the Map's own entry — a wrong answer.
+  Fix: pass `'notMap'` for onMatch arms. Build BEFORE R8-res.
 - **R8-res** Record and `inject(map)` drivers with `select('k')` decline until `mergeFromTraversal` takes them.
   This includes the batch-upsert idiom `inject([lookup:…, create:…]).mergeV(__.select('lookup'))` and
   `unfold().mergeV(__.select('match'))`, a Map driver's OWN entry.
@@ -596,18 +638,8 @@ fix.
 
 ### Declines to lift
 
-- ✅ **nr-fu2-mapscope-advice** LANDED `3140e83b`..`5fbebe54`: `mergedFromMap` (`ir/write-args.ts`) decides a
-  merge `select(k)` over a Map driver by the stream's MAY key set (`MergeTraverser` = `'notMap' | { mayHold }`, built
-  from `mapTail`'s `MapKeyFacts`): a key no Map can hold reads the side effect (the cr-fu2 regression answers
-  again); a MAY-held `k` beside a declared side effect `k` declines `merge-map-scope` naming the collision; else a
-  plain `merge-own-entry` decline (own-entry support stays R8-res). The one-at-a-time guard is bounded by the same
-  MAY set, and a null entry in a created map is not a property. Remains: nothing. Original note:
-  Reach: common. `MapScopeDeferral` (`ir/write-args.ts` ~:367) fires for EVERY bare
-  `select(k)` over a Map driver, so the batch-upsert idiom is told to "name the side effect" when none exists.
-  Raise it only when a side effect or named scope declares `k`; otherwise decline plainly (the own-entry support
-  is R8-res). The regression: `g.withSideEffect('c',[age:1]).inject([name:'x']).mergeV().option(Merge.onCreate,
-  __.select('c'))` answered `[1]` before cr-fu2. Say "a Map stream MAY hold 'c'".
-- **nr-b4-record-alias** REGRESSION (+nr-b4-dedup-absent-term). A `select('a','b')`/`match()` record re-entered
+- **nr-b4-record-alias** PARKED on the owner question under "Needs a human decision"; if admitted, build
+  `record-required-fields` first (+nr-b4-dedup-absent-term). A `select('a','b')`/`match()` record re-entered
   as a Map declines `select(k)` of its own field. Witnesses, all answering at `020fecdf`:
   - `…select('a','b').by('name').as('m').select('m').select('a')`;
   - `….format('%{a}->%{b}')`;
@@ -728,6 +760,101 @@ fix.
   - `rowBounds` over `collapsedToOneRow` (r3-reuse5);
   - every self-contained fence through `build.ts` `fenced`/`fencedWhereSelfContained`, ~10 sites
     (r6-reuse3 + r7-reuse1).
+
+### Next round
+
+Round 3 of the 2026-11-03 run landed Substrate 0 (`3cbf460b`), nr-c5-sideeffect-arm (`a4c62a20`), B4 collision
+reasons (`82805dde`), cr-fu6's gated hint (`22fd3b71`) and nr-fu2's Map-driver merge scope
+(`3140e83b`..`5fbebe54`). Parked: nr-b4-record-alias (owner question above). Merged: C4's wording into
+Substrate 0 (owner question above). Fold this section into the lists above at the end of the run.
+
+**Review follow-ups, major first.**
+
+- **nr-fu-b4-unknown-keys** MAJOR — the B4 advice is wrong wherever the Map's key set is UNKNOWN. Reach: common.
+  `valueMap()`/`elementMap()` with no key args, `group()`/`groupCount()` leave `facts.keys` undefined, so
+  `mayHoldKey` is true for every name and "rename the label (as('v1')) or the key" can never fix the query:
+  `g.V().as('v').valueMap().select('v')` → as('v1') → "rename … (as('v11'))", forever. The corpus hits it:
+  `g.V().label().groupCount().as("x").select("x")` (`Select.feature:167`). It also calls an ordinary
+  label-then-map idiom "ambiguous", against EXPLAIN, DON'T BAFFLE. Fix in `mapKeyCollision`/`mapKeyCollided`
+  (`rel/lower.ts`): give the rename advice only when `facts.keys` is KNOWN and holds the key; when unknown, say
+  the Map's keys are not known at compile time and suggest naming them (`valueMap('name',…)`) or selecting the
+  label before the map step. Also soften "which one is read would depend on the row" where a Map DEFINITELY
+  holds the key (the Map wins, `Scoping.java:120-122`) — MapKeyFacts is MAY-only, so drop the clause rather
+  than add a MUST set. Pin `g.V().as('v').valueMap().select('v')` in `test/compiler/map-key-collision.exec.test.ts`.
+  No answer changes.
+- **nr-fu-b4-one-authority** `mapKeyCollision` decides only the MESSAGE; each site still spells the decline
+  condition (`mapTail` select(k), `mapHostChild`, select(k1,k2)'s `namedElsewhere` which omits enclosingLabels,
+  `projector.ts`'s `sideEffectBehindOwnScope`/`mayScope`/`mapScopeMayHold`). A disagreement silently loses the
+  explanation. Fold the verdict into the classifier (reuse proposal *mapKeyScope* below). Also: the FIRST
+  advisory wins (`Declines.note` `??=`), so a speculative route's collision can blame the wrong step
+  (`g.V().as('name').elementMap().as('m').select('m').select('name')` blames select('m')) — record only on the
+  route that declines.
+- **nr-fu-s0-default-kind** ~25 self-explaining declines (federate params, io() GraphML/Gryo, olap scope,
+  `channels.ts` arm disagreement, q.ts NUL constant, `coerce.ts` dateAdd, ResumeGap) carry kind `'uncovered'`.
+  Rename the default `'unsupported'`, or give them kinds, before any consumer reads `.kind`. Remaining throws
+  inside the lowering, against "`lowerToRel` never throws": `channels.ts:266/272` (`mergeChannels`) and
+  `sql/kernel/q.ts:174` — migrate them to the sink.
+- **nr-fu-s0-nested-draw** A draw one host deeper loses its shared-draw reason and says "no lowering covers":
+  `g.V().map(__.map(__.V().sample(1)))`, `where(__.map(__.V().sample(1)).is(neq(0)))`,
+  `repeat(__.map(__.V().sample(1))).times(2)`. Propagate the recorded reason through the enclosing child hosts.
+- **nr-fu-hint-depth** cr-fu6's hint checks only the map()'s own host, so it still suggests local(…) where that
+  declines too: `coalesce(__.map(__.V().sample(1)), __.identity())`, `optional(__.map(…))`,
+  `where(__.map(…).count().is(1))`, `local(__.map(…))`, `flatMap(__.map(…))`. Skip the hint when the map is nested
+  in another child body, or make the `reSourcesOncePerOrigin` doc say "the immediate host admits it". Same
+  change: name `sample(n)` not `sample(1)`, and note local() emits every body result while map() emits one;
+  extract `perOriginSafeBody(body)` so `localDrawsPerRow` and `flatMapRejoin` share the barrier admission.
+- **nr-fu-addE-draw** `g.V().addE('x').to(__.V().sample(1))` (link each vertex to a random one — a natural app
+  query) declines SHARED_DRAW with no hint, while `g.V().property('pick', __.V().sample(1).id())` answers.
+  Belongs under S3 / the shared-draw family.
+- **nr-fu-merge-messages** (`ir/write-args.ts`) "a Map stream MAY hold 'k'" leaks the lattice term — say "the
+  injected Maps may contain a 'k' key, and a side effect 'k' is also declared". And
+  `g.withSideEffect('k',[name:'zz']).inject([name:'q']).mergeV(__.select('k'))` lost its explanation (now folds
+  to the side effect and hits "no lowering covers": no whole-argument Map-driver form). A decline that depends on
+  a parameter Map's keys (contrived) is noted; it is sound, as every compile sees its own parameters.
+- **nr-fu-c5-hygiene** Over the answering side-effect choose arm: fold `json_extract(json('{"t":"int","v":5}'),
+  '$.v'/'$.t')` of a compile-time constant to the literal (overlaps cr-fu3); `scalarChoice` spells a mixed-vtype
+  choose's predicate in both v and vtype (`CASE WHEN rn.id IN (…)` twice) → `once()`; over a may-be-absent host
+  the gated node is re-inlined ~20×/row including inside `is(5)`'s type-tag tower. All linear (×0.9–×5.0 1k→8k).
+  Comment `constantSelectChild`'s inline `caseWhen(hostPresence(host), value)` as "gatedByHost, keeping its
+  predicate". Depth gaps (clean declines, older than C5): repeat body, `where(__.map(choose…).is(5))`, a by()
+  with a filter tail, `local(…map(choose…).sum())`, a property host, single-arm `coalesce(choose(…))`.
+- **nr-fu-mapentry-props** `mapEntryProperties` (`rel/write.ts`) adds a fourth hand-rolled `json_extract` helper
+  (`sideOf`, beside three local `ext`s) and evaluates `json_extract(values,'$.v')` twice per entry row — hoist one
+  helper, compute once. Overlaps the *propertyRowsInsert* proposal.
+- **nr-fu-ci-flake** `test/compiler/one-row-one-traverser.exec.test.ts` "a typed inject payload crosses a
+  branch… MERGED_VTYPE" timed out at 5000 ms under the full parallel run (5.5 s alone); it failed one `ci` run
+  this round. Give it an explicit timeout or shrink it.
+- **Depth gaps recorded, not scheduled** (clean declines, older than this round): Map-driver/computed merges in
+  local/union/optional/coalesce arms (S3); record-framed `project('name').by('name').mergeV()` (`mergedFromMap`
+  admits only Map framing — reach common, beside R8-res); `mergeV(__.valueMap('name').by(__.unfold()))`;
+  explanations for `where/map/group().by/order().by/filter/format` over `valueMap().select(label)` (they decline
+  before the key fact is read).
+
+**Reuse-sweep proposals.**
+
+- **merge collision via mapKeyCollision** — `ir/write-args.ts` `resolveMergeArg` (~:376-380) writes its own
+  collision sentence from `sideEffects?.has(k)` and sees only withSideEffect constants. Let `MapScopeDeferral`
+  carry only the key; `mergedFromMap` (`rel/lower.ts` ~:6278) asks `mapKeyCollision(k, facts, ctx, false)`,
+  records it terminal when non-null, else `merge-own-entry`. User prose leaves the Pass-tier module; one wording
+  table; `merge-map-scope` kind and prefix row deleted (needs a `terminal` flag on `mapKeyCollided`). Do AFTER
+  nr-fu-b4-unknown-keys so the merge message inherits the corrected advice.
+- **one Deferral catch** — `deferred(ctx, () => …)` for the four narrowed catches (`rel/lower.ts`
+  `mergedElements` ~:6145, `mergedFromMap` ~:6278; `rel/write.ts` `propertyWrites` ~:2602, the token-property
+  loop ~:3129). Notes a `MapScopeDeferral` terminal, drops a plain `Deferral`, optionally as an ADVISORY reason
+  so "merge with select(k) needs a withSideEffect(k, map) constant" reaches the user. No answer change.
+- **`presentWhere(pred)`** in `rel/child.ts` beside `presenceOf` (null/`ALWAYS_PRODUCTIVE` → `'always'`, else
+  `{when}`), so no producer can report `{when: ALWAYS_PRODUCTIVE}` — the a4c62a20 regression's cause. Replaces
+  the ternaries in `selectedNodeChild` (~:2671), `modulator.ts` `aliasField` (~:522) and `gatedOn` (~:658), and
+  deletes `meetPresence`'s doc caveat. Zero SQL change. (Moot if Tier B retires `PresentWhen`.)
+- **`propertyRowsInsert`** — six sites in `rel/write.ts` (`mapEntryProperties`, `mergeArmValueWrite`,
+  `armValueWriteCorrelated`, the mergeV/mergeE FromMap literal-create loops, `propertyStatements`) build the same
+  PROPERTY_TABLE scan, `typeOf(meta(owner…), …)` row type and `insert({cols, type: WRITTEN_TYPE, returning})`;
+  two hard-code `'node'`/`'edge'`. One builder with `{meta?, onConflict?}`; byte-identical SQL, ~30 lines.
+- **`mapKeyScope`** — `mapTail` select(k) (`rel/lower.ts` ~:3223) and `mapHostChild` (`lower/reduction.ts`
+  ~:2545) run the same four-way dispatch (collided / beyond / absent / entry) and evaluate `namedBeyondMap`
+  twice. One `mapKeyScope(key, facts, ctx, live)` beside `mapKeyCollision`, plus `sideEffectConstantNode(key,
+  ctx)` for the duplicated `constantNode(c.value, c.type ?? null, c.name ?? null)` pair. This is the vehicle for
+  nr-fu-b4-one-authority.
 
 ### Laws found working this list
 
