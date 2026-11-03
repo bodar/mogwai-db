@@ -12,7 +12,6 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow } from '../../rel/bounds.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { containsSelfRef, freeRelIds } from '../../rel/walk.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, typeOfAssert } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
@@ -1592,15 +1591,18 @@ function perRowCollectionStep(
   // Rows keep their count and their channels through every arm, so the stream's multiplicity rides on.
   const resume = (tail: Tail | null): Tail | null => tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, tail.aliases ?? labels);
 
+  // EVERY route reads its input behind a HARD fence (`AS MATERIALIZED`, which SQLite may not flatten): each
+  // arm tests the tag and then reads behind it (`json(v)` of a Map row), and SQLite orders a flattened
+  // WHERE's terms by cost, not as written — so an upstream value filter's term (`is(neq('text'))`, whose `v`
+  // the arm's `vtype = 'map'` constant-folds to a bare `json(value)`) or this route's own raise would fire
+  // on a row the tag test drops (`fencedWhereSelfContained`). A correlated input cannot be hoisted to a CTE
+  // and stays as is.
+  const fence = (rel: Rel): Rel => fencedWhereSelfContained(rel, fresh, true);
+
   if (reader === 'column') {
     // A non-Map row is `Column.apply`'s IllegalArgumentException — a WHERE raise (`raisingRows`), so a
     // position that reads only existence (`count()`) raises too, and is never a drop. Every other row is a Map.
-    // Behind a HARD fence (`AS MATERIALIZED`, which SQLite may not flatten) first: it orders a WHERE's terms
-    // by cost, not as written, so a raise fused beside an earlier filter (`where(count(local).is(2))`, a
-    // subquery) would fire on a row that filter drops. A correlated input cannot be hoisted and stays as is.
-    const selfContained = freeRelIds(input).size === 0 && !containsSelfRef(input);
-    const fencedInput = selfContained
-      ? make.materialize({ id: fresh('prf'), input, channels: input.channels, type: input.type, fenced: true }) : input;
+    const fencedInput = fence(input);
     return resume(mapArm(raisingRows(fencedInput, [[tagIsNot(fencedInput, 'map'), COLUMN_OF_NON_MAP]], fresh)));
   }
   if (reader === 'submap') {
@@ -1609,14 +1611,15 @@ function perRowCollectionStep(
     const named = namedElsewhere(ctx);
     const live = liveAliases(labels, input);
     if (selectSpec(step)!.labels.some((key) => live.has(key) || named(key) || ctx.enclosingLabels?.has(key))) return null;
-    return resume(mapArm(where(input, tagIs(input, 'map'))));
+    const fencedInput = fence(input);
+    return resume(mapArm(where(fencedInput, tagIs(fencedInput, 'map'))));
   }
 
   // SEVERAL ARMS over ONE fenced relation — one scan per arm, never re-computing the upstream. Where a later
   // step reads the arrival order the input is POSITIONED first (the branch merge's own rule,
   // `branchOrderOwed`/`positioned`): every arm carries the position through, so the merged stream is in its
   // input's order rather than arm-major.
-  const base = fencedWhereSelfContained(branchOrderOwed(ctx, { steps, at }, input) ? positioned(input, fresh) : input, fresh);
+  const base = fence(branchOrderOwed(ctx, { steps, at }, input) ? positioned(input, fresh) : input);
   // The Map arm first: where the map vocabulary cannot answer the step, nothing else is built.
   const maps = mapArm(where(base, tagIs(base, 'map')));
   if (!maps) return null;

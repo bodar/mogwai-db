@@ -181,3 +181,70 @@ Feature: mogwai addendum — a per-row-typed stream whose rows may be collection
     Then the result should be unordered
       | result |
       | s[k,x] |
+
+  # A VALUE FILTER in front of the reader (`is`/`where(is)`/`not(is)`) keeps a non-JSON row (`'text'`) in a
+  # relation every arm reads behind its tag test. Each route reads that relation behind a HARD fence
+  # (`fencedWhereSelfContained(…, hard)`), so the filter's `CASE … json(value)` never runs on a row the tag
+  # test drops — flattened, it surfaced as a bare `malformed JSON`.
+  Scenario: g_V_valuesXmX_isXneqXtextXX_countXlocalX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).addV("p").property("m", ["x": 3]).addV("p").property("m", "text").addV("p").property("m", [7, 8, 9]).addV("p").property("m", 5)
+      """
+    And the traversal of
+      """
+      g.V().values("m").is(P.neq("text")).count(local)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+      | d[1].l |
+      | d[3].l |
+      | d[1].l |
+
+  Scenario: g_V_valuesXmX_whereXisXneqX5XXX_limitXlocal_1X
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).addV("p").property("m", "text").addV("p").property("m", [7, 8, 9]).addV("p").property("m", 5)
+      """
+    And the traversal of
+      """
+      g.V().values("m").where(__.is(P.neq(5))).limit(local, 1)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"k":"d[1].i"}] |
+      | text |
+      | l[d[7].i] |
+
+  Scenario: g_V_valuesXmX_notXisXtextXX_selectXk_xX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1, "x": 2]).addV("p").property("m", ["x": 3]).addV("p").property("m", "text").addV("p").property("m", [7, 8, 9])
+      """
+    And the traversal of
+      """
+      g.V().values("m").not(__.is("text")).select("k", "x")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"k":"d[1].i", "x":"d[2].i"}] |
+
+  Scenario: g_V_valuesXmX_isXneqXtextXX_selectXkeysX_raises_over_a_list_row
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("p").property("m", ["k": 1]).addV("p").property("m", "text").addV("p").property("m", [7, 8])
+      """
+    And the traversal of
+      """
+      g.V().values("m").is(P.neq("text")).select(keys)
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "does not have accessible keys"

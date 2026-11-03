@@ -192,9 +192,22 @@ export const presenceFenced = (rel: Rel, value: Expr, fresh: Minter): Rel =>
   (exprHasSubquery(value) ? fencedWhereSelfContained(rel, fresh) : rel);
 
 /** `fenced` where a fence CAN stand — a self-contained relation. A correlated or recursive one is left
- *  as it is: its CTE could not see the outer row (`freeRelIds`) or the walk (`containsSelfRef`). */
-export const fencedWhereSelfContained = (rel: Rel, fresh: Minter): Rel =>
-  (freeRelIds(rel).size === 0 && !containsSelfRef(rel) ? fenced(rel, fresh) : rel);
+ *  as it is: its CTE could not see the outer row (`freeRelIds`) or the walk (`containsSelfRef`).
+ *
+ *  `hard` asks for the `AS MATERIALIZED` barrier (`Rel.materialize.fenced`) rather than a CTE SQLite may
+ *  flatten — for a relation whose READERS filter it on a tag and then compute something defined only
+ *  behind that tag (`json(v)` of a row tagged `map`). Flattened, SQLite propagates the reader's
+ *  `vtype = 'map'` into the input's own `CASE WHEN vtype IN (…) THEN json(value) …`, folds it to a bare
+ *  `json(value)`, and may evaluate the input's WHERE before the tag test — so a non-JSON row an upstream
+ *  value filter (`is(neq('text'))`) still sees raises `malformed JSON`. Only the barrier keeps the input's
+ *  terms evaluated per row, ahead of any reader's. */
+export const fencedWhereSelfContained = (rel: Rel, fresh: Minter, hard = false): Rel =>
+  (freeRelIds(rel).size === 0 && !containsSelfRef(rel) ? (hard ? hardFenced(rel, fresh) : fenced(rel, fresh)) : rel);
+
+/** An `AS MATERIALIZED` CTE over `rel` — one already hard-fenced is itself. */
+const hardFenced = (rel: Rel, fresh: Minter): Rel =>
+  (rel.kind === 'materialize' && rel.fenced
+    ? rel : make.materialize({ id: fresh('hf'), input: rel, channels: rel.channels, type: rel.type, fenced: true }));
 
 /** Physical columns of the two element tables, as `Scan` must declare them. `Scan` is the one node
  *  that names the physical schema (§3.3), so this list IS the algebra's view of storage. */

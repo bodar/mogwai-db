@@ -16,6 +16,12 @@ describe('per-row collection readers — shape', () => {
     expect(sql).not.toMatch(/EXISTS/);
   });
 
+  test('every route reads its input behind a hard fence, so a value filter is never flattened into an arm', () => {
+    for (const q of ["g.V().values('m').is(neq('text')).count(local)", "g.V().values('m').is(neq('text')).select('k','x')"]) {
+      expect(read(q).sql).toMatch(/AS MATERIALIZED/);
+    }
+  });
+
   test('select(keys) over a non-Map row is a raise behind a hard fence, never a drop', () => {
     const sql = read("g.V().values('m').where(__.count(local).is(2)).select(keys)").sql;
     expect(sql).toMatch(/AS MATERIALIZED/);
