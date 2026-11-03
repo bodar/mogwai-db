@@ -826,14 +826,14 @@ reads the Map, then side effects, then path labels, so a row lacking the key mus
   fourth-round S9 item 6 regressions (`withSideEffect('k',['x':1])…select('k').unfold()` etc.) for the scalar host.
 
 **Follow-ups from review (major first):**
-1. **Quadratic write-body re-source with `sample()` (major — production-size outage, pre-existing).**
-   `g.V().hasLabel('holder').property(list,'l', __.V().hasLabel('person','software').sample(1).coalesce(__.values('age'), __.constant(null)))`:
-   561 ms → 2.1 s → 34 s at N = 1k/2k/8k holders (≈61×). The cost is the per-traverser sample window: the lowering
-   builds `traversers CROSS JOIN nodes` and runs `row_number() OVER (ORDER BY encounter, id)` over the whole product,
-   applying `hasLabel` afterwards. `property('c', __.V().hasLabel('person').count())` is linear (50 → 83 ms);
-   `…values('age').sample(1)` is quadratic; the read `flatMap(__.V().hasLabel(…)).count()` is 3–7 ms. Fix: push the
-   label filter below the encounter window (traversers × MATCHING vertices), and partition the window per origin
-   rather than ordering the whole product. Add a scaling witness. Also add a line to `docs/outstanding-work.md`.
+1. ✅ **LANDED (c4b1f4ef, 22e3293d, 839fbd1f, 9e0d5ab1) — per-traverser `sample()` over a rooted body is linear.**
+   `reSourcedOnce` (`src/compiler/rel/lower/reduction.ts`, reached from the one re-source dispatch `reSourceTail` in
+   `lower.ts`) lowers the origin-independent prefix once via `rootedRead` and draws per origin: `sample(1)` one fenced
+   index equi-joined to the numbered candidates; `sample(n)` O(q log q) per origin (sparse draw-with-replacement keeping
+   the first q distinct, else a per-origin rank where P < 2q). Coupling barriers at any depth (`streamsIntoChildren`,
+   `ir/step.ts`) and side-effect collectors in the prefix decline instead of paying the product. Witness:
+   `test/compiler/rooted-sample-scale.exec.test.ts` (~8x for 8x). Remains: nothing (residual declines and the
+   first-value-child single-draw gap are tracked in `docs/outstanding-work.md`).
 2. **R11 hygiene (major, introduced by `82d66183`).** `aliasOperandAt` reads the label's tag via `aliasTypeAt` beside
    `aliasValueAt`; the emitter fuses the alias-history read back in, so the whole history-entry expression
    (`jsonb_object` over the exact-REAL printf/CAST CASE) is spelled TWICE per operand (`$[#-1].v` and `$[#-1].t`), and
