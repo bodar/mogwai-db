@@ -12,6 +12,7 @@ import type { AliasMap } from '../../alias.ts';
 import type { Elem } from '../../elem.ts';
 import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
+import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
 import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, REDUCERS, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
@@ -397,7 +398,7 @@ const nestedBarrierScopes = (s: IRStep, params: ParamEnv): boolean =>
  *   barriers precede the reducer live inside that correlated read and never see an origin;
  * - a FAN-OUT body whose barriers are per-origin windows or further such hosts (`local(__.out())`,
  *   `local(__.out().limit(1))`): `flatMapRejoin` runs it under a NESTED origin (`nestRowOrigin`) where it
- *   holds a window, and inlined where it holds none.
+ *   holds a window or a branch at any depth, and inlined where it holds neither.
  */
 function nestedHostScopes(step: IRStep, params: ParamEnv): boolean {
   if (!PER_TRAVERSER_HOSTS.has(step.name) || step.modulators?.length || step.optionArms || step.args.length !== 1) return false;
@@ -436,15 +437,21 @@ export function flatMapRejoin(
   if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
   // AN ENCLOSING ORIGIN — this host sits inside another per-traverser body (`local(__.out().local(…))`,
   // a `group().by()` reducer body, a `match` pattern), whose origin the input already carries and which
-  // that enclosing host still needs back. A body holding a per-origin WINDOW scopes per INNER row, so it
-  // runs under a NESTED origin (`nestRowOrigin`), shed again below; a body holding none is the body
-  // inlined, and runs over the enclosing origin unchanged. A grouping barrier declines
+  // that enclosing host still needs back. A body holding a per-origin window or a branch ANYWHERE scopes
+  // per INNER row, so it runs under a NESTED origin (`nestRowOrigin`), shed again below; a body holding
+  // neither is the body inlined, and runs over the enclosing origin unchanged. A grouping barrier declines
   // (`nestedBarrierScopes`), and so does the path-hide below, whose origin → path join is one-to-one only
   // for an origin minted over THIS input.
   const enclosed = !!originOf(rel.channels);
   const barriers = body.filter(isStreamBarrier);
   if (enclosed && (!barriers.every((s) => nestedBarrierScopes(s, ctx.params)) || (ctx.tracksPath && step.name === 'flatMap' && pathCarried(rel)))) return null;
-  const nests = enclosed && barriers.some((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name));
+  // WHETHER to nest is a question about the WHOLE body, not its top level: a per-origin window inside a
+  // `union`/`choose` arm (`local(__.union(__.out().limit(1), __.in().limit(1)))`) partitions by
+  // `originOf` exactly as a top-level one does, and an arm merge orders by it — so under the ENCLOSING
+  // origin either would scope per OUTER traverser where `LocalStep` scopes per entering one
+  // (`.../step/branch/LocalStep.java:80-88`). Only a body with no barrier and no branch anywhere is the
+  // body inlined.
+  const nests = enclosed && someStepDeep(body, ctx.params, (s) => isStreamBarrier(s) || BRANCH_HOSTS.has(s.name), true);
   // PATH: `local` and plain `flatMap` DIVERGE (`vendor/tinkerpop/gremlin-core`). `LocalStep` forwards
   // the child's FULL `Traverser.Admin` (`.../step/branch/LocalStep.java:60-67` →
   // `.../Traversal.java:593-595`), so `local(out().out()).path()` is `[v, mid, end]` — the body's minted
@@ -1945,13 +1952,14 @@ function nestedHostChild(body: readonly IRStep[], host: ChildHost, child: ChildS
   const value: ChildValue = step.name === 'map' ? { ...produced, yields: 'one' } : produced;
   if (body.length === 1) return value;
   if (value.yields !== 'one' || typeof value.present === 'object' || value.present === 'unknown') return null;
+  const rest = body.slice(1);
   const carried = { ...(host.row ? { row: host.row } : {}), ...(value.present === 'always' ? {} : { present: value.present }) };
   const framing = value.framing;
   if (framing.kind === 'elements')
-    return producedOnlyWhere(child.scalar(body.slice(1), { kind: 'element', id: value.expr, elem: framing.elem, ...carried }), value.present, value.expr);
+    return producedOnlyWhere(child.scalar(rest, { kind: 'element', id: value.expr, elem: framing.elem, ...carried }), value.present, value.expr, rest);
   if (framing.kind !== 'scalar') return null;
   const vtype = hostTag(framing.type, value.vtype);
-  return producedOnlyWhere(child.scalar(body.slice(1), { kind: 'scalar', value: value.expr, ...(vtype ? { vtype } : {}), ...carried }), value.present, value.expr);
+  return producedOnlyWhere(child.scalar(rest, { kind: 'scalar', value: value.expr, ...(vtype ? { vtype } : {}), ...carried }), value.present, value.expr, rest);
 }
 
 /**
@@ -1960,9 +1968,17 @@ function nestedHostChild(body: readonly IRStep[], host: ChildHost, child: ChildS
  * own presence speaks only for a value it was given, so the handed value's presence is ANDed in as a stated
  * one, and the value is NULL there too (a consumer may read either), rather than trusted to every body to
  * read off its host. A member node computed apart from the value declines.
+ *
+ * "The rest never runs" holds only for a STRICT `rest`. One that can yield from an EMPTY stream — a seeded
+ * barrier (`fold()` → `[]`, `count()` → `0`: `FoldStep`/`CountGlobalStep` supply a seed, under
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/`),
+ * or any step `producesWithoutInput` names — answers its seed where nothing reached it, which no gate on the
+ * handed value can say. So over a value that may be absent it DECLINES (a leading host then falls through
+ * to the seam's other arms, which reduce the whole body).
  */
-function producedOnlyWhere(ran: ChildValue | null, present: HostPresence, value: Expr): ChildValue | null {
+function producedOnlyWhere(ran: ChildValue | null, present: HostPresence, value: Expr, rest: readonly IRStep[]): ChildValue | null {
   if (!ran || present === 'always') return ran;
+  if (producesWithoutInput(rest)) return null;
   const restPresent = presenceOf(ran.present, ran.expr);
   const here = presenceOf(present, value);
   if (!restPresent || !here || ran.node) return null;
@@ -2618,7 +2634,7 @@ export function valueRun(
         kind: 'scalar', value, ...(hostVtype ? { vtype: hostVtype } : {}), ...(row ? { row } : {}),
         ...(presence === 'always' ? {} : { present: presence }),
       }, child);
-      const rest = producedOnlyWhere(over(present), present, value);
+      const rest = producedOnlyWhere(over(present), present, value, body.slice(at + 1));
       if (!rest || seed.yields === 'one') return rest;
       // A run that reached only the FIRST of several values (`values(k)`) answers the reference's first
       // result only where the rest maps EACH value to exactly one — never drops one (an `is()` would make

@@ -505,9 +505,18 @@ export function groupRows(
       // `map(…).fold()` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:92-101`);
       // `__.select(Column.values)` is a `TraversalMapStep` (`…/dsl/graph/GraphTraversal.java`), so the value is
       // the entry's own list, not a one-member list of it. A list keeps its retained rowids under its list
-      // node, which the map's `valOf` routes through `listNodeExpr` at framing.
+      // node, which the map's `valOf` routes through `listNodeExpr` at framing. A list is never a
+      // productive NULL, so a body that may produce nothing (`by(__.values('age').local(__.fold()))` on a
+      // vertex with no age) yields NO node there — the "produced nothing" NULL `memberNodeOf` answers for
+      // every other shape, which `childValueDrop` removes — rather than a `{t:'list', v:null}` member.
+      // Under `ProductiveByStrategy` that NULL is KEPT as the key's value, and the list-valued map's
+      // framing (`mapNodePayload`) rebuilds every value as a list node, so it has no null value to frame:
+      // that one form declines rather than frame a list whose members are NULL.
+      if (produced.framing.kind === 'list' && produced.present !== 'always' && isProductiveBy(step)) return null;
       const node = produced.framing.kind === 'list'
-        ? listNode(produced.expr)
+        ? produced.present === 'always'
+          ? listNode(produced.expr)
+          : { kind: 'case' as const, whens: [[isNot(produced.expr, compilerNull()), listNode(produced.expr)] as [Expr, Expr]], else: compilerNull() }
         : memberNodeOf(produced, source, fresh);
       if (!node) return null;
       member = node;

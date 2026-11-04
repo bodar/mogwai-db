@@ -10,8 +10,8 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
   #     element — `nestedHostChild` where the host LEADS a child value (a choose() key, a by()), and
   #     `perTraverserChild`'s scalar route inside a fan-out body;
   #   - a FAN-OUT inner body is inlined over the enclosing origin, or, where it holds a per-origin
-  #     window of its own (limit/dedup/order…), run under a NESTED origin (`nestRowOrigin`) so the
-  #     window scopes per INNER row.
+  #     window (limit/dedup/order…) or a branch anywhere — a union()/choose() arm included — run under
+  #     a NESTED origin (`nestRowOrigin`) so the window scopes per INNER row.
   #
   # A grouping barrier (fold()/group() continuing mid-body) inside a nested fan-out body has no nested
   # form and declines.
@@ -310,3 +310,161 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | result |
       | marko |
     And the decline should say "no lowering covers"
+
+  # ---- a nested host whose body may produce NOTHING, followed by a SEEDED barrier ----
+  # fold()/count() over zero traversers emit []/0: FoldStep and CountGlobalStep supply a seed
+  # (vendor/tinkerpop/gremlin-core/.../step/map/FoldStep.java, CountGlobalStep.java). So the steps after
+  # the host still answer where the host's body produced nothing; gating them on the host's presence
+  # dropped these rows and keys.
+
+  Scenario: g_V_localXmapXvaluesXageXX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.map(__.values("age")).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[d[29].i] |
+      | l[d[27].i] |
+      | l[] |
+      | l[d[32].i] |
+      | l[] |
+      | l[d[35].i] |
+
+  Scenario: g_V_whereXmapXvaluesXageXX_count_isX0XX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.map(__.values("age")).count().is(0)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |
+
+  Scenario: g_V_projectXn_aX_byXnameX_byXlocalXinE_valuesXweightX_meanX_foldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("n","a").by("name").by(__.local(__.inE().values("weight").mean()).fold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"n":"marko","a":"l[]"}] |
+      | m[{"n":"vadas","a":"l[d[0.5].d]"}] |
+      | m[{"n":"lop","a":"l[d[0.3333333333333333].d]"}] |
+      | m[{"n":"josh","a":"l[d[1.0].d]"}] |
+      | m[{"n":"ripple","a":"l[d[1.0].d]"}] |
+      | m[{"n":"peter","a":"l[]"}] |
+
+  Scenario: g_V_chooseXlocalXoutE_valuesXweightX_sumX_fold__constantXtX__constantXfXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(__.local(__.outE().values("weight").sum()).fold(), __.constant("t"), __.constant("f"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | t |
+      | t |
+      | t |
+      | t |
+      | t |
+      | t |
+
+  # ---- a mid-run nested host whose value is a LIST, as a group() value: a vertex with no age has no
+  #      value, so its key is omitted, as for the sibling by(__.values("age")) ----
+
+  Scenario: g_V_groupXX_byXnameX_byXvaluesXageX_localXfoldXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by("name").by(__.values("age").local(__.fold()))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"marko":"l[d[29].i]","vadas":"l[d[27].i]","josh":"l[d[32].i]","peter":"l[d[35].i]"}] |
+
+  # Under ProductiveByStrategy the unproductive value is KEPT as null; the list-valued map framing has no
+  # null value to frame, so this one form declines (it once framed {t:'list', v:null} and crashed).
+  @Unsupported
+  Scenario: g_withStrategiesXProductiveByStrategyX_V_groupXX_byXnameX_byXvaluesXageX_localXfoldXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withStrategies(ProductiveByStrategy).V().group().by("name").by(__.values("age").local(__.fold()))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"marko":"l[d[29].i]","vadas":"l[d[27].i]","lop":null,"josh":"l[d[32].i]","ripple":null,"peter":"l[d[35].i]"}] |
+    And the decline should say "no lowering covers"
+
+  Scenario: g_V_groupXX_byXidX_byXlocalXvaluesXageX_mapXfoldXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.id).by(__.local(__.values("age").map(__.fold())))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"d[1].i":"l[d[29].i]","d[2].i":"l[d[27].i]","d[4].i":"l[d[32].i]","d[6].i":"l[d[35].i]"}] |
+
+  # ---- a per-origin window inside a BRANCH ARM of a nested body scopes per INNER row, exactly as the
+  #      flat g.V().out().local(<same body>) does ----
+
+  Scenario: g_V_localXout_localXunionXout_limitX1X__in_limitX1XXXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.out().local(__.union(__.out().limit(1), __.in().limit(1)))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[7].l |
+
+  Scenario: g_V_localXout_localXchooseXout_count_isXgtX0XX__out_limitX1X__in_limitX1XXXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.out().local(__.choose(__.out().count().is(P.gt(0)), __.out().limit(1), __.in().limit(1)))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_localXout_localXunionXboth_rangeX0_1X__identityXXXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.out().local(__.union(__.both().range(0,1), __.identity()))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[12].l |
+
+  Scenario: g_V_projectXv_cX_byXidX_byXlocalXout_localXunionXout_limitX1X__in_limitX1XXXX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("v","c").by(T.id).by(__.local(__.out().local(__.union(__.out().limit(1), __.in().limit(1)))).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"v":"d[1].i","c":"d[4].l"}] |
+      | m[{"v":"d[2].i","c":"d[0].l"}] |
+      | m[{"v":"d[3].i","c":"d[0].l"}] |
+      | m[{"v":"d[4].i","c":"d[2].l"}] |
+      | m[{"v":"d[5].i","c":"d[0].l"}] |
+      | m[{"v":"d[6].i","c":"d[1].l"}] |
