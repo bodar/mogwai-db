@@ -103,6 +103,12 @@ item lands with tests that stop it from coming back.
   then `finishLowering`, then `renderProgram`): about 55% of corpus compile time. Render once and pass the
   rendered result forward (the prototype's memo is NOT the shape to land). Test: a counter or spy proving one
   emit per statement per compile.
+- ✅ **cc-3 sll-first-parse LANDED (54eb6fb2).** `parseGremlinUncached` runs SLL with `BailErrorStrategy`
+  and re-parses from a fresh lexer/token stream in full LL only on a bail, so every syntax-error message still
+  comes from LL. Zero bails over the 2,395-traversal corpus and 20,000 L5 traversals; warm corpus parse
+  850 ms → ~100 ms. Tests: `test/L1-corpus/two-stage-parse.test.ts` (tree equality vs forced LL, identical
+  error messages) and `parser-state.test.ts` (SLL/LL interleaved over the patched shared DFA). Remains:
+  nothing. Original item text follows.
 - **cc-3 sll-first-parse.** antlr runs full-LL prediction on every query (19% of corpus time; `SubgraphStrategy(…)`
   sources take 6–8 ms). Parse with SLL plus a bail error strategy, falling back to LL on failure: 14× faster,
   with zero tree differences over all 2395 corpus queries. It must keep the load-bearing `antlr4ng` patch's
