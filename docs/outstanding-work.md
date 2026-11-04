@@ -251,26 +251,25 @@ statement's text grows with data or doubles with query shape. The items below ar
   (`runTimeHole`/`fillHoles`, `src/sql/kernel/q.ts`); `runStepsIn` (`src/program.ts`) packs each binding's rows
   once through the one packer `jsonChunks` (now `src/json-chunks.ts`) and fills the hole with a k-way
   `json_each(?)` UNION ALL — bind count O(bytes / 2 MB), byte-identical under the cap. Tests:
-  `test/value-cap-split.test.ts` under `CfLimitedSql`. Remains: nothing for this item (inject-param-ceiling,
-  mapvalues-inject-ceiling and value-cap-message below are still open).
-- **federate's mapValues injection sends the parents as ONE map (mapvalues-inject-ceiling) — MAJOR at ~7k
-  wide parents.** `g.V().hasLabel("p").values("name").as("e").call("federate",["graph":"x"]).V().has("name",
-  select("e"))` injects every parent's value as one `inject($map)` parameter; at 8k × 300 B it is one 2.8 MB
-  value, which no DO can hold (now the clear platform-limit error, not a bare one). The sibling statement is
-  also P×N: its per-key `has("name", <correlated>)` scans `nodes` per key (2.5 s at 2k parents). Fix: inject
-  a LIST of pairs the sibling explodes (splittable), and seek the property index per key.
-- **A list PARAMETER consumed by `inject()` still crosses as ONE value (inject-param-ceiling) — DATA-SIZE
-  REFUSAL, plausible (review of f3e607f4).** `g.inject(xs).unfold().count()` / `g.inject(xs).count(local)`
-  with xs = 8k × 500 B (4 MB) raise the platform-cap error under `CfLimitedSql` (trunk: bare "bind 1
-  exceeds"). Unfolded, it is a data-sized set like `within($xs)`/`V($ids)`, which now split: route inject's
-  collection-parameter source through `jsonEachRelation` (`src/compiler/rel/build.ts`). Take with
-  rowsbind-value-ceiling. Test: that witness under `CfLimitedSql`.
-- **The platform-cap message blames "a single value" for a SET (value-cap-message) — minor, cheap; take with
-  rowsbind-value-ceiling.** `GraphStore.query` (`src/storage.ts`) maps every `string or blob too big` to
-  `VALUE_PAST_PLATFORM_CAP` ("reduce a fold()/group()/property/parameter"), but the rowsbind witness above and
-  federate's mapValues injection hit it with no single value near 2 MB — the user debugs the wrong thing.
-  Word it to cover "a set this query carries between its statements" (or a separate message at the
-  `RowsBind` site) until those two land.
+  `test/value-cap-split.test.ts` under `CfLimitedSql`. Remains: nothing (its follow-ups landed
+  in d605f072, below).
+- ✅ **An unfolded collection PARAMETER splits past DO's 2 MB value cap; the cap message says what is left
+  (inject-param-ceiling + value-cap-message + mapvalues-inject-ceiling's injection) — LANDED (d605f072).**
+  `explodeMembers` (`src/compiler/rel/build.ts`, the one explode every `unfold()` arm uses) explodes a named
+  parameter cell past the cap through `jsonEachRelation` over `jsonTextChunks` (`src/json-chunks.ts`), so
+  `g.inject($xs).unfold()`, `g.inject($m).unfold()` and federate's per-parent `inject($map).unfold()` cross as
+  k `json_each(?)` chunks (byte-identical SQL under the cap); `valuePastPlatformCap('sent' | 'computed')`
+  (`src/rel/raise.ts`, chosen from the binds in `GraphStore.query`) says whether the value was SENT whole or
+  BUILT by the query. Tests: `test/inject-param-split.test.ts` under `CfLimitedSql`. Remains: an `as()` label
+  or `count(local)` on the whole parameter still reads it as one value (the honest single-value case);
+  `mergeV()` over an unfolded list-of-maps parameter needs R8-res (Map-framed `unfold()` plus a list
+  parameter of Maps, filed under **Writes** below); the two items below.
+- **federate's `has(k, select(label))` sibling is P×N (mapvalues-inject-ceiling residue) — MAJOR at ~2k
+  parents.** The injection now splits, but the sibling statement's per-key `has("name", <correlated>)` scans
+  `nodes` per key (2.5 s at 2k parents). Fix needs a correlated property-index seek per key.
+- **A large collection carried per member under an `as()` label surfaces a bare `database or disk is full`
+  (large-label-carrier-full) — pre-existing, seen while landing d605f072.** Not a query decline in the
+  user's terms; map it to a clear platform/size message or avoid the per-member carrier copy.
 - **both-gate-lineage made label-carrying and barrier frontiers SLOWER (both-gate-frontier-cost) — MAJOR,
   common (two reviews of 28890cd0 + 345dfd5b).** `doubledReads` bounds prepare-time COPIES, not the cost
   of EVALUATING a copy: when the frontier carries a computed per-row column (an `as()` label's `jsonb_array`
