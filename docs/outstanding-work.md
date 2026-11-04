@@ -32,6 +32,14 @@ reached trunk inside the 9adf67d7 push although its own land was reported failed
 inject-fresh-traversers wrong answer). Built but NOT landed: tag-excludes-guard (§1b binary-carrier-guard,
 resume branch `wf/tag-excludes-guard-3-0`).
 
+**Landed in the 2026-11-04 compile-cost round 2** (no answer or baseline moved; residue filed below): federate
+value-stream resumes as ONE `json_each` bind (25a64da6); cc-7 + rf3-is-chain-size, a value run spelled once per
+step via `build.ts` `once()` (8dbb8b44); cc-6 host-unroll linear compile work + `JoinWidthExceeded` (dadaba39);
+cc-8 / a multi-direction hop reads its frontier once (536d727e + b6a97ead). The user's question ("why would
+twenty keys hit our limit — are we binding again?"): no — every one was statement TEXT (DO's 100 KB cap) or
+statement SHAPE (SQLite's 64-table join), never the 100-bind cap. Two of this round's fixes made common queries
+measurably SLOWER (constant factor, linear) — §0b's two MAJOR follow-ups are first in line.
+
 ## 0. Trunk CI (green again at 0152983f)
 
 The stack-depth red (`repeat-unroll-boundary.exec.test.ts` "a count under the ceiling still unrolls and
@@ -205,12 +213,82 @@ statement's text grows with data or doubles with query shape. The items below ar
   `local(repeat(both()).times(k))` ENUMERATES its walks (it now compiles; it is exponential in k by
   multiplicity, not by text); (c) from its second hop on a `both()` chain pays SQLite's MULTI-INDEX OR, ~30%
   per hop over two plain seeks (8k vertices: `both().both().count()` 32 → 42 ms) — a cheaper one-reference
-  spelling would recover it. Related, also found by cc-4:
+  spelling would recover it — SUPERSEDED by §0b both-gate-lineage, which measured the cost on a LONE
+  `out().both()` too. Related, also found by cc-4:
   before the spine cut, proving a correlated id absent (`definesId`, `src/rel/walk.ts`) is O(k²) up to
   `SPINE_DEPTH_BOUND` (linear after); and the TRUE case of `definesId` is O(n²) (only FALSE answers are
   spread) — the doc comment and commit claim O(n) overall; correct the comment.
 - ✅ **Federate resumes put returned data into the SQL TEXT — LANDED (25a64da6).** See the reuse-sweep
   entry below; nothing remains.
+
+**Follow-ups from the compile-cost round 2 reviews (next round starts HERE, major first).**
+
+- **cc-7 made a ONE-step value run under `order().by()`/`dedup().by()` read its property TWICE per row
+  (cc7-one-step-reread) — MAJOR, common (both review lenses).** `g.V().order().by(values('name').toLower())`,
+  `dedup().by(values('name').substring(0,1))`, `order().by(values('name').toUpper(), desc).limit(5)` — the
+  case-insensitive sort/dedup idiom. `runningOnce` (`src/compiler/rel/lower/reduction.ts`) wraps even the
+  FIRST member, whose receiver is a bare correlated read; the receiver-check raise sits inside the `once()`
+  scalar subquery, so `exprMayAbort` stops `withSubqueryColumns` (`src/compiler/rel/build.ts`) from hoisting
+  it, and the emitter's per-node hoist (`src/rel/emit.ts` ~596, the old `sk16_0/sk16_1` columns) no longer
+  sees the two reads — the productivity `WHERE (SELECT … FROM (VALUES(…)) once16) IS NOT NULL` re-spells the
+  window key's subquery. 2 → 4 correlated `vertex_properties` lookups; SQL 1,452 → 1,860 B (order) and
+  1,066 → 1,428 B (dedup), against the commit's "1-step SQL shrinks". 8k vertices: order…limit(5)
+  9.7–15.5 → 14.5–21.8 ms (~+45%), dedup…count 16.4 → 20.6 ms, `as('a').out().order().by(select('a')
+  .values('name').toLower())` ~14.8 → ~29 ms (2×). Linear, answers byte-identical. Fix (generic, pick by
+  measurement): skip `once()` when the incoming value is a bare column/correlated read (only from the second
+  member on is the running value a CASE the emitter cannot hoist), OR let `withSubqueryColumns` hoist the
+  non-aborting scalar subqueries inside a `once()` VALUES row. Test (the reason it passed CI unnoticed): a
+  witness in `test/compiler/value-run-once.exec.test.ts` asserting the property read is spelled ONCE for a
+  one-step `order().by(values('name').toUpper())` and `dedup().by(values('name').substring(0,1))`, and an
+  sql-hygiene family for a transformed `by()` key (none banked today). Minor, same file: each member calls
+  `predicateExpr`/`transformOffences`+`transformExpr` twice (verdict over the real value, then inside the
+  `once()` callback) — compute the verdict once or comment why it is deliberate.
+- **`rereadsFreely` asks the wrong question, so a LONE `both()` after any hop pays the MULTI-INDEX OR
+  (both-gate-lineage) — MAJOR, common (three review findings; supersedes cc-8 follow-up (c)).** The gate
+  (`src/rel/walk.ts`) admits the two-seek form only over a base-table frontier (Scan/Values under
+  Project/Filter), but what compounds is a frontier that ALREADY holds a doubled reference. So
+  `g.V().out().both().count()` 19.3 → 22.6 ms (×1.17–1.23, 8k), `out('knows').bothE().otherV()` ×1.21,
+  `optional(out().both())` +36%, `repeat(both()).emit().times(3)` 277 → 429 ms (+55%),
+  `both().both()` 27.5–30.8 → 30.3–39 ms; single-vertex starts unchanged. Linear, every answer matches.
+  Fix: make the node fact "nothing beneath this frontier reads its input twice" (a `nodeFact`, `walk.ts`),
+  so the two-join form is used at most once along any lineage — copies bounded at 2×, the 2^k growth still
+  gone. If that does not recover `both().both()`, measure a MATERIALIZED-CTE frontier reference against the
+  prepare-time copy. Test: a plan-shape/EXPLAIN assertion in `test/compiler/both-frontier-once.exec.test.ts`
+  that `g.V().out().both()` keeps two plain seeks (`e_out`/`e_in` with no OR).
+- **The one-value landing has its own production-only wall: DO's 2 MB per-bound-value cap
+  (one-value-landing-ceiling) — MAJOR, common, DATA-SIZE REFUSAL.** 25a64da6 moved the federate wall ~20×
+  but did not remove it: under `CfLimitedSql` (`CF_MAX_VALUE_BYTES`, `src/cf-limits.ts`) at 8,000 person
+  vertices `g.call("federate",["graph":"big","traversal":__.V().hasLabel("person").elementMap()])` fails
+  "bind 1 exceeds Cloudflare's 2097152-byte value limit: 2740184 bytes" (answers at 1k; parent commit failed
+  both, on the 100 KB text cap). Same ceiling for a pushed `fold()` node, the element landing
+  (`foreignRelation`) and `valueMap`/`project` at a few thousand wide rows — and for every other
+  "data crosses as ONE json_each value" site (`src/setwrite.ts`, `src/formats/drain.ts`), so it is the
+  CLAUDE.md rule's own limit, not federate's. Fix once, at the shared builder (take with the Next-round
+  "foreign.ts json_each sites on one spelling" proposal, which should land FIRST so there is one place):
+  split the JSON into ≤2 MB binds joined by `UNION ALL` with `ord` offsets — bind count then grows with
+  bytes/2 MB (100 binds ≈ 200 MB, past any isolate). Test: the 8k `elementMap()` witness under `CfLimitedSql`.
+  Test gaps from the same review: no witness with map/element-shaped members (`valueMap`, `elementMap`,
+  `project`, `groupCount().by(name)` — the widest, first to hit 2 MB) in
+  `test/federate-value-stream-scale.test.ts`, and nothing pins per-parent grouping when the sibling stream
+  has duplicates (`g.V().hasLabel("y").call("federate",[…,__.V().union(values("name"),values("name"))
+  .order()])` must give `a,a,b,b,c,c` per parent).
+- **Scatter sort order (federate-scatter-order) — minor, constant factor.** `lowerTypedNodeStream`'s
+  scatter is `json_each(?) fnx0 CROSS JOIN json_each(?) fgd2 ORDER BY fgd2.value, fnx0.key`: pool outer,
+  parents inner, so a TEMP B-TREE sorts all P×N rows (pool 8k × 100 parents 385 ms vs trunk's inlined VALUES
+  107 ms; end to end 98 → 144 ms over 8k parents). Put parents outer; and §17 treats cross-parent order as
+  unordered, so the parent-major sort is only owed where a pushed `order()` asked for it — sort per parent
+  only then. Linear either way.
+- **`JoinWidthExceeded`'s hint suggests remedies that do not work under a filter host (cc6-hint) — minor;
+  take with cc-5 follow-up (a), same function `expansionNamed` (`src/compiler/compiler.ts`).** For
+  `g.V().where(repeat(out()).times(70)).count()` it says "move it to the top level" (turns a filter into a
+  map — a different query) and "use `until(loops().is(n))`" (declines "no lowering covers" under
+  `where`/`not`/`filter` even at n=2; works under `local`). Offer top-level only for map/flatMap-like
+  hosts and `until(loops())` only where it lowers, else "lower the count". Also: the message's
+  "not supported yet" prefix (`UnsupportedTraversal.because`, `src/sql/kernel/budget.ts`) promises a fix
+  for a permanent SQLite limit (same framing as `STATEMENT_SHAPE_LIMIT`) — reword both. And
+  `test/compiler/host-unroll-width.exec.test.ts` at times(2000) accepts either `JoinWidthExceeded` or the
+  stack decline depending on what ran earlier in the process — pin it in a fresh compile or assert only the
+  work bound.
 - **cc-5 review follow-ups (minor).** (a) `expansionNamed` (`src/compiler/compiler.ts`) blames nesting for a
   flat literal bulk upsert (`g.inject([name:'m1'],…×8000).mergeV()`: "each level spells the one before it")
   and blames the largest `times(n)` even when a guarded chain or emit triangle overran — name `times(n)` only
@@ -304,6 +382,11 @@ refusal comes first: it is a production outage.
   `group().by('name').by(values('m').is(typeOf(SET)).fold())` a List of a List. The record-field and
   group-value framers do not read `ListOf.set`. Pre-existing; `typeof-framing.exec.test.ts` asserts only the
   single-key select.
+- **A federate `has(k, select(label))` over a scalar label leaks a bare `Error` (fed-mapvalue-bare-error)** —
+  `g.V().hasLabel("parent").values("i").as("e").call("federate",["graph":"big","traversal":__.V().has("age",
+  select("e")).count()])` gives "federate: mapValues result must map a scalar parent key to an element list"
+  (`src/compiler/rel/segment.ts` ~801, `mapValueElem`); pre-existing. Raise `UnsupportedTraversal` (or answer).
+  Same throw as the r7-fu3 parked attempt (§1b).
 - **A malformed `g:Binary` in a GraphSON load throws a bare `Error`** (`src/formats/graphson.ts`, the same
   pattern as `g:Duration`), which reaches the user through `io().read()` — raise the named load error.
 - **A label bound before a local `order()` is lost (order-local-alias-drop)** — `g.V(1).as('a').values('name')
@@ -363,6 +446,13 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   .select('a').select('a').count()` 57 ms → 3.4 s. Read the key once as one MATERIALIZED relation and
   cross-join it.
 - **Mid-traversal `V().has` with no seek in a READ (r4-perf1)** — 813 ms → 44.6 s.
+- **Injected mid-federate `has(k, select(label))` is quadratic in parents (fed-inject-quadratic) — MAJOR,
+  plausible.** `g.V().hasLabel("parent").values("name").as("e").call("federate",["graph":"big","traversal":
+  __.V().has("name", select("e"))]).count()` 227/474/1939 ms at P=500/1k/2k (4× per doubling); P=8k did not
+  finish. The cost is the sibling-side injection statement (the inj-map group with a correlated
+  `count(1)` subquery per key over `json_extract(ex2.value …)`, `src/compiler/rel/segment.ts`), not the
+  resume 25a64da6 touched; pre-existing. Group the injected map once (one `GROUP BY` over the exploded
+  parents) instead of a per-key correlated count. Same family as r7-fu3 below.
 - **Correlated-value property seek (r7-fu3, r6-fu1)** — `V().has(k, select(label))` needs a narrowing
   `element.id IN (owner seek)` conjunct in `rel/passes/semijoin.ts`, entering correlated subplans via
   `rewriteRels` (55×). The parked attempt failed on: a string id `V('u0')` not treated as a bound, a shared
@@ -464,6 +554,20 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
     ref `[null,null]` (`Scoping.java:129-130`; `rerootPresence` is `'value-nullness'`); a re-sourced
     productive-null arm in `choose`; stated-presence `by()` in local/map/optional; `aliasGuard`'s presence
     spelling (F14b). None user-reported.
+
+- **Long bounded repeats inside a per-traverser host past times(63) (host-body-decorrelation).** 🔴
+  Verbatim: "Long bounded repeats inside a per-traverser host (local/where/map/by) answer only up to
+  times(63). From 64 on, SQLite refuses them, a clean decline that depends on the query text (cc-6 makes it
+  fast and makes it name the times()). Recommendation: accept this and add one line to
+  docs/feature-support-matrix.md §17 as a SQLite statement-shape limit. Decorrelate reducing host bodies only
+  if a common-reach performance measurement asks for it, because doing so changes the plan of every
+  local(...count())/by(__...count())/where(...count()) and may slow single-origin hosts. Agree?"
+  Context: deferred, not built, no branch. **Prerequisite (do BEFORE any decorrelation build): measure**
+  correlated-scalar vs GROUP-BY-origin cost for COMMON reducing host bodies —
+  `g.V().project('n').by(__.out().count())`, `g.V().where(__.out().count().is(gt(2)))` at 1k/8k, plus the
+  single-origin `g.V(1)` form; build only if the correlated form is super-linear or materially slower. Shares
+  its root with §0b's correlated-subtree-sharing prerequisite and §0 spine-cut-hosts (a correlated body as a
+  relation of its own) — if that substrate is built, this item is its consumer, not a second mechanism.
 
 ## 3. Compounding substrate
 
@@ -1104,7 +1208,6 @@ Proposals from the 2026-11-04 compile-cost round's reuse sweep (answer-neutral u
   `foreignRelation`, `ord` kept and pinned by `ORDER BY (parent, ord)`), and the three parent-scatter copies
   are one `parentsRelation(P, fresh, kind)` authority (`src/compiler/rel/lower.ts`); statement text no longer
   grows with returned data (`test/federate-value-stream-scale.test.ts`). Remains: nothing.
-- **cc-7 via `once`** — see §0b; one more caller of `build.ts` `once`, no new mechanism.
 - **One param-or-constant authority in `src/compiler/rel/const.ts`** — the exact-tail
   `name != null ? param(v,name) : compilerText(String(v))` ×3 (`lower.ts` `exactTailConst` ~2810, `lower.ts`
   inject `rowExpr` ~2926, `predicate.ts` ~90; `isExactTail` spelled twice in lower.ts + privately in
@@ -1119,6 +1222,40 @@ Proposals from the 2026-11-04 compile-cost round's reuse sweep (answer-neutral u
   and `emitQuery`'s 42 references are all in `test/`; each re-states `lowered()`'s `DO_BIND_CAP` check.
   Leave `renderLowered` + `renderedSteps` as the one crossing so a future caller cannot re-emit. ~15 lines
   out of `src/`, no SQL change.
+
+Proposals from the compile-cost round 2 reuse sweep (answer-neutral unless stated; the first is a possible
+production-only wall — verify it first):
+
+- **`lowerScalarResume`/`lowerReduceCombine` land their one value through `foreignNodeStream`**
+  (`src/compiler/rel/lower.ts` ~4578, ~4671; both splice `compilerText(stringifyExact(node))` into a one-row
+  VALUES with a `Filter(CONSTANT.false)` for empty). **Verify first:** `lowerScalarResume`'s node is the
+  sibling's value in statement TEXT, so a pushed `max()`/`min()` over a long string property may grow the
+  statement with data — the DO 100 KB wall in its last spelling. Either way, `foreignNodeStream(empty ? [] :
+  [node], fresh)` deletes both Filter(false) workarounds. ~15 lines.
+- **foreign.ts's five data-array `json_each` sites on one spelling** — `foreignRelation`,
+  `foreignMapRelation`, `parentsRelation`, `foreignNodeStream`, `landedStream` (`src/compiler/rel/foreign.ts`)
+  each hand-roll `make.explode({ expr: lit(stringify(X), 'text'), … })`; `build.ts` `jsonEachSet` is the
+  same meaning. Caveat: `jsonEachSet` takes a compiler-minted param NAME and the bind dedup merges same-named
+  binds, so two landings in one plan would share a bind (wrong answer) — the shared helper must keep the
+  unnamed mechanical `lit(...)` form (a mode of `jsonEachSet`, or the base its named form wraps). Also makes
+  "the ONE JSON writer is stringifyExact" true (`parentsRelation`/`landedStream` call bare `JSON.stringify`).
+  `foreignNodeStream`'s `json(value)`+ord projection = `lower.ts` `listSeed`/`mapSeed`. Land BEFORE
+  one-value-landing-ceiling (§0b) so the 2 MB split has one home. ~20 lines.
+- **Every compute-once scalar subquery via `build.ts` `once()`** — `predicate.ts` `storedCompareOnce` (~604)
+  and `valueTheta`'s `vto`/`vtp` one-row VALUES (~750) are hand-rolled copies (each with its own copy of
+  `once`'s `spelledFreely` test); `reduction.ts` `runningOnce` and `modulator.ts` `producedMemberNode` both
+  spell `vtype ? [value, vtype] : [value]` — a small `onceTyped(value, vtype?, body, fresh, type)` absorbs
+  them. SQL same or smaller (`once` keeps a cheap operand inline). ~25 lines. Take with cc7-one-step-reread
+  (§0b) — that fix lands in `runningOnce`/`once` too.
+- **One `oneRow` unit relation** — exported from `build.ts` beside `once()`, replacing `lower.ts` `oneRow`
+  (~2841) and the hand-rolled `u`/`eu`/`pu` (`reduction.ts` ~1509, `mapEntryChild` ~2508,
+  `perRowCollectionChild` ~2592) and `pv` (`write.ts` ~1368); `mapEntryChild`/`perRowCollectionChild`
+  become a one-row `make.values({ rows: [[…]] })` (one Rel node and one nesting level fewer). ~10 lines.
+- **`directory` (`--list`) answers an empty listing instead of declining — CHANGES BEHAVIOUR, flag it.**
+  `src/services/catalog/directory.ts` `scalarStrings` returns null (→ UnsupportedTraversal) when the
+  service filter matches nothing, because `Values([])` is unrepresentable; build the rows as one exploded
+  JSON array (empty array = zero-row relation). `call('--list',[service:'nope'])` → `[]`. Today's decline
+  depends on registry contents, not query text.
 
 ## 7. Low priority
 
