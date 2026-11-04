@@ -69,6 +69,59 @@ describe('a write inside a SINGLE-arm branch (works)', () => {
   });
 });
 
+// branch(<traversal>).option(…) with ONE live option is the same single arm as `union(t)`, over the gated
+// input: the option's write effects must thread out too (dropping them leaked an internal "Ref … is not a
+// Plan binding" Error). A REDUCING writing option declines: its "was a start routed here" probe sits in the
+// result query and would re-evaluate the choice AFTER the write moved it.
+describe('a write inside the ONE live option of a branch() (works)', () => {
+  const modern = [
+    ...seed,
+    "g.addV('software').property('name','lop')",
+    "g.addE('created').from(__.V().has('name','marko')).to(__.V().has('name','lop'))",
+  ];
+
+  test('a keyed option writes only the starts it admits', async () => {
+    const s = store(modern);
+    expect((await run(s, "g.V().branch(__.label()).option('person', __.property('seen', true)).values('name')")).sort()).toEqual(['marko', 'vadas']);
+    expect((await run(s, "g.V().has('seen').values('name')")).sort()).toEqual(['marko', 'vadas']);
+  });
+
+  test('a predicate key over a value choice, then a tail', async () => {
+    const s = store(modern);
+    expect(await run(s, "g.V().hasLabel('person').branch(__.values('age')).option(P.gt(28), __.property('senior', true)).count()")).toEqual([1]);
+    expect(await run(s, "g.V().has('senior').values('name')")).toEqual(['marko']);
+  });
+
+  test('addV / addE in the option, and Pick.any', async () => {
+    let s = store(modern);
+    expect(await run(s, "g.V().branch(__.label()).option('person', __.addV('copy')).count()")).toEqual([2]);
+    expect(await run(s, "g.V().hasLabel('copy').count()")).toEqual([2]);
+    s = store(modern);
+    expect(await run(s, "g.V().branch(__.label()).option('software', __.addE('self').to(__.V().has('name','marko'))).count()")).toEqual([1]);
+    expect(await run(s, "g.E().hasLabel('self').count()")).toEqual([1]);
+    s = store(modern);
+    expect(await run(s, "g.V().branch(__.label()).option(Pick.any, __.addV('copy')).count()")).toEqual([3]);
+    expect(await run(s, "g.V().count()")).toEqual([6]);
+  });
+
+  test('a write that moves the choice keeps the starts it was routed', async () => {
+    // vadas and lop have no out-edge, so both take option 0; the new edge then gives each one.
+    const s = store(modern);
+    expect((await run(s, "g.V().branch(__.out().count()).option(0L, __.addE('self').to(__.V().has('name','marko'))).outV().values('name')")).sort()).toEqual(['lop', 'vadas']);
+  });
+
+  test('a REDUCING writing option declines (its routed probe would read the post-write choice)', async () => {
+    const s = store(modern);
+    await expect(run(s, "g.V().branch(__.out().count()).option(0L, __.addE('self').to(__.V().has('name','marko')).count())")).rejects.toThrow(/not supported/);
+    expect(await run(s, 'g.E().count()')).toEqual([2]); // nothing written
+  });
+
+  test('a writing option beside a second live option declines', async () => {
+    const s = store(modern);
+    await expect(run(s, "g.V().branch(__.label()).option('person', __.property('seen', true)).option(Pick.none, __.values('name'))")).rejects.toThrow(/not supported/);
+  });
+});
+
 describe('a write inside a SOURCE union (g.union(…)) — unconditionally correct', () => {
   // A source union has ONE start traverser, so arm-major order coincides with per-traverser order —
   // there is no sibling traverser whose writes an arm could observe out of order. So even MULTIPLE write

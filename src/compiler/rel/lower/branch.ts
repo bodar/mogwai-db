@@ -53,6 +53,15 @@ export const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'br
  *  observe it, so it is identical to a top-level write followed by its tail. */
 export type BranchRel = FramedRel & { readonly aliases: AliasMap; readonly effects?: readonly Binding[] };
 
+/** A ONE-ARM branch IS its arm: the arm's relation (its encounter framed by the caller), framing, label
+ *  names — AND its effects. A write in the sole arm is a set-based statement over that arm's input whose
+ *  bindings must thread OUT to the program (see `BranchRel`); a return that rebuilt the record field by
+ *  field and dropped `effects` left the result referencing a write binding no program declared, an
+ *  internal plan error reaching the user. Every single-arm branch exit goes through here. */
+function soleArm(only: Tail, rel: Rel): BranchRel {
+  return { rel, framing: only.framing, aliases: only.aliases, ...(only.effects?.length ? { effects: only.effects } : {}) };
+}
+
 /** Which arm-merging builder a step wants. Total over `BRANCH_HOSTS`, so a member added there without a
  *  builder is a compile error rather than a silent decline. */
 export function branchArms(
@@ -287,10 +296,7 @@ export function unionArms(
     if (!only || (owed && !encounterOf(only.rel.channels))) return null;
     // A write in the single arm (`union(__.mergeV(…))`) threads its effects out — a `Tail`'s `effects`
     // become the branch's, so the arm's write bindings reach the program instead of dangling.
-    return {
-      rel: owed ? only.rel : dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases,
-      ...(only.effects?.length ? { effects: only.effects } : {}),
-    };
+    return soleArm(only, owed ? only.rel : dropEncounter(only.rel, fresh));
   }
 
   // A REDUCTION arm holds a COLLAPSING barrier (a reducer/count/fold — `selfCollapses`), so the arm is a
@@ -1019,6 +1025,12 @@ export function chooseOptions(
     // A REDUCING option emits only where a start was routed to it (`BranchStep.java:130-134` drains an
     // option once it `hasStarts()`), never its seed over nothing — `chooseArms`' gate, on this option's input.
     const collapses = isReductionArm(body);
+    // …but that probe is part of the RESULT query, which runs AFTER the arm's writes: a write that moves the
+    // choice (`branch(out().count()).option(0L, addE('self').to(V(1)).count())` — the new edge makes the count
+    // 1) would re-route the start out of its own option and the count would vanish. The probe needs the routed
+    // input snapshotted before the effects, which this seam does not hold, so a writing reducing option
+    // declines. A non-reducing writing option reads its write's own RETURNING rows and answers.
+    if (collapses && lowered.effects?.length) return null;
     reduced.push(collapses);
     built.push(collapses ? routedReduction(lowered, gate(pred), fresh) : lowered);
   }
@@ -1039,7 +1051,7 @@ export function chooseOptions(
   // emission key's job, so an owed single arm declines rather than invent one.
   if (built.length === 1) {
     const only = built[0]!;
-    return owed ? null : { rel: dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases };
+    return owed ? null : soleArm(only, dropEncounter(only.rel, fresh));
   }
   return emissionMerge(built, from, owed, labels, ctx, fresh, reduced);
 }
