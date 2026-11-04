@@ -37,6 +37,14 @@ instead of declining: a `null` member is an id no element has, so it adds no cla
 members but none matchable is `CONSTANT.false`, never `V()` (`idMembership` in
 `src/compiler/rel/source.ts`; `boundGraph.elementScan` likewise). L3 1908 → 1919. Remains: nothing.
 
+**Filter-led predicate body (✅ landed, cb3e44a2..e195afc2).** A predicate body that leads with filters
+and then moves — `where(hasLabel(..).out())`, `not(hasLabel(..).out())`, SubgraphStrategy criteria
+`or(…, has(..).outV()…)` — answers at every predicate position: `bodyPredicate`
+(`src/compiler/rel/lower/filter.ts`) conjoins the leading filters with the moving/projecting shapes over
+a STRICT suffix (`producesWithoutInput`, `src/compiler/ir/productivity.ts`); a label/id test on a joined
+element is a per-row key probe (`src/compiler/rel/source.ts`). L3 1931 → 1942. Remains: nothing (the
+`map()` element-absence gap below is a separate item).
+
 **Statically decidable steps (✅ landed, f5b66932).** Four rules at existing authorities: a stray
 `emit()`/`until()`/`times()` with no `repeat()` body raises TinkerPop's verification message
 (`verifyStandard`); `times(n<=0)` before `repeat()` is the identity, after it `times(1)` (`tryUnroll`);
