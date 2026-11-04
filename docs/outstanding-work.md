@@ -120,6 +120,13 @@ item lands with tests that stop it from coming back.
   with zero tree differences over all 2395 corpus queries. It must keep the load-bearing `antlr4ng` patch's
   guarantees (`test/L1-corpus/parser-state.test.ts`). Test: SLL tree equals LL tree over the whole corpus, and
   error messages are unchanged for invalid input.
+- ✅ **cc-4 per-node fact cache LANDED (4b500f21).** `nodeFact(compute)` in `src/compiler/rel/walk.ts` memoizes a
+  per-node fact in a WeakMap keyed on node identity (Calcite's `RelMetadataQuery` discipline); `freeRelIds`,
+  `hasFreeSelfRef`, `refNames`, `exprReach`, `recursiveStep` and the emitter/bounds/block private memos are built
+  on it. Corpus compile ~2250 → ~2140 ms, `times(400)` ~210 → ~186 ms, no SQL change. Test:
+  `test/compiler/node-facts.test.ts` (walk oracle over every corpus plan + child-enumeration meter). Remains:
+  nothing. Found, not this item: `g.V().local(__.both()×k.count())` emits SQL growing 2^k (a correlated shared
+  subtree is inlined at each use). Original item text follows.
 - **cc-4 per-node fact cache.** Within one compile, an Expr's children are walked about 17× and a Rel node's
   about 6.7×, because separate passes each re-derive their own fact. Cache per-node facts keyed on node
   identity, which is safe because nodes are immutable. Estimated 2–3×. Pass/ChainFacts boundaries per
