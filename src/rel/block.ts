@@ -1,6 +1,6 @@
 import type { Expr } from './expr.ts';
 import type { Rel, RelKind } from './rel.ts';
-import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
+import { exprRels, forEachExpr, forEachRel, nodeFact, relExprs } from './walk.ts';
 import { exprMayRaise } from './raise.ts';
 
 /**
@@ -206,21 +206,13 @@ const leaf = (r: Rel): BlockShape => ({ slots: EMPTY, aliases: [aliasOf(r)], sou
 /** A unary node's own block: its operator lands in the block its input gave it. */
 const over = (r: Rel, b: BlockShape, slots: Slots = b.slots): BlockShape => ({ ...b, slots, fused: [r, ...b.fused] });
 
-const cache = new WeakMap<Rel, Shape>();
-
 /**
  * The block the emitter will assemble for this relation — slots, aliases and unwrapped sources.
  *
  * Pure in the node (a `Rel` is frozen), so it is memoised across the DAG: without that a diamond
  * costs exponentially, and a plan with shared subtrees is the normal case here (§3.4).
  */
-export function shapeOf(r: Rel): Shape {
-  const seen = cache.get(r);
-  if (seen) return seen;
-  const out = compute(r);
-  cache.set(r, out);
-  return out;
-}
+export const shapeOf: (r: Rel) => Shape = nodeFact((r: Rel): Shape => compute(r));
 
 /** The input of a unary node, as the block that node fills a slot in. */
 const inputShape = (node: Rel & { readonly input: Rel }): BlockShape => {

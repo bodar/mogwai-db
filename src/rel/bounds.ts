@@ -1,5 +1,6 @@
 import type { Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
+import { nodeFact } from './walk.ts';
 
 /** How many rows a relation can yield: `min <= rows <= max`, `max = Infinity` where nothing bounds it. */
 export interface RowBounds { readonly min: number; readonly max: number }
@@ -63,15 +64,7 @@ function uniqueKeyMatches(pred: Expr, scan: Extract<Rel, { readonly kind: 'scan'
  * are too, and the plan is a DAG — `both()` is a `Union` of two arms reading ONE input, so an unmemoised
  * walk visits 2^k nodes for k hops (`freeRelIds` carries the same measurement).
  */
-export function rowBounds(rel: Rel): RowBounds {
-  const known = boundsMemo.get(rel);
-  if (known) return known;
-  const bounds = boundsOf(rel);
-  boundsMemo.set(rel, bounds);
-  return bounds;
-}
-
-const boundsMemo = new WeakMap<Rel, RowBounds>();
+export const rowBounds: (rel: Rel) => RowBounds = nodeFact((rel: Rel): RowBounds => boundsOf(rel));
 
 function boundsOf(rel: Rel): RowBounds {
   switch (rel.kind) {

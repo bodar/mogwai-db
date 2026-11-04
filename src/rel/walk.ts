@@ -11,10 +11,54 @@ import type { FrameBound, RelId, SortTerm, WindowSpec } from './types.ts';
  * `noImplicitReturns`, a new kind makes each of these fail to compile, which is the whole contract.
  * A `default` here would restore exactly the fail-open behaviour this module exists to delete. */
 
-/** A recursive term is only reachable through its builder, so enumerating it needs the self-ref. */
-export const recursiveStep = (r: Extract<Rel, { readonly kind: 'recursive' }>): Rel => r.step(recursiveSelf(r));
+/**
+ * ONE PER-NODE FACT, COMPUTED ONCE PER NODE — the memo every synthesized fact below is built on.
+ *
+ * A `Rel` is frozen at construction (`brandRel`, `factory.ts`) and an `Expr` is never mutated after it
+ * is built, so a fact that reads only the node and what lies beneath it is a property of the node's
+ * IDENTITY: computed on first ask, it is the answer for every later asker, in every pass, for the rest
+ * of the node's life. That is Calcite's discipline — `RelMetadataQuery` answers a metadata question
+ * per `RelNode` through a per-node cache
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/metadata/RelMetadataQuery.java`) — and it
+ * is what keeps a whole-plan question linear when lowering, the passes, `check` and the emitter all ask
+ * it of the same DAG. A WeakMap per fact, so a node the compile has dropped takes its facts with it.
+ *
+ * ⚠️ ONLY a fact of the node. Anything that also reads a caller's context (a scope, a binding list) is
+ * not keyed by the node alone, and memoising it here would hand one caller's answer to another.
+ */
+export function nodeFact<N extends object, T>(compute: (node: N) => T): (node: N) => T {
+  const memo = new WeakMap<N, T>();
+  return (node) => {
+    const known = memo.get(node);
+    if (known !== undefined || memo.has(node)) return known as T;
+    const value = compute(node);
+    memo.set(node, value);
+    return value;
+  };
+}
 
-/** Child relations, in declaration order. */
+const NONE: readonly never[] = Object.freeze([]);
+/** A computed child list, frozen: it is handed to every asker, so no asker may edit it. */
+const fixed = <T>(items: T[]): readonly T[] => (items.length ? Object.freeze(items) : NONE);
+
+/**
+ * A recursive term is only reachable through its builder, so enumerating it needs the self-ref.
+ * Memoised per `Recursive` node, so every walker — `check`, `obligations`, the emitter, every pass —
+ * sees the ONE step tree, the same node identities, and one `SelfRef` for it. (The factory already
+ * builds the term once per node, `factory.ts` `recursive`; this keeps the self-ref it is asked with
+ * from being minted again per ask.)
+ */
+export const recursiveStep: (r: Extract<Rel, { readonly kind: 'recursive' }>) => Rel =
+  nodeFact((r) => r.step(recursiveSelf(r)));
+
+/**
+ * Child relations, in declaration order.
+ *
+ * ⚠️ Deliberately NOT a cached list per node. A one- or two-element array is cheaper to allocate than a
+ * WeakMap lookup is to make — measured: caching `relChildren`/`relExprs`/`exprChildren` per node made the
+ * corpus compile ~3% SLOWER and `times(400)` no faster. The facts below are what is worth caching: each
+ * replaces a WALK, not an allocation.
+ */
 export function relChildren(r: Rel): readonly Rel[] {
   switch (r.kind) {
     case 'scan': case 'values': case 'self-ref': case 'ref': return [];
@@ -61,13 +105,12 @@ const specExprs = (spec: WindowSpec): readonly Expr[] => [
   ...(spec.frame ? [...boundExprs(spec.frame.start), ...boundExprs(spec.frame.end)] : []),
 ];
 
-/** Does an expression tree contain a SUBQUERY node (a correlated `scalar`/`exists`/`in-query`)? */
-export function exprHasSubquery(e: Expr): boolean {
-  if (e.kind === 'scalar' || e.kind === 'exists' || e.kind === 'in-query') return true;
-  return exprChildren(e).some(exprHasSubquery);
-}
+/** Does an expression tree contain a SUBQUERY node (a correlated `scalar`/`exists`/`in-query`)?
+ *  A fact of the expression, memoised per node (`nodeFact`). */
+export const exprHasSubquery: (e: Expr) => boolean = nodeFact((e: Expr): boolean =>
+  e.kind === 'scalar' || e.kind === 'exists' || e.kind === 'in-query' || exprChildren(e).some(exprHasSubquery));
 
-/** Sub-expressions, in declaration order. */
+/** Sub-expressions, in declaration order. Allocated per ask, like `relChildren` and for its reason. */
 export function exprChildren(e: Expr): readonly Expr[] {
   const some = (...maybe: readonly (Expr | undefined)[]): readonly Expr[] => maybe.filter((x): x is Expr => x !== undefined);
   switch (e.kind) {
@@ -273,30 +316,66 @@ export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel, m
  *
  * A `SelfRef` defines nothing and names its walk positionally, so it is not a free reference.
  *
- * ⚠️ **VISITS EACH NODE ONCE — the plan is a DAG (§3.4) and the guard is not an optimization.**
- * Both sets it accumulates are unions, so revisiting a shared node adds nothing; what it costs is
- * TIME, exponentially. `both()` is the shape that shows it: each hop is a `Union` of two arms and
+ * ⚠️ **ANSWERS EACH NODE ONCE — the plan is a DAG (§3.4) and the memo is not an optimization.**
+ * The answer is a union over what lies beneath, so recomputing a shared node adds nothing; what it
+ * costs is TIME, exponentially. `both()` is the shape that shows it: each hop is a `Union` of two arms and
  * both arms read the SAME input relation, so a walk without this guard visits 2^k nodes for k hops.
  * Measured before the guard, on `g.V().both()…count()`: 3 ms at k=8, 169 ms at k=16, 2 660 ms at
  * k=20, while the emitted SQL grew LINEARLY (~310 bytes per hop) throughout — the giveaway that the
  * cost was a traversal and never the plan.
  */
-export function freeRelIds(plan: Rel): ReadonlySet<string> {
-  const defined = new Set<string>();
-  const referenced = new Set<string>();
-  const seen = new Set<Rel>();
-  const go = (r: Rel): void => {
-    if (seen.has(r)) return;
-    seen.add(r);
-    defined.add(r.id);
-    relExprs(r).forEach((e) => forEachExpr(e, (node) => {
-      if (node.kind === 'col') referenced.add(node.rel);
-      exprRels(node).forEach(go);
-    }));
-    relChildren(r).forEach(go);
-  };
-  go(plan);
-  return new Set([...referenced].filter((id) => !defined.has(id)));
+export const freeRelIds: (plan: Rel) => ReadonlySet<string> = nodeFact((r: Rel): ReadonlySet<string> => {
+  // SYNTHESIZED from what lies beneath, not re-walked per ask: a candidate is an id this node's own
+  // expressions name or one free in something beneath it, and it stays free unless the subtree defines
+  // it. `name` asks this of every shared node and the lowering of every long spine, so each node is
+  // answered once for all of them. What is NOT cheaper is proving a correlated id ABSENT from a subtree
+  // (`definesId`): that is one search of the subtree, as the walk was, and the spine cut
+  // (`boundedSpine`) is what bounds it.
+  const beneath = relsBeneath(r);
+  const freeBeneath = beneath.map(freeRelIds);
+  const candidates = unionOf([exprReach(r).cols, ...freeBeneath]);
+  if (!candidates.size) return candidates;
+  const free = [...candidates].filter((id) => id !== r.id
+    && !beneath.some((child, i) => child.id === id || (!freeBeneath[i]!.has(id) && definesId(child, id))));
+  return free.length === candidates.size ? candidates : free.length ? new Set(free) : NO_NAMES;
+});
+
+/**
+ * Is `id` the id of `r` or of a relation beneath it? Asked only of a candidate that is neither the node's
+ * id nor a directly-beneath node's — over the corpus, a correlated (outer) reference ~4 200 times and a
+ * deeper definition 79 times, of ~34 000 own-expression references.
+ *
+ * BREADTH-FIRST, because a deeper definition sits a level or two down (a fused expression reading through
+ * the relation beneath it) and depth-first would dive to the bottom of a long chain first. A correlated
+ * reference is the costly case: proving it ABSENT is one search of the subtree, as the walk-per-ask was.
+ * An exhausted search records "not here" for EVERY node it visited — each of their subtrees was searched
+ * whole — so one id rising through n ancestors costs O(n) in all, not a search per ancestor.
+ */
+const idsDefined = new WeakMap<Rel, Map<string, boolean>>();
+const recordDefines = (r: Rel, id: string, answer: boolean): void => {
+  let asked = idsDefined.get(r);
+  if (!asked) idsDefined.set(r, asked = new Map());
+  asked.set(id, answer);
+};
+function definesId(r: Rel, id: string): boolean {
+  if (r.id === id) return true;
+  const known = idsDefined.get(r)?.get(id);
+  if (known !== undefined) return known;
+  const seen = new Set<Rel>([r]);
+  let frontier: readonly Rel[] = [r];
+  while (frontier.length) {
+    const next: Rel[] = [];
+    for (const node of frontier) for (const child of relsBeneath(node)) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      const answer = child.id === id || idsDefined.get(child)?.get(id);
+      if (answer === true) { recordDefines(r, id, true); return true; }
+      if (answer === undefined) next.push(child);
+    }
+    frontier = next;
+  }
+  seen.forEach((node) => recordDefines(node, id, false));
+  return false;
 }
 
 /**
@@ -335,16 +414,36 @@ export function containsSelfRef(plan: Rel, name?: string): boolean {
  * names its walk positionally rather than through a `Col`, which is exactly why `freeRelIds` cannot
  * see it and this exists beside it.
  */
-export function hasFreeSelfRef(plan: Rel): boolean {
-  const bound = new Set<string>();
-  const referenced = new Set<string>();
-  // ONE traversal: `forEachRel` already descends a recursive node's step and every correlated
-  // subplan, so a reference inside either is found and a definition inside either binds it.
-  forEachRel(plan, (r) => {
-    if (r.kind === 'recursive') bound.add(r.name);
-    if (r.kind === 'self-ref') referenced.add(r.name);
-  });
+export const hasFreeSelfRef = (plan: Rel): boolean => {
+  const { referenced, bound } = walkNames(plan);
   return [...referenced].some((name) => !bound.has(name));
+};
+/** The walk names a subtree REFERENCES (a `SelfRef`) and BINDS (a `Recursive`), each over the WHOLE
+ *  subtree — a recursive node's step and every correlated subplan included, `forEachRel`'s coverage, so
+ *  a reference inside either is found and a definition inside either binds it. Synthesized bottom-up,
+ *  one fact per node; a node that adds nothing shares its child's answer (`unionOf`), so the sets cost
+ *  memory only where walks are. */
+interface WalkNames { readonly referenced: ReadonlySet<string>; readonly bound: ReadonlySet<string>; }
+const walkNames: (r: Rel) => WalkNames = nodeFact((r: Rel): WalkNames => {
+  const beneath = relsBeneath(r).map(walkNames);
+  const referenced = unionOf(beneath.map((names) => names.referenced), r.kind === 'self-ref' ? r.name : undefined);
+  const bound = unionOf(beneath.map((names) => names.bound), r.kind === 'recursive' ? r.name : undefined);
+  return beneath.find((names) => names.referenced === referenced && names.bound === bound) ?? { referenced, bound };
+});
+
+/** The union of some sets plus one optional member, SHARING an input that already IS the answer — what
+ *  keeps a bottom-up set fact linear in memory on a long chain, where most nodes add nothing. */
+const NO_NAMES: ReadonlySet<string> = new Set();
+function unionOf(sets: readonly ReadonlySet<string>[], plus?: string): ReadonlySet<string> {
+  let largest: ReadonlySet<string> = NO_NAMES;
+  for (const set of sets) if (set.size > largest.size) largest = set;
+  const covered = (plus === undefined || largest.has(plus))
+    && sets.every((set) => set === largest || [...set].every((name) => largest.has(name)));
+  if (covered) return largest;
+  const out = new Set<string>(largest);
+  if (plus !== undefined) out.add(plus);
+  sets.forEach((set) => set.forEach((name) => out.add(name)));
+  return out;
 }
 
 /**
@@ -358,13 +457,39 @@ export function hasFreeSelfRef(plan: Rel): boolean {
  */
 export const isSelfContained = (plan: Rel): boolean => freeRelIds(plan).size === 0 && !hasFreeSelfRef(plan);
 
-/** The relations directly beneath `r` that a walk descends into: its children, then every relation an
- *  expression it owns correlates (`forEachRel`'s coverage, one level). */
+/**
+ * WHAT A NODE'S OWN EXPRESSIONS REACH — the relation ids their `Col`s name, and the correlated subplans
+ * they hang, each ONCE and in first-visit order. A fact of the node: every whole-plan walk asks it of
+ * every node it passes, so it is computed once rather than re-walking the expressions per walk, and an
+ * expression SHARED within the node (fusion spells one `Expr` at several positions) is walked once.
+ */
+interface ExprReach { readonly cols: ReadonlySet<string>; readonly subplans: readonly Rel[]; }
+const NO_REACH: ExprReach = { cols: NO_NAMES, subplans: NONE };
+const exprReach: (r: Rel) => ExprReach = nodeFact((r: Rel): ExprReach => {
+  const exprs = relExprs(r);
+  if (!exprs.length) return NO_REACH;
+  const cols = new Set<string>();
+  const subplans = new Set<Rel>();
+  const seen = new Set<Expr>();
+  const go = (e: Expr): void => {
+    if (seen.has(e)) return;
+    seen.add(e);
+    if (e.kind === 'col') cols.add(e.rel);
+    exprRels(e).forEach((plan) => subplans.add(plan));
+    exprChildren(e).forEach(go);
+  };
+  exprs.forEach(go);
+  return cols.size || subplans.size ? { cols, subplans: fixed([...subplans]) } : NO_REACH;
+});
+
+/** The relations directly beneath `r` that a walk descends into: every relation an expression it owns
+ *  correlates, then its children (`forEachRel`'s coverage, one level). Built per ask, like `relChildren`,
+ *  which keeps `relChildren` the honest meter of how often a node is enumerated
+ *  (`test/compiler/node-facts.test.ts`). */
 const relsBeneath = (r: Rel): readonly Rel[] => {
-  const out: Rel[] = [];
-  relExprs(r).forEach((e) => forEachExpr(e, (node) => out.push(...exprRels(node))));
-  out.push(...relChildren(r));
-  return out;
+  const { subplans } = exprReach(r);
+  const children = relChildren(r);
+  return subplans.length ? [...subplans, ...children] : children;
 };
 
 const depthMemo = new WeakMap<Rel, number>();
@@ -404,8 +529,7 @@ export function forEachRel(plan: Rel | readonly Rel[], visit: (r: Rel) => void):
     if (seen.has(r)) return;
     seen.add(r);
     visit(r);
-    relExprs(r).forEach((e) => forEachExpr(e, (node) => exprRels(node).forEach(go)));
-    relChildren(r).forEach(go);
+    relsBeneath(r).forEach(go);
   };
   (isRel(plan) ? [plan] : plan).forEach(go);
 }
@@ -471,7 +595,6 @@ export function stmtExprs(s: Stmt): readonly Expr[] {
  */
 export interface RefRead { readonly ref: Extract<Rel, { readonly kind: 'ref' }>; readonly count: number; readonly inner: boolean; }
 type RefReads = ReadonlyMap<string, RefRead>;
-const refReadMemo = new WeakMap<Rel, RefReads>();
 const addRefReads = (into: Map<string, RefRead>, from: RefReads, inner: boolean): void => {
   for (const [name, read] of from) {
     const prior = into.get(name);
@@ -480,9 +603,7 @@ const addRefReads = (into: Map<string, RefRead>, from: RefReads, inner: boolean)
 };
 const exprRefReads = (e: Expr, into: Map<string, RefRead>): void =>
   forEachExpr(e, (node) => exprRels(node).forEach((plan) => addRefReads(into, relRefReads(plan), freeRelIds(plan).size > 0)));
-function relRefReads(r: Rel): RefReads {
-  const known = refReadMemo.get(r);
-  if (known) return known;
+const relRefReads: (r: Rel) => RefReads = nodeFact((r: Rel): RefReads => {
   const out = new Map<string, RefRead>();
   if (r.kind === 'ref') out.set(r.name, { ref: r, count: 1, inner: false });
   relExprs(r).forEach((e) => exprRefReads(e, out));
@@ -494,9 +615,8 @@ function relRefReads(r: Rel): RefReads {
     addRefReads(out, relRefReads(r.left), r.join === 'inner' && !r.ordered);
     addRefReads(out, relRefReads(r.right), true);
   } else relChildren(r).forEach((child) => addRefReads(out, relRefReads(child), false));
-  refReadMemo.set(r, out);
   return out;
-}
+});
 export function refReads(node: Rel | Stmt): RefReads {
   if (!isStmt(node)) return relRefReads(node);
   const out = new Map<string, RefRead>();
@@ -507,15 +627,18 @@ export function refReads(node: Rel | Stmt): RefReads {
 }
 
 /** Every `Ref` NAME a node reaches, relations and expression subplans alike — "which bindings does
- * this step read". One walk for both halves of the union, because a program's steps are of both
- * kinds and the question asked of them is the same. */
-export function refNames(node: Rel | Stmt): ReadonlySet<string> {
-  const names = new Set<string>();
-  const relation = (r: Rel): void => forEachRel(r, (n) => { if (n.kind === 'ref') names.add(n.name); });
-  const expression = (e: Expr): void => forEachExpr(e, (n) => exprRels(n).forEach(relation));
-  if (isStmt(node)) {
-    stmtChildren(node).forEach(relation);
-    stmtExprs(node).forEach(expression);
-  } else relation(node);
-  return names;
-}
+ * this step read". One fact for both halves of the union, because a program's steps are of both
+ * kinds and the question asked of them is the same. Synthesized bottom-up per node, sharing a child's
+ * set wherever a node adds nothing (`unionOf`): the lowering, `check` and the emitter all ask it of the
+ * same bindings, so each is answered once. */
+export const refNames = (node: Rel | Stmt): ReadonlySet<string> => (isStmt(node) ? stmtRefNames(node) : relRefNames(node));
+const stmtRefNames: (s: Stmt) => ReadonlySet<string> = nodeFact((s: Stmt): ReadonlySet<string> =>
+  unionOf([...stmtChildren(s), ...stmtExprs(s).flatMap(exprSubplans)].map(relRefNames)));
+const relRefNames: (r: Rel) => ReadonlySet<string> = nodeFact((r: Rel): ReadonlySet<string> =>
+  unionOf(relsBeneath(r).map(relRefNames), r.kind === 'ref' ? r.name : undefined));
+/** The correlated subplans anywhere in an expression tree. */
+const exprSubplans = (e: Expr): readonly Rel[] => {
+  const out: Rel[] = [];
+  forEachExpr(e, (node) => out.push(...exprRels(node)));
+  return out;
+};

@@ -2,13 +2,13 @@ import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value
 import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import { col, compilerInt, type Expr } from './expr.ts';
-import { materialize, recursiveSelf } from './factory.ts';
+import { materialize } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
-import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, refNames, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
+import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, nodeFact, recursiveStep, refNames, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
 import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 import { realJsonText } from '../json-exact.ts';
@@ -200,39 +200,32 @@ const JSON_WRITERS: ReadonlySet<string> = new Set([
  * than once" (saturating, which is all the one caller asks and what keeps a DAG walk linear).
  *
  * A correlated subplan counts at every occurrence, because it is SPELLED at every occurrence: each
- * renders the outer column it reads again. Memoised per node; both `Expr` and `Rel` are frozen.
+ * renders the outer column it reads again. Three per-node facts (`nodeFact`): `Expr` and `Rel` are
+ * immutable, and the emitter asks a reader's own reads at every block it might close.
  */
 type Reads = ReadonlyMap<string, number>;
-const exprReadMemo = new WeakMap<Expr, Reads>();
-const relReadMemo = new WeakMap<Rel, Reads>();
 const addReads = (into: Map<string, number>, from: Reads): void => {
   for (const [key, n] of from) into.set(key, Math.min(2, (into.get(key) ?? 0) + n));
 };
-function exprReads(e: Expr): Reads {
-  const known = exprReadMemo.get(e);
-  if (known) return known;
+const exprReads: (e: Expr) => Reads = nodeFact((e: Expr): Reads => {
   const out = new Map<string, number>();
   if (e.kind === 'col') out.set(`${e.rel}\0${e.name}`, 1);
   exprChildren(e).forEach((child) => addReads(out, exprReads(child)));
   exprRels(e).forEach((plan) => addReads(out, relReads(plan)));
-  exprReadMemo.set(e, out);
   return out;
-}
+});
 /** The reads of a node's OWN expressions — its input is a block of its own, rendered once. */
-const ownReads = (r: Rel): Reads => {
+const ownReads: (r: Rel) => Reads = nodeFact((r: Rel): Reads => {
   const out = new Map<string, number>();
   relExprs(r).forEach((e) => addReads(out, exprReads(e)));
   return out;
-};
+});
 /** A whole subplan's reads: its own and every descendant's, all spelled inside the one subquery. */
-function relReads(r: Rel): Reads {
-  const known = relReadMemo.get(r);
-  if (known) return known;
+const relReads: (r: Rel) => Reads = nodeFact((r: Rel): Reads => {
   const out = new Map(ownReads(r));
   relChildren(r).forEach((child) => addReads(out, relReads(child)));
-  relReadMemo.set(r, out);
   return out;
-}
+});
 
 function assembler(bindings: ReadonlyMap<string, Binding>) {
 
@@ -304,18 +297,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    * `unanchoredAggregate` read the same sets. Memoised per scope and per spelling — both are immutable
    * once built, and a scope is asked once per FROM item placed under it.
    */
-  const qualifierMemo = new WeakMap<Expression, readonly string[]>();
-  const qualifiersOf = (e: Expression): readonly string[] => {
-    let out = qualifierMemo.get(e);
-    if (!out) qualifierMemo.set(e, out = qualifiers(render(e).sql));
-    return out;
-  };
-  const scopeAliasMemo = new WeakMap<Scope, ReadonlySet<string>>();
-  const scopeAliases = (scope: Scope): ReadonlySet<string> => {
-    let out = scopeAliasMemo.get(scope);
-    if (!out) scopeAliasMemo.set(scope, out = new Set([...scope.values()].flatMap((cols) => [...cols.values()].flatMap(qualifiersOf))));
-    return out;
-  };
+  const qualifiersOf = nodeFact((e: Expression): readonly string[] => qualifiers(render(e).sql));
+  const scopeAliases = nodeFact((scope: Scope): ReadonlySet<string> =>
+    new Set([...scope.values()].flatMap((cols) => [...cols.values()].flatMap(qualifiersOf))));
   /** The aliases a block's OWN FROM items take — what a qualifier inside it resolves to first. */
   const itemAliases = (b: Block): ReadonlySet<string> =>
     new Set([b.from.alias, ...b.joins.map((join) => join.item.alias)].map((alias) => render(ident(alias)).sql));
@@ -988,7 +972,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   }
 
   const recursiveDefinition = (r: Extract<Rel, { readonly kind: 'recursive' }>, outer: Scope): Expression =>
-    q`${ident(r.name)}(${list(r.cols.map(ident))}) AS (${renderRel(r.seed, outer)} UNION ALL ${renderRel(r.step(recursiveSelf(r)), outer)})`;
+    q`${ident(r.name)}(${list(r.cols.map(ident))}) AS (${renderRel(r.seed, outer)} UNION ALL ${renderRel(recursiveStep(r), outer)})`;
 
   /**
    * `INSERT … SELECT … ON CONFLICT` NEEDS A `WHERE` IN THE SELECT, and SQLite says so: with a
