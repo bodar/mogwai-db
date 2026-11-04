@@ -14,10 +14,19 @@ export type { Sql } from './api.ts';
 
 /** SQLite's PREPARE-time limits on a statement's SHAPE, by SQLite's own messages: the 64-table join
  *  bitmask, the per-table reference count, the expression-tree height, the compound-SELECT term cap and
- *  the parser stack. Each fires before a row is read, so none depends on the data. (`string or blob too
- *  big` is deliberately absent: it also fires on a VALUE at run time.) */
+ *  the parser stack, and the statement's own length (`statement too long`, SQLite's
+ *  `SQLITE_LIMIT_SQL_LENGTH` — the cap behind a Durable Object's 100 KB statement limit, `src/cf-limits.ts`).
+ *  Each fires before a row is read, so none depends on the data. (`string or blob too big` is
+ *  deliberately absent: it also fires on a VALUE at run time.) */
 const STATEMENT_SHAPE_LIMIT =
-  /^(at most \d+ tables in a join|too many references to "[^"]*": max \d+|Expression tree is too large \(maximum depth \d+\)|too many terms in compound SELECT|parser stack overflow)$/;
+  /^(at most \d+ tables in a join|too many references to "[^"]*": max \d+|Expression tree is too large \(maximum depth \d+\)|too many terms in compound SELECT|parser stack overflow|statement too long)$/;
+
+/** SQLite's own message, as BOTH runtimes spell it. bun:sqlite reports `sqlite3_errmsg` bare; workerd's
+ *  DO SQLite appends the result code (`at most 64 tables in a join: SQLITE_ERROR`, `integer overflow:
+ *  SQLITE_ERROR` — measured under `wrangler dev`). Every test of a SQLite message goes through this ONE
+ *  normalization, or it matches on Bun alone and the bare error leaks only in production. */
+export const sqliteMessage = (error: unknown): string | null =>
+  error instanceof Error ? error.message.replace(/: SQLITE_[A-Z_]+$/, '') : null;
 
 /** The `property_fts` DDL — its own constant because `upgradePropertyFts` re-creates the table. */
 const PROPERTY_FTS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
@@ -323,13 +332,14 @@ export class GraphStore {
       // SQLite's int64 `sum()` overflowing is not a crash but a number the reference PROMOTES past 64
       // bits (`NumberHelper.add` → BigInteger, `NumberHelper.java:430-452`), which this store cannot
       // carry: a deferral the query answers with, not an internal error.
-      if (error instanceof Error && /^integer overflow$/.test(error.message)) throw new RaisedByQuery(INTEGER_OVERFLOW);
+      const message = sqliteMessage(error);
+      if (message === 'integer overflow') throw new RaisedByQuery(INTEGER_OVERFLOW);
       // A statement past one of SQLite's own STATEMENT-SHAPE limits is rejected at prepare, before any
       // row is read — so it is a property of the compiled TEXT (hence of the query text), never of the
       // data, and the user's answer is a clear decline rather than SQLite's bare message. The usual
       // cause is a repeat() unrolled to a large times()/loops() count (each phase is a join).
-      if (error instanceof Error && STATEMENT_SHAPE_LIMIT.test(error.message))
-        throw UnsupportedTraversal.because(`the SQL this traversal compiles to exceeds a SQLite statement limit (${error.message}); a repeat() with a large times() or loops() count is the usual cause`);
+      if (message !== null && STATEMENT_SHAPE_LIMIT.test(message))
+        throw UnsupportedTraversal.because(`the SQL this traversal compiles to exceeds a SQLite statement limit (${message}); a repeat() with a large times() or loops() count is the usual cause`);
       throw error;
     }
   }

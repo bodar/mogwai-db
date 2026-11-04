@@ -1144,12 +1144,17 @@ export function withSubqueryColumns(rel: Rel, exprs: readonly Expr[], fresh: Min
     return name ? col(keyed.id, name) : mapExprChildren(e, hoist);
   };
   const rewritten = exprs.map((e) => substRelId(hoist(e), rel.id, keyed.id));
-  const below = new Set<string>([rel.id]);
-  forEachRel(rel, (node) => below.add(node.id));
   const reads = new Set<string>();
   rewritten.forEach((e) => forEachExpr(e, (node) => {
     if (node.kind === 'col') reads.add(node.rel);
     exprRels(node).forEach((plan) => freeRelIds(plan).forEach((free) => reads.add(free)));
   }));
+  // `keyed` is minted here, so a read of it is never a read from below; only the rest need the walk. Asked
+  // first because the walk visits the WHOLE plan under `rel`: done unconditionally it made a chain of N
+  // hosts (an unrolled `repeat(…order().by(k)).times(N)`) quadratic in N.
+  reads.delete(keyed.id);
+  if (!reads.size) return { rel: keyed, exprs: rewritten };
+  const below = new Set<string>([rel.id]);
+  forEachRel(rel, (node) => below.add(node.id));
   return [...reads].some((read) => below.has(read)) ? null : { rel: keyed, exprs: rewritten };
 }

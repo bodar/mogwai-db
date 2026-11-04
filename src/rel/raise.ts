@@ -1,3 +1,4 @@
+import { spells, type Expression } from '../sql/kernel/q.ts';
 import { compilerText, type Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
 import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
@@ -61,10 +62,11 @@ const CLOSE = '!$';
 const OPEN_DEFERRAL = '$!defer:';
 const RAISED = /\$!(?:raise|defer):(.*?)!\$/;
 
-/** Does rendered SQL spell a DEFERRAL arm anywhere — for the emitter, which decides over the text SQLite
- *  will actually evaluate. The sentinel is a compiler literal, rendered inline, so the test is exact up to
- *  arms a guard keeps off every row. */
-export const sqlMayDefer = (sql: string): boolean => sql.includes(OPEN_DEFERRAL);
+/** Does built SQL spell a DEFERRAL arm anywhere — for the emitter, which decides over the text SQLite
+ *  will actually evaluate. The sentinel is a compiler literal, rendered inline as ONE token, so the test is
+ *  exact up to arms a guard keeps off every row; asked of the tree (`spells`) so a nested plan is not
+ *  re-rendered per question. */
+export const sqlMayDefer = (sql: Expression): boolean => spells(sql, OPEN_DEFERRAL);
 
 /** The message a `raiseExpr` arm aborted a statement with, or `null` for any other failure. */
 export function raisedMessage(error: unknown): string | null {

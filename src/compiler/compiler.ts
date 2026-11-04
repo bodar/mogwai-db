@@ -45,6 +45,25 @@ function applyDiscard(plan: Executable): Executable {
  *  (segment.ts runPlan). Every non-barrier caller keeps using compile() below, whose type never
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, wireParams: Record<string, any>, options?: CompileOptions, wireParamTypes: Record<string, TypeNode> = {}): Plan {
+  try { return compileUnguarded(gremlin, wireParams, options, wireParamTypes); }
+  catch (error) { throw tooDeep(error) ?? error; }
+}
+
+/**
+ * A compile that ran out of STACK is a decline, never an internal error. Parsing, the Passes, the lowering
+ * and the emitter all recurse over the traversal's NESTING, so the depth they reach is a property of the
+ * query text (a repeat() unrolled to a large count, child traversals nested hundreds deep) and never of the
+ * data — but WHERE it runs out is the runtime's: workerd's V8 stack is several times shallower than Bun's
+ * (measured: `repeat(local(out().limit(1))).times(200)` overflows in a Durable Object and compiles on Bun).
+ * So the backstop is here, at the one boundary every compile and every resumed segment crosses, rather
+ * than as a per-shape depth guess that would decline what one runtime can compile to protect the other.
+ */
+function tooDeep(error: unknown): UnsupportedTraversal | null {
+  if (!(error instanceof RangeError) || !/call stack/i.test(error.message)) return null;
+  return UnsupportedTraversal.because('this traversal nests deeper than the compiler can follow — a repeat() unrolled to a large times() or loops() count, or child traversals nested hundreds deep, is the usual cause');
+}
+
+function compileUnguarded(gremlin: string, wireParams: Record<string, any>, options: CompileOptions | undefined, wireParamTypes: Record<string, TypeNode>): Plan {
   // THE PARAMETER ENVIRONMENT, built once (`paramEnv`): every parameter carries a type from here on (the
   // wire's where it declared one, the JS value's own otherwise — an untyped Boolean would otherwise be
   // stored, and compared, as 1/0), and a Float lands on its carrier before anything reads it. ONE value,
@@ -162,7 +181,7 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
  */
 function underDeclines<T>(declines: Declines, stretch: () => T): T {
   let result: T;
-  try { result = stretch(); } catch (error) { throw declines.terminalError() ?? error; }
+  try { result = stretch(); } catch (error) { throw declines.terminalError() ?? tooDeep(error) ?? error; }
   declines.raiseTerminal();
   return result;
 }

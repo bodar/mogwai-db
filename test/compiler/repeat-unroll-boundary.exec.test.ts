@@ -41,6 +41,12 @@ import { compile } from '../../src/compiler/compiler.ts';
 import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { bagOf, run, seededStore } from '../support/harness.ts';
+import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
+import { GraphStore, type Sql } from '../../src/storage.ts';
+import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import { RaisedByQuery } from '../../src/rel/raise.ts';
+import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { executeQuery } from '../support/executor.ts';
 
 const store = seededStore();
 const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v ?? r.id);
@@ -459,5 +465,85 @@ describe('a bounded repeat past a SQLite statement-shape limit declines clearly'
   ])('%s', (q) => {
     expect(() => run(store, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(.*\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
     try { run(store, q); } catch (e) { expect((e as Error).name).toBe('UnsupportedTraversal'); }
+  });
+});
+
+// workerd's DO SQLite spells SQLite's message with the result code appended (`at most 64 tables in a join:
+// SQLITE_ERROR`, `statement too long: SQLITE_TOOBIG`, `integer overflow: SQLITE_ERROR` — measured under
+// `wrangler dev`), where bun:sqlite reports it bare. A test of the message anchored at its end matched on
+// Bun alone and let the bare error reach a production user, so the store normalizes it ONCE. This driver
+// is bun:sqlite re-spelled the workerd way, so the suite sees what a Durable Object sees.
+class WorkerdSpelledSql implements Sql {
+  constructor(private readonly inner: Sql) {}
+  exec(sql: string): void { this.respell(() => this.inner.exec(sql)); }
+  query<T = any>(sql: string, binds?: readonly unknown[]): T[] { return this.respell(() => this.inner.query<T>(sql, binds)); }
+  private respell<T>(go: () => T): T {
+    try { return go(); } catch (e) {
+      if (!(e instanceof Error)) throw e;
+      throw new Error(`${e.message}: ${/too long/.test(e.message) ? 'SQLITE_TOOBIG' : 'SQLITE_ERROR'}`);
+    }
+  }
+}
+
+describe('a SQLite limit spelled the workerd way still declines clearly', () => {
+  const workerd = new GraphStore(new WorkerdSpelledSql(new BunSqlite(':memory:')));
+  for (const q of MODERN_SEED) executeQuery(workerd, q, {});
+
+  test.each([
+    'g.V().repeat(__.out()).emit().times(64).count()',
+    'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
+  ])('%s', (q) => {
+    expect(() => run(workerd, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \((at most 64 tables in a join|too many references to "edges": max 65535)\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
+  });
+
+  test('an int64 sum overflow is still the deferral it is on Bun', () => {
+    expect(() => run(workerd, 'g.inject(9223372036854775807L, 1L).sum()')).toThrow(RaisedByQuery);
+  });
+
+  test('the statement-length limit a Durable Object enforces is one of the shape limits', () => {
+    const store = new GraphStore(new WorkerdSpelledSql({
+      exec: () => {},
+      query: (sql: string) => { if (/\bedges\b/.test(sql) && !/^(CREATE|PRAGMA)/i.test(sql)) throw new Error('statement too long'); return []; },
+    }));
+    expect(() => run(store, 'g.V().repeat(__.out().limit(1)).times(2).count()')).toThrow(/exceeds a SQLite statement limit \(statement too long\)/);
+  });
+});
+
+// A bounded repeat's ONE lowering is the unroll, whose compile work is linear in the steps it splices — a
+// count the user typed. Past `MAX_UNROLLED_STEPS` (where even the cheapest step overflows a DO's 100 KB
+// statement) it declines from the count alone, before a phase is built: a written times(n), the counted
+// until that rewrites to one, a large nested product, and emit's triangular arms alike.
+describe('a bounded repeat past the unroll ceiling declines from the count', () => {
+  test.each([
+    ['g.V().repeat(__.out().limit(1)).until(__.loops().is(3000)).count()', 'lower the count — a body holding a barrier'],
+    ['g.V().repeat(__.out().limit(1)).until(__.loops().is(P.gte(1000000000))).count()', 'lower the count — a body holding a barrier'],
+    ['g.V().repeat(__.out().limit(1)).times(5000).count()', 'lower the count — a body holding a barrier'],
+    ['g.V().repeat(__.out()).times(5000).count()', 'bound the loop with until(loops().is(n))'],
+    ['g.V().emit().repeat(__.out().limit(1)).times(60).count()', 'with emit()'],
+    ['g.V().repeat(__.local(__.repeat(__.out().limit(1)).times(100))).times(100).count()', 'unrolls to about'],
+  ])('%s', (q, says) => {
+    const started = performance.now();
+    let thrown: unknown;
+    try { run(store, q); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+    expect((thrown as Error).message).toContain('one SQL statement can carry');
+    expect((thrown as Error).message).toContain(says);
+    expect(performance.now() - started).toBeLessThan(1000); // decided from the count, not by compiling it
+  });
+
+  test('a count under the ceiling still unrolls and answers', () => {
+    expect(vals('g.V().repeat(__.out().limit(1)).times(1200).count()')).toEqual([0]);
+    expect(vals('g.V().repeat(__.out()).until(__.loops().is(5000)).count()')).toEqual([0]); // the walk: not unrolled
+  });
+
+  // Under the ceiling a deep enough plan can still run the compiler out of STACK — where depends on the
+  // runtime (workerd's is several times shallower than Bun's), so the backstop is the compile boundary:
+  // whatever happens, a RangeError never reaches the user.
+  test('a compile that runs out of stack declines', () => {
+    for (const q of ["g.V().repeat(__.out().order().by('name')).times(1200).count()", 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()']) {
+      let thrown: unknown;
+      try { run(store, q); } catch (e) { thrown = e; }
+      if (thrown !== undefined) expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+    }
   });
 });

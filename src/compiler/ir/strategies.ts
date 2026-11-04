@@ -10,6 +10,7 @@ import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
+import { CF_MAX_SQL_BYTES } from '../../cf-limits.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -1449,23 +1450,6 @@ const unrollableBodyStep = (s: Step, read: BodyReader): boolean =>
       && !(s as IRStep).modulators?.length && (s as IRStep).from === undefined && (s as IRStep).to === undefined)
   || s.name === 'call';
 
-/**
- * THE STATEMENT-TEXT CEILING WAS A PROXY, AND IT IS GONE.
- *
- * `MAX_UNROLLED_STEPS = 100` used to stop the multiplication here, derived as the DO's 100 KB
- * statement cap divided by the worst measured per-step cost (~1 KB for an `order().by(k)` body).
- * Two things were wrong with charging every body that rate. It is a STEP count standing in for
- * BYTES, and a movement body actually costs ~140 bytes per spliced step — measured, `times(99)` is
- * 13,824 bytes of SQL — so the ceiling refused seven times more than the platform does. And it was a
- * platform constant inside a compiler decision, which is the thing that makes a compiler wrong the
- * moment the platform changes: a raised Cloudflare cap would need a release before anyone saw it.
- *
- * So the pass no longer guesses, and nothing replaces it here. A Durable Object enforces its own
- * statement limits and rejects what it cannot run. The caps are asserted in the BUILD instead —
- * `CfLimitedSql` makes Bun refuse exactly what a DO refuses (`mise run test:cf-limits`), and
- * `rel-sweep`/`sql-hygiene` ask `cfLimitViolation` of every corpus plan as CI gates.
- */
-
 /** `childSteps` (`ir/passes.ts`), injected. It runs the WHOLE pass pipeline over the nested body, and
  *  that pipeline is what this file's passes are folded into — so taking it as an argument is what
  *  keeps the dependency one-way instead of importing the module that imports this one. */
@@ -1645,6 +1629,50 @@ function minimalLoopCount(p: unknown, lo: number, holds: (k: number) => boolean 
   return undefined;
 }
 
+/**
+ * THE MOST STEPS ONE BOUNDED REPEAT MAY SPLICE — a ceiling on COMPILE WORK, set where no statement could
+ * come out of it anyway, and a property of the query text, so a decline past it is one too.
+ *
+ * A bounded repeat has ONE lowering, the unroll, and everything after it — every Pass, the lowering, the
+ * emitter — costs time and stack linear in the steps it splices: in a count the user TYPED. Unchecked,
+ * `repeat(out().limit(1)).until(loops().is(gte(1000000000)))` never finished compiling (a CPU-limit kill
+ * in a Durable Object), and `times(3000)` ran the compiler out of stack.
+ *
+ * ⚠️ **It must not refuse what the platform accepts — the defect of the ceiling it replaces.** That one
+ * (`= 100`) charged every body the worst per-step cost (~1 KB, `order().by(k)`), so it refused seven
+ * times more than a DO does. This one charges the CHEAPEST step that renders: a slice, ~40 bytes a phase
+ * (`repeat(limit(1))`, measured; a movement ~140, `has()` ~120). Past `CF_MAX_SQL_BYTES` / 40 steps no
+ * body fits a Durable Object's 100 KB statement, so the decline only says early, and clearly, what the
+ * store would have said late. Below it nothing is guessed: SQLite's own statement-shape limits (the DO's
+ * expression depth is 100, its join width 64) decline cleanly at the store (`GraphStore.query`), and
+ * `CfLimitedSql` makes Bun refuse what a DO refuses (`mise run test:cf-limits`).
+ */
+const MAX_UNROLLED_STEPS = Math.floor(CF_MAX_SQL_BYTES / 40);
+
+/** How many steps `chain` stands for once every bounded repeat inside it is unrolled: each step once, plus
+ *  its child chains (read raw — they are normalized later, per spliced copy), with a `times(m)` region's
+ *  body counted m times. Counting stops past `cap`, so a huge nested count costs nothing to reject. */
+function unrolledSize(chain: readonly Step[], read: BodyReader, cap: number): number {
+  let total = 0;
+  for (let i = 0; i < chain.length && total <= cap; i++) {
+    const s = chain[i]!;
+    total += 1;
+    const weight = s.name === 'repeat' ? timesBeside(chain, i) : 1;
+    eachChildChain(s, read, (child) => { if (total <= cap) total += weight * unrolledSize(child, read, cap); });
+  }
+  return total;
+}
+
+/** The literal `times(m)` of the repeat cluster around `chain[i]` (a `repeat`), or 1 without one. */
+function timesBeside(chain: readonly Step[], i: number): number {
+  let lo = i, hi = i;
+  while (lo > 0 && REPEAT_CLUSTER.has(chain[lo - 1]!.name) && chain[lo - 1]!.name !== 'repeat') lo--;
+  while (hi + 1 < chain.length && REPEAT_CLUSTER.has(chain[hi + 1]!.name) && chain[hi + 1]!.name !== 'repeat') hi++;
+  const times = chain.slice(lo, hi + 1).find((s) => s.name === 'times');
+  const m = (times?.args ?? [])[0]?.value;
+  return typeof m === 'number' && m > 1 ? m : 1;
+}
+
 /** One repeat run → its unrolled steps, or null to leave the run alone. */
 function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step[] | null {
   // The bounded regime is `repeat`+`times`, optionally with a bare `emit` (repeat+times+emit). A region
@@ -1731,7 +1759,17 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // each phase boundary. Unrolling is our ONLY lowering of a bounded repeat (the physical regime split,
   // not TinkerPop's optional strategy), so `withoutStrategies(RepeatUnrollStrategy)` is a result-preserving
   // no-op (`NO_OP_STRATEGIES`) rather than a request that could only turn an answer into a throw.
-  // No ceiling here: the platform enforces its own statement limits, and the build asserts them.
+  // THE ONE CEILING, and it is on the query TEXT: how many steps this unroll splices (`MAX_UNROLLED_STEPS`).
+  // Checked from the count alone, before a phase is built, so `until(loops().is(gte(1000000000)))` declines
+  // at once instead of compiling for minutes.
+  const levels = Math.min(n, lastLevel);
+  const copies = emit ? (levels * (levels + 1)) / 2 : levels; // emit: one arm per level, arm k holds k copies
+  const spliced = copies * unrolledSize(body, read, MAX_UNROLLED_STEPS);
+  if (spliced > MAX_UNROLLED_STEPS) {
+    throw UnsupportedTraversal.because(`a repeat() bounded at ${n} iterations (times(${n}), or an until(loops().is(…)) that first holds there)${emit ? ' with emit()' : ''} unrolls to about ${Math.round(spliced)} steps, past the ${MAX_UNROLLED_STEPS} one SQL statement can carry; ${needsPhases(body)
+      ? 'lower the count — a body holding a barrier (order/limit/range/dedup/aggregate/…) runs only as unrolled iterations'
+      : 'lower the count, or bound the loop with until(loops().is(n)), which a body without a barrier runs as a loop rather than unrolled'}`);
+  }
   const phase = (): Step[] => body.map((s) => ({ ...s }));
 
   // WITHOUT emit — the plain bounded repeat. The output is the frontier after EXACTLY n iterations, so

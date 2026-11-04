@@ -147,6 +147,54 @@ function renderStatement(tree: Sql): { sql: string; binds: any[] } {
   return { sql: text, binds };
 }
 
+/** Per-needle memo of `spells`: a `Compound` is immutable once built, so its answer never changes. */
+const spelled = new Map<string, WeakMap<Compound, boolean>>();
+
+/**
+ * Would `tree`'s RENDERED text contain `needle` within one literal token? The answer `render(tree).sql
+ * .includes(needle)` gives for a needle that never straddles two tokens (a compiler sentinel inside one
+ * text literal) — without rendering.
+ *
+ * ⚠️ **Memoised per `Compound` because a nested plan SHARES its subtrees.** The emitter asks this of a
+ * block whose FROM is the derived table of the block below it, and so on down, so rendering each
+ * question re-rendered every relation beneath it: O(depth²) text, measured as most of a 3.4s compile for
+ * `repeat(out().order().by('name')).times(400)`. A subtree already answered is answered again in O(1),
+ * so a chain of such questions costs O(tokens) in all. An explicit stack, like `tokens`, because a
+ * nesting this deep overflows a recursive walk.
+ */
+export function spells(tree: Expression, needle: string): boolean {
+  if (tree instanceof Text) return tree.text.includes(needle);
+  if (!(tree instanceof Compound)) return false;
+  let memo = spelled.get(needle);
+  if (!memo) spelled.set(needle, memo = new WeakMap());
+  const known = memo;
+  const stack: { node: Compound; members: Iterator<Expression>; found: boolean }[] = [];
+  const enter = (node: Compound): boolean | undefined => {
+    const answer = known.get(node);
+    if (answer !== undefined) return answer;
+    stack.push({ node, members: node.expressions[Symbol.iterator](), found: node.start.text.includes(needle) || node.end.text.includes(needle) });
+    return undefined;
+  };
+  const root = enter(tree);
+  if (root !== undefined) return root;
+  let last = false;
+  while (stack.length) {
+    const top = stack[stack.length - 1]!;
+    const next = top.found ? { done: true as const, value: undefined } : top.members.next();
+    if (next.done) {
+      stack.pop();
+      known.set(top.node, top.found);
+      last = top.found;
+      if (stack.length && top.found) stack[stack.length - 1]!.found = true;
+      continue;
+    }
+    const e = next.value;
+    if (e instanceof Text) { if (e.text.includes(needle)) top.found = true; }
+    else if (e instanceof Compound) { const answer = enter(e); if (answer) top.found = true; }
+  }
+  return last;
+}
+
 /** Render a standalone node (a fragment or a whole tree) to `{sql, binds}` — the
  *  boundary for the few spots that need SQL text without the `Query` CTE machinery
  *  (e.g. a merge run-closure's match query). Binds fall out of the tree. */

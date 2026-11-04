@@ -671,7 +671,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         return b.scope.get(rel)?.get(name);
       }));
       const lazy = [...b.select, ...carried].filter(([, spelled]) => !tested.has(spelled));
-      if (sqlMayDefer(render(renderBlock({ ...b, select: lazy.length ? lazy : [['one', raw('1')]] })).sql)) return undefined;
+      if (sqlMayDefer(renderBlock({ ...b, select: lazy.length ? lazy : [['one', raw('1')]] }))) return undefined;
     }
     const body = renderBlock({ ...b, select: [...b.select, ...carried, ...computed], offset: b.offset ?? raw('0') });
     return { kind: 'block', select: passed, from: { text: q`(${body})`, alias }, joins: [], distinct: false, windowed: false, scope };
