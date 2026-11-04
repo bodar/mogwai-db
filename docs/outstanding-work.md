@@ -37,6 +37,15 @@ instead of declining: a `null` member is an id no element has, so it adds no cla
 members but none matchable is `CONSTANT.false`, never `V()` (`idMembership` in
 `src/compiler/rel/source.ts`; `boundGraph.elementScan` likewise). L3 1908 → 1919. Remains: nothing.
 
+**`is(typeOf(T))` over known framings + a scalar MAP retype (✅ landed, febee4cf..2142f762).**
+`is(typeOf(GType.MAP))` over a per-row-typed scalar retypes the stream to a map (`collectionRetype` →
+`continueAs`), so count(local)/select(keys|values)/unfold/fold answer after it; every framing whose GType
+is known (map, record, path, element, property) folds statically by GType ASSIGNABILITY
+(`framingTypeOf`, `src/compiler/rel/predicate.ts`; the table in `src/gremlin/types.ts`). The Set marker
+now travels with the value (labels, folded members, branch meets), `count(local)` is a mapping terminal
+not a seeded barrier (`isMappingTerminal`, `src/compiler/ir/productivity.ts`), and `order(local)` unmakes
+a Set. L3 1942 → 1947. Remains: nothing (typeOf(LIST|SET) over a LIST framing is a separate item below).
+
 **Filter-led predicate body (✅ landed, cb3e44a2..e195afc2).** A predicate body that leads with filters
 and then moves — `where(hasLabel(..).out())`, `not(hasLabel(..).out())`, SubgraphStrategy criteria
 `or(…, has(..).outV()…)` — answers at every predicate position: `bodyPredicate`
