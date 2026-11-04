@@ -114,15 +114,17 @@ describe('an expansion past the budget declines, in the user\'s terms', () => {
     expect(compile('g.V().repeat(__.out()).times(1600)', {}).kind).toBe('read');
   });
 
-  // THE cc-1 CLASS, in a real query: a guarded string transform names its value in the type test and again
-  // in the else arm, so each transform doubles the text (filed beside `recordPairs`' fix). Its DAG is 30
-  // levels; its text would be 2^30. Refused off the DAG before any pass walks the tree.
-  test('a chain of guarded transforms whose text doubles per step declines in milliseconds', () => {
+  // THE cc-1 CLASS, in a real query, is GONE: a guarded string transform names its value in the type test
+  // and again in the else arm, so each transform used to double the text — 30 levels was 2^30, refused here
+  // off the DAG. The value run now spells its running value once per step (`valueRun`'s `once`), so the
+  // same query is linear and simply compiles; the budget's early refusal of a doubling DAG is pinned by the
+  // crafted shape below, and the run's linearity by `value-run-once.exec.test.ts`.
+  test('a chain of thirty guarded transforms compiles, linearly and fast', () => {
     const transforms = Array.from({ length: 30 }, (_, i) => (i % 2 ? '.toLower()' : '.toUpper()')).join('');
-    const { error, ms } = declineOf(() => compile(`g.V().where(__.values('name')${transforms}.is('x'))`, {}));
-    expect(error).toBeInstanceOf(CompileBudgetExceeded);
-    expect((error as Error).message).toContain('split it into smaller traversals');
-    expect(ms).toBeLessThan(500);
+    const started = performance.now();
+    const plan = compile(`g.V().where(__.values('name')${transforms}.is('x'))`, {});
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(plan.kind === 'read' ? plan.sql.length : Infinity).toBeLessThan(40 * 1024);
   });
 });
 

@@ -18,7 +18,7 @@ import { BATCHING_BRANCHES, collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalS
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, once, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -2656,6 +2656,16 @@ function oneRowValue(tail: Tail, fresh: Minter): ChildValue | null {
 }
 
 /**
+ * ONE MEMBER of a value run over the running value — and its per-row tag, where it has one — each SPELLED
+ * ONCE (`once`, SQLite's missing LET). A member reads its receiver several times (an `is()` in its test and
+ * its THEN, a transform in its receiver check and its expression), so building it over the inline value
+ * made a k-step run O(2^k) statement text: a production-only wall at the DO's 100 KB cap. The tag rides
+ * with the value because a per-row test reads both.
+ */
+const runningOnce = (value: Expr, vtype: Expr | undefined, member: (v: Expr, t: Expr | undefined) => Expr, fresh: Minter): Expr =>
+  vtype ? once([value, vtype], ([v, t]) => member(v!, t!), fresh) : once([value], ([v]) => member(v!, undefined), fresh);
+
+/**
  * THE VALUE RUN — a child body's tail once its SUBJECT is named: a sequence of steps that each turn
  * one value into another.
  *
@@ -2742,11 +2752,16 @@ export function valueRun(
       if (seed.yields !== 'one') return null;
       const pred = step.args[0]?.value;
       if (pred == null || isNested(pred)) return null;
-      const subjType: SubjectType = vtype ? perRowSubject(vtype, value)
-        : type.kind === 'static' ? { kind: 'static', type: type.type, text: type.text } : SUBJECT_UNKNOWN;
-      const test = predicateExpr(value, pred, subjType, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
-      if (!test) return null;
-      value = { kind: 'case', whens: [[test, value]], else: compilerNull() };
+      const testOver = (v: Expr, t: Expr | undefined): Expr | null => predicateExpr(v, pred, t ? perRowSubject(t, v)
+        : type.kind === 'static' ? { kind: 'static', type: type.type, text: type.text } : SUBJECT_UNKNOWN,
+      step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
+      // Whether the predicate lowers at all is a property of the step, decided over the real value; the
+      // filtered value is then built over `once`'s reads, so the test and the THEN — and the tag the
+      // test types the subject by — spell the incoming value ONCE. Inline, every step doubled the run:
+      // three chained `is()` over a selected label took the statement to 142 KB, a fourth past the
+      // compile budget.
+      if (!testOver(value, vtype)) return null;
+      value = runningOnce(value, vtype, (v, t) => ({ kind: 'case', whens: [[testOver(v, t)!, v]], else: compilerNull() }), fresh);
       // A failed test is a NULL, so the run is now present exactly where its value is. A seed that cannot
       // say stays unable to (`'unknown'`), so its consumers keep declining.
       if (present !== 'unknown') present = 'value-nullness';
@@ -2756,16 +2771,24 @@ export function valueRun(
     // THE RECEIVER first — the same authority the root scalar fold asks (`receiver.ts`), so a body at
     // any depth (`map`/`local`/`by()`/`where`/a branch arm) gets the reference's raise, not SQLite's
     // coercion. A NULL here is a productive null exactly where the seed says the body produced.
-    const evidence = evidenceOf(type, vtype);
-    const offences = transformOffences(step, value, evidence, present === 'unknown' ? undefined : present === 'always');
+    const productive = present === 'unknown' ? undefined : present === 'always';
+    const asNumberType = step.name === 'asNumber' ? type : undefined;
+    // Both are pure in the value, so the decline (and the facts that do not depend on the value's
+    // SPELLING — the result type, the fence, whether anything is owed) are decided over the real value,
+    // and the guarded result is rebuilt over `once`'s reads: a transform reads its receiver several
+    // times (`substring` four, a receiver check one more), which inline compounded per step.
+    const offences = transformOffences(step, value, evidenceOf(type, vtype), productive);
     if (!offences) return null;
-    const transformed = transformExpr(step, value, false, step.name === 'asNumber' ? type : undefined, evidence);
+    const transformed = transformExpr(step, value, false, asNumberType, evidenceOf(type, vtype));
     if (!transformed) return null;
     // A RAISING transform (a runtime `asNumber(GType.X)`, a receiver offence) raises when its VALUE is
     // evaluated — so a host that asks only WHETHER the run produced (`where`/`not`/`choose`) must read
     // the value: an `'always'` run becomes a value-nullness one.
     if ((transformed.fenced || offences.length) && present !== 'unknown') present = 'value-nullness';
-    value = raisingWhen(offences, transformed.expr);
+    value = runningOnce(value, vtype, (v, t) => {
+      const evidence = evidenceOf(type, t);
+      return raisingWhen(transformOffences(step, v, evidence, productive)!, transformExpr(step, v, false, asNumberType, evidence)!.expr);
+    }, fresh);
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
   }
