@@ -54,7 +54,6 @@ export const REASONS = {
   'merge-type-error-text': { kind: 'divergence', why: '`merge()` raises the same type error in our own words', cite: ['docs/feature-support-matrix.md', '| `merge()` type-error text |'] },
   'oncreate-override': { kind: 'divergence', why: 'an onCreate map that changes a merge key is refused when the query compiles (eager error timing), though here the edge exists and onCreate never runs', cite: ['docs/feature-support-matrix.md', '| Error timing |'] },
   // ── defect ──
-  'call-traversal-params': { kind: 'defect', why: '`call(service, map, traversal)` ignores the traversal\'s parameter map', cite: ['docs/outstanding-work.md', '(l3-call-trav-params)'] },
   'multilabel-edge-label': { kind: 'defect', why: '`with(\'multilabel\')` frames an edge\'s own label as a String, not a Set', cite: ['docs/outstanding-work.md', '(l3-multilabel-edge-label)'] },
   't-token-order': { kind: 'defect', why: '`order(local).by(keys)` sorts `T.id`/`T.label` keys after every String instead of by name', cite: ['docs/outstanding-work.md', '(l3-t-token-order)'] },
   'map-merge': { kind: 'defect', why: 'a `merge()` over an incoming Map raises a type error instead of merging', cite: ['docs/outstanding-work.md', '(l3-map-merge)'] },
@@ -129,10 +128,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
   ],
   'oncreate-override': [
     'g_withSideEffect_mergeEXout_vadasX_optionXonCreate_created_YX_optionXonMatch_created_NX_exists_updated_dynamic_override_sketchily_allowed',
-  ],
-  'call-traversal-params': [
-    'g_V_callXdc_map_traversalX',
-    'g_callXlist_map_traversalX',
   ],
   'multilabel-edge-label': [
     'g_withXmultilabelX_E_elementMap',

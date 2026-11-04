@@ -93,9 +93,6 @@ refusal comes first: it is a production outage.
   pattern as `g:Duration`), which reaches the user through `io().read()` — raise the named load error.
 - **L3-ledgered wrong answers** — each is a `defect` in `test/L3-conformance/expected-outcomes.ts`; the
   fix deletes its names there.
-  - **`call(service, map, traversal)` ignores the traversal's map (l3-call-trav-params)** —
-    `call('tinker.degree.centrality', ['x':'y'], __.project('direction').by(constant(Direction.OUT)))`
-    answers the default direction, and `call('--list', …, project('service')…)` lists every service. 2.
   - **`with('multilabel')` frames an edge's own label as a String (l3-multilabel-edge-label)** —
     `E().elementMap()` gives its endpoints' labels as Sets but its own as a String. 1.
   - **`order(local).by(keys)` sorts `T` keys after every String (l3-t-token-order)** —

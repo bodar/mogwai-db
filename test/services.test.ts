@@ -125,11 +125,29 @@ describe('call/with fold + param resolution', () => {
       .toEqual({ serviceName: '--list', params: { service: 'tinker.search' } });
   });
 
-  test('when BOTH a map and a traversal arg are given, the map wins', () => {
-    // TinkerPop's own g_callXlist_map_traversalX note: the map is what applies.
+  // Precedence is CallStep.getMergedParams: static map, then putAll(traversal map), then each with()
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CallStep.java:216-231).
+  test('when BOTH a map and a traversal arg are given, both apply — the traversal layered on the map', () => {
     expect(spec('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
       { xx1: new Map([['x', 'y']]) }))
-      .toEqual({ serviceName: '--list', params: { x: 'y' } });
+      .toEqual({ serviceName: '--list', params: { x: 'y', service: 'tinker.search' } });
+  });
+
+  test('a key in both the map and the traversal: the traversal wins', () => {
+    expect(spec('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
+      { xx1: new Map([['service', 'tinker.degree.centrality']]) }).params)
+      .toEqual({ service: 'tinker.search' });
+  });
+
+  test('a key in the map, the traversal and a with(): with() wins over both', () => {
+    expect(spec('g.call("--list", xx1, __.project("service", "verbose").by(__.constant("tinker.search")).by(__.constant(false))).with("service", "--list").with("verbose", true)',
+      { xx1: new Map<string, unknown>([['service', 'a'], ['verbose', 'x'], ['keep', 1]]) }).params)
+      .toEqual({ service: '--list', verbose: true, keep: 1 });
+  });
+
+  test('a traverser-reading traversal map is a clear decline, not a silently dropped param', () => {
+    expect(() => spec('g.V().call("tinker.degree.centrality", xx1, __.project("direction").by(values("name")))',
+      { xx1: new Map([['x', 'y']]) })).toThrow(/call\(\) parameter value traversal must be __\.constant/);
   });
 
   test('.with() layers on top of a map arg, winning on key collision', () => {
@@ -165,11 +183,11 @@ describe('call/with fold + param resolution', () => {
   });
 
   test('a NON-injection traversal beside a map is NOT captured (the --list dynamic-params form)', () => {
-    // call(name, map, project-traversal) is TinkerPop's call_string_map_traversal: the map wins,
-    // the traversal is ordinary dynamic params — NEVER an injection (and never retains the cyclic
+    // call(name, map, project-traversal) is TinkerPop's call_string_map_traversal: the traversal is
+    // ordinary dynamic params merged over the map — NEVER an injection (and never retains the cyclic
     // antlr node, which a toEqual on the spec would choke on).
     const s = spec('g.call("--list", ["service":"tinker.search"], __.project("x").by(__.constant("y")))');
-    expect(s.params).toEqual({ service: 'tinker.search' });
+    expect(s.params).toEqual({ service: 'tinker.search', x: 'y' });
   });
 });
 
@@ -246,7 +264,7 @@ describe('call() routing (seedCall)', () => {
     const reg = createRegistry([federate]);
     // The head's shape asserted directly — see the note just below on what it is and why.
     const plan = compilePlan(
-      'g.V().call("federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg });
+      'g.V().call("federate", ["graph":"crew"])', {}, { registry: () => reg });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') {
       expect(plan.head).not.toBeNull();
@@ -303,9 +321,19 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
       .toEqual(['tinker.search']);
   });
 
-  test('g_callXlist_map_traversalX — map wins when both given', async () => {
+  test('g_callXlist_map_traversalX — the traversal\'s service filter applies alongside an unrelated map', async () => {
     expect(await run('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
-      { xx1: new Map([['service', 'tinker.search']]) })).toEqual(['tinker.search']);
+      { xx1: new Map([['x', 'y']]) })).toEqual(['tinker.search']);
+  });
+
+  test('a map and a traversal naming different services: the traversal wins', async () => {
+    expect(await run('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search")))',
+      { xx1: new Map([['service', 'tinker.degree.centrality']]) })).toEqual(['tinker.search']);
+  });
+
+  test('a traversal and a with() naming different services: with() wins', async () => {
+    expect(await run('g.call("--list", xx1, __.project("service").by(__.constant("tinker.search"))).with("service", "tinker.degree.centrality")',
+      { xx1: new Map([['x', 'y']]) })).toEqual(['tinker.degree.centrality']);
   });
 
   test('verbose → a JSON describe blob per service', async () => {
@@ -371,6 +399,32 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
       expect(await projMap('g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()'))
         .toEqual(OUT);
     });
+
+  test('g_V_callXdc_map_traversalX — the traversal\'s direction applies alongside an unrelated map', async () => {
+    expect(await projMap('g.V().as("v").call("tinker.degree.centrality", xx1, __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()',
+      { xx1: new Map([['x', 'y']]) })).toEqual(OUT);
+  });
+
+  test('a traversal OUT beats a map IN; a with(IN) on top beats both', async () => {
+    const q = 'g.V().as("v").call("tinker.degree.centrality", xx1, __.project("direction").by(__.constant(OUT)))';
+    const tail = '.project("vertex","degree").by(select("v")).by()';
+    const xx1 = new Map<string, unknown>([['direction', 'IN']]);
+    expect(await projMap(q + tail, { xx1 })).toEqual(OUT);
+    expect(await projMap(q + '.with("direction", IN)' + tail, { xx1 })).toEqual(IN);
+  });
+
+  test('the merge is the same mid-traversal after as()/select() and inside a where() child', async () => {
+    const xx1 = new Map([['x', 'y']]);
+    const viaSelect = (await decodeAll(executeQuery(store,
+      'g.V().as("a").out("created").select("a").call("tinker.degree.centrality", xx1, __.project("direction").by(__.constant(OUT)))',
+      { xx1 }, {}, standardRegistry))).map(Number).sort();
+    // created-by: marko (OUT 3), josh twice (OUT 2), peter (OUT 1) — a multiset, one per traverser.
+    expect(viaSelect).toEqual([1, 2, 2, 3]);
+    const names = (await decodeAll(executeQuery(store,
+      'g.V().where(call("tinker.degree.centrality", xx1, __.project("direction").by(__.constant(OUT))).is(3))',
+      { xx1 }, {}, standardRegistry))).map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
+    expect(names).toEqual(['marko']);
+  });
 
   test('bare mid-traversal degree (no project) yields one scalar per vertex', async () => {
       // Order-independent: the multiset of degrees matches IN's values.

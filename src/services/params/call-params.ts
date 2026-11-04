@@ -45,9 +45,13 @@ function resolveValueTraversal(nested: any, params: ParamEnv): unknown {
 //   3. a __.project(k).by(__.constant(v)) traversal → a constant map (evaluated at
 //        COMPILE time by tree inspection — no traversal execution; every scenario's
 //        traversal arg is built from literal constant()s)
-//   4. both a map AND a traversal        → the map wins (TinkerPop's own semantics)
-//   5. .with(k, v) pairs (folded onto call.withArgs) → merged on top, .with() winning;
+//   4. both a map AND a traversal        → static map entries, then the traversal's map on top
+//        (the traversal wins on a shared key)
+//   5. .with(k, v) pairs (folded onto call.withArgs) → merged on top of both, .with() winning;
 //        v is a string/literal or __.constant(x)
+// The precedence is the reference's: `CallStep.getMergedParams` builds `new LinkedHashMap(staticParams)`,
+// `putAll`s the map traversal's result, then `put`s each with() pair
+// (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CallStep.java:216-231).
 //
 // A param whose value is a traversal NOT reducible to a compile-time constant fails
 // closed (the plan doc's "non-constant per-traverser call params → deferral").
@@ -102,16 +106,14 @@ export function parseCallSpec(step: IRStep, params: ParamEnv): CallSpec {
   // The injection READ comes from the `parent` marker inside the `traversal` sub-body — walk its AST
   // NOW, before `resolveValueTraversal` serializes it to a string (the marker rides along verbatim to the
   // sibling). The `traversal` may arrive as a map entry OR a `.with("traversal", …)` pair; check both.
-  if (mapArg) {
-    // A map value may itself be a nested sub-traversal (federate's `traversal`) — resolve it
-    // the same way a .with() value is (constant fold or serialize), so both param-source forms
-    // agree; a plain value passes through. A lone (non-map) traversal is the dynamic-params form.
-    for (const [k, v] of mapArg) merged[String(k)] = isNested(v) ? resolveValueTraversal(v.nested, params) : v;
-  } else if (travArg) {
-    Object.assign(merged, constMapFromTraversal(travArg.nested, params));
-  }
+  // A map value may itself be a nested sub-traversal (federate's `traversal`) — resolve it the same
+  // way a .with() value is (constant fold or serialize), so both param-source forms agree; a plain
+  // value passes through.
+  if (mapArg) for (const [k, v] of mapArg) merged[String(k)] = isNested(v) ? resolveValueTraversal(v.nested, params) : v;
+  // Sources 3/4: the dynamic-params traversal's map lands ON TOP of the static map (CallStep's putAll).
+  if (travArg) Object.assign(merged, constMapFromTraversal(travArg.nested, params));
 
-  // Source 5: .with(k, v) pairs layer on top (with() wins over the call-arg map).
+  // Source 5: .with(k, v) pairs layer on top (with() wins over the static and traversal maps).
   for (const [k, v] of step.withArgs ?? []) {
     merged[k] = isNested(v) ? resolveValueTraversal(v.nested, params) : v;
   }

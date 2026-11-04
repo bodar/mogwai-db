@@ -1,5 +1,5 @@
 {
-  "passing": 1963,
+  "passing": 1965,
   "total": 2270,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -459,6 +459,7 @@
     "g_V_callXdcX",
     "g_V_callXdcX_withXdirection_OUTX",
     "g_V_callXdc_mapX_withXdirection_OUTX",
+    "g_V_callXdc_map_traversalX",
     "g_V_callXdc_traversalX",
     "g_V_chooseXTlabelX_optionXblah__outXknowsXX_optionXbleep__outXcreatedXX_optionXnone__identityX_name",
     "g_V_chooseXTlabelX_optionXblah__outXknowsXX_optionXbleep__outXcreatedXX_optionXnone_discardX_name",
@@ -1352,6 +1353,7 @@
     "g_callXlistX_withXstring_stringX",
     "g_callXlistX_withXstring_traversalX",
     "g_callXlist_mapX",
+    "g_callXlist_map_traversalX",
     "g_callXlist_traversalX",
     "g_callXsearchX_withXstring_stringX",
     "g_callXsearchX_withXstring_traversalX",
@@ -2050,7 +2052,6 @@
     "g_V_branchXidentityX_optionXhasLabelXsoftwareX__inXcreatedX_name_order_foldX_optionXhasXname_vadasX__ageX_optionXneqX123X__bothE_countX",
     "g_V_branchXlabel_isXpersonX_countX_optionX1__ageX_optionX0__langX_optionX0__nameX",
     "g_V_branchXlabel_isXpersonX_countX_optionX1__ageX_optionX0__langX_optionX0__nameX_optionXany__labelX",
-    "g_V_callXdc_map_traversalX",
     "g_V_chooseXhasLabelXpersonX_localXchooseXageX_optionXbetweenX26_30X_name_foldX_optionXnone_name_foldXX",
     "g_V_chooseXhasLabelXpersonX_mapXchooseXageX_optionXbetweenX26_30X_name_foldX_optionXnone_name_foldXX",
     "g_V_chooseXlabelX_optionXperson__chooseXageX_optionXP_lt_30__constantXyoungXX_optionXP_gte_30__constantXoldXXX_optionXsoftware__constantXprogramXX_optionXnone__constantXunknownXX",
@@ -2192,7 +2193,6 @@
     "g_addV_propertyXid_1X",
     "g_addV_propertyXname_markoX_withXkey_valueX_valuesXname_keyX",
     "g_addV_propertyXname_marko_since_2010X_withXkey_valueX_propertiesXnameX_valuesXsince_keyX",
-    "g_callXlist_map_traversalX",
     "g_injectX0X_V_both_coalesceXhasXname_markoX_both_constantX0XX_cyclicPath_path",
     "g_injectX0X_V_both_coalesceXhasXname_markoX_both_constantX0XX_simplePath_path",
     "g_injectX0X_mergeVXlabel_person_name_markoX_propertyXname_vadas_acl_publicX",
