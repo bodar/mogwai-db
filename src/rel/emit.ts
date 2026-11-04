@@ -1,4 +1,4 @@
-import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
+import { empty, identifier, jsonEachValues, keyedValue, list, q, raw, render, runTimeHole, textLiteral, value, type Expression, type RunTimeHole } from '../sql/kernel/q.ts';
 import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import { col, compilerInt, type Expr } from './expr.ts';
@@ -14,14 +14,17 @@ import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 import { realJsonText } from '../json-exact.ts';
 
-export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
+/** A rendered statement. `holes`, present only when it reads retained rows, says where each `RowsBind`'s
+ *  table source landed in `sql` (`RunTimeHole`), so the executor can re-spell it without parsing SQL. */
+export interface Emitted { readonly sql: string; readonly binds: readonly any[]; readonly holes?: readonly RunTimeHole[]; }
 
 /**
  * A bind the EXECUTOR fills in: the retained rows of an earlier binding — a statement's `RETURNING`
- * or a `snapshot` relation's SELECT — landed as ONE JSON bind exploded by `json_each`, never a
+ * or a `snapshot` relation's SELECT — landed as JSON values exploded by `json_each`, never a
  * row-count-sized placeholder list, which is the DO 100-parameter wall (§3.6). It travels in
- * `Emitted.binds` in its own position, so `emit` never learns about chunking and the executor never
- * parses SQL to find the slot.
+ * `Emitted.binds` in its own position, inside a run-time HOLE (`Emitted.holes`): ONE value under a DO's
+ * 2 MB value cap (the statement exactly as rendered), one per packed chunk past it — so `emit` never
+ * learns about chunking and the executor never parses SQL to find the slot.
  */
 export interface RowsBind { readonly rowsOf: string; }
 export const isRowsBind = (bind: unknown): bind is RowsBind =>
@@ -810,7 +813,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     const rows: RowsBind = { rowsOf: r.name };
     const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${textLiteral(`$[${i}]`)})`]));
     for (const spelled of cols.values()) jsonText.add(spelled);
-    return { item: { text: q`json_each(${value(rows)})`, alias }, cols };
+    // A RUN-TIME HOLE (`runTimeHole`): the rows' size is known only when they are retained, so the executor packs
+    // them (`jsonChunks`) and re-spells this source over as many values as a DO needs (`fillHoles`).
+    return { item: { text: runTimeHole(jsonEachValues([rows])), alias }, cols };
   };
 
   /**
@@ -1180,7 +1185,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
 const renderStep = (tree: Expression, budget?: CompileBudget): Emitted => {
   const out = render(tree, budget);
   if (out.binds.length > DO_BIND_CAP) throw new BindBudgetExceeded(out.binds.length);
-  return { sql: out.sql, binds: out.binds };
+  return out;
 };
 
 /**
@@ -1219,7 +1224,7 @@ export function renderLowered(program: Plan, budget?: CompileBudget): RenderedPl
   const { effects, result } = emitProgram(program, budget);
   if (!result) return { effects };
   const out = render(result, budget);
-  return { effects, result: { sql: out.sql, binds: out.binds } };
+  return { effects, result: out };
 }
 
 /** A rendered plan as the ordered steps a runner walks: the effects, then the result read if any. */

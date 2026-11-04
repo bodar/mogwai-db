@@ -132,13 +132,29 @@ function hasRepeatedKey(toks: readonly (Text | Identifier | Value)[]): boolean {
  * Durable Object, `test/cf-probe`). With no repeat the statement keeps lazyrecords' anonymous-`?`
  * spelling (`statement/ordinalPlaceholder`), so the overwhelmingly common case is byte-identical.
  */
-function renderStatement(tree: Sql, budget?: CompileBudget): { sql: string; binds: any[] } {
+function renderStatement(tree: Sql, budget?: CompileBudget): Rendered {
   const toks = tokens(tree, budget);
   const numbered = hasRepeatedKey(toks);
   const ordinals = new Map<string, number>();
   const binds: any[] = [];
+  const holes: RunTimeHole[] = [];
+  let open: { start: number; bind: number } | undefined;
   let next = 0;
-  const text = toks.map((e) => {
+  let length = 0;
+  const parts = toks.map((e) => {
+    const part = spell(e);
+    length += part.length;
+    return part;
+  });
+  function spell(e: Text | Identifier | Value): string {
+    if (e instanceof HoleMark) {
+      if (e.opens) { open = { start: length, bind: binds.length }; return ''; }
+      // A hole holds exactly ONE bind — the value the executor fills — and a hole never nests.
+      if (!open || binds.length !== open.bind + 1) throw new Error('a run-time hole must hold exactly one bound value');
+      holes.push({ start: open.start, end: length, bind: open.bind, ...(numbered ? { ordinal: open.bind + 1 } : {}) });
+      open = undefined;
+      return '';
+    }
     if (e instanceof Text) return e.text;
     // Our kernel emits identifiers as `raw(quote(...))` Text, never lazyrecords `Identifier` nodes, so
     // this arm is a defensive fallback; `quote` is the kernel's own identifier authority all the same.
@@ -153,9 +169,76 @@ function renderStatement(tree: Sql, budget?: CompileBudget): { sql: string; bind
     }
     binds.push(e.value);
     return `?${++next}`;
-  }).join('');
+  }
+  const text = parts.join('');
+  return holes.length ? { sql: text, binds, holes } : { sql: text, binds };
+}
+
+/** A rendered statement: its text, its binds in placeholder order, and — only when it has any — the
+ *  run-time HOLES in it (`runTimeHole`). */
+export interface Rendered { readonly sql: string; readonly binds: any[]; readonly holes?: readonly RunTimeHole[]; }
+
+/**
+ * WHERE A RUN-TIME HOLE LANDED in a rendered statement — plain data, so it crosses an RPC with the text.
+ * `[start, end)` is the hole's spelling in `sql`; `bind` is the index in `binds` of the one value it holds;
+ * `ordinal` is that value's `?N` when the statement renders NUMBERED placeholders (absent: anonymous `?`).
+ */
+export interface RunTimeHole { readonly start: number; readonly end: number; readonly bind: number; readonly ordinal?: number; }
+
+/** A zero-width token bracketing a hole's spelling, so the render records where it landed. */
+class HoleMark extends Text {
+  constructor(readonly opens: boolean) { super(''); }
+}
+
+/**
+ * A RUN-TIME HOLE: a fragment holding ONE bound value whose final spelling only the EXECUTOR can choose —
+ * because it depends on what that value turns out to be at run time (a statement's retained rows, whose
+ * size no compile can know). It renders exactly as `body` does; the render additionally records WHERE
+ * (`RunTimeHole`), so `fillHoles` re-spells it without ever scanning SQL text for a `?`.
+ */
+export const runTimeHole = (body: Expression): Expression => new Compound([body], empty, new HoleMark(true), new HoleMark(false));
+
+/**
+ * FILL a rendered statement's holes — the run-time half of `runTimeHole`. `fill` turns each hole's marker value
+ * into the fragment that replaces it, built through this kernel like any other SQL; the fragment's values
+ * become binds in the statement's own placeholder scheme: anonymous `?`s spliced in at the hole's
+ * position, or — under numbered placeholders — the first taking the hole's own `?N` and the rest fresh
+ * ordinals past the last, so no other placeholder in the statement moves. A fragment spelled exactly as
+ * the hole's body leaves the statement byte-identical. Holes fill from the LAST backwards, so every
+ * earlier offset stays valid.
+ */
+export function fillHoles(statement: { readonly sql: string; readonly binds: readonly unknown[]; readonly holes?: readonly RunTimeHole[] }, fill: (marker: unknown) => Expression): { sql: string; binds: unknown[] } {
+  let text = statement.sql;
+  const binds = [...statement.binds];
+  for (const at of [...(statement.holes ?? [])].sort((a, b) => b.start - a.start)) {
+    const values: unknown[] = [];
+    const spelled = tokens(sql(fill(binds[at.bind]))).map((e) => {
+      if (e instanceof Text) return e.text;
+      if (e instanceof Identifier) return quote(e.identifier);
+      values.push(e.value);
+      if (at.ordinal === undefined) return '?';
+      return values.length === 1 ? `?${at.ordinal}` : `?${binds.length + values.length - 1}`;
+    }).join('');
+    if (!values.length) throw new Error('a run-time hole must be filled with at least one bound value');
+    text = text.slice(0, at.start) + spelled + text.slice(at.end);
+    if (at.ordinal === undefined) binds.splice(at.bind, 1, ...values);
+    else { binds[at.bind] = values[0]; binds.push(...values.slice(1)); }
+  }
   return { sql: text, binds };
 }
+
+/**
+ * A DATA-SIZED SET AS A TABLE SOURCE over its JSON values (each a JSON array, at most one DO value —
+ * `jsonChunks`, `src/json-chunks.ts`): `json_each(?)` for one, the spelling every set under 2 MB has
+ * always had, else one `json_each(?)` per value under `UNION ALL`. The source's one column is `value`; a
+ * member's position in the whole is NOT carried — a reader that needs an order carries it as a column.
+ * The ONE spelling, shared by the set-based writes (`setwrite.ts`) and the executor's retained rows
+ * (`program.ts`, through `runTimeHole`).
+ */
+export const jsonEachValues = (values: readonly unknown[]): Expression => {
+  if (values.length === 1) return q`json_each(${value(values[0])})`;
+  return q`(${list(values.map((one) => q`SELECT value FROM json_each(${value(one)})`), ' UNION ALL ')})`;
+};
 
 /** Per-needle memo of `spells`: a `Compound` is immutable once built, so its answer never changes. */
 const spelled = new Map<string, WeakMap<Compound, boolean>>();
@@ -210,7 +293,7 @@ export function spells(tree: Expression, needle: string): boolean {
  *  (e.g. a merge run-closure's match query). Binds fall out of the tree. A STATEMENT a compile ships is
  *  rendered with that compile's `budget`, which charges its bytes (`CompileBudget`); a fragment rendered
  *  only to be read (the emitter's qualifier scan) is not a statement and passes none. */
-export function render(node: Expression, budget?: CompileBudget): { sql: string; binds: any[] } {
+export function render(node: Expression, budget?: CompileBudget): Rendered {
   return renderStatement(sql(node), budget);
 }
 
@@ -396,7 +479,7 @@ export class Query {
   /** Assemble `WITH [RECURSIVE] … <tail>` as one tree and render to {sql, binds}.
    *  With no CTEs, render the bare tail — an empty `with ` prefix is malformed SQL
    *  (the only zero-CTE read is a constant source like `g.inject()`). */
-  render(tail: Expression): { sql: string; binds: any[] } {
+  render(tail: Expression): Rendered {
     if (this.ctes.length === 0) return renderStatement(q`${tail}`);
     const heads = this.ctes.map((c) =>
       q`${raw(c.name)}${c.cols ? raw(`(${c.cols.join(', ')})`) : empty} as (${c.body})`);

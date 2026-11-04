@@ -3,8 +3,8 @@
 //
 // Two kinds of reader, and the split is why this is its own module rather than part of the test decorator:
 //   - the ASSERTION — `CfLimitedSql` (`src/cf-limits.ts`) makes Bun refuse what a DO refuses;
-//   - a STRATEGY in shipping code — the json_each builder (`compiler/rel/build.ts` `jsonEachRelation`)
-//     splits a data-sized set into values a DO can hold.
+//   - a STRATEGY in shipping code — the one packer (`json-chunks.ts` `jsonChunks`, behind the json_each
+//     builder and the executor's retained rows) splits a data-sized set into values a DO can hold.
 // Importing ONE constant is what keeps the decorator and the producer from disagreeing about where the
 // wall is. Shipping code may read these only as a strategy that stays correct if the platform moves the
 // number (merely conservative), never as a refusal (`compiler/rel/spine.ts` `finishLowering` explains why).

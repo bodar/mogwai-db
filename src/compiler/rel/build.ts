@@ -1,7 +1,6 @@
-import { stringifyExact } from '../../json-exact.ts';
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
-import { CF_MAX_VALUE_BYTES, fitsUtf8, utf8Bytes } from '../../do-limits.ts';
+import { jsonChunks, type JsonChunk } from '../../json-chunks.ts';
 import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
@@ -336,7 +335,7 @@ export const notProduced = (pred: Expr): Expr =>
  *     deduped. A landing must NOT take a name: two different landings under one name would merge into one
  *     bind, and one of them would answer with the other's rows.
  *
- * **SPLIT BY BYTES, at member boundaries** (`jsonChunks`). A Durable Object caps one VALUE at 2 MB
+ * **SPLIT BY BYTES, at member boundaries** (`jsonChunks`, `src/json-chunks.ts`). A Durable Object caps one VALUE at 2 MB
  * (`do-limits.ts`), so one JSON value per set is a wall at data size — an `io()` load of 6,000 × 500 B
  * properties, a federated `elementMap()` of 8,000 people — that no Bun store sees. A set past the cap
  * becomes one `json_each` per chunk under `UNION ALL`, and the order column (`as.ord`, the member's array
@@ -381,42 +380,6 @@ export function jsonEachRelation(spec: {
     });
   });
   return make.union({ id: fresh(`${spec.id}u`), inputs: arms, all: true, channels: [], type: spec.type });
-}
-
-/** One `json_each` value of a split set: its JSON array text and the index of its first member in the whole. */
-export interface JsonChunk { readonly text: string; readonly offset: number }
-
-/**
- * THE ONE PACKER: a data-sized set's members as JSON array texts, each at most a DO value
- * (`CF_MAX_VALUE_BYTES`, UTF-8), packed greedily in order. `stringifyExact` is the writer. A set under the
- * cap is ONE chunk spelled exactly as `stringifyExact(members)` spells the whole array. A member that is
- * alone past the cap is its own chunk — the platform's limit, not a split we can make. Shared by
- * `jsonEachRelation` and the direct set-based statements in `setwrite.ts`, so there is one spelling.
- */
-export function jsonChunks(members: readonly unknown[]): readonly JsonChunk[] {
-  const whole = stringifyExact(members);
-  if (fitsUtf8(whole, CF_MAX_VALUE_BYTES)) return [{ text: whole, offset: 0 }];
-  const chunks: JsonChunk[] = [];
-  let open: string[] = [];
-  let bytes = 2;
-  let offset = 0;
-  const close = (): void => {
-    if (open.length) chunks.push({ text: `[${open.join(',')}]`, offset });
-    offset += open.length;
-    open = [];
-    bytes = 2;
-  };
-  for (const member of members) {
-    // An array member `JSON.stringify` cannot spell (`undefined`) is `null`, as in the whole-array spelling.
-    const text = stringifyExact(member) ?? 'null';
-    const size = utf8Bytes(text);
-    // `bytes` is the open chunk's spelled size: its brackets, its members, and a comma between each two.
-    if (open.length && bytes + 1 + size > CF_MAX_VALUE_BYTES) close();
-    bytes += (open.length ? 1 : 0) + size;
-    open.push(text);
-  }
-  close();
-  return chunks;
 }
 
 /**

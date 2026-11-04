@@ -1,4 +1,5 @@
-import { stringifyExact } from './json-exact.ts';
+import { jsonChunks } from './json-chunks.ts';
+import { fillHoles, jsonEachValues } from './sql/kernel/q.ts';
 import { isRowsBind, renderLowered, renderedSteps, type Emitted, type RenderedPlan } from './rel/emit.ts';
 import type { Guard, Plan } from './rel/plan.ts';
 import { RaisedByQuery } from './rel/raise.ts';
@@ -54,10 +55,11 @@ export function renderProgram(program: Plan, rendered: RenderedPlan): RenderedPr
  * rebuilds write as a special case in a new layer. RelIR supplies `Ref`, the plan shape and the
  * passes; running is somebody else's job.
  *
- * Retained rows travel as ONE JSON bind exploded by `json_each` — never a row-count-sized
- * placeholder list, which is the Durable Objects 100-parameter wall. The emitter leaves a
- * `RowsBind` marker in its bind list saying which binding's rows belong there, so this never parses
- * SQL to find the slot and `emit` never learns about the transport.
+ * Retained rows travel as JSON binds exploded by `json_each` — ONE under a Durable Object's 2 MB value
+ * cap, one per packed chunk past it — never a row-count-sized placeholder list, which is the DO
+ * 100-parameter wall. The emitter leaves a `RowsBind` marker in a run-time hole (`Emitted.holes`)
+ * saying which binding's rows belong there, so this never parses SQL to find the slot and `emit`
+ * never learns about the transport.
  */
 export function runProgram(store: RowSource, program: Plan): readonly Record<string, unknown>[] {
   return runSteps(store, renderProgram(program, renderLowered(program)));
@@ -82,11 +84,25 @@ export function runSteps(store: RowSource, program: RenderedProgram): readonly R
 
 function runStepsIn(store: RowSource, { steps, columns }: RenderedProgram): readonly Record<string, unknown>[] {
   const retained = new Map<string, readonly Record<string, unknown>[]>();
+  // A binding's packed rows, once: a snapshot is read by several later statements (a property write reads
+  // its traversers six times), and its rows never change after it ran.
+  const packed = new Map<string, readonly string[]>();
+  const chunksOf = (name: string): readonly string[] => {
+    let chunks = packed.get(name);
+    if (!chunks) packed.set(name, chunks = payload(name, columns, retained));
+    return chunks;
+  };
   let result: readonly Record<string, unknown>[] = [];
 
   for (const step of steps) {
-    const binds = step.emitted.binds.map((bind) => (isRowsBind(bind) ? payload(bind.rowsOf, columns, retained) : bind));
-    const rows = store.query<Record<string, unknown>>(step.emitted.sql, binds);
+    // Every `RowsBind` sits in a run-time hole (`refSource`), re-spelled over its rows' packed values: ONE
+    // value under a DO's 2 MB cap — the statement byte for byte as rendered — else one `json_each` per chunk.
+    const { sql, binds } = fillHoles(step.emitted, (marker) => {
+      if (!isRowsBind(marker)) throw new Error('RelIR program: a run-time hole holds no retained-rows marker');
+      return jsonEachValues(chunksOf(marker.rowsOf));
+    });
+    if (binds.some(isRowsBind)) throw new Error('RelIR program: a retained-rows bind is outside a run-time hole');
+    const rows = store.query<Record<string, unknown>>(sql, binds);
     if (step.binding) {
       retained.set(step.binding, rows);
       // A GUARD BINDING is the refusal only the graph can decide (§6·5): the plan CARRIES it, so a
@@ -108,16 +124,23 @@ function runStepsIn(store: RowSource, { steps, columns }: RenderedProgram): read
 }
 
 /**
- * A retained result as one JSON value, POSITIONALLY — a row per member, a column per position, in
- * the binding's declared column order. The declared column order is the authority for what each
- * position means; there is no inference here and no second type system, which is the same reason the
- * SQL side reads `$[i]` rather than a name.
+ * A retained result as JSON values, POSITIONALLY — a row per member, a column per position, in the
+ * binding's declared column order. The declared column order is the authority for what each position
+ * means; there is no inference here and no second type system, which is the same reason the SQL side
+ * reads `$[i]` rather than a name.
+ *
+ * PACKED by the one packer (`jsonChunks`) into values a Durable Object can hold — ONE under its 2 MB value
+ * cap, spelled exactly as the whole array, so every plan a test graph makes is unchanged; several past it
+ * (a bulk `property()` over ~100k vertices), each exploded under `UNION ALL`. No position offset is needed:
+ * a reader takes a row's columns by `$[i]` and any order it needs from a declared column (`encounter`,
+ * `ord`), never from `json_each.key`. The bind count is O(bytes / 2 MB), so the 100-bind budget is ~200 MB
+ * of retained rows — more than an isolate holds — and no size of graph becomes a refusal here.
  */
-function payload(name: string, columns: Readonly<Record<string, readonly string[]>>, retained: ReadonlyMap<string, readonly Record<string, unknown>[]>): string {
+function payload(name: string, columns: Readonly<Record<string, readonly string[]>>, retained: ReadonlyMap<string, readonly Record<string, unknown>[]>): readonly string[] {
   const cols = columns[name];
   const rows = retained.get(name);
   if (!cols || !rows) throw new Error(`RelIR program: binding '${name}' has no retained rows — it must run before the step that references it`);
-  return stringifyExact(rows.map((row) => cols.map((column) => transportable(row[column], name, column))));
+  return jsonChunks(rows.map((row) => cols.map((column) => transportable(row[column], name, column)))).map((chunk) => chunk.text);
 }
 
 /** JSON carries null, numbers, strings and booleans losslessly and nothing else. A blob or a

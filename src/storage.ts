@@ -339,8 +339,8 @@ export class GraphStore {
       const message = sqliteMessage(error);
       if (message === 'integer overflow') throw new RaisedByQuery(INTEGER_OVERFLOW);
       // ONE VALUE past the platform's per-value cap (a DO's 2 MB — `do-limits.ts`). A data-sized SET never
-      // gets here: it crosses split under the cap (`jsonEachRelation`). What does is a single member, or a
-      // value SQLite computes, that no Durable Object can hold at all — a `fold()` of 8,000 long names, one
+      // gets here: it crosses split under the cap (`jsonChunks` — at compile time, or at run time for a
+      // statement's retained rows). What does is a single member, or a value SQLite computes, that no Durable Object can hold at all — a `fold()` of 8,000 long names, one
       // `groupCount()` map, a property that large. That is the platform's limit, not a traversal we decline,
       // so it is said as such rather than as SQLite's bare message. (Bun's cap is ~1 GB: it answers.)
       if (message === VALUE_TOO_BIG) throw new RaisedByQuery(VALUE_PAST_PLATFORM_CAP, { cause: error });

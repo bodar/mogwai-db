@@ -72,7 +72,8 @@ const describe = (sql: string): string => (sql.length > 160 ? `${sql.slice(0, 16
  * the decorator's diagnostic as the `cause` — because that one is not a statement-shape defect of ours
  * but a value the platform cannot hold, and the store translates it to the user's clear error
  * (`GraphStore.query`). The data-sized sets we produce are split under the cap
- * (`compiler/rel/build.ts` `jsonEachRelation`), so what still reaches it is a single member past 2 MB.
+ * (`jsonChunks`, `src/json-chunks.ts` — at compile time, and at run time for retained rows), so what still
+ * reaches it is a single member past 2 MB.
  * NOT modelled: a value SQLite COMPUTES past the cap (a `json_group_array` over a large fold) — the DO
  * refuses that too (measured), but only the real platform can see it.
  */

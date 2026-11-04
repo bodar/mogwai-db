@@ -24,9 +24,10 @@ import * as make from './rel/factory.ts';
 import { plan } from './rel/plan.ts';
 import { insert } from './rel/stmt-factory.ts';
 import type { ColMeta, SqlType } from './rel/types.ts';
-import { jsonChunks, jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
+import { jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
+import { jsonChunks } from './json-chunks.ts';
 import { runProgram, type RowSource } from './program.ts';
-import { execute, identifier, list, q, textLiteral, value, type Expression } from './sql/kernel/q.ts';
+import { execute, identifier, jsonEachValues, list, q, textLiteral, type Expression } from './sql/kernel/q.ts';
 
 /** One column of a set-insert target. `jsonb` wraps the cell in `jsonb(<text>)` — the collection /
  *  meta shape, whose JSON TEXT crosses and lets SQLite build the blob (a raw blob bind would diverge
@@ -52,14 +53,10 @@ const cellAt = (row: Expr, at: number, col: SetColumn): Expr => {
   return extract;
 };
 
-/** A data-sized set as a FROM-able relation of its members (`value`): `json_each(?)` when it fits one DO
- *  value — the spelling every set under 2 MB has always had — else one `json_each(?)` per `jsonChunks`
- *  chunk under `UNION ALL`. The direct statements' twin of `jsonEachRelation`, over the SAME packer. */
-const members = (set: readonly unknown[]): Expression => {
-  const chunks = jsonChunks(set);
-  if (chunks.length === 1) return q`json_each(${value(chunks[0]!.text)})`;
-  return q`(${list(chunks.map((chunk) => q`SELECT value FROM json_each(${value(chunk.text)})`), ' UNION ALL ')})`;
-};
+/** A data-sized set as a FROM-able relation of its members (`value`): its `jsonChunks` values in the ONE
+ *  spelling (`jsonEachValues`) — `json_each(?)` when it fits one DO value, else one per chunk under
+ *  `UNION ALL`. The direct statements' twin of `jsonEachRelation`, over the SAME packer. */
+const members = (set: readonly unknown[]): Expression => jsonEachValues(jsonChunks(set).map((chunk) => chunk.text));
 
 /**
  * Insert `rows` into `table`, one relational statement, one JSON bind. Returns the number of
