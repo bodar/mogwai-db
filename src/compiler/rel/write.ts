@@ -33,7 +33,7 @@ import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
 import { fieldCol, framingCols, type MapKeyFacts, type RelFraming } from './framing.ts';
-import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
+import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, traversalIdArg, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from './ranked-order.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
@@ -3094,7 +3094,8 @@ function parameterSite(
   const ordered = incoming.type.cols.some((column) => column.name === ORD);
   if (incomingElem !== null && incoming.kind !== 'values' && ordered && incoming.type.cols.some((column) => column.name === 'id'))
     return { host: incoming, hostElem: incomingElem, origin: ORD, aliases, resolve: 'first' };
-  if (!bodies.every((body) => body[0]?.name === 'V' || body[0]?.name === 'E')) return null;
+  // A `V(<traversal>)` resolves its ids against the traverser it is handed, so it does read it.
+  if (!bodies.every((body) => (body[0]?.name === 'V' || body[0]?.name === 'E') && !traversalIdArg(body[0]))) return null;
   // The source's one row is position 1 — the position `positioned` gives the one element it creates.
   const host = make.project({
     id: fresh('h'), input: incoming, channels: [], type: typeOf(meta('id', 'int', true), meta(ORD, 'int')),

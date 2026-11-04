@@ -8,6 +8,7 @@ import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { CONSTANT, storedCompareOn } from './predicate.ts';
+import { valueIsKind, type ValueEvidence } from './receiver.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, or, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
@@ -70,6 +71,13 @@ export interface GraphSource {
    *  `jsonb(?)` exploded by `json_each`); a landed graph scans its bound CTE and filters its single
    *  `id` column. The caller derives the element KIND from the step name. */
   elementScan(kind: Elem, args: readonly Arg[], fresh: Minter): { scan: Rel; pred?: Expr } | null;
+
+  /** `V(<traversal>)`/`E(<traversal>)` — the element whose EXTERNAL id is a value computed per row, as a
+   *  scan plus a predicate CORRELATED on that value's routing keys (`externalIdKeys` — the value split by
+   *  its Gremlin type, so a Number id and a String one are told apart without coercing either); the caller
+   *  joins its stream to the scan on it. `BaseGraph` matches through `externalIdIs`; absent, the source
+   *  cannot resolve a runtime id and the caller declines. */
+  elementById?(kind: Elem, keys: ExternalIdKeys, fresh: Minter): { scan: Rel; pred: Expr };
 
   /** `hasLabel(names…)` (and the label half of `has(label, k, v)`), as a predicate CORRELATED on the
    *  element `id`. `labels` is the pre-validated NON-EMPTY label-arg set (the caller owns the null /
@@ -312,10 +320,45 @@ function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Min
   const text: Expr[] = [];
   if (inlineStrs.length) text.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
   text.push(...strParams);
-  const numMatch = disjunction(numeric);
-  const match = disjunction([...(numMatch ? [and(numMatch, rowidOnly(uidCol))] : []), ...text]);
-  return match ?? (nonEmpty ? CONSTANT.false : undefined);
+  return routedExternalId(uidCol, disjunction(numeric), disjunction(text)) ?? (nonEmpty ? CONSTANT.false : undefined);
 }
+
+/**
+ * THE EXTERNAL-ID ROUTING LAW, stated once: the external id is `COALESCE(uid, id)`, so a NUMBER names the
+ * rowid of a row WITHOUT a `uid` and a STRING names the `uid`. `numeric` is the match over the rowid
+ * column and `text` the match over the `uid` column — either may be absent. Kept as two indexable
+ * disjuncts (a rowid seek, a `uid`-UNIQUE seek) rather than one comparison against the COALESCE, which no
+ * index serves. `idMembership` hands it compile-time sets; `externalIdIs` a per-row value's keys.
+ */
+const routedExternalId = (uidCol: Expr, numeric: Expr | undefined, text: Expr | undefined): Expr | undefined =>
+  disjunction([...(numeric ? [and(numeric, rowidOnly(uidCol))] : []), ...(text ? [text] : [])]);
+
+/**
+ * A run-time id VALUE's two routing KEYS — the value itself where its Gremlin type (`evidence`) is a Number
+ * (`rowid`) or a String (`uid`), else NULL; a key the static type rules out is `null` (no clause at all).
+ * Anything else (a Boolean, a list, a NULL) is an id no element has, so both keys are NULL. The type is
+ * READ, never coerced — a String `'1'` is not rowid `1` (§17 "String vs integer element id"), which is why
+ * the route is a type test rather than SQLite's affinity comparison (an INTEGER column compared with TEXT
+ * `'1'` would convert it).
+ *
+ * Keys rather than a guarded predicate so a caller can compute them ONCE per row (a projected column) and
+ * the match reads each once: the value is often a correlated read (an element's external id), and a
+ * predicate testing its type and then comparing it would spell that read four times.
+ */
+export interface ExternalIdKeys { readonly rowid: Expr | null; readonly uid: Expr | null }
+export function externalIdKeys(value: Expr, evidence: ValueEvidence): ExternalIdKeys {
+  const key = (is: Expr | boolean): Expr | null =>
+    is === false ? null : is === true ? value : { kind: 'case', whens: [[is, value]], else: compilerNull() };
+  return { rowid: key(valueIsKind('number', value, evidence)), uid: key(valueIsKind('string', value, evidence)) };
+}
+
+/**
+ * IS THIS ROW THE ELEMENT A RUN-TIME ID NAMES? — `routedExternalId` over the value's routing keys
+ * (`externalIdKeys`): plain equalities, so each disjunct is one index seek (a rowid, a `uid`) and a NULL key
+ * matches nothing. Static keys decide the route at compile time.
+ */
+export const externalIdIs = (idCol: Expr, uidCol: Expr, keys: ExternalIdKeys): Expr =>
+  routedExternalId(uidCol, keys.rowid ? eq(idCol, keys.rowid) : undefined, keys.uid ? eq(uidCol, keys.uid) : undefined) ?? CONSTANT.false;
 
 /** `uid IS NULL` — the row's external id IS its rowid (see `idMembership`). */
 const rowidOnly = (uidCol: Expr): Expr => ({ kind: 'binary', op: 'is', left: uidCol, right: compilerNull() });
@@ -473,6 +516,14 @@ export const BaseGraph: GraphSource = {
     // of a shape it cannot place) declines the whole source; no ids is the whole graph.
     const pred = idMembership(col(scan.id, 'id'), col(scan.id, 'uid'), args, fresh);
     return pred === null ? null : { scan, pred };
+  },
+
+  elementById: (kind, keys, fresh) => {
+    const scan = make.scan({
+      id: fresh('src'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh(kind === 'edge' ? 're' : 'rn'), channels: [],
+      type: typeOf(...(kind === 'edge' ? EDGE_COLS : NODE_COLS)),
+    });
+    return { scan, pred: externalIdIs(col(scan.id, 'id'), col(scan.id, 'uid'), keys) };
   },
 
   hasLabelPredicate: (kind, id, labelCol, labels, fresh, row) => {

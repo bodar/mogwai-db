@@ -1,4 +1,4 @@
-import { gtypeName, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
+import { gtypeName, isNested, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
 import { normalizeTypeName } from '../../gremlin/types.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
@@ -39,10 +39,38 @@ import { UnsupportedTraversal } from '../unsupported.ts';
  *    relation (`segment.ts`'s `nestedBranchSegment`); the `V()`/`E()` dispatch routes the scan and the
  *    arm's own continuation through that bound source. Provenance, not shape — the same axis
  *    `GraphSource` already abstracts, so it is a step annotation like the ones above, never a wire fact.
+ *  - `idOfValue` — a lowering-minted `V()`/`E()` whose ids ARE the arriving traverser's value
+ *    (`V(__.identity())`'s meaning). The lowering splits `V(<traversal>)` into the traversal's
+ *    per-traverser results (`flatMap`) followed by this lookup (`traversalIdsTail`, `rel/lower.ts`);
+ *    `'start'` marks the lookup of a START step, whose elements begin fresh traversers.
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; earlyLimitSuppressed?: boolean; keepsPathEntry?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; earlyLimitSuppressed?: boolean; keepsPathEntry?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string; idOfValue?: 'start' | 'split' };
+
+/** The id TRAVERSAL of a `V(<traversal>)`/`E(<traversal>)` — its one argument when that is a nested
+ *  traversal (GraphStep's `idTraversal`), else `null`. Its child runs over the traverser ARRIVING at the
+ *  GraphStep, so a body that opens with one reads its host (`readsHostState`). */
+export const traversalIdArg = (step: IRStep): { readonly nested: unknown } | null => {
+  if (step.name !== 'V' && step.name !== 'E') return null;
+  const only = step.args.length === 1 ? step.args[0]!.value : undefined;
+  return isNested(only) ? only : null;
+};
+
+/**
+ * `V(<traversal>)` at `at` as the two things it is (`traversalIdsTail`, `rel/lower.ts`): `flatMap(<traversal>)`
+ * — the child's results per arriving traverser — then the LOOKUP of each (`idOfValue: 'split'`).
+ *
+ * A lowering-time decomposition rather than a Pass, for two reasons the chain cannot state: the read-only
+ * rule (`verifyStandard`) must still see the id traversal in GraphStep's VALUE slot, where a write is
+ * illegal, and not in a `flatMap` body where it is legal; and whether a leading GraphStep is a START (its
+ * child runs over a synthetic head) or the head of a child body (its child runs over the host) is a fact of
+ * the POSITION the lowering reaches it from.
+ */
+export const splitTraversalIds = (steps: readonly IRStep[], at: number): IRStep[] => {
+  const step = steps[at]!;
+  return [...steps.slice(0, at), { ...step, name: 'flatMap' }, { ...step, args: [], idOfValue: 'split' }, ...steps.slice(at + 1)];
+};
 
 /** Did this step run inside a PER-TRAVERSER host (`local`/`map`/`flatMap`) whose wrapper the splice pass
  *  erased — `inlineIdentityHostBody`, `ir/strategies.ts`?

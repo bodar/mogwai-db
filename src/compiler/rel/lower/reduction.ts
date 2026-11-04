@@ -13,7 +13,7 @@ import type { Elem } from '../../elem.ts';
 import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { normalize } from '../../ir/passes.ts';
-import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
@@ -623,7 +623,7 @@ export function dropOrigin(rel: Rel, fresh: Minter): Rel {
  *  Keeps every non-alias channel, the payload, and the pre-body alias channels named by `keep` (their
  *  columns are lower-numbered; a body mints fresh higher-numbered ones off the incoming map's size). A
  *  no-op when the body bound none. */
-function shedBodyAliases(rel: Rel, keep: AliasMap, fresh: Minter): Rel {
+export function shedBodyAliases(rel: Rel, keep: AliasMap, fresh: Minter): Rel {
   const keepCols = new Set([...keep.values()].map((entry) => entry.col));
   const drop = new Set(rel.channels.filter((channel) => channel.role === 'alias' && !keepCols.has(channel.col)).map((channel) => channel.col));
   if (!drop.size) return rel;
@@ -896,6 +896,9 @@ export type RootedStart = 'source' | 'split';
  */
 function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
   const { params } = ctx;
+  // An opening `V(<traversal>)` resolves its ids by running its child over the HOST traverser, so it is a
+  // host read through and through (`__.V(__.identity())` is the host itself), never one shared evaluation.
+  if (steps[0] && traversalIdArg(steps[0])) return true;
   if (someStepDeep(steps, params, (s) => TRAVERSER_STATE_READS.has(s.name))) return true;
   const popped = someStepDeep(steps, params, (s) => (s.args ?? []).some((a) => isPopArg(a.value) && a.value.pop !== 'last'));
   return steps.some((step, i) => {
@@ -1891,6 +1894,9 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // host triggered it, and a host that may be absent declines (`reSourcedUnder`). This is the `map(__.V().count())`
   // half of re-sourcing; fan-out `flatMap(__.V()…)` is the general child rejoin's (`flatMapRejoin`),
   // rather than abusing a scalar subquery's arbitrary-first-row behaviour.
+  // `V(<traversal>)` is not that: its ids come from its child run over THIS host, so it is the
+  // per-traverser results then their lookup (`splitTraversalIds`), lowered like any other body.
+  if (traversalIdArg(first)) return scalarChild(splitTraversalIds(body, 0), host, given, fresh);
   if (first.name === 'V' || first.name === 'E') return reSourcedUnder(host, body, ctx, fresh);
 
   // THE RECORD ARM — `by(__.project('a','b')…)`, one traverser in and one MAP out.

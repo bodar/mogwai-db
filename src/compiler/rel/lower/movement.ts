@@ -17,6 +17,9 @@ import { extendPath, pathCarried } from '../path.ts';
 import { BULK, ENCOUNTER, encounterOf, FROM_V, fromVOf, type ChainCtx } from './chain.ts';
 import { remintOrder } from '../lower.ts';
 import { ensureBulk } from './branch.ts';
+import { evidenceOf } from '../receiver.ts';
+import { externalIdKeys } from '../source.ts';
+import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -44,6 +47,62 @@ export function reSource(
     type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
   return { elem, rel: crossCarried(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, ctx, fresh) };
+}
+
+/**
+ * GRAPHSTEP'S ID LOOKUP — the elements a `V(<traversal>)`/`E(<traversal>)` names, once the traversal's
+ * results have arrived as this stream's values (one row per result, the head's carried channels riding).
+ *
+ * `GraphStep.resolveTraversalIds` turns each result into an id — an Element contributes its id, any other
+ * value IS an id — and `lookupElements` hands them to `graph.vertices(ids)`/`edges(ids)`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:231-260`).
+ * Relationally that is an inner JOIN of the result rows to the element relation on the external id, and
+ * an element id names at most one element (the rowid is the key, the `uid` UNIQUE, and a value routes to
+ * exactly one of the two), so the join is 1:≤1: a result naming no element drops, every other row keeps
+ * its channels and its position unchanged, and nothing is re-minted. A repeated id is a repeated row, as
+ * TinkerGraph's `vertices(ids)` maps every id it is handed.
+ *
+ * An element result of the TARGET kind is its own lookup (`V(__.out())` names the vertices `out()`
+ * reached). Any other is matched by VALUE through the source's one routing (`elementById` →
+ * `externalIdIs`): a Number is a rowid, a String a `uid`, every other type an id no element has. A
+ * collection result is unpacked by the caller before it reaches here (`traversalIdsTail`).
+ *
+ * The state `reSource` refuses (a path, a sack, an otherV entry) is refused here for the same reason.
+ */
+export function idLookup(
+  input: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, elem: Elem, ctx: ChainCtx, fresh: Minter,
+): Rel | null {
+  if (input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
+  const parent = ensureBulk(input, fresh);
+  if (framing.kind === 'elements' && framing.elem === elem) return parent;
+  if (!ctx.source.elementById) return null;
+  // An element's external id carries no tag: its storage class (INTEGER rowid, TEXT uid) IS its type.
+  const vtype = framing.kind === 'scalar' ? perRowColumnOf(framing.type) : undefined;
+  const keys = externalIdKeys(
+    framing.kind === 'scalar' ? col(parent.id, 'v') : ctx.source.externalId(framing.elem, col(parent.id, 'id'), fresh),
+    framing.kind === 'scalar' ? evidenceOf(framing.type, vtype ? col(parent.id, vtype) : undefined) : { kind: 'storage' },
+  );
+  // The routing KEYS as columns of one projection, so the value — often a correlated read — is computed
+  // once per row (the emitter's one-subquery rule over a projection) and the join reads each key once.
+  const keyCols = (['rowid', 'uid'] as const).filter((key) => keys[key] !== null);
+  const keyed = make.project({
+    id: fresh('xk'), input: parent, channels: parent.channels,
+    type: typeOf(...keyCols.map((key) => meta(`k_${key}`, 'any', true)), ...carriedCols(parent.channels)),
+    exprs: [...keyCols.map((key) => [`k_${key}`, keys[key]!] as const),
+      ...parent.channels.map((channel) => [channel.col, col(parent.id, channel.col)] as const)],
+  });
+  const keyOf = (key: 'rowid' | 'uid'): Expr | null => keys[key] && col(keyed.id, `k_${key}`);
+  const found = ctx.source.elementById(elem, { rowid: keyOf('rowid'), uid: keyOf('uid') }, fresh);
+  const met = (name: string): string => `rl_${name}`;
+  const joined = make.join({
+    id: fresh('j'), left: keyed, right: found.scan, join: 'inner', ordered: true, channels: keyed.channels,
+    type: typeOf(...keyed.type.cols, ...found.scan.type.cols.map((column) => ({ ...column, name: met(column.name) }))),
+    on: found.pred,
+  });
+  return make.project({
+    id: fresh('rl'), input: joined, channels: parent.channels, type: typeOf(...elementCols(parent.channels)),
+    exprs: [['id', col(joined.id, met('id'))], ...parent.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
+  });
 }
 
 /**

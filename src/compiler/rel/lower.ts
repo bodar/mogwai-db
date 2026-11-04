@@ -15,7 +15,7 @@ import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow } from '../../rel/bounds.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
-import { collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds } from '../ir/step.ts';
+import { collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -74,11 +74,11 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
-import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
-import { HOPS, movement, otherVertex, reSource } from './lower/movement.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, bodyOf, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
+import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
-import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild } from './lower/reduction.ts';
+import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
@@ -162,10 +162,57 @@ export interface RelLowering {
 function reSourceTail(
   steps: readonly IRStep[], at: number, rel: Rel, framing: RelFraming, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
+  if (steps[at]!.idOfValue || traversalIdArg(steps[at]!)) return traversalIdsTail(steps, at, rel, framing, bulked, ctx, fresh, labels);
   const once = reSourcedOnce(steps, at, rel, bulked, ctx, fresh, labels);
   if (once) return once;
   const reSourced = reSource(steps[at]!, rel, framing, ctx, fresh);
   return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+}
+
+/**
+ * `V(<traversal>)` / `E(<traversal>)` — GraphStep with an id TRAVERSAL.
+ *
+ * Per head traverser GraphStep runs the child over it and looks up what it yields
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:213-247`):
+ * every result is an id — an Element contributes its own, a Collection is unpacked (each member an
+ * Element's id or an id), any other value is one — and no result means no elements. The head then splits
+ * into the elements found, keeping its carried state, exactly as for literal ids.
+ *
+ * So it lowers as the two things it is, each through the authority that already owns it:
+ *  1. the child's results PER HEAD TRAVERSER — `flatMap(<traversal>)`, the per-traverser rows seam, which
+ *     already scopes a barrier in the body to its head and keeps the body's labels inside it (a child's
+ *     labels never reach the head GraphStep splits); then
+ *  2. the LOOKUP of each arriving value — this same step re-entered as a `V()` whose ids are the value
+ *     (`IRStep.idOfValue`, `V(__.identity())`'s meaning): a collection unpacked by `unfoldedMembers`, then
+ *     `idLookup`'s 1:≤1 join through the source's one id routing (`externalIdIs`).
+ * An identity body needs no split. A mutating body never reaches here (`verifyStandard`).
+ */
+function traversalIdsTail(
+  steps: readonly IRStep[], at: number, rel: Rel, framing: RelFraming, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  const step = steps[at]!;
+  if (step.modulators?.length || step.optionArms || step.landedSource) return null;
+  const elem: Elem = step.name === 'E' ? 'edge' : 'vertex';
+  const nested = traversalIdArg(step);
+  const body = nested ? bodyOf(nested.nested, ctx.params, ctx.sideEffects) : [];
+  if (!body) return null;
+  if (!step.idOfValue && !body.every((s) => s.name === 'identity'))
+    return continueAs(rel, framing, splitTraversalIds(steps, at), at, bulked, ctx, fresh, labels);
+  const looked = (input: Rel, valued: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, multiplied: boolean): Tail | null => {
+    const found = idLookup(input, valued, elem, ctx, fresh);
+    if (!found) return null;
+    // A START lookup's elements begin fresh traversers: whatever the body bound is not theirs.
+    if (step.idOfValue === 'start') return elementTail(shedBodyAliases(found, NO_ALIASES, fresh), elem, steps, at + 1, multiplied, ctx, fresh, NO_ALIASES);
+    return elementTail(found, elem, steps, at + 1, multiplied, ctx, fresh, labels);
+  };
+  if (framing.kind === 'elements' || framing.kind === 'scalar') return looked(rel, framing, bulked);
+  if (framing.kind !== 'list') return null;
+  // A COLLECTION result is unpacked one level (`resolveTraversalIds`): its members are the ids. A member
+  // that is itself a collection, a map or a mixed node has no element/scalar stream to look up; decline.
+  const members = unfoldedMembers(rel, framing.of, fresh);
+  if (!members || members.unfolded.member || members.unfolded.mapVal || members.unfolded.nodes) return null;
+  // `false`: a fold collapsed the multiplicity, so each member stands for exactly one traverser.
+  return looked(members.rel, members.unfolded.elem ? { kind: 'elements', elem: members.unfolded.elem } : members.scalar, false);
 }
 
 /** The fan-out re-mint: renumber by the incoming position, tie-broken on the element id so rows
@@ -2789,6 +2836,49 @@ function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; f
 }
 
 /**
+ * `unfold()` over a LIST traverser — one traverser per member, POSITIONED: the member's position becomes
+ * the emission order, minted rather than declared. `json_each.key` is an index within ONE list, so it is a
+ * total order only where the relation has one row, and taking a later slice's window from a per-row index
+ * would return the right multiset from the wrong place. Where a position was already carried it leads the
+ * sort, so the members of an earlier list all precede the members of a later one.
+ *
+ * `scalar` is the framing a SCALAR member stream takes. THE MEMBER TYPE CROSSES BACK ONTO THE ROW CHANNEL,
+ * carrier and all: an envelope becomes the `PER_ROW('vtype')` column the explode just projected — the
+ * same channel and column name `values()` uses, so the scalar tail's `carries('vtype')` picks it up and an
+ * `is(P.gt(…))` after it gets the vtype-aware compare key for free — while a `static` member type crosses
+ * unchanged rather than being flattened to `UNKNOWN`, which is what used to happen and cost a
+ * `fold().unfold()` its tag. `productiveNull` rides along for the same reason it rides through every other
+ * retype: it says a NULL is a real value, and losing it means losing the value. Shared by `listTail`'s
+ * `unfold()` and GraphStep's collection unpacking (`traversalIdsTail`).
+ */
+function unfoldedMembers(rel: Rel, items: ListOf, fresh: Minter): {
+  readonly rel: Rel; readonly unfolded: NonNullable<ReturnType<typeof unfoldList>>; readonly scalar: Extract<RelFraming, { readonly kind: 'scalar' }>;
+} | null {
+  const unfolded = unfoldList(rel, items, fresh);
+  if (!unfolded) return null;
+  const carried = encounterOf(rel.channels);
+  const channels = carried ? rel.channels : withChannel(rel.channels, ENCOUNTER);
+  const terms: readonly SortTerm[] = [
+    ...(carried ? [{ expr: col(unfolded.rel.id, carried.col), dir: 'asc' as const }] : []),
+    { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
+  ];
+  const payloadCols: readonly ColMeta[] = unfolded.member ? [meta(LIST_COL, 'json')]
+    : unfolded.mapVal ? [meta(MAP_COL, 'json')]
+      : unfolded.nodes ? [meta(NODE_COL, 'json', true)]
+        : unfolded.elem ? [meta('id', 'int')]
+          : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
+  return {
+    rel: renumber(unfolded.rel, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh),
+    unfolded,
+    scalar: {
+      kind: 'scalar',
+      type: unfolded.typed ? PER_ROW('vtype') : memberTypeOf(items) ?? UNKNOWN,
+      ...(items.kind === 'scalar' && items.productiveNull ? { productiveNull: true } : {}),
+    },
+  };
+}
+
+/**
  * THE LIST TAIL — the vocabulary above a collection-valued relation.
  *
  * Three exits, and they are the three things a list op can do: stay a list (`list.ts`'s member
@@ -2817,6 +2907,9 @@ function listTail(
     const step = steps[at];
     if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
     if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'list', of: items, ...(set ? { set: true } : {}) }, false, ctx, fresh, labels);
+    // A re-source from a LIST traverser is the one GraphStep lowering every tail shares (`continueAs`'s
+    // own reason) — and the lookup of a collection of ids (`V(__.out().fold())`) arrives here.
+    if (step.name === 'V' || step.name === 'E') return reSourceTail(steps, at, rel, { kind: 'list', of: items, ...(set ? { set: true } : {}) }, false, ctx, fresh, labels);
 
     // `as()` over a LIST traverser binds the whole collection as ONE history entry, tagged `list` — a
     // list is one traverser, so binding it per member would be a different question. `listOf` rides on
@@ -2850,25 +2943,9 @@ function listTail(
 
     if (step.name === 'unfold') {
       if ((step.args ?? []).length) return null;
-      const unfolded = unfoldList(rel, items, fresh);
-      if (!unfolded) return null;
-      // The member's POSITION becomes the emission order, minted rather than declared: `json_each.key`
-      // is an index within ONE list, so it is a total order only where the relation has one row, and
-      // taking a later slice's window from a per-row index would return the right multiset from the
-      // wrong place. Where a position was already carried it leads the sort, so the members of an
-      // earlier list all precede the members of a later one.
-      const carried = encounterOf(rel.channels);
-      const channels = carried ? rel.channels : withChannel(rel.channels, ENCOUNTER);
-      const terms: readonly SortTerm[] = [
-        ...(carried ? [{ expr: col(unfolded.rel.id, carried.col), dir: 'asc' as const }] : []),
-        { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
-      ];
-      const payloadCols: readonly ColMeta[] = unfolded.member ? [meta(LIST_COL, 'json')]
-        : unfolded.mapVal ? [meta(MAP_COL, 'json')]
-          : unfolded.nodes ? [meta(NODE_COL, 'json', true)]
-            : unfolded.elem ? [meta('id', 'int')]
-              : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
-      const positioned = renumber(unfolded.rel, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh);
+      const members = unfoldedMembers(rel, items, fresh);
+      if (!members) return null;
+      const { unfolded, rel: positioned } = members;
       // A MIXED list's members are HETEROGENEOUS self-describing nodes, so the unfolded stream is a
       // per-row `typedNode` — terminal, exactly as a variant is (a stream that is a vertex on one row
       // and an edge on the next cannot uniformly continue), and `continueAs` declines any follower.
@@ -2886,18 +2963,8 @@ function listTail(
       // the multiplicity when it collapsed the stream to one traverser, and each member now stands for
       // exactly one.
       if (unfolded.elem) return elementTail(positioned, unfolded.elem, steps, at + 1, false, ctx, fresh, labels);
-      // THE MEMBER TYPE CROSSES BACK ONTO THE ROW CHANNEL, carrier and all: an envelope becomes the
-      // `PER_ROW('vtype')` column the explode just projected — the same channel and column name
-      // `values()` uses, so the scalar tail's `carries('vtype')` picks it up and an `is(P.gt(…))`
-      // after it gets the vtype-aware compare key for free — while a `static` member type crosses
-      // unchanged rather than being flattened to `UNKNOWN`, which is what used to happen and cost a
-      // `fold().unfold()` its tag. `productiveNull` rides along for the same reason it rides through
-      // every other retype: it says a NULL is a real value, and losing it means losing the value.
-      return scalarTail(positioned, {
-        kind: 'scalar',
-        type: unfolded.typed ? PER_ROW('vtype') : memberTypeOf(items) ?? UNKNOWN,
-        ...(items.kind === 'scalar' && items.productiveNull ? { productiveNull: true } : {}),
-      }, steps, at + 1, false, ctx, fresh, labels);
+      // A SCALAR member keeps its member type (`unfoldedMembers`).
+      return scalarTail(positioned, members.scalar, steps, at + 1, false, ctx, fresh, labels);
     }
 
     // GLOBAL `count()` counts the LIST TRAVERSERS — a list is ONE traverser, so this is the ordinary
@@ -4723,6 +4790,24 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // A modulator or an option arm on the source is not a source argument; decline rather than
   // silently ignore it.
   if (first.modulators?.length || first.optionArms) return null;
+  // `g.V(<traversal>)` — a START GraphStep with an id traversal has no head, so it runs the child ONCE over
+  // a SYNTHETIC traverser whose object is `false` (`generate(false, this, 1L)`,
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:201-208`)
+  // and starts a fresh traverser at every element it names. With one head there is nothing to scope per
+  // head, so the child's steps run as this chain over that one-row seed, followed by the lookup of what it
+  // yields (`idOfValue: 'start'`, which drops the body's labels) and the rest of the traversal. A path
+  // would begin at the synthetic head, which the reference never shows, so a path read declines.
+  const ids = traversalIdArg(first);
+  if (ids) {
+    const body = bodyOf(ids.nested, params, ctx.sideEffects);
+    if (!body || tracksPath || first.landedSource || first.graphTag != null) return null;
+    const synthetic = (fresh: Minter): FramedRel => ({
+      rel: literalSource(fresh('gs'), [[compilerInt(0)]], [meta('v', 'any', true)], false),
+      framing: { kind: 'scalar', type: STATIC('boolean') },
+    });
+    const lookup: IRStep = { ...first, args: [], idOfValue: 'start' };
+    return lowerChainOf([...body, lookup, ...steps.slice(1)], { ...opts, seed: synthetic }, fresh, false);
+  }
   const elem0: Elem = first.name === 'E' ? 'edge' : 'vertex';
   // A `landedSource` marker (the nested-branch federate segment's arm rewrite) re-roots this read at a
   // LANDED graph — a `boundGraph` over its named CTE bindings — instead of `ctx.source`. The arm's whole

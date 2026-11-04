@@ -150,6 +150,17 @@ export function receiverOffence(
   return nullOffends ? or(typeOffends, nullOffends) : typeOffends;
 }
 
+/**
+ * IS THE VALUE OF `kind`? — the positive twin of `receiverOffence`'s type test, over the same evidence and
+ * the same per-row type name: `true`/`false` where the evidence is a static tag, else the per-row test.
+ * A NULL is neither kind. For a reader that ROUTES on the type rather than raising on it (an element id
+ * computed at run time, `externalIdIs`).
+ */
+export function valueIsKind(kind: ReceiverKind, value: Expr, evidence: ValueEvidence): Expr | boolean {
+  if (evidence.kind === 'static') return tagIs(kind, evidence.tag);
+  return inList(typeName(value, evidence), admitting(kind));
+}
+
 /** A guarded expression: the first offending test raises its message, else `value`. */
 export const raisingWhen = (offences: readonly (readonly [Expr, string])[], value: Expr): Expr =>
   offences.length ? { kind: 'case', whens: offences.map(([test, message]) => [test, raise(message)] as const), else: value } : value;
