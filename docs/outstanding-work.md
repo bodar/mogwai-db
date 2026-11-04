@@ -187,8 +187,8 @@ statement's text grows with data or doubles with query shape. The items below ar
   before the spine cut, proving a correlated id absent (`definesId`, `src/rel/walk.ts`) is O(k²) up to
   `SPINE_DEPTH_BOUND` (linear after); and the TRUE case of `definesId` is O(n²) (only FALSE answers are
   spread) — the doc comment and commit claim O(n) overall; correct the comment.
-- **Federate resumes put returned data into the SQL TEXT — a data-size decline (see Next round,
-  "federate resumes land as one json_each bind").** Same class as the user's question; promote it to an item.
+- ✅ **Federate resumes put returned data into the SQL TEXT — LANDED (25a64da6).** See the reuse-sweep
+  entry below; nothing remains.
 - **cc-5 review follow-ups (minor).** (a) `expansionNamed` (`src/compiler/compiler.ts`) blames nesting for a
   flat literal bulk upsert (`g.inject([name:'m1'],…×8000).mergeV()`: "each level spells the one before it")
   and blames the largest `times(n)` even when a guarded chain or emit triangle overran — name `times(n)` only
@@ -1075,16 +1075,11 @@ Proposals from the 2026-11-04 round's reuse sweep (answer-neutral unless stated)
 
 Proposals from the 2026-11-04 compile-cost round's reuse sweep (answer-neutral unless stated):
 
-- **Federate resumes land their values as ONE `json_each` bind, as `foreign.ts` already does — NOT
-  answer-neutral in production: removes a data-size decline.** `lowerTypedNodeStream`, `lowerScalarResume`
-  and `lowerReduceCombine` (`src/compiler/rel/lower.ts`) spell every returned value as a VALUES row of
-  `compilerText(stringifyExact(node))` and the parent scatter as P `compilerInt(i)` rows, so a large federated
-  `values()`/`fold()` crosses DO's 100 KB statement text in production only. Use `foreignRelation`'s
-  `make.explode` over one `lit(stringifyExact(rows))` (json_each key keeps emission order); the three
-  parent-scatter copies (`foreignRejoin`, `foreignMapRejoin`, the tnpr VALUES cross join) become one
-  `scatterOverParents(pool, parentCount, fresh)` (~25 lines gone), and `typedNodeLowering` loses its
-  "charges no CompileBudget" exception. Test: statement text identical at 10 and 10,000 returned values
-  under `CfLimitedSql`.
+- ✅ **Federate resumes land their values as ONE `json_each` bind — LANDED (25a64da6).** A pushed-down value
+  terminal's N nodes cross as one `stringifyExact` bind exploded by `foreignNodeStream` (beside
+  `foreignRelation`, `ord` kept and pinned by `ORDER BY (parent, ord)`), and the three parent-scatter copies
+  are one `parentsRelation(P, fresh, kind)` authority (`src/compiler/rel/lower.ts`); statement text no longer
+  grows with returned data (`test/federate-value-stream-scale.test.ts`). Remains: nothing.
 - **cc-7 via `once`** — see §0b; one more caller of `build.ts` `once`, no new mechanism.
 - **One param-or-constant authority in `src/compiler/rel/const.ts`** — the exact-tail
   `name != null ? param(v,name) : compilerText(String(v))` ×3 (`lower.ts` `exactTailConst` ~2810, `lower.ts`
