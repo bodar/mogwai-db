@@ -573,9 +573,15 @@ function extractArgs(ctx: any, params: ParamEnv): Arg[] {
  *  (a nested criterion → `{nested}`, a list → array, a scalar → the literal), so
  *  strategy config reuses the one arg walker. */
 function argOf(node: any, params: ParamEnv): any {
+  return typedArgOf(node, params).value;
+}
+
+/** `argOf` WITH the type the walk captured: a single argument keeps its `Arg` (value + type), a
+ *  multi-arg walk collapses to one untyped array-valued `Arg`. */
+function typedArgOf(node: any, params: ParamEnv): Arg {
   const out: Arg[] = [];
   walkArgs(node, out, params);
-  return out.length === 1 ? out[0].value : out.map((a) => a.value);
+  return out.length === 1 ? out[0]! : arg(out.map((a) => a.value));
 }
 
 /** Walk one AST node, pushing each recognised argument onto `out` as an `Arg` (value + canonical
@@ -706,7 +712,13 @@ function walkArgs(node: any, out: Arg[], params: ParamEnv): void {
     const literal = node.genericLiteral?.();
     const cardinality = node.getText().match(/(?:^|\.)(single|set|list)(?:\(|$)/i)?.[1]?.toLowerCase();
     if (!cardinality) throw new Error(`unrecognized Cardinality form: ${node.getText()}`);
-    emit(literal ? { cardinality, value: argOf(literal, params) } : { cardinality }); return;
+    if (!literal) { emit({ cardinality }); return; }
+    // The wrapper is TYPED BY ITS VALUE: `Cardinality.list(UUID(…))` / `set(Binary(…))` is a token
+    // around a typed literal, and every consumer unwraps the value and reads the entry's type as ITS type
+    // (the merge map's `propTypes`, `desugarPropertyMap`). Recording none left the TEXT-carried classes
+    // (uuid/char/binary) to be inferred as a String — written as one, and searched for as one.
+    const inner = typedArgOf(literal, params);
+    emit({ cardinality, value: inner.value }, inner.type); return;
   }
   // A map literal [k: v, …] / [:] — a real JS Map so it matches how a bound map
   // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged
@@ -795,13 +807,9 @@ function enumSuffix(node: any): string {
  *  multi-arg element → a nameless, typeless member). One member per element, in order — the per-element
  *  type is what the collection storage tags each leaf with (full-fidelity elements). */
 function literalItems(nodes: any[], params: ParamEnv): Arg[] {
-  return nodes.map((lit) => {
-    const out: Arg[] = [];
-    walkArgs(lit, out, params);
-    // A single-arg element IS its `Arg` (value + type + name — a `$x` element keeps its name); a rare
-    // multi-arg element collapses to a nameless array-valued member.
-    return out.length === 1 ? out[0]! : arg(out.map((a) => a.value));
-  });
+  // A single-arg element IS its `Arg` (value + type + name — a `$x` element keeps its name); a rare
+  // multi-arg element collapses to a nameless array-valued member.
+  return nodes.map((lit) => typedArgOf(lit, params));
 }
 
 /** A `[k: v, …]` / `[:]` map literal → a JS Map, keyed by the classified map

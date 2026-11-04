@@ -4714,6 +4714,21 @@ function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minte
   return make.project({ id: fresh('ep'), input: read.rel, channels: [], type: ID_TYPE, exprs: [['id', col(read.rel.id, 'id')]] });
 }
 
+/** One merge-map entry as a search criterion: key, value, and the value's DECLARED type. */
+type Criterion = readonly [key: string, value: import('../../gremlin/frontend.ts').ArgValue, type: TypeNode | null];
+
+/**
+ * A merge map's property entries as the `has(key, value)` criteria they are — each value carrying the
+ * TYPE its map declared (`MergeSpec.propTypes`: the literal's subtype, the typed client's wire
+ * DataType). The synthesized `has` must read exactly what a written one would, and a written
+ * `has('blob', Binary('AQID'))` / `has('u', UUID(…))` carries its type on the `Arg`: dropping it here
+ * left the compare to infer a String from the TEXT carrier, so the search never matched an element the
+ * same map had created — a duplicate per upsert. The create path already reads `propTypes`; the search
+ * now reads the same authority.
+ */
+const searchCriteria = (spec: Pick<MergeSpec, 'props' | 'propTypes'>): Criterion[] =>
+  Object.entries(spec.props).map(([key, value]) => [key, value, spec.propTypes[key] ?? null] as const);
+
 /**
  * THE VERTICES A MERGE MAP MATCHES — its criteria handed BACK to the read fold as the
  * `V().hasLabel(l)….has(k, v)…` chain they are, rather than re-expressed as a second predicate
@@ -4729,7 +4744,7 @@ function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minte
  */
 function matching(
   id: string | number | null,
-  labels: readonly string[], props: readonly (readonly [string, import('../../gremlin/frontend.ts').ArgValue])[], child: ChildSeam, fresh: Minter,
+  labels: readonly string[], props: readonly Criterion[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
   // A SUPPLIED `T.id` is `searchVerticesTraversal`'s `g.V(id)` narrowing, spelled as the `hasId(id)`
   // step it is equivalent to — the same read-fold path `g.V().has(T.id, …)` takes, reading the
@@ -4739,7 +4754,7 @@ function matching(
     { name: 'V', args: [] },
     ...(id === null ? [] : [{ name: 'hasId', args: [arg(id)] }]),
     ...labels.map((label) => ({ name: 'hasLabel', args: [arg(label)] })),
-    ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
+    ...props.map(([key, value, type]) => ({ name: 'has', args: [arg(key), arg(value, type)] })),
   ] as IRStep[], child, fresh);
 }
 
@@ -5035,7 +5050,7 @@ function mergeVComputed(
   const tupleKey = (rel: RelId): Expr => ({ kind: 'call', fn: 'json_array', args: cKeys.flatMap((_, i) => [col(rel, ppCol(i)), col(rel, ptCol(i)), col(rel, cvCol(i))]) });
 
   // THE MATCH — candidates (constant criteria, input-independent) narrowed by every computed criterion.
-  const candidates = (): Rel | null => matching(searchId, labels, Object.entries(match.props), child, fresh);
+  const candidates = (): Rel | null => matching(searchId, labels, searchCriteria(match), child, fresh);
   if (!candidates()) return null;
   const matched = bind(computedMatch('vertex', carrier, () => candidates()!, cKeys, ppCol, cvCol, ptCol, hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
@@ -5738,7 +5753,7 @@ export function elementMergeV(
   const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], child);
   if (!createLabels || createLabels.kind !== 'const') return null;
 
-  const searched = matching(searchId, (match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);
+  const searched = matching(searchId, (match.label as string[] | null) ?? [], searchCriteria(match), child, fresh);
   if (!searched) return null;
 
   const carried = writeInputChannels(input);
@@ -6233,7 +6248,7 @@ export function elementMergeE(
     exprs: [[ORD, position], ...(src ? [['src', src] as const] : []), ...(tgt ? [['tgt', tgt] as const] : [])],
   }), true);
 
-  const criteria = edgeCriteria(searchId, searchLabels[0] ?? null, Object.entries(match.props), child, fresh);
+  const criteria = edgeCriteria(searchId, searchLabels[0] ?? null, searchCriteria(match), child, fresh);
   if (!criteria) return null;
   // SNAPSHOTTED for `mergeV`'s two reasons at once: the create is guarded by this relation's
   // emptiness and would otherwise read the very table its own statement inserts into, and an
@@ -6455,7 +6470,7 @@ function endpointRowid(uid: string | number, guard: Guarder, fresh: Minter): Exp
  */
 function edgeCriteria(
   id: string | number | null,
-  label: string | null, props: readonly (readonly [string, import('../../gremlin/frontend.ts').ArgValue])[], child: ChildSeam, fresh: Minter,
+  label: string | null, props: readonly Criterion[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
   const read = child.rooted([
     { name: 'E', args: [] },
@@ -6466,7 +6481,7 @@ function edgeCriteria(
     // A map with no `T.label` searches EVERY edge — `searchEdges` adds `hasLabel` only when the label
     // is non-null, so an absent one is one fewer step rather than a different chain.
     ...(label === null ? [] : [{ name: 'hasLabel', args: [arg(label)] }]),
-    ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
+    ...props.map(([key, value, type]) => ({ name: 'has', args: [arg(key), arg(value, type)] })),
   ] as IRStep[]);
   if (!read || read.effects?.length || read.framing.kind !== 'elements' || read.framing.elem !== 'edge') return null;
   return make.project({ id: fresh('p'), input: read.rel, channels: [], type: ID_TYPE, exprs: [['id', col(read.rel.id, 'id')]] });

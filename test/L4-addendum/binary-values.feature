@@ -215,3 +215,113 @@ Feature: mogwai addendum — Binary is a value class of its own, at any depth
       """
     When iterated to list
     Then the traversal will raise an error with message containing text of "is not valid base64"
+
+  # A MERGE SEARCH is `has(k, v)` per entry (`MergeVertexStep`/`MergeEdgeStep` → `searchVerticesTraversal`,
+  # vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeStep.java),
+  # so a Binary (or UUID) entry must match the element it names — the search reads the entry's declared
+  # type exactly as a written `has()` does. Without it every upsert keyed on such a value wrote a duplicate.
+  Scenario: g_mergeVXblob_BinaryXAQIDXX_matches_existing
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("data").property("blob", Binary("AQID")).property("name", "a").addV("data").property("blob", Binary("AQID")).property("name", "b")
+      """
+    And the traversal of
+      """
+      g.mergeV(["blob": Binary("AQID")]).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | b |
+    And the graph should return 2 for count of "g.V()"
+
+  Scenario: g_mergeVXblob_BinaryXygXX_twice_creates_once
+    Given the empty graph
+    And the traversal of
+      """
+      g.mergeV(["blob": Binary("yg==")]).mergeV(["blob": Binary("yg==")]).values("blob")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | bin[yg==] |
+    And the graph should return 1 for count of "g.V()"
+
+  Scenario: g_injectX1_2X_mergeVXblob_BinaryXAQIDXX_count
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("data").property("blob", Binary("AQID"))
+      """
+    And the traversal of
+      """
+      g.inject(1, 2).mergeV(["blob": Binary("AQID")]).count()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[2].l |
+    And the graph should return 1 for count of "g.V()"
+
+  Scenario: g_mergeVXu_UUIDX_matches_existing
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("data").property("u", UUID("f47af10b-58cc-4372-a567-0f02b2f3d479")).property("name", "a")
+      """
+    And the traversal of
+      """
+      g.mergeV(["u": UUID("f47af10b-58cc-4372-a567-0f02b2f3d479")]).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+    And the graph should return 1 for count of "g.V()"
+
+  # A `Cardinality` wrapper is typed by its value: the merge both SEARCHES for and WRITES the Binary/UUID,
+  # never the String its carrier spells.
+  Scenario: g_mergeVXblob_singleXBinaryXAQIDXXX_matches_existing
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("data").property("blob", Binary("AQID")).property("u", UUID("f47af10b-58cc-4372-a567-0f02b2f3d479"))
+      """
+    And the traversal of
+      """
+      g.mergeV(["blob": Cardinality.single(Binary("AQID")), "u": Cardinality.list(UUID("f47af10b-58cc-4372-a567-0f02b2f3d479"))]).count()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[1].l |
+    And the graph should return 1 for count of "g.V()"
+
+  Scenario: g_mergeVXblob_setXBinaryXAQIEXXX_writes_a_Binary
+    Given the empty graph
+    And the traversal of
+      """
+      g.mergeV(["blob": Cardinality.set(Binary("AQIE"))]).values("blob").is(P.typeOf(GType.BINARY))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | bin[AQIE] |
+
+  Scenario: g_mergeEXk_1_2_eb_BinaryXygXX_matches_existing
+    Given the modern graph
+    And the graph initializer of
+      """
+      g.V(1).addE("k").to(__.V(2)).property("eb", Binary("yg=="))
+      """
+    And the traversal of
+      """
+      g.mergeE([(T.label): "k", (Direction.OUT): 1, (Direction.IN): 2, "eb": Binary("yg==")]).values("eb")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | bin[yg==] |
+    And the graph should return 7 for count of "g.E()"

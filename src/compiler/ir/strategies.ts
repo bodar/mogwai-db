@@ -507,8 +507,8 @@ export function desugarPropertyMap(steps: IRStep[]): IRStep[] {
     for (const [k, v] of entries) {
       const cv = isCardinalityValueArg(v) ? v : null;
       const card = cv ? cv.cardinality : outer;
-      // The entry's captured value TYPE. A CardinalityValue entry has none (the parser records
-      // `value: null` for it), which is the honest answer — its inner value is typed by inference.
+      // The entry's captured value TYPE. A CardinalityValue entry is typed by its inner value (the
+      // parser records the wrapped literal's type on the wrapper), so the unwrapped value keeps it.
       const vt = mapEntryType(entryType, k);
       out.push(card === null
         ? { ...s, args: [arg(k), arg(cv ? cv.value : v, vt)] }
