@@ -962,6 +962,54 @@ export function unfoldList(
 }
 
 /**
+ * A COLLECTION ROW'S MEMBERS, EVERY OTHER ROW ITSELF — the one-level unpack over a PER-ROW-TYPED scalar
+ * stream whose rows MAY be collections (a list/set-valued stored property, `values('m')`; a merged arm).
+ *
+ * `GraphStep.resolveTraversalIds` turns each child result into ids by its RUNTIME class: a Collection is
+ * unpacked one level, anything else is one id
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:229-247`).
+ * A Map is not a Collection, so a map row passes through as itself (an id no element has). Relationally it
+ * is ONE explode, so the cost is linear and there is no join between arms: a collection row reads its own
+ * stored `{t,v}` tree (`collectionRetype`'s encoding — `TYPED_MEMBERS`), every other row reads a one-member
+ * placeholder array, so it yields exactly one row carrying its OWN value and tag. An empty collection
+ * yields no row, which is "no ids". The members leave as `v`/`vtype` (the per-row framing every scalar
+ * reader takes); `ord` is the member's index within its row, for a caller that re-mints a carried position.
+ */
+export function collectionMembersOrSelf(rel: Rel, vtype: string, fresh: Minter): { readonly rel: Rel; readonly ord: string } {
+  const COLL = 'cm_c';
+  // The tag test, stated ONCE as a column the explode and both member reads share. `IN` is NULL-safe for
+  // an untagged row (a computed scalar): NULL is not true, so it is no collection.
+  const flagged = make.project({
+    id: fresh('cm'), input: rel, channels: rel.channels,
+    type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta(COLL, 'int', true), ...carriedCols(rel.channels)),
+    exprs: [
+      ['v', col(rel.id, 'v')],
+      ['vtype', col(rel.id, vtype)],
+      [COLL, { kind: 'in-list', expr: col(rel.id, vtype), values: (['list', 'set'] as const).map((tag) => compilerText(tag)) }],
+      ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
+    ],
+  });
+  const collection = make.project({
+    id: fresh('cm'), input: flagged, channels: flagged.channels,
+    type: typeOf(meta(LIST_COL, 'json'), ...flagged.type.cols),
+    exprs: [
+      [LIST_COL, { kind: 'case', whens: [[col(flagged.id, COLL), jsonOf(col(flagged.id, 'v'))]], else: compilerText('[null]') }],
+      ...flagged.type.cols.map((column) => [column.name, col(flagged.id, column.name)] as const),
+    ],
+  });
+  const { exploded, project } = explodeMembers(collection, LIST_COL, MEMBER, fresh);
+  const either = (member: Expr, self: Expr): Expr => ({ kind: 'case', whens: [[col(exploded.id, COLL), member]], else: self });
+  return {
+    rel: project(
+      [['v', either(memberPayload(TYPED_MEMBERS, exploded), col(exploded.id, 'v'))],
+        ['vtype', either(memberVtype(TYPED_MEMBERS, exploded)!, col(exploded.id, 'vtype'))]],
+      [meta('v', 'any', true), meta('vtype', 'text', true)],
+    ),
+    ord: MEMBER.ord,
+  };
+}
+
+/**
  * A list VALUE's members as a CORRELATED relation, re-entering the member vocabulary — the seed a
  * `by()` body over a list host (`select(Pop.all).by(__.unfold()…)`) opens with.
  *

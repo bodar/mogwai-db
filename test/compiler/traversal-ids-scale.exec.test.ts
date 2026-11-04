@@ -17,11 +17,14 @@ const N = 6000;
 /** Linear is ~15 ms at this size; a scan per produced id would be seconds. */
 const BUDGET_MS = 1000;
 
-/** `n` numbered vertices in a `knows` ring, each with a String-id twin its `ref` property names. */
+/** `n` numbered vertices in a `knows` ring, each with a String-id twin its `ref` property names, and a
+ *  list-valued `refs` naming its ring successor (a Number) and its twin (a String). */
 function graph(n: number): GraphStore {
   const store = new GraphStore(new BunSqlite(':memory:'));
   const vertices = [];
-  for (let i = 1; i <= n; i++) vertices.push({ id: i, labels: ['p'], properties: [{ key: 'ref', value: `s${i}` }] });
+  for (let i = 1; i <= n; i++) {
+    vertices.push({ id: i, labels: ['p'], properties: [{ key: 'ref', value: `s${i}` }, { key: 'refs', value: [(i % n) + 1, `s${i}`] }] });
+  }
   for (let i = 1; i <= n; i++) vertices.push({ id: `s${i}`, labels: ['q'] });
   const edges = [];
   for (let i = 1; i <= n; i++) edges.push({ label: 'knows', src: i, tgt: (i % n) + 1 });
@@ -46,6 +49,10 @@ describe('V(<traversal>)/E(<traversal>) scale linearly', () => {
     ["g.V().E(__.outE().id()).count()", N],
     ["g.V().outE().V(__.identity()).count()", N], // edge rowid k is id k, which names vertex k
     ["g.V().project('n').by(__.V(__.out().id()).count()).select('n').sum()", N],
+    // a List-valued id result is unpacked per row (`collectionMembersOrSelf`): one explode, then the same seeks
+    ["g.V().V(__.values('refs')).count()", 2 * N],
+    ["g.V().V(__.values('refs', 'ref')).count()", 3 * N],
+    ["g.V().local(__.V(__.values('refs')).count()).sum()", 2 * N],
   ] as const) {
     test(q, () => {
       const { count, ms } = timed(q);
@@ -54,8 +61,8 @@ describe('V(<traversal>)/E(<traversal>) scale linearly', () => {
     });
   }
 
-  test('the lookup is a MULTI-INDEX OR of a rowid seek and a uid seek, never a scan', () => {
-    const plan = read("g.V().id().V(__.identity()).count()");
+  for (const q of ["g.V().id().V(__.identity()).count()", "g.V().V(__.values('refs')).count()"]) test(`${q}: the lookup is a MULTI-INDEX OR of a rowid seek and a uid seek, never a scan`, () => {
+    const plan = read(q);
     const detail = store.query(`EXPLAIN QUERY PLAN ${plan.sql}`, plan.binds).map((row: { detail: string }) => row.detail);
     expect(detail).toContain('MULTI-INDEX OR');
     expect(detail.some((d: string) => /SEARCH \S+ USING INTEGER PRIMARY KEY \(rowid=\?\)/.test(d))).toBe(true);

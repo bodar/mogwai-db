@@ -57,7 +57,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
-import { BARE_LIST, collectionRetype, collectionValue, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -183,7 +183,8 @@ function reSourceTail(
  *     already scopes a barrier in the body to its head and keeps the body's labels inside it (a child's
  *     labels never reach the head GraphStep splits); then
  *  2. the LOOKUP of each arriving value — this same step re-entered as a `V()` whose ids are the value
- *     (`IRStep.idOfValue`, `V(__.identity())`'s meaning): a collection unpacked by `unfoldedMembers`, then
+ *     (`IRStep.idOfValue`, `V(__.identity())`'s meaning): a collection unpacked one level — a list-framed
+ *     result by `unfoldedMembers`, a per-row list/set row of a scalar stream by `collectionMembersOrSelf` — then
  *     `idLookup`'s 1:≤1 join through the source's one id routing (`externalIdIs`).
  * An identity body needs no split. A mutating body never reaches here (`verifyStandard`).
  */
@@ -205,7 +206,19 @@ function traversalIdsTail(
     if (step.idOfValue === 'start') return elementTail(shedBodyAliases(found, NO_ALIASES, fresh), elem, steps, at + 1, multiplied, ctx, fresh, NO_ALIASES);
     return elementTail(found, elem, steps, at + 1, multiplied, ctx, fresh, labels);
   };
-  if (framing.kind === 'elements' || framing.kind === 'scalar') return looked(rel, framing, bulked);
+  if (framing.kind === 'elements') return looked(rel, framing, bulked);
+  if (framing.kind === 'scalar') {
+    // A per-row-typed scalar MAY hold a collection on some rows (a list-valued property): those rows are
+    // unpacked one level, every other row is its own id (`collectionMembersOrSelf`). A static tag is never a
+    // collection (a collection is framed as a list), so only a per-row tag needs the unpack.
+    const tag = perRowColumnOf(framing.type);
+    if (!tag) return looked(rel, framing, bulked);
+    // The members are positioned as a collection result's are (`unfoldedMembers`), so a slice or fold after
+    // the lookup sees them in the collection's own order.
+    const unpacked = collectionMembersOrSelf(rel, tag, fresh);
+    const members = positionedMembers(rel, unpacked.rel, unpacked.ord, [meta('v', 'any', true), meta('vtype', 'text', true)], fresh);
+    return looked(members, { ...framing, type: PER_ROW('vtype') }, bulked);
+  }
   if (framing.kind !== 'list') return null;
   // A COLLECTION result is unpacked one level (`resolveTraversalIds`): its members are the ids. A member
   // that is itself a collection, a map or a mixed node has no element/scalar stream to look up; decline.
@@ -2856,19 +2869,13 @@ function unfoldedMembers(rel: Rel, items: ListOf, fresh: Minter): {
 } | null {
   const unfolded = unfoldList(rel, items, fresh);
   if (!unfolded) return null;
-  const carried = encounterOf(rel.channels);
-  const channels = carried ? rel.channels : withChannel(rel.channels, ENCOUNTER);
-  const terms: readonly SortTerm[] = [
-    ...(carried ? [{ expr: col(unfolded.rel.id, carried.col), dir: 'asc' as const }] : []),
-    { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
-  ];
   const payloadCols: readonly ColMeta[] = unfolded.member ? [meta(LIST_COL, 'json')]
     : unfolded.mapVal ? [meta(MAP_COL, 'json')]
       : unfolded.nodes ? [meta(NODE_COL, 'json', true)]
         : unfolded.elem ? [meta('id', 'int')]
           : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
   return {
-    rel: renumber(unfolded.rel, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh),
+    rel: positionedMembers(rel, unfolded.rel, unfolded.ord, payloadCols, fresh),
     unfolded,
     scalar: {
       kind: 'scalar',
@@ -2876,6 +2883,19 @@ function unfoldedMembers(rel: Rel, items: ListOf, fresh: Minter): {
       ...(items.kind === 'scalar' && items.productiveNull ? { productiveNull: true } : {}),
     },
   };
+}
+
+/** An explode's MEMBERS, POSITIONED: the member's index within its row becomes the emission order, after
+ *  any position the row already carried (row-major), minted rather than declared (`unfoldedMembers`'s
+ *  reason). `input` is the relation the explode read; `members` its member rows, carrying `ord`. */
+function positionedMembers(input: Rel, members: Rel, ord: string, payloadCols: readonly ColMeta[], fresh: Minter): Rel {
+  const carried = encounterOf(input.channels);
+  const channels = carried ? input.channels : withChannel(input.channels, ENCOUNTER);
+  const terms: readonly SortTerm[] = [
+    ...(carried ? [{ expr: col(members.id, carried.col), dir: 'asc' as const }] : []),
+    { expr: col(members.id, ord), dir: 'asc' as const },
+  ];
+  return renumber(members, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh);
 }
 
 /**

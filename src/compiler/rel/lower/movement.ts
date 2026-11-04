@@ -65,7 +65,8 @@ export function reSource(
  * An element result of the TARGET kind is its own lookup (`V(__.out())` names the vertices `out()`
  * reached). Any other is matched by VALUE through the source's one routing (`elementById` →
  * `externalIdIs`): a Number is a rowid, a String a `uid`, every other type an id no element has. A
- * collection result is unpacked by the caller before it reaches here (`traversalIdsTail`).
+ * Collection result — list-framed, or a per-row list/set row of a scalar stream — is unpacked one level by
+ * the caller before it reaches here (`traversalIdsTail`, `collectionMembersOrSelf`).
  *
  * The state `reSource` refuses (a path, a sack, an otherV entry) is refused here for the same reason.
  */

@@ -336,7 +336,8 @@ const routedExternalId = (uidCol: Expr, numeric: Expr | undefined, text: Expr | 
 /**
  * A run-time id VALUE's two routing KEYS — the value itself where its Gremlin type (`evidence`) is a Number
  * (`rowid`) or a String (`uid`), else NULL; a key the static type rules out is `null` (no clause at all).
- * Anything else (a Boolean, a list, a NULL) is an id no element has, so both keys are NULL. The type is
+ * Anything else (a Boolean, a Map, a NULL, a collection nested inside an unpacked one) is an id no element
+ * has, so both keys are NULL. The type is
  * READ, never coerced — a String `'1'` is not rowid `1` (§17 "String vs integer element id"), which is why
  * the route is a type test rather than SQLite's affinity comparison (an INTEGER column compared with TEXT
  * `'1'` would convert it).
