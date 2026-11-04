@@ -260,6 +260,41 @@ statement's text grows with data or doubles with query shape. The items below ar
   value, which no DO can hold (now the clear platform-limit error, not a bare one). The sibling statement is
   also P×N: its per-key `has("name", <correlated>)` scans `nodes` per key (2.5 s at 2k parents). Fix: inject
   a LIST of pairs the sibling explodes (splittable), and seek the property index per key.
+- **A list PARAMETER consumed by `inject()` still crosses as ONE value (inject-param-ceiling) — DATA-SIZE
+  REFUSAL, plausible (review of f3e607f4).** `g.inject(xs).unfold().count()` / `g.inject(xs).count(local)`
+  with xs = 8k × 500 B (4 MB) raise the platform-cap error under `CfLimitedSql` (trunk: bare "bind 1
+  exceeds"). Unfolded, it is a data-sized set like `within($xs)`/`V($ids)`, which now split: route inject's
+  collection-parameter source through `jsonEachRelation` (`src/compiler/rel/build.ts`). Take with
+  rowsbind-value-ceiling. Test: that witness under `CfLimitedSql`.
+- **The platform-cap message blames "a single value" for a SET (value-cap-message) — minor, cheap; take with
+  rowsbind-value-ceiling.** `GraphStore.query` (`src/storage.ts`) maps every `string or blob too big` to
+  `VALUE_PAST_PLATFORM_CAP` ("reduce a fold()/group()/property/parameter"), but the rowsbind witness above and
+  federate's mapValues injection hit it with no single value near 2 MB — the user debugs the wrong thing.
+  Word it to cover "a set this query carries between its statements" (or a separate message at the
+  `RowsBind` site) until those two land.
+- **both-gate-lineage made label-carrying and barrier frontiers SLOWER (both-gate-frontier-cost) — MAJOR,
+  common (two reviews of 28890cd0 + 345dfd5b).** `doubledReads` bounds prepare-time COPIES, not the cost
+  of EVALUATING a copy: when the frontier carries a computed per-row column (an `as()` label's `jsonb_array`
+  carrier, a path) or a barrier (sort/window/limit) and is not a materialized CTE, SQLite flattens each
+  copy and re-runs that work per copy. Measured 8k vertices / 16k edges, identical answers, old → new:
+  `g.V().as('a').both().both().where(neq('a')).count()` 59 → 141–154 ms (2.4×; 1k 7.8 → 18.4);
+  `…both().both().as('b').where('a',neq('b'))` 121–134 → 249 ms; `g.V().as('a').out().both().where(neq('a'))`
+  44–55 → 73–75 ms; `g.V().out().order().by('name').limit(500).both().count()` 12.7 → 25.0 ms;
+  `g.V().both().order().by('name').limit(10).both().count()` 22–25 → 42–51 ms;
+  `local(out().order().by('name').limit(1).both().count()).sum()` 57 → 82 ms. All still linear. Fix in the
+  SAME fact (`src/rel/copies.ts`, read by `hopJoin` in `src/compiler/rel/lower/movement.ts`): count a
+  per-row computed column or a barrier node beneath the frontier as a reason to read it once (unless it is
+  a materialized CTE), or measure the decision with those columns. The plain-hop wins must hold
+  (`out().both()` 15.0 → 11.5, `both().both()` 19.3 → 15.6). Tests today pin plan shape on label-free
+  `count()` chains only (`test/compiler/both-frontier-once.exec.test.ts`) and the `BOTH_COPY_BOUND`
+  comment cites only those — add a timing/EQP witness for the label and order/limit frontiers.
+- **A transformed sort/dedup key's raising body is still spelled twice per row (cc7-key-twice) — minor,
+  common, no extra read.** `g.V().out().order().by(values('name').toLower().toUpper())`: the property reads
+  are computed once (`sk26`), but the `lower()/upper()` + receiver-check CASE appears in the productivity
+  filter's `IS NOT NULL` AND in the sort projection (~2× pure string work). The filter already runs the key
+  on every input row, so computing the whole key once as a column below it changes neither which rows run
+  it nor which error fires — `exprMayAbort` is over-conservative here (`withSubqueryColumns`/`keptBy`,
+  `src/compiler/rel/build.ts`). sql-hygiene's "no subquery twice per row" does not see a LET-shaped repeat.
 - **Scatter sort order (federate-scatter-order) — minor, constant factor.** `lowerTypedNodeStream`'s
   scatter is `json_each(?) fnx0 CROSS JOIN json_each(?) fgd2 ORDER BY fgd2.value, fnx0.key`: pool outer,
   parents inner, so a TEMP B-TREE sorts all P×N rows (pool 8k × 100 parents 385 ms vs trunk's inlined VALUES
@@ -309,6 +344,25 @@ statement's text grows with data or doubles with query shape. The items below ar
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
 refusal comes first: it is a production outage.
+
+- **A random draw read by two branches still answers WRONG when the body is decorrelated
+  (copied-draw-cte) — MAJOR wrong answer, plausible reach (review of 345dfd5b; also wrong before it).**
+  `CopiedDraw` (`src/rel/passes/name.ts`) exempts any shared relation `binds()` turns into a CTE on the
+  premise "a CTE is evaluated once" — false: the emitter writes it without `MATERIALIZED`, and SQLite
+  3.51 re-evaluates a flattenable CTE per reference (measured: `WITH c AS (… row_number() OVER (ORDER BY
+  RANDOM()) …) … c UNION ALL … c` differs in 182/200 runs plain, 0/200 `AS MATERIALIZED`). So the `.count()`
+  form declines but the plain form answers impossibly: `g.V().hasId(1).local(out().order().by(shuffle)
+  .limit(1).union(out(), __.in()))` → ids [1,3,4,5,6] (one pick gives [1], [1,3,5] or [1,4,6]); the same with
+  `optional(out())` → [] / [2,3,5], `coalesce(out(), __.in())`, `choose(hasLabel('software'), __.in(),
+  out())`, `union(identity(), identity()).values('name')` (two different names). Fix generically: `name`
+  emits a shared relation that `draws()` (`src/rel/copies.ts`) `AS MATERIALIZED`, which covers every reader
+  with no decline; keep `CopiedDraw` only for the correlated case (where MATERIALIZED does not help). Correct
+  the "SQLite materializes once because it is read more than once" comments in `name.ts`/`copies.ts`. While
+  there: `draws` is the third randomness detector (with `nondeterministic`/`RANDOM_STEPS`,
+  `src/compiler/ir/step.ts`, and `SHARED_DRAW`, `reduction.ts`) — make the three declines (SHARED_DRAW, the
+  repeat-emit draw decline in `strategies.ts`, CopiedDraw) share one message, citing
+  `vendor/tinkerpop/gremlin-core/.../LocalStep.java` for "one draw per traverser is shared by local()'s
+  branches". Test: 150-run repetition of each witness, answers ⊆ the single-pick set.
 
 - **Merge writes refuse on traverser count (o-seqguard) — DATA-SIZE REFUSAL.** `sequentialGuard`
   (`rel/write.ts`) raises at run time on `count(*) > 1`: `…values('name').mergeV(__.select('k'))
@@ -665,7 +719,13 @@ Beside the RelIR substrate:
   over such a frontier answers (`doubledReads` treats a drawing relation as unbounded, so `hopJoin` reads it
   once), and so does the draw in the outer traversal (`local(out().sample(1)).union(…)`), which the message
   suggests. PREREQUISITE: a read-once branch form, with the arm index crossed onto the frontier like
-  `hopJoin`'s direction row, so the arms read one evaluation. Reach: rare.
+  `hopJoin`'s direction row, so the arms read one evaluation. Reach: rare. (The decorrelated twin answers
+  WRONG today — §1 copied-draw-cte; fix that first.)
+- **`where()` over a `math()` result after a hop declines (where-math-depth, predates cc7)** —
+  `g.V().out().where(values('age').math('_+1').is(gt(30))).values('name')` → UnsupportedTraversal, while
+  `where(values('age').is(gt(30)))` answers (josh) and `order()/dedup().by(…math('_+1'))` now answer
+  (cfeb1003). The value run accepts it in by(); find where `src/compiler/rel/lower/reduction.ts`'s
+  where-test path refuses a math() member and route it through the same `valueRun`. Reach: plausible.
 
 - **Ordinary `project()` `by()` bodies decline (project-by-depth, found reviewing cc-1; predates it)** —
   "no lowering covers …" for `g.V().project('a','b').by(__.out('created')).by('name')`,
@@ -1233,10 +1293,9 @@ production-only wall — verify it first):
   [node], fresh)` deletes both Filter(false) workarounds. ~15 lines.
 - **Every compute-once scalar subquery via `build.ts` `once()`** — `predicate.ts` `storedCompareOnce` (~604)
   and `valueTheta`'s `vto`/`vtp` one-row VALUES (~750) are hand-rolled copies (each with its own copy of
-  `once`'s `spelledFreely` test); `reduction.ts` `runningOnce` and `modulator.ts` `producedMemberNode` both
-  spell `vtype ? [value, vtype] : [value]` — a small `onceTyped(value, vtype?, body, fresh, type)` absorbs
-  them. SQL same or smaller (`once` keeps a cheap operand inline). ~25 lines. Take with cc7-one-step-reread
-  (§0b) — that fix lands in `runningOnce`/`once` too.
+  `once`'s `spelledFreely` test). (`onceTyped` landed in cfeb1003 and absorbed `runningOnce` and
+  `producedMemberNode`; the two `predicate.ts` sites remain.) SQL same or smaller (`once` keeps a cheap
+  operand inline). ~15 lines.
 - **One `oneRow` unit relation** — exported from `build.ts` beside `once()`, replacing `lower.ts` `oneRow`
   (~2841) and the hand-rolled `u`/`eu`/`pu` (`reduction.ts` ~1509, `mapEntryChild` ~2508,
   `perRowCollectionChild` ~2592) and `pv` (`write.ts` ~1368); `mapEntryChild`/`perRowCollectionChild`
@@ -1246,6 +1305,38 @@ production-only wall — verify it first):
   service filter matches nothing, because `Values([])` is unrepresentable; build the rows as one exploded
   JSON array (empty array = zero-row relation). `call('--list',[service:'nope'])` → `[]`. Today's decline
   depends on registry contents, not query text.
+
+Proposals from the compile-cost round 3 reuse sweep (answer-neutral unless stated):
+
+- **One q-level json_each membership: `setwrite.ts`'s private `members` for every set outside the
+  compiler — closes two more 2 MB walls.** `members` already uses `jsonChunks`; ~20 sites still hand-write
+  `IN (SELECT value FROM json_each(?))` with a mix of `JSON.stringify`/`stringifyExact`:
+  `src/formats/drain.ts` `rowsForOwners`; `src/bulk.ts` `BatchingLoader.existing`/`existingUid`/
+  `wipeFts`/`assertFree`; `src/replicate.ts` `resolveGids`/`localRevs`/`resurrect`/`applyDeletes`
+  (referenced, weakCascade, both `property_fts` deletes, tombstone `already`)/`liveRevs`; `src/manager.ts`
+  `changes` (filtered `match`)/`conflictLeaves`/`revsDiff`; `src/refresh.ts` `ftsRowsForDirty`. Under 2 MB
+  each still renders exactly `json_each(?)`. NOT bounded as f3e607f4 assumed: `manager.ts`'s filtered
+  `_changes` `match` set is a filter's matched vertices, and replicate's gid sets are a peer's whole
+  changeset batch (~60k hex gids per 2 MB) — data-size walls. A gid caller writes `SELECT unhex(value) FROM
+  ${members(gids)}` so the gid index still serves.
+- **One owned-row wipe shared by the bulk loader and replication deletes.** `src/bulk.ts`
+  `BatchingLoader.wipeVertexChildren`/`wipeEdges`/`wipeFts` and `src/replicate.ts` `applyDeletes` (~262–273)
+  hand-roll the same cascade (`DELETE FROM property_fts WHERE rowid IN (SELECT [-]id FROM *_properties WHERE
+  owner IN json_each)`, then the `deleteMembers` chain). One `wipeOwners(store, 'vertex'|'edge', ids,
+  {self})` beside `deleteMembers` in `src/setwrite.ts` states the load-bearing order (FTS before the
+  property rows it reads through) once and gives both FTS deletes the 2 MB split. ~15 lines; same statements.
+  Take after the membership item above.
+- **`order(local).by()` over list members onto `keptBy` + `withSubqueryColumns`.** `src/compiler/rel/list.ts`
+  (local order branch ~540–575) calls `byProjection` a second time (`keyOn(kept)`) to re-point the key at the
+  `mof` productivity filter — what `keptBy` (`build.ts`) now does — and spells the member key twice (filter
+  and `json_group_array`'s ORDER BY). Third caller of cfeb1003's two seams: `fold().order(local).by('age')`
+  should read its property once per member, not twice. Same productivity drop (`Order.feature:281-289`
+  still four vertices). Gate: a `vertex_properties` read count as in `value-run-once.exec.test.ts`.
+- **`deferralInRow(message)` beside `raiseInRow` in `src/rel/raise.ts`.** `projector.ts` (:222, :333),
+  `path.ts` (:103) and `receiver.ts` (:267) each spell `deferralExpr(MSG, {kind:'call', fn:'random',
+  args:[]})` — the only `fn:'random'` constructions outside raise.ts, and exactly the arms `draws`
+  (`src/rel/copies.ts`) must skip via `isAbort` or a valid query declines `CopiedDraw`. One constructor next
+  to its recogniser keeps them from drifting. No SQL change.
 
 ## 7. Low priority
 
