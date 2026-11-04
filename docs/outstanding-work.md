@@ -189,12 +189,22 @@ statement's text grows with data or doubles with query shape. The items below ar
   when `offences.length > 0` (`build.ts` `once`, as `projector.ts` math and `modulator.ts` do; col/lit pass
   through, so top-level SQL stays byte-identical). Same family as §3.1 `once` consumers and §1b
   rf3-is-chain-size — take them together. Test: linear text growth in chain length under `CfLimitedSql`.
-- **PREREQUISITE (build before cc-8 and before spine-cut-hosts): correlated-subtree sharing.** A correlated
+- **PREREQUISITE (build before spine-cut-hosts): correlated-subtree sharing.** A correlated
   body is inlined at every use because the naming pass cannot hoist a correlated shared subtree (it is not a
   relation of its own). Same root as §0 spine-cut-hosts ("a correlated body that is a relation of its own —
-  the tree-Plan promotion") and cc-6. One substrate item, three unblocks.
-- **cc-8 `g.V().local(__.both()×k.count())` SQL grows 2^k (found by cc-4)** — 46 KB at k=8, 749 KB at k=12;
-  check's tree walk grows the same way. Blocked on the prerequisite above. Related, also found by cc-4:
+  the tree-Plan promotion") and cc-6. (cc-8 turned out not to need it — see below.)
+- ✅ **cc-8 `local(__.both()×k.count())` 2^k — LANDED with "movement reads its frontier once", without the
+  prerequisite above.** The doubling was `both()`'s own UNION ALL naming its frontier twice; a multi-direction
+  hop now crosses a non-base frontier with a `(VALUES (0),(1))` direction row and joins `edges` once
+  (`hopJoin`, `src/compiler/rel/lower/movement.ts`; gate `rereadsFreely`, `src/rel/walk.ts`). k=8 is 2.1 KB,
+  k=32 8.8 KB; `both()×20`/`repeat(both()).times(20)` answer. Tests: `test/compiler/both-frontier-once.exec.test.ts`.
+  Follow-ups it found: (a) a CHAIN of general `union()`s still names its input once per arm, so
+  `union(out(),in())×16` is still the "too many references" wall — no one-reference spelling exists for
+  arbitrary arms; (b) `local()`/`repeat` inside `local()` does not bulk-collapse, so
+  `local(repeat(both()).times(k))` ENUMERATES its walks (it now compiles; it is exponential in k by
+  multiplicity, not by text); (c) from its second hop on a `both()` chain pays SQLite's MULTI-INDEX OR, ~30%
+  per hop over two plain seeks (8k vertices: `both().both().count()` 32 → 42 ms) — a cheaper one-reference
+  spelling would recover it. Related, also found by cc-4:
   before the spine cut, proving a correlated id absent (`definesId`, `src/rel/walk.ts`) is O(k²) up to
   `SPINE_DEPTH_BOUND` (linear after); and the TRUE case of `definesId` is O(n²) (only FALSE answers are
   spread) — the doc comment and commit claim O(n) overall; correct the comment.

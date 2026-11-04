@@ -133,8 +133,8 @@ export function recursiveViolation(node: Extract<Rel, { readonly kind: 'recursiv
    * `seed UNION ALL arm₁ UNION ALL arm₂` as one recursive term PER ARM: each must reference the walk
    * exactly once, and the same two arms behind a derived table are `circular reference` (measured,
    * §6 of `docs/archive/2026-08-09-repeat-two-regimes-plan.md`). Asking the questions of the whole step
-   * instead is what refused every multi-arm body — `both()`/`bothE()`/`bothV()` are two `HOPS`
-   * entries unioned, so a walk over one holds two references in what is really two terms.
+   * instead is what refused every multi-arm body — a walk over a two-arm union holds two references in
+   * what is really two terms (`shortestPath`'s `both` reconstruction is one).
    *
    * ⚠️ **Only a UNION ALL splits.** A compound `UNION` in a recursive term dedups across the WHOLE
    * walk rather than within an iteration, which is P3's category exactly: SQLite ACCEPTS it and

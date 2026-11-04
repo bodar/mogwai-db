@@ -3,7 +3,6 @@ import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { containsSelfRef, substRelId } from '../../rel/walk.ts';
 import type { IRStep } from '../ir/step.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import type { AliasMap } from '../alias.ts';
@@ -55,74 +54,6 @@ interface WalkRead {
  * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/RelNode.java`), it is state declared at
  * the relational position where it is live.
  */
-/** Rebuild a unary `Project`/`Filter` over a NEW input, remapping every reference to its OLD input's
- *  id onto the new one. The new input carries the same columns (it is one arm of the UNION ALL the
- *  node sat over), so the remap is total. A fresh node id keeps the two distributed copies distinct. */
-function reparent(unary: Extract<Rel, { readonly kind: 'project' | 'filter' }>, input: Rel, fresh: Minter): Rel {
-  const from = unary.input.id;
-  return unary.kind === 'project'
-    ? make.project({ id: fresh('wt'), input, channels: unary.channels, type: unary.type,
-        exprs: unary.exprs.map(([name, e]) => [name, substRelId(e, from, input.id)] as const) })
-    : make.filter({ id: fresh('wt'), input, channels: unary.channels, type: unary.type,
-        pred: substRelId(unary.pred, from, input.id) });
-}
-
-/**
- * Project/Filter distribute over UNION ALL — Calcite's `Project`/`FilterSetOpTransposeRule` — pushing
- * the unary nodes a recursive body stacked over its hop-union DOWN into the arms, so each arm becomes
- * its own recursive term referencing the walk EXACTLY ONCE.
- *
- * ⚠️ **This is why a `both()`-bodied `repeat()` composes with anything above the hop.** A projection
- * (the path append, the loops bump) or a filter (`simplePath()`) left ABOVE the union takes a DERIVED
- * TABLE over a compound (the emitter's fusion rule, `src/rel/block.ts`), and a derived table collects
- * every arm's `SelfRef` into ONE SELECT — `circular reference`, P1/§6 of the build plan. Distributed,
- * each arm is a single recursive term SQLite accepts, which is also what makes a self-loop yield the
- * vertex twice. It is the same transpose the loops bump did by hand; generalizing it lets the body's
- * OWN path-append and `simplePath` nodes ride through the identical mechanism.
- *
- * A no-op wherever there is no self-referencing UNION ALL underneath — an ordinary `union` over a
- * non-recursive relation stays for the emitter to derived-table as before.
- */
-function distributeThroughUnion(rel: Rel, name: string, fresh: Minter): Rel {
-  const selfUnion = (r: Rel): r is Extract<Rel, { readonly kind: 'union' }> =>
-    r.kind === 'union' && r.all && r.inputs.some((arm) => containsSelfRef(arm, name));
-  if (rel.kind === 'union')
-    return selfUnion(rel)
-      ? make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
-          inputs: rel.inputs.map((arm) => distributeThroughUnion(arm, name, fresh)) })
-      : rel;
-  // A JOIN over a self-referencing UNION-ALL side — Calcite's `JoinUnionTransposeRule`, the shape a
-  // `bothE().inV()` recursive body makes (`inV()` re-joins the edge table to read `tgt`, so the term is
-  // `project(join(union(edge-arms), edges), …)`). Push the join INTO the union's arms so each arm is a
-  // single recursive reference. The OTHER side (the plain edge scan) is SHARED across the arms — legal,
-  // because the arms are distinct UNION-ALL SELECTs whose aliases are scoped per-SELECT (the `check`
-  // that forbids a shared id is about the TWO SIDES of one join, which stay distinct here). The `on`
-  // references the union side by its id, remapped to the arm's; the shared side's references are
-  // untouched, and its schema — hence the join's positional output — is identical in every arm.
-  if (rel.kind === 'join') {
-    const left = distributeThroughUnion(rel.left, name, fresh);
-    const right = distributeThroughUnion(rel.right, name, fresh);
-    const distribute = (arms: readonly Rel[], onSide: 'left' | 'right'): Rel =>
-      make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
-        inputs: arms.map((arm) => make.join({
-          id: fresh('wj'), join: rel.join, ordered: rel.ordered,
-          left: onSide === 'left' ? arm : left, right: onSide === 'left' ? right : arm,
-          on: rel.on ? substRelId(rel.on, onSide === 'left' ? rel.left.id : rel.right.id, arm.id) : undefined,
-          channels: rel.channels, type: rel.type,
-        })) });
-    if (selfUnion(left) && !containsSelfRef(right, name)) return distribute(left.inputs, 'left');
-    if (selfUnion(right) && !containsSelfRef(left, name)) return distribute(right.inputs, 'right');
-    return left === rel.left && right === rel.right ? rel
-      : make.join({ id: fresh('wj'), left, right, on: rel.on, join: rel.join, ordered: rel.ordered, channels: rel.channels, type: rel.type });
-  }
-  if (rel.kind !== 'project' && rel.kind !== 'filter') return rel;
-  const inner = distributeThroughUnion(rel.input, name, fresh);
-  if (selfUnion(inner))
-    return make.union({ id: fresh('wd'), all: true, channels: rel.channels, type: rel.type,
-      inputs: inner.inputs.map((arm) => reparent(rel, arm, fresh)) });
-  return inner === rel.input ? rel : reparent(rel, inner, fresh);
-}
-
 export function repeatWalk(
   step: IRStep, input: Rel, elem: Elem, child: ChildSeam, fresh: Minter, aliases: AliasMap,
 ): WalkRead | null {
@@ -166,10 +97,9 @@ export function repeatWalk(
   // A PATH now rides through, and its update law is exactly the recursive term's own. The channel is
   // seeded at the source (position 0) and rides in `input.channels`; the body re-enters our fold with
   // it live, so a movement APPENDS the arrived object (`extendPath` in `movement`) and `simplePath()`
-  // reads it as an ordinary body filter — no path-specific machinery here. The one structural fact is
-  // that an append is a `Project` and `simplePath` a `Filter`, and in a `both()` body those sit over
-  // the hop-union; `distributeThroughUnion` (above) pushes them into the arms so each stays a single
-  // recursive term. `path()` after the walk frames the carried column (`pathPositions`).
+  // reads it as an ordinary body filter — no path-specific machinery here. An append is a `Project` and
+  // `simplePath` a `Filter` over the hop's one join, so the term stays a single recursive reference
+  // (`both()` included — `hopJoin`). `path()` after the walk frames the carried column (`pathPositions`).
   //
   // A SACK does ride through, and it needs no rule here beyond the ones already holding. Its update
   // law is the recursive term's own — read the previous row's column, write the folded value — which
@@ -276,18 +206,18 @@ export function repeatWalk(
         ] as const)],
       });
       /**
-       * ⚠️ **A TERM IS A COMPOUND, so the bump — and every per-iteration node the body stacked over
-       * its hop-union (a path append, a `simplePath` filter) — DISTRIBUTES over the arms rather than
-       * sitting above them.** `both()`/`bothE()`/`bothV()` are two `HOPS` entries unioned `ALL`, each
-       * arm joining the frontier, which in a walk IS the `SelfRef`. A projection over that compound
-       * takes a DERIVED TABLE that collects both references into one subquery: `circular reference`
-       * (§6). `distributeThroughUnion` pushes the unary chain down into the arms so each becomes its
-       * own recursive term referencing the walk once — the textbook `Project`/`Filter` through
-       * `UNION ALL` transpose (Calcite's `Project`/`FilterSetOpTransposeRule`), and what makes a
-       * self-loop yield the vertex twice. A non-`ALL` compound would dedup the whole walk, which
-       * `recursiveViolation` refuses by name rather than letting this quietly rebuild it.
+       * ⚠️ **THE TERM REFERENCES THE WALK ONCE, and nothing here has to make it so.** A projection over
+       * a compound whose arms each read the `SelfRef` would take a DERIVED TABLE collecting both
+       * references into one subquery — `circular reference` (§6). That used to be every `both()` body
+       * (two `HOPS` arms unioned `ALL`), and a `Project`/`Filter`/`Join`-through-`UNION ALL` transpose
+       * (Calcite's `*SetOpTransposeRule`s) pushed the bump into the arms. A multi-direction hop now
+       * reads its frontier ONCE through a direction row (`hopJoin`, `lower/movement.ts` — a `SelfRef` is
+       * never free to read twice), so no body this route admits builds a self-referencing compound
+       * (measured: zero over the L1 corpus and the repeat tests), and the transpose was deleted with
+       * it. A body that ever did would be refused by name by `recursiveViolation` below, never
+       * mis-executed; a `union()` body declines before reaching here.
        */
-      return distributeThroughUnion(bump, walkName, fresh);
+      return bump;
     },
   });
 

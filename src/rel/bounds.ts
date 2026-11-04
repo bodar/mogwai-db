@@ -61,8 +61,8 @@ function uniqueKeyMatches(pred: Expr, scan: Extract<Rel, { readonly kind: 'scan'
  * a decline.
  *
  * MEMOISED per node, as Calcite caches its metadata per `RelNode`: a node is immutable, so its bounds
- * are too, and the plan is a DAG — `both()` is a `Union` of two arms reading ONE input, so an unmemoised
- * walk visits 2^k nodes for k hops (`freeRelIds` carries the same measurement).
+ * are too, and the plan is a DAG — a `Union` of two arms reading ONE input, chained k deep, is 2^k visits
+ * to an unmemoised walk (`freeRelIds` carries the measurement).
  */
 export const rowBounds: (rel: Rel) => RowBounds = nodeFact((rel: Rel): RowBounds => boundsOf(rel));
 

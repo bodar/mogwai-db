@@ -461,16 +461,31 @@ describe('the repeat() unroll boundary', () => {
 // The 64-table join limit is the one the compiler can see for itself: the assembler knows how wide a FROM
 // it is building, so it declines there (`SQLITE_JOIN_TABLES`, src/rel/emit.ts) rather than spelling the
 // statement for SQLite to refuse. Same decline class, its own message (`host-unroll-width.exec.test.ts`).
+//
+// `repeat(both().limit(3)).times(24)` USED to be the "65,535 references" witness here: every `both()` hop was
+// a UNION ALL naming its frontier twice, so 24 phases were 2^24 references. A multi-direction hop now reads
+// its frontier ONCE (`hopJoin`, src/compiler/rel/lower/movement.ts), so it ANSWERS — pinned below. The
+// reference wall is still reachable by a chain of general `union()`s, each of which names its input once per
+// arm (a recorded follow-up, not a `both()` property), so that is the witness now.
+const CHAINED_UNIONS = `g.V()${'.union(__.out(),__.in())'.repeat(16)}.count()`;
 describe('a bounded repeat past a SQLite statement-shape limit declines clearly', () => {
   test('the join-width limit is declined before the store sees it', () => {
     expect(() => run(store, 'g.V().repeat(__.out()).emit().times(64).count()')).toThrow(/^this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat\(…\)\.times\(64\) unrolls into one join per iteration — lower the count, or, /);
   });
   test.each([
-    'g.V().repeat(__.both().limit(3)).times(24).count()',
-    'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
+    CHAINED_UNIONS,
   ])('%s', (q) => {
     expect(() => run(store, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(.*\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
     try { run(store, q); } catch (e) { expect((e as Error).name).toBe('UnsupportedTraversal'); }
+  });
+
+  // The former witnesses, now answered: a per-iteration `limit(3)` keeps three traversers whatever the depth,
+  // and the two spellings of the bound agree.
+  test.each([
+    'g.V().repeat(__.both().limit(3)).times(24).count()',
+    'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
+  ])('%s answers — both() no longer doubles its frontier per phase', (q) => {
+    expect(run(store, q)).toEqual([{ v: 3 }]);
   });
 });
 
@@ -496,7 +511,7 @@ describe('a SQLite limit spelled the workerd way still declines clearly', () => 
   for (const q of MODERN_SEED) executeQuery(workerd, q, {});
 
   test.each([
-    'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
+    CHAINED_UNIONS,
   ])('%s', (q) => {
     expect(() => run(workerd, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(too many references to "edges": max 65535\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
   });

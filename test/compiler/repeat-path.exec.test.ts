@@ -123,9 +123,9 @@ test('repeat().times(n).path() emits the ordered walk, one Path per route', asyn
 // ---------- the UNBOUNDED regime carries the path channel through the walk ----------
 // The recursive `Recursive` walk now rides a seeded path column: a body movement APPENDS the arrived
 // object (`extendPath`), `simplePath()` reads it as an ordinary body filter, and a later `path()`
-// frames the carried column. The per-iteration append/filter sits over a `both()` body's hop-union and
-// is pushed into the arms by `distributeThroughUnion` (Calcite Project/FilterSetOpTransposeRule), so
-// each arm stays a single recursive term SQLite accepts.
+// frames the carried column. The per-iteration append/filter sits over a `both()` body's ONE hop join
+// (the walk crossed with a direction row, `hopJoin`), so the term references the walk once and SQLite
+// accepts it.
 const scalarValues = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => r.v);
 
 test('unbounded repeat(out()).until(hasId).path() carries the path out of the walk', async () => {
@@ -137,7 +137,7 @@ test('unbounded repeat(out()).until(hasId).path() carries the path out of the wa
 test('unbounded repeat(both().simplePath()).until(hasId).path().by(name) — corpus Unfold.feature', async () => {
   // g_VX1X_repeatXboth_simplePathX_untilXhasIdX6XX_path_byXnameX (modern graph, vid6 = peter).
   // simplePath() runs INSIDE the recursive term, filtering the carried path per iteration; both()'s
-  // two arms each stay a single recursive reference after the transpose. Two acyclic routes to peter.
+  // hop reads the walk once through its direction row. Two acyclic routes to peter.
   const rows = (await decodePaths(seededStore(),
     "g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).path().by('name')"))
     .map((p: any) => p.objects);
@@ -224,10 +224,10 @@ test('simplePath()/cyclicPath().by(<proj>) compares positions by their projectio
   expect(run(store, "g.V(1).out('created').in('created').simplePath().by('age')")).toEqual([]); // marko→lop→... lop no age
 });
 
-test('a JOIN-over-UNION recursive body composes — bothE().inV() (join-union transpose)', async () => {
+test('an edge-hop-then-endpoint recursive body composes — bothE().inV()', async () => {
   // `inV()` re-joins the edge table to read `tgt`, so a `bothE().inV()` body's recursive term is
-  // project(join(union(edge-arms), edges), …) — a JOIN over a self-referencing UNION. distributeThroughUnion
-  // pushes the join into the arms (Calcite JoinUnionTransposeRule), sharing the plain edge scan across them.
+  // project(join(join(walk × directions, edges), edges), …) — every join one reference to the walk. (It was
+  // a JOIN over a two-arm self-referencing UNION, which needed a join-union transpose to be accepted.)
   // bothE().inV() is out-heads plus a self-loop per in-edge (inV of an in-edge is the vertex itself), which
   // simplePath() prunes — so bothE().inV().simplePath() reaches exactly what out().simplePath() does.
   const store = seededStore();

@@ -318,11 +318,11 @@ export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel, m
  *
  * ⚠️ **ANSWERS EACH NODE ONCE — the plan is a DAG (§3.4) and the memo is not an optimization.**
  * The answer is a union over what lies beneath, so recomputing a shared node adds nothing; what it
- * costs is TIME, exponentially. `both()` is the shape that shows it: each hop is a `Union` of two arms and
- * both arms read the SAME input relation, so a walk without this guard visits 2^k nodes for k hops.
- * Measured before the guard, on `g.V().both()…count()`: 3 ms at k=8, 169 ms at k=16, 2 660 ms at
- * k=20, while the emitted SQL grew LINEARLY (~310 bytes per hop) throughout — the giveaway that the
- * cost was a traversal and never the plan.
+ * costs is TIME, exponentially. Any chain of nodes that each read one shared input twice shows it — a
+ * `Union` of two arms over ONE input, repeated k times, is 2^k visits without this guard. `both()` was
+ * that shape until it learned to read its frontier once (`hopJoin`); measured then, on
+ * `g.V().both()…count()`: 3 ms at k=8, 169 ms at k=16, 2 660 ms at k=20, while the DAG grew LINEARLY
+ * throughout — the giveaway that the cost was a traversal of a shared node and never the plan itself.
  */
 export const freeRelIds: (plan: Rel) => ReadonlySet<string> = nodeFact((r: Rel): ReadonlySet<string> => {
   // SYNTHESIZED from what lies beneath, not re-walked per ask: a candidate is an id this node's own
@@ -467,6 +467,27 @@ function unionOf(sets: readonly ReadonlySet<string>[], plus?: string): ReadonlyS
  * `malformed JSON`.
  */
 export const isSelfContained = (plan: Rel): boolean => freeRelIds(plan).size === 0 && !hasFreeSelfRef(plan);
+
+/**
+ * IS A SECOND REFERENCE TO THIS RELATION FREE? — a base-table read: a `Scan` or `Values` under nothing but
+ * row-wise `Project`/`Filter`, whose expressions correlate only against relations of the same kind.
+ *
+ * SQLite has no LATERAL and expands every reference to a derived table or CTE into its own copy of the
+ * definition — at PREPARE time, even when it then materializes the result once. So spelling a relation
+ * twice is free only when what is copied holds no copy of its own: a chain of operators that each read
+ * their input twice is 2^k copies for k of them (the `both()` UNION ALL wall: `g.V().both()×16` refused,
+ * `local(both()×8.count())` 46 KB). A base-table read holds no doubled reference anywhere beneath it, so
+ * reading it twice costs one more scan of the same index — a constant, not a compounding, factor.
+ *
+ * A `Ref` (a named CTE), a `SelfRef` and every multi-input or barrier node answer NO: each can stand for
+ * an arbitrarily deep definition, and that is exactly the case the expansion compounds.
+ */
+export const rereadsFreely: (r: Rel) => boolean = nodeFact((r: Rel): boolean => {
+  if (r.kind === 'scan' || r.kind === 'values') return true;
+  if (r.kind !== 'project' && r.kind !== 'filter') return false;
+  return rereadsFreely(r.input) && relExprs(r).every(exprRereadsFreely);
+});
+const exprRereadsFreely = (e: Expr): boolean => exprRels(e).every(rereadsFreely) && exprChildren(e).every(exprRereadsFreely);
 
 /**
  * WHAT A NODE'S OWN EXPRESSIONS REACH — the relation ids their `Col`s name, and the correlated subplans

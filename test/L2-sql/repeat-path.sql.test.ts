@@ -203,19 +203,18 @@ describe('repeat / path SQL', () => {
   });
 
 
-  test('a both() walk is a COMPOUND term — one arm per direction, not one arm with an OR', () => {
+  test('a both() walk is ONE recursive term — the walk crossed with a direction row, read once', () => {
     const p = read('g.V(1).repeat(__.both()).emit()');
     expect(p.kind).toBe('read');
-    // seed UNION ALL arm1 UNION ALL arm2 — each arm references the walk exactly once, which is the
-    // only shape SQLite accepts (§6). The counter bump distributes over the arms rather than sitting
-    // above them, because a projection over a compound would take a derived table and collect both
-    // references into one subquery.
-    expect(p.sql.match(/UNION ALL/g)).toHaveLength(2);
+    // seed UNION ALL term — the term references the walk exactly once (§6) and reaches both directions
+    // through a constant `(VALUES (0), (1))` direction row: `(dir = 0 AND src = id) OR (dir = 1 AND tgt =
+    // id)`, which SQLite plans as a MULTI-INDEX OR over e_out/e_in. A walk's frontier is its SelfRef,
+    // which is never free to read twice (`hopJoin`), so there is no per-direction compound to transpose.
+    expect(p.sql.match(/UNION ALL/g)).toHaveLength(1);
     expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
-    // both directions present, and no disjunctive single-arm join standing in for them
-    expect(p.sql).toMatch(/\.src = w\d+\.id/);
-    expect(p.sql).toMatch(/\.tgt = w\d+\.id/);
-    expect(p.sql).not.toMatch(/src = w\d+\.id\) OR \(/);
+    expect(p.sql.match(/FROM wk_w\d+ w\d+/g)).toHaveLength(1);
+    expect(p.sql).toMatch(/CROSS JOIN \(VALUES \(0\), \(1\)\) dir\d+/);
+    expect(p.sql).toMatch(/\(dir\d+\.column1 = 0\) AND \(rme\d+\.src = w\d+\.id\)\) OR \(\(dir\d+\.column1 = 1\) AND \(rme\d+\.tgt = w\d+\.id\)/);
   });
 
   test('a no-modulator repeat PRUNES to an empty relation instead of walking', () => {

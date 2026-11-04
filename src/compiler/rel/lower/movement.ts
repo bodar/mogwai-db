@@ -4,7 +4,7 @@
 // the cleanest slice of the old lower.ts. Extracted from lower.ts; see ./chain.ts for the vocabulary.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, eq, labelSetArgs, meta, renumber, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, elementCols, eq, labelSetArgs, meta, or, renumber, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
@@ -20,6 +20,7 @@ import { ensureBulk } from './branch.ts';
 import { evidenceOf } from '../receiver.ts';
 import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
+import { rereadsFreely } from '../../../rel/walk.ts';
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -166,8 +167,9 @@ export function crossCarried(
  *
  * Six adjacency steps plus the three endpoint reads, each one direction table entry: which edge
  * column matches the incoming id, and which column the outgoing id comes from. `both`/`bothE`/
- * `bothV` are the UNION of their two halves and get no special case beyond being two entries — the
- * multiset rule means UNION ALL, so a self-loop legitimately yields the vertex twice.
+ * `bothV` are two entries, and `hopJoin` reads their incoming frontier ONCE against a DIRECTION row —
+ * one output row per (edge, direction) that matches, so a self-loop legitimately yields the vertex
+ * twice (the multiset rule, carried by the direction row rather than by a UNION ALL).
  *
  * `otherV` is absent, and deliberately: it reads the entering vertex a preceding edge step
  * retained (`fromV`), which is carried state this route does not yet model. Declining is the whole
@@ -204,6 +206,106 @@ const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
 type Frontier = { readonly rel: Rel } | { readonly correlated: Expr };
 const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.rel : undefined);
 
+/** One joined edge relation and its two per-row edge-end reads: `to` (the reached id) and `from` (the end
+ *  the incoming id matched — what a `fromV` channel retains). */
+interface HopArm { readonly rel: Rel; readonly to: Expr; readonly from: Expr }
+
+/**
+ * THE HOP JOIN — a frontier against `edges` for every direction of a hop table entry, as the arms whose
+ * UNION ALL is the hop (one arm unless the frontier is free to read twice).
+ *
+ * A rooted frontier is the LEFT, `ordered` side of the edge join; a correlated one compares the edge
+ * column to the outer expression. `restrict` adds the per-edge condition (the label match).
+ *
+ * ⚠️ **A MULTI-DIRECTION HOP (`both`/`bothE`/`bothV`) READS ITS FRONTIER ONCE unless a second read is
+ * free.** The per-direction UNION ALL names its frontier once per arm, and SQLite has no LATERAL and
+ * expands every reference to a derived table or CTE into its own copy — so k chained `both()` hops were
+ * 2^k copies of the first: `g.V().both()×16.count()` and `repeat(both()).times(16)` exceeded SQLite's
+ * reference limits outright, `local(both()×8.count())` was 46 KB of statement text doubling per hop, and
+ * `local(repeat(both()).times(16))` spent 4.7 s in prepare before refusing. So the frontier is crossed
+ * with a constant `VALUES (0),(1)` direction relation and joined to `edges` on
+ * `(dir = 0 AND e.<from₀> = in) OR (dir = 1 AND e.<from₁> = in)` — SQLite plans that as a MULTI-INDEX OR
+ * (one seek of `e_out`, one of `e_in`, measured) — and `to`/`from` are `CASE dir` reads. A self-loop
+ * matches under BOTH directions, so it is two rows: the multiset rule carried by the direction row, with
+ * no dedup. Where every direction matches the same end (`bothV`: both from `id`) the ON collapses to the
+ * one equality and only the reads differ per direction.
+ *
+ * **The one exemption is a frontier whose second read is free** (`rereadsFreely` — a base-table read, or
+ * a correlated column): there the two per-direction joins stay, because the MULTI-INDEX OR pays a rowid
+ * set per probe and measured ~45–60% slower per hop than two plain seeks (8 000 vertices:
+ * `g.V().both().count()` 14 ms as two joins, 20 ms as one; `bothE().otherV().count()` 13 vs 22). A
+ * base-table read holds no doubled reference beneath it, so its copy is a constant factor that cannot
+ * compound. That is a fact of the INPUT, never a hop count: every later hop's frontier is the previous
+ * hop's join, which is not free, so a chain pays the OR from its second hop on and stays linear.
+ *
+ * The direction relation names no table and binds nothing (compiler ints), so a recursive term may hold
+ * it — and a walk's frontier is its `SelfRef`, never free, so a `both()` walk body is one recursive
+ * reference with no compound to transpose (`walk.ts`).
+ */
+function hopJoin(
+  hops: readonly Pick<Hop, 'from' | 'to'>[], from: Frontier, graph: GraphSource, fresh: Minter,
+  restrict: (edges: Rel) => Expr | undefined = () => undefined,
+): readonly HopArm[] {
+  const left = frontierRel(from);
+  const free = left ? rereadsFreely(left) : (from as { readonly correlated: Expr }).correlated.kind === 'col';
+  return hops.length > 1 && free
+    ? hops.map((hop) => directionsJoin([hop], from, graph, fresh, restrict))
+    : [directionsJoin(hops, from, graph, fresh, restrict)];
+}
+
+/** ONE join of the frontier against `edges` covering every hop in `hops` — through a direction row when
+ *  there is more than one (`hopJoin`). */
+function directionsJoin(
+  hops: readonly Pick<Hop, 'from' | 'to'>[], from: Frontier, graph: GraphSource, fresh: Minter,
+  restrict: (edges: Rel) => Expr | undefined,
+): HopArm {
+  const e = graph.adjacencyEdges(fresh);
+  const edgeCols = [meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')];
+  const dirs = hops.length === 1 ? undefined : make.values({
+    id: fresh('dir'), channels: [], type: typeOf(meta('dir', 'int')), rows: hops.map((_, i) => [compilerInt(i)]),
+  });
+  const dirCols = dirs ? [meta('dir', 'int')] : [];
+  const left = frontierRel(from);
+  const leftCols = left ? [meta('pid', 'int'), ...carriedCols(left.channels)] : [];
+  // **THE INCOMING FRONTIER IS THE LEFT SIDE, AND THE EDGE JOIN IS `ordered`** — a hop is "for each
+  // traverser I have, find its edges", so the stream drives and `edges` is probed through
+  // `e_out(src,label,tgt)` / `e_in(tgt,label,src)`. With the order free SQLite chose `e_in` and scanned
+  // the whole edge table for a hop off ONE vertex, taking a 4 000-vertex `has(name).out(knows).values(name)`
+  // to 1 492 ms; pinned, it seeks `e_out` and takes 0.3 ms. The direction row is crossed onto the frontier
+  // BEFORE the edges, so each (traverser, direction) pair is one indexed probe.
+  //
+  // `driver` is what the ON reads the incoming id and the direction off: the frontier crossed with the
+  // directions, the bare frontier, or — correlated — the direction row alone.
+  const driver: Rel | undefined = left && dirs
+    ? make.join({ id: fresh('j'), left, right: dirs, join: 'cross', channels: left.channels, type: typeOf(...leftCols, ...dirCols) })
+    : left ?? dirs;
+  const incoming = left ? col(driver!.id, dirs ? 'pid' : 'id') : (from as { readonly correlated: Expr }).correlated;
+  const froms = hops.map((hop) => hop.from);
+  const matched = !dirs || froms.every((name) => name === froms[0])
+    ? eq(col(e.id, froms[0]!), incoming)
+    : froms.reduce<Expr | undefined>((acc, name, i) =>
+      or(acc, and(eq(col(driver!.id, 'dir'), compilerInt(i)), eq(col(e.id, name), incoming))), undefined)!;
+  const on = and(matched, restrict(e));
+  // A correlated single-direction hop FILTERS the edge table against the outer id; every other form JOINS.
+  const source = driver
+    ? make.join({
+      id: fresh('j'), left: driver, right: e, join: 'inner', ordered: true, on, channels: driver.channels,
+      type: typeOf(...leftCols, ...dirCols, ...edgeCols),
+    })
+    : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
+  /** One read per direction, as `CASE dir` — or the plain column when every direction agrees. */
+  const perDir = (end: (hop: Pick<Hop, 'from' | 'to'>) => string): Expr => {
+    const ends = hops.map(end);
+    if (!dirs || ends.every((name) => name === ends[0])) return col(source.id, ends[0]!);
+    return {
+      kind: 'case',
+      whens: ends.slice(0, -1).map((name, i) => [eq(col(source.id, 'dir'), compilerInt(i)), col(source.id, name)] as const),
+      else: col(source.id, ends[ends.length - 1]!),
+    };
+  };
+  return { rel: source, to: perDir((hop) => hop.to), from: perDir((hop) => hop.from) };
+}
+
 export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphSource, fresh: Minter, withLabels = false, mintFromV = false): { rel: Rel; elem: Elem } | null {
   const hops = HOPS[step.name];
   if (!hops || step.modulators?.length || step.optionArms) return null;
@@ -235,53 +337,32 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
   const wantFromV = mintFromV && hops.every((hop) => hop.to === 'id');
   const outChannels = wantFromV ? withChannel(carried, FROM_V) : carried;
   const armCols = elementCols(outChannels);
-  const arms = hops.map((hop) => {
-    const e = graph.adjacencyEdges(fresh);
-    const incoming = input ? col(input.id, 'id') : (from as { readonly correlated: Expr }).correlated;
-    const on = and(eq(col(e.id, hop.from), incoming),
-      labelArgs.length ? graph.edgeLabelMatch(col(e.id, 'label'), labelArgs, fresh)
-        // NAMED labels, none of which can match — `out(null)`. NEVER, not "every label".
-        : asked.given ? CONSTANT.false : undefined);
-    // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
-    // frontier. The projection is identical either way, which is what keeps the second hop from
-    // needing a second implementation. A correlated body's `bulk` is synthetic: an EXISTS asks
-    // whether a row is there, never how many traversers it is.
-    //
-    // **THE INCOMING FRONTIER IS THE LEFT SIDE, AND THE JOIN IS `ordered`** — a hop is "for each
-    // traverser I have, find its edges", so the stream drives and `edges` is probed through
-    // `e_out(src,label,tgt)` / `e_in(tgt,label,src)`. This USED to be `edges` on the left and free
-    // to reorder, "so the access path stays the one the covering
-    // indexes were built for" — measured, and it is the opposite: with the order free SQLite chose
-    // `e_in` and scanned the whole edge table for a hop off ONE vertex, taking a 4 000-vertex
-    // `has(name).out(knows).values(name)` to 1 492 ms. Pinned, it seeks `e_out` and takes 0.3 ms.
-    // The covering indexes were never in question — which of them the planner reaches for was.
-    const source = input
-      ? make.join({
-        id: fresh('j'), left: input, right: e, join: 'inner', ordered: true, on, channels: carried,
-        type: typeOf(meta('pid', 'int'), ...carriedCols(carried),
-          meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
-      })
-      : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
-    // The arm carries the INCOMING position through unchanged; re-minting happens once over the
-    // whole fan-out below, not per arm — two arms each numbering from 1 would interleave. A `fromV`
-    // channel (edge hops, under `mintFromV`) takes this hop's incoming end (`hop.from`) — the vertex
-    // this arm entered from — so `bothE`'s two arms each carry their own entering vertex.
-    return make.project({
-      id: fresh('m'), input: source, channels: outChannels, type: typeOf(...armCols),
-      exprs: [['id', col(source.id, hop.to)],
-        ...outChannels.map((channel) =>
-          channel.role === 'fromV' ? [channel.col, col(source.id, hop.from)] as const
-          : !input && channel.role === 'bulk' ? [channel.col, compilerInt(1)] as const
-          : [channel.col, col(source.id, channel.col)] as const)],
-    });
-  });
-  const [first, ...rest] = arms;
-  if (!first) return null;
+  // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
+  // frontier. The projection is identical either way, which is what keeps the second hop from needing
+  // a second implementation. A correlated body's `bulk` is synthetic: an EXISTS asks whether a row is
+  // there, never how many traversers it is.
+  //
+  // An arm carries the INCOMING position through unchanged; re-minting happens once over the whole
+  // fan-out below, not per arm — two arms each numbering from 1 would interleave. A `fromV` channel (edge
+  // hops, under `mintFromV`) takes the edge end the row matched (`hop.from`, per direction) — the vertex
+  // it entered from — so `bothE`'s two directions each carry their own entering vertex.
+  const arms = hopJoin(hops, from, graph, fresh, (e) =>
+    labelArgs.length ? graph.edgeLabelMatch(col(e.id, 'label'), labelArgs, fresh)
+      // NAMED labels, none of which can match — `out(null)`. NEVER, not "every label".
+      : asked.given ? CONSTANT.false : undefined,
+  ).map((arm) => make.project({
+    id: fresh('m'), input: arm.rel, channels: outChannels, type: typeOf(...armCols),
+    exprs: [['id', arm.to],
+      ...outChannels.map((channel) =>
+        channel.role === 'fromV' ? [channel.col, arm.from] as const
+        : !input && channel.role === 'bulk' ? [channel.col, compilerInt(1)] as const
+        : [channel.col, col(arm.rel.id, channel.col)] as const)],
+  }));
   // N-ary UNION ALL, minted once — and ALL, never distinct: traversers are a multiset, so a vertex
   // reachable both ways is two traversers.
-  let fanned: Rel = rest.length
+  let fanned: Rel = arms.length > 1
     ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: outChannels, type: typeOf(...armCols) })
-    : first;
+    : arms[0]!;
   if (pathCarried(fanned))
     fanned = extendPath(fanned, { kind: 'element', elem: hops[0]!.elem, id: col(fanned.id, 'id') }, fresh, withLabels);
   const encounter = encounterOf(carried);

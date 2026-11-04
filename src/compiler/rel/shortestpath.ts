@@ -12,6 +12,7 @@ import type { ChildSeam } from './child.ts';
 import { historyAppend, objectEntry, type TraverserObject } from './history.ts';
 import { PATH_CHANNEL, PATH_COL, pathPositions, seedPath } from './path.ts';
 import type { GraphSource } from './source.ts';
+import { HOPS } from './lower/movement.ts';
 
 /**
  * `shortestPath()` — path RECONSTRUCTION for the BSP barrier (`docs/archive/2026-08-23-barrier-substrate-reshape-plan.md`
@@ -26,21 +27,12 @@ import type { GraphSource } from './source.ts';
  * zero/negative weights. Because only shortest-path edges are walked there is no MIN window and no
  * exponential blowup — which is exactly why the old enumerate-every-simple-path walk (deleted) hung on a
  * dense graph even unweighted, and why the min-distance relaxation lives in the barrier (an aggregate a
- * recursive term forbids — P3 / repeat-two-regimes §1a). The helpers below (`DIR_HOPS`, `notInPath`, the
+ * recursive term forbids — P3 / repeat-two-regimes §1a). The helpers below (`notInPath`, the
  * path-entry builders) were the walk's and are reused verbatim.
  */
 
 /** The bulk channel carried beside the path — one traverser per emitted path. */
 const BULK_CHANNEL: Channel = { col: 'bulk', role: 'bulk' };
-
-/** A scope direction as an edge-column pair: which edge column matches the current endpoint (`from`)
- *  and which yields the neighbour (`to`). `both` is the two halves — the multiset UNION ALL that makes a
- *  self-loop legitimately yield the vertex twice, exactly as `HOPS.both` does. */
-const DIR_HOPS: Readonly<Record<'out' | 'in' | 'both', readonly { readonly from: 'src' | 'tgt'; readonly to: 'src' | 'tgt' }[]>> = {
-  out: [{ from: 'src', to: 'tgt' }],
-  in: [{ from: 'tgt', to: 'src' }],
-  both: [{ from: 'src', to: 'tgt' }, { from: 'tgt', to: 'src' }],
-};
 
 
 const vertexEntry = (id: Expr): TraverserObject => ({ kind: 'element', elem: 'vertex', id });
@@ -138,7 +130,12 @@ export function shortestPathReconstruct(
   // No `dist` payload — the gate reads both endpoints' distance off `barrier_state` (float-exact).
   const walkType = typeOf(meta('id', 'int'), meta('src', 'int'), ...carriedCols(channels));
   const header = walkType.cols.map((c) => c.name);
-  const hops = DIR_HOPS[cfg.direction];
+  // A scope direction is the movement's own direction table (`HOPS`): which edge column matches the current
+  // endpoint and which yields the neighbour. `both` is its two directions as two recursive ARMS — each arm
+  // reads the walk's `SelfRef` once, which a recursive term expands per queue row rather than per
+  // reference, so the union costs nothing here and keeps each arm's neighbour a plain column for the
+  // distance gate, the simple-path guard and the path append alike.
+  const hops = HOPS[cfg.direction]!;
   const labelArgs: Arg[] = cfg.labels.map((label) => ({ value: label, type: null, name: null }));
   let termOk = true;
   const walkId = fresh('spr');
