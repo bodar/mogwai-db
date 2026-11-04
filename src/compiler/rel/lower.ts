@@ -7,12 +7,13 @@ import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
-import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
-import { fuse } from '../../rel/passes/fuse.ts';
+import { indexSeek, semijoinAll, trigramSeek } from '../../rel/passes/semijoin.ts';
+import { fuseAll } from '../../rel/passes/fuse.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import { mayRaise } from '../../rel/raise.ts';
-import { atMostOneRow } from '../../rel/bounds.ts';
+import { atMostOneRow, rowBounds } from '../../rel/bounds.ts';
+import { isSelfContained, refNames, relDepth } from '../../rel/walk.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { collectionAssert, EDGE_MOVES, elementKindAt, FAN_OUT_HOSTS, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
@@ -74,7 +75,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
-import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, withEnclosing, type ChainCtx, type HoistedSpine, type SpineHoist, type Tail } from './lower/chain.ts';
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
@@ -2087,6 +2088,7 @@ function scalarTail(
     rel = make.materialize({ id: fresh('m'), input: rel, channels: rel.channels, type: rel.type });
 
   for (let at = from; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
       return reSourceTail(steps, at, rel, out, bulked, ctx, fresh, labels);
@@ -3078,6 +3080,7 @@ function listTail(
   // a nested chain lowered would otherwise import the fold that imports it.
   const seam = childSeam(ctx, fresh);
   for (let at = from; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
     if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
     if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'list', of: items, ...(set ? { set: true } : {}) }, false, ctx, fresh, labels);
@@ -3244,6 +3247,7 @@ function pathTail(
   let rel = seed;
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
@@ -3401,6 +3405,7 @@ function mapTail(
   // entry drops it; one that only removes entries keeps it.
   let facts = mapKeyFacts(seedFacts);
   for (let at = from; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
@@ -3716,6 +3721,7 @@ function mapEntryTail(
   let rel = seed;
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
@@ -4214,6 +4220,55 @@ const scalarPayload = (
   };
 };
 
+/**
+ * THE SPINE DEPTH PAST WHICH A FOLD CUTS ITS RELATION INTO A CTE (`boundedSpine`).
+ *
+ * Every walker over the algebra — the passes, `checkPlan`, the emitter — recurses over a relation's
+ * depth, and a bounded `repeat()` unrolls to a chain whose spine grows by a few nodes per iteration
+ * (`out().limit(1)` by 3, `out().order().by(k)` by 8). So the JS stack, not the query-text ceiling
+ * (`MAX_UNROLLED_STEPS`), was the binding limit — and where it binds is the RUNTIME's: workerd's stack is
+ * about 5× shallower than Bun's, so `repeat(out().limit(1)).times(1200)` compiled on Bun and declined in
+ * a Durable Object. Cutting the spine into CTEs every `SPINE_DEPTH_BOUND` levels makes every walk's depth
+ * this constant (plus what one step adds), whatever the chain's length.
+ *
+ * MEASURED, not guessed: the deepest relation any L1-corpus or L4 traversal lowers to is 47 levels, so at
+ * 128 no ordinary query is cut and its plan stays byte-identical (`test/plan-stability.test.ts`, the
+ * `sql-hygiene` baseline) — a `Ref` hides its binding from every relation-level fact but `rowBounds`
+ * (which the cut carries on the `Ref`), so a cut inside a common query would quietly change plans. Only a
+ * long chain reaches it, and 128 levels is a small fraction of even workerd's stack.
+ */
+const SPINE_DEPTH_BOUND = 128;
+
+/**
+ * CUT A SPINE THAT HAS GROWN PAST `SPINE_DEPTH_BOUND` — bind it as a CTE of the program and continue the
+ * fold over a `Ref` to it. SQLite flattens a once-read CTE into its reader (or runs it as a co-routine),
+ * exactly as it does the derived table it replaces, so the SQL means and costs the same; it only stops
+ * nesting. The `Ref` keeps the relation's id, so every expression already naming it still resolves
+ * (`name`'s own convention), and its row bounds, so `rowBounds` answers through the cut.
+ *
+ * Only the root chain of an effect-free program cuts (`ChainCtx.hoist`), only while folding that very
+ * step list, and only a self-contained relation: a correlated child body is not a relation of its own,
+ * and its depth stays the compile boundary's backstop (`tooDeep`). Depth is asked per step but memoised
+ * (`relDepth`), so a chain of n steps pays O(n) for it in total.
+ */
+function boundedSpine(rel: Rel, steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Rel {
+  const hoist = ctx.hoist;
+  if (!hoist || hoist.steps !== steps || relDepth(rel) <= SPINE_DEPTH_BOUND || !isSelfContained(rel)) return rel;
+  // A walk or a named fence is bound under its OWN name, as `name` binds it: the emitter spells either's
+  // definition by that name.
+  const name = rel.kind === 'recursive' ? rel.name : rel.kind === 'materialize' && rel.name ? rel.name : fresh('r');
+  hoist.cut.push({ name, node: rel });
+  return make.ref({ id: rel.id, name, channels: rel.channels, type: rel.type, bounds: rowBounds(rel) });
+}
+
+/** The cut-off pieces the result still reads, transitively — a piece a fold built and then abandoned (a
+ *  lowering that tried one route, cut, and fell back to another) names nothing anyone reads. */
+const liveHoisted = (cut: readonly HoistedSpine[], result: Rel): readonly HoistedSpine[] => {
+  const wanted = new Set(refNames(result));
+  for (let i = cut.length - 1; i >= 0; i--) if (wanted.has(cut[i]!.name)) refNames(cut[i]!.node).forEach((name) => wanted.add(name));
+  return cut.filter((piece) => wanted.has(piece.name));
+};
+
 const lowered = (
   chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter,
   rawListElements = false,
@@ -4232,10 +4287,15 @@ const lowered = (
   // `indexSeek` gives a substring predicate the trigram index rather than a base-table `LIKE`.
   // `fuse` (the SEMANTIC tier) runs first, so a filter it pushes below a renumber reaches `semijoin`'s
   // access-path strategies over the base relation it now sits on.
-  const named = nameBindings(semijoin(fuse(wire.rel), [
+  // A long spine the fold CUT (`boundedSpine`) is part of the same program: its pieces and the result run
+  // through every pass as one plan, so a node they share stays one node and is named once.
+  const hoisted = liveHoisted(chain.hoisted ?? [], wire.rel);
+  const passed = semijoinAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel]), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
-  ]), () => fresh('r'));
+  ]);
+  const named = nameBindings(passed[hoisted.length]!, () => fresh('r'),
+    hoisted.map((piece, i) => ({ name: piece.name, node: passed[i]! })));
   // A stateful SOURCE (a `decorateGraph` stack) declares its landed `(id → value)` CTEs HERE — the one
   // collection point — so every entry that reads through it (a resume's final SQL, a downstream
   // barrier's head) gets them without threading a binding by hand. `BaseGraph`/`BoundGraph` carry none.
@@ -4880,8 +4940,19 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   // (`rootedRead`, a source-union arm) may run once per parent traverser of a GLOBAL child; a seeded
   // resume (`opts.seed`) is a tail whose prefix ran elsewhere; and a re-sourced chain (a decorate
   // barrier's resume drops its `call()`, a federated arm reads a landed marker) is a REWRITTEN list.
-  const ctx: ChainCtx = root && !opts.seed && analysed.ctx.source === BaseGraph
-    ? { ...analysed.ctx, traversal: { steps, rooted: true } } : analysed.ctx;
+  const rooted = root && !opts.seed && analysed.ctx.source === BaseGraph;
+  // That same root chain is the one whose spine may be CUT into CTEs (`boundedSpine`) — and only in a
+  // program with no effects, where every binding is a plain CTE rather than a step whose retention
+  // `checkPlan` rules on.
+  const writes = analysed.ctx.writes;
+  const hoist: SpineHoist | undefined = rooted && writes.sites !== 'unknown' && writes.sites.length === 0
+    ? { steps, cut: [] } : undefined;
+  const ctx: ChainCtx = rooted ? { ...analysed.ctx, traversal: { steps, rooted: true }, ...(hoist && { hoist }) } : analysed.ctx;
+  const tail = lowerChainFrom(steps, opts, fresh, ctx, facts);
+  return tail && hoist?.cut.length ? { ...tail, hoisted: [...hoist.cut] } : tail;
+}
+
+function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter, ctx: ChainCtx, facts: ChainFacts): Tail | null {
   const { params } = ctx;
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
@@ -5332,6 +5403,7 @@ function elementTail(
   let labels = aliases;
   let at = from;
   for (; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
     if (step.name === 'V' || step.name === 'E') {
       return reSourceTail(steps, at, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
@@ -6345,6 +6417,7 @@ function recordTail(
   let rel = seed;
   let labels = aliases;
   for (let at = from; at < steps.length; at++) {
+    rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at]!;
     if (step.optionArms) return null;
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;

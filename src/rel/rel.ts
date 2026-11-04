@@ -1,3 +1,4 @@
+import type { RowBounds } from './bounds.ts';
 import type { Expr } from './expr.ts';
 import type { RelBase, RelId, SortTerm } from './types.ts';
 
@@ -11,7 +12,10 @@ type RawRel =
   | (RelBase & { readonly kind: 'scan'; readonly id: RelId; readonly table: Table; readonly alias: string })
   | (RelBase & { readonly kind: 'values'; readonly id: RelId; readonly rows: readonly (readonly Expr[])[] })
   | (RelBase & { readonly kind: 'self-ref'; readonly id: RelId; readonly name: string })
-  | (RelBase & { readonly kind: 'ref'; readonly id: RelId; readonly name: string })
+  /** `bounds` — the row bounds of the relation the binding holds, where the lowering that cut it out
+   *  knew them (`boundedSpine`). A `Ref` is a leaf to every walker, so without it `rowBounds` would read
+   *  a hoisted spine as unbounded and a decision taken over it would change with the cut. */
+  | (RelBase & { readonly kind: 'ref'; readonly id: RelId; readonly name: string; readonly bounds?: RowBounds })
   | (RelBase & { readonly kind: 'project'; readonly id: RelId; readonly input: Rel; readonly exprs: readonly (readonly [string, Expr])[] })
   | (RelBase & { readonly kind: 'filter'; readonly id: RelId; readonly input: Rel; readonly pred: Expr })
   | (RelBase & { readonly kind: 'aggregate'; readonly id: RelId; readonly input: Rel; readonly groupBy: readonly Expr[]; readonly aggs: readonly (readonly [string, Expr])[]; readonly having?: Expr })

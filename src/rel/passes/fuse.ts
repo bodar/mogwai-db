@@ -45,9 +45,18 @@ import { exprChildren, exprRels, forEachExpr, forEachRel, relChildren, relExprs,
  * tier, so a pushed label/property predicate reaches the access-path strategies.
  */
 export function fuse(plan: Rel): Rel {
+  return fuseAll([plan])[0]!;
+}
+
+/**
+ * `fuse` over a PROGRAM's relations — its bindings' nodes, then its result — as ONE plan: the census
+ * sees every reader in every root (each root's columns leave it, so they are values), and one rewrite
+ * memo keeps a node two roots share one node afterwards.
+ */
+export function fuseAll(plans: readonly Rel[]): readonly Rel[] {
   // Each transpose can expose another (a filter that lands on a second renumber), so to a fixpoint —
   // bounded, because every round moves at least one filter strictly lower.
-  let current = plan;
+  let current = plans;
   for (let round = 0; round < 64; round++) {
     const next = transposeRound(current);
     if (next === current) return current;
@@ -69,11 +78,11 @@ interface Census {
   readonly roots: Set<Rel>;
 }
 
-function census(plan: Rel): Census {
+function census(plans: readonly Rel[]): Census {
   const parents = new Map<Rel, Rel[]>();
   const readers = new Map<string, Rel[]>();
-  const roots = new Set<Rel>([plan]);
-  forEachRel(plan, (r) => {
+  const roots = new Set<Rel>(plans);
+  forEachRel(plans, (r) => {
     relChildren(r).forEach((child) => parents.set(child, [...(parents.get(child) ?? []), r]));
     const named = new Set<string>();
     relExprs(r).forEach((e) => forEachExpr(e, (node) => {
@@ -228,17 +237,18 @@ function transpose(mapped: Filter, t: Transpose): Rel {
   return make.project({ id: mapped.id, input: windowed, channels: mapped.channels, type: mapped.type, exprs: project.exprs });
 }
 
-function transposeRound(plan: Rel): Rel {
-  const c = census(plan);
+function transposeRound(plans: readonly Rel[]): readonly Rel[] {
+  const c = census(plans);
   const found = new Map<Rel, Transpose>();
-  forEachRel(plan, (r) => {
+  forEachRel(plans, (r) => {
     if (r.kind !== 'filter') return;
     const t = recognise(r, c);
     if (t) found.set(r, t);
   });
-  if (!found.size) return plan;
-  return rewriteRels(plan, (mapped, original) => {
+  if (!found.size) return plans;
+  const memo = new Map<Rel, Rel>();
+  return plans.map((plan) => rewriteRels(plan, (mapped, original) => {
     const t = found.get(original);
     return t && mapped.kind === 'filter' ? transpose(mapped, t) : mapped;
-  });
+  }, memo));
 }

@@ -1,7 +1,7 @@
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
 import * as make from './factory.ts';
-import type { Rel } from './rel.ts';
+import { isRel, type Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import type { FrameBound, RelId, SortTerm, WindowSpec } from './types.ts';
 
@@ -225,9 +225,11 @@ export function substRelId(e: Expr, from: RelId, to: RelId, rename: (name: strin
  *
  * The callback receives the node with its children already rewritten AND the original node, so a
  * pass that pre-computed an analysis over the input plan can still key it by the node it analysed.
+ *
+ * `memo` is passed in by a pass that rewrites SEVERAL roots of one program (a plan's bindings and its
+ * result, `rewriteAll`): one memo keeps a node two roots share one node after the rewrite as well.
  */
-export function rewrite(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): Rel {
-  const memo = new Map<Rel, Rel>();
+export function rewrite(plan: Rel, f: (mapped: Rel, original: Rel) => Rel, memo: Map<Rel, Rel> = new Map()): Rel {
   const go = (r: Rel): Rel => {
     const seen = memo.get(r);
     if (seen) return seen;
@@ -248,8 +250,7 @@ export function rewrite(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): Rel 
  * inside a correlated subquery down to its channels. The two coverages are different questions and a
  * pass must say which one it is asking.
  */
-export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): Rel {
-  const memo = new Map<Rel, Rel>();
+export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel, memo: Map<Rel, Rel> = new Map()): Rel {
   const go = (r: Rel): Rel => {
     const seen = memo.get(r);
     if (seen) return seen;
@@ -357,8 +358,47 @@ export function hasFreeSelfRef(plan: Rel): boolean {
  */
 export const isSelfContained = (plan: Rel): boolean => freeRelIds(plan).size === 0 && !hasFreeSelfRef(plan);
 
-/** Visit every relation in the DAG once, plus every relation correlated from an expression. */
-export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
+/** The relations directly beneath `r` that a walk descends into: its children, then every relation an
+ *  expression it owns correlates (`forEachRel`'s coverage, one level). */
+const relsBeneath = (r: Rel): readonly Rel[] => {
+  const out: Rel[] = [];
+  relExprs(r).forEach((e) => forEachExpr(e, (node) => out.push(...exprRels(node))));
+  out.push(...relChildren(r));
+  return out;
+};
+
+const depthMemo = new WeakMap<Rel, number>();
+/**
+ * HOW DEEP A WALK OVER THIS RELATION RECURSES — the longest chain of nodes from `r` to a leaf, counting a
+ * correlated subplan as beneath the node that owns it, and a `Ref` as the leaf it is to every walker.
+ *
+ * Every analysis, pass and the emitter recurse over this depth, so it is the quantity a JS stack bounds
+ * (`boundedSpine`, `src/compiler/rel/lower.ts`). MEMOISED per node and computed ITERATIVELY: a fold that
+ * asks it after every step pays only for the nodes built since it last asked, so a chain of n steps costs
+ * O(n) in total — re-measuring the spine at every step would be O(n²), on exactly the long chains that ask.
+ */
+export function relDepth(r: Rel): number {
+  const known = depthMemo.get(r);
+  if (known !== undefined) return known;
+  const stack: { readonly rel: Rel; expanded: boolean }[] = [{ rel: r, expanded: false }];
+  while (stack.length) {
+    const top = stack[stack.length - 1]!;
+    if (depthMemo.has(top.rel)) { stack.pop(); continue; }
+    const beneath = relsBeneath(top.rel);
+    if (!top.expanded) {
+      top.expanded = true;
+      for (const child of beneath) if (!depthMemo.has(child)) stack.push({ rel: child, expanded: false });
+      continue;
+    }
+    stack.pop();
+    depthMemo.set(top.rel, 1 + beneath.reduce((deepest, child) => Math.max(deepest, depthMemo.get(child) ?? 0), 0));
+  }
+  return depthMemo.get(r)!;
+}
+
+/** Visit every relation in the DAG once, plus every relation correlated from an expression. Several
+ *  ROOTS (a program's bindings and its result) are one walk: a node they share is visited once. */
+export function forEachRel(plan: Rel | readonly Rel[], visit: (r: Rel) => void): void {
   const seen = new Set<Rel>();
   const go = (r: Rel): void => {
     if (seen.has(r)) return;
@@ -367,7 +407,7 @@ export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
     relExprs(r).forEach((e) => forEachExpr(e, (node) => exprRels(node).forEach(go)));
     relChildren(r).forEach(go);
   };
-  go(plan);
+  (isRel(plan) ? [plan] : plan).forEach(go);
 }
 
 /**

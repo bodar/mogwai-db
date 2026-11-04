@@ -58,8 +58,22 @@ function uniqueKeyMatches(pred: Expr, scan: Extract<Rel, { readonly kind: 'scan'
  * It is a SUFFICIENT bound, not an exact one, and every arm errs WIDER: a too-narrow `max` costs an
  * arbitrary row, a too-high `min` a traverser the body dropped; a too-wide bound costs only a guard or
  * a decline.
+ *
+ * MEMOISED per node, as Calcite caches its metadata per `RelNode`: a node is immutable, so its bounds
+ * are too, and the plan is a DAG — `both()` is a `Union` of two arms reading ONE input, so an unmemoised
+ * walk visits 2^k nodes for k hops (`freeRelIds` carries the same measurement).
  */
 export function rowBounds(rel: Rel): RowBounds {
+  const known = boundsMemo.get(rel);
+  if (known) return known;
+  const bounds = boundsOf(rel);
+  boundsMemo.set(rel, bounds);
+  return bounds;
+}
+
+const boundsMemo = new WeakMap<Rel, RowBounds>();
+
+function boundsOf(rel: Rel): RowBounds {
   switch (rel.kind) {
     case 'values': return { min: rel.rows.length, max: rel.rows.length };
     // A reducing barrier with no grouping is one row by definition — `HAVING` can reject it.
@@ -105,7 +119,10 @@ export function rowBounds(rel: Rel): RowBounds {
     }
     // `WITH RECURSIVE … seed UNION ALL step` (`emit.ts`): every seed row is a row, and the walk is unbounded.
     case 'recursive': return { min: rowBounds(rel.seed).min, max: Infinity };
-    case 'scan': case 'self-ref': case 'ref': case 'explode': return UNBOUNDED;
+    // A `Ref` the lowering hoisted carries its binding's bounds (`boundedSpine`); any other names a
+    // binding this walk cannot see.
+    case 'ref': return rel.bounds ?? UNBOUNDED;
+    case 'scan': case 'self-ref': case 'explode': return UNBOUNDED;
     default: { const unknown: never = rel; return unknown; }
   }
 }

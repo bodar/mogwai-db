@@ -45,7 +45,18 @@ export type Tail = ChainRead & {
    * result is, so the fold's shape does not change and a write remains one step of the same loop.
    */
   readonly effects?: readonly Binding[];
+  /**
+   * THE SPINE THE FOLD CUT INTO CTEs (`boundedSpine`), in fold order — each a plain relation binding the
+   * next one, or the result, reads through a `Ref`. Absent unless the chain was long enough to cut.
+   */
+  readonly hoisted?: readonly HoistedSpine[];
 };
+
+/** One cut-off piece of a long spine: a CTE named `name` whose relation is `node`. */
+export interface HoistedSpine { readonly name: string; readonly node: Rel }
+
+/** The root chain's cut list (`ChainCtx.hoist`): which step list may cut, and what it has cut so far. */
+export interface SpineHoist { readonly steps: readonly IRStep[]; readonly cut: HoistedSpine[] }
 
 /** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
 export const NO_ALIASES: AliasMap = new Map();
@@ -219,6 +230,13 @@ export interface ChainCtx extends FilterCtx {
    * different array, and the consumer declines.
    */
   readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
+  /**
+   * WHERE A LONG SPINE IS CUT — set only on an effect-free ROOT chain over the base graph, and honoured
+   * only while a tail folds that very step list (`steps`, compared BY IDENTITY like `traversal`), so a
+   * correlated child body, a branch arm or a rewritten chain inheriting this scope never hoists. The fold
+   * pushes the cut-off spine here (`boundedSpine`); `lowered` names them as roots of the one program.
+   */
+  readonly hoist?: SpineHoist;
   /**
    * Is the order this body's END emits in READ by its host — where the host knows, rather than the
    * chain-global `ordered`/`sliced` guessing for it? `'free'`: the consumer provably ignores it — an EXISTS

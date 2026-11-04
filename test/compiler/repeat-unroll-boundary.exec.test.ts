@@ -40,7 +40,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
-import { bagOf, run, seededStore } from '../support/harness.ts';
+import { bagOf, run, seededStore, storeSeededWith } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 import { GraphStore, type Sql } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -536,14 +536,86 @@ describe('a bounded repeat past the unroll ceiling declines from the count', () 
     expect(vals('g.V().repeat(__.out()).until(__.loops().is(5000)).count()')).toEqual([0]); // the walk: not unrolled
   });
 
-  // Under the ceiling a deep enough plan can still run the compiler out of STACK — where depends on the
-  // runtime (workerd's is several times shallower than Bun's), so the backstop is the compile boundary:
-  // whatever happens, a RangeError never reaches the user.
+  // A STACK the size of a Durable Object's. workerd's is about 5× shallower than Bun's, and a test runner's
+  // can be shallower still — which is how "answers on the dev box, declines on CI" shipped. So the count
+  // under the ceiling must answer with four fifths of THIS runtime's stack already consumed: the root
+  // chain's spine is cut into CTEs (`boundedSpine`), so no walker's depth grows with the count.
+  test('a count under the ceiling answers on a workerd-sized stack', () => {
+    expect(underShallowStack(() => vals('g.V().repeat(__.out().limit(1)).times(1200).count()'))).toEqual([0]);
+    expect(underShallowStack(() => vals("g.V().repeat(__.out().limit(1)).times(1200).values('name')"))).toEqual([]);
+  });
+
+  // With the compiler's stack no longer the limit, the binding limit is the STATEMENT's — a clear decline
+  // naming it, the same on every runtime.
+  test('a deep unroll past what SQLite parses declines by the statement limit, not the stack', () => {
+    for (const q of ["g.V().repeat(__.out().order().by('name')).times(1200).count()", 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()'])
+      expect(() => underShallowStack(() => run(store, q))).toThrow(/exceeds a SQLite statement limit/);
+  });
+
+  // A CORRELATED body is not a relation of its own, so its spine is never cut: there the depth stays the
+  // compile boundary's backstop (`tooDeep`) — whatever happens, a RangeError never reaches the user.
   test('a compile that runs out of stack declines', () => {
-    for (const q of ["g.V().repeat(__.out().order().by('name')).times(1200).count()", 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()']) {
+    for (const q of ['g.V().local(__.repeat(__.out().limit(1)).times(1200)).count()', 'g.V().union(__.repeat(__.out().limit(1)).times(1200), __.identity()).count()']) {
       let thrown: unknown;
-      try { run(store, q); } catch (e) { thrown = e; }
+      try { underShallowStack(() => run(store, q)); } catch (e) { thrown = e; }
       if (thrown !== undefined) expect(thrown).toBeInstanceOf(UnsupportedTraversal);
     }
   });
 });
+
+// A CUT SPINE ANSWERS WHAT THE UNCUT ONE DID. Over a 40-vertex ring (`next` to i+1, `jump` to i+3) a long
+// unroll actually carries rows through every cut, so a row lost or doubled at a CTE boundary shows — and a
+// collection registered before a cut and read after it, or a label bound before one and selected after,
+// crosses it the way a shared node does (`name` names the cut pieces and the result as one program).
+describe('a long unrolled chain cut into CTEs', () => {
+  const N = 40;
+  const ring = storeSeededWith([
+    ...Array.from({ length: N }, (_, i) => `g.addV('n').property('i', ${i})`),
+    ...Array.from({ length: N }, (_, i) => `g.V().has('i', ${i}).addE('next').to(__.V().has('i', ${(i + 1) % N}))`),
+    ...Array.from({ length: N }, (_, i) => `g.V().has('i', ${i}).addE('jump').to(__.V().has('i', ${(i + 3) % N}))`),
+  ]);
+  const on = (q: string) => (run(ring, q) as any[]).map((r) => r.v);
+
+  test.each([
+    ["g.V().has('i', 0).repeat(__.out('next').limit(1)).times(300).values('i')", [300 % N]],
+    ["g.V().has('i', 0).repeat(__.out('next').limit(1)).times(150).as('a').repeat(__.out('next').limit(1)).times(150).select('a').values('i')", [150 % N]],
+    ["g.V().has('i', 0).repeat(__.out('next').limit(1)).times(100).aggregate('x').repeat(__.out('next').limit(1)).times(200).cap('x').unfold().values('i')", [100 % N]],
+    // Each phase keeps the two lowest-`i` targets of the whole frontier — computed here phase by phase.
+    ["g.V().repeat(__.out().order().by('i').limit(2)).times(60).values('i')", lowestTwoAfter(60, N)],
+    ["g.V().has('i', 0).repeat(__.out('jump').limit(1)).times(400).groupCount().by('i').select(values).unfold()", [1]],
+  ] as const)('%s', (q, expected) => {
+    expect(bagOf(on(q))).toEqual([...expected]);
+  });
+
+  test('the cut is a plain CTE: one statement, no bind, no fence', () => {
+    const { sql, binds } = compile("g.V().has('i', 0).repeat(__.out('next').limit(1)).times(300).values('i')", {}) as any;
+    expect(sql).toMatch(/^WITH /);
+    expect(sql).not.toMatch(/MATERIALIZED/);
+    expect(binds).toEqual([]);
+  });
+});
+
+/** `V().repeat(out().order().by('i').limit(2)).times(n)` over the ring, by hand: each phase moves every
+ *  traverser along both its edges and keeps the two lowest targets. */
+function lowestTwoAfter(n: number, size: number): number[] {
+  let frontier = Array.from({ length: size }, (_, i) => i);
+  for (let k = 0; k < n; k++)
+    frontier = frontier.flatMap((i) => [(i + 1) % size, (i + 3) % size]).sort((a, b) => a - b).slice(0, 2);
+  return frontier;
+}
+
+/** Run `go` with four fifths of this runtime's JS stack already consumed — a workerd-sized stack. The
+ *  capacity is measured in the very frames that consume it, so the margin is relative whatever the host. */
+function underShallowStack<T>(go: () => T): T {
+  const fits = (n: number): boolean => { try { burn(n, () => 0); return true; } catch { return false; } };
+  let lo = 0, hi = 1 << 22;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (fits(mid)) lo = mid; else hi = mid - 1; }
+  return burn(Math.floor(lo * 0.8), go);
+}
+/** `n` stack frames, then `go`. The result is held in an array so no engine turns it into a tail call
+ *  (JavaScriptCore implements proper tail calls, which would consume nothing). */
+function burn<T>(n: number, go: () => T): T {
+  if (n === 0) return go();
+  const kept = [burn(n - 1, go)];
+  return kept[0]!;
+}

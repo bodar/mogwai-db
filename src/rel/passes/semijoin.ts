@@ -83,9 +83,16 @@ export type OwnerSeek = (term: Expr, element: RelId, elementTable: Table, mint: 
  * access paths are OFFERED, never whether the plan exists.
  */
 export function semijoin(plan: Rel, strategies: readonly OwnerSeek[]): Rel {
-  if (strategies.length === 0) return plan;
-  const mint = minter(plan);
-  return rewrite(plan, (mapped) => (mapped.kind === 'filter' ? semijoinFilter(mapped, strategies, mint) : mapped));
+  return semijoinAll([plan], strategies)[0]!;
+}
+
+/** `semijoin` over a PROGRAM's relations — its bindings' nodes, then its result — as one plan: fresh
+ *  names minted against all of them, and one rewrite memo, so a node two roots share stays one node. */
+export function semijoinAll(plans: readonly Rel[], strategies: readonly OwnerSeek[]): readonly Rel[] {
+  if (strategies.length === 0) return plans;
+  const mint = minter(...plans);
+  const memo = new Map<Rel, Rel>();
+  return plans.map((plan) => rewrite(plan, (mapped) => (mapped.kind === 'filter' ? semijoinFilter(mapped, strategies, mint) : mapped), memo));
 }
 
 /**

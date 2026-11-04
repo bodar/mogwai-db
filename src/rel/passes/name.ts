@@ -22,8 +22,16 @@ import { exprRels, forEachExpr, isSelfContained, relChildren, relExprs, rewriteR
  * `g.V().both().addV('x')`). Drawing binding names from the same per-compile minter as `Rel` ids also
  * means a CTE name can never equal a relation alias. The `taken` loop below still guards the names this
  * pass did NOT mint — an explicit `Materialize` name and a `Recursive`'s CTE name.
+ *
+ * `hoisted` are relations the LOWERING already bound (`boundedSpine`, `src/compiler/rel/lower.ts`: a long
+ * chain's spine cut into CTEs so no walker recurses deeper than a bound), each read by a `Ref` from the
+ * next. They are roots of the same program, so they are named as ONE plan with `root`: a node two of them
+ * share is counted across all of them and bound once, and a hoisted node reached again by identity reads
+ * its own binding rather than being spelled a second time. A hoisted binding is never inlined back — it
+ * is a root, and the depth bound is the reason it exists.
  */
-export function name(root: Rel, mint: () => string): Plan {
+export function name(root: Rel, mint: () => string, hoisted: readonly { readonly name: string; readonly node: Rel }[] = []): Plan {
+  const roots = [...hoisted.map((binding) => binding.node), root];
   const counts = new Map<Rel, number>();
   const visit = (rel: Rel): void => {
     const seen = (counts.get(rel) ?? 0) + 1;
@@ -38,12 +46,13 @@ export function name(root: Rel, mint: () => string): Plan {
     relExprs(rel).forEach((e) => forEachExpr(e, (node) => exprRels(node).forEach(visit)));
     relChildren(rel).forEach(visit);
   };
-  visit(root);
+  roots.forEach(visit);
 
   // An explicit Materialize name is the caller's, and a Recursive's name is its CTE's — the walk's
-  // own term refers to it — so generated names must not collide with either.
-  const taken = new Set([...counts.keys()].flatMap((rel) =>
-    ((rel.kind === 'materialize' && rel.name) || rel.kind === 'recursive' ? [rel.name] : [])));
+  // own term refers to it — so generated names must not collide with either, nor with a hoisted one.
+  const taken = new Set([...[...counts.keys()].flatMap((rel) =>
+    ((rel.kind === 'materialize' && rel.name) || rel.kind === 'recursive' ? [rel.name] : [])),
+  ...hoisted.map((binding) => binding.name)]);
   const generate = (): string => {
     let candidate = mint();
     while (taken.has(candidate)) candidate = mint();
@@ -72,14 +81,17 @@ export function name(root: Rel, mint: () => string): Plan {
    * node: it binds its own name, so moving it moves the definition too. `containsSelfRef` made every
    * walk unbindable — a walk always holds its own reference — so a SHARED walk lost its CTE and was
    * spelled, and computed, once per occurrence (`hasFreeSelfRef` carries the measurement). */
+  const isRoot = new Set(roots);
   const binds = (rel: Rel): boolean =>
-    rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
+    !isRoot.has(rel) && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
     && isSelfContained(rel);
 
   const bindings: Binding[] = [];
-  // Bottom-up and memoised, so a binding is pushed after every binding it depends on, and the
-  // second occurrence of a shared node gets the SAME `Ref` — the ordering `checkPlan` then proves.
-  const result = rewriteRels(root, (mapped, original) => {
+  // Bottom-up and memoised — ONE memo across every root — so a binding is pushed after every binding it
+  // depends on, and the second occurrence of a shared node gets the SAME `Ref`: the ordering `checkPlan`
+  // then proves.
+  const memo = new Map<Rel, Rel>();
+  const rewriteRoot = (from: Rel): Rel => rewriteRels(from, (mapped, original) => {
     if (!binds(original)) return mapped;
     // A Recursive binds under its OWN name rather than a generated one: its term already refers to
     // that name, so a second name would need the definition rewritten to match.
@@ -88,6 +100,11 @@ export function name(root: Rel, mint: () => string): Plan {
     const bound = declared ?? generate();
     bindings.push({ name: bound, node: mapped });
     return ref({ id: original.id, name: bound, channels: mapped.channels, type: mapped.type });
-  });
-  return plan({ bindings, result });
+  }, memo);
+  for (const binding of hoisted) {
+    const node = rewriteRoot(binding.node);
+    bindings.push({ name: binding.name, node });
+    memo.set(binding.node, ref({ id: binding.node.id, name: binding.name, channels: node.channels, type: node.type }));
+  }
+  return plan({ bindings, result: rewriteRoot(root) });
 }
