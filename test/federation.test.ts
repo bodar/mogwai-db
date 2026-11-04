@@ -190,8 +190,8 @@ describe('federate — arg-less pushdown (win 2a)', () => {
   });
 
   test('an EMPTY value stream is NO traversers; an EMPTY fold is ONE empty list', async () => {
-    // A value STREAM over no elements yields nothing (`Values` refuses the empty relation → a Filter(false),
-    // the same empty spelling the scalar resume takes). A `fold()` over no elements is still ONE traverser,
+    // A value STREAM over no elements yields nothing (`json_each('[]')` is the zero-row relation, the same
+    // as an empty element landing). A `fold()` over no elements is still ONE traverser,
     // the empty list — the fold's own identity, unchanged by federation.
     const emptyStream = await Promise.all((await mgr.executor('home').framedAsync(argless('.V().hasLabel("nope").values("name")'), {})).map(dec));
     expect(emptyStream).toEqual([]);

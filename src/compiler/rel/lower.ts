@@ -61,7 +61,7 @@ import { Declines } from '../unsupported.ts';
 import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
-import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
+import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignNodeStream, foreignRejoin, landForeignRows, landedCols, landedStream, PARENT_COL, parentsRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
@@ -4557,10 +4557,10 @@ export function lowerForeignResume(
 }
 
 /** A resumed `typedNode` relation — values that already crossed back, so no chain, no passes and no
- * `lowered()` — named and RENDERED ONCE like every other lowering. Its literals inline, so it binds
- * nothing and has no budget to decide — and it charges no `CompileBudget` either: those literals are the
- * resumed DATA, so its text grows with the rows that crossed back, and a refusal on it would be a refusal
- * on data size. */
+ * `lowered()` — named and RENDERED ONCE like every other lowering. A scalar/combine resume inlines its ONE
+ * value; a value STREAM crosses as one JSON bind (`foreignNodeStream`), so the text stays O(plan) either
+ * way. It charges no `CompileBudget`: what it carries is the resumed DATA, and a refusal on it would be a
+ * refusal on data size. */
 const typedNodeLowering = (rel: Rel, fresh: Minter): RelLowering => {
   const plan = nameBindings(rel, () => fresh('r'));
   return { plan, shape: { kind: 'typedNode' }, rendered: renderLowered(plan) };
@@ -4606,38 +4606,43 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
  * THE VALUE-STREAM RESUME — a pushed-down federate terminal that produced a STREAM of values
  * (`values(k)`, `unfold()`, a `cap('a')`/`fold()` list), not a single reduced scalar. The whole tail ran
  * on the SIBLING (the pushable prefix is MAXIMAL, so a value terminal pushes its own downstream too), so
- * this is a pure framing of the N values that crossed back — the exact `lowerScalarResume` mechanism one
- * cardinality up: each `{t,v}` node is one `Values` row in `NODE_COL`, framed by the ONE `typedNode` rule
- * (`frameTypedNode`), so every member keeps its own Gremlin type — a scalar leaf, a detached vertex/edge
- * (a pushed `fold()` of elements), a nested list/map, each by its own tag. It is the value-stream twin of
- * `lowerForeignResume` (which lands ELEMENT rows) sharing `lowerScalarResume`'s framing rather than the
- * `valueResume`/`scalarTail` substrate, because there is NO local suffix to continue: a maximal prefix
- * leaves the sibling's values AS the result. An EMPTY stream frames as no traversers (`Values` refuses the
- * empty relation, so a `Filter(false)` stands in — the same spelling `lowerScalarResume` uses for the
- * empty aggregate).
+ * this is a pure framing of the N values that crossed back: each `{t,v}` node is one `NODE_COL` row,
+ * framed by the ONE `typedNode` rule (`frameTypedNode`), so every member keeps its own Gremlin type — a
+ * scalar leaf, a detached vertex/edge (a pushed `fold()` of elements), a nested list/map, each by its own
+ * tag. There is NO local suffix to continue: a maximal prefix leaves the sibling's values AS the result.
+ *
+ * The nodes LAND exactly as an element stream does (`foreignNodeStream`, beside `foreignRelation`): ONE
+ * JSON bind exploded by `json_each`, never one inlined row per value — the returned set is DATA-sized, so
+ * a statement that grew with it passed every Bun test and hit the DO's 100 KB text wall at a few thousand
+ * names. An empty stream is the zero-row relation.
+ *
+ * The ORDER is the sibling's EMISSION order (`ord`, the array index), pinned by an `ORDER BY` rather
+ * than left to the scan: a pushed `order().by(…).values(k)` asked for it, and a landed stream's index is
+ * the only order it can carry.
  */
 export function lowerTypedNodeStream(nodes: readonly FrameNode[], parents?: number): RelLowering {
   const fresh = minter();
-  const type = typeOf(meta(NODE_COL, 'json', true));
-  // `Values` REFUSES an empty relation (`checkValuesShape`), so an empty stream is a one-row `Values`
-  // FILTERED to nothing — the same honest `Filter(false)` `lowerScalarResume` uses for the empty aggregate
-  // (§3.3). A non-empty stream is one `Values` row per node.
-  const rowsOf = (ns: readonly FrameNode[]): (readonly Expr[])[] => ns.map((node) => [jsonOf(compilerText(stringifyExact(node)))]);
-  const one = make.values({ id: fresh('tnv'), channels: [], type, rows: nodes.length > 0 ? rowsOf(nodes) : [[jsonOf(compilerText('null'))]] });
+  const pool = foreignNodeStream(nodes, fresh);
   // MID-TRAVERSAL CONSTANT SCATTER: a `V().call(federate, <constant sub>)` runs the sibling ONCE and each
   // of the P parents re-emits the WHOLE pool — the value-stream analogue of the element rejoin's CROSS join
-  // (`foreignRejoin`, no injection). `parents` is the parent count; the pool CROSS-joins a P-row relation so
-  // the result is P×N traversers, exactly `call()`'s flatMap shape. `undefined` = the source form (one
-  // emission, no parents). P=0 (no parents) or an empty pool both yield no traversers.
-  const scattered = parents === undefined ? one
-    : parents === 0 ? make.filter({ id: fresh('tnp'), input: one, channels: [], type, pred: CONSTANT.false })
+  // (`foreignRejoin`, no injection), over the same one-bind parent relation, so the result is P×N
+  // traversers, exactly `call()`'s flatMap shape, each parent's pool in emission order. `undefined` = the
+  // source form (one emission, no parents); one parent takes the pool unchanged; P=0 crosses the
+  // zero-row parent relation and yields nothing.
+  const scattered = parents === undefined || parents === 1 ? { rel: pool, order: [col(pool.id, FOREIGN_ORD)] }
     : (() => {
-      // A P-row parent relation (index 0..P-1), crossed with the pool. The indices are a compile-time set
-      // (P is known), so they inline as a `Values` relation rather than a data bind.
-      const parentRows = make.values({ id: fresh('tnpr'), channels: [], type: typeOf(meta('p', 'int')), rows: Array.from({ length: parents }, (_, i) => [compilerInt(i)] as const) });
-      return make.join({ id: fresh('tnj'), left: one, right: parentRows, channels: [], join: 'cross', type: typeOf(meta(NODE_COL, 'json', true), meta('p', 'int')) });
+      const parentRows = parentsRelation(parents, fresh, 'int');
+      const joined = make.join({ id: fresh('tnj'), left: pool, right: parentRows, channels: [], join: 'cross', type: typeOf(...pool.type.cols, ...parentRows.type.cols) });
+      return { rel: joined as Rel, order: [col(joined.id, PARENT_COL), col(joined.id, FOREIGN_ORD)] };
     })();
-  const rel = nodes.length > 0 ? scattered : make.filter({ id: fresh('tnf'), input: one, channels: [], type, pred: CONSTANT.false });
+  const ordered = make.sort({
+    id: fresh('tns'), input: scattered.rel, channels: [], type: scattered.rel.type,
+    terms: scattered.order.map((expr) => ({ expr, dir: 'asc' as const })),
+  });
+  const rel = make.project({
+    id: fresh('tnr'), input: ordered, channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
+    exprs: [[NODE_COL, col(ordered.id, NODE_COL)]],
+  });
   return typedNodeLowering(rel, fresh);
 }
 

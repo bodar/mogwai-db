@@ -5,8 +5,9 @@ import type { ColMeta } from '../../rel/types.ts';
 import { type Binding } from '../../rel/plan.ts';
 import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
-import type { ValueNode } from '../../gremlin/types.ts';
-import { meta, typeOf, type Minter } from './build.ts';
+import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
+import { jsonOf, meta, typeOf, type Minter } from './build.ts';
+import { NODE_COL } from './list.ts';
 import { stringifyExact } from '../../json-exact.ts';
 
 // ---------- DETACHED elements — a barrier call()'s awaited rows, as a relation ----------
@@ -131,15 +132,11 @@ const nodeField = (node: Expr, field: string): Expr =>
 /** The standard mapValues parent IDs are map keys, not a hidden transport channel. Joining the
  * per-entry rows to this parent relation preserves two equal values under two different keys. */
 export function foreignMapRejoin(pool: Rel, elem: Elem, parentCount: number, fresh: Minter): Rel {
-  const parents = make.explode({
-    id: fresh('fmd'), channels: [],
-    expr: lit(JSON.stringify(Array.from({ length: parentCount }, (_, parentId) => String(parentId))), 'text'),
-    as: { value: 'fmdv' }, type: typeOf(meta('fmdv', 'text')),
-  });
+  const parents = parentsRelation(parentCount, fresh, 'text');
   const joined = make.join({
     id: fresh('fmj'), left: pool, right: parents, channels: [],
-    join: 'inner', type: typeOf(...pool.type.cols, meta('fmdv', 'text')),
-    on: { kind: 'binary', op: '=', left: col(pool.id, 'parentId'), right: col(parents.id, 'fmdv') },
+    join: 'inner', type: typeOf(...pool.type.cols, ...parents.type.cols),
+    on: { kind: 'binary', op: '=', left: col(pool.id, 'parentId'), right: col(parents.id, PARENT.value) },
   });
   const payload = foreignPayloadCols(elem);
   return make.project({
@@ -156,6 +153,49 @@ export const FOREIGN_ORD = CELL.ord;
 const cellAt = (row: Expr, at: number): Expr =>
   ({ kind: 'call', fn: 'json_extract', args: [row, compilerText(`$[${at}]`)] });
 
+/** The exploded parent relation's column — one row per parent index. */
+const PARENT = { value: 'fdv' } as const;
+
+/**
+ * THE PARENTS a batched barrier answers for, as a relation: one row per parent index `0..P-1`, under
+ * the same one-bind rule the pool lands under (a parent set is data-sized — a `V().call(federate, …)`
+ * over 5,000 parents is 5,000 rows, so a `VALUES` list or an IN-list would grow the statement text with
+ * the graph). `as` is the index's spelling: `'int'` for a pure CROSS scatter (`foreignRejoin`,
+ * `lowerTypedNodeStream`), `'text'` where it equi-joins a standard `mapValues` map KEY, which is the
+ * parent id as a string (`foreignMapRejoin`). P=0 is the zero-row relation — no branch.
+ */
+export function parentsRelation(parentCount: number, fresh: Minter, as: 'int' | 'text'): Rel {
+  const indices = Array.from({ length: parentCount }, (_, parentId) => as === 'text' ? String(parentId) : parentId);
+  return make.explode({
+    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify(indices), 'text'), as: { value: PARENT.value },
+    type: typeOf(meta(PARENT.value, as)),
+  });
+}
+
+/** The parent-index column a `parentsRelation` row carries — the scatter's per-parent ORDER key. */
+export const PARENT_COL = PARENT.value;
+
+/**
+ * LAND a pushed-down VALUE STREAM — the `{t,v}` nodes a sibling's `values(k)`/`unfold()`/`fold()`/`cap()`
+ * terminal returned — as a relation of `NODE_COL` rows plus the `ord` emission order: the value-stream
+ * twin of `foreignRelation`, by the SAME mechanism. The nodes cross as ONE JSON bind, exploded by
+ * `json_each`, so a 5,000-value stream costs one of the 100 parameters and the statement text is the
+ * same bytes as a 10-value stream's (it was one inlined `VALUES` row per node — 200 KB of text at 5,000
+ * names, refused only on a DO). `stringifyExact` is the writer, so a member's `±Infinity`/bigint lands
+ * exactly as before; `json()` hands the framer the member's JSON text. An empty stream is the zero-row
+ * relation — no `Filter(false)` stand-in.
+ */
+export function foreignNodeStream(nodes: readonly FrameNode[], fresh: Minter): Rel {
+  const exploded = make.explode({
+    id: fresh('fnx'), channels: [], expr: lit(stringifyExact(nodes), 'text'), as: { value: CELL.value, ord: CELL.ord },
+    type: typeOf(meta(CELL.value, 'any', true), meta(CELL.ord, 'int')),
+  });
+  return make.project({
+    id: fresh('fnp'), input: exploded, channels: [], type: typeOf(meta(NODE_COL, 'json', true), meta(CELL.ord, 'int')),
+    exprs: [[NODE_COL, jsonOf(col(exploded.id, CELL.value))], [CELL.ord, col(exploded.id, CELL.ord)]],
+  });
+}
+
 /**
  * SCATTER a batched barrier's pooled results back over the parents that asked for them.
  *
@@ -163,20 +203,16 @@ const cellAt = (row: Expr, at: number): Expr =>
  * ordinary CROSS join. `parentCount` supplies that parent relation.
  */
 export function foreignRejoin(pool: Rel, elem: Elem, parentCount: number, fresh: Minter): Rel {
-  // ONE parent per row, the same one-bind rule the pool itself lands under: a parent set is data-sized.
-  const parents = make.explode({
-    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify(Array.from({ length: parentCount }, (_, parentId) => parentId)), 'text'), as: { value: 'fdv' },
-    type: typeOf(meta('fdv', 'int')),
-  });
-  const payload = foreignPayloadCols(elem);
   // A single parent takes the pool unchanged — the join would multiply by one, and
   // skipping it keeps the ordinary one-parent federate plan as small as it was.
   if (parentCount <= 1) return pool;
+  const parents = parentsRelation(parentCount, fresh, 'int');
   const joined = make.join({
     id: fresh('fgj'), left: pool, right: parents, channels: [],
     join: 'cross',
-    type: typeOf(...pool.type.cols, meta('fdv', 'int')),
+    type: typeOf(...pool.type.cols, ...parents.type.cols),
   });
+  const payload = foreignPayloadCols(elem);
   return make.project({
     id: fresh('fgr'), input: joined, channels: [], type: typeOf(...payload),
     exprs: payload.map((column) => [column.name, col(joined.id, column.name)] as const),
