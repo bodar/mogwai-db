@@ -482,7 +482,7 @@ Beside the RelIR substrate:
   combine/product/merge(…)` over a list-valued property: collection rows take the set op, a null or
   non-collection row raises the reference text. Its two review blockers (a false "encountered object"
   operand raise, a 53× quadratic member test) are fixed on trunk by the prerequisite
-  **setop-operand-relation** — LANDED: the operand is one fenced MATERIALIZED relation the membership
+  **setop-operand-relation** — LANDED (b15c9897; nothing remains of it): the operand is one fenced MATERIALIZED relation the membership
   semi/anti-joins through an automatic index (`listSetOp`), a per-row-typed operand is decided on its first
   result (`perRowOperand`), and `operandForm`/`operandClass` are the one classifier `mapMerge` shares. The
   branch must drop its own operand classifier (`listValuedOperand`) for those on rebase. Then re-land it with: one bound
