@@ -491,10 +491,11 @@ Beside the RelIR substrate:
      (≈4× for 8× rows) and the two numberings agree on one scan, but it is an expression computed twice and
      a correlation between two independently minted origins; find which tree rewrite does not reach the probe's
      subplan (`src/rel/passes/prune.ts` DAG pruning is the first suspect) and make it one relation.
-  2. **branch-step-options — LANDED, residue only.** `branch(<traversal>).option(…)` is `chooseOptions` under
-     `MatchPolicy` (`src/compiler/ir/option-map.ts`); `choose()` raises the reference text for a traversal key,
+  2. **branch-step-options — LANDED (df99c592 + f1e9199a, L3 2010 → 2018); nothing branch-specific remains.**
+     `branch(<traversal>).option(…)` is `chooseOptions` under `MatchPolicy` (`src/compiler/ir/option-map.ts`); `choose()` raises the reference text for a traversal key,
      `Pick.any` and a traversal-bearing `P` (`verifyChooseOptionKeys`). L4
-     `test/L4-addendum/branch-keyed-options.feature`. Still declining, shared with keyed `choose`: either form
+     `test/L4-addendum/branch-keyed-options.feature`; a one-option writing `branch()` threads its effects, a
+     reducing writing option declines. Still declining, NOT branch-specific (shared with keyed `choose`): either form
      under a CORRELATED child (`where(branch(…))`, `by(branch(…).fold())`, a `repeat` body) — the choice and
      the per-key flags are `Materialize` fences, which a correlated subquery cannot host; an ordering/text key
      over an ELEMENT choice (`elementPredicate` answers only the equality family).
