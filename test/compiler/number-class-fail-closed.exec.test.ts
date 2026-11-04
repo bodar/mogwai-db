@@ -43,10 +43,13 @@ describe('ORDERABILITY classifies or declines, never ties', () => {
     expect([...(map as Map<unknown, unknown>).keys()]).toEqual([27, 29, 32, 35, 'lop', 'ripple']);
   });
 
-  test('tokens order by their enum: Direction before T, T by declaration (label, id)', async () => {
+  // A token is a String-rung member ordered by its name (`orderability.ts` `kindOf`; the corpus's
+  // `g_VX1X_elementMap_orderXlocalX_byXkeys_ascXunfold`), not by Java's enum class — so plain code point
+  // order, upper-case `Direction` names first. More in `token-order.exec.test.ts`.
+  test('tokens order by their name, interleaved with String keys', async () => {
     const [[map]] = await typed('g.E(7).elementMap().order(local).by(keys)');
     expect([...(map as Map<any, unknown>).keys()].map((k) => (typeof k === 'string' ? k : k.elementName)))
-      .toEqual(['weight', 'OUT', 'IN', 'label', 'id']);
+      .toEqual(['IN', 'OUT', 'id', 'label', 'weight']);
   });
 
   test('an unclassifiable member declines rather than tying', () => {

@@ -55,7 +55,6 @@ export const REASONS = {
   'oncreate-override': { kind: 'divergence', why: 'an onCreate map that changes a merge key is refused when the query compiles (eager error timing), though here the edge exists and onCreate never runs', cite: ['docs/feature-support-matrix.md', '| Error timing |'] },
   // ── defect ──
   'multilabel-edge-label': { kind: 'defect', why: '`with(\'multilabel\')` frames an edge\'s own label as a String, not a Set', cite: ['docs/outstanding-work.md', '(l3-multilabel-edge-label)'] },
-  't-token-order': { kind: 'defect', why: '`order(local).by(keys)` sorts `T.id`/`T.label` keys after every String instead of by name', cite: ['docs/outstanding-work.md', '(l3-t-token-order)'] },
   'map-merge': { kind: 'defect', why: 'a `merge()` over an incoming Map raises a type error instead of merging', cite: ['docs/outstanding-work.md', '(l3-map-merge)'] },
   // ── decline ──
   'subgraph-strategy': { kind: 'decline', why: '`SubgraphStrategy` with a `vertexProperties` criterion', cite: ['docs/outstanding-work.md', '`SubgraphStrategy(vertexProperties:)`'] },
@@ -131,10 +130,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
   ],
   'multilabel-edge-label': [
     'g_withXmultilabelX_E_elementMap',
-  ],
-  't-token-order': [
-    'g_VX1X_elementMap_orderXlocalX_byXkeys_ascXunfold',
-    'g_VX1X_elementMap_orderXlocalX_byXkeys_descXunfold',
   ],
   'map-merge': [
     'g_V_asXnameX_projectXnameX_byXnameX_mergeXother_blueprintX',

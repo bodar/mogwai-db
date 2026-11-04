@@ -97,9 +97,6 @@ refusal comes first: it is a production outage.
   fix deletes its names there.
   - **`with('multilabel')` frames an edge's own label as a String (l3-multilabel-edge-label)** —
     `E().elementMap()` gives its endpoints' labels as Sets but its own as a String. 1.
-  - **`order(local).by(keys)` sorts `T` keys after every String (l3-t-token-order)** —
-    `V(1).elementMap().order(local).by(keys, desc)` gives `id, label, name, age`; the reference orders a
-    `T` key by its name (`name, label, id, age`). 2.
   - **`merge()` over an incoming Map raises a type error (l3-map-merge)** —
     `V().has('name','marko').elementMap().merge(__.V().has('name','lop').elementMap())` raises `merge step
     can only take an array or an Iterable type for incoming traversers, encountered map`; the reference

@@ -74,3 +74,38 @@ describe('orderabilityCompare direct', () => {
     expect(orderabilityCompare(99, 'a')).toBeLessThan(0);
   });
 });
+
+describe('T / Direction tokens order on the String rung by NAME', () => {
+  const T = (v: string) => ({ t: 'T', v });
+  const D = (v: string) => ({ t: 'D', v });
+
+  test('a token interleaves with Strings by its name, in code-point order', () => {
+    expect(sorted(['name', T('label'), 'age', T('id')])).toEqual(['age', T('id'), T('label'), 'name']);
+    // `Direction` names are upper case, so they precede every lower-case key — plain code-point order
+    expect(sorted(['weight', T('label'), D('OUT'), T('id'), D('IN')])).toEqual([D('IN'), D('OUT'), T('id'), T('label'), 'weight']);
+  });
+
+  test('a token is still a String-rung member for the ladder (after numbers, before uuids)', () => {
+    expect(sorted([T('id'), 3, null])).toEqual([null, 3, T('id')]);
+  });
+
+  test('equality stays TYPE-SPACED: a token never equals the String spelling its name', () => {
+    expect(orderabilityCompare(T('label'), 'label')).not.toBe(0);
+    expect(orderabilityCompare(T('label'), { t: 'string', v: 'label' })).not.toBe(0);
+    expect(orderabilityCompare(T('label'), T('label'))).toBe(0);
+    expect(dedupLocalValue([T('label'), 'label', T('label'), 'label'])).toEqual([T('label'), 'label']);
+    expect(dedupLocalValue([D('OUT'), T('id'), 'OUT', D('OUT')])).toEqual([D('OUT'), T('id'), 'OUT']);
+  });
+
+  test('a same-spelling tie breaks deterministically — String, then T, then Direction — whatever the input order', () => {
+    expect(sorted([T('x'), D('x'), 'x'])).toEqual(['x', T('x'), D('x')]);
+    expect(sorted([D('x'), 'x', T('x')])).toEqual(['x', T('x'), D('x')]);
+    expect(Math.sign(orderabilityCompare('x', T('x')))).toBe(-Math.sign(orderabilityCompare(T('x'), 'x')));
+  });
+
+  test('a set holding a token is not the set holding its spelling', () => {
+    const set = (...v: unknown[]) => ({ t: 'set', v });
+    expect(orderabilityCompare(set(T('id')), set('id'))).not.toBe(0);
+    expect(orderabilityCompare(set(T('id'), 'a'), set('a', T('id')))).toBe(0);
+  });
+});

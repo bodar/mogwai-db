@@ -61,10 +61,13 @@ function kindOf(v: unknown): Kind {
       if (t === 'datetime') return 'date';
       if (t === 'uuid') return 'uuid';
       if (NUMERIC.has(t)) return 'number';
-      // A `T`/`Direction` TOKEN is a Java enum — none of the ladder's classes, so `Type.Unknown`
-      // (`GremlinValueComparator.java:243-255`, `type()` falls through to `Object.class`).
-      if (t in TOKEN_ORDINALS) return 'unknown';
-      // So is a Binary (a `ByteBuffer`, no rung of its own).
+      // A `T`/`Direction` TOKEN orders on the String rung by its NAME (`id`, `label`, `OUT`, …) — what the
+      // corpus asks for (`vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/map/Order.feature`,
+      // `g_VX1X_elementMap_orderXlocalX_byXkeys_ascXunfold`: `age, id, label, name`) and what the SQL-side
+      // `order().by(keys)` already does with the token's text carrier. Java's own placement (`Type.Unknown`,
+      // then by anonymous enum CLASS NAME) is how it executes, not what the query means — not emulated.
+      if (t in TOKEN_TIE) return 'string';
+      // A Binary (a `ByteBuffer`) has no rung of its own — `Type.Unknown`.
       if (t === 'binary') return 'unknown';
       throw unclassified(`a '${t}' member`);
     }
@@ -75,16 +78,15 @@ function kindOf(v: unknown): Kind {
 }
 
 /**
- * The tokens whose `Type.Unknown` order this comparator CAN state, in DECLARATION order — `T` is
- * `label, id, key, value`
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/T.java:36-84`),
- * `Direction` is `OUT, IN, BOTH` (`.../structure/Direction.java:42-56`). Lexical order is NOT that (`id`
- * would sort before `label`); `tokenClass` says how the two enums interleave.
+ * The String rung's TIE-BREAK between same-spelled members of different types: a String, then a `T`
+ * token, then a `Direction`. Ordering is by name, but equality stays TYPE-SPACED — `T.label` is not the
+ * String `'label'` (`GremlinValueComparator.equals` needs one type), so `dedup(Scope.local)` over
+ * `[T.label, 'label']` keeps both, and the sort between them is deterministic. A String/Char is rank 0.
  */
-const TOKEN_ORDINALS: Readonly<Record<string, readonly string[]>> = {
-  T: ['label', 'id', 'key', 'value'],
-  D: ['OUT', 'IN', 'BOTH'],
-};
+const TOKEN_TIE: Readonly<Record<string, number>> = { T: 1, D: 2 };
+
+const tieRank = (member: unknown): number =>
+  member !== null && typeof member === 'object' ? (TOKEN_TIE[(member as { t?: string }).t ?? ''] ?? 0) : 0;
 
 /** The decline for a member ORDERABILITY cannot place on its ladder — an `UnsupportedTraversal`, never a
  *  silent tie (a tie keeps arrival order, which is a plausible WRONG order) and never an invented rung. */
@@ -295,40 +297,18 @@ export function orderabilityCompare(first: unknown, second: unknown): number {
     case 'null': return 0;
     // The whole MEMBER, not its payload — the comparison class lives on the tag.
     case 'number': return cmpNumber(f, s);
-    case 'boolean': case 'date': case 'string': case 'uuid': return cmpNatural(fp, sp);
+    case 'boolean': case 'date': case 'uuid': return cmpNatural(fp, sp);
+    // By text (a token by its name), then type-spaced so only a same-type equal compares 0 (`TOKEN_TIE`).
+    case 'string': return cmpNatural(fp, sp) || tieRank(f) - tieRank(s);
     // An element/property orders by its id — `Comparator.comparing(Element::id, this)`.
     case 'vertex': case 'edge': case 'vertexproperty': case 'property': return orderabilityCompare(fp, sp);
     case 'list': return cmpIterable(fp as unknown[], sp as unknown[]);
     case 'set': case 'map': return cmpUnordered(fp as unknown[], sp as unknown[]);
-    // Unknown: the members `kindOf` lets onto this rung are TOKENS (`tokenClass`) and BINARIES. Classes
-    // order by NAME (`unknownTypeComparator`), so `java.nio.HeapByteBuffer` precedes every token's
-    // `org.apache.…` class; two binaries compare naturally — by their hex carriers, which is unsigned byte
-    // order (`binaryCarrier`; Java's `ByteBuffer.compareTo` is signed, `docs/feature-support-matrix.md` §17).
-    default: {
-      const fb = (f as { t: string }).t === 'binary';
-      const sb = (s as { t: string }).t === 'binary';
-      if (fb || sb) return fb && sb ? cmpNatural(fp, sp) : fb ? -1 : 1;
-      const a = tokenClass(f as { t: string }, fp);
-      const b = tokenClass(s as { t: string }, sp);
-      return a.name < b.name ? -1 : a.name > b.name ? 1 : a.ordinal - b.ordinal;
-    }
+    // Unknown: the only member `kindOf` lets onto this rung is a BINARY, compared by its hex carrier —
+    // unsigned byte order (`binaryCarrier`; Java's `ByteBuffer.compareTo` is signed,
+    // `docs/feature-support-matrix.md` §17).
+    default: return cmpNatural(fp, sp);
   }
-}
-
-/**
- * A token's place under `unknownTypeComparator` (`GremlinValueComparator.java:223-226`): two members of
- * ONE class compare naturally — an enum by ordinal — and two of different classes by CLASS NAME (then
- * `toString`). `Direction`'s constants share its class. `T`'s do NOT: each constant has a body, so each is
- * its own anonymous class `T$1`…`T$4` in declaration order (`T.java:36-84`), which makes the class-name
- * compare agree with the ordinal one. Every `Direction` therefore sorts before every `T`
- * (`…structure.Direction` < `…structure.T$n`). An ordinal it does not know DECLINES.
- */
-function tokenClass(node: { t: string }, value: unknown): { readonly name: string; readonly ordinal: number } {
-  const ordinal = TOKEN_ORDINALS[node.t]!.indexOf(String(value));
-  if (ordinal < 0) throw unclassified(`the token ${node.t}.${String(value)}`);
-  return node.t === 'T'
-    ? { name: `org.apache.tinkerpop.gremlin.structure.T$${ordinal + 1}`, ordinal }
-    : { name: 'org.apache.tinkerpop.gremlin.structure.Direction', ordinal };
 }
 
 /** ORDERABILITY equality — `dedup(Scope.local)`'s member identity (`DedupLocalStep`'s `LinkedHashSet`,
