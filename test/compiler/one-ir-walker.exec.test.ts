@@ -163,6 +163,8 @@ describe('path entries: a map/flatMap identity host is kept where the path is re
     "g.V(1).union(union(map(identity()))).path()",
     "g.V(1).optional(flatMap(identity())).path()",
     "g.V(1).union(local(map(identity()))).path()",
+    // a per-traverser host in a bounded repeat body unrolls to the top-level host (`PER_TRAVERSER_HOSTS`)
+    "g.V(1).repeat(map(identity())).times(1).path()",
   ])('a nested host under a root path read: %s', async (q) => expect((await framed(q)).map((p: any) => p.objects.map((v: any) => v.id))).toEqual([[1, 1]]));
 
   test('a nested host under a root simplePath() is filtered', async () => {
@@ -185,7 +187,6 @@ describe('path entries: a map/flatMap identity host is kept where the path is re
     expect(bagOf(await paths(q))).toEqual(bagOf(expected)));
 
   test.each([
-    "g.V(1).repeat(map(identity())).times(1).path()",
     "g.V(1).coalesce(map(identity())).path()",
   ])('a kept nested host the lowering does not cover declines: %s', (q) => declines(q));
 

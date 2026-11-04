@@ -317,8 +317,9 @@ Beside the RelIR substrate:
     `groupCount()`, `order().by(count(local)|select('a'))`, `aggregate('x').cap('x')`; mixed-element meets
     `union(outE(), out()).is(typeOf(VERTEX))`. A branch mixing a Set arm with a List arm now declines
     (trunk sent the List arm as a Set): a mixed-shape variant has no Set arm.
-  - **`where()` inside a `repeat()` body** — `repeat(out().where(out('worksAt'))).times(2)`, and so
-    `repeat(out().where(identity()))`/`repeat(out().discard())`.
+  - **`discard()` inside a bounded `repeat()` body** — `repeat(out().discard()).times(2)`. (A
+    `where`/`filter`/`not`/`and`/`or`/`local`/`map`/`flatMap` host in a bounded body now unrolls —
+    `PER_TRAVERSER_HOSTS`, `ir/strategies.ts`; a host whose child reads `loops()` still declines.)
   - **Constant filters in non-filter hosts** — `coalesce(__.discard(), …)`, `map(__.discard())`,
     `fold().discard()`, `valueMap()/elementMap()/path()` + `where(identity())`; `g.V().discard().sum()`
     declines while `values('age').discard().sum()` answers `[]`.

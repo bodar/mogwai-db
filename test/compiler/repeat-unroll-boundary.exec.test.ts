@@ -91,6 +91,88 @@ describe('the repeat() unroll boundary', () => {
     for (const [rolled, written] of pairs) expect(vals(rolled)).toEqual(vals(written));
   });
 
+  test('tail/skip/sample and the per-traverser hosts unroll to EXACTLY the hand-written phases', () => {
+    // SQL IDENTITY, not just an equal answer: the unroll's whole claim is that it emits the top-level
+    // chain a user could have written, so the two spellings must compile to the same statement. (Each
+    // pair is also run, so the identity is not vacuously between two plans that both fail.)
+    const sqlOf = (q: string): string => {
+      const plan = compile(q, {});
+      if (!('sql' in plan)) throw new Error(`expected a read plan: ${q}`);
+      return plan.sql;
+    };
+    const rows = (q: string) => JSON.stringify(run(store, q));
+    const pairs: readonly [string, string][] = [
+      // THE SLICE FAMILY widened: `tail` drains per iteration, `skip` is `range(k,-1)`'s per-loop counter.
+      ["g.V().repeat(__.both().order().by('name').tail(2)).times(2).values('name')",
+        "g.V().both().order().by('name').tail(2).both().order().by('name').tail(2).values('name')"],
+      ["g.V().repeat(__.both().order().by('name').skip(3)).times(2).values('name')",
+        "g.V().both().order().by('name').skip(3).both().order().by('name').skip(3).values('name')"],
+      ["g.V().repeat(__.outE().order().by('weight').tail(2).inV()).times(2).values('name')",
+        "g.V().outE().order().by('weight').tail(2).inV().outE().order().by('weight').tail(2).inV().values('name')"],
+      // `sample` — its pick is implementation-defined, identically in both spellings.
+      ['g.V().repeat(__.both().sample(1)).times(2).count()', 'g.V().both().sample(1).both().sample(1).count()'],
+      // …and in the EMIT regime, where each level is an independent UNION arm.
+      ["g.V().emit().repeat(__.out().order().by('name').tail(1)).times(2).values('name')",
+        "g.V().union(__.identity(), __.out().order().by('name').tail(1), __.out().order().by('name').tail(1).out().order().by('name').tail(1)).values('name')"],
+      // THE PER-TRAVERSER HOSTS — their children are reset per traverser, so nothing carries.
+      ["g.V().repeat(__.local(__.both().order().by('name').tail(1))).times(2).values('name')",
+        "g.V().local(__.both().order().by('name').tail(1)).local(__.both().order().by('name').tail(1)).values('name')"],
+      ["g.V().repeat(__.local(__.both().simplePath().order().by('name').tail(1))).times(2).path()",
+        "g.V().local(__.both().simplePath().order().by('name').tail(1)).local(__.both().simplePath().order().by('name').tail(1)).path()"],
+      ["g.V().repeat(__.both().not(__.hasLabel('software'))).times(2).count()",
+        "g.V().both().not(__.hasLabel('software')).both().not(__.hasLabel('software')).count()"],
+      ['g.V().repeat(__.both().where(__.out())).times(2).count()', 'g.V().both().where(__.out()).both().where(__.out()).count()'],
+      ['g.V().repeat(__.both().filter(__.in())).times(2).count()', 'g.V().both().filter(__.in()).both().filter(__.in()).count()'],
+      ['g.V().repeat(__.both().or(__.out(), __.in())).times(2).count()', 'g.V().both().or(__.out(), __.in()).both().or(__.out(), __.in()).count()'],
+      ['g.V().repeat(__.flatMap(__.out())).times(2).count()', 'g.V().flatMap(__.out()).flatMap(__.out()).count()'],
+      ["g.V().as('a').repeat(__.both().where(P.neq('a'))).times(2).count()", "g.V().as('a').both().where(P.neq('a')).both().where(P.neq('a')).count()"],
+      // A host's dedup is reset PER TRAVERSER, so it is exact at n ≥ 2 — unlike a bare body dedup.
+      ['g.V().repeat(__.local(__.both().dedup())).times(3).count()',
+        'g.V().local(__.both().dedup()).local(__.both().dedup()).local(__.both().dedup()).count()'],
+      ['g.V().repeat(__.both().where(__.both().dedup().limit(2).count().is(2))).times(2).count()',
+        'g.V().both().where(__.both().dedup().limit(2).count().is(2)).both().where(__.both().dedup().limit(2).count().is(2)).count()'],
+      // At DEPTH: the repeat itself inside a union arm, a local, a where.
+      ["g.V().union(__.repeat(__.local(__.out().order().by('name').tail(1))).times(2), __.identity()).count()",
+        "g.V().union(__.local(__.out().order().by('name').tail(1)).local(__.out().order().by('name').tail(1)), __.identity()).count()"],
+      ["g.V().local(__.repeat(__.both().order().by('name').tail(1)).times(2)).values('name')",
+        "g.V().local(__.both().order().by('name').tail(1).both().order().by('name').tail(1)).values('name')"],
+    ];
+    for (const [rolled, written] of pairs) {
+      expect(sqlOf(rolled), rolled).toBe(sqlOf(written));
+      expect(rows(rolled), rolled).toBe(rows(written));
+    }
+    // A host dedup at n = 3 really answers (30 → 72), where a bare body dedup at n ≥ 2 is empty.
+    expect(vals('g.V().repeat(__.local(__.both().dedup())).times(3).count()')).toEqual([72]);
+    // The value-preserving exemption still holds with the new slices in it: levels ≥ 2 are empty.
+    expect(vals('g.V().repeat(__.dedup().tail(3)).times(2).count()')).toEqual([0]);
+    expect(vals('g.V().repeat(__.dedup().skip(1).sample(2)).times(2).count()')).toEqual([0]);
+  });
+
+  test('a host is NOT unrolled when its child reads loop state or carries state across iterations', () => {
+    // The host argument is "the child is reset per traverser". It does not cover a child that reads the
+    // LOOP COUNTER (the phases have none), a named repeat, a write or a keyed side effect — nor a branch
+    // step, whose arms are GLOBAL children never reset (a `dedup` in a `union` arm carries its seen-set
+    // across iterations exactly as a bare body dedup does). The `repeat` must SURVIVE normalization —
+    // a downstream throw alone would not distinguish "declined" from "unrolled, then refused".
+    const rolled = (g: string) =>
+      normalize(stepChain(parseGremlin(g), NO_PARAMS), NO_PARAMS, undefined, false).steps.map((s) => s.name);
+    for (const q of [
+      'g.V().repeat(__.local(__.where(__.loops().is(0)).out())).times(2)',
+      'g.V().repeat(__.where(__.out().loops().is(0))).times(2)',
+      'g.V().emit().repeat(__.local(__.out().loops())).times(2)',
+      "g.V().repeat(__.local(__.repeat('a', __.out()).times(1))).times(2)",
+      "g.V().repeat(__.local(__.out().aggregate('x'))).times(2).cap('x')",
+      "g.V().repeat(__.local(__.out().property('k', 1))).times(2)",
+      // a body side effect a host could READ — the host argument says nothing about what phase k sees
+      "g.V().repeat(__.out().aggregate('x').where(__.out())).times(2).cap('x')",
+      // a union-arm dedup at n ≥ 2: a GLOBAL child
+      'g.V().repeat(__.union(__.both().dedup(), __.out())).times(2)',
+    ]) {
+      expect(rolled(q), q).toContain('repeat');
+      expect(() => compile(q, {}), q).toThrow(/not supported/);
+    }
+  });
+
   test('a dedup body past one iteration DECLINES — the seen-set spans iterations, a phase cannot carry it', () => {
     // `DedupGlobalStep.duplicateSet` (vendor/tinkerpop/gremlin-core/.../step/filter/DedupGlobalStep.java:59)
     // is never reset between iterations, unlike `RangeGlobalStep`'s per-loop counters — so iteration

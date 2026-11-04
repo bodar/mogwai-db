@@ -1251,7 +1251,7 @@ export function canonicalizeConnectives(steps: Step[], params: ParamEnv): IRStep
 }
 
 /** The barriers whose per-iteration meaning an UNROLLED phase reproduces exactly, so
- *  `unrollFixedRepeat` may admit them. Deliberately ONE name.
+ *  `unrollFixedRepeat` may admit them — each family under ONE stated argument.
  *
  *  A barrier in a repeat body observes the whole frontier at that iteration — that is the
  *  reference's own behaviour, not our reading of it: `RepeatStep.standardAlgorithm`
@@ -1263,10 +1263,11 @@ export function canonicalizeConnectives(steps: Step[], params: ParamEnv): IRStep
  *  That argument is not uniform across barriers, which is why this set is not
  *  `COLLAPSING_BARRIERS` or `GLOBAL_BARRIER_STEPS`. `dedup` was once argued airtight here ("a
  *  stateless collapse of the set it is handed") — WRONG for n ≥ 2: its seen-set is carried across
- *  iterations (see its entry below), so it is admitted only for a single-iteration body.
- *  `order`/`limit`/`range`/`tail`/`sample` all interact with an emission order the walk does not
- *  have (a recursive CTE cannot window across iterations), and the reducers change the stream's
- *  shape mid-body. **Each additional name needs its own argument and its own pin** — and note that
+ *  iterations (see its entry below), so it is admitted only for a single-iteration body. The
+ *  slices and `order` are per-iteration in the reference and per-PHASE here (the walk could not host
+ *  them — a recursive CTE cannot window across iterations — which is why only the unroll admits them),
+ *  and the bare reducers change the stream's shape mid-body, so they stay out. **Each additional
+ *  family needs its own argument and its own pin** — and note that
  *  TinkerPop's `RepeatUnrollStrategy` admits NO barrier at all, its comment recording
  *  "unintentional traversal semantics changes in the past when allowing a large variety of steps
  *  (especially barriers)". We go further than it deliberately, one name at a time.
@@ -1286,13 +1287,24 @@ const SIDE_EFFECT_FREE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> 
   // different question and not this one's argument.
   dedup: (s) => !(s.args ?? []).length,
   // THE SLICE FAMILY, and one argument covers all of it: phase k's relation IS the frontier at
-  // iteration k, so taking its first `k` rows takes exactly the traversers the interpreter's
-  // per-iteration slice takes. Nothing is carried between invocations, which is the same property
-  // that makes `dedup` airtight. Where no order is pinned the slice is arbitrary — but that is the
-  // TRAVERSAL's nondeterminism (TinkerPop's too) and it is identical in both spellings, which is why
-  // the pins below assert an IDENTITY against the hand-written phases rather than a value.
+  // iteration k, so taking its first `k` (or, for `tail`, last `k`; for `skip`, all but the first `k`)
+  // rows takes exactly the traversers the interpreter's per-iteration slice takes. Nothing is carried
+  // between iterations: `RangeGlobalStep` keys its counters PER LOOP (`isInsideLoop` → `loopCounters`,
+  // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/
+  // filter/RangeGlobalStep.java:171-205 — `skip` is `range(k, -1)`), and `TailGlobalStep` refills its
+  // buffer only once the previous iteration's tail has DRAINED ("most important when part of a repeat
+  // traversal as traversers can be looped back as starts", TailGlobalStep.java:62-66). Where no order
+  // is pinned the slice is arbitrary — but that is the TRAVERSAL's nondeterminism (TinkerPop's too) and
+  // it is identical in both spellings, which is why the pins assert an IDENTITY against the
+  // hand-written phases rather than a value.
   limit: () => true,
   range: () => true,
+  skip: () => true,
+  tail: () => true,
+  // `sample(k)` is a per-iteration COLLECTING barrier over the same frontier: which `k` it picks is
+  // implementation-defined in both spellings alike (the reference's merge keeps the most-looped
+  // traversers, `SampleGlobalStep.java:149-170`, which in a repeat body is every one of the frontier).
+  sample: () => true,
   // A REORDERING of the frontier at that iteration, stateless in the set it is handed for the same
   // reason. Its `by()` rides as an absorbed modulator (see `tryUnroll` — the body is normalized
   // before it is spliced), so `order().by(k)` arrives as ONE step rather than two loose ones. The
@@ -1372,7 +1384,33 @@ function markAtDepth(steps: Step[], params: ParamEnv, matches: (s: Step) => bool
   return (changed ? marked : steps) as IRStep[];
 }
 
-/** A body step an unrolled phase may contain: one of the barriers above, a row-local movement/filter
+/** THE PER-TRAVERSER HOSTS, and ONE argument admits all of them: their children are LOCAL children the
+ *  reference RESETS before each start. `LocalStep` resets its child per traverser (vendor/tinkerpop/
+ *  gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:
+ *  60-75); `map`/`flatMap` (`TraversalMapStep`/`TraversalFlatMapStep`) and the filters `where`/`filter`/
+ *  `not`/`and`/`or` (`WhereTraversalStep`, `TraversalFilterStep`, `NotStep`, `AndStep`/`OrStep`) all run
+ *  their child through `TraversalUtil.applyAll`/`test`, whose `prepare` calls `traversal.reset()` before
+ *  adding the split start (`.../util/TraversalUtil.java:185-191`). So a `dedup`'s seen-set or a slice's
+ *  counter inside one cannot carry from one iteration to the next — it does not even carry from one
+ *  traverser to the next — and splicing the host n times asks exactly the n questions the loop asks.
+ *  That argument fails only where the child reads or writes something that DOES outlive the reset:
+ *  `carriesIterationState`.
+ *
+ *  ⚠️ **The branch steps are deliberately NOT here.** `union`/`choose`/`coalesce`/`optional` arms are
+ *  GLOBAL children, never reset per traverser, so a `dedup` inside an arm carries its seen-set across
+ *  iterations exactly as a bare body `dedup` does — that needs its own argument. */
+const PER_TRAVERSER_HOSTS: ReadonlySet<string> = new Set(['local', 'map', 'flatMap', 'where', 'filter', 'not', 'and', 'or']);
+
+/** What a per-traverser host's child may NOT hold at any depth, because it outlives the reset the host
+ *  argument rests on: the LOOP COUNTER (`loops()`, and a named repeat whose counter `loops("a")` can
+ *  read from anywhere — the phases have no counter to give either), a graph WRITE, and a keyed side
+ *  effect (root-traversal state, `collectsSideEffect`). The last two are not per-traverser at all, and
+ *  an emit unroll's independent arms would re-run them. */
+const carriesIterationState = (s: Step): boolean =>
+  s.name === 'loops' || (s.name === 'repeat' && !!(s as IRStep).loopName)
+  || MUTATING_STEPS.has(s.name) || collectsSideEffect(s as IRStep);
+
+/** A body step an unrolled phase may contain: one of the barriers above, a per-traverser host, a row-local movement/filter
  *  the main chain already lowers, or a barrier `call()` — a service boundary.
  *
  *  **`call` unrolls by the same "phase k IS the frontier at iteration k" argument as the barriers
@@ -1387,8 +1425,9 @@ function markAtDepth(steps: Step[], params: ParamEnv, matches: (s: Step) => bool
  *  never a wrong answer — which is why the admission is safe without resolving the service here (the
  *  unroll pass holds no registry). The EMIT regime declines a `call` body separately: an emitted level
  *  is a UNION arm, and a barrier inside a union arm is the tree-Plan promotion target (§6), not this. */
-const unrollableBodyStep = (s: Step): boolean =>
+const unrollableBodyStep = (s: Step, read: BodyReader): boolean =>
   UNROLLABLE_BARRIERS[s.name]?.(s)
+  || (PER_TRAVERSER_HOSTS.has(s.name) && !someStepDeep([s], read, carriesIterationState, true))
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
   || ROW_FILTERS.has(s.name)
   // `simplePath()`/`cyclicPath()` are PURE PATH FILTERS: a spliced phase checks the whole-path-so-far
@@ -1519,7 +1558,12 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // admitted set — the body's canonicalization is now stated here rather than inherited from where in
   // the pipeline this pass happens to sit.
   const body = childBody(args[0].value.nested, params);
-  if (!body.length || !body.every(unrollableBodyStep)) return null;
+  const read = rawBodies(params);
+  if (!body.length || !body.every((s) => unrollableBodyStep(s, read))) return null;
+  // A body SIDE EFFECT is root state that outlives every iteration, and a per-traverser host's child
+  // could READ it (`aggregate('x').where(within('x'))`) — which the host argument says nothing about.
+  // So the two never meet in one body: decline rather than argue what phase k's read sees.
+  if (body.some((s) => s.name in SIDE_EFFECT_BARRIERS) && body.some((s) => PER_TRAVERSER_HOSTS.has(s.name))) return null;
   // A barrier `call()` unrolls only in the NON-emit regime. `emit` makes each level a UNION-ALL arm
   // (below), and a barrier inside a union arm is the tree-Plan promotion target (§6), not the sequential
   // chaining this slice reuses — so decline it here, fail closed, rather than splice a `call` into an arm
