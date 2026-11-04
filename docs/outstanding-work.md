@@ -131,6 +131,14 @@ item lands with tests that stop it from coming back.
   about 6.7×, because separate passes each re-derive their own fact. Cache per-node facts keyed on node
   identity, which is safe because nodes are immutable. Estimated 2–3×. Pass/ChainFacts boundaries per
   `src/compiler/CLAUDE.md` (`mise run arch`).
+- ✅ **cc-5 compile-work budget LANDED (868afc73, 4ed019ed).** `CompileBudget` (`src/sql/kernel/budget.ts`), one
+  per compile threaded like `Declines`, charges per STATEMENT (unroll estimate, largest Expr tree, spelled size
+  per binding, rendered bytes in `q.ts`; a string constant's payload counts as its quotes) against 400 KB and
+  raises `CompileBudgetExceeded` naming the expansion; `MAX_UNROLLED_STEPS`'s `CF_MAX_SQL_BYTES/40` and the
+  compiler's cf-limits import are gone, statement size is the store's call. A parameterised property write's
+  FTS text now binds (`ftsTextExpr`, `write.ts`). Tests: `test/compiler/compile-budget.test.ts` (corpus peak
+  instrument, 13,658 B), `test/compiler/parameter-size.exec.test.ts`. Remains: nothing (mergeV map-member
+  inlining is nr-param-map-members, §4). Original item text follows.
 - **cc-5 compile-work budget: an ARCHITECTURAL limit, the same on every runtime, deterministic.** After cc-1..4,
   replace `MAX_UNROLLED_STEPS = CF_MAX_SQL_BYTES / 40` (`ir/strategies.ts`). That ceiling assumes 40 bytes a
   step when a step costs up to 390, so `times(800)` compiles for 0.6 s and then fails at the store anyway. The
