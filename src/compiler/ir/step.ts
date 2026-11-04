@@ -45,10 +45,17 @@ import { UnsupportedTraversal } from '../unsupported.ts';
  *    (`V(__.identity())`'s meaning). The lowering splits `V(<traversal>)` into the traversal's
  *    per-traverser results (`flatMap`) followed by this lookup (`traversalIdsTail`, `rel/lower.ts`);
  *    `'start'` marks the lookup of a START step, whose elements begin fresh traversers.
+ *  - `unrolled` — a step SPLICED by a bounded repeat's unroll (`tryUnroll`, `ir/strategies.ts`): the count
+ *    it was unrolled `times`, and whether its body is `loopable` (barrier-free, so the walk could run it).
+ *    Provenance only: no lowering reads it to choose SQL. The host that lowers a body holding one records
+ *    it on the compile's meter (`CompileBudget.noteUnroll`) with what that host allows, so a decline past
+ *    a statement limit names the count from the unroll itself rather than from a re-read of the query.
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; earlyLimitSuppressed?: boolean; keepsPathEntry?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string; idOfValue?: 'start' | 'split' };
+export interface UnrolledFrom { readonly times: number; readonly loopable: boolean }
+
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; earlyLimitSuppressed?: boolean; keepsPathEntry?: boolean; from?: string; to?: string; withArgs?: [string, any][]; landedSource?: { readonly vertexBinding: string | null; readonly edgeBinding: string | null }; graphTag?: string; idOfValue?: 'start' | 'split'; unrolled?: UnrolledFrom };
 
 /** The id TRAVERSAL of a `V(<traversal>)`/`E(<traversal>)` — its one argument when that is a nested
  *  traversal (GraphStep's `idTraversal`), else `null`. Its child runs over the traverser ARRIVING at the

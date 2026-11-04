@@ -141,7 +141,7 @@ const FOLD: Pass[] = group('canonicalize', [
   // `until(loops().is($x))` over a body that needs phases is rewritten to `times(k)`, so a `$x` parameter
   // there is REDUCED to a constant here — the last responsible moment the bind rule allows, since the
   // phase count is the plan's shape.
-  { name: 'unrollFixedRepeat', applies: (steps) => steps.some((s) => s.name === 'times' || s.name === 'until'), run: (steps, ctx) => unrollFixedRepeat(steps, ctx.params, (nested, params) => childSteps(nested, params, ctx.sideEffects)) },
+  { name: 'unrollFixedRepeat', applies: (steps) => steps.some((s) => s.name === 'times' || s.name === 'until'), run: (steps, ctx) => unrollFixedRepeat(steps, ctx.params, (nested, params) => childSteps(nested, params, ctx.sideEffects), ctx.nested) },
   { name: 'formRepeatRegions', run: (steps) => formRepeatRegions(steps) },
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE absorbModulators, so a
   // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.

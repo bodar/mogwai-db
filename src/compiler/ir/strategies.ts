@@ -10,7 +10,7 @@ import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
-import { COMPILE_BUDGET_BYTES } from '../../sql/kernel/budget.ts';
+import { COMPILE_BUDGET_BYTES, CompileBudgetExceeded, UNROLLED_STEP_BYTES } from '../../sql/kernel/budget.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -1544,7 +1544,10 @@ function gatherRepeatRegion(steps: Step[], i: number): { region: Step[]; end: nu
   return { region, end: j };
 }
 
-export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBody): Step[] {
+/** `nested`: this chain is a CHILD body (`PassContext.nested`), whose host's lowering the Pass tier cannot
+ *  see — so an early decline here offers no `until(loops())`, which that host's route might decline too. */
+export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBody, nested = false): Step[] {
+  const tryUnroll = (region: Step[]): Step[] | null => unrollRegion(region, params, body, nested);
   const out: Step[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
@@ -1554,7 +1557,7 @@ export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBo
     // If the unroll still declines the body, the ORIGINAL region (with its `until`) goes on exactly as
     // before — the rewrite never strands one.
     const counted = loopCountUntilAsTimes(region, params, body);
-    const unrolled = (counted && tryUnroll(counted, params, body)) ?? tryUnroll(region, params, body);
+    const unrolled = (counted && tryUnroll(counted)) ?? tryUnroll(region);
     out.push(...(unrolled ?? region));
     i = end - 1;
   }
@@ -1706,8 +1709,10 @@ function minimalLoopCount(p: unknown, lo: number, holds: (k: number) => boolean 
  * the DO refuses; `CfLimitedSql` makes Bun refuse the same, `mise run test:cf-limits`), so a raised cap is a
  * free win here. The one body this over-charges is one whose phases render NOTHING (a side-effect-only
  * `repeat(aggregate('x'))`), and past 10 000 spliced steps that is still 10 000 steps of every Pass's work.
+ *
+ * The rate itself is `UNROLLED_STEP_BYTES` (`budget.ts`), beside the decline that states the count it
+ * stands for (`CompileBudgetExceeded`, `kind: 'unroll'`).
  */
-const UNROLLED_STEP_BYTES = 40;
 const STEPS_IN_BUDGET = Math.floor(COMPILE_BUDGET_BYTES / UNROLLED_STEP_BYTES);
 
 /** How many steps `chain` stands for once every bounded repeat inside it is unrolled: each step once, plus
@@ -1735,7 +1740,7 @@ function timesBeside(chain: readonly Step[], i: number): number {
 }
 
 /** One repeat run → its unrolled steps, or null to leave the run alone. */
-function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step[] | null {
+function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, nested: boolean): Step[] | null {
   // The bounded regime is `repeat`+`times`, optionally with a bare `emit` (repeat+times+emit). A region
   // carrying `until` is the UNBOUNDED regime — no compile-time n — and belongs to the walk (`walk.ts`),
   // not the unroll; decline it here rather than unrolling a loop whose bound is a runtime predicate.
@@ -1826,12 +1831,19 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   const levels = Math.min(n, lastLevel);
   const copies = emit ? (levels * (levels + 1)) / 2 : levels; // emit: one arm per level, arm k holds k copies
   const spliced = copies * unrolledSize(body, read, STEPS_IN_BUDGET);
+  const barrier = needsPhases(body, read);
   if (spliced > STEPS_IN_BUDGET) {
-    throw UnsupportedTraversal.because(`a repeat() bounded at ${n} iterations (times(${n}), or an until(loops().is(…)) that first holds there)${emit ? ' with emit()' : ''} unrolls to about ${Math.round(spliced)} steps, more than the ${STEPS_IN_BUDGET} the compiler spells into one statement (${Math.round(COMPILE_BUDGET_BYTES / 1000)} KB of SQL); ${needsPhases(body, read)
-      ? 'lower the count — a body holding a barrier (order/limit/range/dedup/aggregate/…) runs only as unrolled iterations'
-      : 'lower the count, or bound the loop with until(loops().is(n)), which a body without a barrier runs as a loop rather than unrolled'}`);
+    // `until(loops())` is offered only on the ROOT chain: there the walk takes a barrier-free body, while a
+    // child body's host may lower it as a correlated test (`where`, `map`) that no walk can run.
+    throw new CompileBudgetExceeded(COMPILE_BUDGET_BYTES, {
+      kind: 'unroll', times: n, steps: spliced, emit: !!emit, advice: barrier ? 'barrier' : nested ? 'count' : 'loop',
+    });
   }
-  const phase = (): Step[] => body.map((s) => ({ ...s }));
+  // Every spliced step carries WHICH unroll made it (`IRStep.unrolled`) — the fact the host that lowers it
+  // records on the compile's meter (`CompileBudget.noteUnroll`), so a later decline past a limit (a join
+  // width, the rendered bytes) names this count rather than re-reading the query to guess one.
+  const mark = { times: n, loopable: !barrier } as const;
+  const phase = (): Step[] => body.map((s): IRStep => ({ ...s, unrolled: mark }));
 
   // WITHOUT emit — the plain bounded repeat. The output is the frontier after EXACTLY n iterations, so
   // splice n copies of the body inline (each an ordinary phase that collapses).
@@ -1912,7 +1924,7 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // A single level is just that arm spliced inline — a one-arm `union` is not a thing the lowering
   // accepts (`unionArms` requires ≥2), and it would mean the same rows anyway. Two or more levels are a
   // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` is normalised above).
-  return arms.length === 1 ? arms[0]! : [{ name: 'union', args: arms.map((a) => arg({ nested: a })), ctx: rep.ctx }];
+  return arms.length === 1 ? arms[0]! : [{ name: 'union', args: arms.map((a) => arg({ nested: a })), ctx: rep.ctx, unrolled: mark } as IRStep];
 }
 
 /**

@@ -13,8 +13,7 @@ import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
 import { Declines, UnsupportedTraversal } from './unsupported.ts';
-import { CompileBudget, CompileBudgetExceeded, JoinWidthExceeded } from '../sql/kernel/budget.ts';
-import { eachStepDeep, rawBodies } from './ir/walk.ts';
+import { CompileBudget, CompileBudgetExceeded, JoinWidthExceeded, literalTextHint, type UnrollNote } from '../sql/kernel/budget.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, Executable, Program, Shape, ValueType, ListOf, MapOf } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, perRowColumn, hasTypedMembers, memberTypeOf, withMemberType, isPerRow, SCALAR_MEMBERS, TYPED_MEMBERS, PER_ROW, PER_ROW_ENVELOPE, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -47,52 +46,54 @@ function applyDiscard(plan: Executable): Executable {
  *  (segment.ts runPlan). Every non-barrier caller keeps using compile() below, whose type never
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, wireParams: Record<string, any>, options?: CompileOptions, wireParamTypes: Record<string, TypeNode> = {}): Plan {
-  try { return compileUnguarded(gremlin, wireParams, options, wireParamTypes); }
-  catch (error) { throw tooDeep(error) ?? expansionNamed(error, gremlin, wireParams, wireParamTypes) ?? error; }
+  // The compile's ONE work meter, made here rather than inside so the boundary below reads what it recorded.
+  const budget = options?.budget ?? new CompileBudget();
+  try { return compileUnguarded(gremlin, wireParams, options, wireParamTypes, budget); }
+  catch (error) { throw tooDeep(error) ?? expansionNamed(error, budget) ?? error; }
 }
 
 /**
- * A compile past its WORK BUDGET (`CompileBudget`) says which part of the query expanded, in the user's
- * terms. The meter is charged deep in the emitter, which knows bytes and nodes but not the step the user
- * typed — the query text does. A bounded `repeat()` is the expansion a user can see and change (its body
- * is spelled once per iteration), so the largest `times(n)` at any depth is named; anything else is a
- * nesting whose text compounds per level, and the advice is to split the traversal.
+ * A compile past one of its STATEMENT LIMITS — the work budget (`CompileBudget`) or SQLite's join width
+ * (`JoinWidthExceeded`) — says which part of the query grew, in the user's terms, from the FACTS the
+ * compile recorded rather than from a second reading of the query:
  *
- * A SELECT past SQLite's join width (`JoinWidthExceeded`) is the same expansion seen by a different
- * limit: an unroll inside a per-traverser body fuses one join per iteration into one SELECT, while at the
- * top level each iteration is a step of its own — so that is what it suggests.
+ *  - WHICH CHARGE FIRED, carried on the error (`CompileBudgetExceeded.charged`). The unroll's early charge
+ *    already names its count. A rendered-text charge that is mostly LITERAL VALUES says so
+ *    (`literalTextHint`): a bulk upsert written as literal maps grows the statement's TEXT, not its binds.
+ *  - THE LARGEST UNROLL THE LOWERING MET (`CompileBudget.unroll`), noted by the host that lowered it with
+ *    what that host allows (`noteUnrolled`): `move it to the top level` only from a map-like host
+ *    (`local`/`map`/`flatMap` — never `where`/`not`, whose body is a test), `until(loops())` only on the root
+ *    chain, the one place the walk is known to take the body.
+ *
+ * Otherwise the decline says what grew without guessing a cause.
  */
-function expansionNamed(error: unknown, gremlin: string, wireParams: Record<string, any>, wireParamTypes: Record<string, TypeNode>): CompileBudgetExceeded | JoinWidthExceeded | null {
-  if (!(error instanceof CompileBudgetExceeded) && !(error instanceof JoinWidthExceeded)) return null;
-  const { most, nested } = largestTimes(gremlin, wireParams, wireParamTypes);
-  const loop = `or, for a body without a barrier step (order/limit/range/dedup/aggregate/…), bound it with until(loops().is(${most})), which runs as a loop rather than unrolled`;
+function expansionNamed(error: unknown, budget: CompileBudget): CompileBudgetExceeded | JoinWidthExceeded | null {
+  const unroll = budget.unroll;
   if (error instanceof JoinWidthExceeded) {
-    return error.hinted(most > 1
-      ? `repeat(…).times(${most}) unrolls into one join per iteration — lower the count, ${nested ? 'move the repeat() out of its child traversal (local/where/map/…) to the top level, where its iterations are not fused into one SELECT, ' : ''}${loop}`
+    return error.hinted(unroll
+      ? `repeat(…).times(${unroll.times}) unrolls into one join per iteration — ${unrollAdvice(unroll, ', where its iterations are not fused into one SELECT')}`
       : 'its steps fuse into one join per step — split it into smaller traversals');
   }
-  return error.hinted(most > 1
-    ? `repeat(…).times(${most}) unrolls its body ${most} times — lower the count, ${loop}`
-    : 'its steps nest so that each level spells the one before it again — split it into smaller traversals');
+  if (!(error instanceof CompileBudgetExceeded)) return null;
+  const charged = error.charged;
+  if (charged.kind === 'unroll') return error;
+  const literal = charged.kind === 'text' ? literalTextHint(charged.literalBytes, error.bytes) : null;
+  if (literal) return error.hinted(literal);
+  if (unroll) return error.hinted(`repeat(…).times(${unroll.times}) unrolls its body ${unroll.times} times — ${unrollAdvice(unroll, '')}`);
+  return error.hinted(charged.kind === 'text'
+    ? 'split it into smaller traversals'
+    : 'a part of it is spelled again wherever it is used, so its text compounds with each level of nesting — split it into smaller traversals');
 }
 
-/** The largest `times(n)` at any depth of the query text — 0 when there is none, or the text is unreadable
- *  (the hint is a courtesy: an unreadable query keeps the plain decline) — and whether it sits inside a
- *  child traversal rather than on the root chain. */
-function largestTimes(gremlin: string, wireParams: Record<string, any>, wireParamTypes: Record<string, TypeNode>): { readonly most: number; readonly nested: boolean } {
-  const params = paramEnv(wireParams, wireParamTypes);
-  const count = (s: { readonly name: string; readonly args?: readonly { readonly value?: unknown }[] }): number | undefined => {
-    const n = s.name === 'times' ? (s.args ?? [])[0]?.value : undefined;
-    return typeof n === 'number' ? n : undefined;
-  };
-  let most = 0;
-  let root: readonly Parameters<typeof count>[0][] = [];
-  try {
-    const chain = stepChain(parseGremlin(gremlin), params);
-    root = chain;
-    eachStepDeep(chain, rawBodies(params), (s) => { const n = count(s); if (n !== undefined && n > most) most = n; });
-  } catch { /* unreadable: no count to name */ }
-  return { most, nested: !root.some((s) => count(s) === most) };
+/** What the user can do about an unroll, from what its host allows (`UnrollNote`) — never a remedy the
+ *  compile has no fact for. `fused` says why the top level helps, where that is the reason. */
+function unrollAdvice(unroll: UnrollNote, fused: string): string {
+  const options = [
+    'lower the count',
+    ...(unroll.host ? [`move the repeat() out of ${unroll.host}(…) to the top level${fused}`] : []),
+    ...(unroll.loops ? [`bound it with until(loops().is(${unroll.times})), which runs as a loop rather than unrolled`] : []),
+  ];
+  return options.length === 1 ? options[0]! : `${options.slice(0, -1).join(', ')}, or ${options.at(-1)}`;
 }
 
 /**
@@ -109,7 +110,7 @@ function tooDeep(error: unknown): UnsupportedTraversal | null {
   return UnsupportedTraversal.because('this traversal nests deeper than the compiler can follow — a repeat() unrolled to a large times() or loops() count, or child traversals nested hundreds deep, is the usual cause');
 }
 
-function compileUnguarded(gremlin: string, wireParams: Record<string, any>, options: CompileOptions | undefined, wireParamTypes: Record<string, TypeNode>): Plan {
+function compileUnguarded(gremlin: string, wireParams: Record<string, any>, options: CompileOptions | undefined, wireParamTypes: Record<string, TypeNode>, budget: CompileBudget): Plan {
   // THE PARAMETER ENVIRONMENT, built once (`paramEnv`): every parameter carries a type from here on (the
   // wire's where it declared one, the JS value's own otherwise — an untyped Boolean would otherwise be
   // stored, and compared, as 1/0), and a Float lands on its carrier before anything reads it. ONE value,
@@ -179,7 +180,7 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
     declines,
     // The compile's ONE work meter, beside the decline sink and for its reason: every route below — the
     // wire read, each segment head and resume, the ranked-order probe — charges the same one.
-    budget: options?.budget ?? new CompileBudget(),
+    budget,
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,

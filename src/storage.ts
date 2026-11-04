@@ -7,8 +7,9 @@
 import { coerceBindValue } from './gremlin/types.ts';
 import { type Sql } from './api.ts';
 import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery, VALUE_PAST_PLATFORM_CAP } from './rel/raise.ts';
-import { VALUE_TOO_BIG } from './do-limits.ts';
+import { STATEMENT_TOO_LONG, VALUE_TOO_BIG } from './do-limits.ts';
 import { UnsupportedTraversal } from './compiler/unsupported.ts';
+import { literalTextHint } from './sql/kernel/budget.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
@@ -24,6 +25,32 @@ export type { Sql } from './api.ts';
  *  at run time.) */
 const STATEMENT_SHAPE_LIMIT =
   /^(at most \d+ tables in a join|too many FROM clause terms, max: \d+|too many references to "[^"]*": max \d+|Expression tree is too large \(maximum depth \d+\)|too many terms in compound SELECT|too many columns in [a-z ]+|too many terms in (ORDER|GROUP) BY clause|too many arguments on function \S+|parser stack overflow|statement too long)$/;
+
+/**
+ * The decline for a statement past a SHAPE limit (`STATEMENT_SHAPE_LIMIT`). The statement LENGTH is the one
+ * users meet without a large count anywhere (a bulk upsert written as literal maps), and the one that reads
+ * as "too many parameters" — so it says it is the TEXT, and, when the rejected text is mostly quoted
+ * constants, that those are the user's literal values (`literalTextHint`), measured off the statement itself.
+ */
+function statementShapeDecline(message: string, sql: string): UnsupportedTraversal {
+  if (message !== STATEMENT_TOO_LONG)
+    return UnsupportedTraversal.because(`the SQL this traversal compiles to exceeds a SQLite statement limit (${message})`);
+  const literal = quotedChars(sql);
+  const hint = literalTextHint(literal, sql.length - literal);
+  return UnsupportedTraversal.because(`the SQL this traversal compiles to is longer than this store accepts in one statement (${message}) — `
+    + `a limit on the statement's TEXT, about ${Math.max(1, Math.round(sql.length / 1000))} KB here, not on its bound parameters${hint ? `; ${hint}` : ''}`);
+}
+
+/** The characters inside single-quoted SQL string constants (identifiers are double-quoted, and an escaped
+ *  `''` toggles twice) — one pass, on the error path only. */
+function quotedChars(sql: string): number {
+  let inside = false, count = 0;
+  for (let i = 0; i < sql.length; i++) {
+    if (sql.charCodeAt(i) === 39) inside = !inside;
+    else if (inside) count++;
+  }
+  return count;
+}
 
 /** SQLite's own message, as BOTH runtimes spell it. bun:sqlite reports `sqlite3_errmsg` bare; workerd's
  *  DO SQLite appends the result code (`at most 64 tables in a join: SQLITE_ERROR`, `integer overflow:
@@ -346,10 +373,9 @@ export class GraphStore {
       if (message === VALUE_TOO_BIG) throw new RaisedByQuery(VALUE_PAST_PLATFORM_CAP, { cause: error });
       // A statement past one of SQLite's own STATEMENT-SHAPE limits is rejected at prepare, before any
       // row is read — so it is a property of the compiled TEXT (hence of the query text), never of the
-      // data, and the user's answer is a clear decline rather than SQLite's bare message. The usual
-      // cause is a repeat() unrolled to a large times()/loops() count (each phase is a join).
-      if (message !== null && STATEMENT_SHAPE_LIMIT.test(message))
-        throw UnsupportedTraversal.because(`the SQL this traversal compiles to exceeds a SQLite statement limit (${message}); a repeat() with a large times() or loops() count is the usual cause`);
+      // data, and the user's answer is a clear decline rather than SQLite's bare message. It names the
+      // limit and nothing it cannot see: the store does not know which step grew, so it blames none.
+      if (message !== null && STATEMENT_SHAPE_LIMIT.test(message)) throw statementShapeDecline(message, sql);
       throw error;
     }
   }

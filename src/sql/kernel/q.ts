@@ -79,10 +79,16 @@ function tokens(tree: Sql, budget?: CompileBudget): (Text | Identifier | Value)[
   // THE RENDERED-BYTES CHARGE (`CompileBudget`): exact over the statement's STRUCTURE, and counted AS the
   // text is laid out, so a statement past the budget stops here rather than after its whole text is joined.
   // A placeholder counts as its `?`, a string constant as its quotes (`TextLiteral`: its payload is data).
+  // The payload is still COUNTED beside it (`literalBytes`), uncharged: when a statement is past the budget
+  // mostly because the query wrote its data as literals, that is what the decline says (`literalTextHint`).
   let bytes = 0;
+  let literalBytes = 0;
   const push = (token: Text | Identifier | Value): void => {
     out.push(token);
-    if (budget && (bytes += token instanceof TextLiteral ? 2 : token instanceof Text ? token.text.length : 1) > budget.limit) budget.charge(bytes);
+    if (!budget) return;
+    if (token instanceof TextLiteral) { bytes += 2; literalBytes += token.text.length - 2; }
+    else bytes += token instanceof Text ? token.text.length : 1;
+    if (bytes > budget.limit) budget.charge(bytes, { kind: 'text', literalBytes });
   };
   const stack: { node: Compound; members: Iterator<Expression>; first: boolean }[] = [];
   const enter = (node: Compound): void => {
@@ -104,7 +110,7 @@ function tokens(tree: Sql, budget?: CompileBudget): (Text | Identifier | Value)[
     if (e instanceof Text || e instanceof Identifier || e instanceof Value) push(e);
     else if (e instanceof Compound) enter(e);
   }
-  budget?.charge(bytes);
+  budget?.charge(bytes, { kind: 'text', literalBytes });
   return out;
 }
 

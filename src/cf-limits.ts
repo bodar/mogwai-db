@@ -20,25 +20,27 @@
 //     compiler and never against a real DO; the CONTRACT's DO-legality is enforced natively by the real
 //     DO in cloudflare.test.ts, and `mise run binds` catches the placeholder idiom statically.
 import type { Sql } from './api.ts';
-import { CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES, fitsUtf8, utf8Bytes, VALUE_TOO_BIG } from './do-limits.ts';
+import { CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES, fitsUtf8, STATEMENT_TOO_LONG, utf8Bytes, VALUE_TOO_BIG } from './do-limits.ts';
 
 // The numbers live in `do-limits.ts`, shared with the json_each builder that splits a data-sized set
 // under the value cap, so the assertion and the producer cannot disagree about where the wall is.
 export { CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES };
 
-/** The violation, and whether it is a VALUE's size — the one limit a DO reports as the value's own
- *  error (`string or blob too big`) rather than as the statement's, so the store's translation applies. */
-interface Violation { readonly message: string; readonly value: boolean }
+/** The violation, and the PLATFORM'S OWN SPELLING of it where a Durable Object reports it as SQLite's error —
+ *  a VALUE past its size (`string or blob too big`) and a statement past its TEXT length (`statement too
+ *  long`), each of which the store translates into the user's clear error. `null` for the bind COUNT: past
+ *  100 binds is always a defect of ours (a bind list sized by row count), so it stays our diagnostic. */
+interface Violation { readonly message: string; readonly platform: string | null }
 
 function violation(sql: string, binds: readonly unknown[]): Violation | null {
   if (binds.length > CF_MAX_BINDS)
-    return { value: false, message: `statement exceeds Cloudflare's ${CF_MAX_BINDS}-bound-parameter limit: ${binds.length} binds in ${describe(sql)}` };
+    return { platform: null, message: `statement exceeds Cloudflare's ${CF_MAX_BINDS}-bound-parameter limit: ${binds.length} binds in ${describe(sql)}` };
   if (!fitsUtf8(sql, CF_MAX_SQL_BYTES))
-    return { value: false, message: `statement exceeds Cloudflare's ${CF_MAX_SQL_BYTES}-byte text limit: ${utf8Bytes(sql)} bytes in ${describe(sql)}` };
+    return { platform: STATEMENT_TOO_LONG, message: `statement exceeds Cloudflare's ${CF_MAX_SQL_BYTES}-byte text limit: ${utf8Bytes(sql)} bytes in ${describe(sql)}` };
   for (const [at, bind] of binds.entries()) {
     const size = valueBytes(bind);
     if (size > CF_MAX_VALUE_BYTES)
-      return { value: true, message: `bind ${at + 1} exceeds Cloudflare's ${CF_MAX_VALUE_BYTES}-byte value limit: ${size} bytes in ${describe(sql)}` };
+      return { platform: VALUE_TOO_BIG, message: `bind ${at + 1} exceeds Cloudflare's ${CF_MAX_VALUE_BYTES}-byte value limit: ${size} bytes in ${describe(sql)}` };
   }
   return null;
 }
@@ -68,19 +70,22 @@ const describe = (sql: string): string => (sql.length > 160 ? `${sql.slice(0, 16
 /**
  * Throw if `sql`/`binds` would be rejected on a Durable Object.
  *
- * A bind past the VALUE cap throws the way the DO itself does — SQLite's `string or blob too big`, with
- * the decorator's diagnostic as the `cause` — because that one is not a statement-shape defect of ours
- * but a value the platform cannot hold, and the store translates it to the user's clear error
- * (`GraphStore.query`). The data-sized sets we produce are split under the cap
- * (`jsonChunks`, `src/json-chunks.ts` — at compile time, and at run time for retained rows), so what still
- * reaches it is a single member past 2 MB.
- * NOT modelled: a value SQLite COMPUTES past the cap (a `json_group_array` over a large fold) — the DO
- * refuses that too (measured), but only the real platform can see it.
+ * A bind past the VALUE cap, and a statement past the TEXT cap, throw the way the DO itself does — SQLite's
+ * `string or blob too big` / `statement too long`, with the decorator's diagnostic as the `cause` — because
+ * neither is a bind-list defect of ours: one is a value the platform cannot hold, the other a statement as
+ * long as the query text made it (a bulk upsert written as literal maps), and the store translates each into
+ * the user's clear error (`GraphStore.query`) exactly as it does in production. Thrown as our own diagnostic,
+ * the text cap reached the user as a bare `Error` under this decorator and as a decline in production — the
+ * test harness disagreeing with the platform it stands in for. The data-sized sets we produce are split under
+ * the value cap (`jsonChunks`, `src/json-chunks.ts` — at compile time, and at run time for retained rows), so
+ * what still reaches it is a single member past 2 MB.
+ * NOT modelled: a value SQLite COMPUTES past the cap (a `json_group_array` over a large fold) —
+ * the DO refuses that too (measured), but only the real platform can see it.
  */
 export function assertCfLimits(sql: string, binds: readonly unknown[]): void {
   const found = violation(sql, binds);
   if (!found) return;
-  if (found.value) throw new Error(`${VALUE_TOO_BIG}: SQLITE_TOOBIG`, { cause: new Error(found.message) });
+  if (found.platform) throw new Error(`${found.platform}: SQLITE_TOOBIG`, { cause: new Error(found.message) });
   throw new Error(found.message);
 }
 

@@ -26,6 +26,11 @@ export const CF_MAX_VALUE_BYTES = 2 * 1024 * 1024;
  *  it — the one spelling the decorator throws and the store recognizes. */
 export const VALUE_TOO_BIG = 'string or blob too big';
 
+/** SQLite's own message for a statement past its text-length limit (`SQLITE_LIMIT_SQL_LENGTH`, the cap behind
+ *  a Durable Object's 100 KB — spelled `statement too long: SQLITE_TOOBIG` there, measured under `wrangler
+ *  dev`), as `sqliteMessage` normalizes it: the spelling the decorator throws and the store declines. */
+export const STATEMENT_TOO_LONG = 'statement too long';
+
 /** Does `text` fit in `cap` UTF-8 bytes? Settled from the length alone when even 3 bytes per UTF-16 unit
  *  (the most any unit costs) fits — every small statement and value — and counted only otherwise. */
 export const fitsUtf8 = (text: string, cap: number): boolean => text.length * 3 <= cap || utf8Bytes(text) <= cap;

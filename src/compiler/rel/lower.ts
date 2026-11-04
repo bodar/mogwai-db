@@ -76,7 +76,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
-import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, withEnclosing, type ChainCtx, type HoistedSpine, type SpineHoist, type Tail } from './lower/chain.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, noteUnrolled, withEnclosing, type ChainCtx, type HoistedSpine, type SpineHoist, type Tail } from './lower/chain.ts';
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
@@ -4333,7 +4333,7 @@ const lowered = (
   // (a running value read twice per level) is already 2^k text here, and the passes below walk and rewrite
   // it as that tree (`fuse`'s census, `substRelId`). Its size is read off the DAG in O(DAG) and charged
   // now, so such a plan declines in milliseconds rather than after the passes have spent minutes on it.
-  budget.charge(largestExpression([wire.rel, ...(chain.hoisted ?? []).map((piece) => piece.node), ...(chain.effects ?? []).map((effect) => effect.node)]));
+  budget.charge(largestExpression([wire.rel, ...(chain.hoisted ?? []).map((piece) => piece.node), ...(chain.effects ?? []).map((effect) => effect.node)]), { kind: 'expression' });
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
   // exists. `semijoin` (`src/rel/passes/semijoin.ts`) is the physical tier: a `Rel → Rel` identity on
@@ -4969,7 +4969,7 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, wireTerminal } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, budget, wireTerminal } = settle(opts);
   const facts = analyzeChain(steps as IRStep[], { wireTerminal });
   return {
     facts,
@@ -4982,6 +4982,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
       scopeNames: scopeNames ?? programScopeNames(steps, params, [...sideEffects.keys(), ...sideEffectPolicies.keys()]),
       rankedOrders,
       declines,
+      budget,
     },
   };
 }
@@ -5017,6 +5018,8 @@ function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, r
   const hoist: SpineHoist | undefined = rooted && writes.sites !== 'unknown' && writes.sites.length === 0
     ? { steps, cut: [] } : undefined;
   const ctx: ChainCtx = rooted ? { ...analysed.ctx, traversal: { steps, rooted: true }, ...(hoist && { hoist }) } : analysed.ctx;
+  // The ROOT chain's own unrolls: the one place `until(loops())` is known to run a barrier-free body as the walk.
+  if (rooted) noteUnrolled(steps, ctx, null, true);
   const tail = lowerChainFrom(steps, opts, fresh, ctx, facts);
   return tail && hoist?.cut.length ? { ...tail, hoisted: [...hoist.cut] } : tail;
 }

@@ -40,10 +40,11 @@ import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
 import { RANDOM_ORDER } from './slice.ts';
-import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, noteUnrolled, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
 import { nondeterministic } from '../../ir/step.ts';
+import { pastBudget } from '../../../sql/kernel/budget.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the
@@ -285,6 +286,9 @@ export function perTraverserChild(
   if (extra !== undefined || !isNested(nested)) return null;
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
+  // A repeat() unrolled into this body fuses into the host's ONE relation; the host is map-like, so a
+  // decline past a statement limit may suggest moving the repeat() out of it (`noteUnrolled`).
+  noteUnrolled(body, ctx, step.name);
   // The body BEGINS a child traversal handed one traverser at a time at bulk 1 — `map`/`flatMap` through
   // `TraversalUtil.apply`, and `local` because `LocalStep.nextStart` SPLITS a merged slot into unit
   // traversers and runs its body once per unit
@@ -1117,7 +1121,7 @@ export function rootedRead(
  *  `childSteps`, which strips a source and answers the empty chain, i.e. an endpoint that silently
  *  matched nothing. */
 export function rootedSteps(nested: unknown, params: ParamEnv, sideEffects?: SideEffectConstants): readonly IRStep[] | null {
-  try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch { return null; }
+  try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch (error) { return pastBudget(error); }
 }
 
 /**

@@ -7,7 +7,7 @@
 //   - a compile-cost regression is VISIBLE: the corpus's largest charge must stay under an eighth of the
 //     budget. A change that makes some ordinary query's plan grow past that is the regression, whatever the
 //     wall clock says.
-//   - an expansion is refused EARLY: a shared node spelled 2^k times declines in milliseconds, from the
+//   - an expansion is refused EARLY: a shared node spelled 2^k times declines from its size, read off the
 //     DAG, rather than after the passes and the emitter have written it out (`spelledSize`).
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
@@ -29,11 +29,11 @@ import { detail, summary } from '../support/output.ts';
 
 const CORPUS = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 
-/** A decline, and how long it took to say so. */
-const declineOf = (go: () => unknown): { readonly error: unknown; readonly ms: number } => {
-  const started = performance.now();
-  try { go(); } catch (error) { return { error, ms: performance.now() - started }; }
-  return { error: undefined, ms: performance.now() - started };
+/** A decline. How EARLY it was decided is read off the work meter (`CompileBudget.peak`, the charge that
+ *  fired), never a wall clock: the meter is deterministic, a timer is a property of the machine. */
+const declineOf = (go: () => unknown): { readonly error: unknown } => {
+  try { go(); } catch (error) { return { error }; }
+  return { error: undefined };
 };
 
 describe('the L1 corpus under the compile budget', () => {
@@ -98,17 +98,40 @@ describe('an expansion past the budget declines, in the user\'s terms', () => {
     const { error } = declineOf(() => compile("g.V().repeat(__.out().order().by('name')).times(800)", {}));
     expect(error).toBeInstanceOf(CompileBudgetExceeded);
     expect(error).toBeInstanceOf(UnsupportedTraversal);
-    expect((error as Error).message).toContain('expands to more than 400 KB of SQL in one statement');
-    expect((error as Error).message).toContain('repeat(…).times(800) unrolls its body 800 times');
+    // The rendered TEXT fired, and the count is named from the unroll the lowering noted — not re-read
+    // from the query. The body holds a barrier, so the loop is not offered: only phases can run it.
+    expect((error as CompileBudgetExceeded).charged.kind).toBe('text');
+    expect((error as Error).message).toBe('this traversal is not supported yet: it expands to more than 400 KB of SQL in one statement; '
+      + 'repeat(…).times(800) unrolls its body 800 times — lower the count');
   });
 
-  // A count the unroll's early charge alone refuses: decided before a phase is built.
-  test('a count past the early charge declines in milliseconds', () => {
-    const { error, ms } = declineOf(() => compile('g.V().repeat(__.out()).times(20000)', {}));
-    expect(error).toBeInstanceOf(UnsupportedTraversal);
+  // A count the unroll's early charge alone refuses: decided before a phase is built. The proxy for "before
+  // a phase is built" is the meter, not a wall clock: the unroll's charge fired, and nothing was charged.
+  test('a count past the early charge declines before the lowering charges anything', () => {
+    const budget = new CompileBudget();
+    const { error } = declineOf(() => compile('g.V().repeat(__.out()).times(20000)', {}, { budget }));
+    expect(error).toBeInstanceOf(CompileBudgetExceeded);
+    expect((error as CompileBudgetExceeded).charged).toEqual({ kind: 'unroll', times: 20000, steps: 20000, emit: false, advice: 'loop' });
+    expect(budget.peak).toBe(0);
     expect((error as Error).message).toContain('400 KB of SQL');
-    expect(ms).toBeLessThan(250);
+    expect((error as Error).message).toContain('bound the loop with until(loops().is(n))');
   });
+
+  // A FLAT statement that is mostly the user's LITERAL VALUES — a bulk upsert written as 40,000 literal maps.
+  // No repeat(), nothing nests: the decline says the text is literal data spelled into the SQL, not bound
+  // (the question "are we binding again?" answered in the product), and blames neither.
+  test('a literal bulk upsert past the budget says it is literal text, not a nesting or a repeat()', () => {
+    const maps = Array.from({ length: 40_000 }, (_, i) => `[name:'m${i}']`).join(',');
+    const { error } = declineOf(() => compile(`g.inject(${maps}).mergeV()`, {}));
+    expect(error).toBeInstanceOf(CompileBudgetExceeded);
+    expect((error as CompileBudgetExceeded).charged.kind).toBe('text');
+    const message = (error as Error).message;
+    expect(message).toStartWith('this traversal is not supported yet: it expands to more than 400 KB of SQL in one statement; '
+      + 'most of it is literal values written into the query (');
+    expect(message).toContain('spelled into the SQL text itself, not bound as parameters — send the values in smaller batches');
+    expect(message).not.toContain('nest');
+    expect(message).not.toContain('repeat(');
+  }, 30_000);
 
   test('a count under the budget still compiles', () => {
     expect(compile('g.V().repeat(__.out()).times(1600)', {}).kind).toBe('read');
@@ -119,11 +142,13 @@ describe('an expansion past the budget declines, in the user\'s terms', () => {
   // off the DAG. The value run now spells its running value once per step (`valueRun`'s `once`), so the
   // same query is linear and simply compiles; the budget's early refusal of a doubling DAG is pinned by the
   // crafted shape below, and the run's linearity by `value-run-once.exec.test.ts`.
-  test('a chain of thirty guarded transforms compiles, linearly and fast', () => {
+  test('a chain of thirty guarded transforms compiles, linearly', () => {
     const transforms = Array.from({ length: 30 }, (_, i) => (i % 2 ? '.toLower()' : '.toUpper()')).join('');
-    const started = performance.now();
-    const plan = compile(`g.V().where(__.values('name')${transforms}.is('x'))`, {});
-    expect(performance.now() - started).toBeLessThan(500);
+    const budget = new CompileBudget();
+    const plan = compile(`g.V().where(__.values('name')${transforms}.is('x'))`, {}, { budget });
+    // The work proxy: the largest charge the compile made (every charge is a lower bound on a statement's
+    // text, and the passes' work is linear in it) — 2^30 would be refused, linear is a few KB.
+    expect(budget.peak).toBeLessThan(40 * 1024);
     expect(plan.kind === 'read' ? plan.sql.length : Infinity).toBeLessThan(40 * 1024);
   });
 });
@@ -151,23 +176,25 @@ describe('a crafted shared DAG declines from its size, not by writing it out', (
     expect(spelledSize(plan.result)).toBeLessThanOrEqual(sql.length);
   });
 
-  test('a shared expression 60 levels deep declines in milliseconds', () => {
-    const { error, ms } = declineOf(() => renderLowered(over(accumulator(60)), new CompileBudget()));
+  test('a shared expression 60 levels deep declines from its size, not by writing it out', () => {
+    const { error } = declineOf(() => renderLowered(over(accumulator(60)), new CompileBudget()));
     expect(error).toBeInstanceOf(CompileBudgetExceeded);
-    expect(ms).toBeLessThan(100);
+    // Refused from the DAG's tree size, before a byte of its text is written — the work proxy for "fast".
+    expect((error as CompileBudgetExceeded).charged.kind).toBe('plan');
   });
 
   // The relational twin: a scalar subquery read twice per level. A `Ref` would share it; inline, it is
   // spelled per use, so the checker and the emitter both meet 2^k subqueries.
-  test('a shared subplan 60 levels deep declines in milliseconds', () => {
+  test('a shared subplan 60 levels deep declines from its size, not by writing it out', () => {
     const one = { cols: [{ name: 'v', type: 'int', nullable: false }] } as const;
     let sub: Rel = values({ id: relId('v0'), channels: [], type: one, rows: [[compilerInt(1)]] });
     for (let i = 1; i <= 60; i++) {
       const read: Expr = { kind: 'scalar', plan: sub };
       sub = project({ id: relId(`s${i}`), input: values({ id: relId(`w${i}`), channels: [], type: one, rows: [[compilerInt(1)]] }), channels: [], type: one, exprs: [['v', { kind: 'binary', op: '+', left: read, right: read }]] });
     }
-    const { error, ms } = declineOf(() => renderLowered({ bindings: [], result: sub }, new CompileBudget()));
+    const { error } = declineOf(() => renderLowered({ bindings: [], result: sub }, new CompileBudget()));
     expect(error).toBeInstanceOf(CompileBudgetExceeded);
-    expect(ms).toBeLessThan(100);
+    // Refused from the DAG's tree size, before a byte of its text is written — the work proxy for "fast".
+    expect((error as CompileBudgetExceeded).charged.kind).toBe('plan');
   });
 });

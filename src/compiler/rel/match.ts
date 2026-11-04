@@ -17,6 +17,7 @@ import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 import type { GraphSource } from './source.ts';
 import { perRowColumnOf } from '../../sql/kernel/render.ts';
+import { pastBudget } from '../../sql/kernel/budget.ts';
 
 /**
  * `match(p1, p2, …)` — the CONJUNCTIVE PATTERN step, lowered as a BINDING TABLE threaded through the
@@ -105,7 +106,7 @@ type Pattern =
  *  crosses via `childSteps`. A pattern keeps its `as()` anchors, so it runs `normalize` directly rather
  *  than `childSteps` (which strips a source). `null` where normalizing RAISES — a deferral, not a crash. */
 function patternSteps(nested: unknown, params: ParamEnv): IRStep[] | null {
-  try { return normalize(stepChain(nested, params), params).steps as IRStep[]; } catch { return null; }
+  try { return normalize(stepChain(nested, params), params).steps as IRStep[]; } catch (error) { return pastBudget(error); }
 }
 
 /** The alias labels a pattern READS — all must be bound before it is ready to run. */

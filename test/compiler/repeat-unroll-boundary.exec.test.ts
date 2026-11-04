@@ -42,7 +42,7 @@ import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { bagOf, run, seededStore, storeSeededWith } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
-import { CompileBudgetExceeded } from '../../src/sql/kernel/budget.ts';
+import { CompileBudget, CompileBudgetExceeded } from '../../src/sql/kernel/budget.ts';
 import { GraphStore, type Sql } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
@@ -469,13 +469,16 @@ describe('the repeat() unroll boundary', () => {
 // arm (a recorded follow-up, not a `both()` property), so that is the witness now.
 const CHAINED_UNIONS = `g.V()${'.union(__.out(),__.in())'.repeat(16)}.count()`;
 describe('a bounded repeat past a SQLite statement-shape limit declines clearly', () => {
+  // A ROOT-chain unroll of a barrier-free body: the one place the walk is known to take it, so the loop is
+  // offered — and nothing about moving it to a top level it is already at.
   test('the join-width limit is declined before the store sees it', () => {
-    expect(() => run(store, 'g.V().repeat(__.out()).emit().times(64).count()')).toThrow(/^this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat\(…\)\.times\(64\) unrolls into one join per iteration — lower the count, or, /);
+    expect(() => run(store, 'g.V().repeat(__.out()).emit().times(64).count()')).toThrow(/^this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat\(…\)\.times\(64\) unrolls into one join per iteration — lower the count, or bound it with until\(loops\(\)\.is\(64\)\), which runs as a loop rather than unrolled$/);
   });
+  // The store sees only SQL, so it names the limit and blames no step: this query has no repeat() at all.
   test.each([
     CHAINED_UNIONS,
   ])('%s', (q) => {
-    expect(() => run(store, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(.*\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
+    expect(() => run(store, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(.*\)$/);
     try { run(store, q); } catch (e) { expect((e as Error).name).toBe('UnsupportedTraversal'); }
   });
 
@@ -513,19 +516,22 @@ describe('a SQLite limit spelled the workerd way still declines clearly', () => 
   test.each([
     CHAINED_UNIONS,
   ])('%s', (q) => {
-    expect(() => run(workerd, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(too many references to "edges": max 65535\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
+    expect(() => run(workerd, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(too many references to "edges": max 65535\)$/);
   });
 
   test('an int64 sum overflow is still the deferral it is on Bun', () => {
     expect(() => run(workerd, 'g.inject(9223372036854775807L, 1L).sum()')).toThrow(RaisedByQuery);
   });
 
+  // The statement LENGTH says it is the TEXT, not the bound parameters — the confusion it invites — and
+  // blames no step: what this query's text is made of is not literal values, so no literal hint either.
   test('the statement-length limit a Durable Object enforces is one of the shape limits', () => {
     const store = new GraphStore(new WorkerdSpelledSql({
       exec: () => {},
       query: (sql: string) => { if (/\bedges\b/.test(sql) && !/^(CREATE|PRAGMA)/i.test(sql)) throw new Error('statement too long'); return []; },
     }));
-    expect(() => run(store, 'g.V().repeat(__.out().limit(1)).times(2).count()')).toThrow(/exceeds a SQLite statement limit \(statement too long\)/);
+    expect(() => run(store, 'g.V().repeat(__.out().limit(1)).times(2).count()'))
+      .toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to is longer than this store accepts in one statement \(statement too long\) — a limit on the statement's TEXT, about \d+ KB here, not on its bound parameters$/);
   });
 
   // Every PREPARE-time shape limit SQLite has, by its own message (SQLite 3.51 `sqlite3SrcListEnlarge`,
@@ -562,14 +568,23 @@ describe('a bounded repeat past the unroll ceiling declines from the count', () 
     ['g.V().repeat(__.out()).times(12000).count()', 'bound the loop with until(loops().is(n))'],
     ['g.V().emit().repeat(__.out().limit(1)).times(120).count()', 'with emit()'],
     ['g.V().repeat(__.local(__.repeat(__.out().limit(1)).times(100))).times(100).count()', 'unrolls to about'],
+    // In a CHILD body the same decline reaches the user (it read "no lowering covers …" when the host's
+    // normalization swallowed it), and offers no until(loops()): whether that host's route runs the walk is
+    // not a fact the Pass tier has (`where`/`map` do not, `local` does).
+    ['g.V().where(__.repeat(__.out()).times(12000)).count()', 'unrolls to about 12000 steps'],
+    ['g.V().local(__.repeat(__.out()).times(12000).count())', 'unrolls to about 12000 steps'],
   ])('%s', (q, says) => {
-    const started = performance.now();
+    // THE WORK PROXY, not a wall clock: the decline is the unroll's own charge, raised before the lowering
+    // charged the meter once — decided from the count, not by compiling it.
+    const budget = new CompileBudget();
     let thrown: unknown;
-    try { run(store, q); } catch (e) { thrown = e; }
-    expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+    try { compile(q, {}, { budget }); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(CompileBudgetExceeded);
+    expect((thrown as CompileBudgetExceeded).charged.kind).toBe('unroll');
+    expect(budget.peak).toBe(0);
     expect((thrown as Error).message).toContain('the compiler spells into one statement (400 KB of SQL)');
     expect((thrown as Error).message).toContain(says);
-    expect(performance.now() - started).toBeLessThan(1000); // decided from the count, not by compiling it
+    if (q.startsWith('g.V().where') || q.startsWith('g.V().local')) expect((thrown as Error).message).not.toContain('bound the loop');
   });
 
   test('a count under the ceiling still unrolls and answers', () => {

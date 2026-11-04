@@ -24,7 +24,7 @@ import { liveAliases } from '../alias.ts';
 import { recordToMap } from '../record.ts';
 import { variantArm, variantArmOf, variantVocabulary, type VariantArm } from '../variant.ts';
 import { pathCarried } from '../path.ts';
-import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
+import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, noteUnrolled, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
 import { childSeam, hostItself, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
@@ -280,6 +280,7 @@ export function unionArms(
   if (args.length < 1 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
+  for (const body of bodies) noteUnrolled(body, ctx, null);
   if (bodies.some((body) => seedsUngated(body!))) return null;
   const armCtx = armScope(ctx, position, owed);
 
@@ -1082,6 +1083,7 @@ export function coalesceArms(
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
+  for (const body of bodies) noteUnrolled(body, ctx, null);
   return coalesceMerge(bodies as readonly (readonly IRStep[])[], input, framing, bulked, ctx, fresh, labels, position);
 }
 
@@ -1101,6 +1103,7 @@ export function optionalArms(
   if (extra !== undefined || !isNested(nested)) return null;
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
+  noteUnrolled(body, ctx, null);
   return coalesceMerge([body, []], input, framing, bulked, ctx, fresh, labels, position);
 }
 
@@ -1256,6 +1259,7 @@ export function chooseArms(
   const bodies = rest.map((arg) => bodyOf((arg.value as { readonly nested: unknown }).nested, ctx.params));
   const [then, otherwise] = bodies;
   if (!condition?.length || !then?.length) return null;
+  for (const body of [condition, ...bodies]) noteUnrolled(body, ctx, null);
   if (seedsUngated(then) || (otherwise && seedsUngated(otherwise))) return null;
 
   // The arms are numbered `[then, else]` by the emission key wherever the order is owed. See `unionArms`.

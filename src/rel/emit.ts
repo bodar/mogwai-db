@@ -1242,7 +1242,7 @@ function emitProgram(program: Plan, budget?: CompileBudget): { readonly effects:
   // tree its text is, so a DAG whose sharing compounds would cost them 2^k before the rendered-bytes charge
   // could fire. `spelledSize` reads that tree's size off the DAG in O(DAG): each binding, and the result,
   // is spelled whole by the assembler, and every node spells at least one byte.
-  if (budget) for (const node of [...program.bindings.map((binding) => binding.node), program.result]) budget.charge(spelledSize(node));
+  if (budget) for (const node of [...program.bindings.map((binding) => binding.node), program.result]) budget.charge(spelledSize(node), { kind: 'plan' });
   checkPlan(program);
   return assembler(new Map(program.bindings.map((binding) => [binding.name, binding])), budget).parts(program);
 }

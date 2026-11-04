@@ -14,6 +14,7 @@ import type { ChainRead, Subject } from '../child.ts';
 import type { ProgramWrites } from '../write.ts';
 import type { ProgramScopeNames } from '../../ir/labels.ts';
 import type { Declines } from '../../unsupported.ts';
+import { pastBudget, type CompileBudget } from '../../../sql/kernel/budget.ts';
 
 // THE SHARED VOCABULARY OF THE CHAIN FOLD — the types every tail returns, the context every tail
 // threads, and the carried-channel constants the whole lowering mints and reads. It lives in its own
@@ -253,6 +254,9 @@ export interface ChainCtx extends FilterCtx {
   /** The compile's decline-reason sink — see `Lowering.declines`. A decline decided here on a framing
    *  fact is recorded into it, and the lowering returns `null`. */
   readonly declines: Declines;
+  /** The compile's work meter — see `Lowering.budget`. A host lowering a body that holds unrolled steps
+   *  records the unroll on it (`noteUnrolled`), so a decline past a statement limit can name the count. */
+  readonly budget: CompileBudget;
 }
 
 /**
@@ -268,7 +272,7 @@ export const settledOf = (ctx: ChainCtx) => ({
   params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
   labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects, sideEffectPolicies: ctx.sideEffectPolicies,
   services: ctx.services, sack: ctx.sack, collections: ctx.collections,
-  writes: ctx.writes, scopeNames: ctx.scopeNames, declines: ctx.declines,
+  writes: ctx.writes, scopeNames: ctx.scopeNames, declines: ctx.declines, budget: ctx.budget,
 }) as const;
 
 /**
@@ -313,8 +317,21 @@ export const inArmBody = (ctx: ChainCtx): ChainCtx =>
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */
 export const bodyOf = (nested: unknown, params: ParamEnv, sideEffects?: SideEffectConstants): readonly IRStep[] | null => {
-  try { return childSteps(nested, params, sideEffects); } catch { return null; }
+  try { return childSteps(nested, params, sideEffects); } catch (error) { return pastBudget(error); }
 };
+
+/**
+ * THE HOST'S HALF OF AN UNROLL'S PROVENANCE — record on the compile's meter (`CompileBudget.noteUnroll`) the
+ * largest unroll a body about to be lowered holds (`IRStep.unrolled`), with what THIS host allows: `host`
+ * is the map-like host step (`local`/`map`/`flatMap`) whose repeat() the user could move to the top level,
+ * else `null`; `root` is the root chain, the one place `until(loops())` is known to run as the walk. Only
+ * the body's own steps: a deeper body is noted by the host that lowers it.
+ */
+export function noteUnrolled(body: readonly IRStep[] | null, ctx: ChainCtx, host: string | null, root = false): void {
+  let largest: IRStep['unrolled'];
+  for (const s of body ?? []) if (s.unrolled && (!largest || s.unrolled.times > largest.times)) largest = s.unrolled;
+  if (largest) ctx.budget.noteUnroll({ times: largest.times, host, loops: root && largest.loopable });
+}
 
 /** The subject of a clause that reads an ELEMENT — a property row, a label row, an id. Named because
  *  three clause builders take it and each would otherwise re-state the narrowing in its signature. */

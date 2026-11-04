@@ -37,6 +37,7 @@ import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalSco
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { nondeterministic } from '../ir/step.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
+import { pastBudget } from '../../sql/kernel/budget.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
@@ -1103,7 +1104,7 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
       let body: readonly IRStep[];
       // The NORMALIZED body — the one the lowering reads (`bodyOf`), so a slice `EarlyLimitStrategy` moves inside it
       // and a `choose`'s absorbed option arms are judged as they will run.
-      try { body = childSteps(node.nested, params); } catch { unreadable = true; continue; }
+      try { body = childSteps(node.nested, params); } catch (error) { pastBudget(error); unreadable = true; continue; }
       const inner = walk(body, false, pull === 'loop' ? false : true);
       if (!inner.effects) continue;
       into.effects = true;

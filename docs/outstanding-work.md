@@ -756,7 +756,16 @@ Beside the RelIR substrate:
   `parseComputedMergeArg`'s per-driver map decomposition (`src/compiler/ir/write-args.ts`). Build
   nr-fu-onmatch-scope (§1) first. Beside it: an explicit whole-arg map over a Map driver
   (`inject([a:1]).mergeV([name:'q'])`, or a side-effect `select(k)` no Map holds) is a mere multiplier
-  `mergedFromMap` does not route yet.
+  `mergedFromMap` does not route yet. Its parameter form (`inject($rows).unfold().mergeV()`) is what a
+  literal bulk upsert past the statement cap SHOULD be told to send instead; until it lowers, that decline
+  (`literalTextHint`, `src/sql/kernel/budget.ts`) can only say "send the values in smaller batches".
+- **Literal maps are spelled ~5× their query text (literal-text-amplification)** — `g.inject(<3,000
+  [name:'m<i>'] maps>).mergeV()` is 44 KB of query and a ~223 KB first statement (each map a
+  `jsonb('[[{"t":"string","v":"name"},{"t":"string","v":"m0"}]]')` VALUES row), so a Durable Object refuses
+  it at ~1,300 maps where the query text alone would allow ~6,000. It now declines CLEANLY on both runtimes
+  (statement text, not parameters; mostly literal values; send smaller batches), but the multiplier is the
+  real cost. Fix in the typed-literal spelling — a compact per-literal encoding (or one JSON array literal
+  exploded by `json_each`, the same one-value rule binds follow) — never a decline.
 - **A Map driver holding a TOKEN key (`T.label`, `Direction`) (nr-fu-token-keys)** — `literalKeyFacts`
   (`rel/framing.ts`) gives up on a non-string key, so `mapSearchedKeys` is null (the one-at-a-time guard
   refuses any onMatch/`property()` write) and `mayHold` is always true (a side-effect `select(k)` arm

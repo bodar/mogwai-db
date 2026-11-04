@@ -76,6 +76,14 @@ describe('past it, the decline is clear and costs work linear in the count', () 
   // The first count past the limit: a `local` body joins its host's row in, while an `EXISTS` body
   // correlates against it instead, so its SELECT holds one table fewer.
   const FIRST_PAST: Readonly<Record<string, number>> = { local: 64, where: 65 };
+  // WHAT EACH HOST ALLOWS, from the fact its lowering holds (`noteUnrolled`), never from a list of names in
+  // the message: a map-like host's repeat() can move to the top level; a `where()` body is a TEST, so moving
+  // it out would change the question. Neither offers until(loops()): `where` lowers its body as a correlated
+  // test no walk can run, and a child host's route is not a fact the decline has.
+  const ADVICE: Readonly<Record<string, string>> = {
+    local: 'lower the count, or move the repeat() out of local(…) to the top level, where its iterations are not fused into one SELECT',
+    where: 'lower the count',
+  };
   for (const [host, q] of HOSTS.filter(([host]) => host in FIRST_PAST)) {
     const first = FIRST_PAST[host]!;
     test(`${host}: times(${first}), times(500) and times(2000)`, () => {
@@ -83,7 +91,7 @@ describe('past it, the decline is clear and costs work linear in the count', () 
       for (const k of [first, 500]) {
         const e = declines(q(k));
         expect(e).toBeInstanceOf(JoinWidthExceeded);
-        expect(e.message).toBe(`this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat(…).times(${k}) unrolls into one join per iteration — lower the count, move the repeat() out of its child traversal (local/where/map/…) to the top level, where its iterations are not fused into one SELECT, or, for a body without a barrier step (order/limit/range/dedup/aggregate/…), bound it with until(loops().is(${k})), which runs as a loop rather than unrolled`);
+        expect(e.message).toBe(`this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat(…).times(${k}) unrolls into one join per iteration — ${ADVICE[host]}`);
       }
       // At 2000 the compile's recursion may meet the runtime's stack first — a full suite process runs out
       // where a lone file does not, and workerd's stack is shallower still (`tooDeep`, compiler.ts). Either
@@ -99,6 +107,23 @@ describe('past it, the decline is clear and costs work linear in the count', () 
     const e = declines('g.V().repeat(__.out()).emit().times(64).count()');
     expect(e.message).not.toContain('top level');
     expect(e.message).toContain('repeat(…).times(64) unrolls into one join per iteration');
+  });
+
+  // THE ADVICE AT DEPTH: each host says only what it allows, wherever it sits. A `where()` nested in a `local()`
+  // is still a test — the `local` holds no unrolled step of its own, so it offers nothing — and a branch arm
+  // names the count without a remedy it has no fact for.
+  test.each([
+    ['g.V().local(repeat(out()).times(70).count())', 'lower the count, or move the repeat() out of local(…) to the top level, where its iterations are not fused into one SELECT'],
+    ['g.V().flatMap(repeat(out()).times(70)).count()', 'lower the count, or move the repeat() out of flatMap(…) to the top level, where its iterations are not fused into one SELECT'],
+    ['g.V().where(repeat(out()).times(70)).count()', 'lower the count'],
+    ['g.V().not(repeat(out()).times(70)).count()', 'lower the count'],
+    ['g.V().local(where(repeat(out()).times(70))).count()', 'lower the count'],
+    ['g.V().union(repeat(out()).times(70), out()).count()', 'lower the count'],
+    ['g.V().optional(repeat(out()).times(70)).count()', 'lower the count'],
+  ] as const)('%s', (q, advice) => {
+    const e = declines(q);
+    expect(e).toBeInstanceOf(JoinWidthExceeded);
+    expect(e.message).toBe(`this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat(…).times(70) unrolls into one join per iteration — ${advice}`);
   });
 
   test('the top-level form of the same walk answers', () => {

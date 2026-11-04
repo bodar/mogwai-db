@@ -19,7 +19,7 @@ import { arg, isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/fr
 import type { TypeNode } from '../../../gremlin/types.ts';
 import { propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
-import { BULK, NO_ALIASES, bodyOf, elementSubject, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
+import { BULK, NO_ALIASES, bodyOf, elementSubject, noteUnrolled, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
 import { foldedListSet, nestedFirstValue, readsScopeValue, scalarChild } from './reduction.ts';
 
@@ -595,6 +595,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     // which is the same instrument-shaped finding as the four before it.
     const body = bodyOf(nested.nested, ctx.params);
     if (!body?.length) return null;
+    noteUnrolled(body, ctx, null);
     // ALL THREE SHAPES, through the one answer: a FILTER-ONLY body is a conjunction over this row, a
     // body that MOVES is a correlated `EXISTS`, and a body that PROJECTS a value is that value
     // compared. This used to offer only the last two, so `where(__.has('age', P.gt(27)))` declined —
@@ -634,6 +635,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
       if (!isNested(arm)) return null;
       const body = bodyOf(arm.nested, ctx.params);
       if (!body?.length) return null;
+      noteUnrolled(body, ctx, null);
       const pred = childPredicate(body, subject, fresh, ctx, false, aliases);
       // ONE ARM THIS ROUTE CANNOT ANSWER DECLINES THE WHOLE STEP. A connective is not decomposable
       // into the arms it happens to understand: dropping an arm of an `and` widens the result and

@@ -4,6 +4,8 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql, CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES, cfLimitViolation } from '../src/cf-limits.ts';
 import { executeQuery } from './support/executor.ts';
+import { run } from './support/harness.ts';
+import { UnsupportedTraversal } from '../src/compiler/unsupported.ts';
 import { compile } from '../src/compiler/compiler.ts';
 import { lowerForeignResume } from '../src/compiler/rel/lower.ts';
 import { finishLowering } from '../src/compiler/rel/spine.ts';
@@ -60,8 +62,39 @@ describe('cfLimitViolation — the DO statement contract', () => {
     const sql = new CfLimitedSql(new BunSqlite(':memory:'));
     expect(() => sql.query(`SELECT ${Array.from({ length: 101 }, () => '?').join(',')}`, Array(101).fill(1)))
       .toThrow(/bound-parameter limit/);
-    expect(() => sql.exec(`CREATE TABLE t(${'x'.repeat(CF_MAX_SQL_BYTES)})`)).toThrow(/byte text limit/);
+    // The TEXT cap throws the platform's own spelling, with the decorator's diagnostic as its cause — so a
+    // store above it declines exactly as a Durable Object's does (below).
+    let thrown: unknown;
+    try { sql.exec(`CREATE TABLE t(${'x'.repeat(CF_MAX_SQL_BYTES)})`); } catch (e) { thrown = e; }
+    expect((thrown as Error).message).toBe('statement too long: SQLITE_TOOBIG');
+    expect(((thrown as Error).cause as Error).message).toMatch(/byte text limit/);
   });
+});
+
+// A STATEMENT PAST THE TEXT CAP, as a user meets it: a bulk upsert written as literal maps. The compile spells
+// each literal into the SQL text, so 3,000 short maps (44 KB of query) are a ~220 KB statement — past a
+// Durable Object's 100 KB, with not one bound parameter. Under this decorator that used to reach the user as a
+// bare `Error` (our diagnostic), while production declined it blaming repeat(); both now reach the SAME clean
+// decline, which says it is the TEXT, not parameters, and that the text is the user's literal values.
+describe('a literal bulk upsert past the statement text cap', () => {
+  const maps = (n: number): string => Array.from({ length: n }, (_, i) => `[name:'m${i}']`).join(',');
+
+  test('declines cleanly under the decorator, naming the text and the literals', () => {
+    let thrown: unknown;
+    try { run(limited(), `g.inject(${maps(3000)}).mergeV().count()`); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+    const message = (thrown as Error).message;
+    expect(message).toContain('is longer than this store accepts in one statement (statement too long)');
+    expect(message).toContain("a limit on the statement's TEXT");
+    expect(message).toContain('not on its bound parameters');
+    expect(message).toContain('most of it is literal values written into the query');
+    expect(message).toContain('send the values in smaller batches');
+    expect(message).not.toContain('repeat(');
+  });
+
+  test('a batch under the cap answers', () => {
+    expect(run(limited(), `g.inject(${maps(500)}).mergeV().count()`)).toEqual([{ v: 500 }]);
+  }, 30_000);
 });
 
 /**
