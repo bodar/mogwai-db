@@ -185,6 +185,20 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
     });
   }
 
+  // A LABELLED hop off a derived frontier: the label must sit inside EACH direction's disjunct, or the
+  // MULTI-INDEX OR seeks `e_out (src=?)` / `e_in (tgt=?)` and filters the label afterwards — every hop
+  // then pays the vertex's total degree, not its degree for the label (×59 from 1k to 8k vertices on a
+  // hub, measured). Both seeks must carry `label=?`, and no seek of either index may lack it.
+  for (const q of ["g.V().out('created').both('knows').path().count()", "g.V().out('created').bothE('knows').path().count()",
+    "g.V(1).out('knows').both('knows','created')", "g.V().repeat(__.both('knows')).times(2).path()"]) {
+    test(`labelled: ${q}`, () => {
+      const seeks = plan(q).filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_(out|in) /.test(d));
+      expect(seeks.some((d) => /e_out \(src=\? AND label=\?\)/.test(d))).toBe(true);
+      expect(seeks.some((d) => /e_in \(tgt=\? AND label=\?\)/.test(d))).toBe(true);
+      expect(seeks.filter((d) => !/label=\?/.test(d))).toEqual([]);
+    });
+  }
+
   test('a base-table frontier keeps two plain seeks; a derived one is read once through the direction row', () => {
     // `g.V(1)` is a base-table read, so naming it twice is free — and measured faster than the OR.
     expect(sqlOf('g.V(1).both()')).not.toContain('VALUES (0), (1)');

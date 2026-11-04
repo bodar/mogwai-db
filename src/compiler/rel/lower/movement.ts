@@ -281,11 +281,17 @@ function directionsJoin(
     : left ?? dirs;
   const incoming = left ? col(driver!.id, dirs ? 'pid' : 'id') : (from as { readonly correlated: Expr }).correlated;
   const froms = hops.map((hop) => hop.from);
-  const matched = !dirs || froms.every((name) => name === froms[0])
-    ? eq(col(e.id, froms[0]!), incoming)
+  // The per-edge restriction (the label match) is built ONCE and ANDed INTO EACH direction's disjunct,
+  // never outside the OR: SQLite's MULTI-INDEX OR picks each arm's index from that arm's OWN terms, so a
+  // label left outside the OR seeks `e_out (src=?)` / `e_in (tgt=?)` and filters afterwards — every hop
+  // then costs the vertex's TOTAL degree instead of its degree for the label (measured: a path()ed
+  // `out('likes').both('knows')` into a hub went ×1.4 → ×59 from 1k to 8k vertices). Inside each
+  // disjunct the two seeks are `(src=? AND label=?)` / `(tgt=? AND label=?)`, as two plain joins were.
+  const restriction = restrict(e);
+  const on = !dirs || froms.every((name) => name === froms[0])
+    ? and(eq(col(e.id, froms[0]!), incoming), restriction)
     : froms.reduce<Expr | undefined>((acc, name, i) =>
-      or(acc, and(eq(col(driver!.id, 'dir'), compilerInt(i)), eq(col(e.id, name), incoming))), undefined)!;
-  const on = and(matched, restrict(e));
+      or(acc, and(and(eq(col(driver!.id, 'dir'), compilerInt(i)), eq(col(e.id, name), incoming)), restriction)), undefined)!;
   // A correlated single-direction hop FILTERS the edge table against the outer id; every other form JOINS.
   const source = driver
     ? make.join({
