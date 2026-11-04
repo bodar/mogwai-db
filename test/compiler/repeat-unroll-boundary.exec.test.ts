@@ -507,6 +507,26 @@ describe('a SQLite limit spelled the workerd way still declines clearly', () => 
     }));
     expect(() => run(store, 'g.V().repeat(__.out().limit(1)).times(2).count()')).toThrow(/exceeds a SQLite statement limit \(statement too long\)/);
   });
+
+  // Every PREPARE-time shape limit SQLite has, by its own message (SQLite 3.51 `sqlite3SrcListEnlarge`,
+  // `sqlite3ExprListCheckLength`, `resolveOrderGroupBy`, `sqlite3ExprFunction`), in the workerd spelling:
+  // each is a property of the compiled text, so each is the same clear decline and none leaks bare.
+  test.each([
+    'too many FROM clause terms, max: 200',
+    'too many columns in result set',
+    'too many terms in ORDER BY clause',
+    'too many terms in GROUP BY clause',
+    'too many arguments on function max',
+  ])('%s', (limit) => {
+    const store = new GraphStore(new WorkerdSpelledSql({
+      exec: () => {},
+      query: (sql: string) => { if (/\bedges\b/.test(sql) && !/^(CREATE|PRAGMA)/i.test(sql)) throw new Error(limit); return []; },
+    }));
+    let thrown: unknown;
+    try { run(store, 'g.V().repeat(__.out().limit(1)).times(2).count()'); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+    expect((thrown as Error).message).toContain(`exceeds a SQLite statement limit (${limit})`);
+  });
 });
 
 // A bounded repeat's ONE lowering is the unroll, whose compile work is linear in the steps it splices — a
@@ -585,6 +605,22 @@ describe('a long unrolled chain cut into CTEs', () => {
     ["g.V().has('i', 0).repeat(__.out('jump').limit(1)).times(400).groupCount().by('i').select(values).unfold()", [1]],
   ] as const)('%s', (q, expected) => {
     expect(bagOf(on(q))).toEqual([...expected]);
+  });
+
+  // A body SQLite FLATTENS (a bare `out('next')`, no barrier) makes one FROM list of every hop, so there
+  // the binding limit is SQLite's 200-term FROM list, not the statement text: past it, on a full stack and
+  // a workerd-sized one alike, the user gets the clear decline naming it — never SQLite's bare message.
+  test.each([
+    "g.V().has('i', 0).repeat(__.out('next')).times(1200).values('i')",
+    "g.V().repeat(__.out('next')).times(1200).values('i').limit(2)",
+    "g.V().has('i', 0).repeat(__.out('next')).times(200).values('i')",
+  ])('a flattened unroll past the FROM-list cap declines: %s', (q) => {
+    for (const go of [() => run(ring, q), () => underShallowStack(() => run(ring, q))]) {
+      let thrown: unknown;
+      try { go(); } catch (e) { thrown = e; }
+      expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+      expect((thrown as Error).message).toContain('exceeds a SQLite statement limit (too many FROM clause terms, max: 200)');
+    }
   });
 
   test('the cut is a plain CTE: one statement, no bind, no fence', () => {

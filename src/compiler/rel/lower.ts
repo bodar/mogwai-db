@@ -4229,7 +4229,10 @@ const scalarPayload = (
  * (`MAX_UNROLLED_STEPS`), was the binding limit — and where it binds is the RUNTIME's: workerd's stack is
  * about 5× shallower than Bun's, so `repeat(out().limit(1)).times(1200)` compiled on Bun and declined in
  * a Durable Object. Cutting the spine into CTEs every `SPINE_DEPTH_BOUND` levels makes every walk's depth
- * this constant (plus what one step adds), whatever the chain's length.
+ * this constant (plus what one step adds), whatever the chain's length. What binds after the cut is
+ * SQLite's, decided by the compiled TEXT on every runtime alike: for a body SQLite flattens into one FROM
+ * (a bare `out()`), its 200-term FROM list, well before the text length; otherwise the text length or the
+ * expression depth. Each surfaces as the clear shape-limit decline (`STATEMENT_SHAPE_LIMIT`, `storage.ts`).
  *
  * MEASURED, not guessed: the deepest relation any L1-corpus or L4 traversal lowers to is 47 levels, so at
  * 128 no ordinary query is cut and its plan stays byte-identical (`test/plan-stability.test.ts`, the
