@@ -830,6 +830,14 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
     }) });
     return { value: readOne('v', 'any'), ...(perRow ? { vtype: readOne('t', 'text') } : {}) };
   }
+  return { value: firstRootedColumn(read, 'v', fresh) };
+}
+
+/** A rooted read's FIRST ROW's `column`, as a scalar subquery — the first in emission order where the
+ *  read carries one (`firstRootedValue`'s untyped form, for any payload column: a map read's pairs). NULL
+ *  over no rows. The caller has checked the read's framing names `column`. */
+export function firstRootedColumn(read: RootedRead, column: string, fresh: Minter): Expr {
+  const encounter = read.rel.channels.find((channel) => channel.role === 'encounter');
   const ordered = encounter
     ? make.limit({
       id: fresh('rfl'),
@@ -838,10 +846,10 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
       channels: read.rel.channels, type: read.rel.type, count: compilerInt(1),
     })
     : read.rel;
-  return { value: { kind: 'scalar', plan: make.project({
-    id: fresh('rfv'), input: ordered, channels: [], type: typeOf(meta('v', 'any', true)),
-    exprs: [['v', col(ordered.id, 'v')]],
-  }) } };
+  return { kind: 'scalar', plan: make.project({
+    id: fresh('rfv'), input: ordered, channels: [], type: typeOf(meta(column, 'any', true)),
+    exprs: [[column, col(ordered.id, column)]],
+  }) };
 }
 
 /** A rooted body's FIRST ROW, read off one fenced row (`firstRootedValue`'s typed form): its value and

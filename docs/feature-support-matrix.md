@@ -154,7 +154,7 @@ The GQL string form (`g.match("MATCH (a)-[:knows]->(b)")`) desugars to it.
 | Step | | Notes |
 |---|:--:|---|
 | `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | ❌ map `order(Scope.local).by(<key>/<traversal>)`; `dedup(local)` with labels or `by()`; a list of properties; a federated element list |
-| `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ over a non-collection scalar |
+| `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ over a non-collection scalar. `merge(<map>)` over a Map/`project()` is a per-traverser putAll (the argument wins a shared key) ✅; ❌ a non-empty literal beside list- or element-valued sides (`valueMap().merge([k:v])`), an operand whose sides differ from the incoming map's |
 | `index()` | ❌ | |
 
 ## 10. Types, math & strings
@@ -288,6 +288,7 @@ wrong number class.
 | Unread erroneous values | an error in a value nothing reads is not raised (`project('x').by(values('age').toUpper()).count()` answers) |
 | Number equality | by value: `1`, `1L`, `1.0` are one value; `true`/`1` and a UUID/Char vs String stay distinct. A merged key frames as one of the merged classes (`inject(1, 1.0).groupCount()` is `{1.0: 2}`) |
 | String vs integer element id | a String id is not the integer it spells: `V('1')`, `hasId('1')`, `E('11')` do not find rowid `1`/`11`. A user-supplied `T.id` may be a String or an integer and both may exist, so coercing would be ambiguous (TinkerGraph's id manager coerces) |
+| `merge()` over a Map | entries keep insertion order — the incoming map's, then the argument's new keys (a shared key stays in place with the argument's value) — not `HashMap` order. A `null` argument raises `encountered null`, where Java throws a `NullPointerException` |
 | `merge()` type-error text | a list `merge()` given a Map argument raises `merge step can only take an array or an Iterable as an argument, encountered map`, not Java's `step type mismatch: expected argument to be Iterable but got Map` |
 | UUID vs String on an untyped value | a value with no type fact — an unfolded list member, an injected String — compares by its text, so a String spelling a UUID equals that UUID there (`inject(['<u>']).unfold().is(UUID('<u>'))` is 1); a stored or typed value keeps the two distinct |
 | Signed zero | `-0.0` is `0.0` everywhere |

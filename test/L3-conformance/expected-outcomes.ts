@@ -55,7 +55,6 @@ export const REASONS = {
   'oncreate-override': { kind: 'divergence', why: 'an onCreate map that changes a merge key is refused when the query compiles (eager error timing), though here the edge exists and onCreate never runs', cite: ['docs/feature-support-matrix.md', '| Error timing |'] },
   // ── defect ──
   'multilabel-edge-label': { kind: 'defect', why: '`with(\'multilabel\')` frames an edge\'s own label as a String, not a Set', cite: ['docs/outstanding-work.md', '(l3-multilabel-edge-label)'] },
-  'map-merge': { kind: 'defect', why: 'a `merge()` over an incoming Map raises a type error instead of merging', cite: ['docs/outstanding-work.md', '(l3-map-merge)'] },
   // ── decline ──
   'subgraph-strategy': { kind: 'decline', why: '`SubgraphStrategy` with a `vertexProperties` criterion', cite: ['docs/outstanding-work.md', '`SubgraphStrategy(vertexProperties:)`'] },
   'partition-upsert': { kind: 'decline', why: 'a partition-aware `mergeV`/`mergeE`', cite: ['docs/outstanding-work.md', 'PartitionStrategy-aware upsert'] },
@@ -129,11 +128,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
   ],
   'multilabel-edge-label': [
     'g_withXmultilabelX_E_elementMap',
-  ],
-  'map-merge': [
-    'g_V_asXnameX_projectXnameX_byXnameX_mergeXother_blueprintX',
-    'g_V_elementMap_mergeXconstantXaXX',
-    'g_V_hasXname_markoX_elementMap_mergeXV_hasXname_lopX_elementMapX',
   ],
   'subgraph-strategy': [
     'g_withStrategiesXSubgraphStrategyXvertexProperties_hasXstartTime_gtX2005XXXX_V_asXaX_propertiesXlocationX_asXbX_selectXaX_outE_properties_selectXbX_value_dedup',

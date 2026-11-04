@@ -1546,13 +1546,22 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
  *  Java class we do not have. The type its channel DECLARED (the literal's suffix, the parameter's settled
  *  type) wins — `2L` is a long, not the integer its JS value spells — and only an untyped value falls back
  *  to the one JS-value inference (`gremlinTypeOf`). */
-const encounteredType = (value: unknown, declared: TypeNode | null | undefined): string =>
+export const encounteredType = (value: unknown, declared: TypeNode | null | undefined): string =>
   flatType(declared) ?? gremlinTypeOf(value) ?? 'object';
+
+/** `%s step expected provided argument to evaluate to a Map, encountered %s` — a `merge()` over a MAP
+ *  traverser whose operand is not a Map (`MergeStep.java:78-86`); the Map self has no Iterable arm to fall
+ *  back to. `null` is named as such: Java's `mapB.getClass()` there is a `NullPointerException`, and a
+ *  clear message beats a crash. The class tail is the Gremlin type name, `nonIterableTraverser`'s rule. */
+export const nonMapArgument = (step: IRStep, encountered: string | null): never => {
+  throw new ValueParseError(
+    `${step.name} step expected provided argument to evaluate to a Map, encountered ${encountered ?? 'null'}`);
+};
 
 /** What a lowered operand YIELDED, as a Gremlin type name — or `null` where the framing cannot say, which
  *  fails open rather than naming a type the answer does not have. A `path` is deliberately absent: it
  *  coerces to its element sequence and IS iterable, so it never reaches here. */
-const gremlinTypeOfFraming = (framing: RelFraming): string | null =>
+export const gremlinTypeOfFraming = (framing: RelFraming): string | null =>
   framing.kind === 'elements' || framing.kind === 'detached' ? framing.elem
     : framing.kind === 'scalar' ? (framing.type.kind === 'static' ? framing.type.type : 'object')
       : framing.kind === 'map' || framing.kind === 'mapEntry' ? 'map'

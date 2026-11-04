@@ -17,7 +17,7 @@ import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamB
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -32,7 +32,7 @@ import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, typ
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { propertyReadOf } from '../property.ts';
 import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
-import { recordNode } from '../record.ts';
+import { recordNode, recordToMap } from '../record.ts';
 import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
@@ -1646,7 +1646,19 @@ function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx,
 /** A re-sourcing body's value over the graph, whoever the host — `reSourcedUnder`'s one lowering. */
 function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter, hosts: RootedHosts): ChildValue | null {
   const rooted = rootedRead(body, ctx, fresh, hosts);
-  if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar') return null;
+  if (!rooted || rooted.effects) return null;
+  // A MAP-valued re-source (`__.V().has('name','lop').elementMap()`, a `project()` record collapsed to its
+  // map) is the same first-result read over its pairs column. A map is never null, so the value's nullness
+  // IS its productivity.
+  const mapped = rooted.framing.kind === 'record' ? recordToMap(rooted.rel, rooted.framing.fields, ctx.source, fresh) : null;
+  if (rooted.framing.kind === 'map' || mapped) {
+    const framing: RelFraming = mapped
+      ? { kind: 'map', keyOf: { kind: 'scalar' }, valOf: mapped.valOf, ...recordKeyFacts((rooted.framing as Extract<RelFraming, { kind: 'record' }>).fields) }
+      : rooted.framing;
+    const first = firstRootedColumn(mapped ? { ...rooted, rel: mapped.rel } : rooted, MAP_COL, fresh);
+    return { expr: jsonOf(first), framing, present: 'value-nullness', yields: 'first' };
+  }
+  if (rooted.framing.kind !== 'scalar') return null;
   // A reducing barrier (`__.V().count()`) collapses to EXACTLY one row and is always productive.
   const counted = rootedCount(rooted, fresh);
   if (counted) return counted;

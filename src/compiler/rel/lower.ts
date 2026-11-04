@@ -42,7 +42,7 @@ import {
     labelSetArgs,
     meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
-    typedNode, typeOf, withPayload, originOf,
+    typedNode, typeOf, withPayload, originOf, presenceFenced,
     type Minter, withSubqueryColumns,
 } from './build.ts';
 import { aliasElementHost, aliasGuard, aliasIdAt, aliasProjection, aliasOperandAt, bindAliases, isElementAlias, liveAliases, selectSpec, type AliasProjection, type ElementAliasProjection } from './alias.ts';
@@ -57,8 +57,8 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
-import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, oneMemberList, unfoldList } from './list.ts';
-import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
+import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, gremlinTypeOfFraming, nonMapArgument, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, oneMemberList, unfoldList } from './list.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -79,7 +79,7 @@ import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movemen
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
-import { BRANCH_HOSTS, branchArms, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
+import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
  * THE LOWERING — `Step[] -> RelIR`.
@@ -3203,6 +3203,76 @@ function pathTail(
 }
 
 /**
+ * `merge(<operand>)` over a MAP traverser — `new HashMap(incoming).putAll(operand)`, the operand winning a
+ * shared key (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeStep.java:76-88`).
+ * The Map self is the step's OWN arm, decided before any collection conversion, so the ListFunction raises
+ * do not apply to it; an operand that is not a Map is the reference's `expected provided argument to
+ * evaluate to a Map` (`nonMapArgument`), raised at compile time wherever its form is static.
+ *
+ * The operand is one of three forms, one question — what Map does this traverser put:
+ * - a map LITERAL (`merge(['k':'v'])`, a `$param` map, or `__.constant([…])`) — a compile-time blob;
+ * - any other child body — the per-traverser child value (`ChildSeam.scalar`, `TraversalUtil.apply`'s
+ *   FIRST result), which must frame as a Map. An operand that may produce NOTHING raises the reference's
+ *   `does not map to a value` per row (`emptyOperand`), never silently merging nothing.
+ *
+ * Both maps must agree on their side encodings (`sameFraming`, the branch merge's one rule), because the
+ * merged pairs array is framed by ONE `keyOf`/`valOf`; otherwise this declines. The result's key fact is
+ * the two MAY sets' meet (`meetFraming`). `null` declines.
+ */
+function mapMerge(
+  rel: Rel, step: IRStep, self: Extract<RelFraming, { kind: 'map' }>, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
+): { readonly rel: Rel; readonly facts: MapKeyFacts } | null {
+  if (step.args.length !== 1 || step.modulators?.length || step.optionArms) return null;
+  const operandArg = step.args[0]!;
+  const literal = (value: unknown, type: TypeNode | null, name: string | null) => {
+    if (value === undefined) return null;
+    if (!(value instanceof Map)) return nonMapArgument(step, value === null ? null : encounteredType(value, type));
+    // An EMPTY map puts nothing — the incoming map is the answer, whatever its side encodings.
+    if (!value.size) return { rel, facts: self };
+    const blob = mapLiteralSide({ value, type, name }, self.keyOf, self.valOf);
+    if (!blob) return null;
+    const keys = meetFraming([self, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...literalKeyFacts([...value.keys()]) }]);
+    return { rel: mapPutAll(rel, () => blob, fresh), facts: keys as MapKeyFacts };
+  };
+  if (!isNested(operandArg.value)) return literal(operandArg.value, operandArg.type ?? null, operandArg.name ?? null);
+  const seam = childSeam(ctx, fresh);
+  const body = seam.body((operandArg.value as { readonly nested: unknown }).nested, 'child');
+  if (!body?.length) return null;
+  // `__.constant(c)` is the literal it names, so a non-Map constant is the same compile-time raise.
+  if (body.length === 1 && body[0]!.name === 'constant' && body[0]!.args.length === 1 && !body[0]!.modulators?.length) {
+    const c = body[0]!.args[0]!;
+    return literal(c.value, c.type ?? null, c.name ?? null);
+  }
+  const host: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf: self.keyOf, valOf: self.valOf, ...mapKeyFacts(self), row: { rel, aliases: labels } };
+  const cv = seam.scalar(body, host);
+  if (!cv) return null;
+  if (cv.framing.kind !== 'map') {
+    // A per-row scalar could be anything, a Map included — the seam cannot say, so it declines. Every
+    // other shape is statically NOT a Map.
+    if (cv.framing.kind === 'scalar' && cv.framing.type.kind !== 'static') return null;
+    const named = gremlinTypeOfFraming(cv.framing);
+    return named === null ? null : nonMapArgument(step, named);
+  }
+  if (!sameFraming(self, cv.framing)) return null;
+  const empty = emptyOperand(cv);
+  // Productivity is read off the projected column, so only a presence the value's nullness states can
+  // travel with it; any other presence declines.
+  if (empty === null || (empty && cv.present !== 'value-nullness')) return null;
+  // The operand is read ONCE, in the row's own scope: projected beside the map, fenced where it can
+  // stand, then the empty-operand raise and the putAll both read that column.
+  const projected = withPayload(rel, [[MAP_COL, col(rel.id, MAP_COL)], [MERGE_OPERAND, cv.expr]],
+    [meta(MAP_COL, 'json', true), meta(MERGE_OPERAND, 'json', true)], fresh);
+  const held = presenceFenced(projected, cv.expr, fresh);
+  const guarded = empty
+    ? raisingRows(held, [[{ kind: 'binary', op: 'is', left: col(held.id, MERGE_OPERAND), right: compilerNull() }, empty[1]]], fresh)
+    : held;
+  return { rel: mapPutAll(guarded, (at) => col(at.id, MERGE_OPERAND), fresh), facts: meetFraming([self, cv.framing]) as MapKeyFacts };
+}
+
+/** The column a `merge()` operand's per-row Map rides in beside the incoming one (`mapMerge`). */
+const MERGE_OPERAND = 'mop';
+
+/**
  * THE MAP LOOP — a map traverser is not terminal either.
  *
  * `group()`/`groupCount()`/`cap()` and (next) `valueMap()` all produce ONE map per traverser, and until
@@ -3269,6 +3339,16 @@ function mapTail(
       if (!merged) return null;
       return afterWrite(ctx.writes, rel, steps, at, merged.at, merged.effects.bindings, ctx.params, fresh,
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
+    }
+
+    // `merge(<map>)` over a MAP — one `putAll` per traverser (`mapPutAll`), the fold's key rule run per row.
+    if (step.name === 'merge') {
+      const self: Extract<RelFraming, { kind: 'map' }> = { kind: 'map', keyOf, valOf, ...facts };
+      const merged = mapMerge(rel, step, self, labels, ctx, fresh);
+      if (!merged) return null;
+      rel = merged.rel;
+      facts = mapKeyFacts(merged.facts);
+      continue;
     }
 
     if (step.name === 'is') {
@@ -5672,7 +5752,10 @@ export function continueAs(
   // ⚠️ A SCALAR self is deliberately absent: there the choice between "can't be null" and "can only take
   // an array or an Iterable" is a PER-ROW question, and answering one for a value that may be either
   // would raise the WRONG error. It keeps declining until the null-ness is a compile-time fact.
-  if (next && LIST_FUNCTIONS.has(next.name) && NON_ITERABLE_SELF.has(framing.kind))
+  // `merge()` over a MAP (or a record, which is one) is the step's own Map arm, not a collection
+  // conversion (`MergeStep.map`), so it is the map tail's to answer (`mapMerge`).
+  if (next && LIST_FUNCTIONS.has(next.name) && NON_ITERABLE_SELF.has(framing.kind)
+    && !(next.name === 'merge' && (framing.kind === 'map' || framing.kind === 'record')))
     nonIterableTraverser(next, gremlinSelfName(framing));
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
@@ -6227,7 +6310,8 @@ function recordTail(
     // record COLLAPSES to a map (`recordToMap` — the same boundary `fold()`/`select` cross) and re-enters
     // `mapTail`, which owns that vocabulary. This is why a multi-key `select(k…).by(…)` reaches the map
     // ops that a single-key select's map value already had. A GLOBAL count/slice stays the row op below.
-    if ((step.name === 'count' && isLocalScope(step)) || (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step))) {
+    // `merge(<map>)` is a putAll into the map the record IS — the same collapse.
+    if ((step.name === 'count' && isLocalScope(step)) || (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step)) || step.name === 'merge') {
       const mapped = recordToMap(rel, fields, ctx.source, fresh);
       if (!mapped) return null;
       return mapTail(mapped.rel, { kind: 'scalar' }, mapped.valOf, steps, at, ctx, fresh, labels, recordKeyFacts(fields));

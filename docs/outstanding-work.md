@@ -97,10 +97,6 @@ refusal comes first: it is a production outage.
   fix deletes its names there.
   - **`with('multilabel')` frames an edge's own label as a String (l3-multilabel-edge-label)** —
     `E().elementMap()` gives its endpoints' labels as Sets but its own as a String. 1.
-  - **`merge()` over an incoming Map raises a type error (l3-map-merge)** —
-    `V().has('name','marko').elementMap().merge(__.V().has('name','lop').elementMap())` raises `merge step
-    can only take an array or an Iterable type for incoming traversers, encountered map`; the reference
-    merges the two maps. 3.
 
 ## 1b. Super-linear at production size
 
