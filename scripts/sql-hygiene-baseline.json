@@ -68,7 +68,7 @@
   "both": {
     "binds": 0,
     "bytes": 1876,
-    "compiler": 19,
+    "compiler": 17,
     "bound": 0
   },
   "bothE": {
@@ -79,7 +79,7 @@
   },
   "branch": {
     "binds": 0,
-    "bytes": 5227,
+    "bytes": 5422,
     "compiler": 79,
     "bound": 0
   },
@@ -121,13 +121,13 @@
   },
   "constant": {
     "binds": 0,
-    "bytes": 1265,
-    "compiler": 21,
+    "bytes": 1205,
+    "compiler": 16,
     "bound": 0
   },
   "count": {
     "binds": 2,
-    "bytes": 3670,
+    "bytes": 3620,
     "compiler": 62,
     "bound": 0
   },
@@ -145,8 +145,8 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 6254,
-    "compiler": 68,
+    "bytes": 6196,
+    "compiler": 63,
     "bound": 0
   },
   "difference": {
@@ -451,8 +451,8 @@
   },
   "path": {
     "binds": 0,
-    "bytes": 7246,
-    "compiler": 94,
+    "bytes": 7097,
+    "compiler": 84,
     "bound": 0
   },
   "product": {
@@ -511,8 +511,8 @@
   },
   "sample": {
     "binds": 0,
-    "bytes": 1932,
-    "compiler": 21,
+    "bytes": 1991,
+    "compiler": 16,
     "bound": 0
   },
   "select": {

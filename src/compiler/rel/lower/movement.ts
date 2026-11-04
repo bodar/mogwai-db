@@ -20,7 +20,7 @@ import { ensureBulk } from './branch.ts';
 import { evidenceOf } from '../receiver.ts';
 import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
-import { rereadsFreely } from '../../../rel/walk.ts';
+import { doubledReads } from '../../../rel/walk.ts';
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -211,14 +211,35 @@ const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.r
 interface HopArm { readonly rel: Rel; readonly to: Expr; readonly from: Expr }
 
 /**
+ * HOW MANY DOUBLINGS a multi-direction hop may stack before it reads its frontier once (`hopJoin`): copies
+ * of the first frontier are bounded by 2^BOTH_COPY_BOUND, a constant factor, so statement text and
+ * prepare stay linear in the chain.
+ *
+ * A MEASURED tuning constant (8 000 vertices, two edges out of each; median of 7; 2026-11). Times at bound
+ * 1 / 2 / 3, and under the previous gate ("only a base-table frontier keeps two seeks"):
+ *
+ *   g.V().out().both().count()                      11.4 / 11.5 / 11.2 ms   was 14.5
+ *   g.V().both().both().count()                     18.5 / 15.1 / 14.9      was 18.6
+ *   g.V().repeat(both()).emit().times(3).count()   154   / 135  / 110       was 153
+ *   g.V().out('knows').bothE().otherV().count()     10.4 / 10.1 / 10.0      was 10.7
+ *   g.V().optional(out().both()).count()            12.1 / 12.5 / 12.1      was 15.1
+ *
+ * What a larger bound costs is copies of whatever precedes the doubled hops: `local(both()×8.count())`
+ * is 2.2 / 2.6 / 3.8 KB of text (the per-arm inline copy grows 2^bound), and a 30-step filter prefix
+ * before `both()×3` prepares in 1.2 / 1.3 / 1.9 ms. 2 recovers the two-hop `both().both()` without
+ * paying 3's 8× copy of an arbitrary prefix.
+ */
+const BOTH_COPY_BOUND = 2;
+
+/**
  * THE HOP JOIN — a frontier against `edges` for every direction of a hop table entry, as the arms whose
- * UNION ALL is the hop (one arm unless the frontier is free to read twice).
+ * UNION ALL is the hop (one arm unless a second read of the frontier is bounded — `BOTH_COPY_BOUND`).
  *
  * A rooted frontier is the LEFT, `ordered` side of the edge join; a correlated one compares the edge
  * column to the outer expression. `restrict` adds the per-edge condition (the label match).
  *
  * ⚠️ **A MULTI-DIRECTION HOP (`both`/`bothE`/`bothV`) READS ITS FRONTIER ONCE unless a second read is
- * free.** The per-direction UNION ALL names its frontier once per arm, and SQLite has no LATERAL and
+ * bounded.** The per-direction UNION ALL names its frontier once per arm, and SQLite has no LATERAL and
  * expands every reference to a derived table or CTE into its own copy — so k chained `both()` hops were
  * 2^k copies of the first: `g.V().both()×16.count()` and `repeat(both()).times(16)` exceeded SQLite's
  * reference limits outright, `local(both()×8.count())` was 46 KB of statement text doubling per hop, and
@@ -230,16 +251,17 @@ interface HopArm { readonly rel: Rel; readonly to: Expr; readonly from: Expr }
  * no dedup. Where every direction matches the same end (`bothV`: both from `id`) the ON collapses to the
  * one equality and only the reads differ per direction.
  *
- * **The one exemption is a frontier whose second read is free** (`rereadsFreely` — a base-table read, or
- * a correlated column): there the two per-direction joins stay, because the MULTI-INDEX OR pays a rowid
- * set per probe and measured ~45–60% slower per hop than two plain seeks (8 000 vertices:
- * `g.V().both().count()` 14 ms as two joins, 20 ms as one; `bothE().otherV().count()` 13 vs 22). A
- * base-table read holds no doubled reference beneath it, so its copy is a constant factor that cannot
- * compound. That is a fact of the INPUT, never a hop count: every later hop's frontier is the previous
- * hop's join, which is not free, so a chain pays the OR from its second hop on and stays linear.
+ * **The exemption is a frontier whose second read is BOUNDED** — fewer than `BOTH_COPY_BOUND` doubled
+ * reads beneath it (`doubledReads`, `src/rel/walk.ts`), or a correlated column. There the two
+ * per-direction joins stay, because the MULTI-INDEX OR pays a rowid set per probe and measured ~45–60%
+ * slower per hop than two plain seeks (8 000 vertices: `g.V().both().count()` 14 ms as two joins, 20 ms
+ * as one; `bothE().otherV().count()` 13 vs 22). That is a fact of the INPUT, never a hop count: a
+ * `both()` after a plain hop (`out().both()`) has a frontier with no doubled read beneath it and keeps
+ * the two seeks; each two-seek `both()` adds one doubled read, so along any lineage at most
+ * `BOTH_COPY_BOUND` hops take that form and every later one reads its frontier once through the OR.
  *
  * The direction relation names no table and binds nothing (compiler ints), so a recursive term may hold
- * it — and a walk's frontier is its `SelfRef`, never free, so a `both()` walk body is one recursive
+ * it — and a walk's frontier is its `SelfRef`, unbounded, so a `both()` walk body is one recursive
  * reference with no compound to transpose (`walk.ts`).
  */
 function hopJoin(
@@ -247,7 +269,7 @@ function hopJoin(
   restrict: (edges: Rel) => Expr | undefined = () => undefined,
 ): readonly HopArm[] {
   const left = frontierRel(from);
-  const free = left ? rereadsFreely(left) : (from as { readonly correlated: Expr }).correlated.kind === 'col';
+  const free = left ? doubledReads(left) < BOTH_COPY_BOUND : (from as { readonly correlated: Expr }).correlated.kind === 'col';
   return hops.length > 1 && free
     ? hops.map((hop) => directionsJoin([hop], from, graph, fresh, restrict))
     : [directionsJoin(hops, from, graph, fresh, restrict)];

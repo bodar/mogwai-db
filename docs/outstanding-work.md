@@ -204,8 +204,8 @@ statement's text grows with data or doubles with query shape. The items below ar
 - ✅ **cc-8 `local(__.both()×k.count())` 2^k — LANDED (536d727e + b6a97ead) with "movement reads its frontier once",
   without the prerequisite above; a labelled multi-direction hop (`both('knows')`) seeks the label on
   every direction. Remains for this item: nothing (the follow-ups below are their own items).** The doubling was `both()`'s own UNION ALL naming its frontier twice; a multi-direction
-  hop now crosses a non-base frontier with a `(VALUES (0),(1))` direction row and joins `edges` once
-  (`hopJoin`, `src/compiler/rel/lower/movement.ts`; gate `rereadsFreely`, `src/rel/walk.ts`). k=8 is 2.1 KB,
+  hop now crosses a frontier already holding two doubled reads with a `(VALUES (0),(1))` direction row and joins `edges` once
+  (`hopJoin`, `src/compiler/rel/lower/movement.ts`; gate `doubledReads` < `BOTH_COPY_BOUND`, `src/rel/walk.ts`). k=8 is 2.1 KB,
   k=32 8.8 KB; `both()×20`/`repeat(both()).times(20)` answer. Tests: `test/compiler/both-frontier-once.exec.test.ts`.
   Follow-ups it found: (a) a CHAIN of general `union()`s still names its input once per arm, so
   `union(out(),in())×16` is still the "too many references" wall — no one-reference spelling exists for

@@ -6,9 +6,10 @@
 // `g.V().both()×16.count()` and `repeat(both()).times(16)` exceeded "too many references to edges",
 // `local(both()×8.count())` was 46 KB of statement text doubling per hop (over a Durable Object's 100 KB cap
 // by k≈9), and `local(repeat(both()).times(16))` spent 4.7 s in prepare before refusing. A hop whose frontier
-// is not free to read twice now crosses it with a constant `(VALUES (0),(1))` direction row and joins
-// `edges` once (`hopJoin`, src/compiler/rel/lower/movement.ts); a base-table frontier keeps the two plain
-// seeks, which measured faster (`rereadsFreely`, src/rel/walk.ts).
+// already holds `BOTH_COPY_BOUND` doubled reads now crosses it with a constant `(VALUES (0),(1))` direction
+// row and joins `edges` once (`hopJoin`, src/compiler/rel/lower/movement.ts); any other frontier keeps the
+// two plain seeks, which measured faster than SQLite's MULTI-INDEX OR (`doubledReads`, src/rel/walk.ts).
+// The gate used to admit only a BASE-TABLE frontier, so an ordinary `out().both()` paid the OR (+25–47%).
 //
 // The oracles here are independent of the lowering: walk counts come from powers of the adjacency matrix,
 // and every `both`-family read is compared with its `union()` spelling, which is a different lowering.
@@ -199,12 +200,46 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
     });
   }
 
-  test('a base-table frontier keeps two plain seeks; a derived one is read once through the direction row', () => {
-    // `g.V(1)` is a base-table read, so naming it twice is free — and measured faster than the OR.
+  // A frontier with fewer than BOTH_COPY_BOUND (2) doubled reads beneath it keeps the per-direction joins:
+  // two plain `e_out`/`e_in` seeks, never the MULTI-INDEX OR, which measured 25–47% slower at 8k vertices.
+  // `both().both()` is the D=2 case: its second hop's frontier holds the first hop's ONE doubling.
+  for (const q of ['g.V().out().both()', "g.V().out('knows').bothE().otherV()", 'g.V().optional(__.out().both())',
+    'g.V().both().both()', "g.V().hasLabel('person').out('knows').both('created')", 'g.V().out().out().both().count()']) {
+    test(`two plain seeks, no MULTI-INDEX OR: ${q}`, () => {
+      const detail = plan(q);
+      expect(detail.filter((d) => /MULTI-INDEX OR/.test(d))).toEqual([]);
+      expect(detail.filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_out \(src=\?/.test(d)).length).toBeGreaterThanOrEqual(1);
+      expect(detail.filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_in \(tgt=\?/.test(d)).length).toBeGreaterThanOrEqual(1);
+      expect(sqlOf(q)).not.toContain('VALUES (0), (1)');
+    });
+  }
+
+  test('the bound is per LINEAGE: two doublings take the seeks, every later hop reads its frontier once', () => {
     expect(sqlOf('g.V(1).both()')).not.toContain('VALUES (0), (1)');
-    // The second hop's frontier is the first hop's join: one direction row per non-base hop, one reference.
-    const twoHop = sqlOf('g.V(1).out().both()');
-    expect(twoHop.match(/VALUES \(0\), \(1\)/g)).toHaveLength(1);
-    expect(twoHop).not.toContain('UNION ALL');
+    expect(sqlOf('g.V(1).out().both()')).not.toContain('VALUES (0), (1)');
+    expect(sqlOf('g.V().both().both()')).not.toContain('VALUES (0), (1)');
+    // The third hop's frontier holds two doublings: one direction row, the OR.
+    expect(sqlOf('g.V().both().both().both()').match(/VALUES \(0\), \(1\)/g)).toHaveLength(1);
+    expect(plan('g.V().both().both().both()').some((d) => /MULTI-INDEX OR/.test(d))).toBe(true);
+    // A plain hop between doublings adds none, so it does not reset the count either.
+    expect(sqlOf('g.V().both().out().both().out().both()').match(/VALUES \(0\), \(1\)/g)).toHaveLength(1);
+    // k hops: k − 2 direction rows, so the copy factor stays 2^2 however long the chain.
+    for (const k of [4, 8, 16]) expect(sqlOf(`g.V()${both(k)}`).match(/VALUES \(0\), \(1\)/g)).toHaveLength(k - 2);
+    // A walk's frontier is its recursive reference — unbounded — so a walk body always reads it once.
+    expect(sqlOf('g.V().repeat(__.both()).until(__.loops().is(3))')).toContain('VALUES (0), (1)');
+  });
+});
+
+describe('g.V().both()×k — statement text is LINEAR in k, up to 32 hops', () => {
+  const bytes = new Map([8, 16, 32].map((k) => [k, sqlOf(`g.V()${both(k)}.count()`).length] as const));
+  test('each doubling of k adds ~the same bytes again (no 2^k)', () => {
+    const d1 = bytes.get(16)! - bytes.get(8)!;
+    const d2 = bytes.get(32)! - bytes.get(16)!;
+    expect(d2 / d1).toBeGreaterThan(1.5);
+    expect(d2 / d1).toBeLessThan(2.5);
+    expect(bytes.get(32)!).toBeLessThan(CF_MAX_SQL_BYTES);
+  });
+  test('×32 answers on a CfLimitedSql store and matches the adjacency oracle', () => {
+    expect(count(seeded(PATH_SEED, true), `g.V()${both(32)}.count()`)).toBe(total(walkCounts(PATH_EDGES, [1, 2, 3], 32)));
   });
 });
