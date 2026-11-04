@@ -70,6 +70,54 @@ answers") reddened GitHub CI for 0dc7f3ce, 0451a9d1, b15c9897 and f47a0fe6; 0152
     the `group('a')…cap('a')` form answers) — legitimate query-text limits, recorded so they are not mistaken
     for a regression.
 
+## 0b. Compile cost — fix the compiler, THEN impose a budget (owner, 2026-11-04)
+
+Measured over the whole corpus and scaling probes, with the per-query data, CPU profiles and hot spots with
+file:function references in the local report `.logs/compile-cost-report.md`. Prototypes for cc-1..cc-3 are
+on branch `worktree-agent-a18b9b87cac33f5d9` (`c03df4c2`, `18f8e390`, `ca9d1bd9`). They are prototypes:
+rebuild them properly; do not cherry-pick the throwaway `d6524009` timers. Order: cc-1 → cc-2 → cc-3 → cc-4 →
+cc-5. Owner rule: a high compile cost is a reason to make the compiler faster, never to raise a limit. Every
+item lands with tests that stop it from coming back.
+
+- **cc-1 project-linear: PRODUCTION FAILURE, common reach.** `project(k keys).by(…)×k` emits SQL text that
+  DOUBLES per key: `recordPairs` (`rel/record.ts`) writes `CASE WHEN p THEN json_insert(acc,…) ELSE acc END`,
+  naming the accumulator twice. Measured on trunk: 7 keys is 92 KB, **8 keys is 183 KB, over a DO's 100 KB
+  statement-text cap** (0 binds — this is text, not parameters), and 16 keys takes 11 s to compile. Fix:
+  `json_insert(acc, CASE WHEN p THEN '$[#]' ELSE '$' END, pair)` (inserting at `$` leaves `acc` unchanged).
+  Then sweep for the same idiom: any other accumulator, CASE or fold that names its input twice per step. Tests:
+  - an exec test at 20+ keys under `CfLimitedSql` that answers correctly, including rows where some `by()` is
+    unproductive;
+  - an SQL-size test asserting LINEAR growth in k (size(2k) ≤ ~2.2 × size(k));
+  - a compile-time scaling assertion.
+
+  Re-record `sql-hygiene` (down).
+- **cc-2 emit-once.** A read plan is emitted twice and a write three times (the bind-budget probe in `lowered`,
+  then `finishLowering`, then `renderProgram`): about 55% of corpus compile time. Render once and pass the
+  rendered result forward (the prototype's memo is NOT the shape to land). Test: a counter or spy proving one
+  emit per statement per compile.
+- **cc-3 sll-first-parse.** antlr runs full-LL prediction on every query (19% of corpus time; `SubgraphStrategy(…)`
+  sources take 6–8 ms). Parse with SLL plus a bail error strategy, falling back to LL on failure: 14× faster,
+  with zero tree differences over all 2395 corpus queries. It must keep the load-bearing `antlr4ng` patch's
+  guarantees (`test/L1-corpus/parser-state.test.ts`). Test: SLL tree equals LL tree over the whole corpus, and
+  error messages are unchanged for invalid input.
+- **cc-4 per-node fact cache.** Within one compile, an Expr's children are walked about 17× and a Rel node's
+  about 6.7×, because separate passes each re-derive their own fact. Cache per-node facts keyed on node
+  identity, which is safe because nodes are immutable. Estimated 2–3×. Pass/ChainFacts boundaries per
+  `src/compiler/CLAUDE.md` (`mise run arch`).
+- **cc-5 compile-work budget: an ARCHITECTURAL limit, the same on every runtime, deterministic.** After cc-1..4,
+  replace `MAX_UNROLLED_STEPS = CF_MAX_SQL_BYTES / 40` (`ir/strategies.ts`). That ceiling assumes 40 bytes a
+  step when a step costs up to 390, so `times(800)` compiles for 0.6 s and then fails at the store anyway. The
+  compiler imports NO platform constant: statement size is the store's call, so a raised Cloudflare cap is a
+  free win with no code change.
+  - **Fuel:** charge Rel nodes at the `Minter` plus SQL bytes in the emitter (both predict compile time at
+    ρ 0.91; the emitter charge is the only one that catches a cc-1-style blow-up).
+  - **Decline:** past the budget, an explanatory `UnsupportedTraversal` that names the expansion.
+  - **Courtesy:** keep the unroll's up-front estimate as an early decline charged against the same fuel.
+  - **Size:** about 8× the post-fix corpus maximum.
+  - **Instrument:** a test that reports the corpus maximum fuel, so a compile-cost regression is visible.
+
+  Free-tier Workers (10 ms CPU) are out of scope.
+
 ## 1. Wrong answers today
 
 Each is a lost or duplicated row, a wrong number class, a wrong value or element, or a crash. A data-size
