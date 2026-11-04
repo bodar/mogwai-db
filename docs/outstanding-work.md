@@ -11,88 +11,15 @@ IDs in parentheses are stable — `git log -S<id>` finds their history (much of 
 `test/L7-census/deferrals.tsv` must hold no `crashed` rows. Three worklists fail loudly when a shape
 lands: `test/rel-spine.test.ts` `DECLINED`, `test/L4-addendum` `@Unsupported`, L5 `LAW UNEVALUABLE`.
 
-**L3 accounting (✅ landed, faecb6f2).** Every in-scope L3 failure is ledgered with a kind
-(divergence/wall/decline/defect) and a checked citation; the 16 scenarios the JS GLV cannot ask are
-excluded as GLV-lossy, DERIVED from gremlin.js + the corpus (`GLV_LOSSY`, `test/L3-conformance/tags.ts`).
-The ledger must equal the failing set (`l3-state.test.ts`, `l3.test.ts`). Remains: nothing — the ledgered
-defects are §1 items; a fix deletes its names from the ledger.
-
-**Edge Property framing (l3-edge-prop-frame, ✅ landed, 781a352c).** An edge's property is framed as a
-plain `Property`, not a `VertexProperty`: the class rides a compile-time owner discriminant (`Shape`/
-`ListOf` `elem`, node tag via `propertyTag`) into `framePropertyRow` (`src/execute.ts`). L3 1890 → 1896.
-Remains: nothing.
-
-**Mid-traversal `inject(xs)` (✅ landed, 90518dfa).** On the root chain, `inject(xs)` after a stream is a
-UNION ALL of that stream with the literal relation, the injected rows minted as fresh traversers
-(`injectTail`/`injectedRows` in `src/compiler/rel/lower.ts`). L3 1896 → 1904. Remains: nothing.
-
-**List-host member order in a `by()` body (l3-select-mixed-by, ✅ landed, d4e3312f).** `unfold()` of an
-element list inside a `by()`/child body keeps LIST order: the correlated element explode mints the
-json_each `key` as its encounter channel like the scalar/map/list arms (`correlatedListMembers`,
-`src/compiler/rel/list.ts`), so the re-collecting `fold()` and a body `tail(1)` read list order.
-L3 1904 → 1907. Remains: nothing.
-
-**A `null` id member (✅ landed, 9ec195ad).** `V(null)`/`E(null)`/`V(1,null)`/`hasId(2,null)` answer
-instead of declining: a `null` member is an id no element has, so it adds no clause, and a set with
-members but none matchable is `CONSTANT.false`, never `V()` (`idMembership` in
-`src/compiler/rel/source.ts`; `boundGraph.elementScan` likewise). L3 1908 → 1919. Remains: nothing.
-
-**`is(typeOf(T))` over known framings + a scalar MAP retype (✅ landed, febee4cf..2142f762).**
-`is(typeOf(GType.MAP))` over a per-row-typed scalar retypes the stream to a map (`collectionRetype` →
-`continueAs`), so count(local)/select(keys|values)/unfold/fold answer after it; every framing whose GType
-is known (map, record, path, element, property) folds statically by GType ASSIGNABILITY
-(`framingTypeOf`, `src/compiler/rel/predicate.ts`; the table in `src/gremlin/types.ts`). The Set marker
-now travels with the value (labels, folded members, branch meets), `count(local)` is a mapping terminal
-not a seeded barrier (`isMappingTerminal`, `src/compiler/ir/productivity.ts`), and `order(local)` unmakes
-a Set. L3 1942 → 1947. Remains: nothing (typeOf(LIST|SET) over a LIST framing is a separate item below).
-
-**Binary values (✅ landed, 1929a5c6..e4b29d47).** A `Binary(…)` literal or a wire BINARY parameter is a
-value class, no longer answered as its base64 String: an UPPERCASE-HEX TEXT carrier tagged `binary` (the
-uuid/char family in `src/gremlin/types.ts`, `binaryCarrier`), so hex order is unsigned byte order and
-equality is byte equality with no per-row term; framed back as GraphBinary BINARY. Merge search reads each
-entry's declared type and a Cardinality wrapper carries its value's type inside itself, not on its `Arg`.
-L3 1947 → 1952. Remains: making `inject(map).mergeV()`/`mergeE()` unwrap a Cardinality wrapper inside the
-map, so those queries answer instead of declining, is not done — it needs the map-literal blob
-(`mapLiteralBlob`/`valueNodeOf`) and the merge driver to carry and unwrap a wrapper value; the three
-`@Unsupported` L4 scenarios fail loudly when it lands. Separately, `test/cloudflare.test.ts` hard-codes
-port 8976, so CI flakes when several worktrees run at once.
-
-**`V(<traversal>)`/`E(<traversal>)` (✅ landed, b6d181e2..89ed8a0d).** An id traversal resolves ids per
-head traverser, as `GraphStep.resolveTraversalIds` does: the child runs as `flatMap(<traversal>)` (at the
-start, over a one-row synthetic seed), each value is looked up by re-entering the step with `idOfValue`
-(an element gives its id, a list/set is unpacked via `collectionMembersOrSelf`, no result matches
-nothing), through one external-id routing law (`routedExternalId`/`externalIdIs`,
-`src/compiler/rel/source.ts`; split in `splitTraversalIds`, `src/compiler/ir/step.ts`). Scales 3-5× for
-8× traversers. L3 1952 → 1963 (the whole `traversal-id` ledger bucket). Remains: nothing.
-
-**Filter-led predicate body (✅ landed, cb3e44a2..e195afc2).** A predicate body that leads with filters
-and then moves — `where(hasLabel(..).out())`, `not(hasLabel(..).out())`, SubgraphStrategy criteria
-`or(…, has(..).outV()…)` — answers at every predicate position: `bodyPredicate`
-(`src/compiler/rel/lower/filter.ts`) conjoins the leading filters with the moving/projecting shapes over
-a STRICT suffix (`producesWithoutInput`, `src/compiler/ir/productivity.ts`); a label/id test on a joined
-element is a per-row key probe (`src/compiler/rel/source.ts`). L3 1931 → 1942. Remains: nothing (the
-`map()` element-absence gap below is a separate item).
-
-**Statically decidable steps (✅ landed, f5b66932).** Four rules at existing authorities: a stray
-`emit()`/`until()`/`times()` with no `repeat()` body raises TinkerPop's verification message
-(`verifyStandard`); `times(n<=0)` before `repeat()` is the identity, after it `times(1)` (`tryUnroll`);
-`identity()`/`discard()` as filters are `CONSTANT.true`/`CONSTANT.false` (`sourceFilter`, so
-`filter(__.identity())` — the L5 lattice gap — now answers); an effect-free `sideEffect()` is dropped
-(`dropEffectFreeSideEffect` in `src/compiler/ir/strategies.ts`). L3 1919 → 1931. Not landed:
-`g_V_hasXname_notXidentityXX`. It needs element-valued operands in value comparisons (`has(k, <body
-yielding the element>)`, which is `P.eq(traversal)`), and the operand route only handles bodies that
-produce a scalar.
-
-**Reducer-headed child body (✅ landed, 202bdbce).** A per-traverser child body whose head is a reducer
-(`local(count())`, `values('age').local(sum())`) reduces the host's one-row self at bulk 1, exactly as
-`identity()` does (`TraversalUtil.apply`): `hostSelfRow` seeds element AND scalar hosts through one gate,
-`selfCollapsed` (`src/compiler/rel/lower/reduction.ts`). L3 1907 → 1908. Remains (§3.8): a `local`/`map`
-nested inside a child body (`g_V_localXout_localXcountXX`, also `values('age').local(local(count()))`,
-`project().by(values(k).local(fold()))`; L4 `nested-local.feature`) — `valueRun` has no local/map step and
-`flatMapRejoin` refuses `local` as a barrier; a reducer arm of a batched `union` over the one-row seed
-(`g_VX1_2X_localXunionXcountXX`, the union-residue family); min/max over a scalar host's self seed
-(`values('age').local(max())`) declines until the argmax ORDER BY stops repeating an outer column — an
-emitter change, pinned by an `@Unsupported` L4 scenario.
+**Landed in the 2026-11-03 round** (detail in git; each item's residue is filed below). L3 1890 → 1963:
+the L3 accounting ledger + derived GLV-lossy exclusion (faecb6f2: every in-scope failure is in
+`test/L3-conformance/expected-outcomes.ts` with a kind and a checked citation; a fix deletes its names
+there); edge Property framing (781a352c); mid-traversal `inject(xs)` (90518dfa); list-host member order in
+a `by()` body (d4e3312f); reducer-headed child body (202bdbce); `null` id members (9ec195ad); statically
+decidable steps — stray repeat modulators, `times(n<=0)`, `identity()`/`discard()` filters, effect-free
+`sideEffect()` (f5b66932); filter-led predicate body + per-row label/id key probe (7915c526);
+`is(typeOf(T))` over known framings + MAP retype (7b3d623a); Binary values (e4b29d47);
+`V(<traversal>)`/`E(<traversal>)` (89ed8a0d).
 
 ## 1. Wrong answers today
 
@@ -129,9 +56,13 @@ refusal comes first: it is a production outage.
   form, or lower the pushed prefix over an empty relation for the seed (`ReducingBarrierStep.java:143-148`).
 - **A federate subgraph's `V(2,[3,4])` gives `[josh,lop,vadas]`, ref `[vadas]` (rf3-reuse3)** — extract
   `idArgMembers(args)` from `idMembership` for `BoundGraph.elementScan`/`inlineNames` (`rel/boundgraph.ts`).
+  9ec195ad copied the null-member rule into `elementScan` a second time (its own `nonEmpty` and
+  `CONSTANT.false`) — the extraction deletes both copies.
 - **A Map-valued property under `project()` (cr-fu14)** — `g.V().project('n','m').by('name').by(values('m'))
   .select('m')` leaks `TypeError: pairs.flatMap is not a function` (`src/execute.ts`); a `group()` nested in
-  `local()` is not reached by ProductiveByStrategy.
+  `local()` is not reached by ProductiveByStrategy. **Re-check first:** a 2026-11-03 reviewer reports the
+  project form now answers (with the `map(values('m'))` crash fix in the typeOf work); drop the first half
+  if a FRAMED run confirms it.
 - **`dedup()` keeps `[a:1,b:2]` and `[b:2,a:1]` apart** — `g.inject([x:1,y:2],[y:2,x:1]).dedup().count()`
   gives 2; a map's identity should be its entries in any order, read by every dedup/group/set-op site.
 - **`barrier(Barrier.normSack)` mis-executes instead of declining** — `withSack(1.0).V().both()
@@ -141,6 +72,25 @@ refusal comes first: it is a production outage.
 - **Set-op literal operand loses member class** — `combine([1.0d])` reads a whole Double back as an Int.
 - **Intermediate `sum` overflow not widened** — a running total that leaves the Long range and returns.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
+- **`path().from(label)` after a mid-chain `inject` keeps the injected row (inject-fresh-traversers)** —
+  `g.V(1).as('a').values('age').inject(1).path().from('a')` gives `[[], [v1,29]]`, ref raises "Could not
+  locate path from-label: a" (`Path.java:275`); `simplePath().from('a')` likewise. Newly reachable since
+  90518dfa (it declined before). Cause: the "this step mints fresh traversers" rule was added as a name
+  peephole (`i > 0 && name === 'inject'`) in `labelsBoundBefore` only, not in `unlocatableSubPath`
+  (`src/compiler/ir/labels.ts`). Fix by consolidation: one named fact (stream barrier OR a root inject past
+  the source) read by both scans and by `injectTail`'s alias reset.
+- **`reverse()` over a list-valued property returns it unreversed** — `g.V().values('lst').reverse()` with
+  `[1,2,3]` gives `[1,2,3]`, ref `[3,2,1]` (`ReverseStep.java:55-57` reverses an Iterable); also via
+  `properties().value()`, `as()/select()`, `coalesce`, `local`. `reverseValue` (`src/compiler/rel/reverse.ts`)
+  is identity for every non-String type; trunk before e4b29d47 reversed the JSON text, also wrong. Also: a
+  `select('a').reverse()` over a `project().by('lst')` leaks `TypeError node.v.map is not a function`.
+- **A Set frames as a List inside a `select()` record and a `group()` value** — over a set-valued `m`,
+  `g.V().as('v').values('m').is(typeOf(GType.SET)).as('a').select('v','a')` gives `a:['p','q']` (List), and
+  `group().by('name').by(values('m').is(typeOf(SET)).fold())` a List of a List. The record-field and
+  group-value framers do not read `ListOf.set`. Pre-existing; `typeof-framing.exec.test.ts` asserts only the
+  single-key select.
+- **A malformed `g:Binary` in a GraphSON load throws a bare `Error`** (`src/formats/graphson.ts`, the same
+  pattern as `g:Duration`), which reaches the user through `io().read()` — raise the named load error.
 - **L3-ledgered wrong answers** — each is a `defect` in `test/L3-conformance/expected-outcomes.ts`; the
   fix deletes its names there.
   - **`call(service, map, traversal)` ignores the traversal's map (l3-call-trav-params)** —
@@ -182,8 +132,35 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 - **Scalar member node rebuilt per one-row producer (r6-reuse4)** —
   `project().by(outE().values('weight').sum())` reads the edges 2× per host row (`max`: 3×).
 - **No body-may-yield-NULL fact (S11)**, so the M3 removal machinery always runs (+13–75%).
+- **The Binary hex carrier costs ordinary String equality its seek (binary-carrier-guard) — MAJOR, three
+  reviewers.** `textCarriedOthers` (`src/compiler/rel/predicate.ts`) matches `/^(?:[0-9A-F]{2})*$/`, i.e.
+  `''`, `'CA'`, `'DE'`, `'2024'`, `'DEADBEEF'`, so each such String bound gets a
+  `NOT (coalesce(vtype,'') IN ('binary'))` guard. In a literal `within` the guarded member no longer merges
+  into `value IN (…)`: `g.V().has('name', within('CA','US')).count()` degrades from a `vp_key_value
+  (key=?,value=?)` seek to a scan of every row with the key — 0.072 ms → 3.01 ms at 64k rows (42×, growing
+  with GRAPH size, not answer size). Single `has(k,'CA')` keeps its seek but gains the guard twice;
+  `values(k).is('BE')` gains an inlined vtype-inference chain per row. Same pre-existing split for
+  UUID-shaped members. Fix, in order: (a) hoist the one exclusion guard outside the IN-list (no non-carrier
+  string can equal a carrier, so it is correct for every member) — restores the seek for both families;
+  (b) consider a carrier ordinary text never spells (a fixed prefix such as `\u0001`+hex keeps byte order
+  and one spelling), so the guard fires only on a bound that could be a carrier. Move the recognizer next to
+  `binaryCarrier` (`isBinaryCarrier(text)`, `src/gremlin/types.ts`) either way.
+- **`fold().as('x').select('x').unfold()` is quadratic in the folded list (fold-label-history-copy)** —
+  `g.V().values('name').fold().as('x').select('x').unfold().count()` 30.7 ms → 1595.8 ms N=1k → 8k (52×;
+  a map-valued `values('m')` 67×), on trunk before this round too. The label-history column
+  `a0 = jsonb_array(jsonb_object('k',3,'v',json(fd8.list)))` is projected onto every exploded member row,
+  copying the whole list N times (`src/compiler/rel/list.ts`). Drop the history entry through the explode
+  when nothing downstream reads it, or reference the folded row by key instead of copying the blob.
 
 ## 2. Needs a human call
+
+- **Numeric STRING ids (string-id-coercion).** 🔴 Verbatim: "Should a numeric string id like '1' address
+  the element whose rowid is 1, as TinkerGraph's LONG id manager does? Or are ids typed, so that '1' names
+  only a uid '1'? In the typed case these 8 scenarios are recorded as an expected outcome with a §17 line."
+  Context: the 8 L3 scenarios assume TinkerGraph's LONG id manager; today ids are typed (the §17 "String vs
+  integer element id" row; `V(5)` and `V('5')` coexist). Not built; no branch. Either answer is one change:
+  coercion at `routedExternalId`/`externalIdIs` (`src/compiler/rel/source.ts`), or ledger the 8 as
+  `divergence`s. rf3-reuse1 (§1) is the one hole in "both may exist" — fix it under either answer.
 
 - **GraphQL redesign.** The reflection-derived schema was a mistake
   ([plan, top section](./2026-08-07-graphql-front-end-plan.md)). Replace it with an explicit,
@@ -218,7 +195,15 @@ RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open familie
    nr-ru2, r5-fu5 — every correlated `where()`/`has()` comparison); the `is()` chain (rf3-is-chain-size,
    §1b); the modulator's `projectionOf`/`typedOf`; groupCount's `json_each` 15×/row (r6-s9-4), the child
    seam's 3–5× (S9.8), alias operand at `as()` (r5-fu2), `order().by(<may-be-empty>)` emitted twice
-   (r6-m-orderby), record-field `{t,v}` round trip (r6-s9-6); the math label-variable fold spelled 3×.
+   (r6-m-orderby), record-field `{t,v}` round trip (r6-s9-6); the math label-variable fold spelled 3×;
+   `correlatedReduce`'s v/vtype pair recomputes the whole aggregate twice per row — now on the common
+   `values('age').local(sum())` route too (~6× per-row overhead, linear; `lower/reduction.ts`); the
+   per-row `typeOf` CASE inlines the inferred-vtype `coalesce(vtype, nullif(…typeof(v)…))` twice
+   (`predicate.ts`); `collectionMembersOrSelf` (`list.ts`, 5d500199) — `g.V().V(__.values('ref')).count()`
+   over a plain String key went 919 → 2499 B and 12.0 → 19.3 ms at 8k: the member value expression is
+   inlined 4×, vtype 2×, the `vtype IN (list,set)` flag ~10× (project them once behind a fence, as
+   `V(__.out().id())`'s `LIMIT -1 OFFSET 0` does), and `positionedMembers` adds a full-stream
+   `row_number()` even under `count()` (skip it when nothing reads the order).
 2. **Closed per-row node vocabulary (per-row-node-vocabulary-closed)** — a `{t,v}` node and framing arm for
    every per-row scalar shape (Map.Entry `{t:'entry'}` like `execute.ts` `mapEntry`; element nodes carry
    their id; an unreadable arm raises via `src/rel/raise.ts`). Unblocks `g.V().values('m').unfold()` and
@@ -294,6 +279,12 @@ Beside the RelIR substrate:
   `option(Merge.outV/inV)` or an onCreate endpoint; `mergeE` over an incoming vertex stream
   (`elementMergeE`); edge runtime arm value `option(onMatch,[k:__.trav])`; the local-slice corpus form
   `mergeV(__.select("m").limit(local,1).unfold())` (could move L3). PartitionStrategy-aware upsert (×7 L3).
+  A Cardinality wrapper inside a driver map — `g.inject([name:'x', age:Cardinality.single(1)]).mergeV()`,
+  the `mergeE` twin, bare `inject([k: single(1)])` — declines (correctly, writes nothing): the map-literal
+  blob (`mapLiteralBlob`/`valueNodeOf`) and the merge driver must carry and unwrap a `{cardinality, value,
+  type}` value (`MergeVertexStep.java` unwraps `CardinalityValueTraversal`); three `@Unsupported` scenarios
+  in `test/L4-addendum/binary-values.feature` fail loudly when it lands. Likewise `mergeE`/`E().property`
+  with a `Cardinality.single(…)` map value, and wrapper writes inside `union`/`sideEffect`/`local` (S3).
 - **`math()` over a Map's OWN keys (cr-fu10, B1)** — `g.V().has('name','marko').values('m').math('k + a')`
   declines (trunk answered `[3]`); keep the map-entry read when no outer scope names the variable
   (`Scoping.java:119-135`).
@@ -311,12 +302,59 @@ Beside the RelIR substrate:
 - **Path / property streams** (corpus) — `dedup()` before `path().from()` (o-subpath); `id`/`label`/
   `valueMap` positions and mixed `path().unfold()` (o-pathvals); `where(<body>)` over a property host,
   meta-properties (o-propstream).
-- **Values** (corpus) — set ops lose member types (o-setop-types); `order(local)` keeps the `set` marker
-  (o-set-framing); global `order()` over element lists (o-order-elemlist); local split (o-split); sack merge
+- **Values** (corpus) — set ops lose member types (o-setop-types); global `order()` over element lists (o-order-elemlist); local split (o-split); sack merge
   seed and `normSack` (o-sack); inject list/set residue `g.inject({1,1})` (r6-fu2-r).
 - **Depth gaps** — Column/multi-key select inside arms (`path().select(Column.keys)`); `values('m')
   .select(k)` over a Map-capable scalar; federate tails beyond values/count/order;
   `project().by()` after an `emit().repeat(…simplePath())` walk.
+- **Depth gaps found by the 2026-11-03 reviews** (all clean `UnsupportedTraversal`, none a wrong answer;
+  several decline with the generic "no lowering covers …", which should name the composition):
+  - **An element-valued operand in a value comparison** — `has(k, <body yielding the element>)`, i.e.
+    `P.eq(traversal)`: L3 `g_V_hasXname_notXidentityXX`. The operand route (`nestedFirstValue`/`scalarChild`)
+    takes only scalar-producing bodies.
+  - **Edge properties beyond the stream** — `g.E().properties('weight').fold()`, `path()`,
+    `aggregate().cap()`, `as().select()`, `project().by(properties())`, `sideEffect()`, union/coalesce/
+    choose/optional arms. The `Shape`/node-tag owner discriminant (781a352c) is the seam to frame them.
+  - **Mid-chain `inject` past count/fold/limit** — over an element stream: `g.V(1).out().inject(7).path()`,
+    `V().as('a').inject(1).select('a')`, `withSack(1).V().inject(5).sack()`, `inject(1).inject(2)`; over a
+    collection stream: `values('age').fold().inject([1])`, `project('a').by('age').inject([a:1])`,
+    `valueMap().inject([…])`, `out().path().inject(1)` (list+list arms whose `of` differs and computed-map
+    arms do not merge in `mergeArms`); after `coalesce`/`sideEffect`/`sum`. `inject` in a child body declines
+    with the advisory `inject-in-child` reason by design.
+  - **`V(<traversal>)` in more hosts** — `where/filter/not/optional/coalesce/repeat(__.V(__.out().id()))`,
+    `group().by(__.V(…))`, any `path()` after a lookup, `withSack(1).V(1).V(__.out()).sack()`; a list-headed
+    child (`V().fold().V(__.unfold().id())`, `id().fold().V(__.unfold())`, a list-valued label
+    `V(__.select('ids'))`). The ceiling is the flatMap-in-body substrate (§3.8).
+  - **The MAP retype as a child or before a barrier** — `project().by(values('m').is(typeOf(MAP))
+    .count(local))`, `coalesce`/`optional`/`sideEffect` hosts; after it, `where(count(local)…)`,
+    `groupCount()`, `order().by(count(local)|select('a'))`, `aggregate('x').cap('x')`; mixed-element meets
+    `union(outE(), out()).is(typeOf(VERTEX))`. A branch mixing a Set arm with a List arm now declines
+    (trunk sent the List arm as a Set): a mixed-shape variant has no Set arm.
+  - **`where()` inside a `repeat()` body** — `repeat(out().where(out('worksAt'))).times(2)`, and so
+    `repeat(out().where(identity()))`/`repeat(out().discard())`.
+  - **Constant filters in non-filter hosts** — `coalesce(__.discard(), …)`, `map(__.discard())`,
+    `fold().discard()`, `valueMap()/elementMap()/path()` + `where(identity())`; `g.V().discard().sum()`
+    declines while `values('age').discard().sum()` answers `[]`.
+  - **A repeat region with an interior `as()`** — `g.V(1).repeat(out()).as('a').times(2)` and
+    `repeat(out()).as('z').emit().times(1)`: `verifyRepeatDefined` accepts it (correctly, as() is
+    transparent to TinkerPop's slot rule) but `gatherRepeatRegion` splits at `as()`. Lands with the
+    region-grouping proposal under "Next round", as its own item with an L4 witness.
+  - **A scalar or element tail after a list-host slice** — `by(__.unfold().tail(1).id())` with no trailing
+    fold, `by(__.unfold().limit(1))`, `values('name').tail(1)`, `is(neq(null)).count()`, `groupCount()`,
+    `path()`; the edge-bearing `select(Pop.all,'a').by(__.unfold().label().fold())`.
+  - **A strict suffix that `producesWithoutInput` misreads by name** —
+    `where(__.hasLabel('person').out('created').fold().unfold())` (seeded then re-strictified).
+  - **Scalar-host child shapes** — `values('age').local(__.max()|identity().min()|math('_+1').max())`
+    (§3.8), `values('age').coalesce(__.sum(), __.constant(0))`; path/VertexProperty/list hosts of
+    `local(count())`.
+  - **Binary in more steps** — `values('blob').asBool()`, `local(fold()).unfold()`,
+    `optional(values('blob')).is(typeOf(BINARY))` decline instead of raising by class like `asNumber`.
+- **gremlin-lang's `UUID()` random literal** — `g.inject(UUID())` raises "no lowering covers
+  g.inject(UUID())". L3's `g_injectXUUIDXXX` is excluded as GLV-lossy (gremlin.js sends a concrete
+  `uuid.v4()`), so L3 never sees the random-literal form; any client sending the Gremlin string does.
+  Either lower it to a random v4 carrier tagged `uuid` (read the grammar visitor in
+  `vendor/tinkerpop/gremlin-language` for when it is evaluated first) or add a §12 matrix line naming it
+  unsupported — today the gap is tracked nowhere else.
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`
   (`choose(values('name')).option(is('marko'),…)`), Column/path row ops, `Pop.all/mixed`, side effects
   (`group('m').by().by(__.in().values())`), local/match/where; the single-missing-caller list.
@@ -458,7 +496,12 @@ Beside the RelIR substrate:
   (`g.V().values('age').as('a').math('a+1').as('b').math('a+b').as('c').math('a+b+c')` → `[118,110,130,142]`
   at ~15 KB).
 - **`barrierIn` mislabels a federate call in an arm as `'source'` (rf3-callsite-form)** (`rel/segment.ts`).
-- **Pins and tests** — `test/cf-constructs.test.ts` binds fixed port 8977 (rf3-ci-port);
+- **Pins and tests** — `test/cf-constructs.test.ts` binds fixed port 8977 and `test/cloudflare.test.ts`
+  8976 (rf3-ci-port; both reddened local `ci` this round when worktrees ran in parallel); the L8 browser
+  bracket's `failover.test.ts` "hard-killed leader" went red on CI for 90518dfa (count `4`, expected `3`:
+  most likely a write retried across failover and applied twice) and green on the next push — treat it as
+  the §5 exactly-once gap (idempotency keys) surfacing, not noise, until shown otherwise; no test pairs
+  `mergeV`/`mergeE` keyed on a Binary (`test/L4-addendum/binary-values.feature`);
   `one-row-one-traverser.exec.test.ts` times out at 5 s under the parallel run (nr-fu-ci-flake); replace the
   vacuous "hasId after a hop adds no scan" pin with the uncorrelated `IN (SELECT id …)` shape (rf3-pins);
   stale L4 expectations (o-l4-sweep).
@@ -472,11 +515,77 @@ Beside the RelIR substrate:
   one JS→JSON encoder for a literal list (r7-fu10); `byNode` nests its CASE (o-plansize);
   `properties().drop()` via `removeRows` (r4-fu8c); `effectScope` snapshots leak into later statements'
   WITH (r4-fu8d, verify).
+- **The Number family is spelled five times (number-family-one-authority) — MAJOR.** 7b3d623a added
+  `SUBTYPES.number` (`src/gremlin/types.ts`) beside `NUMBER_TAGS` (`receiver.ts`, documented as THE
+  family), `NUMBER_FAMILY` (`transform.ts`), `NUMERIC_VTYPES` (`predicate.ts`) and `NUMERIC`
+  (`orderability.ts`). Define it once in `gremlin/types.ts` beside `CANONICAL`; derive the rest, so a
+  corrected or added numeric type cannot change `typeOf(NUMBER)` without `asNumber`/receiver checks.
+- **L3 ledger citations that do not say what they cite (l3-ledger-cites).** `list-default-cardinality`
+  (`g_V_hasXname_fooX_propertyXname_setXbarX_age_43X`) is a `wall` citing a code literal (`src/api.ts`
+  `DEFAULT_VERTEX_CARDINALITY`): an undeclared `property(k,v)` APPENDS, which changes ordinary write
+  answers versus TinkerGraph's `single` — file it as a `divergence` with a §17 row ("Default vertex
+  cardinality is list, the `Graph.Features` default — `Graph.java:671`; TinkerGraph's is single").
+  `oncreate-override` cites the §17 "Error timing" row, which covers constant names only — cite matrix row
+  ~199 (mergeV/mergeE "onCreate may restate a merge key, never change it") or add the clause. The §17
+  "String vs integer element id" row should cross-reference rf3-reuse1. The three `wall`s that ANSWER
+  (graph-computer-inert, vertex-property-ids, list-default-cardinality) are held to no check.
+- **`hasLabel` on a joined EDGE re-reads the edge (label-probe-edge-col)** — when `ownScan(row, id,
+  'edges')` resolves, read `col(scan,'label')` instead of a correlated rowid probe:
+  `outE().as('e').inV().inE().hasLabel('created').where(neq('e'))` ~1.5× slower than before 7915c526
+  (linear; output-bound). Same in the old IN form.
+- **A `CONSTANT.true` conjunct is emitted as `WHERE (1 = 1)`** — f5b66932 routes `identity()` arms/bodies
+  through `sourceFilter`, so 11 corpus plans (`emit().repeat(out()).times(2).path()`,
+  `union(identity(), out())`, `choose(…, identity())`, …) gained it (its commit says no plan changed).
+  Runtime-free (SQLite hoists it); elide it in the filter composer.
+- **`dropEffectFreeSideEffect`'s effect test** (`OPAQUE_OR_RAISING`, `ir/strategies.ts`) is a hand
+  denylist — see the effect-vocabulary proposal under "Next round".
+- **Binary carrier size** — hex doubles a Binary's stored size, so DO's ~2 MB value cap holds ~1 MB of
+  bytes (base64 would hold ~1.5 MB); add the line to §17/§10 so it is not found in production. A Binary's
+  hex text is also indexed in `property_fts` (as a UUID's is) — wasted index space.
 - **Docs** — the C3 §17 line (name `not()`, the `order()` route, the seats it covers, and that the concat
   raise is not Java's); the r7-m §17 lines for NUL and surrogates.
 - **Stale comments**: `src/services/catalog/olap/shortest-path.ts` header (old recursive-CTE walk);
   `src/compiler/ir/strategies.ts` ~539 (stream/mutate/stats modes).
 - Keep the `antlr4ng` patch until upstreamed; regenerate and diff `parser/` on a TinkerPop bump.
+
+## Next round — reuse sweep and shared prerequisites
+
+Proposals from the 2026-11-03 reuse sweep, each answer-neutral unless it says otherwise. Order matters only
+where stated.
+
+- **Shared prerequisite: a per-traverser child body INSIDE a child body (§3.8).** One root cause parks
+  several items: the nested `local`/`map` (`g_V_localXout_localXcountXX`, `nested-local.feature`),
+  `V(<traversal>)` under `where/filter/coalesce/optional/repeat`, and `flatMap` in a body generally
+  (`valueRun` has no `local`/`map`/`flatMap` step; `flatMapRejoin` refuses `local` as a barrier). Build that
+  one substrate item BEFORE any of them; do not special-case `V(<traversal>)` hosts.
+- **Prerequisite for inject-fresh-traversers (§1): one "mints fresh traversers" fact** in
+  `src/compiler/ir/labels.ts`, read by `labelsBoundBefore`, `unlocatableSubPath` and `injectTail`'s alias
+  reset — replaces the `i > 0 && name === 'inject'` peephole and fixes the §1 wrong answer.
+- **One correlated-probe builder** — replace ~19 hand-rolled `project(['one', 1])` EXISTS probes
+  (`source.ts` `hasLabelPredicate`/`hasPropertyPredicate`/`hasTokenPredicate`, 3 new in 7915c526;
+  `write.ts` ×5; `list.ts` ×2; `map.ts` ×2; `lower.ts`) and the two private `existsOf` copies
+  (`boundgraph.ts`, `decorate.ts`) with one `existsProbe(matched, fresh, {negated, prefix})` beside `make`.
+  Pass the id prefix through so alias spelling and L2 snapshots stay byte-identical. ~25 lines.
+- **One column-lineage walker** — `columnOrigin(rel, name)` in `src/rel` after
+  `vendor/calcite/core/src/main/java/org/apache/calcite/rel/metadata/RelMdColumnOrigins.java`, returning
+  scan+column / computed-at-rel / opaque, with the passthrough list and window/join rules once. Serves
+  `ownScan` (`source.ts`, 7915c526) and `valueColIsDetached` (`lower/reduction.ts`, 202bdbce) — which
+  already disagree on joins — and the passthrough lists in `src/rel/subtype.ts` and `block.ts`
+  `aggregateCols`. ~30–40 lines; plan-only.
+- **`hasTokenPredicate`'s direct own-scan test is `ownScan`'s base case** — spell it
+  `ownScan(row, id, table) === row`, so the direct/uncorrelated/correlated choice is a switch on one answer.
+  (Small constant-factor cost noted: `out().hasId(P.without(1,4))` 13.6 → 24.8 ms at 8k, linear.) Do after
+  the lineage walker if both are taken.
+- **Effect/opaque step vocabularies on the existing authorities** — export
+  `GRAPH_ALGO_NAMES = Object.keys(GRAPH_ALGO_SERVICE)` (`ir/strategies.ts`); build `write.ts` `OPAQUE_STEPS`
+  from `MUTATING_STEPS` ∪ that ∪ `['call','io','read','write','subgraph','profile']`, `OPAQUE_OR_RAISING`
+  from `{'fail','call','io', …GRAPH_ALGO_NAMES}`, and `desugarGraphAlgos`'s gate as
+  `s.name in GRAPH_ALGO_SERVICE` (`ir/passes.ts`). `MUTATING_STEPS`' own doc ("not in two places") is
+  violated today. ~6 lines, sets identical.
+- **Repeat-region grouping stated once** — export one `repeatSlot(name)` (times→until) plus the shared
+  REPEAT_CLUSTER walk and build `verifyRepeatDefined` on `gatherRepeatRegion`'s grouping (~10 lines,
+  answer-neutral). Letting `gatherRepeatRegion` absorb an interior `as()` (TinkerPop's rule) turns the §4
+  `repeat(out()).as('a').times(2)` decline into an answer — a SEPARATE item with an L4 witness.
 
 ## 7. Low priority
 
