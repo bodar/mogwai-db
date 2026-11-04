@@ -26,7 +26,7 @@ import { propertyAsString, propertyElement, propertyHasClause, propertyId, prope
 import { edgeEndpoint } from './element.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, arg, type Arg, type ArgValue, type MergePolicy, type SideEffectConstants } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isScopeArg, isPred, arg, type Arg, type ArgValue, type MergePolicy, type SideEffectConstants } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type FrameNode, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
@@ -57,8 +57,8 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
-import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
-import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
+import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, oneMemberList, unfoldList } from './list.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -1588,15 +1588,49 @@ const COLLECTION_TAGS = ['map', 'list', 'set'] as const;
 
 /** Which of `perRowCollectionStep`'s compound readers `step` is, or `null` — ONE recognizer, so the chain
  *  and the child seam (`perRowCollectionChild`) agree about which steps re-enter the collection tails. */
-export function collectionReaderOf(step: IRStep | undefined): 'count' | 'slice' | 'column' | 'submap' | null {
+export function collectionReaderOf(step: IRStep | undefined): CollectionReader | null {
   if (!step || step.optionArms || step.modulators?.length) return null;
   const local = isLocalScope(step);
+  const bare = (step.args ?? []).every((a) => isScopeArg(a.value));
   return step.name === 'count' && local ? 'count'
     : MAP_LOCAL_SLICE.has(step.name) && local ? 'slice'
-      : selectedColumn(step) ? 'column'
-        : step.name === 'select' && (selectSpec(step)?.labels.length ?? 0) >= 2 ? 'submap'
-          : null;
+      : isReducer(step.name) && local && bare ? 'reduce'
+        : (step.name === 'order' || step.name === 'dedup') && local && bare ? step.name
+          : selectedColumn(step) ? 'column'
+            : step.name === 'select' && (selectSpec(step)?.labels.length ?? 0) >= 2 ? 'submap'
+              : null;
 }
+type CollectionReader = 'count' | 'slice' | 'reduce' | 'order' | 'dedup' | 'column' | 'submap';
+
+/** The readers whose answer over a NON-collection is the value read as itself — a projection, so a
+ *  STATIC scalar (never a collection: one is framed as a list) takes this arm alone (`selfAnswer`). */
+const SELF_READERS: ReadonlySet<CollectionReader> = new Set(['count', 'slice', 'reduce', 'order', 'dedup']);
+
+/**
+ * A `Scope.local` reader over a value that is NOT a collection, answered as `IteratorUtils.asIterator` reads
+ * it — a one-element iterator:
+ * - `count(local)` is `1` (`CountLocalStep`);
+ * - a local slice and `order(local)` return the value UNCHANGED (`RangeLocalStep.applyRange` returns `start`;
+ *   `OrderLocalStep.map` returns a non-collection `start`, `vendor/tinkerpop/gremlin-core/.../step/map/OrderLocalStep.java`);
+ * - `sum`/`mean`/`min`/`max(local)` reduce the one value and `dedup(local)` collects it into a one-member Set
+ *   (`SumLocalStep`, `MeanLocalStep`, `DedupLocalStep`) — the value wrapped as a one-member list
+ *   (`oneMemberList`) and handed to the LIST route's own member reducer, the one authority for the
+ *   answer's class (`mean` a Double), eligibility (a String's `sum` refuses) and null rule.
+ */
+function selfAnswer(
+  reader: CollectionReader, step: IRStep, rel: Rel, framing: Extract<RelFraming, { readonly kind: 'scalar' }>, tagCol: string | undefined,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if (reader === 'count') return countedScalar(rel, fresh, labels);
+  if (reader === 'slice' || reader === 'order') return { rel, framing, aliases: labels, bulked };
+  const wrapped = oneMemberList(rel, framing.type, tagCol, fresh);
+  return listTail(wrapped.rel, wrapped.of, [step], 0, ctx, fresh, labels);
+}
+
+/** `SumLocalStep`/`MaxLocalStep` over a MAP iterate its ENTRIES and cast each to a Number / Comparable — the
+ *  reference's `ClassCastException`, raised in the user's terms. */
+const reduceMapMessage = (name: string): string =>
+  `${name}(local) cannot reduce a Map: its entries are ${name === 'min' || name === 'max' ? 'not comparable' : 'not numbers'}`;
 
 /**
  * A COMPOUND READER over a PER-ROW-TYPED SCALAR stream whose rows MAY be collections — a map/list-valued
@@ -1609,6 +1643,8 @@ export function collectionReaderOf(step: IRStep | undefined): 'count' | 'slice' 
  * - `limit`/`range`/`skip`/`tail(local)` — `RangeLocalStep.applyRange`: a Map keeps a window of its entries,
  *   a Set stays a Set, a List a List, and anything else passes through UNCHANGED (`RangeLocalStep.java:84-95`;
  *   `TailLocalStep` delegates to it);
+ * - `sum`/`mean`/`min`/`max`/`order`/`dedup(local)` — each reads `IteratorUtils.asIterator`: a Collection's
+ *   members, a Map's entries (sorted / made a Set; a reducer raises), anything else ONE element (`selfAnswer`);
  * - `select(Column.keys|values)` — `Column.apply`: a Map's side, else `IllegalArgumentException`
  *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:41-68`);
  * - a multi-key `select(k1, k2…)` — reads the traverser's Map first (`Scoping.getScopeValue`), so a row that is
@@ -1632,10 +1668,19 @@ function perRowCollectionStep(
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if (framing.kind !== 'scalar' || step.optionArms) return null;
-  const tagCol = ['vtype', perRowColumnOf(framing.type)].find((name) => name && input.type.cols.some((column) => column.name === name));
-  if (!tagCol) return null;
   const reader = collectionReaderOf(step);
   if (!reader) return null;
+  const tagCol = ['vtype', perRowColumnOf(framing.type)].find((name) => name && input.type.cols.some((column) => column.name === name));
+  // Rows keep their count and their channels through every arm, so the stream's multiplicity rides on.
+  const resume = (tail: Tail | null): Tail | null => tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, tail.aliases ?? labels);
+  // A scalar with NO per-row tag is never a collection — a collection is framed as a list or a map, and an
+  // untagged row infers its type from its storage class — so every row takes the non-collection answer:
+  // one projection, no split.
+  if (!tagCol) {
+    const tag = staticTypeOf(framing.type);
+    return (tag === undefined || !(COLLECTION_TAGS as readonly string[]).includes(tag)) && SELF_READERS.has(reader)
+      ? resume(selfAnswer(reader, step, input, framing, undefined, bulked, ctx, fresh, labels)) : null;
+  }
   const where = (from: Rel, pred: Expr): Rel => make.filter({ id: fresh('prc'), input: from, channels: from.channels, type: from.type, pred });
   // `IS NOT` is null-safe: an untagged row (infer from the value) is no stored collection.
   const tagIs = (from: Rel, name: string): Expr => eq(col(from.id, tagCol), compilerText(name));
@@ -1647,8 +1692,6 @@ function perRowCollectionStep(
     const value = collectionValue(from, 'map', fresh);
     return value.framing.kind === 'map' ? mapTail(value.rel, value.framing.keyOf, value.framing.valOf, one, 0, ctx, fresh, labels) : null;
   };
-  // Rows keep their count and their channels through every arm, so the stream's multiplicity rides on.
-  const resume = (tail: Tail | null): Tail | null => tail && continueAs(tail.rel, tail.framing, steps, at + 1, bulked, ctx, fresh, tail.aliases ?? labels);
 
   // EVERY route reads its input behind a HARD fence (`AS MATERIALIZED`, which SQLite may not flatten): each
   // arm tests the tag and then reads behind it (`json(v)` of a Map row), and SQLite orders a flattened
@@ -1679,17 +1722,23 @@ function perRowCollectionStep(
   // `branchOrderOwed`/`positioned`): every arm carries the position through, so the merged stream is in its
   // input's order rather than arm-major.
   const base = fence(branchOrderOwed(ctx, { steps, at }, input) ? positioned(input, fresh) : input);
-  // The Map arm first: where the map vocabulary cannot answer the step, nothing else is built.
-  const maps = mapArm(where(base, tagIs(base, 'map')));
-  if (!maps) return null;
+  // The Map arm first: where the map vocabulary cannot answer the step, nothing else is built. A local
+  // REDUCER has none: over a Map it is the reference's raise, never a drop.
+  const maps = reader === 'reduce' ? undefined : mapArm(where(base, tagIs(base, 'map')));
+  if (maps === null) return null;
   const listArm = (kind: 'list' | 'set'): Tail | null => {
     const retyped = collectionRetype(base, tagCol, kind, fresh);
     return retyped.framing.kind === 'list' ? listTail(retyped.rel, retyped.framing.of, one, 0, ctx, fresh, labels, !!retyped.framing.set) : null;
   };
-  const scalars = where(base, COLLECTION_TAGS.map((name) => tagIsNot(base, name)).reduce(and));
-  const arms = [maps, listArm('list'), listArm('set'),
-    // A non-collection's local slice is the row itself (`applyRange` returns `start`).
-    reader === 'count' ? countedScalar(scalars, fresh, labels) : { rel: scalars, framing, aliases: labels, bulked }];
+  // So a reducer's non-collection arm also takes the Map rows, and raises on them — in the SAME WHERE as
+  // its tag test, so the raise fires whichever term SQLite evaluates first (a correlated input is not
+  // fenced, and a raise filtered beside the base would be dropped by every arm's tag test before it ran).
+  const scalars = reader === 'reduce'
+    ? raisingRows(base, [[tagIs(base, 'map'), reduceMapMessage(step.name)]], fresh,
+      (['list', 'set'] as const).map((name) => tagIsNot(base, name)).reduce(and))
+    : where(base, COLLECTION_TAGS.map((name) => tagIsNot(base, name)).reduce(and));
+  const arms = [...(maps ? [maps] : []), listArm('list'), listArm('set'),
+    selfAnswer(reader, step, scalars, framing, tagCol, bulked, ctx, fresh, labels)];
   if (arms.some((arm) => !arm || arm.effects?.length)) return null;
   const met = reNoded(arms as Tail[], ctx.source, fresh);
   const merged = met && mergeArms(met, labels, ctx.source, fresh);
@@ -3245,13 +3294,24 @@ function mapTail(
     // A LOCAL POSITION SLICE over a map is an ORDER-PRESERVING ENTRY slice (`RangeLocalStep.applyRangeMap`
     // / `TailLocalStep`) — `limit`/`range`/`skip`/`tail`(Scope.local) keep a window of the ENTRIES in
     // insertion order, the map's own `MAP_COL` pairs array sliced like the list-local slice. The map
-    // shape is preserved, so the tail continues under the SAME framing. `order`/`dedup`(Scope.local) over
-    // a map (by key/value) is a different question and is NOT this arm — it declines below.
+    // shape is preserved, so the tail continues under the SAME framing.
     // The window only REMOVES entries, so the key fact (a MAY set) stays a sound upper bound.
     if (MAP_LOCAL_SLICE.has(step.name) && isLocalScope(step)) {
       const sliced = mapRange(rel, step, fresh);
       if (!sliced) return null;
       rel = sliced;
+      continue;
+    }
+    // A BARE `order`/`dedup(Scope.local)` reads the map's ENTRY set (`mapEntriesLocal`): `order` keeps a map
+    // (its entries sorted by key), `dedup` makes the Set of its entries. A top-level map head's `order(local)`
+    // is the orderability barrier's first (`order-dedup-local.ts`); this is the inline answer everywhere else
+    // — a per-row Map (`values('m').order(local)`), a child body.
+    const entryOp = collectionReaderOf(step);
+    if (entryOp === 'order' || entryOp === 'dedup') {
+      const done = mapEntriesLocal(rel, keyOf, valOf, entryOp, fresh);
+      if (!done) return null;
+      if (entryOp === 'dedup') return listTail(done, TYPED_MEMBERS, steps, at + 1, ctx, fresh, labels, true);
+      rel = done;
       continue;
     }
 

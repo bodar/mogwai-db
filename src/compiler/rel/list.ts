@@ -1163,12 +1163,31 @@ export function foldScalars(
   const order = opts.order?.length || !vtypeCol
     ? foldOrder(input, opts.order, 'v')
     : [...foldOrder(input, opts.order, 'v'), { expr: col(input.id, vtypeCol), dir: 'asc' as const }];
+  const { member, of } = scalarListMember(value, opts.type, vtype, !!opts.productiveNull);
+  const origin = originOf(input.channels);
+  if (origin && domain) return foldPerOrigin(input, origin, domain, member, order, of, fresh);
+  return {
+    rel: make.aggregate({
+      id: fresh('fd'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      groupBy: [],
+      aggs: [[LIST_COL, collectedArray(member, order)]],
+    }),
+    of,
+  };
+}
+
+/**
+ * A SCALAR ROW AS A LIST MEMBER — the one encoding a value takes when it enters a list, shared by the
+ * `fold()` barrier and the one-member wrap (`oneMemberList`), so a value folded and a value wrapped spell
+ * the same JSON. `vtype` is the row's per-row tag column, where it has one.
+ */
+function scalarListMember(value: Expr, type: ScalarType, vtype: Expr | undefined, productiveNull: boolean): { readonly member: Expr; readonly of: ListOf } {
   // A PER-ROW member envelopes when ITS type is lossy under its storage class (`lossyMember` — now
   // including `double`, whose whole-number members would infer back as Int and whose 17-digit members
   // would lose a bit), else stays bare (the lossless types — `string`/`int` — infer back exactly). A STATIC member has one tag for the list, so it never needs the envelope, but a
   // static REAL still crosses the lossy JSON writer — `jsonMember` makes it exact (a no-op for a static
   // string/int). Both paths reach the one JSON-entry authority.
-  const staticTag = vtype ? undefined : staticTypeOf(opts.type);
+  const staticTag = vtype ? undefined : staticTypeOf(type);
   const member: Expr = vtype
     ? { kind: 'case', whens: [[lossyMember(vtype), typedNode(value, vtype)]], else: value }
     // A STATIC tag gates `jsonMember` at compile time; an UNKNOWN one (an inject literal, an untyped
@@ -1177,15 +1196,25 @@ export function foldScalars(
   // The CARRIER moves; the type does not. A column-carried per-row type becomes envelope-carried
   // because a member has no column of its own; `static`/`unknown` cross unchanged, `text` flag and
   // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.
-  const memberType: ScalarType = vtype ? PER_ROW_ENVELOPE : opts.type;
-  const of: ListOf = { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull };
-  const origin = originOf(input.channels);
-  if (origin && domain) return foldPerOrigin(input, origin, domain, member, order, of, fresh);
+  return { member, of: { kind: 'scalar', type: vtype ? PER_ROW_ENVELOPE : type, productiveNull } };
+}
+
+/**
+ * A NON-COLLECTION VALUE AS ITS OWN ONE-MEMBER LIST — what `IteratorUtils.asIterator` makes of a traverser
+ * that is not a collection, which is how every `Scope.local` reducer and `dedup(local)` reads one
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SumLocalStep.java`,
+ * `.../step/map/DedupLocalStep.java`). A per-row PROJECTION (`json_array` of the value's member encoding),
+ * so the list route's member reducers stay the ONE authority for the answer's class, eligibility and
+ * null rule — `mean` a Double, a String's `sum` refused, a lone null reduced to null (`untilNonNull`). A
+ * per-row member is a `TYPED_MEMBERS` one, exactly as a stored list's, so the arms of a per-row split agree.
+ */
+export function oneMemberList(rel: Rel, type: ScalarType, tagCol: string | undefined, fresh: Minter): { readonly rel: Rel; readonly of: ListOf } {
+  const { member, of } = scalarListMember(col(rel.id, 'v'), type, tagCol ? col(rel.id, tagCol) : undefined, false);
   return {
-    rel: make.aggregate({
-      id: fresh('fd'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
-      groupBy: [],
-      aggs: [[LIST_COL, collectedArray(member, order)]],
+    rel: make.project({
+      id: fresh('om'), input: rel, channels: rel.channels, type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(rel.channels)),
+      exprs: [[LIST_COL, { kind: 'call', fn: 'jsonb', args: [{ kind: 'call', fn: 'json_array', args: [member] }] }],
+        ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
     }),
     of,
   };

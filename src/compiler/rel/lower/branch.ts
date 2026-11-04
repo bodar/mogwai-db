@@ -99,8 +99,10 @@ export function batchedBranch(
 
 /** An arm whose body holds a COLLAPSING barrier (a reducer/count/fold — `selfCollapses`), so when a
  *  batching branch runs it over the whole input the arm is a global REDUCTION. Deliberately NARROWER
- *  than `armBatches` (any Barrier): a SLICE arm (`out().limit(1)`) batches too but does not collapse. */
-export const isReductionArm = (body: readonly IRStep[]): boolean => body.some((step) => selfCollapses(step.name));
+ *  than `armBatches` (any Barrier): a SLICE arm (`out().limit(1)`) batches too but does not collapse.
+ *  A `Scope.local` reducer or count is NOT one — `SumLocalStep`/`CountLocalStep` are `ScalarMapStep`s, one
+ *  traverser in and one out — so `union(sum(local), …)` is an ordinary per-traverser arm. */
+export const isReductionArm = (body: readonly IRStep[]): boolean => body.some((step) => selfCollapses(step.name) && !isLocalScope(step));
 
 /** The reducing/supplying barriers that EMIT over an EMPTY input — a seed (`GroupStep`/`GroupCountStep` `{}`,
  *  `TreeStep` an empty tree, `ReducingBarrierStep.processAllStarts`) or a supply (`SideEffectCapStep`) — beyond

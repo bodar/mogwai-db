@@ -63,7 +63,6 @@ export const REASONS = {
   'tree-step': { kind: 'decline', why: '`tree()`', cite: ['docs/outstanding-work.md', '**Step vocabulary (matrix-fill).** `tree`'] },
   'subgraph-step': { kind: 'decline', why: '`subgraph(\'sg\')`', cite: ['docs/outstanding-work.md', '`subgraph(\'sg\')`'] },
   'to-direction-step': { kind: 'decline', why: '`to(Direction, …)` / `toE(Direction, …)`', cite: ['docs/outstanding-work.md', '**Step vocabulary (matrix-fill).**'] },
-  'local-scope-scalar': { kind: 'decline', why: 'a `Scope.local` reducer over a scalar value', cite: ['docs/outstanding-work.md', '`mean/sum(Scope.local)` over a value list'] },
   'inject-residue': { kind: 'decline', why: '`inject()` with a set literal, or a keyed `select(traversal)` over injected values', cite: ['docs/outstanding-work.md', 'inject list/set residue'] },
   'set-op-operand': { kind: 'decline', why: 'a set-op/`merge`/`conjoin` over a null or non-list operand', cite: ['docs/outstanding-work.md', '**Values** (corpus)'] },
   'split-residue': { kind: 'decline', why: '`split()` over a list or inside a body', cite: ['docs/outstanding-work.md', '(o-split)'] },
@@ -185,14 +184,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
   'to-direction-step': [
     'g_VX1X_to_XOUT_knowsX',
     'g_V_toEXout_knowsvarX_valuesXweightX',
-  ],
-  'local-scope-scalar': [
-    'g_VX1X_valuesXageX_dedupXlocalX_unfold',
-    'g_VX1X_valuesXageX_maxXlocalX',
-    'g_VX1X_valuesXageX_meanXlocalX',
-    'g_VX1X_valuesXageX_minXlocalX',
-    'g_VX1X_valuesXageX_orderXlocalX',
-    'g_VX1X_valuesXageX_sumXlocalX',
   ],
   'inject-residue': [
     'g_injectX10_20_null_20_10_10X_groupCountXxX_dedup_asXyX_projectXa_bX_by_byXselectXxX_selectXselectXyXXX',

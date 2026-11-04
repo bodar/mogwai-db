@@ -397,7 +397,7 @@ Beside the RelIR substrate:
   `SubgraphStrategy(vertexProperties:)`, `includeMetaProperties`,
   ProductiveByStrategy on a non-standard host. No rule yet wraps a criterion around a mutation.
 - **Step vocabulary (matrix-fill).** `tree`, `subgraph('sg')`, `withSack(seed, Operator)`,
-  `mean/sum(Scope.local)` over a value list, string steps inside `repeat`, null carriage under `path()`,
+  string steps inside `repeat`, null carriage under `path()`,
   mutation-guard outcomes (`ReadOnlyStrategy` — reject as the reference does). Sizes in L3 telemetry.
 - **Federate.** Run independent sibling RPCs concurrently (federate and `io()`); arms at mid-position or
   inside a nested prefix; Phase 2b cross-graph identity (`group().by(id)`, `has(T.id, <cross-graph>)`);

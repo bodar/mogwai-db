@@ -32,6 +32,8 @@ const COVERED = [
   "g.V().local(__.values('name'))",
   // A reducer-HEADED body reduces the host's one-row self, over an element or a scalar host alike.
   "g.V().local(__.count())", "g.V().values('age').local(__.fold())", "g.V().values('age').map(__.sum())",
+  // A Scope.local order over a NON-collection returns it unchanged (`OrderLocalStep.map`).
+  'g.inject(1,2).order(Scope.local)',
   "g.V().hasLabel('person')", "g.V().hasLabel('person','software')", "g.E().hasLabel('knows')",
   "g.V().has('name')", "g.V().has('name','marko')", "g.V().has('age',29)", "g.E().has('weight',0.5)",
   // A RUN of filters is the shape worth pinning: a per-step lowering would give each its own CTE
@@ -643,7 +645,6 @@ const DECLINED = [
   'g.V().order().by(T.key)',          // an element has no key
   'g.E().properties().id()',          // an edge `Property` is not an Element — no id, no label
   'g.E().properties().label()',
-  'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   // A `groupCount` site beside a `group` site on ONE label is not one grouping: `registerIfAbsent` keeps

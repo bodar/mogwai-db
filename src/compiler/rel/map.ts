@@ -2,7 +2,7 @@ import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr }
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ColMeta } from '../../rel/types.ts';
+import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import { framingCols } from './framing.ts';
 import type { Elem } from '../elem.ts';
@@ -11,7 +11,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { mapSlot, valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonField, jsonOf, listNode, seedPerOrigin, meta, presenceFenced, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, firstArrival, firstOf, rowNumberWindow, jsonExtract, jsonField, jsonOf, listNode, mapNode, seedPerOrigin, meta, presenceFenced, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, isProductiveBy, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
@@ -20,6 +20,7 @@ import { recordToMap } from './record.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
+import { storedCompareOn } from './predicate.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -1688,6 +1689,33 @@ export function mapRange(input: Rel, step: IRStep, fresh: Minter): Rel | null {
   // a bare `json_each` element as a JSON STRING otherwise, which would double-encode the `[key,val]` pair.
   const sliced = collectedOf(taken, jsonOf(col(taken.id, PAIR.value)), [{ expr: col(taken.id, PAIR.ord), dir: 'asc' }], MAP_COL, fresh);
   return withPayload(rel, [[MAP_COL, sliced]], [meta(MAP_COL, 'json', true)], fresh);
+}
+
+/**
+ * `order(Scope.local)` / `dedup(Scope.local)` over a MAP whose keys are `{t,v}` nodes, in SQL — `null` for any
+ * other key side. Both iterate the ENTRY set (`IteratorUtils.asIterator(Map)` is `entrySet().iterator()`):
+ * - `order` re-collects the pairs SORTED: an entry compares by its key first, and a map's keys are distinct,
+ *   so the key alone is the order (`OrderLocalStep.map`'s Map arm, a `LinkedHashMap` re-built in sorted order,
+ *   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderLocalStep.java`).
+ *   The key's compare value is `storedCompareOn` — the authority the list route's member order spends.
+ * - `dedup` is the Set of the entries (`DedupLocalStep`'s `LinkedHashSet`): every entry survives, in
+ *   insertion order, each a one-entry `{t:'map'}` node (a `Map.Entry` frames as a one-entry map, `mapEntry`'s
+ *   rule) — the `LIST_COL` of a `TYPED_MEMBERS` set, the encoding a stored set holds, so it merges with one.
+ *   Only a self-describing value side can become such a node.
+ */
+export function mapEntriesLocal(input: Rel, keyOf: MapOf, valOf: MapOf, op: 'order' | 'dedup', fresh: Minter): Rel | null {
+  if (keyOf.kind !== 'scalar' || (op === 'dedup' && valOf.kind !== 'scalar')) return null;
+  const rel = fenced(input, fresh);
+  const pairs = pairsOf(col(rel.id, MAP_COL), fresh);
+  const pair = col(pairs.id, PAIR.value);
+  const ord: SortTerm = { expr: col(pairs.id, PAIR.ord), dir: 'asc' };
+  if (op === 'dedup') {
+    const entries = collectedOf(pairs, mapNode({ kind: 'call', fn: 'json_array', args: [jsonOf(pair)] }), [ord], LIST_COL, fresh);
+    return withPayload(rel, [[LIST_COL, entries]], [meta(LIST_COL, 'json')], fresh);
+  }
+  const key = storedCompareOn(jsonExtract(pair, '$[0].t'))(jsonExtract(pair, '$[0].v'));
+  const sorted = collectedOf(pairs, jsonOf(pair), [{ expr: key, dir: 'asc' }, ord], MAP_COL, fresh);
+  return withPayload(rel, [[MAP_COL, sorted]], [meta(MAP_COL, 'json', true)], fresh);
 }
 
 /** The columns a merged ENTRY rides in on its way into `mapsMerged`'s one map: its key node as JSON text

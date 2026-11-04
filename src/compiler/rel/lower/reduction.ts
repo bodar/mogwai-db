@@ -2383,11 +2383,11 @@ function perRowCollectionChild(body: readonly IRStep[], host: Extract<ChildHost,
   const one = make.limit({ id: fresh('pl'), input: split.rel, channels: split.rel.channels, type: split.rel.type, count: compilerInt(1) });
   const tail = continueAs(one, split.framing, body, 1, false, bodyCtx, fresh, NO_ALIASES);
   const value = tail && !tail.effects?.length ? oneRowValue(tail, fresh) : null;
-  // A bare `count(local)` or local slice is ONE-TO-ONE: every seeded row enters exactly one arm and leaves
+  // A bare `count(local)`, local slice or `order(local)` is ONE-TO-ONE: every seeded row enters exactly one arm and leaves
   // it, so the body produces exactly where the host does — stated, rather than the `EXISTS` a union of
   // filtered arms otherwise needs, which would spell the whole split a second time per row.
   const reader = collectionReaderOf(body[0]);
-  if (!value || body.length !== 1 || (reader !== 'count' && reader !== 'slice')) return value;
+  if (!value || body.length !== 1 || (reader !== 'count' && reader !== 'slice' && reader !== 'order')) return value;
   return {
     expr: value.expr, framing: value.framing, ...(value.vtype ? { vtype: value.vtype } : {}),
     present: present ? 'value-nullness' : 'always', yields: value.yields,
