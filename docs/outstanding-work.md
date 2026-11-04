@@ -99,6 +99,12 @@ item lands with tests that stop it from coming back.
   - a compile-time scaling assertion.
 
   Re-record `sql-hygiene` (down).
+- ✅ **cc-2 emit-once LANDED (63f6e044).** `renderLowered` (`src/rel/emit.ts`) is the one crossing out of
+  the algebra; `lowered()` renders once, decides the bind budget on that value, and carries it as the
+  REQUIRED `RelLowering.rendered`, so `finishLowering` and `renderProgram` emit nothing. No SQL change.
+  Write compile 4.96 → 3.23 ms. Test: `test/compiler/emit-once.exec.test.ts` (spy on `checkPlan`: one
+  emission per lowering for reads, writes, drop, at depth, and a regex barrier resume; carried rendering
+  equals a fresh `emit()`). Remains: nothing. Original item text follows.
 - **cc-2 emit-once.** A read plan is emitted twice and a write three times (the bind-budget probe in `lowered`,
   then `finishLowering`, then `renderProgram`): about 55% of corpus compile time. Render once and pass the
   rendered result forward (the prototype's memo is NOT the shape to land). Test: a counter or spy proving one
