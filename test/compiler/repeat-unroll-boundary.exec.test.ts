@@ -446,3 +446,18 @@ describe('the repeat() unroll boundary', () => {
   });
 
 });
+
+// A bounded repeat's phases are joins, so a large enough count meets one of SQLite's PREPARE-time
+// statement-shape limits (64 tables in a join; 65,535 references to one table). That is a property of
+// the compiled text — of the query — never of the data, so the user gets a clear decline naming the
+// limit and the likely cause, never SQLite's bare message (`GraphStore.query`, src/storage.ts).
+describe('a bounded repeat past a SQLite statement-shape limit declines clearly', () => {
+  test.each([
+    'g.V().repeat(__.out()).emit().times(64).count()',
+    'g.V().repeat(__.both().limit(3)).times(24).count()',
+    'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
+  ])('%s', (q) => {
+    expect(() => run(store, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(.*\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
+    try { run(store, q); } catch (e) { expect((e as Error).name).toBe('UnsupportedTraversal'); }
+  });
+});

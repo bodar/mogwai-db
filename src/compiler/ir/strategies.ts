@@ -1344,6 +1344,15 @@ const SIDE_EFFECT_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
 
 const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = { ...SIDE_EFFECT_FREE_BARRIERS, ...SIDE_EFFECT_BARRIERS };
 
+/** Does a (normalized) repeat body hold a per-iteration barrier at its own level — a member of
+ *  `UNROLLABLE_BARRIERS` or a barrier `call()`? Such a body "always has 'global' children" in the
+ *  reference (`RepeatStep.standardAlgorithm` drains every start into a body that
+ *  `hasStepOfAssignableClassRecursively(Barrier.class, …)`), and only a PHASE can host one: a recursive
+ *  term refuses the window/aggregate/effect it lowers to. A barrier under a per-traverser host is that
+ *  host's LOCAL child, reset per traverser, so it does not make the body need phases. */
+const needsPhases = (body: readonly Step[]): boolean =>
+  body.some((s) => s.name === 'call' || !!UNROLLABLE_BARRIERS[s.name]?.(s));
+
 /** The row-local FILTERS a phase may contain — they drop traversers and change none. */
 const ROW_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'identity']);
 
@@ -1500,8 +1509,10 @@ export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBo
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
     const { region, end } = gatherRepeatRegion(steps, i);
-    // A counted until is a `times` in disguise; if the unroll still declines its body, the ORIGINAL
-    // region (with its `until`) goes on to the walk exactly as before — the rewrite never strands one.
+    // A counted until is a `times` in disguise, but it is rewritten only for a body that NEEDS phases
+    // (`needsPhases`); every other counted until stays the walk's, which lowers it in constant-size SQL.
+    // If the unroll still declines the body, the ORIGINAL region (with its `until`) goes on exactly as
+    // before — the rewrite never strands one.
     const counted = loopCountUntilAsTimes(region, params, body);
     const unrolled = (counted && tryUnroll(counted, params, body)) ?? tryUnroll(region, params, body);
     out.push(...(unrolled ?? region));
@@ -1530,11 +1541,24 @@ export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBo
  * written `times` (the emit/until position rules live in `tryUnroll`). Returns null when the region is not
  * this shape; a `loops("a")` reads some OTHER loop's counter and a named repeat is declined by the unroll
  * anyway, so both stay untouched.
+ *
+ * ⚠️ **The rewrite is a REGIME choice, and it is taken only where the walk cannot serve the region**: a
+ * body holding a per-iteration barrier (`needsPhases`). That is the one axis the two-regime split rests
+ * on (`docs/archive/2026-08-09-repeat-two-regimes-plan.md`): a recursive term cannot hold a window or an
+ * aggregate (`BARRIER_IN_TERM`, src/rel/recursive.ts), so `order`/`limit`/`range`/… in the body can only
+ * be phases, while a barrier-free body is the walk's, in SQL whose size does not depend on `k*`. Rewriting
+ * a barrier-free body too traded that for k* spliced phases — O(k*²) text under `emit`, over the DO
+ * statement cap by `emit().until(loops().is(40)).path()` and into SQLite's 64-table join wall at 64 — and
+ * sent emit+`simplePath` k-hop neighbourhoods, which the walk answers, into an emit-unroll gap that
+ * declines. Deciding by the body rather than by `k*` keeps it a property of the query's SHAPE, not a
+ * size threshold.
  */
 function loopCountUntilAsTimes(region: Step[], params: ParamEnv, childBody: ChildBody): Step[] | null {
   const rep: IRStep | undefined = region.find((s) => s.name === 'repeat');
   const until = region.find((s) => s.name === 'until');
   if (!rep || !until || rep.loopName || region.some((s) => s.name === 'times')) return null;
+  const repBody = (rep.args ?? [])[0]?.value;
+  if ((rep.args ?? []).length !== 1 || !isNested(repBody) || !needsPhases(childBody(repBody.nested, params))) return null;
   const nested = (until.args ?? [])[0]?.value;
   if ((until.args ?? []).length !== 1 || !isNested(nested)) return null;
   const test = childBody(nested.nested, params);

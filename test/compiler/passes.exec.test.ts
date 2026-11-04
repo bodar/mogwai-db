@@ -415,8 +415,21 @@ describe('until(loops().is(P)) canonicalizes to times(k*)', () => {
 
   test("an unsatisfiable count, another loop's counter, or a named repeat keeps its until for the walk", () => {
     for (const q of [
-      'g.V().repeat(out()).until(loops().is(0))', 'g.V().repeat(out()).until(loops().is(-1))', 'g.V().until(loops().is(2.5)).repeat(out())',
-      'g.V().until(loops().is(lt(0))).repeat(out())', 'g.V().repeat(out()).until(loops("b").is(2))', 'g.V().repeat("a", out()).until(loops("a").is(2))',
+      'g.V().repeat(out().limit(2)).until(loops().is(0))', 'g.V().repeat(out().limit(2)).until(loops().is(-1))',
+      'g.V().until(loops().is(2.5)).repeat(out().limit(2))', 'g.V().until(loops().is(lt(0))).repeat(out().limit(2))',
+      'g.V().repeat(out().limit(2)).until(loops("b").is(2))', 'g.V().repeat("a", out().limit(2)).until(loops("a").is(2))',
+    ]) expect(chain(q)).toContain('repeat');
+  });
+
+  // The rewrite is a REGIME choice: only a body holding a per-iteration barrier needs phases. A
+  // barrier-free body stays the walk's, whose SQL does not grow with k* — rewriting it sent
+  // emit+simplePath neighbourhoods into a declining emit-unroll gap and large counts past the DO
+  // statement cap. A barrier under a per-traverser host is that host's local child, not a phase.
+  test('a barrier-free body keeps its counted until for the walk, at any count and with emit', () => {
+    for (const q of [
+      'g.V().repeat(out()).until(loops().is(2))', 'g.V().until(loops().is(2)).repeat(out())',
+      'g.V(1).repeat(both().simplePath()).emit().until(loops().is(3))', 'g.V().repeat(out()).emit().until(loops().is(64))',
+      'g.V().repeat(out()).until(loops().is(gte(100000)))', 'g.V().repeat(local(out().limit(1))).until(loops().is(2))',
     ]) expect(chain(q)).toContain('repeat');
   });
 });

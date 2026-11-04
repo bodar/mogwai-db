@@ -2,7 +2,7 @@
 //
 // The compiler builds ALL of its SQL through this kernel — no ansi builder layer,
 // no hand-rolled {sql,binds}. This is the ONE module that touches lazyrecords
-// directly (its bind-safe core: Text/Value/Sql/statement/jsonExtract); every
+// directly (its bind-safe core: Text/Value/Sql/Compound/jsonExtract); every
 // other module builds SQL via the exports here. Template-first: `q\`…\``
 // interpolations default to RAW identifiers/text and only bound VALUES are wrapped
 // (`value(x)`) — the flip of the usual bind-by-default tag, right for an
@@ -16,12 +16,11 @@
 //   • q / list / values / paren / empty / raw — the template + compound helpers.
 //   • render(node) — the node → {sql, binds} boundary for standalone (non-CTE) SQL.
 
-import { text as raw, empty, type Text } from '@bodar/lazyrecords/sql/template/Text.ts';
+import { text as raw, empty, Text } from '@bodar/lazyrecords/sql/template/Text.ts';
 import { value, Value } from '@bodar/lazyrecords/sql/template/Value.ts';
 import { Identifier } from '@bodar/lazyrecords/sql/template/Identifier.ts';
 import { sql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
-import { list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
-import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
+import { Compound, list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 
@@ -62,22 +61,54 @@ export class KeyedValue extends Value {
  *  `undefined` → null, matching lazyrecords' `value()`. */
 export const keyedValue = (v: unknown, key: string): Expression => new KeyedValue(v === undefined ? null : v, key);
 
-/** Does any reuse key appear more than once in this tree? Only then is it worth switching the
- *  statement to numbered placeholders; the common no-repeat case keeps the anonymous-`?` render
- *  byte-for-byte, so no existing SQL (or snapshot) moves. Walks via `generate` (the same in-order
- *  visit the renderer uses) rather than `for…of`, because lazyrecords' generated `Sql` d.ts declares
- *  `Iterable` without emitting the `[Symbol.iterator]` member — `generate` is the exposed walk. */
-function hasRepeatedKey(tree: Sql): boolean {
-  const seen = new Set<string>();
-  let repeated = false;
-  tree.generate((e) => {
-    if (e instanceof KeyedValue) {
-      if (seen.has(e.key)) repeated = true;
-      else seen.add(e.key);
+/**
+ * THE TREE'S TOKENS IN RENDER ORDER, in ONE linear walk — exactly the visit lazyrecords' `Compound`
+ * iterator makes (`start`, the members joined by `separator`, `end`; `empty` never emitted), done with
+ * an explicit stack instead of nested `yield*`.
+ *
+ * ⚠️ **Not a style choice: the nested generators are QUADRATIC in nesting depth.** A token a `Compound`
+ * at depth d yields is re-yielded through d generator frames, so a plan whose relations NEST (a bounded
+ * repeat's phases, each a derived table over the last) paid O(tokens × depth) — three times over, since
+ * the render walked the tree separately for the repeated-key check, the text and the binds. Measured:
+ * `repeat(out().order().by('name')).times(40)` spent 1.44s of a 1.60s compile in those walks, and the
+ * compile of `times(n)` grew ~5× per doubling of n. One stack walk is O(tokens).
+ */
+function tokens(tree: Sql): (Text | Identifier | Value)[] {
+  const out: (Text | Identifier | Value)[] = [];
+  const stack: { node: Compound; members: Iterator<Expression>; first: boolean }[] = [];
+  const enter = (node: Compound): void => {
+    if (node.start !== empty) out.push(node.start);
+    stack.push({ node, members: node.expressions[Symbol.iterator](), first: true });
+  };
+  enter(tree);
+  while (stack.length) {
+    const top = stack[stack.length - 1]!;
+    const next = top.members.next();
+    if (next.done) {
+      stack.pop();
+      if (top.node.end !== empty) out.push(top.node.end);
+      continue;
     }
-    return '';
-  });
-  return repeated;
+    if (top.first) top.first = false;
+    else if (top.node.separator !== empty) out.push(top.node.separator);
+    const e = next.value;
+    if (e instanceof Text || e instanceof Identifier || e instanceof Value) out.push(e);
+    else if (e instanceof Compound) enter(e);
+  }
+  return out;
+}
+
+/** Does any reuse key appear more than once? Only then is it worth switching the statement to numbered
+ *  placeholders; the common no-repeat case keeps the anonymous-`?` render byte-for-byte, so no existing
+ *  SQL (or snapshot) moves. */
+function hasRepeatedKey(toks: readonly (Text | Identifier | Value)[]): boolean {
+  const seen = new Set<string>();
+  for (const e of toks) {
+    if (!(e instanceof KeyedValue)) continue;
+    if (seen.has(e.key)) return true;
+    seen.add(e.key);
+  }
+  return false;
 }
 
 /**
@@ -88,21 +119,21 @@ function hasRepeatedKey(tree: Sql): boolean {
  * the next ordinal and contributes one bind; a repeat of that key re-emits its ordinal and contributes
  * NONE. SQLite binds exactly `sqlite3_bind_parameter_count` values, which is that deduped count, so N
  * uses of one keyed value (a `$x` parameter) cost ONE of the 100 (verified on bun:sqlite and on a
- * Durable Object, `test/cf-probe`). With no repeat we defer to lazyrecords' anonymous-`?` statement
- * unchanged, so the overwhelmingly common case is byte-identical to before.
+ * Durable Object, `test/cf-probe`). With no repeat the statement keeps lazyrecords' anonymous-`?`
+ * spelling (`statement/ordinalPlaceholder`), so the overwhelmingly common case is byte-identical.
  */
 function renderStatement(tree: Sql): { sql: string; binds: any[] } {
-  if (!hasRepeatedKey(tree)) {
-    const { text, args } = statement(tree);
-    return { sql: text, binds: args };
-  }
+  const toks = tokens(tree);
+  const numbered = hasRepeatedKey(toks);
   const ordinals = new Map<string, number>();
   const binds: any[] = [];
   let next = 0;
-  const text = tree.generate((e) => {
+  const text = toks.map((e) => {
+    if (e instanceof Text) return e.text;
     // Our kernel emits identifiers as `raw(quote(...))` Text, never lazyrecords `Identifier` nodes, so
     // this arm is a defensive fallback; `quote` is the kernel's own identifier authority all the same.
     if (e instanceof Identifier) return quote(e.identifier);
+    if (!numbered) { binds.push(e.value); return '?'; }
     if (e instanceof KeyedValue) {
       const seen = ordinals.get(e.key);
       if (seen !== undefined) return `?${seen}`;
@@ -110,9 +141,9 @@ function renderStatement(tree: Sql): { sql: string; binds: any[] } {
       binds.push(e.value);
       return `?${next}`;
     }
-    if (e instanceof Value) { binds.push(e.value); return `?${++next}`; }
-    return '';
-  });
+    binds.push(e.value);
+    return `?${++next}`;
+  }).join('');
   return { sql: text, binds };
 }
 

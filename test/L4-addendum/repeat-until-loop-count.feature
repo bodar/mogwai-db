@@ -7,6 +7,11 @@ Feature: mogwai addendum — until(loops().is(P)) on an unnamed repeat is the bo
   # tested on entry at loops() == 0, so k* = min{k >= 0 : P(k)}; an until AFTER repeat is first tested
   # once the body has run, so k* = min{k >= 1 : P(k)} (RepeatStep.java:265-278, :334-353). No such k is
   # the spec's loop-to-extinction, answered by the walk with no artificial cap.
+  #
+  # Only a body holding a per-iteration barrier (order/limit/range/…) is rewritten to times(k*): a
+  # recursive term cannot host the barrier, so phases are its only lowering. A barrier-free body stays
+  # the walk's, in SQL that does not grow with k*. The answers below are the same either way; the
+  # barrier-free scenarios pin the walk, the order().by() ones the unroll.
 
   # until-FIRST is(0) holds on entry: every traverser leaves untouched.
   Scenario: g_V_untilXloops_isX0XX_repeatXoutX_count
@@ -97,6 +102,10 @@ Feature: mogwai addendum — until(loops().is(P)) on an unnamed repeat is the bo
       | d[0].l |
       | d[1].l |
 
+  # A barrier-free body is the walk's, and the walk does not lower inside a where() child yet — for ANY
+  # until (`where(repeat(out()).until(has('name','lop')))` declines the same way). Not a count question:
+  # the barrier-body form below answers through the unroll.
+  @Unsupported
   Scenario: g_V_whereXrepeatXoutX_untilXloops_isX2XXX_name
     Given the modern graph
     And the traversal of
@@ -130,3 +139,90 @@ Feature: mogwai addendum — until(loops().is(P)) on an unnamed repeat is the bo
     Then the result should be unordered
       | result |
       | d[0].l |
+
+  # A k-hop neighbourhood: emit + simplePath + a counted until. The body has no barrier, so it stays the
+  # walk's — rewriting it into the emit unroll lost this answer to a decline.
+  Scenario: g_VX1X_repeatXboth_simplePathX_emit_untilXloops_isX3XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).repeat(__.both().simplePath()).emit().until(__.loops().is(3)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[9].l |
+
+  # A large count with emit is the walk's constant-size SQL, not 64 spliced union arms.
+  Scenario: g_VX1X_repeatXoutX_emit_untilXloops_isX64XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).repeat(__.out()).emit().until(__.loops().is(64)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
+  # A BARRIER body needs phases: emit composes in both positions exactly as with times(2).
+  Scenario: g_V_emit_repeatXout_order_byXnameXX_untilXloops_isXwithinX2_3XXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().emit().repeat(__.out().order().by("name")).until(__.loops().is(P.within(2, 3))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[14].l |
+
+  # until FIRST, emit LAST over a barrier body: level 2 is emitted AND exits — 6 + 2·2.
+  Scenario: g_V_untilXloops_isX2XX_repeatXout_order_byXnameXX_emit_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().until(__.loops().is(2)).repeat(__.out().order().by("name")).emit().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[10].l |
+
+  Scenario: g_V_localXrepeatXout_limitX1XX_untilXloops_isX1XX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.repeat(__.out().limit(1)).until(__.loops().is(1)).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+      | d[0].l |
+      | d[0].l |
+      | d[1].l |
+      | d[0].l |
+      | d[1].l |
+
+  Scenario: g_V_whereXrepeatXout_order_byXnameXX_untilXloops_isX2XXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.repeat(__.out().order().by("name")).until(__.loops().is(2))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+
+  Scenario: g_V_unionXrepeatXout_order_byXnameXX_untilXloops_isX2XX_constantXxXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().union(__.repeat(__.out().order().by("name")).until(__.loops().is(2)), __.constant("x")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[8].l |
