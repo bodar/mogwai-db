@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { DFA, DFAState, type ATNConfigSet } from 'antlr4ng';
-import { parseGremlin } from '../../src/gremlin/frontend.ts';
+import { parseGremlin, parseGremlinUncached } from '../../src/gremlin/frontend.ts';
+import { parseShape } from '../support/parse-shape.ts';
 
 // A parse must not depend on what was parsed before it. antlr-ng's generated recognizers share one
 // static prediction DFA across every instance, so a wrong cached prediction is not a transient miss
@@ -57,6 +58,25 @@ const WITNESSES = [
   'g.V(2).by(asc).not(__.or(__.skip(2).or(__.min(), __.max()), __.max()))',
   "g.V().repeat(__.coalesce(__.label().not(__.order()), __.skip(1)))",
 ];
+
+// The parse is two-stage — SLL first, full LL on a bail (`parseGremlinUncached`) — and both modes
+// read and write the SAME static DFA. SLL leans on that cache harder (its whole speed-up is reusing
+// cached decisions instead of recomputing full-context ones), so a conflated state is now reached
+// from either mode. Interleave them over every ordered pair, UNCACHED (the memoising `parseGremlin`
+// would answer a repeat without touching the DFA), and require each parse to equal the victim's
+// forced-LL tree in whatever order the DFA was warmed.
+test('SLL and LL parses interleaved over the shared DFA agree with each other', () => {
+  const expected = new Map(WITNESSES.map((q) => [q, parseShape(parseGremlinUncached(q, 'll'))]));
+  for (const first of WITNESSES) {
+    for (const second of WITNESSES) {
+      for (const [a, b] of [['ll', 'two-stage'], ['two-stage', 'll'], ['two-stage', 'two-stage']] as const) {
+        expect(parseShape(parseGremlinUncached(first, a))).toBe(expected.get(first)!);
+        expect(parseShape(parseGremlinUncached(second, b))).toBe(expected.get(second)!);
+        expect(parseShape(parseGremlinUncached(second, a))).toBe(expected.get(second)!);
+      }
+    }
+  }
+});
 
 test('a parse does not depend on the parses before it', () => {
   // Every ordered pair, plus a repeat of each — a poisoned cache entry survives, so re-parsing the

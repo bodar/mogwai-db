@@ -1,5 +1,8 @@
 import { NO_PARAMS, type ParamEnv } from './param-env.ts';
-import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
+import {
+  CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext,
+  BailErrorStrategy, ParseCancellationException, PredictionMode,
+} from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
 import { binaryOfBase64, fitsSafeInteger, BigDecimal, Duration, mapSlot, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
@@ -21,13 +24,59 @@ class Errors extends BaseErrorListener {
   }
 }
 
-function parseGremlinUncached(query: string) {
+// TWO-STAGE PARSE — the antlr runtime's documented fast path; no grammar edit, no edit to `parser/`.
+//
+// Stage 1 predicts in SLL mode with `BailErrorStrategy`. SLL ignores the parser's call stack when
+// predicting, so its decisions are cached in the shared DFA and reused across parses; full LL re-runs
+// context-sensitive (full-context) prediction on every parse, which that DFA does not cache. The SLL
+// CONTRACT (`node_modules/antlr4ng/dist/atn/PredictionMode.d.ts`, on `SLL`): an SLL parse either
+// returns THE SAME TREE full LL would, or it reports a syntax error — a real one, or merely an input
+// that needs LL's extra power. So a stage-1 success IS the LL answer, and a stage-1 failure decides
+// nothing: it bails (no recovery, no message) and stage 2 re-parses in full LL.
+//
+// MESSAGES ARE IDENTICAL BY CONSTRUCTION. Stage 1 attaches no parser listener, so it never authors a
+// syntax-error message; every parser message comes from stage 2, which is exactly the single-pass LL
+// parse this function used to be. Stage 2 starts from a FRESH lexer and token stream rather than
+// `seek(0)` + `reset()` on stage 1's — measured, the reused recognizer is NOT message-identical:
+// `g.V().out(( # ` reports `1:10 ` with the no-viable-alternative text lost, where LL reports
+// `1:10 no viable alternative at input 'g.V().out(('`. And the stream lexes lazily as the parser
+// pulls tokens, so reuse would also move stage 1's lookahead lexer errors ahead of parser errors at
+// earlier tokens. Stage 1's lexer messages are discarded with it, so none is reported twice, and
+// re-lexing costs little beside the LL parse that follows it. A stage-1 success
+// that carries a lexer error (a dropped character the parser did not need) throws the lexer messages
+// alone — exactly what LL reports for that input, since LL builds the same tree with no parser error.
+//
+// Both stages share the generated parser's static prediction DFA, and SLL leans on it harder: that
+// DFA is what `patches/antlr4ng@3.0.16.patch` guards, and `test/L1-corpus/parser-state.test.ts`
+// interleaves the two modes against it. `mode: 'll'` forces the single LL pass (tests compare to it).
+export function parseGremlinUncached(query: string, mode: 'two-stage' | 'll' = 'two-stage') {
+  if (mode === 'two-stage') {
+    const errs = new Errors();
+    const parser = recognizer(query, errs);
+    parser.removeErrorListeners();
+    parser.interpreter.predictionMode = PredictionMode.SLL;
+    parser.errorHandler = new BailErrorStrategy();
+    try {
+      return checked(parser.queryList(), errs);
+    } catch (e) {
+      if (!(e instanceof ParseCancellationException)) throw e;
+    }
+  }
+  const errs = new Errors();
+  return checked(recognizer(query, errs).queryList(), errs);
+}
+
+// A recognizer whose lexer and parser both report into `errs`; default (LL) prediction and the
+// default recovering error strategy, as antlr builds it.
+function recognizer(query: string, errs: Errors): GremlinParser {
   const lexer = new GremlinLexer(CharStream.fromString(query));
   const parser = new GremlinParser(new CommonTokenStream(lexer));
-  const errs = new Errors();
   lexer.removeErrorListeners(); parser.removeErrorListeners();
   lexer.addErrorListener(errs); parser.addErrorListener(errs);
-  const tree = parser.queryList();
+  return parser;
+}
+
+function checked<T>(tree: T, errs: Errors): T {
   if (errs.errors.length) throw new ValueParseError(`Gremlin parse error: ${errs.errors.join('; ')}`);
   return tree;
 }
