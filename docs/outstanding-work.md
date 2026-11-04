@@ -213,7 +213,7 @@ statement's text grows with data or doubles with query shape. The items below ar
   `local(repeat(both()).times(k))` ENUMERATES its walks (it now compiles; it is exponential in k by
   multiplicity, not by text); (c) from its second hop on a `both()` chain pays SQLite's MULTI-INDEX OR, ~30%
   per hop over two plain seeks (8k vertices: `both().both().count()` 32 → 42 ms) — a cheaper one-reference
-  spelling would recover it — SUPERSEDED by §0b both-gate-lineage, which measured the cost on a LONE
+  spelling would recover it — SUPERSEDED by §0b both-gate-lineage (landed), which measured the cost on a LONE
   `out().both()` too. Related, also found by cc-4:
   before the spine cut, proving a correlated id absent (`definesId`, `src/rel/walk.ts`) is O(k²) up to
   `SPINE_DEPTH_BOUND` (linear after); and the TRUE case of `definesId` is O(n²) (only FALSE answers are
@@ -229,18 +229,16 @@ statement's text grows with data or doubles with query shape. The items below ar
   validates a window's ORDER/PARTITION BY and frame bounds. The re-read: `withSubqueryColumns` descends into
   a non-movable `once()` LET and hoists its unconditional VALUES cells, so a transformed key reads its
   property once per row. Nothing remains.
-- **`rereadsFreely` asks the wrong question, so a LONE `both()` after any hop pays the MULTI-INDEX OR
-  (both-gate-lineage) — MAJOR, common (three review findings; supersedes cc-8 follow-up (c)).** The gate
-  (`src/rel/walk.ts`) admits the two-seek form only over a base-table frontier (Scan/Values under
-  Project/Filter), but what compounds is a frontier that ALREADY holds a doubled reference. So
-  `g.V().out().both().count()` 19.3 → 22.6 ms (×1.17–1.23, 8k), `out('knows').bothE().otherV()` ×1.21,
-  `optional(out().both())` +36%, `repeat(both()).emit().times(3)` 277 → 429 ms (+55%),
-  `both().both()` 27.5–30.8 → 30.3–39 ms; single-vertex starts unchanged. Linear, every answer matches.
-  Fix: make the node fact "nothing beneath this frontier reads its input twice" (a `nodeFact`, `walk.ts`),
-  so the two-join form is used at most once along any lineage — copies bounded at 2×, the 2^k growth still
-  gone. If that does not recover `both().both()`, measure a MATERIALIZED-CTE frontier reference against the
-  prepare-time copy. Test: a plan-shape/EXPLAIN assertion in `test/compiler/both-frontier-once.exec.test.ts`
-  that `g.V().out().both()` keeps two plain seeks (`e_out`/`e_in` with no OR).
+- ✅ **`rereadsFreely` asked the wrong question, so a LONE `both()` after any hop paid the MULTI-INDEX OR
+  (both-gate-lineage) — LANDED (28890cd0 + 345dfd5b).** The boolean gate is replaced by one numeric node
+  fact, `doubledReads` (`src/rel/copies.ts`): `hopJoin` (`src/compiler/rel/lower/movement.ts`) keeps the
+  per-direction seeks while `doubledReads(frontier) < BOTH_COPY_BOUND`, so copies stay bounded and a frontier
+  that `draws` (a RANDOM() beneath it) is read once. `out().both()` 14.5 → 11.2 ms at 8k. Tests:
+  `test/compiler/both-frontier-once.exec.test.ts`. Remains: two branches over a random frontier inside a
+  per-traverser body (`local(…shuffle.limit(1).union(out(), in()))`, and the same with `optional`,
+  `coalesce` or `choose`) now decline (`CopiedDraw`) instead of answering. Making them answer needs a branch
+  form that reads the frontier once, with the branch index crossed onto the frontier like `hopJoin`'s
+  direction row — filed in §4.
 - ✅ **One-value landing past DO's 2 MB per-value cap (one-value-landing-ceiling) — LANDED (f3e607f4).**
   `jsonEachRelation` (`src/compiler/rel/build.ts`) is the one "data crosses as a json_each relation" builder
   (foreign.ts's five hand-rolled explodes go through it) and `jsonChunks` packs members into ≤2 MB chunks
