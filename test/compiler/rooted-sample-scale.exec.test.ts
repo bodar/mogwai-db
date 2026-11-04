@@ -225,6 +225,9 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     ["g.V().has('name','marko').flatMap(__.out().V().choose(__.label()).option('person', __.dedup()).option('software', __.identity()).sample(100)).count()", 10],
     ["g.V().local(__.out().V().choose(__.label()).option('person', __.limit(1)).option(none, __.identity()).sample(100)).count()", 15],
     ["g.V().has('name','marko').local(__.out().V().choose(__.values('age')).option(29, __.dedup()).option(none, __.identity()).sample(100)).count()", 16],
+    // `branch()` is the same lowering under its own match policy: every admitting option, `Pick.any` included.
+    ["g.V().local(__.out().V().branch(__.label()).option('person', __.dedup()).option(none, __.identity()).sample(100)).count()", 24],
+    ["g.V().has('name','marko').local(__.out().V().branch(__.label()).option('person', __.dedup()).option(any, __.identity()).sample(100)).count()", 22],
     // ... at depth: inside a union arm, a flatMap, after an outer label.
     ["g.V().union(__.local(__.out().V().dedup().sample(100))).count()", 18],
     ["g.V().flatMap(__.out().V().dedup().sample(100)).count()", 18],
@@ -246,7 +249,7 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
   });
 
   // What the product route ITSELF does not lower yet stays a clear refusal — a side-effect collector, a coin
-  // (at any depth of the prefix), a reducer in a union arm, a branch() over options. Depth gaps of the
+  // (at any depth of the prefix), a reducer in a union arm. Depth gaps of the
   // general route, not of this fast path.
   test.each([
     "g.V().local(__.V().groupCount('x').sample(1)).cap('x')",
@@ -258,7 +261,6 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     "g.V().local(__.V().coin(0.5).sample(1)).count()",
     "g.V().local(__.V().where(__.coin(0.5)).sample(100)).count()",
     "g.V().local(__.out().V().union(__.count(), __.constant(0)).sample(100)).count()",
-    "g.V().local(__.out().V().branch(__.label()).option('person', __.dedup()).option(none, __.identity()).sample(100)).count()",
   ])('declines %s', (q) => {
     expect(() => compile(q, {})).toThrow(/not supported/);
   });

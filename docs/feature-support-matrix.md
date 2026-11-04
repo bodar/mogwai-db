@@ -94,11 +94,12 @@ Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 | Step | | Notes |
 |---|:--:|---|
 | `union(a, b…)` | ✅ | ❌ a single arm that reduces or binds a label; a mixed map/scalar union; an alias through a collapsed arm |
-| `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | |
+| `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | ❌ a keyed choose under a correlated child (`where`/`by()`/`repeat` body); an ordering/text key over an ELEMENT choice (`choose(identity()).option(P.gt(1), …)`) |
+| `branch(<traversal>).option(…)` — every admitting option, `Pick.any`, traversal keys | ✅ | ❌ the same correlated-child positions as keyed `choose`; a single surviving arm where the emission order is owed |
 | `coalesce` | ✅ | ❌ an unseeded reducer arm (`max`/`sum`); a `number`-reducer merged with a plain scalar; a member step (`unfold`, keyed `dedup`) over a variant stream |
 | `optional` | ✅ | ❌ an element re-source arm (`optional(__.V())`) |
 | `map(__.…)`, `flatMap(__.…)`, `local(__.…)` | ✅ | ❌ `map` over a fan-out body (`map(__.out())`) |
-| `branch`, `sideEffect(__.…)` | ❌ | |
+| `sideEffect(__.…)` | ❌ | |
 
 Heterogeneous arms merge into a **variant stream**: `count`, slices and bare `dedup` work over it; a
 member step (`unfold`, a member transform, keyed `dedup`) does not.

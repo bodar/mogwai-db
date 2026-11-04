@@ -2044,6 +2044,21 @@ function producedOnlyWhere(ran: ChildValue | null, present: HostPresence, value:
   return { ...ran, expr: caseWhen(here, ran.expr), present: { when: and(here, restPresent === ALWAYS_PRODUCTIVE ? undefined : restPresent) } };
 }
 
+/** THE HOST AS ITS OWN CHILD VALUE — what a bare `__.inject()` yields, and a keyed branch's `__.identity()`
+ *  CHOICE (`chooseOptions`): the host, present exactly where the host is. A value only — a consumer that
+ *  reads the child's PATH (`map(identity()).path()`) keeps its own route. */
+export function hostItself(host: ChildHost, yields: ChildValue['yields']): ChildValue | null {
+  const self = hostSelf(host);
+  const cols = self && framingCols(self.framing);
+  const payload = cols?.[0];
+  if (!self || !payload) return null;
+  const typeCol = cols.find((column) => column.name !== payload.name);
+  return {
+    expr: self.col(payload.name), framing: self.framing,
+    ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: presentOfHost(host), yields,
+  };
+}
+
 function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   // Every consumer of this seam applies its child as `TraversalUtil.apply` does — one host traverser at
@@ -2094,16 +2109,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   if (first.name === 'inject') {
     const injects = first.args.length > 0;
     if (body.length > 1) return injects ? null : scalarChild(body.slice(1), host, ctx, fresh);
-    const self = hostSelf(host);
-    const cols = self && framingCols(self.framing);
-    const payload = cols?.[0];
-    if (!self || !payload) return null;
-    const typeCol = cols.find((column) => column.name !== payload.name);
-    return {
-      expr: self.col(payload.name), framing: self.framing,
-      // The host ITSELF, so it is present exactly where the host is.
-      ...(typeCol ? { vtype: self.col(typeCol.name) } : {}), present: presentOfHost(host), yields: injects ? 'first' : 'one',
-    };
+    return hostItself(host, injects ? 'first' : 'one');
   }
 
   // A GraphStep inside a per-traverser child RE-SOURCES the graph: its answer is independent of WHICH

@@ -4,7 +4,7 @@ import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from 
 import {
     stripTerminal, desugarMatchString, desugarPropertyMap, desugarGraphAlgos, formRepeatRegions, unrollFixedRepeat, markEarlyLimitSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
-    verifyStandard, verifyByModulatorArity,
+    verifyStandard, verifyByModulatorArity, verifyChooseOptionKeys,
     absorbValueMapWith, collapseFoldCountLocal, plainFoldSpelling, dropRedundantOrder, mergeStepLabels,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, dropEffectFreeSideEffect, verify,
     inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
@@ -273,6 +273,16 @@ const VERIFY: Pass[] = group('verify', [
     applies: (_steps, ctx) => ctx.originalChain.some((s) => s.name === 'by' || s.args.some((a) => isNested(a.value))),
     run: function byModulatorArityPass(steps, ctx) {
       verifyByModulatorArity(ctx.originalChain as IRStep[], ctx.params);
+      return steps;
+    },
+  },
+  // The option keys `choose()` refuses at construction (`ChooseStep.addChildOption`) — invalid Gremlin,
+  // always on, against the authored chain for the same reason as the arity rule above.
+  {
+    name: 'chooseOptionKeys',
+    applies: (_steps, ctx) => ctx.originalChain.some((s) => s.name === 'option' || s.args.some((a) => isNested(a.value))),
+    run: function chooseOptionKeysPass(steps, ctx) {
+      verifyChooseOptionKeys(ctx.originalChain as IRStep[], ctx.params);
       return steps;
     },
   },

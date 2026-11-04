@@ -248,7 +248,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | m[{"n":"peter","c":"peter"}] |
     And the decline should say "no lowering covers"
 
-  @Unsupported
   Scenario: g_V_projectXn_cX_byXnameX_byXvaluesXageX_localXisXgtX30XX_countXX
     Given the modern graph
     And the traversal of
@@ -264,7 +263,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | m[{"n":"josh","c":"d[1].l"}] |
       | m[{"n":"ripple"}] |
       | m[{"n":"peter","c":"d[1].l"}] |
-    And the decline should say "no lowering covers"
 
   @Unsupported
   Scenario: g_V_mapXvaluesXageX_localXfoldX_countXlocalXX

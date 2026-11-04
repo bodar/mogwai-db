@@ -135,7 +135,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | d[1].l |
       | d[1].l |
 
-  @Unsupported
   Scenario: g_injectX1_2_3X_optionalXisX2X_countX
     Given the empty graph
     And the traversal of

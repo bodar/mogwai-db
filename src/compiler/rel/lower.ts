@@ -2085,7 +2085,12 @@ function scalarTail(
   // further along sits over a node the assembler already refuses to fuse into — a `Limit`, a
   // `Distinct`, an earlier `Sort`, or this very fence — so its subject is a column of a finished
   // block and there is nothing left to re-inline.
-  if (CLAUSE_READERS.has(steps[from]?.name ?? '') && seed.kind !== 'values')
+  //
+  // Only where a fence CAN stand (`isSelfContained`, `fencedWhereSelfContained`'s test): inside a
+  // CORRELATED child — the scalar run of `branch(__.label().is('person').count())`,
+  // `local(__.values('age').is(P.gt(30)).count())` — a CTE could not see the outer row, so the reader stays
+  // fused and the child reduces as every other does.
+  if (CLAUSE_READERS.has(steps[from]?.name ?? '') && seed.kind !== 'values' && isSelfContained(rel))
     rel = make.materialize({ id: fresh('m'), input: rel, channels: rel.channels, type: rel.type });
 
   for (let at = from; at < steps.length; at++) {
@@ -2096,7 +2101,9 @@ function scalarTail(
     }
     if (step.name === 'inject') return injectTail(steps, at, rel, out, bulked, ctx, fresh, labels);
     const args = step.args.map((a) => a.value);
-    if (step.optionArms) return null;
+    // A keyed `choose`/`branch` over a VALUE stream is the same `chooseOptions` the element tail reaches
+    // (`branchArms`, below) — its subject comes from the framing, as the boolean `choose`'s does.
+    if (step.optionArms && !BRANCH_HOSTS.has(step.name)) return null;
     // A PATH carried into the scalar stream (a `values()` appended a value position). It composes with
     // exactly the path-family steps — `path()` frames it, `simplePath()`/`cyclicPath()` filter it —
     // handled BEFORE the blanket modulator decline so `path().by()`/`simplePath().by()` reach their own

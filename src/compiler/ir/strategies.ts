@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { stepChain, collectionMembers, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, collectionMembers, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPickArg, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
@@ -1015,7 +1015,7 @@ const BY_MODULATOR_ARITY: ReadonlyMap<string, { readonly max: number; readonly m
  * ALWAYS ON, like `verifyReadOnlyChildren`: an arity violation is invalid Gremlin, not a strategy.
  */
 export function verifyByModulatorArity(steps: IRStep[], params: ParamEnv): void {
-  const scan = (chain: Step[]) => {
+  const scan = (chain: readonly Step[]) => {
     for (let i = 0; i < chain.length; i++) {
       const s = chain[i];
       const rule = BY_MODULATOR_ARITY.get(s.name);
@@ -1024,12 +1024,45 @@ export function verifyByModulatorArity(steps: IRStep[], params: ParamEnv): void 
         while (chain[i + 1 + n]?.name === 'by') n++;
         if (n > rule.max) throw new ValueParseError(rule.message);
       }
-      for (const { value: a } of s.args ?? []) {
-        if (!isNested(a)) continue;
-        try { scan(stepChain(a.nested, params)); } catch { /* unparseable without params — skip */ }
-      }
+      // Every child position (`eachChildChain`); a body unparseable without params is skipped. The PARSE
+      // may fail quietly, the SCAN may not — a `try` around both swallowed a nested violation's own throw.
+      eachChildChain(s, read, scan);
     }
   };
+  const read = rawBodies(params);
+  scan(steps as Step[]);
+}
+
+/**
+ * `ChooseStep.addChildOption`'s refusals, applied to the authored chain at every depth — the option keys a
+ * `choose()` cannot take, though its sibling `branch()` takes all three
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/ChooseStep.java:108-133`):
+ * `Pick.any` (which a one-argument `option(body)` IS — `GraphTraversal.option(Traversal)`), a TRAVERSAL
+ * key, and a predicate whose operand is a traversal. A construction-time rule like the `by()` arity above,
+ * so it is invalid Gremlin rather than a capability gap, and the message is the reference's own text.
+ * The option steps a `choose()` hosts are the CONTIGUOUS run after it — what `absorbOptionArms` folds.
+ */
+export function verifyChooseOptionKeys(steps: IRStep[], params: ParamEnv): void {
+  const bearsTraversal = (value: unknown): boolean =>
+    isNested(value) || (isPred(value) && value.operands.some((operand) => bearsTraversal(operand.value)));
+  const scan = (chain: readonly Step[]) => {
+    for (let i = 0; i < chain.length; i++) {
+      if (chain[i]!.name === 'choose') {
+        for (let j = i + 1; chain[j]?.name === 'option'; j++) {
+          const args = chain[j]!.args;
+          const key = args.length > 1 ? args[0]!.value : { pick: 'any' };
+          if (isPickArg(key) && key.pick === 'any')
+            throw new ValueParseError('Choose step can not have an any-option as only one option per traverser is allowed');
+          if (isNested(key)) throw new ValueParseError('Traversal is not allowed as a Pick token for choose().option()');
+          if (isPred(key) && bearsTraversal(key))
+            throw new ValueParseError('Traversal-bearing predicates are not supported as option keys in choose(). '
+              + "The predicate's child traversal cannot be resolved in this context.");
+        }
+      }
+      eachChildChain(chain[i]!, read, scan);
+    }
+  };
+  const read = rawBodies(params);
   scan(steps as Step[]);
 }
 
@@ -2035,7 +2068,7 @@ function seedBodies(host: IRStep, entry: ReadonlySet<string>, read: (nested: unk
   return armsChanged ? { ...self, optionArms: arms } : self;
 }
 
-/** Absorb each choose()'s trailing contiguous option() steps into `choose.optionArms`
+/** Absorb each choose()'s or branch()'s trailing contiguous option() steps into `optionArms`
  *  — the option-map form choose(choiceFn).option(key, traversal)…. A choose with no
  *  trailing option() is the predicate form (untouched → the prefix branch compiler).
  *  The compiler reads `.optionArms` and never scans siblings. */
@@ -2043,7 +2076,7 @@ export function absorbOptionArms(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
-    if (s.name !== 'choose') { out.push(s); continue; }
+    if (s.name !== 'choose' && s.name !== 'branch') { out.push(s); continue; }
     const options: Step[] = [];
     let j = i + 1;
     for (; j < steps.length && steps[j].name === 'option'; j++) options.push(steps[j]);

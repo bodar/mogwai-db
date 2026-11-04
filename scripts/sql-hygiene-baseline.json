@@ -77,6 +77,12 @@
     "compiler": 17,
     "bound": 0
   },
+  "branch": {
+    "binds": 0,
+    "bytes": 5422,
+    "compiler": 79,
+    "bound": 0
+  },
   "cap": {
     "binds": 0,
     "bytes": 7284,

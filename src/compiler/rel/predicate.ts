@@ -978,6 +978,37 @@ export function valueSet(
     : { kind: 'in-list', expr: subject, values: values as Expr[] };
 }
 
+/**
+ * A VALUE PREDICATE OVER AN ELEMENT — a vertex or edge tested against LITERAL operands, which is what a
+ * `branch(__.identity()).option(P.neq(123), …)` key asks of its choice (`BranchStep.addChildOption` wraps a
+ * non-traversal key in a `PredicateTraversal`, run on the choice).
+ *
+ * EQUALITY NEVER CROSSES A TYPE SPACE (`typeSpaced`), and an element is a `Type` of its own to
+ * `GremlinValueComparator.COMPARABILITY` (`comparable()` is `ft == st`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:71-74,314-363`),
+ * so no literal equals one: `eq`/`within` are FALSE and `neq`/`without` TRUE for every element, folded here
+ * to a constant with no per-row term. An ORDERING or text test of an element has no natural answer to
+ * give, so it declines; so does an operand that is not a plain literal (a traversal, or a value that could
+ * itself be an element).
+ */
+export function elementPredicate(pred: unknown): Expr | null {
+  const literal = (value: unknown): boolean => value === null || ['number', 'string', 'boolean', 'bigint'].includes(typeof value)
+    || (Array.isArray(value) && value.every(literal));
+  const truth = (p: unknown): boolean | null => {
+    if (!isPred(p)) return literal(p) ? false : null;
+    const sides = p.operands.map((operand) => operand.value);
+    if (p.op === 'not') { const inner = truth(sides[0]); return inner === null ? null : !inner; }
+    if (p.op === 'and' || p.op === 'or') {
+      const [left, right] = [truth(sides[0]), truth(sides[1])];
+      return left === null || right === null ? null : p.op === 'and' ? left && right : left || right;
+    }
+    if (!sides.every(literal)) return null;
+    return p.op === 'eq' || p.op === 'within' ? false : p.op === 'neq' || p.op === 'without' ? true : null;
+  };
+  const answer = truth(pred);
+  return answer === null ? null : answer ? CONSTANT.true : CONSTANT.false;
+}
+
 export function predicateExpr(
   subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
   opType: TypeNode | null = null, opParam: string | null = null, fresh?: Minter,

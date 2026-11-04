@@ -77,7 +77,7 @@ function repeatBodyTracksPath(step: IRStep): boolean {
  *  order-sensitive). `values` is conservative — a property MAY be multi-valued. */
 const FANOUT_STEPS = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV', 'otherV',
-  'values', 'union', 'choose', 'coalesce', 'optional', 'local', 'flatMap',
+  'values', 'union', 'choose', 'branch', 'coalesce', 'optional', 'local', 'flatMap',
 ]);
 /** SLICE consumers: their result depends on emission order once a fan-out precedes, and an
  *  upstream `order()` satisfies them because `LIMIT` reads the ordered relation in the same query.
@@ -108,17 +108,18 @@ const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap', 'group']);
  *  see, so `armChains` recurses the arm bodies. A drop-SLICE inside an arm is deliberately NOT a reason
  *  to seed one: over an unordered stream it is "some n" (`Range.feature` asserts only a count), and
  *  whichever n the plan's scan order picks is an answer. */
-const BRANCH_MERGE_STEPS = new Set(['union', 'choose', 'coalesce', 'optional']);
+const BRANCH_MERGE_STEPS = new Set(['union', 'choose', 'branch', 'coalesce', 'optional']);
 
-/** The nested arm step-chains of a branch-merge step — union/coalesce's nested args and choose's
+/** The nested arm step-chains of a branch-merge step — union/coalesce's nested args and choose's/branch's
  *  `optionArms`. An unnormalizable arm is skipped: it declines in the lowering, so at worst this
  *  over- or under-seeds an order column, never mis-answers. */
 function armChains(step: IRStep): IRStep[][] {
   const trees: unknown[] = [];
   for (const a of step.args) if (isNested(a.value)) trees.push((a.value as { nested: unknown }).nested);
   for (const opt of step.optionArms ?? []) {
-    const n = opt.args.find((a) => isNested(a.value))?.value;
-    if (n) trees.push((n as { nested: unknown }).nested);
+    // The option BODY is its LAST argument; a `branch()` key may itself be a traversal (`option(__.hasLabel(…), body)`).
+    const n = opt.args[opt.args.length - 1]?.value;
+    if (isNested(n)) trees.push(n.nested);
   }
   const chains: IRStep[][] = [];
   for (const t of trees) { try { chains.push(stepChain(t, NO_PARAMS) as IRStep[]); } catch { /* unnormalizable — skip */ } }

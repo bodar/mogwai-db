@@ -1,7 +1,7 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, meta, notProduced, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
+import { and, carriedCols, eq, meta, notProduced, or, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
 import { groupableChannels, mergePeerArms, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
@@ -12,11 +12,11 @@ import { referenceDistinctAt } from '../../ir/bulk.ts';
 import { armCollectsInOrder } from '../../ir/analyze.ts';
 import { alwaysProduces } from '../../ir/productivity.ts';
 import { matchLabelsOf, pathLabelsAt, readsPathLabel, scopeKeyReads, type LabelReads } from '../../ir/labels.ts';
-import { optionArms, type OptionArm } from '../../ir/option-map.ts';
+import { BRANCH_MATCH, CHOOSE_MATCH, optionArms, type MatchPolicy, type OptionArm } from '../../ir/option-map.ts';
 import { meetScalarTypes, MERGED_VTYPE, PER_ROW, STATIC, UNKNOWN, type MapOf, type MixedArm, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isNested, isPred, isTokenArg } from '../../../gremlin/frontend.ts';
-import { ALWAYS_PRODUCTIVE, presenceOf } from '../child.ts';
-import { CONSTANT, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { ALWAYS_PRODUCTIVE, presenceOf, type Subject } from '../child.ts';
+import { CONSTANT, elementPredicate, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { meetMapKeyFacts, type FramedRel, type RecordField, type RelFraming } from '../framing.ts';
 import type { GraphSource } from '../source.ts';
 import { joinAliasEntry, type AliasEntry, type AliasMap } from '../../alias.ts';
@@ -27,7 +27,7 @@ import { pathCarried } from '../path.ts';
 import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
-import { childSeam, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
+import { childSeam, hostItself, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
 import { type Arrival, branchOrderOwed, continueAs, countTail, dropEncounter, freezeParent, mintBranchOrder, positioned, tokenChoice, withoutEncounter } from '../lower.ts';
 
 // BRANCH / MERGE — the arm-merging steps union/choose/coalesce/optional (branchArms dispatches),
@@ -39,7 +39,7 @@ import { type Arrival, branchOrderOwed, continueAs, countTail, dropEncounter, fr
 /** The three steps that MERGE arms over the same input. One set and one dispatcher, so a tail gains all
  *  three at once — the asymmetry this replaces was `union` in the scalar fold and `union`+`choose` in the
  *  element one, with `coalesce` in neither. */
-export const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'coalesce', 'optional']);
+export const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'branch', 'coalesce', 'optional']);
 
 /** A branch boundary returns the physical relation, the label names its arms carried out, AND any EFFECTS
  *  its arm ran — a write in a SINGLE-arm branch (`union(__.mergeV(…))`) is a set-based statement over that
@@ -61,6 +61,8 @@ export function branchArms(
 ): BranchRel | null {
   return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels, position)
     : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels, position)
+      // `branch()` has ONLY the keyed form — a bare `branch(t)` with no option routes every start nowhere.
+      : step.name === 'branch' ? (step.optionArms ? chooseOptions(step, input, framing, bulked, ctx, fresh, labels, position, BRANCH_MATCH) : null)
       : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels, position)
         : step.name === 'optional' ? optionalArms(step, input, framing, bulked, ctx, fresh, labels, position)
           : null;
@@ -755,7 +757,11 @@ function mergeAliasEntry(left: AliasEntry | undefined, right: AliasEntry): Alias
  * key rather than a boolean — and declines here; it is the family's next arm.
  */
 /**
- * `choose(<key>).option(k, body)…` — the OPTION-MAP form, or `null` to decline.
+ * `choose(<key>).option(k, body)…` and `branch(<key>).option(k, body)…` — the KEYED-OPTION form, or `null`
+ * to decline. One lowering for both, parametrized by the `MatchPolicy` (`ir/option-map.ts`) that is the
+ * whole of their difference: `choose` routes a start to the FIRST admitting option and passes an unclaimed
+ * start through; `branch` routes it to EVERY admitting option (and to every `Pick.any`) and drops an
+ * unclaimed one.
  *
  * A different question from the boolean `choose`: an N-way lookup on a projected CHOICE rather than a
  * predicate, so the arms are gated by a comparison against each key rather than by a condition and its
@@ -763,7 +769,7 @@ function mergeAliasEntry(left: AliasEntry | undefined, right: AliasEntry): Alias
  * input, and `mergeArms` merges them, including as a VARIANT where their shapes differ, which is what
  * makes the common `option(Pick.none, __.identity())` shape expressible at all.
  *
- * TWO ARMS ARE IMPLICIT and neither is written down (`optionArms`' note): a map with no `Pick.none`
+ * TWO ARMS ARE IMPLICIT on a `choose` and neither is written down (`optionArms`' note): a map with no `Pick.none`
  * emits the TRAVERSER for an unmatched input, and a `__.discard()` body contributes no arm at all.
  * The pass-through is `ChooseStep`'s own default — its private constructor installs identity
  * traversals for both `Pick` tokens — so it is the reference's rule rather than an inference.
@@ -776,15 +782,16 @@ function mergeAliasEntry(left: AliasEntry | undefined, right: AliasEntry): Alias
  */
 export function chooseOptions(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival, policy: MatchPolicy = CHOOSE_MATCH,
 ): BranchRel | null {
   if (step.modulators?.length) return null;
   const seam = childSeam(ctx, fresh);
-  const arms = optionArms(step, (nested) => seam.body(nested, 'child'));
+  const arms = optionArms(step, (nested) => seam.body(nested, 'child'), policy);
   if (!arms) return null;
   // THE EMISSION ORDER is the emission key's (`mintBranchOrder`): `ChooseStep.pickBranches` routes each
   // traverser to ONE option (`…/step/branch/ChooseStep.java:139-142`), so within a start only that option's
-  // own order shows, and the options are numbered in the order they were written.
+  // own order shows, and the options are numbered in the order they were written. A `branch` start several
+  // options admit shows them in that same written order.
   const owed = branchOrderOwed(ctx, position, input);
   const optionBodies = arms.map((arm) => (arm.discard ? [] : seam.body(arm.nested, 'child')));
   if (optionBodies.some((body) => !!body && seedsUngated(body))) return null;
@@ -802,7 +809,10 @@ export function chooseOptions(
   const produced = isTokenArg(choiceArg)
     ? tokenChoice(choiceArg.token, subject, ctx.source, fresh)
     : isNested(choiceArg)
-      ? ((body) => (body?.length ? seam.scalar(body, host) : null))(seam.body(choiceArg.nested, 'child'))
+      // An IDENTITY choice (`branch(__.identity())`) is the traverser itself — a value, read as one.
+      ? ((body) => (!body?.length ? null
+        : body.every((s) => s.name === 'identity' && !s.args.length && !s.modulators?.length) ? hostItself(host, 'one')
+          : seam.scalar(body, host)))(seam.body(choiceArg.nested, 'child'))
       : null;
   // A choice that cannot report its own productivity cannot serve the two `Pick` arms, and cannot be
   // told apart from a productive NULL — decline rather than answer one of them for the other.
@@ -870,41 +880,128 @@ export function chooseOptions(
    * element where the reference gives a plain value stream. Right arity, wrong shape.
    */
   const canBeUnproductive = present !== ALWAYS_PRODUCTIVE;
-  const whens: (readonly [Expr, Expr])[] = canBeUnproductive
-    ? [[{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)]]
-    : [];
-  for (const [at, arm] of keyed.entries()) {
-    const pred = predicateExpr(choice.expr, arm.key, choiceType, arm.keyType, null, fresh);
-    if (!pred) return null;
-    whens.push([pred, compilerInt(at)]);
-  }
-  const armOf = make.project({
-    id: fresh('oa'), input: scoped, channels: scoped.channels,
-    type: typeOf(...scoped.type.cols, meta(ARM, 'int')),
-    exprs: [...scoped.type.cols.map((column) => [column.name, col(scoped.id, column.name)] as const),
-      [ARM, { kind: 'case', whens, else: compilerInt(NONE) }]],
-  });
-  const takes = (ordinal: number): Expr => eq(col(armOf.id, ARM), compilerInt(ordinal));
+  // A TRAVERSAL KEY (`branch` only — `MatchPolicy.any`) admits a choice it PRODUCES from:
+  // `BranchStep.pickBranches` asks `TraversalUtil.test(choice, key)`, the key body run on the CHOICE rather
+  // than on the traverser. So its subject is the projected choice column, framed as the choice is — an
+  // element where the choice is one (`branch(identity()).option(hasLabel('software'), …)`), a value otherwise.
+  const keySubject: Subject | null = produced.framing.kind === 'elements'
+    ? { kind: 'element', id: choice.expr, rel: scoped, elem: produced.framing.elem }
+    : produced.framing.kind === 'scalar'
+      ? { kind: 'scalar', value: choice.expr, rel: scoped, type: choiceType, ...(choice.vtype ? { vtype: choice.vtype } : {}) }
+      : null;
+  const keyTest = (arm: OptionArm): Expr | null => {
+    // A VALUE key over an ELEMENT choice compares across type spaces — `elementPredicate`, never the id.
+    if (!isNested(arm.key)) return produced.framing.kind === 'elements' ? elementPredicate(arm.key)
+      : predicateExpr(choice.expr, arm.key, choiceType, arm.keyType, null, fresh);
+    const body = keySubject && seam.body(arm.key.nested, 'child');
+    return body?.length ? bodyPredicate(body, keySubject!, fresh, withEnclosing(ctx, labels)) : null;
+  };
 
-  // The ordinal each written arm claims. A `Pick` arm claims its sentinel; a keyed arm claims its
-  // position, which is the order `whens` above assigned.
-  const claimed: number[] = [];
-  const gated: { readonly arm: OptionArm; readonly ordinal: number }[] = [];
-  let next = 0;
-  for (const arm of arms) {
-    const ordinal = arm.pick === 'unproductive' ? UNPRODUCTIVE : arm.pick === 'none' ? NONE : next++;
-    claimed.push(ordinal);
-    if (!arm.discard) gated.push({ arm, ordinal });
+  // `over` is the widened relation every arm's gate reads, and `routes` the gate of each written arm that
+  // keeps its rows (a `discard` arm has none) — the two policies differ in nothing else.
+  let over: Rel;
+  const routes: { readonly arm: OptionArm; readonly pred: Expr | null }[] = [];
+  let passThrough: Expr | null = null;
+  if (policy.pick === 'first') {
+    // WHICH ARM A ROW TAKES IS ONE COLUMN, computed once — not a predicate per arm.
+    //
+    // The naive gating is O(n²) in the EXPENSIVE term: arm k tests its own key, negates every earlier
+    // key, and the implicit pass-through negates them all — and a key test is a vtype-aware ordering
+    // compare, which is the big expression in the plan (`predicateExpr`, the same one `is(P.gt(…))`
+    // spends). Measured on a three-option map: 18.7 KB of statement text with the choice inlined, 7.5 KB
+    // with the choice projected but the tests still repeated, 1.9 KB with the tests projected too. Same
+    // rule as the group key, one level up — name the expensive thing once and let every later reference
+    // be a column.
+    //
+    // The ordinal also carries FIRST-MATCH-WINS for free, because a `CASE` takes its first true `WHEN`:
+    // `BranchStep.pickBranches` collects every matching option and `ChooseStep` overrides it with
+    // `branches.subList(0, 1)` (`gremlin-core/.../branch/ChooseStep.java:139-142`), which is exactly a
+    // `CASE`'s own rule. Reading only the super-method makes overlapping keys look like a fan-out, and
+    // this emitted six rows where `Choose.feature:244-256` pins four until the override was read.
+    const whens: (readonly [Expr, Expr])[] = canBeUnproductive
+      ? [[{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)]]
+      : [];
+    for (const [at, arm] of keyed.entries()) {
+      const pred = keyTest(arm);
+      if (!pred) return null;
+      whens.push([pred, compilerInt(at)]);
+    }
+    const armOf = make.project({
+      id: fresh('oa'), input: scoped, channels: scoped.channels,
+      type: typeOf(...scoped.type.cols, meta(ARM, 'int')),
+      exprs: [...scoped.type.cols.map((column) => [column.name, col(scoped.id, column.name)] as const),
+        [ARM, { kind: 'case', whens, else: compilerInt(NONE) }]],
+    });
+    over = armOf;
+    const takes = (ordinal: number): Expr => eq(col(armOf.id, ARM), compilerInt(ordinal));
+    // The ordinal each written arm claims. A `Pick` arm claims its sentinel; a keyed arm claims its
+    // position, which is the order `whens` above assigned.
+    const claimed: number[] = [];
+    let next = 0;
+    for (const arm of arms) {
+      const ordinal = arm.pick === 'unproductive' ? UNPRODUCTIVE : arm.pick === 'none' ? NONE : next++;
+      claimed.push(ordinal);
+      if (!arm.discard) routes.push({ arm, pred: takes(ordinal) });
+    }
+    // THE IMPLICIT PASS-THROUGH is every ordinal no written arm claimed — which is at most the two
+    // sentinels, since every keyed ordinal is claimed by construction. Deriving it from the claims
+    // rather than from which tokens were written is what keeps it right when both are, and what makes a
+    // `discard` arm's rows disappear rather than fall through: its ordinal IS claimed. Each start takes one
+    // option, so one arm serves both.
+    const unclaimed = [NONE, ...(canBeUnproductive ? [UNPRODUCTIVE] : [])]
+      .filter((ordinal) => !claimed.includes(ordinal));
+    if (policy.implicitPassThrough && unclaimed.length) passThrough = unclaimed.map(takes).reduce((left, right) => or(left, right));
+  } else {
+    // EVERY ADMITTING OPTION RUNS (`BranchStep.pickBranches` with no `subList`), so a start is a member of
+    // several arms and no single ordinal can name its route. Each KEY's test is instead projected ONCE, as
+    // its own boolean column beside the choice, and every gate reads columns: arm k its own flag, `Pick.none`
+    // the negation of their disjunction. Inlined, a correlated key (`hasLabel('aquatic')` over the choice)
+    // would be evaluated again inside the none arm's negation. FENCED like the choice, for the same reason.
+    const flagCols = keyed.map((_, at) => `okey${at}`);
+    const tests: Expr[] = [];
+    for (const arm of keyed) {
+      const pred = keyTest(arm);
+      if (!pred) return null;
+      tests.push(pred);
+    }
+    const flagged = make.project({
+      id: fresh('ok'), input: scoped, channels: scoped.channels,
+      type: typeOf(...scoped.type.cols, ...flagCols.map((name) => meta(name, 'int', true))),
+      exprs: [...scoped.type.cols.map((column) => [column.name, col(scoped.id, column.name)] as const),
+        ...flagCols.map((name, at) => [name, tests[at]!] as const)],
+    });
+    const fenced = make.materialize({ id: fresh('okm'), input: flagged, channels: flagged.channels, type: flagged.type });
+    over = fenced;
+    const productive = col(fenced.id, PRESENT);
+    const admitted = flagCols.reduce<Expr | undefined>((all, name) => or(all, col(fenced.id, name)), undefined);
+    // `Pick.none` takes a productive start no key admitted — and an UNPRODUCTIVE start too where no
+    // `Pick.unproductive` is written: `pickBranches(Pick.unproductive)` finds no list and falls to `Pick.none`
+    // (`BranchStep.java:206-219`). Null-safe (`notProduced`): a key test may be NULL, which admits nothing.
+    const splitsUnproductive = !canBeUnproductive || arms.some((arm) => arm.pick === 'unproductive');
+    const unmatched = admitted
+      ? (splitsUnproductive ? and(productive, notProduced(admitted)) : notProduced(and(productive, admitted)))
+      : (splitsUnproductive ? productive : null);
+    let at = 0;
+    for (const arm of arms) {
+      const pred = arm.pick === 'key' ? and(productive, col(fenced.id, flagCols[at++]!))
+        : arm.pick === 'none' ? unmatched
+          // Dead where the choice always produces — the arm cannot fire, so it is not built (see above).
+          : arm.pick === 'unproductive' ? (canBeUnproductive ? { kind: 'unary', op: 'not', arg: productive } as Expr : undefined)
+            // `Pick.any` takes EVERY start, unproductive ones included (`choice != Pick.any` holds for them).
+            : null;
+      if (pred !== undefined && !arm.discard) routes.push({ arm, pred });
+    }
   }
+
   // AN ARM RUNS OVER THE INPUT'S OWN COLUMNS, not the widened ones. The choice columns exist to be
   // TESTED and nothing downstream may see them: an arm body is the ordinary fold, and a `values()`
   // after one joins the property table against a relation whose declared width it computes from the
   // CHANNELS. Leaving the extra payload columns on it made that join declare six and emit nine — a
   // factory throw, i.e. a compile error where the traversal must answer. So the gate filters on the wide relation
   // and projects straight back to the narrow one, and the widening never escapes this step.
-  const gate = (pred: Expr): Rel => {
-    const kept = make.filter({ id: fresh('og'), input: armOf, channels: armOf.channels, type: armOf.type, pred });
-    // Addressed through `kept`, not `armOf`: a node addresses its own INPUT, and `armOf` is the
+  const gate = (pred: Expr | null): Rel => {
+    const kept = pred ? make.filter({ id: fresh('og'), input: over, channels: over.channels, type: over.type, pred }) : over;
+    // Addressed through `kept`, not `over`: a node addresses its own INPUT, and `over` is the
     // GRANDchild here. Naming it is the "no relation in scope" the checker catches — and it caught it.
     return make.project({
       id: fresh('on'), input: kept, channels: input.channels, type: input.type,
@@ -914,27 +1011,20 @@ export function chooseOptions(
 
   const built: Tail[] = [];
   const reduced: boolean[] = [];
-  for (const { arm, ordinal } of gated) {
+  for (const { arm, pred } of routes) {
     const body = seam.body(arm.nested, 'child');
     if (!body?.length) return null;
-    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, armBody(ctx, owed), fresh, labels);
+    const lowered = continueAs(gate(pred), framing, body, 0, bulked, armBody(ctx, owed), fresh, labels);
     if (!lowered) return null;
     // A REDUCING option emits only where a start was routed to it (`BranchStep.java:130-134` drains an
     // option once it `hasStarts()`), never its seed over nothing — `chooseArms`' gate, on this option's input.
     const collapses = isReductionArm(body);
     reduced.push(collapses);
-    built.push(collapses ? routedReduction(lowered, gate(takes(ordinal)), fresh) : lowered);
+    built.push(collapses ? routedReduction(lowered, gate(pred), fresh) : lowered);
   }
-  // THE IMPLICIT PASS-THROUGH is every ordinal no written arm claimed — which is at most the two
-  // sentinels, since every keyed ordinal is claimed by construction. Deriving it from the claims
-  // rather than from which tokens were written is what keeps it right when both are, and what makes a
-  // `discard` arm's rows disappear rather than fall through: its ordinal IS claimed. Each start takes one
-  // option, so one arm serves both.
-  const unclaimed = [NONE, ...(canBeUnproductive ? [UNPRODUCTIVE] : [])]
-    .filter((ordinal) => !claimed.includes(ordinal));
-  if (unclaimed.length) {
+  if (passThrough) {
     built.push({
-      rel: gate(unclaimed.map(takes).reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }))),
+      rel: gate(passThrough),
       framing,
       aliases: labels,
       // The pass-through arm IS the branch's input, unchanged, so it stands for exactly what the input
@@ -943,7 +1033,14 @@ export function chooseOptions(
     });
     reduced.push(false);
   }
-  if (built.length < 2) return null;
+  if (!built.length) return null;
+  // ONE ARM (a `branch` with no pass-through, or every sibling a `discard`) IS the result — no merge, as a
+  // single-arm `union(t)` is `t`. Where the order is owed it would be the arm's own; that numbering is the
+  // emission key's job, so an owed single arm declines rather than invent one.
+  if (built.length === 1) {
+    const only = built[0]!;
+    return owed ? null : { rel: dropEncounter(only.rel, fresh), framing: only.framing, aliases: only.aliases };
+  }
   return emissionMerge(built, from, owed, labels, ctx, fresh, reduced);
 }
 
@@ -1066,7 +1163,7 @@ const SUBSET_SLICES: ReadonlySet<string> = new Set([...SLICE_BARRIERS].filter((n
  *  body is one traversal every looping traverser flows through. A child of any OTHER host (`local`,
  *  `where`, `map`, `by`, `coalesce`, …) is applied per traverser (`TraversalUtil.apply`) and so cannot
  *  select across starts. */
-const STREAM_CHILD_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'repeat']);
+const STREAM_CHILD_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'branch', 'repeat']);
 
 /**
  * Does a PER-TRAVERSER arm body hold a step that would select or REDUCE ACROSS the traversers it is

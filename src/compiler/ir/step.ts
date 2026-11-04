@@ -479,7 +479,7 @@ export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
 
 /**
  * The branch kinds whose arms can see the branch's WHOLE input, and it is a class-hierarchy fact,
- * not a judgement: `UnionStep` and `ChooseStep` extend `BranchStep`, whose `standardAlgorithm`
+ * not a judgement: `UnionStep` and `ChooseStep` extend `BranchStep` (which `branch()` IS), whose `standardAlgorithm`
  * injects every start at once when `hasBarrier` is set. `CoalesceStep extends FlatMapStep` and
  * `OptionalStep extends AbstractStep` take ONE traverser at a time unconditionally, so a barrier in
  * one of their arms genuinely reduces over that traverser's sub-stream and our per-origin lowering
@@ -491,7 +491,7 @@ export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
  * break a dozen tests that are already right
  * (docs/2026-08-01-branch-arm-barrier-scope-plan.md §1, §6).
  */
-export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose']);
+export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose', 'branch']);
 
 /**
  * The barriers that PRESERVE cardinality but choose or reorder a subset of the whole stream. Every

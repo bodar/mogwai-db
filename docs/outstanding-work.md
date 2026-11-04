@@ -491,11 +491,15 @@ Beside the RelIR substrate:
      (≈4× for 8× rows) and the two numberings agree on one scan, but it is an expression computed twice and
      a correlation between two independently minted origins; find which tree rewrite does not reach the probe's
      subplan (`src/rel/passes/prune.ts` DAG pruning is the first suspect) and make it one relation.
-  2. **branch-step-options — unblocked.** `branch(<traversal>).option(…)` on `chooseOptions`,
-     parametrized by a match policy (all-matching, `Pick.any`, no implicit default); `choose()` refuses a
-     Traversal option key with the reference error. Not started.
+  2. **branch-step-options — LANDED, residue only.** `branch(<traversal>).option(…)` is `chooseOptions` under
+     `MatchPolicy` (`src/compiler/ir/option-map.ts`); `choose()` raises the reference text for a traversal key,
+     `Pick.any` and a traversal-bearing `P` (`verifyChooseOptionKeys`). L4
+     `test/L4-addendum/branch-keyed-options.feature`. Still declining, shared with keyed `choose`: either form
+     under a CORRELATED child (`where(branch(…))`, `by(branch(…).fold())`, a `repeat` body) — the choice and
+     the per-key flags are `Materialize` fences, which a correlated subquery cannot host; an ordering/text key
+     over an ELEMENT choice (`elementPredicate` answers only the equality family).
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`
-  (`choose(values('name')).option(is('marko'),…)`), Column/path row ops, `Pop.all/mixed`, side effects
+  (a keyed `choose` nested in an option arm; `choose(select('a'))` through an arm alias — §3.9), Column/path row ops, `Pop.all/mixed`, side effects
   (`group('m').by().by(__.in().values())`), local/match/where; the single-missing-caller list.
 - **`match()` residue.** A binding `or` branch; `map(<mean>)` body; `fold()` end;
   ProductiveByStrategy null-keeping; `where('a',P)` over scalar aliases / non-eq ops; per-origin slice
