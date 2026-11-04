@@ -46,6 +46,17 @@ now travels with the value (labels, folded members, branch meets), `count(local)
 not a seeded barrier (`isMappingTerminal`, `src/compiler/ir/productivity.ts`), and `order(local)` unmakes
 a Set. L3 1942 → 1947. Remains: nothing (typeOf(LIST|SET) over a LIST framing is a separate item below).
 
+**Binary values (✅ landed, 1929a5c6..e4b29d47).** A `Binary(…)` literal or a wire BINARY parameter is a
+value class, no longer answered as its base64 String: an UPPERCASE-HEX TEXT carrier tagged `binary` (the
+uuid/char family in `src/gremlin/types.ts`, `binaryCarrier`), so hex order is unsigned byte order and
+equality is byte equality with no per-row term; framed back as GraphBinary BINARY. Merge search reads each
+entry's declared type and a Cardinality wrapper carries its value's type inside itself, not on its `Arg`.
+L3 1947 → 1952. Remains: making `inject(map).mergeV()`/`mergeE()` unwrap a Cardinality wrapper inside the
+map, so those queries answer instead of declining, is not done — it needs the map-literal blob
+(`mapLiteralBlob`/`valueNodeOf`) and the merge driver to carry and unwrap a wrapper value; the three
+`@Unsupported` L4 scenarios fail loudly when it lands. Separately, `test/cloudflare.test.ts` hard-codes
+port 8976, so CI flakes when several worktrees run at once.
+
 **Filter-led predicate body (✅ landed, cb3e44a2..e195afc2).** A predicate body that leads with filters
 and then moves — `where(hasLabel(..).out())`, `not(hasLabel(..).out())`, SubgraphStrategy criteria
 `or(…, has(..).outV()…)` — answers at every predicate position: `bodyPredicate`
