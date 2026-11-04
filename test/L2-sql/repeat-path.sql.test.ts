@@ -166,11 +166,18 @@ describe('repeat / path SQL', () => {
     expect(p.sql).not.toContain('depth <');          // no artificial depth cap — runs to fixpoint
   });
 
-  test('until(loops().is(n)) tests the depth counter, not an element', () => {
-    const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
+  test('until(loops().is(n) or …) tests the depth counter, not an element', () => {
+    const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2).or().has("name","ripple"))');
     // `loops()` is a read of CARRIED STATE, named by the walk's `loops` channel and compared to the
     // literal 2.
     expect(p.sql).toMatch(/w\d+\.lp0 = 2/);
+  });
+
+  test('until(loops().is(n)) ALONE is a count — it unrolls as times(n), no walk', () => {
+    // `loopCountUntilAsTimes` (ir/strategies.ts): every traverser reads the same counter at a level.
+    const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
+    expect(p.sql).not.toContain('WITH RECURSIVE');
+    expect(p.sql).toBe(read('g.V(1).repeat(__.out()).times(2)').sql);
   });
 
 

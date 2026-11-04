@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, collectionMembers, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
@@ -1500,11 +1500,125 @@ export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBo
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
     const { region, end } = gatherRepeatRegion(steps, i);
-    const unrolled = tryUnroll(region, params, body);
+    // A counted until is a `times` in disguise; if the unroll still declines its body, the ORIGINAL
+    // region (with its `until`) goes on to the walk exactly as before — the rewrite never strands one.
+    const counted = loopCountUntilAsTimes(region, params, body);
+    const unrolled = (counted && tryUnroll(counted, params, body)) ?? tryUnroll(region, params, body);
     out.push(...(unrolled ?? region));
     i = end - 1;
   }
   return out;
+}
+
+/**
+ * `until(loops().is(P))` on an UNNAMED repeat is a compile-time count: every traverser enters the loop at
+ * `loops() == 0` and each body pass increments it by one, so the predicate reads the SAME value for every
+ * traverser at a given level and the until fires at ONE level `k*` for all of them — which is exactly what
+ * `times(k*)` is (`times(n)` = `until(loops() >= n)`, `GraphTraversal.times` → `LoopTraversal`, vendor/
+ * tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/lambda/
+ * LoopTraversal.java). Below `k*` neither predicate holds, at `k*` both do, and no traverser ever reaches
+ * past it, so the two untils agree on every level a traverser can occupy. WHICH level is read off
+ * `RepeatStep`/`RepeatEndStep` (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/
+ * process/traversal/step/branch/RepeatStep.java:265-278, :334-353): an until BEFORE `repeat` is tested on
+ * entry at `loops() == 0` too, so `k* = min{k ≥ 0 : P(k)}` (0 → the identity region `tryUnroll` already
+ * spells for `times(0)`-first); an until AFTER it is first tested once the body has run, so
+ * `k* = min{k ≥ 1 : P(k)}` — `repeat(out()).until(loops().is(0))` is NOT `times(0)` (= one pass) but a
+ * loop that never exits, i.e. 0 on the modern graph. No such `k` (`is(-1)`, `is(2.5)`, until-last
+ * `is(0)`) is the spec's loop-to-extinction, so the region is left alone for the walk — no artificial cap.
+ *
+ * The rewritten `times` sits at the until's own POSITION, so an `emit()` composes exactly as it does with a
+ * written `times` (the emit/until position rules live in `tryUnroll`). Returns null when the region is not
+ * this shape; a `loops("a")` reads some OTHER loop's counter and a named repeat is declined by the unroll
+ * anyway, so both stay untouched.
+ */
+function loopCountUntilAsTimes(region: Step[], params: ParamEnv, childBody: ChildBody): Step[] | null {
+  const rep: IRStep | undefined = region.find((s) => s.name === 'repeat');
+  const until = region.find((s) => s.name === 'until');
+  if (!rep || !until || rep.loopName || region.some((s) => s.name === 'times')) return null;
+  const nested = (until.args ?? [])[0]?.value;
+  if ((until.args ?? []).length !== 1 || !isNested(nested)) return null;
+  const test = childBody(nested.nested, params);
+  if (test.length !== 2 || test[0].name !== 'loops' || (test[0].args ?? []).length || test[1].name !== 'is') return null;
+  const isArgs = test[1].args ?? [];
+  if (isArgs.length !== 1) return null;
+  const p = isArgs[0]!.value;
+  const holds = (k: number): boolean | undefined => loopCountHolds(p, k);
+  const untilFirst = region.indexOf(until) < region.indexOf(rep);
+  const k = minimalLoopCount(p, untilFirst ? 0 : 1, holds);
+  if (k === undefined) return null;
+  return region.map((s) => (s === until ? { name: 'times', args: [arg(k)], ctx: until.ctx } : s));
+}
+
+/** A loop count's numeric value from a predicate operand, or undefined when it is not a plain number
+ *  (a String, a null, a BigDecimal — the comparison is then not a count test this rewrite reasons about). */
+function countOperand(v: unknown): number | undefined {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'bigint') return Number(v);
+  return undefined;
+}
+
+/** The number operands of `p` at any depth, spread from a single collection operand — the points where
+ *  `P(k)` over the integers can change truth value. Undefined when any operand is not a plain number. */
+function countOperands(p: unknown): number[] | undefined {
+  if (!isPred(p)) { const n = countOperand(p); return n === undefined ? undefined : [n]; }
+  const out: number[] = [];
+  const operands = p.operands.length === 1 && Array.isArray(p.operands[0]!.value) ? collectionMembers(p.operands[0]!) : p.operands;
+  for (const o of operands) {
+    const inner = countOperands(o.value);
+    if (!inner) return undefined;
+    out.push(...inner);
+  }
+  return out;
+}
+
+/** `P(k)` for an integer loop count `k`, in plain JS number comparison (an integer count against a double
+ *  bound compares exactly at any count a query can reach). Undefined for an op this rewrite does not know. */
+function loopCountHolds(p: unknown, k: number): boolean | undefined {
+  if (!isPred(p)) { const n = countOperand(p); return n === undefined ? undefined : k === n; }
+  const operands = p.operands.length === 1 && Array.isArray(p.operands[0]!.value) ? collectionMembers(p.operands[0]!) : p.operands;
+  const nums = operands.map((o) => countOperand(o.value));
+  const all = (n: number) => nums.length === n && nums.every((x) => x !== undefined) ? (nums as number[]) : undefined;
+  const one = all(1)?.[0];
+  const two = all(2);
+  switch (p.op) {
+    case 'eq': return one === undefined ? undefined : k === one;
+    case 'neq': return one === undefined ? undefined : k !== one;
+    case 'lt': return one === undefined ? undefined : k < one;
+    case 'lte': return one === undefined ? undefined : k <= one;
+    case 'gt': return one === undefined ? undefined : k > one;
+    case 'gte': return one === undefined ? undefined : k >= one;
+    case 'between': return two && k >= two[0]! && k < two[1]!;
+    case 'inside': return two && k > two[0]! && k < two[1]!;
+    case 'outside': return two && (k < two[0]! || k > two[1]!);
+    case 'within': return nums.every((x) => x !== undefined) ? nums.includes(k) : undefined;
+    case 'without': return nums.every((x) => x !== undefined) ? !nums.includes(k) : undefined;
+    case 'not': case 'and': case 'or': {
+      const parts = operands.map((o) => loopCountHolds(o.value, k));
+      if (parts.some((x) => x === undefined)) return undefined;
+      return p.op === 'not' ? (parts.length === 1 ? !parts[0] : undefined) : p.op === 'and' ? parts.every(Boolean) : parts.some(Boolean);
+    }
+    default: return undefined;
+  }
+}
+
+/** `min{k ≥ lo : P(k)}`, or undefined when no integer satisfies `P` (or `P` is not decidable here). `P` is
+ *  a finite boolean combination of comparisons against its number operands, so over the integers its truth
+ *  is constant between consecutive operand floors/ceilings: the least satisfying `k` is `lo` or one of
+ *  `⌊c⌋, ⌈c⌉` or their successor for some operand `c` — a finite candidate set, so no scan of the count. */
+function minimalLoopCount(p: unknown, lo: number, holds: (k: number) => boolean | undefined): number | undefined {
+  const operands = countOperands(p);
+  if (!operands) return undefined;
+  const candidates = new Set<number>([lo]);
+  for (const c of operands) {
+    if (!Number.isFinite(c)) continue;
+    for (const b of [Math.floor(c), Math.ceil(c)]) for (const k of [b, b + 1]) if (k >= lo && Number.isSafeInteger(k)) candidates.add(k);
+  }
+  for (const k of [...candidates].sort((a, b) => a - b)) {
+    const v = holds(k);
+    if (v === undefined) return undefined;
+    if (v) return k;
+  }
+  return undefined;
 }
 
 /** One repeat run → its unrolled steps, or null to leave the run alone. */

@@ -390,3 +390,33 @@ describe('desugarGraphAlgos — the four native OLAP steps rewrite to call() on 
       .toThrow(/barrier step .* compiles to a segment plan that must be DRIVEN against a store/);
   });
 });
+
+// `until(loops().is(P))` on an UNNAMED repeat is a compile-time count (`loopCountUntilAsTimes`,
+// ir/strategies.ts): the chain it unrolls to is the `times(k*)` chain, k* minimized over k ≥ 0 for an
+// until BEFORE repeat and k ≥ 1 AFTER it. The answers are pinned in L4 repeat-until-loop-count.feature.
+describe('until(loops().is(P)) canonicalizes to times(k*)', () => {
+  const chain = (g: string) =>
+    runPasses(stepChain(parseGremlin(g), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps.map((s: any) => s.name).join('.');
+
+  test('each predicate form is the times(k*) chain, in both positions', () => {
+    // [P, k* for until-first, k* for until-last]
+    const forms: [string, number, number][] = [
+      ['2', 2, 2], ['eq(2)', 2, 2], ['neq(0)', 1, 1], ['gt(1)', 2, 2], ['gte(2)', 2, 2], ['lt(3)', 0, 1], ['lte(1)', 0, 1],
+      ['between(2,4)', 2, 2], ['inside(1,4)', 2, 2], ['outside(0,2)', 3, 3], ['within(3,2)', 2, 2], ['without(0,1)', 2, 2],
+      ['gt(1.5)', 2, 2], ['not(lt(2))', 2, 2], ['gt(1).and(lt(3))', 2, 2], ['eq(7).or(eq(2))', 2, 2],
+    ];
+    for (const [p, first, last] of forms) {
+      expect(chain(`g.V().until(loops().is(${p})).repeat(out().order().by("name"))`))
+        .toBe(chain(first === 0 ? 'g.V().identity()' : `g.V().times(${first}).repeat(out().order().by("name"))`));
+      expect(chain(`g.V().repeat(out().order().by("name")).until(loops().is(${p}))`))
+        .toBe(chain(`g.V().repeat(out().order().by("name")).times(${last})`));
+    }
+  });
+
+  test("an unsatisfiable count, another loop's counter, or a named repeat keeps its until for the walk", () => {
+    for (const q of [
+      'g.V().repeat(out()).until(loops().is(0))', 'g.V().repeat(out()).until(loops().is(-1))', 'g.V().until(loops().is(2.5)).repeat(out())',
+      'g.V().until(loops().is(lt(0))).repeat(out())', 'g.V().repeat(out()).until(loops("b").is(2))', 'g.V().repeat("a", out()).until(loops("a").is(2))',
+    ]) expect(chain(q)).toContain('repeat');
+  });
+});
