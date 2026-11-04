@@ -469,60 +469,6 @@ function unionOf(sets: readonly ReadonlySet<string>[], plus?: string): ReadonlyS
 export const isSelfContained = (plan: Rel): boolean => freeRelIds(plan).size === 0 && !hasFreeSelfRef(plan);
 
 /**
- * HOW MANY DOUBLED READS LIE BENEATH THIS RELATION — the most nodes, along any one path from `r` to a
- * leaf, that each read two non-base inputs. So 2^`doubledReads(r)` bounds how many copies of any one
- * relation beneath `r` SQLite spells when it prepares `r`.
- *
- * SQLite has no LATERAL and expands every reference to a derived table or CTE into its own copy of the
- * definition — at PREPARE time, even when it then materializes the result once. So naming a relation
- * twice copies everything beneath it, and a chain of k operators that each read their input twice is 2^k
- * copies of the first (the `both()` UNION ALL wall: `g.V().both()×16` refused, `local(both()×8.count())`
- * 46 KB). A consumer about to read an input twice bounds this fact first (`hopJoin`,
- * `src/compiler/rel/lower/movement.ts`), which caps the text at a CONSTANT factor of the plan.
- *
- * - A `Scan`/`Values` is 0.
- * - A single-input node is the max over its input and the subplans its expressions correlate.
- * - A join or union is that max PLUS ONE when two or more of its inputs are not base reads
- *   (`isBaseRead`). A copy of a base read is one more scan of the same index, a constant that cannot
- *   compound, so only a non-base pair counts. Two DIFFERENT non-base inputs count too: over-counting
- *   costs only the faster form, never an answer or text.
- * - A `Ref`, a `SelfRef` and a `Recursive` are UNBOUNDED: each can stand for an arbitrarily deep
- *   definition this fact cannot see. So is any node kind not named here, because UNDER-counting is the
- *   dangerous direction — it re-enables 2^k.
- *
- * Memoized per node (`nodeFact`), so a fold that re-asks it after every step pays only for the nodes
- * built since: O(DAG) in total.
- */
-export const doubledReads: (r: Rel) => number = nodeFact((r: Rel): number => {
-  switch (r.kind) {
-    case 'scan': case 'values':
-    case 'project': case 'filter': case 'aggregate': case 'sort': case 'limit': case 'window':
-    case 'distinct': case 'materialize': case 'explode':
-      return beneathMax(r, 0);
-    case 'join': case 'union':
-      return beneathMax(r, relChildren(r).filter((input) => !isBaseRead(input)).length >= 2 ? 1 : 0);
-    default: return Infinity;
-  }
-});
-/** The most `doubledReads` beneath `r` — over its children and the subplans its expressions correlate
- *  (`relsBeneath`) — plus what `r` itself adds. */
-const beneathMax = (r: Rel, adds: number): number =>
-  relsBeneath(r).reduce((most, beneath) => Math.max(most, doubledReads(beneath) + adds), adds);
-
-/**
- * IS A COPY OF THIS RELATION ONE MORE INDEX SCAN? — a base-table read: a `Scan` or `Values` under nothing
- * but row-wise `Project`/`Filter`, whose expressions correlate only against relations of the same kind.
- * `doubledReads` counts a join's or union's inputs by it. A `Ref` (a named CTE), a `SelfRef` and every
- * multi-input or barrier node answer NO: each can stand for an arbitrarily deep definition.
- */
-const isBaseRead: (r: Rel) => boolean = nodeFact((r: Rel): boolean => {
-  if (r.kind === 'scan' || r.kind === 'values') return true;
-  if (r.kind !== 'project' && r.kind !== 'filter') return false;
-  return isBaseRead(r.input) && relExprs(r).every(exprIsBaseRead);
-});
-const exprIsBaseRead = (e: Expr): boolean => exprRels(e).every(isBaseRead) && exprChildren(e).every(exprIsBaseRead);
-
-/**
  * WHAT A NODE'S OWN EXPRESSIONS REACH — the relation ids their `Col`s name, and the correlated subplans
  * they hang, each ONCE and in first-visit order. A fact of the node: every whole-plan walk asks it of
  * every node it passes, so it is computed once rather than re-walking the expressions per walk, and an
@@ -551,7 +497,7 @@ const exprReach: (r: Rel) => ExprReach = nodeFact((r: Rel): ExprReach => {
  *  correlates, then its children (`forEachRel`'s coverage, one level). Built per ask, like `relChildren`,
  *  which keeps `relChildren` the honest meter of how often a node is enumerated
  *  (`test/compiler/node-facts.test.ts`). */
-const relsBeneath = (r: Rel): readonly Rel[] => {
+export const relsBeneath = (r: Rel): readonly Rel[] => {
   const { subplans } = exprReach(r);
   const children = relChildren(r);
   return subplans.length ? [...subplans, ...children] : children;

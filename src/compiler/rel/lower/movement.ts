@@ -20,7 +20,7 @@ import { ensureBulk } from './branch.ts';
 import { evidenceOf } from '../receiver.ts';
 import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
-import { doubledReads } from '../../../rel/walk.ts';
+import { doubledReads } from '../../../rel/copies.ts';
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -252,13 +252,15 @@ const BOTH_COPY_BOUND = 2;
  * one equality and only the reads differ per direction.
  *
  * **The exemption is a frontier whose second read is BOUNDED** — fewer than `BOTH_COPY_BOUND` doubled
- * reads beneath it (`doubledReads`, `src/rel/walk.ts`), or a correlated column. There the two
+ * reads beneath it (`doubledReads`, `src/rel/copies.ts`), or a correlated column. There the two
  * per-direction joins stay, because the MULTI-INDEX OR pays a rowid set per probe and measured ~45–60%
  * slower per hop than two plain seeks (8 000 vertices: `g.V().both().count()` 14 ms as two joins, 20 ms
  * as one; `bothE().otherV().count()` 13 vs 22). That is a fact of the INPUT, never a hop count: a
  * `both()` after a plain hop (`out().both()`) has a frontier with no doubled read beneath it and keeps
  * the two seeks; each two-seek `both()` adds one doubled read, so along any lineage at most
  * `BOTH_COPY_BOUND` hops take that form and every later one reads its frontier once through the OR.
+ * A frontier that DRAWS (`order().by(shuffle).limit(1)`) is unbounded too, because inside a per-traverser
+ * body each copy is evaluated on its own: the out-arm and the in-arm would read two different picks.
  *
  * The direction relation names no table and binds nothing (compiler ints), so a recursive term may hold
  * it — and a walk's frontier is its `SelfRef`, unbounded, so a `both()` walk body is one recursive

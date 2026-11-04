@@ -122,8 +122,9 @@ export function exprMayRaise(e: Expr): boolean {
   return found;
 }
 
-/** Is `e` a `raiseExpr` OR a `deferralExpr` arm. */
-const isAbort = (e: Expr): boolean =>
+/** Is `e` a `raiseExpr` OR a `deferralExpr` arm. `draws` (`src/rel/copies.ts`) skips one: its `random()`
+ *  only keeps SQLite from hoisting the arm, and an arm that is evaluated aborts, so it never draws an answer. */
+export const isAbort = (e: Expr): boolean =>
   e.kind === 'call' && e.fn === 'json_extract' && e.args[1]?.kind === 'lit'
   && typeof e.args[1].value === 'string' && (e.args[1].value.startsWith(OPEN) || e.args[1].value.startsWith(OPEN_DEFERRAL));
 

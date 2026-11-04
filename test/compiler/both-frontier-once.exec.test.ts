@@ -8,7 +8,7 @@
 // by k≈9), and `local(repeat(both()).times(16))` spent 4.7 s in prepare before refusing. A hop whose frontier
 // already holds `BOTH_COPY_BOUND` doubled reads now crosses it with a constant `(VALUES (0),(1))` direction
 // row and joins `edges` once (`hopJoin`, src/compiler/rel/lower/movement.ts); any other frontier keeps the
-// two plain seeks, which measured faster than SQLite's MULTI-INDEX OR (`doubledReads`, src/rel/walk.ts).
+// two plain seeks, which measured faster than SQLite's MULTI-INDEX OR (`doubledReads`, src/rel/copies.ts).
 // The gate used to admit only a BASE-TABLE frontier, so an ordinary `out().both()` paid the OR (+25–47%).
 //
 // The oracles here are independent of the lowering: walk counts come from powers of the adjacency matrix,
@@ -242,4 +242,66 @@ describe('g.V().both()×k — statement text is LINEAR in k, up to 32 hops', () 
   test('×32 answers on a CfLimitedSql store and matches the adjacency oracle', () => {
     expect(count(seeded(PATH_SEED, true), `g.V()${both(32)}.count()`)).toBe(total(walkCounts(PATH_EDGES, [1, 2, 3], 32)));
   });
+});
+
+// A frontier that DRAWS is evaluated ONCE per traverser. Inside a per-traverser body (local/map/by()) a
+// relation that cannot move out to a CTE is spelled at every reference and SQLite evaluates every copy on
+// its own, so two copies of `out().order().by(shuffle).limit(1)` pick two different vertices. Read through
+// the two-seek form, both() read the out-arm of one pick and the in-arm of another: v1's out-neighbours 2, 3
+// and 4 have both() counts 1, 3 and 3, yet it answered 5, and `both().id().fold()` answered [1,3,4,5,6].
+// `doubledReads` (src/rel/copies.ts) treats a drawing frontier as unbounded, so the hop reads it once; two
+// branches that would each read it decline (`name`, src/rel/passes/name.ts).
+describe('a drawing frontier is read once — no reader mixes two picks', () => {
+  const RUNS = 150;
+  const outcomes = (q: string): Set<string> => {
+    const seen = new Set<string>();
+    for (let i = 0; i < RUNS; i++) seen.add(JSON.stringify(run(modern, q)));
+    return seen;
+  };
+  /** The single scalar each run answers, whatever its column is called. */
+  const scalars = (q: string): unknown[] => [...outcomes(q)].map((r) => Object.values(JSON.parse(r)[0])[0]);
+
+  for (const q of ['g.V(1).local(__.out().order().by(shuffle).limit(1).both().count())',
+    'g.V(1).map(__.out().order().by(shuffle).limit(1).both().count())',
+    'g.V(1).local(__.out().order().by(shuffle).limit(1).bothE().count())',
+    "g.V(1).local(__.out().order().by(shuffle).limit(1).as('a').both().select('a').count())",
+    'g.V(1).local(__.out().order().by(shuffle).limit(1)).union(__.out(), __.in()).count()',
+    'g.V(1).local(__.out().sample(1)).union(__.out(), __.in()).count()']) {
+    test(`${q} is always one pick's degree, 1 or 3`, () => {
+      for (const n of scalars(q)) expect([1, 3]).toContain(Number(n));
+    });
+  }
+
+  test("project('n').by(…shuffle.limit(1).both().count()) is always 1 or 3", () => {
+    for (const map of scalars("g.V(1).project('n').by(__.out().order().by(shuffle).limit(1).both().count())")) {
+      expect([1, 3]).toContain(Number(/"long","v":(\d+)/.exec(String(map))![1]));
+    }
+  });
+
+  test("both().id().fold() is one pick's neighbourhood — never two picks mixed", () => {
+    for (const list of scalars('g.V(1).local(__.out().order().by(shuffle).limit(1).both().id().order().fold())')) {
+      expect(['[1]', '[1,3,5]', '[1,4,6]']).toContain(String(list));
+    }
+  });
+
+  test("both().both() over a drawn frontier is one pick's two-step walk count (3 or 7)", () => {
+    for (const n of scalars('g.V(1).local(__.out().order().by(shuffle).limit(1).both().both().count())')) expect([3, 7]).toContain(Number(n));
+  });
+
+  test('the hop over a drawing frontier is the direction-row join', () => {
+    expect(sqlOf('g.V(1).local(__.out().order().by(shuffle).limit(1).both().count())')).toContain('VALUES (0), (1)');
+  });
+
+  // Two BRANCHES over one drawn frontier cannot read it once: each arm is its own reference, and SQLite has
+  // no way to evaluate a correlated relation once for two readers. They answered 5 and 11 — counts no single
+  // pick has — so they decline, naming the draw and the spelling that answers (the test above). optional()
+  // and coalesce() are two branches too (an arm and its absence test): they answered 0 and 5.
+  for (const q of ['g.V(1).local(__.out().order().by(shuffle).limit(1).union(__.out(), __.in()).count())',
+    'g.V(1).local(__.out().order().by(shuffle).limit(1).optional(__.out()).count())',
+    'g.V(1).local(__.out().order().by(shuffle).limit(1).coalesce(__.out(), __.in()).count())',
+    "g.V(1).local(__.out().order().by(shuffle).limit(1).choose(__.hasLabel('software'), __.in(), __.out()).both().count())"]) {
+    test(`declines, naming the draw: ${q}`, () => {
+      expect(() => compile(q, {})).toThrow(/random draw .* more than one branch reads/);
+    });
+  }
 });

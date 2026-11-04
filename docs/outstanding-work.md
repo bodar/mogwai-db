@@ -205,7 +205,7 @@ statement's text grows with data or doubles with query shape. The items below ar
   without the prerequisite above; a labelled multi-direction hop (`both('knows')`) seeks the label on
   every direction. Remains for this item: nothing (the follow-ups below are their own items).** The doubling was `both()`'s own UNION ALL naming its frontier twice; a multi-direction
   hop now crosses a frontier already holding two doubled reads with a `(VALUES (0),(1))` direction row and joins `edges` once
-  (`hopJoin`, `src/compiler/rel/lower/movement.ts`; gate `doubledReads` < `BOTH_COPY_BOUND`, `src/rel/walk.ts`). k=8 is 2.1 KB,
+  (`hopJoin`, `src/compiler/rel/lower/movement.ts`; gate `doubledReads` < `BOTH_COPY_BOUND`, `src/rel/copies.ts`). k=8 is 2.1 KB,
   k=32 8.8 KB; `both()×20`/`repeat(both()).times(20)` answer. Tests: `test/compiler/both-frontier-once.exec.test.ts`.
   Follow-ups it found: (a) a CHAIN of general `union()`s still names its input once per arm, so
   `union(out(),in())×16` is still the "too many references" wall — no one-reference spelling exists for
@@ -657,6 +657,17 @@ Beside the RelIR substrate:
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
 
 ## 4. Sensible queries we decline
+
+- **Two branches over a random draw inside a per-traverser body (copied-draw)** —
+  `g.V().local(out().order().by(shuffle).limit(1).union(out(), __.in()))`, and the same with `optional()`,
+  `coalesce()` or `choose()` in place of `union()`, decline with `CopiedDraw` (`src/sql/kernel/budget.ts`,
+  raised by `name`, `src/rel/passes/name.ts`). Before that they answered counts no single pick has (5, 11):
+  each arm spells the CORRELATED frontier again, and SQLite evaluates each copy on its own (an `AS
+  MATERIALIZED` CTE inside a correlated subquery is re-evaluated per reference, measured). A single `both()`
+  over such a frontier answers (`doubledReads` treats a drawing relation as unbounded, so `hopJoin` reads it
+  once), and so does the draw in the outer traversal (`local(out().sample(1)).union(…)`), which the message
+  suggests. PREREQUISITE: a read-once branch form, with the arm index crossed onto the frontier like
+  `hopJoin`'s direction row, so the arms read one evaluation. Reach: rare.
 
 - **Ordinary `project()` `by()` bodies decline (project-by-depth, found reviewing cc-1; predates it)** —
   "no lowering covers …" for `g.V().project('a','b').by(__.out('created')).by('name')`,

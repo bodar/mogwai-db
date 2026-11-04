@@ -111,3 +111,22 @@ export class JoinWidthExceeded extends UnsupportedTraversal {
     return new JoinWidthExceeded(this.limit, hint);
   }
 }
+
+/**
+ * A random draw that a per-traverser body would read through two copies — the decline `name`
+ * (`src/rel/passes/name.ts`) raises for a shared CORRELATED relation that DRAWS (`draws`,
+ * `src/rel/copies.ts`). SQLite evaluates each spelling of an inline relation on its own (no LATERAL, and an
+ * `AS MATERIALIZED` CTE inside a correlated subquery is re-evaluated per reference, measured), so two
+ * branches over one `out().order().by(shuffle).limit(1)` would each pick a different vertex. A sibling of
+ * `JoinWidthExceeded` with the same contract: a property of the query text, raised from the algebra, which
+ * may not import the compiler.
+ */
+export class CopiedDraw extends UnsupportedTraversal {
+  constructor() {
+    const sentence = 'a random draw (order().by(shuffle), sample(), coin()) that more than one branch reads inside a '
+      + 'per-traverser body (local(), map(), a by() or a branch arm) is not supported: each branch would draw again '
+      + 'and see a different pick. Draw in the outer traversal instead, e.g. local(out().sample(1)).union(…)';
+    super(sentence);
+    this.message = UnsupportedTraversal.because(sentence).message;
+  }
+}

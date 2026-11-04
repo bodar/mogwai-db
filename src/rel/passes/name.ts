@@ -1,3 +1,5 @@
+import { CopiedDraw } from '../../sql/kernel/budget.ts';
+import { draws } from '../copies.ts';
 import { ref } from '../factory.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
@@ -85,6 +87,19 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
   const binds = (rel: Rel): boolean =>
     !isRoot.has(rel) && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
     && isSelfContained(rel);
+  /**
+   * ⚠️ **A SHARED relation that stays INLINE is evaluated once per spelling** — so if it DRAWS (`draws`,
+   * `src/rel/copies.ts`), each spelling picks differently and the readers disagree about one traverser:
+   * `local(out().order().by(shuffle).limit(1).union(out(), __.in()).count())` read the out-arm of one
+   * pick and the in-arm of another and answered 5, which no out-neighbour of v1 has. SQLite has no way to
+   * evaluate a CORRELATED relation once for two readers (an `AS MATERIALIZED` CTE written inside the
+   * correlated subquery is re-evaluated per reference, measured), so this declines. A bound one is a CTE,
+   * evaluated once, and stays correct; a reader that can read its input once instead (`hopJoin`'s
+   * direction row) asks `doubledReads` first and never reaches here.
+   */
+  for (const [rel, seen] of counts) {
+    if (seen > 1 && !isRoot.has(rel) && !binds(rel) && draws(rel)) throw new CopiedDraw();
+  }
 
   const bindings: Binding[] = [];
   // Bottom-up and memoised — ONE memo across every root — so a binding is pushed after every binding it
