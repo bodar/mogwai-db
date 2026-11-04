@@ -26,6 +26,8 @@ the reference's order, static map < traversal map < `with()` (874c5570: the one 
 ## 0. Trunk CI is RED (fix first)
 
 - **0dc7f3ce (until-loops-count) is red on GitHub CI, `test (other)` and `L8 (other)`** (run 41782887722):
+  Still live at 9adf67d7: it failed locally in `L8 (other)` and passed on a re-run of `mise run ci` — host- and
+  run-dependent, a flake on Bun and a hard red on the runner.
   `test/compiler/repeat-unroll-boundary.exec.test.ts:535` "a count under the ceiling still unrolls and answers"
   — `g.V().repeat(__.out().limit(1)).times(1200).count()` hits the new stack-overflow backstop
   (`tooDeep`, `src/compiler/compiler.ts:49`) on the runner and declines, where it answers `[0]` locally. So the
@@ -461,7 +463,7 @@ Beside the RelIR substrate:
   unsupported — today the gap is tracked nowhere else.
 - **Keyed `choose` with a reducing option arm, then `branch()` (keyed-choose-reducing-arm → branch-step-options).**
   In order:
-  1. **keyed-choose-reducing-arm — residue only.** Every branch merge asks `reconcileCollapsed`
+  1. **keyed-choose-reducing-arm — LANDED (9adf67d7, L3 1994 → 2000), residue only.** Every branch merge asks `reconcileCollapsed`
      (`src/compiler/rel/lower/branch.ts`), and `map()` shares `flatMapRejoin` where `atMostOnePerTraverser`
      (`src/compiler/rel/lower/reduction.ts`, over `ONE_TO_ONE` in `src/compiler/ir/step.ts`) proves at most one
      result per start; L4 `test/L4-addendum/branch-mixed-reducing-arms.feature`. Still declining, each shared
@@ -469,7 +471,8 @@ Beside the RelIR substrate:
      per-start key in the rejoin); a rejoin's list/variant result then a local op, fold/sum/where/select or
      `select(<outer label>)`; repeat bodies; a rejoin under `path()`. `map()` over a FAN-OUT body
      (`g_V_mapXin_hasIdX1XX_limitX2X_valuesXnameX`) needs a per-start "first" and stays declined; the
-     `withPath…mapXselectXaX_valuesXnameX_concatXselectXbX…` witness declines on `concat(<traversal>)` itself.
+     `withPath…mapXselectXaX_valuesXnameX_concatXselectXbX…` witness declines on `concat(<traversal>)` itself
+     (needs `concat(<traversal>)`, unrelated to this item).
      **Follow-up (pre-existing, also on trunk's `local(choose(p, values('name').fold(), out()…fold()))`):** under
      a rejoin, `routedReduction`'s `EXISTS` probe is emitted over a SECOND copy of the routed input — its own
      `row_number() OVER ()` origin and, keyed, its own option `CASE` — instead of the CTE the arms read. Linear
