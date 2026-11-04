@@ -223,26 +223,12 @@ statement's text grows with data or doubles with query shape. The items below ar
 
 **Follow-ups from the compile-cost round 2 reviews (next round starts HERE, major first).**
 
-- **cc-7 made a ONE-step value run under `order().by()`/`dedup().by()` read its property TWICE per row
-  (cc7-one-step-reread) — MAJOR, common (both review lenses).** `g.V().order().by(values('name').toLower())`,
-  `dedup().by(values('name').substring(0,1))`, `order().by(values('name').toUpper(), desc).limit(5)` — the
-  case-insensitive sort/dedup idiom. `runningOnce` (`src/compiler/rel/lower/reduction.ts`) wraps even the
-  FIRST member, whose receiver is a bare correlated read; the receiver-check raise sits inside the `once()`
-  scalar subquery, so `exprMayAbort` stops `withSubqueryColumns` (`src/compiler/rel/build.ts`) from hoisting
-  it, and the emitter's per-node hoist (`src/rel/emit.ts` ~596, the old `sk16_0/sk16_1` columns) no longer
-  sees the two reads — the productivity `WHERE (SELECT … FROM (VALUES(…)) once16) IS NOT NULL` re-spells the
-  window key's subquery. 2 → 4 correlated `vertex_properties` lookups; SQL 1,452 → 1,860 B (order) and
-  1,066 → 1,428 B (dedup), against the commit's "1-step SQL shrinks". 8k vertices: order…limit(5)
-  9.7–15.5 → 14.5–21.8 ms (~+45%), dedup…count 16.4 → 20.6 ms, `as('a').out().order().by(select('a')
-  .values('name').toLower())` ~14.8 → ~29 ms (2×). Linear, answers byte-identical. Fix (generic, pick by
-  measurement): skip `once()` when the incoming value is a bare column/correlated read (only from the second
-  member on is the running value a CASE the emitter cannot hoist), OR let `withSubqueryColumns` hoist the
-  non-aborting scalar subqueries inside a `once()` VALUES row. Test (the reason it passed CI unnoticed): a
-  witness in `test/compiler/value-run-once.exec.test.ts` asserting the property read is spelled ONCE for a
-  one-step `order().by(values('name').toUpper())` and `dedup().by(values('name').substring(0,1))`, and an
-  sql-hygiene family for a transformed `by()` key (none banked today). Minor, same file: each member calls
-  `predicateExpr`/`transformOffences`+`transformExpr` twice (verdict over the real value, then inside the
-  `once()` callback) — compute the verdict once or comment why it is deliberate.
+- ✅ **cc-7 one-step re-read + `order()/dedup().by(<transformed key>)` after a hop crash — LANDED (cfeb1003).**
+  The crash (the emitter's bare "column … not in scope" Error) was mis-scoped sort/dedup keys: `keptBy`
+  (`src/compiler/rel/build.ts`) re-points the key terms at the productivity filter, and `check.ts` now
+  validates a window's ORDER/PARTITION BY and frame bounds. The re-read: `withSubqueryColumns` descends into
+  a non-movable `once()` LET and hoists its unconditional VALUES cells, so a transformed key reads its
+  property once per row. Nothing remains.
 - **`rereadsFreely` asks the wrong question, so a LONE `both()` after any hop pays the MULTI-INDEX OR
   (both-gate-lineage) — MAJOR, common (three review findings; supersedes cc-8 follow-up (c)).** The gate
   (`src/rel/walk.ts`) admits the two-seek form only over a base-table frontier (Scan/Values under
