@@ -372,7 +372,19 @@ Beside the RelIR substrate:
   `valueMap` positions and mixed `path().unfold()` (o-pathvals); `where(<body>)` over a property host,
   meta-properties (o-propstream).
 - **Values** (corpus) — set ops lose member types (o-setop-types); global `order()` over element lists (o-order-elemlist); local split (o-split); sack merge
-  seed and `normSack` (o-sack); inject list/set residue `g.inject({1,1})` (r6-fu2-r).
+  seed and `normSack` (o-sack); inject list/set residue `g.inject({1,1})` (r6-fu2-r); `combine`/`merge`/`disjunct`/`product`
+  between a scalar-membered list and an ELEMENT-list operand (`values('tags').combine(V().fold())`, and the
+  four `g_V_valuesXnameX_{combine,merge,disjunct,product}XV_foldX` scenarios, whose name rows would raise)
+  need a mixed scalar/element member encoding in `listSetOp` (o-setop-mixed) — the decline is the query
+  text's (a stored list never holds an element), and the reference's per-row raise is unreachable until a
+  list row can frame both kinds. A per-row-typed scalar's list functions (`perRowListFunction`) answer
+  inside a SCALAR-host body (`values('tags').order().by(intersect(['a']).count(local))`,
+  `group().by(conjoin('-'))`, `where(intersect([…]).count(local).is(1))`) but share the per-row collection
+  readers' ELEMENT-host depth limit: `V().map(values('tags').intersect(…))`, `order().by(values('tags')…)`,
+  `map()`/`optional()`/`choose()` over `values('m').<reader>` decline (`map(values('tags').count(local))` too).
+  Its other clean declines: a correlated operand (`__.select('a')…`), `merge()` whose operand is not
+  provably a List (a Map row would merge), `merge([y:2])` over a map-valued property, `union` mixing
+  different list functions or a constant arm, `filter`/`not(intersect([…]).unfold())`.
 - **Depth gaps** — Column/multi-key select inside arms (`path().select(Column.keys)`); `values('m')
   .select(k)` over a Map-capable scalar; federate tails beyond values/count/order;
   `project().by()` after an `emit().repeat(…simplePath())` walk.
@@ -477,23 +489,6 @@ Beside the RelIR substrate:
   2. **branch-step-options — unblocked.** `branch(<traversal>).option(…)` on `chooseOptions`,
      parametrized by a match policy (all-matching, `Pick.any`, no implicit default); `choose()` refuses a
      Traversal option key with the reference error. Not started.
-- **Set ops over a per-row-typed scalar (set-op-incoming-class-raise) — PARKED, branch
-  `wf/set-op-incoming-class-raise-2-0` (b774020b).** `values('tags').intersect/union/disjunct/difference/
-  combine/product/merge(…)` over a list-valued property: collection rows take the set op, a null or
-  non-collection row raises the reference text. Its two review blockers (a false "encountered object"
-  operand raise, a 53× quadratic member test) are fixed on trunk by the prerequisite
-  **setop-operand-relation** — LANDED (b15c9897; nothing remains of it): the operand is one fenced MATERIALIZED relation the membership
-  semi/anti-joins through an automatic index (`listSetOp`), a per-row-typed operand is decided on its first
-  result (`perRowOperand`), and `operandForm`/`operandClass` are the one classifier `mapMerge` shares. The
-  branch must drop its own operand classifier (`listValuedOperand`) for those on rebase. Then re-land it with: one bound
-  `vtype IN ('list','set')` test (written twice in the fenced WHERE), scenarios for the scalar-host
-  `by()`/`where()` route it opens via `perRowCollectionChild` (`order().by(intersect(['a']).count(local))`,
-  `group().by(conjoin('-'))` — measured correct and linear), and the doc line corrected (element-host bodies
-  `map(values('tags').intersect(…))` decline; scalar-host bodies answer). Clean declines left: the
-  `project()/group()` `by()` host, a correlated operand (`__.select('a')…`), a nested-collection literal
-  member (`merge(__.constant(['a']).fold())`), cross-kind `combine`/`merge`/`disjunct`, `merge([y:2])`
-  over a map-valued property, `union` mixing different list functions or a constant arm,
-  coalesce/optional arms, `where(intersect([…]))` as a bare filter.
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`
   (`choose(values('name')).option(is('marko'),…)`), Column/path row ops, `Pop.all/mixed`, side effects
   (`group('m').by().by(__.in().values())`), local/match/where; the single-missing-caller list.

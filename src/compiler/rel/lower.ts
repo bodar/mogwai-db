@@ -36,7 +36,7 @@ import { someStepDeep } from '../ir/walk.ts';
 import { contentDemand } from '../ir/content-demand.ts';
 import { programScopeNames, type ProgramScopeNames } from '../ir/labels.ts';
 import { comparabilityClass, CONSTANT, framingTypeOf, NUMERIC_VTYPES, perRowSubject, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, subjectOperand, type SubjectType, type TypedOperand, valueTheta } from './predicate.ts';
-import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS } from '../../gremlin/coerce.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, fencedWhereSelfContained, jsonEachSet, jsonField, jsonOf,
     labelSetArgs,
@@ -57,7 +57,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
-import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, oneMemberList, unfoldList } from './list.ts';
+import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -1598,9 +1598,10 @@ export function collectionReaderOf(step: IRStep | undefined): CollectionReader |
         : (step.name === 'order' || step.name === 'dedup') && local && bare ? step.name
           : selectedColumn(step) ? 'column'
             : step.name === 'select' && (selectSpec(step)?.labels.length ?? 0) >= 2 ? 'submap'
-              : null;
+              : LIST_FUNCTIONS.has(step.name) ? 'listFunction'
+                : null;
 }
-type CollectionReader = 'count' | 'slice' | 'reduce' | 'order' | 'dedup' | 'column' | 'submap';
+type CollectionReader = 'count' | 'slice' | 'reduce' | 'order' | 'dedup' | 'column' | 'submap' | 'listFunction';
 
 /** The readers whose answer over a NON-collection is the value read as itself — a projection, so a
  *  STATIC scalar (never a collection: one is framed as a list) takes this arm alone (`selfAnswer`). */
@@ -1678,6 +1679,12 @@ function perRowCollectionStep(
   // one projection, no split.
   if (!tagCol) {
     const tag = staticTypeOf(framing.type);
+    // A list function over such a stream raises on EVERY row, before its operand is read (the self's
+    // conversion comes first, `ListFunction.convertTraverserToCollection`), so the operand is never lowered.
+    if (reader === 'listFunction') {
+      if (tag !== undefined && (COLLECTION_TAGS as readonly string[]).includes(tag)) return null;
+      return resume(listFunctionRaised(step, input, listFunctionSelfOffences(step, input, null, tag ?? NOT_A_COLLECTION), fresh, labels));
+    }
     return (tag === undefined || !(COLLECTION_TAGS as readonly string[]).includes(tag)) && SELF_READERS.has(reader)
       ? resume(selfAnswer(reader, step, input, framing, undefined, bulked, ctx, fresh, labels)) : null;
   }
@@ -1700,6 +1707,8 @@ function perRowCollectionStep(
   // on a row the tag test drops (`fencedWhereSelfContained`). A correlated input cannot be hoisted to a CTE
   // and stays as is.
   const fence = (rel: Rel): Rel => fencedWhereSelfContained(rel, fresh, true);
+
+  if (reader === 'listFunction') return resume(perRowListFunction(step, fence(input), tagCol, ctx, fresh, labels));
 
   if (reader === 'column') {
     // A non-Map row is `Column.apply`'s IllegalArgumentException — a WHERE raise (`raisingRows`), so a
@@ -1748,6 +1757,102 @@ function perRowCollectionStep(
 /** `Column.apply`'s message over a traverser with no keys (`Column.java:51,67`). The trailing Java class is
  *  per row and is not interpolated, as `stringReceiverMessage` does not interpolate its class. */
 const COLUMN_OF_NON_MAP = 'The provided object does not have accessible keys';
+
+/**
+ * A LIST FUNCTION (`combine`/`intersect`/`difference`/`disjunct`/`merge`/`product`/`conjoin`) over a
+ * PER-ROW-TYPED scalar — a list-valued stored property (`values('tags').intersect(['a','b'])`), a merged
+ * arm. `ListFunction.convertTraverserToCollection` decides per traverser
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/ListFunction.java`):
+ * a NULL is `Incoming traverser … can't be null.`, a non-collection (a Map included — it is no Iterable)
+ * the non-iterable message, and a List or Set is converted and the step runs.
+ *
+ * So ONE `WHERE` over the fenced input raises on every row that is not a collection and keeps the rest —
+ * one CASE whose last guard is the one `vtype IN ('list','set')` test (`storedCollection`), so the raise
+ * fires whichever term SQLite evaluates first and the rows that pass it ARE the collections. The input is
+ * checked BEFORE the operand is read (`ListFunction.convertTraverserToCollection` first, as
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CombineStep.java:58-59`
+ * converts the traverser before its argument). The kept rows ARE stored
+ * collections, read as the list traverser `collectionValue` projects, and the EXISTING list tail runs the
+ * step over them — the same lowering `is(typeOf(GType.LIST)).intersect(…)` already takes. No row is
+ * dropped, so the stream's channels and multiplicity carry. A Set self needs no marker: every one of these
+ * steps decides its own result class.
+ *
+ * `merge()` over a MAP row is the step's own Map arm (`MergeStep.map`), so it is not the non-iterable
+ * raise. Where the operand is PROVABLY a list (`operandIsList`, the set ops' one classifier) that arm's answer is certain — the
+ * reference's `expected provided argument to evaluate to a Map` — and raises per row; otherwise the operand
+ * may be a Map, a Map row would merge, and a compile-time operand error (`listSetOp`) would answer the
+ * wrong question for it, so this declines.
+ *
+ * An operand error the list tail raises at compile time (`__.inject(1)`, which yields no collection) is the
+ * answer for the COLLECTION rows only — the reference converts the traverser first, so every other row
+ * still raises its own message. It is therefore not propagated as the whole query's answer but becomes the
+ * collection rows' raise, and every row raises (`listFunctionRaised`).
+ */
+function perRowListFunction(
+  step: IRStep, base: Rel, tagCol: string, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if (step.name === 'merge' && !operandIsList(step, childSeam(ctx, fresh))) return null;
+  const tag = col(base.id, tagCol);
+  const offences = listFunctionSelfOffences(step, base, tag, NOT_A_COLLECTION);
+  // Every row that is not a stored collection RAISES in the CASE, so the rows it keeps are exactly the
+  // collections — the `vtype IN ('list','set')` test is written once, as the last offence's guard.
+  const kept = raisingRows(base, offences, fresh);
+  const value = collectionValue(kept, 'list', fresh);
+  if (value.framing.kind !== 'list') return null;
+  try {
+    return listTail(value.rel, value.framing.of, [step], 0, ctx, fresh, labels);
+  } catch (error) {
+    if (!(error instanceof ValueParseError)) throw error;
+    return listFunctionRaised(step, base, [...offences, [CONSTANT.true, error.message]], fresh, labels);
+  }
+}
+
+/** The non-iterable tail where the class is per row (an in-statement raise carries a literal). */
+const NOT_A_COLLECTION = 'a value that is not a collection';
+
+/**
+ * WHAT A LIST FUNCTION'S SELF OWES, per row, in `convertTraverserToCollection`'s order: a NULL value is the
+ * null message, then anything that is not a collection the non-iterable one. `tag` is the per-row tag, or
+ * `null` for a stream that is never a collection (every non-null row offends). `merge()`'s Map row is its
+ * own arm, the non-Map-operand message once the operand is proven a list (`perRowListFunction`). The
+ * collection test is `IS TRUE`, so an untagged row (a NULL tag: a computed scalar, never a stored
+ * collection) offends rather than slipping through SQL's NULL.
+ */
+function listFunctionSelfOffences(step: IRStep, rel: Rel, tag: Expr | null, encountered: string): (readonly [Expr, string])[] {
+  const isNullValue: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
+  const notCollection: Expr = tag
+    ? { kind: 'unary', op: 'not', arg: { kind: 'binary', op: 'is', left: storedCollection(tag), right: CONSTANT.true } }
+    : CONSTANT.true;
+  return [
+    [isNullValue, nullTraverserMessage(step)],
+    ...(tag && step.name === 'merge' ? [[eq(tag, compilerText('map')), nonMapArgumentMessage(step, 'list')] as const] : []),
+    [notCollection, nonIterableTraverserMessage(step, encountered)],
+  ];
+}
+
+/**
+ * A list function over a stream whose EVERY row raises (`offences` ends in an unconditional one) — an
+ * untagged or statically typed scalar is never a collection (a collection is framed as a list or a map),
+ * and a collection row whose operand is the reference's own error raises that. No row survives, so what
+ * follows reads an empty relation; it is framed as the step's own result CLASS, which the step's name fixes
+ * (`conjoin` a String, every set op a List), so a follower lowers as it would over a real answer.
+ */
+function listFunctionRaised(
+  step: IRStep, rel: Rel, offences: readonly (readonly [Expr, string])[], fresh: Minter, labels: AliasMap,
+): Tail {
+  const raised = raisingRows(rel, offences, fresh);
+  const string = step.name === 'conjoin';
+  const payload = string ? 'v' : LIST_COL;
+  return {
+    rel: make.project({
+      id: fresh('lfr'), input: raised, channels: raised.channels,
+      type: typeOf(meta(payload, string ? 'any' : 'json', true), ...carriedCols(raised.channels)),
+      exprs: [[payload, compilerNull()], ...raised.channels.map((channel) => [channel.col, col(raised.id, channel.col)] as const)],
+    }),
+    framing: string ? { kind: 'scalar', type: STATIC('string') } : { kind: 'list', of: TYPED_MEMBERS },
+    aliases: labels, bulked: false,
+  };
+}
 
 /** `count(local)` of a NON-ITERABLE row is `1` (`CountLocalStep` → `IteratorUtils.asIterator(item)`, a
  *  one-element iterator for any non-collection — a null included), framed as the map/list arms' count is. */
@@ -5745,9 +5850,9 @@ export function continueAs(
   // rather than in each tail. `ListFunction.convertTraverserToCollection` raises for anything
   // `asCollection` cannot convert, and every shape below can never be null, so the message is CERTAIN.
   //
-  // ⚠️ A SCALAR self is deliberately absent: there the choice between "can't be null" and "can only take
-  // an array or an Iterable" is a PER-ROW question, and answering one for a value that may be either
-  // would raise the WRONG error. It keeps declining until the null-ness is a compile-time fact.
+  // A SCALAR self is answered by the scalar tail, not here: its choice between "can't be null" and "can
+  // only take an array or an Iterable" (or none — a List-valued row runs the step) is per row, and
+  // `perRowListFunction` makes it on each row.
   // `merge()` over a MAP (or a record, which is one) is the step's own Map arm, not a collection
   // conversion (`MergeStep.map`), so it is the map tail's to answer (`mapMerge`).
   if (next && LIST_FUNCTIONS.has(next.name) && NON_ITERABLE_SELF.has(framing.kind)

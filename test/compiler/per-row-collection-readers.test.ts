@@ -33,6 +33,20 @@ describe('per-row collection readers — shape', () => {
     }
   });
 
+  test('a list function raises in the tag test\'s own WHERE, behind a hard fence — one CASE, no second arm', () => {
+    const sql = read("g.V().values('tags').intersect(['a','b'])").sql;
+    expect(sql).toMatch(/AS MATERIALIZED/);
+    expect(sql.match(/Incoming traverser for intersect step/g)).toHaveLength(1);
+    expect(sql.match(/can only take an array or an Iterable type for incoming traversers/g)).toHaveLength(1);
+    expect(sql).not.toMatch(/UNION ALL/);
+  });
+
+  test('a list function over a stream that is never a collection never reads its operand', () => {
+    // `inject(1)` is no collection, so `convertTraverserToCollection` raises before the operand: the
+    // operand's own error (a traversal yielding no collection) is not the answer.
+    expect(() => read("g.inject(null).combine(__.inject(1))")).not.toThrow();
+  });
+
   test('select(keys) over a non-Map row is a raise behind a hard fence, never a drop', () => {
     const sql = read("g.V().values('m').where(__.count(local).is(2)).select(keys)").sql;
     expect(sql).toMatch(/AS MATERIALIZED/);

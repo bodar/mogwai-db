@@ -1432,9 +1432,10 @@ const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
  * `asNumber('1,000')`'s route.
  *
  * ⚠️ **Only where the shape is statically CERTAIN.** A SCALAR self is a per-row question — `items` being
- * null selects `nullTraverser` and anything else selects `nonIterableTraverser`, and picking one for a
- * value that may be either would answer with the WRONG ERROR. So the scalar self keeps declining; an
- * ELEMENT / MAP / RECORD / PROPERTY traverser can never be null, which is what makes its message certain.
+ * null selects `nullTraverserMessage` and anything else `nonIterableTraverser`, and picking one for a
+ * value that may be either would answer with the WRONG ERROR. So a STATIC scalar raises at compile time
+ * (its tag is certain), a PER-ROW-typed one decides per row (`perRowCollectionStep`'s list-function arm),
+ * and an ELEMENT / MAP / RECORD / PROPERTY traverser can never be null, which makes its message certain.
  */
 export const LIST_FUNCTIONS: ReadonlySet<string> = new Set([...SET_OPS, 'conjoin']);
 
@@ -1442,9 +1443,18 @@ export const LIST_FUNCTIONS: ReadonlySet<string> = new Set([...SET_OPS, 'conjoin
  *  SELF is not a collection. The trailing class is Java's and the corpus matches on the prefix, so the
  *  Gremlin type name goes there instead of inventing a Java one. */
 export const nonIterableTraverser = (step: IRStep, encountered: string): never => {
-  throw new ValueParseError(
-    `${step.name} step can only take an array or an Iterable type for incoming traversers, encountered ${encountered}`);
+  throw new ValueParseError(nonIterableTraverserMessage(step, encountered));
 };
+
+/** `nonIterableTraverser`'s text — the ONE spelling, shared by the compile-time throw and the per-row raise
+ *  over a per-row-typed scalar (`perRowCollectionStep`'s list-function arm), whose class is per row and so
+ *  is not interpolated (an in-statement raise carries a literal, `stringReceiverMessage`'s rule). */
+export const nonIterableTraverserMessage = (step: IRStep, encountered: string): string =>
+  `${step.name} step can only take an array or an Iterable type for incoming traversers, encountered ${encountered}`;
+
+/** `Incoming traverser for %s step can't be null.` — `convertTraverserToCollection`'s FIRST test, so a null
+ *  self raises this before any operand is read. */
+export const nullTraverserMessage = (step: IRStep): string => `Incoming traverser for ${step.name} step can't be null.`;
 
 /** The operand's two, from `convertArgumentToCollection` (a literal) and `convertTraversalToCollection`
  *  (a traversal). Which pair applies is decided by the OPERAND's own form (`OperandForm.nested`). */
@@ -1508,6 +1518,20 @@ export const operandClass = (framing: RelFraming): OperandClass => {
   const named = gremlinTypeOfFraming(framing);
   return named === null ? null : { encountered: named };
 };
+
+/**
+ * Is a list function's operand STATICALLY a List — `operandForm`/`operandClass`, the one classifier
+ * `operandList` reads: a literal array (a `$param` list included, `__.constant([…])` too), or a rooted read
+ * whose lowered framing is a list. Anything else — a correlated, declining, per-row or non-list operand —
+ * answers `false`, and the caller (a `merge()` that must know whether a Map row meets a Map) declines.
+ */
+export function operandIsList(step: IRStep, child: ChildSeam): boolean {
+  const form = operandForm(step, child);
+  if (!form) return false;
+  if (form.kind === 'literal') return Array.isArray(form.value);
+  const read = child.rooted(form.body);
+  return !!read && !read.effects?.length && operandClass(read.framing) === 'list';
+}
 
 /** The member columns of an operand's list, as a set op reads it: the list expression and its member encoding. */
 interface OperandList { readonly expr: Expr; readonly of: ListOf }
@@ -1585,6 +1609,10 @@ function operandList(step: IRStep, child: ChildSeam, fresh: Minter): OperandList
   return read.framing.kind === 'list' ? { expr: firstRootedColumn(read, LIST_COL, fresh), of: read.framing.of } : null;
 }
 
+/** Does a per-row tag name a stored List or Set — the values `ListFunction.asCollection` converts (a Map is
+ *  no Iterable). The one spelling of the test, for a per-row operand and a per-row self alike. */
+export const storedCollection = (tag: Expr): Expr => ({ kind: 'in-list', expr: tag, values: [compilerText('list'), compilerText('set')] });
+
 /**
  * A PER-ROW-TYPED operand's first result, decided ON THAT ROW — `convertTraversalToCollection`
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/ListFunction.java`)
@@ -1598,7 +1626,7 @@ function operandList(step: IRStep, child: ChildSeam, fresh: Minter): OperandList
 function perRowOperand(step: IRStep, read: RootedRead, fresh: Minter): OperandList | null {
   const first = firstRootedValue(read, fresh, true);
   if (!first?.vtype) return null;
-  const collection: Expr = { kind: 'in-list', expr: first.vtype, values: [compilerText('list'), compilerText('set')] };
+  const collection = storedCollection(first.vtype);
   return {
     expr: {
       kind: 'case',
@@ -1625,9 +1653,12 @@ export const encounteredType = (value: unknown, declared: TypeNode | null | unde
  *  back to. `null` is named as such: Java's `mapB.getClass()` there is a `NullPointerException`, and a
  *  clear message beats a crash. The class tail is the Gremlin type name, `nonIterableTraverser`'s rule. */
 export const nonMapArgument = (step: IRStep, encountered: string | null): never => {
-  throw new ValueParseError(
-    `${step.name} step expected provided argument to evaluate to a Map, encountered ${encountered ?? 'null'}`);
+  throw new ValueParseError(nonMapArgumentMessage(step, encountered));
 };
+
+/** `nonMapArgument`'s text — shared with the per-row raise over a Map row of a per-row-typed scalar. */
+export const nonMapArgumentMessage = (step: IRStep, encountered: string | null): string =>
+  `${step.name} step expected provided argument to evaluate to a Map, encountered ${encountered ?? 'null'}`;
 
 /** What a lowered operand YIELDED, as a Gremlin type name — or `null` where the framing cannot say, which
  *  fails open rather than naming a type the answer does not have. A `path` is deliberately absent: it
