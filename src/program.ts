@@ -1,5 +1,5 @@
 import { stringifyExact } from './json-exact.ts';
-import { emit, emitProgram, isRowsBind, type Emitted } from './rel/emit.ts';
+import { isRowsBind, renderLowered, renderedSteps, type Emitted, type RenderedPlan } from './rel/emit.ts';
 import type { Guard, Plan } from './rel/plan.ts';
 import { RaisedByQuery } from './rel/raise.ts';
 
@@ -26,17 +26,15 @@ export interface RunStep { readonly binding?: string; readonly result: boolean; 
 export interface RenderedProgram { readonly steps: readonly RunStep[]; readonly columns: Readonly<Record<string, readonly string[]>>; }
 
 /**
- * RENDER a program to transport-safe steps — the compile-time half, run on the edge. Emits the plan
- * (`emit`, or `emitProgram` + the framing `tail` as a final result step), inlines each binding's
- * `guard` onto its step, and records every binding's declared column order. Pure: no store, and the
- * algebra (closures, symbol brands) does not survive into the output.
+ * RENDER a program to transport-safe steps — the compile-time half, run on the edge. Takes the plan
+ * ALREADY rendered (`renderLowered`, which a compile carries on `RelLowering.rendered`) and only
+ * DECORATES it: inlines each binding's `guard` onto its step and records every binding's declared
+ * column order. It never emits — emitting again here is how a write came to be rendered three times
+ * per compile. Pure: no store, and the algebra (closures, symbol brands) does not survive into the output.
  */
-export function renderProgram(program: Plan, tail?: Emitted): RenderedProgram {
+export function renderProgram(program: Plan, rendered: RenderedPlan): RenderedProgram {
   const declared = new Map(program.bindings.map((binding) => [binding.name, binding] as const));
-  const raw = tail
-    ? [...emitProgram(program).effects, { result: true, emitted: tail }]
-    : emit(program);
-  const steps: RunStep[] = raw.map((step) => ({ ...step, guard: step.binding ? declared.get(step.binding)?.guard : undefined }));
+  const steps: RunStep[] = renderedSteps(rendered).map((step) => ({ ...step, guard: step.binding ? declared.get(step.binding)?.guard : undefined }));
   const columns: Record<string, readonly string[]> = {};
   for (const binding of program.bindings) columns[binding.name] = binding.node.type.cols.map((column) => column.name);
   return { steps, columns };
@@ -61,8 +59,8 @@ export function renderProgram(program: Plan, tail?: Emitted): RenderedProgram {
  * `RowsBind` marker in its bind list saying which binding's rows belong there, so this never parses
  * SQL to find the slot and `emit` never learns about the transport.
  */
-export function runProgram(store: RowSource, program: Plan, tail?: Emitted): readonly Record<string, unknown>[] {
-  return runSteps(store, renderProgram(program, tail));
+export function runProgram(store: RowSource, program: Plan): readonly Record<string, unknown>[] {
+  return runSteps(store, renderProgram(program, renderLowered(program)));
 }
 
 /**

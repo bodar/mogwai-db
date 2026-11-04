@@ -13,7 +13,7 @@ import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/front
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
 import { NO_PARAMS } from '../src/gremlin/param-env.ts';
-import { emit, isRowsBind } from '../src/rel/emit.ts';
+import { isRowsBind, renderedSteps } from '../src/rel/emit.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { bindsAsParameter, type Expr } from '../src/rel/expr.ts';
@@ -136,9 +136,8 @@ for (const query of corpus) {
   // The terminal step is the vocabulary family whose generated statement this is; a whole chain
   // would turn every corpus spelling into a separate baseline and would not detect a family regression.
   const family = steps.at(-1)?.name ?? 'empty';
-  let rendered;
-  try { rendered = emit(lowered.plan); }
-  catch (error) { failures.push(`${query}: ${(error as Error).message}`); continue; }
+  // The statements that SHIP: the lowering's own rendering, not a second emission of its plan.
+  const rendered = renderedSteps(lowered.rendered);
   for (const [index, step] of rendered.entries()) {
     statements++;
     const violation = cfLimitViolation(step.emitted.sql, step.emitted.binds);

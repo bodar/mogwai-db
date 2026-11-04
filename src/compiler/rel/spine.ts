@@ -1,7 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
-import { emitProgram } from '../../rel/emit.ts';
 import { renderProgram } from '../../program.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
@@ -81,8 +79,9 @@ export interface RelRequest {
  *
  * ## The plan IS the query
  *
- * `emitProgram` hands back the effects and the result as a kernel `Expression`, `WITH` list and all, and
- * one `render` turns that into `{sql, binds}`. Three things fall out, all of them wanted:
+ * `renderLowered` assembles the effects and the result as a kernel `Expression`, `WITH` list and all,
+ * and one `render` turns that into `{sql, binds}` — ONCE per lowering, carried on `RelLowering.rendered`.
+ * Three things fall out, all of them wanted:
  *
  * - **binds stay in ONE `render`.** Composing an `Expression` rather than splicing a rendered string is
  *   what stops a second bind-ordering authority existing.
@@ -175,9 +174,15 @@ export function loweringOptions(
  * a chain over rows that arrived on a Promise. Both owe the identical crossing — emit the program,
  * render the result, decide read vs program — and a second copy of it is a second bind-ordering
  * authority, which is the thing §5 exists to keep singular.
+ *
+ * It EMITS NOTHING. The plan was rendered once, where the lowering decided its bind budget
+ * (`lowered()` → `renderLowered`), and that value travels on `RelLowering.rendered`; this only
+ * ASSEMBLES `Compiled | Program` from it. Re-emitting here is what made every write compile its plan
+ * three times and every read twice.
  */
 export function finishLowering(lowered: RelLowering): Compiled | Program {
-  const { effects, result: relational } = emitProgram(lowered.plan);
+  const { rendered } = lowered;
+  const relational = rendered.result;
 
   // A DISCARD leaves through its own door, and the reason is that there is nothing to read: `drop()`'s
   // result relation is a statement with an empty `RETURNING`, so the whole traversal IS its effects.
@@ -187,10 +192,10 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
   const isDiscard = lowered.shape.kind === 'discard';
   if (isDiscard || !relational) {
     if (!isDiscard || relational) throw new Error('RelIR spine: a discard shape and a relational result disagree about whether this program yields traversers');
-    return { kind: 'program', ...renderProgram(lowered.plan), shape: { kind: 'discard' } };
+    return { kind: 'program', ...renderProgram(lowered.plan, rendered), shape: { kind: 'discard' } };
   }
 
-  const { sql, binds } = render(relational);
+  const { sql, binds } = relational;
   /**
    * THE PLATFORM'S LIMITS ARE NOT CHECKED HERE, AND THAT IS DELIBERATE.
    *
@@ -215,7 +220,7 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
   // the framing read is the program's last step. A write reaches the SAME payload projection a pure read
   // does rather than a write-shaped copy, which is the property §6·3 had to preserve while moving where
   // that projection is built.
-  return effects.length
-    ? { kind: 'program', ...renderProgram(lowered.plan, { sql, binds }), shape: lowered.shape }
+  return rendered.effects.length
+    ? { kind: 'program', ...renderProgram(lowered.plan, rendered), shape: lowered.shape }
     : { kind: 'read', sql, binds, shape: lowered.shape };
 }

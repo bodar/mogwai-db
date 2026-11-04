@@ -5,11 +5,10 @@ import type { TraverserObject } from './history.ts';
 import { col, compilerInt, compilerNull, compilerText, compilerParamName, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
-import { emit, emitRelational } from '../../rel/emit.ts';
+import { renderLowered, type RenderedPlan } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoinAll, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { fuseAll } from '../../rel/passes/fuse.ts';
-import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
@@ -138,6 +137,14 @@ export interface RelLowering {
    * `origin`/`path` and threw), and `RelLowering.aliases` (the alias map had exactly one reader, that bridge).
    */
   readonly shape: Shape;
+  /**
+   * THE PLAN, RENDERED — once (`renderLowered`), by whichever producer built it. REQUIRED so that no
+   * producer can hand on a plan for someone downstream to emit again: the bind-budget decision is taken
+   * on this value, and `finishLowering` assembles `Compiled | Program` from it without emitting. One
+   * crossing out of the algebra per lowering. `plan` stays beside it for what is not rendering — each
+   * binding's guard and declared columns (`renderProgram`), and the instruments that walk the algebra.
+   */
+  readonly rendered: RenderedPlan;
 }
 
 
@@ -4011,15 +4018,13 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
  * divergences, the widest 42 rendered against 31 counted. An under-estimate would admit a plan that
  * renders past 100 and refuse only at emission — after the point this seam could still decline
  * cleanly; an over-estimate would wrongly decline a valid plan. So RENDER once and ask the real list.
- * The render costs ~30µs against a compile and is the
- * only count worth checking.
+ * That render is not an extra cost: it is THE render (`renderLowered`), and its output is carried on
+ * `RelLowering.rendered` to `finishLowering`, which assembles the compiled query from it and emits nothing.
  *
- * It goes through `emitRelational` + the kernel's own `render` rather than `emitQuery` (which refuses
- * an over-budget plan by throwing a bare number). The decline is a TYPED catch — `BindBudgetExceeded`
- * only, the same discrimination the effects branch makes: `checkPlan` (inside `emitRelational`) raises
- * that class for a per-binding over-budget, a real cap decision, while a structural checker violation
- * is a different class that still escapes — so the one failure `rel-sweep` exists to see is never
- * swallowed.
+ * The decline is a TYPED catch — `BindBudgetExceeded` only: `checkPlan` (inside `renderLowered`) raises
+ * that class for a per-binding over-budget and `renderStep` for an over-budget effect statement, both
+ * real cap decisions, while a structural checker violation is a different class that still escapes — so
+ * the one failure `rel-sweep` exists to see is never swallowed.
  */
 /**
  * THE PAYLOAD PROJECTION, APPLIED — the fold's last act, and the §6·3 boundary in one function.
@@ -4354,31 +4359,24 @@ const lowered = (
   // way past it is 100+ distinct PARAMETERS in one statement, which fails closed at the gate below rather
   // than being blobbed into one bind — a scenario not in the corpus and deliberately unsupported.
   const plan = built;
-  // A PROGRAM's budget is PER STATEMENT — each binding is its own query — so the sum a read plan is
-  // measured by (its bindings are CTEs of ONE statement) would refuse a nine-statement cascade on a
-  // number no database ever asks. `emit` renders every step and raises `BindBudgetExceeded` on the
-  // one that is over, which is the same rendered-list authority the read path renders for.
-  if (effects.length) {
-    try { emit(plan); } catch (error) {
-      if (!(error instanceof BindBudgetExceeded)) throw error;
-      return null;
-    }
-    return { plan, shape: wire.shape };
-  }
-  // A read is ONE statement, so the number the DO measures is exactly its rendered bind list — ask
-  // that, nothing coarser. A pre-count summed per binding could only DECLINE a valid plan on an
-  // over-estimate: a parameter shared across CTEs is one bind after dedup but was summed once per
-  // binding, and wrongly declining a repeated-parameter plan that RelIR could actually fit would turn
-  // a valid traversal into a failure. `emitRelational` renders
-  // through `checkPlan`, whose per-binding budget guard throws `BindBudgetExceeded`; catch THAT as a
-  // decline (a genuine over-budget binding is a genuine over-budget statement) exactly as the effects
-  // branch does, while a real checker violation is a different class and still escapes.
-  try {
-    return render(emitRelational(plan)).binds.length > DO_BIND_CAP ? null : { plan, shape: wire.shape };
-  } catch (error) {
+  // RENDER ONCE, and decide the budget on that rendering — the same value `finishLowering` assembles
+  // the compiled query from, so the number asked here is the number that ships.
+  //
+  // The budget is PER STATEMENT, on the RENDERED list. A program's effects are each their own query, so
+  // the sum a read is measured by would refuse a nine-statement cascade on a number no database ever
+  // asks: `renderStep` raises `BindBudgetExceeded` on the effect that is over. A read is ONE statement,
+  // so its number is exactly the result's rendered bind list — nothing coarser: a pre-count summed per
+  // binding could only DECLINE a valid plan on an over-estimate (a parameter shared across CTEs is one
+  // bind after dedup). `checkPlan` (inside `renderLowered`) raises the same class for a per-binding
+  // over-budget; catch THAT as a decline, while a real checker violation is a different class and
+  // still escapes.
+  let rendered: RenderedPlan;
+  try { rendered = renderLowered(plan); } catch (error) {
     if (!(error instanceof BindBudgetExceeded)) throw error;
     return null;
   }
+  if (rendered.result && rendered.result.binds.length > DO_BIND_CAP) return null;
+  return { plan, shape: wire.shape, rendered };
 };
 
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering): RelLowering | null {
@@ -4544,6 +4542,14 @@ export function lowerForeignResume(
   return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
 }
 
+/** A resumed `typedNode` relation — values that already crossed back, so no chain, no passes and no
+ * `lowered()` — named and RENDERED ONCE like every other lowering. Its literals inline, so it binds
+ * nothing and has no budget to decide. */
+const typedNodeLowering = (rel: Rel, fresh: Minter): RelLowering => {
+  const plan = nameBindings(rel, () => fresh('r'));
+  return { plan, shape: { kind: 'typedNode' }, rendered: renderLowered(plan) };
+};
+
 /**
  * THE SCALAR RESUME — a pushed-down federate reducer's tail. The reducer (`count`/`sum`/…) already ran
  * on the SIBLING and its one typed `{t,v}` value crossed back (`BarrierScalar`); the reduction was the
@@ -4577,7 +4583,7 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
   // `Values` refuses the empty relation, so the empty aggregate is the honest `Filter(false)` over the one
   // row (§3.3) — no traverser.
   const rel = empty ? make.filter({ id: fresh('scf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
-  return { plan: nameBindings(rel, () => fresh('r')), shape: { kind: 'typedNode' } };
+  return typedNodeLowering(rel, fresh);
 }
 
 /**
@@ -4616,7 +4622,7 @@ export function lowerTypedNodeStream(nodes: readonly FrameNode[], parents?: numb
       return make.join({ id: fresh('tnj'), left: one, right: parentRows, channels: [], join: 'cross', type: typeOf(meta(NODE_COL, 'json', true), meta('p', 'int')) });
     })();
   const rel = nodes.length > 0 ? scattered : make.filter({ id: fresh('tnf'), input: one, channels: [], type, pred: CONSTANT.false });
-  return { plan: nameBindings(rel, () => fresh('r')), shape: { kind: 'typedNode' } };
+  return typedNodeLowering(rel, fresh);
 }
 
 /** What a mid-traversal reduction emits when a parent has no partial (see `reducers.ts`): `zero` = the
@@ -4670,7 +4676,7 @@ export function lowerReduceCombine(
   // A null fold (an all-empty semigroup) frames as NO traverser — `Values` refuses the empty relation, so
   // it is the honest `Filter(false)` (§3.3), matching `lowerScalarResume`'s empty-aggregate spelling.
   const rel = folded === null ? make.filter({ id: fresh('rcf'), input: one, channels: [], type: one.type, pred: CONSTANT.false }) : one;
-  return { plan: nameBindings(rel, () => fresh('r')), shape: { kind: 'typedNode' } };
+  return typedNodeLowering(rel, fresh);
 }
 
 /**

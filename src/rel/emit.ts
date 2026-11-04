@@ -1066,9 +1066,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    *
    * One walk, because there is one program: a retained binding (a `Stmt`, or a relation the plan
    * snapshotted) is a step, a plain `Rel` binding is a CTE the steps after it see, and whatever the
-   * result relation is renders over the CTE list that reached it. `emit` finishes the job by
-   * rendering `result`; `emitRelational` hands that expression to the framing layer instead of
-   * rendering it. Splitting them into two near-copies of this walk is what let the CTE-versus-step
+   * result relation is renders over the CTE list that reached it; `renderLowered` renders that
+   * `result` once. Splitting this into two near-copies of the walk is what let the CTE-versus-step
    * rule be stated twice — and the recursive-root case, which only one of them had.
    *
    * `result` is ABSENT when the plan's result is exactly a retained binding's rows: the executor
@@ -1152,41 +1151,53 @@ const renderStep = (tree: Expression): Emitted => {
  * not a second machine, it is a binding whose node is a statement, and the three-entry-point
  * emitter this replaces (`emit`/`emitStmt`/`emitSequence`, with statement-only back channels) was
  * the drift toward rebuilding write as a special case inside a new layer.
+ *
+ * A derived convenience over `renderLowered` that also refuses a result step over the DO cap, for a
+ * caller holding a bare `Plan`. A compile never comes here — it carries `RelLowering.rendered`.
  */
 export function emit(program: Plan): readonly Step[] {
-  const { effects, result } = emitProgram(program);
-  return result ? [...effects, { result: true, emitted: renderStep(result) }] : effects;
+  const rendered = renderLowered(program);
+  if (rendered.result && rendered.result.binds.length > DO_BIND_CAP) throw new BindBudgetExceeded(rendered.result.binds.length);
+  return renderedSteps(rendered);
 }
 
 /**
- * A CHECKED PROGRAM SPLIT INTO WHAT RUNS AND WHAT IS LEFT — the entry point for a caller that must
- * put something of its own BETWEEN the two.
+ * A CHECKED PROGRAM, RENDERED ONCE — what crosses out of the algebra. `effects` are the statements
+ * that run first, each already rendered and refused over the DO cap (`renderStep`); `result` is the
+ * framing read, rendered but NOT refused, because what an over-budget read means is the CALLER's
+ * decision (the lowering declines it, `emit` throws).
  *
- * The framing layer is that caller once a write produces traversers: `property()` hands back the
- * elements it mutated, so the framing query has to run AFTER the effects and read their retained
- * rows. Handing back an `Expression` rather than a rendered string is what keeps bind ordering in
- * one `render` (the same reason `emitRelational` does), and handing the effects back separately is
- * what stops the framing layer needing a write vocabulary to run them.
+ * The framing read runs AFTER the effects because a write that produces traversers (`property()`
+ * hands back the elements it mutated) is framed from their retained rows; handing the effects back
+ * separately is what stops the framing layer needing a write vocabulary to run them.
+ *
+ * THE ONE CROSSING ON THE COMPILE PATH. A lowering renders here exactly once and carries the value on
+ * `RelLowering.rendered`, so the bind-budget decision, the read/program split (`finishLowering`) and
+ * the transport-safe `RenderedProgram` all read the SAME rendering. Before, a write was checked and
+ * assembled three times over and a read twice — identical SQL each time, so pure CPU per request.
  */
-export function emitProgram(program: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } {
+export interface RenderedPlan { readonly effects: readonly Step[]; readonly result?: Emitted; }
+
+export function renderLowered(program: Plan): RenderedPlan {
+  const { effects, result } = emitProgram(program);
+  if (!result) return { effects };
+  const out = render(result);
+  return { effects, result: { sql: out.sql, binds: out.binds } };
+}
+
+/** A rendered plan as the ordered steps a runner walks: the effects, then the result read if any. */
+export const renderedSteps = (rendered: RenderedPlan): readonly Step[] =>
+  rendered.result ? [...rendered.effects, { result: true, emitted: rendered.result }] : rendered.effects;
+
+/**
+ * A CHECKED PROGRAM SPLIT INTO WHAT RUNS AND WHAT IS LEFT — the effects rendered, the result still a
+ * kernel `Expression`. Keeping the result an `Expression` until ONE `render` is what keeps bind
+ * ordering in one place, and `renderLowered` is that render. Deliberately module-private: a second
+ * exported crossing is how a compile came to emit the same plan three times.
+ */
+function emitProgram(program: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } {
   checkPlan(program);
   return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).parts(program);
-}
-
-/**
- * A checked READ program as ONE kernel `Expression`, for a caller that composes it into a larger
- * `q` tree instead of executing it. RelIR's output contract is a relation, and shape is resolved
- * above it (§2).
- *
- * Read plans only, and the THROW is the point: a caller that composes this into a `SELECT` has no
- * way to run the effects, so a program with them would silently lose its writes. A caller that CAN
- * run them asks `emitProgram` instead and gets the same expression beside its steps.
- */
-export function emitRelational(program: Plan): Expression {
-  const { effects, result } = emitProgram(program);
-  if (effects.length) throw new Error(`RelIR: this plan has ${effects.length} execution step(s); a caller that composes its result must run them — use emitProgram()`);
-  if (!result) throw new Error('RelIR: this plan has no relational result');
-  return result;
 }
 
 /** The single-step case, which every read plan is. A derived convenience over `emit`, deliberately

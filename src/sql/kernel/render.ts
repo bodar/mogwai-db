@@ -345,7 +345,7 @@ export type Shape =
 export interface Compiled {
   kind: 'read';
   sql: string;
-  binds: any[];
+  binds: readonly any[];
   shape: Shape;
   /** OLAP-barrier run tokens whose `barrier_state` scratch this plan reads (a decorate tail). The
    *  framer drops them once it has produced the rows — precise post-frame GC (`frameResolved`). */

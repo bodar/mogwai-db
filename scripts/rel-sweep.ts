@@ -43,9 +43,7 @@ import type { IRStep } from '../src/compiler/ir/step.ts';
 import { ValueParseError } from '../src/gremlin/coerce.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
 import { DO_BIND_CAP } from '../src/rel/check.ts';
-import { emit, emitRelational } from '../src/rel/emit.ts';
-import { retained, type Plan } from '../src/rel/plan.ts';
-import { render } from '../src/sql/kernel/q.ts';
+import { renderedSteps as stepsOf, type RenderedPlan } from '../src/rel/emit.ts';
 import { cfLimitViolation } from '../src/cf-limits.ts';
 
 /** No `withSideEffect` declared — the sweep parses the corpus text alone. */
@@ -154,7 +152,7 @@ let emitted = 0;
 /**
  * THE ADMITTED COUNT MUST BOUND THE ENFORCED COUNT.
  *
- * `lowerToRel` decides the cap on the RENDERED bind list itself — it renders `emitRelational` and
+ * `lowerToRel` decides the cap on the RENDERED bind list itself — it renders once (`renderLowered`) and
  * counts, with no cheaper pre-count — because any estimate diverges from what the assembler spells: it
  * can count one `Lit` the block fuses in twice as one (measured in the algebra: 91 occurrences
  * rendering as 181 binds), or sum a repeated parameter the render dedups to a single reused `?N`. A
@@ -177,10 +175,7 @@ let emitted = 0;
  * because each of its statements meets the wall on its own — summing them would report a number no
  * database ever asks.
  */
-const renderedSteps = (plan: Plan) =>
-  plan.bindings.some((binding) => retained(binding))
-    ? emit(plan).map((step) => step.emitted)
-    : [render(emitRelational(plan))];
+const renderedSteps = (rendered: RenderedPlan) => stepsOf(rendered).map((step) => step.emitted);
 
 /**
  * Sweep ONE configuration, recording both properties above.
@@ -197,7 +192,7 @@ function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolea
   try {
     const lowered = lowerToRel(chain, { params: NO_PARAMS, collapse, correlatedChildren });
     if (!lowered) return;
-    const rendered = renderedSteps(lowered.plan);
+    const rendered = renderedSteps(lowered.rendered);
     emitted++;
     const widest = Math.max(...rendered.map((step) => step.binds.length));
     if (widest > DO_BIND_CAP) {
