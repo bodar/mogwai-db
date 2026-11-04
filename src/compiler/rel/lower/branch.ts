@@ -173,6 +173,24 @@ export function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
  * …).select('x')`, the `mintArmMajor` channel check), declines.
  */
 export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSource, fresh: Minter, labels: AliasMap): BranchRel | null {
+  const normalized = reconcileCollapsed(arms, fresh);
+  return normalized && batchedBranch(normalized, input, graph, fresh, labels);
+}
+
+/**
+ * COLLAPSED ARMS BESIDE STREAMING ONES — reconcile them to one channel set, the ONE normalization every
+ * branch merge uses where a reducing arm (`isReductionArm`) meets an arm that streams its traversers.
+ * A reduced arm emits one traverser per scope, so its multiplicity is 1 (`ensureBulk`); a SCALAR arm also
+ * sheds its `result` marker onto the merged per-row vtype (`toScalarArm`), so a `count()` can meet a plain
+ * value or join a variant. `union`'s batched merge (`mixedBranch`) and `choose`'s routed one — its boolean
+ * arms or its keyed options beside the implicit pass-through `ChooseStep` installs for an unclaimed `Pick`
+ * — are the same question, so they ask it here.
+ *
+ * An ELEMENT or LIST arm joins the variant unchanged but for a `bulk = 1` if it collapsed; `variantPayload`
+ * frames a list-of-elements member by the same `listPayloadExpr` expansion the non-variant list uses. A
+ * map/record/path/property arm declines (no variant `vk`).
+ */
+function reconcileCollapsed(arms: readonly Tail[], fresh: Minter): readonly Tail[] | null {
   const normalized: Tail[] = [];
   for (const arm of arms) {
     const fr = arm.framing;
@@ -182,13 +200,10 @@ export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSourc
       normalized.push({ ...arm, rel, framing: { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } });
       continue;
     }
-    // An ELEMENT or LIST arm joins the variant unchanged but for a `bulk = 1` if it collapsed;
-    // `variantPayload` frames a list-of-elements member by the same `listPayloadExpr` expansion the
-    // non-variant list uses. A map/record/path/property arm declines (no variant `vk`).
     if (fr.kind !== 'elements' && fr.kind !== 'list') return null;
     normalized.push({ ...arm, rel: ensureBulk(arm.rel, fresh) });
   }
-  return batchedBranch(normalized, input, graph, fresh, labels);
+  return normalized;
 }
 
 /** An ARM of a branch merge — `inArmBody`, with whether the merge reads the arm's emission order
@@ -225,10 +240,15 @@ function emissionSource(
 }
 
 /** The merge a branch returns: numbered by the emission key where the order is owed (`mintBranchOrder`),
- *  positionless otherwise — every arm's own position dropped, as a stream nobody reads in order carries none. */
+ *  positionless otherwise — every arm's own position dropped, as a stream nobody reads in order carries none.
+ *  `reduced` names the arms that COLLAPSED (`isReductionArm`); where they sit beside streaming arms the two
+ *  are reconciled first (`reconcileCollapsed`). */
 function emissionMerge(
-  arms: readonly Tail[], from: { readonly parent?: Channel }, owed: boolean, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
+  built: readonly Tail[], from: { readonly parent?: Channel }, owed: boolean, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
+  reduced: readonly boolean[] = [],
 ): BranchRel | null {
+  const arms = reduced.some(Boolean) && !reduced.every(Boolean) ? reconcileCollapsed(built, fresh) : built;
+  if (!arms) return null;
   return owed
     ? mintBranchOrder(arms, from.parent, labels, ctx.source, fresh)
     : mergeArms(arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) })), labels, ctx.source, fresh);
@@ -893,6 +913,7 @@ export function chooseOptions(
   };
 
   const built: Tail[] = [];
+  const reduced: boolean[] = [];
   for (const { arm, ordinal } of gated) {
     const body = seam.body(arm.nested, 'child');
     if (!body?.length) return null;
@@ -900,7 +921,9 @@ export function chooseOptions(
     if (!lowered) return null;
     // A REDUCING option emits only where a start was routed to it (`BranchStep.java:130-134` drains an
     // option once it `hasStarts()`), never its seed over nothing — `chooseArms`' gate, on this option's input.
-    built.push(isReductionArm(body) ? routedReduction(lowered, gate(takes(ordinal)), fresh) : lowered);
+    const collapses = isReductionArm(body);
+    reduced.push(collapses);
+    built.push(collapses ? routedReduction(lowered, gate(takes(ordinal)), fresh) : lowered);
   }
   // THE IMPLICIT PASS-THROUGH is every ordinal no written arm claimed — which is at most the two
   // sentinels, since every keyed ordinal is claimed by construction. Deriving it from the claims
@@ -918,9 +941,10 @@ export function chooseOptions(
       // did — nothing here collapses and nothing resets a multiplicity.
       bulked,
     });
+    reduced.push(false);
   }
   if (built.length < 2) return null;
-  return emissionMerge(built, from, owed, labels, ctx, fresh);
+  return emissionMerge(built, from, owed, labels, ctx, fresh, reduced);
 }
 
 /**
@@ -1163,7 +1187,7 @@ export function chooseArms(
     reduced[0] ? routedReduction(armThen, guarded(false), fresh) : armThen,
     reduced[1] ? routedReduction(armElse, guarded(true), fresh) : armElse,
   ];
-  return emissionMerge(arms, from, owed, labels, ctx, fresh);
+  return emissionMerge(arms, from, owed, labels, ctx, fresh, reduced);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which

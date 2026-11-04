@@ -14,7 +14,7 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
-import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, REDUCERS, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, ONE_TO_ONE, REDUCERS, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
@@ -411,6 +411,55 @@ function nestedHostScopes(step: IRStep, params: ParamEnv): boolean {
 }
 
 /**
+ * Does a per-traverser body give AT MOST ONE result for each traverser it is applied to — so `map()` may
+ * share `flatMap()`'s rejoin (`flatMapRejoin`) with no "first" to name?
+ *
+ * Read off the IR's arity vocabulary rather than a list of its own: the body is a run of steps that each
+ * keep "at most one" (`ONE_TO_ONE`, `src/compiler/ir/step.ts` — the always-bound `MapStep`s
+ * `EarlyLimitStrategy`'s port crosses — and every `Scope.local` op, a `ScalarMapStep` one-in one-out), after
+ * either the traverser itself (the body's start) or a GLOBAL collapse (`selfCollapses` — one row or none
+ * over the traverser's sub-stream, whatever precedes it). A branch keeps it where its arms do: `choose`
+ * routes each traverser to ONE option, an unwritten `Pick` being the identity its constructor installs
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/ChooseStep.java`
+ * `pickBranches`, and the constructor's pass-throughs); `coalesce` emits one arm's results, `optional` its
+ * arm's or the traverser; a nested `map` is one by definition and `local`/`flatMap` are their body's.
+ *
+ * The correlated-row authority (`atMostOneRow`, `src/rel/bounds.ts`) cannot answer this here: the rejoin
+ * lowers the body over EVERY traverser at once, and a `choose`'s arms lower to a `union` whose disjoint gates
+ * `rowBounds` does not read. Sufficient, not necessary — an unreadable body answers `false`, and the rejoin
+ * then stays closed to `map`.
+ */
+function atMostOnePerTraverser(body: readonly IRStep[], params: ParamEnv): boolean {
+  const one = (raw: unknown): boolean => {
+    const inner = bodyOf(raw, params);
+    return !!inner && atMostOnePerTraverser(inner, params);
+  };
+  const each = (value: unknown): boolean => isNested(value) && one(value.nested);
+  const keeps = (step: IRStep): boolean => {
+    if (step.modulators?.length) return false;
+    if (isLocalScope(step)) return true;
+    if (step.name === 'constant') return !step.args.some((arg) => isNested(arg.value));
+    if (ONE_TO_ONE.has(step.name)) return true;
+    if (step.name === 'map') return step.args.length === 1 && isNested(step.args[0]!.value);
+    if (step.name === 'local' || step.name === 'flatMap' || step.name === 'optional' || step.name === 'coalesce')
+      return step.args.length >= 1 && step.args.every((arg) => each(arg.value));
+    if (step.name !== 'choose') return false;
+    if (step.optionArms) {
+      const arms = optionArms(step, (nested) => bodyOf(nested, params));
+      return !!arms && arms.every((arm) => arm.discard || one(arm.nested));
+    }
+    const arms = step.args.slice(1);
+    return arms.length >= 1 && arms.every((arg) => each(arg.value));
+  };
+  for (let i = body.length - 1; i >= 0; i--) {
+    const step = body[i]!;
+    if (selfCollapses(step.name) && !isLocalScope(step)) return true;
+    if (!keeps(step)) return false;
+  }
+  return true;
+}
+
+/**
  * A FAN-OUT `flatMap`/`local` body, spliced back as a REJOIN — the general child answer
  * `scalarChild`'s movement arm explicitly defers ("fan-out `flatMap(__.V()…)` needs the general child
  * rejoin"). `scalarChild` only produces a body that yields ONE value per traverser; a body that FANS
@@ -425,8 +474,14 @@ function nestedHostScopes(step: IRStep, params: ParamEnv): boolean {
  * as a column would distinguish rows by WHICH host they descend from and keep convergent walks that must
  * collapse.
  *
- * `map` is excluded: it takes the FIRST body result, not all, so a fan-out under it is a per-origin
- * window, not this. A scalar host has no rowid for `origin` (`childRows`' own limit), so only an element
+ * `map` takes the body's FIRST result: `TraversalMapStep.processNextStart` is `applyAll(traverser,
+ * mapTraversal)` then `traverser.split(iterator.next())`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`)
+ * — `FlatMapStep`'s split from the same head, taken once. So where the body has at most one result per
+ * traverser (`atMostOnePerTraverser` — a list- or variant-valued branch the correlated-scalar route cannot
+ * carry, `map(choose(k).option(v, values('name').fold())…)`) the first IS every result, and `map` is this
+ * rejoin exactly, path and label shedding included. A fan-out body has no "first" to name without a window,
+ * so it stays closed. A scalar host has no rowid for `origin` (`childRows`' own limit), so only an element
  * host reaches here.
  */
 export function flatMapRejoin(
@@ -434,7 +489,11 @@ export function flatMapRejoin(
   body: readonly IRStep[], steps: readonly IRStep[], at: number, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
   bodyCtx: ChainCtx = ctx,
 ): Tail | null {
-  if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
+  if (step.name === 'map' ? !atMostOnePerTraverser(body, ctx.params) : step.name !== 'flatMap' && step.name !== 'local') return null;
+  if (framing.kind !== 'elements') return null;
+  // `map` re-derives from the PRE-child head exactly as `flatMap` does (`head.split`), so below it takes
+  // `flatMap`'s path and label treatment; only `local` forwards the child's own traverser.
+  const splits = step.name !== 'local';
   // AN ENCLOSING ORIGIN — this host sits inside another per-traverser body (`local(__.out().local(…))`,
   // a `group().by()` reducer body, a `match` pattern), whose origin the input already carries and which
   // that enclosing host still needs back. A body holding a per-origin window or a branch ANYWHERE scopes
@@ -444,7 +503,7 @@ export function flatMapRejoin(
   // for an origin minted over THIS input.
   const enclosed = !!originOf(rel.channels);
   const barriers = body.filter(isStreamBarrier);
-  if (enclosed && (!barriers.every((s) => nestedBarrierScopes(s, ctx.params)) || (ctx.tracksPath && step.name === 'flatMap' && pathCarried(rel)))) return null;
+  if (enclosed && (!barriers.every((s) => nestedBarrierScopes(s, ctx.params)) || (ctx.tracksPath && splits && pathCarried(rel)))) return null;
   // WHETHER to nest is a question about the WHOLE body, not its top level: a per-origin window inside a
   // `union`/`choose` arm (`local(__.union(__.out().limit(1), __.in().limit(1)))`) partitions by
   // `originOf` exactly as a top-level one does, and an arm merge orders by it — so under the ENCLOSING
@@ -468,7 +527,7 @@ export function flatMapRejoin(
   // an id to append; a scalar/list output under `path()` stays its own increment.
   // Only where the INPUT carries a path: a probe of the body's productivity (`coalesce`/`optional`'s
   // exhaustion guard, `childPredicate`) runs it over a path-free subject, which has no P to recover.
-  if (ctx.tracksPath && step.name === 'flatMap' && pathCarried(rel)) {
+  if (ctx.tracksPath && splits && pathCarried(rel)) {
     if (!bodyScopesPerOrigin(body, ctx.params)) return null;
     const numbered = mintRowOrigin(rel, fresh); // a per-row origin BESIDE the entering path P
     const origin = originOf(numbered.channels)!;

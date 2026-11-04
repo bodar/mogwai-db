@@ -337,8 +337,8 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 3558,
-    "compiler": 48,
+    "bytes": 10452,
+    "compiler": 226,
     "bound": 0
   },
   "lTrim": {
@@ -349,8 +349,8 @@
   },
   "map": {
     "binds": 0,
-    "bytes": 1256,
-    "compiler": 16,
+    "bytes": 10452,
+    "compiler": 226,
     "bound": 0
   },
   "match": {

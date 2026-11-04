@@ -576,6 +576,18 @@ export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
 // rule this module exists to enforce. Read them against the bases above, not against the file each
 // used to live in.
 
+/** THE ALWAYS-BOUND `MapStep`s — one traverser in, exactly one out — by NAME, the IR's one arity
+ *  vocabulary: TinkerPop's `StepOutputArityPredictor` `STEP_CLASSES_WITH_DEFINITELY_SINGULAR_ARITY_BEHAVIOR`
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/util/StepOutputArityPredictor.java`):
+ *  `IdentityStep`, `IdStep`, `LabelStep`, `ConstantStep`, `PropertyKeyStep`, `PropertyValueStep`, `PathStep`,
+ *  `ElementMapStep`, `PropertyMapStep`, `MathStep`, and `EdgeVertexStep` one-sided (`inV`/`outV`) or
+ *  `EdgeOtherVertexStep` — plus `as()`, which is a label on the step before, not a step. Two readers ask it:
+ *  `EarlyLimitStrategy`'s port (`early-limit.ts`, which slice may cross) and the per-traverser arity a
+ *  `map()` body is admitted to the rejoin on (`atMostOnePerTraverser`, `rel/lower/reduction.ts`). */
+export const ONE_TO_ONE: ReadonlySet<string> = new Set([
+  'as', 'identity', 'id', 'label', 'constant', 'key', 'value', 'path', 'elementMap', 'valueMap', 'propertyMap', 'math', 'inV', 'outV', 'otherV',
+]);
+
 /** The syntax-only scalar transform vocabulary — the step names whose meaning is "reshape this one
  *  scalar value", emitted by `transformExpr` (`rel/transform.ts`). Membership is decided by SYNTAX alone,
  *  which is why child-shape classification can consult it without importing an emitter: the

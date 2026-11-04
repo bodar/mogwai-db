@@ -461,22 +461,22 @@ Beside the RelIR substrate:
   unsupported — today the gap is tracked nowhere else.
 - **Keyed `choose` with a reducing option arm, then `branch()` (keyed-choose-reducing-arm → branch-step-options).**
   In order:
-  1. **keyed-choose-reducing-arm — BLOCKED, work uncommitted, resume from it.** The design premise was off:
-     `chooseOptions` already routes reducing options through `routedReduction`; the decline is in the MERGE —
-     the keyed form's implicit pass-through arm for `Pick.unproductive` (`ChooseStep.java:71-79`) keeps
-     `bulk` while reduced arms do not, so `mergeArms` refuses (the boolean form fails the same way beside a
-     streaming arm: `choose(p, out().count(), values('name'))`, `choose(p, fold())`). Built but unverified
-     (final test run unread, no `mise run ci`, nothing committed) in worktree
-     `.claude/worktrees/wf_e5181ab5-5da-81` (branch `wf/keyed-choose-reducing-arm-2-0`, base 1c34ffa2, dirty
-     tree): `reconcileCollapsed()` extracted from `mixedBranch` in `src/compiler/rel/lower/branch.ts` and used
-     by union/boolean/keyed choose with a per-arm `reduced[]` flag; `flatMapRejoin` takes `map()` when
-     `atMostOnePerTraverser(body)` (`TraversalMapStep.java:49-53`; a `limit(1)` append was tried and backed
-     out — it opened `map(out())` and gave a wrong `[]` on an L4 `@Unsupported`);
-     `test/L4-addendum/branch-mixed-reducing-arms.feature` (10 + 1 `@Unsupported`). Resume: rebase onto trunk,
-     run `mise run ci`, ledger the newly passing L3 names. Still declining there: `local()` keyed `count()`
-     arms beside the pass-through (no per-start key in the rejoin); mixed-shape results then
-     fold/sum/where/select; repeat bodies.
-  2. **branch-step-options — DEFERRED on (1).** `branch(<traversal>).option(…)` on `chooseOptions`,
+  1. **keyed-choose-reducing-arm — residue only.** Every branch merge asks `reconcileCollapsed`
+     (`src/compiler/rel/lower/branch.ts`), and `map()` shares `flatMapRejoin` where `atMostOnePerTraverser`
+     (`src/compiler/rel/lower/reduction.ts`, over `ONE_TO_ONE` in `src/compiler/ir/step.ts`) proves at most one
+     result per start; L4 `test/L4-addendum/branch-mixed-reducing-arms.feature`. Still declining, each shared
+     by `local`/`flatMap` so not a `map` gap: `local()` keyed `count()` arms beside the pass-through (no
+     per-start key in the rejoin); a rejoin's list/variant result then a local op, fold/sum/where/select or
+     `select(<outer label>)`; repeat bodies; a rejoin under `path()`. `map()` over a FAN-OUT body
+     (`g_V_mapXin_hasIdX1XX_limitX2X_valuesXnameX`) needs a per-start "first" and stays declined; the
+     `withPath…mapXselectXaX_valuesXnameX_concatXselectXbX…` witness declines on `concat(<traversal>)` itself.
+     **Follow-up (pre-existing, also on trunk's `local(choose(p, values('name').fold(), out()…fold()))`):** under
+     a rejoin, `routedReduction`'s `EXISTS` probe is emitted over a SECOND copy of the routed input — its own
+     `row_number() OVER ()` origin and, keyed, its own option `CASE` — instead of the CTE the arms read. Linear
+     (≈4× for 8× rows) and the two numberings agree on one scan, but it is an expression computed twice and
+     a correlation between two independently minted origins; find which tree rewrite does not reach the probe's
+     subplan (`src/rel/passes/prune.ts` DAG pruning is the first suspect) and make it one relation.
+  2. **branch-step-options — unblocked.** `branch(<traversal>).option(…)` on `chooseOptions`,
      parametrized by a match policy (all-matching, `Pick.any`, no implicit default); `choose()` refuses a
      Traversal option key with the reference error. Not started.
 - **Set ops over a per-row-typed scalar (set-op-incoming-class-raise) — PARKED, branch

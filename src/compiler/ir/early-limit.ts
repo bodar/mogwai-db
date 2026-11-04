@@ -1,5 +1,5 @@
 import { isDirectionArg, isNested } from '../../gremlin/frontend.ts';
-import { isLocalScope, SLICE_STEPS, type IRStep } from './step.ts';
+import { isLocalScope, ONE_TO_ONE, SLICE_STEPS, type IRStep } from './step.ts';
 
 /**
  * TINKERPOP'S `EarlyLimitStrategy`, for the windows where it changes WHAT HAPPENS — a slice moved left past
@@ -73,13 +73,6 @@ export function earlyLimit(steps: IRStep[]): IRStep[] {
  *  an effect). */
 const SIDE_EFFECTS: ReadonlySet<string> = new Set(['property', 'addLabel', 'dropLabel', 'dropLabels', 'sideEffect', 'addV', 'addE']);
 
-/** The always-bound `MapStep`s crossed (`StepOutputArityPredictor`): `IdentityStep`, `IdStep`, `LabelStep`,
- *  `ConstantStep`, `PropertyKeyStep`, `PropertyValueStep`, `PathStep`, `ElementMapStep`, `PropertyMapStep`,
- *  `MathStep`, and `EdgeVertexStep` one-sided (`inV`/`outV`) or `EdgeOtherVertexStep` — plus `as()`, which
- *  is a label on the step before, not a step. */
-const ONE_TO_ONE: ReadonlySet<string> = new Set([
-  'as', 'identity', 'id', 'label', 'constant', 'key', 'value', 'path', 'elementMap', 'valueMap', 'propertyMap', 'math', 'inV', 'outV', 'otherV',
-]);
 const CLUSTER_HEADS: ReadonlySet<string> = new Set(['addV', 'addE', 'mergeV', 'mergeE']);
 const CLUSTER_MEMBERS: ReadonlySet<string> = new Set(['property', 'from', 'to', 'option']);
 /** Is `chain[at]` a write's cluster — its head, or a modulator-named step reaching one leftwards? */

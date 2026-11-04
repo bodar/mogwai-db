@@ -4,7 +4,7 @@ A ✅ step works **anywhere in a traversal**, at any depth. **Notes list only wh
 note means the whole step works. Anything unsupported throws a clear error, never a wrong answer.
 Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 
-**L3 conformance: <!-- L3:passing -->1,994<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->2,000<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
