@@ -13,7 +13,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow, rowBounds } from '../../rel/bounds.ts';
-import { isSelfContained, refNames, relDepth } from '../../rel/walk.ts';
+import { isSelfContained, largestExpression, refNames, relDepth } from '../../rel/walk.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { collectionAssert, EDGE_MOVES, elementKindAt, FAN_OUT_HOSTS, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
@@ -58,6 +58,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
+import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
@@ -1199,7 +1200,7 @@ export function lowerRankHead(
     input: make.project({ id: fresh('okv'), input: keyed, channels: [], type: typeOf(meta('v', 'text')), exprs: [['v', col(keyed.id, ORDER_KEY)]] }),
   });
   const head = lowered({ rel: keys, framing: { kind: 'scalar', type: STATIC('string') }, aliases: NO_ALIASES, bulked: false },
-    settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+    settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.budget);
   return head && { head, dirs: sink.dirs };
 }
 
@@ -3948,6 +3949,12 @@ export interface Lowering {
    * Absent, a fresh sink nobody reads (an instrument or a test lowering).
    */
   readonly declines?: Declines;
+  /**
+   * THE COMPILE'S WORK METER (`CompileBudget`, `src/sql/kernel/budget.ts`) — created once in `compilePlan`
+   * and carried here, like `declines`, so every lowering the compile starts charges the same one. Absent,
+   * a fresh meter at the same limit (an instrument or a test lowering).
+   */
+  readonly budget?: CompileBudget;
 }
 
 /**
@@ -3982,6 +3989,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   scopeNames: opts.scopeNames ?? null,
   rankedOrders: opts.rankedOrders ?? NO_RANKED_ORDERS,
   declines: opts.declines ?? new Declines(),
+  budget: opts.budget ?? new CompileBudget(),
 });
 
 /** No `order()` ranked through JS — every lowering but a ranked-order barrier's two statements. */
@@ -4239,7 +4247,7 @@ const scalarPayload = (
  * Every walker over the algebra — the passes, `checkPlan`, the emitter — recurses over a relation's
  * depth, and a bounded `repeat()` unrolls to a chain whose spine grows by a few nodes per iteration
  * (`out().limit(1)` by 3, `out().order().by(k)` by 8). So the JS stack, not the query-text ceiling
- * (`MAX_UNROLLED_STEPS`), was the binding limit — and where it binds is the RUNTIME's: workerd's stack is
+ * (the unroll's early charge, `ir/strategies.ts`), was the binding limit — and where it binds is the RUNTIME's: workerd's stack is
  * about 5× shallower than Bun's, so `repeat(out().limit(1)).times(1200)` compiled on Bun and declined in
  * a Durable Object. Cutting the spine into CTEs every `SPINE_DEPTH_BOUND` levels makes every walk's depth
  * this constant (plus what one step adds), whatever the chain's length. What binds after the cut is
@@ -4313,13 +4321,19 @@ function declaredBeforeUse(bindings: readonly Binding[]): readonly Binding[] {
 
 const lowered = (
   chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter,
-  rawListElements = false,
+  budget: CompileBudget, rawListElements = false,
 ): RelLowering | null => {
   const wire = framed(chain, source, detached, rawListElements, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
   // gate that proves this seam never raises where it should decline.
   if (!wire) return null;
+  // THE EXPRESSION CHARGE, BEFORE ANY PASS (`CompileBudget`). An `Expr` is spelled per use at every stage
+  // — no pass shares one and `name` hoists only relations — so a DAG whose expression sharing compounds
+  // (a running value read twice per level) is already 2^k text here, and the passes below walk and rewrite
+  // it as that tree (`fuse`'s census, `substRelId`). Its size is read off the DAG in O(DAG) and charged
+  // now, so such a plan declines in milliseconds rather than after the passes have spent minutes on it.
+  budget.charge(largestExpression([wire.rel, ...(chain.hoisted ?? []).map((piece) => piece.node), ...(chain.effects ?? []).map((effect) => effect.node)]));
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
   // exists. `semijoin` (`src/rel/passes/semijoin.ts`) is the physical tier: a `Rel → Rel` identity on
@@ -4371,7 +4385,7 @@ const lowered = (
   // over-budget; catch THAT as a decline, while a real checker violation is a different class and
   // still escapes.
   let rendered: RenderedPlan;
-  try { rendered = renderLowered(plan); } catch (error) {
+  try { rendered = renderLowered(plan, budget); } catch (error) {
     if (!(error instanceof BindBudgetExceeded)) throw error;
     return null;
   }
@@ -4386,7 +4400,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering): RelLowerin
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh, true);
-  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.rawListElements);
+  return chain && lowered(chain, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.budget, settled.rawListElements);
 }
 
 /**
@@ -4539,12 +4553,14 @@ export function lowerForeignResume(
       exprs: [['id', col(rejoined.id, 'id')]],
     });
   const chain = detachedTail(seed, streamElem, steps, from, boundCtx, fresh, isSubgraph);
-  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return chain && lowered({ ...chain, effects: [...bindings, ...(chain.effects ?? [])] }, boundSource, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.budget);
 }
 
 /** A resumed `typedNode` relation — values that already crossed back, so no chain, no passes and no
  * `lowered()` — named and RENDERED ONCE like every other lowering. Its literals inline, so it binds
- * nothing and has no budget to decide. */
+ * nothing and has no budget to decide — and it charges no `CompileBudget` either: those literals are the
+ * resumed DATA, so its text grows with the rows that crossed back, and a refusal on it would be a refusal
+ * on data size. */
 const typedNodeLowering = (rel: Rel, fresh: Minter): RelLowering => {
   const plan = nameBindings(rel, () => fresh('r'));
   return { plan, shape: { kind: 'typedNode' }, rendered: renderLowered(plan) };
@@ -4696,7 +4712,7 @@ export function lowerPathResume(
   const built = shortestPathReconstruct(run, round, cfg, ctx.source, childSeam(ctx, fresh), fresh);
   if (!built) return null;
   const tail = continueAs(built.rel, { kind: 'path', of: built.of, scalars: built.scalars }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
-  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.budget);
 }
 
 /**
@@ -4735,7 +4751,7 @@ export function lowerPairResume(
     exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [blob] }]],
   });
   const tail = continueAs(rel, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, steps, barrierAt + 1, false, ctx, fresh, NO_ALIASES);
-  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return tail && lowered(tail, settled.source, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.budget);
 }
 
 /** The reserved bind a value-transform barrier's re-injected values cross under — one `json_each` bind
@@ -4783,7 +4799,7 @@ function valueResume(
   if (facts.tracksPath) return null;
   const seeded = seedOf(fresh);
   const chain = tail(seeded.rel, seeded.framing, ctx, fresh);
-  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh);
+  return chain && lowered(chain, BaseGraph, settled.propertySeek, settled.ftsSubstringPredicate, settled.detached, fresh, settled.budget);
 }
 
 /** The column a re-inject binds each value's array index (stream position) to — threaded as an encounter

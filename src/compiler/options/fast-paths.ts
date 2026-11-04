@@ -89,6 +89,12 @@ export interface CompileOptions {
    *  meta-properties, which a bound `properties().id()` / meta read then consumes. Off (the default) for
    *  ordinary wire framing, so base props stay `{t, v}` and the base plan is unchanged by construction. */
   readonly detached?: boolean;
+  /** THIS compile's work meter (`CompileBudget`, `src/sql/kernel/budget.ts`), when the caller holds one —
+   *  per-compile STATE handed in, never shared between compiles. Absent (every production caller), the
+   *  compile makes its own at `COMPILE_BUDGET_BYTES`. Two callers pass one: an instrument that reads the
+   *  meter's `peak`, and a Bun-only scale test whose LITERAL text (`inject` of 6 000 maps) is deliberately
+   *  past what a Durable Object accepts. Raising the production limit is never the fix for a slow compile. */
+  readonly budget?: import('../../sql/kernel/budget.ts').CompileBudget;
 }
 
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({

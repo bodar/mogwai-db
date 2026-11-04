@@ -10,7 +10,7 @@ import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
-import { CF_MAX_SQL_BYTES } from '../../cf-limits.ts';
+import { COMPILE_BUDGET_BYTES } from '../../sql/kernel/budget.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -1686,24 +1686,29 @@ function minimalLoopCount(p: unknown, lo: number, holds: (k: number) => boolean 
 }
 
 /**
- * THE MOST STEPS ONE BOUNDED REPEAT MAY SPLICE — a ceiling on COMPILE WORK, set where no statement could
- * come out of it anyway, and a property of the query text, so a decline past it is one too.
+ * WHAT ONE SPLICED STEP IS CHARGED — the unroll's EARLY charge against the compile's work budget
+ * (`COMPILE_BUDGET_BYTES`, `src/sql/kernel/budget.ts`), decided from the count alone before a phase is built.
  *
  * A bounded repeat has ONE lowering, the unroll, and everything after it — every Pass, the lowering, the
- * emitter — costs time and stack linear in the steps it splices: in a count the user TYPED. Unchecked,
+ * emitter — costs time linear in the steps it splices: in a count the user TYPED. Unchecked,
  * `repeat(out().limit(1)).until(loops().is(gte(1000000000)))` never finished compiling (a CPU-limit kill
- * in a Durable Object), and `times(3000)` ran the compiler out of stack.
+ * in a Durable Object). So the steps are charged before any are built, at the CHEAPEST step that renders:
+ * a slice, ~40 bytes a phase (`repeat(limit(1))` ~60, measured; a movement ~130, `has()` ~115,
+ * `out().order().by(k)` ~750). Past the budget at that rate no body fits the budget anyway, so the
+ * decline only says early, and clearly, what the rendered-bytes charge would say late. It is a charge of
+ * the same LIMIT rather than of the compile's meter instance because it runs in the Pass tier, which no
+ * lowering state reaches (a nested body's unroll runs under its own `runPasses`), and because it is one
+ * unit's charge, a function of the query text alone.
  *
- * ⚠️ **It must not refuse what the platform accepts — the defect of the ceiling it replaces.** That one
- * (`= 100`) charged every body the worst per-step cost (~1 KB, `order().by(k)`), so it refused seven
- * times more than a DO does. This one charges the CHEAPEST step that renders: a slice, ~40 bytes a phase
- * (`repeat(limit(1))`, measured; a movement ~140, `has()` ~120). Past `CF_MAX_SQL_BYTES` / 40 steps no
- * body fits a Durable Object's 100 KB statement, so the decline only says early, and clearly, what the
- * store would have said late. Below it nothing is guessed: SQLite's own statement-shape limits (the DO's
- * expression depth is 100, its join width 64) decline cleanly at the store (`GraphStore.query`), and
- * `CfLimitedSql` makes Bun refuse what a DO refuses (`mise run test:cf-limits`).
+ * ⚠️ **It must not refuse what the platform accepts** — the defect of the two ceilings it replaces: `= 100`
+ * charged every body the worst step's cost, and `CF_MAX_SQL_BYTES / 40` wired the Durable Object's statement
+ * cap into the compiler. The store's limits are the store's call (`GraphStore.query` declines a statement
+ * the DO refuses; `CfLimitedSql` makes Bun refuse the same, `mise run test:cf-limits`), so a raised cap is a
+ * free win here. The one body this over-charges is one whose phases render NOTHING (a side-effect-only
+ * `repeat(aggregate('x'))`), and past 10 000 spliced steps that is still 10 000 steps of every Pass's work.
  */
-const MAX_UNROLLED_STEPS = Math.floor(CF_MAX_SQL_BYTES / 40);
+const UNROLLED_STEP_BYTES = 40;
+const STEPS_IN_BUDGET = Math.floor(COMPILE_BUDGET_BYTES / UNROLLED_STEP_BYTES);
 
 /** How many steps `chain` stands for once every bounded repeat inside it is unrolled: each step once, plus
  *  its child chains (read raw — they are normalized later, per spliced copy), with a `times(m)` region's
@@ -1815,14 +1820,14 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // each phase boundary. Unrolling is our ONLY lowering of a bounded repeat (the physical regime split,
   // not TinkerPop's optional strategy), so `withoutStrategies(RepeatUnrollStrategy)` is a result-preserving
   // no-op (`NO_OP_STRATEGIES`) rather than a request that could only turn an answer into a throw.
-  // THE ONE CEILING, and it is on the query TEXT: how many steps this unroll splices (`MAX_UNROLLED_STEPS`).
+  // THE EARLY CHARGE, on the query TEXT: how many steps this unroll splices (`UNROLLED_STEP_BYTES` each).
   // Checked from the count alone, before a phase is built, so `until(loops().is(gte(1000000000)))` declines
   // at once instead of compiling for minutes.
   const levels = Math.min(n, lastLevel);
   const copies = emit ? (levels * (levels + 1)) / 2 : levels; // emit: one arm per level, arm k holds k copies
-  const spliced = copies * unrolledSize(body, read, MAX_UNROLLED_STEPS);
-  if (spliced > MAX_UNROLLED_STEPS) {
-    throw UnsupportedTraversal.because(`a repeat() bounded at ${n} iterations (times(${n}), or an until(loops().is(…)) that first holds there)${emit ? ' with emit()' : ''} unrolls to about ${Math.round(spliced)} steps, past the ${MAX_UNROLLED_STEPS} one SQL statement can carry; ${needsPhases(body, read)
+  const spliced = copies * unrolledSize(body, read, STEPS_IN_BUDGET);
+  if (spliced > STEPS_IN_BUDGET) {
+    throw UnsupportedTraversal.because(`a repeat() bounded at ${n} iterations (times(${n}), or an until(loops().is(…)) that first holds there)${emit ? ' with emit()' : ''} unrolls to about ${Math.round(spliced)} steps, more than the ${STEPS_IN_BUDGET} the compiler spells into one statement (${Math.round(COMPILE_BUDGET_BYTES / 1000)} KB of SQL); ${needsPhases(body, read)
       ? 'lower the count — a body holding a barrier (order/limit/range/dedup/aggregate/…) runs only as unrolled iterations'
       : 'lower the count, or bound the loop with until(loops().is(n)), which a body without a barrier runs as a loop rather than unrolled'}`);
   }

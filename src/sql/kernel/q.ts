@@ -23,6 +23,7 @@ import { sql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { Compound, list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { type Expression } from '@bodar/lazyrecords/sql/template/Expression.ts';
 import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
+import type { CompileBudget } from './budget.ts';
 
 // Re-export the node types so no other module imports them from lazyrecords.
 export type { Expression, Sql };
@@ -73,11 +74,18 @@ export const keyedValue = (v: unknown, key: string): Expression => new KeyedValu
  * `repeat(out().order().by('name')).times(40)` spent 1.44s of a 1.60s compile in those walks, and the
  * compile of `times(n)` grew ~5× per doubling of n. One stack walk is O(tokens).
  */
-function tokens(tree: Sql): (Text | Identifier | Value)[] {
+function tokens(tree: Sql, budget?: CompileBudget): (Text | Identifier | Value)[] {
   const out: (Text | Identifier | Value)[] = [];
+  // THE RENDERED-BYTES CHARGE (`CompileBudget`): exact, and counted AS the text is laid out, so a statement
+  // past the budget stops here rather than after its whole text is joined. A placeholder counts as its `?`.
+  let bytes = 0;
+  const push = (token: Text | Identifier | Value): void => {
+    out.push(token);
+    if (budget && (bytes += token instanceof Text ? token.text.length : 1) > budget.limit) budget.charge(bytes);
+  };
   const stack: { node: Compound; members: Iterator<Expression>; first: boolean }[] = [];
   const enter = (node: Compound): void => {
-    if (node.start !== empty) out.push(node.start);
+    if (node.start !== empty) push(node.start);
     stack.push({ node, members: node.expressions[Symbol.iterator](), first: true });
   };
   enter(tree);
@@ -86,15 +94,16 @@ function tokens(tree: Sql): (Text | Identifier | Value)[] {
     const next = top.members.next();
     if (next.done) {
       stack.pop();
-      if (top.node.end !== empty) out.push(top.node.end);
+      if (top.node.end !== empty) push(top.node.end);
       continue;
     }
     if (top.first) top.first = false;
-    else if (top.node.separator !== empty) out.push(top.node.separator);
+    else if (top.node.separator !== empty) push(top.node.separator);
     const e = next.value;
-    if (e instanceof Text || e instanceof Identifier || e instanceof Value) out.push(e);
+    if (e instanceof Text || e instanceof Identifier || e instanceof Value) push(e);
     else if (e instanceof Compound) enter(e);
   }
+  budget?.charge(bytes);
   return out;
 }
 
@@ -122,8 +131,8 @@ function hasRepeatedKey(toks: readonly (Text | Identifier | Value)[]): boolean {
  * Durable Object, `test/cf-probe`). With no repeat the statement keeps lazyrecords' anonymous-`?`
  * spelling (`statement/ordinalPlaceholder`), so the overwhelmingly common case is byte-identical.
  */
-function renderStatement(tree: Sql): { sql: string; binds: any[] } {
-  const toks = tokens(tree);
+function renderStatement(tree: Sql, budget?: CompileBudget): { sql: string; binds: any[] } {
+  const toks = tokens(tree, budget);
   const numbered = hasRepeatedKey(toks);
   const ordinals = new Map<string, number>();
   const binds: any[] = [];
@@ -197,9 +206,11 @@ export function spells(tree: Expression, needle: string): boolean {
 
 /** Render a standalone node (a fragment or a whole tree) to `{sql, binds}` — the
  *  boundary for the few spots that need SQL text without the `Query` CTE machinery
- *  (e.g. a merge run-closure's match query). Binds fall out of the tree. */
-export function render(node: Expression): { sql: string; binds: any[] } {
-  return renderStatement(sql(node));
+ *  (e.g. a merge run-closure's match query). Binds fall out of the tree. A STATEMENT a compile ships is
+ *  rendered with that compile's `budget`, which charges its bytes (`CompileBudget`); a fragment rendered
+ *  only to be read (the emitter's qualifier scan) is not a statement and passes none. */
+export function render(node: Expression, budget?: CompileBudget): { sql: string; binds: any[] } {
+  return renderStatement(sql(node), budget);
 }
 
 /** The minimal seam a rendered statement runs against — `GraphStore.query` satisfies it. Structural,

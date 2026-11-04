@@ -7,6 +7,7 @@ import type { Service } from '../../services/spi/types.ts';
 import type { MergePolicy, SideEffectConstants } from '../../gremlin/frontend.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { Declines } from '../unsupported.ts';
+import type { CompileBudget } from '../../sql/kernel/budget.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
 /**
@@ -57,6 +58,9 @@ export interface RelRequest {
    *  but per-compile STATE, carried so every lowering this request starts (the wire read, a segment head,
    *  a resume) records into the same one. Absent: each lowering gets a fresh sink nobody reads. */
   readonly declines?: Declines;
+  /** The compile's ONE work meter (`CompileBudget`), created by `compilePlan` — per-compile STATE carried
+   *  for `declines`' reason. Absent: each lowering gets a fresh meter at the same limit. */
+  readonly budget?: CompileBudget;
 }
 
 /**
@@ -155,6 +159,7 @@ export function loweringOptions(
     sideEffectPolicies: request.sideEffectPolicies,
     ...(request.scopeNames ? { scopeNames: request.scopeNames } : {}),
     ...(request.declines ? { declines: request.declines } : {}),
+    ...(request.budget ? { budget: request.budget } : {}),
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that this value was not handed to the lowering when one was declared, so the whole

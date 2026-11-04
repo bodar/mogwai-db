@@ -42,6 +42,7 @@ import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { bagOf, run, seededStore, storeSeededWith } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
+import { CompileBudgetExceeded } from '../../src/sql/kernel/budget.ts';
 import { GraphStore, type Sql } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
@@ -530,23 +531,24 @@ describe('a SQLite limit spelled the workerd way still declines clearly', () => 
 });
 
 // A bounded repeat's ONE lowering is the unroll, whose compile work is linear in the steps it splices — a
-// count the user typed. Past `MAX_UNROLLED_STEPS` (where even the cheapest step overflows a DO's 100 KB
-// statement) it declines from the count alone, before a phase is built: a written times(n), the counted
-// until that rewrites to one, a large nested product, and emit's triangular arms alike.
+// count the user typed. Past what the compile budget (`COMPILE_BUDGET_BYTES`) holds even at the cheapest
+// step's bytes (`UNROLLED_STEP_BYTES`, `ir/strategies.ts`) it declines from the count alone, before a phase
+// is built: a written times(n), the counted until that rewrites to one, a large nested product, and emit's
+// triangular arms alike. The ceiling is the compiler's own, not the store's: no platform constant is read.
 describe('a bounded repeat past the unroll ceiling declines from the count', () => {
   test.each([
-    ['g.V().repeat(__.out().limit(1)).until(__.loops().is(3000)).count()', 'lower the count — a body holding a barrier'],
+    ['g.V().repeat(__.out().limit(1)).until(__.loops().is(6000)).count()', 'lower the count — a body holding a barrier'],
     ['g.V().repeat(__.out().limit(1)).until(__.loops().is(P.gte(1000000000))).count()', 'lower the count — a body holding a barrier'],
-    ['g.V().repeat(__.out().limit(1)).times(5000).count()', 'lower the count — a body holding a barrier'],
-    ['g.V().repeat(__.out()).times(5000).count()', 'bound the loop with until(loops().is(n))'],
-    ['g.V().emit().repeat(__.out().limit(1)).times(60).count()', 'with emit()'],
+    ['g.V().repeat(__.out().limit(1)).times(6000).count()', 'lower the count — a body holding a barrier'],
+    ['g.V().repeat(__.out()).times(12000).count()', 'bound the loop with until(loops().is(n))'],
+    ['g.V().emit().repeat(__.out().limit(1)).times(120).count()', 'with emit()'],
     ['g.V().repeat(__.local(__.repeat(__.out().limit(1)).times(100))).times(100).count()', 'unrolls to about'],
   ])('%s', (q, says) => {
     const started = performance.now();
     let thrown: unknown;
     try { run(store, q); } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(UnsupportedTraversal);
-    expect((thrown as Error).message).toContain('one SQL statement can carry');
+    expect((thrown as Error).message).toContain('the compiler spells into one statement (400 KB of SQL)');
     expect((thrown as Error).message).toContain(says);
     expect(performance.now() - started).toBeLessThan(1000); // decided from the count, not by compiling it
   });
@@ -565,22 +567,37 @@ describe('a bounded repeat past the unroll ceiling declines from the count', () 
     expect(underShallowStack(() => vals("g.V().repeat(__.out().limit(1)).times(1200).values('name')"))).toEqual([]);
   });
 
-  // With the compiler's stack no longer the limit, the binding limit is the STATEMENT's — a clear decline
-  // naming it, the same on every runtime.
-  test('a deep unroll past what SQLite parses declines by the statement limit, not the stack', () => {
-    for (const q of ["g.V().repeat(__.out().order().by('name')).times(1200).count()", 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()'])
-      expect(() => underShallowStack(() => run(store, q))).toThrow(/exceeds a SQLite statement limit/);
+  // With the compiler's stack no longer the limit, what binds is the TEXT: past the compile budget the
+  // compiler declines naming the count (`CompileBudgetExceeded`); under it, past what SQLite parses, the
+  // store declines naming its limit. Both clear, the same on every runtime, neither the stack.
+  test('a deep unroll past the compile budget declines naming the count, not the stack', () => {
+    const q = "g.V().repeat(__.out().order().by('name')).times(1200).count()"; // ~900 KB of SQL
+    let thrown: unknown;
+    try { underShallowStack(() => run(store, q)); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(CompileBudgetExceeded);
+    expect((thrown as Error).message).toContain('expands to more than 400 KB of SQL in one statement; repeat(…).times(1200) unrolls its body 1200 times');
+  });
+  test('a deep unroll under the budget, past what SQLite parses, declines by the statement limit, not the stack', () => {
+    const q = 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()'; // ~270 KB of SQL
+    expect(() => underShallowStack(() => run(store, q))).toThrow(/exceeds a SQLite statement limit/);
   });
 
   // A CORRELATED body is not a relation of its own, so its spine is never cut: there the depth stays the
-  // compile boundary's backstop (`tooDeep`) — whatever happens, a RangeError never reaches the user.
-  test('a compile that runs out of stack declines', () => {
-    for (const q of ['g.V().local(__.repeat(__.out().limit(1)).times(1200)).count()', 'g.V().union(__.repeat(__.out().limit(1)).times(1200), __.identity()).count()']) {
-      let thrown: unknown;
-      try { underShallowStack(() => run(store, q)); } catch (e) { thrown = e; }
-      if (thrown !== undefined) expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+  // compile boundary's backstop (`tooDeep`). Whichever way a runtime's stack falls, the user gets the right
+  // answer or a clear decline — never a RangeError, and never a wrong count.
+  test.each([
+    ['g.V().local(__.repeat(__.out().limit(1)).times(1200)).count()', 0],
+    ['g.V().union(__.repeat(__.out().limit(1)).times(1200), __.identity()).count()', 6],
+  ] as const)('a compile that may run out of stack answers or declines: %s', (q, count) => {
+    let thrown: unknown;
+    let answered: unknown;
+    try { answered = underShallowStack(() => vals(q)); } catch (e) { thrown = e; }
+    if (thrown === undefined) expect(answered).toEqual([count]);
+    else {
+      expect(thrown).toBeInstanceOf(UnsupportedTraversal);
+      expect((thrown as Error).message).toMatch(/nests deeper than the compiler can follow|statement limit/);
     }
-  });
+  }, 30_000);
 });
 
 // A CUT SPINE ANSWERS WHAT THE UNCUT ONE DID. Over a 40-vertex ring (`next` to i+1, `jump` to i+3) a long

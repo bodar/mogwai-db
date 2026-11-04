@@ -8,7 +8,8 @@ import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
-import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, nodeFact, recursiveStep, refNames, refReads, relChildren, relExprs, rewriteExpr } from './walk.ts';
+import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, nodeFact, recursiveStep, refNames, refReads, relChildren, relExprs, rewriteExpr, spelledSize } from './walk.ts';
+import type { CompileBudget } from '../sql/kernel/budget.ts';
 import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 import { realJsonText } from '../json-exact.ts';
@@ -227,7 +228,7 @@ const relReads: (r: Rel) => Reads = nodeFact((r: Rel): Reads => {
   return out;
 });
 
-function assembler(bindings: ReadonlyMap<string, Binding>) {
+function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudget) {
 
   /**
    * COMPUTE ONCE: the column spellings whose every inlining RE-RUNS A SUBQUERY.
@@ -1086,7 +1087,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         const local = spools(node);
         const body = render();
         spooled = new Set();
-        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes([...ctesFor(node), ...local], body, recursiveList)) });
+        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes([...ctesFor(node), ...local], body, recursiveList), budget) });
       };
       // `isStmt` first because it NARROWS the union `retained` only answers a question about, so the
       // CTE arm below has a `Rel`. Then `retained`, not `binding.snapshot`: this is the STEP
@@ -1124,8 +1125,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
 
 /** The rendered bind list is the authority the DO cap is measured against: `check`'s static count
  * is over IR occurrences, and a fused block can spell one `Lit` more than once. */
-const renderStep = (tree: Expression): Emitted => {
-  const out = render(tree);
+const renderStep = (tree: Expression, budget?: CompileBudget): Emitted => {
+  const out = render(tree, budget);
   if (out.binds.length > DO_BIND_CAP) throw new BindBudgetExceeded(out.binds.length);
   return { sql: out.sql, binds: out.binds };
 };
@@ -1162,10 +1163,10 @@ export function emit(program: Plan): readonly Step[] {
  */
 export interface RenderedPlan { readonly effects: readonly Step[]; readonly result?: Emitted; }
 
-export function renderLowered(program: Plan): RenderedPlan {
-  const { effects, result } = emitProgram(program);
+export function renderLowered(program: Plan, budget?: CompileBudget): RenderedPlan {
+  const { effects, result } = emitProgram(program, budget);
   if (!result) return { effects };
-  const out = render(result);
+  const out = render(result, budget);
   return { effects, result: { sql: out.sql, binds: out.binds } };
 }
 
@@ -1179,9 +1180,14 @@ export const renderedSteps = (rendered: RenderedPlan): readonly Step[] =>
  * ordering in one place, and `renderLowered` is that render. Deliberately module-private: a second
  * exported crossing is how a compile came to emit the same plan three times.
  */
-function emitProgram(program: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } {
+function emitProgram(program: Plan, budget?: CompileBudget): { readonly effects: readonly Step[]; readonly result?: Expression } {
+  // THE TREE-SIZE CHARGE, FIRST (`CompileBudget`). `checkPlan` and the assembler both walk the plan as the
+  // tree its text is, so a DAG whose sharing compounds would cost them 2^k before the rendered-bytes charge
+  // could fire. `spelledSize` reads that tree's size off the DAG in O(DAG): each binding, and the result,
+  // is spelled whole by the assembler, and every node spells at least one byte.
+  if (budget) for (const node of [...program.bindings.map((binding) => binding.node), program.result]) budget.charge(spelledSize(node));
   checkPlan(program);
-  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).parts(program);
+  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding])), budget).parts(program);
 }
 
 /** The single-step case, which every read plan is. A derived convenience over `emit`, deliberately

@@ -13,6 +13,8 @@ import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
 import { Declines, UnsupportedTraversal } from './unsupported.ts';
+import { CompileBudget, CompileBudgetExceeded } from '../sql/kernel/budget.ts';
+import { eachStepDeep, rawBodies } from './ir/walk.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, Executable, Program, Shape, ValueType, ListOf, MapOf } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, perRowColumn, hasTypedMembers, memberTypeOf, withMemberType, isPerRow, SCALAR_MEMBERS, TYPED_MEMBERS, PER_ROW, PER_ROW_ENVELOPE, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -46,7 +48,29 @@ function applyDiscard(plan: Executable): Executable {
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, wireParams: Record<string, any>, options?: CompileOptions, wireParamTypes: Record<string, TypeNode> = {}): Plan {
   try { return compileUnguarded(gremlin, wireParams, options, wireParamTypes); }
-  catch (error) { throw tooDeep(error) ?? error; }
+  catch (error) { throw tooDeep(error) ?? expansionNamed(error, gremlin, wireParams, wireParamTypes) ?? error; }
+}
+
+/**
+ * A compile past its WORK BUDGET (`CompileBudget`) says which part of the query expanded, in the user's
+ * terms. The meter is charged deep in the emitter, which knows bytes and nodes but not the step the user
+ * typed — the query text does. A bounded `repeat()` is the expansion a user can see and change (its body
+ * is spelled once per iteration), so the largest `times(n)` at any depth is named; anything else is a
+ * nesting whose text compounds per level, and the advice is to split the traversal.
+ */
+function expansionNamed(error: unknown, gremlin: string, wireParams: Record<string, any>, wireParamTypes: Record<string, TypeNode>): CompileBudgetExceeded | null {
+  if (!(error instanceof CompileBudgetExceeded)) return null;
+  const params = paramEnv(wireParams, wireParamTypes);
+  let most = 0;
+  try {
+    eachStepDeep(stepChain(parseGremlin(gremlin), params), rawBodies(params), (s) => {
+      const n = s.name === 'times' ? (s.args ?? [])[0]?.value : undefined;
+      if (typeof n === 'number' && n > most) most = n;
+    });
+  } catch { /* the hint is a courtesy: an unreadable query keeps the plain decline */ }
+  return error.hinted(most > 1
+    ? `repeat(…).times(${most}) unrolls its body ${most} times — lower the count, or, for a body without a barrier step (order/limit/range/dedup/aggregate/…), bound it with until(loops().is(${most})), which runs as a loop rather than unrolled`
+    : 'its steps nest so that each level spells the one before it again — split it into smaller traversals');
 }
 
 /**
@@ -131,6 +155,9 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
   const declines = new Declines();
   const relRequest = {
     declines,
+    // The compile's ONE work meter, beside the decline sink and for its reason: every route below — the
+    // wire read, each segment head and resume, the ranked-order probe — charges the same one.
+    budget: options?.budget ?? new CompileBudget(),
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,

@@ -16,6 +16,7 @@
 // generous enough for a loaded CI runner yet far below the quadratic cost.
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
+import { CompileBudget } from '../../src/sql/kernel/budget.ts';
 import { runSteps } from '../../src/program.ts';
 import { isRowsBind } from '../../src/rel/emit.ts';
 import { GraphStore } from '../../src/storage.ts';
@@ -47,8 +48,16 @@ function graph(n: number): GraphStore {
   return store;
 }
 
+/**
+ * The drivers arrive as an `inject()` LITERAL of up to 8 000 maps, so one statement here is several MB of SQL —
+ * past what a Durable Object accepts (100 KB) and past the compile budget (`COMPILE_BUDGET_BYTES`, 400 KB),
+ * on purpose: what is under test is the merge's RUNTIME linearity in its drivers, and a literal is the one
+ * way to hand a merge thousands of drivers on Bun. So these compiles run under a meter sized for that text.
+ */
+const SCALE_TEXT_BUDGET = 64_000_000;
+
 function runRecorded(store: GraphStore, q: string): { rows: readonly Record<string, unknown>[]; ms: number; statements: { sql: string; binds: readonly unknown[] }[] } {
-  const compiled = compile(q, {});
+  const compiled = compile(q, {}, { budget: new CompileBudget(SCALE_TEXT_BUDGET) });
   if (compiled.kind !== 'program') throw new Error(`expected a write program for ${q}`);
   const statements: { sql: string; binds: readonly unknown[] }[] = [];
   const recording = {

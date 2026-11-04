@@ -521,6 +521,98 @@ export function relDepth(r: Rel): number {
   return depthMemo.get(r)!;
 }
 
+const spelledMemo = new WeakMap<object, number>();
+/**
+ * HOW MANY NODES A TREE WALK OVER THIS NODE VISITS — the DAG read as the TREE every spelling of it is.
+ *
+ * The plan is a DAG: a node built once and referenced twice is ONE object. But `check` walks it, and the
+ * emitter SPELLS it, once per reference — SQL has no `let` inside a statement, so a shared `Expr` is
+ * written out at each use and a correlated subplan shared by two parents is a subquery written twice.
+ * Sharing that compounds (a running value named in both arms of a `CASE`, a correlated body that reads the
+ * body before it twice) is therefore 2^k text for k levels while the DAG is only k nodes — the class
+ * `project()`'s accumulator shipped (`record.ts`, `recordPairs`' invariant) and the guarded transform
+ * chain still has.
+ *
+ * This answers the TREE size from the DAG in O(DAG): memoised per node (a node is immutable, so its tree
+ * size is a fact of its identity — `nodeFact`'s argument) and computed ITERATIVELY, for `relDepth`'s
+ * reason: a bounded repeat's spine is thousands of nodes deep. A `Ref` is a leaf, as it is to every walker
+ * — a named binding is spelled once, in the `WITH` list, however often it is read. A node referenced twice
+ * by one parent is counted twice: that is a second spelling, not a duplicate visit.
+ *
+ * Every node spells at least one byte, so this is a lower bound on the text one walk of the node writes
+ * (`CompileBudget`, `src/sql/kernel/budget.ts`, is what reads it).
+ */
+export const spelledSize = (root: Rel | Stmt | Expr): number => treeSize(root, spelledMemo, (node) => {
+  if (isStmt(node)) return [...stmtChildren(node), ...stmtExprs(node)];
+  if (isRel(node)) return [...relExprs(node), ...relChildren(node)];
+  return [...exprChildren(node), ...exprRels(node)];
+},
+// An expression holding no subquery IS its `expressionSize`, usually already known: the passes rebuild
+// relations but keep their expressions, which the lowering's own charge measured before them.
+(node) => (isRel(node) || isStmt(node) || exprHasSubquery(node) ? undefined : expressionSize(node)));
+
+const expressionMemo = new WeakMap<object, number>();
+/**
+ * `spelledSize` of ONE EXPRESSION, its correlated subplans counted as one node each — the part of the tree
+ * no rewrite can share. A shared `Rel` may yet become one named CTE (`name`), so before naming only an
+ * `Expr`'s own sharing is certain to be spelled per use: an `Expr` is never hoisted, at any stage.
+ */
+const expressionSize = (root: Expr): number =>
+  treeSize(root, expressionMemo, exprChildren, (node) => (node.kind === 'col' || node.kind === 'lit' ? 1 : undefined));
+
+/** The largest `expressionSize` among every expression of a program's roots — their relations', their
+ *  correlated subplans' and their statements' — each node visited once. */
+export function largestExpression(roots: readonly (Rel | Stmt)[]): number {
+  let largest = 0;
+  const measure = (e: Expr): void => { largest = Math.max(largest, expressionSize(e)); };
+  const rels: Rel[] = [];
+  const seen = new Set<Expr>();
+  for (const root of roots) {
+    if (!isStmt(root)) { rels.push(root); continue; }
+    rels.push(...stmtChildren(root));
+    stmtExprs(root).forEach(measure);
+    const stack = [...stmtExprs(root)];
+    while (stack.length) {
+      const e = stack.pop()!;
+      if (seen.has(e)) continue;
+      seen.add(e);
+      rels.push(...exprRels(e));
+      stack.push(...exprChildren(e));
+    }
+  }
+  forEachRel(rels, (r) => relExprs(r).forEach(measure));
+  return largest;
+}
+
+/**
+ * The tree size of a DAG node, memoised per node in `memo` and computed with an explicit stack. `direct`
+ * answers a node without a frame or a memo entry when it can (a leaf, a size another fact already holds) —
+ * most nodes of a plan are leaves, and a memo entry each is most of what this would otherwise cost.
+ */
+function treeSize<N extends object>(
+  root: N, memo: WeakMap<object, number>, beneath: (node: N) => readonly N[], direct: (node: N) => number | undefined,
+): number {
+  const size = (node: N): number | undefined => direct(node) ?? memo.get(node);
+  const known = size(root);
+  if (known !== undefined) return known;
+  // Each frame holds its node's children once enumerated, so a node is enumerated once however it is reached.
+  const stack: { readonly node: N; children?: readonly N[] }[] = [{ node: root }];
+  while (stack.length) {
+    const top = stack[stack.length - 1]!;
+    if (memo.has(top.node)) { stack.pop(); continue; }
+    if (!top.children) {
+      top.children = beneath(top.node);
+      for (const child of top.children) if (size(child) === undefined) stack.push({ node: child });
+      continue;
+    }
+    stack.pop();
+    let total = 1;
+    for (const child of top.children) total += size(child)!;
+    memo.set(top.node, total);
+  }
+  return memo.get(root)!;
+}
+
 /** Visit every relation in the DAG once, plus every relation correlated from an expression. Several
  *  ROOTS (a program's bindings and its result) are one walk: a node they share is visited once. */
 export function forEachRel(plan: Rel | readonly Rel[], visit: (r: Rel) => void): void {
