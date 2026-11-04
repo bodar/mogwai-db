@@ -57,6 +57,14 @@ map, so those queries answer instead of declining, is not done — it needs the 
 `@Unsupported` L4 scenarios fail loudly when it lands. Separately, `test/cloudflare.test.ts` hard-codes
 port 8976, so CI flakes when several worktrees run at once.
 
+**`V(<traversal>)`/`E(<traversal>)` (✅ landed, b6d181e2..89ed8a0d).** An id traversal resolves ids per
+head traverser, as `GraphStep.resolveTraversalIds` does: the child runs as `flatMap(<traversal>)` (at the
+start, over a one-row synthetic seed), each value is looked up by re-entering the step with `idOfValue`
+(an element gives its id, a list/set is unpacked via `collectionMembersOrSelf`, no result matches
+nothing), through one external-id routing law (`routedExternalId`/`externalIdIs`,
+`src/compiler/rel/source.ts`; split in `splitTraversalIds`, `src/compiler/ir/step.ts`). Scales 3-5× for
+8× traversers. L3 1952 → 1963 (the whole `traversal-id` ledger bucket). Remains: nothing.
+
 **Filter-led predicate body (✅ landed, cb3e44a2..e195afc2).** A predicate body that leads with filters
 and then moves — `where(hasLabel(..).out())`, `not(hasLabel(..).out())`, SubgraphStrategy criteria
 `or(…, has(..).outV()…)` — answers at every predicate position: `bodyPredicate`
