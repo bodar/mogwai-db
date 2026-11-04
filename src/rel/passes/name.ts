@@ -94,8 +94,14 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
    * pick and the in-arm of another and answered 5, which no out-neighbour of v1 has. SQLite has no way to
    * evaluate a CORRELATED relation once for two readers (an `AS MATERIALIZED` CTE written inside the
    * correlated subquery is re-evaluated per reference, measured), so this declines. A bound one is a CTE,
-   * evaluated once, and stays correct; a reader that can read its input once instead (`hopJoin`'s
-   * direction row) asks `doubledReads` first and never reaches here.
+   * and a CTE read twice is evaluated once only when SQLite cannot flatten it into its readers: a CTE
+   * whose top SELECT is a plain projection or filter IS flattened into each reader, under a plain compound
+   * and a MERGE UNION ALL alike (measured; `copyRepeatsWork`, `src/rel/copies.ts`). The drawing relations
+   * that reach here — a shuffle `order()` (its `ORDER BY … LIMIT` or position window) and `sample()` (its
+   * draw window) — keep that barrier at the CTE's top, so each is materialized once and its readers agree
+   * (`g.V().order().by(shuffle).limit(1).as('x').union(identity(), identity()).select('x').dedup().count()`
+   * is always 1). A reader that can read its input once instead (`hopJoin`'s direction row) asks
+   * `doubledReads` first and never reaches here.
    */
   for (const [rel, seen] of counts) {
     if (seen > 1 && !isRoot.has(rel) && !binds(rel) && draws(rel)) throw new CopiedDraw();

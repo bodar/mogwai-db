@@ -21,6 +21,7 @@ import { CfLimitedSql, CF_MAX_SQL_BYTES } from '../../src/cf-limits.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { executeQuery } from '../support/executor.ts';
 import { bagOf, run } from '../support/harness.ts';
+import { rawVertex } from '../support/graph.ts';
 
 const MODERN_EDGES: readonly (readonly [number, number])[] = [[1, 2], [1, 4], [1, 3], [4, 5], [4, 3], [6, 3]];
 /** A small graph with a SELF-LOOP on 2 and a parallel pair 1→3, 3→1 — the multiset cases `both()` must
@@ -152,6 +153,14 @@ describe('both()/bothE()/bothV() agree with their union() spelling at depth', ()
     ['g.V().repeat(__.both()).times(3)', 'g.V().union(__.out(),__.in()).union(__.out(),__.in()).union(__.out(),__.in())'],
     // The UNBOUNDED walk: its frontier is the recursive reference, so its body is the direction-row join.
     ['g.V().repeat(__.both()).until(__.loops().is(3))', 'g.V().union(__.out(),__.in()).union(__.out(),__.in()).union(__.out(),__.in())'],
+    // Frontiers whose second copy would repeat work (`copyRepeatsWork`) read once — a label carrier, a
+    // sliced order, a keyed dedup, the per-traverser form — and still answer as the union spelling.
+    ["g.V().as('a').both().both().where(neq('a'))", "g.V().as('a').union(__.out(),__.in()).union(__.out(),__.in()).where(neq('a'))"],
+    ["g.V().as('a').out().both().where(neq('a'))", "g.V().as('a').out().union(__.out(),__.in()).where(neq('a'))"],
+    ["g.V().out().order().by('name').limit(2).both()", "g.V().out().order().by('name').limit(2).union(__.out(),__.in())"],
+    ["g.V().both().order().by('name').limit(3).both()", "g.V().both().order().by('name').limit(3).union(__.out(),__.in())"],
+    ["g.V().out().dedup().by('name').both()", "g.V().out().dedup().by('name').union(__.out(),__.in())"],
+    ["g.V().local(__.out().order().by('name').limit(1).both())", "g.V().local(__.out().order().by('name').limit(1).union(__.out(),__.in()))"],
   ];
   for (const store of [modern, loopy]) {
     for (const [a, b] of pairs) {
@@ -203,8 +212,12 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
   // A frontier with fewer than BOTH_COPY_BOUND (2) doubled reads beneath it keeps the per-direction joins:
   // two plain `e_out`/`e_in` seeks, never the MULTI-INDEX OR, which measured 25–47% slower at 8k vertices.
   // `both().both()` is the D=2 case: its second hop's frontier holds the first hop's ONE doubling.
+  // The last four are frontiers SQLite MATERIALIZES once — their CTE's top is the order's window, the
+  // DISTINCT, the LIMIT, the HAVING of a collapsed hop — so a second read is one more seek (`copyRepeatsWork`).
   for (const q of ['g.V().out().both()', "g.V().out('knows').bothE().otherV()", 'g.V().optional(__.out().both())',
-    'g.V().both().both()', "g.V().hasLabel('person').out('knows').both('created')", 'g.V().out().out().both().count()']) {
+    'g.V().both().both()', "g.V().hasLabel('person').out('knows').both('created')", 'g.V().out().out().both().count()',
+    'g.V().out().dedup().both().count()', "g.V().out().order().by('name').both().count()", 'g.V().out().limit(4).both().count()',
+    "g.V().out().has('name',neq('x')).both().count()"]) {
     test(`two plain seeks, no MULTI-INDEX OR: ${q}`, () => {
       const detail = plan(q);
       expect(detail.filter((d) => /MULTI-INDEX OR/.test(d))).toEqual([]);
@@ -227,6 +240,94 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
     for (const k of [4, 8, 16]) expect(sqlOf(`g.V()${both(k)}`).match(/VALUES \(0\), \(1\)/g)).toHaveLength(k - 2);
     // A walk's frontier is its recursive reference — unbounded — so a walk body always reads it once.
     expect(sqlOf('g.V().repeat(__.both()).until(__.loops().is(3))')).toContain('VALUES (0), (1)');
+  });
+});
+
+// A frontier whose second COPY would repeat per-row work is read ONCE, through the direction row, even
+// with no doubled read beneath it (`copyRepeatsWork`, src/rel/copies.ts). SQLite flattens a CTE whose top is
+// a plain projection or filter into each reader — under a plain compound and a MERGE UNION ALL alike — and
+// spells a correlated frontier at every reference, so the two-seek form ran the frontier's window, or
+// recomputed its label carrier, once per direction: `as('a').both().both().where(neq('a')).count()` 2.4×
+// and `out().order().by('name').limit(500).both().count()` 2× slower at 8 000 vertices than reading it once.
+describe('a frontier whose copy repeats work is evaluated once', () => {
+  type PlanRow = { id: number; parent: number; detail: string };
+  const planRows = (store: GraphStore, q: string): PlanRow[] => {
+    const p = compile(q, {});
+    if (p.kind !== 'read') throw new Error('expected a read plan');
+    return store.query(`EXPLAIN QUERY PLAN ${p.sql}`, p.binds) as PlanRow[];
+  };
+  /** The seeks of `index` NOT under a MULTI-INDEX OR — one per evaluation of a hop the FRONTIER makes
+   *  through that index (the copies of a frontier each seek it again). */
+  const plainSeeks = (index: 'e_out' | 'e_in', rows: readonly PlanRow[]): number => {
+    const orIndex = new Set(rows.filter((r) => /^INDEX \d+$/.test(r.detail)).map((r) => r.id));
+    return rows.filter((r) => r.detail.startsWith('SEARCH rme') && r.detail.includes(`INDEX ${index} (`) && !orIndex.has(r.parent)).length;
+  };
+  const nodeScans = (rows: readonly PlanRow[]): number => rows.filter((r) => /^SCAN rn\b/.test(r.detail)).length;
+
+  for (const [cls, q, frontierScans] of [
+    ['label carrier', "g.V().as('a').both().both().where(neq('a')).count()", (rows: PlanRow[]) => nodeScans(rows)],
+    ['label carrier after a hop', "g.V().as('a').out().both().where(neq('a')).count()", (rows: PlanRow[]) => nodeScans(rows)],
+    ['order + limit', "g.V().out().order().by('name').limit(500).both().count()", (rows: PlanRow[]) => plainSeeks('e_out', rows)],
+    // The first both() is two plain seeks off a scan; its in-arm is the frontier's one `e_in` seek.
+    ['order + limit after both()', "g.V().both().order().by('name').limit(10).both().count()", (rows: PlanRow[]) => plainSeeks('e_in', rows)],
+    ['dedup().by()', "g.V().out().dedup().by('name').both().count()", (rows: PlanRow[]) => plainSeeks('e_out', rows)],
+    ['the per-traverser form', "g.V().local(__.out().order().by('name').limit(1).both().count()).sum()", (rows: PlanRow[]) => plainSeeks('e_out', rows)],
+  ] as const) {
+    test(`${cls}: ${q}`, () => {
+      const rows = planRows(modern, q);
+      expect(rows.some((r) => r.detail === 'MULTI-INDEX OR')).toBe(true);
+      expect(sqlOf(q)).toContain('VALUES (0), (1)');
+      // The frontier's root access appears ONCE: it is evaluated once, not once per direction.
+      expect(frontierScans(rows)).toBe(1);
+    });
+  }
+
+  test('the bound is unchanged: a frontier SQLite materializes keeps its two seeks', () => {
+    for (const q of ["g.V().out().order().by('name').both().count()", 'g.V().out().dedup().both().count()', 'g.V().out().limit(4).both().count()']) {
+      expect(planRows(modern, q).some((r) => r.detail === 'MULTI-INDEX OR')).toBe(false);
+    }
+  });
+
+  // The SCALING PROBE, pinned: linear is ≈8× from 1 000 to 8 000 vertices, N log N ≈10×, above 16× is
+  // super-linear. The minimum of several runs, so a loaded runner's spikes cannot push the ratio up.
+  describe('linear from 1 000 to 8 000 vertices', () => {
+    /** n vertices named in a scrambled order, two `knows` edges out of each. */
+    const synthetic = (n: number): GraphStore => {
+      const raw = new BunSqlite(':memory:');
+      const store = new GraphStore(raw);
+      raw.exec('BEGIN');
+      const knows = store.labelId('knows');
+      for (let i = 1; i <= n; i++) {
+        rawVertex(store, i, 'person');
+        store.query('INSERT INTO vertex_properties(node,key,value,vtype) VALUES(?,?,?,?)', [i, 'name', `n${(i * 7919) % n}`, 'string']);
+      }
+      for (let i = 1; i <= n; i++) {
+        for (const t of [((i * 7 + 1) % n) + 1, ((i * 13 + 5) % n) + 1]) store.query('INSERT INTO edges(src,label,tgt) VALUES(?,?,?)', [i, knows, t]);
+      }
+      raw.exec('COMMIT');
+      return store;
+    };
+    const fastest = (store: GraphStore, q: string): number => {
+      run(store, q);
+      let best = Infinity;
+      for (let i = 0; i < 7; i++) {
+        const started = performance.now();
+        run(store, q);
+        best = Math.min(best, performance.now() - started);
+      }
+      return best;
+    };
+    const small = synthetic(1_000);
+    const large = synthetic(8_000);
+    for (const [q, expected] of [
+      ["g.V().as('a').both().both().where(neq('a')).count()", 95_960],
+      ["g.V().out().order().by('name').limit(500).both().count()", 2_000],
+    ] as const) {
+      test(q, () => {
+        expect((run(large, q) as { v: number }[])[0]!.v).toBe(expected);
+        expect(fastest(large, q) / fastest(small, q)).toBeLessThan(16);
+      });
+    }
   });
 });
 

@@ -20,7 +20,7 @@ import { ensureBulk } from './branch.ts';
 import { evidenceOf } from '../receiver.ts';
 import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
-import { doubledReads } from '../../../rel/copies.ts';
+import { copyRepeatsWork, doubledReads } from '../../../rel/copies.ts';
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -262,6 +262,15 @@ const BOTH_COPY_BOUND = 2;
  * A frontier that DRAWS (`order().by(shuffle).limit(1)`) is unbounded too, because inside a per-traverser
  * body each copy is evaluated on its own: the out-arm and the in-arm would read two different picks.
  *
+ * **Two seeks also need a copy to BE a seek** (`copyRepeatsWork`, `src/rel/copies.ts`): text is not the
+ * only cost. Where SQLite would evaluate each copy of the frontier on its own — a CTE it flattens into
+ * both arms, or a correlated frontier spelled twice — and that copy re-runs a barrier (the running-sum
+ * window under `order().by(k).limit(n)`, `dedup().by(k)`'s partition window) or recomputes a carried
+ * column (an `as()` label's `jsonb_array`), the one-read form wins: `out().order().by('name').limit(500)
+ * .both().count()` 27 → 15 ms and `as('a').both().both().where(neq('a')).count()` 93 → 72 at 8 000
+ * vertices. A frontier SQLite materializes once (a CTE whose top is the window, the DISTINCT or the
+ * LIMIT: `out().order().by('name')`, `out().dedup()`, `out().limit(n)`) keeps the two seeks.
+ *
  * The direction relation names no table and binds nothing (compiler ints), so a recursive term may hold
  * it — and a walk's frontier is its `SelfRef`, unbounded, so a `both()` walk body is one recursive
  * reference with no compound to transpose (`walk.ts`).
@@ -271,7 +280,7 @@ function hopJoin(
   restrict: (edges: Rel) => Expr | undefined = () => undefined,
 ): readonly HopArm[] {
   const left = frontierRel(from);
-  const free = left ? doubledReads(left) < BOTH_COPY_BOUND : (from as { readonly correlated: Expr }).correlated.kind === 'col';
+  const free = left ? doubledReads(left) < BOTH_COPY_BOUND && !copyRepeatsWork(left) : (from as { readonly correlated: Expr }).correlated.kind === 'col';
   return hops.length > 1 && free
     ? hops.map((hop) => directionsJoin([hop], from, graph, fresh, restrict))
     : [directionsJoin(hops, from, graph, fresh, restrict)];
