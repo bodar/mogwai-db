@@ -11,6 +11,7 @@ import { indexSeek, semijoinAll, trigramSeek } from '../../rel/passes/semijoin.t
 import { fuseAll } from '../../rel/passes/fuse.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
+import type { Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow, rowBounds } from '../../rel/bounds.ts';
 import { isSelfContained, refNames, relDepth } from '../../rel/walk.ts';
@@ -4264,13 +4265,39 @@ function boundedSpine(rel: Rel, steps: readonly IRStep[], ctx: ChainCtx, fresh: 
   return make.ref({ id: rel.id, name, channels: rel.channels, type: rel.type, bounds: rowBounds(rel) });
 }
 
-/** The cut-off pieces the result still reads, transitively — a piece a fold built and then abandoned (a
- *  lowering that tried one route, cut, and fell back to another) names nothing anyone reads. */
-const liveHoisted = (cut: readonly HoistedSpine[], result: Rel): readonly HoistedSpine[] => {
-  const wanted = new Set(refNames(result));
+/** The cut-off pieces the program still reads, transitively — from its result AND from its effects (a
+ *  guard over a collection site filled after a cut reads that cut) — while a piece a fold built and then
+ *  abandoned (a lowering that tried one route, cut, and fell back to another) names nothing anyone reads. */
+const liveHoisted = (cut: readonly HoistedSpine[], readers: readonly (Rel | Stmt)[]): readonly HoistedSpine[] => {
+  const wanted = new Set(readers.flatMap((reader) => [...refNames(reader)]));
   for (let i = cut.length - 1; i >= 0; i--) if (wanted.has(cut[i]!.name)) refNames(cut[i]!.node).forEach((name) => wanted.add(name));
   return cut.filter((piece) => wanted.has(piece.name));
 };
+
+/**
+ * THE BINDINGS IN AN ORDER WHERE EVERY `Ref` RESOLVES BACKWARDS (`checkPlan`), as close to the given order
+ * as that allows: each binding is preceded by whichever of the others it reads, transitively, and nothing
+ * else moves — a stable topological order, so a list that already resolves comes back unchanged. A cycle
+ * cannot be ordered and is left where it stands, for `checkPlan` to reject as the bug it is.
+ */
+function declaredBeforeUse(bindings: readonly Binding[]): readonly Binding[] {
+  const byName = new Map(bindings.map((binding) => [binding.name, binding] as const));
+  const placed = new Set<string>(), visiting = new Set<string>();
+  const ordered: Binding[] = [];
+  const place = (binding: Binding): void => {
+    if (placed.has(binding.name) || visiting.has(binding.name)) return;
+    visiting.add(binding.name);
+    for (const name of refNames(binding.node)) {
+      const read = byName.get(name);
+      if (read) place(read);
+    }
+    visiting.delete(binding.name);
+    placed.add(binding.name);
+    ordered.push(binding);
+  };
+  bindings.forEach(place);
+  return ordered;
+}
 
 const lowered = (
   chain: Tail, source: GraphSource, propertySeek: boolean, ftsSubstringPredicate: boolean, detached: boolean, fresh: Minter,
@@ -4292,7 +4319,7 @@ const lowered = (
   // access-path strategies over the base relation it now sits on.
   // A long spine the fold CUT (`boundedSpine`) is part of the same program: its pieces and the result run
   // through every pass as one plan, so a node they share stays one node and is named once.
-  const hoisted = liveHoisted(chain.hoisted ?? [], wire.rel);
+  const hoisted = liveHoisted(chain.hoisted ?? [], [wire.rel, ...(chain.effects ?? []).map((effect) => effect.node)]);
   const passed = semijoinAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel]), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
@@ -4309,7 +4336,12 @@ const lowered = (
   // on the result alone because a write step has already named its own target's shared nodes; the
   // day a write RESULT needs naming across that boundary, this is where the pass grows to walk a
   // program rather than a tree.
-  const built = effects.length ? program({ bindings: [...effects, ...named.bindings], result: named.result }) : named;
+  // A CUT spine (`boundedSpine`) is the one place an effect reads one of those CTEs — a guard over a
+  // collection site filled after a cut — so there each effect is preceded by the cut pieces it reads
+  // (`declaredBeforeUse`). They are plain CTEs, not steps: moving one earlier changes only where it is in
+  // scope, never what runs or when, and the effects keep their own order.
+  const bindings = [...effects, ...named.bindings];
+  const built = effects.length ? program({ bindings: hoisted.length ? declaredBeforeUse(bindings) : bindings, result: named.result }) : named;
   // A held LITERAL — of any size — inlines as a typed SQL literal (`constLit`), so a big `inject(v1…vN)`
   // is 0 binds and DO-legal with nothing to convert. The 100-bind cap is a PARAMETER budget, and the only
   // way past it is 100+ distinct PARAMETERS in one statement, which fails closed at the gate below rather

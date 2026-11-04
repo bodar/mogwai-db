@@ -607,6 +607,31 @@ describe('a long unrolled chain cut into CTEs', () => {
     expect(bagOf(on(q))).toEqual([...expected]);
   });
 
+  // AN EFFECT THAT READS ACROSS A CUT. A collection filled through a by() that may raise (`sum()` over a
+  // value whose type only the graph knows) carries a GUARD binding — its own step — that reads the site,
+  // and so the cut pieces before it. The guard was declared ahead of them, and every such query raised an
+  // internal "Ref … is not a Plan binding declared before this point". The ring is 40 long, so 100 hops
+  // (cut twice) must answer exactly what 20 (never cut) does — on a full stack and a workerd-sized one.
+  test.each([
+    "group('a').by('i').by(__.values('i').sum()).cap('a')",
+    "aggregate('a').by(__.values('i').sum()).cap('a')",
+    "groupCount('a').by(__.values('i').sum()).cap('a')",
+    "group('a').by('i').by(__.values('i').sum()).out('next').values('i')",
+    "as('p').out('next').group('a').by('i').by(__.select('p').values('i').sum()).cap('a')",
+    "union(__.identity(), __.out('next')).group('a').by('i').by(__.values('i').sum()).cap('a')",
+    "local(__.group('a').by('i').by(__.values('i').sum())).cap('a')",
+  ])('an effect reading a cut spine answers what the uncut chain does: …%s', (tail) => {
+    const after = (n: number) => `g.V().has('i', 0).repeat(__.out('next').limit(1)).times(${n}).${tail}`;
+    const uncut = JSON.stringify(run(ring, after(20)));
+    expect(JSON.stringify(run(ring, after(100)))).toEqual(uncut);
+    expect(JSON.stringify(underShallowStack(() => run(ring, after(100))))).toEqual(uncut);
+  });
+
+  test('a guard across a cut still raises the reference error', () => {
+    const q = "g.V().has('i', 0).repeat(__.out('next').limit(1)).times(100).group('a').by('i').by(__.label().sum()).cap('a')";
+    expect(() => run(ring, q)).toThrow(/sum\/mean over a text or non-number value/);
+  });
+
   // A body SQLite FLATTENS (a bare `out('next')`, no barrier) makes one FROM list of every hop, so there
   // the binding limit is SQLite's 200-term FROM list, not the statement text: past it, on a full stack and
   // a workerd-sized one alike, the user gets the clear decline naming it — never SQLite's bare message.
