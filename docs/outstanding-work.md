@@ -11,7 +11,7 @@ IDs in parentheses are stable — `git log -S<id>` finds their history (much of 
 `test/L7-census/deferrals.tsv` must hold no `crashed` rows. Three worklists fail loudly when a shape
 lands: `test/rel-spine.test.ts` `DECLINED`, `test/L4-addendum` `@Unsupported`, L5 `LAW UNEVALUABLE`.
 
-**Landed in the 2026-11-03 round** (detail in git; each item's residue is filed below). L3 1890 → 1963:
+**Landed in the 2026-11-03 round** (detail in git; each item's residue is filed below). L3 1890 → 1965:
 the L3 accounting ledger + derived GLV-lossy exclusion (faecb6f2: every in-scope failure is in
 `test/L3-conformance/expected-outcomes.ts` with a kind and a checked citation; a fix deletes its names
 there); edge Property framing (781a352c); mid-traversal `inject(xs)` (90518dfa); list-host member order in
@@ -19,7 +19,9 @@ a `by()` body (d4e3312f); reducer-headed child body (202bdbce); `null` id member
 decidable steps — stray repeat modulators, `times(n<=0)`, `identity()`/`discard()` filters, effect-free
 `sideEffect()` (f5b66932); filter-led predicate body + per-row label/id key probe (7915c526);
 `is(typeOf(T))` over known framings + MAP retype (7b3d623a); Binary values (e4b29d47);
-`V(<traversal>)`/`E(<traversal>)` (89ed8a0d).
+`V(<traversal>)`/`E(<traversal>)` (89ed8a0d); `call(service, map, traversal)` param merge in
+the reference's order, static map < traversal map < `with()` (874c5570: the one merger `parseCallSpec`,
+`src/services/params/call-params.ts`, over the existing constant folder; L3 → 1965, remains: nothing).
 
 ## 1. Wrong answers today
 
