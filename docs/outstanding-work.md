@@ -23,7 +23,19 @@ decidable steps — stray repeat modulators, `times(n<=0)`, `identity()`/`discar
 the reference's order, static map < traversal map < `with()` (874c5570: the one merger `parseCallSpec`,
 `src/services/params/call-params.ts`, over the existing constant folder; L3 → 1965, remains: nothing); T/`Direction` tokens order on the String rung by name, the Java class-name emulation deleted (5cb607a7: `kindOf` in `src/compiler/rel/orderability.ts` shares `cmpNatural` with String, so the JS and SQL key orders agree; defect l3-t-token-order, L3 → 1967, remains: nothing); `sum/mean/min/max/order/dedup(Scope.local)` over a value that may not be a collection (f1639e8a: a non-collection row is a one-member list handed to the list route's own per-row reducer via `oneMemberList`/`scalarListMember` in `src/compiler/rel/list.ts`, a Map row reads its entry set via `mapEntriesLocal` in `src/compiler/rel/map.ts`; ledger local-scope-scalar, L3 → 1973, remains: nothing); `merge()` over an incoming Map (6770c173: a per-row putAll — `mapPutAll` in `src/compiler/rel/map.ts` runs the `putAll` key rule factored out of `mapsMerged`, argument wins a shared key, wired by `mapMerge` in `src/compiler/rel/lower.ts`; defect l3-map-merge, L3 → 1976, remains: nothing); bounded `repeat().times(n)` unroll admits `tail`/`skip`/`sample` and the per-traverser hosts `local`/`map`/`flatMap`/`where`/`filter`/`not`/`and`/`or` (33e353dc + 6b7b8fac: the slices join `SIDE_EFFECT_FREE_BARRIERS` and the hosts `PER_TRAVERSER_HOSTS` in `src/compiler/ir/strategies.ts` — a host child resets per traverser, so nothing carries across iterations; an emit unroll over a random-drawing body declines via `nondeterministic` in `src/compiler/ir/step.ts`; L3 → 1988, remains: nothing); a per-traverser host NESTED inside a child body — an inner `local`/`map`/`flatMap` whose body is one value, plus scalar-route recursion, seeded continuations, gated list values and deep nesting (42beba55 + 5ec1079b + f341d307: `nestedHostChild`/`valueRun` in `src/compiler/rel/lower/reduction.ts`, `flatMapRejoin` under an enclosing origin via `nestRowOrigin`; a mid-run decline is final, never a re-entry; on trunk it also admits the local-emit-repeat witness `g_V_localXemit_repeatXlocalXout_order_byXnameXXX_timesX2X_valuesXnameXX` through the bounded unroll; L3 → 1991, remains: the ProductiveByStrategy form of `group().by(k).by(<list value that may be absent>)` declines — supporting it needs `mapNodePayload` to frame a null list value); `until(loops().is(P))` on an unnamed `repeat()` is a compile-time count, canonicalized to `times(k*)` with k* minimized over k≥0 for until-first and k≥1 for until-last (5d831b68 + d89ec6a7 + 0dc7f3ce: the canonicalization in `src/compiler/ir/strategies.ts`, unrolling only a body that needs phases, under a count ceiling with DO-spelled SQLite limits in `src/storage.ts` and a linear render in `src/sql/kernel/q.ts`; L4 witness `test/L4-addendum/repeat-until-loop-count.feature`; L3 → 1994, remains: nothing). Set ops over a per-row-typed scalar (f47a0fe6, re-landed on the setop-operand-relation prerequisite b15c9897): `values('tags').intersect/difference/combine/disjunct/merge/product/conjoin(…)` re-enter the per-row collection readers (`perRowListFunction` → `perRowCollectionStep`, reader `listFunction`, `src/compiler/rel/lower.ts`) — one fenced WHERE raises the reference text on a null or non-collection row and the List/Set rows run the existing list tail; L4 `test/L4-addendum/per-row-list-functions.feature`; L3 2000 → 2010; remains: the four `g_V_valuesXnameX_{combine,merge,disjunct,product}XV_foldX` declines (o-setop-mixed), the element-host depth limit and the other clean declines, all filed on the **Values** line below.
 
-## 0. Trunk CI is RED (fix first)
+**Landed in the 2026-11-04 round** (L3 1994 → 2018; residue filed below): the spine-depth bound (0152983f,
+§0 — trunk CI is green again from it); set-op operand as one relation (b15c9897); keyed/boolean `choose` with a
+reducing arm + `map()` on the rejoin (9adf67d7); the counted-until regime by what the walk refuses (0451a9d1);
+set ops over a per-row-typed scalar (f47a0fe6); `branch(<traversal>).option(…)` (df99c592 + f1e9199a); one
+"adds unlabelled traversers" step fact (f12ab0c7 — `addsUnlabelledTraversers`, `src/compiler/ir/step.ts`; it
+reached trunk inside the 9adf67d7 push although its own land was reported failed, and it fixes §1's former
+inject-fresh-traversers wrong answer). Built but NOT landed: tag-excludes-guard (§1b binary-carrier-guard,
+resume branch `wf/tag-excludes-guard-3-0`).
+
+## 0. Trunk CI (green again at 0152983f)
+
+The stack-depth red (`repeat-unroll-boundary.exec.test.ts` "a count under the ceiling still unrolls and
+answers") reddened GitHub CI for 0dc7f3ce, 0451a9d1, b15c9897 and f47a0fe6; 0152983f is the first green push.
 
 - ✅ **LANDED (83be7569→0e13f52b, 2ca3bfb6→d4c248a1, d86bd6b0→0152983f): the Rel tree's depth is bounded along a
   long step chain**, so the unroll's query-text ceiling (`MAX_UNROLLED_STEPS`), not the compiler's stack, is the
@@ -40,6 +52,23 @@ the reference's order, static map < traversal map < `with()` (874c5570: the one 
     cut. It is a clean decline.
   - **The spine is evaluated once per step.** A guard step and the result each re-evaluate the plain cut CTEs.
     The uncut plan inlined the spine twice in the same way, so this is not a regression.
+  - **The cut covers only the root spine of a WRITE-free program (spine-cut-hosts).** A long unroll inside a
+    correlated host (`g.V().local(__.repeat(__.out().limit(1)).times(1200)).count()`, union arms) or in a
+    write program (`g.V().repeat(__.out().limit(1)).times(1200).addV('x')`, `….property('x',1)`) still rides
+    the JS stack and declines via `tooDeep` at a runtime-dependent depth — clean, but the runtime-dependent
+    boundary the item set out to remove. Prerequisite: a correlated body that is a relation of its own (the
+    tree-Plan promotion), then cut there too. Likewise `fold()`, `values().fold()`, `aggregate('a').cap('a')
+    .unfold()` after times(200..1000) hit SQLite's expression depth (clean, query-text).
+  - **Follow-ups from review.** (a) The `boundedSpine` doc (~4153) and the `lowerChainOf` comment (~4879)
+    say "effect-free"; the gate is `writes.sites.length === 0`, so say "write-free" and that guard/site
+    effects read the cut pieces (ordered by `declaredBeforeUse`). (b) `test/compiler/repeat-unroll-boundary
+    .exec.test.ts`: add a statement-limit assertion for `repeat(out()).times(≥200).values(…)` on the
+    workerd-sized stack (a reviewer saw it reach SQLite there; verify it declines as `UnsupportedTraversal`,
+    not a plain Error), and make "a compile that runs out of stack declines" assert something when nothing
+    throws (`if (thrown !== undefined)` passes vacuously). (c) Behind the same cut a 140-hop walk declines or
+    answers by tail shape alone (`…times(140).group().by('k').by(values('i').sum())` hits the FROM-list cap,
+    the `group('a')…cap('a')` form answers) — legitimate query-text limits, recorded so they are not mistaken
+    for a regression.
 
 ## 1. Wrong answers today
 
@@ -92,13 +121,10 @@ refusal comes first: it is a production outage.
 - **Set-op literal operand loses member class** — `combine([1.0d])` reads a whole Double back as an Int.
 - **Intermediate `sum` overflow not widened** — a running total that leaves the Long range and returns.
 - **`mean()` of a BigInteger** answers a Double (reference: BigDecimal).
-- **`path().from(label)` after a mid-chain `inject` keeps the injected row (inject-fresh-traversers)** —
-  `g.V(1).as('a').values('age').inject(1).path().from('a')` gives `[[], [v1,29]]`, ref raises "Could not
-  locate path from-label: a" (`Path.java:275`); `simplePath().from('a')` likewise. Newly reachable since
-  90518dfa (it declined before). Cause: the "this step mints fresh traversers" rule was added as a name
-  peephole (`i > 0 && name === 'inject'`) in `labelsBoundBefore` only, not in `unlocatableSubPath`
-  (`src/compiler/ir/labels.ts`). Fix by consolidation: one named fact (stream barrier OR a root inject past
-  the source) read by both scans and by `injectTail`'s alias reset.
+- **Within/without over a LIST PARAMETER over-matches (string-set-param-guard)** — `has('k', within(xs))`
+  with `xs=['9007199254740993']` also matches a BigInteger stored as decimal text, and `xs=['1']` a Char
+  `'1'`; the inline literal set does not. Fixed on the unlanded `wf/tag-excludes-guard-3-0` (a448915b,
+  `textSpacedSet` takes the composed guard) — re-land it (§1b binary-carrier-guard).
 - **`reverse()` over a list-valued property returns it unreversed** — `g.V().values('lst').reverse()` with
   `[1,2,3]` gives `[1,2,3]`, ref `[3,2,1]` (`ReverseStep.java:55-57` reverses an Iterable); also via
   `properties().value()`, `as()/select()`, `coalesce`, `local`. `reverseValue` (`src/compiler/rel/reverse.ts`)
@@ -138,6 +164,24 @@ refusal comes first: it is a production outage.
 
 Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test graph, fails in production.
 
+- **branch-step-options re-routed answered scalar runs to a slower correlated plan (scalar-tail-fence) —
+  MAJOR (review of df99c592).** `scalarTail` now fences the clause reader only where `isSelfContained(rel)`
+  holds (`src/compiler/rel/lower.ts`), so `g.V().local(__.values('age').is(P.gt(30)).dedup().fold())` (and
+  `.order().fold()`), which trunk lowered decorrelated (one `values` CTE, `row_number() OVER (PARTITION BY
+  origin, v …)`, `GROUP BY origin`), now runs as a correlated per-row subquery re-inlining the value
+  expression `CASE WHEN rp.vtype IN ('list','map','set') THEN json(rp.value) ELSE rp.value END` 9× — 35–40%
+  slower at N=8k (14.8 → 20.2 ms), still linear (3.7–4.5× for 8×), against "computed once". Reverting only the
+  `&& isSelfContained(rel)` term restores the old plan and re-declines the branch witnesses. Fix: route only
+  the previously-declining runs (the reducing `count()` children) through the unfenced path, or project the
+  value once inside the correlated child. Add a sql-hygiene corpus witness of this shape (none exists, which
+  is why the baseline did not catch it).
+- **Set-op membership relies on SQLite's AUTOMATIC index (setop-autoindex-do) — verify on DO.** b15c9897's
+  intersect/difference semi-join a MATERIALIZED operand spool; EXPLAIN shows `USING AUTOMATIC PARTIAL
+  COVERING INDEX` and every witness is 2.5–5× for 8× on bun. If DO's SQLite runs with `automatic_index` off,
+  it is O(N·M) in production only. Check DO's pragma default (cite it in the `listSetOp` doc) or teach
+  `CfLimitedSql` (`src/cf-limits.ts`) to run with `PRAGMA automatic_index=OFF` so CI sees it; if it is off
+  on DO, index the spool explicitly.
+
 - **A chain of value-run `is()` re-inlines its input per `CASE` (rf3-is-chain-size)** — four `is()` emit
   1.52 MB, over DO's 100 KB statement cap. Pin under `CfLimitedSql`; fixed by §3's `once` consumers.
 - **A re-source over an origin-INDEPENDENT candidate set is quadratic (cr-fu5 + per-origin slice)** —
@@ -164,18 +208,20 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   one tag guard off its `IN` list (`hoistedStringSet`, `src/compiler/rel/predicate.ts`) and keeps the
   `vp_key_value(key=?,value=?)` multi-seek, for hex-, UUID- and number-spelled members alike. Left: a set
   MIXING a number-spelled member with another (`within('CA','10')`) keeps the per-member disjunction and so a
-  key-only seek (graph-sized, measured 0.086 → 0.855 ms N=1k → 8k; trunk-identical, not a regression). MAJOR
-  review follow-up, do this rather than a seekable-prefix residue: `hoistedStringSet` decides the guard by
-  REBUILDING each member's `textSpaced`/`stringOnly` Expr and `JSON.stringify`-comparing it to
-  `sameSpaceEquality`'s output — a peephole over constructed Exprs, and the `numberSpelling`/`perRow`
-  condition is now written twice. On a perRow subject a String equals only a String
-  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:239-275`),
-  so the one per-row String guard `stringOnly` holds for EVERY String member and the hoist covers every String
-  set; or have `sameSpaceEquality` return `(raw, guard-kind)` so the set composes guards without re-matching
-  JSON. Either deletes the shape recognizer. First confirm no non-String text vtype (e.g. `char`) is meant to
-  equal a String. Pin the mixed-set plan (`within('CA','10')`) in `test/plan-stability.test.ts` so the change
-  shows; fix `spaces.size > 1 ||same` spacing in `predicateExpr`. Do the `tagExcludes` proposal under "Next
-  round" first — it makes the guards byte-equal by construction.
+  key-only seek (graph-sized, measured 0.086 → 0.855 ms N=1k → 8k; trunk-identical, not a regression).
+  **BUILT, NOT LANDED — re-land first (tag-excludes-guard, branch `wf/tag-excludes-guard-3-0`, a448915b,
+  worktree `.claude/worktrees/wf_e5181ab5-5da-143`).** Its own `mise run ci` was green; the land failed only
+  on the §0 stack red (now fixed), and its cherry-pick onto trunk applied cleanly. It is one tag-guard
+  algebra in `src/compiler/rel/predicate.ts` (`tagExcludes`/`tagOnly`, a `TagGuard` value,
+  `sameSpaceEquality` returning `(raw, guard)`, `composedSetGuard`), deletes `hoistedStringSet` and both
+  `JSON.stringify` recognizers, gives `within('CA','10')` the multi-seek (pinned in
+  `test/plan-stability.test.ts`), and fixes §1 string-set-param-guard. Every L1 plan byte-identical; no
+  baseline moved. On re-land: strike the stale `hoistedStringSet`/`stringOnly`/`textSpaced` names here and
+  in the Next-round `tagExcludes` line. Left open by it: a set holding a one-char DIGIT and another one-char
+  member (`within('1','2','C')`) has no single exact guard because a Char `'C'` equals `'C'` but a Char
+  `'1'` does not equal `'1'` — it keeps the per-member disjunction (inline) or the exclusion-only guard
+  (list parameter). Whether a Char should ever equal a String is unresolved; read
+  `vendor/tinkerpop/gremlin-core/.../util/GremlinValueComparator.java:239-275` before deciding.
   The carrier-prefix format change (`\u0001`+hex, so ordinary text never spells a carrier) is a persisted
   format change with GraphSON/CSV/`hex()` blast radius and no answer change — only worth it if a measured
   cost of the guard itself remains.
@@ -193,6 +239,13 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   each unrolled `order().by().limit()` phase nests ~18 levels of SQLite expression depth; if DO's cap is 100,
   `repeat(out().order().by('k').limit(5)).times(6)` declines on DO only, and `CfLimitedSql`
   (`src/cf-limits.ts`) checks bytes and binds but not depth — teach it depth so CI sees the wall.
+  Same root, also on the NON-emit unroll since 0451a9d1 made more fan-out-hosted bodies take phases: the
+  `MAX_UNROLLED_STEPS` ceiling assumes ~40 bytes/step (`CF_MAX_SQL_BYTES/40`, `ir/strategies.ts` ~1673),
+  ~10× low for a fan-out-hosted barrier body — `g.V().repeat(local(outE().order().by('weight',desc)
+  .limit(1)).inV()).emit().until(loops().is(20)).values('name')` passes the ceiling at 319,550 bytes and
+  `emit().repeat(local(both().limit(1))).until(loops().is(30)).count()` at 272,690, so DO declines late with
+  the generic statement-limit text instead of the ceiling's "lower the count". Size the ceiling from the
+  rendered bytes (or a per-host estimate) — a clean query-text decline either way, so after the frontier.
 - **`fold().as('x').select('x').unfold()` is quadratic in the folded list (fold-label-history-copy)** —
   `g.V().values('name').fold().as('x').select('x').unfold().count()` 30.7 ms → 1595.8 ms N=1k → 8k (52×;
   a map-valued `values('m')` 67×), on trunk before this round too. The label-history column
@@ -266,7 +319,10 @@ RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open familie
    `by(values('name').toUpper())` once; sql-hygiene's `respelled` misses it — different EXPLAIN parents). It is
    also a near-copy of the presence authority in `src/compiler/rel/child.ts` (`hostPresence`/`gatedByHost`/
    `caseWhen`/`presenceDischarged`): gate through `gatedByHost`, lower the rest over `presenceDischarged(host)`
-   with the value projected once.
+   with the value projected once. Also: `listSetOp`'s self-side member family expression (a CASE in a CASE
+   over `json_extract(mx.type)`) is spelled 3× — SELECT, the semi-join EXISTS and GROUP BY
+   (`g.V().local(__.values('name').fold()).intersect(__.V().values('name').fold())`, `src/compiler/rel/list.ts`);
+   project `mine`'s `(mv, mf)` once below the join.
 2. **Closed per-row node vocabulary (per-row-node-vocabulary-closed)** — a `{t,v}` node and framing arm for
    every per-row scalar shape (Map.Entry `{t:'entry'}` like `execute.ts` `mapEntry`; element nodes carry
    their id; an unreadable arm raises via `src/rel/raise.ts`). Unblocks `g.V().values('m').unfold()` and
@@ -306,7 +362,20 @@ RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open familie
     `needsPhases` (`src/compiler/ir/strategies.ts`) now asks: a top-level call/unrollable barrier, OR a
     fan-out host (`FAN_OUT_HOSTS`, `src/compiler/ir/step.ts`) whose child holds a stream barrier at ANY depth
     (`someStepDeep`) — the shapes the recursive term refuses (`BARRIER_IN_TERM`). The unroll's host set is
-    derived (`PER_TRAVERSER_RESET_HOSTS`). Scaling linear (≤7.4× at 1k→8k). What remains: nothing.
+    derived (`PER_TRAVERSER_RESET_HOSTS`). Scaling linear (≤7.4× at 1k→8k). Residue from review:
+    - **The trigger is a proxy for what the walk refuses, and a narrow one (until-fanout-host).** The walk
+      refuses EVERY fan-out-hosted body, barrier or not: `g.V().repeat(local(bothE().has('weight',gt(0.4))
+      .otherV())).until(loops().is(2)).count()` and `repeat(flatMap(outE().inV())).until(loops().is(2))`
+      decline while `times(2)` answers (10, 2); `repeat(local(local(out())))` answers only because the inner
+      `local` is a barrier by name. Widen `needsPhases` to any `FAN_OUT_HOSTS` child (phases already answer
+      them, O(k) SQL), or correct the docstring's `BARRIER_IN_TERM` reason and record the gap.
+    - A fan-out barrier body under a non-counted `until` or a BRANCH host (`repeat(optional|union|coalesce|
+      choose(…local(…)…))`, `where(repeat(local(out().limit(1))).until(loops().is(1)))`) still declines, in its
+      `times(n)` spelling too — needs the tree-Plan promotion; "at any depth" holds below a fan-out host only.
+    - Move the orphaned `/* THE PER-TRAVERSER HOSTS … */` reset rationale (`ir/strategies.ts` ~1420, now
+      attached to nothing) onto `PER_TRAVERSER_RESET_HOSTS` in `ir/step.ts`; `test/compiler/one-ir-walker
+      .exec.test.ts:166` still names the old `PER_TRAVERSER_HOSTS`.
+    - The ceiling's byte estimate is ~10× low for these bodies — §1b emit-unroll-frontier.
 
 Beside the RelIR substrate:
 
@@ -389,7 +458,16 @@ Beside the RelIR substrate:
   Its other clean declines: a correlated operand (`__.select('a')…`), `merge()` whose operand is not
   provably a List (a Map row would merge), `merge([y:2])` over a map-valued property, `union` mixing
   different list functions or a constant arm, `filter`/`not(intersect([…]).unfold())`. Separately, any set op with a
-  `__.inject(1)` operand declines because `inject` is not lowered as a rooted operand.
+  `__.inject(1)` operand declines because `inject` is not lowered as a rooted operand. From the 2026-11-04
+  reviews (all clean declines, all on trunk before): scalar-host `map`/`local`/`flatMap`/`coalesce`/`repeat`
+  bodies (`values('tags').map(intersect(['x']))`, `….local(intersect(['x']).unfold())`); element-host
+  `project('n').by(values('tags').intersect(['y']))` — the form an app most likely writes — and
+  `group().by(…).by(…)`, `coalesce`/`optional`/`filter` hosts; lists of lists (`values('nested')
+  .intersect([['a']])`); a set op inside `project/group().by()`, `map`/`flatMap`/`union`/`choose`/`coalesce`/
+  `optional`/`repeat`/`where` over a fold (`by(__.out().fold().intersect(__.V().has('lang').fold())
+  .count(local))`) — the uncorrelated operand spool composes, the host seam does not. Wording: a per-row
+  operand with no first result raises "must yield an iterable type, not null"; the reference says "The
+  provided traverser does not map to a value" (`TraversalUtil.java:41-53`).
 - **Depth gaps** — Column/multi-key select inside arms (`path().select(Column.keys)`); `values('m')
   .select(k)` over a Map-capable scalar; federate tails beyond values/count/order;
   `project().by()` after an `emit().repeat(…simplePath())` walk.
@@ -406,7 +484,14 @@ Beside the RelIR substrate:
     collection stream: `values('age').fold().inject([1])`, `project('a').by('age').inject([a:1])`,
     `valueMap().inject([…])`, `out().path().inject(1)` (list+list arms whose `of` differs and computed-map
     arms do not merge in `mergeArms`); after `coalesce`/`sideEffect`/`sum`. `inject` in a child body declines
-    with the advisory `inject-in-child` reason by design.
+    with the advisory `inject-in-child` reason by design. `g.V(1).as('a').out().inject(1).select('a')`
+    declines while the `values('age')` form answers `[v1]`. The f12ab0c7 sub-path decline
+    (`g.V(1).as('a').values('age').inject(1).path().from('a')`) says "not supported" twice
+    (`UnsupportedTraversal.because` adds its own prefix, `src/compiler/compiler.ts`), quotes the placeholder
+    `from(…)` as a label when the argument is not a literal, and should name the cause ("inject() adds
+    traversers that do not carry 'a'") and suggest `select('a')` or moving `as('a')` after `inject()`.
+    `injectTail`'s alias reset (`rel/lower.ts`) still decides independently of `addsUnlabelledTraversers` —
+    read the fact there too so the two cannot drift.
   - **`V(<traversal>)` in more hosts** — `where/filter/not/optional/coalesce/repeat(__.V(__.out().id()))`,
     `group().by(__.V(…))`, any `path()` after a lookup, `withSack(1).V(1).V(__.out()).sack()`; a list-headed
     child (`V().fold().V(__.unfold().id())`, `id().fold().V(__.unfold())`, a list-valued label
@@ -418,7 +503,7 @@ Beside the RelIR substrate:
     (trunk sent the List arm as a Set): a mixed-shape variant has no Set arm.
   - **`discard()` inside a bounded `repeat()` body** — `repeat(out().discard()).times(2)`. (A
     `where`/`filter`/`not`/`and`/`or`/`local`/`map`/`flatMap` host in a bounded body now unrolls —
-    `PER_TRAVERSER_HOSTS`, `ir/strategies.ts`; a host whose child reads `loops()` still declines.)
+    `PER_TRAVERSER_RESET_HOSTS`, `ir/step.ts`; a host whose child reads `loops()` still declines.)
   - **Constant filters in non-filter hosts** — `coalesce(__.discard(), …)`, `map(__.discard())`,
     `fold().discard()`, `valueMap()/elementMap()/path()` + `where(identity())`; `g.V().discard().sum()`
     declines while `values('age').discard().sum()` answers `[]`.
@@ -490,7 +575,16 @@ Beside the RelIR substrate:
      `row_number() OVER ()` origin and, keyed, its own option `CASE` — instead of the CTE the arms read. Linear
      (≈4× for 8× rows) and the two numberings agree on one scan, but it is an expression computed twice and
      a correlation between two independently minted origins; find which tree rewrite does not reach the probe's
-     subplan (`src/rel/passes/prune.ts` DAG pruning is the first suspect) and make it one relation.
+     subplan (`src/rel/passes/prune.ts` DAG pruning is the first suspect) and make it one relation. The 2026-11-04
+     review widens it: it is reachable at TOP LEVEL for every keyed reducing option —
+     `g.V().choose(__.label()).option('person', __.out().count())` emits byte-identical CTEs `r48`/`r50`, each
+     with the correlated `ochoice` label subquery, the `HAVING EXISTS` reading `r50` and re-spelling the option
+     CASE — because `chooseOptions` calls `gate(takes(ordinal))` a second time for the probe; under `map()` the
+     `P.between(26,30)` gate is inlined 4× (10 KB of SQL). Likely fix: hand the probe the gated Rel the arm
+     was lowered over. Linear (2.8× / 3.4× for 8×).
+     Also: a `reconcileCollapsed` merge adds a `1 AS bulk` constant even when no arm carries a bulk channel
+     (`g.V(3).local(__.choose(__.hasLabel('person'), __.out().count(), __.constant('z')).fold())` 1886 → 1927 B,
+     answer unchanged); skip `ensureBulk` when no arm is bulked.
   2. **branch-step-options — LANDED (df99c592 + f1e9199a, L3 2010 → 2018); nothing branch-specific remains.**
      `branch(<traversal>).option(…)` is `chooseOptions` under `MatchPolicy` (`src/compiler/ir/option-map.ts`); `choose()` raises the reference text for a traversal key,
      `Pick.any` and a traversal-bearing `P` (`verifyChooseOptionKeys`). L4
@@ -498,7 +592,17 @@ Beside the RelIR substrate:
      reducing writing option declines. Still declining, NOT branch-specific (shared with keyed `choose`): either form
      under a CORRELATED child (`where(branch(…))`, `by(branch(…).fold())`, a `repeat` body) — the choice and
      the per-key flags are `Materialize` fences, which a correlated subquery cannot host; an ordering/text key
-     over an ELEMENT choice (`elementPredicate` answers only the equality family).
+     over an ELEMENT choice (`elementPredicate` answers only the equality family). Further clean declines from
+     review: `map`/`project().by`/`coalesce`/`optional`/`repeat` hosts (keyed `choose` the same); mixed reducing
+     options (`option('person', values('age').fold()).option('software', count())`); an all-discard
+     `option(Pick.none, __.discard())`. **The one an ordinary user hits — single-arm owed order
+     (branch-sole-arm-owed):** with one surviving option and an owed emission order `chooseOptions` declines
+     (`built.length === 1 && owed → null`), so `g.V().branch(__.label()).option('person', __.out()).fold()`,
+     `g.V().order().by('name').branch(label()).option('person', values('name'))` and
+     `…branch(values('age')).option(P.gt(28), values('name'))` fail with the generic message while the two-arm
+     forms answer in order. `unionArms` keeps its sole arm when its encounter survives
+     (`owed && !encounterOf(…)`); move that owed test into `soleArm` (`src/compiler/rel/lower/branch.ts`) so
+     both exits share one rule.
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`
   (a keyed `choose` nested in an option arm; `choose(select('a'))` through an arm alias — §3.9), Column/path row ops, `Pop.all/mixed`, side effects
   (`group('m').by().by(__.in().values())`), local/match/where; the single-missing-caller list.
@@ -669,9 +773,13 @@ Beside the RelIR substrate:
   `lower/reduction.ts`), `ir/analyze.ts:151/292/347`, `rel/write.ts:1169`; and `nestedHostChild` restates
   `perTraverserChild`'s map→one / local,flatMap→all policy. One fact, fail-closed today. See also
   `selfCollapses` under "Next round".
-- **`PER_TRAVERSER_HOSTS` is declared twice with different members** — `ir/strategies.ts`
-  (`local,map,flatMap,where,filter,not,and,or`: children reset per traverser) and `rel/lower/slice.ts`
-  (`map,flatMap,local`: hosts `perTraverserChild` dispatches). Rename one or derive it; joins cr-fu15.
+- **Two arity vocabularies (arity-one-authority)** — `atMostOnePerTraverser` (`rel/lower/reduction.ts`,
+  9adf67d7) is a hand recursion over named hosts beside `rowBounds`/`atMostOneRow` (`src/rel/bounds.ts`); its
+  doc explains why rowBounds cannot see a `choose`'s disjoint gates. Sound (no unsound admission found) but
+  conservative: filters and modulated local ops are not in it, so `g.V().map(__.coalesce(__.out('knows')
+  .count().is(P.gt(0)), __.constant(-1L)))` declines. Keep it in step with `ONE_TO_ONE`; see the KEEPS_ONE
+  proposal under "Next round". (The old twin `PER_TRAVERSER_HOSTS` is resolved: `FAN_OUT_HOSTS` and the
+  derived `PER_TRAVERSER_RESET_HOSTS` live once in `ir/step.ts`, 0451a9d1.)
 - **Unroll pins prove nothing for a random body** — `test/compiler/repeat-unroll-boundary.exec.test.ts`
   compares the emit unroll's SQL with a hand-written union, which has the same independent draw; add a
   coupling check (every emitted level-k path extends an emitted level-(k-1) path) and deny pins for
@@ -719,9 +827,6 @@ where stated.
   (`bodyScopesPerOrigin`, `nestRowOrigin`). Items it parked (`V(<traversal>)` under
   `where/filter/coalesce/optional/repeat`) should be re-probed against it; do not special-case
   `V(<traversal>)` hosts.
-- **Prerequisite for inject-fresh-traversers (§1): one "mints fresh traversers" fact** in
-  `src/compiler/ir/labels.ts`, read by `labelsBoundBefore`, `unlocatableSubPath` and `injectTail`'s alias
-  reset — replaces the `i > 0 && name === 'inject'` peephole and fixes the §1 wrong answer.
 - **One correlated-probe builder** — replace ~19 hand-rolled `project(['one', 1])` EXISTS probes
   (`source.ts` `hasLabelPredicate`/`hasPropertyPredicate`/`hasTokenPredicate`, 3 new in 7915c526;
   `write.ts` ×5; `list.ts` ×2; `map.ts` ×2; `lower.ts`) and the two private `existsOf` copies
@@ -773,11 +878,34 @@ Proposals from the 2026-11-04 reuse sweep (answer-neutral unless stated):
 - **call-params: `constFromValueTraversal` on `resolveValueTraversal`**, and one `paramValue(v)` for the
   static-map and `with()` loops in `parseCallSpec` (`src/services/params/call-params.ts`); keeps the
   per-traverser refusal message. ~6 lines.
-- **One `tagExcludes(tag, vtypes)` guard** for the `NOT coalesce(tag,'') IN (others)` tree `typeSpaced` and
-  `textSpaced` each build (`src/compiler/rel/predicate.ts`) — `hoistedStringSet`'s `JSON.stringify` match
-  relies on them being byte-equal. Byte-identical SQL. Prerequisite of the §1b binary-carrier-guard follow-up.
+- **One `tagExcludes(tag, vtypes)` guard** — BUILT with the §1b binary-carrier-guard follow-up on
+  `wf/tag-excludes-guard-3-0`; re-land it there, not separately.
 - **`firstRootedColumn` on `build.ts` `firstOf`** for the ordered case (the typed `firstRootedValue` branch is
   a third copy, differing only by a fence). Confirm with the sql-hygiene baseline that no plan moves.
+
+Proposals from the 2026-11-04 round's reuse sweep (answer-neutral unless stated):
+
+- **`collectionMembersOrSelf` reads `storedCollection`** — its `cm_c` projection (`src/compiler/rel/list.ts`
+  ~989) hand-builds the `vtype IN ('list','set')` test that `storedCollection` (list.ts ~1614) documents as
+  the one spelling; one place to add a future collection tag. Same Expr, same bytes.
+- **One `notStoredCollection(tag)`** beside `storedCollection` for the two NULL-safe negations in
+  `rel/lower.ts`'s per-row collection reader (~1749 `tagIsNot(…'list') AND tagIsNot(…'set')`, ~1826
+  `NOT (storedCollection(tag) IS TRUE)`); the first site's SQL shrinks a little (sql-hygiene moves down).
+- **`write.ts` `KEEPS_ONE` derived from `ONE_TO_ONE`** (`src/compiler/ir/step.ts`) ∪ filters/slices/side
+  effects/creations via `unionOf` — 14 names gone, one arity vocabulary. It has already drifted (lacks
+  `path`); adding it turns a one-traverser write chain through `path()` from a decline into an answer
+  (`PathStep` is in Java's definitely-singular list).
+- **Remaining hand-written host lists through `FAN_OUT_HOSTS`/`PER_TRAVERSER_FILTER_HOSTS`** —
+  `ir/passes.ts:95` (`inlineIdentityHostBody`), `ir/strategies.ts:704` (`identityHostBody`),
+  `rel/lower/reduction.ts:492` (`flatMapRejoin`), `ir/passes.ts:180` (`isAlwaysProductiveFilterNoOp`, exactly
+  `PER_TRAVERSER_FILTER_HOSTS` — export it). Same membership; joins §6 cr-fu15.
+- **Fold `mixedBranch` into `unionArms`** (`rel/lower/branch.ts`) — it is now `reconcileCollapsed +
+  batchedBranch`; ~15 lines and an export gone, same plan. Update the comment at
+  `test/L4-addendum/element-branch-child.feature:248`.
+- **`declaredBeforeUse` on every effect program** — drop the `hoisted.length ? … : bindings` switch in
+  `lowered` (`rel/lower.ts` ~4351); the stable sort returns a resolving list unchanged, and it guards any
+  future effect-reads-later-binding order bug (trunk once shipped it as a bare "Ref … is not a Plan
+  binding"). Plan-stability stays byte-identical.
 
 ## 7. Low priority
 
