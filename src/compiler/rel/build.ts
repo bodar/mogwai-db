@@ -1,6 +1,7 @@
 import { stringifyExact } from '../../json-exact.ts';
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
+import { CF_MAX_VALUE_BYTES, fitsUtf8, utf8Bytes } from '../../do-limits.ts';
 import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
@@ -322,11 +323,109 @@ export const notProduced = (pred: Expr): Expr =>
 /** `SELECT id FROM labels WHERE name IN (…)` — the name→id indirection every label-aware step
  *  reaches through, and the reason `labels` is a `Scan` table rather than a string in an emitter. */
 /**
+ * DATA CROSSES AS A `json_each` RELATION — the ONE builder for a set whose size is a function of DATA (root
+ * `CLAUDE.md`: such a set crosses the seam as ONE JSON value, exploded in-query, never as N binds or as
+ * statement text). Every site lands through here: a bound collection (`jsonEachSet` — `within($list)`,
+ * `V($ids)`, `hasLabel($labels)`, the value/ranked-order resumes), a federated landing (`foreign.ts`), a
+ * set-based write's rows (`setwrite.ts` `insertSet`).
+ *
+ * TWO SOURCE MODES, and the difference is a correctness property, not a spelling:
+ *   - `name` given — a PARAMETER (a user `$x`, or a compiler-minted name): `jsonb(?)` under that name, so
+ *     the render's bind dedup collapses repeated uses of one parameter to one bind.
+ *   - no `name` — a MECHANICAL bind (`lit(…)`, source `'bound'`): `json_each(?)` over the text, never
+ *     deduped. A landing must NOT take a name: two different landings under one name would merge into one
+ *     bind, and one of them would answer with the other's rows.
+ *
+ * **SPLIT BY BYTES, at member boundaries** (`jsonChunks`). A Durable Object caps one VALUE at 2 MB
+ * (`do-limits.ts`), so one JSON value per set is a wall at data size — an `io()` load of 6,000 × 500 B
+ * properties, a federated `elementMap()` of 8,000 people — that no Bun store sees. A set past the cap
+ * becomes one `json_each` per chunk under `UNION ALL`, and the order column (`as.ord`, the member's array
+ * index) is `key + <members before this chunk>`, so it is the member's index in the WHOLE array exactly as
+ * before. A chunk under a `name` is named `<name>#k` (k ≥ 1), so two chunks never dedup together while a
+ * repeated parameter still dedups chunk for chunk (`#` is outside Gremlin's `Identifier` alphabet).
+ * Concatenation is linear in the chunks, and a set under the cap — every plan a test graph makes — is ONE
+ * chunk, i.e. exactly the single explode this always emitted, byte for byte.
+ *
+ * The bind count is therefore O(bytes / 2 MB), never O(rows): reaching the 100-bind budget (counted where
+ * it always is, `renderStep`) takes ~200 MB in one plan, more than an isolate holds. A single MEMBER past
+ * the cap is not split (there is no partial-member reassembly): it crosses as its own chunk, and a DO
+ * refuses it as the platform's own per-value limit (`GraphStore.query` says so in the user's terms).
+ *
+ * `as` names the explode's columns (`value`, plus `ord` = json_each.key and `type` = json_each.type when
+ * given); `type` is the explode's declared row type; `id` is the minter hint.
+ */
+export function jsonEachRelation(spec: {
+  readonly members: readonly unknown[];
+  readonly name?: string;
+  readonly id: string;
+  readonly as: { readonly value: string; readonly ord?: string; readonly type?: string };
+  readonly type: RelType;
+}, fresh: Minter): Rel {
+  const chunks = jsonChunks(spec.members);
+  const explodeChunk = (chunk: JsonChunk, at: number): Rel => {
+    const source: Expr = spec.name === undefined
+      ? lit(chunk.text, 'text')
+      : { kind: 'call', fn: 'jsonb', args: [param(chunk.text, at === 0 ? spec.name : `${spec.name}#${at}`)] };
+    return make.explode({ id: fresh(spec.id), channels: [], expr: source, as: spec.as, type: spec.type });
+  };
+  if (chunks.length === 1) return explodeChunk(chunks[0]!, 0);
+  const { ord } = spec.as;
+  const arms = chunks.map((chunk, at) => {
+    const exploded = explodeChunk(chunk, at);
+    if (ord === undefined || chunk.offset === 0) return exploded;
+    return make.project({
+      id: fresh(`${spec.id}o`), input: exploded, channels: [], type: spec.type,
+      exprs: spec.type.cols.map((c) => [c.name, c.name === ord
+        ? { kind: 'binary', op: '+', left: col(exploded.id, ord), right: compilerInt(chunk.offset) }
+        : col(exploded.id, c.name)] as const),
+    });
+  });
+  return make.union({ id: fresh(`${spec.id}u`), inputs: arms, all: true, channels: [], type: spec.type });
+}
+
+/** One `json_each` value of a split set: its JSON array text and the index of its first member in the whole. */
+export interface JsonChunk { readonly text: string; readonly offset: number }
+
+/**
+ * THE ONE PACKER: a data-sized set's members as JSON array texts, each at most a DO value
+ * (`CF_MAX_VALUE_BYTES`, UTF-8), packed greedily in order. `stringifyExact` is the writer. A set under the
+ * cap is ONE chunk spelled exactly as `stringifyExact(members)` spells the whole array. A member that is
+ * alone past the cap is its own chunk — the platform's limit, not a split we can make. Shared by
+ * `jsonEachRelation` and the direct set-based statements in `setwrite.ts`, so there is one spelling.
+ */
+export function jsonChunks(members: readonly unknown[]): readonly JsonChunk[] {
+  const whole = stringifyExact(members);
+  if (fitsUtf8(whole, CF_MAX_VALUE_BYTES)) return [{ text: whole, offset: 0 }];
+  const chunks: JsonChunk[] = [];
+  let open: string[] = [];
+  let bytes = 2;
+  let offset = 0;
+  const close = (): void => {
+    if (open.length) chunks.push({ text: `[${open.join(',')}]`, offset });
+    offset += open.length;
+    open = [];
+    bytes = 2;
+  };
+  for (const member of members) {
+    // An array member `JSON.stringify` cannot spell (`undefined`) is `null`, as in the whole-array spelling.
+    const text = stringifyExact(member) ?? 'null';
+    const size = utf8Bytes(text);
+    // `bytes` is the open chunk's spelled size: its brackets, its members, and a comma between each two.
+    if (open.length && bytes + 1 + size > CF_MAX_VALUE_BYTES) close();
+    bytes += (open.length ? 1 : 0) + size;
+    open.push(text);
+  }
+  close();
+  return chunks;
+}
+
+/**
  * A collection PARAMETER exploded to a one-column relation of its members (`sv`) — the whole array
  * crosses as ONE `jsonb(?)` bind (named, so repeated uses dedup at render) and `json_each` explodes it
  * IN-QUERY, so its data never enters the statement text (root `CLAUDE.md`'s data-sized-set rule). This
  * is the shared kernel behind every "a bound collection is a set membership" site — a `within($list)`
- * predicate (`predicate.ts`), a `V($ids)` id list and a `hasLabel($labels)` name list here.
+ * predicate (`predicate.ts`), a `V($ids)` id list and a `hasLabel($labels)` name list here — and the
+ * NAMED mode of `jsonEachRelation`, so a collection past a DO value splits like any other set.
  *
  * `jsonTypes`, when given, keeps only the members whose json_each `type` is in the set — the seam a
  * `V()`/`E()` id list needs to route a JSON number to the rowid column and a JSON string to `uid`,
@@ -339,12 +438,11 @@ export const notProduced = (pred: Expr): Expr =>
  * exclusive with `jsonTypes` (a membership set has no meaningful order) — the resume path never uses both.
  */
 export function jsonEachSet(name: string, value: readonly unknown[], fresh: Minter, jsonTypes?: readonly string[], ordCol?: string): Rel {
-  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(stringifyExact(value), name)] };
-  const exploded = make.explode(jsonTypes
-    ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', type: 'st' }, type: typeOf(meta('sv', 'any', true), meta('st', 'text', true)) }
+  const exploded = jsonEachRelation(jsonTypes
+    ? { members: value, name, id: 'jes', as: { value: 'sv', type: 'st' }, type: typeOf(meta('sv', 'any', true), meta('st', 'text', true)) }
     : ordCol
-      ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', ord: ordCol }, type: typeOf(meta('sv', 'any', true), meta(ordCol, 'int')) }
-      : { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)) });
+      ? { members: value, name, id: 'jes', as: { value: 'sv', ord: ordCol }, type: typeOf(meta('sv', 'any', true), meta(ordCol, 'int')) }
+      : { members: value, name, id: 'jes', as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)) }, fresh);
   if (!jsonTypes) return exploded;
   const kept = make.filter({
     id: fresh('jesf'), input: exploded, channels: [], type: exploded.type,

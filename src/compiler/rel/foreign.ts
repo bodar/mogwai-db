@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -6,7 +6,7 @@ import { type Binding } from '../../rel/plan.ts';
 import type { Elem } from '../elem.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { FrameNode, ValueNode } from '../../gremlin/types.ts';
-import { jsonOf, meta, typeOf, type Minter } from './build.ts';
+import { jsonEachRelation, jsonOf, meta, typeOf, type Minter } from './build.ts';
 import { NODE_COL } from './list.ts';
 import { stringifyExact } from '../../json-exact.ts';
 
@@ -25,14 +25,15 @@ import { stringifyExact } from '../../json-exact.ts';
 // `execute.ts`'s framers are untouched: a vertex's `label` is the JSON labels ARRAY and a `props` bag
 // is the per-key `{t,v}` tree, exactly what `foreignLabels`/`propsOf` already parse coming back.
 //
-// **The rows cross as ONE bind** (§6·2): a set whose size is a function of DATA is a single JSON value
-// exploded by `json_each`, never N parameters. A federated hop returning 26 vertices was a hard DO
+// **The rows cross as a `json_each` relation** (§6·2): a set whose size is a function of DATA is a JSON
+// value exploded in-query, never N parameters. A federated hop returning 26 vertices was a hard DO
 // failure while this was a `VALUES (?,?,…)` list, and nothing on Bun could see it (65 535 vs 100).
 // The empty case needs no branch — `json_each('[]')` is a zero-row relation with these columns.
-//
-// **That one value is written by the ONE JSON writer of a text headed into SQLite** (`stringifyExact`,
-// `json-exact.ts`), never a bare `JSON.stringify`: a sibling's `±Infinity` must not land as `null`, and a
-// leaked `bigint` declines rather than throw a raw TypeError.
+// Every landing here goes through the ONE builder, `jsonEachRelation` (`build.ts`), in its MECHANICAL
+// (unnamed) mode — a named landing could dedup into another landing's bind — which also splits a set past
+// a Durable Object's 2 MB value cap into several values (an 8,000-person `elementMap()` is ~4 MB), and
+// writes each with the ONE JSON writer (`stringifyExact`), so a sibling's `±Infinity` does not land as
+// `null` and a leaked `bigint` declines rather than throw a raw TypeError.
 //
 // What a detached element does NOT support is live adjacency: `out()`/`both()`/`properties()` have no
 // table to reach. Those decline in `lower.ts`'s detached tail rather than silently joining this
@@ -75,11 +76,10 @@ export function foreignRelation(
   withOrder = false,
 ): Rel {
   const cols = [...foreignPayloadCols(elem), ...extra];
-  const payload = stringifyExact(rows.map((row) => cellsOf(row, extraOf(row))));
-  const exploded = make.explode({
-    id: fresh('fgx'), channels: [], expr: lit(payload, 'text'), as: { value: CELL.value, ord: CELL.ord },
+  const exploded = jsonEachRelation({
+    members: rows.map((row) => cellsOf(row, extraOf(row))), id: 'fgx', as: { value: CELL.value, ord: CELL.ord },
     type: typeOf(meta(CELL.value, 'any', true), meta(CELL.ord, 'int')),
-  });
+  }, fresh);
   // `withOrder` keeps the json_each KEY (the array index) as an `ord` column — the order the sibling
   // EMITTED these rows, which is the only order a landed stream can carry. The seed renumbers by it to
   // mint the `encounter` channel, so a bound `fold()`/`order()` collects in the sibling's own order.
@@ -100,10 +100,9 @@ export function foreignMapRelation(
   map: Extract<ValueNode, { readonly t: 'map' }>, elem: Elem, fresh: Minter,
   extra: readonly ColMeta[] = [], withOrder = false,
 ): Rel {
-  const pairs = make.explode({
-    id: fresh('fmx'), channels: [], expr: lit(stringifyExact(map.v), 'text'), as: { value: MAP_PAIR.value },
-    type: typeOf(meta(MAP_PAIR.value, 'json')),
-  });
+  const pairs = jsonEachRelation({
+    members: map.v, id: 'fmx', as: { value: MAP_PAIR.value }, type: typeOf(meta(MAP_PAIR.value, 'json')),
+  }, fresh);
   const members = make.explode({
     id: fresh('fmy'), input: pairs, channels: [],
     expr: { kind: 'call', fn: 'json_extract', args: [col(pairs.id, MAP_PAIR.value), compilerText('$[1].v')] },
@@ -166,10 +165,7 @@ const PARENT = { value: 'fdv' } as const;
  */
 export function parentsRelation(parentCount: number, fresh: Minter, as: 'int' | 'text'): Rel {
   const indices = Array.from({ length: parentCount }, (_, parentId) => as === 'text' ? String(parentId) : parentId);
-  return make.explode({
-    id: fresh('fgd'), channels: [], expr: lit(JSON.stringify(indices), 'text'), as: { value: PARENT.value },
-    type: typeOf(meta(PARENT.value, as)),
-  });
+  return jsonEachRelation({ members: indices, id: 'fgd', as: { value: PARENT.value }, type: typeOf(meta(PARENT.value, as)) }, fresh);
 }
 
 /** The parent-index column a `parentsRelation` row carries — the scatter's per-parent ORDER key. */
@@ -186,10 +182,10 @@ export const PARENT_COL = PARENT.value;
  * relation — no `Filter(false)` stand-in.
  */
 export function foreignNodeStream(nodes: readonly FrameNode[], fresh: Minter): Rel {
-  const exploded = make.explode({
-    id: fresh('fnx'), channels: [], expr: lit(stringifyExact(nodes), 'text'), as: { value: CELL.value, ord: CELL.ord },
+  const exploded = jsonEachRelation({
+    members: nodes, id: 'fnx', as: { value: CELL.value, ord: CELL.ord },
     type: typeOf(meta(CELL.value, 'any', true), meta(CELL.ord, 'int')),
-  });
+  }, fresh);
   return make.project({
     id: fresh('fnp'), input: exploded, channels: [], type: typeOf(meta(NODE_COL, 'json', true), meta(CELL.ord, 'int')),
     exprs: [[NODE_COL, jsonOf(col(exploded.id, CELL.value))], [CELL.ord, col(exploded.id, CELL.ord)]],
@@ -243,12 +239,14 @@ export const landedCols = (kind: Elem): readonly ColMeta[] =>
 export function landedStream(rows: readonly ForeignRow[], elem: Elem, landed: Rel, fresh: Minter): Rel {
   const ids = rows.filter((r) => r.kind === elem).map((r) => r.id);
   if (new Set(ids).size === ids.length) return landed;
-  const emitted = make.explode({
-    id: fresh('fsx'), channels: [], expr: lit(JSON.stringify(ids), 'text'), as: { value: 'fsid', ord: 'fsord' },
-    type: typeOf(meta('fsid', 'any', true), meta('fsord', 'int')),
-  });
+  const emitted = jsonEachRelation({
+    members: ids, id: 'fsx', as: { value: 'fsid', ord: 'fsord' }, type: typeOf(meta('fsid', 'any', true), meta('fsord', 'int')),
+  }, fresh);
+  // `ordered`: the emitted ids drive and the landed binding is SEARCHED. Left free, SQLite scanned the
+  // binding outer and re-scanned the json_each per element — N² (measured: 8,000 elements × 2 was 5.0 s;
+  // pinned, the binding takes an automatic covering index on `id` and the same join is 14 ms).
   const joined = make.join({
-    id: fresh('fsj'), left: emitted, right: landed, channels: [], join: 'inner',
+    id: fresh('fsj'), left: emitted, right: landed, channels: [], join: 'inner', ordered: true,
     type: typeOf(...emitted.type.cols, ...landed.type.cols),
     on: { kind: 'binary', op: '=', left: col(emitted.id, 'fsid'), right: col(landed.id, 'id') },
   });

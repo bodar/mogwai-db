@@ -390,7 +390,12 @@ remaining cross-cutting substrate.
   runtime release can move: a read cannot chunk at all (a compiled plan is one statement, and the set
   must be a relation it can join against); a chunked write cannot be a value the algebra references,
   which is what preserves a cascade's pre-mutation snapshot; and one value makes a plan's bind count
-  O(plan size) BY CONSTRUCTION rather than an idiom to grep for. Typing goes the same way — JSON
+  O(plan size) BY CONSTRUCTION rather than an idiom to grep for. **"One value" is per 2 MB**: a DO also
+  caps one VALUE at 2 MB, so a set past it splits at MEMBER boundaries into several `json_each` values
+  under `UNION ALL` — done once, in the one builder every set crosses through (`compiler/rel/build.ts`
+  `jsonEachRelation` / `jsonChunks`, which `setwrite.ts` reuses) — so the count is O(bytes / 2 MB), never
+  O(rows), and a set under 2 MB is the single bind it always was. One MEMBER past 2 MB is the platform's
+  own limit, surfaced as such (`GraphStore.query`). Typing goes the same way — JSON
   transport fails closed on what it cannot carry (`src/program.ts`) and AGREES across runtimes where
   native binds do not (an integer binds INTEGER on Bun, REAL on DO; `boolean`/`bigint` throw on DO).
   Its one real cost: a BLOB cannot travel, so **a `RETURNING` feeding a retained binding projects

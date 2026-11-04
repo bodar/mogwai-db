@@ -20,29 +20,27 @@
 //     compiler and never against a real DO; the CONTRACT's DO-legality is enforced natively by the real
 //     DO in cloudflare.test.ts, and `mise run binds` catches the placeholder idiom statically.
 import type { Sql } from './api.ts';
+import { CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES, fitsUtf8, utf8Bytes, VALUE_TOO_BIG } from './do-limits.ts';
 
-/** Cloudflare DO SQLite: maximum bound parameters in one query. */
-export const CF_MAX_BINDS = 100;
+// The numbers live in `do-limits.ts`, shared with the json_each builder that splits a data-sized set
+// under the value cap, so the assertion and the producer cannot disagree about where the wall is.
+export { CF_MAX_BINDS, CF_MAX_SQL_BYTES, CF_MAX_VALUE_BYTES };
 
-/** Cloudflare DO SQLite: maximum length of a SQL statement, in BYTES (UTF-8). */
-export const CF_MAX_SQL_BYTES = 100 * 1024;
+/** The violation, and whether it is a VALUE's size — the one limit a DO reports as the value's own
+ *  error (`string or blob too big`) rather than as the statement's, so the store's translation applies. */
+interface Violation { readonly message: string; readonly value: boolean }
 
-/** Cloudflare DO SQLite: maximum size of one string or BLOB VALUE, in bytes (the documented "maximum
- *  string, BLOB or table row size", 2 MB). The bind-count rule pushes every data-sized set into ONE
- *  `json_each(?)` value, so that value's SIZE is the wall a large set meets next — a ranked-order
- *  barrier's ranking (`compiler/rel/ranked-order.ts`), a federated landing, a `within()` set — and on
- *  Bun, whose value cap is ~1 GB, it is as invisible as the bind cap was. */
-export const CF_MAX_VALUE_BYTES = 2 * 1024 * 1024;
-
-/** UTF-8 is at most 3 bytes per UTF-16 code unit (a 4-byte codepoint costs two units), so a string
- *  shorter than this cannot possibly exceed the byte cap and needs no encode. */
-const NO_ENCODE_BELOW = Math.floor(CF_MAX_SQL_BYTES / 3);
-
-const encoder = new TextEncoder();
-
-/** Exact UTF-8 byte length, encoding only when the cheap bound cannot settle it. */
-function sqlBytes(sql: string): number {
-  return sql.length < NO_ENCODE_BELOW ? sql.length : encoder.encode(sql).length;
+function violation(sql: string, binds: readonly unknown[]): Violation | null {
+  if (binds.length > CF_MAX_BINDS)
+    return { value: false, message: `statement exceeds Cloudflare's ${CF_MAX_BINDS}-bound-parameter limit: ${binds.length} binds in ${describe(sql)}` };
+  if (!fitsUtf8(sql, CF_MAX_SQL_BYTES))
+    return { value: false, message: `statement exceeds Cloudflare's ${CF_MAX_SQL_BYTES}-byte text limit: ${utf8Bytes(sql)} bytes in ${describe(sql)}` };
+  for (const [at, bind] of binds.entries()) {
+    const size = valueBytes(bind);
+    if (size > CF_MAX_VALUE_BYTES)
+      return { value: true, message: `bind ${at + 1} exceeds Cloudflare's ${CF_MAX_VALUE_BYTES}-byte value limit: ${size} bytes in ${describe(sql)}` };
+  }
+  return null;
 }
 
 /**
@@ -54,33 +52,35 @@ function sqlBytes(sql: string): number {
  * identifies the site. Truncated, since the interesting statements are the huge ones.
  */
 export function cfLimitViolation(sql: string, binds: readonly unknown[]): string | null {
-  if (binds.length > CF_MAX_BINDS)
-    return `statement exceeds Cloudflare's ${CF_MAX_BINDS}-bound-parameter limit: ${binds.length} binds in ${describe(sql)}`;
-  const bytes = sqlBytes(sql);
-  if (bytes > CF_MAX_SQL_BYTES)
-    return `statement exceeds Cloudflare's ${CF_MAX_SQL_BYTES}-byte text limit: ${bytes} bytes in ${describe(sql)}`;
-  for (const [at, bind] of binds.entries()) {
-    const size = valueBytes(bind);
-    if (size > CF_MAX_VALUE_BYTES)
-      return `bind ${at + 1} exceeds Cloudflare's ${CF_MAX_VALUE_BYTES}-byte value limit: ${size} bytes in ${describe(sql)}`;
-  }
-  return null;
+  return violation(sql, binds)?.message ?? null;
 }
 
-/** A bind's stored size: a string's UTF-8 bytes (encoding only when the 3-bytes-per-unit bound cannot
- *  settle it), a BLOB's length, and 0 for a number/null, which cannot approach the cap. */
+/** A bind's stored size: a string's UTF-8 bytes (counted only when the 3-bytes-per-unit bound cannot settle
+ *  it), a BLOB's length, and 0 for a number/null, which cannot approach the cap. */
 function valueBytes(bind: unknown): number {
-  if (typeof bind === 'string') return bind.length * 3 <= CF_MAX_VALUE_BYTES ? bind.length : encoder.encode(bind).length;
+  if (typeof bind === 'string') return fitsUtf8(bind, CF_MAX_VALUE_BYTES) ? 0 : utf8Bytes(bind);
   if (bind instanceof Uint8Array || bind instanceof ArrayBuffer) return bind.byteLength;
   return 0;
 }
 
 const describe = (sql: string): string => (sql.length > 160 ? `${sql.slice(0, 160)}…` : sql);
 
-/** Throw if `sql`/`binds` would be rejected on a Durable Object. */
+/**
+ * Throw if `sql`/`binds` would be rejected on a Durable Object.
+ *
+ * A bind past the VALUE cap throws the way the DO itself does — SQLite's `string or blob too big`, with
+ * the decorator's diagnostic as the `cause` — because that one is not a statement-shape defect of ours
+ * but a value the platform cannot hold, and the store translates it to the user's clear error
+ * (`GraphStore.query`). The data-sized sets we produce are split under the cap
+ * (`compiler/rel/build.ts` `jsonEachRelation`), so what still reaches it is a single member past 2 MB.
+ * NOT modelled: a value SQLite COMPUTES past the cap (a `json_group_array` over a large fold) — the DO
+ * refuses that too (measured), but only the real platform can see it.
+ */
 export function assertCfLimits(sql: string, binds: readonly unknown[]): void {
-  const violation = cfLimitViolation(sql, binds);
-  if (violation) throw new Error(violation);
+  const found = violation(sql, binds);
+  if (!found) return;
+  if (found.value) throw new Error(`${VALUE_TOO_BIG}: SQLITE_TOOBIG`, { cause: new Error(found.message) });
+  throw new Error(found.message);
 }
 
 /** A `Sql` that rejects any statement a Durable Object would reject. Composes over any driver;

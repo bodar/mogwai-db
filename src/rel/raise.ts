@@ -1,4 +1,5 @@
 import { spells, type Expression } from '../sql/kernel/q.ts';
+import { CF_MAX_VALUE_BYTES } from '../do-limits.ts';
 import { compilerText, type Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
 import { exprRels, forEachExpr, forEachRel, relExprs } from './walk.ts';
@@ -78,11 +79,15 @@ export function raisedMessage(error: unknown): string | null {
 /** The deferral an int64 overflow in SQLite's own arithmetic (`sum()`) becomes (`GraphStore.query`). */
 export const INTEGER_OVERFLOW = 'integer arithmetic past 64 bits is not supported';
 
+/** The error ONE value past the platform's per-value cap becomes (`GraphStore.query`) — the platform's limit,
+ *  in the user's terms: what holds the value, and the likely cause. */
+export const VALUE_PAST_PLATFORM_CAP = `a single value is larger than this graph's storage can hold (a Durable Object's SQLite caps one string or JSON value at ${CF_MAX_VALUE_BYTES / (1024 * 1024)} MB) — a fold(), group()/groupCount(), property or parameter value of this size cannot be stored or carried here; reduce it inside the traversal (count(), limit(), a narrower by()) or unfold() it`;
+
 /** A query whose answer is an error the DATA decided — the reference's own message, raised mid-statement
  *  by a `raiseExpr` arm. A distinct class so a caller can tell an answer that IS an error from a failure. */
 export class RaisedByQuery extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'RaisedByQuery';
   }
 }

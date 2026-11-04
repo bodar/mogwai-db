@@ -6,7 +6,8 @@
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin/types.ts';
 import { type Sql } from './api.ts';
-import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery } from './rel/raise.ts';
+import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery, VALUE_PAST_PLATFORM_CAP } from './rel/raise.ts';
+import { VALUE_TOO_BIG } from './do-limits.ts';
 import { UnsupportedTraversal } from './compiler/unsupported.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
@@ -337,6 +338,12 @@ export class GraphStore {
       // carry: a deferral the query answers with, not an internal error.
       const message = sqliteMessage(error);
       if (message === 'integer overflow') throw new RaisedByQuery(INTEGER_OVERFLOW);
+      // ONE VALUE past the platform's per-value cap (a DO's 2 MB — `do-limits.ts`). A data-sized SET never
+      // gets here: it crosses split under the cap (`jsonEachRelation`). What does is a single member, or a
+      // value SQLite computes, that no Durable Object can hold at all — a `fold()` of 8,000 long names, one
+      // `groupCount()` map, a property that large. That is the platform's limit, not a traversal we decline,
+      // so it is said as such rather than as SQLite's bare message. (Bun's cap is ~1 GB: it answers.)
+      if (message === VALUE_TOO_BIG) throw new RaisedByQuery(VALUE_PAST_PLATFORM_CAP, { cause: error });
       // A statement past one of SQLite's own STATEMENT-SHAPE limits is rejected at prepare, before any
       // row is read — so it is a property of the compiled TEXT (hence of the query text), never of the
       // data, and the user's answer is a clear decline rather than SQLite's bare message. The usual

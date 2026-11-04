@@ -7,7 +7,10 @@
 // transport `compiler/rel/foreign.ts` uses to land a barrier's awaited rows and `build.ts`'s
 // `jsonEachSet` uses for every bound collection. A data-sized set is a single value, never N
 // parameters — which is what makes a load of 10,000 rows O(1) binds instead of a Durable Object wall
-// no Bun test can see (src/cf-limits.ts). JSON transport also AGREES across runtimes where native
+// no Bun test can see (src/cf-limits.ts). "One" is per 2 MB: a batch past a DO's per-value cap splits at row
+// boundaries into several values under UNION ALL (`jsonChunks`, the ONE packer — the relational `Insert`
+// through `jsonEachSet`, the direct statements below through `members`), so the bind count is
+// O(bytes / 2 MB), never O(rows). JSON transport also AGREES across runtimes where native
 // binds diverge: an integer read from a JSON array binds INTEGER on both, where a native number bind
 // is INTEGER on Bun and REAL on DO. The empty case needs no branch here — a caller with no rows makes
 // no statement at all.
@@ -21,9 +24,8 @@ import * as make from './rel/factory.ts';
 import { plan } from './rel/plan.ts';
 import { insert } from './rel/stmt-factory.ts';
 import type { ColMeta, SqlType } from './rel/types.ts';
-import { jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
+import { jsonChunks, jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
 import { runProgram, type RowSource } from './program.ts';
-import { stringifyExact } from './json-exact.ts';
 import { execute, identifier, list, q, textLiteral, value, type Expression } from './sql/kernel/q.ts';
 
 /** One column of a set-insert target. `jsonb` wraps the cell in `jsonb(<text>)` — the collection /
@@ -48,6 +50,15 @@ const cellAt = (row: Expr, at: number, col: SetColumn): Expr => {
   if (col.jsonb) return { kind: 'call', fn: 'jsonb', args: [extract] };
   if (col.blob) return { kind: 'call', fn: 'unhex', args: [extract] };
   return extract;
+};
+
+/** A data-sized set as a FROM-able relation of its members (`value`): `json_each(?)` when it fits one DO
+ *  value — the spelling every set under 2 MB has always had — else one `json_each(?)` per `jsonChunks`
+ *  chunk under `UNION ALL`. The direct statements' twin of `jsonEachRelation`, over the SAME packer. */
+const members = (set: readonly unknown[]): Expression => {
+  const chunks = jsonChunks(set);
+  if (chunks.length === 1) return q`json_each(${value(chunks[0]!.text)})`;
+  return q`(${list(chunks.map((chunk) => q`SELECT value FROM json_each(${value(chunk.text)})`), ' UNION ALL ')})`;
 };
 
 /**
@@ -103,7 +114,7 @@ export function insertSet(
  */
 export function deleteMembers(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
   if (!ids.length) return 0;
-  execute(store, q`DELETE FROM ${identifier(table)} WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(stringifyExact([...ids]))}))`);
+  execute(store, q`DELETE FROM ${identifier(table)} WHERE ${identifier(column)} IN (SELECT value FROM ${members(ids)})`);
   return 1;
 }
 
@@ -114,7 +125,7 @@ export function deleteMembers(store: RowSource, table: string, column: string, i
  *  changes content without re-landing the element row (bulk `'replace'`, and replication apply). */
 export function markMembersDirty(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
   if (!ids.length) return 0;
-  execute(store, q`UPDATE ${identifier(table)} SET dirty = 2 WHERE ${identifier(column)} IN (SELECT value FROM json_each(${value(stringifyExact([...ids]))}))`);
+  execute(store, q`UPDATE ${identifier(table)} SET dirty = 2 WHERE ${identifier(column)} IN (SELECT value FROM ${members(ids)})`);
   return 1;
 }
 
@@ -148,6 +159,6 @@ export function updateSet(
   const assignments = list(columns.map((c, i) => q`${identifier(c.name)} = ${cell(i + 1)}`));
   const t = identifier(table);
   execute(store,
-    q`UPDATE ${t} SET ${assignments} FROM json_each(${value(stringifyExact(rows))}) AS u WHERE ${t}.${identifier(keyColumn)} = ${extractAt(0)}`);
+    q`UPDATE ${t} SET ${assignments} FROM ${members(rows)} AS u WHERE ${t}.${identifier(keyColumn)} = ${extractAt(0)}`);
   return 1;
 }

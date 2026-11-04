@@ -1,7 +1,9 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { CfLimitedSql } from '../src/cf-limits.ts';
+import { CfLimitedSql, CF_MAX_VALUE_BYTES } from '../src/cf-limits.ts';
+import { utf8Bytes } from '../src/do-limits.ts';
+import { RaisedByQuery } from '../src/rel/raise.ts';
 import { extendedRegistry } from '../src/services/standard.ts';
 import { loadBulk, type BulkVertex } from '../src/bulk.ts';
 import { lowerTypedNodeStream } from '../src/compiler/rel/lower.ts';
@@ -75,6 +77,80 @@ describe('a federated value stream lands as one bind at any size', () => {
     expect(await run('home', source('V().hasLabel("nope").values("name")'))).toEqual([]);
     expect(await run('home', 'g.V().hasLabel("nope").call("federate", ["graph":"big","traversal":__.V().hasLabel("few").values("name")])')).toEqual([]);
   });
+});
+
+// PAST ONE DURABLE OBJECT VALUE. "One bind" was the rule above, and it moved the wall from the bind count
+// to the bind's SIZE: a DO caps one value at 2 MB (`src/do-limits.ts`), so 8,000 wide people landed as ONE
+// `json_each` value (an `elementMap()` is ~4 MB) were refused in production and green on Bun. Every landing
+// now goes through the one builder (`compiler/rel/build.ts` `jsonEachRelation`), which splits such a set at
+// member boundaries into several values. Each test here first checks that ITS payload is past the cap —
+// otherwise it would pass without the split and gate nothing.
+describe('a federated landing past one DO value (2 MB) lands whole, in order', () => {
+  const W = 8_000;
+  const wideName = (i: number) => `${String(i).padStart(5, '0')}-${'n'.repeat(290)}`;
+  // Loaded in batches each under the cap, so these tests isolate the LANDING's split from the load's
+  // (`test/value-cap-split.test.ts` gates the load).
+  beforeAll(() => {
+    const people: BulkVertex[] = Array.from({ length: W }, (_, i) => ({
+      labels: ['person'], properties: [{ key: 'name', value: wideName(i) }, { key: 'age', value: i }],
+    }));
+    for (let at = 0; at < W; at += 1_000) loadBulk(mgr.storeOf('wide'), people.slice(at, at + 1_000));
+  });
+  const wideSource = (sub: string) => `g.call("federate", ["graph":"wide","traversal":__.${sub}])`;
+  /** The sibling's own answer is past the cap — so the landing, which also carries each `{t,v}` envelope, is. */
+  const pastCap = async (sub: string) => {
+    const answer = await run('wide', `g.${sub}`);
+    const spelled = JSON.stringify(answer, (_, v: unknown) => (v instanceof Map ? [...v] : v));
+    expect(utf8Bytes(spelled)).toBeGreaterThan(CF_MAX_VALUE_BYTES);
+    return answer;
+  };
+
+  for (const sub of [
+    'V().hasLabel("person").order().by("name").elementMap()',
+    'V().hasLabel("person").order().by("name").valueMap()',
+    'V().hasLabel("person").order().by("name").project("n","a").by("name").by("age")',
+    'V().hasLabel("person").order().by("name").values("name")',
+  ]) {
+    test(`a pushed ${sub.slice(sub.lastIndexOf(').') + 2)} stream of ${W} lands every member in the sibling's order`, async () => {
+      const expected = await pastCap(sub);
+      const got = await run('home', wideSource(sub));
+      expect(got.length).toBe(W);
+      expect(got).toEqual(expected);
+    }, ROW_SCALE_TIMEOUT_MS);
+  }
+
+  // A multiset: a landed ELEMENT stream read back through `values()` is not order-pinned at the wire (L8
+  // reverses it at any size, one chunk or several), so this asserts no element is lost or duplicated.
+  test(`an ELEMENT landing of ${W} wide people keeps every element`, async () => {
+    await pastCap('V().hasLabel("person").elementMap()');
+    const got = await run('home', `${wideSource('V().hasLabel("person")')}.values("name")`);
+    expect([...got].sort()).toEqual(Array.from({ length: W }, (_, i) => wideName(i)));
+  }, ROW_SCALE_TIMEOUT_MS);
+
+  test('a landed element stream that REPEATS each element keeps its multiplicity past the cap', async () => {
+    const got = await run('home', `${wideSource('V().hasLabel("person").union(identity(), identity())')}.count()`);
+    expect(got).toEqual([2 * W]);
+  }, ROW_SCALE_TIMEOUT_MS);
+
+  test('a mid call() whose pool is past the cap re-emits the WHOLE pool per parent, duplicates and order kept', async () => {
+    const sub = 'V().hasLabel("person").union(values("name"), values("name")).order()';
+    await pastCap(sub);
+    const got = await run('home', `g.V().hasLabel("parent").limit(2).call("federate", ["graph":"wide","traversal":__.${sub}])`);
+    const pool = Array.from({ length: W }, (_, i) => [wideName(i), wideName(i)]).flat();
+    expect(got).toEqual([...pool, ...pool]);
+  }, ROW_SCALE_TIMEOUT_MS);
+
+  // ONE member past the cap cannot be split — no Durable Object can hold it as a value at all. That is the
+  // PLATFORM's limit, and the user is told so in its terms rather than handed SQLite's bare message (or a
+  // decline that blames the traversal). On Bun alone (no cap to model) these answer.
+  for (const sub of ['V().hasLabel("person").values("name").fold()', 'V().hasLabel("person").groupCount().by("name")']) {
+    test(`a pushed ${sub.slice(sub.lastIndexOf(').') + 2)} — ONE value past the cap — is a clear platform-limit error`, async () => {
+      await pastCap(sub);
+      const failure = await run('home', wideSource(sub)).then(() => null, (e: unknown) => e);
+      expect(failure).toBeInstanceOf(RaisedByQuery);
+      expect((failure as Error).message).toMatch(/a single value is larger than this graph's storage can hold \(a Durable Object's SQLite caps one string or JSON value at 2 MB\)/);
+    }, ROW_SCALE_TIMEOUT_MS);
+  }
 });
 
 // The resumed statement itself: its TEXT is a property of the plan, never of how many values came back.

@@ -241,23 +241,20 @@ statement's text grows with data or doubles with query shape. The items below ar
   gone. If that does not recover `both().both()`, measure a MATERIALIZED-CTE frontier reference against the
   prepare-time copy. Test: a plan-shape/EXPLAIN assertion in `test/compiler/both-frontier-once.exec.test.ts`
   that `g.V().out().both()` keeps two plain seeks (`e_out`/`e_in` with no OR).
-- **The one-value landing has its own production-only wall: DO's 2 MB per-bound-value cap
-  (one-value-landing-ceiling) — MAJOR, common, DATA-SIZE REFUSAL.** 25a64da6 moved the federate wall ~20×
-  but did not remove it: under `CfLimitedSql` (`CF_MAX_VALUE_BYTES`, `src/cf-limits.ts`) at 8,000 person
-  vertices `g.call("federate",["graph":"big","traversal":__.V().hasLabel("person").elementMap()])` fails
-  "bind 1 exceeds Cloudflare's 2097152-byte value limit: 2740184 bytes" (answers at 1k; parent commit failed
-  both, on the 100 KB text cap). Same ceiling for a pushed `fold()` node, the element landing
-  (`foreignRelation`) and `valueMap`/`project` at a few thousand wide rows — and for every other
-  "data crosses as ONE json_each value" site (`src/setwrite.ts`, `src/formats/drain.ts`), so it is the
-  CLAUDE.md rule's own limit, not federate's. Fix once, at the shared builder (take with the Next-round
-  "foreign.ts json_each sites on one spelling" proposal, which should land FIRST so there is one place):
-  split the JSON into ≤2 MB binds joined by `UNION ALL` with `ord` offsets — bind count then grows with
-  bytes/2 MB (100 binds ≈ 200 MB, past any isolate). Test: the 8k `elementMap()` witness under `CfLimitedSql`.
-  Test gaps from the same review: no witness with map/element-shaped members (`valueMap`, `elementMap`,
-  `project`, `groupCount().by(name)` — the widest, first to hit 2 MB) in
-  `test/federate-value-stream-scale.test.ts`, and nothing pins per-parent grouping when the sibling stream
-  has duplicates (`g.V().hasLabel("y").call("federate",[…,__.V().union(values("name"),values("name"))
-  .order()])` must give `a,a,b,b,c,c` per parent).
+- **A write's retained rows (`program.ts` `RowsBind`) still cross as ONE value — the last 2 MB wall
+  (rowsbind-value-ceiling) — MAJOR, DATA-SIZE REFUSAL.** The one-value-landing ceiling is fixed at the shared
+  builder (`build.ts` `jsonEachRelation`/`jsonChunks`: every landing, bound collection, and `setwrite.ts`
+  statement splits past 2 MB), but a retained binding's rows are produced at RUN time, after its SQL was
+  rendered, so a compile-time chunk count cannot apply: `g.V().hasLabel('doc').as('d').addV('c')
+  .property('b', select('d').values('body')).count()` at 8k × 500 B binds 4.22 MB under `CfLimitedSql`.
+  Needs the consumer statement to take a run-time chunk count (re-render per k, or a fixed k-way UNION ALL
+  with empty arms). Test: that witness under `CfLimitedSql`.
+- **federate's mapValues injection sends the parents as ONE map (mapvalues-inject-ceiling) — MAJOR at ~7k
+  wide parents.** `g.V().hasLabel("p").values("name").as("e").call("federate",["graph":"x"]).V().has("name",
+  select("e"))` injects every parent's value as one `inject($map)` parameter; at 8k × 300 B it is one 2.8 MB
+  value, which no DO can hold (now the clear platform-limit error, not a bare one). The sibling statement is
+  also P×N: its per-key `has("name", <correlated>)` scans `nodes` per key (2.5 s at 2k parents). Fix: inject
+  a LIST of pairs the sibling explodes (splittable), and seek the property index per key.
 - **Scatter sort order (federate-scatter-order) — minor, constant factor.** `lowerTypedNodeStream`'s
   scatter is `json_each(?) fnx0 CROSS JOIN json_each(?) fgd2 ORDER BY fgd2.value, fnx0.key`: pool outer,
   parents inner, so a TEMP B-TREE sorts all P×N rows (pool 8k × 100 parents 385 ms vs trunk's inlined VALUES
@@ -1218,15 +1215,6 @@ production-only wall — verify it first):
   sibling's value in statement TEXT, so a pushed `max()`/`min()` over a long string property may grow the
   statement with data — the DO 100 KB wall in its last spelling. Either way, `foreignNodeStream(empty ? [] :
   [node], fresh)` deletes both Filter(false) workarounds. ~15 lines.
-- **foreign.ts's five data-array `json_each` sites on one spelling** — `foreignRelation`,
-  `foreignMapRelation`, `parentsRelation`, `foreignNodeStream`, `landedStream` (`src/compiler/rel/foreign.ts`)
-  each hand-roll `make.explode({ expr: lit(stringify(X), 'text'), … })`; `build.ts` `jsonEachSet` is the
-  same meaning. Caveat: `jsonEachSet` takes a compiler-minted param NAME and the bind dedup merges same-named
-  binds, so two landings in one plan would share a bind (wrong answer) — the shared helper must keep the
-  unnamed mechanical `lit(...)` form (a mode of `jsonEachSet`, or the base its named form wraps). Also makes
-  "the ONE JSON writer is stringifyExact" true (`parentsRelation`/`landedStream` call bare `JSON.stringify`).
-  `foreignNodeStream`'s `json(value)`+ord projection = `lower.ts` `listSeed`/`mapSeed`. Land BEFORE
-  one-value-landing-ceiling (§0b) so the 2 MB split has one home. ~20 lines.
 - **Every compute-once scalar subquery via `build.ts` `once()`** — `predicate.ts` `storedCompareOnce` (~604)
   and `valueTheta`'s `vto`/`vtp` one-row VALUES (~750) are hand-rolled copies (each with its own copy of
   `once`'s `spelledFreely` test); `reduction.ts` `runningOnce` and `modulator.ts` `producedMemberNode` both
