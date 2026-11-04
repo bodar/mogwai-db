@@ -159,7 +159,14 @@ statement TEXT (0 binds, DO's 100 KB cap); cc-5's FTS fix was the opposite of ov
 index text was inlined as a literal). The rule that answers both: a value the client sent binds once, and no
 statement's text grows with data or doubles with query shape. The items below are the remaining breaches.
 
-- **cc-6 host-unroll compile work — MAJOR, plausible (review of cc-5).** The budget meters BYTES, but compile
+- ✅ **LANDED (dadaba39) — cc-6 host-unroll compile work — MAJOR, plausible (review of cc-5).** `freeRelIds`
+  (`src/rel/walk.ts`) checks every direct child id before searching a subtree and `relReads`
+  (`src/rel/emit.ts`) is one saturating pass per subplan, so compile work under a host is linear in
+  `times(K)` (`where(times(2000))` 5.5 s → ~0.2 s); a fused FROM past SQLite 64-table join width declines
+  at the assembler (`JoinWidthExceeded`) in ms, naming the `times(n)`. Emitted SQL unchanged for every plan
+  that answers. Tests: `test/compiler/host-unroll-width.exec.test.ts`. Remains: nothing. Original item text
+  follows.
+  The budget meters BYTES, but compile
   WORK for an unroll under a per-traverser host is quadratic in `times(K)`: `g.V(1).local(repeat(out())
   .times(K)).count()` K=1000 819 ms, 2000 4.7 s, 3000 14.1 s (then the store refuses: FROM-list cap), 4000
   24.2 s returning a 236 KB plan a DO refuses (~5.7× per doubling); trunk before cc-5 declined K≥3000 in 3 ms.
