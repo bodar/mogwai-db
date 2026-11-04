@@ -25,17 +25,21 @@ the reference's order, static map < traversal map < `with()` (874c5570: the one 
 
 ## 0. Trunk CI is RED (fix first)
 
-- **0dc7f3ce (until-loops-count) is red on GitHub CI, `test (other)` and `L8 (other)`** (run 41782887722):
-  Still live at 9adf67d7: it failed locally in `L8 (other)` and passed on a re-run of `mise run ci` — host- and
-  run-dependent, a flake on Bun and a hard red on the runner.
-  `test/compiler/repeat-unroll-boundary.exec.test.ts:535` "a count under the ceiling still unrolls and answers"
-  — `g.V().repeat(__.out().limit(1)).times(1200).count()` hits the new stack-overflow backstop
-  (`tooDeep`, `src/compiler/compiler.ts:49`) on the runner and declines, where it answers `[0]` locally. So the
-  compiler's recursion depth, not `MAX_UNROLLED_STEPS` (2560, `src/compiler/ir/strategies.ts`), is the
-  binding limit, and it varies by host (workerd's stack is ~5× shallower than Bun's). Fix: make the
-  lowering's recursion over unrolled phases iterative (or bounded by the count, below every runtime's stack)
-  so the query-text ceiling is the real one, then keep the test; do not lower the test's count to fit the
-  runner. Until then trunk's every push is red.
+- ✅ **LANDED (83be7569→0e13f52b, 2ca3bfb6→d4c248a1, d86bd6b0→0152983f): the Rel tree's depth is bounded along a
+  long step chain**, so the unroll's query-text ceiling (`MAX_UNROLLED_STEPS`), not the compiler's stack, is the
+  binding limit and `g.V().repeat(__.out().limit(1)).times(1200).count()` answers on every host. Mechanism: the
+  root spine of an effect-free program is cut into CTEs every `SPINE_DEPTH_BOUND` levels (`hoist.cut`,
+  `src/compiler/rel/lower.ts`; walks iterative in `src/rel/walk.ts`); every SQLite statement-shape limit (the
+  FROM-list cap included, `src/storage.ts`) declines clearly; a cut spine is declared before the effects that
+  read it. Residue, stated rather than fixed:
+  - **Recursion over shape-changing bodies is still unbounded.** `continueAs` over a body like
+    `repeat(out().as('x').select('x')).times(n)` is not bounded by the cut. `tooDeep` is the backstop there,
+    as before.
+  - **Long walk with a later effect stops at SQLite's depth limit.** A long walk followed by a reducing side
+    effect hits "Expression tree is too large (max depth 1000)" at around 200 hops, both with and without the
+    cut. It is a clean decline.
+  - **The spine is evaluated once per step.** A guard step and the result each re-evaluate the plain cut CTEs.
+    The uncut plan inlined the spine twice in the same way, so this is not a regression.
 
 ## 1. Wrong answers today
 
