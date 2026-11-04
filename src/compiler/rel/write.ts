@@ -525,10 +525,29 @@ function cardinalityOf(owner: Expr, key: Expr, declared: VertexCardinality | nul
   return { kind: 'call', fn: 'coalesce', args: [{ kind: 'scalar', plan: only }, text(DEFAULT_VERTEX_CARDINALITY)] };
 }
 
+/**
+ * HOW THE INDEX TEXT IS SPELLED — the way the VALUE crossed the seam. A parsed constant is query text,
+ * so its index text is a literal like every constant. A user PARAMETER is DATA, and its index text is
+ * that data again (a string's index text IS the string), so it binds. Inlined, a parameterised
+ * property's FTS statement grew one byte per byte of the value, and the value's size alone hit the
+ * Durable Object's 100 KB statement cap and the compile budget's 400 KB — a decline on DATA size, for a
+ * value the client deliberately sent as a parameter. Bound, the statement's text is the same whatever
+ * the value, which is also the statement the user's GValue asked to be cacheable.
+ *
+ * Where the text IS the stored value (a string) it is the SAME parameter under its wire name, so every
+ * use within one statement dedups to one bind. Otherwise (a number's text, a collection's `[a, b]`) it
+ * is a different value derived from that parameter, under its own reuse key — one a Gremlin variable
+ * name cannot spell, so it never collides with a second parameter (the kernel keeps the FIRST value a
+ * key is seen with, `q.ts` `renderStatement`, so a shared key with a different value would be wrong).
+ */
+function ftsTextExpr(write: PropertySet, ftsText: string): Expr {
+  if (write.valueName === null) return text(ftsText);
+  return param(ftsText, ftsText === write.stored ? write.valueName : `${write.valueName}#fts`, 'text');
+}
+
 /** `INSERT INTO property_fts … SELECT … FROM <the rows just written>` — one index row per written
- *  property, keyed by its signed id. The pid is known only at run time and the text only at compile
- *  time, so the text rides as a constant. The CALLER checks there is a text: an empty one indexes as
- *  no row. */
+ *  property, keyed by its signed id. The pid is known only at run time; the text is spelled as the
+ *  value was (`ftsTextExpr`). The CALLER checks there is a text: an empty one indexes as no row. */
 function indexWritten(written: Rel, elem: Elem, write: PropertySet, ftsText: string, fresh: Minter): Stmt {
   const row = make.project({
     id: fresh('p'), input: written, channels: [], type: typeOf(...FTS_ROW_COLS),
@@ -538,7 +557,7 @@ function indexWritten(written: Rel, elem: Elem, write: PropertySet, ftsText: str
       // user data, so binding it would spend one of the 100 on a constant the compiler already holds.
       ['owner_elem', compilerText(elem === 'edge' ? 'edge' : 'node')],
       ['pid', col(written.id, 'id')], ['owner', col(written.id, 'owner')], ['pk', propertyKeyExpr(write.key, write.keyName)],
-      ['text', text(ftsText)],
+      ['text', ftsTextExpr(write, ftsText)],
     ],
   });
   // An edge write is an UPSERT on `(edge, key)`, so several traversers onto one edge return the SAME

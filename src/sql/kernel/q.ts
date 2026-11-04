@@ -76,12 +76,13 @@ export const keyedValue = (v: unknown, key: string): Expression => new KeyedValu
  */
 function tokens(tree: Sql, budget?: CompileBudget): (Text | Identifier | Value)[] {
   const out: (Text | Identifier | Value)[] = [];
-  // THE RENDERED-BYTES CHARGE (`CompileBudget`): exact, and counted AS the text is laid out, so a statement
-  // past the budget stops here rather than after its whole text is joined. A placeholder counts as its `?`.
+  // THE RENDERED-BYTES CHARGE (`CompileBudget`): exact over the statement's STRUCTURE, and counted AS the
+  // text is laid out, so a statement past the budget stops here rather than after its whole text is joined.
+  // A placeholder counts as its `?`, a string constant as its quotes (`TextLiteral`: its payload is data).
   let bytes = 0;
   const push = (token: Text | Identifier | Value): void => {
     out.push(token);
-    if (budget && (bytes += token instanceof Text ? token.text.length : 1) > budget.limit) budget.charge(bytes);
+    if (budget && (bytes += token instanceof TextLiteral ? 2 : token instanceof Text ? token.text.length : 1) > budget.limit) budget.charge(bytes);
   };
   const stack: { node: Compound; members: Iterator<Expression>; first: boolean }[] = [];
   const enter = (node: Compound): void => {
@@ -262,8 +263,20 @@ export const identifier = (name: string): Text => raw(quote(name));
 export const textLiteral = (text: string): Text => {
   if (UNSAYABLE.test(text))
     throw UnsupportedTraversal.because(`the string constant ${JSON.stringify(text)} holds a NUL or an unpaired surrogate, which SQL statement text cannot carry`);
-  return raw(`'${text.replace(/'/g, "''")}'`);
+  return new TextLiteral(`'${text.replace(/'/g, "''")}'`);
 };
+
+/**
+ * A string constant's text, told apart from the SQL around it for ONE reader: the compile budget's
+ * rendered-bytes charge (`tokens`), which counts it as its two quotes. Its payload is DATA the compile
+ * copies, never work it does — the work is the structure around it, which the charge still counts byte
+ * for byte, and a literal spelled once per expansion is still seen there and by the node-count charges.
+ * Counted in full, the payload made the budget a function of a VALUE's size: a value that reaches the
+ * text from a user parameter (a `mergeV($m)` map member, which the merge decomposes into constants)
+ * declined at 400 KB on the size of the data, which `CompileBudget` must never do. How long a statement
+ * the store accepts stays the store's call (a Durable Object's 100 KB), as it always was.
+ */
+class TextLiteral extends Text {}
 /** A NUL, or a UTF-16 surrogate not in a well-formed pair — what `textLiteral` declines. */
 const UNSAYABLE = /\u0000|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 

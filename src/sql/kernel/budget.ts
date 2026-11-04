@@ -42,7 +42,12 @@ export const COMPILE_BUDGET_BYTES = 400_000;
  *  - each binding's TREE SIZE, relations included, before `checkPlan` and the emitter walk it
  *    (`emitProgram`, `src/rel/emit.ts`) — after naming, when a shared relation left inline (a correlated
  *    subplan) is certain to be spelled per use (`spelledSize`).
- *  - the RENDERED BYTES, counted as the renderer writes them (`render`, `kernel/q.ts`) — exact.
+ *  - the RENDERED BYTES, counted as the renderer writes them (`render`, `kernel/q.ts`) — exact over the
+ *    statement's STRUCTURE: a placeholder counts as its `?` and a string constant as its two quotes
+ *    (`TextLiteral`), because a constant's payload is data the compile copies, not work it does. Counted in
+ *    full it made this a function of a VALUE's size — a parameter that reaches the text as a constant (a
+ *    `mergeV($m)` member) declined on the size of the data. A parameterised property's own value and its
+ *    FTS text bind (`write.ts` `ftsTextExpr`), so their statements do not grow with the value at all.
  * The two tree sizes count NODES and are charged as bytes because every node spells at least one; both
  * are read off the DAG in O(DAG).
  *

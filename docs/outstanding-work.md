@@ -469,6 +469,17 @@ Beside the RelIR substrate:
 
 ## 4. Sensible queries we decline
 
+- **A map PARAMETER's members are spelled as constants (nr-param-map-members)** — `g.mergeV($m)` and
+  `option(Merge.onCreate/onMatch, $m)` decompose the map at compile time (`MergeMaps`), so each member value
+  is INLINED, and a member over ~100 KB is refused by a Durable Object's statement cap: a decline on the
+  SIZE of data the client sent as a parameter. Measured: statement text grows 1:1 with a member's size
+  (1,484 B at 10 B, 400,699 B at 400 KB). The compile budget no longer refuses it (a constant's payload is
+  charged as its quotes, `TextLiteral` in `kernel/q.ts`), and a parameterised `property(k, $v)` and its FTS
+  text already bind (`write.ts` `ftsTextExpr`). PREREQUISITE: a parameter's MEMBERS spelled from the
+  parameter's own bind — ONE JSON bind per map parameter, members read as `json_extract(?, '$[i]')`
+  (never one bind per member: a map with 100+ keys would then meet the 100-bind cap, a decline on the
+  map's key count). `inject($m).mergeV()` (`mergeVFromMap`) already carries the map as one value and is the
+  workaround. A label/key parameter (`addV($l)`) is inlined the same way but is a name, not a document.
 - **Writes — top candidate: TinkerPop's batch-upsert idiom (R8-res).** Neither
   `g.inject([[name:'x'],…]).unfold().mergeV()` nor
   `g.inject([[lookup:[…], create:[…]],…]).unfold().mergeV(__.select('lookup')).option(Merge.onCreate, __.select('create'))`

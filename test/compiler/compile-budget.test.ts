@@ -45,9 +45,14 @@ describe('the L1 corpus under the compile budget', () => {
       const budget = new CompileBudget();
       const lowered = lowerToRel(steps, { params: NO_PARAMS, wireTerminal: true, budget });
       if (!lowered) return [];
-      // A numbered placeholder (`?12`) is charged as its `?`; the rest of the text is charged exactly.
-      const statements = renderedSteps(lowered.rendered).map((step) => step.emitted.sql.replace(/\?\d+/g, '?').length);
-      return [{ q, plan: lowered.plan, budget, largestStatement: Math.max(...statements) }];
+      // A numbered placeholder (`?12`) is charged as its `?`, a string constant as its two quotes (its
+      // payload is data, `TextLiteral` in q.ts); the rest of the text — the structure — is charged exactly.
+      // So the charge lies between the structure (every quoted run emptied, the compiler's own quoted
+      // text included) and the whole text.
+      const texts = renderedSteps(lowered.rendered).map((step) => step.emitted.sql.replace(/\?\d+/g, '?'));
+      const largestStatement = Math.max(...texts.map((text) => text.replace(/'(?:[^']|'')*'/g, "''").length));
+      const largestText = Math.max(...texts.map((text) => text.length));
+      return [{ q, plan: lowered.plan, budget, largestStatement, largestText }];
     } catch { return []; }
   });
 
@@ -76,8 +81,11 @@ describe('the L1 corpus under the compile budget', () => {
     expect(over).toEqual([]);
   });
 
-  test('the rendered-bytes charge is exact: the largest statement is the peak', () => {
-    for (const { budget, largestStatement } of measured) expect(budget.peak).toBeGreaterThanOrEqual(largestStatement);
+  test('the rendered-bytes charge is exact over the structure: between it and the whole text', () => {
+    for (const { budget, largestStatement, largestText } of measured) {
+      expect(budget.peak).toBeGreaterThanOrEqual(largestStatement);
+      expect(budget.peak).toBeLessThanOrEqual(largestText);
+    }
   });
 });
 
