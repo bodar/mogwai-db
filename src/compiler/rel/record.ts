@@ -9,6 +9,7 @@ import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
 import { exprHasSubquery, isSelfContained } from '../../rel/walk.ts';
+import { exprMayAbort } from '../../rel/raise.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import type { GraphSource } from './source.ts';
@@ -300,8 +301,19 @@ function fieldNode(read: FieldRead, field: RecordField, source: GraphSource, fre
  * string — the same trap `mapOfGroups`' `json()` wrapping documents.
  *
  * Where NO field is optional — every `by()` a token or the traverser itself, or the whole step under
- * `ProductiveByStrategy` — the accumulator collapses to a single `json_array(…)` and the `CASE` chain
- * costs nothing.
+ * `ProductiveByStrategy` — the accumulator collapses to a single `json_array(…)`.
+ *
+ * ## INVARIANT: the accumulator is named ONCE per step
+ *
+ * An `Expr` is a tree to the emitter: a node referenced twice is SPELLED twice, there is no sharing.
+ * So a fold that puts its running value in both a branch and the `else` arm —
+ * `CASE WHEN p THEN json_insert(acc, …) ELSE acc END` — doubles the text per optional field, and the
+ * statement grows as 2^k in the number of keys. That shipped: `project()` over nine `by('age')`/
+ * `by('name')` keys was 371 KB (over a Durable Object's 100 KB statement cap) and twenty never finished
+ * compiling. The condition therefore selects the json_insert PATH (`$[#]` appends, `$` exists and is a
+ * no-op), so each step reads `acc` exactly once and the text is linear in the keys. Any fold here, or
+ * anywhere a running `Expr` accumulates, keeps that rule. `test/compiler/project-linear.exec.test.ts`
+ * pins it.
  */
 function recordPairs(read: FieldRead, fields: readonly RecordField[], source: GraphSource, fresh: Minter): Expr | null {
   const pairs: { readonly pair: Expr; readonly present: Expr | null }[] = [];
@@ -326,8 +338,18 @@ function recordPairs(read: FieldRead, fields: readonly RecordField[], source: Gr
     return { kind: 'json-array', items: pairs.map((entry) => entry.pair), binary: false };
   let acc: Expr = EMPTY_ARRAY;
   for (const { pair, present } of pairs) {
-    const appended: Expr = { kind: 'call', fn: 'json_insert', args: [acc, compilerText('$[#]'), pair] };
-    acc = present ? { kind: 'case', whens: [[present, appended]], else: acc } : appended;
+    if (!present) {
+      acc = { kind: 'call', fn: 'json_insert', args: [acc, compilerText('$[#]'), pair] };
+      continue;
+    }
+    // The CONDITION rides on the PATH, never around the accumulator: an absent field inserts at `$`,
+    // which always exists, and `json_insert` at an existing path is a no-op — so `acc` is named once.
+    const path: Expr = { kind: 'case', whens: [[present, compilerText('$[#]')]], else: compilerText('$') };
+    // The pair is now evaluated on an ABSENT row too, where the old `CASE` skipped it. A node builder
+    // that can RAISE (a `receiver.ts` guard reached through a correlated field read) must still never
+    // fire there, so such a value is gated by the presence test itself — `acc` is still named once.
+    const value: Expr = exprMayAbort(pair) ? { kind: 'case', whens: [[present, pair]], else: compilerNull() } : pair;
+    acc = { kind: 'call', fn: 'json_insert', args: [acc, path, value] };
   }
   return acc;
 }
