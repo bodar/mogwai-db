@@ -569,6 +569,13 @@ export function listMemberOp(
         memberOrder(kept),
       ], fresh), fresh),
       of,
+      // A SORTED SET is a LIST on the wire, for `reverse()`'s reason: `OrderLocalStep.map` collects any
+      // Collection with `Collectors.toList()` (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/
+      // tinkerpop/gremlin/process/traversal/step/map/OrderLocalStep.java:73-76), so the marker stops being
+      // true of the answer — and the class is VISIBLE: a Java/Python GLV decodes a Set as an unordered
+      // hash set, losing the sort the user asked for. The local slices are the contrast: `RangeLocalStep`
+      // keeps a Set a `LinkedHashSet`, so they state nothing and the marker rides.
+      set: false,
     };
   }
 

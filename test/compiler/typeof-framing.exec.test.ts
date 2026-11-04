@@ -137,6 +137,28 @@ describe('a SET retyped by is(typeOf(SET)) stays a Set wherever the value travel
     expect(await values(store, "g.V().values('m').is(typeOf(GType.LIST)).fold().unfold()")).toEqual([['x', 'y']]);
   });
 
+  test('order(local) UNMAKES a Set, wherever the result travels; a local slice keeps it', async () => {
+    // `OrderLocalStep.map` collects any Collection with `Collectors.toList()` (OrderLocalStep.java:73-76),
+    // so a sorted set is a List — through as()/select(), fold(), fold().unfold() and a local() body.
+    // `RangeLocalStep` keeps a Set a LinkedHashSet, so a slice is the contrast.
+    const store = seededStore();
+    const sorted = ['josh', 'lop', 'ripple', 'vadas'];
+    const prefix = "g.V().out().values('name').fold().dedup(local)";
+    const isList = (v: unknown, members: unknown[]) => { expect(Array.isArray(v)).toBe(true); expect(v).toEqual(members); };
+    isList((await values(store, `${prefix}.order(local)`))[0], sorted);
+    isList((await values(store, `${prefix}.order(local).as('a').select('a')`))[0], sorted);
+    isList((await values(store, `${prefix}.order(local).by(desc).as('a').select('a')`))[0], [...sorted].reverse());
+    isList(((await values(store, `${prefix}.order(local).fold()`))[0] as unknown[])[0], sorted);
+    isList((await values(store, `${prefix}.order(local).fold().unfold()`))[0], sorted);
+    for (const v of await values(store, "g.V().local(__.out().values('name').fold().dedup(local).order(local)).as('s').select('s')")) expect(Array.isArray(v)).toBe(true);
+    // A sorted list sliced is still a list; a set sliced is still a set; a sorted list re-deduped is a set again.
+    isList((await values(store, `${prefix}.order(local).limit(local, 2)`))[0], ['josh', 'lop']);
+    expect((await values(store, `${prefix}.limit(local, 2)`))[0] instanceof Set).toBe(true);
+    expect((await values(store, `${prefix}.order(local).dedup(local)`))[0] instanceof Set).toBe(true);
+    // The retyped Set takes the same road.
+    isList((await values(withSet(), "g.V().values('m').is(typeOf(GType.SET)).order(local).by(desc).as('a').select('a')"))[0], ['y', 'x']);
+  });
+
   test('a branch whose arms disagree on Set vs List declines rather than framing both as the first', () => {
     const store = withSet();
     expect(() => executeQuery(store, "g.V().union(__.values('m').is(typeOf(GType.SET)), __.values('m').is(typeOf(GType.LIST)))", {})).toThrow(UnsupportedTraversal);
