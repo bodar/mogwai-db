@@ -241,6 +241,13 @@ statement's text grows with data or doubles with query shape. The items below ar
   gone. If that does not recover `both().both()`, measure a MATERIALIZED-CTE frontier reference against the
   prepare-time copy. Test: a plan-shape/EXPLAIN assertion in `test/compiler/both-frontier-once.exec.test.ts`
   that `g.V().out().both()` keeps two plain seeks (`e_out`/`e_in` with no OR).
+- ✅ **One-value landing past DO's 2 MB per-value cap (one-value-landing-ceiling) — LANDED (f3e607f4).**
+  `jsonEachRelation` (`src/compiler/rel/build.ts`) is the one "data crosses as a json_each relation" builder
+  (foreign.ts's five hand-rolled explodes go through it) and `jsonChunks` packs members into ≤2 MB chunks
+  under UNION ALL with `ord` offsets (SQL byte-identical under the cap; `setwrite.ts` reuses it; limits in
+  `src/do-limits.ts`); one member past 2 MB is a clear platform-limit error. Tests:
+  `test/value-cap-split.test.ts`, `test/federate-value-stream-scale.test.ts`. Remains: nothing (the
+  run-time `RowsBind` and mapValues-param follow-ups are filed separately below).
 - **A write's retained rows (`program.ts` `RowsBind`) still cross as ONE value — the last 2 MB wall
   (rowsbind-value-ceiling) — MAJOR, DATA-SIZE REFUSAL.** The one-value-landing ceiling is fixed at the shared
   builder (`build.ts` `jsonEachRelation`/`jsonChunks`: every landing, bound collection, and `setwrite.ts`
