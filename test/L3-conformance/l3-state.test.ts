@@ -94,7 +94,7 @@ test('every reason is used, and cites a document that says it', () => {
 });
 
 test('a ledgered decline that answers is reported, whatever the answer', () => {
-  const ledger = { 'tree-step': ['declines', 'answers', 'unrun'], 'select-mixed-by': ['wrong'] } as const;
+  const ledger = { 'tree-step': ['declines', 'answers', 'unrun'], 'call-traversal-params': ['wrong'] } as const;
   const queries = [
     { scenario: 'declines', ok: false, declined: true },
     { scenario: 'answers', ok: true },
