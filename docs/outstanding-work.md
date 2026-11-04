@@ -38,7 +38,7 @@ The stack-depth red (`repeat-unroll-boundary.exec.test.ts` "a count under the ce
 answers") reddened GitHub CI for 0dc7f3ce, 0451a9d1, b15c9897 and f47a0fe6; 0152983f is the first green push.
 
 - ✅ **LANDED (83be7569→0e13f52b, 2ca3bfb6→d4c248a1, d86bd6b0→0152983f): the Rel tree's depth is bounded along a
-  long step chain**, so the unroll's query-text ceiling (`MAX_UNROLLED_STEPS`), not the compiler's stack, is the
+  long step chain**, so the compile budget (`CompileBudget`, `src/sql/kernel/budget.ts`, cc-5; was `MAX_UNROLLED_STEPS`), not the compiler's stack, is the
   binding limit and `g.V().repeat(__.out().limit(1)).times(1200).count()` answers on every host. Mechanism: the
   root spine of an effect-free program is cut into CTEs every `SPINE_DEPTH_BOUND` levels (`hoist.cut`,
   `src/compiler/rel/lower.ts`; walks iterative in `src/rel/walk.ts`); every SQLite statement-shape limit (the
@@ -85,7 +85,7 @@ item lands with tests that stop it from coming back.
   `test/compiler/project-linear.exec.test.ts` (20+ keys under `CfLimitedSql`, linear-growth and compile-time
   assertions); `sql-hygiene` re-recorded down. **Remains — follow-up, outside this seam:** guarded transform
   chains in a child body (`receiver.ts` `guarded()` inside `valueRun`, e.g. `by(__.values('name').toUpper()
-  .toLower()…)`) grow 2× per chained step; fix with `once`-style hoisting between guarded steps. Not done here:
+  .toLower()…)`) grow 2× per chained step — filed as cc-7 below. Not done here:
   the corpus-wide bytes-per-Rel-node guard was merged into cc-5 as directed. Original item text follows.
 - **cc-1 project-linear: PRODUCTION FAILURE, common reach.** `project(k keys).by(…)×k` emits SQL text that
   DOUBLES per key: `recordPairs` (`rel/record.ts`) writes `CASE WHEN p THEN json_insert(acc,…) ELSE acc END`,
@@ -152,6 +152,70 @@ item lands with tests that stop it from coming back.
   - **Instrument:** a test that reports the corpus maximum fuel, so a compile-cost regression is visible.
 
   Free-tier Workers (10 ms CPU) are out of scope.
+
+**Residue of the compile-cost round (all five cc items on trunk; next round starts HERE, in this order).**
+What the user asked about ("why would twenty keys hit our limit — are we binding again?"): no. cc-1 was
+statement TEXT (0 binds, DO's 100 KB cap); cc-5's FTS fix was the opposite of over-binding (a parameter's
+index text was inlined as a literal). The rule that answers both: a value the client sent binds once, and no
+statement's text grows with data or doubles with query shape. The items below are the remaining breaches.
+
+- **cc-6 host-unroll compile work — MAJOR, plausible (review of cc-5).** The budget meters BYTES, but compile
+  WORK for an unroll under a per-traverser host is quadratic in `times(K)`: `g.V(1).local(repeat(out())
+  .times(K)).count()` K=1000 819 ms, 2000 4.7 s, 3000 14.1 s (then the store refuses: FROM-list cap), 4000
+  24.2 s returning a 236 KB plan a DO refuses (~5.7× per doubling); trunk before cc-5 declined K≥3000 in 3 ms.
+  `where(repeat(out()).times(2000))` 6.2 s on both. In a DO that is a CPU-limit kill, not a clean decline —
+  the failure `MAX_UNROLLED_STEPS` existed to prevent. Fix (owner rule: make it cheaper, never widen a
+  limit): charge the budget per host RE-LOWERING (work, not bytes) in `CompileBudget`, or keep a step
+  ceiling for an unroll nested under a host; then find why each host level re-lowers the body (shares root
+  with spine-cut-hosts, §0, and correlated-subtree-sharing below). Test: compile time of K=1000→2000 under a
+  host ≤ ~2.5×, or a decline in ms.
+- **cc-7 guarded transform chain in a child body doubles per step — common reach (found by cc-1).**
+  `by(__.values('name').toUpper().toLower()…)`, `where(__.values('name').toUpper()…)`: 1.4 KB at 2 steps,
+  850 KB at 12; top-level chains are linear. `src/compiler/rel/lower/reduction.ts` transform-run loop
+  (`value = raisingWhen(offences, transformed.expr)`, offences and expr both read `value`) and
+  `receiver.ts` `guarded()`. Fix with the EXISTING authority: wrap each guarded step in
+  `once([value], ([v]) => raisingWhen(transformOffences(step, v, …), transformExpr(step, v, …).expr), fresh)`
+  when `offences.length > 0` (`build.ts` `once`, as `projector.ts` math and `modulator.ts` do; col/lit pass
+  through, so top-level SQL stays byte-identical). Same family as §3.1 `once` consumers and §1b
+  rf3-is-chain-size — take them together. Test: linear text growth in chain length under `CfLimitedSql`.
+- **PREREQUISITE (build before cc-8 and before spine-cut-hosts): correlated-subtree sharing.** A correlated
+  body is inlined at every use because the naming pass cannot hoist a correlated shared subtree (it is not a
+  relation of its own). Same root as §0 spine-cut-hosts ("a correlated body that is a relation of its own —
+  the tree-Plan promotion") and cc-6. One substrate item, three unblocks.
+- **cc-8 `g.V().local(__.both()×k.count())` SQL grows 2^k (found by cc-4)** — 46 KB at k=8, 749 KB at k=12;
+  check's tree walk grows the same way. Blocked on the prerequisite above. Related, also found by cc-4:
+  before the spine cut, proving a correlated id absent (`definesId`, `src/rel/walk.ts`) is O(k²) up to
+  `SPINE_DEPTH_BOUND` (linear after); and the TRUE case of `definesId` is O(n²) (only FALSE answers are
+  spread) — the doc comment and commit claim O(n) overall; correct the comment.
+- **Federate resumes put returned data into the SQL TEXT — a data-size decline (see Next round,
+  "federate resumes land as one json_each bind").** Same class as the user's question; promote it to an item.
+- **cc-5 review follow-ups (minor).** (a) `expansionNamed` (`src/compiler/compiler.ts`) blames nesting for a
+  flat literal bulk upsert (`g.inject([name:'m1'],…×8000).mergeV()`: "each level spells the one before it")
+  and blames the largest `times(n)` even when a guarded chain or emit triangle overran — name `times(n)` only
+  when the unroll's charge fired; for a big literal suggest "pass the rows as one parameter". (b) Between the
+  old 2,560-step and new 10,000-step early charge, declines compile fully first: `repeat(out()).times(9000)`
+  0 ms → 2–3 s, `repeat(out().order().by('name')).times(3300)` 1.8 s and ~367 MB heap (near a DO's 128 MB
+  isolate) — remedy is a cheaper per-node cost for `order().by()` phases (~750 B/phase), not a lower budget.
+  (c) Tests assert wall-clock bounds (<100/250/500 ms) — swap for a work proxy (which charge fired / meter
+  peak) to avoid CI flake. (d) Optional: one `mergeV(...).option(Merge.onMatch, $m)` 150 KB-member case in
+  `parameter-size.exec.test.ts` marked expected-failure to pin nr-param-map-members (§4).
+- **cc-1 review follow-ups (minor).** (a) The raise gate in `recordPairs` (`src/compiler/rel/record.ts`
+  ~351, `exprMayAbort(pair) ? CASE WHEN present THEN pair ELSE NULL END : pair`) is untested and appears
+  redundant: forced off, all 13 `project-linear` tests and 25 probes answer identically, because
+  `fieldPresence` (`framing.ts` ~218) reads the same correlated subquery that holds the raise. Either pin it
+  with a probe that needs it or drop it (saves ~13% text on nested math projections; 32 nested keys with 16
+  `math()` is 103,916 B, ~90 KB without). (b) A double-tagged scalar field through the correlated `by()` form
+  spells the correlated value subquery 4× in the number-class framing (`printf('%.15g', v)` CASE) + 2× for
+  presence: ~3.2 KB/key vs ~1.1 KB plain — linear, but breaks "computed once"; a §3.1 `once` consumer.
+- **cc-4 review follow-ups (minor).** (a) The compile-time gain does not reproduce on the post-cc-2 base
+  (times(400) ~30 ms on both; corpus sum noise): keep `nodeFact` + the `ownReads` memo, re-measure the
+  bottom-up `freeRelIds`/`definesId`/`idsDefined` machinery (~140 lines) and drop it if it does not pay.
+  (b) Say why `idsDefined` (two-key) and `depthMemo` (iterative) bypass `nodeFact`. (c) `nodeFact`'s doc
+  says an Expr is never mutated, but `src/rel/expr.ts` does not freeze Exprs (only Rels, `factory.ts`) —
+  freeze them or document the convention.
+- **cc-3 review follow-ups (cheap).** `src/gremlin/frontend.ts` LRU comment (~89) still calls
+  `parseGremlinUncached` "unchanged" — say "two-stage". Note on its `mode` parameter that `'ll'` is a test
+  seam; pin the antlr4ng version (3.0.16) beside the `PredictionMode.d.ts` citation.
 
 ## 1. Wrong answers today
 
@@ -314,7 +378,7 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   ~1.2 KB: `g.V().emit().repeat(__.local(__.out().order().by('name').limit(1))).times(13).count()` is 119 KB
   (over DO's 100 KB; times(12) 101.9 KB), and `emit().repeat(out().order().by('name')).until(loops().is(16))`
   101 KB, k=32 402 KB. Since 0dc7f3ce this is a clean query-text decline (`statement too long` in
-  `STATEMENT_SHAPE_LIMIT`, `src/storage.ts`; `MAX_UNROLLED_STEPS` in `src/compiler/ir/strategies.ts`), not a
+  `STATEMENT_SHAPE_LIMIT`, `src/storage.ts`; the compile budget in `src/sql/kernel/budget.ts`), not a
   raw error — but ordinary depths decline on DO only. Prerequisite (build before more emit-unroll admissions):
   a per-level FRONTIER relation computed once — a MATERIALIZED CTE per level that level k+1 extends, or the
   RelIR tree-Plan promotion. It also lets every emitted level share ONE random draw, which retires the
@@ -322,13 +386,12 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   each unrolled `order().by().limit()` phase nests ~18 levels of SQLite expression depth; if DO's cap is 100,
   `repeat(out().order().by('k').limit(5)).times(6)` declines on DO only, and `CfLimitedSql`
   (`src/cf-limits.ts`) checks bytes and binds but not depth — teach it depth so CI sees the wall.
-  Same root, also on the NON-emit unroll since 0451a9d1 made more fan-out-hosted bodies take phases: the
-  `MAX_UNROLLED_STEPS` ceiling assumes ~40 bytes/step (`CF_MAX_SQL_BYTES/40`, `ir/strategies.ts` ~1673),
-  ~10× low for a fan-out-hosted barrier body — `g.V().repeat(local(outE().order().by('weight',desc)
-  .limit(1)).inV()).emit().until(loops().is(20)).values('name')` passes the ceiling at 319,550 bytes and
-  `emit().repeat(local(both().limit(1))).until(loops().is(30)).count()` at 272,690, so DO declines late with
-  the generic statement-limit text instead of the ceiling's "lower the count". Size the ceiling from the
-  rendered bytes (or a per-host estimate) — a clean query-text decline either way, so after the frontier.
+  Same root, also on the NON-emit unroll since 0451a9d1 made more fan-out-hosted bodies take phases:
+  `g.V().repeat(local(outE().order().by('weight',desc).limit(1)).inV()).emit().until(loops().is(20))
+  .values('name')` is 319,550 bytes and `emit().repeat(local(both().limit(1))).until(loops().is(30)).count()`
+  272,690, so DO declines with the generic statement-limit text. cc-5 replaced the 40-bytes/step
+  `MAX_UNROLLED_STEPS` with a rendered-bytes budget (400 KB, every runtime), so the compile no longer
+  under-estimates — but these still compile fully before the store refuses them; the frontier is the fix.
 - **`fold().as('x').select('x').unfold()` is quadratic in the folded list (fold-label-history-copy)** —
   `g.V().values('name').fold().as('x').select('x').unfold().count()` 30.7 ms → 1595.8 ms N=1k → 8k (52×;
   a map-valued `values('m')` 67×), on trunk before this round too. The label-history column
@@ -476,6 +539,15 @@ Beside the RelIR substrate:
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
 
 ## 4. Sensible queries we decline
+
+- **Ordinary `project()` `by()` bodies decline (project-by-depth, found reviewing cc-1; predates it)** —
+  "no lowering covers …" for `g.V().project('a','b').by(__.out('created')).by('name')`,
+  `…by(__.out('created').values('name'))`, `…by(__.outE().values('weight'))`,
+  `…by(__.out('created').count()).by(__.in('knows').values('name'))`, `…by(constant(null))`,
+  `project(…).select(keys)`/`select(values)`, `project(…).where(select('a').is(gt(28)))`; also
+  `local(project(…))` and `map(project(…))`. Common reach. Probe each with `bun scripts/rel-blockers.ts
+  --step project` and extend the record seam generically (first-element `by()` of a fan-out body is
+  ProjectStep's `TraversalUtil.applyNullable` — one value per key, `ProjectStep.java`), not per shape.
 
 - **A map PARAMETER's members are spelled as constants (nr-param-map-members)** — `g.mergeV($m)` and
   `option(Merge.onCreate/onMatch, $m)` decompose the map at compile time (`MergeMaps`), so each member value
@@ -1000,6 +1072,34 @@ Proposals from the 2026-11-04 round's reuse sweep (answer-neutral unless stated)
   `lowered` (`rel/lower.ts` ~4351); the stable sort returns a resolving list unchanged, and it guards any
   future effect-reads-later-binding order bug (trunk once shipped it as a bare "Ref … is not a Plan
   binding"). Plan-stability stays byte-identical.
+
+Proposals from the 2026-11-04 compile-cost round's reuse sweep (answer-neutral unless stated):
+
+- **Federate resumes land their values as ONE `json_each` bind, as `foreign.ts` already does — NOT
+  answer-neutral in production: removes a data-size decline.** `lowerTypedNodeStream`, `lowerScalarResume`
+  and `lowerReduceCombine` (`src/compiler/rel/lower.ts`) spell every returned value as a VALUES row of
+  `compilerText(stringifyExact(node))` and the parent scatter as P `compilerInt(i)` rows, so a large federated
+  `values()`/`fold()` crosses DO's 100 KB statement text in production only. Use `foreignRelation`'s
+  `make.explode` over one `lit(stringifyExact(rows))` (json_each key keeps emission order); the three
+  parent-scatter copies (`foreignRejoin`, `foreignMapRejoin`, the tnpr VALUES cross join) become one
+  `scatterOverParents(pool, parentCount, fresh)` (~25 lines gone), and `typedNodeLowering` loses its
+  "charges no CompileBudget" exception. Test: statement text identical at 10 and 10,000 returned values
+  under `CfLimitedSql`.
+- **cc-7 via `once`** — see §0b; one more caller of `build.ts` `once`, no new mechanism.
+- **One param-or-constant authority in `src/compiler/rel/const.ts`** — the exact-tail
+  `name != null ? param(v,name) : compilerText(String(v))` ×3 (`lower.ts` `exactTailConst` ~2810, `lower.ts`
+  inject `rowExpr` ~2926, `predicate.ts` ~90; `isExactTail` spelled twice in lower.ts + privately in
+  predicate.ts ~97) and text-or-param ×4 (`write.ts` `storedExpr` ~452, `metaExpr` ~466/469, `list.ts`
+  ~1579) become `exactTailLit(arg)`/`isExactTail` beside `constLit` and a `textLit(value, name)` that
+  `constLit`'s string arm uses; delete the dead `text` alias at `write.ts` ~511. `ftsTextExpr`'s
+  `name#fts` stays the one visible special case. ~15 lines, SQL unchanged.
+- **One iterative bottom-up fold in `src/rel/walk.ts`** — `relDepth` (`depthMemo` + stack) is `treeSize`
+  with max for sum: `foldNodes(root, memo, beneath, combine)`; ~20 lines gone, same O(DAG), stack-safe.
+  Take with cc-4 follow-up (b).
+- **`emit()`/`emitQuery()` move to `test/support`** — `src/rel/emit.ts` `emit` has no production caller
+  and `emitQuery`'s 42 references are all in `test/`; each re-states `lowered()`'s `DO_BIND_CAP` check.
+  Leave `renderLowered` + `renderedSteps` as the one crossing so a future caller cannot re-emit. ~15 lines
+  out of `src/`, no SQL change.
 
 ## 7. Low priority
 
