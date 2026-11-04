@@ -193,8 +193,9 @@ statement's text grows with data or doubles with query shape. The items below ar
   body is inlined at every use because the naming pass cannot hoist a correlated shared subtree (it is not a
   relation of its own). Same root as §0 spine-cut-hosts ("a correlated body that is a relation of its own —
   the tree-Plan promotion") and cc-6. (cc-8 turned out not to need it — see below.)
-- ✅ **cc-8 `local(__.both()×k.count())` 2^k — LANDED with "movement reads its frontier once", without the
-  prerequisite above.** The doubling was `both()`'s own UNION ALL naming its frontier twice; a multi-direction
+- ✅ **cc-8 `local(__.both()×k.count())` 2^k — LANDED (536d727e + b6a97ead) with "movement reads its frontier once",
+  without the prerequisite above; a labelled multi-direction hop (`both('knows')`) seeks the label on
+  every direction. Remains for this item: nothing (the follow-ups below are their own items).** The doubling was `both()`'s own UNION ALL naming its frontier twice; a multi-direction
   hop now crosses a non-base frontier with a `(VALUES (0),(1))` direction row and joins `edges` once
   (`hopJoin`, `src/compiler/rel/lower/movement.ts`; gate `rereadsFreely`, `src/rel/walk.ts`). k=8 is 2.1 KB,
   k=32 8.8 KB; `both()×20`/`repeat(both()).times(20)` answer. Tests: `test/compiler/both-frontier-once.exec.test.ts`.
