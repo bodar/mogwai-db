@@ -246,14 +246,13 @@ statement's text grows with data or doubles with query shape. The items below ar
   `src/do-limits.ts`); one member past 2 MB is a clear platform-limit error. Tests:
   `test/value-cap-split.test.ts`, `test/federate-value-stream-scale.test.ts`. Remains: nothing (the
   run-time `RowsBind` and mapValues-param follow-ups are filed separately below).
-- **A write's retained rows (`program.ts` `RowsBind`) still cross as ONE value — the last 2 MB wall
-  (rowsbind-value-ceiling) — MAJOR, DATA-SIZE REFUSAL.** The one-value-landing ceiling is fixed at the shared
-  builder (`build.ts` `jsonEachRelation`/`jsonChunks`: every landing, bound collection, and `setwrite.ts`
-  statement splits past 2 MB), but a retained binding's rows are produced at RUN time, after its SQL was
-  rendered, so a compile-time chunk count cannot apply: `g.V().hasLabel('doc').as('d').addV('c')
-  .property('b', select('d').values('body')).count()` at 8k × 500 B binds 4.22 MB under `CfLimitedSql`.
-  Needs the consumer statement to take a run-time chunk count (re-render per k, or a fixed k-way UNION ALL
-  with empty arms). Test: that witness under `CfLimitedSql`.
+- ✅ **A write's retained rows (`RowsBind`) split past DO's 2 MB value cap at run time
+  (rowsbind-value-ceiling) — LANDED (72afaa7f).** `refSource` renders its source as a q-kernel run-time hole
+  (`runTimeHole`/`fillHoles`, `src/sql/kernel/q.ts`); `runStepsIn` (`src/program.ts`) packs each binding's rows
+  once through the one packer `jsonChunks` (now `src/json-chunks.ts`) and fills the hole with a k-way
+  `json_each(?)` UNION ALL — bind count O(bytes / 2 MB), byte-identical under the cap. Tests:
+  `test/value-cap-split.test.ts` under `CfLimitedSql`. Remains: nothing for this item (inject-param-ceiling,
+  mapvalues-inject-ceiling and value-cap-message below are still open).
 - **federate's mapValues injection sends the parents as ONE map (mapvalues-inject-ceiling) — MAJOR at ~7k
   wide parents.** `g.V().hasLabel("p").values("name").as("e").call("federate",["graph":"x"]).V().has("name",
   select("e"))` injects every parent's value as one `inject($map)` parameter; at 8k × 300 B it is one 2.8 MB
