@@ -148,6 +148,36 @@ describe('the repeat() unroll boundary', () => {
     expect(vals('g.V().repeat(__.dedup().skip(1).sample(2)).times(2).count()')).toEqual([0]);
   });
 
+  test('an emit over a RANDOM body declines — independent arms would draw independently', () => {
+    // Every emit is a split of the ONE traverser that keeps looping (RepeatStep.java:334-353), so an
+    // emitted level-k path always extends an emitted level-(k-1) path. The emit unroll's arms re-run the
+    // body from the start, so a body that DRAWS (`sample`/`coin`/`order().by(shuffle)`, at any depth)
+    // would draw per arm: `g.V(1).repeat(local(both().sample(1))).emit().times(3).path()` answered
+    // `[1,3]`, `[1,4,3]`, … — a level-2 path whose prefix was never emitted. Measured 29/30 runs broken.
+    for (const q of [
+      'g.V(1).repeat(__.local(__.both().sample(1))).emit().times(3).path()',
+      'g.V(1).repeat(__.both().sample(1)).emit().times(3).path()',
+      'g.V(1).emit().repeat(__.both().sample(1)).times(2).path()',
+      'g.V(1).times(2).repeat(__.both().sample(1)).emit().path()',
+      'g.V(1).emit().repeat(__.both().order().by(Order.shuffle).limit(1)).times(2).path()',
+      'g.V(1).repeat(__.local(__.both().order().by(Order.shuffle).limit(1))).emit().times(2).path()',
+      'g.V(1).repeat(__.both().where(__.out().sample(1))).emit().times(2).path()',
+    ]) expect(() => compile(q, {}), q).toThrow(/draws at random/);
+    // Inside a child body the same decline holds (the child's own route search reports the generic refusal).
+    expect(() => compile('g.V(1).local(__.emit().repeat(__.both().sample(1)).times(2)).path()', {})).toThrow(/not supported/);
+    // ONE arm runs the body once per level, so it stays exact: no emit, or `repeat(b).emit().times(1)`.
+    for (const q of [
+      'g.V(1).repeat(__.local(__.both().sample(1))).times(3).path()',
+      'g.V(1).repeat(__.both().sample(1)).emit().times(1).path()',
+      'g.V(1).times(1).repeat(__.both().sample(1)).emit().path()',
+    ]) expect(() => compile(q, {}), q).not.toThrow();
+    // …and the one-arm forms keep the prefix chain: a times(3) walk is ONE path of length 4.
+    for (let i = 0; i < 10; i++) {
+      const paths = run(store, 'g.V(1).repeat(__.local(__.both().sample(1))).times(3).path().by(id)');
+      expect(paths.length).toBe(1);
+    }
+  });
+
   test('a host is NOT unrolled when its child reads loop state or carries state across iterations', () => {
     // The host argument is "the child is reset per traverser". It does not cover a child that reads the
     // LOOP COUNTER (the phases have none), a named repeat, a write or a keyed side effect — nor a branch

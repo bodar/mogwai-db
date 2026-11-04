@@ -4,7 +4,7 @@ import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
-import { collectsSideEffect, type IRStep } from './step.ts';
+import { collectsSideEffect, nondeterministic, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -1660,6 +1660,18 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // nothing re-run) and every other emit form DECLINES — fail closed, at every depth this pass serves,
   // and no wider than the single-arm shape served before (an emit-FIRST body always has ≥ 2 arms).
   if (arms.length > 1 && body.some((s) => s.name in SIDE_EFFECT_BARRIERS)) return null;
+  // The same re-run is wrong for a body that DRAWS — `sample`, `coin`, `order().by(shuffle)` at any depth
+  // (`nondeterministic`, the one authority the lowering's ranked order and shared-draw rules use): each arm
+  // makes its OWN picks, so an emitted level-k row need not extend any emitted level-(k-1) row. In the
+  // reference every emit is a split of the ONE traverser that keeps looping (RepeatStep.java:334-353), so
+  // each emitted level-k path extends an emitted level-(k-1) path — `g.V(1).repeat(both().sample(1)).emit()
+  // .times(3).path()` answered `[1,4,3]` beside a level-1 `[1,3]`. Sharing arm k-1's frontier with arm k
+  // needs a per-level relation the flat chain cannot spell (and the recursive walk forbids the barrier), so
+  // this DECLINES, on the query text. A one-arm unroll (no emit, `repeat(b).emit().times(1)`) runs the body
+  // once per level and stays exact.
+  if (arms.length > 1 && nondeterministic(body, params)) {
+    throw UnsupportedTraversal.because('repeat()…emit() over a body that draws at random (sample()/coin()/order().by(shuffle)) — each emitted level would draw on its own, so an emitted path need not extend the one emitted before it; drop emit() and read the levels from path(), or move the random step after the repeat()');
+  }
   // A single level is just that arm spliced inline — a one-arm `union` is not a thing the lowering
   // accepts (`unionArms` requires ≥2), and it would mean the same rows anyway. Two or more levels are a
   // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` is normalised above).

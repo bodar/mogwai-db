@@ -1,4 +1,6 @@
-import { gtypeName, isNested, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
+import { gtypeName, isNested, isOrderArg, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
+import type { ParamEnv } from '../../gremlin/param-env.ts';
+import { someStepDeep, someValueNode } from './walk.ts';
 import { normalizeTypeName } from '../../gremlin/types.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
@@ -611,3 +613,22 @@ export const PATH_LIST_OPS: ReadonlySet<string> = new Set([
   'combine', 'intersect', 'difference', 'disjunct', 'product', 'merge', 'reverse', 'conjoin',
   'all', 'any', 'none', 'unfold',
 ]);
+
+/**
+ * Does a chain hold a step whose answer is RANDOM — `sample()`, `coin()`, an `Order.shuffle` anywhere
+ * (`order().by(shuffle)`, `order(local).by(shuffle)`) — at ANY depth: a `by()` body, a branch arm, a
+ * repeat body? Such a prefix answers different traversers in the head and the resume — each draws from
+ * an unseeded `java.util.Random` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/CoinStep.java:39,70`,
+ * `.../step/filter/SampleGlobalStep.java:51,122`, and `Order.shuffle` is only a marker that
+ * `.../step/map/OrderGlobalStep.java:76` answers with `traverserSet.shuffle(random)`) — so ranking its
+ * keys in one statement and sorting by them in the other is ranking a different stream. A body that does
+ * not normalize is treated as random — fail closed. The same fact bounds a bounded repeat's emit unroll
+ * (`ir/strategies.ts` `tryUnroll`): its per-level arms each re-run the body, so a drawing body draws per ARM.
+ */
+export function nondeterministic(steps: readonly IRStep[], params: ParamEnv): boolean {
+  return someStepDeep(steps, params, (step) => RANDOM_STEPS.has(step.name)
+    || someValueNode(step, (n) => isOrderArg(n) && n.order === 'shuffle'), true);
+}
+
+/** The steps that DRAW — their answer is a random choice, not a function of the graph. */
+const RANDOM_STEPS: ReadonlySet<string> = new Set(['sample', 'coin']);

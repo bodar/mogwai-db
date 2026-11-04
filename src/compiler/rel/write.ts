@@ -35,7 +35,7 @@ import { constLit } from './const.ts';
 import { fieldCol, framingCols, type MapKeyFacts, type RelFraming } from './framing.ts';
 import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, traversalIdArg, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
-import { nondeterministic } from './ranked-order.ts';
+import { nondeterministic } from '../ir/step.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers

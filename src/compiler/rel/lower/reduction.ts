@@ -42,7 +42,7 @@ import { RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
-import { nondeterministic } from '../ranked-order.ts';
+import { nondeterministic } from '../../ir/step.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the
 // per-traverser and per-origin child drivers (perTraverserChild/flatMapRejoin/perOriginWindow), the

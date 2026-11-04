@@ -34,9 +34,6 @@
 // sorting another. Whatever slips past both — a key the resume meets that the head never ranked — fails
 // the resume statement (`rankJoin`), never sorts as an unranked NULL.
 
-import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { isOrderArg } from '../../gremlin/frontend.ts';
-import { someStepDeep, someValueNode } from '../ir/walk.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -194,24 +191,6 @@ export const UNRANKED_KEY = 'order() ranked barrier: a traverser key the head ne
 /** The ranking relation's two columns — distinct from every traverser column, all of which the join keeps. */
 const RANKED_KEY = 'rkk';
 const RANKED_RANK = 'rkv';
-
-/**
- * Does a chain hold a step whose answer is RANDOM — `sample()`, `coin()`, an `Order.shuffle` anywhere
- * (`order().by(shuffle)`, `order(local).by(shuffle)`) — at ANY depth: a `by()` body, a branch arm, a
- * repeat body? Such a prefix answers different traversers in the head and the resume — each draws from
- * an unseeded `java.util.Random` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/CoinStep.java:39,70`,
- * `.../step/filter/SampleGlobalStep.java:51,122`, and `Order.shuffle` is only a marker that
- * `.../step/map/OrderGlobalStep.java:76` answers with `traverserSet.shuffle(random)`) — so ranking its
- * keys in one statement and sorting by them in the other is ranking a different stream. A body that does
- * not normalize is treated as random — fail closed.
- */
-export function nondeterministic(steps: readonly IRStep[], params: ParamEnv): boolean {
-  return someStepDeep(steps, params, (step) => RANDOM_STEPS.has(step.name)
-    || someValueNode(step, (n) => isOrderArg(n) && n.order === 'shuffle'), true);
-}
-
-/** The steps that DRAW — their answer is a random choice, not a function of the graph. */
-const RANDOM_STEPS: ReadonlySet<string> = new Set(['sample', 'coin']);
 
 /**
  * THE JS STEP — the head's key texts to `[keyText, denseRank]` pairs, sorted. Each text is a JSON array
