@@ -169,7 +169,11 @@ statement's text grows with data or doubles with query shape. The items below ar
   ceiling for an unroll nested under a host; then find why each host level re-lowers the body (shares root
   with spine-cut-hosts, §0, and correlated-subtree-sharing below). Test: compile time of K=1000→2000 under a
   host ≤ ~2.5×, or a decline in ms.
-- **cc-7 guarded transform chain in a child body doubles per step — common reach (found by cc-1).**
+- ✅ **LANDED (8dbb8b44) — cc-7 guarded transform chain in a child body doubles per step — common reach (found by cc-1).**
+  `valueRun` now builds each member over `build.ts` `once()`'s reads (value + per-row tag, as `typedNodeOnce`), so
+  a k-step run is linear: 7-transform `where()` 101,588 → 4,937 bytes; declines/answers unchanged. Tests:
+  `test/compiler/value-run-once.exec.test.ts` (12-step chains under `CfLimitedSql` at every depth). Remains:
+  nothing. Original item text follows.
   `by(__.values('name').toUpper().toLower()…)`, `where(__.values('name').toUpper()…)`: 1.4 KB at 2 steps,
   850 KB at 12; top-level chains are linear. `src/compiler/rel/lower/reduction.ts` transform-run loop
   (`value = raisingWhen(offences, transformed.expr)`, offences and expr both read `value`) and
@@ -329,7 +333,9 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   `CfLimitedSql` (`src/cf-limits.ts`) to run with `PRAGMA automatic_index=OFF` so CI sees it; if it is off
   on DO, index the spool explicitly.
 
-- **A chain of value-run `is()` re-inlines its input per `CASE` (rf3-is-chain-size)** — four `is()` emit
+- ✅ **LANDED (8dbb8b44, with cc-7) — A chain of value-run `is()` re-inlines its input per `CASE` (rf3-is-chain-size)**
+  — `valueRun` members read `once()`'s value: three `is()` 142,217 → 3,883 bytes, four now compile. Remains:
+  nothing. Original: four `is()` emit
   1.52 MB, over DO's 100 KB statement cap. Pin under `CfLimitedSql`; fixed by §3's `once` consumers.
 - **A re-source over an origin-INDEPENDENT candidate set is quadratic (cr-fu5 + per-origin slice)** —
   `local(__.V().hasLabel('person').limit(2)).count()` 355 ms → 24.6 s (`sample(2)` the same; `rankPairs`
