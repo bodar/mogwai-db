@@ -300,26 +300,18 @@ statement's text grows with data or doubles with query shape. The items below ar
   107 ms; end to end 98 → 144 ms over 8k parents). Put parents outer; and §17 treats cross-parent order as
   unordered, so the parent-major sort is only owed where a pushed `order()` asked for it — sort per parent
   only then. Linear either way.
-- **`JoinWidthExceeded`'s hint suggests remedies that do not work under a filter host (cc6-hint) — minor;
-  take with cc-5 follow-up (a), same function `expansionNamed` (`src/compiler/compiler.ts`).** For
-  `g.V().where(repeat(out()).times(70)).count()` it says "move it to the top level" (turns a filter into a
-  map — a different query) and "use `until(loops().is(n))`" (declines "no lowering covers" under
-  `where`/`not`/`filter` even at n=2; works under `local`). Offer top-level only for map/flatMap-like
-  hosts and `until(loops())` only where it lowers, else "lower the count". Also: the message's
-  "not supported yet" prefix (`UnsupportedTraversal.because`, `src/sql/kernel/budget.ts`) promises a fix
-  for a permanent SQLite limit (same framing as `STATEMENT_SHAPE_LIMIT`) — reword both. And
-  `test/compiler/host-unroll-width.exec.test.ts` at times(2000) accepts either `JoinWidthExceeded` or the
-  stack decline depending on what ran earlier in the process — pin it in a fresh compile or assert only the
-  work bound.
-- **cc-5 review follow-ups (minor).** (a) `expansionNamed` (`src/compiler/compiler.ts`) blames nesting for a
-  flat literal bulk upsert (`g.inject([name:'m1'],…×8000).mergeV()`: "each level spells the one before it")
-  and blames the largest `times(n)` even when a guarded chain or emit triangle overran — name `times(n)` only
-  when the unroll's charge fired; for a big literal suggest "pass the rows as one parameter". (b) Between the
+- **✅ Expansion declines name the real cause (cc6-hint host advice + cc-5 (a)/(c)) — LANDED 67ae23c5.**
+  `CompileBudgetExceeded` carries which charge fired (unroll/expression/plan/text) and the host notes what
+  it allows (`noteUnrolled`, `src/sql/kernel/budget.ts`); a literal-heavy statement says "spelled into the
+  SQL text, not bound" (`literalTextHint`); `CfLimitedSql` throws the DO's own `statement too long` so both
+  runtimes reach one decline; wall-clock asserts became work proxies. Remains: the "not supported yet"
+  prefix on `JoinWidthExceeded`/`CompileBudgetExceeded` (`UnsupportedTraversal.because`) still promises a
+  fix for a permanent SQLite limit — reword (minor).
+- **cc-5 review follow-ups (minor).** (b) Between the
   old 2,560-step and new 10,000-step early charge, declines compile fully first: `repeat(out()).times(9000)`
   0 ms → 2–3 s, `repeat(out().order().by('name')).times(3300)` 1.8 s and ~367 MB heap (near a DO's 128 MB
   isolate) — remedy is a cheaper per-node cost for `order().by()` phases (~750 B/phase), not a lower budget.
-  (c) Tests assert wall-clock bounds (<100/250/500 ms) — swap for a work proxy (which charge fired / meter
-  peak) to avoid CI flake. (d) Optional: one `mergeV(...).option(Merge.onMatch, $m)` 150 KB-member case in
+  (d) Optional: one `mergeV(...).option(Merge.onMatch, $m)` 150 KB-member case in
   `parameter-size.exec.test.ts` marked expected-failure to pin nr-param-map-members (§4).
 - **cc-1 review follow-ups (minor).** (a) The raise gate in `recordPairs` (`src/compiler/rel/record.ts`
   ~351, `exprMayAbort(pair) ? CASE WHEN present THEN pair ELSE NULL END : pair`) is untested and appears
