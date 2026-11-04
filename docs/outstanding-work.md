@@ -79,6 +79,14 @@ rebuild them properly; do not cherry-pick the throwaway `d6524009` timers. Order
 cc-5. Owner rule: a high compile cost is a reason to make the compiler faster, never to raise a limit. Every
 item lands with tests that stop it from coming back.
 
+- ✅ **cc-1 project-linear LANDED (5604b113).** `recordPairs` (`src/compiler/rel/record.ts`) now puts the
+  presence test on the `json_insert` PATH (`CASE WHEN p THEN '$[#]' ELSE '$' END`), naming the accumulator once;
+  20 keys is 22.6 KB (was >100 KB at 8), 0 binds before and after; tests in
+  `test/compiler/project-linear.exec.test.ts` (20+ keys under `CfLimitedSql`, linear-growth and compile-time
+  assertions); `sql-hygiene` re-recorded down. **Remains — follow-up, outside this seam:** guarded transform
+  chains in a child body (`receiver.ts` `guarded()` inside `valueRun`, e.g. `by(__.values('name').toUpper()
+  .toLower()…)`) grow 2× per chained step; fix with `once`-style hoisting between guarded steps. Not done here:
+  the corpus-wide bytes-per-Rel-node guard was merged into cc-5 as directed. Original item text follows.
 - **cc-1 project-linear: PRODUCTION FAILURE, common reach.** `project(k keys).by(…)×k` emits SQL text that
   DOUBLES per key: `recordPairs` (`rel/record.ts`) writes `CASE WHEN p THEN json_insert(acc,…) ELSE acc END`,
   naming the accumulator twice. Measured on trunk: 7 keys is 92 KB, **8 keys is 183 KB, over a DO's 100 KB
