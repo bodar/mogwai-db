@@ -37,6 +37,16 @@ instead of declining: a `null` member is an id no element has, so it adds no cla
 members but none matchable is `CONSTANT.false`, never `V()` (`idMembership` in
 `src/compiler/rel/source.ts`; `boundGraph.elementScan` likewise). L3 1908 → 1919. Remains: nothing.
 
+**Statically decidable steps (✅ landed, f5b66932).** Four rules at existing authorities: a stray
+`emit()`/`until()`/`times()` with no `repeat()` body raises TinkerPop's verification message
+(`verifyStandard`); `times(n<=0)` before `repeat()` is the identity, after it `times(1)` (`tryUnroll`);
+`identity()`/`discard()` as filters are `CONSTANT.true`/`CONSTANT.false` (`sourceFilter`, so
+`filter(__.identity())` — the L5 lattice gap — now answers); an effect-free `sideEffect()` is dropped
+(`dropEffectFreeSideEffect` in `src/compiler/ir/strategies.ts`). L3 1919 → 1931. Not landed:
+`g_V_hasXname_notXidentityXX`. It needs element-valued operands in value comparisons (`has(k, <body
+yielding the element>)`, which is `P.eq(traversal)`), and the operand route only handles bodies that
+produce a scalar.
+
 **Reducer-headed child body (✅ landed, 202bdbce).** A per-traverser child body whose head is a reducer
 (`local(count())`, `values('age').local(sum())`) reduces the host's one-row self at bulk 1, exactly as
 `identity()` does (`TraversalUtil.apply`): `hostSelfRow` seeds element AND scalar hosts through one gate,
@@ -300,7 +310,6 @@ Beside the RelIR substrate:
 - **Keyed-label seeded merge** — `withSideEffect("a", <map>).group("a")…` (per-key `GroupBiOperator`;
   `collection.ts` `registerGrouping`).
 - **Bare-list `[1L]`/`[1.0f]` literal** declines at `listLiteralBlob`.
-- **`filter(__.identity())`** — the one lattice gap L5 names.
 - **A MAP stream's child bodies beyond `select(k)`** — `inject([x:1]).map(__.count(local))`,
   `valueMap().project('c').by(__.count(local))`, `withSideEffect('k',[x:1]).V().values('n').select('k')
   .map(__.count(local))` (`mapHostChild` reads only `select(k)`). Tests:
