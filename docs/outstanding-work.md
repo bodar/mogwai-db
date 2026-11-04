@@ -11,7 +11,7 @@ IDs in parentheses are stable — `git log -S<id>` finds their history (much of 
 `test/L7-census/deferrals.tsv` must hold no `crashed` rows. Three worklists fail loudly when a shape
 lands: `test/rel-spine.test.ts` `DECLINED`, `test/L4-addendum` `@Unsupported`, L5 `LAW UNEVALUABLE`.
 
-**Landed in the 2026-11-03 round** (detail in git; each item's residue is filed below). L3 1890 → 1965:
+**Landed in the 2026-11-03 round** (detail in git; each item's residue is filed below). L3 1890 → 1967:
 the L3 accounting ledger + derived GLV-lossy exclusion (faecb6f2: every in-scope failure is in
 `test/L3-conformance/expected-outcomes.ts` with a kind and a checked citation; a fix deletes its names
 there); edge Property framing (781a352c); mid-traversal `inject(xs)` (90518dfa); list-host member order in
@@ -21,7 +21,7 @@ decidable steps — stray repeat modulators, `times(n<=0)`, `identity()`/`discar
 `is(typeOf(T))` over known framings + MAP retype (7b3d623a); Binary values (e4b29d47);
 `V(<traversal>)`/`E(<traversal>)` (89ed8a0d); `call(service, map, traversal)` param merge in
 the reference's order, static map < traversal map < `with()` (874c5570: the one merger `parseCallSpec`,
-`src/services/params/call-params.ts`, over the existing constant folder; L3 → 1965, remains: nothing).
+`src/services/params/call-params.ts`, over the existing constant folder; L3 → 1965, remains: nothing); T/`Direction` tokens order on the String rung by name, the Java class-name emulation deleted (5cb607a7: `kindOf` in `src/compiler/rel/orderability.ts` shares `cmpNatural` with String, so the JS and SQL key orders agree; defect l3-t-token-order, L3 → 1967, remains: nothing).
 
 ## 1. Wrong answers today
 
