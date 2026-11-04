@@ -131,7 +131,7 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 - **Scalar member node rebuilt per one-row producer (r6-reuse4)** —
   `project().by(outE().values('weight').sum())` reads the edges 2× per host row (`max`: 3×).
 - **No body-may-yield-NULL fact (S11)**, so the M3 removal machinery always runs (+13–75%).
-- **Binary carrier guard, residue (binary-carrier-guard).** A literal String `within`/`without` set now hoists
+- **Binary carrier guard, residue (binary-carrier-guard).** LANDED `dce7072b` (2026-11-04): a literal String `within`/`without` set now hoists
   one tag guard off its `IN` list (`hoistedStringSet`, `src/compiler/rel/predicate.ts`) and keeps the
   `vp_key_value(key=?,value=?)` multi-seek, for hex-, UUID- and number-spelled members alike. Left: a set
   MIXING a number-spelled member with another (`within('CA','10')`) keeps the per-member disjunction and so a
