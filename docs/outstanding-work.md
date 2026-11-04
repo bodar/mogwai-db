@@ -298,16 +298,11 @@ RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open familie
    collapsed arm, nested branch in a sliced arm.
 10. **`repeat()` residue** — an unbounded body whose UNION is not the top node (join-union distribution),
     the UNORDERED bulked slice, `times($x)` → walk; the emit-unroll frontier (§1b emit-unroll-frontier).
-    **The counted-until regime is chosen by a name list (until-regime-authority) — MAJOR.** `needsPhases`
-    (`src/compiler/ir/strategies.ts`) guesses from top-level barrier names what the recursive term refuses
-    (`BARRIER_IN_TERM`, `src/rel/recursive.ts`) and misses a barrier under a per-traverser host:
-    `g.V(1).repeat(__.out().local(__.order().by('name').tail(1))).until(__.loops().is(2)).values('name')`
-    declines (probed on trunk) while `times(2)` gives `[lop, ripple]`; likewise
-    `emit().repeat(local(out().order().by('name'))).until(loops().is(2))`, until-first, and
-    `repeat(flatMap(out().limit(1))).until(loops().is(2))` — one-step neighbours of `Repeat.feature:738/752/877`.
-    Ask the authority that decides (the term's admissibility, or a walk-refused barrier at ANY depth via
-    `someStepDeep`) instead of the list. Note in `passes.ts`: a `loops().is($x)` parameter is now reduced to a
-    constant by this rewrite (consistent with "only `unrollFixedRepeat` needs it").
+    **✅ LANDED (0451a9d1) — the counted-until regime is chosen by what the walk refuses (until-regime-authority).**
+    `needsPhases` (`src/compiler/ir/strategies.ts`) now asks: a top-level call/unrollable barrier, OR a
+    fan-out host (`FAN_OUT_HOSTS`, `src/compiler/ir/step.ts`) whose child holds a stream barrier at ANY depth
+    (`someStepDeep`) — the shapes the recursive term refuses (`BARRIER_IN_TERM`). The unroll's host set is
+    derived (`PER_TRAVERSER_RESET_HOSTS`). Scaling linear (≤7.4× at 1k→8k). What remains: nothing.
 
 Beside the RelIR substrate:
 
