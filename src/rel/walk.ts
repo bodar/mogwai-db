@@ -335,8 +335,11 @@ export const freeRelIds: (plan: Rel) => ReadonlySet<string> = nodeFact((r: Rel):
   const freeBeneath = beneath.map(freeRelIds);
   const candidates = unionOf([exprReach(r).cols, ...freeBeneath]);
   if (!candidates.size) return candidates;
+  // EVERY direct child's id first, and only then a subtree search: searching the left child for the right
+  // one's id made each link of a long chain search the whole chain beneath it (see `definesId`).
   const free = [...candidates].filter((id) => id !== r.id
-    && !beneath.some((child, i) => child.id === id || (!freeBeneath[i]!.has(id) && definesId(child, id))));
+    && !beneath.some((child) => child.id === id)
+    && !beneath.some((child, i) => !freeBeneath[i]!.has(id) && definesId(child, id)));
   return free.length === candidates.size ? candidates : free.length ? new Set(free) : NO_NAMES;
 });
 
@@ -350,6 +353,14 @@ export const freeRelIds: (plan: Rel) => ReadonlySet<string> = nodeFact((r: Rel):
  * reference is the costly case: proving it ABSENT is one search of the subtree, as the walk-per-ask was.
  * An exhausted search records "not here" for EVERY node it visited — each of their subtrees was searched
  * whole — so one id rising through n ancestors costs O(n) in all, not a search per ancestor.
+ *
+ * ⚠️ That amortisation is PER ID, and it holds for an exhausted FALSE search only. A TRUE answer stops at the
+ * first hit and records it for the node asked alone, so each one is up to O(n); and n links each asking a
+ * DIFFERENT id pay a search apiece — O(n²) — whatever is cached. The id a link most often asks about is its
+ * own direct child's (a join's `on` reading its right side), which is why `freeRelIds` tests every DIRECT
+ * child's id before asking this of any child: asked first of the left child, which does not hold the right
+ * one's id, it searched the whole chain beneath at every link (measured:
+ * `g.V(1).where(repeat(out()).times(2000))` spent ~4 s here).
  */
 const idsDefined = new WeakMap<Rel, Map<string, boolean>>();
 const recordDefines = (r: Rel, id: string, answer: boolean): void => {

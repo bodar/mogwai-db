@@ -9,7 +9,7 @@ import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { EXCLUDED, relId, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
 import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachUnconditional, mapExprChildren, nodeFact, recursiveStep, refNames, refReads, relChildren, relExprs, rewriteExpr, spelledSize } from './walk.ts';
-import type { CompileBudget } from '../sql/kernel/budget.ts';
+import { JoinWidthExceeded, type CompileBudget } from '../sql/kernel/budget.ts';
 import { exprMayAbort, sqlMayDefer } from './raise.ts';
 import { mayCarryJsonSubtype } from './subtype.ts';
 import { realJsonText } from '../json-exact.ts';
@@ -221,12 +221,62 @@ const ownReads: (r: Rel) => Reads = nodeFact((r: Rel): Reads => {
   relExprs(r).forEach((e) => addReads(out, exprReads(e)));
   return out;
 });
-/** A whole subplan's reads: its own and every descendant's, all spelled inside the one subquery. */
-const relReads: (r: Rel) => Reads = nodeFact((r: Rel): Reads => {
-  const out = new Map(ownReads(r));
-  relChildren(r).forEach((child) => addReads(out, relReads(child)));
+/**
+ * A whole subplan's reads: its own and every descendant's, all spelled inside the one subquery.
+ *
+ * ONE PASS PER SUBPLAN, not a map per node. The sum is over the subplan as the TREE its text is — a node
+ * reached by two paths is spelled twice — so each node's own reads count once per path to it, and with the
+ * count saturating at 2 a path count saturating at 2 is exact. Summed per node instead (a merged map at
+ * every level), a long chain copied its whole read set at each level: quadratic in the chain, and the bulk
+ * of the compile behind `where(repeat(out()).times(2000))` before the join-width decline could fire.
+ */
+const relReads: (r: Rel) => Reads = nodeFact((root: Rel): Reads => {
+  // DFS FINISH order, iteratively (a chain thousands of nodes deep must not be a JS stack that deep): a node
+  // is marked when it is EXPANDED, not when it is pushed, so it finishes after everything beneath it on
+  // every path — which marking at push gets wrong for a node a later sibling also reaches.
+  const order: Rel[] = [];
+  const seen = new Set<Rel>();
+  const stack: (readonly [Rel, boolean])[] = [[root, false]];
+  while (stack.length) {
+    const [node, expanded] = stack.pop()!;
+    if (expanded) { order.push(node); continue; }
+    if (seen.has(node)) continue;
+    seen.add(node);
+    stack.push([node, true]);
+    for (const child of relChildren(node)) if (!seen.has(child)) stack.push([child, false]);
+  }
+  // Reverse post-order visits every parent before its children, so a node's path count is final when
+  // it is handed down. A child listed twice is two paths.
+  const paths = new Map<Rel, number>([[root, 1]]);
+  for (let i = order.length - 1; i >= 0; i--) {
+    const node = order[i]!;
+    const n = paths.get(node)!;
+    for (const child of relChildren(node)) paths.set(child, Math.min(2, (paths.get(child) ?? 0) + n));
+  }
+  const out = new Map<string, number>();
+  for (const node of order) {
+    const n = paths.get(node)!;
+    for (const [key, k] of ownReads(node)) out.set(key, Math.min(2, (out.get(key) ?? 0) + k * n));
+  }
   return out;
 });
+
+/**
+ * SQLITE'S JOIN BITMASK — a `SELECT` whose `FROM` holds more than 64 items is refused at prepare, on every
+ * runtime (`at most 64 tables in a join`: `sqlite3WhereBegin` tests `nSrc > BMS` before it plans anything,
+ * and its query flattener merges FROM lists, never splits one). So a block this assembler would grow past it is a
+ * statement no store can run, and its width is a property of the query text: a `repeat(…).times(n)` unroll
+ * inside a per-traverser host (`local`, `where`, `map`, …) fuses one join per iteration into ONE block.
+ *
+ * Refused HERE, as the block is assembled and before the rest of the statement is built, because the store
+ * refuses it anyway (`STATEMENT_SHAPE_LIMIT`, `src/storage.ts`) — only after the compiler has spelled every
+ * iteration: measured on `g.V(1).where(repeat(out()).times(2000)).count()`, seconds of compile, then the
+ * same decline. Exact rather than predicted: the count is the FROM the assembler is actually building.
+ */
+const SQLITE_JOIN_TABLES = 64;
+const joinFits = (items: number): void => {
+  if (items > SQLITE_JOIN_TABLES) throw new JoinWidthExceeded(SQLITE_JOIN_TABLES);
+};
 
 function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudget) {
 
@@ -917,6 +967,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
           return { kind: 'block', select, from: item, joins: [], distinct: false, windowed: false, scope: withRel(outer, r.id, new Map(select)) };
         }
         const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.explode(b, r), r);
+        joinFits(2 + b.joins.length);
         const item: FromItem = { text: q`json_each(${expr(r.expr, b.scope)})`, alias: r.id };
         const select = [...b.select, ...explodeColumns(r.as).map(memberCol)];
         return { ...b, joins: [...b.joins, { kind: 'cross', item }], select, scope: withRel(b.scope, r.id, new Map(select)) };
@@ -940,6 +991,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         // Only an inner/cross join may splice its right side: a LEFT join's right-side predicate
         // must stay inside the subquery, or an unmatched row is filtered instead of null-padded.
         const right = side(r.right, outer, r.join === 'inner' || r.join === 'cross', taken);
+        joinFits(2 + left.joins.length + right.joins.length);
         const scope = mergeScopes(left.scope, right.scope);
         const on = r.on ? expr(r.on, scope) : undefined;
         const select = r.type.cols.map((column, i) => [column.name, [...left.cols, ...right.cols][i]!] as const);

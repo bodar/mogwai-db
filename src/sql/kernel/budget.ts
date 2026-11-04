@@ -92,3 +92,22 @@ export class CompileBudgetExceeded extends UnsupportedTraversal {
     return new CompileBudgetExceeded(this.limit, hint);
   }
 }
+
+/**
+ * A statement whose one `SELECT` would join more tables than SQLite plans (`SQLITE_JOIN_TABLES`,
+ * `src/rel/emit.ts`) — the decline the store gives that statement, raised by the assembler before it spells
+ * the rest. A sibling of `CompileBudgetExceeded` with the same contract: the compile boundary names the
+ * `times()` that unrolled (`compilePlan`), which only the query text knows.
+ */
+export class JoinWidthExceeded extends UnsupportedTraversal {
+  constructor(readonly limit: number, hint?: string) {
+    const sentence = `it joins more than ${limit} tables in one SQL SELECT, SQLite's limit${hint ? `; ${hint}` : ''}`;
+    super(sentence);
+    this.message = UnsupportedTraversal.because(sentence).message;
+  }
+
+  /** The same decline, naming the part of the query that expanded. */
+  hinted(hint: string): JoinWidthExceeded {
+    return new JoinWidthExceeded(this.limit, hint);
+  }
+}

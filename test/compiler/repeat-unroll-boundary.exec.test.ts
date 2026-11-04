@@ -458,9 +458,14 @@ describe('the repeat() unroll boundary', () => {
 // statement-shape limits (64 tables in a join; 65,535 references to one table). That is a property of
 // the compiled text — of the query — never of the data, so the user gets a clear decline naming the
 // limit and the likely cause, never SQLite's bare message (`GraphStore.query`, src/storage.ts).
+// The 64-table join limit is the one the compiler can see for itself: the assembler knows how wide a FROM
+// it is building, so it declines there (`SQLITE_JOIN_TABLES`, src/rel/emit.ts) rather than spelling the
+// statement for SQLite to refuse. Same decline class, its own message (`host-unroll-width.exec.test.ts`).
 describe('a bounded repeat past a SQLite statement-shape limit declines clearly', () => {
+  test('the join-width limit is declined before the store sees it', () => {
+    expect(() => run(store, 'g.V().repeat(__.out()).emit().times(64).count()')).toThrow(/^this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat\(…\)\.times\(64\) unrolls into one join per iteration — lower the count, or, /);
+  });
   test.each([
-    'g.V().repeat(__.out()).emit().times(64).count()',
     'g.V().repeat(__.both().limit(3)).times(24).count()',
     'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
   ])('%s', (q) => {
@@ -491,10 +496,9 @@ describe('a SQLite limit spelled the workerd way still declines clearly', () => 
   for (const q of MODERN_SEED) executeQuery(workerd, q, {});
 
   test.each([
-    'g.V().repeat(__.out()).emit().times(64).count()',
     'g.V().repeat(__.both().limit(3)).until(__.loops().is(24)).count()',
   ])('%s', (q) => {
-    expect(() => run(workerd, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \((at most 64 tables in a join|too many references to "edges": max 65535)\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
+    expect(() => run(workerd, q)).toThrow(/^this traversal is not supported yet: the SQL this traversal compiles to exceeds a SQLite statement limit \(too many references to "edges": max 65535\); a repeat\(\) with a large times\(\) or loops\(\) count is the usual cause$/);
   });
 
   test('an int64 sum overflow is still the deferral it is on Bun', () => {

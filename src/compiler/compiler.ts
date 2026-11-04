@@ -13,7 +13,7 @@ import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
 import { Declines, UnsupportedTraversal } from './unsupported.ts';
-import { CompileBudget, CompileBudgetExceeded } from '../sql/kernel/budget.ts';
+import { CompileBudget, CompileBudgetExceeded, JoinWidthExceeded } from '../sql/kernel/budget.ts';
 import { eachStepDeep, rawBodies } from './ir/walk.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, Executable, Program, Shape, ValueType, ListOf, MapOf } from '../sql/kernel/render.ts';
@@ -57,20 +57,42 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
  * typed — the query text does. A bounded `repeat()` is the expansion a user can see and change (its body
  * is spelled once per iteration), so the largest `times(n)` at any depth is named; anything else is a
  * nesting whose text compounds per level, and the advice is to split the traversal.
+ *
+ * A SELECT past SQLite's join width (`JoinWidthExceeded`) is the same expansion seen by a different
+ * limit: an unroll inside a per-traverser body fuses one join per iteration into one SELECT, while at the
+ * top level each iteration is a step of its own — so that is what it suggests.
  */
-function expansionNamed(error: unknown, gremlin: string, wireParams: Record<string, any>, wireParamTypes: Record<string, TypeNode>): CompileBudgetExceeded | null {
-  if (!(error instanceof CompileBudgetExceeded)) return null;
-  const params = paramEnv(wireParams, wireParamTypes);
-  let most = 0;
-  try {
-    eachStepDeep(stepChain(parseGremlin(gremlin), params), rawBodies(params), (s) => {
-      const n = s.name === 'times' ? (s.args ?? [])[0]?.value : undefined;
-      if (typeof n === 'number' && n > most) most = n;
-    });
-  } catch { /* the hint is a courtesy: an unreadable query keeps the plain decline */ }
+function expansionNamed(error: unknown, gremlin: string, wireParams: Record<string, any>, wireParamTypes: Record<string, TypeNode>): CompileBudgetExceeded | JoinWidthExceeded | null {
+  if (!(error instanceof CompileBudgetExceeded) && !(error instanceof JoinWidthExceeded)) return null;
+  const { most, nested } = largestTimes(gremlin, wireParams, wireParamTypes);
+  const loop = `or, for a body without a barrier step (order/limit/range/dedup/aggregate/…), bound it with until(loops().is(${most})), which runs as a loop rather than unrolled`;
+  if (error instanceof JoinWidthExceeded) {
+    return error.hinted(most > 1
+      ? `repeat(…).times(${most}) unrolls into one join per iteration — lower the count, ${nested ? 'move the repeat() out of its child traversal (local/where/map/…) to the top level, where its iterations are not fused into one SELECT, ' : ''}${loop}`
+      : 'its steps fuse into one join per step — split it into smaller traversals');
+  }
   return error.hinted(most > 1
-    ? `repeat(…).times(${most}) unrolls its body ${most} times — lower the count, or, for a body without a barrier step (order/limit/range/dedup/aggregate/…), bound it with until(loops().is(${most})), which runs as a loop rather than unrolled`
+    ? `repeat(…).times(${most}) unrolls its body ${most} times — lower the count, ${loop}`
     : 'its steps nest so that each level spells the one before it again — split it into smaller traversals');
+}
+
+/** The largest `times(n)` at any depth of the query text — 0 when there is none, or the text is unreadable
+ *  (the hint is a courtesy: an unreadable query keeps the plain decline) — and whether it sits inside a
+ *  child traversal rather than on the root chain. */
+function largestTimes(gremlin: string, wireParams: Record<string, any>, wireParamTypes: Record<string, TypeNode>): { readonly most: number; readonly nested: boolean } {
+  const params = paramEnv(wireParams, wireParamTypes);
+  const count = (s: { readonly name: string; readonly args?: readonly { readonly value?: unknown }[] }): number | undefined => {
+    const n = s.name === 'times' ? (s.args ?? [])[0]?.value : undefined;
+    return typeof n === 'number' ? n : undefined;
+  };
+  let most = 0;
+  let root: readonly Parameters<typeof count>[0][] = [];
+  try {
+    const chain = stepChain(parseGremlin(gremlin), params);
+    root = chain;
+    eachStepDeep(chain, rawBodies(params), (s) => { const n = count(s); if (n !== undefined && n > most) most = n; });
+  } catch { /* unreadable: no count to name */ }
+  return { most, nested: !root.some((s) => count(s) === most) };
 }
 
 /**
