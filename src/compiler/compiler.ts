@@ -103,8 +103,11 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
     throw new UnsupportedTraversal(gremlin);
   // A `from()`/`to()` sub-path the reference may THROW on (an absent or misordered label) declines here,
   // once, for every path-family host (`unlocatableSubPath`) — the lowering's sub-path would answer an
-  // empty path instead.
-  if (unlocatableSubPath(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
+  // empty path instead. The message names the label.
+  const unlocatable = unlocatableSubPath(steps, params);
+  if (unlocatable !== null)
+    throw UnsupportedTraversal.because(`a path()/simplePath()/cyclicPath() sub-path bounded by '${unlocatable}' is not supported: `
+      + 'that label may be absent, or out of order, on a traverser reaching the step, so the sub-path cannot be located');
   // A NaN literal VALUE (SQLite stores it as NULL) declines here, once, at every depth (`uncarriedLiteral`).
   if (uncarriedLiteral(steps, params) !== null) throw new UnsupportedTraversal(gremlin);
   // A map- or set-valued EQUALITY operand or merge criterion (stored as JSON text, whose entry order is

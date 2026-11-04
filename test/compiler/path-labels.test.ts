@@ -5,8 +5,8 @@
 import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain, type Step } from '../../src/gremlin/frontend.ts';
-import { GLOBAL_BARRIER_STEPS } from '../../src/compiler/ir/step.ts';
-import { consumesPath, passesTraverser, pathLabelsAt } from '../../src/compiler/ir/labels.ts';
+import { GLOBAL_BARRIER_STEPS, addsUnlabelledTraversers } from '../../src/compiler/ir/step.ts';
+import { consumesPath, labelsBoundBefore, passesTraverser, pathLabelsAt, unlocatableSubPath } from '../../src/compiler/ir/labels.ts';
 
 const chain = (gremlin: string): Step[] => stepChain(parseGremlin(gremlin), NO_PARAMS);
 /** The LAST step of `g.V().<step>` — the parser takes a whole traversal, never a bare `__` step. */
@@ -63,5 +63,28 @@ describe('pathLabelsAt', () => {
   test('only binds before the index count', () => {
     const steps = chain("g.V().as('a').out().as('b')");
     expect([...pathLabelsAt(steps, 2, NO_PARAMS).labels]).toEqual(['a']);
+  });
+});
+
+describe('addsUnlabelledTraversers — the step fact a mid-traversal inject(x…) carries', () => {
+  // `InjectStep` is a `StartStep`: its traversers are generated with an EMPTY path
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/StartStep.java).
+  const at = (gremlin: string, i: number): boolean => addsUnlabelledTraversers(chain(gremlin)[i]!, i);
+  test('only an inject WITH values PAST the source; never V(), which keeps the incoming path', () => {
+    expect(at("g.V().as('a').inject(1)", 2)).toBe(true);
+    expect(at('g.inject(1).out()', 0)).toBe(false);
+    expect(at("g.V().as('a').inject()", 2)).toBe(false);
+    expect(at("g.V().as('a').V()", 2)).toBe(false);
+  });
+  test('labelsBoundBefore clears on it (MUST); pathLabelsAt does not (MAY: the incoming rows still hold it)', () => {
+    const steps = chain("g.V().as('a').values('age').inject(1).as('b').select('a')");
+    expect([...labelsBoundBefore(steps, 5, NO_PARAMS)]).toEqual(['b']);
+    expect([...pathLabelsAt(steps, 5, NO_PARAMS).labels].sort()).toEqual(['a', 'b']);
+  });
+  test('unlocatableSubPath names a from/to label bound only before it', () => {
+    const named = (q: string) => unlocatableSubPath(chain(q), NO_PARAMS);
+    expect(named("g.V().as('a').values('age').inject(1).path().from('a')")).toBe('a');
+    expect(named("g.V().as('a').out().inject(1).as('b').path().from('a').to('b')")).toBe('a');
+    expect(named("g.V().values('age').inject(1).as('a').path().from('a')")).toBeNull();
   });
 });

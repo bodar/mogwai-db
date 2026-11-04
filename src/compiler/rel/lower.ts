@@ -5707,7 +5707,8 @@ function injectTail(
   ];
   const merged = owed ? mintBranchOrder(arms, undefined, labels, ctx.source, fresh) : mergeArms(arms, labels, ctx.source, fresh);
   if (!merged) return null;
-  // Every incoming label is now bound on SOME rows only — an injected traverser holds none — so no entry
+  // Every incoming label is now bound on SOME rows only — an injected traverser holds none
+  // (`addsUnlabelledTraversers`, the step fact `labelsBoundBefore`/`unlocatableSubPath` read) — so no entry
   // keeps a static binding count (`binds`) or path position: a later `select` then owes the presence guard
   // (`aliasGuard`) that drops the injected rows, as the reference's `select` of an unbound key does.
   const aliases: AliasMap = new Map([...merged.aliases].map(([label, entry]) => [label, { ...entry, binds: undefined, pathPos: undefined }]));

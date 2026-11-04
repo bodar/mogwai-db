@@ -1,7 +1,7 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, isPred, stepChain, type Arg, type Pred, type Step } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { PATH_FAMILY, REDUCERS, isLocalScope, isStreamBarrier, type IRStep } from './step.ts';
+import { PATH_FAMILY, REDUCERS, addsUnlabelledTraversers, isLocalScope, isStreamBarrier, type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, eachStepDeep, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 
 // ---------- labels: who BINDS one, who READS one ----------
@@ -224,9 +224,8 @@ function carriesBarrier(s: Step, params: ParamEnv): boolean {
 export function labelsBoundBefore(steps: readonly Step[], index: number, params: ParamEnv): ReadonlySet<string> {
   let bound = new Set<string>();
   for (let i = 0; i < index && i < steps.length; i++) {
-    // An `inject(x…)` past the source adds FRESH traversers beside the stream, each with no label
-    // (`StartStep` generates them), so a bind before it holds on only some rows after it.
-    if (carriesBarrier(steps[i], params) || (i > 0 && steps[i].name === 'inject' && (steps[i].args?.length ?? 0) > 0)) bound = new Set();
+    // A step that adds unlabelled traversers beside the stream leaves a bind before it on only SOME rows.
+    if (carriesBarrier(steps[i], params) || addsUnlabelledTraversers(steps[i], i)) bound = new Set();
     for (const l of asLabelsOf(steps[i])) bound.add(l);
     for (const l of matchLabelsOf(steps[i], params)) bound.add(l);
   }
@@ -505,7 +504,7 @@ export function readsPathLabel(held: LabelReads, reads: LabelReads): boolean {
  * the sub-path is locatable on EVERY traverser:
  *
  * - each label is bound UNCONDITIONALLY before the step — a TOP-LEVEL `as()` of the same chain, not
- *   cleared by a barrier since (`labelsBoundBefore`'s rule, `as()` only: a `match()` pattern's binds
+ *   cleared by a barrier or a mid-traversal `inject(x…)` since (`labelsBoundBefore`'s rule, `as()` only: a `match()` pattern's binds
  *   are not positions this scan can order). A nested chain sees none of its host's labels here, so a
  *   sub-path inside a nested body declines unless that body binds its own;
  * - with both bounds, no bind of the from-label — at any depth — follows the to-label's last top-level
@@ -529,10 +528,11 @@ export function unlocatableSubPath(steps: readonly Step[], params: ParamEnv): st
       }
       if (found !== null || (from === undefined && to === undefined)) continue;
       // The top-level binds before `i`, each at its LAST index; a barrier that mints a NEW traverser
-      // clears them all (`passesTraverser` names the ones that do not).
+      // clears them all (`passesTraverser` names the ones that do not), and so does a step that adds
+      // unlabelled traversers beside the stream: a from/to label bound only before it is ABSENT on those.
       let last = new Map<string, number>();
       for (let k = 0; k < i; k++) {
-        if (!passesTraverser(chain[k]!) && carriesBarrier(chain[k]!, params)) last = new Map();
+        if (addsUnlabelledTraversers(chain[k]!, k) || (!passesTraverser(chain[k]!) && carriesBarrier(chain[k]!, params))) last = new Map();
         for (const l of asLabelsOf(chain[k]!)) last.set(l, k);
       }
       for (const label of [from, to]) if (found === null && label !== undefined && !last.has(label)) found = label;

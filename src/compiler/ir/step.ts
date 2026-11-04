@@ -186,6 +186,14 @@ export const isGlobalBarrier = (s: { readonly name: string }): boolean => GLOBAL
  *  Both gates that need this distinction spelled the exemption inline; this is the one predicate. */
 export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !isLocalScope(s);
 
+/** Does the step at chain position `index` ADD UNLABELLED TRAVERSERS beside the stream? A mid-traversal
+ *  `inject(x…)` past the source does: `InjectStep` is a `StartStep` whose generated traversers start an
+ *  EMPTY path (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/InjectStep.java`,
+ *  `.../step/sideEffect/StartStep.java`), so a label bound before it holds on only SOME rows after it.
+ *  A mid-traversal `V()`/`E()` is deliberately absent: it splits the incoming traverser and keeps its path. */
+export const addsUnlabelledTraversers = (s: { readonly name: string; readonly args?: readonly unknown[] }, index: number): boolean =>
+  index > 0 && s.name === 'inject' && (s.args?.length ?? 0) > 0;
+
 // ---------- Scope.local, and what a slice step's arguments MEAN ----------
 //
 // These two belong together and belong HERE, in the step vocabulary, for the same reason the
