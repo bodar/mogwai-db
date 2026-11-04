@@ -135,10 +135,6 @@ export const RANDOM_ORDER: SortTerm = { expr: { kind: 'call', fn: 'RANDOM', args
  *  row-algebraic op reaches every shape at once instead of only the tail whose author remembered it. */
 export const ROW_OPS: ReadonlySet<string> = new Set(['identity', 'barrier', 'order', 'dedup', ...SLICE_STEPS]);
 
-/** The three steps that apply a CHILD BODY once per traverser. One set rather than three names at the
- *  dispatch, because what separates them is a policy inside the lowering and not which loop owns
- *  them — `perTraverserChild` is where that policy is written down. */
-export const PER_TRAVERSER_HOSTS = new Set(['map', 'flatMap', 'local']);
 
 
 /** `ORDER BY <position> [DESC] LIMIT/OFFSET` — the plain slice, where a row IS one traverser. An

@@ -14,7 +14,7 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
-import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, ONE_TO_ONE, REDUCERS, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalScope, isStreamBarrier, ONE_TO_ONE, REDUCERS, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
@@ -39,7 +39,7 @@ import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
-import { PER_TRAVERSER_HOSTS, RANDOM_ORDER } from './slice.ts';
+import { RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
@@ -401,7 +401,7 @@ const nestedBarrierScopes = (s: IRStep, params: ParamEnv): boolean =>
  *   holds a window or a branch at any depth, and inlined where it holds neither.
  */
 function nestedHostScopes(step: IRStep, params: ParamEnv): boolean {
-  if (!PER_TRAVERSER_HOSTS.has(step.name) || step.modulators?.length || step.optionArms || step.args.length !== 1) return false;
+  if (!FAN_OUT_HOSTS.has(step.name) || step.modulators?.length || step.optionArms || step.args.length !== 1) return false;
   const nested = step.args[0]!.value;
   const body = isNested(nested) ? bodyOf(nested.nested, params) : null;
   if (!body?.length) return false;
@@ -2067,7 +2067,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // A NESTED per-traverser host leading the body (`choose(__.local(__.out('knows').count()))`,
   // `by(__.map(__.values('name')).toUpper())`) — see `nestedHostChild`. Where it cannot answer, the arms
   // below still may (a self-rooted reduce lowers a fan-out `local(…)` through the fold).
-  if (PER_TRAVERSER_HOSTS.has(first.name)) {
+  if (FAN_OUT_HOSTS.has(first.name)) {
     const nestedValue = nestedHostChild(body, host, childSeam(ctx, fresh));
     if (nestedValue) return nestedValue;
   }
@@ -2686,7 +2686,7 @@ export function valueRun(
     // `nestedHostChild` with the value as a scalar host. DIRECTLY, never through `child.scalar`: where it
     // declines, the seam's scalar-host arm hands this same body straight back to `valueRun`, which reaches
     // this same step over the same host and never makes progress — so a decline here is final.
-    if (PER_TRAVERSER_HOSTS.has(step.name)) {
+    if (FAN_OUT_HOSTS.has(step.name)) {
       if (typeof present === 'object' || present === 'unknown') return null;
       const hostVtype = hostTag(type, vtype);
       const over = (presence: HostPresence): ChildValue | null => nestedHostChild(body.slice(at), {

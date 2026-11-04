@@ -137,7 +137,10 @@ const FOLD: Pass[] = group('canonicalize', [
   // BEFORE formRepeatRegions and on the FLAT chain: an unrolled `repeat(body).times(n)` becomes
   // ordinary chain steps, so every later pass sees them as if the user had written them out. Placed
   // in canonicalize rather than simplify because it is not a no-op removal — it changes the chain's
-  // shape so a body the recursive CTE cannot express becomes one the main chain can.
+  // shape so a body the recursive CTE cannot express becomes one the main chain can. A counted
+  // `until(loops().is($x))` over a body that needs phases is rewritten to `times(k)`, so a `$x` parameter
+  // there is REDUCED to a constant here — the last responsible moment the bind rule allows, since the
+  // phase count is the plan's shape.
   { name: 'unrollFixedRepeat', applies: (steps) => steps.some((s) => s.name === 'times' || s.name === 'until'), run: (steps, ctx) => unrollFixedRepeat(steps, ctx.params, (nested, params) => childSteps(nested, params, ctx.sideEffects)) },
   { name: 'formRepeatRegions', run: (steps) => formRepeatRegions(steps) },
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE absorbModulators, so a

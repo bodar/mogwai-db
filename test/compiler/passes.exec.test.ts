@@ -424,12 +424,32 @@ describe('until(loops().is(P)) canonicalizes to times(k*)', () => {
   // The rewrite is a REGIME choice: only a body holding a per-iteration barrier needs phases. A
   // barrier-free body stays the walk's, whose SQL does not grow with k* — rewriting it sent
   // emit+simplePath neighbourhoods into a declining emit-unroll gap and large counts past the DO
-  // statement cap. A barrier under a per-traverser host is that host's local child, not a phase.
+  // statement cap. A barrier under a FILTER host is a correlated test the walk lowers in constant-size
+  // SQL, so it stays the walk's too.
   test('a barrier-free body keeps its counted until for the walk, at any count and with emit', () => {
     for (const q of [
       'g.V().repeat(out()).until(loops().is(2))', 'g.V().until(loops().is(2)).repeat(out())',
       'g.V(1).repeat(both().simplePath()).emit().until(loops().is(3))', 'g.V().repeat(out()).emit().until(loops().is(64))',
-      'g.V().repeat(out()).until(loops().is(gte(100000)))', 'g.V().repeat(local(out().limit(1))).until(loops().is(2))',
+      'g.V().repeat(out()).until(loops().is(gte(100000)))',
+      'g.V().repeat(out().where(out().count().is(gt(0)))).until(loops().is(2))',
+      'g.V().repeat(out().not(out().limit(1))).emit().until(loops().is(64))',
     ]) expect(chain(q)).toContain('repeat');
+  });
+
+  // The regime is chosen by what the walk REFUSES, at any depth: a stream barrier under a FAN-OUT host
+  // (`local`/`map`/`flatMap`) fuses into the recursive term, which cannot hold its window/aggregate
+  // (`BARRIER_IN_TERM`), so only phases run it — until-first and until-last alike, however deep.
+  test('a barrier under a fan-out host, at any depth, takes the phases', () => {
+    for (const [q, n] of [
+      ['g.V().repeat(local(out().limit(1))).until(loops().is(2))', 2],
+      ['g.V().until(loops().is(2)).repeat(out().local(order().by("name").tail(1)))', 2],
+      ['g.V().repeat(flatMap(out().limit(1))).until(loops().is(2))', 2],
+      ['g.V().repeat(map(out().fold())).until(loops().is(3))', 3],
+      ['g.V().repeat(local(out().local(out().order().by("name").limit(1)))).until(loops().is(2))', 2],
+      ['g.V().repeat(local(union(out().limit(1), in()))).until(loops().is(2))', 2],
+    ] as const) {
+      expect(chain(q)).not.toContain('repeat');
+      expect(chain(q)).toBe(chain(q.replace(/until\(loops\(\)\.is\(\d\)\)/, `times(${n})`)));
+    }
   });
 });

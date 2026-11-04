@@ -15,7 +15,7 @@ import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow } from '../../rel/bounds.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
-import { collectionAssert, EDGE_MOVES, elementKindAt, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
+import { collectionAssert, EDGE_MOVES, elementKindAt, FAN_OUT_HOSTS, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -76,7 +76,7 @@ import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
-import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
+import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
 import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
@@ -2059,7 +2059,7 @@ function scalarTail(
     if (armed === 'continue') continue;
     if (armed !== 'pass') return armed.tail;
 
-    if (PER_TRAVERSER_HOSTS.has(step.name)) {
+    if (FAN_OUT_HOSTS.has(step.name)) {
       if (out.kind !== 'scalar') return null;
       return perTraverserChild(step, rel, out, steps, at, bulked, ctx, fresh, labels);
     }
@@ -5339,7 +5339,7 @@ function elementTail(
     // When an `otherV()` reads what this host produces (`local(bothE()).otherV()`), the body's tail edge
     // must retain its entering vertex — signalled by `needsFromV`, honoured only on the `flatMap`/`local`
     // rejoin (no peer merge). A vertex/scalar host result declines `otherV` at the consumer, harmlessly.
-    if (PER_TRAVERSER_HOSTS.has(step.name)) {
+    if (FAN_OUT_HOSTS.has(step.name)) {
       const feeds = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
       const hostCtx = feeds === (ctx.needsFromV ?? false) ? ctx : { ...ctx, needsFromV: feeds };
       return perTraverserChild(step, rel, { kind: 'elements', elem }, steps, at, bulked, hostCtx, fresh, labels);

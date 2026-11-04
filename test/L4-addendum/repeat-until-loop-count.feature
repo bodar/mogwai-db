@@ -226,3 +226,67 @@ Feature: mogwai addendum — until(loops().is(P)) on an unnamed repeat is the bo
     Then the result should be unordered
       | result |
       | d[8].l |
+
+  # A barrier under a FAN-OUT host (local/map/flatMap), at any depth, also needs phases: the host's
+  # child fuses into the recursive term, which refuses the window it lowers to. One-step neighbours of
+  # Repeat.feature's g_VX250X_repeatXout_localXorder_byXperformancesX_tailX1XXX_timesX2X_valuesXnameX
+  # and g_V_emit_repeatXlocalXout_order_byXnameXXX_timesX2X_valuesXnameX, the count spelled as an until.
+  Scenario: g_VX1X_repeatXout_localXorder_byXnameX_tailX1XXX_untilXloops_isX2XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).repeat(__.out().local(__.order().by("name").tail(1))).until(__.loops().is(2)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |
+
+  Scenario: g_VX1X_untilXloops_isX2XX_repeatXout_localXorder_byXnameX_tailX1XXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V(1).until(__.loops().is(2)).repeat(__.out().local(__.order().by("name").tail(1))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | ripple |
+
+  Scenario: g_V_emit_repeatXlocalXout_order_byXnameXXX_untilXloops_isX2XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().emit().repeat(__.local(__.out().order().by("name"))).until(__.loops().is(2)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | josh |
+      | lop |
+      | ripple |
+      | lop |
+      | vadas |
+      | vadas |
+      | lop |
+      | josh |
+      | lop |
+      | ripple |
+      | ripple |
+      | peter |
+      | lop |
+
+  # "Follow the heaviest edge" per hop: marko -[1.0]-> josh -[1.0]-> ripple; every other start dies early.
+  Scenario: g_V_repeatXlocalXoutE_order_byXweight_descX_limitX1XX_inVX_untilXloops_isX2XX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.local(__.outE().order().by("weight", Order.desc).limit(1)).inV()).until(__.loops().is(2)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | ripple |

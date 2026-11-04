@@ -194,6 +194,22 @@ export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !is
 export const addsUnlabelledTraversers = (s: { readonly name: string; readonly args?: readonly unknown[] }, index: number): boolean =>
   index > 0 && s.name === 'inject' && (s.args?.length ?? 0) > 0;
 
+/** THE FAN-OUT HOSTS — the three steps that apply a CHILD BODY once per traverser and emit what it
+ *  yields. One set rather than three names at each dispatch, because what separates them is a policy
+ *  inside the lowering (`perTraverserChild`), not which loop owns them. Their child's barrier is LOCAL
+ *  to one traverser — `LocalStep` resets it per start (vendor/tinkerpop/gremlin-core/src/main/java/org/
+ *  apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:60-75) — but it is still a
+ *  window/aggregate in the relation the host lowers to, which a recursive term cannot hold. */
+export const FAN_OUT_HOSTS: ReadonlySet<string> = new Set(['map', 'flatMap', 'local']);
+
+/** The filter steps whose child is a per-traverser TEST (`WhereTraversalStep`, `TraversalFilterStep`,
+ *  `NotStep`, `AndStep`/`OrStep` — each runs it through `TraversalUtil.test`, which resets it first). */
+const PER_TRAVERSER_FILTER_HOSTS = ['where', 'filter', 'not', 'and', 'or'] as const;
+
+/** Every host whose children the reference RESETS before each traverser: the fan-out hosts plus the
+ *  filter hosts. Derived rather than listed so the two vocabularies cannot drift. */
+export const PER_TRAVERSER_RESET_HOSTS: ReadonlySet<string> = new Set([...FAN_OUT_HOSTS, ...PER_TRAVERSER_FILTER_HOSTS]);
+
 // ---------- Scope.local, and what a slice step's arguments MEAN ----------
 //
 // These two belong together and belong HERE, in the step vocabulary, for the same reason the

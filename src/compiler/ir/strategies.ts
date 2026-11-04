@@ -4,7 +4,7 @@ import { bodyAlwaysProduces } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
-import { collectsSideEffect, nondeterministic, type IRStep } from './step.ts';
+import { collectsSideEffect, FAN_OUT_HOSTS, isStreamBarrier, nondeterministic, PER_TRAVERSER_RESET_HOSTS, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -1345,14 +1345,37 @@ const SIDE_EFFECT_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
 
 const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = { ...SIDE_EFFECT_FREE_BARRIERS, ...SIDE_EFFECT_BARRIERS };
 
-/** Does a (normalized) repeat body hold a per-iteration barrier at its own level — a member of
- *  `UNROLLABLE_BARRIERS` or a barrier `call()`? Such a body "always has 'global' children" in the
- *  reference (`RepeatStep.standardAlgorithm` drains every start into a body that
- *  `hasStepOfAssignableClassRecursively(Barrier.class, …)`), and only a PHASE can host one: a recursive
- *  term refuses the window/aggregate/effect it lowers to. A barrier under a per-traverser host is that
- *  host's LOCAL child, reset per traverser, so it does not make the body need phases. */
-const needsPhases = (body: readonly Step[]): boolean =>
-  body.some((s) => s.name === 'call' || !!UNROLLABLE_BARRIERS[s.name]?.(s));
+/** Does a (normalized) repeat body hold a barrier the recursive WALK cannot carry, so only PHASES can
+ *  run it? Decided by what the walk refuses, at any depth, not by a top-level name list:
+ *
+ *  - a per-iteration barrier at the body's own level — a member of `UNROLLABLE_BARRIERS` or a barrier
+ *    `call()`. Such a body "always has 'global' children" in the reference (`RepeatStep.standardAlgorithm`
+ *    drains every start into a body that `hasStepOfAssignableClassRecursively(Barrier.class, …)`,
+ *    vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/
+ *    branch/RepeatStep.java), and a recursive term refuses the window/aggregate/effect it lowers to;
+ *  - a FAN-OUT host (`local`/`map`/`flatMap`) holding a stream barrier at ANY depth. Its child is reset
+ *    per traverser, so the barrier is not per-ITERATION — but the host's child fuses INTO the recursive
+ *    term, and the window/aggregate it lowers to is exactly what that term refuses (`BARRIER_IN_TERM`,
+ *    src/rel/recursive.ts). `local(out().order().by(k).limit(1))` — "follow the top neighbour per hop" —
+ *    is the ordinary shape. An unreadable child counts as a barrier (fail closed toward phases, which
+ *    the unroll then admits or leaves alone).
+ *
+ *  A barrier under a FILTER host (`where(out().count().is(…))`) stays the walk's: the walk lowers it as a
+ *  correlated test in constant-size SQL. The one over-approximation — a filter-hosted barrier INSIDE a
+ *  fan-out host — takes phases, which answer it with a count bounded by the query text; narrowing it
+ *  would need a private walk (`ir/walk.ts` is the one walker). */
+const needsPhases = (body: readonly Step[], params: ParamEnv | BodyReader): boolean => {
+  const read: BodyReader = typeof params === 'function' ? params as BodyReader : rawBodies(params);
+  return body.some((s) => s.name === 'call' || !!UNROLLABLE_BARRIERS[s.name]?.(s) || (FAN_OUT_HOSTS.has(s.name) && fanOutHoldsBarrier(s, read)));
+};
+
+/** Does a fan-out host's CHILD (not the host itself — `local` is a barrier by name) hold a stream barrier
+ *  at any depth? Unreadable → true. */
+function fanOutHoldsBarrier(host: Step, read: BodyReader): boolean {
+  let hit = false;
+  eachChildChain(host, read, (c) => { if (!hit && someStepDeep(c, read, (inner) => isStreamBarrier(inner as IRStep), true)) hit = true; }, () => { hit = true; });
+  return hit;
+}
 
 /** The row-local FILTERS a phase may contain — they drop traversers and change none. */
 const ROW_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'identity']);
@@ -1394,7 +1417,8 @@ function markAtDepth(steps: Step[], params: ParamEnv, matches: (s: Step) => bool
   return (changed ? marked : steps) as IRStep[];
 }
 
-/** THE PER-TRAVERSER HOSTS, and ONE argument admits all of them: their children are LOCAL children the
+/* THE PER-TRAVERSER RESET HOSTS (`PER_TRAVERSER_RESET_HOSTS`, ir/step.ts), and ONE argument admits all of
+ *  them to an unrolled phase: their children are LOCAL children the
  *  reference RESETS before each start. `LocalStep` resets its child per traverser (vendor/tinkerpop/
  *  gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:
  *  60-75); `map`/`flatMap` (`TraversalMapStep`/`TraversalFlatMapStep`) and the filters `where`/`filter`/
@@ -1409,7 +1433,6 @@ function markAtDepth(steps: Step[], params: ParamEnv, matches: (s: Step) => bool
  *  ⚠️ **The branch steps are deliberately NOT here.** `union`/`choose`/`coalesce`/`optional` arms are
  *  GLOBAL children, never reset per traverser, so a `dedup` inside an arm carries its seen-set across
  *  iterations exactly as a bare body `dedup` does — that needs its own argument. */
-const PER_TRAVERSER_HOSTS: ReadonlySet<string> = new Set(['local', 'map', 'flatMap', 'where', 'filter', 'not', 'and', 'or']);
 
 /** What a per-traverser host's child may NOT hold at any depth, because it outlives the reset the host
  *  argument rests on: the LOOP COUNTER (`loops()`, and a named repeat whose counter `loops("a")` can
@@ -1437,7 +1460,7 @@ const carriesIterationState = (s: Step): boolean =>
  *  is a UNION arm, and a barrier inside a union arm is the tree-Plan promotion target (§6), not this. */
 const unrollableBodyStep = (s: Step, read: BodyReader): boolean =>
   UNROLLABLE_BARRIERS[s.name]?.(s)
-  || (PER_TRAVERSER_HOSTS.has(s.name) && !someStepDeep([s], read, carriesIterationState, true))
+  || (PER_TRAVERSER_RESET_HOSTS.has(s.name) && !someStepDeep([s], read, carriesIterationState, true))
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
   || ROW_FILTERS.has(s.name)
   // `simplePath()`/`cyclicPath()` are PURE PATH FILTERS: a spliced phase checks the whole-path-so-far
@@ -1527,7 +1550,7 @@ export function unrollFixedRepeat(steps: Step[], params: ParamEnv, body: ChildBo
  * anyway, so both stay untouched.
  *
  * ⚠️ **The rewrite is a REGIME choice, and it is taken only where the walk cannot serve the region**: a
- * body holding a per-iteration barrier (`needsPhases`). That is the one axis the two-regime split rests
+ * body holding a barrier the walk refuses — per-iteration, or under a fan-out host at any depth (`needsPhases`). That is the one axis the two-regime split rests
  * on (`docs/archive/2026-08-09-repeat-two-regimes-plan.md`): a recursive term cannot hold a window or an
  * aggregate (`BARRIER_IN_TERM`, src/rel/recursive.ts), so `order`/`limit`/`range`/… in the body can only
  * be phases, while a barrier-free body is the walk's, in SQL whose size does not depend on `k*`. Rewriting
@@ -1542,7 +1565,7 @@ function loopCountUntilAsTimes(region: Step[], params: ParamEnv, childBody: Chil
   const until = region.find((s) => s.name === 'until');
   if (!rep || !until || rep.loopName || region.some((s) => s.name === 'times')) return null;
   const repBody = (rep.args ?? [])[0]?.value;
-  if ((rep.args ?? []).length !== 1 || !isNested(repBody) || !needsPhases(childBody(repBody.nested, params))) return null;
+  if ((rep.args ?? []).length !== 1 || !isNested(repBody) || !needsPhases(childBody(repBody.nested, params), params)) return null;
   const nested = (until.args ?? [])[0]?.value;
   if ((until.args ?? []).length !== 1 || !isNested(nested)) return null;
   const test = childBody(nested.nested, params);
@@ -1729,7 +1752,7 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   // A body SIDE EFFECT is root state that outlives every iteration, and a per-traverser host's child
   // could READ it (`aggregate('x').where(within('x'))`) — which the host argument says nothing about.
   // So the two never meet in one body: decline rather than argue what phase k's read sees.
-  if (body.some((s) => s.name in SIDE_EFFECT_BARRIERS) && body.some((s) => PER_TRAVERSER_HOSTS.has(s.name))) return null;
+  if (body.some((s) => s.name in SIDE_EFFECT_BARRIERS) && body.some((s) => PER_TRAVERSER_RESET_HOSTS.has(s.name))) return null;
   // A barrier `call()` unrolls only in the NON-emit regime. `emit` makes each level a UNION-ALL arm
   // (below), and a barrier inside a union arm is the tree-Plan promotion target (§6), not the sequential
   // chaining this slice reuses — so decline it here, fail closed, rather than splice a `call` into an arm
@@ -1766,7 +1789,7 @@ function tryUnroll(region: Step[], params: ParamEnv, childBody: ChildBody): Step
   const copies = emit ? (levels * (levels + 1)) / 2 : levels; // emit: one arm per level, arm k holds k copies
   const spliced = copies * unrolledSize(body, read, MAX_UNROLLED_STEPS);
   if (spliced > MAX_UNROLLED_STEPS) {
-    throw UnsupportedTraversal.because(`a repeat() bounded at ${n} iterations (times(${n}), or an until(loops().is(…)) that first holds there)${emit ? ' with emit()' : ''} unrolls to about ${Math.round(spliced)} steps, past the ${MAX_UNROLLED_STEPS} one SQL statement can carry; ${needsPhases(body)
+    throw UnsupportedTraversal.because(`a repeat() bounded at ${n} iterations (times(${n}), or an until(loops().is(…)) that first holds there)${emit ? ' with emit()' : ''} unrolls to about ${Math.round(spliced)} steps, past the ${MAX_UNROLLED_STEPS} one SQL statement can carry; ${needsPhases(body, read)
       ? 'lower the count — a body holding a barrier (order/limit/range/dedup/aggregate/…) runs only as unrolled iterations'
       : 'lower the count, or bound the loop with until(loops().is(n)), which a body without a barrier runs as a loop rather than unrolled'}`);
   }
