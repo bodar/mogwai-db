@@ -341,6 +341,10 @@ export const exactInteger = (digits: string | bigint): number | bigint => {
 export const binaryCarrier = (bytes: Uint8Array): string =>
   Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('hex').toUpperCase();
 
+/** Whether `text` is SOME byte string's carrier — exactly the image of `binaryCarrier` (whole bytes of
+ *  uppercase hex, the empty string included), so a text that answers no can never equal a stored Binary. */
+export const isBinaryCarrier = (text: string): boolean => /^(?:[0-9A-F]{2})*$/.test(text);
+
 /** A carrier's bytes — what the GraphBinary `Binary` serializer frames. */
 export const binaryBytes = (carrier: string): Buffer => Buffer.from(carrier, 'hex');
 

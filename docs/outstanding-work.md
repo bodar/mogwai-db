@@ -131,19 +131,14 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 - **Scalar member node rebuilt per one-row producer (r6-reuse4)** —
   `project().by(outE().values('weight').sum())` reads the edges 2× per host row (`max`: 3×).
 - **No body-may-yield-NULL fact (S11)**, so the M3 removal machinery always runs (+13–75%).
-- **The Binary hex carrier costs ordinary String equality its seek (binary-carrier-guard) — MAJOR, three
-  reviewers.** `textCarriedOthers` (`src/compiler/rel/predicate.ts`) matches `/^(?:[0-9A-F]{2})*$/`, i.e.
-  `''`, `'CA'`, `'DE'`, `'2024'`, `'DEADBEEF'`, so each such String bound gets a
-  `NOT (coalesce(vtype,'') IN ('binary'))` guard. In a literal `within` the guarded member no longer merges
-  into `value IN (…)`: `g.V().has('name', within('CA','US')).count()` degrades from a `vp_key_value
-  (key=?,value=?)` seek to a scan of every row with the key — 0.072 ms → 3.01 ms at 64k rows (42×, growing
-  with GRAPH size, not answer size). Single `has(k,'CA')` keeps its seek but gains the guard twice;
-  `values(k).is('BE')` gains an inlined vtype-inference chain per row. Same pre-existing split for
-  UUID-shaped members. Fix, in order: (a) hoist the one exclusion guard outside the IN-list (no non-carrier
-  string can equal a carrier, so it is correct for every member) — restores the seek for both families;
-  (b) consider a carrier ordinary text never spells (a fixed prefix such as `\u0001`+hex keeps byte order
-  and one spelling), so the guard fires only on a bound that could be a carrier. Move the recognizer next to
-  `binaryCarrier` (`isBinaryCarrier(text)`, `src/gremlin/types.ts`) either way.
+- **Binary carrier guard, residue (binary-carrier-guard).** A literal String `within`/`without` set now hoists
+  one tag guard off its `IN` list (`hoistedStringSet`, `src/compiler/rel/predicate.ts`) and keeps the
+  `vp_key_value(key=?,value=?)` multi-seek, for hex-, UUID- and number-spelled members alike. Left: a set
+  MIXING a number-spelled member with another (`within('CA','10')`) keeps the per-member disjunction and so a
+  key-only seek (graph-sized); the fix is the IN-list as a seekable prefix with the disjunction as residue.
+  The carrier-prefix format change (`\u0001`+hex, so ordinary text never spells a carrier) is a persisted
+  format change with GraphSON/CSV/`hex()` blast radius and no answer change — only worth it if a measured
+  cost of the guard itself remains.
 - **`fold().as('x').select('x').unfold()` is quadratic in the folded list (fold-label-history-copy)** —
   `g.V().values('name').fold().as('x').select('x').unfold().count()` 30.7 ms → 1595.8 ms N=1k → 8k (52×;
   a map-valued `values('m')` 67×), on trunk before this round too. The label-history column

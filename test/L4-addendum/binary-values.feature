@@ -70,6 +70,75 @@ Feature: mogwai addendum — Binary is a value class of its own, at any depth
       | result |
       | bin[AQID] |
 
+  # A literal String SET meets a Binary whose carrier it spells no more than one String does: `yg==` is
+  # 0xCA, carried as "CA", and `EA==` is 0x10, carried as "10". The set's type guard is hoisted off its
+  # `IN` list (`hoistedStringSet`) — these pin that the hoist drops no String and admits no Binary, for
+  # `within` and its complement, at the source and after a hop into the values.
+  Scenario: g_VXcodesX_hasXcode_withinXCA_USXX_valuesXcodeX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("d").property("code", Binary("yg==")).addV("d").property("code", "CA").addV("d").property("code", "US").addV("d").property("code", "GB")
+      """
+    And the traversal of
+      """
+      g.V().has("code", within("CA","US")).values("code")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | CA |
+      | US |
+
+  Scenario: g_VXcodesX_hasXcode_withoutXCA_USXX_valuesXcodeX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("d").property("code", Binary("yg==")).addV("d").property("code", "CA").addV("d").property("code", "US").addV("d").property("code", "GB")
+      """
+    And the traversal of
+      """
+      g.V().has("code", without("CA","US")).values("code")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | bin[yg==] |
+      | GB |
+
+  Scenario: g_VXcodesX_unionXvaluesXcodeX_isXwithinXCA_USXX_valuesXcodeX_isXwithinX10_20XXX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("d").property("code", Binary("yg==")).addV("d").property("code", "CA").addV("d").property("code", Binary("EA==")).addV("d").property("code", "10").addV("d").property("code", 10).addV("d").property("code", "20")
+      """
+    And the traversal of
+      """
+      g.V().union(values("code").is(within("CA","US")), values("code").is(within("10","20")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | CA |
+      | 10 |
+      | 20 |
+
+  Scenario: g_VXcodesX_whereXvaluesXcodeX_isXwithoutX10_20XXX_valuesXcodeX
+    Given the empty graph
+    And the graph initializer of
+      """
+      g.addV("d").property("code", Binary("EA==")).addV("d").property("code", "10").addV("d").property("code", 10).addV("d").property("code", "20")
+      """
+    And the traversal of
+      """
+      g.V().where(values("code").is(without("10","20"))).values("code")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | bin[EA==] |
+      | d[10].i |
+
   Scenario: g_V_valuesXblobX_order_byXdescX
     Given the empty graph
     And the graph initializer of

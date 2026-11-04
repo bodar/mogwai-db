@@ -6,7 +6,7 @@ import { inferredVtype, MIXED_COMPARABLES } from './reducer.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
-import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
+import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, isBinaryCarrier, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
 /**
@@ -428,7 +428,7 @@ const textCarriedOthers = (bound: string): readonly string[] => [
   ...(['id', 'label', 'key', 'value'].includes(bound) ? ['T'] : []),
   ...(['IN', 'OUT', 'BOTH'].includes(bound) ? ['D'] : []),
   ...(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bound) ? ['uuid'] : []),
-  ...(/^(?:[0-9A-F]{2})*$/.test(bound) ? ['binary'] : []),
+  ...(isBinaryCarrier(bound) ? ['binary'] : []),
 ];
 
 /**
@@ -481,6 +481,41 @@ function textSpacedSet(member: Expr, values: readonly unknown[], setType: TypeNo
   return owns.size === 1 && only ? textSpaced(member, type, only, []) : member;
 }
 
+/** A String spelling a NUMBER meets only a per-row String: a NULL vtype is "read the value", and a TEXT
+ *  value read that way is a String. */
+const stringOnly = (equal: Expr, vtype: Expr): Expr =>
+  binary('and', equal, binary('=', { kind: 'call', fn: 'coalesce', args: [vtype, compilerText('string')] }, compilerText('string')));
+
+/**
+ * A literal String set's TYPE GUARD, HOISTED off its `IN` list — or `null` when its members' equalities
+ * do not share one hoistable guard (the set then stays the disjunction of its members' equalities).
+ *
+ * Each plain String member's equality is the raw `=` under a guard that reads only the row's tag, so
+ * when every member carries the SAME kind of guard the set is `subject IN (m1..mk)` under ONE guard —
+ * the index multi-seek `vp_key_value(key=?, value=?)` per member, where the per-member disjunction can
+ * only seek the key and test every row of it. Two kinds hoist:
+ * - the TEXT-CARRIED exclusion (`textSpaced`'s `others`): the set excludes the UNION of what its
+ *   members could spell — `textSpacedSet`'s rule for a list parameter, so the two forms are one helper.
+ *   Exact, not approximate: a row of text-carried vtype X equals member mi only if mi's text IS a
+ *   spelling of X, and `textCarriedOthers` characterizes each vtype's spellings exactly (the `T` and
+ *   `Direction` names, the canonical UUID, `isBinaryCarrier`), so X is already in others(mi) — the
+ *   union drops no row any member keeps (`GremlinValueComparator.equals`, `ft == st`,
+ *   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:239-275`).
+ * - the per-row String confinement (`stringOnly`) when EVERY member spells a number: it is one guard.
+ * A mix of the two, a member with a declared type (a UUID/Binary literal), or any other non-raw member
+ * (a BigInteger, a decimal) keeps the disjunction.
+ */
+function hoistedStringSet(subject: Expr, values: readonly unknown[], members: readonly Expr[], same: readonly Expr[], types: readonly (TypeNode | null)[], type: SubjectType): Expr | null {
+  if (!values.every((v, i) => typeof v === 'string' && textCarriedType(types[i]) === null && boundSpace(v, types[i]!) === null)) return null;
+  const strings = values as readonly string[];
+  const matches = (form: (raw: Expr, i: number) => Expr) =>
+    same.every((e, i) => JSON.stringify(e) === JSON.stringify(form(binary('=', subject, members[i]!), i)));
+  const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
+  if (matches((raw, i) => textSpaced(raw, type, null, textCarriedOthers(strings[i]!)))) return textSpacedSet(inList, strings, null, type);
+  if (type.kind === 'perRow' && strings.every(numberSpelling) && matches((raw) => stringOnly(raw, type.vtype))) return stringOnly(inList, type.vtype);
+  return null;
+}
+
 const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: SubjectType, boundType: TypeNode | null): Expr | null => {
   const raw = binary('=', subject, bound);
   if (typeof value === 'string') {
@@ -489,9 +524,7 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
       const canonical = normalizeTypeName(type.type);
       if (canonical !== null && (NUMERIC_VTYPES.includes(canonical) || canonical === 'duration')) return CONSTANT.false;
     }
-    // A NULL vtype is "read the value", and a TEXT value read that way is a String.
-    if (!own && type.kind === 'perRow' && numberSpelling(value))
-      return binary('and', raw, binary('=', { kind: 'call', fn: 'coalesce', args: [type.vtype, compilerText('string')] }, compilerText('string')));
+    if (!own && type.kind === 'perRow' && numberSpelling(value)) return stringOnly(raw, type.vtype);
     return textSpaced(raw, type, own, own ? [] : textCarriedOthers(value));
   }
   const temporal = flatType(boundType) === 'datetime' || flatType(boundType) === 'duration';
@@ -1124,7 +1157,11 @@ export function predicateExpr(
     const decimalArm = decimalTextArm(subject, type, members.filter((_, i) => plainNumber(memberArgs[i]!.value, memberArgs[i]!.type)) as Expr[]);
     const withArm = (e: Expr): Expr => (decimalArm ? binary('or', e, decimalArm) : e);
     const spaces = new Set(memberArgs.map((o) => isNested(o.value) ? null : boundSpace(o.value, o.type)));
-    if (spaces.size > 1 || same.some((e, i) => JSON.stringify(e) !== JSON.stringify(binary('=', subject, members[i]!)))) {
+    // A plain String set whose only non-raw part is a shared tag guard keeps its `IN` list (`hoistedStringSet`).
+    const hoisted = memberArgs.some((o) => isNested(o.value)) ? null
+      : hoistedStringSet(subject, memberArgs.map((o) => o.value), members as Expr[], same as Expr[], memberArgs.map((o) => o.type), type);
+    if (hoisted) return settle(withArm(hoisted), nullMember);
+    if (spaces.size > 1 ||same.some((e, i) => JSON.stringify(e) !== JSON.stringify(binary('=', subject, members[i]!)))) {
       const any = withArm(memberArgs.map((o, i) => isNested(o.value) ? same[i]! : typeSpaced(same[i]!, o.value, type, o.type))
         .reduce((acc, e) => binary('or', acc, e)));
       return settle(any, nullMember);

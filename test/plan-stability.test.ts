@@ -131,3 +131,26 @@ describe('id routing: every id question is a seek', () => {
   });
 });
 
+// A LITERAL String set keeps its index MULTI-SEEK. A String member that some text-carried value could
+// spell (`'CA'` is a Binary's hex carrier, a canonical UUID is a UUID's text) carries a type guard, and
+// while that guard rode PER MEMBER the set was a disjunction SQLite could serve only by seeking the KEY
+// and testing every row under it — O(rows of the key) for an answer of two. One hoisted guard
+// (`hoistedStringSet`, src/compiler/rel/predicate.ts) leaves the `IN` list whole, so each member is a
+// `vp_key_value(key, value)` seek and the cost is answer-sized.
+describe('a literal within() set seeks every member', () => {
+  const MULTI_SEEK: Readonly<Record<string, string>> = {
+    'hex-spelled codes': "g.V().has('name', within('CA','US')).count()",
+    'a UUID-shaped member': "g.V().has('name', within('CA','01234567-89ab-cdef-0123-456789abcdef')).count()",
+    'number-spelled codes': "g.V().has('name', within('10','20')).count()",
+  };
+  for (const [name, gremlin] of Object.entries(MULTI_SEEK)) {
+    test(`${name}: vp_key_value is searched on (key, value), cold and warm`, () => {
+      const { sql, binds } = read(gremlin);
+      for (const store of [noStats, withStats]) {
+        const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
+        expect(details.filter((d) => d.includes('vp_key_value'))).toEqual([expect.stringContaining('(key=? AND value=?)')]);
+      }
+    });
+  }
+});
+
