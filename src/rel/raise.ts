@@ -79,9 +79,23 @@ export function raisedMessage(error: unknown): string | null {
 /** The deferral an int64 overflow in SQLite's own arithmetic (`sum()`) becomes (`GraphStore.query`). */
 export const INTEGER_OVERFLOW = 'integer arithmetic past 64 bits is not supported';
 
-/** The error ONE value past the platform's per-value cap becomes (`GraphStore.query`) — the platform's limit,
- *  in the user's terms: what holds the value, and the likely cause. */
-export const VALUE_PAST_PLATFORM_CAP = `a single value is larger than this graph's storage can hold (a Durable Object's SQLite caps one string or JSON value at ${CF_MAX_VALUE_BYTES / (1024 * 1024)} MB) — a fold(), group()/groupCount(), property or parameter value of this size cannot be stored or carried here; reduce it inside the traversal (count(), limit(), a narrower by()) or unfold() it`;
+/**
+ * The error ONE value past the platform's per-value cap becomes (`GraphStore.query`) — the platform's limit,
+ * in the user's terms. Every data-sized SET splits under the cap (a collection parameter that is unfolded or
+ * matched, a landing, a write's rows, a statement's retained rows — `jsonChunks`), so what is left is ONE
+ * value, and the store can say which of two kinds it was from the statement's binds alone:
+ *   - `'sent'` — a bound value past the cap: something the query hands to storage WHOLE — one property
+ *     value, one member of a collection parameter, one collected value landing from another graph, or a
+ *     list/map parameter a step reads as one value (`count(local)`, an `as()` label on it);
+ *   - `'computed'` — no bind is that large, so SQLite BUILT it: a `fold()`, a `group()`/`groupCount()` map,
+ *     any collected result.
+ */
+export function valuePastPlatformCap(kind: 'sent' | 'computed'): string {
+  const cap = `a single value is larger than this graph's storage can hold (a Durable Object's SQLite caps one string or JSON value at ${CF_MAX_VALUE_BYTES / (1024 * 1024)} MB)`;
+  return kind === 'sent'
+    ? `${cap} — this query hands storage one value of that size whole: a property value, one member of a list or map parameter, a collected value arriving from another graph, or a list or map parameter a step reads as one value (count(local), an as() label on it). A collection that is unfolded is split for you; one value this large cannot be stored or carried here — store or send it in smaller pieces`
+    : `${cap} — this traversal builds one value of that size: a fold(), group()/groupCount() or other collected result; reduce it inside the traversal (count(), limit(), a narrower by()) or leave it unfolded`;
+}
 
 /** A query whose answer is an error the DATA decided — the reference's own message, raised mid-statement
  *  by a `raiseExpr` arm. A distinct class so a caller can tell an answer that IS an error from a failure. */

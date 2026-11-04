@@ -1,6 +1,7 @@
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
-import { jsonChunks, type JsonChunk } from '../../json-chunks.ts';
+import { jsonChunks, jsonTextChunks, type JsonChunk } from '../../json-chunks.ts';
+import { CF_MAX_VALUE_BYTES, fitsUtf8 } from '../../do-limits.ts';
 import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
@@ -117,10 +118,9 @@ export function explodeMembers(
   rel: Rel, column: string, as: MemberAs, fresh: Minter,
 ): { readonly exploded: Rel; readonly project: (payload: readonly (readonly [string, Expr])[], cols: readonly ColMeta[]) => Rel } {
   const memberCols: ColMeta[] = [meta(as.value, 'any', true), meta(as.ord, 'int'), ...(as.type ? [meta(as.type, 'text', true)] : [])];
-  const exploded = make.explode({
-    id: fresh('ex'), input: rel, expr: col(rel.id, column), channels: rel.channels, as,
-    type: typeOf(...rel.type.cols, ...memberCols),
-  });
+  const type = typeOf(...rel.type.cols, ...memberCols);
+  const exploded = parameterCellsExploded(rel, column, as, type, fresh)
+    ?? make.explode({ id: fresh('ex'), input: rel, expr: col(rel.id, column), channels: rel.channels, as, type });
   const project = (payload: readonly (readonly [string, Expr])[], cols: readonly ColMeta[]): Rel => make.project({
     id: fresh('em'), input: exploded, channels: rel.channels,
     type: typeOf(...cols, ...carriedCols(rel.channels), meta(as.ord, 'int')),
@@ -129,6 +129,54 @@ export function explodeMembers(
       [as.ord, col(exploded.id, as.ord)]],
   });
   return { exploded, project };
+}
+
+/**
+ * THE EXPLODE OF A COLLECTION PARAMETER'S CELL IS THE PARAMETER'S OWN `json_each` — so it splits like any
+ * other data-sized set. `explode(Values(row: jsonb($xs)), cell)` and `json_each($xs)` beside that row are
+ * the same relation (a VALUES row is a constant; exploding a cell of it reads only the cell), which is a
+ * fact of the algebra, not of any step: so it is stated here, in the ONE explode every `unfold()` arm goes
+ * through (a list's members, a list of lists or maps, a map's entries — `inject($xs).unfold()`,
+ * `inject($m).unfold()`, federate's `inject($map).unfold().group()…`), and composes wherever those do.
+ *
+ * Past a DO value (2 MB) the cell is one bind no Durable Object can hold — a refusal on the SIZE of what the
+ * client sent. Here each such row explodes its parameter through `jsonEachRelation` (the one data-sized-set
+ * builder: one `jsonb(?)` per ≤2 MB chunk under UNION ALL, each member's `ord` its index in the WHOLE array,
+ * so the caller's positioning is unchanged), beside a copy of its row whose cell is NULL — the whole value
+ * no longer crosses. A row under the cap explodes its cell as it always did. Nothing changes under the cap:
+ * this answers `null` and the caller builds the one explode, byte for byte as before.
+ *
+ * Only a cell that IS a named parameter is split: the parameter's JSON array text is in hand verbatim
+ * (`SpelledJsonArray`), so no member is re-spelled. A constant cell is query-text-bounded (the 100 KB
+ * statement cap meets it first), and a COMPUTED collection (a `fold()`, a stored list) is one value a step
+ * produced — the honest single-value case. A host that is not a bare VALUES (an `as()` before `unfold()`
+ * projects the whole cell into a label) also keeps the one explode: the whole value crosses there anyway.
+ */
+function parameterCellsExploded(rel: Rel, column: string, as: MemberAs, type: RelType, fresh: Minter): Rel | null {
+  const host = rel.kind === 'materialize' ? rel.input : rel;
+  if (host.kind !== 'values') return null;
+  const at = host.type.cols.findIndex((c) => c.name === column);
+  if (at < 0) return null;
+  const spelled = (cell: Expr | undefined): { readonly json: string; readonly name: string } | null => {
+    if (cell?.kind !== 'call' || cell.fn !== 'jsonb' || cell.args.length !== 1) return null;
+    const leaf = cell.args[0]!;
+    return leaf.kind === 'lit' && leaf.source === 'parameter' && leaf.name != null && typeof leaf.value === 'string'
+      ? { json: leaf.value, name: leaf.name } : null;
+  };
+  const cells = host.rows.map((row) => spelled(row[at]));
+  if (!cells.some((cell) => cell && !fitsUtf8(cell.json, CF_MAX_VALUE_BYTES))) return null;
+  const arms = host.rows.map((row, r) => {
+    const cell = cells[r];
+    const big = cell && !fitsUtf8(cell.json, CF_MAX_VALUE_BYTES) ? cell : null;
+    const one = make.values({
+      id: fresh('pv'), channels: host.channels, type: host.type,
+      rows: [big ? row.map((e, i) => (i === at ? compilerNull() : e)) : row],
+    });
+    return big
+      ? jsonEachRelation({ members: { json: big.json }, name: big.name, id: 'ex', as, type, input: one }, fresh)
+      : make.explode({ id: fresh('ex'), input: one, expr: col(one.id, column), channels: one.channels, as, type });
+  });
+  return arms.length === 1 ? arms[0]! : make.union({ id: fresh('exu'), inputs: arms, all: true, channels: rel.channels, type });
 }
 
 /**
@@ -325,7 +373,8 @@ export const notProduced = (pred: Expr): Expr =>
  * DATA CROSSES AS A `json_each` RELATION — the ONE builder for a set whose size is a function of DATA (root
  * `CLAUDE.md`: such a set crosses the seam as ONE JSON value, exploded in-query, never as N binds or as
  * statement text). Every site lands through here: a bound collection (`jsonEachSet` — `within($list)`,
- * `V($ids)`, `hasLabel($labels)`, the value/ranked-order resumes), a federated landing (`foreign.ts`), a
+ * `V($ids)`, `hasLabel($labels)`, the value/ranked-order resumes), an unfolded collection parameter
+ * (`inject($xs).unfold()`, `inject($m).unfold()` — `explodeMembers`), a federated landing (`foreign.ts`), a
  * set-based write's rows (`setwrite.ts` `insertSet`).
  *
  * TWO SOURCE MODES, and the difference is a correctness property, not a spelling:
@@ -340,8 +389,14 @@ export const notProduced = (pred: Expr): Expr =>
  * properties, a federated `elementMap()` of 8,000 people — that no Bun store sees. A set past the cap
  * becomes one `json_each` per chunk under `UNION ALL`, and the order column (`as.ord`, the member's array
  * index) is `key + <members before this chunk>`, so it is the member's index in the WHOLE array exactly as
- * before. A chunk under a `name` is named `<name>#k` (k ≥ 1), so two chunks never dedup together while a
- * repeated parameter still dedups chunk for chunk (`#` is outside Gremlin's `Identifier` alphabet).
+ * before. A chunk under a `name` is named `<name>#k` (every k, once the set splits), so two chunks never
+ * dedup together, no chunk dedups with a WHOLE use of the parameter, and a repeated parameter still dedups
+ * chunk for chunk (`#` is outside Gremlin's `Identifier` alphabet).
+ *
+ * `members` is the set as values (`jsonChunks` writes them) or as an already-spelled array
+ * (`SpelledJsonArray`, cut verbatim by `jsonTextChunks`). `input`, when given, is a host relation every
+ * chunk's explode reads beside (`FROM input CROSS JOIN json_each(?)`), its columns and channels carried —
+ * the CORRELATED form `explodeMembers` needs for a collection parameter's cell.
  * Concatenation is linear in the chunks, and a set under the cap — every plan a test graph makes — is ONE
  * chunk, i.e. exactly the single explode this always emitted, byte for byte.
  *
@@ -354,18 +409,22 @@ export const notProduced = (pred: Expr): Expr =>
  * given); `type` is the explode's declared row type; `id` is the minter hint.
  */
 export function jsonEachRelation(spec: {
-  readonly members: readonly unknown[];
+  readonly members: readonly unknown[] | SpelledJsonArray;
   readonly name?: string;
   readonly id: string;
   readonly as: { readonly value: string; readonly ord?: string; readonly type?: string };
   readonly type: RelType;
+  readonly input?: Rel;
 }, fresh: Minter): Rel {
-  const chunks = jsonChunks(spec.members);
+  const chunks = Array.isArray(spec.members) ? jsonChunks(spec.members) : jsonTextChunks((spec.members as SpelledJsonArray).json);
+  const channels = spec.input?.channels ?? [];
   const explodeChunk = (chunk: JsonChunk, at: number): Rel => {
+    // A SPLIT chunk is named `<name>#k` for every k, the first included, so it never shares a bind with a
+    // WHOLE use of the same parameter elsewhere in the statement (render dedups by name alone).
     const source: Expr = spec.name === undefined
       ? lit(chunk.text, 'text')
-      : { kind: 'call', fn: 'jsonb', args: [param(chunk.text, at === 0 ? spec.name : `${spec.name}#${at}`)] };
-    return make.explode({ id: fresh(spec.id), channels: [], expr: source, as: spec.as, type: spec.type });
+      : { kind: 'call', fn: 'jsonb', args: [param(chunk.text, chunks.length === 1 ? spec.name : `${spec.name}#${at}`)] };
+    return make.explode({ id: fresh(spec.id), channels, expr: source, as: spec.as, type: spec.type, ...(spec.input ? { input: spec.input } : {}) });
   };
   if (chunks.length === 1) return explodeChunk(chunks[0]!, 0);
   const { ord } = spec.as;
@@ -373,14 +432,18 @@ export function jsonEachRelation(spec: {
     const exploded = explodeChunk(chunk, at);
     if (ord === undefined || chunk.offset === 0) return exploded;
     return make.project({
-      id: fresh(`${spec.id}o`), input: exploded, channels: [], type: spec.type,
+      id: fresh(`${spec.id}o`), input: exploded, channels, type: spec.type,
       exprs: spec.type.cols.map((c) => [c.name, c.name === ord
         ? { kind: 'binary', op: '+', left: col(exploded.id, ord), right: compilerInt(chunk.offset) }
         : col(exploded.id, c.name)] as const),
     });
   });
-  return make.union({ id: fresh(`${spec.id}u`), inputs: arms, all: true, channels: [], type: spec.type });
+  return make.union({ id: fresh(`${spec.id}u`), inputs: arms, all: true, channels, type: spec.type });
 }
+
+/** A JSON array the caller already holds as TEXT — `jsonEachRelation` cuts its members out verbatim
+ *  (`jsonTextChunks`) rather than re-writing values it would re-spell. */
+export interface SpelledJsonArray { readonly json: string }
 
 /**
  * A collection PARAMETER exploded to a one-column relation of its members (`sv`) — the whole array

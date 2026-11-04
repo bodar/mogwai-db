@@ -6,8 +6,8 @@
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin/types.ts';
 import { type Sql } from './api.ts';
-import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery, VALUE_PAST_PLATFORM_CAP } from './rel/raise.ts';
-import { STATEMENT_TOO_LONG, VALUE_TOO_BIG } from './do-limits.ts';
+import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery, valuePastPlatformCap } from './rel/raise.ts';
+import { CF_MAX_VALUE_BYTES, fitsUtf8, STATEMENT_TOO_LONG, VALUE_TOO_BIG } from './do-limits.ts';
 import { UnsupportedTraversal } from './compiler/unsupported.ts';
 import { literalTextHint } from './sql/kernel/budget.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
@@ -367,10 +367,17 @@ export class GraphStore {
       if (message === 'integer overflow') throw new RaisedByQuery(INTEGER_OVERFLOW);
       // ONE VALUE past the platform's per-value cap (a DO's 2 MB — `do-limits.ts`). A data-sized SET never
       // gets here: it crosses split under the cap (`jsonChunks` — at compile time, or at run time for a
-      // statement's retained rows). What does is a single member, or a value SQLite computes, that no Durable Object can hold at all — a `fold()` of 8,000 long names, one
-      // `groupCount()` map, a property that large. That is the platform's limit, not a traversal we decline,
-      // so it is said as such rather than as SQLite's bare message. (Bun's cap is ~1 GB: it answers.)
-      if (message === VALUE_TOO_BIG) throw new RaisedByQuery(VALUE_PAST_PLATFORM_CAP, { cause: error });
+      // statement's retained rows). What does is a single value no Durable Object can hold at all — one
+      // SENT whole (a bind that large: a property value, a parameter a step reads whole) or one SQLite
+      // COMPUTED (a `fold()` of 8,000 long names, one `groupCount()` map). Which, the binds say; this is the
+      // error path, so reading them costs nothing on a query that answers. That is the platform's limit, not
+      // a traversal we decline, so it is said as such rather than as SQLite's bare message. (Bun's cap is
+      // ~1 GB: it answers.)
+      if (message === VALUE_TOO_BIG) {
+        const sent = binds.some((bind) => (typeof bind === 'string' ? !fitsUtf8(bind, CF_MAX_VALUE_BYTES)
+          : bind instanceof Uint8Array && bind.byteLength > CF_MAX_VALUE_BYTES));
+        throw new RaisedByQuery(valuePastPlatformCap(sent ? 'sent' : 'computed'), { cause: error });
+      }
       // A statement past one of SQLite's own STATEMENT-SHAPE limits is rejected at prepare, before any
       // row is read — so it is a property of the compiled TEXT (hence of the query text), never of the
       // data, and the user's answer is a clear decline rather than SQLite's bare message. It names the
