@@ -628,7 +628,10 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       // A literal value's FULL type tree comes from the map's TypeNode (the parser subtype /
       // the typed client's wire DataType) — kept whole so a collection value's elements/keys
       // stay typed; a nested value's type is filled per driver (a scalar, in resolveMergeSpec).
-      spec.propTypes[c.name!] = isNested(value) ? null : mapEntryType(typeNode, k);
+      // A `Cardinality.x(v)` entry's type is its WRAPPED value's, carried inside the wrapper (the map's
+      // entry type describes the wrapper, which is untyped).
+      spec.propTypes[c.name!] = isNested(value) ? null
+        : cardinalityValue ? cardinalityValue.type ?? null : mapEntryType(typeNode, k);
       spec.propCardinalities[c.name!] = cardinality;
     }
   }

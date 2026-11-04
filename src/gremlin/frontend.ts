@@ -150,8 +150,10 @@ export type TaggedArg =
   | { readonly merge: string }
   /** A bare Cardinality token, or its value-bearing form used inside a map.
    * `Cardinality.set(v)` is TinkerPop's CardinalityValueTraversal: its cardinality
-   * overrides a map/default cardinality for this one property. */
-  | { readonly cardinality: string; readonly value?: ArgValue }
+   * overrides a map/default cardinality for this one property. `type` is the WRAPPED value's type,
+   * carried INSIDE the wrapper and never on the wrapper's own `Arg`: the wrapper is not its value, and
+   * a consumer that keeps it whole must not read the value's type as the wrapper's. */
+  | { readonly cardinality: string; readonly value?: ArgValue; readonly type?: TypeNode | null }
   | { readonly gtype: string }
   | { readonly pick: string }
   | { readonly withOption: string }
@@ -189,7 +191,7 @@ export const isTokenArg = (arg: unknown): arg is Extract<TaggedArg, { token: str
 export const isDirectionArg = (arg: unknown): arg is Extract<TaggedArg, { direction: string }> => tagged(arg, 'direction');
 export const isMergeArg = (arg: unknown): arg is Extract<TaggedArg, { merge: string }> => tagged(arg, 'merge');
 export const isCardinalityArg = (arg: unknown): arg is Extract<TaggedArg, { cardinality: string }> => tagged(arg, 'cardinality');
-export const isCardinalityValueArg = (arg: unknown): arg is { readonly cardinality: string; readonly value: ArgValue } =>
+export const isCardinalityValueArg = (arg: unknown): arg is { readonly cardinality: string; readonly value: ArgValue; readonly type?: TypeNode | null } =>
   isCardinalityArg(arg) && 'value' in arg;
 export const isGTypeArg = (arg: unknown): arg is Extract<TaggedArg, { gtype: string }> => tagged(arg, 'gtype');
 export const isPickArg = (arg: unknown): arg is Extract<TaggedArg, { pick: string }> => tagged(arg, 'pick');
@@ -713,12 +715,14 @@ function walkArgs(node: any, out: Arg[], params: ParamEnv): void {
     const cardinality = node.getText().match(/(?:^|\.)(single|set|list)(?:\(|$)/i)?.[1]?.toLowerCase();
     if (!cardinality) throw new Error(`unrecognized Cardinality form: ${node.getText()}`);
     if (!literal) { emit({ cardinality }); return; }
-    // The wrapper is TYPED BY ITS VALUE: `Cardinality.list(UUID(…))` / `set(Binary(…))` is a token
-    // around a typed literal, and every consumer unwraps the value and reads the entry's type as ITS type
-    // (the merge map's `propTypes`, `desugarPropertyMap`). Recording none left the TEXT-carried classes
-    // (uuid/char/binary) to be inferred as a String — written as one, and searched for as one.
+    // The wrapped value's TYPE rides INSIDE the wrapper (`Cardinality.list(UUID(…))` / `set(Binary(…))`
+    // is a token around a typed literal). The consumers that UNWRAP it (the merge map's `propTypes`,
+    // `desugarPropertyMap`) read it as the value's type, so a TEXT-carried class (uuid/char/binary) is
+    // not inferred as a String. The wrapper's own `Arg` stays UNTYPED: it is not its value, and a
+    // consumer that keeps it whole (a map handed to `inject()`, then to a merge driver) would otherwise
+    // write the wrapper's JSON under the value's tag.
     const inner = typedArgOf(literal, params);
-    emit({ cardinality, value: inner.value }, inner.type); return;
+    emit({ cardinality, value: inner.value, type: inner.type }); return;
   }
   // A map literal [k: v, …] / [:] — a real JS Map so it matches how a bound map
   // parameter (xx1) arrives after GraphBinary deserialization. Keys are tagged

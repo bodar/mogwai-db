@@ -281,7 +281,7 @@ Feature: mogwai addendum — Binary is a value class of its own, at any depth
       | a |
     And the graph should return 1 for count of "g.V()"
 
-  # A `Cardinality` wrapper is typed by its value: the merge both SEARCHES for and WRITES the Binary/UUID,
+  # A `Cardinality` wrapper carries its value's type: the merge both SEARCHES for and WRITES the Binary/UUID,
   # never the String its carrier spells.
   Scenario: g_mergeVXblob_singleXBinaryXAQIDXXX_matches_existing
     Given the empty graph
@@ -325,3 +325,46 @@ Feature: mogwai addendum — Binary is a value class of its own, at any depth
       | result |
       | bin[yg==] |
     And the graph should return 7 for count of "g.E()"
+
+  # A `Cardinality` wrapper carries its value's type INSIDE itself, never on the wrapper: a map handed to
+  # `inject()` keeps the wrapper whole, so a merge DRIVER reading that map must write the UNWRAPPED value
+  # (`MergeVertexStep` unwraps the CardinalityValueTraversal —
+  # vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeVertexStep.java).
+  # Typing the wrapper by its value once wrote the wrapper's JSON under an int/double tag here. The driver
+  # path does not unwrap yet, so these REFUSE; the reference answers below are what they must say when it does.
+  @Unsupported
+  Scenario: g_injectXmap_age_singleX1XX_mergeV_valuesXageX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject([(T.label): "person", "name": "x", "age": Cardinality.single(1)]).mergeV().values("age")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+
+  @Unsupported
+  Scenario: g_injectXmap_q_3X_Xmap_r_singleX4XX_mergeV_valuesXageX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(["name": "q", "age": 3], ["name": "r", "age": Cardinality.single(4)]).mergeV().values("age")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[3].i |
+      | d[4].i |
+
+  @Unsupported
+  Scenario: g_injectXmap_knows_1_2_w_singleX0_5dXX_mergeE_valuesXwX
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([(T.label): "knows", (Direction.OUT): 1, (Direction.IN): 2, "w": Cardinality.single(0.5d)]).mergeE().values("w")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[0.5].d |

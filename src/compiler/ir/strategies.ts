@@ -507,9 +507,9 @@ export function desugarPropertyMap(steps: IRStep[]): IRStep[] {
     for (const [k, v] of entries) {
       const cv = isCardinalityValueArg(v) ? v : null;
       const card = cv ? cv.cardinality : outer;
-      // The entry's captured value TYPE. A CardinalityValue entry is typed by its inner value (the
-      // parser records the wrapped literal's type on the wrapper), so the unwrapped value keeps it.
-      const vt = mapEntryType(entryType, k);
+      // The entry's captured value TYPE. A CardinalityValue entry's is its WRAPPED value's, which the
+      // parser carries inside the wrapper (the map's entry type describes the untyped wrapper).
+      const vt = cv ? cv.type ?? null : mapEntryType(entryType, k);
       out.push(card === null
         ? { ...s, args: [arg(k), arg(cv ? cv.value : v, vt)] }
         : { ...s, args: [arg({ cardinality: card }), arg(k), arg(cv ? cv.value : v, vt)] });
