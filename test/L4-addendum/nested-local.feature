@@ -223,3 +223,90 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
     Then the result should be unordered
       | result |
       | m[{"marko":"d[3].l","vadas":"d[1].l","lop":"d[3].l","josh":"d[3].l","ripple":"d[1].l","peter":"d[1].l"}] |
+
+  # ---- a mid-run nested host followed by a step the nested-host seam cannot answer DECLINES ----
+  # The mid-run host arm (`valueRun`) asks `nestedHostChild` directly. It once re-entered the whole seam
+  # instead, whose scalar-host arm handed the same body straight back to `valueRun`, so any follow-on step
+  # the seam declined (unfold, limit, count(local), index, is) recursed until a bare RangeError reached
+  # the user. Each scenario carries the REFERENCE answer and pins that the refusal is the clean one.
+
+  @Unsupported
+  Scenario: g_V_projectXn_cX_byXnameX_byXvaluesXnameX_localXfoldX_unfoldX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("n","c").by("name").by(__.values("name").local(__.fold()).unfold())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"n":"marko","c":"marko"}] |
+      | m[{"n":"vadas","c":"vadas"}] |
+      | m[{"n":"lop","c":"lop"}] |
+      | m[{"n":"josh","c":"josh"}] |
+      | m[{"n":"ripple","c":"ripple"}] |
+      | m[{"n":"peter","c":"peter"}] |
+    And the decline should say "no lowering covers"
+
+  @Unsupported
+  Scenario: g_V_projectXn_cX_byXnameX_byXvaluesXageX_localXisXgtX30XX_countXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("n","c").by("name").by(__.values("age").local(__.is(P.gt(30)).count()))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"n":"marko","c":"d[0].l"}] |
+      | m[{"n":"vadas","c":"d[0].l"}] |
+      | m[{"n":"lop"}] |
+      | m[{"n":"josh","c":"d[1].l"}] |
+      | m[{"n":"ripple"}] |
+      | m[{"n":"peter","c":"d[1].l"}] |
+    And the decline should say "no lowering covers"
+
+  @Unsupported
+  Scenario: g_V_mapXvaluesXageX_localXfoldX_countXlocalXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.values("age").local(__.fold()).count(Scope.local))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+      | d[1].l |
+    And the decline should say "no lowering covers"
+
+  @Unsupported
+  Scenario: g_V_hasLabelXpersonX_order_byXvaluesXnameX_localXfoldX_countXlocalXX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by(__.values("name").local(__.fold()).count(Scope.local)).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | josh |
+      | peter |
+    And the decline should say "no lowering covers"
+
+  @Unsupported
+  Scenario: g_V_whereXvaluesXnameX_localXfoldX_unfold_isXmarkoXX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().where(__.values("name").local(__.fold()).unfold().is("marko")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+    And the decline should say "no lowering covers"

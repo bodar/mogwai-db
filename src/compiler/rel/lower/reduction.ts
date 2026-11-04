@@ -1933,12 +1933,14 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
  * presence — only where it IS one value: a continuation over the first of several would run once where
  * the reference runs per result. Any other framing (a list, a map) declines here.
  */
-function nestedHostChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+function nestedHostChild(body: readonly IRStep[], host: ChildHost, child: ChildSeam): ChildValue | null {
   const step = body[0]!;
   const nested = step.args[0]?.value;
   if (step.modulators?.length || step.optionArms || step.args.length !== 1 || !isNested(nested)) return null;
-  const inner = bodyOf(nested.nested, ctx.params);
-  const produced = inner?.length ? scalarChild(inner, host, ctx, fresh) : null;
+  const inner = bodyOf(nested.nested, child.params);
+  // Each re-entry below is on a STRICTLY SMALLER body (the host's own, then the steps after it), which is
+  // what makes calling this directly from `valueRun` terminate.
+  const produced = inner?.length ? child.scalar(inner, host) : null;
   if (!produced) return null;
   const value: ChildValue = step.name === 'map' ? { ...produced, yields: 'one' } : produced;
   if (body.length === 1) return value;
@@ -1946,10 +1948,10 @@ function nestedHostChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx
   const carried = { ...(host.row ? { row: host.row } : {}), ...(value.present === 'always' ? {} : { present: value.present }) };
   const framing = value.framing;
   if (framing.kind === 'elements')
-    return producedOnlyWhere(scalarChild(body.slice(1), { kind: 'element', id: value.expr, elem: framing.elem, ...carried }, ctx, fresh), value.present, value.expr);
+    return producedOnlyWhere(child.scalar(body.slice(1), { kind: 'element', id: value.expr, elem: framing.elem, ...carried }), value.present, value.expr);
   if (framing.kind !== 'scalar') return null;
   const vtype = hostTag(framing.type, value.vtype);
-  return producedOnlyWhere(scalarChild(body.slice(1), { kind: 'scalar', value: value.expr, ...(vtype ? { vtype } : {}), ...carried }, ctx, fresh), value.present, value.expr);
+  return producedOnlyWhere(child.scalar(body.slice(1), { kind: 'scalar', value: value.expr, ...(vtype ? { vtype } : {}), ...carried }), value.present, value.expr);
 }
 
 /**
@@ -1991,7 +1993,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // `by(__.map(__.values('name')).toUpper())`) — see `nestedHostChild`. Where it cannot answer, the arms
   // below still may (a self-rooted reduce lowers a fan-out `local(…)` through the fold).
   if (PER_TRAVERSER_HOSTS.has(first.name)) {
-    const nestedValue = nestedHostChild(body, host, ctx, fresh);
+    const nestedValue = nestedHostChild(body, host, childSeam(ctx, fresh));
     if (nestedValue) return nestedValue;
   }
 
@@ -2605,15 +2607,17 @@ export function valueRun(
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
     // A NESTED per-traverser host mid-run (`by(__.values('name').local(__.fold()))`) runs its body over the
-    // ONE value the run has reached — the rest of the body is a child of that value, so it re-enters the
-    // seam with the value as a scalar host (`nestedHostChild` answers the host step there).
+    // ONE value the run has reached — the rest of the body is a child of that value, answered by
+    // `nestedHostChild` with the value as a scalar host. DIRECTLY, never through `child.scalar`: where it
+    // declines, the seam's scalar-host arm hands this same body straight back to `valueRun`, which reaches
+    // this same step over the same host and never makes progress — so a decline here is final.
     if (PER_TRAVERSER_HOSTS.has(step.name)) {
       if (typeof present === 'object' || present === 'unknown') return null;
       const hostVtype = hostTag(type, vtype);
-      const over = (presence: HostPresence): ChildValue | null => child.scalar(body.slice(at), {
+      const over = (presence: HostPresence): ChildValue | null => nestedHostChild(body.slice(at), {
         kind: 'scalar', value, ...(hostVtype ? { vtype: hostVtype } : {}), ...(row ? { row } : {}),
         ...(presence === 'always' ? {} : { present: presence }),
-      });
+      }, child);
       const rest = producedOnlyWhere(over(present), present, value);
       if (!rest || seed.yields === 'one') return rest;
       // A run that reached only the FIRST of several values (`values(k)`) answers the reference's first
