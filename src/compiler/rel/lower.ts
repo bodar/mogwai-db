@@ -74,7 +74,7 @@ import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollec
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
-import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, ORIGIN, bodyOf, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
+import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, withEnclosing, type ChainCtx, type Tail } from './lower/chain.ts';
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, PER_TRAVERSER_HOSTS, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
@@ -334,7 +334,7 @@ const ORDER_READERS: ReadonlySet<string> = new Set([
 const isRowOriginSeed = (rel: Rel): boolean => {
   const origin = originOf(rel.channels);
   return !!origin && rel.kind === 'project' && rel.input.kind === 'window'
-    && isMintedRowOrigin(rel.input);
+    && isMintedRowOrigin(rel.input, origin);
 };
 
 /**
@@ -6625,7 +6625,7 @@ function mergeFromTraversal(
   // driver's channel check refuses).
   const keep = input.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias');
   const joined = make.join({
-    id: fresh('j'), left: driver, right: fm, join: 'left', on: eq(col(driver.id, ORIGIN.col), col(fm.id, 'morigin')), channels: [],
+    id: fresh('j'), left: driver, right: fm, join: 'left', on: eq(col(driver.id, originCol), col(fm.id, 'morigin')), channels: [],
     type: typeOf(...driver.type.cols, meta('morigin', 'int', true), meta(MAP_COL, 'json', true)),
   });
   // `json()` the map, not `jsonb`: the stream is SNAPSHOTTED below and a retained binding travels as JSON

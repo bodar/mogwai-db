@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
-import { withChannel } from '../../../channels.ts';
+import { withChannel, type Channel } from '../../../channels.ts';
 import { isColumnArg, isNested, isPopArg, isPred, stepChain, type Arg, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
@@ -13,12 +13,12 @@ import type { Elem } from '../../elem.ts';
 import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { normalize } from '../../ir/passes.ts';
-import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { BATCHING_BRANCHES, collectsSideEffect, countOf, isLocalScope, isStreamBarrier, REDUCERS, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
@@ -38,7 +38,7 @@ import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
-import { RANDOM_ORDER } from './slice.ts';
+import { PER_TRAVERSER_HOSTS, RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
@@ -368,6 +368,48 @@ export const PER_ORIGIN_SAFE_BARRIER: ReadonlySet<string> = new Set(['order', 'd
 export const PER_ORIGIN_GROUPING_BARRIER: ReadonlySet<string> = new Set(['fold', 'group', 'groupCount']);
 
 /**
+ * Does every stream barrier of a per-traverser body SELF-SCOPE by the body's ONE origin? The admission
+ * gate of the per-row rejoin (`flatMapRejoin`, both its forms) and of the per-row draw advice
+ * (`localDrawsPerRow`) — one predicate, so the route and the advice cannot disagree about a body.
+ *
+ * A barrier self-scopes when it is a per-origin window or grouping (the two sets above), or when it is a
+ * NESTED per-traverser host that scopes within the enclosing row (`nestedHostScopes`).
+ */
+export function bodyScopesPerOrigin(body: readonly IRStep[], params: ParamEnv): boolean {
+  return body.filter(isStreamBarrier).every((s) =>
+    PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name) || nestedHostScopes(s, params));
+}
+
+/** The stream barriers a body NESTED under an enclosing origin may hold: a per-origin WINDOW (scoped by a
+ *  nested origin, `nestRowOrigin`) or a further nested host. A GROUPING barrier is not among them — its
+ *  `GROUP BY` names one origin, and the enclosing one has no group policy to ride it as a passenger. */
+const nestedBarrierScopes = (s: IRStep, params: ParamEnv): boolean =>
+  PER_ORIGIN_SAFE_BARRIER.has(s.name) || nestedHostScopes(s, params);
+
+/**
+ * A NESTED `local`/`map`/`flatMap` whose body scopes WITHIN one row of the enclosing per-traverser body
+ * — it runs once per entering traverser (`LocalStep.java:80-88`, `FlatMapStep.java:42-52` under
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/`), so
+ * it composes over the ENCLOSING origin. Two body forms qualify:
+ *
+ * - a ONE-value body — one ending in a reducer or a `fold()`, which `scalarChild` answers as a correlated
+ *   scalar over the row's element (`local(__.count())`, `local(__.out('knows').count())`): whatever
+ *   barriers precede the reducer live inside that correlated read and never see an origin;
+ * - a FAN-OUT body whose barriers are per-origin windows or further such hosts (`local(__.out())`,
+ *   `local(__.out().limit(1))`): `flatMapRejoin` runs it under a NESTED origin (`nestRowOrigin`) where it
+ *   holds a window, and inlined where it holds none.
+ */
+function nestedHostScopes(step: IRStep, params: ParamEnv): boolean {
+  if (!PER_TRAVERSER_HOSTS.has(step.name) || step.modulators?.length || step.optionArms || step.args.length !== 1) return false;
+  const nested = step.args[0]!.value;
+  const body = isNested(nested) ? bodyOf(nested.nested, params) : null;
+  if (!body?.length) return false;
+  const last = body.at(-1)!;
+  if (isStreamBarrier(last) && (REDUCERS.has(last.name) || last.name === 'fold')) return true;
+  return body.filter(isStreamBarrier).every((s) => nestedBarrierScopes(s, params));
+}
+
+/**
  * A FAN-OUT `flatMap`/`local` body, spliced back as a REJOIN — the general child answer
  * `scalarChild`'s movement arm explicitly defers ("fan-out `flatMap(__.V()…)` needs the general child
  * rejoin"). `scalarChild` only produces a body that yields ONE value per traverser; a body that FANS
@@ -392,6 +434,17 @@ export function flatMapRejoin(
   bodyCtx: ChainCtx = ctx,
 ): Tail | null {
   if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
+  // AN ENCLOSING ORIGIN — this host sits inside another per-traverser body (`local(__.out().local(…))`,
+  // a `group().by()` reducer body, a `match` pattern), whose origin the input already carries and which
+  // that enclosing host still needs back. A body holding a per-origin WINDOW scopes per INNER row, so it
+  // runs under a NESTED origin (`nestRowOrigin`), shed again below; a body holding none is the body
+  // inlined, and runs over the enclosing origin unchanged. A grouping barrier declines
+  // (`nestedBarrierScopes`), and so does the path-hide below, whose origin → path join is one-to-one only
+  // for an origin minted over THIS input.
+  const enclosed = !!originOf(rel.channels);
+  const barriers = body.filter(isStreamBarrier);
+  if (enclosed && (!barriers.every((s) => nestedBarrierScopes(s, ctx.params)) || (ctx.tracksPath && step.name === 'flatMap' && pathCarried(rel)))) return null;
+  const nests = enclosed && barriers.some((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name));
   // PATH: `local` and plain `flatMap` DIVERGE (`vendor/tinkerpop/gremlin-core`). `LocalStep` forwards
   // the child's FULL `Traverser.Admin` (`.../step/branch/LocalStep.java:60-67` →
   // `.../Traversal.java:593-595`), so `local(out().out()).path()` is `[v, mid, end]` — the body's minted
@@ -409,7 +462,7 @@ export function flatMapRejoin(
   // Only where the INPUT carries a path: a probe of the body's productivity (`coalesce`/`optional`'s
   // exhaustion guard, `childPredicate`) runs it over a path-free subject, which has no P to recover.
   if (ctx.tracksPath && step.name === 'flatMap' && pathCarried(rel)) {
-    if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
+    if (!bodyScopesPerOrigin(body, ctx.params)) return null;
     const numbered = mintRowOrigin(rel, fresh); // a per-row origin BESIDE the entering path P
     const origin = originOf(numbered.channels)!;
     // origin -> P, one row per entering traverser (a fan-out is one-to-many, so recovering P is a real JOIN).
@@ -453,12 +506,14 @@ export function flatMapRejoin(
   // `fold`/`group`/`aggregate`/a reducer that are not per-origin GROUPINGS (framing-changing, and a
   // reducer is `scalarChild`'s job, tried first in `perTraverserChild`) DECLINE — a wrong answer if run
   // across all origins at once.
-  if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return null;
-  const rows = childRows(body, rel, framing.elem, labels, bodyCtx, fresh, true, ctx.needsFromV ?? false);
+  if (!bodyScopesPerOrigin(body, ctx.params)) return null;
+  const rows = childRows(body, nests ? nestRowOrigin(rel, fresh) : rel, framing.elem, labels, bodyCtx, fresh, true, ctx.needsFromV ?? false);
   if (!rows) return null;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
-  const shed = dropOrigin(originMajor(rows.rel, body, ctx.params, fresh), fresh);
+  // An ENCLOSING origin is not this host's to shed (nor to re-rank by — the enclosing host does that); a
+  // NESTED one is, which hands the stream back to the enclosing scope.
+  const shed = enclosed && !nests ? rows.rel : dropOrigin(originMajor(rows.rel, body, ctx.params, fresh), fresh);
   // `local` carries the body's outbound labels to parent scope (the full-traverser forward); plain
   // `flatMap` sheds the body-bound alias CHANNELS (`shedBodyAliases`) and continues with the pre-body map
   // only — so the channel never rides into a downstream `dedup`/merge as a spurious distinguishing column,
@@ -477,7 +532,7 @@ export function flatMapRejoin(
  */
 function localDrawsPerRow(body: readonly IRStep[], rel: Rel, framing: RelFraming, bodyCtx: ChainCtx): boolean {
   if (framing.kind !== 'elements') return false;
-  if (!body.filter(isStreamBarrier).every((s) => PER_ORIGIN_SAFE_BARRIER.has(s.name) || PER_ORIGIN_GROUPING_BARRIER.has(s.name))) return false;
+  if (!bodyScopesPerOrigin(body, bodyCtx.params)) return false;
   const at = body.findIndex((s) => s.name === 'V' || s.name === 'E');
   return at >= 0 && reSourcesOncePerOrigin(body, at, rel, false, inBody(bodyCtx));
 }
@@ -563,12 +618,29 @@ export function perOriginWindow(
  * slice ranks by.
  */
 export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
-  if (originOf(rel.channels)) return rel;
-  const channels = withChannel(rel.channels, ORIGIN);
+  return originOf(rel.channels) ? rel : numberedOrigin(rel, ORIGIN, fresh);
+}
+
+/**
+ * NEST a per-ROW origin INSIDE the one the stream already carries — the origin of a per-traverser host
+ * sitting in another one's body (`local(__.out().local(__.out().limit(1)))`), whose own barriers scope
+ * per INNER row while the enclosing host still needs its origin back afterwards. A second `origin`-role
+ * channel under a fresh column: `withChannel` keeps peers in arrival order, so the nested one is last and
+ * `originOf` (the INNERMOST) is what the body's barriers partition by. Partitioning by it alone is exact —
+ * an inner row descends from one outer row, so the inner origin determines the outer, which rides through
+ * every window as a carried passenger. `dropOrigin` sheds the innermost, restoring the enclosing scope.
+ * A separate entry point because `mintRowOrigin`'s idempotence is what its callers rely on.
+ */
+export function nestRowOrigin(rel: Rel, fresh: Minter): Rel {
+  return numberedOrigin(rel, { col: fresh('origin'), role: 'origin' }, fresh);
+}
+
+function numberedOrigin(rel: Rel, origin: Channel, fresh: Minter): Rel {
+  const channels = withChannel(rel.channels, origin);
   // Numbered in ARRIVAL order where the stream carries one, so the origin is also the entering
   // traverser's position — what `originMajor` re-reads after a per-traverser body.
   const enc = encounterOf(rel.channels);
-  const numbered = rowNumberWindow(rel, ORIGIN.col, rel.channels, {
+  const numbered = rowNumberWindow(rel, origin.col, rel.channels, {
     partitionBy: [], orderBy: enc ? [{ expr: col(rel.id, enc.col), dir: 'asc' }] : [],
   }, fresh);
   const cols = [...payloadCols(rel), ...carriedCols(channels)];
@@ -578,9 +650,9 @@ export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
   });
 }
 
-/** Is `window` the numbering `mintRowOrigin` mints a per-ROW origin from — one origin per row? */
-export const isMintedRowOrigin = (window: Rel): boolean =>
-  window.kind === 'window' && window.specs.some(([name]) => name === ORIGIN.col);
+/** Is `window` the numbering `mintRowOrigin`/`nestRowOrigin` mints the per-ROW origin `origin` from? */
+export const isMintedRowOrigin = (window: Rel, origin: Channel): boolean =>
+  window.kind === 'window' && window.specs.some(([name]) => name === origin.col);
 
 /**
  * A PER-TRAVERSER BODY'S RESULTS IN THE HOST'S ORDER — start-major, then the body's own order within one
@@ -716,7 +788,7 @@ export function childRows(
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.
   if (!tail || tail.effects?.length || !originOf(tail.rel.channels)) return null;
-  return { rel: tail.rel, framing: tail.framing, origin: ORIGIN.col, aliases: tail.aliases };
+  return { rel: tail.rel, framing: tail.framing, origin: originOf(tail.rel.channels)!.col, aliases: tail.aliases };
 }
 
 /**
@@ -1848,6 +1920,53 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
   return scalarChildValue(body, host, outer, fresh);
 }
 
+/**
+ * A NESTED per-traverser host as a child VALUE — `local(b)`/`map(b)`/`flatMap(b)` leading a correlated
+ * child body. Its body runs over ONE entering traverser (`LocalStep.java:80-88`, `FlatMapStep.java:42-52`,
+ * `MapStep`, under `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/`),
+ * and in a correlated child that traverser IS the host, so the host step's value is `b`'s value over the
+ * SAME host. The three differ only in cardinality, as at the chain (`perTraverserChild`'s policy): `map`
+ * takes the first result, so it yields ONE; `local`/`flatMap` emit every result, so they yield what `b`
+ * does, and a consumer that sees every result refuses a `'first'`.
+ *
+ * A body CONTINUING past the host re-roots onto that value — an element or scalar host carrying its
+ * presence — only where it IS one value: a continuation over the first of several would run once where
+ * the reference runs per result. Any other framing (a list, a map) declines here.
+ */
+function nestedHostChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  const step = body[0]!;
+  const nested = step.args[0]?.value;
+  if (step.modulators?.length || step.optionArms || step.args.length !== 1 || !isNested(nested)) return null;
+  const inner = bodyOf(nested.nested, ctx.params);
+  const produced = inner?.length ? scalarChild(inner, host, ctx, fresh) : null;
+  if (!produced) return null;
+  const value: ChildValue = step.name === 'map' ? { ...produced, yields: 'one' } : produced;
+  if (body.length === 1) return value;
+  if (value.yields !== 'one' || typeof value.present === 'object' || value.present === 'unknown') return null;
+  const carried = { ...(host.row ? { row: host.row } : {}), ...(value.present === 'always' ? {} : { present: value.present }) };
+  const framing = value.framing;
+  if (framing.kind === 'elements')
+    return producedOnlyWhere(scalarChild(body.slice(1), { kind: 'element', id: value.expr, elem: framing.elem, ...carried }, ctx, fresh), value.present, value.expr);
+  if (framing.kind !== 'scalar') return null;
+  const vtype = hostTag(framing.type, value.vtype);
+  return producedOnlyWhere(scalarChild(body.slice(1), { kind: 'scalar', value: value.expr, ...(vtype ? { vtype } : {}), ...carried }, ctx, fresh), value.present, value.expr);
+}
+
+/**
+ * A child body's value over a value it was HANDED, produced only where that value was: where the run that
+ * reached it produced NOTHING, the rest never runs (`values('nope').local(__.fold())` is no `[]`). A body's
+ * own presence speaks only for a value it was given, so the handed value's presence is ANDed in as a stated
+ * one, and the value is NULL there too (a consumer may read either), rather than trusted to every body to
+ * read off its host. A member node computed apart from the value declines.
+ */
+function producedOnlyWhere(ran: ChildValue | null, present: HostPresence, value: Expr): ChildValue | null {
+  if (!ran || present === 'always') return ran;
+  const restPresent = presenceOf(ran.present, ran.expr);
+  const here = presenceOf(present, value);
+  if (!restPresent || !here || ran.node) return null;
+  return { ...ran, expr: caseWhen(here, ran.expr), present: { when: and(here, restPresent === ALWAYS_PRODUCTIVE ? undefined : restPresent) } };
+}
+
 function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   // Every consumer of this seam applies its child as `TraversalUtil.apply` does — one host traverser at
@@ -1867,6 +1986,14 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // one-row entry relation with its two correlated sides and hand the WHOLE body to the normal framing
   // dispatcher. Thus every map-entry/list/scalar tail composes here at arbitrary depth.
   if (host.kind === 'scalar' && host.entry) return mapEntryChild(body, { ...host, entry: host.entry }, ctx, fresh);
+
+  // A NESTED per-traverser host leading the body (`choose(__.local(__.out('knows').count()))`,
+  // `by(__.map(__.values('name')).toUpper())`) — see `nestedHostChild`. Where it cannot answer, the arms
+  // below still may (a self-rooted reduce lowers a fan-out `local(…)` through the fold).
+  if (PER_TRAVERSER_HOSTS.has(first.name)) {
+    const nestedValue = nestedHostChild(body, host, ctx, fresh);
+    if (nestedValue) return nestedValue;
+  }
 
   // `__.inject(…)` AS A CHILD BODY IS DEGENERATE — the injected literal never surfaces and the operand
   // is the host's OWN value. This is a real, uniform TinkerPop bug rather than a per-scenario quirk:
@@ -2477,6 +2604,25 @@ export function valueRun(
   let present = seed.present;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
+    // A NESTED per-traverser host mid-run (`by(__.values('name').local(__.fold()))`) runs its body over the
+    // ONE value the run has reached — the rest of the body is a child of that value, so it re-enters the
+    // seam with the value as a scalar host (`nestedHostChild` answers the host step there).
+    if (PER_TRAVERSER_HOSTS.has(step.name)) {
+      if (typeof present === 'object' || present === 'unknown') return null;
+      const hostVtype = hostTag(type, vtype);
+      const over = (presence: HostPresence): ChildValue | null => child.scalar(body.slice(at), {
+        kind: 'scalar', value, ...(hostVtype ? { vtype: hostVtype } : {}), ...(row ? { row } : {}),
+        ...(presence === 'always' ? {} : { present: presence }),
+      });
+      const rest = producedOnlyWhere(over(present), present, value);
+      if (!rest || seed.yields === 'one') return rest;
+      // A run that reached only the FIRST of several values (`values(k)`) answers the reference's first
+      // result only where the rest maps EACH value to exactly one — never drops one (an `is()` would make
+      // a later value the first survivor, the reason `is` above refuses), never fans out. Asked of the
+      // rest over a host that is always there, so the host's own absence does not read as a drop.
+      const total = over('always');
+      return total?.yields === 'one' && total.present === 'always' ? { ...rest, yields: 'first' } : null;
+    }
     if (REL_PROJECTORS.has(step.name)) {
       // The run's productivity rides on the host: the value here can be an UNPRODUCTIVE NULL (an absent
       // property, a failed `is()`), which a `math()` over it must drop rather than raise on. A seed that

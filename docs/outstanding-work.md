@@ -210,10 +210,12 @@ RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open familie
    MIXED lists; `select()` in a list-host body.
 8. **Fan-out** — per-origin scalar order (`project().by(values(k).order().fold())`), reductions without
    fold, scalar-host group reducer, `tail`, child-label escape, `map` first-result window. A per-traverser
-   host NESTED in a child body — `local(__.out().local(__.count()))` (L3 `g_V_localXout_localXcountXX`),
-   `values('age').local(__.local(count()))`, `project().by(values(k).local(fold()))`: `valueRun` has no
-   `local`/`map` step and `flatMapRejoin` refuses `local` as a barrier (L4 `nested-local.feature`). A
-   reducer arm of a BATCHED `union` over the one-row self (`local(__.union(__.count()))`, L3
+   host NESTED in a child body now composes (`nestedHostChild`/`valueRun` for a one-value body,
+   `flatMapRejoin` under an enclosing origin with `nestRowOrigin` for a per-origin window — L4
+   `nested-local.feature`); its residue: a per-origin GROUPING barrier inside a nested fan-out body
+   (`local(__.both().local(__.both().fold().unfold()))` — `GROUP BY` names one origin and the enclosing one
+   has no group policy to ride it as a passenger), and a path-hiding `flatMap` under an enclosing origin
+   (`local(__.out().flatMap(__.out())).path()`). A reducer arm of a BATCHED `union` over the one-row self (`local(__.union(__.count()))`, L3
    `g_VX1_2X_localXunionXcountXX`) is the union-residue. min/max over a SCALAR host's self seed
    (`values('age').local(max())`) declines: the correlated argmax re-inlines an outer column in its
    ORDER BY, which SQLite cannot resolve (`valueColIsDetached`).
@@ -541,11 +543,11 @@ Beside the RelIR substrate:
 Proposals from the 2026-11-03 reuse sweep, each answer-neutral unless it says otherwise. Order matters only
 where stated.
 
-- **Shared prerequisite: a per-traverser child body INSIDE a child body (§3.8).** One root cause parks
-  several items: the nested `local`/`map` (`g_V_localXout_localXcountXX`, `nested-local.feature`),
-  `V(<traversal>)` under `where/filter/coalesce/optional/repeat`, and `flatMap` in a body generally
-  (`valueRun` has no `local`/`map`/`flatMap` step; `flatMapRejoin` refuses `local` as a barrier). Build that
-  one substrate item BEFORE any of them; do not special-case `V(<traversal>)` hosts.
+- **Landed: a per-traverser child body INSIDE a child body (§3.8).** `valueRun`/`scalarChild` take a
+  `local`/`map`/`flatMap` step (`nestedHostChild`), and `flatMapRejoin` composes under an enclosing origin
+  (`bodyScopesPerOrigin`, `nestRowOrigin`). Items it parked (`V(<traversal>)` under
+  `where/filter/coalesce/optional/repeat`) should be re-probed against it; do not special-case
+  `V(<traversal>)` hosts.
 - **Prerequisite for inject-fresh-traversers (§1): one "mints fresh traversers" fact** in
   `src/compiler/ir/labels.ts`, read by `labelsBoundBefore`, `unlocatableSubPath` and `injectTail`'s alias
   reset — replaces the `i > 0 && name === 'inject'` peephole and fixes the §1 wrong answer.
