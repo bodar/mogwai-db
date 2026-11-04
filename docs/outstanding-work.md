@@ -270,22 +270,17 @@ statement's text grows with data or doubles with query shape. The items below ar
 - **A large collection carried per member under an `as()` label surfaces a bare `database or disk is full`
   (large-label-carrier-full) — pre-existing, seen while landing d605f072.** Not a query decline in the
   user's terms; map it to a clear platform/size message or avoid the per-member carrier copy.
-- **both-gate-lineage made label-carrying and barrier frontiers SLOWER (both-gate-frontier-cost) — MAJOR,
-  common (two reviews of 28890cd0 + 345dfd5b).** `doubledReads` bounds prepare-time COPIES, not the cost
-  of EVALUATING a copy: when the frontier carries a computed per-row column (an `as()` label's `jsonb_array`
-  carrier, a path) or a barrier (sort/window/limit) and is not a materialized CTE, SQLite flattens each
-  copy and re-runs that work per copy. Measured 8k vertices / 16k edges, identical answers, old → new:
-  `g.V().as('a').both().both().where(neq('a')).count()` 59 → 141–154 ms (2.4×; 1k 7.8 → 18.4);
-  `…both().both().as('b').where('a',neq('b'))` 121–134 → 249 ms; `g.V().as('a').out().both().where(neq('a'))`
-  44–55 → 73–75 ms; `g.V().out().order().by('name').limit(500).both().count()` 12.7 → 25.0 ms;
-  `g.V().both().order().by('name').limit(10).both().count()` 22–25 → 42–51 ms;
-  `local(out().order().by('name').limit(1).both().count()).sum()` 57 → 82 ms. All still linear. Fix in the
-  SAME fact (`src/rel/copies.ts`, read by `hopJoin` in `src/compiler/rel/lower/movement.ts`): count a
-  per-row computed column or a barrier node beneath the frontier as a reason to read it once (unless it is
-  a materialized CTE), or measure the decision with those columns. The plain-hop wins must hold
-  (`out().both()` 15.0 → 11.5, `both().both()` 19.3 → 15.6). Tests today pin plan shape on label-free
-  `count()` chains only (`test/compiler/both-frontier-once.exec.test.ts`) and the `BOTH_COPY_BOUND`
-  comment cites only those — add a timing/EQP witness for the label and order/limit frontiers.
+- ✅ **both-gate-frontier-cost — LANDED (b3f584bc).** A `both()` frontier that carries a computed per-row
+  column (an `as()` label carrier, a path) or a window/barrier (order+limit, `dedup().by()`) and is not a
+  materialized CTE is now read ONCE (direction row + one `edges` join) instead of copied per direction; plain
+  frontiers keep their two seeks. Mechanism: a sibling node fact beside `doubledReads` in `src/rel/copies.ts`,
+  read by `hopJoin` (`src/compiler/rel/lower/movement.ts`). Tests: EQP + oracle + 1k→8k ratio witnesses in
+  `test/compiler/both-frontier-once.exec.test.ts`. Remains — two follow-ups, neither a prerequisite:
+  - **Dead computed carriers.** A carrier kept alive but never read (an unused `as()` inside an `optional()`
+    arm, a path under `count()`) is 10–28% slower in the one-read form. Root cause: alias/path liveness
+    carries a dead channel; with that fixed these shapes lose the computed column and go back to two seeks.
+  - **The `optional()` arm case.** `optional(out().as('x').both().where(neq('x'))).count()` reads its
+    carrier and is still 15% slower in the one-read form — a candidate for a measured refinement.
 - **A transformed sort/dedup key's raising body is still spelled twice per row (cc7-key-twice) — minor,
   common, no extra read.** `g.V().out().order().by(values('name').toLower().toUpper())`: the property reads
   are computed once (`sk26`), but the `lower()/upper()` + receiver-check CASE appears in the productivity
