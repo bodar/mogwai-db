@@ -330,7 +330,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_V_emitXhasLabelXpersonXX_repeatXout_order_byXnameXX_timesX2X_valuesXnameX',
     'g_V_emit_repeatXa_outXknows_filterXloops_isX0XX_lang',
     'g_V_hasXnameXHEY_BO_DIDDLEYXX_repeatXunionXoutXfollowedByX_order_byXnameX_limitX2X_outXsungByX_order_byXnameX_limitX1XXX_timesX2X',
-    'g_V_localXemit_repeatXlocalXout_order_byXnameXXX_timesX2X_valuesXnameXX',
     'g_V_playlist_paths',
     'g_V_repeatXa_outXknows_repeatXb_outXcreatedX_filterXloops_isX0XX_emit_lang',
     'g_V_repeatXaddV_propertyXgenerated_trueXX_timesX2X',
