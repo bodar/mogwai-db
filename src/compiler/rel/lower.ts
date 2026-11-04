@@ -40,7 +40,7 @@ import { comparabilityClass, CONSTANT, framingTypeOf, NUMERIC_VTYPES, perRowSubj
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffConstant, numericSpec, UNPARSEABLE_TAGS, ValueParseError } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, fencedWhereSelfContained, jsonEachSet, jsonField, jsonOf,
-    labelSetArgs,
+    keptBy, labelSetArgs,
     meta, minter,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf, presenceFenced,
@@ -1102,11 +1102,11 @@ export function orderRows(
   if (!sort) return rankedRows(step, rel, host, ctx, fresh, opts.tie);
   // The key's subqueries are read by the productivity filter AND the sort: one column, read by both.
   const keyed = withSubqueryColumns(rel, [...sort.terms.map((term) => term.expr), ...(sort.drop ? [sort.drop] : [])], fresh);
-  const terms = keyed ? sort.terms.map((term, i) => ({ ...term, expr: keyed.exprs[i]! })) : sort.terms;
-  const keyedRel = keyed?.rel ?? rel;
-  const domain = sort.drop
-    ? make.filter({ id: fresh('f'), input: keyedRel, channels: keyedRel.channels, type: keyedRel.type, pred: keyed ? keyed.exprs[sort.terms.length]! : sort.drop })
-    : keyedRel;
+  const keys = keyed?.exprs ?? [...sort.terms.map((term) => term.expr), ...(sort.drop ? [sort.drop] : [])];
+  // The productivity filter, and the sort terms re-pointed to read IT — the window's own input.
+  const kept = keptBy(keyed?.rel ?? rel, sort.drop && keys[sort.terms.length], keys.slice(0, sort.terms.length), fresh);
+  const terms = sort.terms.map((term, i) => ({ ...term, expr: kept.exprs[i]! }));
+  const domain = kept.rel;
   const carried = encounterOf(domain.channels);
   const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
   // The deterministic tie-break: the carried emission position where there is one (a STABLE re-mint), else

@@ -18,7 +18,7 @@ import { BATCHING_BRANCHES, collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalS
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, once, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -2656,16 +2656,6 @@ function oneRowValue(tail: Tail, fresh: Minter): ChildValue | null {
 }
 
 /**
- * ONE MEMBER of a value run over the running value — and its per-row tag, where it has one — each SPELLED
- * ONCE (`once`, SQLite's missing LET). A member reads its receiver several times (an `is()` in its test and
- * its THEN, a transform in its receiver check and its expression), so building it over the inline value
- * made a k-step run O(2^k) statement text: a production-only wall at the DO's 100 KB cap. The tag rides
- * with the value because a per-row test reads both.
- */
-const runningOnce = (value: Expr, vtype: Expr | undefined, member: (v: Expr, t: Expr | undefined) => Expr, fresh: Minter): Expr =>
-  vtype ? once([value, vtype], ([v, t]) => member(v!, t!), fresh) : once([value], ([v]) => member(v!, undefined), fresh);
-
-/**
  * THE VALUE RUN — a child body's tail once its SUBJECT is named: a sequence of steps that each turn
  * one value into another.
  *
@@ -2680,6 +2670,13 @@ const runningOnce = (value: Expr, vtype: Expr | undefined, member: (v: Expr, t: 
  * than claiming none (`asDate().asString()` would frame text as a Date). The STORED per-row carrier
  * stops at the first step whatever it claims for itself — it describes the value as READ, and every
  * member of this run produces a new one.
+ *
+ * Each member is built over the running value — and its tag, where it has one — SPELLED ONCE
+ * (`onceTyped`, SQLite's missing LET). A member reads its receiver several times (an `is()` in its test
+ * and its THEN, a transform in its receiver check and its expression), so building it over the inline
+ * value made a k-step run O(2^k) statement text: a production-only wall at the DO's 100 KB cap. A host
+ * that reads the run in two nodes (`order().by()`'s productivity filter and sort) still reads the LET's
+ * operands once per row: `withSubqueryColumns` lands them below both.
  */
 export function valueRun(
   body: readonly IRStep[], from: number,
@@ -2761,7 +2758,7 @@ export function valueRun(
       // three chained `is()` over a selected label took the statement to 142 KB, a fourth past the
       // compile budget.
       if (!testOver(value, vtype)) return null;
-      value = runningOnce(value, vtype, (v, t) => ({ kind: 'case', whens: [[testOver(v, t)!, v]], else: compilerNull() }), fresh);
+      value = onceTyped(value, vtype, (v, t) => ({ kind: 'case', whens: [[testOver(v, t)!, v]], else: compilerNull() }), fresh);
       // A failed test is a NULL, so the run is now present exactly where its value is. A seed that cannot
       // say stays unable to (`'unknown'`), so its consumers keep declining.
       if (present !== 'unknown') present = 'value-nullness';
@@ -2773,21 +2770,24 @@ export function valueRun(
     // coercion. A NULL here is a productive null exactly where the seed says the body produced.
     const productive = present === 'unknown' ? undefined : present === 'always';
     const asNumberType = step.name === 'asNumber' ? type : undefined;
-    // Both are pure in the value, so the decline (and the facts that do not depend on the value's
-    // SPELLING — the result type, the fence, whether anything is owed) are decided over the real value,
-    // and the guarded result is rebuilt over `once`'s reads: a transform reads its receiver several
-    // times (`substring` four, a receiver check one more), which inline compounded per step.
-    const offences = transformOffences(step, value, evidenceOf(type, vtype), productive);
+    // THE VERDICT, decided once over the real value: whether the member lowers, and the facts that do not
+    // depend on the value's SPELLING (the result type, the fence, whether a raise is owed). Both functions
+    // are pure in the value, so the rebuild below over `onceTyped`'s reads is DELIBERATE, not a second
+    // decision — it re-spells the same guarded result against the LET's columns, because a transform
+    // reads its receiver several times (`substring` four, a receiver check one more) and inline that
+    // compounded per step.
+    const evidence = evidenceOf(type, vtype);
+    const offences = transformOffences(step, value, evidence, productive);
     if (!offences) return null;
-    const transformed = transformExpr(step, value, false, asNumberType, evidenceOf(type, vtype));
+    const transformed = transformExpr(step, value, false, asNumberType, evidence);
     if (!transformed) return null;
     // A RAISING transform (a runtime `asNumber(GType.X)`, a receiver offence) raises when its VALUE is
     // evaluated — so a host that asks only WHETHER the run produced (`where`/`not`/`choose`) must read
     // the value: an `'always'` run becomes a value-nullness one.
     if ((transformed.fenced || offences.length) && present !== 'unknown') present = 'value-nullness';
-    value = runningOnce(value, vtype, (v, t) => {
-      const evidence = evidenceOf(type, t);
-      return raisingWhen(transformOffences(step, v, evidence, productive)!, transformExpr(step, v, false, asNumberType, evidence)!.expr);
+    value = onceTyped(value, vtype, (v, t) => {
+      const spelled = evidenceOf(type, t);
+      return raisingWhen(transformOffences(step, v, spelled, productive)!, transformExpr(step, v, false, asNumberType, spelled)!.expr);
     }, fresh);
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;

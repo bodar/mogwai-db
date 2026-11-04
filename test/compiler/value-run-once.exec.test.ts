@@ -102,3 +102,81 @@ describe('statement text grows LINEARLY in the run length — doubling the run a
     test(what, () => expect(sqlBytes(query(12))).toBeLessThanOrEqual(2.2 * sqlBytes(query(6))));
   }
 });
+
+// A TRANSFORMED order()/dedup() KEY AFTER A HOP. The key's run is a LET (`once`: a Project over a one-row
+// VALUES) whose body may RAISE, so `withSubqueryColumns` (build.ts) did not land it below the productivity
+// filter, and the sort term — built over the filter's INPUT — read the hop's renumbered relation THROUGH
+// the filter. `check` never looked at a window's ORDER BY, and the emitter resolved it while both sat in
+// one SELECT, until `fuse` pushed the filter below the renumber and handed it the renumber's id: every one
+// of these leaked the emitter's bare "column 'id' of relation 'ro7' is not in scope" Error. The terms now
+// read the filter (`keptBy`), and `check` walks a window's terms. The oracle is the same query keyed by the plain property — the
+// modern graph's names are already lower-case and `_+1` keeps the age order — so each answer is checked
+// against an independent lowering, IN ORDER where the query imposes one.
+describe('a transformed order()/dedup() key after a hop answers, in every position', () => {
+  const ordered = async (g: string) => decodeAll(executeQuery(store, g));
+  const KEYS: readonly (readonly [string, string, string])[] = [
+    ['toLower()', "values('name').toLower()", "'name'"],
+    ['toLower().toUpper()', "values('name').toLower().toUpper()", "'name'"],
+    ["math('_+1')", "values('age').math('_+1')", "'age'"],
+  ];
+  const ORDER: readonly (readonly [string, (by: string) => string])[] = [
+    ['after out()', (by) => `g.V().out().order().by(${by}).values('name')`],
+    ['after out().out()', (by) => `g.V().out().out().order().by(${by}).values('name')`],
+    ['after a labelled hop', (by) => `g.V().hasLabel('person').out('knows').order().by(${by}).values('name')`],
+    ['then a limit', (by) => `g.V().out().order().by(${by}).limit(2).values('name')`],
+    ['inside local()', (by) => `g.V().local(__.out().order().by(${by})).values('name')`],
+    ['inside map().fold()', (by) => `g.V().map(__.out().order().by(${by}).values('name').fold())`],
+    ['after a repeat() body', (by) => `g.V().repeat(__.out()).times(2).order().by(${by}).values('name')`],
+  ];
+  for (const [key, by, oracle] of KEYS) {
+    for (const [where, query] of ORDER) {
+      test(`order().by(${key}) ${where}`, async () => expect(await ordered(query(by))).toEqual(await ordered(query(oracle))));
+    }
+    test(`order().by(${key}) in a union() arm`, async () =>
+      expect(await answer(`g.V().union(__.out().order().by(${by}), __.identity()).values('name')`))
+        .toEqual(await answer(`g.V().union(__.out().order().by(${oracle}), __.identity()).values('name')`)));
+    for (const [where, query] of [
+      ['after out()', (b: string) => `g.V().out().dedup().by(${b}).values('name')`],
+      ['inside local()', (b: string) => `g.V().local(__.out().dedup().by(${b})).values('name')`],
+      ['in a union() arm', (b: string) => `g.V().union(__.out().dedup().by(${b}), __.identity()).values('name')`],
+    ] as const) {
+      test(`dedup().by(${key}) ${where}`, async () => expect(await answer(query(by))).toEqual(await answer(query(oracle))));
+    }
+  }
+
+  test("a selected label's transformed key after the hop", async () =>
+    expect(await ordered("g.V().as('a').out().order().by(select('a').values('name').toLower()).select('a').values('name')"))
+      .toEqual(await ordered("g.V().as('a').out().order().by(select('a').values('name')).select('a').values('name')")));
+
+  test('the case-insensitive sort an application writes', async () =>
+    expect(await ordered("g.V().hasLabel('person').out('knows').order().by(values('name').toLower()).values('name')"))
+      .toEqual(['josh', 'vadas']));
+
+  test('a raising key still raises its own message after the hop, not an internal Error', () =>
+    expect(() => executeQuery(store, "g.V().out().order().by(values('age').toLower())"))
+      .toThrow('The toLower() step can only take string as argument'));
+});
+
+// COMPUTE ONCE: the key's correlated reads — its value and its per-row tag — are read ONCE per row, below
+// both nodes that spell the key (the productivity filter and the sort window; the filter and the rank
+// window for a dedup). The LET's raising body stays where it is; only its unconditionally evaluated cells
+// land as columns. Before, each node re-read both, so a one-step key read the property four times per row
+// (+45% at 8k vertices). `.id()` keeps the framing's own property read out of the count, and `group()`
+// never had the duplicate (its key is one node) and must not gain one.
+describe("a transformed key's property is read once per row", () => {
+  const reads = (g: string): number => {
+    const p = compile(g, {});
+    const sql = p.kind === 'read' ? p.sql : p.steps.map((s) => s.emitted.sql).join('\n');
+    return sql.match(/vertex_properties/g)?.length ?? 0;
+  };
+  for (const g of [
+    "g.V().order().by(values('name').toUpper()).id()",
+    "g.V().out().order().by(values('name').toLower().toUpper()).id()",
+    "g.V().out().order().by(values('age').math('_+1')).id()",
+    "g.V().local(__.out().order().by(values('name').toLower())).id()",
+    "g.V().dedup().by(values('name').substring(0,1)).id()",
+    "g.V().group().by(values('name').substring(0,1)).by(constant(1))",
+  ]) {
+    test(g, () => expect(reads(g)).toBe(2));
+  }
+});

@@ -56,6 +56,22 @@ describe('RelIR', () => {
     expect(() => check(invalid)).toThrow("has no declared column 'missing'");
   });
 
+  // A window's ORDER BY / PARTITION BY are expressions in the window's scope like any other. Only its
+  // arguments were checked, so a sort key reading a relation BELOW its input (through a filter the emitter
+  // happened to fuse into one SELECT) passed — until `fuse` moved that filter and the emitter threw a bare
+  // "not in scope" Error (`g.V().out().order().by(values('name').toLower())`).
+  test('fails closed on a window ORDER BY / PARTITION BY reading a relation that is not its input', () => {
+    const kept = filter({ id: relId('f'), input: scan, channels, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
+    const numbered = (term: Rel, partition: boolean) => windowRel({
+      id: relId('w'), input: kept, channels, type: { cols: [...cols, { name: 'rn', type: 'int', nullable: false }] },
+      specs: [['rn', { kind: 'window-expr', fn: 'row_number', args: [],
+        spec: { partitionBy: partition ? [col(term.id, 'name')] : [], orderBy: [{ expr: col(term.id, 'id'), dir: 'asc' }] } }]],
+    });
+    expect(() => check(numbered(kept, false))).not.toThrow();
+    expect(() => check(numbered(scan, false))).toThrow("no relation 'n' is in scope for column 'id'");
+    expect(() => check(numbered(scan, true))).toThrow("no relation 'n' is in scope for column 'name'");
+  });
+
   test('factories reject locally inconsistent output schemas', () => {
     expect(() => projectRel({
       id: relId('badProject'), input: scan, channels,

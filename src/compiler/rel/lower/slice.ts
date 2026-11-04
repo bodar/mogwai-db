@@ -3,7 +3,7 @@
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, or, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, firstArrival, typedEquality, typeOf, meta, rowNumberWindow, withSubqueryColumns, type Minter } from '../build.ts';
+import { and, carriedCols, eq, firstArrival, keptBy, typedEquality, typeOf, meta, rowNumberWindow, withSubqueryColumns, type Minter } from '../build.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import { type Channel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -546,10 +546,10 @@ function keptDedup(
 ): Rel | null {
   if (!keep) return dedupOnTyped(terms, input, tieOf(input), fresh);
   const keyed = withSubqueryColumns(input, [keep, ...terms], fresh);
-  const at = keyed?.rel ?? input;
   const [pred, ...keys] = keyed?.exprs ?? [keep, ...terms];
-  const domain = make.filter({ id: fresh('f'), input: at, channels: at.channels, type: at.type, pred: pred! });
-  return dedupOnTyped(keys, domain, tieOf(domain), fresh, payloadCols(input));
+  // The keys re-pointed to read the filter: the rank window's own input.
+  const kept = keptBy(keyed?.rel ?? input, pred, keys, fresh);
+  return dedupOnTyped(kept.exprs, kept.rel, tieOf(kept.rel), fresh, payloadCols(input));
 }
 
 /**

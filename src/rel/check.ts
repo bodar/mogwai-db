@@ -135,7 +135,11 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
         e.args.forEach(arg); (e.orderBy ?? []).forEach((term) => arg(term.expr)); if (e.filter) arg(e.filter);
         break;
       }
-      case 'window-expr': e.args.forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
+      // A window's PARTITION BY / ORDER BY terms and frame bounds, likewise: only its arguments were
+      // walked, so a sort key reading a relation two nodes down (through a filter the emitter happened to
+      // fuse into one SELECT) passed here and reached the emitter as a bare "not in scope" Error the moment
+      // `fuse` moved that filter (`g.V().out().order().by(values('name').toLower())`).
+      case 'window-expr': exprChildren(e).forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
   };
   /** Where each of a node's expressions is EVALUATED. A kind that forgets one is caught by the
    * arity assertion below, and `Record<RelKind, …>` means a new kind must declare its placement

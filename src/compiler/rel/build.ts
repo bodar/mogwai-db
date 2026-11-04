@@ -673,6 +673,12 @@ export function once(values: readonly Expr[], body: (reads: readonly Expr[]) => 
   return { kind: 'scalar', plan: make.project({ id: fresh('oncep'), input: one, channels: [], type: typeOf(meta('n', type, true)), exprs: [['n', body(reads)]] }) };
 }
 
+/** `once` over a value and its per-row tag where it has one — the pair a typed member reads together
+ *  (a per-row test types its subject by the tag; a `{t,v}` node frames by it). */
+export const onceTyped = (
+  value: Expr, vtype: Expr | undefined, body: (value: Expr, vtype: Expr | undefined) => Expr, fresh: Minter, type: SqlType = 'any',
+): Expr => once(vtype ? [value, vtype] : [value], ([v, t]) => body(v!, t), fresh, type);
+
 /**
  * `typedNode` for a value or tag that is EXPENSIVE to spell — a correlated read, which `jsonMember`'s
  * per-tag `CASE` would repeat once per mention (measured, spelling the full node inline took
@@ -1099,6 +1105,44 @@ export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undef
 
 
 /**
+ * `e` reading relation `to` wherever it read `from` — `substRelId`, asked first whether there is anything to
+ * re-point: `substRelId` rebuilds every subplan it passes through, so over an expression that does not name
+ * `from` it would only unshare a subquery two expressions shared.
+ */
+const reread = (e: Expr, from: RelId, to: RelId): Expr => {
+  let found = false;
+  forEachExpr(e, (node) => {
+    if (found) return;
+    if (node.kind === 'col' && node.rel === from) found = true;
+    else exprRels(node).forEach((plan) => { if (freeRelIds(plan).has(from)) found = true; });
+  });
+  return found ? substRelId(e, from, to) : e;
+};
+
+/**
+ * `rel` FILTERED by `keep` — the productivity filter a `by()` key owes — with `exprs`, the key terms the
+ * NEXT node spells, re-pointed to read the filter. A node may read only its own input: the key terms were
+ * built over `rel`, and a window over the filter that still named `rel` resolved only while the emitter
+ * kept both in one SELECT — `fuse` pushing the filter below an earlier renumber (and handing it that
+ * renumber's id) turned it into the emitter's bare "not in scope" Error. `keep` absent: `rel` and `exprs`
+ * unchanged.
+ */
+export function keptBy(rel: Rel, keep: Expr | undefined, exprs: readonly Expr[], fresh: Minter): { readonly rel: Rel; readonly exprs: readonly Expr[] } {
+  if (!keep) return { rel, exprs };
+  const kept = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: keep });
+  return { rel: kept, exprs: exprs.map((e) => reread(e, rel.id, kept.id)) };
+}
+
+/**
+ * The operands a scalar subquery evaluates UNCONDITIONALLY, read off its shape: the cells of a one-row
+ * `VALUES` directly under a `Project` — the per-row LET `once` builds. A `VALUES` has no `FROM`, so its
+ * cells see exactly the scope the subquery itself sees, and its one row is produced every time the
+ * subquery runs. Decided by structure, never by who built the node.
+ */
+const letCells = (plan: Rel): readonly Expr[] | undefined =>
+  plan.kind === 'project' && plan.input.kind === 'values' && plan.input.rows.length === 1 ? plan.input.rows[0] : undefined;
+
+/**
  * COMPUTE A KEY'S SUBQUERIES ONCE — every scalar subquery `exprs` spell (one `plan`, however many
  * wrappers) projected as a column over `rel`, and `exprs` rewritten to read the column instead.
  *
@@ -1107,6 +1151,13 @@ export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undef
  * window rewrite. Neither node can share with the other, so both read a column computed below them:
  * one subquery per row where the inlined spellings ran three. A subquery that may RAISE or DEFER stays
  * where it is, since moving it changes which rows it is evaluated for.
+ *
+ * ITS OPERANDS still move where it evaluates them UNCONDITIONALLY: the cells of a one-row `VALUES` under
+ * a `Project` (`letCells` — the per-row LET `once` builds, which a value run nests one per member). A cell
+ * is evaluated whenever the subquery is, so computing it as a column below changes no row's answer, only
+ * how often it is read — `order().by(values('name').toLower())`'s raising receiver check stays where it
+ * is, while the property read it guards is read once per row instead of once per node that spells it.
+ * The rebuilt subquery is shared by every expression that shared it.
  *
  * `null` — keep the unhoisted form — when nothing moves, or when a rewritten expression would still read
  * a relation the new projection closes off: `rel` itself is re-read through the projection (which
@@ -1120,30 +1171,52 @@ export function withSubqueryColumns(rel: Rel, exprs: readonly Expr[], fresh: Min
   const computed: (readonly [string, Expr])[] = [];
   const id = fresh('sk');
   let rescans = false;
-  const visit = (e: Expr): void => {
-    exprRels(e).forEach((plan) => forEachRel(plan, (node) => { if (node === rel) rescans = true; }));
+  // `scanned`: a let cell lies inside a subplan the rescan walk has already covered.
+  const visit = (e: Expr, scanned = false): void => {
+    if (!scanned) exprRels(e).forEach((plan) => forEachRel(plan, (node) => { if (node === rel) rescans = true; }));
     if (e.kind === 'scalar') {
-      if (!names.has(e.plan) && !exprMayAbort(e) && e.plan.type.cols.length === 1) {
+      if (names.has(e.plan)) return;
+      if (!exprMayAbort(e) && e.plan.type.cols.length === 1) {
         const name = `${id}_${names.size}`;
         names.set(e.plan, name);
         added.push(meta(name, e.plan.type.cols[0]!.type, true));
         computed.push([name, e]);
+        return;
       }
+      letCells(e.plan)?.forEach((cell) => visit(cell, true));
       return;
     }
-    exprChildren(e).forEach(visit);
+    exprChildren(e).forEach((child) => visit(child, scanned));
   };
-  exprs.forEach(visit);
+  exprs.forEach((e) => visit(e));
   if (!names.size || rescans) return null;
   const keyed = make.project({
     id, input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, ...added),
     exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), ...computed],
   });
+  // A let whose cells moved is rebuilt ONCE, so the expressions that shared it still share it.
+  const rebuilt = new Map<Rel, Rel>();
   const hoist = (e: Expr): Expr => {
-    const name = e.kind === 'scalar' ? names.get(e.plan) : undefined;
-    return name ? col(keyed.id, name) : mapExprChildren(e, hoist);
+    if (e.kind !== 'scalar') return mapExprChildren(e, hoist);
+    const name = names.get(e.plan);
+    if (name) return col(keyed.id, name);
+    const plan = hoistedLet(e.plan);
+    return plan === e.plan ? e : { ...e, plan };
   };
-  const rewritten = exprs.map((e) => substRelId(hoist(e), rel.id, keyed.id));
+  const hoistedLet = (plan: Rel): Rel => {
+    const cells = letCells(plan);
+    if (!cells || plan.kind !== 'project' || plan.input.kind !== 'values') return plan;
+    const known = rebuilt.get(plan);
+    if (known) return known;
+    const moved = cells.map(hoist);
+    const next = moved.every((cell, i) => cell === cells[i]) ? plan : make.project({
+      id: plan.id, channels: plan.channels, type: plan.type, exprs: plan.exprs,
+      input: make.values({ id: plan.input.id, channels: plan.input.channels, type: plan.input.type, rows: [moved] }),
+    });
+    rebuilt.set(plan, next);
+    return next;
+  };
+  const rewritten = exprs.map((e) => reread(hoist(e), rel.id, keyed.id));
   const reads = new Set<string>();
   rewritten.forEach((e) => forEachExpr(e, (node) => {
     if (node.kind === 'col') reads.add(node.rel);

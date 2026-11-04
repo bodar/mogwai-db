@@ -8,7 +8,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, once, typeOf, familyKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
@@ -633,7 +633,7 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
   // A SCALAR gated on a correlated value names the value (and its tag) ONCE in a one-row subquery, so the
   // gate and the node read a column rather than each re-spelling the read.
   if (framing.kind === 'scalar' && present !== 'always' && exprHasSubquery(value)) {
-    return once(vtype ? [value, vtype] : [value], ([v, t]) => gatedOn(present, v!, scalarNode(v!, t, framing.type, fresh)), fresh, 'json');
+    return onceTyped(value, vtype, (v, t) => gatedOn(present, v, scalarNode(v, t, framing.type, fresh)), fresh, 'json');
   }
   const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
