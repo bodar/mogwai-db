@@ -10,9 +10,10 @@ import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/fr
 import { countOf, GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import { asStringOf, raisingWhen, type ValueEvidence } from './receiver.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import type { ChildSeam } from './child.ts';
+import type { ChildSeam, RootedRead } from './child.ts';
 import type { RelFraming } from './framing.ts';
-import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
+import { raiseInRow } from '../../rel/raise.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedColumn, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { realJsonText, stringifyExact } from '../../json-exact.ts';
@@ -1384,15 +1385,14 @@ const lossyMember = (vtype: Expr): Expr =>
  * OPERAND, and 70 corpus traversals that became visible the moment the member frame existed.
  *
  * One lowering, six semantics, and each is a relational statement over the two sides' members rather
- * than a hand-written subquery: a UNION for concatenation, a correlated `EXISTS` for membership, a
- * `Distinct` for the deduped results, a cross join for the product. What makes them a family is that
- * they all read both sides through the same `membersOf`, and what makes them cheap is that the frame
- * was the previous increment.
+ * than a hand-written subquery: a UNION for concatenation, a semi-/anti-join for membership, a
+ * grouping for the deduped results, a cross join for the product. What makes them a family is that
+ * they all read both sides through the same `membersOf`, and what makes them cheap is that the
+ * operand's members are ONE relation computed once (`listSetOp`'s `theirs`).
  *
- * **The OPERAND crosses the seam as ONE VALUE** — `jsonb('[…]')`, a single bind for the whole array —
- * which is the root rule about a set sized by DATA rather than by query text. A TRAVERSAL operand
- * (`merge(__.V().values('name').fold())`) is a child read and declines; a `Map` operand is a permanent
- * type error.
+ * **The OPERAND crosses the seam as ONE VALUE** — `jsonb('[…]')`, a single bind for the whole array, or
+ * a rooted read's first result — which is the root rule about a set sized by DATA rather than by query
+ * text (`operandList`). A `Map` operand is a permanent type error.
  *
  * **A typed self side is projected to PAYLOADS first**, because the operand is always bare: comparing
  * `{"t":"int","v":5}` against `5` would never match, and emitting a mix of both encodings inside one
@@ -1418,8 +1418,6 @@ export const literalMemberEnvelopes = (declared: string | null, value: unknown):
  *  GraphBinary SET only when TERMINAL: with a follower (`order(Scope.local)`, `unfold()`) TinkerPop
  *  treats it as a plain List, which is what the suite asserts. */
 const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
-
-const OPERAND = { value: 'ov', ord: 'oo', type: 'ot' } as const;
 
 /**
  * THE LIST-FUNCTION STEPS and their SHAPE ERRORS — the traversal's ANSWER is an error, so these RAISE
@@ -1449,48 +1447,103 @@ export const nonIterableTraverser = (step: IRStep, encountered: string): never =
 };
 
 /** The operand's two, from `convertArgumentToCollection` (a literal) and `convertTraversalToCollection`
- *  (a traversal). Which pair applies is decided by the ARGUMENT's own form, which is why this takes it. */
-export const nonIterableArgument = (step: IRStep, arg: unknown, encountered: string | null): never => {
-  const traversal = isNested(arg);
-  if (encountered === null) {
-    throw new ValueParseError(traversal
+ *  (a traversal). Which pair applies is decided by the OPERAND's own form (`OperandForm.nested`). */
+const nonIterableArgumentMessage = (step: IRStep, nested: boolean, encountered: string | null): string =>
+  encountered === null
+    ? (nested
       ? `Provided traversal argument for ${step.name} step must yield an iterable type, not null`
-      : `Argument provided for ${step.name} step can't be null.`);
-  }
-  throw new ValueParseError(traversal
-    ? `Provided traversal argument for ${step.name} step must yield an iterable type, encountered ${encountered}`
-    : `${step.name} step can only take an array or an Iterable as an argument, encountered ${encountered}`);
+      : `Argument provided for ${step.name} step can't be null.`)
+    : (nested
+      ? `Provided traversal argument for ${step.name} step must yield an iterable type, encountered ${encountered}`
+      : `${step.name} step can only take an array or an Iterable as an argument, encountered ${encountered}`);
+
+export const nonIterableArgument = (step: IRStep, nested: boolean, encountered: string | null): never => {
+  throw new ValueParseError(nonIterableArgumentMessage(step, nested, encountered));
 };
 
 /**
- * A set-op OPERAND as a list expression, or `null` to decline — three forms, one question.
+ * WHAT A COLLECTION-FUNCTION OPERAND IS WRITTEN AS — the ONE reading `listSetOp` and `mapMerge` share,
+ * so the two steps cannot disagree about which operands are compile-time values.
+ *
+ * A literal written in place (`merge(['a'])`, `merge($m)`) and `__.constant(c)` are the SAME compile-time
+ * value: `TraversalUtil.apply` over a `constant(c)` child yields `c` (`ConstantStep`), so both are read as
+ * a literal, and only the error WORDING remembers which was written (`nested` — `ListFunction`'s
+ * `convertArgumentToCollection` vs `convertTraversalToCollection` pair). Any other child body is a
+ * `traversal` for the caller to lower. `null` declines — an absent or extra argument, a modulated step.
+ */
+export type OperandForm =
+  | { readonly kind: 'literal'; readonly value: unknown; readonly arg: Arg; readonly nested: boolean }
+  | { readonly kind: 'traversal'; readonly body: readonly IRStep[] };
+
+export function operandForm(step: IRStep, child: Pick<ChildSeam, 'body'>): OperandForm | null {
+  if (step.args.length !== 1 || step.modulators?.length || step.optionArms) return null;
+  const operand = step.args[0]!;
+  if (!isNested(operand.value)) return operand.value === undefined ? null : { kind: 'literal', value: operand.value, arg: operand, nested: false };
+  const body = child.body((operand.value as { readonly nested: unknown }).nested, 'child');
+  if (!body?.length) return null;
+  const only = body.length === 1 ? body[0]! : undefined;
+  if (only?.name === 'constant' && only.args.length === 1 && !only.modulators?.length && only.args[0]!.value !== undefined) {
+    return { kind: 'literal', value: only.args[0]!.value, arg: only.args[0]!, nested: true };
+  }
+  return { kind: 'traversal', body };
+}
+
+/**
+ * WHAT A LOWERED OPERAND YIELDS, as the collection-function steps ask it — is it a List, a Map, a value
+ * that is statically neither (named for the `encountered %s` tail), or a value whose class is only known
+ * PER ROW. The ONE classifier `listSetOp` and `mapMerge` both answer from: a set op raises unless it is a
+ * `'list'` (`ListFunction.asCollection`), a Map merge raises unless it is a `'map'` (`MergeStep.java:78-86`).
+ *
+ * `'per-row'` is a per-row-typed scalar (`values('tags')` — a stored List on one row, a String on the
+ * next): its class is the DATA's, so naming it from the framing would say `object` and raise for a value
+ * that may well be a List. The caller decides it per row or declines; it never raises on it statically.
+ * A `record` (`project()`) IS a Map. `null` is a framing that cannot say and fails open.
+ */
+export type OperandClass = 'list' | 'map' | 'per-row' | { readonly encountered: string } | null;
+
+export const operandClass = (framing: RelFraming): OperandClass => {
+  if (framing.kind === 'list') return 'list';
+  if (framing.kind === 'map' || framing.kind === 'record') return 'map';
+  if (framing.kind === 'scalar' && framing.type.kind !== 'static') return framing.type.kind === 'perRow' ? 'per-row' : null;
+  const named = gremlinTypeOfFraming(framing);
+  return named === null ? null : { encountered: named };
+};
+
+/** The member columns of an operand's list, as a set op reads it: the list expression and its member encoding. */
+interface OperandList { readonly expr: Expr; readonly of: ListOf }
+
+/**
+ * A set-op OPERAND as ONE list value, or `null` to decline.
  *
  * A literal ARRAY and `constant(c).fold()` are both COMPILE-TIME lists (the second a one-member one,
- * which is the same fact rather than a special case). A rooted
- * SUB-READ is a relation: its members are only known at run time, so it is lowered by the same fold
- * and read through a `Scalar` expression — no escape node, and if the inner chain is not covered the
- * decline propagates outward, which is the contract one level down.
+ * which is the same fact rather than a special case). A rooted SUB-READ is a relation: its members are
+ * only known at run time, so it is lowered by the same fold and read as its FIRST result
+ * (`TraversalUtil.apply`, `firstRootedColumn`) — no escape node, and if the inner chain is not covered
+ * the decline propagates outward, which is the contract one level down. A PER-ROW-typed first result
+ * (`__.V(x).values('tags')`) is decided where its class is known — at run time, on that one row
+ * (`perRowOperand`).
  *
- * The ADMISSION RULE over the seam's answer is this module's, not the seam's (§6·6): an operand must
- * be LIST-framed, because the set-op operands and the predicate ones share one rule and the two cannot
- * be allowed to disagree about which traversals qualify — a
- * scalar-valued sub-read is not a collection. An operand with EFFECTS is refused for a harder reason:
- * its statements are `Plan` bindings the operand expression cannot carry, so splicing only the
- * relation would drop the write and leave a `Ref` naming a binding that was never made.
+ * An operand with EFFECTS is refused: its statements are `Plan` bindings the operand expression cannot
+ * carry, so splicing only the relation would drop the write and leave a `Ref` naming a binding that was
+ * never made. A CORRELATED operand (`__.select('a')…`) is not a rooted read and declines here; when one
+ * is admitted it is evaluated once per outer row, O(rows × operand), which is the query's own cost (a
+ * different operand per traverser) rather than a shape to engineer away.
  */
-function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly expr: Expr; readonly of: ListOf } | null {
+function operandList(step: IRStep, child: ChildSeam, fresh: Minter): OperandList | null {
   // The operand's JSON crosses as ONE value. A `$param` list (`combine($x)`, the WHOLE list IS the
-  // parameter's value) binds under its name; a literal array INLINES (the Golden Rule) — the old
-  // `lit()` bound every literal collection.
+  // parameter's value) binds under its name; a literal array INLINES (the Golden Rule).
   //
   // A member keeps its CLASS the way every list literal does (`literalMemberEnvelopes`): a Number its
   // storage class cannot name back — `[4L]`, `[0.1f]`, `[2.0d]` — rides as its `{t,v}` node, which makes
   // the operand a typed list; a Date or Duration member, whose bare form is the number SQLite stores it
   // as, declines (`listLiteralBlob`'s rule for the same literal). The JSON is `stringifyExact`
   // (`json-exact.ts`): `JSON.stringify` writes a member `±Infinity` as `null`, another value.
-  const literal = (members: readonly unknown[], types: readonly (TypeNode | null)[], name: string | null) => {
+  const literal = (members: readonly unknown[], types: readonly (TypeNode | null)[], name: string | null): OperandList | null => {
     const declared = (mi: number): string | null => flatType(types[mi] ?? null);
     if (members.some((_, mi) => NUMBER_STORED_NON_NUMBERS.includes(declared(mi) ?? '') && declared(mi) !== 'boolean')) return null;
+    // A NESTED collection member has no scalar member encoding here: read back bare, `["a"]` would frame
+    // as the String `'["a"]'`. It declines rather than answer with a member of the wrong class.
+    if (members.some((value) => Array.isArray(value) || value instanceof Map || value instanceof Set)) return null;
     let typed = false;
     const encoded = members.map((value, mi) => {
       if (!literalMemberEnvelopes(declared(mi), value)) return value;
@@ -1499,21 +1552,21 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
     });
     const json = stringifyExact(encoded);
     return {
-      expr: { kind: 'call', fn: 'jsonb', args: [name != null ? param(json, name, 'text') : compilerText(json)] } as Expr,
+      expr: { kind: 'call', fn: 'jsonb', args: [name != null ? param(json, name, 'text') : compilerText(json)] },
       of: typed ? TYPED_MEMBERS : BARE_LIST,
     };
   };
-  const listArg = step.args[0];
-  if (Array.isArray(arg)) return literal(arg, arg.map((_, mi) => listArg?.members?.[mi]?.type ?? itemTypeAt(listArg?.type ?? null, mi)), listArg?.name ?? null);
-  // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to learn:
-  // `asCollection` returns null for it and `convertArgumentToCollection` raises. `null` is its own message,
-  // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
-  if (!isNested(arg)) {
-    if (arg === undefined) return null;
-    return nonIterableArgument(step, arg, arg === null ? null : encounteredType(arg, listArg?.type));
+  const form = operandForm(step, child);
+  if (!form) return null;
+  if (form.kind === 'literal') {
+    const { value, arg: written } = form;
+    // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to
+    // learn: `asCollection` returns null for it and the converter raises. `null` is its own message,
+    // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
+    if (!Array.isArray(value)) return nonIterableArgument(step, form.nested, value === null ? null : encounteredType(value, written.type));
+    return literal(value, value.map((_, mi) => written.members?.[mi]?.type ?? itemTypeAt(written.type ?? null, mi)), written.name ?? null);
   }
-  const inner = child.body((arg as { readonly nested: unknown }).nested, 'child');
-  if (!inner?.length) return null;
+  const inner = form.body;
   if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold' && !inner[1].args.length) {
     const value = inner[0].args[0]?.value, extra = inner[0].args[1]?.value;
     if (extra !== undefined || value === undefined) return null;
@@ -1521,24 +1574,42 @@ function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly e
     // not itself a parameter, even if `value` came from one; that inner scalar is a separate concern).
     return literal([value], [inner[0].args[0]?.type ?? null], null);
   }
-  // A BARE `constant(v)` operand — no `fold()` — YIELDS v, and a value is not iterable. Same compile-time
-  // fact as the folded form one line up and the same authority answers it; `constant(null)` takes the
-  // `not null` wording, which is why the type is passed as `null` rather than derived.
-  if (inner.length === 1 && inner[0]!.name === 'constant') {
-    const value = inner[0]!.args[0]?.value, extra = inner[0]!.args[1]?.value;
-    if (extra !== undefined || value === undefined || Array.isArray(value)) return null;
-    return nonIterableArgument(step, arg, value === null ? null : encounteredType(value, inner[0]!.args[0]?.type));
-  }
   const read = child.rooted(inner);
   // A DECLINING operand stays a decline — we cannot type what did not lower, and §6·5's fail-open rule
-  // applies exactly here. A LOWERED operand whose framing is not a list IS the reference's error: the
-  // traversal yielded a value that is not iterable, and we know which one.
+  // applies exactly here. A LOWERED operand whose class is statically not a list IS the reference's error.
   if (!read || read.effects?.length) return null;
-  if (read.framing.kind !== 'list') {
-    const yielded = gremlinTypeOfFraming(read.framing);
-    return yielded === null ? null : nonIterableArgument(step, arg, yielded);
-  }
-  return { expr: { kind: 'scalar', plan: read.rel }, of: read.framing.of };
+  const cls = operandClass(read.framing);
+  if (cls === null) return null;
+  if (cls === 'per-row') return perRowOperand(step, read, fresh);
+  if (cls !== 'list') return nonIterableArgument(step, true, cls === 'map' ? 'map' : cls.encountered);
+  return read.framing.kind === 'list' ? { expr: firstRootedColumn(read, LIST_COL, fresh), of: read.framing.of } : null;
+}
+
+/**
+ * A PER-ROW-TYPED operand's first result, decided ON THAT ROW — `convertTraversalToCollection`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/ListFunction.java`)
+ * takes `TraversalUtil.apply`'s FIRST result and accepts it iff it is a collection. A stored List or Set
+ * IS its self-describing member tree (`collectionValue`), so it is the operand as it stands; a null first
+ * result (or none — the two read the same, `firstRootedValue`) raises the `not null` text, and any other
+ * class the `encountered` text. The raise names no class: it is an in-statement literal and the class is
+ * the row's (docs/feature-support-matrix.md §17). One row, read once (`firstRootedValue` fences it), so
+ * this costs O(1) per statement whatever the graph size.
+ */
+function perRowOperand(step: IRStep, read: RootedRead, fresh: Minter): OperandList | null {
+  const first = firstRootedValue(read, fresh, true);
+  if (!first?.vtype) return null;
+  const collection: Expr = { kind: 'in-list', expr: first.vtype, values: [compilerText('list'), compilerText('set')] };
+  return {
+    expr: {
+      kind: 'case',
+      whens: [
+        [{ kind: 'binary', op: 'is', left: first.value, right: compilerNull() }, raiseInRow(nonIterableArgumentMessage(step, true, null))],
+        [{ kind: 'unary', op: 'not', arg: collection }, raiseInRow(nonIterableArgumentMessage(step, true, 'a value that is not a List or Set'))],
+      ],
+      else: { kind: 'call', fn: 'jsonb', args: [first.value] },
+    },
+    of: TYPED_MEMBERS,
+  };
 }
 
 /** A LITERAL's Gremlin type name, for the `encountered %s` tail. Java prints a class there and the corpus
@@ -1561,9 +1632,9 @@ export const nonMapArgument = (step: IRStep, encountered: string | null): never 
 /** What a lowered operand YIELDED, as a Gremlin type name — or `null` where the framing cannot say, which
  *  fails open rather than naming a type the answer does not have. A `path` is deliberately absent: it
  *  coerces to its element sequence and IS iterable, so it never reaches here. */
-export const gremlinTypeOfFraming = (framing: RelFraming): string | null =>
+const gremlinTypeOfFraming = (framing: RelFraming): string | null =>
   framing.kind === 'elements' || framing.kind === 'detached' ? framing.elem
-    : framing.kind === 'scalar' ? (framing.type.kind === 'static' ? framing.type.type : 'object')
+    : framing.kind === 'scalar' ? (framing.type.kind === 'static' ? framing.type.type : null)
       : framing.kind === 'map' || framing.kind === 'mapEntry' ? 'map'
         : framing.kind === 'property' ? 'property'
           : framing.kind === 'record' ? 'map'
@@ -1572,29 +1643,34 @@ export const gremlinTypeOfFraming = (framing: RelFraming): string | null =>
 export function listSetOp(
   step: IRStep, input: Rel, of: ListOf, terminal: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
-  if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name)) return null;
-  const first = step.args[0]?.value, extra = step.args[1]?.value;
-  if (extra !== undefined) return null;
+  if (!SET_OPS.has(step.name)) return null;
   // ⚠️ THE OPERAND IS RESOLVED BEFORE THE SELF'S MEMBER ENCODING IS GATED, and the order is the whole
   // difference between an ERROR and a decline: a non-iterable operand is the traversal's own answer
   // whatever the self's members are, so testing `isBareList(of)` first turned every element-member list's
   // `combine(2)` into a silent decline. The gate stays AFTER the thing that raises.
-  const resolved = operandList(step, first, child);
+  const resolved = operandList(step, child, fresh);
   if (!resolved) return null;
   // TWO MEMBER ENCODINGS ARE ADMITTED, and the split is the SAME per-type identity fact the property
   // `RowShape` and the element-member `order`/`dedup` already state. A BARE-scalar list compares members
   // by their value. An ELEMENT list compares by ROWID, which IS the element's identity —
   // `ElementHelper.hashCode(Element)` is `element.id().hashCode()`, and `areEqual` also demands the same
   // CLASS (`(a instanceof Vertex && b instanceof Vertex) || …`, `ElementHelper.java:463-466`), so a
-  // vertex rowid never equals an edge's. BOTH SIDES must therefore be the same element kind: a cross-kind
-  // set op matches nothing on identity AND would produce a MIXED-element result the payload layer cannot
-  // frame (`listPayloadExpr`'s elem arm is ONE `elem`), so it declines rather than mis-answer. `product`
+  // vertex rowid never equals an edge's, and no element equals a scalar (`Object.equals` across classes).
+  //
+  // So two sides of DIFFERENT kinds — scalars against vertices, vertices against edges — share no member.
+  // That alone answers the two ops whose result is drawn from the SELF only: `intersect` is empty and
+  // `difference` is the self's distinct members (`IntersectStep`/`DifferenceStep` keep `incoming` members
+  // the operand does or does not contain). The other four would put BOTH kinds in one result, a MIXED list
+  // the payload layer cannot frame (`listPayloadExpr`'s elem arm is ONE `elem`), so they decline. `product`
   // also declines over elements — its members are PAIR-lists whose rowids would frame bare (as integers)
   // instead of as element objects — a distinct shape, not this comparison.
   const elemOf = of.kind === 'elem' ? of.elem : null;
-  const bothElem = elemOf !== null && resolved.of.kind === 'elem' && resolved.of.elem === elemOf;
-  if (!bothElem && !(isBareList(of) && isBareList(resolved.of))) return null;
-  if (bothElem && step.name === 'product') return null;
+  const sideKind = (side: ListOf): string | null => (side.kind === 'elem' ? side.elem : isBareList(side) ? 'scalar' : null);
+  const mineKind = sideKind(of), theirKind = sideKind(resolved.of);
+  if (mineKind === null || theirKind === null) return null;
+  const disjoint = mineKind !== theirKind;
+  if (disjoint && step.name !== 'intersect' && step.name !== 'difference') return null;
+  if (elemOf !== null && step.name === 'product') return null;
   const rel = fenced(input, fresh);
 
   // BOTH SIDES IN ONE VOCABULARY: each member as its PAYLOAD (the comparable SQL value), its CLASS (a
@@ -1614,9 +1690,7 @@ export function listSetOp(
   // names a storage family, so the family of the full class is the family of the own tag.
   const SIDE = { value: MEMBER.value, ord: MEMBER.ord, cls: 'mg', fam: 'mf' } as const;
   const sideCols = [meta(SIDE.value, 'any', true), meta(SIDE.ord, 'int'), meta(SIDE.cls, 'text', true), meta(SIDE.fam, 'text', true)];
-  /** The class column's expression, given the member's payload COLUMN and its own tag (NULL = infer). */
-  const classOf = (ownTag: Expr, payload: Expr): Expr => (bothElem ? compilerNull() : coalesce(ownTag, inferredVtype(payload)));
-  /** One side's members as `(mv payload, mo position, mg class)` — correlated to the list row. */
+  /** One side's members as `(mv payload, mo position, mg class, mf family)`. */
   const sideOf = (listExpr: Expr, items: ListOf): Rel => {
     const members = membersOf(listExpr, fresh);
     const read = make.project({
@@ -1625,53 +1699,70 @@ export function listSetOp(
       exprs: [[SIDE.value, memberPayload(items, members)], [SIDE.ord, col(members.id, MEMBER.ord)], [SIDE.cls, memberOwnTag(items, members)]],
     });
     const value = col(read.id, SIDE.value);
+    // The class column's expression, given the member's own tag (NULL = infer); an element has none.
+    const cls = items.kind === 'elem' ? compilerNull() : coalesce(col(read.id, SIDE.cls), inferredVtype(value));
     return make.project({
       id: fresh('sc'), input: read, channels: [], type: typeOf(...sideCols),
-      exprs: [[SIDE.value, value], [SIDE.ord, col(read.id, SIDE.ord)], [SIDE.cls, classOf(col(read.id, SIDE.cls), value)],
-        [SIDE.fam, valueFamily(col(read.id, SIDE.cls))]],
+      exprs: [[SIDE.value, value], [SIDE.ord, col(read.id, SIDE.ord)], [SIDE.cls, cls], [SIDE.fam, valueFamily(col(read.id, SIDE.cls))]],
     });
   };
-  const selfList = col(rel.id, LIST_COL);
-  const mine = sideOf(selfList, of);
+  // MY members are correlated to the list row — `json_each` of this traverser's own list.
+  const mine = sideOf(col(rel.id, LIST_COL), of);
+  /**
+   * THEIR members, ONCE, as a relation. The operand is UNCORRELATED — a literal, a `$param` or a rooted
+   * read's first result (`operandList`) — so its members are one fenced, MATERIALIZED relation computed
+   * once per statement and read by every list row, rather than a `json_each` re-exploded inside every
+   * membership probe. The membership tests below then JOIN it on the member's (payload, family) COLUMNS,
+   * which is what lets SQLite build its automatic covering index on them: a probe is O(log M) and a set op
+   * over a list of N against an operand of M is O(N log M), where the per-member `json_each` scan was
+   * O(N·M) — measured 53× from 1k to 8k members on the same query. Calcite's `Spool` is the same node
+   * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/Spool.java`).
+   *
+   * A materialized column is computed for every operand member whether or not it is read, so the spool
+   * holds exactly the columns its op reads: the equality key (payload, family) where members are
+   * COMPARED, the position where they are written back IN ORDER, the class wherever they are written back.
+   */
+  const compared = step.name !== 'combine' && step.name !== 'product';
+  const written = step.name !== 'intersect' && step.name !== 'difference';
+  const operandSide = sideOf(resolved.expr, resolved.of);
+  const spooledCols = sideCols.filter((column) =>
+    column.name === SIDE.value || (column.name === SIDE.fam ? compared : column.name === SIDE.ord ? !compared : written));
+  const spooled = make.project({
+    id: fresh('sk'), input: operandSide, channels: [], type: typeOf(...spooledCols),
+    exprs: spooledCols.map((column) => [column.name, col(operandSide.id, column.name)] as const),
+  });
+  const theirs = make.materialize({ id: fresh('so'), input: spooled, channels: [], type: spooled.type, fenced: true });
+
   /** The equality of two member rows — the value plus its family (`valueFamily`, the merges' one
    *  equality), `IS` rather than `=`, so a null member matches a null member. */
   const same = (a: Rel, b: Rel): Expr => and(
     { kind: 'binary', op: 'is', left: col(a.id, SIDE.value), right: col(b.id, SIDE.value) },
     { kind: 'binary', op: 'is', left: col(a.id, SIDE.fam), right: col(b.id, SIDE.fam) });
 
-  /** One side's `(mv, mg)` member rows, optionally filtered — the filter BEFORE the projection, so the
-   *  projection addresses the FILTER, not the explode (the emitter's one scope rule). */
+  /** One side's `(mv, mg, mf)` member rows — projected, so a later union or aggregate addresses ONE
+   *  relation rather than the explode underneath (the emitter's one scope rule). */
   const SET_COLS = [meta(SIDE.value, 'any', true), meta(SIDE.cls, 'text', true), meta(SIDE.fam, 'text', true)];
-  const valuesOf = (members: Rel, pred?: (side: Rel) => Expr): Rel => {
-    const filtered = pred
-      ? make.filter({ id: fresh('sf'), input: members, channels: [], type: members.type, pred: pred(members) })
-      : members;
-    return make.project({
-      id: fresh('sp'), input: filtered, channels: [], type: typeOf(...SET_COLS),
-      exprs: [SIDE.value, SIDE.cls, SIDE.fam].map((column) => [column, col(filtered.id, column)] as const),
-    });
-  };
+  const valuesOf = (members: Rel): Rel => make.project({
+    id: fresh('sp'), input: members, channels: [], type: typeOf(...SET_COLS),
+    exprs: [SIDE.value, SIDE.cls, SIDE.fam].map((column) => [column, col(members.id, column)] as const),
+  });
 
-  /** Does the OTHER side contain this member? */
-  const contains = (otherList: Expr, otherOf: ListOf, row: Rel, negated: boolean): Expr => {
-    const theirs = sideOf(otherList, otherOf);
-    const found = make.filter({ id: fresh('cf'), input: theirs, channels: [], type: theirs.type, pred: same(theirs, row) });
-    return {
-      kind: 'exists',
-      negated,
-      plan: make.project({ id: fresh('cp'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }),
-    };
-  };
+  /** My members that are (`semi`) or are not (`anti`) among theirs — a JOIN against the operand relation.
+   *  Over DISJOINT kinds no member can match (the gate's comment), so the test is decided without one. */
+  const againstTheirs = (join: 'semi' | 'anti'): Rel => disjoint
+    ? (join === 'anti' ? mine : make.filter({ id: fresh('sn'), input: mine, channels: [], type: mine.type, pred: compilerInt(0) }))
+    : make.join({ id: fresh('sj'), left: mine, right: theirs, join, on: same(theirs, mine), channels: [], type: mine.type });
 
   // THE RESULT'S MEMBER TYPE. Where both sides are bare and AGREE on one static tag, that tag describes
   // every member of the result and the members stay bare (the static tag frames them). Otherwise each
   // member's class is per-member, so the result is a self-describing list whose members envelope under
   // `lossyMember`'s per-member rule — bare where a member's class is what its storage says (the common
-  // `[1, 'a']` case keeps its bytes), enveloped where it is not.
-  const mineType = memberTypeOf(of) ?? UNKNOWN, theirType = memberTypeOf(resolved.of) ?? UNKNOWN;
-  const staticMeet = !isTypedList(of) && !isTypedList(resolved.of) && staticTypeOf(mineType) !== undefined
+  // `[1, 'a']` case keeps its bytes), enveloped where it is not. A DISJOINT op's members are all mine, so
+  // only my side's type speaks.
+  const mineType = memberTypeOf(of) ?? UNKNOWN, theirType = disjoint ? mineType : memberTypeOf(resolved.of) ?? UNKNOWN;
+  const staticMeet = !isTypedList(of) && (disjoint || !isTypedList(resolved.of)) && staticTypeOf(mineType) !== undefined
     && sameScalarType(mineType, theirType) ? mineType : undefined;
-  const bareResult = bothElem || staticMeet !== undefined;
+  const bareResult = elemOf !== null || staticMeet !== undefined;
   /** A member written back: bare where the list is bare, else its `{t,v}` node where ITS class is lossy. */
   const memberAt = (rows: Rel, value: string, cls: string): Expr => bareResult
     ? exactMember(col(rows.id, value))
@@ -1690,25 +1781,33 @@ export function listSetOp(
    * out in storage-class order (`null`, numbers, then text) BY ACCIDENT while a `SELECT DISTINCT`
    * leaves it to a temp b-tree. Naming the order makes it deterministic by design — the alternative
    * was inheriting a dedup implementation detail as a contract.
+   *
+   * `having` filters the groups — `disjunct`'s "on exactly one side".
    */
-  const setOf = (rows: Rel): Rel => {
+  const setOf = (rows: Rel, having?: (rows: Rel) => Expr): Rel => {
     // One member per value and family; the class it frames as is the least of the merged ones.
     const deduped = make.aggregate({
       id: fresh('sd'), input: rows, channels: [],
       type: typeOf(meta(SIDE.value, 'any', true), meta(SIDE.fam, 'text', true), meta(SIDE.cls, 'text', true)),
       groupBy: [col(rows.id, SIDE.value), col(rows.id, SIDE.fam)],
       aggs: [[SIDE.cls, { kind: 'agg', fn: 'min', args: [col(rows.id, SIDE.cls)] }]],
+      ...(having ? { having: having(rows) } : {}),
     });
     return collect(deduped, (r) => memberAt(r, SIDE.value, SIDE.cls),
       (r) => [{ expr: col(r.id, SIDE.value), dir: 'asc' }, { expr: col(r.id, SIDE.cls), dir: 'asc' }]);
   };
 
-  /** The two sides' member rows, unioned — the shape `merge` and `disjunct` aggregate over. `all: true`
-   *  plus the `Distinct` in `setOf` IS SQL's distinct `UNION` (§3.3's declared collapse), so there is no
-   *  second union node kind. */
-  const union = (left: Rel, right: Rel): Rel => make.union({
-    id: fresh('su'), inputs: [left, right], all: true, channels: [], type: typeOf(...SET_COLS),
-  });
+  /** Both sides' member rows, unioned, each tagged with its SIDE (0 mine, 1 theirs) — the shape `merge`
+   *  and `disjunct` aggregate over. `all: true` plus the grouping in `setOf` IS SQL's distinct `UNION`
+   *  (§3.3's declared collapse), so there is no second union node kind. */
+  const SIDE_TAG = 'ss';
+  const bothSides = (): Rel => {
+    const tagged = (members: Rel, side: number): Rel => make.project({
+      id: fresh('st'), input: members, channels: [], type: typeOf(...SET_COLS, meta(SIDE_TAG, 'int')),
+      exprs: [...[SIDE.value, SIDE.cls, SIDE.fam].map((column) => [column, col(members.id, column)] as const), [SIDE_TAG, compilerInt(side)]],
+    });
+    return make.union({ id: fresh('su'), inputs: [tagged(mine, 0), tagged(theirs, 1)], all: true, channels: [], type: typeOf(...SET_COLS, meta(SIDE_TAG, 'int')) });
+  };
 
   const result = ((): Rel | null => {
     switch (step.name) {
@@ -1721,49 +1820,45 @@ export function listSetOp(
           exprs: [[SIDE.value, col(members.id, SIDE.value)], [SIDE.cls, col(members.id, SIDE.cls)], ['seg', compilerInt(index)], [SIDE.ord, col(members.id, SIDE.ord)]],
         });
         const both = make.union({
-          id: fresh('cu'), inputs: [seg(mine, 0), seg(sideOf(resolved.expr, resolved.of), 1)], all: true, channels: [], type: typeOf(...segCols),
+          id: fresh('cu'), inputs: [seg(mine, 0), seg(theirs, 1)], all: true, channels: [], type: typeOf(...segCols),
         });
         return collect(both, (r) => memberAt(r, SIDE.value, SIDE.cls),
           (r) => [{ expr: col(r.id, 'seg'), dir: 'asc' }, { expr: col(r.id, SIDE.ord), dir: 'asc' }]);
       }
-      // MEMBERSHIP: mine that are (not) theirs, deduped.
+      // MEMBERSHIP: mine that are (not) theirs, deduped — a semi- / anti-join against the operand.
       case 'intersect':
-        return setOf(valuesOf(mine, (side) => contains(resolved.expr, resolved.of, side, false)));
+        return setOf(valuesOf(againstTheirs('semi')));
       case 'difference':
-        return setOf(valuesOf(mine, (side) => contains(resolved.expr, resolved.of, side, true)));
-      // SYMMETRIC difference: in exactly one side, which is the two one-sided differences unioned.
+        return setOf(valuesOf(againstTheirs('anti')));
+      // SYMMETRIC difference: the members on exactly ONE side. One grouping over both sides' rows rather
+      // than two anti-joins: the second (theirs not mine) would probe MY list, which is a per-row
+      // `json_each` no index serves, and the result already holds every operand member mine lacks, so
+      // reading both sides once is the least this op can cost.
       case 'disjunct':
-        return setOf(union(
-          valuesOf(mine, (side) => contains(resolved.expr, resolved.of, side, true)),
-          valuesOf(sideOf(resolved.expr, resolved.of), (side) => contains(selfList, of, side, true)),
-        ));
+        return setOf(bothSides(), (rows) => ({
+          kind: 'binary', op: '=',
+          left: { kind: 'agg', fn: 'min', args: [col(rows.id, SIDE_TAG)] },
+          right: { kind: 'agg', fn: 'max', args: [col(rows.id, SIDE_TAG)] },
+        }));
       // SET UNION: every distinct member of either side.
       case 'merge':
-        return setOf(union(valuesOf(mine), valuesOf(sideOf(resolved.expr, resolved.of))));
+        return setOf(bothSides());
       // CARTESIAN product → a list of PAIR-lists, so the result's members are lists and no further
-      // member op reads it (`isBareList` names the scalar encodings only). The second `json_each`
-      // takes the first side as its INPUT, which is exactly a cross join; its member is read through the
-      // same `payloadOf`/`ownTagOf` as a side's. Each member of a pair envelopes on its own class.
+      // member op reads it (`isBareList` names the scalar encodings only). A cross join of my members
+      // with the operand relation; each member of a pair envelopes on its own class.
       case 'product': {
-        const paired = make.explode({
-          id: fresh('px'), input: mine, expr: resolved.expr, channels: [], as: OPERAND,
-          type: typeOf(...mine.type.cols, meta(OPERAND.value, 'any', true), meta(OPERAND.ord, 'int'), meta(OPERAND.type, 'text', true)),
+        const PAIR = { value: 'pv', ord: 'po', cls: 'pg' } as const;
+        const pairSide = make.project({
+          id: fresh('pt'), input: theirs, channels: [],
+          type: typeOf(meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int'), meta(PAIR.cls, 'text', true)),
+          exprs: [[PAIR.value, col(theirs.id, SIDE.value)], [PAIR.ord, col(theirs.id, SIDE.ord)], [PAIR.cls, col(theirs.id, SIDE.cls)]],
         });
-        const theirValue = payloadOf(resolved.of, col(paired.id, OPERAND.value), col(paired.id, OPERAND.type));
-        const pairCols = [...sideCols, meta('pv', 'any', true), meta('pg', 'text', true), meta(OPERAND.ord, 'int')];
-        const read = make.project({
-          id: fresh('pr'), input: paired, channels: [], type: typeOf(...sideCols, meta('pv', 'any', true), meta('pg', 'text', true), meta(OPERAND.ord, 'int')),
-          exprs: [...sideCols.map((column) => [column.name, col(paired.id, column.name)] as const),
-            ['pv', theirValue], ['pg', ownTagOf(resolved.of, col(paired.id, OPERAND.value), col(paired.id, OPERAND.type))], [OPERAND.ord, col(paired.id, OPERAND.ord)]],
-        });
-        const pairs = make.project({
-          id: fresh('pc'), input: read, channels: [], type: typeOf(...pairCols),
-          exprs: [...sideCols.map((column) => [column.name, col(read.id, column.name)] as const),
-            ['pv', col(read.id, 'pv')], ['pg', classOf(col(read.id, 'pg'), col(read.id, 'pv'))], [OPERAND.ord, col(read.id, OPERAND.ord)]],
+        const pairs = make.join({
+          id: fresh('pj'), left: mine, right: pairSide, join: 'cross', channels: [], type: typeOf(...mine.type.cols, ...pairSide.type.cols),
         });
         return collect(pairs,
-          (r) => ({ kind: 'json-array', items: [memberAt(r, SIDE.value, SIDE.cls), memberAt(r, 'pv', 'pg')], binary: true }),
-          (r) => [{ expr: col(r.id, SIDE.ord), dir: 'asc' }, { expr: col(r.id, OPERAND.ord), dir: 'asc' }]);
+          (r) => ({ kind: 'json-array', items: [memberAt(r, SIDE.value, SIDE.cls), memberAt(r, PAIR.value, PAIR.cls)], binary: true }),
+          (r) => [{ expr: col(r.id, SIDE.ord), dir: 'asc' }, { expr: col(r.id, PAIR.ord), dir: 'asc' }]);
       }
       default: return null;
     }
@@ -1771,11 +1866,11 @@ export function listSetOp(
   if (!result) return null;
 
   const memberOf: ListOf = bareResult ? withMemberType(BARE_LIST, staticMeet ?? UNKNOWN) : TYPED_MEMBERS;
-  // An ELEMENT-membered result keeps its members as ELEMENTS: every op admitted for `bothElem` above
-  // carries the rowids through unchanged (a set op neither transforms nor pairs a member), and both
-  // sides are the same kind, so the result is a list of that one kind — framed by `listPayloadExpr`'s
-  // elem arm exactly as the input was.
-  const resultOf: ListOf = bothElem ? of : step.name === 'product' ? { kind: 'list', of: memberOf } : memberOf;
+  // An ELEMENT-membered result keeps its members as ELEMENTS: every op admitted over an element self
+  // carries the rowids through unchanged (a set op neither transforms nor pairs a member), and its
+  // members are all of the self's one kind, so the result is a list of that kind — framed by
+  // `listPayloadExpr`'s elem arm exactly as the input was.
+  const resultOf: ListOf = elemOf !== null ? of : step.name === 'product' ? { kind: 'list', of: memberOf } : memberOf;
   return { rel: result, of: resultOf, ...(SET_RESULT.has(step.name) && terminal ? { set: true } : {}) };
 }
 

@@ -97,7 +97,7 @@
   },
   "combine": {
     "binds": 0,
-    "bytes": 4862,
+    "bytes": 4987,
     "compiler": 149,
     "bound": 0
   },
@@ -145,8 +145,8 @@
   },
   "difference": {
     "binds": 0,
-    "bytes": 5422,
-    "compiler": 128,
+    "bytes": 5525,
+    "compiler": 127,
     "bound": 0
   },
   "discard": {
@@ -157,8 +157,8 @@
   },
   "disjunct": {
     "binds": 0,
-    "bytes": 7212,
-    "compiler": 195,
+    "bytes": 5188,
+    "compiler": 129,
     "bound": 0
   },
   "drop": {
@@ -289,8 +289,8 @@
   },
   "intersect": {
     "binds": 0,
-    "bytes": 5418,
-    "compiler": 128,
+    "bytes": 5521,
+    "compiler": 127,
     "bound": 0
   },
   "inV": {
@@ -380,7 +380,7 @@
   "merge": {
     "binds": 0,
     "bytes": 5295,
-    "compiler": 127,
+    "compiler": 129,
     "bound": 0
   },
   "mergeE": {
@@ -451,8 +451,8 @@
   },
   "product": {
     "binds": 0,
-    "bytes": 11121,
-    "compiler": 131,
+    "bytes": 8126,
+    "compiler": 145,
     "bound": 0
   },
   "project": {
@@ -565,8 +565,8 @@
   },
   "unfold": {
     "binds": 0,
-    "bytes": 12132,
-    "compiler": 153,
+    "bytes": 9137,
+    "compiler": 167,
     "bound": 0
   },
   "union": {

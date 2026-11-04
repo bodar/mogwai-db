@@ -480,23 +480,18 @@ Beside the RelIR substrate:
 - **Set ops over a per-row-typed scalar (set-op-incoming-class-raise) — PARKED, branch
   `wf/set-op-incoming-class-raise-2-0` (b774020b).** `values('tags').intersect/union/disjunct/difference/
   combine/product/merge(…)` over a list-valued property: collection rows take the set op, a null or
-  non-collection row raises the reference text. Two review blockers, both NEWLY reachable (trunk declines):
-  a false "must yield an iterable type, encountered object" for
-  `g.V().has('name','x').values('tags').intersect(__.V().has('name','y').values('tags'))` (ref `{b}`:
-  `ListFunction.java:114-135` takes the operand's first result, a List), and a quadratic member test
-  (53× N=1k → 8k: `intersect(__.V().values('name').fold())` probes each element against a json_each over the
-  data-sized operand). They share ONE root with §1 "Set-op literal operand loses member class" and §4
-  o-setop-types: the set op's OPERAND is not a relation with its own framing. Prerequisite, ordered BEFORE
-  this item: **set-op operand as a relation (setop-operand-relation)** — lower the operand once (uncorrelated
-  → a MATERIALIZED CTE of distinct `(value, vtype)`; per-row-typed → decided per row, never by
-  `gremlinTypeOfFraming`'s static `'object'` into `nonIterableArgument`), then semi/anti-join the self's
-  `json_each` against it; one classifier for "is the operand a List/Map" shared with `mapMerge`
-  (`listValuedOperand` disagrees with it on `__.constant(['a'])`). Then re-land the branch with: one bound
+  non-collection row raises the reference text. Its two review blockers (a false "encountered object"
+  operand raise, a 53× quadratic member test) are fixed on trunk by the prerequisite
+  **setop-operand-relation** — LANDED: the operand is one fenced MATERIALIZED relation the membership
+  semi/anti-joins through an automatic index (`listSetOp`), a per-row-typed operand is decided on its first
+  result (`perRowOperand`), and `operandForm`/`operandClass` are the one classifier `mapMerge` shares. The
+  branch must drop its own operand classifier (`listValuedOperand`) for those on rebase. Then re-land it with: one bound
   `vtype IN ('list','set')` test (written twice in the fenced WHERE), scenarios for the scalar-host
   `by()`/`where()` route it opens via `perRowCollectionChild` (`order().by(intersect(['a']).count(local))`,
   `group().by(conjoin('-'))` — measured correct and linear), and the doc line corrected (element-host bodies
   `map(values('tags').intersect(…))` decline; scalar-host bodies answer). Clean declines left: the
-  `project()/group()` `by()` host, operand forms `__.constant([…])`/re-sourced/correlated, `merge([y:2])`
+  `project()/group()` `by()` host, a correlated operand (`__.select('a')…`), a nested-collection literal
+  member (`merge(__.constant(['a']).fold())`), cross-kind `combine`/`merge`/`disjunct`, `merge([y:2])`
   over a map-valued property, `union` mixing different list functions or a constant arm,
   coalesce/optional arms, `where(intersect([…]))` as a bare filter.
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`

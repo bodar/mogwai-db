@@ -314,8 +314,9 @@ const COVERED = [
   "g.inject(['a','b']).merge(['c']).unfold()", "g.inject([1,2]).combine([3]).sum(Scope.local)",
   "g.V().values('name').fold().combine(['x'])", "g.V().values('name').fold().intersect(['marko'])",
   // THE SAME SIX over an ELEMENT-membered list — members compared by ROWID, which IS the element's
-  // identity (`ElementHelper` hashes/equals an Element by id AND class). Both sides must be the same
-  // element kind: `product` and a cross-kind operand decline (see DECLINED). The corpus only names the
+  // identity (`ElementHelper` hashes/equals an Element by id AND class). A CROSS-KIND operand shares no
+  // member, so `intersect` is empty and `difference` is the self's distinct members; the ops that would
+  // frame both kinds in one list, and `product`, decline (see DECLINED). The corpus only names the
   // ERROR forms (`combine(__.V())` — a non-folded stream is not iterable), so this is combinatorial
   // completeness: the element list works and set ops work, so set-ops-over-element-lists must.
   'g.V().fold().combine(__.V().fold())', 'g.V().fold().intersect(__.V().fold())',
@@ -323,6 +324,8 @@ const COVERED = [
   'g.V().fold().merge(__.V().fold())',
   'g.V().hasLabel("person").fold().intersect(__.V().fold()).unfold().values("name")',
   'g.E().fold().combine(__.E().fold())',
+  'g.V().fold().intersect(__.E().fold())', 'g.V().fold().difference(__.E().fold())',
+  "g.inject([1,2]).intersect(__.V().fold())", "g.V().fold().difference([1,2])",
   // `unfold()` of a NESTED list (a `product()`'s pair-lists) stays in the list vocabulary — one LIST
   // traverser per member, which is the same explode with a different payload column.
   "g.inject(['a','b']).product(['c']).unfold()", "g.inject(['a','b']).product(['c','d']).unfold().count(Scope.local)",
@@ -634,11 +637,11 @@ const DECLINED = [
   // vtype-aware compare key from `byExpr` rather than a second policy. The guard that REPLACES it is
   // the one that still holds — an ELEMENT list's members are ROWIDS, so every member op declines
   // (`isBareList`): a question about the element is the child seam's, not the list module's.
-  // ELEMENT-list set ops are covered same-kind (see COVERED), but two shapes stay refused. A CROSS-KIND
-  // operand never matches on identity (`ElementHelper.areEqual` demands the same class) AND its merge/
-  // combine would frame a MIXED-element result the payload layer cannot; `product` over elements makes
-  // PAIR-lists whose rowids would frame bare (as integers), losing the element objects — a distinct shape.
-  'g.V().fold().intersect(__.E().fold())',
+  // ELEMENT-list set ops are covered same-kind, and cross-kind where the result is the self's own members
+  // (see COVERED), but two shapes stay refused. A CROSS-KIND merge/combine/disjunct would frame a
+  // MIXED-element result the payload layer cannot; `product` over elements makes PAIR-lists whose rowids
+  // would frame bare (as integers), losing the element objects — a distinct shape.
+  'g.V().fold().merge(__.E().fold())', "g.inject([1,2]).combine(__.V().fold())",
   'g.V().fold().product(__.V().fold())',
   // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and
   // declines the other, because answering off the wrong row is the plausible-wrong-answer class.

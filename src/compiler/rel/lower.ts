@@ -57,7 +57,7 @@ import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
 import { Declines } from '../unsupported.ts';
-import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, gremlinTypeOfFraming, nonMapArgument, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, oneMemberList, unfoldList } from './list.ts';
+import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignRejoin, landForeignRows, landedCols, landedStream } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
@@ -3222,8 +3222,6 @@ function pathTail(
 function mapMerge(
   rel: Rel, step: IRStep, self: Extract<RelFraming, { kind: 'map' }>, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly rel: Rel; readonly facts: MapKeyFacts } | null {
-  if (step.args.length !== 1 || step.modulators?.length || step.optionArms) return null;
-  const operandArg = step.args[0]!;
   const literal = (value: unknown, type: TypeNode | null, name: string | null) => {
     if (value === undefined) return null;
     if (!(value instanceof Map)) return nonMapArgument(step, value === null ? null : encounteredType(value, type));
@@ -3234,26 +3232,23 @@ function mapMerge(
     const keys = meetFraming([self, { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' }, ...literalKeyFacts([...value.keys()]) }]);
     return { rel: mapPutAll(rel, () => blob, fresh), facts: keys as MapKeyFacts };
   };
-  if (!isNested(operandArg.value)) return literal(operandArg.value, operandArg.type ?? null, operandArg.name ?? null);
+  // The operand's FORM and its yielded CLASS are the set ops' own classifiers (`operandForm`,
+  // `operandClass`), so `merge()` over a List and over a Map read one operand the same way: `__.constant(c)`
+  // is the literal it names, and a non-Map constant is the same compile-time raise.
   const seam = childSeam(ctx, fresh);
-  const body = seam.body((operandArg.value as { readonly nested: unknown }).nested, 'child');
-  if (!body?.length) return null;
-  // `__.constant(c)` is the literal it names, so a non-Map constant is the same compile-time raise.
-  if (body.length === 1 && body[0]!.name === 'constant' && body[0]!.args.length === 1 && !body[0]!.modulators?.length) {
-    const c = body[0]!.args[0]!;
-    return literal(c.value, c.type ?? null, c.name ?? null);
-  }
+  const form = operandForm(step, seam);
+  if (!form) return null;
+  if (form.kind === 'literal') return literal(form.value, form.arg.type ?? null, form.arg.name ?? null);
   const host: ChildHost = { kind: 'map', map: col(rel.id, MAP_COL), keyOf: self.keyOf, valOf: self.valOf, ...mapKeyFacts(self), row: { rel, aliases: labels } };
-  const cv = seam.scalar(body, host);
+  const cv = seam.scalar(form.body, host);
   if (!cv) return null;
-  if (cv.framing.kind !== 'map') {
-    // A per-row scalar could be anything, a Map included — the seam cannot say, so it declines. Every
-    // other shape is statically NOT a Map.
-    if (cv.framing.kind === 'scalar' && cv.framing.type.kind !== 'static') return null;
-    const named = gremlinTypeOfFraming(cv.framing);
-    return named === null ? null : nonMapArgument(step, named);
-  }
-  if (!sameFraming(self, cv.framing)) return null;
+  // A per-row scalar could be anything, a Map included — its class is the row's, so it declines (a
+  // `record` IS a Map, but not in the pairs encoding `mapPutAll` reads). Every other shape is statically
+  // NOT a Map.
+  const cls = operandClass(cv.framing);
+  if (cls === null || cls === 'per-row') return null;
+  if (cls !== 'map') return nonMapArgument(step, cls === 'list' ? 'list' : cls.encountered);
+  if (cv.framing.kind !== 'map' || !sameFraming(self, cv.framing)) return null;
   const empty = emptyOperand(cv);
   // Productivity is read off the projected column, so only a presence the value's nullness states can
   // travel with it; any other presence declines.
