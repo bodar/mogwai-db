@@ -11,7 +11,7 @@ import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { ProgramWrites } from './write.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { SideEffectConstants } from '../../gremlin/frontend.ts';
-import { tagPresent, type PresenceTag } from './tag.ts';
+import type { PresenceTag } from './tag.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -303,9 +303,8 @@ export const statedPresence = (present: StatedPresence, value: Expr): Expr =>
     : present.orValue ? { kind: 'binary', op: 'or', left: isNotNullExpr(value), right: present.when } : present.when;
 
 /** A stated presence's OWN predicate, in the host's scope and without the value — `when`, or
- *  `tag IS NOT NULL` (`tagPresent`: read off the tag's construction, so a gated tag is its gate). What a
- *  consumer projects beside the value before it filters (`restated`). */
-export const statedWhen = (present: StatedPresence): Expr => 'tag' in present ? tagPresent(present.tag) : present.when;
+ *  `tag IS NOT NULL`. What a consumer projects beside the value before it filters (`restated`). */
+export const statedWhen = (present: StatedPresence): Expr => 'tag' in present ? isNotNullExpr(present.tag) : present.when;
 
 /** A stated presence whose own predicate a consumer PROJECTED to `when` (a column), read off that column:
  *  `orValue` is kept, so `statedPresence` still ORs the value's nullness in. */

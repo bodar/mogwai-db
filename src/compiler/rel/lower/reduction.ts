@@ -18,7 +18,7 @@ import { BATCHING_BRANCHES, collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalS
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, once, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, restated, statedPresence, statedWhen, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
@@ -29,11 +29,11 @@ import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL }
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, subPathMembers } from '../path.ts';
-import { mixedClassesRefused, perRowSubject, predicateExpr, predicateOnNull, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { propertyReadOf } from '../property.ts';
 import { raisingWhen, transformOffences } from '../receiver.ts';
-import { evidenceOf, gatedTag, rowTag, type PresenceTag } from '../tag.ts';
+import { evidenceOf, gatedTag } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
 import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
@@ -2683,33 +2683,6 @@ function oneRowValue(tail: Tail, fresh: Minter): ChildValue | null {
  * that reads the run in two nodes (`order().by()`'s productivity filter and sort) still reads the LET's
  * operands once per row: `withSubqueryColumns` lands them below both.
  */
-/**
- * May an `is(pred)` at `body[at]` KEEP a null the run produced — the case its presence cannot be read off
- * its value. Not where the run is already present exactly where its value is (`'value-nullness'`: a NULL
- * there is no value at all), nor where the value has a static, non-null type, nor where the predicate is
- * FALSE on null (`predicateOnNull`: a null fails, so value-nullness is exact again). Only for a run the
- * `is()` ends, give or take further `is()` members: a transform or a nested host after it reads the run's
- * presence as its value's, so a tag would not survive it.
- */
-const mayKeepNull = (present: Presence, type: ScalarType, pred: unknown, body: readonly IRStep[], at: number): present is Exclude<Presence, 'value-nullness' | 'unknown'> =>
-  present !== 'value-nullness' && present !== 'unknown'
-  && type.kind !== 'static'
-  && predicateOnNull(pred) !== false
-  && body.slice(at + 1).every((step) => step.name === 'is');
-
-/**
- * The run's presence tag after a `test` that may keep a null: the incoming TOTAL tag where the test holds
- * and the run was present — an earlier `is()`'s tag, else one inferred over the value's own row
- * (`rowTag`) and gated on a stated seed's presence — NULL elsewhere. `null` where no tag can be built
- * inside the row (a value read through a subquery), which keeps the value-nullness reading.
- */
-function passedTag(present: Exclude<Presence, 'value-nullness' | 'unknown'>, value: Expr, vtype: Expr | undefined, type: ScalarType, test: Expr): PresenceTag | null {
-  if (typeof present === 'object' && 'tag' in present) return gatedTag(test, present.tag);
-  const own = rowTag(value, evidenceOf(type, vtype));
-  if (!own) return null;
-  return gatedTag(present === 'always' ? test : and(statedPresence(present, value), test), own);
-}
-
 export function valueRun(
   body: readonly IRStep[], from: number,
   seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present: Presence; readonly yields: ChildValue['yields'] },
@@ -2724,8 +2697,6 @@ export function valueRun(
   // nullness, and a NULL it made is UNPRODUCTIVE to every consumer — a later receiver check
   // (`receiver.ts`: `asString()`/`math()` raise on a null VALUE only), a `map()` host, a `coalesce()` arm.
   let present = seed.present;
-  /** The value a run of tagged `is()` filters tests — the one its first member saw. */
-  let tagged: { readonly value: Expr; readonly vtype: Expr | undefined } | undefined;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
     // A NESTED per-traverser host mid-run (`by(__.values('name').local(__.fold()))`) runs its body over the
@@ -2792,25 +2763,10 @@ export function valueRun(
       // three chained `is()` over a selected label took the statement to 142 KB, a fourth past the
       // compile budget.
       if (!testOver(value, vtype)) return null;
-      // A PRODUCTIVE NULL THAT PASSES. Where the value may be a null the body produced (the run is not
-      // already present exactly where its value is) and the predicate can HOLD on null (`neq`, `without`,
-      // `eq(null)`, a negative TextP — `predicateOnNull`), a NULL that passes is kept (`FilterStep`), so
-      // "present where the value is" would drop it: `inject(null,1).map(is(neq(1)))` is `[null]`. Its
-      // presence rides as the body's TOTAL tag, gated by the SAME test — one predicate, projected ONCE
-      // through `once` (a free value spells it inline, a held one is one LET). Only for a run that ends in
-      // `is()` members (`mayKeepNull`). A filter does not change the value, so every later test reads the
-      // value the FIRST tagged one did (`tagged`) — a run of k `is()` is a conjunction over ONE value, and
-      // its presence stays linear in k rather than re-spelling each filtered value.
-      const subject = tagged ?? { value, vtype };
-      const passed = mayKeepNull(present, type, pred, body, at)
-        ? passedTag(present, subject.value, subject.vtype, type,
-          once(subject.vtype ? [subject.value, subject.vtype] : [subject.value], ([v, t]) => testOver(v!, t)!, fresh, 'int'))
-        : null;
       value = onceTyped(value, vtype, (v, t) => ({ kind: 'case', whens: [[testOver(v, t)!, v]], else: compilerNull() }), fresh);
-      // A failed test is a NULL, so otherwise the run is now present exactly where its value is. A seed
-      // that cannot say stays unable to (`'unknown'`), so its consumers keep declining.
-      if (passed) { present = { tag: passed }; tagged = subject; }
-      else { if (present !== 'unknown') present = 'value-nullness'; tagged = undefined; }
+      // A failed test is a NULL, so the run is now present exactly where its value is. A seed that cannot
+      // say stays unable to (`'unknown'`), so its consumers keep declining.
+      if (present !== 'unknown') present = 'value-nullness';
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;

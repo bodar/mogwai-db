@@ -120,27 +120,10 @@ declare const presenceTagBrand: unique symbol;
  */
 export type PresenceTag = Expr & { readonly [presenceTagBrand]: true };
 
-/** Each minted tag's PRESENCE, recorded by the constructor that knows it (see `tagPresent`). */
-const presenceOfTag = new WeakMap<PresenceTag, Expr>();
-
-const branded = (tag: Expr, present: Expr): PresenceTag => {
-  const minted = tag as PresenceTag;
-  presenceOfTag.set(minted, present);
-  return minted;
-};
-
-/**
- * WHERE A PRESENCE TAG IS NON-NULL — `tag IS NOT NULL`, read off how the tag was BUILT rather than by
- * spelling the tag: a static or row tag is TOTAL (never NULL on a row that exists), so it is present
- * wherever its row is, and a gated one exactly where its gate holds and its inner tag is present. So a
- * filter that asks only "did the body produce" spends the GATE, never the type inference the tag carries
- * for a consumer that reads its value (`inject(null,1).map(is(neq(1)))` filters on the `neq` alone).
- */
-export const tagPresent = (tag: PresenceTag): Expr =>
-  presenceOfTag.get(tag) ?? bin('is not', tag, compilerNull());
+const branded = (tag: Expr): PresenceTag => tag as PresenceTag;
 
 /** A body's STATIC tag — a literal projected in its own row, present wherever that row is. */
-export const staticTag = (type: ValueType): PresenceTag => branded(compilerText(type), ALWAYS_PRODUCTIVE);
+export const staticTag = (type: ValueType): PresenceTag => branded(compilerText(type));
 
 /**
  * A body's TOTAL tag inferred over a ROW expression of the body — never NULL for a row that exists: the
@@ -157,7 +140,7 @@ export function rowTag(value: Expr, evidence: ValueEvidence): PresenceTag | null
   const total = totalTag(evidence, value);
   // A `COALESCE` the total tag already is takes the `'null'` fallback as one more argument.
   const args = total.kind === 'call' && total.fn === 'COALESCE' ? total.args : [total];
-  return branded(call('COALESCE', ...args, compilerText(NULL_TAG)), ALWAYS_PRODUCTIVE);
+  return branded(call('COALESCE', ...args, compilerText(NULL_TAG)));
 }
 
 /**
@@ -165,8 +148,5 @@ export function rowTag(value: Expr, evidence: ValueEvidence): PresenceTag | null
  * exactly where the arm produced nothing — and the bare tag, no per-row term, where `present` is the
  * constant `ALWAYS_PRODUCTIVE`. The one place a tag read outside an arm's row becomes a presence tag.
  */
-export const gatedTag = (present: Expr, tag: PresenceTag): PresenceTag => {
-  if (present === ALWAYS_PRODUCTIVE) return tag;
-  const inner = tagPresent(tag);
-  return branded({ kind: 'case', whens: [[present, tag]], else: compilerNull() }, inner === ALWAYS_PRODUCTIVE ? present : bin('and', present, inner));
-};
+export const gatedTag = (present: Expr, tag: PresenceTag): PresenceTag =>
+  present === ALWAYS_PRODUCTIVE ? tag : branded({ kind: 'case', whens: [[present, tag]], else: compilerNull() });

@@ -1010,54 +1010,6 @@ export function elementPredicate(pred: unknown): Expr | null {
   return answer === null ? null : answer ? CONSTANT.true : CONSTANT.false;
 }
 
-/**
- * WHAT A PREDICATE ANSWERS OVER A NULL SUBJECT — `predicateExpr`'s own null-space rules, read at compile
- * time: `true`/`false` where every row with a null subject gets that answer, `null` where it cannot say.
- *
- * Asked by a filter that must tell a productive null from no value (`is()` in a child body, `valueRun`): a
- * predicate that is FALSE on null drops a null subject, so the filtered value's nullness is already its
- * presence; one that can HOLD keeps the null (`FilterStep` keeps a traverser whose test passes,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/FilterStep.java`)
- * and its presence must ride beside the value. Each arm below is the arm of `predicateExpr` with the same
- * name, over `subject IS NULL` (Compare's null space: `comparable` is FALSE unless both are null,
- * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:314-316`);
- * `test/compiler/predicate-on-null.test.ts` holds the two to each other by evaluating the emitted SQL.
- */
-export function predicateOnNull(pred: unknown): boolean | null {
-  if (pred === undefined) return false;   // presence
-  if (pred === null) return true;         // a bare null is `eq(null)`
-  // A bare value or traversal is `eq(…)`: a non-null literal never equals null, and a traversal's first
-  // value compares by SQL `=`, which is never true over NULL.
-  if (!isPred(pred)) return false;
-  const { op, operands } = pred;
-  const value = operands[0]?.value;
-  if (op === 'not') { const inner = predicateOnNull(value); return inner === null ? null : !inner; }
-  if (op === 'and' || op === 'or') {
-    const [left, right] = [predicateOnNull(value), predicateOnNull(operands[1]?.value)];
-    // Two-valued, with an unknown side deciding only where the known one does not.
-    if (op === 'and') return left === false || right === false ? false : left === null || right === null ? null : true;
-    return left === true || right === true ? true : left === null || right === null ? null : false;
-  }
-  if (COMPARISON[op]) {
-    if (value === null) return op === 'eq' || op === 'gte' || op === 'lte';
-    if (typeof value === 'number' && Number.isNaN(value)) return op === 'neq';
-    // A literal or a traversal operand: only the negated equality reads a NULL comparison as true.
-    return op === 'neq';
-  }
-  if (op === 'within' || op === 'without') {
-    // A run-time member set (`within(__.…fold())`) never holds a null member SQL can see.
-    const members = operands.length === 1 && Array.isArray(value) ? collectionMembers(operands[0]!)
-      : operands.length === 1 && isNested(value) ? [] : operands;
-    const nullMember = members.some((o) => o.value === null);
-    return op === 'within' ? nullMember : !nullMember;
-  }
-  if (op === 'between' || op === 'inside' || op === 'outside') return false;
-  // TextP accepts a null String reference: a NEGATIVE variant holds for it, a positive one does not.
-  const text = op.startsWith('not') && op.length > 3 ? op[3]!.toLowerCase() + op.slice(4) : op;
-  if (text === 'startingWith' || text === 'endingWith' || text === 'containing') return text !== op;
-  return null;
-}
-
 export function predicateExpr(
   subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
   opType: TypeNode | null = null, opParam: string | null = null, fresh?: Minter,
