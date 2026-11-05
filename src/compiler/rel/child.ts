@@ -278,12 +278,10 @@ export interface PresentWhen { readonly when: Expr; readonly orValue?: true }
  *  where `tag IS NOT NULL`. Only `tag.ts`'s constructors can mint the `PresenceTag`. */
 export interface PresentTag { readonly tag: PresenceTag }
 
-/** A HOST's presence (`ChildHost.present`) — never a `{ when }` predicate: a body over the host narrows its
+/** A HOST's presence (`ChildHost.present`) — never a stated predicate: a body over the host narrows its
  *  presence to its value's nullness (an `is()`, a `drop` projector, `valueRun`), and narrowing a `{ when }`
- *  that way would read a NULL the filter made as a productive null. A presence TAG is admitted — a value
- *  label's entry tag (`alias.ts` `aliasPresence`), so a label bound to null is a host with a null VALUE —
- *  because `valueRun` re-gates a tag at an `is()` (`passedTag`) rather than reading the old one through. */
-export type HostPresence = Exclude<Presence, PresentWhen>;
+ *  that way would read a NULL the filter made as a productive null. */
+export type HostPresence = Exclude<Presence, StatedPresence>;
 
 /** A constant TRUE, the per-row predicate `presenceOf` answers for `'always'` — ONE shared object, so a
  *  consumer can test it by reference and spend no `CASE`/filter on it. SQLite folds it. */

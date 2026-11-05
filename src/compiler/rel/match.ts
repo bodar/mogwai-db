@@ -592,7 +592,7 @@ function scalarSubjectOf(sproj: NonNullable<ReturnType<typeof aliasProjection>>,
   const value = aliasValueAt(column, 'last');
   const vtype = sproj.read.type.kind === 'perRow' ? aliasTypeAt(column, 'last') : undefined;
   const type = aliasValueTypeAt(column, 'last', sproj.read.type);
-  return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}), ...aliasPresence(rel, sproj) };
+  return { kind: 'scalar', value, rel, type, ...(vtype ? { vtype } : {}), ...aliasPresence(rel, sproj.entry) };
 }
 
 /** A whole `and(…)`/`or(…)` connective as one boolean `Expr`: every branch to an `Expr`, folded with

@@ -161,17 +161,6 @@ export function rowTag(value: Expr, evidence: ValueEvidence): PresenceTag | null
 }
 
 /**
- * A tag READ OFF THE ROW that is already NULL exactly where the object is absent — a label history's
- * last entry's shape tag `k` (`alias.ts` `aliasEntryTag`), which every `as()` entry writes (`objectEntry`,
- * `history.ts`) and which is NULL only where the history is NULL or empty. Not a type name: no consumer
- * reads a presence tag's value, only `tagPresent`, which is `tag IS NOT NULL` here.
- *
- * `null` — REFUSED — over a subquery, for `rowTag`'s reason: a correlated read answers NULL on NO row, so
- * a NULL there would not mean "this row's object is absent".
- */
-export const readTag = (tag: Expr): PresenceTag | null => (exprHasSubquery(tag) ? null : branded(tag, bin('is not', tag, compilerNull())));
-
-/**
  * A presence tag over a MAY-BE-ABSENT arm — `CASE WHEN <present> THEN tag END`, so the tag is NULL
  * exactly where the arm produced nothing — and the bare tag, no per-row term, where `present` is the
  * constant `ALWAYS_PRODUCTIVE`. The one place a tag read outside an arm's row becomes a presence tag.

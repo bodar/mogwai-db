@@ -9,8 +9,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../elem.ts';
 import { aliasScalarTypeOf, joinAliasEntry, type AliasEntry, type AliasMap } from '../alias.ts';
 import { MAP_COL } from './map.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, hostPresence, type ChildHost, type HostPresence, type HostRow, type Subject } from './child.ts';
-import { gatedTag, readTag } from './tag.ts';
+import { gatedByHost, mayBeAbsent, type ChildHost, type HostRow, type Subject } from './child.ts';
 import { carriedCols, collectedOf, familyKey, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import { mapKeyFacts, type MapKeyFacts, type RelFraming } from './framing.ts';
 import { perRowSubject, subjectOperand, SUBJECT_UNKNOWN, type SubjectType, type TypedOperand } from './predicate.ts';
@@ -331,32 +330,13 @@ const historyList = (history: Expr, of: ListOf, fresh: Minter): Expr => {
 export const aliasGuard = (rel: Rel, entry: AliasEntry): Expr | undefined =>
   (entry.binds === undefined ? aliasPresent(col(rel.id, entry.col)) : undefined);
 
-/** A label history's LAST entry's shape tag `k` — TOTAL: every `as()` entry writes it, whatever the
- *  object (`objectEntry`, `history.ts`), so it is NULL exactly where the history is NULL or empty, i.e.
- *  where the label is unbound on this row, and never NULL for a label bound to a null VALUE. */
-const aliasEntryTag = (column: Expr): Expr => fieldAt(column, 'last', 'k');
-
-/**
- * The `present` field a child host or predicate subject REROOTED AT this label carries
- * (`ChildHost.present`), given where the OUTER host is there (`outer`; `ALWAYS_PRODUCTIVE` for one that
- * cannot be absent). NOTHING for a statically bound label under a present host, so its SQL is unchanged.
- * Otherwise the label may be unbound here (`aliasGuard`) or its host absent, and:
- * - an ELEMENT label reads `'value-nullness'`: an element's id is never a null value, so `id IS NOT NULL`
- *   is exact — `aliasPresent`'s answer one term cheaper — and the key is already NULL where the outer host
- *   is absent (`rerootPresence`);
- * - any other label reads its entry's own `k` (`aliasEntryTag`) gated on the outer host (`gatedTag`): a
- *   label BOUND TO NULL is PRESENT with a null value — `Scoping.getScopeValue` answers `path.get(k)`
- *   whenever `path.hasLabel(k)`
- *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:129-130`)
- *   — which the value's own nullness read as UNBOUND. One `json_extract`, the cost of the value-nullness
- *   read it replaces; `k` rather than `t` because `t` is written only for a scalar entry.
- */
-export const aliasPresence = (rel: Rel, proj: AliasProjection, outer: Expr = ALWAYS_PRODUCTIVE): { readonly present?: HostPresence } => {
-  if (outer === ALWAYS_PRODUCTIVE && !aliasGuard(rel, proj.entry)) return {};
-  if (proj.read.kind === 'element') return { present: 'value-nullness' };
-  const tag = readTag(aliasEntryTag(col(rel.id, proj.entry.col)));
-  return { present: tag ? { tag: gatedTag(outer, tag) } : 'value-nullness' };
-};
+/** The `present` field a child host or predicate subject REROOTED AT this label carries
+ *  (`ChildHost.present`): `'value-nullness'` exactly where `aliasGuard` owes a guard — the label's
+ *  payload reads NULL on a row it is unbound on — and nothing for a statically bound label, so its SQL
+ *  is unchanged. `id IS NOT NULL` over the payload is `aliasPresent`'s answer one term cheaper:
+ *  `json_extract(a, '$[#-1].id')` is NULL exactly where `a` is NULL or empty. */
+export const aliasPresence = (rel: Rel, entry: AliasEntry): { readonly present?: 'value-nullness' } =>
+  (aliasGuard(rel, entry) ? { present: 'value-nullness' } : {});
 
 /** ONE LABEL'S PAYLOAD, read off the row — `aliasProjection`'s answer. */
 export interface AliasProjection {
@@ -376,7 +356,7 @@ export const isElementAlias = (proj: AliasProjection | null): proj is ElementAli
  *  body behind `aliasElementHost` and `aliasElementSubject`, so no host built off a label can drop it. */
 const aliasElement = (rel: Rel, proj: ElementAliasProjection) => ({
   kind: 'element' as const, id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem,
-  ...aliasPresence(rel, proj),
+  ...aliasPresence(rel, proj.entry),
 });
 
 /**
@@ -404,15 +384,15 @@ export const aliasElementSubject = (rel: Rel, proj: ElementAliasProjection): Sub
 /**
  * A `select(<label>)` REROOT's key and presence — the one answer `selectRerootHost` (a value body) and
  * `selectRerootSubject` (a filter body) share. The new host may be ABSENT two ways: the label may be
- * unbound here, or the OUTER host already was (a nested `select` reads the ROW, so the outer absence gates
- * the new key AND its presence — `aliasPresence` composes the two). `null` declines with `hostPresence`.
+ * unbound here (`aliasPresence`), or the OUTER host already was (a nested `select` reads the ROW, so the
+ * outer absence gates the new key). `null` declines with `gatedByHost`.
  */
 export const rerootPresence = (
   outer: ChildHost | Subject, rel: Rel, proj: AliasProjection,
-): { readonly key: Expr; readonly present: { readonly present?: HostPresence } } | null => {
-  const here = hostPresence(outer);
-  if (!here) return null;
-  return { key: caseWhen(here, proj.payload[0]![1]!), present: aliasPresence(rel, proj, here) };
+): { readonly key: Expr; readonly present: { readonly present?: 'value-nullness' } } | null => {
+  const key = gatedByHost(outer, proj.payload[0]![1]!);
+  if (!key) return null;
+  return { key, present: mayBeAbsent(outer) ? { present: 'value-nullness' } : aliasPresence(rel, proj.entry) };
 };
 
 /** The projection every `select()` shares: the payload under its canonical column names, then the

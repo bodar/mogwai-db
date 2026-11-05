@@ -114,14 +114,8 @@ Each step lands green on its own. IDs are stable. `after` gives the order.
 - **P4 producers, one commit each (after P2, P3)** — replace `{when}` with the tag column. Each producer
   deletes its stated branch and the declines that guarded it:
   - `oneRowPresence` (the tag projected inside `rel`, replacing EXISTS);
-  - ✅ **LANDED (P4b)** `aliasPresence`/`rerootPresence` — a value label that owes a guard is present
-    where its history's last entry's `k` is (`json_extract(a, '$[#-1].k')`, total for every entry shape;
-    `t` is written only for a scalar, so it would read a list/map label unbound), gated on the outer host
-    (`gatedTag`); an element label keeps `id IS NOT NULL`, a statically bound label carries nothing.
-    A label bound to null now reads as present (the §17 "null-valued label" row is gone), and a filter
-    `is()` over a may-be-absent subject conjoins its presence (`where(select('k').is(neq(1)))` dropped
-    nothing on an unbound row). Witnesses `test/L4-addendum/null-bound-label-presence.feature`.
-    `project().by(select('k'))` still omits the key for the null — the §17 null-`by()` row, P6's.
+  - `aliasGuard`/`rerootPresence` (the history entry's own `t`; this fixes a label bound to null reading
+    as unbound);
   - `selectedNodeChild` (the node column IS the Option);
   - `producedOnlyWhere`;
   - coalesce (`orValue` becomes a tag-driven CASE).
