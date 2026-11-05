@@ -570,8 +570,14 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
       return framingTypeOf(step, gtype) ?? null;
     }
     if (args.length !== 1 || collectionAssert(step)) return null;
-    return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh,
+    const tested = predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh,
       (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
+    // A subject ABSENT on some rows (a `select(<label>)` re-root over a label bound on some) is no value
+    // to test there: a predicate that holds on null (`neq`, `eq(null)` — `predicateOnNull`) would pass the
+    // missing traverser. Its presence is conjoined, as `valuePredicate` conjoins a projection's.
+    const present = hostPresence(subject);
+    if (!tested || !present) return null;
+    return present === ALWAYS_PRODUCTIVE ? tested : and(present, tested);
   }
 
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
