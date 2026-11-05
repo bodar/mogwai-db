@@ -76,6 +76,11 @@ Each step lands green on its own. IDs are stable. `after` gives the order.
   - **Revs.** Replication revs must not change because of the new spelling: map it inside `propsCanonical`.
   - **Witness.** `values('l').unfold()` does not lower; use an `inject`- or `dedup(local)`-based one instead.
 
+- ✅ **LANDED 2026-11-05 (78df472a).** P2 one tag module + the `{tag}` Presence arm — `src/compiler/rel/tag.ts`
+  brands `PresenceTag` with a module-private symbol (tsc rejects a hand-built one) and mints it only via
+  `staticTag`/`rowTag` (refuses over any subquery)/`gatedTag`; `child.ts` `Presence` gains `{ tag }`, read as
+  `tag IS NOT NULL`. Framing tags stay unbranded per the plan review. No producer mints one yet (P4); corpus
+  SQL byte-identical; witness `test/compiler/presence-tag.test.ts`. Remains: nothing.
 - **P2 the inside-tag contract (after P1)** — ONE helper builds a child tag. It infers (`typeof(v)`) only
   where `v` is a real row column, and refuses on a scalar-subquery result. Gate every outside-attached
   static literal on its arm's presence, Calcite `visitLiteral` style:
