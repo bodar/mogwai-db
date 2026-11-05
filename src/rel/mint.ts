@@ -1,6 +1,7 @@
-import type { Rel } from './rel.ts';
+import { col, type Expr } from './expr.ts';
+import { brandRel, type Rel } from './rel.ts';
 import { relId, type RelId } from './types.ts';
-import { forEachRel } from './walk.ts';
+import { exprRels, forEachExpr, forEachRel, mapRelExprs, rewriteExpr, rewriteRels } from './walk.ts';
 
 /**
  * FRESH NAMES.
@@ -39,4 +40,32 @@ export function minter(...plans: readonly Rel[]): Minter {
     return `${hint}${n}`;
   };
   return { id: (hint) => relId(next(ids, hint)), alias: (hint) => next(aliases, hint) };
+}
+
+/**
+ * A COPY of an expression whose correlated subplans may stand beside the original — every relation it
+ * defines re-minted (id, and a scan's alias), every `Col` naming one re-pointed — or `null` where a
+ * subplan holds something a copy cannot faithfully duplicate: a `Recursive` (its term is a closure over
+ * its own self-reference) or a `Materialize` (a named CTE boundary — two copies would be two bindings).
+ *
+ * Two relations may not share a `RelId` (`minter`), so an expression with a subplan can appear in a
+ * second place only as a copy. Columns naming relations OUTSIDE the expression are left alone: they are
+ * its correlations, and the copy is correlated exactly as the original was.
+ */
+export function freshCopy(e: Expr, mint: Minter): Expr | null {
+  const renamed = new Map<RelId, RelId>();
+  let opaque = false;
+  forEachExpr(e, (node) => exprRels(node).forEach((plan) => forEachRel(plan, (r) => {
+    if (r.kind === 'recursive' || r.kind === 'self-ref' || r.kind === 'materialize') opaque = true;
+    if (!renamed.has(r.id)) renamed.set(r.id, mint.id('cp'));
+  })));
+  if (opaque) return null;
+  if (!renamed.size) return e;
+  const swap = (node: Expr): Expr => (node.kind === 'col' && renamed.has(node.rel) ? col(renamed.get(node.rel)!, node.name) : node);
+  const memo = new Map<Rel, Rel>();
+  const copy = (plan: Rel): Rel => rewriteRels(plan, (mapped) => {
+    const own = mapRelExprs(mapped, (x) => rewriteExpr(x, swap));
+    return brandRel({ ...own, id: renamed.get(mapped.id)!, ...(own.kind === 'scan' ? { alias: mint.alias('rcp') } : {}) } as typeof own);
+  }, memo);
+  return rewriteExpr(e, swap, copy);
 }

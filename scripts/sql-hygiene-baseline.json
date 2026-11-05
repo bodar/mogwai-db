@@ -79,7 +79,7 @@
   },
   "branch": {
     "binds": 0,
-    "bytes": 5227,
+    "bytes": 4626,
     "compiler": 79,
     "bound": 0
   },
@@ -343,8 +343,8 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 10452,
-    "compiler": 226,
+    "bytes": 7513,
+    "compiler": 152,
     "bound": 0
   },
   "lTrim": {
@@ -355,8 +355,8 @@
   },
   "map": {
     "binds": 0,
-    "bytes": 10452,
-    "compiler": 226,
+    "bytes": 7513,
+    "compiler": 152,
     "bound": 0
   },
   "match": {
@@ -385,7 +385,7 @@
   },
   "merge": {
     "binds": 0,
-    "bytes": 5295,
+    "bytes": 5450,
     "compiler": 129,
     "bound": 0
   },

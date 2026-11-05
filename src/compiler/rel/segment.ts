@@ -792,22 +792,28 @@ function noLocalSuffix(steps: readonly IRStep[], barrier: Barrier): void {
     throw new UnsupportedTraversal(`${afterBarrierText(steps, barrier)} after a barrier call() that produced VALUES — a value result is framed, never continued, so push the step into the sub-traversal`);
 }
 
-/** Validate the existing typed map transport while retaining its data for relational landing. */
+/**
+ * Validate the existing typed map transport while retaining its data for relational landing.
+ *
+ * Each refusal is a property of the QUERY TEXT — the sibling traversal's terminal — so it is a clean
+ * `UnsupportedTraversal` naming it in the user's terms, never a bare `Error` (an internal failure reaching
+ * the user is never correct, `CLAUDE.md` "Correct by design, fail closed").
+ */
 function mapValueElem(map: Extract<ValueNode, { readonly t: 'map' }>): Elem {
+  const notElements = () => UnsupportedTraversal.because(
+    'a federate traversal that reads a parent value through select() must end in vertices or edges — '
+    + 'ending it in a value (count(), values(), fold(), …) is not supported yet; end the sub-traversal at the '
+    + 'elements and apply the value step after call()');
   let elem: Elem | undefined;
   for (const pair of map.v as readonly [ValueNode, FrameNode][]) {
     const key = pair[0]; const value = pair[1];
     if ((typeof key.v !== 'string' && typeof key.v !== 'number') || !isTaggedFrame(value) || value.t !== 'list' || !Array.isArray(value.v))
-      throw new Error('federate: mapValues result must map a scalar parent key to an element list');
+      throw notElements();
     for (const node of value.v as readonly FrameNode[]) {
-      if (!isTaggedFrame(node)) throw new Error('federate: mapValues list contains a non-element result');
-      if (node.t === 'vertex') {
-        if (elem && elem !== 'vertex') throw new Error('federate: mapValues result mixes element kinds');
-        elem = 'vertex';
-      } else if (node.t === 'edge') {
-        if (elem && elem !== 'edge') throw new Error('federate: mapValues result mixes element kinds');
-        elem = 'edge';
-      } else throw new Error('federate: mapValues list contains a non-element result');
+      if (!isTaggedFrame(node) || (node.t !== 'vertex' && node.t !== 'edge')) throw notElements();
+      if (elem && elem !== node.t)
+        throw UnsupportedTraversal.because('a federate traversal that reads a parent value through select() returned both vertices and edges — end it in one element kind');
+      elem = node.t;
     }
   }
   return elem ?? 'vertex';

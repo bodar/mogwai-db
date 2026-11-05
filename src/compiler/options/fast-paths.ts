@@ -48,7 +48,9 @@ export interface FastPathConfig {
   /**
    * Lift a correlated property `EXISTS` over a bare element scan in front of that scan, as a
    * `DISTINCT` relation of owner ids the plan is DRIVEN from (`src/rel/passes/semijoin.ts`,
-   * `indexSeek`). Disabling
+   * `indexSeek`) — or, where the element is one `FROM` item of a join or the value is read off an
+   * OUTER row (`has(k, select('e'))`), NARROW it with an `id IN (<owner ids>)` conjunct beside the
+   * predicate (`narrowFilter`), sought per outer row. Disabling
    * leaves the predicate where the lowering put it — same rows, checked instead of sought.
    *
    * **The EIGHTH switch, and the first that selects a physical ACCESS PATH rather than a lowering

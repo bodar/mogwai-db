@@ -264,9 +264,9 @@ statement's text grows with data or doubles with query shape. The items below ar
   or `count(local)` on the whole parameter still reads it as one value (the honest single-value case);
   `mergeV()` over an unfolded list-of-maps parameter needs R8-res (Map-framed `unfold()` plus a list
   parameter of Maps, filed under **Writes** below); the two items below.
-- **federate's `has(k, select(label))` sibling is P×N (mapvalues-inject-ceiling residue) — MAJOR at ~2k
-  parents.** The injection now splits, but the sibling statement's per-key `has("name", <correlated>)` scans
-  `nodes` per key (2.5 s at 2k parents). Fix needs a correlated property-index seek per key.
+- ✅ **LANDED (with r7-fu3, §1b) — federate's `has(k, select(label))` sibling was P×N
+  (mapvalues-inject-ceiling residue).** The sibling's per-key `has("name", <correlated>)` now seeks
+  `vp_key_value` per key: 24 → 106 ms at P = N = 1k → 8k under `CfLimitedSql`.
 - **A large collection carried per member under an `as()` label surfaces a bare `database or disk is full`
   (large-label-carrier-full) — pre-existing, seen while landing d605f072.** Not a query decline in the
   user's terms; map it to a clear platform/size message or avoid the per-member carrier copy.
@@ -409,11 +409,10 @@ refusal comes first: it is a production outage.
   `group().by('name').by(values('m').is(typeOf(SET)).fold())` a List of a List. The record-field and
   group-value framers do not read `ListOf.set`. Pre-existing; `typeof-framing.exec.test.ts` asserts only the
   single-key select.
-- **A federate `has(k, select(label))` over a scalar label leaks a bare `Error` (fed-mapvalue-bare-error)** —
-  `g.V().hasLabel("parent").values("i").as("e").call("federate",["graph":"big","traversal":__.V().has("age",
-  select("e")).count()])` gives "federate: mapValues result must map a scalar parent key to an element list"
-  (`src/compiler/rel/segment.ts` ~801, `mapValueElem`); pre-existing. Raise `UnsupportedTraversal` (or answer).
-  Same throw as the r7-fu3 parked attempt (§1b).
+- ✅ **LANDED (with r7-fu3, §1b) — A federate `has(k, select(label))` ending in a value leaked a bare `Error`
+  (fed-mapvalue-bare-error).** `mapValueElem` (`src/compiler/rel/segment.ts`) now raises
+  `UnsupportedTraversal` naming the sub-traversal's value terminal. Remains: ANSWERING it (a per-parent value
+  map landing) rather than declining.
 - **A malformed `g:Binary` in a GraphSON load throws a bare `Error`** (`src/formats/graphson.ts`, the same
   pattern as `g:Duration`), which reaches the user through `io().read()` — raise the named load error.
 - **A label bound before a local `order()` is lost (order-local-alias-drop)** — `g.V(1).as('a').values('name')
@@ -472,19 +471,24 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 - **A shared collection is re-read per traverser** — `g.V().group('a').by(constant('a')).by('age')
   .select('a').select('a').count()` 57 ms → 3.4 s. Read the key once as one MATERIALIZED relation and
   cross-join it.
-- **Mid-traversal `V().has` with no seek in a READ (r4-perf1)** — 813 ms → 44.6 s.
-- **Injected mid-federate `has(k, select(label))` is quadratic in parents (fed-inject-quadratic) — MAJOR,
-  plausible.** `g.V().hasLabel("parent").values("name").as("e").call("federate",["graph":"big","traversal":
-  __.V().has("name", select("e"))]).count()` 227/474/1939 ms at P=500/1k/2k (4× per doubling); P=8k did not
-  finish. The cost is the sibling-side injection statement (the inj-map group with a correlated
-  `count(1)` subquery per key over `json_extract(ex2.value …)`, `src/compiler/rel/segment.ts`), not the
-  resume 25a64da6 touched; pre-existing. Group the injected map once (one `GROUP BY` over the exploded
-  parents) instead of a per-key correlated count. Same family as r7-fu3 below.
-- **Correlated-value property seek (r7-fu3, r6-fu1)** — `V().has(k, select(label))` needs a narrowing
-  `element.id IN (owner seek)` conjunct in `rel/passes/semijoin.ts`, entering correlated subplans via
-  `rewriteRels` (55×). The parked attempt failed on: a string id `V('u0')` not treated as a bound, a shared
-  `EXISTS` hoisting a CTE over the whole property table, a constant seek outranked, `mapValueElem` throwing
-  a bare Error.
+- **Mid-traversal `V().has` with no seek in a READ (r4-perf1)** — 813 ms → 44.6 s. Matches the r7-fu3 value
+  join below (818 ms → 50.6 s on trunk, now linear); re-probe the original witness to close it.
+- ✅ **LANDED — Correlated-value property seek (r7-fu3, r6-fu1) + fed-inject-quadratic + the
+  mapvalues-inject-ceiling P×N residue.** `semijoin.ts` (`narrowFilter`) adds `element.id IN (SELECT owner
+  FROM vertex_properties WHERE key = k AND value = <outer value>)` beside the untouched `EXISTS` wherever the
+  element traces (`columnPath`) to an unbounded, not-join-driven element scan; the pass walks with
+  `rewriteRels`, so `group()/project().by()` value traversals, union arms and the federated sibling's per-key
+  count get it too; a correlated value's subplan is copied (`freshCopy`, `src/rel/mint.ts`). A label (or other
+  non-key) membership on the same element is demoted to a check under `noindex` (unary `+`); a KEY
+  restriction (`V('u0')`, `hasId`, `has(T.id, lt(4))`) keeps the access path; a constant seek outranks a
+  correlated one. Measured 1k → 8k: value join 818 ms/50.6 s → 7.4/33 ms; `inject($xs)` 383 ms/22.8 s →
+  9.2/34.6 ms; federate `….call('federate',['graph':'x']).V().has('name', select('e'))` 568 ms at 1k/7.7 s at
+  4k → 24/106 ms; `hasLabel('p')` + value join 1.1 s/73 s → 7.7/32.6 ms. Tests:
+  `test/correlated-value-seek.test.ts`, `test/plan-stability.test.ts` (value-join shapes). Remains: an
+  element reached through a join key (`V().outE().has('w', select('w'))`, 1.07 s → 71 s) — the narrowing
+  declines there by design (the edge join drives it), so the fix is a join REORDER, not a seek; and a
+  constant seek on a LOW-cardinality key outranking a selective correlated one (`has('k', 1).has('name',
+  select('e'))` with 3 values of `k`: 428 ms → 28 s) — needs a selectivity fact the platform does not have.
 - **`fuse` runs only in the read `lowered()` (rf3-fuse-write, r4-fu0)** — a write fed by
   `order().by(…).V().has(…)`, or a write-body `V()` re-source's label filter, renumbers holders×V first.
 - **K-entry map driver (r7-fu9)** — `inject([k0:0,…]).mergeV()` 55× (`json_extract` re-reads per entry); a
@@ -1030,7 +1034,7 @@ Beside the RelIR substrate:
   `decimalTextSeeks`, `endpointSeek`, `cappedCount`'s per-driver choice). Their generic home is a
   CORRELATED-join `OwnerSeek` in `src/rel/passes/semijoin.ts` — a seek per outer row chosen over the
   finished algebra — so any per-row property search (not only a merge's) gets the most-selective-key and
-  decimal-TEXT-prefix access paths. Move them there once `semijoin.ts` seeks under a correlated join. The
+  decimal-TEXT-prefix access paths. Move them there — `semijoin.ts` now seeks per outer row (`narrowFilter`, r7-fu3), so this is unblocked. The
   same multi-key `OwnerSeek` was r6-fu6/S10-r's fix for a 19× two-pool merge guard (verify: the two-pool
   grid now measures linear below).
 - **The map merge guard's key-set containment** (`searchKeying`, `write.ts`) crosses each earlier map with
