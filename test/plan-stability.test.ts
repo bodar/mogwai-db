@@ -65,15 +65,16 @@ const SHAPES: Readonly<Record<string, string>> = {
   'long chain': "g.V().has('person','name','p1000').out('knows').out('knows').values('name')",
   'label scan': "g.V().hasLabel('software')",
   'ordered page': "g.V().hasLabel('person').order().by('name').limit(10).values('name')",
-  // A value read off an OUTER row narrows the re-source per outer row (`narrowFilter`) — and a label
-  // membership on the same element must not take that access path from it once stats exist.
+  // A value read off an OUTER row narrows the re-source per outer row (`narrowFilter`). A label on the
+  // same element keeps the query's own access path (its membership): which of the two is the more
+  // selective is a fact about the data, so the plan must not depend on whether stats exist.
   'value join': "g.V().hasLabel('software').values('lang').as('e').V().has('lang', select('e')).count()",
   'labelled value join': "g.V().hasLabel('person').values('name').as('e').V().hasLabel('person').has('name', select('e')).count()",
 };
 
 // The FILTERED shapes carry a selective `has(k,v)` — at the source, or correlated to an outer row — the
 // case the seek is for.
-const FILTERED = new Set(['point lookup', '1-hop', 'long chain', 'value join', 'labelled value join']);
+const FILTERED = new Set(['point lookup', '1-hop', 'long chain', 'value join']);
 
 describe('query-plan stability', () => {
   for (const [name, gremlin] of Object.entries(SHAPES)) {

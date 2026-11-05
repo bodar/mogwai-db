@@ -72,7 +72,6 @@ describe('a correlated has(k, select(…)) seeks the property index per outer ro
   for (const [name, q, params] of [
     ['a re-source V() after values()', VALUE_JOIN, {}],
     ['an injected collection PARAMETER, unfolded', "g.inject(xs).unfold().as('e').V().has('name', select('e')).count()", 'xs'],
-    ['after hasLabel() — a label membership on the same element does not take the access path', "g.V().values('name').as('e').V().hasLabel('p').has('name', select('e')).out().count()", {}],
     ['inside a group().by() value traversal', "g.V().group().by('name').by(__.values('name').as('e').V().has('name', select('e')).count()).select(values).unfold().sum()", {}],
     ['in both arms of a union()', "g.V().values('name').as('e').union(__.V().has('name', select('e')), __.V().has('name', select('e')).out()).count()", {}],
   ] as const) {
@@ -90,6 +89,11 @@ describe('the narrowing NARROWS and never decides', () => {
   for (const q of [
     VALUE_JOIN,
     "g.V().values('name').as('e').V().hasLabel('p').has('name', select('e')).values('k').sum()",
+    "g.V().values('name').as('e').V().has('name', select('e')).as('m').hasLabel('p').values('k').sum()",
+    "g.V().hasLabel('q').values('k').as('c').V().hasLabel('p').has('k', select('c')).count()",
+    "g.V().hasLabel('q').as('u').V().hasLabel('p').has('k', 1).count()",
+    "g.V().hasLabel('q').as('u').V().has('k', 1).count()",
+    "g.V().values('name').as('e').V().has('name', select('e')).has('k', select('e')).count()",
     "g.V().values('name').as('e').V().has('name', select('e')).has('k', 1).count()",
     "g.V().as('a').values('name').as('e').V().has('name', select('e')).where(neq('a')).count()",
     "g.V().values('name').as('e').V().has('name', select('e')).as('m').select('e', 'm').count()",
@@ -141,6 +145,55 @@ describe('the access path', () => {
   test('an element reached by a join key (out()) is not narrowed — the edge already drives it', () => {
     expect(correlatedSeek(plan("g.V().as('a').values('name').as('e').select('a').out().has('name', select('e')).count()"))).toBe(false);
   });
+
+  // A LABEL on the element is an access path the query states. Whether it or the value seek is the more
+  // selective is a fact about the data, so the label keeps the access path wherever it stands — beneath the
+  // seek's Filter, above it, or past an as() projection.
+  for (const q of [
+    "g.V().values('name').as('e').V().hasLabel('p').has('name', select('e')).count()",
+    "g.V().values('name').as('e').V().has('name', select('e')).hasLabel('p').count()",
+    "g.V().values('name').as('e').V().has('name', select('e')).as('m').hasLabel('p').count()",
+  ]) {
+    test(`a label membership keeps the access path: ${q}`, () => {
+      expect(correlatedSeek(plan(q))).toBe(false);
+    });
+  }
+});
+
+// A FACT joined to a small DIMENSION on a shared low-cardinality key — N users with `country = c{i mod 10}`,
+// 20 offices — is the shape a fixed "value beats label" rule made quadratic: the country a user carries is
+// held by N/10 users, so seeking it per user walks N²/10 owners, where the office label is 20 per user.
+// Measured on the rule: 17 ms → 1 969 ms over 1k → 8k (59×), against 6.9× before it. Pinned linear here.
+describe('a correlated or constant has() beside a small label keeps the label as the access path', () => {
+  const dimension = (n: number): GraphStore => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    loadBulk(store, [
+      ...Array.from({ length: n }, (_, i) => ({ labels: ['user'], properties: [{ key: 'country', value: `c${i % 10}` }, { key: 'k', value: i % 3 }] })),
+      ...Array.from({ length: 20 }, (_, j) => ({ labels: ['office'], properties: [{ key: 'country', value: `c${j % 10}` }, { key: 'k', value: j % 3 }] })),
+    ]);
+    return store;
+  };
+  const small = dimension(1_000);
+  const large = dimension(8_000);
+  // Every user meets the two offices in its country.
+  for (const q of [
+    "g.V().hasLabel('user').values('country').as('c').V().hasLabel('office').has('country', select('c')).count()",
+    "g.V().hasLabel('user').values('country').as('c').V().has('country', select('c')).hasLabel('office').count()",
+    "g.V().hasLabel('user').values('country').as('c').V().has('country', select('c')).as('o').hasLabel('office').count()",
+    "g.V().hasLabel('user').as('u').V().hasLabel('office').has('country', 'c1').count()",
+  ]) {
+    test(`2 offices per user, linear from 1k to 8k: ${q}`, async () => {
+      expect(await answer(small, q)).toEqual([2_000]);
+      expect(await answer(large, q)).toEqual([16_000]);
+      expectLinear(await timed(() => answer(small, q)), await timed(() => answer(large, q)));
+    }, SCALE_TIMEOUT_MS);
+  }
+
+  test('a numeric key: linear from 1k to 8k, and propertySeek on = off', async () => {
+    const q = "g.V().hasLabel('user').values('k').as('c').V().hasLabel('office').has('k', select('c')).count()";
+    expect(await answer(small, q)).toEqual(await answer(small, q, {}, OFF));
+    expectLinear(await timed(() => answer(small, q)), await timed(() => answer(large, q)));
+  }, SCALE_TIMEOUT_MS);
 });
 
 describe('a federated sibling reads its per-parent value through the same seek', () => {

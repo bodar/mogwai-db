@@ -478,13 +478,21 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   FROM vertex_properties WHERE key = k AND value = <outer value>)` beside the untouched `EXISTS` wherever the
   element traces (`columnPath`) to an unbounded, not-join-driven element scan; the pass walks with
   `rewriteRels`, so `group()/project().by()` value traversals, union arms and the federated sibling's per-key
-  count get it too; a correlated value's subplan is copied (`freshCopy`, `src/rel/mint.ts`). A label (or other
-  non-key) membership on the same element is demoted to a check under `noindex` (unary `+`); a KEY
-  restriction (`V('u0')`, `hasId`, `has(T.id, lt(4))`) keeps the access path; a constant seek outranks a
-  correlated one. Measured 1k → 8k: value join 818 ms/50.6 s → 7.4/33 ms; `inject($xs)` 383 ms/22.8 s →
-  9.2/34.6 ms; federate `….call('federate',['graph':'x']).V().has('name', select('e'))` 568 ms at 1k/7.7 s at
-  4k → 24/106 ms; `hasLabel('p')` + value join 1.1 s/73 s → 7.7/32.6 ms. Tests:
-  `test/correlated-value-seek.test.ts`, `test/plan-stability.test.ts` (value-join shapes). Remains: an
+  count get it too; a correlated value's subplan is copied (`freshCopy`, `src/rel/mint.ts`). It only ADDS an
+  access path to an element the query gives none (`ElementFacts`, read off the whole plan, so a label above
+  the seek's Filter or past an `as()` counts): any id membership — a label, `V('u0')`, `hasId`,
+  `has(T.id, lt(4))` — keeps the query's own access path, so no shape is slower than before; a constant seek
+  outranks a correlated one. Measured 1k → 8k: value join 818 ms/50.6 s → 5.5/31.6 ms; `inject($xs)`
+  383 ms/22.8 s → 6.1/33.6 ms; federate `….call('federate',['graph':'x']).V().has('name', select('e'))` 568 ms
+  at 1k/7.7 s at 4k → 16.4/88.6 ms. Tests: `test/correlated-value-seek.test.ts`, `test/plan-stability.test.ts`
+  (value-join shapes). Remains: **a LABELLED value join** (`…V().hasLabel('person').has('name', select('e'))`,
+  incl. inside a federated sibling: 328 ms → 20.8 s, 63×) stays at its pre-r7-fu3 cost, label-driven, because
+  value-over-label was measured making a fact-to-small-dimension join quadratic (`…values('country').as('c')
+  .V().hasLabel('office').has('country', select('c'))`: 17 ms/118 ms → 33 ms/1 969 ms). Linear in BOTH needs
+  either a selectivity fact (DO cannot bound `ANALYZE`, RelIR plan §1 P4) or a DECORRELATION substrate: join
+  the outer value against ONE materialized `(owner, value)` relation of the labelled set, built once and
+  index-probed per outer row (measured: a `MATERIALIZED` CTE read through a correlated `IN` is SCANNED per
+  row, so it must be a real join, the RelIR `flatten` §4 decorrelation, not a narrowing conjunct); an
   element reached through a join key (`V().outE().has('w', select('w'))`, 1.07 s → 71 s) — the narrowing
   declines there by design (the edge join drives it), so the fix is a join REORDER, not a seek; and a
   constant seek on a LOW-cardinality key outranking a selective correlated one (`has('k', 1).has('name',

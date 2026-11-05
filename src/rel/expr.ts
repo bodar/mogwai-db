@@ -12,11 +12,7 @@ export type Expr =
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'real'; readonly source: 'compiler-real' }
   | { readonly kind: 'lit'; readonly value: null; readonly type: SqlType; readonly source: 'compiler-null' }
-  /** `noindex` is SQLite's documented index fence, unary `+`: the value of `arg` unchanged, but a term
-   *  whose column sits under it cannot DRIVE an index loop — so a physical pass can pin which of two
-   *  membership tests on one column is the access path and which is the check
-   *  (`src/rel/passes/semijoin.ts`, `narrowFilter`). */
-  | { readonly kind: 'unary'; readonly op: 'not' | 'neg' | 'noindex'; readonly arg: Expr }
+  | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
   | { readonly kind: 'cast'; readonly arg: Expr; readonly to: SqlType }

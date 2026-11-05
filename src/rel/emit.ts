@@ -455,7 +455,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
           }
           case 'compiler-null': return raw('NULL');
         }
-      case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : e.op === 'noindex' ? q`+${self(e.arg)}` : q`-(${self(e.arg)})`;
+      case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : q`-(${self(e.arg)})`;
       case 'binary': return q`(${self(e.left)} ${raw(e.op.toUpperCase())} ${self(e.right)})`;
       case 'case': return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${self(when)} THEN ${self(then)}`), ' ')}${e.else ? q` ELSE ${self(e.else)}` : empty} END`;
       case 'cast': return q`CAST(${self(e.arg)} AS ${raw(e.to.toUpperCase())})`;

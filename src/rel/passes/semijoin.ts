@@ -4,7 +4,7 @@ import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
 import { rowBounds } from '../bounds.ts';
 import type { RelId } from '../types.ts';
-import { exprRels, forEachExpr, forEachRel, freeRelIds, mapRelExprs, relChildren, relExprs, rewrite, rewriteExpr, rewriteRels } from '../walk.ts';
+import { exprRels, forEachExpr, forEachRel, mapRelExprs, relChildren, relExprs, rewrite, rewriteExpr, rewriteRels } from '../walk.ts';
 
 /**
  * `semijoin` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the
@@ -112,9 +112,64 @@ export function semijoin(plan: Rel, strategies: readonly OwnerSeek[]): Rel {
  *  names minted against all of them, and one rewrite memo, so a node two roots share stays one node. */
 export function semijoinAll(plans: readonly Rel[], strategies: readonly OwnerSeek[]): readonly Rel[] {
   if (strategies.length === 0) return plans;
+  const facts = elementFacts(plans, strategies);
   const mint = minter(...plans);
   const memo = new Map<Rel, Rel>();
-  return plans.map((plan) => rewriteRels(plan, (mapped) => (mapped.kind === 'filter' ? semijoinFilter(mapped, strategies, mint) : mapped), memo));
+  return plans.map((plan) => rewriteRels(plan, (mapped) => (mapped.kind === 'filter' ? semijoinFilter(mapped, strategies, mint, facts) : mapped), memo));
+}
+
+/**
+ * What the WHOLE plan says about each element scan (by `RelId`) before any narrowing is placed — facts
+ * `narrowFilter` must not read off the one `Filter` it stands in, because the query may state them in
+ * another: `V().has('country', select('c')).hasLabel('office')` puts the label in a Filter ABOVE the
+ * seek's, and an `as()` can put a projection between the two.
+ *
+ * - `reached`: the query already gives SQLite an access path to the element through a MEMBERSHIP of its
+ *   id — a literal `=`/`IN` list (`hasId(…)`, `V(1)` mid-chain), or `id IN (<subquery>)` (`hasLabel(…)`,
+ *   `has(T.id, lt(4))`, `V($ids)`). Which of that and a value seek is the more selective is a fact about
+ *   the DATA — a label held by 20 offices against a country held by N/10 users, or a label every vertex
+ *   holds against a name two do — and with no statistics (`docs/archive/2026-08-01-relir-build-plan.md`
+ *   §1 P4) neither SQLite nor this pass knows it. So such an element is not narrowed: the query's own
+ *   access path stays, exactly the plan it had before this pass learned to narrow, so no shape can get
+ *   slower. A fixed "value beats label" rule was measured turning an ordinary fact-to-dimension join
+ *   (`…values('country').as('c').V().hasLabel('office').has('country', select('c'))`) from 7× to 60×
+ *   over 1k → 8k users.
+ * - `constantSeek`: a CONSTANT `has(k, v)` on the element gives a seek computed once per statement,
+ *   which a correlated seek re-run per outer row must not displace — strategy order, across Filters.
+ * - `narrowed`: elements a narrowing already drives, filled as the walk places them, so an element gets
+ *   ONE — a second correlated `IN` could only be a per-row CHECK re-running its subquery per candidate.
+ */
+interface ElementFacts {
+  readonly reached: ReadonlySet<RelId>;
+  readonly constantSeek: ReadonlySet<RelId>;
+  readonly narrowed: Set<RelId>;
+}
+
+function elementFacts(plans: readonly Rel[], strategies: readonly OwnerSeek[]): ElementFacts {
+  const reached = new Set<RelId>();
+  const constantSeek = new Set<RelId>();
+  // A throwaway minter: probing whether a constant seek exists must not spend names the rewrite mints.
+  const probe = minter(...plans);
+  const elementOf = (top: Rel, e: Expr | null): Extract<Rel, { readonly kind: 'scan' }> | null => {
+    if (e?.kind !== 'col') return null;
+    const path = columnPath(top, e.rel, e.name);
+    const leaf = path?.rels.at(-1);
+    return path?.name === 'id' && leaf?.kind === 'scan' && SEEK_PROPERTIES[leaf.table] ? leaf : null;
+  };
+  for (const plan of plans) forEachRel(plan, (r) => {
+    if (r.kind !== 'filter') return;
+    for (const e of conjuncts(r.pred)) {
+      const member = e.kind === 'in-list' || (e.kind === 'in-query' && !e.negated) ? e.expr
+        : e.kind === 'binary' && e.op === '=' ? (e.left.kind === 'lit' ? e.right : e.right.kind === 'lit' ? e.left : null) : null;
+      const reachedLeaf = elementOf(r.input, member);
+      if (reachedLeaf) reached.add(reachedLeaf.id);
+      const owner = ownerColumn(e);
+      const leaf = owner && elementOf(r.input, col(owner.rel, owner.name));
+      if (owner && leaf && strategies.some((seek) => seek(e, { rel: owner.rel, name: owner.name, table: leaf.table, local: null }, probe)))
+        constantSeek.add(leaf.id);
+    }
+  });
+  return { reached, constantSeek, narrowed: new Set() };
 }
 
 /**
@@ -124,17 +179,17 @@ export function semijoinAll(plans: readonly Rel[], strategies: readonly OwnerSee
  *
  * Two placements, one owner relation. Over a BARE element scan a self-contained seek is LIFTED in front
  * as the relation the plan is driven from. Anywhere else — the element is one `FROM` item of a join (a
- * re-source `V()` after a label, `inject(…).unfold()`), or the seek reads an outer row — it NARROWS:
+ * re-source `V()`, `inject(…).unfold()`), or the seek reads an outer row — it NARROWS:
  * `element.id IN (<owner ids>)` is added beside the predicate (`narrowFilter`).
  */
-function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strategies: readonly OwnerSeek[], mint: Minter): Rel {
+function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strategies: readonly OwnerSeek[], mint: Minter, facts: ElementFacts): Rel {
   const element = node.input;
   const terms = conjuncts(node.pred);
   // Lifted only over a BARE scan. A scan already narrowed by something else (`V(1,2)` lowers its id
   // list into this same Filter, which is fine — that is a conjunct) is still bare as a RELATION; what
   // this excludes is a Filter over a join/project/union, where "drive from the seek" is a claim about
   // a plan this pass did not build.
-  if (element.kind !== 'scan') return narrowFilter(node, terms, strategies, mint) ?? node;
+  if (element.kind !== 'scan') return narrowFilter(node, terms, strategies, mint, facts) ?? node;
   const target: SeekTarget = { rel: element.id, name: 'id', table: element.table, local: null };
   for (const seek of strategies) {
     for (const term of terms) {
@@ -155,7 +210,7 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
       });
     }
   }
-  return narrowFilter(node, terms, strategies, mint) ?? node;
+  return narrowFilter(node, terms, strategies, mint, facts) ?? node;
 }
 
 /**
@@ -171,55 +226,27 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
  * after a full scan, which is outer × elements: measured 818 ms at 1k → 3.2 s at 2k vertices on
  * `g.V().values('name').as('e').V().has('name', select('e')).count()`, and 3.6 ms with the conjunct.
  *
- * SELF-CONTAINED seeks are tried before CORRELATED ones, so a constant `has(k, v)` drives in preference
- * to a value read per outer row.
- *
- * THE SEEK IS PINNED AS THE ACCESS PATH, as the lifted form pins it with an order-fenced join. Another
- * membership test on the same column — `hasLabel('p')` after a re-source lowers to `id IN (<every p>)` —
- * is computed ONCE, so SQLite (with no statistics, `docs/archive/2026-08-01-relir-build-plan.md` §1 P4)
- * prefers it to a subquery re-run per outer row and drives the element from EVERY labelled vertex per
- * outer row: measured 1.1 s at 1k → 73 s at 8k. Such a test stays, as a check, under SQLite's documented
- * index fence (`noindex`, unary `+`); the value seek drives. That is the lifted seek's own policy — a
- * property VALUE is the selective access path, a label the coarse one.
+ * It ADDS an access path to an element the query gives none (`ElementFacts.reached`) and never chooses
+ * between two on a selectivity guess. SELF-CONTAINED seeks are tried before CORRELATED ones, and a
+ * correlated one yields to a constant seek anywhere on the element (`ElementFacts.constantSeek`), so a
+ * constant `has(k, v)` drives in preference to a value read per outer row.
  */
-function narrowFilter(node: Extract<Rel, { readonly kind: 'filter' }>, terms: readonly Expr[], strategies: readonly OwnerSeek[], mint: Minter): Rel | null {
+function narrowFilter(node: Extract<Rel, { readonly kind: 'filter' }>, terms: readonly Expr[], strategies: readonly OwnerSeek[], mint: Minter, facts: ElementFacts): Rel | null {
   for (const correlated of [false, true]) {
     for (const seek of strategies) {
       for (const term of terms) {
         const target = drivenElement(node, term, correlated);
-        const owners = target && seek(term, target, mint);
-        if (!target || !owners) continue;
+        const element = target && columnPath(node.input, target.rel, target.name)!.rels.at(-1)!.id;
+        if (!target || !element || facts.reached.has(element) || facts.narrowed.has(element)) continue;
+        if (correlated && facts.constantSeek.has(element)) continue;
+        const owners = seek(term, target, mint);
+        if (!owners) continue;
+        facts.narrowed.add(element);
         // `IN` is a set test, so the strategy's `DISTINCT` (load-bearing only for a JOIN) is dropped.
         const ids = owners.kind === 'distinct' ? owners.input : owners;
-        const element = columnPath(node.input, target.rel, target.name)!.rels.at(-1);
-        const sameElement = (e: Expr): boolean => {
-          if (e.kind !== 'col') return false;
-          const traced = columnPath(node.input, e.rel, e.name);
-          return traced?.name === 'id' && traced.rels.at(-1) === element;
-        };
-        const demote = (e: Expr): Expr => (e.kind === 'in-query' && !e.negated && sameElement(e.expr)
-          ? { ...e, expr: { kind: 'unary', op: 'noindex', arg: e.expr } } : e);
-        // A competing test may sit in a Filter STACKED beneath this one (the emitter renders the stack
-        // as one `WHERE`). The stack is folded into this node to demote it — the same conjunction, so
-        // the same rows — rather than rebuilt in place: a beneath Filter may be shared, and a rebuilt
-        // copy would be a second relation under its `RelId`.
-        const stack: Extract<Rel, { readonly kind: 'filter' }>[] = [];
-        let base: Rel = node.input;
-        while (base.kind === 'filter') { stack.push(base); base = base.input; }
-        // An element the query restricts by its KEY (`hasId(…)`, `has(T.id, lt(4))`, `V(1)` mid-chain) is
-        // already reached by that key, which no value seek beats — it stays the access path, and this
-        // element is not narrowed at all. Nor is one an earlier narrowing already drives, unless this seek
-        // is CONSTANT and that one per-outer-row: a constant seek outranks a correlated one.
-        const all = [...stack.flatMap((f) => conjuncts(f.pred)), ...terms];
-        if (all.some((e) => keyRestricts(e, sameElement) || seekedBy(e, sameElement, correlated))) continue;
-        const competes = (f: Extract<Rel, { readonly kind: 'filter' }>) => conjuncts(f.pred).some((e) => demote(e) !== e);
-        const folded = stack.length > 0 && stack.some(competes) ? stack : [];
-        const input = folded.length ? base : node.input;
-        const rebase = (e: Expr): Expr => folded.reduce((x, f) => retarget(x, f.id, base.id), e);
-        const checks = (folded.length ? all : terms).map(demote).map(rebase);
         return make.filter({
-          id: node.id, input, channels: node.channels, type: node.type,
-          pred: andAll([rebase({ kind: 'in-query', expr: col(target.rel, target.name), plan: ids, negated: false }), ...checks]),
+          id: node.id, input: node.input, channels: node.channels, type: node.type,
+          pred: andAll([{ kind: 'in-query', expr: col(target.rel, target.name), plan: ids, negated: false }, ...terms]),
         });
       }
     }
@@ -271,38 +298,6 @@ function drivenElement(node: Extract<Rel, { readonly kind: 'filter' }>, term: Ex
   return { rel: owner.rel, name: owner.name, table: leaf.table, local };
 }
 
-/**
- * Does conjunct `e` restrict the element (`onElement` recognises its id column) by the element's KEY — a
- * literal `=`/`IN` list, a membership the row-count authority bounds, or a membership in ids selected by the
- * element table's own `id`/`uid` (`has(T.id, lt(4))`) or exploded from a set the user sent (`V($ids)`)?
- * Anything else — a label's or another property's membership — is a coarser access path than a value seek.
- */
-function keyRestricts(e: Expr, onElement: (x: Expr) => boolean): boolean {
-  if (e.kind === 'in-list') return onElement(e.expr);
-  if (e.kind === 'binary' && e.op === '=') return (onElement(e.left) && e.right.kind === 'lit') || (onElement(e.right) && e.left.kind === 'lit');
-  if (e.kind !== 'in-query' || e.negated || !onElement(e.expr)) return false;
-  if (rowBounds(e.plan).max !== Infinity) return true;
-  let r: Rel = e.plan;
-  while (r.kind === 'project' || r.kind === 'distinct' || r.kind === 'filter') {
-    if (r.kind === 'filter' && r.input.kind === 'scan' && SEEK_PROPERTIES[r.input.table]) {
-      const scan = r.input.id;
-      return readsColumn(r.pred, (c) => c.rel === scan && (c.name === 'id' || c.name === 'uid'));
-    }
-    r = r.input;
-  }
-  return r.kind === 'explode';
-}
-
-/** Is conjunct `e` a property-value narrowing of the element (`narrowFilter`'s own form) that a new seek —
- *  `correlated` or not — must not displace? Any does when the new one is correlated; only a correlated one
- *  yields to a constant seek. */
-function seekedBy(e: Expr, onElement: (x: Expr) => boolean, correlated: boolean): boolean {
-  if (e.kind !== 'in-query' || e.negated || !onElement(e.expr)) return false;
-  let r: Rel = e.plan;
-  while (r.kind === 'project' || r.kind === 'distinct' || r.kind === 'filter') r = r.input;
-  if (r.kind !== 'scan' || !PROPERTY_OWNER[r.table]) return false;
-  return correlated || freeRelIds(e.plan).size === 0;
-}
 
 function readsColumn(e: Expr, match: (c: Extract<Expr, { readonly kind: 'col' }>) => boolean): boolean {
   let reads = false;
