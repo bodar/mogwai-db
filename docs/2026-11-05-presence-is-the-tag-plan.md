@@ -5,6 +5,12 @@ a better result is the intended direction.** It replaces outstanding-work §2 "T
 `PresentWhen`?": the answer is neither to retire nor to keep. The side channel goes, and every correct
 answer stays.
 
+**Re-scoped 2026-11-05 (owner): NO storage migration.** Nothing is deployed and no store holds data worth
+migrating. The browser demo's scratch databases may read an old null map entry as absent, and that is
+accepted. P0's migration runner (`186bff82`) was reverted. Everything else stays: the L5 law, following
+the reference, NaN and the single value+type read are all IN. The rule throughout: we have no users, so
+do the correct thing.
+
 Evidence: the design study `.logs/presence-tag-study.md` (local) and its probes in `.logs/presence/`. It
 has file:line maps of every producer, consumer and outside-attached tag, and measured costs.
 
@@ -39,31 +45,32 @@ corollaries:
 2. **A tag is never inferred outside.** `typeof(v)` over a scalar-subquery result answers `'null'` on
    no-row, which is the inverse defect.
 3. **Where a body's type admits no null, the value IS the presence column**, with zero extra cost.
+4. **Value and type travel together.** A typed value is ONE carrier, read once (P9), never a value
+   column and a type column fetched by two correlated reads that can disagree about whether a row
+   exists.
 
 ## Steps
 
 Each step lands green on its own. IDs are stable. `after` gives the order.
 
-- **P0 schema-version** — a storage substrate. There is no schema version or migration mechanism today
-  (`src/storage.ts` is all `CREATE … IF NOT EXISTS`). Add one: `PRAGMA user_version`, read when a store
-  opens, and an ordered list of migrations, each a SET-BASED statement program (no row loops, no
-  data-sized binds: CLAUDE.md's bind rule). The list runs once per graph, inside one transaction. It
-  must work on `bun:sqlite`, a Durable Object (a DO migrates lazily on its first request), and the
-  browser/WASM store. It refuses to open a store whose version is newer than the code. Tests cover a fresh
-  store, an old store, an already-migrated store, a failure mid-migration that rolls back, and a store that
-  is too new.
-
-- **P1 total-tag encoding (after P0)** — every writer of a typed `{t,v}` tree and every alias-history entry
+- **P1 total-tag encoding** — every writer of a typed `{t,v}` tree and every alias-history entry
   `{k,v,t}` writes `t:'null'` for a null value. Today a null member is `{"t":null,"v":null}`, and a
-  `constant(null).as('k')` entry has no `t` at all. **Find every persisted typed tree**: vertex and edge
-  property values, and anything else stored as JSON (replication/sync tables, conflicts, tombstones, saved
-  side effects; check `src/storage.ts`, `src/replicate.ts`, `src/setwrite.ts`, `src/formats/`). Then:
-  - **Migration 1** (P0's first) rewrites legacy nodes set-based, with SQLite JSON1 over `json_tree`.
-  - **Every import path** (GraphSON/CSV loaders, `BatchingLoader`, federation landings, replication
-    apply) writes the total form.
-
-  Tests: a store seeded in the legacy form migrates, and reads back identically; a byte-level check that no
-  writer emits `t:null`.
+  `constant(null).as('k')` entry has no `t` at all. **No migration** (see Status). What a blocked first
+  build verified on trunk, so start from here:
+  - **The writer is ONE seam.** Every persisted typed tree is minted in JS through `propertyValueBind` →
+    `valueNodeOf`, which covers `write.ts`, `bulk.ts` (GraphSON/CSV) and replication (via `loadBulk`). No
+    SQL `typedNode` reaches a property write.
+  - **The edit set** (it passed `tsc` before the worktree was lost):
+    - `src/gremlin/types.ts`: add `NULL_TAG = 'null'`, `isNullTag` and `leafTag`; widen `ValueNode`'s leaf
+      tag; make `valueNodeOf(null)` return `{t:'null',v:null}` whatever its channel declared.
+    - `graphsonNode` and `execute.ts` `frameTypedNode` route the leaf tag through `leafTag`.
+    - foreign-decode and `federate.ts` (~:125) map a typed null, and the empty barrier scalar, to `NULL_TAG`.
+    - `orderability.ts` `untagged()` uses `isNullTag`.
+  - `valueFamily` already lists `'null'` in `STORAGE_FAMILY_TAGS`.
+  - **A `meta` hazard; test it.** The top-level `meta` object is keyed by meta-KEY and is not a `{t,v}`
+    node, so a meta-property NAMED `t` (`property('k',1,'t',null)`) must not be confused with a node tag.
+  - **Revs.** Replication revs must not change because of the new spelling: map it inside `propsCanonical`.
+  - **Witness.** `values('l').unfold()` does not lower; use an `inject`- or `dedup(local)`-based one instead.
 
 - **P2 the inside-tag contract (after P1)** — ONE helper builds a child tag. It infers (`typeof(v)`) only
   where `v` is a real row column, and refuses on a scalar-subquery result. Gate every outside-attached
@@ -141,11 +148,12 @@ Each step lands green on its own. IDs are stable. `after` gives the order.
   This lifts the 6 `nan-literal` L3 scenarios. Delete their ledger reason
   (`test/L3-conformance/expected-outcomes.ts`) and the matrix NaN row.
 
-- **P9 one read for value and tag (after P7)** — where a consumer needs both and they are two correlated
-  subqueries today, read one packed jsonb instead. The study measured this 28% faster at 8k (V6 vs V1b),
-  and it also recovers the second read that single-column consumers (window order keys, dedup partitions)
-  would otherwise pay under P6. Measure on the common shapes before and after, and keep it only where it
-  wins.
+- **P9 value and type travel together (after P7)** — corollary 4 as a carrier, not an optional
+  optimisation. Wherever a typed value crosses a child seam or a property read as a separate value
+  subquery and type subquery today, it crosses as ONE packed jsonb read instead. The study measured this
+  28% faster at 8k (V6 vs V1b), and it removes the second read that single-column consumers (window order
+  keys, dedup partitions) would otherwise pay under P6. Measure on the common shapes before and after.
+  Where the packed form is genuinely slower, find out why rather than keeping two readers.
 
 - **P10 a law, so the class cannot come back (after P6)** — an L5 property law: for a random body `b`, the
   child form agrees with the chain form. That means:
@@ -171,5 +179,4 @@ Each step lands green on its own. IDs are stable. `after` gives the order.
 - Every §5 wrong answer from the study matches the reference.
 - The "A null `by()` value" §17 row and the NaN wall are deleted.
 - The L5 law is green.
-- Legacy stores migrate on open.
 - No common shape got slower.
