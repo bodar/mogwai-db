@@ -10,7 +10,6 @@ import { INTEGER_OVERFLOW, raisedMessage, RaisedByQuery, valuePastPlatformCap } 
 import { CF_MAX_VALUE_BYTES, fitsUtf8, STATEMENT_TOO_LONG, VALUE_TOO_BIG } from './do-limits.ts';
 import { UnsupportedTraversal } from './compiler/unsupported.ts';
 import { literalTextHint } from './sql/kernel/budget.ts';
-import { migrate, type Migration, type SchemaPlan } from './migrate.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
@@ -60,7 +59,7 @@ function quotedChars(sql: string): number {
 export const sqliteMessage = (error: unknown): string | null =>
   error instanceof Error ? error.message.replace(/: SQLITE_[A-Z_]+$/, '') : null;
 
-/** The `property_fts` DDL — its own constant because migration 1 (`GRAPH_MIGRATIONS`) re-creates the table. */
+/** The `property_fts` DDL — its own constant because `upgradePropertyFts` re-creates the table. */
 const PROPERTY_FTS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS property_fts USING fts5(
      owner_elem UNINDEXED, pid UNINDEXED, owner UNINDEXED, pk UNINDEXED,
      text, tokenize="trigram case_sensitive 0")`;
@@ -271,39 +270,6 @@ const SCHEMA = [
      PRIMARY KEY (load, kind, id)) WITHOUT ROWID`,
 ];
 
-/** The graph's migrations, in order — APPEND ONLY: a store's version is how many of these it has
- *  applied, so an entry is never reordered, edited into a different change, or removed. A fresh graph is
- *  stamped at the latest version and runs none of them (the DDL above is already current), so each one
- *  only ever meets a store written before it. */
-const GRAPH_MIGRATIONS: readonly Migration[] = [
-  {
-    id: 'property-fts-signed-rowid',
-    why: 'a graph indexed before property_fts was keyed by signed property id carries a `kind` column and '
-      + 'auto-assigned rowids, which the rowid-keyed index writes would collide with',
-    // Rebuilt from its own 'value' rows (the only kind any reader used) — set-based, nothing held in
-    // memory. Guarded, because a store can have been created by code between this table's two shapes.
-    run(sql) {
-      if (!sql.query("SELECT 1 FROM pragma_table_info('property_fts') WHERE name = 'kind'").length) return;
-      sql.exec('ALTER TABLE property_fts RENAME TO property_fts_v1');
-      sql.exec(PROPERTY_FTS_DDL);
-      sql.exec(`INSERT INTO property_fts(rowid, owner_elem, pid, owner, pk, text)
-        SELECT CASE owner_elem WHEN 'edge' THEN -pid ELSE pid END, owner_elem, pid, owner, pk, text
-        FROM property_fts_v1 WHERE kind = 'value' GROUP BY owner_elem, pid`);
-      sql.exec('DROP TABLE property_fts_v1');
-    },
-  },
-];
-
-/** The graph's schema, as the migration runner reads it. Any of the probe tables present without the
- *  version table means a graph written before versioning (version 0); `property_fts` is a probe on its
- *  own because its one migration rewrites it. */
-const GRAPH_SCHEMA: SchemaPlan = {
-  versionTable: 'schema_version',
-  probeTables: ['nodes', 'property_fts'],
-  schema: SCHEMA,
-  migrations: GRAPH_MIGRATIONS,
-};
-
 export class GraphStore {
   constructor(private sql: Sql) {
     this.initSchema();
@@ -351,13 +317,28 @@ export class GraphStore {
     this.query('DELETE FROM bulk_journal WHERE load = ?', [load]);
   }
 
-  /** Bring the schema to the current version (`src/migrate.ts`): the idempotent DDL, then every pending
-   *  migration in order. Called once from the ctor, and again by a Durable Object after
-   *  `ctx.storage.deleteAll()` wipes the tables — version table included — out from under a still-live
-   *  instance, which the runner then sees as a FRESH store. Throws `SchemaTooNew` for a store a
-   *  newer server wrote. */
+  /** Run the schema DDL (idempotent — every statement is `IF NOT EXISTS`). Called
+   *  once from the ctor, and again by a Durable Object after `ctx.storage.deleteAll()`
+   *  wipes the tables out from under a still-live instance, to restore it to a fresh
+   *  empty graph. */
   initSchema(): void {
-    migrate(this.sql, (fn) => this.atomically(fn), GRAPH_SCHEMA, 'graph');
+    for (const statement of SCHEMA) this.sql.exec(statement);
+    this.upgradePropertyFts();
+  }
+
+  /** A graph indexed before `property_fts` was keyed by signed property id carries a `kind` column and
+   *  auto-assigned rowids, which the rowid inserts would collide with. Rebuild it once from its own
+   *  'value' rows (the only kind any reader used) — set-based, nothing held in memory. */
+  private upgradePropertyFts(): void {
+    if (!this.query("SELECT 1 FROM pragma_table_info('property_fts') WHERE name = 'kind'").length) return;
+    this.atomically(() => {
+      this.sql.exec('ALTER TABLE property_fts RENAME TO property_fts_v1');
+      this.sql.exec(PROPERTY_FTS_DDL);
+      this.sql.exec(`INSERT INTO property_fts(rowid, owner_elem, pid, owner, pk, text)
+        SELECT CASE owner_elem WHEN 'edge' THEN -pid ELSE pid END, owner_elem, pid, owner, pk, text
+        FROM property_fts_v1 WHERE kind = 'value' GROUP BY owner_elem, pid`);
+      this.sql.exec('DROP TABLE property_fts_v1');
+    });
   }
 
   /** Run `fn` as one atomic unit on the driver (`Sql.atomically`) — or bare, on a driver without one. */

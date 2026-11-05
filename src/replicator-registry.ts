@@ -15,7 +15,6 @@
 // no-op promises (`storeRegistry`).
 
 import type { Sql } from './api.ts';
-import { migrate, type Migration, type SchemaPlan } from './migrate.ts';
 import { execute, identifier, list, q, relation, render, value, type Expression } from './sql/kernel/q.ts';
 
 /** A persistent replication job (CouchDB's `_replicator` document — §9·2). `source`/`target` are graph refs
@@ -96,35 +95,6 @@ const REGISTRY_SCHEMA = [
      replication_id TEXT PRIMARY KEY, source_last_seq INTEGER NOT NULL)`,
 ];
 
-/** Add `column` of storage class `type` to `table` unless a registry created by later DDL already has it —
- *  an `ALTER TABLE … ADD COLUMN` (SQLite has no `IF NOT EXISTS` for it), guarded. DDL takes no binds, so
- *  the rendered statement's bind list is empty by construction. */
-const addColumn = (table: 'replication_job' | 'replication_config', column: string, type: 'TEXT' | 'INTEGER') =>
-  (sql: Sql): void => {
-    const t = identifier(table);
-    const cols = execute<{ name: string }>(sql, q`PRAGMA table_info(${t})`);
-    if (!cols.some((c) => c.name === column)) sql.exec(render(q`ALTER TABLE ${t} ADD COLUMN ${identifier(column)} ${type}`).sql);
-  };
-
-/** The registry's migrations — APPEND ONLY, as a graph's are (`src/storage.ts` `GRAPH_MIGRATIONS`). Unlike
- *  a graph DO (a fresh id per graph), the registry is a SINGLETON that persists across schema changes, and
- *  `CREATE TABLE IF NOT EXISTS` never adds a column to a table that already exists — so a column added
- *  after the first release is a migration here, never an edit to the CREATE alone (the CREATE carries it
- *  too, for a fresh registry, which runs no migration). */
-const REGISTRY_MIGRATIONS: readonly Migration[] = [
-  { id: 'job-history', why: 'a job\'s past sessions (`history`) are read and written on every run',
-    run: addColumn('replication_job', 'history', 'TEXT') },
-  { id: 'config-placement', why: 'a filtered replication\'s placement traversal (filtered-replication-plan §8/F2)',
-    run: addColumn('replication_config', 'placement', 'TEXT') },
-];
-
-const REGISTRY_PLAN: SchemaPlan = {
-  versionTable: 'registry_schema_version',
-  probeTables: ['replication_config', 'replication_job'],
-  schema: REGISTRY_SCHEMA,
-  migrations: REGISTRY_MIGRATIONS,
-};
-
 interface ConfigRow {
   id: string; source: string; target: string; continuous: number; create_target: number;
   filter: string | null; placement: string | null; checkpoint_interval: number | null; use_checkpoints: number;
@@ -150,10 +120,24 @@ const configCols = (alias?: string): Expression => {
  *  in-process. Owns its own schema over the `Sql` transport (a dedicated control-plane sqlite, never a
  *  graph). Only 0/1 numbers, strings, and null are bound, so no runtime-divergent bind coercion is needed. */
 export class ReplicatorStore {
-  /** Opens through the same migration runner as a graph (`src/migrate.ts`). Throws `SchemaTooNew` for a
-   *  registry a newer server wrote. */
   constructor(private sql: Sql) {
-    migrate(sql, (fn) => (sql.atomically ? sql.atomically(fn) : fn()), REGISTRY_PLAN, 'replication registry');
+    for (const statement of REGISTRY_SCHEMA) this.sql.exec(statement);
+    // Column migrations for an EXISTING registry. Unlike a graph DO (a fresh id per graph, so its schema is
+    // always current), the registry is a SINGLETON that persists across schema changes — and `CREATE TABLE
+    // IF NOT EXISTS` never adds a column to a table that already exists. So each column added after the first
+    // release is applied idempotently here: an add is skipped when the column is already present. Append new
+    // columns to this list, never edit the CREATE above for them.
+    this.ensureColumn('replication_job', 'history', 'TEXT');
+    this.ensureColumn('replication_config', 'placement', 'TEXT'); // filtered-replication-plan §8/F2
+  }
+
+  /** Add `column` of storage class `type` to `table` if it is not already present — an idempotent
+   *  `ALTER TABLE … ADD COLUMN` (SQLite has no `IF NOT EXISTS` for it). DDL takes no binds, so the
+   *  rendered statement's bind list is empty by construction. */
+  private ensureColumn(table: 'replication_job' | 'replication_config', column: string, type: 'TEXT' | 'INTEGER'): void {
+    const t = identifier(table);
+    const cols = execute<{ name: string }>(this.sql, q`PRAGMA table_info(${t})`);
+    if (!cols.some((c) => c.name === column)) this.sql.exec(render(q`ALTER TABLE ${t} ADD COLUMN ${identifier(column)} ${type}`).sql);
   }
 
   /** Upsert a job by id (create or replace) — idempotent, so a PUT of the same doc is a no-op change. */

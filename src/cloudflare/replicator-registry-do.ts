@@ -4,7 +4,6 @@ import {
   ReplicatorStore, type ReplicationConfig, type ReplicatorRegistry, type ReplicationJob, type JobResult,
 } from '../replicator-registry.ts';
 import type { Env } from './graph-store-do.ts';
-import { SchemaTooNew } from '../migrate.ts';
 
 // The Cloudflare backend of the ReplicatorRegistry seam (docs/2026-09-02-…-plan.md §9·2). Ongoing
 // replication config/job state lives in a SINGLETON control-plane store — one instance per deployment,
@@ -19,23 +18,11 @@ export const REGISTRY_SINGLETON = '_replicator';
  *  runs synchronously in the ctor (before any RPC), exactly like `GraphDatabase`. No `destroy`/`deleteAll`
  *  (a control plane is never torn down), so no `ensureLive` dance is needed. */
 export class ReplicatorRegistryDO extends DurableObject<Env> {
-  private opened: ReplicatorStore | SchemaTooNew;
+  private store: ReplicatorStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // A registry a newer server wrote is REFUSED, but not from here: a constructor throw is an uncaught
-    // exception to workerd on every request. It is held and raised by the call that needs the store.
-    try {
-      this.opened = new ReplicatorStore(new DurableObjectSqlite(ctx.storage.sql, (fn) => ctx.storage.transactionSync(fn)));
-    } catch (error) {
-      if (!(error instanceof SchemaTooNew)) throw error;
-      this.opened = error;
-    }
-  }
-
-  private get store(): ReplicatorStore {
-    if (this.opened instanceof SchemaTooNew) throw this.opened;
-    return this.opened;
+    this.store = new ReplicatorStore(new DurableObjectSqlite(ctx.storage.sql));
   }
 
   // Plain-data RPC (config objects are JSON-able — strings/booleans/numbers/null — so they structured-clone

@@ -65,7 +65,7 @@ describe('replicator config CRUD (Phase 5b)', () => {
     sql.exec(`CREATE TABLE replication_config(
       id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL, continuous INTEGER NOT NULL DEFAULT 0,
       create_target INTEGER NOT NULL DEFAULT 0, filter TEXT, checkpoint_interval INTEGER, use_checkpoints INTEGER NOT NULL DEFAULT 1)`);
-    const store = new ReplicatorStore(sql); // registry migration 2 adds `placement`
+    const store = new ReplicatorStore(sql); // ctor's ensureColumn adds `placement`
     store.putConfig({ id: 'j', source: 'a', target: 'b', placement: 'g.V(matchedIds).addE("x").from(V(1))' });
     expect(store.getConfig('j')?.placement).toBe('g.V(matchedIds).addE("x").from(V(1))');
   });
