@@ -53,7 +53,11 @@ corollaries:
 
 Each step lands green on its own. IDs are stable. `after` gives the order.
 
-- **P1 total-tag encoding** — every writer of a typed `{t,v}` tree and every alias-history entry
+- ✅ **LANDED 2026-11-05 (08aacfbc).** P1 total-tag encoding — a null leaf/member is `{t:'null'}` via
+  `valueNodeOf` (`src/gremlin/types.ts` `NULL_TAG`/`isNullTag`/`leafTag`); compile-time-null alias entries
+  write `t:'null'`; SQL tag inference consolidated in `src/compiler/rel/tag.ts` with one `nodeIsNull`;
+  revs unchanged (`propsCanonical`); witness `test/null-tag.test.ts`. Remains: nothing.
+  **P1 total-tag encoding** — every writer of a typed `{t,v}` tree and every alias-history entry
   `{k,v,t}` writes `t:'null'` for a null value. Today a null member is `{"t":null,"v":null}`, and a
   `constant(null).as('k')` entry has no `t` at all. **No migration** (see Status). What a blocked first
   build verified on trunk, so start from here:
