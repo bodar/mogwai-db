@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { type TypeNode } from '../gremlin/types.ts';
 import { GraphStore } from '../storage.ts';
+import { SchemaTooNew } from '../migrate.ts';
 import { graphInfo, changesFeed, revsDiff } from '../manager.ts';
 import { bulkGet, applyWire, checkpoint as storeCheckpoint, conflictsFeed, matchSetGids, runPlacement } from '../replicate.ts';
 import type { GraphInfo, ChangesFeed, RevsDiffRequest, RevsDiffResponse, BulkGetRef, WireChangeSet, ConflictEntry, Executor, ForeignResult, ForeignTerminal } from '../api.ts';
@@ -42,7 +43,12 @@ export interface Env extends WorkerConfigEnv {
  *  `ctx.storage.deleteAll()`, the only way to fully remove a DO's storage
  *  (dropping tables leaves internal metadata behind). */
 export class GraphDatabase extends DurableObject<Env> {
-  private store: GraphStore;
+  private store!: GraphStore;
+  // Set when this graph's storage was written by a NEWER server (`SchemaTooNew`). It is raised by
+  // `ensureLive` — so a data-plane RPC returns it as a value through `rpcTry` — never thrown from the
+  // constructor, which workerd would count as an uncaught exception on every request. `destroy()` is the
+  // way out: the wiped storage reopens as a fresh graph.
+  private refusal: SchemaTooNew | null = null;
   // Set by destroy(): this warm instance's storage was wiped. CF doesn't evict
   // the instance synchronously, so if it's reused before eviction we must
   // restore the schema first (see ensureLive). Left false and abandoned, the
@@ -51,9 +57,19 @@ export class GraphDatabase extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Schema DDL runs synchronously here (GraphStore ctor); no async init, so
+    // Schema DDL + pending migrations run synchronously here (GraphStore ctor); no async init, so
     // no blockConcurrencyWhile needed — it completes before any RPC.
-    this.store = new GraphStore(new DurableObjectSqlite(ctx.storage.sql, (fn) => ctx.storage.transactionSync(fn)));
+    this.open();
+  }
+
+  private open(): void {
+    try {
+      this.store = new GraphStore(new DurableObjectSqlite(this.ctx.storage.sql, (fn) => this.ctx.storage.transactionSync(fn)));
+      this.refusal = null;
+    } catch (error) {
+      if (!(error instanceof SchemaTooNew)) throw error;
+      this.refusal = error;
+    }
   }
 
   /** Restore the schema if this instance was wiped by a prior destroy() and is
@@ -62,9 +78,11 @@ export class GraphDatabase extends DurableObject<Env> {
    *  store, and as a cold instance whose ctor reruns the DDL. */
   private ensureLive(): void {
     if (this.wiped) {
-      this.store.initSchema();
+      if (this.refusal) this.open();
+      else this.store.initSchema();
       this.wiped = false;
     }
+    if (this.refusal) throw this.refusal;
   }
 
   /** This DO's per-graph Executor: its own store + the extended registry (federation on) + a

@@ -14,6 +14,12 @@ flat `edges.props` JSONB blob is retired).
 
 ## Guardrails
 
+- **A change to persisted DATA or a table's SHAPE is an append-only migration** (`src/migrate.ts`; the
+  graph's list is `GRAPH_MIGRATIONS` in `src/storage.ts`, the registry's `REGISTRY_MIGRATIONS`). `IF NOT
+  EXISTS` DDL only ever adds a table or index. The version lives in a one-row table, never `PRAGMA
+  user_version` (SQLITE_AUTH on a DO). A migration whose cost grows with the graph is `resumable`
+  (`rowidChunk`), because one transaction over a 10 GB graph can leave it unopenable.
+
 - **`value` has no declared type (BLOB affinity)** — this is deliberate: it preserves the bound
   value's SQLite storage class so numeric order/range predicates work. Don't add a type to it.
 - **`vtype` = the canonical Gremlin type from the write channel** (`src/gremlin/types.ts` is the one

@@ -44,21 +44,32 @@ corollaries:
 
 Each step lands green on its own. IDs are stable. `after` gives the order.
 
-- **P0 schema-version** — a storage substrate. There is no schema version or migration mechanism today
-  (`src/storage.ts` is all `CREATE … IF NOT EXISTS`). Add one: `PRAGMA user_version`, read when a store
-  opens, and an ordered list of migrations, each a SET-BASED statement program (no row loops, no
-  data-sized binds: CLAUDE.md's bind rule). The list runs once per graph, inside one transaction. It
-  must work on `bun:sqlite`, a Durable Object (a DO migrates lazily on its first request), and the
-  browser/WASM store. It refuses to open a store whose version is newer than the code. Tests cover a fresh
-  store, an old store, an already-migrated store, a failure mid-migration that rolls back, and a store that
-  is too new.
+- **P0 schema-version** — ✅ LANDED (`src/migrate.ts`, tests `test/migrate.test.ts`). One runner, shared
+  by `GraphStore` (`GRAPH_MIGRATIONS` in `src/storage.ts`) and `ReplicatorStore` (`REGISTRY_MIGRATIONS`,
+  which replaced its ad-hoc `ensureColumn`). The version is a ONE-ROW TABLE (`schema_version`,
+  `registry_schema_version`), not `PRAGMA user_version`, which is SQLITE_AUTH on a DO. With no version
+  table, a probe of `sqlite_master` decides FRESH (DDL, stamped at the latest version, no migration run)
+  or LEGACY (version 0). A store newer than the code is refused with `SchemaTooNew` naming both versions;
+  a DO holds that refusal and raises it per request (`ensureLive`), so it crosses `rpcTry` as a value and
+  the constructor never throws; `destroy()` reopens it fresh. A plain migration runs in one atomic unit
+  with its version bump. A **resumable** one (`rowidChunk`) runs in keyset chunks, each committed with a
+  persisted cursor (`resume_after`), and is stamped after its last chunk, so a graph near the 10 GB
+  ceiling makes progress instead of rolling back one over-budget transaction on every open. Migration 1
+  is the old `upgradePropertyFts` (still guarded). The list is APPEND ONLY.
+  **Open for P1 (measure under `wrangler dev` first):** a DO coalesces every write in one synchronous span
+  into one implicit transaction, so a chunk loop run synchronously in the constructor may still commit as
+  one unit there. If it does, P1's resumable migration must yield between chunks (an async open under
+  `blockConcurrencyWhile`, awaiting between chunks) for chunking to make progress across restarts on a DO.
+  On Bun and in the browser each chunk already commits on its own.
 
 - **P1 total-tag encoding (after P0)** — every writer of a typed `{t,v}` tree and every alias-history entry
   `{k,v,t}` writes `t:'null'` for a null value. Today a null member is `{"t":null,"v":null}`, and a
   `constant(null).as('k')` entry has no `t` at all. **Find every persisted typed tree**: vertex and edge
   property values, and anything else stored as JSON (replication/sync tables, conflicts, tombstones, saved
   side effects; check `src/storage.ts`, `src/replicate.ts`, `src/setwrite.ts`, `src/formats/`). Then:
-  - **Migration 1** (P0's first) rewrites legacy nodes set-based, with SQLite JSON1 over `json_tree`.
+  - **Migration 2** (the graph's second; 1 is the FTS rebuild) rewrites legacy nodes set-based, with SQLite
+    JSON1 over `json_tree`. It is RESUMABLE (`rowidChunk` over each property table), which its own
+    idempotent filter (only rows still carrying a `t:null` node) makes safe.
   - **Every import path** (GraphSON/CSV loaders, `BatchingLoader`, federation landings, replication
     apply) writes the total form.
 
