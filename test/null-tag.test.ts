@@ -16,7 +16,7 @@ import { vertexContent } from '../src/rev.ts';
 import { read, run, seededStore } from './support/harness.ts';
 import { executeQuery } from './support/executor.ts';
 
-// THE TOTAL TAG (docs/2026-11-05-presence-is-the-tag-plan.md P1): every typed `{t,v}` tree and every
+// THE TOTAL TAG (docs/2026-11-05-typed-value-carrier-plan.md P1): every typed `{t,v}` tree and every
 // alias-history entry spells a NULL value with the null tag `'null'`, so a member that IS null is told
 // apart from a tag nobody wrote. The spelling is invisible on the wire (a null frames as the one null
 // whatever its tag), so these assert the stored and compiled forms, plus the one reader whose answer

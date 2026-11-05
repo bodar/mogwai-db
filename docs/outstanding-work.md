@@ -680,10 +680,10 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   - mutations generated from the defined schema;
   - measure bind count / 100 KB SQL text for depth-4 selections.
 
-- **Tier B — `PresentWhen`: DECIDED 2026-11-05 — presence is the tag.** Neither retire nor keep: the side
+- **Tier B — `PresentWhen`: DECIDED 2026-11-05 — a typed value is one carrier.** Neither retire nor keep: the side
   channel is replaced by a total per-row type tag (TinkerPop `TraversalProduct`, Calcite's null indicator),
   with a one-off storage migration, and NaN rides the same carrier. Plan:
-  [2026-11-05-presence-is-the-tag-plan.md](./2026-11-05-presence-is-the-tag-plan.md) (P0–P10). It absorbs
+  [2026-11-05-typed-value-carrier-plan.md](./2026-11-05-typed-value-carrier-plan.md) (P1, T1–T8). It absorbs
   the chain-vs-child null items (r4-fu4, rf3-project-null-label, S9.9, rf3-static-null-is, the null-bound
   branch label) and the NaN wall.
 
