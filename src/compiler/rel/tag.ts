@@ -1,9 +1,7 @@
-import { compilerInt, compilerNull, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
-import { exprHasSubquery } from '../../rel/walk.ts';
+import { compilerInt, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import { NULL_TAG, type ValueType } from '../../gremlin/types.ts';
 import type { ScalarType } from '../../sql/kernel/render.ts';
 import { jsonField } from './build.ts';
-import { ALWAYS_PRODUCTIVE } from './child.ts';
 
 /**
  * THE PER-ROW TYPE TAG — what is known of a value's Gremlin type, and the SQL that reads it.
@@ -92,61 +90,3 @@ export const typeName = (value: Expr, evidence: ValueEvidence): Expr => {
  */
 export const nodeIsNull = (node: Expr): Expr =>
   bin('=', call('coalesce', jsonField(node, 't'), compilerText(NULL_TAG)), compilerText(NULL_TAG));
-
-declare const presenceTagBrand: unique symbol;
-
-/**
- * A PRESENCE TAG — a child body's TOTAL type tag, read by its host as "did the body produce": a Gremlin
- * type name on every row the body produced (`'null'` for a productive null), NULL only where it produced
- * nothing. So presence is `tag IS NOT NULL` (`presenceOf`'s `{ tag }` arm, `child.ts`), and a productive
- * null stays distinct from no row — TinkerPop's one productivity bit beside the value
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalProduct.java`),
- * Calcite's null indicator projected INSIDE the subquery
- * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/RelDecorrelator.java` ~:3157-3170).
- *
- * BRANDED, with the brand's symbol private to this module, so `tsc` (the `check` gate) rejects a
- * hand-built one: a presence tag comes only from a constructor below, each of which builds it where it
- * is TRUE —
- * - `staticTag` — a literal in the body's OWN select list (free: it exists exactly where the row does);
- * - `rowTag` — an inference over a ROW expression of the body, REFUSED over a subquery result, whose
- *   `typeof` answers `'null'` on NO row and so would read an unproductive body as a productive null;
- * - `gatedTag` — a tag over a MAY-BE-ABSENT arm, gated on the arm's presence (Calcite's `visitLiteral`,
- *   `RelDecorrelator.java` ~:2720-2726: a constant hoisted above the join reads NULL where the
- *   subquery's indicator does).
- *
- * Only the PRESENCE payload is branded. A FRAMING tag (`hostTag`, a branch's `armTag`, a merged
- * `vtype`, a write/collection/sack literal) stays a plain `Expr` and ungated, because nothing reads it
- * as presence; it becomes one only through a constructor here, which is where any gate is paid.
- */
-export type PresenceTag = Expr & { readonly [presenceTagBrand]: true };
-
-const branded = (tag: Expr): PresenceTag => tag as PresenceTag;
-
-/** A body's STATIC tag — a literal projected in its own row, present wherever that row is. */
-export const staticTag = (type: ValueType): PresenceTag => branded(compilerText(type));
-
-/**
- * A body's TOTAL tag inferred over a ROW expression of the body — never NULL for a row that exists: the
- * value's own tag completed from its storage class (`totalTag`), and `'null'` for a null value.
- *
- * `null` — REFUSED — where the value or its per-row tag CONTAINS a subquery anywhere, at the top or
- * nested (`json_extract((SELECT …), '$.v')`): a correlated read answers NULL when it finds no row, so an
- * inference over it is made OUTSIDE the body and reads "nothing" as a null value. The caller keeps its
- * value-nullness presence, or declines.
- */
-export function rowTag(value: Expr, evidence: ValueEvidence): PresenceTag | null {
-  if (exprHasSubquery(value) || (evidence.kind === 'tag' && exprHasSubquery(evidence.tag))) return null;
-  if (evidence.kind === 'static') return staticTag(evidence.tag);
-  const total = totalTag(evidence, value);
-  // A `COALESCE` the total tag already is takes the `'null'` fallback as one more argument.
-  const args = total.kind === 'call' && total.fn === 'COALESCE' ? total.args : [total];
-  return branded(call('COALESCE', ...args, compilerText(NULL_TAG)));
-}
-
-/**
- * A presence tag over a MAY-BE-ABSENT arm — `CASE WHEN <present> THEN tag END`, so the tag is NULL
- * exactly where the arm produced nothing — and the bare tag, no per-row term, where `present` is the
- * constant `ALWAYS_PRODUCTIVE`. The one place a tag read outside an arm's row becomes a presence tag.
- */
-export const gatedTag = (present: Expr, tag: PresenceTag): PresenceTag =>
-  present === ALWAYS_PRODUCTIVE ? tag : branded({ kind: 'case', whens: [[present, tag]], else: compilerNull() });

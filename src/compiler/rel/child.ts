@@ -11,7 +11,6 @@ import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { ProgramWrites } from './write.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { SideEffectConstants } from '../../gremlin/frontend.ts';
-import type { PresenceTag } from './tag.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -251,9 +250,6 @@ export interface ChildValue {
    *   from. A consumer that keeps productive nulls (`map()`, a write, a `group()` member node —
    *   `gatedOn`, `modulator.ts`) filters on `when`; one that reads `presenceOf` gets it for free; one that
    *   drops a null value anyway (an ordering/dedup `by()`, §17) still may.
-   * - `{ tag }` — the body produced exactly where its TOTAL type tag is non-NULL (`PresenceTag`,
-   *   `tag.ts`): the tag is built inside the body's own row and is `'null'` for a productive null, so
-   *   "no row" is a NULL tag. Consumed as a stated presence whose predicate is `tag IS NOT NULL`.
    *
    * REQUIRED, as `yields` and `framing` are: only the arm that built the expression knows, and an
    * OPTIONAL field read "the producer forgot" and "the producer cannot say" as one silence.
@@ -262,11 +258,7 @@ export interface ChildValue {
 }
 
 /** A child body's PRODUCTIVITY — see `ChildValue.present`. Never absent. */
-export type Presence = 'always' | 'value-nullness' | 'unknown' | StatedPresence;
-
-/** A presence STATED by its producer rather than read off the value — a `{ when }` predicate or a
- *  `{ tag }` presence tag. A consumer that keeps productive nulls reads both through `statedWhen`. */
-export type StatedPresence = PresentWhen | PresentTag;
+export type Presence = 'always' | 'value-nullness' | 'unknown' | PresentWhen;
 
 /** A presence STATED as its own per-row predicate (`ChildValue.present`'s `{ when }`). `orValue`: the body
  *  ALSO produced wherever its value is non-null — a `coalesce` whose earlier arms answer by value and whose
@@ -274,42 +266,27 @@ export type StatedPresence = PresentWhen | PresentTag;
  *  projects the value (`reductionTail`) tests the column instead of reading the value a second time. */
 export interface PresentWhen { readonly when: Expr; readonly orValue?: true }
 
-/** A presence carried as the body's TOTAL type tag (`ChildValue.present`'s `{ tag }`): present exactly
- *  where `tag IS NOT NULL`. Only `tag.ts`'s constructors can mint the `PresenceTag`. */
-export interface PresentTag { readonly tag: PresenceTag }
-
 /** A HOST's presence (`ChildHost.present`) — never a stated predicate: a body over the host narrows its
  *  presence to its value's nullness (an `is()`, a `drop` projector, `valueRun`), and narrowing a `{ when }`
  *  that way would read a NULL the filter made as a productive null. */
-export type HostPresence = Exclude<Presence, StatedPresence>;
+export type HostPresence = Exclude<Presence, PresentWhen>;
 
 /** A constant TRUE, the per-row predicate `presenceOf` answers for `'always'` — ONE shared object, so a
  *  consumer can test it by reference and spend no `CASE`/filter on it. SQLite folds it. */
 export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
 
 /** The presence as a per-row predicate over the body's VALUE — `ALWAYS_PRODUCTIVE` for `'always'`,
- *  `value IS NOT NULL` for `'value-nullness'`, the stated predicate for `{ when }`, `tag IS NOT NULL` for
- *  `{ tag }`, or `null` to DECLINE
+ *  `value IS NOT NULL` for `'value-nullness'`, the stated predicate for `{ when }`, or `null` to DECLINE
  *  on `'unknown'`. One function so "decline on unknown" is spelled once. */
 export const presenceOf = (present: Presence, value: Expr): Expr | null =>
   present === 'unknown' ? null : present === 'always' ? ALWAYS_PRODUCTIVE
     : present === 'value-nullness' ? isNotNullExpr(value)
       : statedPresence(present, value);
 
-/** A stated presence as a predicate, given where the VALUE can be read — the value expression itself, or
- *  the column a consumer projected it to (read only by a `{ when, orValue }`). */
-export const statedPresence = (present: StatedPresence, value: Expr): Expr =>
-  'tag' in present ? statedWhen(present)
-    : present.orValue ? { kind: 'binary', op: 'or', left: isNotNullExpr(value), right: present.when } : present.when;
-
-/** A stated presence's OWN predicate, in the host's scope and without the value — `when`, or
- *  `tag IS NOT NULL`. What a consumer projects beside the value before it filters (`restated`). */
-export const statedWhen = (present: StatedPresence): Expr => 'tag' in present ? isNotNullExpr(present.tag) : present.when;
-
-/** A stated presence whose own predicate a consumer PROJECTED to `when` (a column), read off that column:
- *  `orValue` is kept, so `statedPresence` still ORs the value's nullness in. */
-export const restated = (present: StatedPresence, when: Expr): PresentWhen =>
-  'tag' in present || !present.orValue ? { when } : { when, orValue: true };
+/** A `{ when }` presence as a predicate, given where the VALUE can be read — the value expression itself,
+ *  or the column a consumer projected it to. */
+export const statedPresence = (present: PresentWhen, value: Expr): Expr =>
+  present.orValue ? { kind: 'binary', op: 'or', left: isNotNullExpr(value), right: present.when } : present.when;
 
 const isNotNullExpr = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: value, right: compilerNull() });
 
@@ -357,7 +334,7 @@ export const presenceDischarged = <H extends ChildHost>(host: H): H =>
 export const mayBeAbsent = (host: ChildHost | Subject): boolean => presentOfHost(host) !== 'always';
 
 /** The presence of arms whose value is ONE value's nullness — a choice's, decided at compile time: every
- *  arm `'always'` ⟹ `'always'`; any arm `'unknown'` or STATED (`{ when }`/`{ tag }`) ⟹ `'unknown'` (the consumer
+ *  arm `'always'` ⟹ `'always'`; any arm `'unknown'` or STATED (`{ when }`) ⟹ `'unknown'` (the consumer
  *  declines); otherwise the chosen value's nullness. A stated arm cannot fold into the meet — a productive
  *  null under it would read as absent — and keeping it would need a per-row presence CASE mirroring the
  *  value's, so a choice with one declines instead. So a PRODUCER whose presence is the constant truth must

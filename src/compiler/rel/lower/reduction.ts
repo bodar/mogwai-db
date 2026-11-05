@@ -19,7 +19,7 @@ import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, renumber, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
-import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, restated, statedPresence, statedWhen, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
+import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
 import { constLit, countLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
@@ -33,7 +33,7 @@ import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, typ
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { propertyReadOf } from '../property.ts';
 import { raisingWhen, transformOffences } from '../receiver.ts';
-import { evidenceOf, gatedTag } from '../tag.ts';
+import { evidenceOf } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
 import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
@@ -221,11 +221,11 @@ export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, lab
     const PRESENT = 'mpw';
     const withPresence = make.project({
       id: fresh('mc'), input: rel, channels, type: typeOf(...cols, meta(PRESENT, 'int', true)),
-      exprs: [...exprs, [PRESENT, statedWhen(produced.present)]],
+      exprs: [...exprs, [PRESENT, produced.present.when]],
     });
     const kept = make.filter({
       id: fresh('mf'), input: withPresence, channels, type: withPresence.type,
-      pred: statedPresence(restated(produced.present, col(withPresence.id, PRESENT)), col(withPresence.id, payload.cols[0]![0].name)),
+      pred: statedPresence({ ...produced.present, when: col(withPresence.id, PRESENT) }, col(withPresence.id, payload.cols[0]![0].name)),
     });
     const shed = make.project({
       id: fresh('mc'), input: kept, channels, type: typeOf(...cols),
@@ -1732,7 +1732,7 @@ function scalarCoalesceChild(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
   // A final arm that STATES its presence (a re-sourced `__.V()…` fallback) states it for ITSELF; where an
   // earlier arm answered, that arm's non-null value is the presence — `orValue`, so a consumer that
   // projects the value tests its column rather than reading every arm a second time.
-  const present: Presence = typeof final.present === 'object' ? { when: statedWhen(final.present), orValue: true } : final.present;
+  const present: Presence = typeof final.present === 'object' ? { when: final.present.when, orValue: true } : final.present;
   // A single shared STATIC type stays static (one column); otherwise a per-row tag whose column is the
   // COALESCE of each arm's own vtype — a reducer's `vt` expr, else the arm's static-type literal (the
   // expression-level twin of `withMergedVtype`, `build.ts`).
@@ -3025,8 +3025,6 @@ function selectedNodeChild(
     if (present === 'unknown') return null;
     if (present === 'value-nullness') return { ...gated, present };
     if (present === 'always') return { ...gated, present: keyPresent };
-    // A presence TAG is gated as the value is (NULL where no scope held `k`); a predicate folds to false.
-    if ('tag' in present) return { ...gated, present: { tag: gatedTag(held, present.tag) } };
     return { ...gated, present: { ...present, when: caseWhen(held, present.when, compilerInt(0)) } };
   } else if (valOf.kind === 'list') {
     reHost = { kind: 'list', list: jsonOf(jsonField(node, 'v')), of: valOf.of, row };
