@@ -474,7 +474,7 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 - **Mid-traversal `V().has` with no seek in a READ (r4-perf1)** — 813 ms → 44.6 s. Matches the r7-fu3 value
   join below (818 ms → 50.6 s on trunk, now linear); re-probe the original witness to close it.
 - ✅ **LANDED — Correlated-value property seek (r7-fu3, r6-fu1) + fed-inject-quadratic + the
-  mapvalues-inject-ceiling P×N residue.** `semijoin.ts` (`narrowFilter`) adds `element.id IN (SELECT owner
+  mapvalues-inject-ceiling P×N residue (7f3c9d31 + d00f299e).** `semijoin.ts` (`narrowFilter`) adds `element.id IN (SELECT owner
   FROM vertex_properties WHERE key = k AND value = <outer value>)` beside the untouched `EXISTS` wherever the
   element traces (`columnPath`) to an unbounded, not-join-driven element scan; the pass walks with
   `rewriteRels`, so `group()/project().by()` value traversals, union arms and the federated sibling's per-key
@@ -485,7 +485,7 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   outranks a correlated one. Measured 1k → 8k: value join 818 ms/50.6 s → 5.5/31.6 ms; `inject($xs)`
   383 ms/22.8 s → 6.1/33.6 ms; federate `….call('federate',['graph':'x']).V().has('name', select('e'))` 568 ms
   at 1k/7.7 s at 4k → 16.4/88.6 ms. Tests: `test/correlated-value-seek.test.ts`, `test/plan-stability.test.ts`
-  (value-join shapes). Remains: **a LABELLED value join** (`…V().hasLabel('person').has('name', select('e'))`,
+  (value-join shapes). Remains (still quadratic, unchanged from trunk): **a LABELLED value join** (`…V().hasLabel('person').has('name', select('e'))`,
   incl. inside a federated sibling: 328 ms → 20.8 s, 63×) stays at its pre-r7-fu3 cost, label-driven, because
   value-over-label was measured making a fact-to-small-dimension join quadratic (`…values('country').as('c')
   .V().hasLabel('office').has('country', select('c'))`: 17 ms/118 ms → 33 ms/1 969 ms). Linear in BOTH needs
