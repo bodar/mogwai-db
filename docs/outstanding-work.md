@@ -680,21 +680,12 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   - mutations generated from the defined schema;
   - measure bind count / 100 KB SQL text for depth-4 selections.
 
-- **Tier B — retire `PresentWhen`?** 🔴 `PresentWhen` (`rel/child.ts`, the `{ when, orValue? }` arm of
-  `Presence`) is the one way a child body states a PRODUCTIVE null. Four producers (`aliasGuard`,
-  `oneRowPresence`'s `EXISTS`, `selectedNodeChild`'s `{t,v}` test, coalesce's `orValue`), ~33 readers.
-  - **Retire:** Presence becomes `'always' | 'value-nullness' | 'unknown'`; a productive null in a child body
-    is absent — one §17 line generalising "A null `by()` value". Deletes the arm, `statedPresence`,
-    `orValue`, `HostPresence` and the per-row `EXISTS`/node tests. Cost: a dropped null changes a COUNT.
-  - **Keep:** add `presentWhere(pred)` so no producer reports `{when: ALWAYS_PRODUCTIVE}` (the a4c62a20
-    regression), then build a binding-presence substrate for the chain-vs-child wrong answers it fixes:
-    `project()` drops a productive-null `by()` entry (r4-fu4, rf3-project-null-label, `ProjectStep.java:66`);
-    a null Map entry dropped under map/local/flatMap/choose (S9.9); `inject(null,1).map(__.is(P.neq(1)))`
-    gives `[]`, chain `[null]` (rf3-static-null-is); a label bound to null in a branch arm —
-    `g.V().as('v').union(constant(null).as('k'), constant(0)).select('v').map(__.select('k'))` gives `[]`,
-    ref `[null,null]` (`Scoping.java:129-130`; `rerootPresence` is `'value-nullness'`); a re-sourced
-    productive-null arm in `choose`; stated-presence `by()` in local/map/optional; `aliasGuard`'s presence
-    spelling (F14b). None user-reported.
+- **Tier B — `PresentWhen`: DECIDED 2026-11-05 — presence is the tag.** Neither retire nor keep: the side
+  channel is replaced by a total per-row type tag (TinkerPop `TraversalProduct`, Calcite's null indicator),
+  with a one-off storage migration, and NaN rides the same carrier. Plan:
+  [2026-11-05-presence-is-the-tag-plan.md](./2026-11-05-presence-is-the-tag-plan.md) (P0–P10). It absorbs
+  the chain-vs-child null items (r4-fu4, rf3-project-null-label, S9.9, rf3-static-null-is, the null-bound
+  branch label) and the NaN wall.
 
 ## 3. Compounding substrate
 
