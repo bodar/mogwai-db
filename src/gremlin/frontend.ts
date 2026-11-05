@@ -48,9 +48,10 @@ class Errors extends BaseErrorListener {
 //
 // Both stages share the generated parser's static prediction DFA, and SLL leans on it harder: that
 // DFA is what `patches/antlr4ng@3.0.16.patch` guards, and `test/L1-corpus/parser-state.test.ts`
-// interleaves the two modes against it. `mode: 'll'` forces the single LL pass (tests compare to it).
-export function parseGremlinUncached(query: string, mode: 'two-stage' | 'll' = 'two-stage') {
-  if (mode === 'two-stage') {
+// interleaves the two modes against it. `mode: 'll'` forces the single LL pass (tests compare to it);
+// `mode: 'sll'` runs stage 1 alone and throws where it would fall back (tests prove stage 1 carries the corpus).
+export function parseGremlinUncached(query: string, mode: 'two-stage' | 'sll' | 'll' = 'two-stage') {
+  if (mode !== 'll') {
     const errs = new Errors();
     const parser = recognizer(query, errs);
     parser.removeErrorListeners();
@@ -59,7 +60,7 @@ export function parseGremlinUncached(query: string, mode: 'two-stage' | 'll' = '
     try {
       return checked(parser.queryList(), errs);
     } catch (e) {
-      if (!(e instanceof ParseCancellationException)) throw e;
+      if (mode === 'sll' || !(e instanceof ParseCancellationException)) throw e;
     }
   }
   const errs = new Errors();

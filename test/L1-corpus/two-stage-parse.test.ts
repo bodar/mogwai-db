@@ -19,6 +19,18 @@ test('every L1 corpus traversal parses to the same tree as a forced LL parse', (
   expect(differs).toEqual([]);
 }, 60_000); // ~2,400 cold LL parses plus as many SLL ones; generous for a slow CI runner.
 
+// The speed half of the contract. The test above passes even if stage 1 never succeeds (every parse
+// falling through to LL is still the LL tree), so it cannot see the 14x regression of a broken or
+// deleted first stage. This can: stage 1 alone must carry every corpus traversal. A new entry here
+// means a grammar change that needs full-context prediction, or a broken stage 1 — both worth knowing.
+test('stage 1 (SLL + bail) parses every L1 corpus traversal without falling back to LL', () => {
+  const fellBack: string[] = [];
+  for (const q of corpus) {
+    try { parseGremlinUncached(q, 'sll'); } catch { fellBack.push(q); }
+  }
+  expect(fellBack).toEqual([]);
+}, 60_000);
+
 test('witnesses whose shapes lean on the grammar parse to the forced-LL tree', () => {
   for (const q of [
     'g.withStrategies(new SubgraphStrategy(checkAdjacentVertices: true, vertices: __.has("name", P.within("josh","lop","ripple")))).V().out()',
