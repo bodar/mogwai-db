@@ -696,20 +696,6 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
     productive-null arm in `choose`; stated-presence `by()` in local/map/optional; `aliasGuard`'s presence
     spelling (F14b). None user-reported.
 
-- **Long bounded repeats inside a per-traverser host past times(63) (host-body-decorrelation).** 🔴
-  Verbatim: "Long bounded repeats inside a per-traverser host (local/where/map/by) answer only up to
-  times(63). From 64 on, SQLite refuses them, a clean decline that depends on the query text (cc-6 makes it
-  fast and makes it name the times()). Recommendation: accept this and add one line to
-  docs/feature-support-matrix.md §17 as a SQLite statement-shape limit. Decorrelate reducing host bodies only
-  if a common-reach performance measurement asks for it, because doing so changes the plan of every
-  local(...count())/by(__...count())/where(...count()) and may slow single-origin hosts. Agree?"
-  Context: deferred, not built, no branch. **Prerequisite (do BEFORE any decorrelation build): measure**
-  correlated-scalar vs GROUP-BY-origin cost for COMMON reducing host bodies —
-  `g.V().project('n').by(__.out().count())`, `g.V().where(__.out().count().is(gt(2)))` at 1k/8k, plus the
-  single-origin `g.V(1)` form; build only if the correlated form is super-linear or materially slower. Shares
-  its root with §0b's correlated-subtree-sharing prerequisite and §0 spine-cut-hosts (a correlated body as a
-  relation of its own) — if that substrate is built, this item is its consumer, not a second mechanism.
-
 ## 3. Compounding substrate
 
 RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open families):
