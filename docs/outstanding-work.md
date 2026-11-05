@@ -221,7 +221,109 @@ statement's text grows with data or doubles with query shape. The items below ar
 - ✅ **Federate resumes put returned data into the SQL TEXT — LANDED (25a64da6).** See the reuse-sweep
   entry below; nothing remains.
 
-**Follow-ups from the compile-cost round 2 reviews (next round starts HERE, major first).**
+**Follow-ups from the round 4 reviews (2026-11-05; next round starts HERE, in this order).** This round
+landed rowsbind-value-ceiling (72afaa7f), expansion-decline real cause (67ae23c5), inject-param-ceiling
+(d605f072), both-gate-frontier-cost (b3f584bc) and r7-fu3 (7f3c9d31 + d00f299e); entries below. Dropped:
+unroll-decline-cost (a per-step-kind lower-bound byte table for cc-5 (b)) — the remedy stays "make the
+`order().by()` phase cheaper", not a byte table. Nothing parked; no branch to resume.
+
+Shared roots, each proposed ONCE as the substrate item to build before what it unblocks:
+- **S1 — a selectivity fact or `flatten` §4 decorrelation (before the r7-fu3 residue AND item 4 below).**
+  The labelled value join, `has(label, k, select(e))`, a low-cardinality constant beside a correlated seek,
+  and a non-sargable constant outranking one are all ONE gap: `semijoin.ts` picks an access path by fixed
+  priority ("label/id reached beats value", "constant beats correlated") where selectivity should decide.
+  Without stats on DO, the substrate is decorrelation: join the outer values against ONE materialized
+  `(owner, value)` relation (RelIR plan `flatten` §4), so neither side drives quadratically.
+- **S2 — alias/path liveness drops a dead carrier before a hop (before item 3's dead-carrier residue).**
+  An unused `as()` inside an `optional()` arm, or a `path()` under `count()`, keeps a computed column alive,
+  which is what tips `copyRepeatsWork` into the slower one-read form.
+
+1. **The user's literal bulk upsert still declines on a DO — prioritise literal-text-amplification (§4),
+   do not park it.** 67ae23c5 fixed the MESSAGE, not the cause: `g.inject(<100 × 20-key string maps>)
+   .mergeV().count()` is 32 KB of query and a ~118 KB first statement (quoted `{"t":"string","v":…}` per key
+   and per value), over DO's 100 KB cap; 50×20 answers, 200×20 is ~238 KB. Same item: a 200 KB literal
+   `property('doc', '<…>')` renders as ~400 KB (spelled twice). The parameter remedy for maps waits on R8-res.
+2. **Unroll advice is recorded at a hand-written host list (expansion-decline, MAJOR, plausible).**
+   `noteUnrolled` (`src/compiler/rel/lower/chain.ts`) is called at 11 sites (root, `perTraverserChild`,
+   where/and/or, union/coalesce/optional/choose); `by()` modulators and `branch()` are missing, so
+   `g.V().project('a').by(repeat(out()).times(70).count())` (also `group().by(…)`, `order().by(…)`,
+   `branch(repeat(out()).times(70).count())`) now says "its steps fuse into one join per step — split it" where
+   trunk named `repeat(…).times(70)` — a message regression. Fix: note host-less at the shared child-body
+   reader (`bodyOf`/`childSeam`, given `ctx.budget`; spliced steps already carry `IRStep.unrolled`); only the
+   map-like hosts upgrade the advice with their own name. Then a new host cannot miss it.
+3. **`copyRepeatsWork`'s computed-carrier leg slows ordinary label/path shapes (both-gate-frontier-cost,
+   MAJOR, common).** The leg cannot see the consumer or the hop depth. Measured 8k/24k, trunk → b3f584bc:
+   `g.V().match(__.as('a').both().as('b'), __.as('b').both().as('c')).count()` 71 → ~100 ms (+40%, and the
+   labels ARE read, contradicting the commit's rationale); `g.V().as('a').both().both().path().count()` 32 →
+   47 ms; `g.V().as('a').both().both().both().where(neq('a')).count()` 205 → 302 ms (+47%), 4 hops 786 →
+   1207 ms (+54%); `both().both().both().simplePath()` +12%. Cause (EXPLAIN): every hop takes the direction-row
+   form, so `jsonb_array(jsonb_object('k',0,'v',rn.id))` is rebuilt per OUTPUT row under nested
+   `CASE WHEN dirN` ids instead of once per vertex. Fix: keep the window/DISTINCT/LIMIT legs (principled,
+   `shapeOf`), and either drop/narrow the carrier leg or have the one-read form PROJECT a computed carrier at
+   the frontier's row count rather than inline it downstream. Add the match(), 3- and 4-hop label shapes to
+   the scaling witnesses in `test/compiler/both-frontier-once.exec.test.ts`. Cheap: `copiedWork`'s doc says
+   "any projected expression…" but a computed FILTER predicate counts as no work — say so.
+4. **r7-fu3: a constant has() outranks a correlated seek even when it is not sargable (MAJOR, plausible).**
+   `ElementFacts.constantSeek` (`src/rel/passes/semijoin.ts`) counts a numeric `has('k',1)` or a range
+   `has('age', gt(40))`, which lower to a CASE over `vtype` → `SEARCH … vp_key_value (key=?)`, a key-only
+   scan of every holder: `g.V().values('name').as('e').V().has('name', select('e')).has('age', gt(40))
+   .count()` 369 ms → 27.5 s at 1k → 8k (trunk 65×, so not newly reachable, but this commit adds the fact
+   keeping it there). Minimum fix: a constant outranks only as a literal equality the index can use on
+   `value`. The general case is S1.
+5. **r7-fu3: the correlated value is spelled twice — the narrowing IN and the EXISTS it sits beside (MAJOR,
+   common).** `narrowFilter` (and `indexSeek` via `freshCopy`) copies the whole typed-value normaliser
+   (`json_extract(jsonb_array(jsonb_object(… printf('%!.17g' …))),'$[#-1].v')`) into the IN and keeps the
+   EXISTS, which the doc comment says holds of exactly the same rows — "computed once" broken, statement text
+   ~doubled per correlated has(); sql-hygiene cannot see it (no corpus value join). Fix: REPLACE the EXISTS
+   with the IN once placed, or project the value once on the outer side and reference the column from both
+   (the `inject($xs)` form already has it as a column). Add a sql-hygiene witness of a value join.
+6. **r7-fu3 verify: the label-past-`as()` regression.** Reported against 7f3c9d31: `g.V().hasLabel('city')
+   .values('name').as('e').V().hasLabel('person').as('v').has('city', select('e')).select('v').values('name')
+   .count()` 232 ms/3.7 s at 1k/4k vs trunk 127 ms/2.0 s (also with `dedup()`). d00f299e's `ElementFacts`
+   claims to cover "label past an `as()`"; re-measure this exact witness and pin it in
+   `test/correlated-value-seek.test.ts`, with the missing fixture shape: a LOW-cardinality key against a
+   SMALL labelled set, correlated and constant.
+7. **r7-fu3 residue to name explicitly (under S1):** the labelled value-join spelling `has('person','name',
+   select('e'))` (905 ms → 57.8 s, the most common app spelling); federate's value tail
+   `….call('federate',['graph':'x']).V().has('name', select('e')).values('age').sum()` 397 ms → 22.2 s while
+   `.count()` and the injected sibling form are linear — the arg-less pushdown for a value tail does not take
+   the mapValues injection route (`src/services/catalog/federate.ts`).
+8. **The write half of the value join is quadratic (§1b, common, pre-existing).** `g.V().hasLabel('order')
+   .as('o').values('code').as('c').V().hasLabel('warehouse').has('code', select('c')).addE('servedBy')
+   .from('o').count()` 730 ms → 42.3 s; the constant form `…has('region','r1').addE(…)` 688 ms → 34 s; a
+   key-bound target (`V('w1')`) is linear, so the cost is the re-source read inside the write program —
+   rf3-fuse-write (§1b, `fuse` runs only in the read `lowered()`) is the likely prerequisite.
+9. **Store-side text-cap decline lost its cause for a root `repeat()` under DO (expansion-decline, minor).**
+   Under `CfLimitedSql`, `g.V().repeat(out()).times(1000).count()` (and `.path()`) now gets "statement too
+   long … about 139 KB" with no cause or remedy; trunk said "a repeat() with a large times() … is the usual
+   cause". The compile meter already holds `budget.unroll` — hand the plan's UnrollNote to the execute-site
+   catch and reuse `unrollAdvice`. `repeat-unroll-boundary.exec.test.ts:534` pins the cause-free text; fix it.
+10. **Decline-message accuracy (minor, cheap).** (a) `statementShapeDecline` (`src/storage.ts`) reports
+    sizes and the literal share in UTF-16 units against DO's 100 KB UTF-8 cap — use `utf8Bytes`
+    (`src/do-limits.ts`). (b) `literalTextHint` (`src/sql/kernel/budget.ts`) always says "send the values in
+    smaller batches", even for ONE large literal value batching cannot shrink — name "send it as a parameter"
+    (`property('doc', doc)` answers today). (c) `valuePastPlatformCap('computed')` (`src/rel/raise.ts`) ends
+    "…or leave it unfolded": say "do not fold() it". (d) `g.V().repeat(out().dedup()).until(loops().is(20000))
+    .count()` and `repeat(both().dedup()).times(70)` still say "no lowering covers" — the `pastBudget`
+    rethrow covers child bodies, not the root barrier-body path (`src/compiler/ir/strategies.ts`).
+    (e) federate's `….call('federate',['graph':'x','traversal':__.V().has('name', select('e')).values('age')])`
+    decline quotes the internal rewrite `g.inject(injectedMap).unfold().group().by(Column.keys)…`, a
+    traversal the user never wrote — quote the user's.
+11. **`inject(xs).unfold()` declines at ANY size when `xs` is a list of lists, Maps, a Set, Dates/BigInts or
+    mixed types (§4, plausible, pre-existing).** So `inject($rows).unfold().select('age')` and
+    `inject(xs).unfold().as('n').addV('person').property('name', select('n'))` decline too; d605f072's split
+    is therefore exercised only for scalar lists and maps. Same seam as R8-res's "a list parameter of Maps"
+    (`listLiteralBlob`) — build it there.
+12. **Mid-traversal `V().has(k, select('e'))` declines under most hosts (§4, plausible, pre-existing).** It
+    answers on the spine, in `local()`, `project()/group().by()` and `union()` arms, but declines cleanly in
+    `coalesce`/`optional`/`filter`/`where`/`map`/`flatMap`/`repeat` bodies and after `simplePath()`, and
+    `has('name', neq(select('e')))`. The seek reaches depth through `rewriteRels`, so these get it for free
+    once those hosts lower a mid-traversal `V()` — re-probe after §3.8's nested child body.
+13. **Cheap test hygiene.** `test/inject-param-split.test.ts` "several list traversers keep inject order":
+    `inject(xs, ys).unfold()` is interleaved by member index (§17 unordered streams) and the test passes only
+    via `tail()` — rename it, or assert count + tail only.
+
+**Follow-ups from the compile-cost round 2 reviews (after the round 4 list above, major first).**
 
 - ✅ **cc-7 one-step re-read + `order()/dedup().by(<transformed key>)` after a hop crash — LANDED (cfeb1003).**
   The crash (the emitter's bare "column … not in scope" Error) was mis-scoped sort/dedup keys: `keptBy`
@@ -274,7 +376,7 @@ statement's text grows with data or doubles with query shape. The items below ar
   column (an `as()` label carrier, a path) or a window/barrier (order+limit, `dedup().by()`) and is not a
   materialized CTE is now read ONCE (direction row + one `edges` join) instead of copied per direction; plain
   frontiers keep their two seeks. Mechanism: a sibling node fact beside `doubledReads` in `src/rel/copies.ts`,
-  read by `hopJoin` (`src/compiler/rel/lower/movement.ts`). Tests: EQP + oracle + 1k→8k ratio witnesses in
+  read by `hopJoin` (`src/compiler/rel/lower/movement.ts`). Review found the carrier leg MAJOR (round 4 item 3). Tests: EQP + oracle + 1k→8k ratio witnesses in
   `test/compiler/both-frontier-once.exec.test.ts`. Remains — two follow-ups, neither a prerequisite:
   - **Dead computed carriers.** A carrier kept alive but never read (an unused `as()` inside an `optional()`
     arm, a path under `count()`) is 10–28% slower in the one-read form. Root cause: alias/path liveness
@@ -757,7 +859,7 @@ Beside the RelIR substrate:
   `mergedFromMap` does not route yet. Its parameter form (`inject($rows).unfold().mergeV()`) is what a
   literal bulk upsert past the statement cap SHOULD be told to send instead; until it lowers, that decline
   (`literalTextHint`, `src/sql/kernel/budget.ts`) can only say "send the values in smaller batches".
-- **Literal maps are spelled ~5× their query text (literal-text-amplification)** — `g.inject(<3,000
+- **Literal maps are spelled ~5× their query text (literal-text-amplification) — PRIORITY: the user's "twenty keys" upsert (round 4 item 1, §0b).** — `g.inject(<3,000
   [name:'m<i>'] maps>).mergeV()` is 44 KB of query and a ~223 KB first statement (each map a
   `jsonb('[[{"t":"string","v":"name"},{"t":"string","v":"m0"}]]')` VALUES row), so a Durable Object refuses
   it at ~1,300 maps where the query text alone would allow ~6,000. It now declines CLEANLY on both runtimes
@@ -1320,11 +1422,23 @@ Proposals from the compile-cost round 3 reuse sweep (answer-neutral unless state
   `src/formats/drain.ts` `rowsForOwners`; `src/bulk.ts` `BatchingLoader.existing`/`existingUid`/
   `wipeFts`/`assertFree`; `src/replicate.ts` `resolveGids`/`localRevs`/`resurrect`/`applyDeletes`
   (referenced, weakCascade, both `property_fts` deletes, tombstone `already`)/`liveRevs`; `src/manager.ts`
-  `changes` (filtered `match`)/`conflictLeaves`/`revsDiff`; `src/refresh.ts` `ftsRowsForDirty`. Under 2 MB
+  `changes` (filtered `match`)/`conflictLeaves`/`revsDiff`; `src/refresh.ts` `ftsRowsForDirty`; the OLAP seeds
+  `src/services/catalog/olap/pagerank.ts` (injected values) and `olap/kernel.ts` `relaxShortestPath` (sources)
+  — re-confirmed by the round 4 sweep (~25 spellings; none reads `key`). Under 2 MB
   each still renders exactly `json_each(?)`. NOT bounded as f3e607f4 assumed: `manager.ts`'s filtered
   `_changes` `match` set is a filter's matched vertices, and replicate's gid sets are a peer's whole
   changeset batch (~60k hex gids per 2 MB) — data-size walls. A gid caller writes `SELECT unhex(value) FROM
   ${members(gids)}` so the gid index still serves.
+- **One "this bind is past the DO value cap" predicate in `src/do-limits.ts` (round 4 sweep).** The
+  VALUE_TOO_BIG branch of `GraphStore.query`'s catch (`src/storage.ts`, inline `typeof bind === 'string' ?
+  !fitsUtf8(…) : bind instanceof Uint8Array && …`) duplicates `src/cf-limits.ts` `valueBytes`, and drops its
+  ArrayBuffer arm — so an ArrayBuffer past the cap reads 'computed' in production but 'sent' under test. Move
+  `valueBytes` (or the predicate) beside `fitsUtf8`/`utf8Bytes`, which both files already import; ~4 lines
+  net, wording unchanged for every string/Uint8Array bind.
+- **Membership item above, per-site checks (round 4 sweep).** `JSON.stringify` becomes `stringifyExact`
+  (same spelling for gid hex strings and integer ids — check pagerank's injected value strings); drain.ts is
+  bounded by its 500-id page, so there it only unifies the spelling. Follow-on: `mise run binds` can flag a
+  hand-written `json_each(?)` outside the helper, as it already flags `?` repetition.
 - **One owned-row wipe shared by the bulk loader and replication deletes.** `src/bulk.ts`
   `BatchingLoader.wipeVertexChildren`/`wipeEdges`/`wipeFts` and `src/replicate.ts` `applyDeletes` (~262–273)
   hand-roll the same cascade (`DELETE FROM property_fts WHERE rowid IN (SELECT [-]id FROM *_properties WHERE
