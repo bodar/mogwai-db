@@ -93,6 +93,19 @@ Each step lands green on its own. IDs are stable. `after` gives the order.
   **Enforce it mechanically**: extend `mise run arch` (or a lint rule) so a child tag can only come from
   the helper. A convention would regress.
 
+- ✅ **LANDED 2026-11-05 (91e2fe04).** P3 an `is()` gate keeps a productive null that passes —
+  `inject(null,1).map(is(neq(1)))` is `[null]` (`FilterStep`; `TraversalMapStep.java:49-53`). Mechanism:
+  `predicateOnNull` (`rel/predicate.ts`) says whether a predicate can hold on NULL; `valueRun`'s `is` member
+  (`lower/reduction.ts`) then makes presence `{ tag }` — the row tag `gatedTag`ged by the test, projected
+  through `once` so the predicate is spelled once — only where the run is not already value-nullness, the
+  value has no static type and the predicate may hold on null; `tagPresent` (`tag.ts`) lets a consumer
+  filter spend the gate alone. Every other case is byte-identical (baselines unmoved); witnesses
+  `test/L4-addendum/is-gate-productive-null.feature`, `test/compiler/predicate-on-null.test.ts`.
+  Remains, deliberately left alone:
+  - a null-admitting `is()` followed by a transform, projector or nested host still reads presence as
+    value-nullness — a tag would not survive those members; needs the P4/P6 consumers to read the tag;
+  - a value read through a subquery (where `rowTag` refuses) keeps value-nullness, unchanged behaviour;
+  - `order().by()` / `project().by()` still drop a productive null — the §17 divergence P6 removes.
 - **P3 the `is()` predicate projected once (after P2)** — a tag gated by the same CASE as the value must
   not spell the predicate twice (the study measured 2.2× vs +12% when projected once). Route it through
   `once()` (`rel/build.ts`). This absorbs outstanding-work §3's "`once` consumers" item where the two
