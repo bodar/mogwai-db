@@ -13,7 +13,7 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import { foldElements, foldScalars, LIST_COL, NODE_COL } from './list.ts';
-import { inferredVtype } from './reducer.ts';
+import { inferredVtype } from './tag.ts';
 import { carriedCols, collectedArray, eq, jsonOf, meta, rowNumberWindow, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';

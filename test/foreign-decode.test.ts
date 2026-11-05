@@ -107,4 +107,13 @@ describe('decodeForeignResult — typed peer response decode', () => {
     const r = await decodeForeignResult(await peerBytes('g.V().hasLabel("nonesuch").values("age").sum()'), 'reduce');
     expect(r).toEqual({ kind: 'scalar', value: { t: null, v: null } });
   });
+
+  // An EMITTED null is a present value, so it carries the null tag a stored null member does — and the
+  // untagged null above stays the reducer's absence (`lowerScalarResume` reads the two apart).
+  test('a null the peer emitted decodes as the null tag, at the top level and as a member', async () => {
+    const top = await decodeForeignResult(await peerBytes('g.inject(1).constant(null)'));
+    expect(top).toEqual({ kind: 'values', values: [{ t: 'null', v: null }] });
+    const member = await decodeForeignResult(await peerBytes('g.inject([null,1])'));
+    expect(member).toEqual({ kind: 'values', values: [{ t: 'list', v: [{ t: 'null', v: null }, { t: 'int', v: 1 }] }] });
+  });
 });

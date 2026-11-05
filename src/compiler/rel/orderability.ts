@@ -21,6 +21,7 @@
 import { UnsupportedTraversal } from '../compiler.ts';
 import { exactNumberOf, isExactNumber, parseExactJson } from '../../json-exact.ts';
 import { RaisedByQuery } from '../../rel/raise.ts';
+import { isNullTag } from '../../gremlin/types.ts';
 
 /** ORDERABILITY's type-priority ladder (`Type` enum order). A cross-type compare is decided by these
  *  alone; same-type falls to the per-type comparator below. */
@@ -105,7 +106,8 @@ function untagged(v: unknown): unknown {
   let member = v;
   while (member !== null && typeof member === 'object' && !Array.isArray(member) && !isExactNumber(member)) {
     const o = member as Record<string, unknown>;
-    if (!('t' in o && 'v' in o) || o.t != null) break;
+    // A null member's node (`{t:'null', v:null}`, `NULL_TAG`) is the bare null it holds, too.
+    if (!('t' in o && 'v' in o) || (o.t != null && !isNullTag(o.t))) break;
     member = o.v;
   }
   return member;

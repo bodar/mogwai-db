@@ -1,0 +1,92 @@
+import { compilerInt, compilerText, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { NULL_TAG, type ValueType } from '../../gremlin/types.ts';
+import type { ScalarType } from '../../sql/kernel/render.ts';
+import { jsonField } from './build.ts';
+
+/**
+ * THE PER-ROW TYPE TAG — what is known of a value's Gremlin type, and the SQL that reads it.
+ *
+ * A value travels with a TAG: a compile-time static, a per-row column (a stored `vtype`, a reducer's `vt`,
+ * the sack's tag, a `{t,v}` node's `t`), or nothing, in which case its SQLite storage class is what the
+ * wire infers it as. Every inference over that — "this value's type name", "complete a partial tag",
+ * "is this node a null" — lives HERE, once, rather than as a private copy beside each consumer (the sack,
+ * the receiver checks and the reducers each held one).
+ */
+
+/** What is known about a value's Gremlin type. */
+export type ValueEvidence =
+  | { readonly kind: 'static'; readonly tag: ValueType }
+  /** `nullOnlyForNull`: the tag is NULL exactly when the value is (a stored property row always carries
+   *  its `vtype`), so the storage class need not be consulted as a fallback. */
+  | { readonly kind: 'tag'; readonly tag: Expr; readonly nullOnlyForNull?: boolean }
+  | { readonly kind: 'storage' };
+
+const STORAGE: ValueEvidence = { kind: 'storage' };
+
+/** The evidence a value's FRAMING type plus an optional per-row type expression give. A per-row tag
+ *  that is a compiler literal (a host that carries its static tag as text) IS a static tag. */
+export function evidenceOf(type: ScalarType | undefined, vtype?: Expr): ValueEvidence {
+  if (vtype) {
+    if (vtype.kind === 'lit' && vtype.source === 'compiler-text') return { kind: 'static', tag: vtype.value as ValueType };
+    return { kind: 'tag', tag: vtype };
+  }
+  if (type?.kind === 'static') return { kind: 'static', tag: type.type };
+  return STORAGE;
+}
+
+const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
+const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
+
+/**
+ * An UNTAGGED value's canonical Gremlin type, inferred from its SQLite storage class — the same inference
+ * the wire applies to an untagged value (an INTEGER is an Int inside 32 bits and a Long past them, a REAL a
+ * Double, TEXT a String), so naming it here is not a second policy. A MIXED list hands every bare member a
+ * type through it, and the number-class authority (`reducer.ts`) reads an untagged row's class through it.
+ */
+export const inferredVtype = (value: Expr): Expr => {
+  // Spelled with the value TWICE, not once per arm: the value is routinely a fused arithmetic over a
+  // correlated read, and a `CASE typeof(v) …` per class would repeat that subquery four times. `typeof` is
+  // rewritten by `replace` (no class name contains another's), and the int32 test is the one-spelling
+  // `abs(2v + 1) <= 2^32 - 1`. NULL for a NULL (and a BLOB, which nothing frames as a number).
+  const int32 = bin('<=', call('abs', bin('+', bin('*', compilerInt(2), value), compilerInt(1))), compilerInt(4294967295));
+  const integral: Expr = { kind: 'case', whens: [[int32, compilerText('int')]], else: compilerText('long') };
+  const renamed = [['integer', integral], ['real', compilerText('double')], ['text', compilerText('string')]] as const;
+  const named = renamed.reduce<Expr>((inner, [cls, tag]) => call('replace', inner, compilerText(cls), tag), call('typeof', value));
+  return call('nullif', call('nullif', named, compilerText('null')), compilerText('blob'));
+};
+
+/**
+ * A value's TOTAL tag — a Gremlin type name on every present row, NULL only for a NULL value. A static tag
+ * is its literal; a per-row tag that is already total (`nullOnlyForNull`, or a literal) is itself; a
+ * PARTIAL one — a reducer's `vt` (`REDUCED_TYPE`), a merged arm's — is completed from the value's storage
+ * class (`inferredVtype`); and storage evidence is that inference alone. So the inference is spent only
+ * where a tag can be NULL on a present row.
+ */
+export function totalTag(evidence: ValueEvidence, value: Expr): Expr {
+  if (evidence.kind === 'static') return compilerText(evidence.tag);
+  if (evidence.kind === 'storage') return inferredVtype(value);
+  const { tag } = evidence;
+  if (evidence.nullOnlyForNull || (tag.kind === 'lit' && tag.value !== null)) return tag;
+  return tag.kind === 'lit' ? inferredVtype(value) : call('COALESCE', tag, inferredVtype(value));
+}
+
+/** The value's per-row TYPE NAME over non-static evidence: its tag, else its storage class (`'null'` for a
+ *  NULL). One expression so the value is spelled once in the test, which matters because a receiver is
+ *  often a correlated property read and every repetition is another subquery in the statement text. The
+ *  storage-class names share no spelling with a `ValueType`, so a consumer lists both in one set. */
+export const typeName = (value: Expr, evidence: ValueEvidence): Expr => {
+  if (evidence.kind !== 'tag') return call('typeof', value);
+  // A tag that is NULL only for a NULL value needs no second spelling of the value to say so.
+  const fallback: Expr = evidence.nullOnlyForNull ? compilerText(NULL_TAG) : call('typeof', value);
+  return call('COALESCE', evidence.tag, fallback);
+};
+
+/**
+ * IS THIS `{t,v}` NODE A NULL — the one SQL spelling. A null member is tagged `'null'` (`NULL_TAG`,
+ * `valueNodeOf`), and a node with NO tag is a null too where a producer left it untagged (a child body's
+ * null, an empty reducer's absence), so the predicate is `coalesce(t, 'null') = 'null'`: one read of the
+ * tag, true for both spellings. A reader that asked `t IS NOT NULL` instead took a tagged null for a value
+ * (`group()`'s last-wins member, `map.ts`).
+ */
+export const nodeIsNull = (node: Expr): Expr =>
+  bin('=', call('coalesce', jsonField(node, 't'), compilerText(NULL_TAG)), compilerText(NULL_TAG));

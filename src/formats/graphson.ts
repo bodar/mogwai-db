@@ -33,7 +33,7 @@ import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
-    base64OfBinary, BigDecimal, binaryOfBase64, Duration, exactInteger, gremlinTypeOf, mapSlot, valueNodeFromStored,
+    base64OfBinary, BigDecimal, binaryOfBase64, Duration, exactInteger, gremlinTypeOf, leafTag, mapSlot, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
 import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
@@ -415,7 +415,9 @@ export function graphsonNode(node: ValueNode): unknown {
   if (node.t === 'map')
     // Flat alternating [k,v,k,v] — the form that lets a KEY carry its own type.
     return typed('map', (node.v as [ValueNode, ValueNode][]).flatMap(([k, v]) => [graphsonNode(k), graphsonNode(v)]));
-  return typed(node.t, leafJson(node.t, node.v));
+  // The null tag writes a bare JSON null (`graphsonValue` reads it back to the same `{t:'null'}` node).
+  const t = leafTag(node.t);
+  return typed(t, leafJson(t, node.v));
 }
 
 /** One scalar leaf's JSON payload, from its STORED form. The exact-digit types return a STRING, which

@@ -5,7 +5,7 @@ import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRo
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
-import { binaryBytes, hasSerializer, isCollectionType, propertyTag, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { binaryBytes, hasSerializer, isCollectionType, leafTag, propertyTag, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
@@ -209,7 +209,8 @@ function frameTypedNode(node: FrameNode): Buffer {
   // a Gremlin vtype exactly, and route a storage class through `sumBuffer` — which forces DOUBLE for
   // `real` so a whole-number mean (`30.0`) frames as a Double rather than the Int magnitude inference
   // would pick. A null tag infers, unchanged.
-  const tag: string | null = node.t;
+  // The null tag (`NULL_TAG`) is a null leaf's, and frames as one.
+  const tag: string | null = leafTag(node.t);
   // A leaf value `parseExactJson` kept as its source text frames from that text — the tag names the class.
   const value = isExactNumber(node.v) ? node.v.rawJSON : node.v;
   const as = vtypeToValueType(tag);

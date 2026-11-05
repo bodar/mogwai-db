@@ -1,11 +1,11 @@
 import { compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { typeName, type ValueEvidence } from './tag.ts';
 import * as make from '../../rel/factory.ts';
 import { deferralExpr, raiseInRow as raise } from '../../rel/raise.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Minter } from './build.ts';
 import { numericSpec } from '../../gremlin/coerce.ts';
 import type { ValueType } from '../../gremlin/types.ts';
-import type { ScalarType } from '../../sql/kernel/render.ts';
 import { GLOBAL_STRING_THROWS, isLocalScope, type IRStep } from '../ir/step.ts';
 
 /**
@@ -54,14 +54,6 @@ import { GLOBAL_STRING_THROWS, isLocalScope, type IRStep } from '../ir/step.ts';
  * might answer — never a plausible wrong value.
  */
 
-/** What is known about a receiver's Gremlin type. */
-export type ValueEvidence =
-  | { readonly kind: 'static'; readonly tag: ValueType }
-  /** `nullOnlyForNull`: the tag is NULL exactly when the value is (a stored property row always carries
-   *  its `vtype`), so the storage class need not be consulted as a fallback. */
-  | { readonly kind: 'tag'; readonly tag: Expr; readonly nullOnlyForNull?: boolean }
-  | { readonly kind: 'storage' };
-
 /** The type a receiver must be: a String, or a Number (`java.lang.Number`). */
 export type ReceiverKind = 'string' | 'number';
 
@@ -69,19 +61,6 @@ export type ReceiverKind = 'string' | 'number';
 export const NUMBER_TAGS: ReadonlySet<ValueType> = new Set<ValueType>([
   'byte', 'short', 'int', 'long', 'bigint', 'float', 'double', 'bigdecimal',
 ]);
-
-const STORAGE: ValueEvidence = { kind: 'storage' };
-
-/** The evidence a value's FRAMING type plus an optional per-row type expression give. A per-row tag
- *  that is a compiler literal (a host that carries its static tag as text) IS a static tag. */
-export function evidenceOf(type: ScalarType | undefined, vtype?: Expr): ValueEvidence {
-  if (vtype) {
-    if (vtype.kind === 'lit' && vtype.source === 'compiler-text') return { kind: 'static', tag: vtype.value as ValueType };
-    return { kind: 'tag', tag: vtype };
-  }
-  if (type?.kind === 'static') return { kind: 'static', tag: type.type };
-  return STORAGE;
-}
 
 /** Is a static tag of the demanded kind? */
 const tagIs = (kind: ReceiverKind, tag: ValueType): boolean =>
@@ -114,15 +93,6 @@ const STORAGE_CLASSES: Readonly<Record<ReceiverKind, readonly string[]>> = {
 const admitting = (kind: ReceiverKind): readonly string[] =>
   [...(kind === 'string' ? ['string'] : [...NUMBER_TAGS]), ...STORAGE_CLASSES[kind]];
 
-/** The value's per-row TYPE NAME over non-static evidence: its tag, else its storage class (`'null'` for a
- *  NULL). One expression so the value is spelled once in the test, which matters because a receiver is
- *  often a correlated property read and every repetition is another subquery in the statement text. */
-const typeName = (value: Expr, evidence: ValueEvidence): Expr => {
-  if (evidence.kind !== 'tag') return { kind: 'call', fn: 'typeof', args: [value] };
-  // A tag that is NULL only for a NULL value needs no second spelling of the value to say so.
-  const fallback: Expr = evidence.nullOnlyForNull ? text('null') : { kind: 'call', fn: 'typeof', args: [value] };
-  return { kind: 'call', fn: 'COALESCE', args: [evidence.tag, fallback] };
-};
 
 /**
  * WHAT A RECEIVER OWES: `false` — refuted, decline; `null` — proven, nothing owed; else the per-row

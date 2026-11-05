@@ -1,9 +1,23 @@
-import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, MapOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { MapKeyFacts } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../alias.ts';
 import { exactRealEntry } from './build.ts';
+import { NULL_TAG } from '../../gremlin/types.ts';
+
+/** Is this value the compiler's own NULL literal — a `constant(null)`/`inject(null)` value, never a
+ *  parameter (whose value is the user's to change) or a per-row NULL? */
+const isCompilerNull = (value: Expr): boolean => value.kind === 'lit' && value.source === 'compiler-null';
+
+/** A relation's `column` as the entry should read it: the compiler's NULL literal where the relation
+ *  PROJECTS one there (`constant(null)`), so `objectEntry` knows the value is null at compile time; else
+ *  the column itself. Only the null is lifted — any other literal is read through its column as before. */
+export const entryValue = (rel: Rel, column: string): Expr => {
+  const projected = rel.kind === 'project' ? rel.exprs.find(([name]) => name === column)?.[1] : undefined;
+  return projected && isCompilerNull(projected) ? projected : col(rel.id, column);
+};
 
 /**
  * ONE TRAVERSER-OBJECT HISTORY ENCODING, shared by the LABEL channel and the PATH channel.
@@ -66,8 +80,17 @@ export const objectEntry = (object: TraverserObject, withLabels = false): Expr =
       kind: 'json-object', binary: true,
       entries: [['k', k], ['v', { kind: 'call', fn: 'json', args: [object.map] }], ...labels],
     };
-  // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column. An
-  // unknown type has nothing honest to record, so the entry carries no tag and readers infer it.
+  // A COMPILE-TIME NULL (`constant(null).as('k')`) is the null it is: tagged `NULL_TAG` like a stored
+  // null member, and written as the bare NULL — there is no REAL to repair, so no `exactRealEntry` test.
+  if (isCompilerNull(object.value))
+    return {
+      kind: 'json-object', binary: true,
+      entries: [['k', k], ['v', object.value], ['t', compilerText(NULL_TAG)], ...labels],
+    };
+  // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own tag column, carried as it
+  // stands. Completing a per-row or an unknown tag here (`totalTag`) would spend a per-row inference
+  // that no answer reads: a NULL `t` already means "read the value" to every reader of the entry — the
+  // framer infers from `v` and the SQL readers take it as storage evidence (`typeName`).
   const tag = object.type.kind === 'static' ? compilerText(object.type.type) : object.vtype;
   // The value crosses SQLite's JSON writer, which spells a binary64 at 15 digits, so it takes the
   // exact-REAL entry (`exactRealEntry`).

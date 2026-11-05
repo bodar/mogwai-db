@@ -10,6 +10,7 @@ import { col, compilerInt, lit, param } from '../../src/rel/expr.ts';
 import { aggregate, distinct, filter, join, limit, scan as scanRel, union, values } from '../../src/rel/factory.ts';
 import type { Rel } from '../../src/rel/rel.ts';
 import { relId } from '../../src/rel/types.ts';
+import { leafTag } from '../../src/gremlin/types.ts';
 import { read, run, seededStore } from '../support/harness.ts';
 
 const channels: Channels = [];
@@ -105,7 +106,11 @@ describe('a one-row child body', () => {
   // first null, `Grouping.doFinalReduction` drops a key only when its value traversal has no next, and a
   // sum over all-null input is null (`Sum.feature`). Each of these dropped the `a` key under value-nullness.
   test('a null map-entry value through a may-be-empty body keeps its group key', () => {
-    const groups = (q: string) => (run(store, q) as { map: string }[]).map((r) => JSON.parse(r.map) as unknown);
+    // A null member is a null whichever spelling carried it — the null tag (`NULL_TAG`) a carried node keeps,
+    // or the untagged node a reducer re-infers — and both frame the one null, so the tag is read through
+    // `leafTag` as the framer reads it.
+    const groups = (q: string) => (run(store, q) as { map: string }[]).map((r) =>
+      JSON.parse(r.map, (k, v) => (k === 't' ? leafTag(v) : v)) as unknown);
     const NULL = { t: null, v: null };
     const A = [{ t: 'string', v: 'a' }, NULL], B = [{ t: 'string', v: 'b' }, { t: 'int', v: 1 }];
     for (const tail of ['dedup()', 'sum()', 'max()', 'dedup().limit(1)'])

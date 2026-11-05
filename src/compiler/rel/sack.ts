@@ -9,12 +9,12 @@ import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { SACK_OPS } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
-import { inferredVtype } from './reducer.ts';
+import { evidenceOf, inferredVtype, totalTag, type ValueEvidence } from './tag.ts';
 import { hostTag, type ChildHost, type ChildSeam } from './child.ts';
 import { constLit, declaredScalarType } from './const.ts';
 import type { FramedRel } from './framing.ts';
 import { byProjection, byTyped, modulations, productivityFilter } from './modulator.ts';
-import { deferral, evidenceOf, numericOperandOffences, raisingRows, type ValueEvidence } from './receiver.ts';
+import { deferral, numericOperandOffences, raisingRows } from './receiver.ts';
 import type { GraphSource } from './source.ts';
 
 /**
@@ -81,20 +81,7 @@ const withSack = (channels: Rel['channels']): Rel['channels'] =>
 export const sackTagOf = (rel: Rel): Expr | undefined =>
   rel.channels.some((channel) => channel.col === SACK_TYPE_COL) ? col(rel.id, SACK_TYPE_COL) : undefined;
 
-/** A value's evidence as a (partial) tag: a static tag as text, a per-row tag as itself, storage
- *  evidence as NULL. `totalTag` completes it. */
-const tagOf = (evidence: ValueEvidence): Expr =>
-  evidence.kind === 'static' ? compilerText(evidence.tag) : evidence.kind === 'tag' ? evidence.tag : compilerNull();
-
 const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
-
-/** A partial tag completed from the value's storage class (`inferredVtype`, what the wire infers for an
- *  untagged value). A literal tag is already total; a per-row one — a reducer's `vt` included
- *  (`REDUCED_TYPE`) — is a Gremlin type name or NULL. */
-const totalTag = (tag: Expr, value: Expr): Expr =>
-  tag.kind === 'lit' && tag.value !== null ? tag
-    : tag.kind === 'lit' ? inferredVtype(value)
-      : { kind: 'call', fn: 'COALESCE', args: [tag, inferredVtype(value)] };
 
 /** Does this relation carry a sack? Asked of the RELATION rather than of a flag, for `liveAliases`'
  *  reason: a barrier consumes the channel (`CHANNEL_BARRIER_POLICY`), and a reader that trusted a
@@ -116,7 +103,8 @@ export function seedSack(rel: Rel, spec: MergePolicy, fresh: Minter): Rel | null
   // inlining — which the value/`initType` pair this replaced could not express, and therefore lost.
   const seed = constLit(spec.seed);
   if (!seed) return null;
-  const tag = totalTag(hostTag(declaredScalarType(spec.seed), undefined) ?? compilerNull(), seed);
+  const seedTag = hostTag(declaredScalarType(spec.seed), undefined);
+  const tag = totalTag(seedTag ? { kind: 'tag', tag: seedTag } : { kind: 'storage' }, seed);
   const channels = withSack(rel.channels);
   const payload = payloadCols(rel);
   return make.project({
@@ -181,8 +169,7 @@ export function sackMutate(
   const held = 'skv';
   const heldTag = 'skt';
   const heldMeet = 'skc';
-  const operandTotal = evidence.kind === 'static' ? compilerText(evidence.tag)
-    : evidence.kind === 'tag' && evidence.nullOnlyForNull ? evidence.tag : totalTag(tagOf(evidence), value);
+  const operandTotal = totalTag(evidence, value);
   const meet = carried ? bin('+', classCode(col(rel.id, SACK_TYPE_COL)), classCode(operandTotal)) : compilerNull();
   const payload = payloadCols(rel);
   // A MINTING `assign` adds the channel here, in the same projection that names the value — so the

@@ -2,7 +2,8 @@ import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param,
 import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { raiseExpr } from '../../rel/raise.ts';
-import { inferredVtype, MIXED_COMPARABLES } from './reducer.ts';
+import { MIXED_COMPARABLES } from './reducer.ts';
+import { inferredVtype } from './tag.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';

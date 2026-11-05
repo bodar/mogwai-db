@@ -19,7 +19,8 @@ import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
-import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, inferredVtype, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
+import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
+import { inferredVtype, nodeIsNull } from './tag.ts';
 import { storedCompareOn } from './predicate.ts';
 
 /**
@@ -844,13 +845,13 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:205-216`),
   // so a later PRODUCTIVE null never overwrites an earlier value, and a key that only ever saw nulls
   // keeps null. Stated as a LEADING sort key on the one aggregate this arm already runs — null nodes
-  // (`{t:null}`, or a bare SQL NULL with `ProductiveByStrategy` off) sort first, so `$[#-1]` reads the
-  // last non-null member when there is one and the last null otherwise. No second aggregate, no extra
-  // pass. A `tail()` value (`firstOnly`) is a traverser, never null, and an element (`rowid`) member is
+  // (`nodeIsNull`: a null-tagged `{t:'null'}`, an untagged `{t:null}`, or a bare SQL NULL with
+  // `ProductiveByStrategy` off) sort first, so `$[#-1]` reads the last non-null member when there is one
+  // and the last null otherwise. No second aggregate, no extra pass. A `tail()` value (`firstOnly`) is a traverser, never null, and an element (`rowid`) member is
   // never null either, so neither carries the key. Nor does a body whose null is ABSENT (`mayYieldNull`
   // false — `group().by(k).by(__.values(p))`): the domain filter already dropped every null member.
   const nullsFirst = single && !recipe.firstOnly && member?.kind === 'node' && recipe.mayYieldNull
-    ? [{ expr: isNot(jsonField(col(rows.id, MEMBER_COL), 't'), compilerNull()), dir: 'asc' as const }]
+    ? [{ expr: nodeIsNull(col(rows.id, MEMBER_COL)), dir: 'desc' as const }]
     : [];
   const memberAggregate: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [collected],

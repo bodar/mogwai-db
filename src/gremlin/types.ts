@@ -589,7 +589,7 @@ export function numberClassOf(value: number): 'int' | 'long' | 'double' {
 // read framing reuses frameValue(v, vtypeToValueType(t)) — one value spine, both paths.
 
 export type ValueNode =
-  | { t: CanonicalType | null; v: any }            // scalar leaf (t=null → infer on frame)
+  | { t: CanonicalType | NullTag | null; v: any }  // scalar leaf (t='null' → a null; t=null → infer on frame)
   | { t: 'list' | 'set'; v: ValueNode[] }
   | { t: 'map'; v: [ValueNode, ValueNode][] };      // ordered pairs → typed/non-string keys
 
@@ -687,7 +687,31 @@ export function leafStore(val: any, t: CanonicalType | null): any {
 export const valueNodeFromStored = (value: any, vtype: string | null): ValueNode =>
   ({ t: (vtype ?? null) as ValueNode['t'], v: isCollectionType(vtype) && typeof value === 'string' ? JSON.parse(value) : value });
 
+/**
+ * THE NULL TAG — the leaf tag a NULL value carries in a typed `{t,v}` tree and in an alias-history entry.
+ *
+ * A tree's tag is TOTAL: every present leaf names its type, and a null names `'null'` — the spelling
+ * SQLite's own `typeof(NULL)` and `json_type` already use, and the one `valueFamily` (`STORAGE_FAMILY_TAGS`)
+ * already lists. So a member that IS null (`[null, 1]`, `['a': null]`) is told apart from a tag nobody
+ * wrote (`{t: null}` — an empty reducer's ABSENCE) by the tag alone. It is a STORED and framing word,
+ * never a `CanonicalType`: no property is OF type null, and every framer reads it back to a plain null
+ * (`leafTag`). Java's null has no class either, so nothing is emulated here.
+ */
+export const NULL_TAG = 'null';
+export type NullTag = typeof NULL_TAG;
+
+/** Is this leaf tag the null tag? */
+export const isNullTag = (t: unknown): t is NullTag => t === NULL_TAG;
+
+/** A leaf's tag as a FRAMER reads it: the null tag frames as an untagged null (a null is null on every
+ *  wire whatever its tag), everything else as itself — the one place a reader maps the spelling back. */
+export const leafTag = <T>(t: T | NullTag | null): Exclude<T, NullTag> | null =>
+  (isNullTag(t) ? null : (t as Exclude<T, NullTag> | null));
+
 export function valueNodeOf(val: any, tn: TypeNode | null): ValueNode {
+  // A NULL leaf is tagged null WHATEVER its channel declared — a declared `int` describes the channel, not
+  // this member, and an untagged `{t:null}` would read as a tag nobody wrote.
+  if (val === null || val === undefined) return { t: NULL_TAG, v: null };
   if (Array.isArray(val) || val instanceof Set) {
     const items = tn != null && typeof tn === 'object' && 'items' in tn ? tn.items : [];
     const arr = Array.isArray(val) ? val : [...val];

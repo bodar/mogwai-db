@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { evidenceOf, receiverProvably } from '../../src/compiler/rel/receiver.ts';
+import { receiverProvably } from '../../src/compiler/rel/receiver.ts';
+import { evidenceOf } from '../../src/compiler/rel/tag.ts';
 import { col, compilerText } from '../../src/rel/expr.ts';
 import { raisedMessage } from '../../src/rel/raise.ts';
 import { relId } from '../../src/rel/types.ts';

@@ -8,7 +8,8 @@ import type { SortTerm } from '../../rel/types.ts';
 import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MapOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, arg, type Arg, type ArgValue } from '../../gremlin/frontend.ts';
 import { countOf, GLOBAL_STRING_THROWS, isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
-import { asStringOf, raisingWhen, type ValueEvidence } from './receiver.ts';
+import { asStringOf, raisingWhen } from './receiver.ts';
+import { inferredVtype, type ValueEvidence } from './tag.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam, RootedRead } from './child.ts';
 import type { RelFraming } from './framing.ts';
@@ -20,7 +21,7 @@ import { realJsonText, stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
-import { exactWideTotal, inferredVtype, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { exactWideTotal, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 /** The column a list reducer carries its members' class pair in (`numberClassPair`). */
 const CLASS_PAIR = 'cw';

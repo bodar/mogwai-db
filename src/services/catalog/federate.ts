@@ -122,6 +122,7 @@ function noParents(mapValues: CallSite['mapValues'], pushdown: CallSite['pushdow
   const emptyMap: Extract<ValueNode, { readonly t: 'map' }> = { t: 'map', v: [] };
   if (mapValues?.reduce) return { kind: 'barrier-scalar', value: emptyMap };
   if (mapValues) return { kind: 'barrier-map', value: emptyMap };
+  // The UNTAGGED null is the semigroup's absence (it emits nothing), not a present null's `NULL_TAG`.
   if (pushdown?.reduces) return { kind: 'barrier-scalar', value: pushdown.empty === 'zero' ? { t: 'long', v: 0 } : { t: null, v: null } };
   return [];
 }

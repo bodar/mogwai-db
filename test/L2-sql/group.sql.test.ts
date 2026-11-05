@@ -310,16 +310,17 @@ describe('group / properties SQL', () => {
   test('group().by(child).by(child) assigns the last arriving traverser\'s scalar value', () => {
     const p = read('g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))');
     expect(p.shape).toEqual({ kind: 'mapValue' });
-    // The leading sort key puts productive-null members (`{t:null}`) FIRST, so `$[#-1]` is the last
-    // NON-NULL arrival — `GroupStep.GroupBiOperator` never lets a null overwrite a held value.
-    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \(json_extract\(\w+\.gt, '\$\.t'\) IS NOT NULL\) ASC, \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT NULL\)\), '\$\[#-1\]'\)/);
+    // The leading sort key puts productive-null members (`nodeIsNull`: a `{t:'null'}` or untagged node)
+    // FIRST, so `$[#-1]` is the last NON-NULL arrival — `GroupStep.GroupBiOperator` never lets a null
+    // overwrite a held value.
+    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \(coalesce\(json_extract\(\w+\.gt, '\$\.t'\), 'null'\) = 'null'\) DESC, \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT NULL\)\), '\$\[#-1\]'\)/);
     expect(p.sql).not.toContain("json_object('t', 'list', 'v', json_group_array(json(");
   });
 
   test('group().by(tail()) reads the FIRST arrival and carries no null sort key', () => {
     const p = read('g.V().both().group().by(T.label).by(__.tail())');
     expect(p.sql).toContain("'$[0]'");
-    expect(p.sql).not.toContain("'$.t') IS NOT NULL) ASC");
+    expect(p.sql).not.toContain("'$.t'), 'null') = 'null') DESC");
   });
 
   // The null sort key is spent only where a member CAN be a productive null. A `'value-nullness'` body
@@ -328,16 +329,16 @@ describe('group / properties SQL', () => {
   test('group().by(k).by(__.values(p)) carries no null sort key — its nulls are already dropped', () => {
     const p = read('g.V().group().by("name").by(__.values("age"))');
     expect(p.sql).toContain("'$[#-1]'");
-    expect(p.sql).not.toContain("'$.t') IS NOT NULL");
+    expect(p.sql).not.toContain("'$.t'), 'null') = 'null')");
   });
 
   test('a body that keeps a productive null still carries the null sort key', () => {
     // `select(values)` over an entry: a null entry value is a member (GroupStep.java:205-216 keeps the held value).
     expect(read('g.inject(["a":3],["a":null]).unfold().group().by(keys).by(__.select(values))').sql)
-      .toContain("'$.t') IS NOT NULL) ASC");
+      .toContain("'$.t'), 'null') = 'null') DESC");
     // `ProductiveByStrategy` turns an absent `values(p)` into a null member, so the key comes back.
     expect(read('g.withStrategies(ProductiveByStrategy).V().group().by(T.label).by(__.values("age"))').sql)
-      .toContain("'$.t') IS NOT NULL) ASC");
+      .toContain("'$.t'), 'null') = 'null') DESC");
   });
 
 

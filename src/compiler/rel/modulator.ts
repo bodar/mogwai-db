@@ -14,7 +14,7 @@ import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { propertyNode, propertyReadOf } from './property.ts';
-import { evidenceOf, type ValueEvidence } from './receiver.ts';
+import { evidenceOf, type ValueEvidence } from './tag.ts';
 
 /** The floating tags whose by(select(label)) key reuses the label's exactly-spelled entry (`aliasEntryNode`). */
 const FLOATING_TAGS: ReadonlySet<string> = new Set(['double', 'float', 'real']);

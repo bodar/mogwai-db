@@ -8,7 +8,8 @@ import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { CONSTANT, storedCompareOn } from './predicate.ts';
-import { valueIsKind, type ValueEvidence } from './receiver.ts';
+import { valueIsKind } from './receiver.ts';
+import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, or, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 

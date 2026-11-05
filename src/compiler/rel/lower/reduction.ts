@@ -32,7 +32,8 @@ import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, s
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { propertyReadOf } from '../property.ts';
-import { evidenceOf, raisingWhen, transformOffences } from '../receiver.ts';
+import { raisingWhen, transformOffences } from '../receiver.ts';
+import { evidenceOf } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
 import { isReducer, REDUCED_TYPE } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';

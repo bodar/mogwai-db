@@ -1,7 +1,7 @@
 import { NO_PARAMS, type ParamEnv } from '../../gremlin/param-env.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import type { TraverserObject } from './history.ts';
+import { entryValue, type TraverserObject } from './history.ts';
 import { col, compilerInt, compilerNull, compilerText, compilerParamName, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
@@ -52,8 +52,9 @@ import { byExpr, byProjection, isProductiveBy, modulations, producedMemberNode, 
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
 import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
-import { concatOperandOffence, evidenceOf, raisingRows, raisingWhen, transformOffences, type ValueEvidence } from './receiver.ts';
-import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, inferredVtype, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClassAggs, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { concatOperandOffence, raisingRows, raisingWhen, transformOffences } from './receiver.ts';
+import { evidenceOf, inferredVtype, type ValueEvidence } from './tag.ts';
+import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, isLongSumClass, isReducer, MIXED_COMPARABLES, numberClassAggs, REDUCED_TYPE, reducedNumberClass, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
@@ -2158,7 +2159,7 @@ function scalarTail(
     // `values('age').as('a').select('a').is(P.gt(30))` compare as a number rather than as text.
     if (step.name === 'as') {
       const bound = bindAliases(step, rel, labels, {
-        kind: 'value', value: col(rel.id, 'v'),
+        kind: 'value', value: entryValue(rel, 'v'),
         type: out.kind === 'scalar' ? out.type : UNKNOWN,
         ...rowTag(),
       }, fresh);
@@ -4590,7 +4591,9 @@ export function lowerScalarResume(value: ValueNode): RelLowering {
   // sanctioned "I want 0" idiom is a user `coalesce(…, constant(0))`, NOT an engine-supplied identity.
   // `count` is the ONE monoid — it installs an explicit `ConstantSupplier(0L)`, so empty count is `0`
   // (arriving here as `v:0`, emitted), while an empty semigroup fold arrives as `v:null` and is dropped.
-  const empty = value != null && typeof value === 'object' && 't' in value && (value as { v?: unknown }).v == null;
+  // The empty aggregate is the UNTAGGED null; a present null (a peer's `max()` over null values) carries the
+  // null tag (`NULL_TAG`) and is emitted.
+  const empty = value != null && typeof value === 'object' && 't' in value && value.t == null && (value as { v?: unknown }).v == null;
   const node: Expr = compilerText(stringifyExact(value));
   const one = make.values({
     id: fresh('scv'), channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
@@ -5854,7 +5857,7 @@ function injectedObject(rows: FramedRel): TraverserObject | null {
   if (framing.kind === 'scalar') {
     const tagCol = perRowColumnOf(framing.type);
     const vtype = tagCol && rel.type.cols.some((column) => column.name === tagCol) ? col(rel.id, tagCol) : undefined;
-    return { kind: 'value', value: col(rel.id, 'v'), type: framing.type, ...(vtype ? { vtype } : {}) };
+    return { kind: 'value', value: entryValue(rel, 'v'), type: framing.type, ...(vtype ? { vtype } : {}) };
   }
   if (framing.kind === 'list') return { kind: 'list', list: col(rel.id, LIST_COL), of: framing.of };
   if (framing.kind === 'map') {

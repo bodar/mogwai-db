@@ -361,24 +361,6 @@ const storageIs = (value: Expr, storage: string): Expr => bin('=', call('typeof'
 export const REDUCED_CLASS_COL = 'vt';
 export const REDUCED_TYPE: ScalarType = PER_ROW(REDUCED_CLASS_COL);
 
-/**
- * An UNTAGGED value's canonical Gremlin type, inferred from its SQLite storage class — the same inference
- * the wire applies to an untagged value (an INTEGER is an Int inside 32 bits and a Long past them, a REAL a
- * Double, TEXT a String), so naming it here is not a second policy. A MIXED list hands every bare member a
- * type through it, and the number-class authority below reads an untagged row's class through it.
- */
-export const inferredVtype = (value: Expr): Expr => {
-  // Spelled with the value TWICE, not once per arm: the value is routinely a fused arithmetic over a
-  // correlated read, and a `CASE typeof(v) …` per class would repeat that subquery four times. `typeof` is
-  // rewritten by `replace` (no class name contains another's), and the int32 test is the one-spelling
-  // `abs(2v + 1) <= 2^32 - 1`. NULL for a NULL (and a BLOB, which nothing frames as a number).
-  const int32 = bin('<=', call('abs', bin('+', bin('*', compilerInt(2), value), compilerInt(1))), compilerInt(4294967295));
-  const integral: Expr = { kind: 'case', whens: [[int32, compilerText('int')]], else: compilerText('long') };
-  const renamed = [['integer', integral], ['real', compilerText('double')], ['text', compilerText('string')]] as const;
-  const named = renamed.reduce<Expr>((inner, [cls, tag]) => ({ kind: 'call', fn: 'replace', args: [inner, compilerText(cls), tag] }), call('typeof', value));
-  return { kind: 'call', fn: 'nullif', args: [{ kind: 'call', fn: 'nullif', args: [named, compilerText('null')] }, compilerText('blob')] };
-};
-
 // ---------- THE NUMBER-CLASS AUTHORITY (build plan §6·7: the class is EXACT) ----------
 //
 // `NumberHelper.getHighestCommonNumberInfo` reads each number as a WIDTH (Byte 8, Short 16, Integer and

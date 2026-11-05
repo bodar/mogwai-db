@@ -10,7 +10,8 @@ import { dateAddDeltaMs, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericS
 import { STATIC, staticIsText, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ValueType } from '../../gremlin/types.ts';
 import type { IRStep } from '../ir/step.ts';
-import { asStringOf, type ValueEvidence } from './receiver.ts';
+import { asStringOf } from './receiver.ts';
+import type { ValueEvidence } from './tag.ts';
 
 // The Number family, as `GremlinValueComparator` treats it — one ordered type (§6·7). Bare
 // `asNumber()` over a value ALREADY in this family is TinkerPop's IDENTITY (`AsNumberStep.map`:

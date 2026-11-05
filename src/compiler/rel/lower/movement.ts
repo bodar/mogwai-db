@@ -17,7 +17,7 @@ import { extendPath, pathCarried } from '../path.ts';
 import { BULK, ENCOUNTER, encounterOf, FROM_V, fromVOf, type ChainCtx } from './chain.ts';
 import { remintOrder } from '../lower.ts';
 import { ensureBulk } from './branch.ts';
-import { evidenceOf } from '../receiver.ts';
+import { evidenceOf } from '../tag.ts';
 import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { copyRepeatsWork, doubledReads } from '../../../rel/copies.ts';

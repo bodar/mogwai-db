@@ -22,7 +22,7 @@
 // replication protocol (Phase 3+) reuses.
 
 import { ioc, StreamReader } from './io.ts';
-import { leafStore, WIRE_TYPE_TO_NAME } from './gremlin/types.ts';
+import { leafStore, NULL_TAG, WIRE_TYPE_TO_NAME } from './gremlin/types.ts';
 import type { FrameNode, ValueNode } from './gremlin/types.ts';
 import type { ForeignResult, ForeignRow, ForeignTerminal } from './api.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
@@ -80,7 +80,9 @@ export async function decodeForeignResult(buffer: Buffer, terminal?: ForeignTerm
 async function decodeNode(r: Reader, typeCode?: number): Promise<FrameNode> {
   const tc = typeCode ?? await r.readUInt8();
   const flag = await r.readUInt8();
-  if (flag === 0x01) return { t: WIRE_TYPE_TO_NAME[tc] ?? null, v: null }; // typed null
+  // A null the peer EMITTED (typed or not — every GLV reads both as the one language null) is a present
+  // value, so it carries the null tag exactly as a stored null member does (`valueNodeOf`).
+  if (flag === 0x01) return { t: NULL_TAG, v: null };
 
   switch (tc) {
     case D.LIST:
@@ -247,6 +249,8 @@ function assemble(nodes: FrameNode[], terminal?: ForeignTerminal): ForeignResult
 
   if (terminal === 'reduce') {
     const first = nodes[0] as ValueNode | undefined;
+    // `{t:null, v:null}` — an UNTAGGED null — is the reducer's ABSENCE (it emitted nothing), never the null
+    // tag a present null carries (`NULL_TAG`); the resume reads the two apart (`lowerScalarResume`).
     return { kind: 'scalar', value: first ?? { t: null, v: null } };
   }
 
