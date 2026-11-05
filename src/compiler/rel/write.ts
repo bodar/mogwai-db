@@ -28,7 +28,7 @@ import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
 import { NUMERIC_VTYPES, typedValueEq, typedValueKey } from './predicate.ts';
-import { presenceOf, statedPresence, type ChildValue } from './child.ts';
+import { presenceOf, restated, statedPresence, statedWhen, type ChildValue } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
@@ -1579,12 +1579,12 @@ function resolveValueRows(
   const stated = typeof produced.present === 'object' ? produced.present : undefined;
   const projected = make.project({
     id: fresh('rv'), input: site.host, channels: [], type: typeOf(...VALUE_ROW_COLS, ...(stated ? [meta('pw', 'int', true)] : [])),
-    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt], ['sq', compilerInt(0)], ...(stated ? [['pw', stated.when] as const] : [])],
+    exprs: [['o', col(site.host.id, site.origin)], ['v', produced.expr], ['vt', vt], ['sq', compilerInt(0)], ...(stated ? [['pw', statedWhen(stated)] as const] : [])],
   });
   const valued = produced.present === 'always' || stated ? projected : presenceFenced(projected, produced.expr, fresh);
   const kept = produced.present === 'always' ? valued
     : make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type,
-      pred: stated ? statedPresence({ ...stated, when: col(valued.id, 'pw') }, col(valued.id, 'v')) : presenceOf('value-nullness', col(valued.id, 'v'))! });
+      pred: stated ? statedPresence(restated(stated, col(valued.id, 'pw')), col(valued.id, 'v')) : presenceOf('value-nullness', col(valued.id, 'v'))! });
   return {
     rel: make.project({ id: fresh('rv'), input: kept, channels: [], type: typeOf(...VALUE_ROW_COLS), exprs: VALUE_ROW_COLS.map((column) => [column.name, col(kept.id, column.name)] as const) }),
     mayBeMulti: false,

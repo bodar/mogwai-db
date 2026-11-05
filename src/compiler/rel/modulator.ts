@@ -1011,7 +1011,7 @@ export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'ele
 export const productivityFilter = (
   step: IRStep, by: Presence | { readonly present: Presence; readonly hostKeep?: Expr }, value: Expr,
 ): { readonly keep?: Expr } | null => {
-  const { present, hostKeep } = typeof by === 'string' || 'when' in by ? { present: by, hostKeep: undefined } : by;
+  const { present, hostKeep } = typeof by === 'string' || !('present' in by) ? { present: by, hostKeep: undefined } : by;
   if (present === 'unknown' && !isProductiveBy(step)) return null;
   // A STATED `{ when }` is read as its value's nullness here: `value` is the caller's column, in whatever
   // scope the caller filters, and `when` may name the host's. A null `by()` value is absent (§17).
