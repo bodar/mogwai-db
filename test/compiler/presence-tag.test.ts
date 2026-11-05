@@ -4,7 +4,7 @@
 // inside the body's row (`staticTag`, `rowTag`) or gated on a may-be-absent arm's presence (`gatedTag`).
 // These pin the constructors' contract and the `{ tag }` arm every presence consumer reads it through.
 import { describe, expect, test } from 'bun:test';
-import { gatedTag, rowTag, staticTag, type PresenceTag } from '../../src/compiler/rel/tag.ts';
+import { gatedTag, rowTag, staticTag, tagPresent, type PresenceTag } from '../../src/compiler/rel/tag.ts';
 import { ALWAYS_PRODUCTIVE, presenceOf, restated, statedPresence, statedWhen } from '../../src/compiler/rel/child.ts';
 import { productivityFilter } from '../../src/compiler/rel/modulator.ts';
 import { col, compilerText, type Expr } from '../../src/rel/expr.ts';
@@ -59,10 +59,14 @@ describe('the constructors', () => {
 
 describe('the { tag } presence arm', () => {
   const tag = staticTag('long');
-  test('presence is `tag IS NOT NULL`', () => {
-    expect(presenceOf({ tag }, value)).toEqual(isNotNull(tag));
-    expect(statedPresence({ tag }, value)).toEqual(isNotNull(tag));
-    expect(statedWhen({ tag })).toEqual(isNotNull(tag));
+  test('presence is `tag IS NOT NULL`, read off the construction: a total tag is always there, a gated one is its gate', () => {
+    expect(presenceOf({ tag }, value)).toBe(ALWAYS_PRODUCTIVE);
+    expect(statedPresence({ tag }, value)).toBe(ALWAYS_PRODUCTIVE);
+    expect(statedWhen({ tag })).toBe(ALWAYS_PRODUCTIVE);
+    expect(tagPresent(rowTag(value, { kind: 'storage' })!)).toBe(ALWAYS_PRODUCTIVE);
+    const p: Expr = col(relId('r'), 'p'), q: Expr = col(relId('r'), 'q');
+    expect(statedWhen({ tag: gatedTag(p, tag) })).toBe(p);
+    expect(statedWhen({ tag: gatedTag(q, gatedTag(p, tag)) })).toEqual({ kind: 'binary', op: 'and', left: q, right: p });
   });
   test('a consumer that projected the predicate reads it back off its column', () => {
     const pw = col(relId('r'), 'pw');
