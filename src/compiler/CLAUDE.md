@@ -83,7 +83,9 @@ while what they operate on keeps TinkerPop's.
     node kind), so the fix composes at every depth and under every host at once.
   - **The old ladder is the `correlatedChild` FastPath and it is SHRINKING.** A route survives only with
     a MEASURED win (`mise run scaling`, 1k/8k) weighed against its complexity; a complex route the
-    connector replaces is deleted. Never extend it. Deleting a rung is scope worth taking.
+    connector replaces is deleted. Never extend it. Deleting a rung is scope worth taking. A deleted route's host
+    joins `LADDERLESS` (`lower/scoped.ts`, so the dispatch offers no ladder there); every route still standing is
+    in the plan's "Kept routes" catalogue with its margin, its sole-answer queries and the owner's call to make.
   - The two orders are each other's fallback at a site and `bothChildOrders` (`rel/spine.ts`) retries a
     declining compile in the other order, so the switch never decides coverage. A body that draws or
     re-sources stays the ladder's (`scopedBody`) until the connector owns it.

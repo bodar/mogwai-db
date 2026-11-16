@@ -563,6 +563,136 @@ Unordered FIRST picks: the ladder is not self-consistent (a `map(coalesce(outE�
 `project().by(flatMap(coalesce…))` first is id order), so a connector body can match only one; no L5 run has
 flagged one, and §17's unordered-slice divergence covers both.
 
+#### Kept routes — the ladder audit (cc3d, 2026-11-16)
+
+**The bar** (owner): a route is deleted when (1) the connector answers every query it answers, with identical
+answers, over the L1 corpus, the L6 workload and the L9 host-closure pools (seed 42, levels 1–2), and (2) it is at
+most 1.2× faster than the connector on its shape at 1k and 8k (`mise run scaling`). Anything else stays, listed here.
+
+**How it was measured.** Coverage: the pools under the shipping default vs `connectorOnly` — on trunk `2c25a969`
+the default answered **119** queries the connector alone does not, and 0 differently; each family was then taken off
+the ladder in turn (the dispatch offers it no ladder) and those queries re-run. Speed: `mise run scaling` on trunk,
+LADDER (`correlatedChild` on) vs CONN (the connector alone), ms at 1k / 8k, min of 7. "Lines only it uses":
+line coverage of the same pools ladder-first vs connector-alone (`bun test --coverage`), read against the code — what
+runs ladder-first and never under the connector. `return null` sites counted by `scripts/ladder-check.ts`'s rule.
+
+**Deleted** (commits `cc3d: …`): `project` over an element or scalar host (`recordLeft` alone: its ladder-first
+branches and the tails' `collectionArm` project arm), and `order`/`dedup`/`groupCount` with a child `by()` (no
+code of their own — the dispatch no longer offers the tail the site alone; `byValues` still hands it the landed
+values). One generic fix moved the largest ladder-only cluster (36 of the 119, `union(<arm>.dedup(), …)` inside a
+body) onto the connector: `mergeArms` reconciles `bulk` and a dropped `path` across arms. The set of ladderless hosts
+is `LADDERLESS` in `lower/scoped.ts`. `return null`: 1360 → 1359.
+
+| Family | 8k ladder / connector (worst shape) | Pool queries only it answers | Recommendation |
+|---|---|---|---|
+| existence (`where`/`filter`/`not`/`and`/`or`) | 20.8 / 23.8 (1.14×) | 28 | make the connector total, then delete |
+| per-traverser (`map`/`flatMap`/`local`) | 8.3 / 10.6 (**1.29×**) | 9 + every re-source/draw body | make the connector total + fast, then delete |
+| `choose` | 7.6 / 14.5 (**1.89×**) | 20 | keep |
+| `coalesce`/`optional` | 3.8 / 10.8 (**2.85×**) | 0 | make the connector fast, then delete |
+| `group` (child value `by()`) | 5.9 / 12.6 (**2.14×**) | 17 | keep; make the pool fast |
+| `union` | 3.6 / 3.6 (1.02×) | 0 in the pools; write arms outside them | delete once `globalArms` threads effects |
+
+**1. Existence — `where`/`filter`/`not`/`and`/`or`.**
+- *Where:* the tails' filter dispatch at a connector site — `lower.ts` `hostFilter` (1252) from `elementTail`/
+  `scalarTail`/`propertyTail`, the scan fusion in `lowerChainFrom` (the `correlatedChild` test at 5267), and
+  `aliasWhere`'s traversal leg (`lower.ts:6519-6619`); the route body is `lower/filter.ts` `sourceFilter`'s nested
+  `where`/`filter`/`not` (588-610) and `and`/`or` (633-652) clauses, `childPredicate` (256-301),
+  `selectRerootSubject` (302-353), `correlatedExists` (43-105).
+- *Shapes (ms 1k/8k, ladder vs connector):* where(count.is) 3.0/20.8 vs 3.0/23.8 (1.14×) · nested where ×3 4.0/32.4
+  vs 4.1/33.9 (1.05) · not(out.has) 2.4/19.4 vs 2.5/18.8 (0.97) · where(out.out) 3.5/27.8 vs 3.6/28.0 (1.01) ·
+  as.where(out.has) 3.5/28.7 vs 3.6/29.1 (1.01) · where(simplePath) 5.9/46.8 vs 6.0/47.1 (1.01) ·
+  and(out,in) 0.3/2.5 vs 0.3/2.4 (0.98) · or(out.has,in) 0.8/7.1 vs 0.8/7.1 (0.99). **Within the bar.**
+- *Lines only it uses:* ~55 — `selectRerootSubject` and `childPredicate`'s `readsScopeValue` re-root (filter.ts),
+  `comparableTheta` (predicate.ts 641-663), `classifyWhereLeg` (match.ts 616-619), the scan fusion. Everything else in
+  the route is SHARED: `sourceFilter`'s connective clauses, `childPredicate` and `correlatedExists` build every
+  `choose`/`repeat`/`coalesce` condition and the connector's own `childSeam.predicate`.
+- *`return null` it owns:* 5 (`selectRerootSubject`); the 8 in the shared clauses stay with them.
+- *Queries only it answers (28):* 27 H2 of ONE shape — an existence body holding `project(…).by(<path read>)`
+  (`not(has('age',lt(1)).project('a','b').by(identity()).by(cyclicPath().hasId(4)))` under nine hosts), because the
+  connector cannot lower `project().by(path())` inside a nested body (`where(project('b').by(path()))` declines); and
+  1 L1, the alias-compare `where("a", P.lt("b").or(P.gt("c")).and(P.neq("d"))).by("age").by("weight").by(__.in("created").values("age").min())`.
+  Outside the pools: a drawing body (`where(out().sample(1))`; the connector refuses draws, `ladderOwns`).
+- *Recommendation:* **make the connector total, then delete** — lower `project().by(<path read>)` inside a nested
+  body, give the alias-compare `where(a, P).by(<traversal>)` a row; the dispatch entries then go.
+
+**2. Per-traverser — `map`/`flatMap`/`local`.** The largest deletable route.
+- *Where:* `lower/reduction.ts` `perTraverserChild` (283-339), `flatMapRejoin` (494-605), `localDrawsPerRow`
+  (606-611), `atMostOnePerTraverser` (439-490), `bodyScopesPerOrigin`/`nestedHostScopes`/the `PER_ORIGIN_*` sets
+  (366-437), `nestRowOrigin` (707-709), `originMajor` (742-752); dispatched from `scalarTail` (`lower.ts:2185`) and
+  `elementTail` (`lower.ts:5625`).
+- *Shapes:* map(values) 0.8/6.5 vs 0.9/6.8 (1.04) · out.map(values) 2.2/17.8 vs 2.4/20.0 (1.12) · map(out.values)
+  1.02 · map(out.count) 0.96 · local(out.count) 0.99 · local(both.dedup) 1.03 · local(out.limit) 0.88 ·
+  **flatMap(out.out) 0.9/8.3 vs 1.2/10.6 (1.29×)** · local(choose.option.fold) 8.1/59.7 vs ✗ (the connector declines).
+- *Lines only it uses (measured by deleting it):* ~360 net in `reduction.ts` plus the two dispatch sites.
+- *`return null` it owns:* 13 (12 in `reduction.ts`, 1 in `lower.ts`).
+- *Queries only it answers:* 9 in the pools — 4 L1 `map|local(choose(values('age')).option(…, values('name').fold())…)`
+  (a VARIANT payload the rejoin refuses), 1 L1 `local(properties('location').order().by(T.value).range(0,2)).value()`
+  (a PROPERTY payload), 1 L1 `match(…, as('a').map(inE('followedBy').values('weight').mean()).as('b'), …)` (the
+  map's value keeps the reducer's `result` marker, which a `match` binding refuses), 3 H2
+  `id().union(map|flatMap|local(sum()), identity())` (the same marker, refused by the arm meet). Outside the pools —
+  which exclude random draws — **every body that re-sources or draws**: `map(V().count())`,
+  `flatMap(V().hasLabel('software'))`, `local(V().has('age',gt(30)).values('name'))`, `local(out().sample(1))`,
+  `flatMap(out().sample(1))`, `local(V().sample(1))`. The connector refuses those bodies by design (`ladderOwns`).
+- *Measured and NOT landed* (each closed its gap and broke a pinned fact): rejoining a property/variant payload
+  (closes 5; raises `sql-hygiene` `local`/`map` 7.5 KB → 12.7 KB and is 1.15× slower on local(choose.option.fold));
+  shedding the reducer's marker on an emitted value (closes 4; loses `property(k, local(values('age').sum()))`'s
+  stored type); letting the connector take a re-source body (answers six `@Unsupported` L4 scenarios and two WRONG —
+  `map(V().choose(hasLabel('person'), values('age'), constant(null)).order().limit(1))` answered six nulls for `[]`);
+  draws through the decorrelated rejoin (independent per scope under `local`/`flatMap`, a SHARED draw under `map`'s
+  correlated form); splicing a barrier-free `local`/`flatMap` body into the chain (flatMap(out.out) → 9.5 ms, 1.14×,
+  but `passes.exec.test.ts` pins "a body that MOVES … is left alone").
+- *Recommendation:* **make the connector total and fast for this shape, then delete** — re-source and draw bodies
+  (the `ladderOwns` refusal, with the reference's answer for a re-source under a maybe-absent value), variant/property
+  payloads, the emitted value's marker, and a transparent body inlined.
+
+**3. `choose`.**
+- *Where:* `lower/branch.ts` `chooseArms` (1277-1345, whole-stream condition) and `chooseOptions` (807-1093, the
+  option-map form — no connector row, so this is that form's ONLY lowering: a deferred host, `deferred-hosts.ts`);
+  `lower/reduction.ts` `scalarChooseOptions`/`scalarChoice`/`scalarChooseChild` (1591-1714, `choose` as a
+  correlated scalar child).
+- *Shapes:* **choose(out,values,constant) 0.9/7.6 vs 1.8/14.5 (1.89×)** · choose(values).option 3.5/26.6 vs ✗.
+- *Lines only it uses:* the scalar-child CASE (1591-1714, 74 code lines); `chooseArms`/`chooseOptions` are shared
+  with the connector's `chooseRoute` (`RoutedCondition`).
+- *`return null` it owns:* 15 (the scalar-child CASE); 19 more in the shared builders.
+- *Queries only it answers (20):* 16 option-map forms (at the root and under `map`/`local`; 2 of them L6), 3
+  `choose(P.eq(29), …)` / `choose(is(P.gte(<traversal>)), …)` over a VALUE stream, 1 `inject().choose(is(P.eq(<traversal>)), …)`.
+- *Recommendation:* **keep** — 1.9× on the boolean form and the only lowering of the option form.
+
+**4. `coalesce`/`optional`.**
+- *Where:* `lower/branch.ts` `coalesceArms`/`optionalArms`/`coalesceMerge` (1094-1219) over the WHOLE stream, from the
+  tails' `BRANCH_HOSTS` dispatch. The functions are shared — `priority` takes them over ONE correlated row.
+- *Shapes:* **coalesce(values,constant) 0.7/6.1 vs 1.6/13.2 (2.17×)** · **optional(out.knows) 0.5/3.8 vs 1.3/10.8
+  (2.85×)** · project.coalesce 4.1/31.9 vs 3.8/35.5 (1.11).
+- *Lines / `return null` only it uses:* none — the dispatch entry (the 11 in 1094-1219 are shared).
+- *Queries only it answers:* 0.
+- *Recommendation:* **make the connector fast for this shape, then delete** — `priority` already takes the host's own
+  merge over one correlated row; taking it over the whole stream wherever every arm is per-row (no barrier, no
+  draw) is ladder-speed by construction, and then this dispatch entry is the only thing left to remove.
+
+**5. `group` with a child value `by()` — the keyed pool.**
+- *Where:* `map.ts` the pooled arm of `groupRows` (417-499), `groupReduced` (913-1086), `groupCollected`
+  (1087-1195), `dedupGroupMembers` (1196-1223), `mapOfGroupsPerOrigin` (806-823), `POOLED_RECIPE` (694); `reducer.ts`
+  `screenedByTag`/`exactTail`/`mixedRefused` (121-280, the typed reduction they feed).
+- *Shapes:* **group.by(label).by(count) 0.9/5.9 vs 1.5/12.6 (2.14×)** · **group.by(name).by(tail) 9.0/71.0 vs
+  13.0/101.8 (1.43×)** · group.by(name).by(both.count) 0.84 · group.by(label).by(fold) 0.86.
+- *Lines only it uses:* ~200 (map.ts 913-1223 and the pooled arm; coverage shows none of it under the connector).
+- *`return null` it owns:* 21 (16 in 913-1223, 5 in the pooled arm).
+- *Queries only it answers (17):* 13 keyed side-effect `group("a").by(…).by(<child>).cap("a")` (12 L1, 1 L6 —
+  `byValues` leaves a keyed group to the host), 2 `group().by(<child key>).by(constant(1))`, 2 L6 nested groups
+  (`group().by('name').by(in('created').group().by('name').by(values('age')))`,
+  `project('name','skills').by('name').by(outE('uses').group().by(inV().values('name')).by(values('skill')))`).
+- *Recommendation:* **keep**; to delete it, make `pooledGroup`'s count/tail plans a plain GROUP BY (they pool through
+  a scope today) and give the keyed side-effect form a connector row.
+
+**6. `union`.**
+- *Where:* the tails' `BRANCH_HOSTS` dispatch + `withBranchEffects`; `globalArms` IS `unionArms`, so no code is the
+  ladder's alone.
+- *Shapes:* union(out,in) 0.4/3.6 vs 0.4/3.6 (1.02).
+- *Queries only it answers:* none in the pools — but they exclude writes, and a union whose single arm WRITES is
+  threaded only by the tail (`withBranchEffects`); `globalArms` declines effects.
+- *Recommendation:* **delete** once `globalArms` threads a single arm's effects as the tail does; then `union` joins
+  `LADDERLESS` with no other change.
+
 ### Phase 4 — Structured values across scope. IDs `cc4-*`.
 
 Sequence this with typed-value carrier T1–T5, because the carrier is what crosses the scope as a column (S5).
