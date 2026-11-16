@@ -1,10 +1,11 @@
 import { isNested } from '../../../gremlin/frontend.ts';
-import { col, compilerInt, eq } from '../../../rel/expr.ts';
+import { and, col, compilerInt, eq, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelate } from '../../../rel/decorrelate.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
-import { isSelfContained } from '../../../rel/walk.ts';
+import { forEachRel, isSelfContained } from '../../../rel/walk.ts';
+import { columnIsStored } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { nondeterministic, type IRStep } from '../../ir/step.ts';
@@ -123,6 +124,34 @@ function scopedBody(
   return keyed && { rel: keyed.rel, keyCol: keyed.keyCol, tail };
 }
 
+/**
+ * Step 2, CORRELATED: the body lowered over one row of `rel` itself and left correlated to it — no scope key,
+ * no decorrelation. Where the reconnect is an EXPRESSION of the host row (an existence test), SQLite runs it as
+ * the nested-loop join it is built for: one index seek per host row. Unnesting a dependent join pays where the
+ * engine has a set-oriented join to hand it; SQLite's join IS a nested loop, so a correlated body the planner
+ * can seek is already the decorrelated plan's best physical form. The decorrelated body (`scopedBody`) is the
+ * fallback where the correlated plan cannot sit in a subquery: a `Recursive` (a walk is a CTE; the decorrelator
+ * keys it instead).
+ */
+function correlatedBody(
+  body: readonly IRStep[], rel: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  order?: 'free' | 'read',
+): Tail | null {
+  if (nondeterministic(body, ctx.params) || someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true)) return null;
+  const seed = seedRow(rel, rel, fresh, someStepDeep(body, ctx.params, (s) => s.name === 'tail'));
+  // The body re-reads every host column its seed carries, and a correlated read SPELLS that column inside
+  // the subquery — a COMPUTED one (a label's `jsonb_array`, a path) would be computed again per inner row,
+  // where the decorrelated form reads it once off the scoped input. A carried column is there to be read
+  // (`copyRepeatsWork`'s rule), so any computed one keeps the body decorrelated.
+  if (!seed.type.cols.every((column) => column.name === ENCOUNTER.col || columnIsStored(rel, column.name))) return null;
+  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
+  const tail = continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
+  if (!tail || tail.effects?.length) return null;
+  let walk = false;
+  forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
+  return walk ? null : tail;
+}
+
 /** The scoped input reprojected to the input's own columns (the key shed). */
 function unscoped(rows: Rel, rel: Rel, fresh: Minter): Rel {
   return make.project({
@@ -188,6 +217,21 @@ const existence = (negated: boolean): Connector => (site) => {
       : null
     : [singleBody(step, ctx)];
   if (!bodies || bodies.some((b) => !b?.length)) return null;
+  // Every body correlated: the semi/anti-join is an `EXISTS` over the body itself, read against the host row
+  // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
+  const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free'));
+  if (correlated.every((tail) => tail)) {
+    // The probe projects the body's FIRST column alone: an `EXISTS` reads no value, so the body's other
+    // columns (labels, path) are not spelled; a column rather than a literal keeps an aggregate block an
+    // aggregate query (the reason `childPredicate`'s probe gives, `filter.ts`).
+    const probe = (tail: Tail): Rel => make.project({
+      id: fresh('sp'), input: tail.rel, channels: [], type: typeOf(meta('one', 'any', true)),
+      exprs: [['one', col(tail.rel.id, tail.rel.type.cols[0]!.name)]],
+    });
+    const pred = (correlated as Tail[]).map((tail): Expr => ({ kind: 'exists', plan: probe(tail), negated }))
+      .reduce((all, one) => and(all, one));
+    return continueAs(make.filter({ id: fresh('sj'), input: rel, channels: rel.channels, type: rel.type, pred }), framing, steps, at + 1, bulked, ctx, fresh, labels);
+  }
   const sc = scope(rel, fresh);
   let kept = sc.scoped;
   // `and(b1, b2, …)` is every body's semi-join in turn (`AndStep`, a `ConnectiveStep` over its children).

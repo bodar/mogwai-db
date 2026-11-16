@@ -381,6 +381,14 @@ description = "Shrink + cluster + classify every decline → .logs/coverage-attr
 depends = ["install", "check", "submodule"]
 run = "bun scripts/coverage-attribution.ts"
 
+# The scaling probe (Phase 3 (b), docs/2026-11-15-compositional-coverage-plan.md §5): each cost-discipline
+# and nested shape at 1k/8k, `correlatedChild` ON vs OFF vs the connector ALONE — ms, SQL bytes, JOINs. An
+# INSTRUMENT (wall-clock, needs judgement), deliberately not in `ci`. `-- --sql <shape>` prints the plans.
+[tasks.scaling]
+description = "Scaling probe: probe shapes at 1k/8k, ladder vs connector vs connector-only (ms, SQL bytes, joins)"
+depends = ["install"]
+run = "bun scripts/scaling-probe.ts"
+
 [tasks.census-record]
 description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"
 depends = ["install", "check", "submodule"]

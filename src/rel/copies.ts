@@ -168,3 +168,33 @@ const isBaseRead: (r: Rel) => boolean = nodeFact((r: Rel): boolean => {
   return isBaseRead(r.input) && relExprs(r).every(exprIsBaseRead);
 });
 const exprIsBaseRead = (e: Expr): boolean => exprRels(e).every(isBaseRead) && exprChildren(e).every(exprIsBaseRead);
+
+/**
+ * IS COLUMN `name` OF `r` A STORED VALUE — a base-table column or a constant, carried up through row-wise
+ * operators only? A correlated subplan that reads an outer column has the emitter SPELL that column's
+ * definition inside it (a correlated plan cannot read a name a CTE gave it), so a COMPUTED outer column —
+ * an `as()` label's `jsonb_array`, a path, a normalized value — is computed again per inner row, where a
+ * stored one costs nothing to re-read. `copiedWork`'s rule, asked of one column instead of a whole relation;
+ * an aggregate's, a window's or an explode's output is not stored (NO, the side that keeps a correlated read
+ * off it).
+ */
+export const columnIsStored = (r: Rel, name: string): boolean => {
+  switch (r.kind) {
+    case 'scan': case 'values': return true;
+    case 'project': {
+      const e = r.exprs.find(([column]) => column === name)?.[1];
+      if (!e) return false;
+      if (e.kind === 'lit') return true;
+      return e.kind === 'col' && e.rel === r.input.id && columnIsStored(r.input, e.name);
+    }
+    case 'filter': case 'sort': case 'limit': case 'distinct': return columnIsStored(r.input, name);
+    case 'materialize': return r.fenced === true || columnIsStored(r.input, name);
+    case 'join': {
+      const at = r.type.cols.findIndex((column) => column.name === name);
+      const leftN = r.left.type.cols.length;
+      if (at < 0) return false;
+      return at < leftN ? columnIsStored(r.left, r.left.type.cols[at]!.name) : columnIsStored(r.right, r.right.type.cols[at - leftN]!.name);
+    }
+    default: return false;
+  }
+};
