@@ -512,3 +512,74 @@ Feature: mogwai addendum — a child-taking host as a scoped-relation CONNECTOR
       | lop |
       | ripple |
       | peter |
+
+  # ---- a MAP holding elements, NESTED in another value, frames its elements ----
+
+  # ProjectStep puts the by() product — here a Map<String,List<Vertex>> — into the record as is
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:64-67);
+  # its members are VERTICES. (Before the nested map was expanded, they framed as their bare ids.) Ordered by
+  # name so each list's member order is the query's.
+  Scenario: g_V_hasLabelXpersonX_projectXxX_byXout_order_byXnameX_groupXX_byXlabelXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").project("x").by(__.out().order().by("name").group().by(T.label))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"m[{\\"person\\":\\"l[v[josh],v[vadas]]\\",\\"software\\":\\"l[v[lop]]\\"}]"}] |
+      | m[{"x":"m[{}]"}] |
+      | m[{"x":"m[{\\"software\\":\\"l[v[lop],v[ripple]]\\"}]"}] |
+      | m[{"x":"m[{\\"software\\":\\"l[v[lop]]\\"}]"}] |
+
+  # A group() VALUE that is itself a group() of elements: Grouping pools each key's traversers into the inner
+  # group barrier (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125).
+  Scenario: g_E_hasXweight_1X_groupXX_byXlabelX_byXgroupXX_byXlabelXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.E().has("weight", 1.0).group().by(T.label).by(__.group().by(T.label))
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | m[{"created":"m[{\\"created\\":\\"l[e[josh-created->ripple]]\\"}]","knows":"m[{\\"knows\\":\\"l[e[marko-knows->josh]]\\"}]"}] |
+
+  # …and folded: a list of such maps, each member framed with its elements.
+  Scenario: g_V_hasXname_markoX_out_order_byXnameX_groupXX_byXlabelX_fold
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","marko").out().order().by("name").group().by(T.label).fold()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | l[m[{"person":"l[v[josh],v[vadas]]","software":"l[v[lop]]"}]] |
+
+  # A NESTED project() is a Map on EVERY traverser it maps — an empty one included
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:62-68),
+  # so the outer key is present even where no inner by() produced. (It was dropped: the inner record's
+  # presence was read off its first field.)
+  Scenario: g_V_hasXname_joshX_projectXxX_byXprojectXxX_byXvaluesXlangXXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().has("name","josh").project("x").by(__.project("x").by(__.values("lang")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"x":"m[{}]"}] |
+
+  Scenario: g_V_projectXxX_byXprojectXa_bX_byXhasXlangXX_byXhasXname_markoXXX_selectXxX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().project("x").by(__.project("a","b").by(__.has("lang")).by(__.has("name","marko"))).select("x").count()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[6].l |

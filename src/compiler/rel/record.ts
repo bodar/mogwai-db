@@ -10,7 +10,7 @@ import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type 
 import { listNodeExpr } from './list.ts';
 import { exprHasSubquery, isSelfContained } from '../../rel/walk.ts';
 import { exprMayAbort } from '../../rel/raise.ts';
-import { MAP_COL, mapPayload } from './map.ts';
+import { MAP_COL, mapHoldsRowids, mapNodePayload, mapPayload } from './map.ts';
 import { byField, modulations, type ByField } from './modulator.ts';
 
 /** A caller-supplied field for a `by()` SLOT (its ring position), or `undefined` to take the slot's own
@@ -273,7 +273,9 @@ function fieldNode(read: FieldRead, field: RecordField, source: GraphSource, fre
     // A MAP field is a record that has ALREADY spent its fields — `by(__.project(…))` inside a
     // `project()` slot, or a map-valued child. Its column holds the pairs array, so the member is that
     // array under the same envelope the record arm above adds. One encoding, two producers.
-    case 'map': return mapNode(jsonOf(own('map')));
+    // Its elements stay rowids in the retained pairs, so they are expanded for the wire as a root map's are
+    // (`mapNodePayload`) — a `project('x').by(out().group().by(label))` field holds vertices, not ids.
+    case 'map': return mapNode(mapHoldsRowids(framing.valOf) ? mapNodePayload(own('map'), framing.valOf, source, fresh) : jsonOf(own('map')));
     // A LIST field — `project('ks').by(__.out().fold())`, the GraphQL to-many object field. The `by()`
     // body now ends in a `fold()` (the map/scalar/element fold), so this arm is reachable where its
     // comment used to say no producer existed. `ProjectStep.map` puts whatever `TraversalUtil.produce`

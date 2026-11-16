@@ -13,12 +13,12 @@ import type { AliasMap } from '../../alias.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
 import { nondeterministic, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
-import { groupKeyTerms, isValueBarrier, keyedValuesMap } from '../map.ts';
+import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
-import { firstArrival, listNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
-import { framingCols, type RelFraming } from '../framing.ts';
+import { firstArrival, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { framingCols, type RecordField, type RelFraming } from '../framing.ts';
 import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
@@ -705,13 +705,16 @@ const recordLeft: Connector = (site) => {
     const by = bys[slot]!;
     if (by.key.kind !== 'child' || by.order !== undefined) continue;
     if (ctx.correlatedChild && byField(step, by, ownHost, framing, (name) => col(rel.id, name), ctx.source, fresh, child)) continue;
-    const tail = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read');
+    // A RECORD-valued by() (`by(__.project(…))`) is held as the MAP it is (`recordAsMap`): a record's own first
+    // column is a SUB-field's, so presence read off it dropped an outer key whose inner map was empty.
+    const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read');
+    const tail = lowered && recordAsMap(lowered, ctx, fresh);
     const fieldCols = tail && framingCols(tail.framing);
     const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), rel, fresh);
     if (tail && exprs) { correlated.set(slot, { exprs, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
     const scoped = sc ??= scope(rel, fresh);
     if (joined === rel) joined = scoped.scoped;
-    const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read');
+    const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh));
     const cols = keyed && framingCols(keyed.tail.framing);
     if (!keyed || !cols || cols.some((column) => !keyed.tail.rel.type.cols.some((c) => c.name === column.name))) {
       if (ctx.correlatedChild) return null;
@@ -825,27 +828,16 @@ const perTraverserSlot = (step: IRStep, slot: number): boolean => step.name !== 
  */
 function landValues(
   rel: Rel, framing: RelFraming, bodies: ReadonlyMap<string, readonly IRStep[]>, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  framed = true,
 ): { readonly over: Rel; readonly values: ReadonlyMap<string, ChildValue> } | null {
   const sc = scope(rel, fresh);
   let joined = sc.scoped;
   const landed: { readonly key: string; readonly first: KeyedRows; readonly framing: RelFraming; readonly cols: readonly ColMeta[] }[] = [];
   for (const [key, body] of bodies) {
-    // A RECORD value (`by(__.project(…))`) is the Map it is (`ProjectStep`): one `map` column, so it lands as
-    // one value — equal by its entries (`recordToMap`).
-    const asMap = (tail: Tail): Tail | null => {
-      if (tail.framing.kind !== 'record') return tail;
-      const map = recordToMap(tail.rel, tail.framing.fields, ctx.source, fresh);
-      return map && { ...tail, rel: map.rel, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: map.valOf } };
-    };
-    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, asMap);
+    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh, true));
     const cols = keyed && framingCols(keyed.tail.framing);
     // One value column (and a scalar's per-row type) is what a ChildValue carries.
     if (!keyed || !cols || cols.length > (keyed.tail.framing.kind === 'scalar' ? 2 : 1)) return null;
     if (cols.some((column) => !keyed.tail.rel.type.cols.some((c) => c.name === column.name))) return null;
-    // A MAP value holding element rowids frames them bare once nested in another value (a key, a member) —
-    // `framed`: the host puts the value on the wire; a dedup()/order() key only compares it.
-    if (framed && keyed.tail.framing.kind === 'map' && JSON.stringify(keyed.tail.framing).includes('"elem"')) return null;
     const first = firstPerScope(keyed, cols.map((column) => column.name), fresh);
     joined = make.join({
       id: fresh('sbj'), left: joined, right: first.rel, join: 'left', channels: joined.channels,
@@ -862,16 +854,39 @@ function landValues(
     // The body produced exactly where its scope has a first row — a NULL value under it is a productive null.
     present: { when: isNot(col(over.id, first.key), compilerNull()) },
     yields: 'first' as const,
+    // A MAP value whose values hold element rowids is NESTED wherever a host puts it (a group key, a member):
+    // its node carries them expanded (`mapNodePayload`), as a root map's are framed; a key that only compares
+    // (`dedup`) reads `expr`.
+    ...(valueFraming.kind === 'map' && mapHoldsRowids(valueFraming.valOf)
+      ? { node: mapNode(mapNodePayload(col(over.id, first.renamed.get(cols[0]!.name)!), valueFraming.valOf, ctx.source, fresh)) } : {}),
   } satisfies ChildValue]));
   return { over, values };
 }
 
-/** Can the tree framer (`listNodeExpr`) walk a list of these members, at every depth? A MAP member is rebuilt as a
- *  `{t:'map'}` node as it stands, so an element ROWID inside one would frame as a bare number: declined. */
+/** Can the tree framer (`listNodeExpr`) walk a list of these members, at every depth? A map member's element
+ *  rowids are expanded there (`mapNodePayload`); a path member has no `{t:'path'}` node yet. */
 const treeFramed = (of: ListOf): boolean =>
-  of.kind === 'list' ? treeFramed(of.of)
-    : of.kind === 'map' ? !JSON.stringify(of).includes('"elem"')
-      : of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'elem';
+  of.kind === 'list' ? treeFramed(of.of) : of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'map' || of.kind === 'elem';
+
+/**
+ * A RECORD value (`by(__.project(…))`) as the MAP it is — `ProjectStep` emits a `Map` for every traverser it
+ * maps, an empty one included: one `map` column (`recordToMap`), so the value is ONE column, present wherever the
+ * body produced and equal by its entries. Read as a record, its presence was its FIRST SUB-field's, so an inner
+ * map with that field absent read as no value at all (`project('x').by(project('a','b').by(has('lang'))…)`
+ * dropped `x`). The ladder's seam already hands a project body back collapsed the same way.
+ */
+function recordAsMap(tail: Tail, ctx: ChainCtx, fresh: Minter, always = false): Tail | null {
+  // Only where the record's presence CANNOT be read off its first column: a first field that is itself always
+  // there (a `count()`, a token) proves the record, and the record's columns stay as they are (no JSON built) —
+  // `always` where the value must be ONE column regardless (a landed by() value, `landValues`).
+  const readable = (fields: readonly RecordField[]): boolean => {
+    const first = fields[0];
+    return !!first && !first.optional && (first.framing.kind !== 'record' || readable(first.framing.fields));
+  };
+  if (tail.framing.kind !== 'record' || (!always && readable(tail.framing.fields))) return tail;
+  const map = recordToMap(tail.rel, tail.framing.fields, ctx.source, fresh);
+  return map && { ...tail, rel: map.rel, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: map.valOf } };
+}
 
 /** The child bodies of a step's per-traverser `by()` slots, by `bodyKey`. */
 function perTraverserBodies(step: IRStep, bys: readonly (Modulation | undefined)[]): Map<string, readonly IRStep[]> {
@@ -912,7 +927,7 @@ const byValues: Connector = (site) => {
   const bodies = new Map([...all].filter(([, body]) => !host || !seam.scalar(body, host)));
   // No child body to land (a `by(__.identity())` IS a bare `by()`): the host's own lowering, over the input.
   const landed = bodies.size
-    ? landValues(rel, framing, bodies, ctx, fresh, labels, step.name !== 'dedup' && step.name !== 'order')
+    ? landValues(rel, framing, bodies, ctx, fresh, labels)
     : { over: rel, values: new Map<string, ChildValue>() };
   if (!landed) return null;
   const { over, values } = landed;
@@ -1033,10 +1048,9 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   // A list value is NESTED in the map, so its members must describe themselves (`selfDescribingList`) — and
   // be members the tree framer can walk (`listNodeExpr`): a path member has no `{t:'path'}` node yet.
   if (valueFraming.kind === 'list' && !treeFramed(valueFraming.of)) return null;
-  // …and a MAP value is nested as it stands, so one holding element rowids (a `group()` of elements) would frame
-  // them as bare numbers; any other value shape is not one this node builder states.
-  if (valueFraming.kind === 'map' ? JSON.stringify(valueFraming).includes('"elem"')
-    : valueFraming.kind !== 'list' && valueFraming.kind !== 'scalar' && valueFraming.kind !== 'elements') return null;
+  // …and a MAP value keeps its element rowids for the root framer, which expands them through `singleOf`
+  // (`mapNodePayload`, recursive over a nested map); any other value shape is not one this node builder states.
+  if (valueFraming.kind !== 'list' && valueFraming.kind !== 'map' && valueFraming.kind !== 'scalar' && valueFraming.kind !== 'elements') return null;
   const listed = valueFraming.kind === 'list' ? selfDescribingList(valueExpr, valueFraming.of, fresh) : null;
   const node = listed ? listNode(listed.list) : memberNodeOf(produced, ctx.source, fresh);
   if (!node) return null;

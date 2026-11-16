@@ -2113,18 +2113,39 @@ export function mapPayload(rel: Rel, valOf: MapOf, source: GraphSource, fresh: M
   };
 }
 
-/** Rebuild a retained map only when its value descriptor says a list contains element rowids.  The
- * retained relation stays rowid-addressable; this projection is solely the direct wire path, where
- * `frameTypedNode` needs `{t:'vertex'|'edge',v:…}` members. */
-function mapNodePayload(map: Expr, valOf: MapOf, source: GraphSource, fresh: Minter): Expr {
-  if (valOf.kind !== 'list') return jsonOf(map);
+/** Does a map value side hold element ROWIDS anywhere beneath it — in a list, at any depth, or in a nested
+ *  map's own value side? Those are the only members the tree framer cannot read as they stand. */
+export const mapHoldsRowids = (of: MapOf): boolean =>
+  of.kind === 'list' ? listHoldsRowids(of.of) : of.kind === 'map' ? mapHoldsRowids(of.of) : false;
+const listHoldsRowids = (of: ListOf): boolean =>
+  of.kind === 'elem' || (of.kind === 'list' && listHoldsRowids(of.of)) || (of.kind === 'map' && mapHoldsRowids(of.of));
+
+/**
+ * A retained map's PAIRS ARRAY with every element rowid beneath its values expanded to a `{t:'vertex'|'edge',v:…}`
+ * node — the map's wire form wherever it sits: the root (`mapPayload`), a record field, a list member, the value
+ * of another map. The retained relation stays rowid-addressable; this is solely the framing path, and it is
+ * RECURSIVE over the value side's shape exactly as `listNodeExpr` is over a list's, so a map of lists of
+ * elements nested in a map (`group().by(k).by(group().by(k))`) or in a `project()` field frames its elements
+ * rather than their rowids. A value side that holds no rowid is the map as it stands.
+ */
+export function mapNodePayload(map: Expr, valOf: MapOf, source: GraphSource, fresh: Minter): Expr {
+  // A LIST value is always rebuilt (`listNodeExpr` gives its map members their `{t:'map'}` node); a map value
+  // only where rowids sit beneath it.
+  if (valOf.kind !== 'list' && !mapHoldsRowids(valOf)) return jsonOf(map);
   const pairs = pairsOf(map, fresh);
   const node = pairSide(col(pairs.id, PAIR.value), 'values');
-  const members = listNodeExpr({ kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] }, valOf.of, source, fresh);
-  if (!members) throw new Error('RelIR lowering: map list value has no typed-node framing');
+  const inner: Expr = { kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] };
+  let value: Expr;
+  if (valOf.kind === 'list') {
+    const members = listNodeExpr(inner, valOf.of, source, fresh);
+    if (!members) throw new Error('RelIR lowering: map list value has no typed-node framing');
+    value = listNode(members);
+  } else {
+    value = mapNode(mapNodePayload(inner, (valOf as Extract<MapOf, { kind: 'map' }>).of, source, fresh));
+  }
   const rebuilt = make.aggregate({
     id: fresh('mn'), input: pairs, channels: [], type: typeOf(meta(MAP_COL, 'json', true)), groupBy: [],
-    aggs: [[MAP_COL, collectedArray(pairOf(pairSide(col(pairs.id, PAIR.value), 'keys'), listNode(members)), [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }])]],
+    aggs: [[MAP_COL, collectedArray(pairOf(pairSide(col(pairs.id, PAIR.value), 'keys'), value), [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }])]],
   });
   return jsonOf({ kind: 'scalar', plan: rebuilt });
 }

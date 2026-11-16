@@ -535,8 +535,23 @@ FRAMING gap, not a connector one — a MAP value holding element rowids nested i
 map node is rebuilt as it stands and never expands its elements. A pooled group value of that shape shipped a
 wrong answer in the first cc3a commit and is now declined (as are such keys); the same gap answers wrong on
 trunk BEFORE this work through `project('x').by(out().group().by(label))` (frames `[2,4]`). Fix in the
-direction: give the map-node builder the element expansion `listNodeExpr` already has (S5's typed carrier) —
-then both rows return to ~95%.
+direction: give the map-node builder the element expansion `listNodeExpr` already has (S5's typed carrier).
+**RESOLVED (cc3a, after the cc3b rebase):** `mapNodePayload` (`map.ts`) is recursive over a map's value side —
+a list's members through `listNodeExpr`, a nested map's through itself — and every place a map is NESTED reads
+it: a record field, a list member (`listNodeExpr`/`listPayloadExpr`), a landed group key's node. The declines
+are gone, the trunk wrong answer is fixed (L4 pins all three shapes), and connector-alone depth-3 closure is
+`group` 87.9%, `dedup` 88.2%.
+
+After the rebase onto cc3b the rows keep cc3b's dependent-join forms (`firstInner`/`existence` correlated
+where SQL-holdable, `rejoin` the decorrelated fallback); `coalesce`/`optional` over ONE correlated row take the
+host's own `coalesceMerge`, and a by() value the seam holds as a correlated scalar is not landed — so `mise run
+scaling` is at trunk's numbers on every shape (CONN@8k `order.by(select)` 84.4 vs 84.4, `project.coalesce`
+51.9 vs 51.8). Not built: a correlated form for the many-row new hosts (`optional`/`local` forward,
+`flatMap`/`coalesce` split) — an EXISTS-gated correlated join where the body is SQL-holdable.
+
+Pre-existing on trunk, found by the differential and FIXED in the same commit: a nested `project()` whose inner map is
+empty drops the outer key under the connector (`g.V(4).project('x').by(project('x').by(values('lang')))` is
+`[{}]`, TinkerPop `[{x:{}}]`): the record-valued by() read its presence off its first SUB-field; it is now held as the map it is wherever that first field may be absent (`recordAsMap`, `scoped.ts`).
 
 Deferred hosts, with the reason: `sideEffect(b)` — an effect-free body is already removed by a Pass
 (`dropEffectFreeSideEffect`), and one WITH effects is the collection substrate's (a scoped body declines

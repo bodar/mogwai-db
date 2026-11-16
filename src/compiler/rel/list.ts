@@ -14,6 +14,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam, RootedRead } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { raiseInRow } from '../../rel/raise.ts';
+import { mapHoldsRowids, mapNodePayload } from './map.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedColumn, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
@@ -2012,6 +2013,12 @@ export function listPayloadExpr(list: Expr, of: ListOf, source: GraphSource, fre
   // (`pathPositions` expanded each via `source.elementNode`), so the outer list already holds the wire
   // tree — nothing to expand at the root, exactly as scalar/mixed/map. The framer (`listMemberNodes`'
   // `path` arm) wraps each member's positions array in `framePath`.
+  // …UNLESS a map member's values hold element rowids (a `group()` of elements, folded): its pairs are rebuilt
+  // with those expanded (`mapNodePayload`), each member still the pairs array the framer walks.
+  if (of.kind === 'map' && mapHoldsRowids(of.of)) {
+    const members = membersOf(jsonOf(list), fresh);
+    return rebuiltMembers(members, mapNodePayload(col(members.id, MEMBER.value), of.of, source, fresh), fresh);
+  }
   if (of.kind === 'scalar' || of.kind === 'mixed' || of.kind === 'map' || of.kind === 'path') return jsonOf(list);
   if (of.kind === 'elem') {
     const rowids = membersOf(jsonOf(list), fresh);
@@ -2090,7 +2097,9 @@ export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh:
   if (of.kind === 'scalar' || of.kind === 'mixed') return jsonOf(list);
   if (of.kind === 'map') {
     const members = membersOf(jsonOf(list), fresh);
-    return rebuiltMembers(members, mapNode(jsonOf(col(members.id, MEMBER.value))), fresh);
+    // A map member's elements are rowids in its pairs; expanded as any nested map's are (`mapNodePayload`).
+    const member = col(members.id, MEMBER.value);
+    return rebuiltMembers(members, mapNode(mapHoldsRowids(of.of) ? mapNodePayload(member, of.of, source, fresh) : jsonOf(member)), fresh);
   }
   if (of.kind === 'elem') {
     // A member ELEMENT node is source-routed — a base member rejoins the physical tables, a bound

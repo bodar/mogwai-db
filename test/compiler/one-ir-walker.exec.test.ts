@@ -278,12 +278,25 @@ describe('a group value fold pools per key, never per member', () => {
       .toEqual(new Map([[1, ['josh', 'lop', 'vadas']], [4, ['lop', 'ripple']], [6, ['lop']]])));
   test.each([
     "g.V().as('a').out().group('m').by(select('a')).by(values('name').fold()).cap('m')",
-    // A pooled value that is a MAP OF ELEMENTS: nested in the outer map, its element rowids would frame as
-    // bare numbers (`{created:{created:[9,10,11,12]}}`), so it declines until a nested map expands them.
-    "g.E().group().by(label).by(group().by(label))",
-    "g.V().group().by(label).by(out().group().by(label))",
-    "g.V().hasLabel('person').groupCount().by(out().group().by(label))",
   ])('%s', (q) => declines(q));
+
+  // A MAP OF ELEMENTS nested in another value — a pooled group value, a groupCount key — frames its elements
+  // (`mapNodePayload`, recursive over the value side), never their bare rowids.
+  const ids = (v: unknown): unknown => (v instanceof Map ? Object.fromEntries([...v].map(([k, x]) => [String(k), ids(x)]))
+    : Array.isArray(v) ? v.map(ids) : v && typeof v === 'object' && 'id' in v && 'label' in v ? `${(v as { label: string }).label}:${(v as { id: unknown }).id}` : v);
+  test('a group value that is a group of edges', async () =>
+    expect(ids((await framed('g.E().group().by(label).by(group().by(label))'))[0]))
+      .toEqual({ created: { created: ['created:9', 'created:10', 'created:11', 'created:12'] }, knows: { knows: ['knows:7', 'knows:8'] } }));
+  test('a group value that is a group of vertices, and an empty pool\'s {}', async () => {
+    const [m] = (await framed('g.V().group().by(label).by(out().group().by(label))')) as Map<string, Map<string, { id: number }[]>>[];
+    expect([...m!.get('person')!.get('person')!].map((v) => v.id).sort()).toEqual([2, 4]);
+    expect(m!.get('software')!.size).toBe(0);
+  });
+  test('a groupCount key that is a group of vertices', async () => {
+    const [m] = (await framed("g.V().hasLabel('person').groupCount().by(out().group().by(label))")) as Map<Map<string, { id: number }[]>, bigint>[];
+    const software = [...m!.keys()].flatMap((key) => key.get('software') ?? []).map((v) => v.id).sort();
+    expect(software).toEqual([3, 3, 3, 5]);
+  });
 
   test('…while a bare by(fold()) still collects the traversers', async () => {
     const [m] = (await framed("g.V().as('a').out().group().by(select('a').values('name')).by(fold())")) as Map<string, any[]>[];

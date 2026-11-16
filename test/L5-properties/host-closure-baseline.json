@@ -42,7 +42,7 @@
       },
       "3": {
         "applicable": 65,
-        "executed": 62
+        "executed": 63
       }
     },
     "where": {
@@ -56,7 +56,7 @@
       },
       "3": {
         "applicable": 64,
-        "executed": 54
+        "executed": 55
       }
     },
     "filter": {
@@ -146,15 +146,15 @@
     "group": {
       "1": {
         "applicable": 160,
-        "executed": 151
+        "executed": 153
       },
       "2": {
         "applicable": 60,
-        "executed": 52
+        "executed": 56
       },
       "3": {
         "applicable": 58,
-        "executed": 50
+        "executed": 54
       }
     },
     "order": {
