@@ -131,6 +131,13 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
 1. **The reducer's `result` marker on an emitted value.** It closes 4 sole answers. Fix it where the marker is
    READ (the `match` binding and the arm meet accept it), not where it is shed. Shedding it lost
    `property(k, local(values('age').sum()))`'s stored type.
+   ✅ **LANDED (2e46e203).** The marker is two facts: the value's class on `vt` (kept) and `reducedGlobally`
+   (a global barrier produced one row), set only by the global reducers and cleared by `perTraverserFraming`
+   and every per-traverser rejoin — `src/compiler/rel/framing.ts`, `lower/scoped.ts`; `scalarArmType`
+   (`lower/branch.ts`) is the one type authority for both arm merges, and `match` declines only
+   `reducedGlobally`. Number class kept (a Long sum stays `L`); every probe shape ~7.5× from 1k to 8k; no
+   baseline moved. Remains: nothing. (A pre-existing wrong answer found while probing,
+   `match-null-reducer-end`, is tracked in `docs/outstanding-work.md`.)
 2. **Variant and property payloads through the rejoin.** These close 5. The first attempt raised `sql-hygiene`
    by 7.5 → 12.7 KB, so it probably wants the typed carrier (parent Phase 4, S5); sequence it there.
 3. **Re-source bodies** (`map(V()…)`). First establish the reference semantics with scenarios: a re-source
