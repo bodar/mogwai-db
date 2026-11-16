@@ -119,6 +119,14 @@ the default). Generalise the ladder's one real idea, then delete the route:
 - Then drop the dispatch entries (`hostFilter`, the scan fusion's `correlatedChild` test, `aliasWhere`'s
   traversal leg). Delete `selectRerootSubject`: about 55 lines and 5 `return null`.
 
+✅ **LANDED (96f8f2c2).** One productivity authority, `existencePrefix` (`src/compiler/ir/productivity.ts`), used by
+the `trimExistenceSuffix` Pass (where/filter/not, and/or arms, if-then choose predicate, repeat until/emit) and by
+`childPredicate`'s coalesce-arm emptiness (replacing `withoutMappingTerminal`). `where(a, P).by(<traversal>)` is
+the `where` connector row's `aliasCompare`, landing by() values through `byValues`' shared `landedStep`/`afterLanded`.
+The existence hosts join ladderless (except `ladderOwns` draw/re-source bodies, R2/R4); the scan fusion's
+`correlatedChild` test is gone. Kept, measured as still reached: `selectRerootSubject` (via `match()` legs) and
+`aliasWhere`'s leg (for `ladderOwns` bodies) — they retire with R2/R4, not here. Remains: nothing.
+
 ### R4 — Per-traverser family (largest prize: ~360 LOC, 13 `return null`)
 
 **DECIDED (owner, 2026-11-16): REPLACE IN STAGES (option A); the route stays until the typed carrier (Phase 4) lands.**
