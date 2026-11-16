@@ -104,6 +104,13 @@ split. It is the builder's judgement. `repeat` until/emit's own condition loweri
   evaluates per host row.
 - *Done when:* `bothChildOrders` never fires on the pools. Count it.
 
+✅ **R2a (join width) LANDED (b1210037).** Neither alternative above was needed: the emitter's join assembly closes
+the wider side of a join whose FROM would pass SQLite's 64 tables into one `OFFSET 0`-fenced derived table (`side`'s
+`fence`, `src/rel/emit.ts`; the width counts what the flattener merges, `derivedTables`), so an unroll nests a
+SELECT every 64 tables and answers in either child order; `bothChildOrders` lost its `JoinWidthExceeded` retry arm,
+and `JoinWidthExceeded` remains only as the assembler's assertion. Tests: `test/compiler/host-unroll-width.exec.test.ts`.
+Remains for R2a: nothing. (The copied-draws bullet is a separate item.)
+
 ### R3 — Existence family (smallest; audit says within the bar)
 
 **DECIDED (owner, 2026-11-16): REPLACE (option A).** Speed is not a factor (connector within 1.14×, and it is already
