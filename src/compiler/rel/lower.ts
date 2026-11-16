@@ -1351,8 +1351,8 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
 type ArmOutcome = { readonly tail: Tail | null } | 'continue' | 'pass';
 
 /**
- * THE COLLECTION-VOCABULARY ARMS BOTH TAILS SHARE — `select`, `group`/`groupCount`, `aggregate`, `cap`,
- * `project` — one lowering at both hosts (§6·6: a shape works wherever it is legal). Each differs
+ * THE COLLECTION-VOCABULARY ARMS BOTH TAILS SHARE — `select`, `group`/`groupCount`, `aggregate`, `cap` —
+ * one lowering at both hosts (`project` is the connector's `recordLeft`, `lower/scoped.ts`) (§6·6: a shape works wherever it is legal). Each differs
  * between the scalar and element folds ONLY by the `host` it reads a `by()` through and the `framing` it
  * hands the reducer/record, so the caller supplies those two; the element-side path preambles
  * (`dropPath`/decline-on-path) are kept here because they are no-ops over a scalar stream (the scalar
@@ -1484,15 +1484,6 @@ function collectionArm(
     const collected = readCollection(step, ctx.collections, ctx.source, fresh);
     if (!collected) return { tail: null };
     return { tail: continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
-  }
-
-  if (step.name === 'project') {
-    // A carried PATH declines: the record is a new traverser object and nothing here appends it as a
-    // path position, so a later `path()` would report a history with a step missing. No-op over a scalar.
-    if (pathCarried(rel)) return { tail: null };
-    const record = recordOf(rel, hostOf(rel), framing, step, childSeam(ctx, fresh), ctx.source, fresh);
-    if (!record) return { tail: null };
-    return { tail: continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels) };
   }
 
   return 'pass';
@@ -2182,7 +2173,7 @@ function scalarTail(
     if (reEntered) return reEntered;
 
     // THE SHARED COLLECTION VOCABULARY — `select` (which may re-root to an ELEMENT, the whole reason
-    // `elementTail` is a function), `group`/`groupCount`, `aggregate`, `cap`, `project` — all lowered by
+    // `elementTail` is a function), `group`/`groupCount`, `aggregate`, `cap` — all lowered by
     // the one helper both tails share, reading `by()` through this fold's scalar `host` and framing `out`.
     const armed = collectionArm(step, rel, () => host, out, bulked, steps, at, ctx, fresh, labels,
       (nextAt) => scalarTail(rel, out, steps, nextAt, bulked, ctx, fresh, labels));
@@ -5608,7 +5599,7 @@ function elementTail(
       continue;
     }
     // THE SHARED COLLECTION VOCABULARY — `select` (a re-root to an aliased object), `group`/`groupCount`,
-    // `aggregate`, `cap`, `project` — the one helper both tails share, reading `by()` through this fold's
+    // `aggregate`, `cap` — the one helper both tails share, reading `by()` through this fold's
     // `elementHost` and framing the elements. Same lowering the scalar tail reaches (§6·6).
     const armed = collectionArm(step, rel, (from) => elementHost(from, elem, labels), { kind: 'elements', elem }, bulked, steps, at, ctx, fresh, labels,
       (nextAt) => elementTail(rel, elem, steps, nextAt, bulked, ctx, fresh, labels));

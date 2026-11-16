@@ -22,7 +22,7 @@ import { framingCols, type RecordField, type RelFraming } from '../framing.ts';
 import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
-import { byField, byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
+import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import type { Declines } from '../../unsupported.ts';
@@ -1104,12 +1104,11 @@ const recordLeft: Connector = (site) => {
   const bys = modulations(step, keys, child);
   if (!bys) return null;
   const host = (from: Rel) => (framing.kind === 'elements' || framing.kind === 'scalar' ? reductionHost(from, framing, labels) : null);
-  const ownHost = host(rel);
   // The scope is minted only once a slot needs it.
   let sc: Scope | undefined;
-  // Which `by()` slots this connector answers: a CHILD body the ladder's own field cannot answer (the fast
-  // path on), or every child body it can lower (off). Decided per slot, so one unanswerable `by()` does not
-  // cost the others their fast path. A slot's ring position is `index % bys.length` (`TraversalRing`).
+  // Which `by()` slots this connector answers: every CHILD body it can lower, correlated or keyed. Decided per
+  // slot — a slot it cannot lower is the record builder's own field (`byField`, through the child seam) — so one
+  // unanswerable `by()` does not cost the others. A slot's ring position is `index % bys.length` (`TraversalRing`).
   const owned = new Map<number, { readonly first: ReturnType<typeof firstPerScope>; readonly framing: RelFraming }>();
   // A slot whose body stays CORRELATED: its first row read per host row (`correlatedFirst`), no join at all.
   const correlated = new Map<number, { readonly exprs: ReadonlyMap<string, Expr>; readonly framing: RelFraming; readonly total: boolean }>();
@@ -1117,7 +1116,6 @@ const recordLeft: Connector = (site) => {
   for (let slot = 0; slot < bys.length; slot++) {
     const by = bys[slot]!;
     if (by.key.kind !== 'child' || by.order !== undefined) continue;
-    if (ctx.correlatedChild && byField(step, by, ownHost, framing, (name) => col(rel.id, name), ctx.source, fresh, child)) continue;
     // A RECORD-valued by() (`by(__.project(…))`) is held as the MAP it is (`recordAsMap`): a record's own first
     // column is a SUB-field's, so presence read off it dropped an outer key whose inner map was empty.
     const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read');
@@ -1129,10 +1127,7 @@ const recordLeft: Connector = (site) => {
     if (joined === rel) joined = scoped.scoped;
     const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh));
     const cols = keyed && framingCols(keyed.tail.framing);
-    if (!keyed || !cols || cols.some((column) => !keyed.tail.rel.type.cols.some((c) => c.name === column.name))) {
-      if (ctx.correlatedChild) return null;
-      continue;
-    }
+    if (!keyed || !cols || cols.some((column) => !keyed.tail.rel.type.cols.some((c) => c.name === column.name))) continue;
     const first = firstPerScope(keyed, cols.map((column) => column.name), fresh);
     joined = make.join({
       id: fresh('spj'), left: joined, right: first.rel, join: 'left', channels: joined.channels,
@@ -1598,6 +1593,16 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
     || (step.modulators ?? []).some((by) => by.some(isNested)));
 
 /**
+ * The hosts whose ladder route is DELETED (Phase 3 (d); the kept ones are catalogued in
+ * `docs/2026-11-15-compositional-coverage-plan.md`, "Kept routes"): the connector row is their one lowering, so the
+ * dispatch offers no ladder to fall back to and the tails never lower them. A host leaves the ladder by joining
+ * this set in the commit that deletes its route. Keyed by the FRAMINGS the deleted route served: over any other
+ * framing the tail that lowers the step is the host's own lowering, not a ladder (`project` over a property row is
+ * `propertyTail`'s record — `recordLeft` reads a `by()` through an element or scalar host only).
+ */
+const LADDERLESS: ReadonlyMap<string, ReadonlySet<RelFraming['kind']>> = new Map([['project', new Set(['elements', 'scalar'] as const)]]);
+
+/**
  * The dispatch at a connector site: the ladder (the `correlatedChild` fast path) and the connector, in the order
  * the switch names, each the other's fallback. `undefined` where `steps[at]` is not a connector site.
  */
@@ -1614,7 +1619,7 @@ export function scopedHost(
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, ['local', 'map', 'flatMap'].includes(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
-  const routes = ctx.connectorOnly ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
+  const routes = ctx.connectorOnly || LADDERLESS.get(step!.name)?.has(framing.kind) ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is
   // tried first (the switch) changes the plan, never whether the traversal compiles.
