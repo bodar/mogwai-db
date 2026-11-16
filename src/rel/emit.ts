@@ -131,7 +131,9 @@ const qualified = (alias: string, name: string): Expression => q`${ident(alias)}
 /** A FROM item: a table, a CTE name, a derived SELECT or a table-valued function, plus its alias. */
 /** `table` marks a BASE TABLE (a `Scan`) — the one FROM item SQLite's own `count(*)` fast path reads,
  * and the only one an argument-less `count` is spelled `count(*)` over (see `countArgument`). */
-interface FromItem { readonly text: Expression; readonly alias: string; readonly table?: true; }
+/** `unit`: a ONE-ROW `VALUES` of compiler constants — a row source that contributes no row multiplicity and
+ *  no bind, so a block whose FROM it heads may drop it (`withoutUnit`). */
+interface FromItem { readonly text: Expression; readonly alias: string; readonly table?: true; readonly unit?: true; }
 interface JoinItem { readonly kind: 'inner' | 'left' | 'cross'; readonly item: FromItem; readonly on?: Expression; readonly ordered?: boolean; }
 
 /** How a relation in scope spells each of its columns IN THE BLOCK BEING ASSEMBLED. Fusing a node
@@ -535,7 +537,22 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     return q` ${keyword} ${fromText(join.item)}${join.on ? q` ON ${join.on}` : empty}`;
   };
 
-  const renderBlock = (b: Block): Expression => q`SELECT ${b.distinct ? raw('DISTINCT ') : empty}${
+  /**
+   * A block whose FROM is a one-row constant `VALUES` (`FromItem.unit`) JOINED to something else — the seed
+   * row of a child body, `(VALUES (1)) su CROSS JOIN edges e ON (e.src = h.id)` — reads FROM the joined item
+   * instead, its ON moved into WHERE: crossing one constant row multiplies nothing, and for an inner or cross
+   * join an ON and a WHERE keep the same rows. Inside a correlated subquery the unit is a co-routine SQLite
+   * re-enters per host row (measured ~10% of a one-hop body). Kept wherever any part of the block still names
+   * the unit's alias, and under a LEFT first join, whose null-padding the unit's row is what drives.
+   */
+  const withoutUnit = (b: Block): Block => {
+    const [first, ...rest] = b.joins;
+    if (!b.from.unit || !first || first.kind === 'left') return b;
+    const dropped: Block = { ...b, from: first.item, joins: rest, where: conjoin(first.on, b.where) };
+    return qualifiers(render(renderBlockAs(dropped)).sql).includes(render(ident(b.from.alias)).sql) ? b : dropped;
+  };
+  const renderBlock = (b: Block): Expression => renderBlockAs(withoutUnit(b));
+  const renderBlockAs = (b: Block): Expression => q`SELECT ${b.distinct ? raw('DISTINCT ') : empty}${
     list(b.select.map(([name, e]) => q`${e} AS ${ident(name)}`))
   } FROM ${fromText(b.from)}${concat(b.joins.map(joinText))}${
     b.where ? q` WHERE ${b.where}` : empty
@@ -571,7 +588,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         const alias = freshAlias(r, outer);
         const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, qualified(alias, `column${i + 1}`)]));
         for (const spelled of cols.values()) jsonText.add(spelled);
-        return { item: { text: q`(VALUES ${rows})`, alias }, cols };
+        const unit = r.rows.length === 1 && r.rows[0]!.every((e) => e.kind === 'lit' && e.source.startsWith('compiler-'));
+        return { item: { text: q`(VALUES ${rows})`, alias, ...(unit ? { unit: true as const } : {}) }, cols };
       }
     }
     // `isDirectSource` is the shared classification (`block.ts`); every kind it marks a table source

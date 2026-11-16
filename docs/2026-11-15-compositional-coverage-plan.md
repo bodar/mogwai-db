@@ -453,6 +453,64 @@ Work order: (a) remaining connector rows and (b) general-path plan cost run in p
 3. **Inversion.** The general path becomes the semantic authority. `correlatedChild` stays a switch, under L5's per-switch sweep.
 4. **Ladder deletion.** Delete a route wherever its plan is no faster than the general one. Track the `return null` count; the target is a large reduction, not zero.
 
+#### Phase 3 (b) — general-path plan cost (2026-11-16)
+
+Instrument: `mise run scaling` (`scripts/scaling-probe.ts`, not in `ci`) — each shape over a synthetic graph
+(~2.5 out-edges/vertex, 20% `software`, 90% of persons with an `age`), ON (ladder first) vs OFF (connector
+first) vs CONN (`MOGWAI_CONNECTOR_ONLY=1`, the connector ALONE); min of 7 runs; `-- --sql <shape>` prints the
+plans and their EXPLAIN.
+
+**Diagnosis.** The OFF plans paid for a decorrelation SQLite cannot use: a `ROW_NUMBER` scope over a fenced
+CTE, the body grouped or windowed over every key, an automatic index to join it back. SQLite's join IS a
+nested loop, so for a body it can SEEK the dependent join itself is the cheapest physical form. The connector
+now KEEPS it wherever SQL can hold it, and decorrelates only where it cannot — one rule per reconnect, none
+per shape:
+- **existence** (`where`/`filter`/`and`/`not`): an `EXISTS` over the correlated body;
+- **first row** (`map`, `project().by`): one correlated scalar per payload column (`correlatedFirst`) — one
+  column always, two (value + type tag) over a body with no subplan of its own, no sort over a body of at most
+  one row;
+- the pick is the body's **emission order** (`TraversalMapStep.java:49-53` takes `mapTraversal.next()`): a
+  multi-row body is lowered from a positioned seed, so its hops number rows in storage order, and the pick
+  sorts by the position's KEYS (`src/rel/position.ts` — a `ROW_NUMBER` is monotone in its order keys, so the
+  window per host row is dropped), never by value;
+- a host column the body COMPUTES with is spelled inside the subquery, so a computed one (a read `as()` label)
+  keeps the body decorrelated (`spelledOuterColumns`/`columnIsStored`, `src/rel/copies.ts`);
+- the emitter drops a one-row constant `VALUES` that only seeds a join (`withoutUnit`, `src/rel/emit.ts`).
+
+The decorrelated plan (`decorrelate.ts`) is the fallback for: a recursive walk in the body, a read computed host
+column, a wider payload, and a multi-row body whose payload is itself a subquery (SQLite resolves an `ORDER BY`
+term's subquery without the outer scopes — "no such column", measured).
+
+**Before → after, connector ALONE, ms at 8k** (1k in the probe output; ON is unchanged by this work):
+
+| Shape | ON | CONN before | CONN after | after / ON |
+|---|---|---|---|---|
+| `where(out().where(out().where(has('age',gt(40)))))` | 31.5 | 108 | 32.8 | 1.04 |
+| `project('a').by(project('b').by(out().count()))` | 10.3 | 41.8 | 8.1 | 0.78 |
+| `map(out().count())` | 2.7 | 16.9 | 2.8 | 1.04 |
+| `map(values('age'))` | 6.3 | 11.4 | 6.6 | 1.05 |
+| `out().map(values('age'))` | 18.5 | 32.1 | 18.7 | 1.01 |
+| `where(out().count().is(gt(1)))` | 20.5 | 33.1 | 19.9 | 0.97 |
+| `not(out().has('age',gt(40)))` | 18.5 | 23.2 | 18.7 | 1.01 |
+| `where(out('knows').out('knows'))` | 27.2 | 33.7 | 26.5 | 0.98 |
+| `as('a').where(out().has(…)).select('a')` | 24.3 | 35.0 | 27.4 | 1.13 |
+| `project('n','m').by('name').by(in('knows').values('name').fold())` | 42.6 | 57.0 | 42.3 | 0.99 |
+| `map(out().values('name'))` † | 23.8 | 33.1 | 23.2 | 0.97 |
+| `where(out().simplePath())` † | 44.9 | 48.3 | 45.7 | 1.02 |
+| `project('n','c').by('name').by(coalesce(values('age'),constant(0)))` | 31.3 | 54.9 | 51.2 | **1.63** |
+
+† the ladder declines these; ON runs the connector's plan. `order().by(select('a')…)`, `project('x').by('age')` and
+`dedup().by('name')` are not connector sites (one plan in every mode). Every shape is within 1.5× of the ladder
+but one: **`project … coalesce`**, whose cost is the `coalesce` body's own lowering (a per-row window and union
+for its arm order), not the reconnect — correlating that body measured worse (89 ms). It moves with the
+`coalesce` lowering. `sql-hygiene`: no baseline rise. Host-closure pool replay (seed 42): no answer lost, ON and
+connector-only agree; `map`'s pick changed to emission order wherever a body had several results
+(`test/L4-addendum/first-row-emission-order.feature`).
+
+**What this means for ladder deletion (Phase 3 step 4):** the existence routes (`childPredicate`/`correlatedExists`)
+and the `map`/`project().by` correlated-scalar routes have no measured win left on these shapes; the `coalesce`
+by() field is the one route with a margin (1.6×) until `coalesce` lowers flat.
+
 ### Phase 4 — Structured values across scope. IDs `cc4-*`.
 
 Sequence this with typed-value carrier T1–T5, because the carrier is what crosses the scope as a column (S5).

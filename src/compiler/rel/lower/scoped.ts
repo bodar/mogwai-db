@@ -2,6 +2,7 @@ import { isNested } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, eq, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelate } from '../../../rel/decorrelate.ts';
+import { positionKeys } from '../../../rel/position.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
@@ -19,7 +20,7 @@ import { byField, isProductiveBy, modulations, type ByField } from '../modulator
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf } from '../record.ts';
 import type { Declines } from '../../unsupported.ts';
-import { bodyOf, ENCOUNTER, inBody, type ChainCtx, type Tail } from './chain.ts';
+import { bodyOf, ENCOUNTER, encounterOf, inBody, type ChainCtx, type Tail } from './chain.ts';
 import { childSeam, defaultCollation, perOriginWindow, reductionHost } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
@@ -98,6 +99,35 @@ interface ScopedBody {
   readonly tail: Tail;
 }
 
+/**
+ * The body lowered through `continueAs` — the fold the ROOT uses — over ONE row of the host (read off `from`:
+ * the host itself, or its scoped copy). A child traversal BEGINS here, handed one traverser at a time
+ * (`ChainCtx.traversal`); it is a body, so the movement collapse is off (`inBody`), and it has no per-origin
+ * domain of its own — its barriers are scoped by the connector, not by an origin channel.
+ *
+ * An EXISTENCE gate reads no order from its body (`ChainCtx.bodyOrder` 'free'); a FIRST-row reconnect reads
+ * the body's EMISSION order ('read'): `TraversalMapStep` keeps `mapTraversal.next()`, the child's first
+ * traverser in its own iteration order
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java:49-53`,
+ * `…/traversal/util/TraversalUtil.java` `apply`) — `map(union(a, b))` is `a`'s first, `map(values(k))` the
+ * first-stored value. So a body that may yield SEVERAL rows and carries no position yet is lowered from a
+ * POSITIONED seed: its hops then number their rows in storage order (the same `encounter` a root chain's
+ * `fold` reads), and the pick is by that position, never by value. A body of at most one row (a reducer, a
+ * record) has nothing to pick and keeps the unpositioned plan — whose collects order their members as the
+ * correlated ladder does.
+ */
+function lowerBody(
+  body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  order?: 'free' | 'read',
+): Tail | null {
+  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
+  const positioned = someStepDeep(body, ctx.params, (s) => s.name === 'tail');
+  const run = (at: boolean): Tail | null => continueAs(seedRow(rel, from, fresh, at), framing, body, 0, false, bodyCtx, fresh, labels);
+  const tail = run(positioned);
+  if (order === 'read' && tail && !positioned && !encounterOf(tail.rel.channels) && !atMostOneRow(tail.rel)) return run(true);
+  return tail;
+}
+
 /** Step 2: the body, lowered as the root lowers a chain, then keyed by the scope. `null` declines. */
 function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -111,14 +141,7 @@ function scopedBody(
   //   answers once, or a re-source under a host value that may be absent (`resource-under-absent`, an
   //   explained decline), is the ladder's decision, and the connector must not answer around it.
   if (nondeterministic(body, ctx.params) || someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true)) return null;
-  const seed = seedRow(rel, sc.scoped, fresh, someStepDeep(body, ctx.params, (s) => s.name === 'tail'));
-  // A child traversal BEGINS here, handed one traverser at a time (`ChainCtx.traversal`); it is a body, so
-  // the movement collapse is off (`inBody`), and it has no per-origin domain of its own — its barriers are
-  // scoped by decorrelation, not by an origin channel.
-  // An EXISTENCE gate reads no order from its body (`ChainCtx.bodyOrder` 'free'); a FIRST-per-scope reconnect
-  // reads the body's emission order ('read') — `map(union(a, b))` is `a`'s first.
-  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
-  const tail = continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
+  const tail = lowerBody(body, rel, sc.scoped, framing, ctx, fresh, labels, order);
   // A body with EFFECTS is not a read the connector may evaluate per scope.
   if (!tail || tail.effects?.length) return null;
   const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh);
@@ -139,9 +162,7 @@ function correlatedBody(
   order?: 'free' | 'read',
 ): Tail | null {
   if (nondeterministic(body, ctx.params) || someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true)) return null;
-  const seed = seedRow(rel, rel, fresh, someStepDeep(body, ctx.params, (s) => s.name === 'tail'));
-  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
-  const tail = continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
+  const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
@@ -162,11 +183,14 @@ function spellsStored(plan: Rel, outputs: readonly string[], host: Rel): boolean
 
 /** A correlated body as an `EXISTS` operand, projecting its FIRST column alone: an `EXISTS` reads no value, so
  *  the body's other columns (labels, path) are not spelled; a column rather than a literal keeps an aggregate
- *  block an aggregate query (the reason `childPredicate`'s probe gives, `filter.ts`). */
+ *  block an aggregate query (the reason `childPredicate`'s probe gives, `filter.ts`). Nor does it read an order,
+ *  so a position the body numbered is not computed for it (`positionKeys` drops the window). */
 function existenceProbe(tail: Tail, fresh: Minter): Rel {
+  const enc = encounterOf(tail.rel.channels);
+  const rows = (enc && positionKeys(tail.rel, enc.col, fresh)?.rel) || tail.rel;
   return make.project({
-    id: fresh('sp'), input: tail.rel, channels: [], type: typeOf(meta('one', 'any', true)),
-    exprs: [['one', col(tail.rel.id, tail.rel.type.cols[0]!.name)]],
+    id: fresh('sp'), input: rows, channels: [], type: typeOf(meta('one', 'any', true)),
+    exprs: [['one', col(rows.id, tail.rel.type.cols[0]!.name)]],
   });
 }
 
@@ -193,9 +217,18 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   // column: t.x"), so such a body stays decorrelated.
   const single = atMostOneRow(tail.rel);
   if (!single && nested) return null;
+  // The FIRST row in EMISSION order (`lowerBody`): sorted by the position's own keys where the body numbered
+  // it with a window (`positionKeys` — a top-1 sort, no window per host row), else by the position itself; the
+  // payload breaks what ties remain, `defaultCollation`'s rule.
+  const enc = encounterOf(tail.rel.channels);
+  const keyed = !single && enc ? positionKeys(tail.rel, enc.col, fresh) : null;
+  const base = keyed?.rel ?? tail.rel;
+  const terms = keyed
+    ? [...keyed.keys, ...payloadCols(tail.rel).map((column) => ({ expr: col(base.id, column.name), dir: 'asc' as const }))]
+    : defaultCollation(tail.rel);
   const first = single ? tail.rel : make.limit({
-    id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: tail.rel, channels: tail.rel.channels, type: tail.rel.type, terms: defaultCollation(tail.rel) }),
-    channels: tail.rel.channels, type: tail.rel.type, count: compilerInt(1),
+    id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: base, channels: base.channels, type: base.type, terms }),
+    channels: base.channels, type: base.type, count: compilerInt(1),
   });
   const plans = (payload as ColMeta[]).map((column) => [column.name,
     make.project({ id: fresh('cv'), input: first, channels: [], type: typeOf({ ...column, nullable: true }), exprs: [[column.name, col(first.id, column.name)]] })] as const);
