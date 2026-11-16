@@ -168,7 +168,8 @@ describe('the repeat() unroll boundary', () => {
       'g.V(1).times(2).repeat(__.both().sample(1)).emit().path()',
       'g.V(1).emit().repeat(__.both().order().by(Order.shuffle).limit(1)).times(2).path()',
       'g.V(1).repeat(__.local(__.both().order().by(Order.shuffle).limit(1))).emit().times(2).path()',
-      'g.V(1).repeat(__.both().where(__.out().sample(1))).emit().times(2).path()',
+      // A draw that a later step can still filter: a TRAILING one in an existence body is trimmed (`existencePrefix`).
+      'g.V(1).repeat(__.both().where(__.out().sample(1).hasLabel("person"))).emit().times(2).path()',
     ]) expect(() => compile(q, {}), q).toThrow(/draws at random/);
     // Inside a child body the same decline holds (the child's own route search reports the generic refusal).
     expect(() => compile('g.V(1).local(__.emit().repeat(__.both().sample(1)).times(2)).path()', {})).toThrow(/not supported/);

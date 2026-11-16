@@ -10,11 +10,11 @@
       },
       "2": {
         "applicable": 64,
-        "executed": 55
+        "executed": 57
       },
       "3": {
         "applicable": 75,
-        "executed": 69
+        "executed": 70
       }
     },
     "flatMap": {
@@ -24,11 +24,11 @@
       },
       "2": {
         "applicable": 60,
-        "executed": 59
+        "executed": 60
       },
       "3": {
         "applicable": 73,
-        "executed": 70
+        "executed": 71
       }
     },
     "local": {
@@ -38,35 +38,35 @@
       },
       "2": {
         "applicable": 79,
-        "executed": 72
+        "executed": 75
       },
       "3": {
         "applicable": 65,
-        "executed": 63
+        "executed": 65
       }
     },
     "where": {
       "1": {
         "applicable": 200,
-        "executed": 196
+        "executed": 197
       },
       "2": {
         "applicable": 103,
-        "executed": 95
+        "executed": 99
       },
       "3": {
         "applicable": 64,
-        "executed": 55
+        "executed": 58
       }
     },
     "filter": {
       "1": {
         "applicable": 200,
-        "executed": 196
+        "executed": 197
       },
       "2": {
         "applicable": 63,
-        "executed": 55
+        "executed": 59
       },
       "3": {
         "applicable": 66,
@@ -76,11 +76,11 @@
     "not": {
       "1": {
         "applicable": 200,
-        "executed": 196
+        "executed": 197
       },
       "2": {
         "applicable": 71,
-        "executed": 63
+        "executed": 68
       },
       "3": {
         "applicable": 77,
@@ -90,7 +90,7 @@
     "optional": {
       "1": {
         "applicable": 127,
-        "executed": 123
+        "executed": 125
       },
       "2": {
         "applicable": 51,
@@ -98,13 +98,13 @@
       },
       "3": {
         "applicable": 51,
-        "executed": 42
+        "executed": 46
       }
     },
     "coalesce": {
       "1": {
         "applicable": 127,
-        "executed": 124
+        "executed": 125
       },
       "2": {
         "applicable": 41,
@@ -112,21 +112,21 @@
       },
       "3": {
         "applicable": 77,
-        "executed": 67
+        "executed": 69
       }
     },
     "union": {
       "1": {
         "applicable": 127,
-        "executed": 120
+        "executed": 124
       },
       "2": {
         "applicable": 49,
-        "executed": 42
+        "executed": 47
       },
       "3": {
         "applicable": 58,
-        "executed": 51
+        "executed": 53
       }
     },
     "project": {
@@ -136,11 +136,11 @@
       },
       "2": {
         "applicable": 60,
-        "executed": 55
+        "executed": 56
       },
       "3": {
         "applicable": 53,
-        "executed": 50
+        "executed": 52
       }
     },
     "group": {
@@ -154,7 +154,7 @@
       },
       "3": {
         "applicable": 58,
-        "executed": 54
+        "executed": 55
       }
     },
     "order": {
@@ -174,15 +174,15 @@
     "dedup": {
       "1": {
         "applicable": 200,
-        "executed": 176
+        "executed": 177
       },
       "2": {
         "applicable": 85,
-        "executed": 77
+        "executed": 78
       },
       "3": {
         "applicable": 73,
-        "executed": 62
+        "executed": 64
       }
     }
   }

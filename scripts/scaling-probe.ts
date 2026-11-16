@@ -79,6 +79,16 @@ const SHAPES: readonly Shape[] = [
   { name: 'reducer arm: match(map(mean))', query: "g.V().match(__.as('a').map(inE('created').values('weight').mean()).as('b')).select('b')" },
   { name: 'reducer arm: union(local(sum),out)', query: "g.V().union(local(outE().values('weight').sum()), out())" },
   { name: 'reducer arm: group.by(union(local(sum),constant).sum)', query: "g.V().group().by(label).by(union(local(outE().values('weight').sum()), constant(0)).sum())" },
+  // R3 (docs/2026-11-16-ladder-retirement-plan.md): the existence prefix and the alias compare's landed by().
+  { name: 'where(a,gt(b)).by(out.count)', query: "g.V().as('a').out().as('b').where('a', gt('b')).by(out().count()).count()" },
+  { name: 'where(a,neq(b)).by(landed)', query: "g.V().as('a').out().as('b').where('a', neq('b')).by(out().order().by('name').values('name').limit(1)).count()" },
+  { name: 'where(out.sample)', query: 'g.V().where(out().sample(1)).count()' },
+  { name: 'not(has.project.by(path))', query: "g.V().not(has('age',lt(1)).project('a','b').by(identity()).by(cyclicPath().hasId(4))).count()" },
+  { name: 'where(project.by(path))', query: "g.V().where(project('b').by(path())).count()" },
+  { name: 'coalesce(has.project,has.project)', query: "g.V().coalesce(has('age').project('a').by(values('name')), hasNot('age').project('a').by(values('name'))).count()" },
+  { name: 'local(where(out.project))', query: "g.V().local(where(out().project('x').by(path()))).count()" },
+  { name: 'union(where(out.limit),id)', query: 'g.V().union(where(out().limit(2)), identity()).count()' },
+  { name: 'choose(out.project.by(path),a,b)', query: "g.V().choose(out().project('x').by(path()), constant('a'), constant('b')).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

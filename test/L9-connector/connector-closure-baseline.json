@@ -10,11 +10,11 @@
       },
       "2": {
         "applicable": 64,
-        "executed": 55
+        "executed": 57
       },
       "3": {
         "applicable": 75,
-        "executed": 68
+        "executed": 70
       }
     },
     "flatMap": {
@@ -24,11 +24,11 @@
       },
       "2": {
         "applicable": 60,
-        "executed": 59
+        "executed": 60
       },
       "3": {
         "applicable": 73,
-        "executed": 70
+        "executed": 71
       }
     },
     "local": {
@@ -38,35 +38,35 @@
       },
       "2": {
         "applicable": 79,
-        "executed": 72
+        "executed": 75
       },
       "3": {
         "applicable": 65,
-        "executed": 64
+        "executed": 65
       }
     },
     "where": {
       "1": {
         "applicable": 200,
-        "executed": 196
+        "executed": 197
       },
       "2": {
         "applicable": 103,
-        "executed": 96
+        "executed": 99
       },
       "3": {
         "applicable": 64,
-        "executed": 56
+        "executed": 58
       }
     },
     "filter": {
       "1": {
         "applicable": 200,
-        "executed": 196
+        "executed": 197
       },
       "2": {
         "applicable": 63,
-        "executed": 57
+        "executed": 59
       },
       "3": {
         "applicable": 66,
@@ -76,11 +76,11 @@
     "not": {
       "1": {
         "applicable": 200,
-        "executed": 196
+        "executed": 197
       },
       "2": {
         "applicable": 71,
-        "executed": 62
+        "executed": 68
       },
       "3": {
         "applicable": 77,
@@ -98,7 +98,7 @@
       },
       "3": {
         "applicable": 51,
-        "executed": 44
+        "executed": 46
       }
     },
     "coalesce": {
@@ -112,7 +112,7 @@
       },
       "3": {
         "applicable": 77,
-        "executed": 67
+        "executed": 69
       }
     },
     "union": {
@@ -122,11 +122,11 @@
       },
       "2": {
         "applicable": 49,
-        "executed": 42
+        "executed": 47
       },
       "3": {
         "applicable": 58,
-        "executed": 52
+        "executed": 53
       }
     },
     "project": {
@@ -136,11 +136,11 @@
       },
       "2": {
         "applicable": 60,
-        "executed": 55
+        "executed": 56
       },
       "3": {
         "applicable": 53,
-        "executed": 50
+        "executed": 52
       }
     },
     "group": {
@@ -150,11 +150,11 @@
       },
       "2": {
         "applicable": 60,
-        "executed": 55
+        "executed": 56
       },
       "3": {
         "applicable": 58,
-        "executed": 54
+        "executed": 55
       }
     },
     "order": {
@@ -174,15 +174,15 @@
     "dedup": {
       "1": {
         "applicable": 200,
-        "executed": 176
+        "executed": 177
       },
       "2": {
         "applicable": 85,
-        "executed": 77
+        "executed": 78
       },
       "3": {
         "applicable": 73,
-        "executed": 62
+        "executed": 64
       }
     }
   },
@@ -212,7 +212,6 @@
       "a406824e786d",
       "a9de2f371783",
       "b0420945928d",
-      "c5301cb2ff2b",
       "c76c5b4e159a",
       "cb0c7a75f00f",
       "cd450ad5a09b",
@@ -225,27 +224,21 @@
       "fec1cb8ce5ff"
     ],
     "map@2": [
-      "19dcb3f0523b",
       "1c99c6f602e8",
       "1e037e36545c",
       "496e808f9c93",
       "8d419f448d94",
       "a27e06f34f48",
       "a4bcb3b32cdc",
-      "bf319a57b68c",
-      "df87edc9ca74"
+      "bf319a57b68c"
     ],
     "local@2": [
       "105a8d661533",
       "750651f5135e",
       "c18419d0c30b",
-      "d55279d44acc",
-      "dfe80a2e0f9f",
-      "e71b66e0cef5",
-      "f8f240b0acc7"
+      "d55279d44acc"
     ],
     "union@3": [
-      "06cbb75d9443",
       "3d397b31e907",
       "6f4842380508",
       "91377bfd1758",
@@ -260,19 +253,15 @@
       "ff5c02df5c1c"
     ],
     "optional@3": [
-      "12ab6a5cb6f0",
       "49eeee49ce87",
       "98946c71d2cd",
       "a024dbac7667",
-      "a8b32d5b5100",
       "c7b1b9a7e9a2",
       "ce24c2c2395b"
     ],
     "coalesce@3": [
       "0aa32daa72d1",
-      "0c87281b5e2a",
       "135123618dd8",
-      "2077a6478a1e",
       "4fa82f40c122",
       "89e5fc17c413",
       "c9f36004a7fd",
@@ -304,24 +293,17 @@
     "group@2": [
       "09aed838a621",
       "0c68e5ca1ca8",
-      "355f18bbce98",
       "8eaa204e1374",
       "adf0fb88296a"
     ],
     "map@3": [
       "07137ca8b981",
       "1c958f857bd6",
-      "3f7f2c5980b2",
-      "77cdaac47fe7",
       "7dfdca81769d",
       "a2c7b8acce38",
       "cd7f9c5a3056"
     ],
-    "flatMap@2": [
-      "5730cecb1e07"
-    ],
     "dedup@2": [
-      "1052a806c651",
       "8142b59128a5",
       "82f1075439b0",
       "91bdf83aad0a",
@@ -331,47 +313,21 @@
       "f5daae42c797"
     ],
     "not@2": [
-      "27743498166b",
-      "30abc2770bd0",
       "3ccaf834f749",
       "594be71d789f",
-      "810d5aace962",
-      "a9d32b876682",
-      "b9eaf41b2361",
-      "d3dbe04ac3a5",
-      "ea64ce7a839e"
+      "810d5aace962"
     ],
     "where@3": [
       "14c6b78508a9",
       "1be7871872e4",
       "214a0ac6b654",
-      "21663d036c42",
       "6e89a00dd7d6",
-      "6ef38e36c4fb",
       "cb747a79108a",
       "e1c40581fb0f"
     ],
-    "where@2": [
-      "3586108077ca",
-      "4f0fe8c87f4c",
-      "5c98c7ee15d0",
-      "a0f2139d4591",
-      "a85039b21315",
-      "a9882f2f2488",
-      "e967d987ed77"
-    ],
-    "project@2": [
-      "65bd656fa88e",
-      "82e2eb8e67fd",
-      "b90dc8a57a6e",
-      "d9b5f260b9e8",
-      "f19bc1cc97bf"
-    ],
     "dedup@3": [
-      "06868b8ae22a",
       "0bcc0c34a4fa",
       "11e91aead294",
-      "41e99224d169",
       "59fdf5c172f2",
       "80c0c08815f8",
       "aa5d40e4ca14",
@@ -399,7 +355,6 @@
       "fc0c55b01ecb"
     ],
     "where@1": [
-      "355cc1ca47ae",
       "5745b4805614",
       "e799d0eed36a",
       "eb4b7b234ce3"
@@ -407,14 +362,12 @@
     "filter@1": [
       "062212b27c72",
       "74181daf1434",
-      "931b5bc823c3",
-      "c9166ed0b0d6"
+      "931b5bc823c3"
     ],
     "not@1": [
       "0331b77a5199",
       "8ec09eafbde7",
-      "a7d40930297a",
-      "af28931762ea"
+      "a7d40930297a"
     ],
     "optional@1": [
       "6afeba6bdcc4",
@@ -430,21 +383,14 @@
       "c6a4e523d733"
     ],
     "union@2": [
-      "263f9b2e4993",
       "41deab25d625",
-      "83c79b8e7917",
-      "875e2fc3318b",
-      "aa2ef381abb1",
-      "ca12f357a126",
       "fbbeb1f808fd"
     ],
     "filter@2": [
       "10141ca7dd4a",
       "7431629095e2",
-      "82aeedf27732",
       "85df55294b6f",
-      "a63003d1f9f0",
-      "aafa75218c3c"
+      "a63003d1f9f0"
     ],
     "coalesce@2": [
       "5561672814e0",
@@ -455,19 +401,25 @@
     "not@3": [
       "7f7b0d4d87de"
     ],
+    "project@2": [
+      "65bd656fa88e",
+      "82e2eb8e67fd",
+      "b90dc8a57a6e",
+      "d9b5f260b9e8"
+    ],
+    "where@2": [
+      "3586108077ca",
+      "4f0fe8c87f4c",
+      "5c98c7ee15d0",
+      "a0f2139d4591"
+    ],
     "project@3": [
-      "30f608d64236",
-      "3643dd704300",
-      "c7e1d1db865f"
+      "30f608d64236"
     ],
     "group@3": [
-      "6ad5c39b7209",
       "cb27c437552f",
       "d1377b96d0b5",
       "efbdd8c02897"
-    ],
-    "local@3": [
-      "a06b90a4a18b"
     ],
     "order@2": [
       "02738876e366"
@@ -477,8 +429,7 @@
     ],
     "flatMap@3": [
       "4c5e22c05ba4",
-      "511b4f38268f",
-      "b087106b64b8"
+      "511b4f38268f"
     ]
   }
 }

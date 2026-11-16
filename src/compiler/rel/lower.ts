@@ -5263,9 +5263,9 @@ function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter,
   let at = 1;
   let elem = elem0;
   for (; at < steps.length; at++) {
-    // A correlated child filter fusing into the scan's WHERE is the LADDER's route for a connector host, so
-    // with the `correlatedChild` switch off it is left to the connector dispatch (`lower/scoped.ts`).
-    if (!readCtx.correlatedChild && connectorSite(steps[at])) break;
+    // A child filter at a connector site is the connector's (`lower/scoped.ts`, its hosts LADDERLESS): it never
+    // fuses into the scan's WHERE as a correlated clause.
+    if (connectorSite(steps[at])) break;
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx);
     if (!clause) break;
     pred = and(pred, clause);
@@ -6609,8 +6609,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
   // A where/not whose body re-roots at a bound alias (`as(k)`→`select(k)`): a filter leg. Only claim it
   // when every alias it reads is LIVE here; otherwise it is not this stream's alias filter.
   const leg = classifyWhereLeg(step, ctx.params);
-  if (!leg) return null;
-  const live = liveAliases(labels, rel);
+  if (!leg) return null;  const live = liveAliases(labels, rel);
   if (!leg.reads.every((l) => live.has(l))) return null;
   return applyLeg(leg, rel, labels, childSeam(ctx, fresh), fresh) ?? 'decline';
 }

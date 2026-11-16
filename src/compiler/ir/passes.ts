@@ -6,7 +6,7 @@ import {
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity, verifyChooseOptionKeys,
     absorbValueMapWith, collapseFoldCountLocal, plainFoldSpelling, dropRedundantOrder, mergeStepLabels,
-    injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, dropEffectFreeSideEffect, verify,
+    injectSubgraphRec, injectPartitionRec, markProductiveBy, trimExistenceSuffix, isAlwaysProductiveFilterNoOp, dropEffectFreeSideEffect, verify,
     inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
@@ -170,6 +170,14 @@ const FOLD: Pass[] = group('canonicalize', [
 const SIMPLIFY: Pass[] = group('simplify', [
   { name: 'collapseFoldCountLocal', run: (steps) => collapseFoldCountLocal(steps) },
   { name: 'dropRedundantOrder', run: (steps) => dropRedundantOrder(steps) },
+  // An existence check asks only its body's EXISTENCE PREFIX (`ir/productivity.ts` `existencePrefix`):
+  // `where(out().project('a').by(path()))` is `where(out())`. Before the no-op Pass, which then removes a
+  // filter whose body trimmed to `identity()`.
+  {
+    name: 'trimExistenceSuffix',
+    applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or', 'choose'].includes(s.name) || !!s.repeatRegion),
+    run: (steps, ctx) => trimExistenceSuffix(steps, ctx.params) as IRStep[],
+  },
   {
     // An existence filter whose body ALWAYS produces a traverser cannot reject anything, so the step
     // is provably inert — the same category of fact as the two above. Removing it here is also what

@@ -1,6 +1,7 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
 import { isLocalScope, SCALAR_TRANSFORMS } from './step.ts';
+import { someStepDeep } from './walk.ts';
 
 // ---------- productivity: does a child body ALWAYS yield a traverser? ----------
 //
@@ -90,6 +91,76 @@ const MAPPING_TERMINAL: ReadonlySet<string> = new Set(['constant', 'project', 'v
 export const isMappingTerminal = (step: Step): boolean =>
   MAPPING_TERMINAL.has(step.name) || (step.name === 'count' && isLocalScope(step));
 
+/** A slice/draw count that is a parsed LITERAL ≥ 1 (a user parameter may be 0, so it never counts). */
+const literalAtLeastOne = (a: Step['args'][number] | undefined): boolean =>
+  !!a && a.name == null && (typeof a.value === 'number' || typeof a.value === 'bigint') && a.value >= 1;
+
+/**
+ * Can this step EMPTY a stream that reaches it non-empty? `false` only where the reference says it cannot —
+ * the question an existence check asks of everything after its last row-dropping step:
+ *
+ * - a MAPPING terminal (`isMappingTerminal`): one traverser out per traverser in (`ScalarMapStep.java:38-40`);
+ * - `id()`/`label()` — `ScalarMapStep`s too (`.../step/map/IdStep.java`, `LabelStep.java`), and a bare
+ *   `path()` (no `by()`/`from`/`to`), which splits every traverser it receives (`PathStep.processNextStart`;
+ *   a `by()` there DROPS the path when unproductive, so it is excluded);
+ * - a GLOBAL `limit(n)`/`range(0, n)`/`tail(n)`/`sample(n)` with a literal `n ≥ 1` (`range(0, -1)` is the
+ *   whole stream) and no `by()`: each keeps at least one of a non-empty stream
+ *   (`.../step/filter/RangeGlobalStep.java`, `TailGlobalStep.java`; `SampleGlobalStep.java:103-105` returns the
+ *   whole set when it is no larger than the amount). A weighted `sample().by()` may draw nothing.
+ *
+ * `select`, `dedup().by` and `order().by` are NOT here and never may be: an unproductive `by()` or a missing
+ * key drops the traverser there (`SelectStep.java:65-90`; §17's by() line).
+ */
+const neverEmpties = (s: Step): boolean => {
+  const ir = s as Step & { modulators?: unknown[]; from?: string; to?: string };
+  if (isMappingTerminal(s)) return true;
+  if (ir.modulators?.length || isLocalScope(s)) return false;
+  if (s.name === 'id' || s.name === 'label') return !s.args.length;
+  if (s.name === 'path') return !s.args.length && ir.from === undefined && ir.to === undefined;
+  const nums = s.args;
+  if (s.name === 'limit' || s.name === 'sample') return nums.length === 1 && literalAtLeastOne(nums[0]);
+  if (s.name === 'tail') return !nums.length || (nums.length === 1 && literalAtLeastOne(nums[0]));
+  if (s.name === 'range') {
+    const [lo, hi] = nums;
+    return nums.length === 2 && lo!.name == null && hi!.name == null && Number(lo!.value) === 0
+      && (literalAtLeastOne(hi) || Number(hi!.value) === -1);
+  }
+  return false;
+};
+
+/**
+ * THE EXISTENCE PREFIX — the body an existence check actually asks: `body` up to its last step that can drop a
+ * row. Every step after it maps or slices a non-empty stream to a non-empty one (`neverEmpties`), so "did the body
+ * produce anything" is answered by the prefix alone, and the suffix need never be computed:
+ * `where(out().project('a').by(path()))` is `where(out())`, `where(out().sample(1))` is `where(out())`.
+ *
+ * Trimming stops at the first step (from the end) that is `isImpure` — a side effect, an `as()` at any depth, a
+ * step that may raise — because removing it would skip what it does. An EMPTY prefix means the body produces for
+ * every traverser that reaches it.
+ *
+ * ONE authority with two consumers: the `trimExistenceSuffix` Pass (`ir/strategies.ts`) rewrites a body in a TRUE
+ * existence position, and `childPredicate` (`rel/lower/filter.ts`) asks it for a `coalesce` arm's emptiness, whose
+ * body it cannot rewrite because the arm's VALUE is used. `null` where there is nothing to trim.
+ */
+export function existencePrefix<S extends Step>(body: readonly S[], params: ParamEnv): readonly S[] | null {
+  let end = body.length;
+  while (end > 0) {
+    // A RAW body (a nested argument the Pass reads before its own normalization) still spells a host's
+    // modulators as the steps after it; they are the host's, trimmed with it or not at all.
+    let host = end - 1;
+    while (host > 0 && RAW_MODULATORS.has(body[host]!.name)) host--;
+    const cluster = body.slice(host, end);
+    const modulated = cluster.some((s) => s.name === 'by') ? { ...cluster[0]!, modulators: [[]] } : cluster[0]!;
+    const scoped = cluster.some((s) => s.name === 'from' || s.name === 'to') ? { ...modulated, from: '' } : modulated;
+    if (RAW_MODULATORS.has(cluster[0]!.name) || !neverEmpties(scoped) || isImpure(cluster, params)) break;
+    end = host;
+  }
+  return end < body.length ? body.slice(0, end) : null;
+}
+
+/** The modulator steps a raw chain spells after their host (`absorbModulators` folds them later). */
+const RAW_MODULATORS: ReadonlySet<string> = new Set(['by', 'from', 'to', 'with']);
+
 /**
  * Steps that touch state beyond their own traverser stream, keyed by the arity that makes them do so.
  *
@@ -125,10 +196,9 @@ const mayRaise = (s: Step): boolean => SCALAR_TRANSFORMS.has(s.name) || s.name =
  *  (see the child-seam guardrail in steps/CLAUDE.md) — declining on `as()` keeps this Pass from
  *  depending on that asymmetry holding. Fail closed: an unrecognisable arg counts as impure. */
 function isImpure(steps: readonly Step[], params: ParamEnv): boolean {
-  return steps.some((s) => {
-    if (isSideEffecting(s) || s.name === 'as' || mayRaise(s)) return true;
-    return s.args.some((a) => isNested(a.value) && isImpure(stepChain(a.value.nested, params), params));
-  });
+  // EVERY child position (`ir/walk.ts`), an unreadable body impure: a folded `by()` body
+  // (`project('a').by(__.as('x'))`) is a child as much as an argument is.
+  return someStepDeep(steps, params, (s) => isSideEffecting(s) || s.name === 'as' || mayRaise(s), true);
 }
 
 /**
@@ -142,7 +212,9 @@ function isImpure(steps: readonly Step[], params: ParamEnv): boolean {
 export function bodyAlwaysProduces(nested: any, params: ParamEnv): boolean {
   if (!isNested(nested)) return false;
   const body = stepChain(nested.nested, params);
-  return alwaysProduces(body) && !isImpure(body, params);
+  // `identity()` alone is what `trimExistenceSuffix` leaves of a body that trims away entirely.
+  const identity = body.length > 0 && body.every((s) => s.name === 'identity' && !s.args.length);
+  return (identity || alwaysProduces(body)) && !isImpure(body, params);
 }
 
 /**

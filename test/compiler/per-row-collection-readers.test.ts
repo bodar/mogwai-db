@@ -2,18 +2,13 @@
 // `perRowCollectionChild`, src/compiler/rel/lower/reduction.ts). The answers live in
 // test/L4-addendum/per-row-collection-readers.feature; this pins what a result cannot show — the SHAPE.
 import { test, expect, describe } from 'bun:test';
-import { LADDER, read } from '../support/harness.ts';
+import { read } from '../support/harness.ts';
 
 describe('per-row collection readers — shape', () => {
   test('the split reads ONE relation: each arm filters it on the tag, no arm joins another', () => {
     const sql = read("g.V().values('m').count(local)").sql;
     expect(sql).not.toMatch(/\bJOIN\b[^)]*json_each[^)]*\bJOIN\b[^)]*json_each/);
     expect(sql.match(/vtype = 'map'/g)).toHaveLength(1);
-  });
-
-  test('a one-to-one child (count(local)) states its presence — the split is spelled once, not again in an EXISTS', () => {
-    const sql = read("g.V().values('m').where(__.count(local).is(2))", { fastPaths: LADDER }).sql; // the ladder's stated-presence route
-    expect(sql).not.toMatch(/EXISTS/);
   });
 
   test('every route reads its input behind a hard fence, so a value filter is never flattened into an arm', () => {

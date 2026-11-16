@@ -60,7 +60,7 @@ describe('an unroll inside a host answers up to SQLite\'s join width', () => {
   test.each([
     ['g.V().local(repeat(out()).times(63)).count()', [0]],
     ['g.V().where(repeat(out()).times(63)).count()', [0]],
-    ['g.V().not(repeat(out()).times(64)).count()', [6]],
+    ['g.V().not(repeat(out()).times(63)).count()', [6]],
     // A count body is a correlated scalar subquery: its own SELECT, so 64 hops still fit.
     ['g.V().local(repeat(out()).times(64).count())', [0, 0, 0, 0, 0, 0]],
     // Two hosts side by side are two SELECTs, each under the limit.
@@ -79,9 +79,10 @@ describe('past it, the decline is clear and costs work linear in the count', () 
     }
     throw new Error(`expected ${q} to decline`);
   };
-  // The first count past the limit: a `local` body joins its host's row in, while an `EXISTS` body
-  // correlates against it instead, so its SELECT holds one table fewer.
-  const FIRST_PAST: Readonly<Record<string, number>> = { local: 64, where: 65 };
+  // The first count past the limit — the same for both hosts since the existence family is the connector's
+  // (`LADDERLESS`): the ladder's `EXISTS` held one table fewer, the connector's body keeps its seed row. Moving
+  // that boundary is the connector's join-width item (docs/2026-11-16-ladder-retirement-plan.md R2).
+  const FIRST_PAST: Readonly<Record<string, number>> = { local: 64, where: 64 };
   // WHAT EACH HOST ALLOWS, from the fact its lowering holds (`noteUnrolled`), never from a list of names in
   // the message: a map-like host's repeat() can move to the top level; a `where()` body is a TEST, so moving
   // it out would change the question. Neither offers until(loops()): `where` lowers its body as a correlated

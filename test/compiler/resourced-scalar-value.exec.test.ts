@@ -72,7 +72,11 @@ describe('a re-sourced first value that is null reads as nothing (§17)', () => 
   test('constant(null)', () => none('g.V().map(__.V().constant(null))'));
   test('inside local(map())', () => none(`g.V().local(__.map(${CHOOSE}))`));
   test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null).limit(1)).count()')[0].v).toBe(0));
-  test('a where() body over it drops the row', () => none('g.V().where(__.V().constant(null).limit(1))'));
+  // An EXISTENCE check never reads the value: `constant(null).limit(1)` cannot empty a non-empty stream, so the
+  // body is its existence prefix `V()` (`existencePrefix`) — a re-source the connector does not own yet
+  // (docs/2026-11-16-ladder-retirement-plan.md R4), a clean decline rather than the null-as-nothing `[]`.
+  test('a where() body over it is asked for existence alone', () =>
+    expect(() => rows('g.V().where(__.V().constant(null).limit(1))')).toThrow(UnsupportedTraversal));
   test('a concat() operand raises as an empty one does', () =>
     expect(() => run(s, "g.V().values('name').concat(__.V().constant(null))")).toThrow('does not map to a value'));
   test('an EMPTY re-source still drops the row', () => none('g.V().map(__.V(99).constant(null))'));

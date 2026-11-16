@@ -383,8 +383,9 @@ export function rowOp(
   if (!bys) return null;
   // A `dedup().by(k)` is a ranked WINDOW (`dedupBy` → `dedupOn`), which carries every channel whole, so
   // it serves a body with alias channels or an `origin` with no guard — the guard below is for the
-  // COLLAPSING arms only.
-  if (bys[0]) return dedupBy(step, bys[0], input, shape, ctx, fresh);
+  // COLLAPSING arms only. An IDENTITY `by()` (`by()`, `by(__.identity())`) keys the traverser itself: the bare
+  // `dedup()` below.
+  if (bys[0] && bys[0].key.kind !== 'identity') return dedupBy(step, bys[0], input, shape, ctx, fresh);
 
   // THE WINDOW ARMS — both `dedupOn`, which EXTENDS the row (a `row_number` window) and keeps every
   // member's whole payload and every carried channel, so they serve a body that carries alias channels

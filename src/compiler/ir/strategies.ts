@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { stepChain, collectionMembers, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPickArg, isPred, isScopeArg, isOperatorArg, arg, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
-import { bodyAlwaysProduces } from './productivity.ts';
+import { bodyAlwaysProduces, existencePrefix } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
@@ -217,8 +217,47 @@ export function isAlwaysProductiveFilterNoOp(steps: Step[], params: ParamEnv): S
       }
       out.push(s);
     }
-    return out;
+    // A body that WAS only inert filters is the identity traversal, spelled as one (`dropEffectFreeSideEffect`'s
+    // reason): an empty chain is no body at all to the hosts that lower one.
+    return out.length || !level.length ? out : [{ name: 'identity', args: [], ctx: level[0]!.ctx } as Step];
   });
+}
+
+// ---------- an existence check asks only its existence prefix ----------
+
+/**
+ * Rewrite every body in a TRUE EXISTENCE position to its existence prefix (`existencePrefix`,
+ * `ir/productivity.ts`) — the steps after its last row-dropping step answer nothing the check asks.
+ *
+ * The positions are those whose body is asked only "did it produce": a `where`/`filter`/`not` argument
+ * (`TraversalFilterStep`/`NotStep`), every `and`/`or` arm (`ConnectiveStep`), the PREDICATE of the if-then
+ * `choose(t, a[, b])` (`ChooseStep.java:86-91` appends a `HasNextStep` to it), and a `repeat()`'s
+ * `until`/`emit` condition (`RepeatStep`'s `TraversalUtil.test`). Never a VALUE position: the map form
+ * `choose(t).option(…)` reads `t`'s value, and a `coalesce`/`optional` arm or a `by()` body is used — those
+ * consult the same authority without rewriting (`childPredicate`).
+ *
+ * A body whose whole content trims away is `identity()` — it produces whenever it is reached — which
+ * `isAlwaysProductiveFilterNoOp`, after this, removes where the host is a filter.
+ */
+export function trimExistenceSuffix(steps: Step[], params: ParamEnv): Step[] {
+  const trimmed = (a: Arg): Arg => {
+    if (!isNested(a.value)) return a;
+    const body = stepChain(a.value.nested, params);
+    const prefix = existencePrefix(body, params);
+    if (!prefix) return a;
+    return arg(nestedArg(prefix.length ? [...prefix] : [{ name: 'identity', args: [], ctx: body[0]!.ctx } as Step]));
+  };
+  const level = (s: Step): Step => {
+    const ir = s as IRStep;
+    if ((EXISTENCE_FILTER_HOSTS.has(s.name) && s.args.length === 1) || s.name === 'and' || s.name === 'or')
+      return { ...s, args: s.args.map(trimmed) };
+    if (s.name === 'choose' && !ir.optionArms && s.args.length >= 2 && s.args.length <= 3 && s.args.every((a) => isNested(a.value)))
+      return { ...s, args: [trimmed(s.args[0]!), ...s.args.slice(1)] };
+    if (ir.repeatRegion)
+      return { ...s, repeatRegion: ir.repeatRegion.map((r) => (r.name === 'until' || r.name === 'emit') && r.args.length === 1 ? { ...r, args: r.args.map(trimmed) } : r) } as Step;
+    return s;
+  };
+  return recurseInject(steps, params, (chain) => chain.map(level));
 }
 
 /** Steps that may RAISE, or whose effect the IR cannot see — a service runs arbitrary code (and `io()`

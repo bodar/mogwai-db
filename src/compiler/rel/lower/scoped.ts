@@ -1,4 +1,4 @@
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, isPred } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelate, keyMatch, type KeyProjection } from '../../../rel/decorrelate.ts';
@@ -10,6 +10,9 @@ import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfC
 import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
+import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias } from '../alias.ts';
+import { freshTraverserRow } from '../child.ts';
+import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
 import { isLocalScope, nondeterministic, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
@@ -171,6 +174,31 @@ function scopedBody(
   const tail = reframe ? reframe(lowered) : lowered;
   if (!tail) return null;
   const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh);
+  return keyed && { rel: keyed.rel, keyCol: keyed.key[0].col, tail };
+}
+
+/**
+ * Step 2 for a body ROOTED elsewhere than the scoped row (`LandedRoot`): its domain is the scoped rows whose root
+ * element is THERE — a label unbound on a row gives that row no domain row, so its value is absent and the host's
+ * productivity rule drops it, as `aliasElementHost`'s presence does — each a FRESH traverser on that element (no
+ * labels, no path), keyed by the scope key.
+ */
+function rootedBody(
+  body: readonly IRStep[], root: LandedRoot, rel: Rel, sc: Scope, ctx: ChainCtx, fresh: Minter, reframe: (tail: Tail) => Tail | null,
+): ScopedBody | null {
+  if (ladderOwns(body, ctx)) return null;
+  const type = typeOf(meta('id', 'int'), meta(sc.key, 'int'));
+  const located = make.project({
+    id: fresh('sbr'), input: sc.scoped, channels: [], type,
+    exprs: [['id', substRelId(root.id, rel.id, sc.scoped.id)], [sc.key, col(sc.scoped.id, sc.key)]],
+  });
+  const domain = make.filter({ id: fresh('sbd'), input: located, channels: [], type, pred: isNot(col(located.id, 'id'), compilerNull()) });
+  const element = make.project({ id: fresh('sbe'), input: domain, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(domain.id, 'id')]] });
+  const lowered = lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, fresh, NO_ALIASES, 'read');
+  if (!lowered || lowered.effects?.length) return null;
+  const tail = reframe(lowered);
+  if (!tail) return null;
+  const keyed = decorrelate(tail.rel, domain, sc.key, fresh);
   return keyed && { rel: keyed.rel, keyCol: keyed.key[0].col, tail };
 }
 
@@ -1231,9 +1259,10 @@ function colsRead(e: Expr, rel: RelId): Set<string> {
  *  builds its own. Read only over the relation the values were joined into. */
 export function scopedValue(ctx: ChainCtx, body: readonly IRStep[], host: ChildHost): ChildValue | undefined {
   const scoped = ctx.scopedValues;
-  const value = scoped?.values.get(bodyKey(body));
-  if (!scoped || !value) return undefined;
+  if (!scoped) return undefined;
   const at = hostRelOf(host);
+  const value = scoped.values.get(landedKey(body, rootOfHost(host, at)));
+  if (!value) return undefined;
   if (at === scoped.over) return value;
   // The host reads a PASS-THROUGH of the joined relation (a fence the tail put over it): the landed columns
   // ride it under their names, so the value is re-pointed at it — where every column it reads is there.
@@ -1244,6 +1273,21 @@ export function scopedValue(ctx: ChainCtx, body: readonly IRStep[], host: ChildH
   if (!reads.every((name) => row.type.cols.some((column) => column.name === name))) return undefined;
   return mapValue(value, (e) => substRelId(e, scoped.over, row.id));
 }
+
+/** WHERE A LANDED BODY STARTS — a FRESH traverser on an element (`freshTraverserRow`): a `where(k, P(k2)).by(b)`
+ *  operand's label, or the current traverser of a bare `where(P(k)).by(b)` (`WherePredicateStep` projects each
+ *  through `TraversalUtil.produce` on a split with no path). `id` is an expression of the host relation. */
+interface LandedRoot { readonly id: Expr; readonly elem: Elem }
+
+/** The columns a landed root's id reads — what tells two operands of one `by()` body apart. */
+const rootTag = (id: Expr, rel: RelId | undefined): string => (rel ? [...colsRead(id, rel)].sort().join(',') : '');
+
+/** A landed value's key: the body, and for a ROOTED body the root it starts from. */
+const landedKey = (body: readonly IRStep[], root?: string): string => (root === undefined ? bodyKey(body) : `${bodyKey(body)}@${root}`);
+
+/** The root a host's value was landed under, where the host is a FRESH element traverser. */
+const rootOfHost = (host: ChildHost, at: RelId | undefined): string | undefined =>
+  host.kind === 'element' && host.row?.fresh ? rootTag(host.id, at) : undefined;
 
 /** The slots of a by()-modulated host whose child value is PER TRAVERSER — each traverser's first result
  *  (`TraversalUtil.produce`). `group()`'s VALUE `by()` is not one: `Grouping` pools a key's traversers into
@@ -1266,12 +1310,16 @@ const perTraverserSlot = (step: IRStep, slot: number): boolean => step.name !== 
  */
 function landValues(
   rel: Rel, framing: RelFraming, bodies: ReadonlyMap<string, readonly IRStep[]>, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  roots: ReadonlyMap<string, LandedRoot> = new Map(),
 ): { readonly over: Rel; readonly values: ReadonlyMap<string, ChildValue> } | null {
   const sc = scope(rel, fresh);
   let joined = sc.scoped;
   const landed: { readonly key: string; readonly first: KeyedRows; readonly framing: RelFraming; readonly cols: readonly ColMeta[] }[] = [];
   for (const [key, body] of bodies) {
-    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh, true));
+    const root = roots.get(key);
+    const reframe = (t: Tail) => recordAsMap(t, ctx, fresh, true);
+    const keyed = root ? rootedBody(body, root, rel, sc, ctx, fresh, reframe)
+      : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe);
     const cols = keyed && framingCols(keyed.tail.framing);
     // One value column (and a scalar's per-row type) is what a ChildValue carries.
     if (!keyed || !cols || cols.length > (keyed.tail.framing.kind === 'scalar' ? 2 : 1)) return null;
@@ -1349,7 +1397,7 @@ const byArity = (step: IRStep): number =>
  * A `group()` whose VALUE `by()` is a child is `pooledGroup`'s.
  */
 const byValues: Connector = (site) => {
-  const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
+  const { step, rel, framing, ctx, fresh, labels } = site;
   // An ARGUMENT changes what the by() runs over: `dedup("a")` projects each scope LABEL's value on a NEW traverser
   // (`freshTraverserRow`), and `group("m")`/`groupCount("m")` is a keyed SIDE EFFECT — neither is a per-traverser
   // by() over this stream, so both stay the host's own.
@@ -1370,23 +1418,31 @@ const byValues: Connector = (site) => {
     return !!tail && !!cols && !!seedExpressions(tail.rel, cols.map((column) => column.name), rel);
   };
   const seamless = new Map([...all].filter(([, body]) => !host || !seam.scalar(body, host)));
-  const lowerOver = (bodies: ReadonlyMap<string, readonly IRStep[]>) => {
-    // No child body to land (a `by(__.identity())` IS a bare `by()`): the host's own lowering, over the input.
-    const landed = bodies.size
-      ? landValues(rel, framing, bodies, ctx, fresh, labels)
-      : { over: rel, values: new Map<string, ChildValue>() };
-    if (!landed) return null;
-    const { over, values } = landed;
-    // The ladder lowers THIS step alone over the joined relation, reading the landed values.
-    const only = [step];
-    return continueAs(over, framing, only, 0, bulked,
-      { ...ctx, scopedValues: { over: over.id, values }, ladderAt: { steps: only, at: 0 } }, fresh, labels);
-  };
   const inPlace = new Map([...seamless].filter(([, body]) => !seedOnly(body)));
   // Where the host's own by() cannot spell a seed-only body in place, it is landed like any other.
-  const tail = (inPlace.size < seamless.size ? lowerOver(inPlace) : null) ?? lowerOver(seamless);
-  if (!tail) return null;
-  // The joined columns are shed: a framing-preserving step (order, dedup) carries them as payload.
+  const tail = (inPlace.size < seamless.size ? landedStep(site, inPlace) : null) ?? landedStep(site, seamless);
+  return tail && afterLanded(site, tail);
+};
+
+/** THE HOST STEP ALONE over its landed by() values (`landValues`): the host's own lowering of `site.step` over
+ *  the joined relation, reading each landed value as a column (`scopedValue`). No body to land (a
+ *  `by(__.identity())` IS a bare `by()`): the host's own lowering over the input. */
+function landedStep(site: HostSite, bodies: ReadonlyMap<string, readonly IRStep[]>, roots?: ReadonlyMap<string, LandedRoot>): Tail | null {
+  const { step, rel, framing, bulked, ctx, fresh, labels } = site;
+  const landed = bodies.size
+    ? landValues(rel, framing, bodies, ctx, fresh, labels, roots)
+    : { over: rel, values: new Map<string, ChildValue>() };
+  if (!landed) return null;
+  const { over, values } = landed;
+  const only = [step];
+  return continueAs(over, framing, only, 0, bulked,
+    { ...ctx, scopedValues: { over: over.id, values }, ladderAt: { steps: only, at: 0 } }, fresh, labels);
+}
+
+/** The chain after a `landedStep`, the joined columns shed: a framing-preserving step (order, dedup, a filter)
+ *  carries them as payload. */
+function afterLanded(site: HostSite, tail: Tail): Tail | null {
+  const { rel, framing, steps, at, ctx, fresh } = site;
   const payload = payloadCols(rel);
   const preserved = tail.framing.kind === framing.kind;
   if (preserved && !payload.every((column) => tail.rel.type.cols.some((c) => c.name === column.name))) return null;
@@ -1399,6 +1455,70 @@ const byValues: Connector = (site) => {
     })
     : tail.rel;
   return continueAs(kept, tail.framing, steps, at + 1, tail.bulked, ctx, fresh, tail.aliases);
+}
+
+/**
+ * The OPERANDS of an alias-compare `where` in the order its `by()` ring serves them, or `null` where the step is
+ * not one: `where(k, P(k2…))` starts at `k`, a bare `where(P(k…))` at the current traverser (`null`), then
+ * each predicate leaf's label left to right through `and`/`or`/`not` — `WherePredicateStep` hands out the
+ * ring's `by()`s in that order, cycling
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`).
+ */
+function whereOperands(step: IRStep): (string | null)[] | null {
+  if (step.name !== 'where' || step.optionArms || step.args.some((arg) => isNested(arg.value))) return null;
+  const leaves = (pred: unknown): string[] | null => {
+    if (!isPred(pred)) return null;
+    if (pred.op === 'and' || pred.op === 'or' || pred.op === 'not') {
+      const parts = pred.operands.map((operand) => leaves(operand.value));
+      return parts.every((part): part is string[] => !!part) ? parts.flat() : null;
+    }
+    const only = pred.operands.length === 1 ? pred.operands[0]!.value : undefined;
+    return typeof only === 'string' ? [only] : null;
+  };
+  const [start, pred] = step.args.map((arg) => arg.value);
+  if (step.args.length === 2 && typeof start === 'string') { const rest = leaves(pred); return rest && [start, ...rest]; }
+  if (step.args.length === 1) { const rest = leaves(start); return rest && [null, ...rest]; }
+  return null;
+}
+
+/**
+ * `where(k, P(k2…)).by(b…)` / `where(P(k…)).by(b…)` — the ALIAS COMPARE, its `by()` values as JOIN COLUMNS
+ * (`byValues`' move): each operand's `by()` runs on a FRESH traverser on the element its label names (the current
+ * traverser for a bare form), so each (operand, body) pair is landed ROOTED there (`LandedRoot`), and the compare
+ * itself — the ring, the predicate tree, the productivity rule — is the host's own lowering over the joined
+ * relation. As in `byValues`, a body the host's seam answers as a correlated value keeps the dependent join.
+ */
+const aliasCompare: Connector = (site) => {
+  const { step, rel, framing, ctx, fresh, labels } = site;
+  const operands = whereOperands(step);
+  if (!operands || !step.modulators?.length) return null;
+  const seam = childSeam(ctx, fresh);
+  const ring = modulations(step, step.modulators.length, seam);
+  if (!ring?.length) return null;
+  const bodies = new Map<string, readonly IRStep[]>();
+  const roots = new Map<string, LandedRoot>();
+  operands.forEach((label, i) => {
+    const by = ring[i % ring.length];
+    if (by?.key.kind !== 'child') return;
+    const proj = label === null ? null : aliasProjection(rel, labels, label, 'last', fresh);
+    if (label !== null && !isElementAlias(proj)) return;
+    if (label === null && framing.kind !== 'elements') return;
+    const root: LandedRoot = isElementAlias(proj)
+      ? { id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem }
+      : { id: col(rel.id, 'id'), elem: (framing as Extract<RelFraming, { kind: 'elements' }>).elem };
+    const host: ChildHost = isElementAlias(proj)
+      ? aliasElementHost(rel, proj, freshTraverserRow(rel))
+      : { kind: 'element', id: root.id, elem: root.elem, row: freshTraverserRow(rel) };
+    if (seam.scalar(by.key.body, host)) return;
+    const key = landedKey(by.key.body, rootTag(root.id, rel.id));
+    bodies.set(key, by.key.body);
+    roots.set(key, root);
+  });
+  const tail = landedStep(site, bodies, roots);
+  if (!tail) return null;
+  // Nothing landed, nothing to shed: the host's own compare over its input, continued as it is.
+  return bodies.size ? afterLanded(site, tail)
+    : continueAs(tail.rel, tail.framing, site.steps, site.at + 1, tail.bulked, site.ctx, site.fresh, tail.aliases);
 };
 
 /**
@@ -1595,7 +1715,7 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
 
 /** THE CONNECTOR TABLE — one row per host, keyed by step name (§2 S4). */
 const CONNECTORS: ReadonlyMap<string, Connector> = new Map<string, Connector>([
-  ['where', existence(false)],
+  ['where', (site) => (whereOperands(site.step) ? aliasCompare(site) : existence(false)(site))],
   ['filter', existence(false)],
   ['and', existence(false)],
   ['or', existence(false)],
@@ -1641,12 +1761,21 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
  * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
  * `groupCount("m")` — `byValues` leaves both to the host).
  */
-const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union']);
+const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union', 'where', 'filter', 'not', 'and', 'or']);
 /** The hosts whose connector row (`byValues`) claims only the argument-free form. */
 const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
-const ladderless = (step: IRStep, framing: RelFraming): boolean =>
+/** The EXISTENCE hosts, LADDERLESS except over a body the connector leaves to the ladder by design
+ *  (`ladderOwns`: a draw or a re-source, `docs/2026-11-16-ladder-retirement-plan.md` R2/R4) — the one form of
+ *  their route still standing. */
+const EXISTENCE_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or']);
+const ladderless = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =>
   LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar')
-  && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length);
+  && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length)
+  && (!EXISTENCE_HOSTS.has(step.name) || ![...step.args.map((arg) => arg.value), ...(step.modulators ?? []).flat()].some((value) => {
+    if (!isNested(value)) return false;
+    const body = bodyOf(value.nested, ctx.params, ctx.sideEffects);
+    return !body || ladderOwns(body, ctx);
+  }));
 
 /**
  * The dispatch at a connector site: the ladder (the `correlatedChild` fast path) and the connector, in the order
@@ -1665,7 +1794,7 @@ export function scopedHost(
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, ['local', 'map', 'flatMap'].includes(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
-  const routes = ctx.connectorOnly || ladderless(step!, framing) ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
+  const routes = ctx.connectorOnly || ladderless(step!, framing, ctx) ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is
   // tried first (the switch) changes the plan, never whether the traversal compiles.

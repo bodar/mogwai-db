@@ -14,14 +14,21 @@ const store = seeded(MODERN_SEED);
 const run = (q: string) => reach([{ pool: 'W', q, store }]);
 
 describe('L9 — ladder reach engine', () => {
-  test('a draw under an existence host: the default answers, the connector alone declines', () => {
-    const r = run("g.V().where(out().sample(1)).values('name')");
+  test('a draw a later step filters, under an existence host: the default answers, the connector alone declines', () => {
+    const r = run("g.V().where(out().sample(1).has('age')).values('name')");
     expect(r.ladderOnly.map((x) => [x.family, x.rescued])).toEqual([['existence', false]]);
   });
 
-  test('an alias compare by() a traversal: the default answers, the connector alone declines', () => {
+  // A TRAILING draw is trimmed from an existence body (`existencePrefix`), so the connector answers it.
+  test('a trailing draw under an existence host: both answer, and agree', () => {
+    const r = run("g.V().where(out().sample(1)).values('name')");
+    expect(r.ladderOnly).toEqual([]);
+    expect(r.differ).toEqual([]);
+  });
+
+  test('an alias compare by() a traversal: the connector alone answers it, and the two agree', () => {
     const r = run("g.V().as('a').out().as('b').where('a', gt('b')).by(out().count())");
-    expect(r.ladderOnly.map((x) => [x.family, x.rescued])).toEqual([['existence', false]]);
+    expect(r.ladderOnly).toEqual([]);
     expect(r.differ).toEqual([]);
   });
 

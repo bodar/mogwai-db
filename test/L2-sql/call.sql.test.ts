@@ -9,7 +9,7 @@
 import { test, expect, describe } from 'bun:test';
 import { type CompileOptions } from '../../src/compiler/compiler.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
-import { LADDER, read, run, runWith, seededStore } from '../support/harness.ts';
+import { read, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -18,15 +18,12 @@ describe('call / search service SQL', () => {
   test('a call() scalar body is a correlated VALUE, compared in place', () => {
     const store = seededStore();
     const withReg: CompileOptions = { registry: standardRegistry };
-    // `tinker.degree.centrality` is a `rel` contribution, so this asserts the SHAPE of the answer
-    // absolutely. A `streaming` service contributes a per-parent VALUE, and a body that projects a
-    // value and then tests it is a COMPARISON — so there is no EXISTS, no pushed child ordinal and no
-    // LEFT JOIN rejoin.
-    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', { ...withReg, fastPaths: LADDER }).sql;
-    expect(wsql).not.toContain('EXISTS');
+    // A `streaming` service contributes a per-parent VALUE, so the `where()` body is that value tested in a
+    // CORRELATED existence over the host row (the connector's `existence` row) — no LEFT JOIN rejoin.
+    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', withReg).sql;
     expect(wsql).not.toContain('LEFT JOIN');
     expect(wsql).toContain('= 3');
-    expect(wsql).toContain('rme2.tgt = rn.id');
+    expect(wsql).toContain('.tgt = rn.id');
     // The nested child scope rides the carried origin: only lop (IN-degree 3) survives. (Result
     // shape/values are asserted end-to-end over GraphBinary in test/services.test.ts.)
     const nameOf = (id: unknown) => (run(store, `g.V(${id}).values("name")`) as any[])[0]?.v;

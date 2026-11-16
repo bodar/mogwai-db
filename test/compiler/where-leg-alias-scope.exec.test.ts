@@ -92,7 +92,10 @@ describe('a multi-correlation leg reads outer labels after the correlation', () 
   test('a repeat body then an outer select', () =>
     expect(count(`${BA}.where(__.select('a').repeat(__.out()).times(1).select('b')).count()`)).toBe(1)); // only a=josh moves on
   test('a body reading the whole path still declines', () =>
-    expect(() => run(s, `${BAC}.where(__.select('a').in().where(P.eq('c')).path()).count()`)).toThrow(UnsupportedTraversal));
+    expect(() => run(s, `${BAC}.where(__.select('a').in().where(P.eq('c')).path().count(local).is(gt(0))).count()`)).toThrow(UnsupportedTraversal));
+  // A TRAILING path() cannot empty the stream, so the existence check never builds it (`existencePrefix`).
+  test('a trailing path() is not read by the existence check', () =>
+    expect(count(`${BAC}.where(__.select('a').in().where(P.eq('c')).path()).count()`)).toBe(12));
   test('a multi-correlation leg reading only its correlated labels still answers', () =>
     expect(count("g.V().as('a').out().as('b').match(__.as('a').out().as('b'), __.where(__.as('a').out('knows').as('b'))).count()")).toBe(2));
 });

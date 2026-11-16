@@ -11,7 +11,7 @@ import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
 import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, valueTheta, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
-import { isMappingTerminal, producesWithoutInput } from '../../ir/productivity.ts';
+import { existencePrefix, producesWithoutInput } from '../../ir/productivity.ts';
 import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
 import { scopeKeyReads } from '../../ir/labels.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -287,8 +287,13 @@ export function childPredicate(
   }
   const direct = childPredicateDirect(body, subject, fresh, ctx, negated, aliases);
   if (direct) return direct;
-  // LAST RESORT — a trailing MAPPING terminal contributes nothing to the QUESTION, so ask the prefix.
-  const prefix = withoutMappingTerminal(body);
+  // LAST RESORT — what follows the body's last row-dropping step contributes nothing to the QUESTION, so ask
+  // the EXISTENCE PREFIX (`ir/productivity.ts`, the authority the `trimExistenceSuffix` Pass rewrites a true
+  // existence position with). This is the consumer that cannot rewrite: a `coalesce` arm's emptiness, whose
+  // VALUE is still used — `coalesce(__.hasLabel('person').project(…), __.hasLabel('software').project(…))`,
+  // per-member type dispatch, the shape a GraphQL union field takes. An empty prefix produces wherever reached.
+  const prefix = existencePrefix(body, ctx.params);
+  if (prefix && !prefix.length) return negated ? CONSTANT.false : CONSTANT.true;
   return prefix ? childPredicate(prefix, subject, fresh, ctx, negated, aliases) : null;
 }
 
@@ -324,32 +329,7 @@ function selectRerootSubject(step: IRStep, subject: Subject, aliases: AliasMap, 
   return null; // a list/Pop history alias in a filter body is a later phase
 }
 
-/**
- * A body's PRODUCTIVITY question with a trailing mapping terminal removed, or `null` where there is none
- * to remove.
- *
- * `<prefix>.project(k…)` produces exactly when `<prefix>` produces, and the same holds for `valueMap`,
- * `elementMap` and `constant`: each is a `ScalarMapStep` that emits one traverser per INCOMING traverser
- * and never drops one — `project()` omits an unproductive KEY (`ProjectStep.map`'s `ifProductive`) and
- * still emits the map, and `constant()` replaces the value without touching the stream. So for the
- * question "did this body produce anything", the terminal is transparent and the prefix carries the whole
- * answer.
- *
- * This is what turns `coalesce(__.hasLabel('person').project(…), __.hasLabel('software').project(…))` —
- * per-member type dispatch, the shape a GraphQL union field takes — from a DECLINE into the right answer:
- * arm 1's emptiness is `NOT hasLabel('person')`, which the filter route can already build. Without it the
- * arm is unanswerable, because `scalarChild`'s record arm takes a `project()` only as a WHOLE body, so
- * `projectionProductive` has no `present` to offer.
- *
- * A FALLBACK and not a first move, which is this module's standing rule for a new route: every body the
- * direct shapes already answered keeps the SQL it has.
- */
-const withoutMappingTerminal = (body: readonly IRStep[]): readonly IRStep[] | null => {
-  const last = body.at(-1);
-  return last && body.length > 1 && isMappingTerminal(last) ? body.slice(0, -1) : null;
-};
-
-/** The three shapes tried in order, unchanged — split out so the mapping-terminal fallback above can
+/** The three shapes tried in order, unchanged — split out so the existence-prefix fallback above can
  *  retry the whole ladder against a prefix rather than duplicating it. */
 function childPredicateDirect(
   body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,

@@ -6,7 +6,7 @@
   },
   "ladderOnly": {
     "L1": {
-      "existence": 1,
+      "existence": 0,
       "per-traverser": 6,
       "group": 14,
       "other": 0
@@ -18,7 +18,7 @@
       "other": 0
     },
     "H": {
-      "existence": 6,
+      "existence": 0,
       "per-traverser": 0,
       "group": 0,
       "other": 0
@@ -34,25 +34,18 @@
     "37b7aef162be",
     "453bbb7434cd",
     "476dc6bdc71c",
-    "529a64cd72da",
     "61063cb6084b",
     "687c561137bb",
     "7563378b7437",
     "7a163fa20b84",
-    "84eccf0a0909",
-    "8be8944c7dca",
     "a547c5f00084",
     "a789a12466fd",
     "c068d1eaa2b6",
-    "c727bc08c1a6",
     "ca52f8047492",
     "cbd5e1b42527",
-    "ce9001eb2b58",
     "d0e288cd2be4",
     "d4f5df237027",
-    "dbe9012b2379",
     "deff90325220",
-    "e207113911d6",
     "ef9c2a2f38ea",
     "f6be844c87ab",
     "f9c88ebe9e3e"
