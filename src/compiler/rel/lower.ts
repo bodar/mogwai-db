@@ -546,7 +546,7 @@ export const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFr
     id: fresh('agg'), input, channels: [], type: typeOf(meta('v', 'int')),
     groupBy: [], aggs: [['v', countExpr(input)]],
   }),
-  framing: { kind: 'scalar', type: STATIC('long'), result: 'count' },
+  framing: { kind: 'scalar', type: STATIC('long'), result: 'count', reducedGlobally: true },
 });
 
 /**
@@ -2553,7 +2553,7 @@ function scalarTail(
       // the reference's one null traverser into an empty result. Written once, above all three arms,
       // because writing it three times is how two of them would come to disagree.
       const numeric = {
-        kind: 'scalar', type: REDUCED_TYPE, result: 'number',
+        kind: 'scalar', type: REDUCED_TYPE, result: 'number', reducedGlobally: true,
         ...(out.kind === 'scalar' && out.productiveNull ? { productiveNull: true } : {}),
       } as const satisfies RelFraming;
       if (step.name === 'min' || step.name === 'max') {
@@ -2707,7 +2707,7 @@ function scalarTail(
         id: fresh('agg'), input: rel, channels: [], type: typeOf(meta('v', 'int')),
         groupBy: [], aggs: [['v', countExpr(rel)]],
       });
-      out = { kind: 'scalar', type: STATIC('long'), result: 'count' };
+      out = { kind: 'scalar', type: STATIC('long'), result: 'count', reducedGlobally: true };
       continue;
     }
 
@@ -4207,8 +4207,9 @@ export function streamRowTag(rel: Rel, framing: RelFraming): Expr | null {
  * casts before it orders (`predicate.ts` `ordered`) and `as()` records the class. Without it the subject
  * was `SUBJECT_UNKNOWN`, whose storage-class test answered FALSE for the text:
  * `inject(9007199254740992L, 29L).sum().is(P.gt(100))` and `inject(9007199254740993L, 1L).max().is(P.gt(100))`
- * answered nothing. Only the `type` is set; the caller keeps `result: 'number'`, which is what every
- * consumer not audited for a reducer result declines on (`variant.ts`'s branch merge, a filter body).
+ * answered nothing. Only the `type` is set; the caller keeps `result: 'number'` (where the class rides) and
+ * `reducedGlobally` (one row for the whole stream), which a branch merge declines on until a per-traverser
+ * rejoin clears it, and a filter body declines on regardless.
  * Anything else stays `UNKNOWN` — its class is the `vt` column's, read only by the framer.
  */
 export function wideClassOf(framing: RelFraming): { readonly type?: ScalarType } {

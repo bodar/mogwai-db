@@ -156,16 +156,21 @@ export function ensureBulk(rel: Rel, fresh: Minter): Rel {
  *  `long`, a plain scalar's declared type (`withMergedVtype`). `null` for a non-scalar arm (a
  *  mixed-SHAPE branch is the variant arm-major, a later increment) or a `value`-marked one. */
 export function toScalarArm(arm: Tail, fresh: Minter): Rel | null {
+  const vtype = scalarArmType(arm);
+  return vtype && ensureBulk(withMergedVtype(arm.rel, vtype, fresh), fresh);
+}
+
+/** THE TYPE A SCALAR ARM'S ROWS STATE, by its `result` marker — the one authority both branch merges
+ *  (`toScalarArm`'s collapsed one, `mergeArms`' scalar meet) re-project an arm onto the merged `vtype` by: a
+ *  `count`'s `long`, a `number` reducer's own `vt` column (`REDUCED_TYPE` — a Gremlin type name, so it lands
+ *  in the merged per-row `vtype` as is: `union(__.values('age').mean(), __.constant(1))` answers the Double
+ *  29.0), a plain scalar's declared type. `null` for a non-scalar or a `value`-marked arm. */
+function scalarArmType(arm: Tail): ScalarType | null {
   if (arm.framing.kind !== 'scalar') return null;
   const result = arm.framing.result;
-  const vtype: ScalarType | null =
-    result === 'count' ? STATIC('long')
-      : result === undefined || result === 'number' ? arm.framing.type
-        : null;
-  if (!vtype) return null;
-  // A reducer's `vt` is a Gremlin type name (`REDUCED_TYPE`), so it lands in the merged per-row `vtype`
-  // as is: `union(__.values('age').mean(), __.constant(1))` answers the Double 29.0.
-  return ensureBulk(withMergedVtype(arm.rel, vtype, fresh), fresh);
+  return result === 'count' ? STATIC('long')
+    : result === undefined || result === 'number' ? arm.framing.type
+      : null;
 }
 
 /**
@@ -399,10 +404,15 @@ export function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
     if (arm.framing.kind !== 'scalar') return null;
     // A `result:'count'` arm carries a proper `STATIC('long')` type and NO `vt` column, so it meets like
     // any typed scalar — which is what lets `coalesce(__.out().count(), __.constant(0))` merge (count→long,
-    // constant→int, a per-row tagged scalar). `result:'number'`/`'value'` are refused: their type rides on
-    // a `vt` column the meet's own `vtype` column would then contradict — the two-authorities trap.
-    if (arm.framing.result !== undefined && arm.framing.result !== 'count') return null;
-    types.push(arm.framing.type);
+    // constant→int, a per-row tagged scalar). A `result:'number'` arm's type rides on its `vt` column, and
+    // it meets too once it is a value PER TRAVERSER (the rejoin cleared `reducedGlobally`): `mergeArms`
+    // re-projects every arm through `scalarArmType`, so the merged `vtype` column is the ONE authority and
+    // `vt` never stands beside it — `union(local(outE().values('weight').sum()), constant(0))`. A GLOBAL
+    // numeric reduction's one row is the batched merge's (`isReductionArm`), and a `value` arm has no type
+    // this can name: both refused.
+    const type = scalarArmType(arm);
+    if (!type || (arm.framing.result === 'number' && arm.framing.reducedGlobally)) return null;
+    types.push(type);
   }
   // The MEET itself is `render.ts`'s — the same question a named collection asks of its sites. What
   // stays here is the framing-level decline above it, which is about `Tail`s and not about types.
@@ -549,8 +559,8 @@ function opensOffStarter(step: IRStep, ctx: ChainCtx): boolean {
  * §7 sets — the seam could already EXPRESS this; it had not been taught to.
  *
  * The declines are the arms' own: a shape with no `vk` (a map, a record, a path, a property, a
- * discard), a reducer-marked scalar (its type rides on a `vt` column the payload has no slot for),
- * and a SET, whose wire form differs from a list's while sharing its member substrate.
+ * discard), a GLOBAL reduction's scalar (`reducedGlobally` — its one row joins only through the batched
+ * merge's normalization; a per-traverser reducer's `vt` re-homes like any per-row column), and a SET, whose wire form differs from a list's while sharing its member substrate.
  *
  * The channel and label tests are NOT repeated here — the caller runs them for both routes, because
  * an arm that binds a label or mints its own order is refused for reasons that have nothing to do
@@ -603,18 +613,18 @@ export function mergeArms(
   // so it has to happen before both the framing and the column tests below.
   if (first.framing.kind === 'scalar') {
     const met = meetScalarArms(arms);
-    if (met && met.kind === 'perRow') {
+    // An arm whose type rides its `vt` column (`result: 'number'`) re-projects even where the met type is
+    // static, so no arm leaves the merge with a type column of its own beside the merged one.
+    const vtArm = arms.some((arm) => arm.framing.kind === 'scalar' && arm.framing.result === 'number');
+    if (met && (met.kind === 'perRow' || vtArm)) {
       // The framing names the column `withMergedVtype` PROJECTS — always `MERGED_VTYPE` — never the
       // met type's own: arms that AGREE on a per-row type carried under another column (an inject that
       // mixes declared types rides `vt`) meet to that type unchanged, and framing the re-projected union
       // by it named a column the union no longer has — an internal error on `inject(1, 1L).union(…)`,
       // and, where a narrowing reader degraded the missing column to UNKNOWN, an Int framed for a Long.
       const framing = { kind: 'scalar', type: PER_ROW(MERGED_VTYPE) } as const;
-      // `meetScalarArms` returned non-null, so EVERY arm is a scalar without a `result` marker.
-      const retyped = arms.map((arm) => ({
-        ...arm, framing,
-        rel: withMergedVtype(arm.rel, arm.framing.kind === 'scalar' ? arm.framing.type : UNKNOWN, fresh),
-      }));
+      // `meetScalarArms` returned non-null, so EVERY arm is a scalar `scalarArmType` can name.
+      const retyped = arms.map((arm) => ({ ...arm, framing, rel: withMergedVtype(arm.rel, scalarArmType(arm) ?? UNKNOWN, fresh) }));
       [first, ...rest] = retyped as [Tail, ...Tail[]];
       arms = retyped;
     }

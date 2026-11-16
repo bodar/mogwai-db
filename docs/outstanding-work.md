@@ -535,6 +535,11 @@ refusal comes first: it is a production outage.
 - **`project().by(out().count().fold())` frames the count as Int (project-count-fold-class)** — reported `[3i]`,
   ref `[3L]` (`CountGlobalStep` yields a Long); the top-level `g.V().out().count().fold()` is right. Re-check
   under a FRAMED run before building.
+- **A `match` pattern ending in a NON-SEEDED reducer binds NULL for an empty origin (match-null-reducer-end)** —
+  `g.V().match(__.as('a').values('age').sum().as('b')).select('b')` gives `[29,27,null,32,null,35]`, ref
+  `[29,27,32,35]`: `SumGlobalStep` emits nothing over zero starts, so the pattern does not match that `a`. The
+  `reducingEnd` route (`src/compiler/rel/match.ts`) binds `child.scalar`'s value without its `present` signal;
+  filter the binding table on it (`value-nullness`) before binding, as `count()` needs no filter.
 - **L3-ledgered wrong answers** — each is a `defect` in `test/L3-conformance/expected-outcomes.ts`; the
   fix deletes its names there.
   - **`with('multilabel')` frames an edge's own label as a String (l3-multilabel-edge-label)** —
@@ -1060,7 +1065,8 @@ Beside the RelIR substrate:
 - **Families** (rank by `rel-blockers`) — scalar-transform tail, body-keyed `choose`
   (a keyed `choose` nested in an option arm; `choose(select('a'))` through an arm alias — §3.9), Column/path row ops, `Pop.all/mixed`, side effects
   (`group('m').by().by(__.in().values())`), local/match/where; the single-missing-caller list.
-- **`match()` residue.** A binding `or` branch; `map(<mean>)` body; `fold()` end;
+- **`match()` residue.** A binding `or` branch; a `local(<reducer>)` body (`local` forwards the reducer's fresh
+  traverser, which holds no binding — `map(<reducer>)` binds); `fold()` end;
   ProductiveByStrategy null-keeping; `where('a',P)` over scalar aliases / non-eq ops; per-origin slice
   in a pattern body; `match` over a map stream (`g.V().valueMap().match(as('a').select('name').as('b'))`);
   `concat(constant(…), select('b').by('name'))` (likely a concat-with-select-child gap).

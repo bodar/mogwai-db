@@ -52,8 +52,17 @@ export type RelFraming =
    *  a local reducer collapsed: nothing was dropped, so an all-null collection reduces to a null
    *  that `MaxLocalStep` genuinely emits (`NumberHelper.max(null,null)` returns null and the step
    *  splits on it — `gremlin-core/.../util/NumberHelper.java`, `.../step/map/MaxLocalStep.java:45`).
-   *  Without it the framer's "a null scalar is no result" rule silently eats a correct answer. */
-  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number'; readonly productiveNull?: boolean }
+   *  Without it the framer's "a null scalar is no result" rule silently eats a correct answer.
+   *
+   *  `result` is a TYPE fact: where the value's class rides (`'number'` — a reducer's `vt` column,
+   *  `REDUCED_TYPE`; `'count'` — a `long` with no column). `reducedGlobally` is the OTHER fact a reducer's
+   *  output used to share that marker with: the value is ONE row for the WHOLE stream a GLOBAL reducing
+   *  barrier consumed, not one per traverser that reached it — so a consumer that needs a per-origin value
+   *  (a `match` pattern end, the scalar arm meet) must not read it as one. Only the global reducers set it;
+   *  the per-traverser REJOIN (`scoped.ts` `rejoin`/`firstInnerOver`, via `perTraverserFraming`) is the one
+   *  place that knows it produced one row per host traverser, so it clears it and keeps `result`.
+   */
+  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number'; readonly reducedGlobally?: true; readonly productiveNull?: boolean }
   /** A traverser whose VALUE is a collection — one JSONB `list` column per row (§ the list
    *  vocabulary, `list.ts`). `of` describes the MEMBER encoding, which is what the framing layer
    *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
@@ -251,6 +260,21 @@ export const fieldCol = (prefix: string, name: string): string => `${prefix}_${n
  * declines rather than omissions — the switch is total, so a shape that becomes reachable as a field is
  * a compile error here until its columns are declared.
  */
+/**
+ * A body's framing as the PER-TRAVERSER rejoin hands it back: one result row per host traverser, so a
+ * global reducer's `reducedGlobally` no longer holds — the body ran once per traverser (`LocalStep`,
+ * `FlatMapStep`, `TraversalMapStep` each apply their child to ONE traverser,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`).
+ * The TYPE fact (`result`, and the `vt` column it names) is the value's own and survives, which is why
+ * this clears one field rather than the marker: `property(k, local(values('age').sum()))` still stores
+ * the sum's class.
+ */
+export function perTraverserFraming(framing: RelFraming): RelFraming {
+  if (framing.kind !== 'scalar' || !framing.reducedGlobally) return framing;
+  const { reducedGlobally: _cleared, ...perTraverser } = framing;
+  return perTraverser;
+}
+
 export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
   switch (framing.kind) {
     case 'elements': return [{ name: 'id', type: 'int', nullable: true }];

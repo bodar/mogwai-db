@@ -18,7 +18,7 @@ import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { firstArrival, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
-import { framingCols, type RecordField, type RelFraming } from '../framing.ts';
+import { framingCols, perTraverserFraming, type RecordField, type RelFraming } from '../framing.ts';
 import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned, withBranchEffects } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
@@ -784,7 +784,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
       exprs: [...bodyPayload.map((column) => [column.name, substRelId(inline.values.get(column.name)!, rel.id, kept.id)] as const),
         ...rel.channels.map((channel) => [channel.col, col(kept.id, channel.col)] as const)],
     });
-    return continueAs(splitPath(mapped, tail.framing, ctx, fresh), tail.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    return continueAs(splitPath(mapped, tail.framing, ctx, fresh), perTraverserFraming(tail.framing), steps, at + 1, bulked, ctx, fresh, labels);
   }
   const first = tail && framingCols(tail.framing) ? correlatedFirst(tail, payloadCols(tail.rel).map((column) => column.name), rel, fresh) : null;
   const lead = tail && payloadCols(tail.rel)[0];
@@ -814,7 +814,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
       exprs: [...bodyPayload.map((column) => [column.name, col(present.id, named.get(column.name)!)] as const),
         ...rel.channels.map((channel) => [channel.col, col(present.id, channel.col)] as const)],
     });
-    return continueAs(splitPath(mapped, tail.framing, ctx, fresh), tail.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    return continueAs(splitPath(mapped, tail.framing, ctx, fresh), perTraverserFraming(tail.framing), steps, at + 1, bulked, ctx, fresh, labels);
   }
   // A host whose COMPUTED columns kept the dependent join out (`spellsStored` — a correlated read would compute
   // them again per inner row) is computed ONCE first: a fenced CTE, whose columns are then read by name, and the
@@ -850,7 +850,8 @@ function rejoin(
   sc: Scope, host: Rel, keyed: ScopedBody, rel: Rel, policy: 'split' | 'forward', firstOnly: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, bodyPosition = false, feedsOtherV = false,
 ): ChainReadOut | null {
-  const outFraming = keyed.tail.framing;
+  // Each result is one host traverser's: a global reducer in the body is no longer global (`perTraverserFraming`).
+  const outFraming = perTraverserFraming(keyed.tail.framing);
   if (!framingCols(outFraming)) return null;
   // A body row that stands for several traversers (a BULKED body, its own `bulk` column) is that many results
   // for EACH of the host row's traversers: the two multiplicities MULTIPLY. An unbulked body's `bulk` is one

@@ -513,7 +513,7 @@ export function seededLeftFold(
         }],
       ],
     }),
-    framing: { kind: 'scalar', type: REDUCED_TYPE, result: 'number', productiveNull },
+    framing: { kind: 'scalar', type: REDUCED_TYPE, result: 'number', reducedGlobally: true, productiveNull },
   };
 }
 

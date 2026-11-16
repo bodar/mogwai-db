@@ -630,14 +630,17 @@ function producedObject(rel: Rel, framing: RelFraming): { readonly value: Expr; 
     return { value: id, kind: 'element', bind: { kind: 'element', elem: framing.elem, id } };
   }
   if (framing.kind === 'scalar') {
-    // A REDUCING BARRIER end (`count()`/`sum()`/…, `result` 'count'|'number') declines: its value is a
-    // reduction that must be computed ONCE PER ORIGIN with a 0/empty default (a correlated scalar
-    // child), and folding it inline drops the empty origins instead — a wrong answer, not a decline.
-    // That is the scalar-child seam's job and a later phase. A PER-ROW value (`values('name')`,
-    // `select(key)`) has no such marker and binds directly.
-    if (framing.result === 'count' || framing.result === 'number') return null;
+    // A GLOBAL REDUCING BARRIER's one row (`reducedGlobally` — a reducer the body ran across the WHOLE
+    // binding table) declines: its value is a reduction that must be computed ONCE PER ORIGIN with a
+    // 0/empty default (a correlated scalar child — `reducingEnd` routes the trailing case there), and
+    // folding it inline answers one value for every origin at once — a wrong answer, not a decline. A
+    // PER-ROW value (`values('name')`, `select(key)`) binds directly, and so does a reducer a per-traverser
+    // body produced (`map(inE('created').values('weight').mean())` — the rejoin cleared the global fact),
+    // its class read off its own `vt` column below.
+    if (framing.reducedGlobally) return null;
     const value = col(rel.id, 'v');
-    // The row's own tag column — the stored `vtype`, else the framing's PER-ROW one (a mixed inject's tag).
+    // The row's own tag column — the stored `vtype`, else the framing's PER-ROW one (a mixed inject's tag,
+    // a reducer's `vt`).
     const tagCol = ['vtype', perRowColumnOf(framing.type)].find((name) => name && rel.type.cols.some((c) => c.name === name));
     const vtype = tagCol ? col(rel.id, tagCol) : undefined;
     return { value, kind: 'value', bind: { kind: 'value', value, type: framing.type, ...(vtype ? { vtype } : {}) } };

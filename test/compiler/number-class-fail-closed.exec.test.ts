@@ -125,12 +125,22 @@ describe('a sum over a known long class compares as a number', () => {
   for (const q of [
     "g.inject(1L,2L).sum().union(__.identity(), __.constant(5L)).sum()",
     "g.inject(1L,2L).sum().union(__.identity(), __.constant(5L)).fold().sum(local)",
-    "g.inject(1L,2L).fold().sum(local).union(__.identity(), __.constant(5L)).sum()",
     "g.inject(1L,2L).sum().union(__.identity(), __.constant(5)).sum()",
     "g.inject(1L,2L).sum().union(__.identity(), __.constant(5)).max()",
     "g.inject(1L,2L).sum().choose(__.is(3), __.identity(), __.constant(1))",
     "g.inject(9007199254740993L, 1L).max().union(__.identity(), __.constant(5L)).sum()",
   ]) test(`declines: ${q}`, () => expect(typed(q)).rejects.toThrow(UnsupportedTraversal));
+
+  // A LOCAL reducer's value is already one per traverser (`sum(local)` never set `reducedGlobally`), so the arm
+  // meet takes it: its `vt` class moves onto the merged per-row vtype (`scalarArmType`, `lower/branch.ts`) and the
+  // follow-on reducer reads a Long — Long + Long is a Long (NumberHelper.java:452), and Int + Int stays an Int.
+  test.each([
+    ['g.inject(1L,2L).fold().sum(local).union(__.identity(), __.constant(5L)).sum()', [[8, T.long]] as [unknown, number][]],
+    ['g.inject(1,2).fold().sum(local).union(__.identity(), __.constant(5)).sum()', [[8, T.int]] as [unknown, number][]],
+    ['g.inject(1.5,2).fold().sum(local).union(__.identity(), __.constant(5)).sum()', [[8.5, T.double]] as [unknown, number][]],
+  ])('a local reducer arm meets: %s', async (q, want) => {
+    expect(await typed(q)).toEqual(want);
+  });
 
   // The scoped `coalesce` connector (`src/compiler/rel/lower/scoped.ts`) merges a reducer arm by moving its
   // class onto the merged per-row vtype (`reconcileCollapsed`), so a follow-on reducer reads a Long, not a storage

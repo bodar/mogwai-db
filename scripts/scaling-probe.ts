@@ -72,6 +72,13 @@ const SHAPES: readonly Shape[] = [
   { name: 'project.by(out.count)', query: "g.V().project('a','b').by(out().count()).by(values('name'))" },
   { name: 'and(out,in)', query: 'g.V().and(out(), in()).count()' },
   { name: 'or(out.has,in)', query: "g.V().or(out().has('age', gt(40)), in('created')).count()" },
+  // A per-traverser reducer beside a default (the rejoin clears `reducedGlobally`, the arm meet re-types `vt`).
+  { name: 'reducer arm: union(local(sum),constant)', query: "g.V().union(local(outE().values('weight').sum()), constant(0))" },
+  { name: 'reducer arm: choose(local(mean),constant)', query: "g.V().choose(hasLabel('person'), local(outE().values('weight').mean()), constant(0))" },
+  { name: 'reducer arm: id.union(map(sum),identity)', query: 'g.V().id().union(map(sum()), identity())' },
+  { name: 'reducer arm: match(map(mean))', query: "g.V().match(__.as('a').map(inE('created').values('weight').mean()).as('b')).select('b')" },
+  { name: 'reducer arm: union(local(sum),out)', query: "g.V().union(local(outE().values('weight').sum()), out())" },
+  { name: 'reducer arm: group.by(union(local(sum),constant).sum)', query: "g.V().group().by(label).by(union(local(outE().values('weight').sum()), constant(0)).sum())" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

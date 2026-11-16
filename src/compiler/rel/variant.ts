@@ -68,8 +68,14 @@ export function variantArmOf(framing: RelFraming): VariantArm | null {
   // An ENVELOPE-carried per-row type belongs to a value inside a JSON blob; a scalar ROW has no envelope
   // to read it from, so the arm declines rather than projecting a tag it cannot reach (`mergedVtypeOf`
   // would NULL it and the framer would infer — a different class, not the reference's).
+  // A reducer a per-traverser body produced (the rejoin cleared `reducedGlobally`) is an arm like any
+  // other scalar: its class is its type — a `count`'s `long`, a `number`'s `vt` column (`REDUCED_TYPE`) —
+  // which `variantArm` re-homes on `MERGED_VTYPE` as it does any per-row column. A GLOBAL reduction's one
+  // row joins a variant only through the batched merge's normalization (`reconcileCollapsed`).
   if (framing.kind === 'scalar') {
-    return framing.result === undefined && !(isPerRow(framing.type) && !perRowColumnOf(framing.type))
+    const typed = framing.result === undefined
+      || ((framing.result === 'count' || framing.result === 'number') && !framing.reducedGlobally);
+    return typed && !(isPerRow(framing.type) && !perRowColumnOf(framing.type))
       ? { kind: 'scalar', type: framing.type } : null;
   }
   if (framing.kind === 'elements') return { kind: 'elements', elem: framing.elem };
