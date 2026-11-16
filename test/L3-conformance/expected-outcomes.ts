@@ -255,7 +255,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_VX1X_asXaX_V_valuesXageX_whereXeqXVXvid1X_valuesXageXX_orXeqXaXXX_byX_byXageX',
     'g_VX1X_asXaX_V_valuesXageX_whereXgteXconstantX0XX_andXneqXaXXX_byX_byXageX',
     'g_VX1X_asXaX_V_valuesXageX_whereXneqXaX_andXgtXVXvid1X_valuesXageXXXX_byX_byXageX',
-    'g_VX1X_asXaX_out_hasXageX_whereXgtXaXX_byXageX_name',
     'g_VXvid1X_asXaX_V_valuesXageX_isXgtXselectXaX_valuesXageXXX',
     'g_V_asXaX_out_asXbX_whereXin_count_isXeqX3XX_or_whereXoutXcreatedX_and_hasXlabel_personXXX_selectXa_bX',
     'g_V_hasXname_notXidentityXX',

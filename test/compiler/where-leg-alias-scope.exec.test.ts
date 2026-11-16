@@ -141,8 +141,13 @@ describe('a value traverser compares against a label', () => {
     expect(count("g.V().as('a').values('name').as('n').select('a').where(__.repeat(__.out()).times(1).values('name').where(P.lt('n'))).count()")).toBe(2));
   test('inside flatMap', () =>
     expect(names("g.V().as('a').values('name').as('n').select('a').flatMap(__.out().values('name').where(P.lt('n')))")).toEqual(['josh', 'lop', 'lop']));
-  test('a by()-modulated label compare in a leg declines (unbuilt), never a wrong count', () =>
-    expect(() => run(s, `${BAC}.where(__.select('a').in().where(P.eq('c')).by(T.label)).count()`)).toThrow(UnsupportedTraversal));
+  // A by()-modulated bare label compare in a leg: the leg's traverser through `by[0]`, `c` through the ring
+  // (WherePredicateStep with no startKey). `c` is itself an in-neighbour of `a` and every in-neighbour in
+  // the modern graph is a person, so `eq` keeps all 12 and `neq` none.
+  test('a by()-modulated label compare in a leg', () => {
+    expect(count(`${BAC}.where(__.select('a').in().where(P.eq('c')).by(T.label)).count()`)).toBe(12);
+    expect(count(`${BAC}.where(__.select('a').in().where(P.neq('c')).by(T.label)).count()`)).toBe(0);
+  });
 });
 
 // An UNKNOWN-typed side (an untagged `inject`, a `select` of an untagged label) is typed by the value's own

@@ -5567,7 +5567,7 @@ function elementTail(
     // reads a PATH label rather than the current traverser, so it is a correlated test over the alias
     // element that `sourceFilter` (rooted at the current row) cannot express. Try it first; a `null`
     // means it is an ordinary current-traverser filter and falls through to `sourceFilter` unchanged.
-    const aliased = aliasWhere(step, rel, labels, ctx, fresh);
+    const aliased = aliasWhere(step, rel, labels, ctx, fresh, elem);
     if (aliased === 'decline') return null;
     if (aliased) { rel = aliased; continue; }
     const filtered = hostFilter(rel, step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, ctx, fresh, labels);
@@ -6445,17 +6445,14 @@ const whereOperandHost = (rel: Rel, proj: ElementAliasProjection): ChildHost =>
  * single-binary path).
  */
 function aliasValueWhere(
-  step: IRStep, startKey: string, pred: unknown, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
+  step: IRStep, startHost: ChildHost, pred: unknown, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): Rel | 'decline' | null {
-  const startProj = aliasProjection(rel, labels, startKey, 'last', fresh);
-  if (!isElementAlias(startProj)) return null; // a scalar-alias theta is unbuilt
   const ring = modulations(step, step.modulators?.length ?? 0, childSeam(ctx, fresh));
   if (!ring || !ring.length) return null;
   const seam = childSeam(ctx, fresh);
   // Under `ProductiveByStrategy` an unproductive `by()` is KEPT as a null and compared; that keep-null
   // compare is not built, so it declines (as the single-binary path does).
   if (isProductiveBy(step)) return 'decline';
-  const startHost = whereOperandHost(rel, startProj);
   const lhsBy = byProjection(ring[0]!, startHost, ctx.source, fresh, true, seam);
   if (!lhsBy) return 'decline';
   const lhs = lhsBy.value;
@@ -6484,7 +6481,7 @@ function aliasValueWhere(
   return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: kept ? and(kept, clause) : clause });
 }
 
-function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
+function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter, elem?: Elem): Rel | 'decline' | null {
   if ((step.name !== 'where' && step.name !== 'not') || step.optionArms) return null;
   // A side-effect name outranks a label (`Scoping.getScopeValue`): `collectionMembership` owns it.
   if (step.name === 'where' && step.args.length === 1 && namesACollection(step.args[0]!.value, ctx)) return null;
@@ -6501,6 +6498,14 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
     if (rel.type.cols.some((c) => c.name === 'id')) {
       const bare = bareAliasWhere(step, rel, labels, fresh, { kind: 'element', id: col(rel.id, 'id') });
       if (bare) return bare;
+      // The SAME bare compare under a `by()` ring — `where(P.gt('a')).by('age')`. With no startKey the
+      // LHS is the CURRENT traverser (`WherePredicateStep.filter`: `null == this.startKey ?
+      // TraversalUtil.produce(traverser, ring.next())`), projected through `by[0]` on a fresh split of it,
+      // and each leaf's label through the ring after it — `aliasValueWhere` with the traverser as its start.
+      if (elem && step.modulators?.length && step.args.length === 1 && isPred(step.args[0]!.value) && namesALiveLabel(step.args[0]!.value, labels)) {
+        const self: ChildHost = { kind: 'element', id: col(rel.id, 'id'), elem, row: freshTraverserRow(rel) };
+        return aliasValueWhere(step, self, step.args[0]!.value, rel, labels, ctx, fresh) ?? 'decline';
+      }
     }
     // A COMPOUND connective (`and`/`or`/`not`) over selectKey operands. WITH a `by()` it is a value
     // compare through the ring (`aliasValueWhere`); WITHOUT one the leaves compare rowids
@@ -6509,7 +6514,9 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
     if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
       && (pred.op === 'and' || pred.op === 'or' || pred.op === 'not')) {
       if (step.modulators?.length) {
-        const built = aliasValueWhere(step, wargs[0], pred, rel, labels, ctx, fresh);
+        const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
+        // A scalar-alias start is an unbuilt theta.
+        const built = isElementAlias(startProj) ? aliasValueWhere(step, whereOperandHost(rel, startProj), pred, rel, labels, ctx, fresh) : null;
         if (built) return built;
       } else {
         const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
