@@ -110,7 +110,7 @@ the default). Generalise the ladder's one real idea, then delete the route:
 
 **DECIDED (owner, 2026-11-16): REPLACE IN STAGES (option A); the route stays until the typed carrier (Phase 4) lands.**
 Now: inline a body that only moves (flatMap(out().out()) is 1.29× today, on the default path); the reducer marker is
-accepted where it is READ; re-source bodies go to the connector; draws are one per scope row (with R2). The
+accepted where it is READ; re-source bodies go to the connector; the pinned `[]` scenario (`resourced-scalar-value.feature`) moves to the six nulls and its §17 line is deleted — the `[]` was the ladder scalar subquery confusing a null value with no row, not a JS/SQLite semantic (owner, 2026-11-16); draws are one per scope row (with R2). The
 variant- and property-payload sole answers wait for the carrier; the route is deleted when they land.
 
 Each sub-item is its own commit. The audit's "measured and NOT landed" list is the starting evidence.
