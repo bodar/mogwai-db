@@ -1595,12 +1595,19 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
 /**
  * The hosts whose ladder route is DELETED (Phase 3 (d); the kept ones are catalogued in
  * `docs/2026-11-15-compositional-coverage-plan.md`, "Kept routes"): the connector row is their one lowering, so the
- * dispatch offers no ladder to fall back to and the tails never lower them. A host leaves the ladder by joining
+ * dispatch offers no ladder to fall back to. (`order`/`dedup`/`groupCount` keep their tail lowering — `byValues`
+ * hands it the landed `by()` values, the connector's own use of it — but the tail no longer answers the site
+ * ALONE, correlating its `by()` bodies itself.) A host leaves the ladder by joining
  * this set in the commit that deletes its route. Keyed by the FRAMINGS the deleted route served: over any other
  * framing the tail that lowers the step is the host's own lowering, not a ladder (`project` over a property row is
- * `propertyTail`'s record — `recordLeft` reads a `by()` through an element or scalar host only).
+ * `propertyTail`'s record — `recordLeft` reads a `by()` through an element or scalar host only), and so is a step
+ * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
+ * `groupCount("m")` — `byValues` leaves both to the host).
  */
-const LADDERLESS: ReadonlyMap<string, ReadonlySet<RelFraming['kind']>> = new Map([['project', new Set(['elements', 'scalar'] as const)]]);
+const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount']);
+const ladderless = (step: IRStep, framing: RelFraming): boolean =>
+  LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar')
+  && (step.name === 'project' || !step.args.length);
 
 /**
  * The dispatch at a connector site: the ladder (the `correlatedChild` fast path) and the connector, in the order
@@ -1619,7 +1626,7 @@ export function scopedHost(
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, ['local', 'map', 'flatMap'].includes(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
-  const routes = ctx.connectorOnly || LADDERLESS.get(step!.name)?.has(framing.kind) ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
+  const routes = ctx.connectorOnly || ladderless(step!, framing) ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is
   // tried first (the switch) changes the plan, never whether the traversal compiles.
