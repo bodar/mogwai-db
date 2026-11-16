@@ -1,5 +1,6 @@
+import { atMostOneRow, rowBounds } from './bounds.ts';
 import type { Expr } from './expr.ts';
-import { col, compilerInt, compilerNull, compilerText, eq } from './expr.ts';
+import { and, col, compilerInt, compilerNull, compilerText, eq } from './expr.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import type { ColMeta, RelId, SortTerm } from './types.ts';
@@ -38,24 +39,70 @@ import { freeRelIds, mapRelChildren, recursiveStep, relChildren, relExprs, rewri
  *
  * ## The contract
  *
- * `decorrelate(plan, outer, key, fresh)` — `plan` may reference columns of `outer` (a relation carrying a
- * column `key` that is UNIQUE per row) anywhere, including inside correlated subqueries. The answer is a
- * relation with `plan`'s columns followed by the domain's: `key` (as `keyCol`) and a copy of each `outer`
- * column the plan read, such that its rows with `keyCol = k` are exactly `plan`'s rows evaluated for the
- * outer row whose key is `k`. `null` where a node cannot be rewritten (a multi-row correlated `Values`, a
+ * `decorrelate(plan, outer, key, fresh, projection?)` — `plan` may reference columns of `outer` (a relation
+ * carrying a column `key` that is UNIQUE per row) anywhere, including inside correlated subqueries. The answer
+ * is a relation with `plan`'s columns followed by the domain's: `key` and a copy of each `outer` column the plan
+ * read (or, under a `KeyProjection`, the projected columns), such that its rows whose `Decorrelated.key`
+ * matches an outer row are exactly `plan`'s rows evaluated for that outer row. `null` where a node cannot be rewritten (a multi-row correlated `Values`, a
  * correlated `LIMIT` count) — the caller declines.
  *
  * Every rewritten node keeps its ORIGINAL id, so the expressions above it still resolve; a wrapper the
  * rewrite adds takes a fresh one and the parent's references are moved onto it (`substRelId`).
+ *
+ * ## The domain that IS its input's key projection (`KeyProjection`)
+ *
+ * Calcite eliminates `D` unconditionally (`TopDownGeneralDecorrelator`: a correlated equi-filter's column is
+ * read off the input instead of the domain), which suits an executor that hash-joins. On SQLite, a nested-loop
+ * engine, `D ⋈ B(d)` runs as an index SEEK per domain row, and eliminating `D` from a SELECTIVE host turns that
+ * seek into a scan of the body's whole input — `g.V(1).map(outE().count())` would aggregate every edge to
+ * answer one vertex. So elimination is never inferred from the plan here: it fires only on a fact the CALLER
+ * states, that the outer relation's rows are DISTINCT key tuples (`cols`) and every key tuple of `input` is one
+ * of them — `π_cols(input) ⊆ outer`, and `= outer` where the caller also says every outer row has a member
+ * (`covers`). A host that POOLS its own input (`group().by(k).by(b)`, `lower/scoped.ts` `pooledGroup`) knows
+ * this by construction: its domain is the DISTINCT keys of the members it pools. Under it, and only where the
+ * plan reads nothing of the outer row but those columns:
+ *
+ * - the FILTER `input.c IS outer.d` (null-safe, so a NULL key keeps its bucket) is the key projection itself:
+ *   the input is keyed by its own columns, read in place of the domain's — `D` is never joined;
+ * - the KEY is then those columns jointly (`Decorrelated.key`), not the outer relation's row key;
+ * - a SCALAR aggregate whose input COVERS the domain (every key has at least one row — `Out.covering`, which
+ *   the eliminated filter establishes under `covers`: every key tuple has a member) needs no LEFT JOIN to `D`,
+ *   whatever the aggregate is. That is a STRONGER fact than the one Calcite's `Aggregate` rule keys on: it
+ *   keeps the join for a `COUNT` (the count bug), because it knows the key is equi-correlated, not that each
+ *   key has a row. Without `covers` the LEFT JOIN stays, matched null-safely on the key tuple.
  */
 export interface Decorrelated {
   readonly rel: Rel;
-  /** The domain key's column in `rel`. */
-  readonly keyCol: string;
+  /** The key `rel`'s rows are keyed by: each `col` of `rel` equals the outer relation's column `outer`, and
+   *  jointly they name ONE outer row. Without a `KeyProjection` it is the single `key` the caller passed. */
+  readonly key: readonly [KeyColumn, ...KeyColumn[]];
+}
+
+export interface KeyColumn {
+  readonly outer: string;
+  readonly col: string;
+  /** May hold NULL — matched null-safely (`IS`), since a NULL key is a key. */
+  readonly nullable: boolean;
+}
+
+/** THE CALLER'S FACT (see "The domain that IS its input's key projection" above): the outer relation's rows are
+ *  distinct tuples of `cols` (each outer column → the `input` column it projects), and `π_cols(input) ⊆ outer` —
+ *  equal where `covers` (every outer row has an `input` row). */
+export interface KeyProjection {
+  readonly input: RelId;
+  readonly cols: ReadonlyMap<string, string>;
+  readonly covers: boolean;
+}
+
+/** The predicate pairing a key with another relation's copy of it — null-safe where a key column may be NULL. */
+export function keyMatch(key: readonly KeyColumn[], left: (k: KeyColumn) => Expr, right: (k: KeyColumn) => Expr): Expr {
+  return key.map((k): Expr => (k.nullable ? { kind: 'binary', op: 'is', left: left(k), right: right(k) } : eq(left(k), right(k))))
+    .reduce((a, b) => and(a, b));
 }
 
 type Minter = (hint: string) => RelId;
-interface Out { readonly rel: Rel; readonly keyed: boolean }
+/** `covering`: every domain key has at least one row (a scalar aggregate over it needs no LEFT JOIN). */
+interface Out { readonly rel: Rel; readonly keyed: boolean; readonly covering?: boolean }
 
 /** The value an aggregate function takes over ZERO rows — SQL's own rule, which the correlated plan obeyed. */
 function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
@@ -70,7 +117,7 @@ function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
   }
 }
 
-export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): Decorrelated | null {
+export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter, projection?: KeyProjection): Decorrelated | null {
   const h = outer.id;
   // THE DOMAIN: the key and every outer column the plan reads, renamed so it cannot collide with a column
   // of the plan. One row per outer row (the key is unique), so D IS the domain of the free variables.
@@ -87,10 +134,15 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
     relChildren(r).forEach(walkPlan);
   };
   walkPlan(plan);
+  // The key projection is usable only where the plan reads nothing of the outer row but its projected columns.
+  const eliminating = projection && [...read].every((name) => projection.cols.has(name)) ? projection : undefined;
   read.delete(key);
-  const keyCol = fresh('dk') as string;
-  const dName = new Map<string, string>([[key, keyCol]]);
-  for (const name of read) dName.set(name, fresh('dc') as string);
+  const dName = new Map<string, string>();
+  if (eliminating) for (const name of eliminating.cols.keys()) dName.set(name, fresh('dk') as string);
+  else {
+    dName.set(key, fresh('dk') as string);
+    for (const name of read) dName.set(name, fresh('dc') as string);
+  }
   const outerCol = (name: string): ColMeta => {
     const c = outer.type.cols.find((column) => column.name === name);
     if (!c) throw new Error(`RelIR decorrelate: outer relation ${h} has no column '${name}'`);
@@ -98,6 +150,15 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
   };
   const dMeta: readonly ColMeta[] = [...dName].map(([from, to]) => ({ ...outerCol(from), name: to }));
   const dNames = dMeta.map((c) => c.name);
+  // THE KEY among the domain columns: the outer row key, or — eliminating — every projected column jointly.
+  const keyAt = eliminating ? dNames.map((_, i) => i) : [0];
+  const keyNames = keyAt.map((i) => dNames[i]!);
+  const outerNames = [...dName.keys()];
+  const keyOf = (names: readonly string[]): KeyColumn[] =>
+    keyAt.map((i) => ({ outer: outerNames[i]!, col: names[i]!, nullable: dMeta[i]!.nullable }));
+  /** `l`'s key equal to `r`'s, each read under its own names for the domain columns. */
+  const keysEqual = (l: RelId, lNames: readonly string[], r: RelId, rNames: readonly string[]): Expr =>
+    keyMatch(keyOf(lNames), (k) => col(l, k.col), (k) => col(r, rNames[lNames.indexOf(k.col)]!));
   const domain = make.project({
     id: fresh('dom'), input: outer, channels: [], type: { cols: dMeta },
     exprs: [...dName].map(([from, to]) => [to, col(h, from)] as const),
@@ -128,6 +189,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
     });
     return {
       keyed: true,
+      covering: rowBounds(r).min >= 1,
       rel: make.project({
         id: fresh('dxp'), input: crossed, channels: r.channels, type: { cols: withD(r.type.cols) },
         exprs: [...r.type.cols.map((c) => [c.name, col(crossed.id, c.name)] as const), ...dPass(crossed.id)],
@@ -137,10 +199,10 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
   /** Re-point an expression read against `from` (an input that was rewritten under a new id) at `to`, and
    *  every outer-row read at `to`'s domain copy. */
   const moved = (e: Expr, from: RelId, to: RelId): Expr => fromDomain(from === to ? e : substRelId(e, from, to), to);
-  const keyTerm = (rel: RelId): SortTerm => ({ expr: col(rel, keyCol), dir: 'asc' });
+  const keyTerms = (rel: RelId): SortTerm[] => keyNames.map((n) => ({ expr: col(rel, n), dir: 'asc' as const }));
 
   /** Rename a keyed relation's domain columns, so a JOIN of two keyed sides has one copy of each name. */
-  const renamedD = (r: Rel): { readonly rel: Rel; readonly key: string; readonly names: readonly string[] } => {
+  const renamedD = (r: Rel): { readonly rel: Rel; readonly names: readonly string[] } => {
     const names = dNames.map(() => fresh('dr') as string);
     const own = r.type.cols.slice(0, r.type.cols.length - dNames.length);
     const rel = make.project({
@@ -148,7 +210,38 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
       type: { cols: [...own, ...dMeta.map((c, i) => ({ ...c, name: names[i]! }))] },
       exprs: [...own.map((c) => [c.name, col(r.id, c.name)] as const), ...dNames.map((n, i) => [names[i]!, col(r.id, n)] as const)],
     });
-    return { rel, key: names[0]!, names };
+    return { rel, names };
+  };
+
+  /** The filter `input.c IS outer.d` over the projection's own input, for every projected pair: the input keyed
+   *  by its own columns, `D` never joined. Covering — every key tuple has a member. `null` where the filter is
+   *  not that (a pair missing, `=` rather than the null-safe `IS`, another conjunct reading the outer row). */
+  const keyProjected = (r: Extract<Rel, { kind: 'filter' }>): Out | null => {
+    const projection = eliminating!;
+    const conjuncts: Expr[] = [];
+    const split = (e: Expr): void => { if (e.kind === 'binary' && e.op === 'and') { split(e.left); split(e.right); } else conjuncts.push(e); };
+    split(r.pred);
+    const matched = new Set<string>();
+    const rest = conjuncts.filter((e) => {
+      if (e.kind !== 'binary' || e.op !== 'is') return true;
+      const [inner, outerSide] = e.left.kind === 'col' && e.left.rel === h ? [e.right, e.left] : [e.left, e.right];
+      if (inner.kind !== 'col' || inner.rel !== r.input.id || outerSide.kind !== 'col' || outerSide.rel !== h) return true;
+      if (projection.cols.get(outerSide.name) !== inner.name) return true;
+      matched.add(outerSide.name);
+      return false;
+    });
+    if (matched.size !== projection.cols.size || rest.some(exprTouches)) return null;
+    const base = rest.length
+      ? make.filter({ id: fresh('dkf'), input: r.input, channels: r.channels, type: r.input.type, pred: rest.reduce((a, b) => and(a, b)) })
+      : r.input;
+    return {
+      keyed: true, covering: projection.covers && !rest.length,
+      rel: make.project({
+        id: r.id, input: base, channels: r.channels, type: { cols: withD(r.type.cols) },
+        exprs: [...r.type.cols.map((c) => [c.name, col(base.id, c.name)] as const),
+          ...[...dName].map(([from, to]) => [to, col(base.id, projection.cols.get(from)!)] as const)],
+      }),
+    };
   };
 
   const memo = new Map<Rel, Out | null>();
@@ -189,7 +282,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         // A one-row correlated VALUES is the outer row itself: read it off the domain.
         const row = r.rows[0]!;
         return {
-          keyed: true,
+          keyed: true, covering: true,
           rel: make.project({
             id: r.id, input: domain, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.type.cols.map((c, i) => [c.name, fromDomain(row[i]!, domain.id)] as const), ...dPass(domain.id)],
@@ -210,7 +303,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
             return at < 0 ? n : unit.rows[0]![at]!;
           });
           return {
-            keyed: true,
+            keyed: true, covering: true,
             rel: make.project({
               id: r.id, input: domain, channels: r.channels, type: { cols: withD(r.type.cols) },
               exprs: [...r.exprs.map(([n, e]) => [n, fromDomain(literal(e), domain.id)] as const), ...dPass(domain.id)],
@@ -219,7 +312,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         }
         const k = ensureKeyed(input);
         return {
-          keyed: true,
+          keyed: true, covering: k.covering,
           rel: make.project({
             id: r.id, input: k.rel, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.exprs.map(([n, e]) => [n, moved(e, r.input.id, k.rel.id)] as const), ...dPass(k.rel.id)],
@@ -227,6 +320,10 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         };
       }
       case 'filter': case 'sort': case 'distinct': case 'materialize': {
+        if (r.kind === 'filter' && eliminating && r.input.id === eliminating.input) {
+          const projected = keyProjected(r);
+          if (projected) return projected;
+        }
         const input = go(r.input);
         if (!input) return null;
         if (!input.keyed && !own) return input.rel === r.input ? { rel: r, keyed: false } : { rel: mapRelChildren(r, () => input.rel), keyed: false };
@@ -236,9 +333,9 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         switch (r.kind) {
           case 'filter': return { keyed: true, rel: make.filter({ ...base, pred: at(r.pred) }) };
           // The key LEADS: an order inside one key is the plan's order, and a consumer reads it per key.
-          case 'sort': return { keyed: true, rel: make.sort({ ...base, terms: [keyTerm(k.rel.id), ...r.terms.map((t) => ({ ...t, expr: at(t.expr) }))] }) };
-          case 'distinct': return { keyed: true, rel: make.distinct(base) };
-          case 'materialize': return { keyed: true, rel: make.materialize({ ...base, ...(r.name ? { name: r.name } : {}), ...(r.fenced ? { fenced: r.fenced } : {}) }) };
+          case 'sort': return { keyed: true, covering: k.covering, rel: make.sort({ ...base, terms: [...keyTerms(k.rel.id), ...r.terms.map((t) => ({ ...t, expr: at(t.expr) }))] }) };
+          case 'distinct': return { keyed: true, covering: k.covering, rel: make.distinct(base) };
+          case 'materialize': return { keyed: true, covering: k.covering, rel: make.materialize({ ...base, ...(r.name ? { name: r.name } : {}), ...(r.fenced ? { fenced: r.fenced } : {}) }) };
         }
       }
       case 'limit': {
@@ -251,15 +348,24 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         const count = constant(r.count), offset = constant(r.offset);
         if (count === null || offset === null) return null;
         const k = ensureKeyed(input);
+        const keeps = !offset && (count === undefined || count >= 1);
+        // LIMIT n ≥ 1 over at most ONE row per outer row (a scalar aggregate, `atMostOneRow`) is the identity:
+        // no per-key window. A PARAMETER count is the user's to vary, so the plan does not depend on it.
+        if (keeps && (!r.count || (r.count.kind === 'lit' && r.count.source !== 'parameter')) && atMostOneRow(r.input)) {
+          return {
+            keyed: true, covering: k.covering,
+            rel: make.project({ id: r.id, input: k.rel, channels: r.channels, type: k.rel.type, exprs: k.rel.type.cols.map((c) => [c.name, col(k.rel.id, c.name)] as const) }),
+          };
+        }
         // Ranked over the SORT the limit reads, where there is one (its terms resolve against its own
         // input, so the window replaces the sort rather than sitting above it).
         const sorted = k.rel.kind === 'sort' ? k.rel : null;
         const base = sorted ? sorted.input : k.rel;
-        const order = sorted ? sorted.terms.filter((t) => !(t.expr.kind === 'col' && t.expr.rel === base.id && t.expr.name === keyCol)) : [];
+        const order = sorted ? sorted.terms.filter((t) => !(t.expr.kind === 'col' && t.expr.rel === base.id && keyNames.includes(t.expr.name))) : [];
         const RN = fresh('drn') as string;
         const windowed = make.window({
           id: fresh('dw'), input: base, channels: base.channels, type: { cols: [...base.type.cols, { name: RN, type: 'int', nullable: false }] },
-          specs: [[RN, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [col(base.id, keyCol)], orderBy: order } }]],
+          specs: [[RN, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: keyNames.map((n) => col(base.id, n)), orderBy: order } }]],
         });
         const rn = col(windowed.id, RN);
         const lower: Expr = { kind: 'binary', op: '>', left: rn, right: compilerInt(offset ?? 0) };
@@ -267,7 +373,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
           : { kind: 'binary', op: 'and', left: lower, right: { kind: 'binary', op: '<=', left: rn, right: compilerInt((offset ?? 0) + count) } };
         const kept = make.filter({ id: fresh('dlf'), input: windowed, channels: windowed.channels, type: windowed.type, pred });
         return {
-          keyed: true,
+          keyed: true, covering: keeps && k.covering,
           rel: make.project({
             id: r.id, input: kept, channels: r.channels, type: k.rel.type,
             exprs: k.rel.type.cols.map((c) => [c.name, col(kept.id, c.name)] as const),
@@ -283,14 +389,14 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         const specs = r.specs.map(([name, spec]) => {
           const mapped = at(spec);
           if (mapped.kind !== 'window-expr') throw new Error('RelIR decorrelate: a Window spec must stay a WindowExpr');
-          return [name, { ...mapped, spec: { ...mapped.spec, partitionBy: [col(k.rel.id, keyCol), ...mapped.spec.partitionBy] } }] as const;
+          return [name, { ...mapped, spec: { ...mapped.spec, partitionBy: [...keyNames.map((n) => col(k.rel.id, n)), ...mapped.spec.partitionBy] } }] as const;
         });
         const minted = r.type.cols.slice(r.input.type.cols.length);
         const windowed = make.window({
           id: fresh('dwn'), input: k.rel, channels: r.channels, type: { cols: [...k.rel.type.cols, ...minted] }, specs,
         });
         return {
-          keyed: true,
+          keyed: true, covering: k.covering,
           rel: make.project({
             id: r.id, input: windowed, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.type.cols.map((c) => [c.name, col(windowed.id, c.name)] as const), ...dPass(windowed.id)],
@@ -335,9 +441,11 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
           aggs: r.aggs.map(([n, e]) => [n, at(e)] as const),
           ...(r.having ? { having: at(r.having) } : {}),
         });
-        if (r.groupBy.length) {
+        // A grouping over a COVERING input has a group for every key — and so does a SCALAR one, which then
+        // needs no LEFT JOIN to the domain for an empty key's value, whatever the aggregate is.
+        if (r.groupBy.length || k.covering) {
           return {
-            keyed: true,
+            keyed: true, covering: k.covering && !r.having,
             rel: make.project({
               id: r.id, input: grouped, channels: r.channels, type: { cols: withD(r.type.cols) },
               exprs: [...r.type.cols.map((c) => [c.name, col(grouped.id, c.name)] as const),
@@ -346,15 +454,20 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
           };
         }
         // SCALAR: every key emits, an empty one with the aggregate's value over zero rows.
+        // A key that may be NULL cannot say a key is missing by being NULL: the grouped side carries a marker.
+        const marker = keyOf(dNames).some((k) => k.nullable) ? fresh('dgm') as string : undefined;
+        const marked = marker
+          ? make.aggregate({ ...grouped, aggs: [...grouped.aggs, [marker, compilerInt(1)] as const], type: { cols: [...grouped.type.cols, { name: marker, type: 'int', nullable: false }] } })
+          : grouped;
         const joined = make.join({
-          id: fresh('daj'), left: domain, right: grouped, join: 'left', channels: [],
-          type: { cols: [...dMeta, ...grouped.type.cols.map((c) => ({ ...c, nullable: true }))] },
-          on: eq(col(domain.id, keyCol), col(grouped.id, gNames[0]!)),
+          id: fresh('daj'), left: domain, right: marked, join: 'left', channels: [],
+          type: { cols: [...dMeta, ...marked.type.cols.map((c) => ({ ...c, nullable: true }))] },
+          on: keysEqual(domain.id, dNames, marked.id, gNames),
         });
-        const missing: Expr = { kind: 'binary', op: 'is', left: col(joined.id, gNames[0]!), right: compilerNull() };
+        const missing: Expr = { kind: 'binary', op: 'is', left: col(joined.id, marker ?? gNames[0]!), right: compilerNull() };
         const overNothing = (e: Expr): Expr => substRelId(rewriteExpr(e, (n) => (n.kind === 'agg' ? emptyAgg(n) : n)), k.rel.id, joined.id);
         return {
-          keyed: true,
+          keyed: true, covering: true,
           rel: make.project({
             id: r.id, input: joined, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [
@@ -388,7 +501,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
           return fromDomain(x, L.keyed ? leftOut.id : rightOut.id);
         };
         const on0 = r.on ? fix(r.on) : undefined;
-        const keyEq = renamed ? eq(col(leftOut.id, keyCol), col(rightOut.id, renamed.key)) : undefined;
+        const keyEq = renamed ? keysEqual(leftOut.id, dNames, rightOut.id, renamed.names) : undefined;
         const on = on0 && keyEq ? { kind: 'binary', op: 'and', left: on0, right: keyEq } as Expr : on0 ?? keyEq;
         const kind = r.join === 'cross' && on ? 'inner' : r.join;
         const existence = r.join === 'semi' || r.join === 'anti';
@@ -406,7 +519,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         // The domain is read off the side that carries it (the left whenever the left is keyed).
         const dFrom = L.keyed ? dNames : (renamed?.names ?? dNames);
         return {
-          keyed: true,
+          keyed: true, covering: r.join === 'left' && L.keyed && !!L.covering,
           rel: make.project({
             id: r.id, input: joined, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.type.cols.map((c) => [c.name, col(joined.id, c.name)] as const),
@@ -421,7 +534,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         if (!outs.some((x) => x.keyed))
           return outs.every((x, i) => x.rel === r.inputs[i]) ? { rel: r, keyed: false } : { rel: mapRelChildren(r, (c) => outs[r.inputs.indexOf(c)]!.rel), keyed: false };
         const keyed = outs.map(ensureKeyed);
-        return { keyed: true, rel: make.union({ id: r.id, channels: r.channels, type: { cols: withD(r.type.cols) }, inputs: keyed.map((x) => x.rel), all: r.all }) };
+        return { keyed: true, covering: keyed.some((x) => x.covering), rel: make.union({ id: r.id, channels: r.channels, type: { cols: withD(r.type.cols) }, inputs: keyed.map((x) => x.rel), all: r.all }) };
       }
       case 'recursive': {
         const seed = go(r.seed);
@@ -443,7 +556,7 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
         });
         recursiveStep(rec);
         if (failed) return null;
-        return { rel: rec, keyed: true };
+        return { rel: rec, keyed: true, covering: keyedSeed.covering };
       }
     }
   };
@@ -451,5 +564,6 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter): 
   const out = go(plan);
   if (!out) return null;
   const keyed = ensureKeyed(out);
-  return { rel: keyed.rel, keyCol };
+  const [first, ...more] = keyOf(dNames);
+  return { rel: keyed.rel, key: [first!, ...more] };
 }

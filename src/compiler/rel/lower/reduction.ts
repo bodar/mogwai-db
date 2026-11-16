@@ -656,12 +656,12 @@ export function reverseCollation(rows: Rel): SortTerm[] {
  * `skip`/`range(k,-1)` upper bound), the top-N + range generalization.
  */
 export function perOriginWindow(
-  rows: Rel, partitionBy: Expr | null, order: readonly SortTerm[], slice: Slice, fresh: Minter, fenced = false,
+  rows: Rel, partitionBy: Expr | readonly Expr[] | null, order: readonly SortTerm[], slice: Slice, fresh: Minter, fenced = false,
 ): Rel {
   const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
   const RN = 'prn';
   const orderBy = order.length ? order : defaultCollation(rows);
-  const window = rowNumberWindow(rows, RN, rows.channels, { partitionBy: partitionBy ? [partitionBy] : [], orderBy }, fresh);
+  const window = rowNumberWindow(rows, RN, rows.channels, { partitionBy: !partitionBy ? [] : Array.isArray(partitionBy) ? partitionBy : [partitionBy as Expr], orderBy }, fresh);
   // FENCED for a RANDOM() collation (`sample`): the filter reads a column the window computed, and an
   // inlined window re-evaluates RANDOM() at the clause-reader boundary — the wrong cardinality.
   const ranked = fenced ? make.materialize({ id: fresh('sm'), input: window, channels: window.channels, type: window.type }) : window;

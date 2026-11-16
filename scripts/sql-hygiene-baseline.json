@@ -91,14 +91,14 @@
   },
   "choose": {
     "binds": 0,
-    "bytes": 6596,
+    "bytes": 5524,
     "compiler": 178,
     "bound": 0
   },
   "coalesce": {
     "binds": 0,
-    "bytes": 2066,
-    "compiler": 25,
+    "bytes": 1801,
+    "compiler": 27,
     "bound": 0
   },
   "combine": {
@@ -145,7 +145,7 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 10625,
+    "bytes": 10209,
     "compiler": 147,
     "bound": 0
   },
@@ -229,7 +229,7 @@
   },
   "group": {
     "binds": 0,
-    "bytes": 13049,
+    "bytes": 10631,
     "compiler": 216,
     "bound": 0
   },

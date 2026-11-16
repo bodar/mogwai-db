@@ -9,7 +9,8 @@
 import { test, expect, describe } from 'bun:test';
 import { PER_ROW, STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
-import { executeQuery } from '../support/executor.ts';
+import { exec, executeQuery } from '../support/executor.ts';
+import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { decodeAll } from '../support/decode.ts';
 import { LADDER, bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
 import { t } from '../../src/io.ts';
@@ -524,5 +525,71 @@ describe('by(__.select(label)) — the alias arm', () => {
     const viaProject = runWith(store, 'g.V().as("a").as("b").out().project("x").by(__.select("a","b")).select("x").select("a").values("name")').map((r) => r.v);
     const direct = runWith(store, 'g.V().as("a").as("b").out().select("a","b").select("a").values("name")').map((r) => r.v);
     expect(viaProject.sort()).toEqual(direct.sort());
+  });
+});
+
+// THE POOLED GROUP'S DOMAIN IS ITS MEMBERS' KEY PROJECTION (`src/rel/decorrelate.ts` "The domain that IS its
+// input's key projection"): `group().by(k).by(b)` pools each key's members, and its domain is the DISTINCT key
+// terms of those members — so the body keys the pool by the members' own columns. No domain cross join, no
+// count-bug LEFT JOIN where every key has a member, no first-row window over a one-row-per-key value.
+describe('pooled group — the domain is the members\' key projection', () => {
+  // The answer the ladder's correlated routes give, decoded off the wire (the two frame a list member differently).
+  const store = seededStore();
+  const ladderAgrees = async (q: string) => {
+    const [own, ladder] = [exec(store).buffers(q, {}, {}), exec(store, undefined, { ...DEFAULT_FAST_PATHS, ...LADDER }).buffers(q, {}, {})];
+    expect(await decodeAll(own), q).toEqual(await decodeAll(ladder));
+  };
+
+  test('group().by(label).by(count()) is ONE grouping of the members — no domain join, no LEFT JOIN, no window', async () => {
+    const sql = read('g.V().group().by(T.label).by(__.count())').sql;
+    expect(sql).not.toContain('LEFT JOIN');
+    expect(sql).not.toContain('PARTITION BY');
+    // The domain is read once more — the reconnect naming each key — and never crossed with the pool.
+    expect(sql.match(/CROSS JOIN/g) ?? []).toHaveLength(0);
+    await ladderAgrees('g.V().group().by(T.label).by(__.count())');
+  });
+
+  test('a NULL key keeps its bucket — the key is matched null-safely', async () => {
+    for (const q of [
+      'g.V().group().by(__.coalesce(__.values("age"), __.constant(null))).by(__.count())',
+      'g.V().group().by(__.coalesce(__.values("age"), __.constant(null))).by(__.values("name").fold())',
+      'g.withStrategies(ProductiveByStrategy).V().group().by("age").by(__.count())',
+    ]) {
+      expect(read(q).sql).toContain(' IS ');
+      await ladderAgrees(q);
+    }
+  });
+
+  test('a key whose pool reduces over NOTHING keeps its seed — the LEFT JOIN stays where the body can empty a key', async () => {
+    // `out().count()`: a key whose members have no out-edges (software) is 0, the NULL key included.
+    for (const q of [
+      'g.V().group().by(T.label).by(__.out().count())',
+      'g.V().group().by(__.coalesce(__.values("age"), __.constant(null))).by(__.out().count())',
+      'g.V().group().by(T.label).by(__.values("age").is(P.gt(100)).fold())',
+      // A per-member prefix (a barrier inside a union arm): its results need not cover every key.
+      'g.V().group().by(T.label).by(__.union(__.out().order().by("name",Order.desc).limit(2)).values("name").fold())',
+    ]) {
+      expect(read(q).sql).toContain('LEFT JOIN');
+      await ladderAgrees(q);
+    }
+  });
+
+  test('the shapes over the pool compose: tail, an ordered fold, a nested group, a per-traverser host around it', async () => {
+    for (const q of [
+      'g.V().group().by("name").by(__.tail())',
+      'g.V().group().by(T.label).by(__.values("name").order().by(Order.desc).fold())',
+      'g.V().group().by("name").by(__.both().count())',
+      'g.V().group().by(T.label).by(__.out().limit(2).fold())',
+      'g.V().group().by(T.label).by(__.group().by("age").by(__.count()))',
+      'g.V().local(__.group().by(T.label).by(__.count()))',
+      'g.V().map(__.out().group().by(T.label).by(__.count()))',
+    ]) await ladderAgrees(q);
+  });
+
+  test('a SELECTIVE correlated body keeps its domain-driven seek — no key projection is stated there', async () => {
+    // `V(1)`'s one edge-count seek stays a seek on `edges.src`; eliminating a domain is the pool's fact, not a
+    // property inferred from an equi-correlation.
+    expect(read('g.V(1).map(__.outE().count())').sql).toContain('WHERE (rme6.src = rn.id)');
+    expect(read('g.V(1).where(__.out().count().is(P.gt(1)))').sql).toContain('(rme6.src = rn.id)');
   });
 });

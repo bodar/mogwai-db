@@ -1,7 +1,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
-import { decorrelate } from '../../../rel/decorrelate.ts';
+import { decorrelate, keyMatch, type KeyProjection } from '../../../rel/decorrelate.ts';
 import { positionKeys } from '../../../rel/position.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -171,7 +171,7 @@ function scopedBody(
   const tail = reframe ? reframe(lowered) : lowered;
   if (!tail) return null;
   const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh);
-  return keyed && { rel: keyed.rel, keyCol: keyed.keyCol, tail };
+  return keyed && { rel: keyed.rel, keyCol: keyed.key[0].col, tail };
 }
 
 /**
@@ -641,20 +641,32 @@ function firstPerScope(
 }
 
 /** A keyed body's rows (`first`: only the first per scope), their named columns renamed so they can sit
- *  beside the host's — the right side of every reconnect. */
-interface KeyedRows { readonly rel: Rel; readonly key: string; readonly renamed: ReadonlyMap<string, string> }
+ *  beside the host's — the right side of every reconnect. `key` is the first of `keys`, the whole key of a
+ *  body keyed by the scope's own row key. */
+interface KeyedRows { readonly rel: Rel; readonly key: string; readonly keys: readonly string[]; readonly renamed: ReadonlyMap<string, string> }
 
 function keyedRows(body: ScopedBody, names: readonly string[], fresh: Minter, firstOnly: boolean): KeyedRows {
-  const first = firstOnly ? perOriginWindow(body.rel, col(body.rel.id, body.keyCol), [], { scope: 'global', offset: 0, limit: 1 }, fresh) : body.rel;
+  return rowsKeyedBy(body.rel, body.tail.rel, [body.keyCol], names, fresh, firstOnly);
+}
+
+/** `keyedRows` over a key of one or more columns of `rel` (the decorrelation of `correlated`). The first row
+ *  of a body that yields AT MOST ONE row per scope (`atMostOneRow` — a reducer, a `limit(1)`) is the row
+ *  itself: no window. */
+function rowsKeyedBy(
+  rel: Rel, correlated: Rel, keyCols: readonly string[], names: readonly string[], fresh: Minter, firstOnly: boolean,
+): KeyedRows {
+  const first = firstOnly && !atMostOneRow(correlated)
+    ? perOriginWindow(rel, keyCols.map((name) => col(rel.id, name)), [], { scope: 'global', offset: 0, limit: 1 }, fresh)
+    : rel;
   const renamed = new Map(names.map((name) => [name, fresh('sf') as string]));
-  const key = fresh('sfk') as string;
+  const keys = keyCols.map(() => fresh('sfk') as string);
   const typed = (name: string): ColMeta => ({ ...first.type.cols.find((column) => column.name === name)!, nullable: true });
-  const rel = make.project({
+  const projected = make.project({
     id: fresh('sfp'), input: first, channels: [],
-    type: typeOf({ ...typed(body.keyCol), name: key }, ...names.map((name) => ({ ...typed(name), name: renamed.get(name)! }))),
-    exprs: [[key, col(first.id, body.keyCol)], ...names.map((name) => [renamed.get(name)!, col(first.id, name)] as const)],
+    type: typeOf(...keyCols.map((name, i) => ({ ...typed(name), name: keys[i]! })), ...names.map((name) => ({ ...typed(name), name: renamed.get(name)! }))),
+    exprs: [...keyCols.map((name, i) => [keys[i]!, col(first.id, name)] as const), ...names.map((name) => [renamed.get(name)!, col(first.id, name)] as const)],
   });
-  return { rel, key, renamed };
+  return { rel: projected, key: keys[0]!, keys, renamed };
 }
 
 /** The ONE nested-traversal argument of a single-body host, or `null`. */
@@ -1540,17 +1552,24 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: rest, rooted: false }, originDomain: undefined, bodyOrder: 'read' };
   const tail = continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, fresh, labels);
   if (!tail || tail.effects?.length) return null;
-  const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh);
+  // THE KEY PROJECTION: the domain is the members' DISTINCT key terms, so the body keys the pool by those terms
+  // read off the pool's traversers themselves — no domain cross join. The members COVER the domain (every key
+  // has one), so no LEFT JOIN either; a per-member prefix's results need not (a key whose members all produced
+  // nothing), and keep it. `src/rel/decorrelate.ts` "The domain that IS its input's key projection".
+  const projection: KeyProjection = {
+    input: source.id, cols: new Map(termCols.map((column, i) => [column.name, memberCols[i]!.name])), covers: source === members,
+  };
+  const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh, projection);
   if (!keyed) return null;
   // THE VALUE NODE: the reduced value of the key's pool, one row per key (a FIRST, for a body whose last
   // barrier is not its last step and could still fan out — `doFinalReduction` reads `next()`).
   const valueCols = framingCols(tail.framing);
   if (!valueCols || valueCols.length > (tail.framing.kind === 'scalar' ? 2 : 1)) return null;
-  const first = firstPerScope({ rel: keyed.rel, keyCol: keyed.keyCol, tail }, valueCols.map((column) => column.name), fresh);
+  const first = rowsKeyedBy(keyed.rel, tail.rel, keyed.key.map((k) => k.col), valueCols.map((column) => column.name), fresh, true);
   const joined = make.join({
     id: fresh('pgj'), left: sc.scoped, right: first.rel, join: 'inner', channels: [],
     type: typeOf(...sc.scoped.type.cols, ...first.rel.type.cols),
-    on: eq(col(sc.scoped.id, sc.key), col(first.rel.id, first.key)),
+    on: keyMatch(keyed.key, (k) => col(sc.scoped.id, k.outer), (k) => col(first.rel.id, first.keys[keyed.key.indexOf(k)]!)),
   });
   const valueExpr = col(joined.id, first.renamed.get(valueCols[0]!.name)!);
   const produced: ChildValue = {
