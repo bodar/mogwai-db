@@ -689,6 +689,13 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 
 ## 3. Compounding substrate
 
+**Compositional coverage (2026-11-15) — `docs/2026-11-15-compositional-coverage-plan.md`.** The depth
+cliff: decline rate 6% → 28% → 71% → 88% by nesting depth. The plan measures it (depth curve, `L6-workload`,
+host-closure law, attribution of minimal declining cores), then spikes general decorrelation behind gates:
+a total scope key, a barrier law and a domain law, and hosts as connectors (Calcite
+`TopDownGeneralDecorrelator`). The correlated-scalar ladder becomes a fast path. Items 4, 7, 8 and 9 below,
+and "Path as a value", are expected to fall out of it.
+
 RelIR substrate, in unlock order (`mise run rel-blockers` ranks the open families):
 
 1. **`once` consumers** — route every re-inliner through `once()` (`rel/build.ts`), semantics-free (no Map
