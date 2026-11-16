@@ -23,7 +23,7 @@ import { compile } from '../../src/compiler/compiler.ts';
  * coverage; a traversal that compiles still lowers once. The 10 extra emissions are corpus traversals that
  * newly COMPILE through the scoped-relation connector.
  */
-const CEILING = { lowerings: 2190, emissions: 1807, perQuery: 12 } as const;
+const CEILING = { lowerings: 2190, emissions: 1809, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 

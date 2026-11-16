@@ -4,35 +4,35 @@
     "lattice": {
       "0": {
         "n": 708,
-        "rows": 661,
-        "decline": 46,
+        "rows": 672,
+        "decline": 35,
         "error": 1,
         "internal": 0,
-        "executeRate": 0.935
+        "executeRate": 0.95
       },
       "1": {
         "n": 262,
-        "rows": 221,
-        "decline": 39,
+        "rows": 224,
+        "decline": 36,
         "error": 2,
         "internal": 0,
-        "executeRate": 0.85
+        "executeRate": 0.862
       },
       "2": {
         "n": 122,
-        "rows": 74,
-        "decline": 47,
+        "rows": 75,
+        "decline": 46,
         "error": 1,
         "internal": 0,
-        "executeRate": 0.612
+        "executeRate": 0.62
       },
       "3": {
         "n": 108,
-        "rows": 39,
-        "decline": 69,
+        "rows": 40,
+        "decline": 68,
         "error": 0,
         "internal": 0,
-        "executeRate": 0.361
+        "executeRate": 0.37
       }
     },
     "realistic": {

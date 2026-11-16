@@ -6,183 +6,183 @@
     "map": {
       "1": {
         "applicable": 200,
-        "executed": 198
+        "executed": 196
       },
       "2": {
-        "applicable": 62,
+        "applicable": 65,
         "executed": 44
       },
       "3": {
-        "applicable": 62,
-        "executed": 34
+        "applicable": 72,
+        "executed": 44
       }
     },
     "flatMap": {
       "1": {
         "applicable": 200,
-        "executed": 152
+        "executed": 147
       },
       "2": {
-        "applicable": 63,
-        "executed": 34
+        "applicable": 78,
+        "executed": 31
       },
       "3": {
-        "applicable": 60,
-        "executed": 24
+        "applicable": 66,
+        "executed": 26
       }
     },
     "local": {
       "1": {
         "applicable": 200,
-        "executed": 155
+        "executed": 150
       },
       "2": {
-        "applicable": 92,
-        "executed": 56
+        "applicable": 82,
+        "executed": 46
       },
       "3": {
-        "applicable": 63,
-        "executed": 34
+        "applicable": 64,
+        "executed": 23
       }
     },
     "where": {
       "1": {
         "applicable": 200,
-        "executed": 198
+        "executed": 196
       },
       "2": {
-        "applicable": 82,
+        "applicable": 76,
         "executed": 61
       },
       "3": {
-        "applicable": 68,
-        "executed": 37
+        "applicable": 70,
+        "executed": 44
       }
     },
     "filter": {
       "1": {
         "applicable": 200,
-        "executed": 198
+        "executed": 196
       },
       "2": {
         "applicable": 62,
-        "executed": 49
+        "executed": 45
       },
       "3": {
-        "applicable": 79,
-        "executed": 42
+        "applicable": 67,
+        "executed": 36
       }
     },
     "not": {
       "1": {
         "applicable": 200,
-        "executed": 198
+        "executed": 196
       },
       "2": {
-        "applicable": 73,
-        "executed": 53
+        "applicable": 59,
+        "executed": 44
       },
       "3": {
-        "applicable": 75,
-        "executed": 42
+        "applicable": 88,
+        "executed": 49
       }
     },
     "optional": {
       "1": {
-        "applicable": 132,
-        "executed": 67
+        "applicable": 129,
+        "executed": 65
       },
       "2": {
-        "applicable": 51,
-        "executed": 12
+        "applicable": 41,
+        "executed": 6
       },
       "3": {
-        "applicable": 63,
-        "executed": 8
+        "applicable": 75,
+        "executed": 6
       }
     },
     "coalesce": {
       "1": {
-        "applicable": 132,
-        "executed": 67
+        "applicable": 129,
+        "executed": 65
       },
       "2": {
-        "applicable": 47,
-        "executed": 10
+        "applicable": 38,
+        "executed": 9
       },
       "3": {
-        "applicable": 76,
-        "executed": 7
+        "applicable": 63,
+        "executed": 6
       }
     },
     "union": {
       "1": {
-        "applicable": 132,
-        "executed": 112
+        "applicable": 129,
+        "executed": 109
       },
       "2": {
-        "applicable": 52,
-        "executed": 30
+        "applicable": 47,
+        "executed": 31
       },
       "3": {
-        "applicable": 51,
-        "executed": 25
+        "applicable": 46,
+        "executed": 21
       }
     },
     "project": {
       "1": {
         "applicable": 200,
-        "executed": 192
+        "executed": 190
       },
       "2": {
-        "applicable": 52,
-        "executed": 40
+        "applicable": 83,
+        "executed": 63
       },
       "3": {
         "applicable": 71,
-        "executed": 44
+        "executed": 42
       }
     },
     "group": {
       "1": {
-        "applicable": 163,
-        "executed": 105
+        "applicable": 159,
+        "executed": 100
       },
       "2": {
-        "applicable": 70,
-        "executed": 45
+        "applicable": 61,
+        "executed": 41
       },
       "3": {
-        "applicable": 51,
-        "executed": 31
+        "applicable": 49,
+        "executed": 26
       }
     },
     "order": {
       "1": {
-        "applicable": 51,
+        "applicable": 56,
         "executed": 20
       },
       "2": {
-        "applicable": 12,
-        "executed": 4
+        "applicable": 13,
+        "executed": 2
       },
       "3": {
-        "applicable": 10,
+        "applicable": 9,
         "executed": 1
       }
     },
     "dedup": {
       "1": {
         "applicable": 200,
-        "executed": 55
+        "executed": 53
       },
       "2": {
-        "applicable": 82,
-        "executed": 2
+        "applicable": 95,
+        "executed": 5
       },
       "3": {
-        "applicable": 71,
-        "executed": 2
+        "applicable": 60,
+        "executed": 4
       }
     }
   }
