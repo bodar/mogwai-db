@@ -38,8 +38,10 @@ while what they operate on keeps TinkerPop's.
 - **The lowering is a fold over `Step[]`, not an object graph.** The `src/compiler/rel/lower/` module
   is the fold — `lower.ts` holds the fold core (the shape tails, `continueAs`, assembly and the
   `lower*` entry points), and the cohesive clusters live beside it as `lower/{chain,movement,slice,
-  filter,reduction,branch}.ts` (shared vocabulary; physical movement; slice/row algebra; the
-  filter/predicate family; child/correlated reduction; branch/merge). The shape-aware payload builders
+  filter,exists,reduction,branch,scoped,per-traverser}.ts` (shared vocabulary; physical movement;
+  slice/row algebra; the filter steps; a child body as a boolean — the correlated `EXISTS`; the child
+  seam and the correlated first-row read; branch/merge; the connector; the ladder's per-traverser
+  ROUTE — the only ladder-only code, the one file `mise run ladder` ratchets per file). The shape-aware payload builders
   a level up (`element.ts`, `list.ts`, `map.ts`, `record.ts`, `path.ts`, `foreign.ts`, …) are pure
   functions it calls. The `lower/` family is mutually recursive (a tail calls `continueAs` which
   re-dispatches into a cluster which calls back), so it uses function-level import cycles WITHIN the

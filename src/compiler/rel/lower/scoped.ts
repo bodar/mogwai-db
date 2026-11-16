@@ -387,7 +387,7 @@ function spellsStored(plan: Rel, outputs: readonly string[], host: Rel): boolean
 
 /** A correlated body as an `EXISTS` operand, projecting its FIRST column alone: an `EXISTS` reads no value, so
  *  the body's other columns (labels, path) are not spelled; a column rather than a literal keeps an aggregate
- *  block an aggregate query (the reason `childPredicate`'s probe gives, `filter.ts`). Nor does it read an order,
+ *  block an aggregate query (the reason `correlatedExists`' probe gives, `exists.ts`). Nor does it read an order,
  *  so a position the body numbered is not computed for it (`positionKeys` drops the window). */
 function existenceProbe(tail: Tail, fresh: Minter): Rel {
   const enc = encounterOf(tail.rel.channels);

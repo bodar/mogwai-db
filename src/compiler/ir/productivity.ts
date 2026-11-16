@@ -139,7 +139,7 @@ const neverEmpties = (s: Step): boolean => {
  * every traverser that reaches it.
  *
  * ONE authority with two consumers: the `trimExistenceSuffix` Pass (`ir/strategies.ts`) rewrites a body in a TRUE
- * existence position, and `childPredicate` (`rel/lower/filter.ts`) asks it for a `coalesce` arm's emptiness, whose
+ * existence position, and `childPredicate` (`rel/lower/exists.ts`) asks it for a `coalesce` arm's emptiness, whose
  * body it cannot rewrite because the arm's VALUE is used. `null` where there is nothing to trim.
  */
 export function existencePrefix<S extends Step>(body: readonly S[], params: ParamEnv): readonly S[] | null {

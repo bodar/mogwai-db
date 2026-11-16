@@ -616,7 +616,7 @@ export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
  *  `ElementMapStep`, `PropertyMapStep`, `MathStep`, and `EdgeVertexStep` one-sided (`inV`/`outV`) or
  *  `EdgeOtherVertexStep` — plus `as()`, which is a label on the step before, not a step. Two readers ask it:
  *  `EarlyLimitStrategy`'s port (`early-limit.ts`, which slice may cross) and the per-traverser arity a
- *  `map()` body is admitted to the rejoin on (`atMostOnePerTraverser`, `rel/lower/reduction.ts`). */
+ *  `map()` body is admitted to the rejoin on (`atMostOnePerTraverser`, `rel/lower/per-traverser.ts`). */
 export const ONE_TO_ONE: ReadonlySet<string> = new Set([
   'as', 'identity', 'id', 'label', 'constant', 'key', 'value', 'path', 'elementMap', 'valueMap', 'propertyMap', 'math', 'inV', 'outV', 'otherV',
 ]);

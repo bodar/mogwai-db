@@ -93,6 +93,24 @@ split. It is the builder's judgement. `repeat` until/emit's own condition loweri
   visible, and every later replacement decision is about routing, not about substrate that would survive anyway.
 - *Risk:* low. Guards: census plan hashes unchanged, `sql-hygiene` unchanged.
 
+✅ **LANDED.** Measured: line coverage of the L1 and L6 pools compiled ladder-first
+(`correlatedChild: true`) and connector-alone (`connectorOnly`), per top-level function of the five ladder files.
+Nearly everything in them runs in BOTH modes, so the shared side is most of the code, and the ROUTING is the small
+part: the per-traverser route — `perTraverserChild`, `flatMapRejoin` and the admission gates only they consult
+(`bodyScopesPerOrigin`, `nestedHostScopes`, `atMostOnePerTraverser`, `localDrawsPerRow`, `originMajor`, the two
+`PER_ORIGIN_*` sets). So the move went the cheap direction for the same end state: the routing left
+`lower/reduction.ts` for its own file, `lower/per-traverser.ts` (12 `return null`), and the shared substrate kept
+its module. The correlated existence and its predicate shapes (`correlatedExists`, `anchoredSeed`,
+`matchPredicate`, `bodyPredicate`, `childPredicate`, `valuePredicate`) left `lower/filter.ts` for
+`lower/exists.ts`, so `filter.ts` holds only the filter steps' clauses. `byField` stays in `modulator.ts`, a neutral
+by() module already (its callers are `record.ts` and `collection.ts`). `child.ts` and `branch.ts` are entirely
+shared (every branch host is `LADDERLESS`). `LADDER_FILES` is now `lower/per-traverser.ts` alone. The total is
+unchanged (1278: the moves net to zero, and the baseline's 1279 was an unrecorded earlier fall in `branch.ts`).
+Plan hashes and SQL are byte-identical: the functions moved, nothing else changed. **Remains:** the ladder routing
+still outside that file is in `lower.ts`: the existence leg for `ladderOwns` bodies (`aliasWhere`) and group's
+own lowering of a child-value `by()` (`collectionArm` → `groupRows`, `map.ts`, reading the body through `childSeam`).
+Each goes with its family's step (R2/R4/R5), not as a move.
+
 ### R2 — Make the retry unnecessary (connector handles its own declines)
 
 - **Join width:**

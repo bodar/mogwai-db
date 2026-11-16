@@ -82,7 +82,8 @@ import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, noteUnrolled, 
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, namesACollection, sourceFilter } from './lower/filter.ts';
-import { admitsReSource, childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
+import { admitsReSource, childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
+import { perTraverserChild } from './lower/per-traverser.ts';
 import { atLadder, connectorSite, scopedHost } from './lower/scoped.ts';
 import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 

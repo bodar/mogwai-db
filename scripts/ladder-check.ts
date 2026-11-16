@@ -45,15 +45,16 @@ import { ROOT } from './lsp.ts';
 
 const BASELINE = new URL('./ladder-baseline.json', import.meta.url);
 const SCOPE = 'src/compiler/rel';
-/** The correlated-route homes (the `correlatedChild` ladder — `scalarChild`, `correlatedReduce`,
- *  `flatMapRejoin`, `nestedHostChild`, `correlatedExists`, the per-host merges and the by() child readers).
- *  Ratcheted file by file. Paths relative to the repo root. */
+/** The correlated-route homes — the `correlatedChild` ladder's ROUTING, ratcheted file by file. Paths relative to
+ *  the repo root. Only routing: `docs/2026-11-16-ladder-retirement-plan.md` R1 measured line coverage of the L1+L6
+ *  pools with the ladder first and with the connector alone, and the code BOTH run is shared substrate, not ladder
+ *  — the correlated existence and its predicates (`lower/exists.ts`), the correlated first-row read and the child
+ *  seam (`lower/reduction.ts`), the arm merges (`lower/branch.ts`, every host of which is `LADDERLESS`), the by()
+ *  readers (`modulator.ts` `byField`, read by `record.ts`/`collection.ts`) and the presence vocabulary
+ *  (`child.ts`). Those are counted in the total like any lowering. What only the ladder runs is the per-traverser
+ *  route (`perTraverserChild`/`flatMapRejoin` and their admission gates), which R1 moved into its own file. */
 const LADDER_FILES = [
-  `${SCOPE}/lower/reduction.ts`,
-  `${SCOPE}/lower/filter.ts`,
-  `${SCOPE}/lower/branch.ts`,
-  `${SCOPE}/child.ts`,
-  `${SCOPE}/modulator.ts`,
+  `${SCOPE}/lower/per-traverser.ts`,
 ] as const;
 /** The connector's own files: counted and printed, but outside the total (see WHY) — L9 guards them. */
 const CONNECTOR_FILES: readonly string[] = [`${SCOPE}/lower/scoped.ts`];
