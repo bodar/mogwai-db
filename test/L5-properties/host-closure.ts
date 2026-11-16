@@ -22,6 +22,7 @@ import type { GraphStore } from '../../src/storage.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { isNondeterministic, orderIndeterminacy } from '../support/graph.ts';
 import { describeThrow, failsClosed } from '../support/fail-closed.ts';
+import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 import { outcomeOf, type Outcome } from './oracle.ts';
 import { hostCase, type Budget, type HostCase } from './generate.ts';
 import { HOSTS, type Host } from './hosts.ts';
@@ -49,6 +50,9 @@ export interface SweepResult {
   readonly table: ClosureTable;
   /** Throws that are not a fail-closed decline. Never legal. */
   readonly internal: string[];
+  /** Every host query that DECLINED (`UnsupportedTraversal`), levels 1 and 2 — the seam gaps the
+   *  attribution shrinks (`attribution.ts`, cc1-shrink). */
+  readonly declined: string[];
   /** Law violations not diagnosed in host-known.ts. */
   readonly divergences: string[];
   /** Diagnosed (known) law violations hit, by entry id. */
@@ -113,11 +117,13 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
   const { drawn, cases, fingerprint } = drawCases(store, seed, want, body);
   const table = emptyTable();
   const internal: string[] = [];
+  const declined: string[] = [];
   const divergences: string[] = [];
   const knownHits = new Map<string, number>();
   const laws = new Map<string, { evaluated: number; indeterminate: number }>();
   const run = (q: string): Outcome => {
     const o = outcomeOf(store, q, DEFAULT_FAST_PATHS);
+    if (o.kind === 'threw' && o.error instanceof UnsupportedTraversal) declined.push(q);
     if (o.kind === 'threw' && !failsClosed(o.error)) {
       const known = knownHostInternal(q, o.message);
       if (known) knownHits.set(known, (knownHits.get(known) ?? 0) + 1);
@@ -247,7 +253,7 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
     }
   });
 
-  return { drawn, cases: cases.length, fingerprint, table, internal, divergences, knownHits, laws };
+  return { drawn, cases: cases.length, fingerprint, table, internal, declined, divergences, knownHits, laws };
 }
 
 export const rate = (t: Tally): number => (t.applicable === 0 ? 1 : t.executed / t.applicable);

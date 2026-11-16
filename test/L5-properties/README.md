@@ -204,3 +204,6 @@ internal errors:
 | `host-closure.test.ts` | the ratchet sample (fixed seed) + the exploration sample (HEAD seed) |
 | `host-closure-baseline.json` | the closure-rate floor; `mise run L5-host-record` re-records it |
 | `host-known.ts` | diagnosed host-law divergences and internal errors (one per root cause) |
+| `shrink.ts` | cc1-shrink: the concrete step tree (source slices with child holes — a faithful renderer), the reduction moves, the slippage guards, hoisting, signatures |
+| `shrink.test.ts` | the shrinker + renderer's own guards (L1 round-trip, known reductions) — in `ci` |
+| `attribution.ts` | cc1-classify: collect every decline (workload/realistic/host/lattice), shrink, classify (a)–(d), cluster. Run by `mise run attribution` (not `ci`) → `.logs/coverage-attribution.md` |

@@ -373,6 +373,14 @@ description = "Re-record test/L5-properties/coverage-baseline.json (commit it wi
 depends = ["install", "check", "submodule"]
 run = "bun scripts/coverage-curve.ts --record"
 
+# The decline attribution (cc1-shrink + cc1-classify, docs/2026-11-15-compositional-coverage-plan.md Phase 1):
+# every decline the Phase 0 instruments see, shrunk to a minimal core, clustered and classified. An
+# INSTRUMENT (minutes, not seconds) — deliberately not in `ci`; its shrinker has a unit test that is.
+[tasks.attribution]
+description = "Shrink + cluster + classify every decline → .logs/coverage-attribution.md; ATTRIBUTION_PER_SEED=n to resize"
+depends = ["install", "check", "submodule"]
+run = "bun scripts/coverage-attribution.ts"
+
 [tasks.census-record]
 description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"
 depends = ["install", "check", "submodule"]

@@ -241,6 +241,76 @@ as `movementCollapse` is today. Three consequences:
   - If it is **≥ 50%** of the weighted declines at depth ≥ 2, proceed to Phase 2.
   - If it is lower, the missing steps (class (b)) are a bigger share than expected. Bring the clusters to the owner with a proposal for how to interleave the (b) work alongside Phase 2. Do not drop the refactor.
 
+#### G1 measurement (2026-11-16)
+
+Recorded for the owner's checkpoint — **the decision is the owner's, not this record's.** Instrument:
+`mise run attribution` (`scripts/coverage-attribution.ts`, engine `test/L5-properties/{shrink,attribution}.ts`;
+full table in `.logs/coverage-attribution.md`, ~2 min). Inputs: every decline from the L6 workload (41),
+the `realistic` and `lattice` coverage profiles at 1,000/seed × 3 seeds, and the host-closure ratchet sample
+(seed 42, 200 cases) — 3,013 declines, 1,152 clusters, **0 internal errors**. Reach weights: workload ×8,
+realistic ×4, host-closure ×2, lattice ×1. Depth = the ORIGINAL query's child-nesting depth.
+
+**Weighted share of class (a) seam at depth ≥ 2: 94.5%** (1,573 of 1,744 declines; 95.1% with noise left out
+of the denominator; 90.2% unweighted).
+
+| Scope (count, weighted share) | (a) seam | (b) step | (c) platform | (d) noise |
+|---|---|---|---|---|
+| all depths | 2,604 — 90.6% | 377 — 8.9% | 0 | 32 — 0.5% |
+| depth ≥ 2 | 1,573 — 94.5% | 146 — 4.9% | 0 | 25 — 0.6% |
+| workload (all / depth ≥ 2) | 20 / 7 | 21 / 1 | 0 | 0 |
+| realistic, depth ≥ 2 | 429 — 98.2% | 8 | 0 | 0 |
+| host-closure, depth ≥ 2 | 805 — 98.1% | 16 | 0 | 0 |
+| lattice, depth ≥ 2 | 332 — 69.5% | 121 — 25.3% | 0 | 25 — 5.2% |
+
+Seam (a) by S-item (weighted; a step-name heuristic in `attribution.ts` `sItemOf`, not a proof): **S5 34%**
+(most of it the PATH channel a `simplePath()` body reads, then a `fold()` arm), **S4 29%**, S2 21%, S1 13%, S3 3%.
+
+Top 20 clusters by reach (sources = workload/realistic/host/lattice):
+
+| # | Reach | Class | S | Host | Sources | Example minimal core |
+|---|---|---|---|---|---|---|
+| 1 | 292 | seam | S5 | coalesce | 1/71/0/0 | `g.V().coalesce(__.values('name').fold(), __.constant([]))` |
+| 2 | 76 | seam | S4 | project.by | 3/13/0/0 | `g.V().project('name','manager').by('name').by(__.in('knows'))` |
+| 3 | 76 | seam | S5 | where | 0/19/0/0 | `g.V().where(__.simplePath().count().is(P.gt(1)))` |
+| 4 | 75 | seam | S5 | where | 0/16/2/7 | `g.V().where(__.simplePath())` |
+| 5 | 74 | seam | S4 | map | 0/0/37/0 | `g.V().map(__.has('age'))` |
+| 6 | 73 | seam | S2 | coalesce | 0/18/0/1 | `g.V().coalesce(__.limit(2), __.identity())` |
+| 7 | 72 | seam | S4 | group.by | 0/18/0/0 | `g.V().group().by('name').by(__.out())` |
+| 8 | 71 | step | — | — | 4/0/0/39 | `g.V().path().count(local)` |
+| 9 | 71 | seam | S4 | project.by | 0/0/33/5 | `g.V().project('x').by(__.has('age'))` |
+| 10 | 68 | seam | S4 | groupCount.by | 0/17/0/0 | `g.V().groupCount().by(__.out())` |
+| 11 | 64 | seam | S3 | group.by | 0/16/0/0 | `g.V().group().by('name').by(__.count().is(P.gt(0)))` |
+| 12 | 64 | seam | S4 | project.by | 0/16/0/0 | `g.V().project('a','b').by('name').by(__.out())` |
+| 13 | 62 | seam | S5 | not | 0/14/2/2 | `g.V().not(__.simplePath())` |
+| 14 | 61 | seam | S5 | or | 0/15/0/1 | `g.V().or(__.identity(), __.simplePath())` |
+| 15 | 58 | seam | S4 | dedup.by | 0/0/29/0 | `g.V().dedup().by(__.has('age'))` |
+| 16 | 57 | seam | S2 | coalesce | 0/9/9/3 | `g.V().coalesce(__.dedup(), __.identity())` |
+| 17 | 52 | seam | S5 | choose | 0/13/0/0 | `g.V().choose(__.identity(), __.simplePath())` |
+| 18 | 51 | step | — | — | 0/0/0/51 | `g.E().otherV()` |
+| 19 | 48 | seam | S4 | group.by | 1/10/0/0 | `g.V().group().by('name').by(__.in('created'))` |
+| 20 | 44 | seam | S4 | project.by | 3/5/0/0 | `g.V().project('p','top').by('name').by(__.outE('created'))` |
+
+What the numbers say, for the owner:
+- **The workload is the one source where (b) is half** (21 of 41): those are almost all depth 0–1 step gaps —
+  vertex-property (meta-property) access (`properties('location').has/hasNot/values/order`), `path()` as a value
+  (`path().count(local)`, `path().unfold()`), `tree()`, `where(P.within(sideEffect))`, `where(P.gt(label)).by()`.
+  At depth ≥ 2 the workload is 7 seam to 1 step. So the (b) work Phase 5 owns is concentrated and nameable.
+- **Several seams are trivially shallow**: a filter or element-valued body under a value host
+  (`map(has(..))`, `project().by(has(..))`, `dedup().by(has(..))`, `group().by(k).by(out())`,
+  `order().by(out(), desc)`) declines at depth 1. These are S4 connector rows in their simplest form.
+- **A path-reading body (`simplePath()`) under any host** is the largest S5 family (clusters 3, 4, 13, 14, 17,
+  plus `union`/`optional`/`repeat`): the path channel does not cross the seam.
+
+How to read it (the instrument's limits): delta debugging keeps the FIRST minimal decline it reaches, so a
+query with two gaps is attributed to whichever survives the greedy shrink; slippage to an unrelated
+decline is held back by guards (a coarse type check, positional `by()`s, label protection, shape-preserving
+drops, two-arm branches — `shrink.ts`). The figure is sensitive to those guards and they push it UP: an
+unguarded shrink (small sample) read 44%, because a third of its top clusters were slips into type-error
+declines (`project('p').out()`, `count().values()`); with the guards, the full-sample runs read 87.1% →
+87.2% → 94.5% as the last two (two-arm branches, shape-aware hoisting) went in. Class (a) is decided mechanically: every arm of the innermost
+host, hoisted over the host's input, compiles (and, outside a `repeat`, executes). Noise (d) is lattice-only:
+a filter over an always-productive seeded reducer, or a hoisted body the reference rejects.
+
 ### Phase 2 — Spike: scoped relations for three hosts, behind a switch. IDs `cc2-*`.
 
 - Implement S1–S3 plus the connector rows for `where`/`not`, `map`, and `project().by` over **every host framing**.
