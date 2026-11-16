@@ -329,6 +329,20 @@ sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.jso
 
 # Re-record the baseline. Deliberately a command rather than the test rewriting itself: the census
 # is a two-way baseline, so an auto-record would launder the very regression it exists to catch.
+# The depth curve (cc0-curve, docs/2026-11-15-compositional-coverage-plan.md): the execute rate by child-
+# traversal nesting depth over two FIXED-seed profiles. Its ratchet test, test/L5-properties/coverage.test.ts,
+# is part of L5 and therefore part of `ci`. These tasks are the human-facing report and the re-record. Like
+# census-record, recording is a COMMAND that needs a reason in the commit message.
+[tasks.coverage]
+description = "Print the depth curve (execute % by child-nesting depth); COVERAGE_PER_SEED=n for a bigger sample"
+depends = ["install", "check", "submodule"]
+run = "bun scripts/coverage-curve.ts"
+
+[tasks.coverage-record]
+description = "Re-record test/L5-properties/coverage-baseline.json (commit it with the reason the curve moved)"
+depends = ["install", "check", "submodule"]
+run = "bun scripts/coverage-curve.ts --record"
+
 [tasks.census-record]
 description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"
 depends = ["install", "check", "submodule"]

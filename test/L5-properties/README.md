@@ -38,6 +38,30 @@ has. Parsing and compiling are submodule-free; running is not.
 - Lattice: 7 shapes, 108 transitions, covering 54 step names (the corpus uses 131 — `table.test.ts`
   prints the gap as a table-growth list).
 
+## The depth curve — `coverage.test.ts`
+
+This is the compositionality instrument (cc0-curve, `docs/2026-11-15-compositional-coverage-plan.md`). It
+reports the execute rate by **child-traversal nesting depth**, read from the IR (`coverage.ts`
+`childDepth`), not by paren depth.
+
+It runs two FIXED-seed profiles:
+- `lattice` — the shape-lattice generator below;
+- `realistic` — `realistic.ts`, app idioms over the `modern` schema.
+
+The ratchet is one-way. At every depth, the number of answering queries may not fall below
+`coverage-baseline.json`, and an internal error fails the test. A changed sample size means the generator
+moved, and the test asks for a re-record. Commands:
+- `mise run coverage` — print the curve;
+- `COVERAGE_PER_SEED=n mise run coverage` — a bigger sample (report only);
+- `mise run coverage-record` — re-record the baseline. The commit message must say why the curve moved.
+
+Baseline at 2026-11-16 (execute % by depth):
+
+| Profile | 0 | 1 | 2 | 3 | 4+ |
+|---|---|---|---|---|---|
+| lattice | 93.5 | 67.7 | 24.0 | 6.5 | — |
+| realistic | — | 83.2 | 70.4 | 71.6 | 63.2 |
+
 ## Oracle 1 — the fast-path differential
 
 `src/compiler/options/fast-paths.ts` defines six independently switchable optimized lowerings, each

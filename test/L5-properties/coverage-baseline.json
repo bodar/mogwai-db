@@ -1,0 +1,73 @@
+{
+  "perSeed": 400,
+  "profiles": {
+    "lattice": {
+      "0": {
+        "n": 708,
+        "rows": 661,
+        "decline": 46,
+        "error": 1,
+        "internal": 0,
+        "executeRate": 0.935
+      },
+      "1": {
+        "n": 262,
+        "rows": 176,
+        "decline": 84,
+        "error": 2,
+        "internal": 0,
+        "executeRate": 0.677
+      },
+      "2": {
+        "n": 122,
+        "rows": 29,
+        "decline": 92,
+        "error": 1,
+        "internal": 0,
+        "executeRate": 0.24
+      },
+      "3": {
+        "n": 108,
+        "rows": 7,
+        "decline": 101,
+        "error": 0,
+        "internal": 0,
+        "executeRate": 0.065
+      }
+    },
+    "realistic": {
+      "1": {
+        "n": 692,
+        "rows": 576,
+        "decline": 116,
+        "error": 0,
+        "internal": 0,
+        "executeRate": 0.832
+      },
+      "2": {
+        "n": 260,
+        "rows": 183,
+        "decline": 77,
+        "error": 0,
+        "internal": 0,
+        "executeRate": 0.704
+      },
+      "3": {
+        "n": 134,
+        "rows": 96,
+        "decline": 38,
+        "error": 0,
+        "internal": 0,
+        "executeRate": 0.716
+      },
+      "4+": {
+        "n": 114,
+        "rows": 72,
+        "decline": 42,
+        "error": 0,
+        "internal": 0,
+        "executeRate": 0.632
+      }
+    }
+  }
+}
