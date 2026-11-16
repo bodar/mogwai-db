@@ -20,7 +20,9 @@ measurements this plan starts from). Direction: root `CLAUDE.md` locked decision
   `coalesce`/`optional`, `choose`, `union`.
 - Still on it, per the audit: existence (`where`/`filter`/`not`/`and`/`or`), per-traverser
   (`map`/`flatMap`/`local`), and `group` with a child value `by()`.
-- Ladder-only answers over the L1/L6/L9 pools: **66** (from 119 before cc3d). Ladder files: 328 `return null`.
+- Ladder-only answers over the L1/L6/L9 pools: **66** (from 119 before cc3d) — the wide instrument
+  (`mise run ladder-reach`, ~29k traversals). The CI-gated subset (L1, L6, the sweep's host queries) is **30**
+  (existence 7, per-traverser 6, group 17), plus 1 `bothChildOrders` rescue. Ladder files: 328 `return null`.
 
 ## What "retired" means — the end state
 
@@ -66,6 +68,17 @@ Each step is independently landable and leaves trunk better even if the next nev
 - Add that count to L9 as a ratchet. It may only fall, it starts at 66, and it is reported per family.
 - Classify every `deferred-hosts.ts` entry as `ladder` or `host-owned`, so the end state has an exact scope.
 - *Why first:* every later step is measured by this number. Without it, "done" is a judgement.
+
+✅ **LANDED (6b31bffc).** `test/L9-connector/ladder-reach.ts` compiles each traversal under the default and
+`connectorOnly`, charges a ladder-only answer to its deepest family host, and counts `bothChildOrders` rescues
+via the new measurement mode `FastPathConfig.childOrderRetry: false`; where both answer, the multisets must agree.
+The ratchet (`ladder-reach.test.ts`, baseline `ladder-reach-baseline.json`, `mise run ladder-reach-record`) gates
+the CI pools at **30** — L1 21, L6 3, H 6 (existence 7, per-traverser 6, group 17) — and 1 rescue; it may only
+fall. The wider `mise run ladder-reach` (not a gate) reproduces the audit's 66 (existence 40, per-traverser 9,
+group 17) and finds 4 rescues. `deferred-hosts.ts` gives all 48 entries a `scope` (27 `ladder`, 21 `host-owned`),
+asserted by host-totality. Measured after R5.1 landed: unchanged at 30. **Remains:** the owner must confirm the
+split. It is the builder's judgement. `repeat` until/emit's own condition lowering is set to `host-owned` for now
+(open question 2), and `sideEffect` is set to `ladder`. Each choice is recorded in a comment in `deferred-hosts.ts`.
 
 ### R1 — Pull out what is genuinely shared (move/rename, no behaviour change)
 
