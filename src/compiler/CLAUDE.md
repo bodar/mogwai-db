@@ -88,7 +88,8 @@ while what they operate on keeps TinkerPop's.
     declining compile in the other order, so the switch never decides coverage. A body that draws or
     re-sources stays the ladder's (`scopedBody`) until the connector owns it.
   - **Three CI guards hold this direction:** `mise run ladder` (the `return null` count in `rel/` never rises —
-    the total, and per file for the ladder files), and L9 (`test/L9-connector/`): the host-closure ratchet with the
+    the total, and per file for the ladder files; the connector's own `scoped.ts` is outside the total because
+    L9 guards its reach by coverage, not by site count), and L9 (`test/L9-connector/`): the host-closure ratchet with the
     connector ALONE (`FastPathConfig.connectorOnly` — no ladder at any site, no retry) and host totality (a
     child-taking position is a `CONNECTORS` row or a `deferred-hosts.ts` entry with its reason and blocker).
 - **Shape is CONSULTED, never CONSTRUCTED — the bright line.** Shape may be an annotation a Pass reads

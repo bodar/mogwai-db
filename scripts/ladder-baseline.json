@@ -1,5 +1,5 @@
 {
-  "total": 1360,
+  "total": 1279,
   "files": {
     "src/compiler/rel/alias.ts": 15,
     "src/compiler/rel/asstring-barrier.ts": 3,
