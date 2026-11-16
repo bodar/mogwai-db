@@ -163,7 +163,11 @@ describe('a slice count is decoded EXACTLY, at one authority (`sliceOf` / `count
     ['g.inject([1,2,3,4,5,6,7]).range(local,-3,5)', ['[1i,2i,3i,4i,5i]']],
     ["g.inject(['a':1,'b':2]).range(local,-1,1)", ['{"a":1i}']],
   ])('%s', async (q, want) => {
-    expect(await run(q)).toEqual(want);
+    // `g.V()` is an UNORDERED stream on the wire (§17), so its per-vertex results compare as a multiset;
+    // an `inject()` stream's order is the query's own.
+    const got = await run(q);
+    if (q.startsWith('g.V()')) expect([...got].sort()).toEqual([...want].sort());
+    else expect(got).toEqual(want);
   });
   test.each([
     ['g.inject(1,2,3).limit(-2)', 'Not a legal range: [0, -2]'],

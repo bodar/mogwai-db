@@ -354,8 +354,10 @@ describe('group / properties SQL', () => {
     // The sack carries its own per-row TYPE TAG (`sackt`), so its read frames by it rather than inferring.
     expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(p.sql).toContain('0.0 AS sack');
-    // The fold is SQLite's own arithmetic in every class (a Float rides as its Double).
-    expect(p.sql).toMatch(/SELECT \(skz\d+\.sack \+ skz\d+\.skv\) AS v/);
+    // The fold is SQLite's own arithmetic in every class (a Float rides as its Double) — computed as the sack
+    // column, which the read then projects as its value (the long class-tag spelling it reads twice is computed
+    // once by the emitter, so the fold sits in the fenced block beneath the read).
+    expect(p.sql).toMatch(/\(skz\d+\.sack \+ skz\d+\.skv\) AS (v|sack)\b/);
     expect(p.binds).toEqual([]);
     // `div` is REAL division where the operands' COMMON class is floating, and integer division otherwise
     // — `NumberHelper`'s integral helpers truncate, so `withSack(1).sack(div).by(constant(2))` is 0.

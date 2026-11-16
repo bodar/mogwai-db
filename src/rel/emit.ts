@@ -133,7 +133,9 @@ const qualified = (alias: string, name: string): Expression => q`${ident(alias)}
  * and the only one an argument-less `count` is spelled `count(*)` over (see `countArgument`). */
 /** `unit`: a ONE-ROW `VALUES` of compiler constants — a row source that contributes no row multiplicity and
  *  no bind, so a block whose FROM it heads may drop it (`withoutUnit`). */
-interface FromItem { readonly text: Expression; readonly alias: string; readonly table?: true; readonly unit?: true; }
+/** `tables`: a DERIVED SELECT SQLite's query flattener merges into the FROM that reads it (`flattens`) brings its
+ *  own tables with it, so it counts as that many toward the join width (`joinFits`); anything else counts one. */
+interface FromItem { readonly text: Expression; readonly alias: string; readonly table?: true; readonly unit?: true; readonly tables?: number; }
 interface JoinItem { readonly kind: 'inner' | 'left' | 'cross'; readonly item: FromItem; readonly on?: Expression; readonly ordered?: boolean; }
 
 /** How a relation in scope spells each of its columns IN THE BLOCK BEING ASSEMBLED. Fusing a node
@@ -176,6 +178,9 @@ interface Closed {
 }
 type Built = Block | Closed;
 
+/** A spelling longer than this is COMPUTED work worth computing once when read more than once (`rereadsSubquery`):
+ *  past a column reference, a literal and a trivial call, short enough that re-spelling is cheaper than a fence. */
+const COMPUTED_TEXT = 120;
 const EMPTY_SCOPE: Scope = new Map();
 const withRel = (scope: Scope, id: string, cols: Cols): Scope => new Map(scope).set(id, cols);
 const mergeScopes = (...scopes: readonly Scope[]): Scope => new Map(scopes.flatMap((scope) => [...scope]));
@@ -282,6 +287,18 @@ const SQLITE_JOIN_TABLES = 64;
 const joinFits = (items: number): void => {
   if (items > SQLITE_JOIN_TABLES) throw new JoinWidthExceeded(SQLITE_JOIN_TABLES);
 };
+/** The tables a FROM list brings to SQLite's planner, a flattened derived SELECT counted by its own. */
+const fromTables = (b: { readonly from: FromItem; readonly joins: readonly JoinItem[] }): number =>
+  (b.from.tables ?? 1) + b.joins.reduce((n, join) => n + (join.item.tables ?? 1), 0);
+/**
+ * Whether SQLite's flattener (`flattenSubquery`, `select.c`) may merge this block, as a derived table, into the
+ * FROM that reads it — measured: a decorrelated `local()` body of 63 joins, its own SELECT, was refused at prepare
+ * once flattened beside its scope. Conservatively the plain join (no aggregate, DISTINCT, window, ORDER BY, LIMIT
+ * or OFFSET — an `OFFSET 0` fence is exactly what keeps one apart); a block that may flatten counts its tables.
+ */
+const flattens = (built: Built): built is Block => built.kind === 'block' && built.groupBy === undefined && !built.distinct
+  && !built.windowed && built.having === undefined && !built.orderBy?.length && built.limit === undefined && built.offset === undefined;
+const derivedTables = (built: Built): { readonly tables?: number } => (flattens(built) ? { tables: fromTables(built) } : {});
 
 function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudget) {
 
@@ -341,6 +358,15 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       const [rel, name] = key.split('\0') as [string, string];
       const spelled = b.scope.get(rel)?.get(name);
       if (spelled && subqueryCols.has(spelled) && (n > 1 || once(spelled))) return true;
+      // A COMPUTED column read more than once is computed ONCE too (root CLAUDE.md: "an expression referenced
+      // N times is computed ONCE … never re-inlined at each use") — not only a subquery: a value run inlined
+      // into each next step (`substring(0,4)` spells its input three times) otherwise grows its text by that
+      // factor per step, in a correlated body where no CTE can hold it (measured: six steps under
+      // `project().by` were 178 KB). A bare column, a literal or a short expression is free to repeat.
+      // NOT under a FILTER over a JOIN: the fence would keep its predicate out of the join, and a predicate there
+      // is what SQLite drives the join's index seeks from (measured: a value join `V().values('name').as('e')
+      // .V().has('name', select('e'))` fenced its product of every vertex with every name, 1k → 8k 66× slower).
+      if (spelled && n > 1 && render(spelled).sql.length > COMPUTED_TEXT && !(reader.kind === 'filter' && b.joins.length)) return true;
     }
     return false;
   };
@@ -645,7 +671,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     return {
       kind: 'block',
       select: input.type.cols.map((column) => [column.name, cols.get(column.name)!] as const),
-      from: { text: q`(${body})`, alias: input.id },
+      from: { text: q`(${body})`, alias: input.id, ...derivedTables(built) },
       joins: [], distinct: false, windowed: false,
       scope: withRel(outer, input.id, cols),
     };
@@ -809,7 +835,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     const direct = directSource(r, outer);
     const { item, cols } = direct && free([direct.item.alias], taken)
       ? direct
-      : { item: { text: q`(${renderBuilt(built)})`, alias: r.id }, cols: colsOf(r.id, r) };
+      : { item: { text: q`(${renderBuilt(built)})`, alias: r.id, ...derivedTables(built) }, cols: colsOf(r.id, r) };
     if (!direct) inherit(built, cols);
     return { from: item, joins: [], cols: r.type.cols.map((column) => cols.get(column.name)!), scope: withRel(outer, r.id, cols) };
   };
@@ -1021,7 +1047,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
           return { kind: 'block', select, from: item, joins: [], distinct: false, windowed: false, scope: withRel(outer, r.id, new Map(select)) };
         }
         const b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.explode(b, r), r);
-        joinFits(2 + b.joins.length);
+        joinFits(fromTables(b) + 1);
         const item: FromItem = { text: q`json_each(${expr(r.expr, b.scope)})`, alias: r.id };
         const select = [...b.select, ...explodeColumns(r.as).map(memberCol)];
         return { ...b, joins: [...b.joins, { kind: 'cross', item }], select, scope: withRel(b.scope, r.id, new Map(select)) };
@@ -1045,7 +1071,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         // Only an inner/cross join may splice its right side: a LEFT join's right-side predicate
         // must stay inside the subquery, or an unmatched row is filtered instead of null-padded.
         const right = side(r.right, outer, r.join === 'inner' || r.join === 'cross', taken);
-        joinFits(2 + left.joins.length + right.joins.length);
+        joinFits(fromTables(left) + fromTables(right));
         const scope = mergeScopes(left.scope, right.scope);
         const on = r.on ? expr(r.on, scope) : undefined;
         const select = r.type.cols.map((column, i) => [column.name, [...left.cols, ...right.cols][i]!] as const);

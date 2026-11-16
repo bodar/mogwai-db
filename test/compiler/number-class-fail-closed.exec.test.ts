@@ -78,12 +78,16 @@ describe('a reducer never drops a text value', () => {
   ];
   for (const q of deferred) test(`sum/mean defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
 
-  // NumberHelper.max/min compare across classes with compareTo, which throws
-  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597).
-  for (const q of [
-    "g.V().group().by('name').by(__.union(__.constant(9999999999999970L), __.values('age')).max())",
-    "g.V().group().by('name').by(__.union(__.constant(-9999999999999970L), __.values('age')).min())",
-  ]) test(`min/max over text among numbers defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
+  // NumberHelper.max/min over two NUMBERS promote to their highest common class
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597 —
+  // `compareTo` is only for non-Numbers), so a wide Long among Integers is answered exactly: in a group value
+  // as the same reducer answers at the top level (`g.V(1).union(constant(9999999999999970L), values('age')).max()`
+  // is `9999999999999970`). Only the reducer's own row tag decides, at every site.
+  for (const [q, want] of [
+    ["g.V().group().by('name').by(__.union(__.constant(9999999999999970L), __.values('age')).max()).select(values).unfold().dedup()", 9999999999999970n],
+    ["g.V().group().by('name').by(__.union(__.constant(-9999999999999970L), __.values('age')).min()).select(values).unfold().dedup()", -9999999999999970n],
+    ["g.V(1).union(__.constant(9999999999999970L), __.values('age')).max()", 9999999999999970n],
+  ] as const) test(`min/max over a wide long among numbers is exact: ${q}`, async () => expect(await values(q)).toEqual([want]));
 
   test('single-class reducers answer as before', async () => {
     expect(await typed("g.V().values('age').sum()")).toEqual([[123, T.int]]);

@@ -7,7 +7,7 @@ import type { Service } from '../../services/spi/types.ts';
 import type { MergePolicy, SideEffectConstants } from '../../gremlin/frontend.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { Declines } from '../unsupported.ts';
-import type { CompileBudget } from '../../sql/kernel/budget.ts';
+import { CopiedDraw, JoinWidthExceeded, type CompileBudget } from '../../sql/kernel/budget.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
 /**
@@ -152,19 +152,36 @@ export function compileViaRel(
  */
 function bothChildOrders<T>(request: RelRequest, lower: (attempt: RelRequest) => T | null): T | null {
   const root = request.declines;
-  const attempt = (correlatedChild: boolean) => {
+  // A decline raised from the finished ALGEBRA inside the lowering declines THIS order's plan — a property of
+  // the query text, never of the data — and the other order builds a different plan:
+  //  - a JOIN WIDTH past SQLite's (`JoinWidthExceeded`, raised as the emitter assembles a block): a decorrelated
+  //    body joins its scope into one SELECT where the ladder's correlated subquery is a SELECT of its own;
+  //  - a random draw two branches would read through two copies (`CopiedDraw`, the `name` pass): which relation
+  //    is shared depends on which route lowered each nested site.
+  // So it is retried like a decline, and rethrown — the specific reason — only when neither order lowers.
+  interface Attempt { readonly sink: Declines | undefined; readonly lowered: T | null; readonly planDecline?: JoinWidthExceeded | CopiedDraw }
+  const attempt = (correlatedChild: boolean): Attempt => {
     const sink = root?.fork();
-    return { sink, lowered: lower({ ...request, correlatedChild, ...(sink ? { declines: sink } : {}) }) };
+    try {
+      return { sink, lowered: lower({ ...request, correlatedChild, ...(sink ? { declines: sink } : {}) }) };
+    } catch (error) {
+      if (!(error instanceof JoinWidthExceeded || error instanceof CopiedDraw)) throw error;
+      return { sink, lowered: null, planDecline: error };
+    }
+  };
+  const declined = (...attempts: readonly Attempt[]): null => {
+    for (const a of attempts) if (a.sink) root!.adopt(a.sink);
+    const planDecline = attempts.find((a) => a.planDecline)?.planDecline;
+    if (planDecline) throw planDecline;
+    return null;
   };
   const first = attempt(request.correlatedChild);
   // The measurement knob reads the connector ALONE, so it never falls back to the other order.
-  if (request.connectorOnly) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
   if (first.lowered) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
+  if (request.connectorOnly) return declined(first);
   const second = attempt(!request.correlatedChild);
   if (second.lowered) { if (second.sink) root!.adopt(second.sink); return second.lowered; }
-  if (first.sink) root!.adopt(first.sink);
-  if (second.sink) root!.adopt(second.sink);
-  return null;
+  return declined(first, second);
 }
 
 /**

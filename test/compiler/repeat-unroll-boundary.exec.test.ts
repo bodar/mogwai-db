@@ -612,8 +612,11 @@ describe('a bounded repeat past the unroll ceiling declines from the count', () 
     expect((thrown as Error).message).toContain('expands to more than 400 KB of SQL in one statement; repeat(…).times(1200) unrolls its body 1200 times');
   });
   test('a deep unroll under the budget, past what SQLite parses, declines by the statement limit, not the stack', () => {
-    const q = 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()'; // ~270 KB of SQL
-    expect(() => underShallowStack(() => run(store, q))).toThrow(/exceeds a SQLite statement limit/);
+    // ~250 KB of SQL. Each phase's `local()` is the connector's correlated first-row seek over the previous phase's
+    // fenced CTE, so the spine is a chain of CORRELATED bodies — whose depth is the compile boundary's backstop
+    // (`tooDeep`, below) under a shallow stack. Either clear decline is a property of the query text.
+    const q = 'g.V().repeat(__.local(__.out().limit(1))).times(800).count()';
+    expect(() => underShallowStack(() => run(store, q))).toThrow(/exceeds a SQLite statement limit|nests deeper than the compiler can follow/);
   });
 
   // A CORRELATED body is not a relation of its own, so its spine is never cut: there the depth stays the

@@ -13,7 +13,8 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow, rowBounds } from '../../rel/bounds.ts';
-import { isSelfContained, largestExpression, refNames, relDepth } from '../../rel/walk.ts';
+import { forEachExpr, isSelfContained, largestExpression, refNames, relDepth } from '../../rel/walk.ts';
+import { columnIsStored } from '../../rel/copies.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
 import { collectionAssert, EDGE_MOVES, elementKindAt, FAN_OUT_HOSTS, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
@@ -2395,6 +2396,15 @@ function scalarTail(
       // input (a preceding transform's projection — `asString()`'s per-type rendering) is materialized
       // once rather than re-inlined into every spelling.
       if (step.name === 'asNumber' && step.args.length && rel.kind === 'project') rel = fenced(rel, fresh);
+      // The same for ANY transform that spells its input more than once (`substring`'s bounds read `length(v)`
+      // three times): over a computed input a run of them re-inlines each step into the next, so the text
+      // grows by that factor per step (measured: four `substring(0,4)` were 39 KB). The input is computed once.
+      else if (rel.kind === 'project' && !columnIsStored(rel, 'v')) {
+        const probe = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence());
+        let reads = 0;
+        if (probe) forEachExpr(probe.expr, (node) => { if (node.kind === 'col' && node.rel === rel.id && node.name === 'v') reads++; });
+        if (reads > 1) rel = fenced(rel, fresh);
+      }
       const offences = transformOffences(step, col(rel.id, 'v'), receiverEvidence(), true);
       if (!offences) return null;
       const transformed = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', transformInput(out), receiverEvidence());

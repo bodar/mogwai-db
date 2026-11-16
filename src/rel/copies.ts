@@ -220,7 +220,12 @@ export const columnIsRowKey = (r: Rel, name: string): boolean => {
       return e?.kind === 'col' && e.rel === r.input.id && columnIsRowKey(r.input, e.name);
     }
     case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': return columnIsRowKey(r.input, name);
-    case 'window': return !r.specs.some(([minted]) => minted === name) && columnIsRowKey(r.input, name);
+    case 'window': {
+      // A ROW_NUMBER over the whole relation (no partition) numbers every row differently: a key.
+      const spec = r.specs.find(([minted]) => minted === name)?.[1];
+      if (spec) return spec.fn === 'row_number' && !spec.spec.partitionBy.length;
+      return columnIsRowKey(r.input, name);
+    }
     case 'join': {
       // A side's key stays a key where the OTHER side has at most one row (a correlated seed row joined to
       // the relation it starts): no row of this side is repeated.
@@ -243,8 +248,22 @@ export const columnIsRowKey = (r: Rel, name: string): boolean => {
  * (measured, bun:sqlite 3.51 — "no such column" for an outer column read there), so a term that is, or
  * flattens to, a subquery cannot sort a correlated body; a subquery that only FILTERS the body (an arm's
  * priority guard) or is only carried can. Conservative: a node this does not follow answers yes.
+ *
+ * MEMOIZED per (relation, column): a relation is immutable, and a value run whose every step reads its input
+ * more than once (`substring`'s bounds read `length(v)` three times) otherwise asks the same column of the
+ * same input once per READ — exponential in the run (measured: twelve `substring(0,4)` under a `by()`, 20 s).
  */
+const readsSubqueryMemo = new WeakMap<Rel, Map<string, boolean>>();
 export const columnReadsSubquery = (r: Rel, name: string): boolean => {
+  let known = readsSubqueryMemo.get(r);
+  if (!known) readsSubqueryMemo.set(r, known = new Map());
+  const hit = known.get(name);
+  if (hit !== undefined) return hit;
+  const answer = readsSubqueryOf(r, name);
+  known.set(name, answer);
+  return answer;
+};
+const readsSubqueryOf = (r: Rel, name: string): boolean => {
   const exprReads = (e: Expr, input: Rel | undefined): boolean => {
     let hit = false;
     forEachExpr(e, (node) => {

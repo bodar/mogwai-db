@@ -108,6 +108,10 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
       | result |
       | m[{"person":"l[vadas,ripple,lop,lop,lop,josh]","software":"l[]"}] |
 
+  # A CUT nested in a value body's branch cuts PER MEMBER: `GroupStep` pushes each traverser through the value
+  # traversal's pre-barrier part on its own (`Grouping.determineBarrierStep`), and a `union` arm is fed that one
+  # traverser — so `limit(2)` keeps two of EACH member's out-neighbours (marko: vadas, lop; josh: ripple, lop;
+  # peter: lop), in member order. The pool runs the part before `fold()` per member, then folds the key's pool.
   Scenario: g_V_group_byXlabelX_byXunionXout_order_byXname_descX_limitX2XX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of
@@ -117,7 +121,43 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"person":"l[vadas,ripple,lop,lop,lop]","software":"l[]"}] |
+      | m[{"person":"l[vadas,lop,ripple,lop,lop]","software":"l[]"}] |
+
+  # The same per-member rule on a cut, a collapse and a reducer that read the member itself: `range(0, 2)` of ONE
+  # traverser keeps it (4 persons → 4, plus the identity arm's 4); `dedup()` of one traverser is that traverser,
+  # so a vertex reached twice by `both()` counts twice through each arm.
+  Scenario: g_V_hasLabelXpersonX_group_byXlabelX_byXunionXrangeX0_2X_identityX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by(T.label).by(__.union(__.range(0, 2), __.identity()).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"d[8].l"}] |
+
+  Scenario: g_V_hasLabelXpersonX_both_group_byXlabelX_byXunionXdedup_identityX_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").both().group().by(T.label).by(__.union(__.dedup(), __.identity()).count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"d[8].l","software":"d[8].l"}] |
+
+  Scenario: g_V_hasLabelXsoftwareX_group_byXlabelX_byXunionXrangeX0_2X_identityX_foldX_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("software").group().by(T.label).by(__.union(__.range(0, 2), __.identity()).fold().count(local))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"software":"d[4].l"}] |
 
   Scenario: g_V_out_group_by_byXunionXin_order_byXname_descXX_valuesXnameX_foldX
     Given the modern graph

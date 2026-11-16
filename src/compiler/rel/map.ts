@@ -19,6 +19,7 @@ import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
+import { someStepDeep } from '../ir/walk.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
 import { inferredVtype, nodeIsNull } from './tag.ts';
 import { storedCompareOn } from './predicate.ts';
@@ -441,7 +442,15 @@ export function groupRows(
       // to one key is that key's own stable sort. Every other barrier here is origin-scoped.
       const preBarriers = body.slice(0, -1).filter((bodyStep) => isValueBarrier(bodyStep) && bodyStep.name !== 'order');
       const perKeyDedup = terminal === 'fold' && preBarriers.length === 1 && dedupBeforeFold(body.slice(0, -1));
-      if (preBarriers.length && keyBy && !perKeyDedup) return null;
+      // A barrier NESTED in a branch's arm before the pool's barrier (`by(union(dedup(), identity()).count())`)
+      // cuts PER TRAVERSER in the reference — `GroupStep` feeds each one through the pre-barrier part alone — so
+      // pooling the arm's child rows per element dedups/limits ACROSS a vertex's repeat arrivals instead
+      // (measured: `g.V().hasLabel('person').both().group().by(label).by(union(dedup(), identity()).count())`
+      // answered person 7, software 6 where each member counts twice: 8, 8). The connector's grouped pool runs
+      // that part per member (`pooledGroup`'s `perMember`), so this arm declines and the site takes it.
+      const armCuts = body.slice(0, firstBarrier).some((s) => ['union', 'choose', 'branch'].includes(s.name)
+        && someStepDeep([s], child.params, (inner) => inner !== s && inner.name !== 'order' && isValueBarrier(inner), true));
+      if ((preBarriers.length && keyBy && !perKeyDedup) || armCuts) return null;
       // A barrier that does not REDUCE ends the body (`by(__.values(k).order())`, `.dedup()`, `.limit(1)`):
       // the value is the first of the pool's remaining traversers, which no arm here builds.
       if (!reducesPool(body.at(-1)!)) return null;

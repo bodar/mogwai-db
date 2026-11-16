@@ -26,7 +26,7 @@ import { byField, byNode, isProductiveBy, memberNodeOf, modulations, productivit
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import type { Declines } from '../../unsupported.ts';
-import { bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, type ChainCtx, type Tail } from './chain.ts';
+import { bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
 import { childSeam, defaultCollation, perOriginWindow, reductionHost } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
@@ -192,7 +192,31 @@ function correlatedBody(
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
-  return walk ? null : tail;
+  if (walk) return null;
+  // A GROUP BY, ORDER BY or window term that reads the HOST row is one SQLite cannot resolve inside a nested
+  // correlated subquery ("no such column", measured: `local(groupCount())` grouping a one-row body by the host's
+  // id). Such a body stays decorrelated, where the key is a column of the scoped input.
+  // A term reads the host directly, or through the seed row's copy of a host column (which the emitter fuses
+  // into the host's own spelling).
+  const byId = new Map<string, Rel>();
+  forEachRel(tail.rel, (r) => byId.set(r.id, r));
+  const outerTerm = (e: Expr): boolean => {
+    let hit = false;
+    forEachExpr(e, (node) => {
+      if (node.kind !== 'col') return;
+      const owner = byId.get(node.rel);
+      if (!owner || constantOver(owner, node.name, (id) => !byId.has(id))) hit = true;
+    });
+    return hit;
+  };
+  let termReadsHost = false;
+  forEachRel(tail.rel, (r) => {
+    const terms = r.kind === 'aggregate' ? r.groupBy
+      : r.kind === 'sort' ? r.terms.map((term) => term.expr)
+        : r.kind === 'window' ? r.specs.flatMap(([, spec]) => [...spec.spec.partitionBy, ...spec.spec.orderBy.map((term) => term.expr)]) : [];
+    if (terms.some(outerTerm)) termReadsHost = true;
+  });
+  return termReadsHost ? null : tail;
 }
 
 /**
@@ -321,12 +345,22 @@ function seedExpressions(rel: Rel, names: readonly string[], host: Rel): SeedExp
   const preds: Expr[] = [];
   let failed = false;
   // `name` of `r`, spelled over the host row.
+  // Each (relation, column) resolved ONCE; a COMPUTED one asked for a second time — by a filter and the payload,
+  // or by two filters — would be spelled twice, so the body is not inlined (see `over`).
+  const resolved = new Map<string, Expr | null>();
   const resolve = (r: Rel, name: string): Expr | null => {
     if (r.kind === 'filter' || oneRowKeeps(r)) return resolve((r as Extract<Rel, { kind: 'filter' }>).input, name);
     if (r.kind !== 'project') return null;
+    const key = `${r.id}\u0000${name}`;
+    const done = resolved.get(key);
+    if (done !== undefined) {
+      if (done && done.kind !== 'col' && done.kind !== 'lit') failed = true;
+      return done;
+    }
     const e = r.exprs.find(([n]) => n === name)?.[1];
-    if (!e) return null;
-    return over(r, e);
+    const out = e ? over(r, e) : null;
+    resolved.set(key, out);
+    return out;
   };
   // An expression of project/filter `r`, its reads of `r.input` resolved down to the host.
   const over = (r: Extract<Rel, { kind: 'project' | 'filter' }>, e: Expr): Expr | null => {
@@ -345,17 +379,29 @@ function seedExpressions(rel: Rel, names: readonly string[], host: Rel): SeedExp
       forEachExpr(e, (node) => { for (const sub of exprRels(node)) if ([...freeRelIds(sub)].some((id) => !isOuterOf(id as RelId, rel))) readsBody = true; });
       if (readsBody) return null;
     }
+    // INLINED ONCE, never re-spelled: a computed column read more than once here would be computed again at
+    // each read (an expression referenced N times is computed once — root CLAUDE.md), and down a value run
+    // (`toUpper().toLower()…`) that doubles per step. Such a body stays a subquery, which names the column.
+    const reads = new Map<string, number>();
+    forEachExpr(e, (node) => { if (node.kind === 'col' && node.rel === input.id) reads.set(node.name, (reads.get(node.name) ?? 0) + 1); });
     return rewriteExpr(e, (node) => {
       if (failed || node.kind !== 'col' || node.rel !== input.id) return node;
       const resolved = resolve(input, node.name);
       if (!resolved) { failed = true; return node; }
+      if ((reads.get(node.name) ?? 0) > 1 && resolved.kind !== 'col' && resolved.kind !== 'lit') { failed = true; return node; }
       return resolved;
     });
   };
   // The filters on the way down, each over the host.
   for (let r: Rel = rel; ;) {
     if (r.kind === 'filter') {
+      // A PRESENCE test of one column (`x IS NOT NULL`, a productive `by()`'s) is not a second use of it: it is
+      // the value itself, which `seedValues` folds back into the value — so what it resolves is not remembered.
+      const presence = r.pred.kind === 'binary' && r.pred.op === 'is not' && r.pred.left.kind === 'col'
+        && r.pred.right.kind === 'lit' && r.pred.right.value === null;
+      const before = presence ? new Map(resolved) : null;
       const p = over(r, r.pred);
+      if (before) { resolved.clear(); for (const [k, v] of before) resolved.set(k, v); }
       if (!p || failed) return null;
       preds.push(p);
       r = r.input;
@@ -407,7 +453,7 @@ function untilKey(rows: Rel, terms: readonly SortTerm[]): readonly SortTerm[] {
       // A term the same on every row (a constant, or the correlated host's own column) orders nothing — and an
       // outer column as an ORDER BY term of a nested scalar subquery is one SQLite cannot resolve ("no such
       // column", measured: `(SELECT rn.id FROM (VALUES (1)) ORDER BY rn.id LIMIT 1)` two levels down).
-      if (term.expr.rel === rows.id && constantOver(rows, term.expr.name)) continue;
+      if (term.expr.rel === rows.id && constantOver(rows, term.expr.name, undefined, true)) continue;
     }
     out.push(term);
     if (term.expr.kind === 'col' && term.expr.rel === rows.id && columnIsRowKey(rows, term.expr.name)) break;
@@ -416,18 +462,53 @@ function untilKey(rows: Rel, terms: readonly SortTerm[]): readonly SortTerm[] {
 }
 
 /** Is column `name` of `rows` the SAME on every row — defined, through copying projections, filters, sorts and
- *  limits, by a literal or by a column of a relation outside `rows` (the correlated host)? */
-function constantOver(rows: Rel, name: string): boolean {
+ *  limits, by a literal or by a column of a relation outside `rows` (the correlated host)? `outer` answers that
+ *  last question; a caller that already holds the relations of a tree passes it, so a term asked of every node of
+ *  a long chain is not a walk of the chain per step (measured: quadratic in an unrolled body's length).
+ *  `computed` also follows a COMPUTED definition and a join's sides — the question a sort term asks (`untilKey`);
+ *  without it only a copied column or a literal counts, the narrower question of whether a term READS the host. */
+function constantOver(rows: Rel, name: string, outer?: (id: RelId) => boolean, computed = false): boolean {
+  let inside: Set<string> | undefined;
+  const isOuter = outer ?? ((id: RelId): boolean => {
+    if (!inside) { const ids = new Set<string>(); forEachRel(rows, (x) => ids.add(x.id)); inside = ids; }
+    return !inside.has(id);
+  });
   let r: Rel = rows;
   let column = name;
   for (;;) {
-    if (r.kind === 'filter' || r.kind === 'sort' || r.kind === 'limit' || r.kind === 'distinct') { r = r.input; continue; }
+    if (r.kind === 'filter' || r.kind === 'sort' || r.kind === 'limit' || r.kind === 'distinct' || r.kind === 'materialize') { r = r.input; continue; }
+    if (r.kind === 'window' && !r.specs.some(([minted]) => minted === column)) { r = r.input; continue; }
+    // Through a join, the side the column comes from (positionally, as the join's own type lists them) — the
+    // body's seed row joined to the relation it starts carries the host's columns on its side.
+    if (computed && r.kind === 'join' && r.join !== 'semi' && r.join !== 'anti') {
+      const at = r.type.cols.findIndex((c) => c.name === column);
+      if (at < 0) return false;
+      const leftN = r.left.type.cols.length;
+      const side: Rel = at < leftN ? r.left : r.right;
+      column = side.type.cols[at < leftN ? at : at - leftN]!.name;
+      r = side;
+      continue;
+    }
     if (r.kind !== 'project') return false;
     const e = r.exprs.find(([n]) => n === column)?.[1];
     if (!e) return false;
     if (e.kind === 'lit') return true;
-    if (e.kind !== 'col') return false;
-    if (isOuterOf(e.rel, rows)) return true;
+    // A COMPUTED term of columns constant here (a selected path label's id, `CAST(json_extract(a0, …) AS INT)`
+    // over the host's carried `a0`) is as constant per host row as they are — no subquery, aggregate, window or
+    // draw in it. (Measured: such a term left in a correlated first-row pick's ORDER BY is "no such column".)
+    if (e.kind !== 'col') {
+      if (!computed) return false;
+      const input = r.input;
+      let constant = true;
+      forEachExpr(e, (node) => {
+        if (!constant) return;
+        if (exprRels(node).length || node.kind === 'agg' || node.kind === 'window-expr'
+          || (node.kind === 'call' && node.fn.toLowerCase().startsWith('random'))) constant = false;
+        else if (node.kind === 'col' && !isOuter(node.rel) && !(node.rel === input.id && constantOver(input, node.name, isOuter, true))) constant = false;
+      });
+      return constant;
+    }
+    if (isOuter(e.rel)) return true;
     if (e.rel !== r.input.id) return false;
     column = e.name;
     r = r.input;
@@ -666,7 +747,12 @@ const existence = (negated: boolean): Connector => (site) => {
  * Which result is "first" in an unordered body is the body's emission order, then its payload — the same
  * deterministic pick a per-origin `limit(1)` makes (`defaultCollation`).
  */
-const firstInner: Connector = (site) => {
+const firstInner: Connector = (site) => firstInnerOver(site);
+
+/** `map`'s connector, given the body ALREADY lowered correlated over `site.rel` where the caller has it
+ *  (`allRows`' at-most-one-row test) — so a body is lowered over the host row once, never once to ask and again
+ *  to use (measured: that second lowering made an unrolled `local()` body's compile work super-linear). */
+function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
   const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
   const body = singleBody(step, ctx);
   if (!body) return null;
@@ -674,7 +760,7 @@ const firstInner: Connector = (site) => {
   // decorrelated rejoin carries.
   const feedsOtherV = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
   const hostChannel = (channel: Channel): ColMeta => rel.type.cols.find((column) => column.name === channel.col)!;
-  const tail = feedsOtherV ? null : correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
+  const tail = feedsOtherV ? null : lowered !== undefined ? lowered : correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
   // A body over its seed row alone (`seedExpressions`) is a projection of the host row, and its filters are the
   // host's: no subquery, no existence probe.
   const inline = tail && framingCols(tail.framing) ? seedExpressions(tail.rel, payloadCols(tail.rel).map((column) => column.name), rel) : null;
@@ -718,13 +804,22 @@ const firstInner: Connector = (site) => {
     });
     return continueAs(splitPath(mapped, tail.framing, ctx, fresh), tail.framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
+  // A host whose COMPUTED columns kept the dependent join out (`spellsStored` — a correlated read would compute
+  // them again per inner row) is computed ONCE first: a fenced CTE, whose columns are then read by name, and the
+  // dependent join is tried over that. A chain of maps (`repeat(local(out().limit(1))).times(n)`) is then one
+  // CTE and one seek per phase rather than a scope, a window and a rejoin per phase.
+  if (tail && rel.kind !== 'materialize' && isSelfContained(rel) && rel.type.cols.some((column) => !columnIsStored(rel, column.name))) {
+    const fencedHost = make.materialize({ id: fresh('smh'), input: rel, channels: rel.channels, type: rel.type, fenced: true });
+    const over = firstInner({ ...site, rel: fencedHost });
+    if (over) return over;
+  }
   // Not SQL-holdable as a dependent join: the decorrelated body, its FIRST row per scope through the rejoin.
   const sc = scope(rel, fresh);
   const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read');
   if (!keyed) return null;
   const out = rejoin(sc, sc.scoped, keyed, rel, 'split', true, ctx, fresh, labels, false, feedsOtherV);
   return out && continueAs(out.rel, out.framing, steps, at + 1, bulked, ctx, fresh, out.aliases);
-};
+}
 
 /**
  * THE REJOIN — a keyed body's rows (`firstOnly`: its first per scope) INNER-joined back to `host` (the scoped
@@ -888,7 +983,7 @@ const allRows = (policy: 'split' | 'forward'): Connector => (site) => {
   const ownsNothing = (r: Rel): boolean => r.channels.every((channel) => HOST_ONLY.has(channel.role));
   const probe = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
   if (probe && atMostOneRow(probe.rel) && (policy === 'split' || (ownsNothing(rel) && ownsNothing(probe.rel)))) {
-    const mapped = firstInner(site);
+    const mapped = firstInnerOver(site, probe);
     if (mapped) return mapped;
   }
   // An order the BODY imposes (`local(out().order().by('name'))`) is meaningful past the host — through a
@@ -1327,8 +1422,13 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   // Only a branch's arms are GLOBAL children (`BranchStep`/`UnionStep` run every traverser through one arm
   // traversal); a per-traverser host's body (`project().by`, `map`, `where`) is applied to one traverser at a
   // time in the pool too.
+  // A barrier inside such an arm cuts PER TRAVERSER in the reference, so the part before the group's barrier is
+  // then applied to each member on its own (`perMember`, below) and only the rest runs over the key's pool. A lone
+  // `order()` there changes only the members' order, which is §17's "sorted together" divergence; anything that
+  // cuts or collapses (`limit`, `range`, `dedup`, a reducer) changes WHICH members there are.
   const GLOBAL_ARMS = new Set(['union', 'choose', 'branch']);
-  if (body.slice(0, cut).some((s) => GLOBAL_ARMS.has(s.name) && someStepDeep([s], ctx.params, (inner) => inner !== s && isValueBarrier(inner), true))) return null;
+  const perMember = body.slice(0, cut).some((s) => GLOBAL_ARMS.has(s.name)
+    && someStepDeep([s], ctx.params, (inner) => inner !== s && inner.name !== 'order' && isValueBarrier(inner), true));
   // An enclosing per-traverser scope's key would have to ride every pool as one more group key; the ladder's.
   if (rel.channels.some((channel) => channel.role === 'origin' || channel.role === 'branchKey')) return null;
   // THE KEY: the host's own by() vocabulary over the (possibly value-landed) relation.
@@ -1382,20 +1482,51 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
     aggs: [[KEY, firstArrival(col(members.id, KEY), enc ? [col(members.id, enc.col)] : [])]],
   });
   const sc = scope(domain, fresh);
+  if (ladderOwns(body, ctx)) return null;
+  // THE POOL'S TRAVERSERS: the members themselves — or, where the pre-barrier part must run per member
+  // (`perMember`), each member's own results of it: that part lowered as a `local()` body over the members (the
+  // connector's `forward` rejoin, host-major then the body's order), each result keeping its member's key terms
+  // as host-only channels, and the pool continuing from the barrier.
+  let source: Rel = members;
+  let sourceFraming: RelFraming = framing;
+  let rest: readonly IRStep[] = body;
+  let restBulked = site.bulked;
+  if (perMember) {
+    const prefix = body.slice(0, cut);
+    const keyChannels = memberCols.map((column): Channel => ({ col: column.name, role: 'branchKey' }));
+    // The member as the traverser it is (its own columns — the key node is not its payload) plus its key terms.
+    const hostCols = [...own, ...memberCols];
+    const asHost = make.project({
+      id: fresh('pgh'), input: members, channels: keyChannels.reduce(withChannel, rel.channels), type: typeOf(...hostCols),
+      exprs: hostCols.map((column) => [column.name, col(members.id, column.name)] as const),
+    });
+    const frozen = freezeParent(positioned(asHost, fresh), fresh);
+    const msc = scope(frozen.rel, fresh);
+    const keyedPrefix = scopedBody(prefix, frozen.rel, framing, msc, ctx, fresh, labels, 'read', !isReductionArm(prefix));
+    const out = keyedPrefix && rejoin(msc, msc.scoped, keyedPrefix, frozen.rel, 'forward', false, ctx, fresh, labels, true);
+    const merged = out && mintBranchOrder([{ ...out, bulked: site.bulked || out.bulked }], frozen.parent, labels, ctx.source, fresh);
+    if (!out || !merged || !memberCols.every((column) => merged.rel.type.cols.some((c) => c.name === column.name))) return null;
+    source = merged.rel;
+    sourceFraming = merged.framing;
+    rest = body.slice(cut);
+    restBulked = site.bulked || out.bulked;
+  }
   // ONE KEY'S POOL: the members whose key is the domain row's, as the traverser stream the body starts from.
   const pooled = make.filter({
-    id: fresh('pgs'), input: members, channels: members.channels, type: members.type,
+    id: fresh('pgs'), input: source, channels: source.channels, type: source.type,
     // NULL-safe (`IS`): a term may be NULL for every member of a key (a string key has no family tag).
-    pred: memberCols.map((column, i): Expr => ({ kind: 'binary', op: 'is', left: col(members.id, column.name), right: col(sc.scoped.id, termCols[i]!.name) }))
+    pred: memberCols.map((column, i): Expr => ({ kind: 'binary', op: 'is', left: col(source.id, column.name), right: col(sc.scoped.id, termCols[i]!.name) }))
       .reduce((a, b) => and(a, b)),
   });
+  const termNames = new Set(memberCols.map((column) => column.name));
+  const seedChannels = source === members ? rel.channels : source.channels.filter((channel) => !termNames.has(channel.col));
+  const seedCols = source === members ? own : source.type.cols.filter((column) => !termNames.has(column.name));
   const seed = make.project({
-    id: fresh('pgn'), input: pooled, channels: rel.channels, type: rel.type,
-    exprs: own.map((column) => [column.name, col(pooled.id, column.name)] as const),
+    id: fresh('pgn'), input: pooled, channels: seedChannels, type: typeOf(...seedCols),
+    exprs: seedCols.map((column) => [column.name, col(pooled.id, column.name)] as const),
   });
-  if (ladderOwns(body, ctx)) return null;
-  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, bodyOrder: 'read' };
-  const tail = continueAs(seed, framing, body, 0, site.bulked, bodyCtx, fresh, labels);
+  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: rest, rooted: false }, originDomain: undefined, bodyOrder: 'read' };
+  const tail = continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, fresh, labels);
   if (!tail || tail.effects?.length) return null;
   const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh);
   if (!keyed) return null;
@@ -1477,6 +1608,11 @@ export function scopedHost(
   const step = steps[at];
   if (!connectorSite(step)) return undefined;
   const connector = CONNECTORS.get(step!.name)!;
+  // The bodies' unroll provenance, as the hosts' own lowering records it, so a width or size decline names the
+  // repeat() and the host it could move out of (`noteUnrolled`).
+  for (const arg of step!.args) if (isNested(arg.value)) {
+    noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, ['local', 'map', 'flatMap'].includes(step!.name) ? step!.name : null);
+  }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
   const routes = ctx.connectorOnly ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that

@@ -11,7 +11,7 @@
 // Over the modern graph `g.V().optional(__.out().as('a'))` is 9 rows: 6 bind `a`, 3 (the leaves) do not.
 import { test, expect, describe } from 'bun:test';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
-import { seededStore, run, bare } from '../support/harness.ts';
+import { LADDER, seededStore, run, bare } from '../support/harness.ts';
 
 const s = seededStore();
 const rows = (g: string): any[] => bare(run(s, g));
@@ -129,7 +129,7 @@ describe('a re-sourcing body over an unbound label declines with an explanation'
 test('a record over an unbound label spells its presence term once per map', () => {
   const g = `${OPT}.project('x').by(__.select('a').project('y').by(__.constant(1))).select('x').select('y').sum()`;
   expect(vals(g)).toEqual([6]);
-  const plan = compile(g, {});
+  const plan = compile(g, {}, { fastPaths: LADDER }); // `presenceDischarged` is the ladder's record route (opt-in since the inversion)
   if (plan.kind !== 'read') throw new Error('expected read plan');
   const presence = plan.sql.match(/json_extract\(\w+\.a0, '\$\[#-1\]\.v'\) AS INT\) IS NOT NULL/g)?.length ?? 0;
   const maps = plan.sql.split("json_object('t', 'string', 'v', 'y')").length - 1;

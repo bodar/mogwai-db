@@ -4,7 +4,7 @@
 // Map probe is spent (only where no scope beyond the Map names the key) — and the declines the query text
 // decides.
 import { test, expect, describe } from 'bun:test';
-import { bare, read, run, seededStore } from '../support/harness.ts';
+import { LADDER, bare, read, run, seededStore } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 
 const values = (rows: readonly any[]): unknown[] => rows.map((row) => row.v);
@@ -123,7 +123,7 @@ describe('select(k) over a per-row scalar stream — Map first only where nothin
 describe('a side-effect constant read in a choose arm', () => {
   test('over an always-present host: no presence term, and the choice answers', () => {
     const q = "g.withSideEffect('k',5).V().map(__.choose(__.hasLabel('person'), __.select('k'), __.constant(0)))";
-    expect(read(q).sql).not.toMatch(/IS NOT NULL/i);
+    expect(read(q, { fastPaths: LADDER }).sql).not.toMatch(/IS NOT NULL/i); // the ladder's choose-arm route
     expect(values(run(seededStore(), q)).sort()).toEqual([0, 0, 5, 5, 5, 5]);
   });
 

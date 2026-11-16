@@ -230,23 +230,39 @@ describe('a sum never saturates past int64', () => {
 // a Date stored as a number is never added or ordered as one — in a group value, a local reduction or the
 // top-level reducer alike — and a wide Long held as text is never ordered (or framed) as a String.
 describe('a reducer never reads a Boolean, a Date or a wide long through its storage class', () => {
+  // A group value is the SAME reducer over the key's members, so it answers what that reducer answers at the
+  // top level over those members: a key whose members are all Booleans (or all Dates, or a wide Long) has a
+  // max/min of that class — `g.V().hasLabel('software').coalesce(values('age'), constant(true)).max()` is `true`
+  // (NumberHelper.max/min compare a non-Number with `compareTo`,
+  // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:582-597).
+  // Members of DIFFERENT classes in one key still raise, at the top level and in a group alike.
+  const perKey: [string, string[]][] = [
+    ["g.V().group().by(label).by(coalesce(values('age'), constant(true)).max())",
+      ["g.V().hasLabel('person').coalesce(values('age'), constant(true)).max()", "g.V().hasLabel('software').coalesce(values('age'), constant(true)).max()"]],
+    ["g.V().group().by(label).by(coalesce(values('age'), constant(true)).min())",
+      ["g.V().hasLabel('person').coalesce(values('age'), constant(true)).min()", "g.V().hasLabel('software').coalesce(values('age'), constant(true)).min()"]],
+    ["g.V().group().by(label).by(choose(has('age'), values('age'), constant(true)).max())",
+      ["g.V().hasLabel('person').choose(has('age'), values('age'), constant(true)).max()", "g.V().hasLabel('software').choose(has('age'), values('age'), constant(true)).max()"]],
+    [`g.V().group().by(label).by(coalesce(values('age'), constant(${DATE})).max())`,
+      ["g.V().hasLabel('person').values('age').max()", `g.V().hasLabel('software').constant(${DATE}).max()`]],
+  ];
+  for (const [q, keys] of perKey) test(`a group value is its key's top-level reducer: ${q}`, async () => {
+    const parts: [unknown, number][] = [];
+    for (const k of keys) parts.push(...(await typed(k)));
+    expect(bagOf(await typed(`${q}.select(values).unfold()`))).toEqual(bagOf(parts as [unknown, number][]));
+  });
+  test('members of different classes in one key still raise', () =>
+    expect(typed("g.V().group().by(constant(1)).by(coalesce(values('age'), constant(true)).max())")).rejects.toThrow(RaisedByQuery));
   const deferred = [
-    "g.V().group().by(label).by(coalesce(values('age'), constant(true)).max())",
-    "g.V().group().by(label).by(coalesce(values('age'), constant(true)).min())",
     "g.V().group().by(label).by(coalesce(values('age'), constant(true)).mean())",
     "g.V().group().by(label).by(coalesce(values('age'), constant(true)).sum())",
-    "g.V().group().by(label).by(choose(has('age'), values('age'), constant(true)).max())",
     "g.V().coalesce(values('age'), constant(true)).fold().sum(local)",
     "g.V().hasLabel('software').coalesce(values('age'), constant(true)).fold().sum(local)",
     "g.V().coalesce(values('age'), constant(true)).fold().mean(local)",
     "g.V().choose(has('age'), values('age'), constant(true)).fold().sum(local)",
-    `g.V().group().by(label).by(coalesce(values('age'), constant(${DATE})).max())`,
     `g.V().group().by(label).by(coalesce(values('age'), constant(${DATE})).sum())`,
     `g.V().coalesce(values('age'), constant(${DATE})).fold().sum(local)`,
-    "g.V(1).property('b', true) ;; g.V().group().by(label).by(values('b').max())",
     "g.V(1).property('b', true) ;; g.V().values('b').fold().sum(local)",
-    `${WIDE}g.V().group().by(label).by(values('x').max())`,
-    `${WIDE}g.V().group().by(label).by(values('x').min())`,
   ];
   for (const q of deferred) test(`deferred: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
   const answered: [string, unknown[]][] = [
@@ -255,6 +271,10 @@ describe('a reducer never reads a Boolean, a Date or a wide long through its sto
     ["g.V().group().by(label).by(values('age').max()).select(values).unfold()", [35]],
     ["g.V().group().by(label).by(values('age').mean()).select(values).unfold()", [30.75]],
     [`${WIDE}g.V().values('x').max()`, [9007199254740993n]],
+    // The same reducers in a group value: a key holding only a Boolean or only a wide Long answers it.
+    ["g.V(1).property('b', true) ;; g.V().group().by(label).by(values('b').max()).select(values).unfold()", [true]],
+    [`${WIDE}g.V().group().by(label).by(values('x').max()).select(values).unfold()`, [9007199254740993n]],
+    [`${WIDE}g.V().group().by(label).by(values('x').min()).select(values).unfold()`, [9007199254740993n]],
   ];
   for (const [q, want] of answered) test(`answered: ${q}`, async () => expect(bagOf(await values(q))).toEqual(bagOf(want)));
 });

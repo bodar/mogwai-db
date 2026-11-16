@@ -20,13 +20,14 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import * as walk from '../../src/rel/walk.ts';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { JoinWidthExceeded } from '../../src/sql/kernel/budget.ts';
-import { bare, run, seededStore } from '../support/harness.ts';
+import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
+import { bare, LADDER, run, seededStore } from '../support/harness.ts';
 
 /** Child-relation enumerations one compile makes — answered or declined. */
-const enumerations = (q: string): number => {
+const enumerations = (q: string, fastPaths?: Partial<FastPathConfig>): number => {
   const rc = spyOn(walk, 'relChildren');
   try {
-    try { compile(q, {}); } catch (e) { if (!(e instanceof UnsupportedTraversal)) throw e; }
+    try { compile(q, {}, fastPaths ? { fastPaths } : undefined); } catch (e) { if (!(e instanceof UnsupportedTraversal)) throw e; }
     return rc.mock.calls.length;
   } finally { rc.mockRestore(); }
 };
@@ -39,13 +40,18 @@ const HOSTS: readonly (readonly [string, (k: number) => string])[] = [
   ['filter', (k) => `g.V().filter(repeat(out()).times(${k})).count()`],
 ];
 
+// Measured in EACH child order alone: where one order's plan is past the join width the compile retries in the
+// other (`bothChildOrders`), a constant factor of at most two that lands on whichever count first crosses it
+// (`local` at 63, where the connector's flattened FROM is 65 tables and the ladder's is not) — a step, not growth.
 describe('an unroll inside a host compiles in work linear in its count', () => {
   for (const [host, q] of HOSTS) {
-    test(host, () => {
-      const [k16, k32, k63] = [16, 32, 63].map((k) => enumerations(q(k)));
-      expect(k32! / k16!).toBeLessThanOrEqual(2.5);
-      expect(k63! / k32!).toBeLessThanOrEqual(2.5);
-    });
+    for (const [order, fastPaths] of [['connector', { connectorOnly: true }], ['ladder', LADDER]] as const) {
+      test(`${host} (${order})`, () => {
+        const [k16, k32, k63] = [16, 32, 63].map((k) => enumerations(q(k), fastPaths));
+        expect(k32! / k16!).toBeLessThanOrEqual(2.5);
+        expect(k63! / k32!).toBeLessThanOrEqual(2.5);
+      });
+    }
   }
 });
 

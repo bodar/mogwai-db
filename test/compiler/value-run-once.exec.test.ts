@@ -97,6 +97,10 @@ describe('statement text grows LINEARLY in the run length — doubling the run a
     ['substring in a by()', (k) => `g.V().project('a').by(__.values('name')${substrings(k)})`],
     ['is() in a by()', (k) => `g.V().project('a').by(__.values('age')${neqs(k)})`],
     ['is() over a selected label', (k) => `g.V().union(values('age').as('k'), constant(0)).map(select('k')${neqs(k)})`],
+    // The scoped-relation connector's correlated bodies (the default since the Phase 3 inversion): each step's
+    // computed input is fenced by the emitter (`rereadsSubquery`, src/rel/emit.ts), never re-inlined.
+    ['substring in a group() value', (k) => `g.V().group().by(label).by(__.values('name')${substrings(k)}.fold())`],
+    ['transforms in a group() value', (k) => `g.V().group().by(label).by(__.values('name')${cases(k)}.fold())`],
   ];
   for (const [what, query] of shapes) {
     test(what, () => expect(sqlBytes(query(12))).toBeLessThanOrEqual(2.2 * sqlBytes(query(6))));

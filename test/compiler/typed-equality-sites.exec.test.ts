@@ -32,13 +32,18 @@ describe('an all-null mean() is NULL — math() refuses a null traverser, a chil
     ]) expect(raises(q), q).toContain('must resolve to a Number');
   });
 
-  test('a child body whose value is NULL produced nothing (presence is value nullness), so nothing reaches math()', () => {
+  // A child body whose one result IS a null produces it, as the reference does (`TraversalMapStep` emits
+  // `mapTraversal.next()`, vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java:49-53;
+  // `LocalStep` forwards the child's traverser) — so math() then refuses it, exactly as over a null traverser
+  // above. The L4 twin is `null-membership-typed-sets.feature`. A null `by()` VALUE is still absent where §17
+  // says so: `sack(assign).by(<null>)` drops the row (docs/feature-support-matrix.md §17, "A null by() value").
+  test('a child body whose value is NULL produces the null, which math() refuses', () => {
     for (const q of [
       `g.V(1).out().map(${ALL_NULL_MEAN}).math('_ + 1')`,
       `g.V(1).out().local(${ALL_NULL_MEAN}).math('_ + 1')`,
       `g.V(1).out().map(${ALL_NULL_MEAN}).where(__.math('_ + 1'))`,
-      `g.withSack(1).V(1).out().sack(assign).by(${ALL_NULL_MEAN}).sack().math('_ + 1')`,
-    ]) expect(typed(q), q).toEqual([]);
+    ]) expect(raises(q), q).toContain('must resolve to a Number');
+    expect(typed(`g.withSack(1).V(1).out().sack(assign).by(${ALL_NULL_MEAN}).sack().math('_ + 1')`)).toEqual([]);
   });
 
   test('a non-null mean is still a Double, and an all-null one still a null', () => {
