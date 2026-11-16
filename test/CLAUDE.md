@@ -113,6 +113,13 @@
   which is the thing the L3 count structurally cannot. Current state + runbook:
   `L5-properties/README.md`; design rationale + the unbuilt oracles:
   `docs/property-based-testing-l5.md`.
+- **L6** (`test/L6-workload/`) — the realistic-WORKLOAD ratchet: ~300 app-shaped queries (the owner's
+  seed list, TinkerPop recipes, *Practical Gremlin* over `air-routes`) classified pass / wrong / unverified
+  / declined / error against goldens generated ONCE, offline, from TinkerGraph
+  (`scripts/workload-goldens/generate.ts` — docker, never CI), reported by source, idiom and CHILD-nesting
+  depth. Values compare as typed canonical strings read from the GraphBinary bytes (`canon.ts`), so `3` vs
+  `3.0` is a wrong answer. `baseline.json` is re-recorded by `mise run workload-record`, never by the test,
+  and a WRONG answer can only be baselined with a human-written reason. `mise run L6` prints the full report.
 - **L8** (no folder — a MODE) — the whole suite re-run under `reverse_unordered_selects`, gated at zero:
   every order an answer relies on is pinned by the SQL. See "L8 — the perturbation rung" below.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers

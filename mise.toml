@@ -309,6 +309,26 @@ sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.jso
 # Not in `ci` only because of its SIZE (3000 traversals). Ordinary L5 derives its seed from HEAD,
 # so CI and a local checkout of the same commit draw the same corpus; this deeper sweep remains
 # intentionally random for breadth and prints its seed for reproduction.
+# The realistic-WORKLOAD ratchet (docs/2026-11-15-compositional-coverage-plan.md cc0-workload): ~300
+# app-shaped queries over modern/crew/air-routes, classified pass/wrong/unverified/declined/error against
+# goldens generated offline from TinkerGraph (scripts/workload-goldens/generate.ts — never run here).
+# `test/L6-workload/` is its own CI bracket by construction (scripts/brackets.ts). MOGWAI_VERBOSE so this
+# task prints the full report by source, graph, nesting depth and idiom; inside `test` it prints one line.
+[tasks.L6]
+alias = "workload"
+description = "L6 — realistic workload: app-shaped queries vs TinkerGraph goldens (ratcheted; full report)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_VERBOSE = "1" }
+run = "bun test test/L6-workload"
+sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
+
+# Re-record the L6 baseline — a command, never the test (a new WRONG answer is written UNTRIAGED and the
+# test refuses it until a human gives the reason). Prints the report and the delta first.
+[tasks.workload-record]
+description = "Re-record the L6 workload baseline (prints the report + delta; commit test/L6-workload/baseline.json)"
+depends = ["install", "check", "submodule"]
+run = "bun run test/L6-workload/record.ts"
+
 [tasks.L5-random]
 description = "L5 exploration — random seed, 3000 generated traversals (not a CI gate)"
 depends = ["install", "check", "submodule"]
