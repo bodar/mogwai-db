@@ -175,6 +175,8 @@ interface Closed {
   readonly subqueryCols?: ReadonlySet<string>;
   /** The output columns some arm spells with a value that may carry the JSON subtype. */
   readonly jsonCols?: ReadonlySet<string>;
+  /** A `UNION ALL` SQLite may flatten into the FROM that reads it brings its widest arm's tables (`derivedTables`). */
+  readonly tables?: number;
 }
 type Built = Block | Closed;
 
@@ -278,10 +280,13 @@ const relReads: (r: Rel) => Reads = nodeFact((root: Rel): Reads => {
  * statement no store can run, and its width is a property of the query text: a `repeat(…).times(n)` unroll
  * inside a per-traverser host (`local`, `where`, `map`, …) fuses one join per iteration into ONE block.
  *
- * Refused HERE, as the block is assembled and before the rest of the statement is built, because the store
- * refuses it anyway (`STATEMENT_SHAPE_LIMIT`, `src/storage.ts`) — only after the compiler has spelled every
- * iteration: measured on `g.V(1).where(repeat(out()).times(2000)).count()`, seconds of compile, then the
- * same decline. Exact rather than predicted: the count is the FROM the assembler is actually building.
+ * A JOIN past it CLOSES ITS WIDER SIDE into one derived table fenced with `OFFSET 0` (`side`'s `fence`), so the
+ * unroll nests a SELECT every 64 tables and answers. What is left for `joinFits` is an assertion — a side it may
+ * not close (a recursive term's own reference, P1) or an `Explode` over a full block — refused HERE, as the block
+ * is assembled, because the store refuses it anyway (`STATEMENT_SHAPE_LIMIT`, `src/storage.ts`), only after the
+ * compiler has spelled every iteration. The count must see what the flattener WILL merge: a flattenable derived
+ * table, `UNION ALL` (its widest arm) or CTE brings its own tables (`derivedTables`) — measured, a `both()`
+ * unroll whose compound CTEs counted one table each closed at 64 and SQLite still refused the flattened 65.
  */
 const SQLITE_JOIN_TABLES = 64;
 const joinFits = (items: number): void => {
@@ -298,7 +303,8 @@ const fromTables = (b: { readonly from: FromItem; readonly joins: readonly JoinI
  */
 const flattens = (built: Built): built is Block => built.kind === 'block' && built.groupBy === undefined && !built.distinct
   && !built.windowed && built.having === undefined && !built.orderBy?.length && built.limit === undefined && built.offset === undefined;
-const derivedTables = (built: Built): { readonly tables?: number } => (flattens(built) ? { tables: fromTables(built) } : {});
+const derivedTables = (built: Built): { readonly tables?: number } =>
+  (flattens(built) ? { tables: fromTables(built) } : built.kind === 'closed' && built.tables ? { tables: built.tables } : {});
 
 function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudget) {
 
@@ -324,6 +330,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
    * CTE boundaries. */
   const jsonText = new WeakSet<Expression>();
   const cteJsonCols = new Map<string, ReadonlySet<string>>();
+  /** Per CTE SQLite may flatten into its reader, the tables it brings to that reader's join (`derivedTables`). */
+  const cteTables = new Map<string, number>();
   const carriesJson = (e: Expr, scope: Scope): boolean => mayCarryJsonSubtype(e, (rel, name) => {
     const spelled = scope.get(rel)?.get(name);
     return spelled ? jsonText.has(spelled) : true;
@@ -827,12 +835,15 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
    * `FROM r0 shared INNER JOIN r0 shared` → `ambiguous column name`. A collision is not an error
    * (the sides are genuinely different relations, §9's `c4bce7f` rule is about ONE relation used
    * twice); it just means this side keeps its own SELECT, where its aliases are private again.
+   *
+   * `fence` closes the side for WIDTH (`closesForWidth`): its block becomes ONE derived table fenced with
+   * `OFFSET 0` (the flattener's rule 14, as `fenced`), so it counts one table toward SQLite's 64.
    */
-  const side = (r: Rel, outer: Scope, mayFuse: boolean, taken: ReadonlySet<string>): Side => {
-    const built = build(r, outer);
-    if (built.kind === 'block' && maySplice(mayFuse, built, [built.from.alias, ...built.joins.map((join) => join.item.alias)], taken))
+  const side = (r: Rel, outer: Scope, mayFuse: boolean, taken: ReadonlySet<string>, built: Built = build(r, outer), fence = false): Side => {
+    if (fence && built.kind === 'block') built = { ...built, offset: built.offset ?? raw('0') };
+    if (built.kind === 'block' && maySplice(mayFuse && !fence, built, [built.from.alias, ...built.joins.map((join) => join.item.alias)], taken))
       return { from: built.from, joins: built.joins, where: built.where, cols: built.select.map(([, e]) => e), scope: built.scope };
-    const direct = directSource(r, outer);
+    const direct = fence ? undefined : directSource(r, outer);
     const { item, cols } = direct && free([direct.item.alias], taken)
       ? direct
       : { item: { text: q`(${renderBuilt(built)})`, alias: r.id, ...derivedTables(built) }, cols: colsOf(r.id, r) };
@@ -840,6 +851,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     return { from: item, joins: [], cols: r.type.cols.map((column) => cols.get(column.name)!), scope: withRel(outer, r.id, cols) };
   };
   const sideAliases = (s: Side): readonly string[] => [s.from.alias, ...s.joins.map((join) => join.item.alias)];
+  /** Whether closing this side for width narrows the join: a block that brings several tables, and never one
+   *  holding a recursive term's own reference, which SQLite requires unwrapped (P1, as `inputBlock`). */
+  const closesForWidth = (r: Rel, built: Built, s: Side, taken: ReadonlySet<string>): boolean =>
+    built.kind === 'block' && fromTables(s) > 1 && free([r.id], taken) && !fromTree(r).some((source) => source.kind === 'self-ref');
 
   /**
    * How an argument-less `count` is spelled over this block's FROM — `count(*)` over a lone BASE TABLE,
@@ -881,7 +896,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       const cols = colsOf(alias, r);
       for (const name of cteSubqueryCols.get(r.name) ?? []) { const spelled = cols.get(name); if (spelled) subqueryCols.add(spelled); }
       for (const name of cteJsonCols.get(r.name) ?? r.type.cols.map((column) => column.name)) { const spelled = cols.get(name); if (spelled) jsonText.add(spelled); }
-      return { item: { text: ident(r.name), alias }, cols };
+      const tables = cteTables.get(r.name);
+      return { item: { text: ident(r.name), alias, ...(tables ? { tables } : {}) }, cols };
     }
     const rows: RowsBind = { rowsOf: r.name };
     const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(alias, 'value')}, ${textLiteral(`$[${i}]`)})`]));
@@ -925,6 +941,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     const built = build(node, EMPTY_SCOPE);
     // A fenced CTE is computed once by construction; any other one SQLite may flatten into its reader.
     if (!fenced) cteSubqueryCols.set(name, new Set(carriesSubquery(built)));
+    const tables = fenced ? undefined : derivedTables(built).tables;
+    if (tables) cteTables.set(name, tables);
     cteJsonCols.set(name, new Set(carriesJsonText(built)));
     return q`${ident(name)} AS ${fenced ? raw('MATERIALIZED ') : empty}(${renderBuilt(built)})`;
   };
@@ -1059,7 +1077,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       }
 
       case 'join': {
-        const left = side(r.left, outer, true, new Set());
+        const leftBuilt = build(r.left, outer);
+        let left = side(r.left, outer, true, new Set(), leftBuilt);
         const taken = new Set(sideAliases(left));
         if (r.join === 'semi' || r.join === 'anti') {
           // Adds no columns: an existence test over the right side, correlated against the left.
@@ -1070,7 +1089,16 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         }
         // Only an inner/cross join may splice its right side: a LEFT join's right-side predicate
         // must stay inside the subquery, or an unmatched row is filtered instead of null-padded.
-        const right = side(r.right, outer, r.join === 'inner' || r.join === 'cross', taken);
+        const rightBuilt = build(r.right, outer);
+        let right = side(r.right, outer, r.join === 'inner' || r.join === 'cross', taken, rightBuilt);
+        // PAST SQLITE'S JOIN WIDTH THE WIDER SIDE CLOSES — one fenced derived table (`side`'s `fence`), so an
+        // unroll inside a per-traverser host nests every 64 tables instead of declining; `joinFits` asserts it.
+        if (fromTables(left) + fromTables(right) > SQLITE_JOIN_TABLES) {
+          const rightTaken = new Set(sideAliases(right));
+          if (fromTables(left) >= fromTables(right) && closesForWidth(r.left, leftBuilt, left, rightTaken))
+            left = side(r.left, outer, false, rightTaken, leftBuilt, true);
+          else if (closesForWidth(r.right, rightBuilt, right, taken)) right = side(r.right, outer, false, taken, rightBuilt, true);
+        }
         joinFits(fromTables(left) + fromTables(right));
         const scope = mergeScopes(left.scope, right.scope);
         const on = r.on ? expr(r.on, scope) : undefined;
@@ -1097,6 +1125,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
           // Positional, as the compound itself is: an arm's i-th column is the union's i-th.
           subqueryCols: new Set(r.type.cols.filter((_, i) => arms.some((arm) => subqueryCols.has(arm.select[i]![1]))).map((column) => column.name)),
           jsonCols: new Set(r.type.cols.filter((_, i) => arms.some((arm) => jsonText.has(arm.select[i]![1]))).map((column) => column.name)),
+          // SQLite's flattener merges a UNION ALL into its reader one arm at a time (`flattenSubquery` rule 17).
+          ...(r.all && arms.every(flattens) ? { tables: Math.max(...arms.map(fromTables)) } : {}),
         };
       }
 

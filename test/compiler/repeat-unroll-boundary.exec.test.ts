@@ -460,8 +460,8 @@ describe('the repeat() unroll boundary', () => {
 // the compiled text — of the query — never of the data, so the user gets a clear decline naming the
 // limit and the likely cause, never SQLite's bare message (`GraphStore.query`, src/storage.ts).
 // The 64-table join limit is the one the compiler can see for itself: the assembler knows how wide a FROM
-// it is building, so it declines there (`SQLITE_JOIN_TABLES`, src/rel/emit.ts) rather than spelling the
-// statement for SQLite to refuse. Same decline class, its own message (`host-unroll-width.exec.test.ts`).
+// it is building, so it closes a join side there (`SQLITE_JOIN_TABLES`, src/rel/emit.ts) rather than
+// spelling a statement for SQLite to refuse (`host-unroll-width.exec.test.ts`).
 //
 // `repeat(both().limit(3)).times(24)` USED to be the "65,535 references" witness here: every `both()` hop was
 // a UNION ALL naming its frontier twice, so 24 phases were 2^24 references. A multi-direction hop now reads
@@ -472,8 +472,10 @@ const CHAINED_UNIONS = `g.V()${'.union(__.out(),__.in())'.repeat(16)}.count()`;
 describe('a bounded repeat past a SQLite statement-shape limit declines clearly', () => {
   // A ROOT-chain unroll of a barrier-free body: the one place the walk is known to take it, so the loop is
   // offered — and nothing about moving it to a top level it is already at.
-  test('the join-width limit is declined before the store sees it', () => {
-    expect(() => run(store, 'g.V().repeat(__.out()).emit().times(64).count()')).toThrow(/^this traversal is not supported yet: it joins more than 64 tables in one SQL SELECT, SQLite's limit; repeat\(…\)\.times\(64\) unrolls into one join per iteration — lower the count, or bound it with until\(loops\(\)\.is\(64\)\), which runs as a loop rather than unrolled$/);
+  // The join width is no longer one: the assembler closes the wider side of a join that would pass it into a
+  // fenced derived table, so the unroll answers (`host-unroll-width.exec.test.ts`).
+  test('the join-width limit is closed by the assembler, not declined', () => {
+    expect(run(store, 'g.V().repeat(__.out()).emit().times(64).count()')).toEqual([{ v: 8 }]);
   });
   // The store sees only SQL, so it names the limit and blames no step: this query has no repeat() at all.
   test.each([
@@ -687,19 +689,19 @@ describe('a long unrolled chain cut into CTEs', () => {
     expect(() => run(ring, q)).toThrow(/sum\/mean over a text or non-number value/);
   });
 
-  // A body SQLite FLATTENS (a bare `out('next')`, no barrier) makes one FROM list of every hop, so there
-  // the binding limit is SQLite's 200-term FROM list, not the statement text: past it, on a full stack and
-  // a workerd-sized one alike, the user gets the clear decline naming it — never SQLite's bare message.
+  // A body SQLite FLATTENS (a bare `out('next')`, no barrier) once made one FROM list of every hop, past
+  // SQLite's 200-term cap. The assembler now closes a join side every 64 tables (`SQLITE_JOIN_TABLES`,
+  // src/rel/emit.ts), so no FROM list grows with the count: on a full stack and a workerd-sized one alike
+  // the walk answers — 1200 and 200 hops round the 40-ring both land back on 0.
   test.each([
-    "g.V().has('i', 0).repeat(__.out('next')).times(1200).values('i')",
-    "g.V().repeat(__.out('next')).times(1200).values('i').limit(2)",
-    "g.V().has('i', 0).repeat(__.out('next')).times(200).values('i')",
-  ])('a flattened unroll past the FROM-list cap declines: %s', (q) => {
+    ["g.V().has('i', 0).repeat(__.out('next')).times(1200).values('i')", 1],
+    ["g.V().repeat(__.out('next')).times(1200).values('i').limit(2)", 2],
+    ["g.V().has('i', 0).repeat(__.out('next')).times(200).values('i')", 1],
+  ] as const)('a flattened unroll past the FROM-list cap answers: %s', (q, count) => {
     for (const go of [() => run(ring, q), () => underShallowStack(() => run(ring, q))]) {
-      let thrown: unknown;
-      try { go(); } catch (e) { thrown = e; }
-      expect(thrown).toBeInstanceOf(UnsupportedTraversal);
-      expect((thrown as Error).message).toContain('exceeds a SQLite statement limit (too many FROM clause terms, max: 200)');
+      const values = (go() as any[]).map((r) => r.v);
+      expect(values.length).toBe(count);
+      if (count === 1) expect(values).toEqual([0]);
     }
   });
 

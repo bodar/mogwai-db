@@ -32,10 +32,10 @@ describe('L9 — ladder reach engine', () => {
     expect(r.differ).toEqual([]);
   });
 
-  test('a join too wide for one order is RESCUED by the retry (`childOrderRetry: false` declines it)', () => {
+  // R2: the emitter closes a join side past SQLite's width, so neither order needs the other's plan.
+  test('a join too wide for one SELECT is answered by the connector alone, with no retry', () => {
     const r = run('g.V().local(repeat(out()).times(63)).count()');
-    expect(r.ladderOnly.map((x) => [x.family, x.rescued])).toEqual([['per-traverser', true]]);
-    expect(counts(r).rescued).toBe(1);
+    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, rescued: counts(r).rescued }).toEqual({ ladderOnly: 0, differ: [], rescued: 0 });
   });
 
   test('a traversal both modes answer is not ladder-only, and agrees', () => {

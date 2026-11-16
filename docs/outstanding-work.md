@@ -170,8 +170,9 @@ statement's text grows with data or doubles with query shape. The items below ar
 - ✅ **LANDED (dadaba39) — cc-6 host-unroll compile work — MAJOR, plausible (review of cc-5).** `freeRelIds`
   (`src/rel/walk.ts`) checks every direct child id before searching a subtree and `relReads`
   (`src/rel/emit.ts`) is one saturating pass per subplan, so compile work under a host is linear in
-  `times(K)` (`where(times(2000))` 5.5 s → ~0.2 s); a fused FROM past SQLite 64-table join width declines
-  at the assembler (`JoinWidthExceeded`) in ms, naming the `times(n)`. Emitted SQL unchanged for every plan
+  `times(K)` (`where(times(2000))` 5.5 s → ~0.2 s); a fused FROM past SQLite 64-table join width now
+  closes its wider side into an `OFFSET 0`-fenced derived table and ANSWERS (R2a, ladder-retirement plan;
+  `JoinWidthExceeded` is left as the assembler's assertion). Emitted SQL unchanged for every plan
   that answers. Tests: `test/compiler/host-unroll-width.exec.test.ts`. Remains: nothing. Original item text
   follows.
   The budget meters BYTES, but compile
