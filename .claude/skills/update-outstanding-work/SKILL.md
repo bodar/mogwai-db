@@ -26,13 +26,17 @@ This ordering principle governs prioritization; preserve it and use it to rank.
 
 - **L3 is the floor** — documented scenarios that pass. Not the goal.
 - **The ceiling** is generic lowering that composes the full nested Gremlin grammar at any valid
-  depth/combination (see `src/compiler/steps/CLAUDE.md`).
+  depth/combination (see `src/compiler/CLAUDE.md`). For nesting, the generic seam is the
+  scoped-relation connector (root `CLAUDE.md` locked decision 6): measure the ceiling with
+  `mise run coverage` (execute % by child depth) and the connector-only host-closure, and rank a
+  decline cluster by whether ONE connector row or ONE body/decorrelator fix clears it.
 - A one-off "implement step X for exactly the failing scenario" raises the floor by one; extending
   the **generic seam** so a whole family of nested compositions lowers at once raises the ceiling —
   and the floor follows for free.
 - So **P1 = ceiling-raising generic-substrate lifts** (each unblocks a *family*). One-off step
   implementations are lower — matrix-fill, not ceiling-raising. The largest L3 deferral buckets
-  (`local`/`where`/`choose`/`map`/`by(traversal)` child shapes) are almost always ceiling gaps.
+  (`local`/`where`/`choose`/`map`/`by(traversal)` child shapes) are almost always ceiling gaps —
+  connector or body-lowering gaps, never a reason for a new correlated route.
 
 ## The committed test baselines ARE inputs to this index
 
@@ -149,7 +153,9 @@ cross-layer shape refactors** and states the rule (*a Pass may CONSULT shape; it
 it*) — tell it not to re-propose those. Ask specifically for **places the
 substrate/lowering could be made more generic** — steps hand-rolling similar SQL that could route
 through a shared seam, fast-paths duplicating the general path, shapes special-cased where a generic
-mechanism exists — plus hard `throw` deferrals and TODO/FIXME. **Expect zero TODO/FIXME markers**:
+mechanism exists, and **every rung of the old `correlatedChild` ladder the scoped-relation connector
+now covers** (a deletion candidate: give its `mise run scaling` margin and its line count, since a
+rung survives only on a measured win weighed against its complexity) — plus hard `throw` deferrals and TODO/FIXME. **Expect zero TODO/FIXME markers**:
 debt here is encoded as typed `throw` deferrals and prose, so ask it to cluster the throw sites by ROOT
 CAUSE and say which clusters ONE generic lift would clear. Ask for a measured
 **(shape × row-op) matrix** if it is auditing the shape tails — a counted matrix turned "67 per-step

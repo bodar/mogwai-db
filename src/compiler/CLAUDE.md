@@ -62,15 +62,28 @@ while what they operate on keeps TinkerPop's.
   access-path strategy). Either position must compile the same traversal — turning one off may change the
   PLAN, never whether there is one — and L5's per-switch sweep is what checks that claim. No new
   switch without its differential + perf evidence in the same change.
-- **A child-taking host is a CONNECTOR as well as a ladder of routes.** `rel/lower/scoped.ts` scopes the
-  host stream by a row number (any framing), lowers the body over ONE correlated host row through
-  `continueAs` — the root's fold — and DECORRELATES it (`src/rel/decorrelate.ts`, Neumann/Calcite
-  `TopDownGeneralDecorrelator`: one rule per RelIR node kind, the scope key added to every grouping/window/
-  limit, a scalar aggregate LEFT-joining the domain for its value over zero rows), then reconnects by the
-  host's row in `CONNECTORS` (keyed by step name). The ladder is the `correlatedChild` fast path; the two
-  are each other's fallback at a site, and `bothChildOrders` (`rel/spine.ts`) retries a declining compile
-  in the other order, so the switch never decides coverage. A body that draws or re-sources stays the
-  ladder's (`scopedBody`). New hosts are new `CONNECTORS` rows, never a shape-specific branch.
+- **A child traversal lowers through the SCOPED-RELATION CONNECTOR — this is THE mechanism for nesting,
+  and all new work goes through it.** `rel/lower/scoped.ts` scopes the host stream (any framing), lowers
+  the body over ONE correlated host row through `continueAs` — the root's own fold, so every step the root
+  lowers is automatically a step a body lowers — and reconnects it by the host's row in `CONNECTORS`
+  (keyed by step name). Where SQL can hold the dependency the body stays correlated (an `EXISTS`, a
+  correlated first-row scalar — SQLite has no hash join, so an index-seeking dependent join is the fast
+  form); otherwise it is DECORRELATED (`src/rel/decorrelate.ts`, Neumann/Calcite
+  `TopDownGeneralDecorrelator`: one rule per RelIR node kind, the scope key added to every grouping/
+  window/limit, a scalar aggregate LEFT-joining the domain for its value over zero rows). This is what
+  flattened the nesting-depth decline cliff (measured: `docs/2026-11-15-compositional-coverage-plan.md`
+  G1/G2 and Phase 3) — composition comes from the ALGEBRA, not from enumerating routes. So:
+  - **A new child-taking host is a `CONNECTORS` row** built from the shared reconnect primitives.
+    **Never** a new correlated route, ladder rung or `(host, body-shape)` branch — that is the pattern
+    that produced ~890 decline sites and a 98% decline rate at depth 5.
+  - **A body that does not lower is fixed in the body's lowering or in `decorrelate.ts`** (one rule per
+    node kind), so the fix composes at every depth and under every host at once.
+  - **The old ladder is the `correlatedChild` FastPath and it is SHRINKING.** A route survives only with
+    a MEASURED win (`mise run scaling`, 1k/8k) weighed against its complexity; a complex route the
+    connector replaces is deleted. Never extend it. Deleting a rung is scope worth taking.
+  - The two orders are each other's fallback at a site and `bothChildOrders` (`rel/spine.ts`) retries a
+    declining compile in the other order, so the switch never decides coverage. A body that draws or
+    re-sources stays the ladder's (`scopedBody`) until the connector owns it.
 - **Shape is CONSULTED, never CONSTRUCTED — the bright line.** Shape may be an annotation a Pass reads
   and may DECLINE on; it must never be a representation a Pass CONSTRUCTS or a lowering CONSUMES, and
   sharing across shapes is registration into a Map, never a widening fallback chain. This is a
@@ -92,5 +105,8 @@ while what they operate on keeps TinkerPop's.
   `src/rel/` node set). The shape vocabularies themselves landed as that plan's §6·3 three-layer
   boundary (row algebra → payload projection → byte framing). **The burden on any structural proposal
   here is a measurement, not a design sketch** — forward-reasoned "this needs a new substrate" has been
-  falsified about a dozen times; the wins were reachability fixes and one measured vocabulary
-  unification (`ScalarType`).
+  falsified about a dozen times; the wins were reachability fixes, one measured vocabulary
+  unification (`ScalarType`), and the scoped-relation connector above — which is the model of how a
+  structural change earns its place: an attribution instrument showed 94.5% of deep declines were ONE
+  seam (G1), a switched spike showed the curve flatten with zero wrong answers (G2), then it was built
+  out. Measure first; when the measurement says "one substrate", build the substrate.

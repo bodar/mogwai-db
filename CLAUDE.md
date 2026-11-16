@@ -254,6 +254,13 @@ property.
    rule under Environment notes and
    `docs/archive/2026-08-05-parameters-are-the-only-binds.md`). What stays out of the compiler is the wire
    *format*, not the *fact that the user declared a parameter*.
+6. **Nesting composes through ONE mechanism: the scoped-relation connector** (general decorrelation —
+   `src/compiler/rel/lower/scoped.ts` + `src/rel/decorrelate.ts`; the rule and its measurements are in
+   `src/compiler/CLAUDE.md`). Every child traversal — `where`/`map`/`project().by`/`group().by`/
+   `coalesce`/`union`/… at any depth — lowers its body with the root's own fold and reconnects through a
+   `CONNECTORS` row. A new host is a row; a body that won't lower is fixed in the body's lowering or the
+   decorrelator. Never add a correlated route or a `(host, body-shape)` special case — the old ladder
+   is a shrinking fast path that must earn its keep by measurement. Owner decision, 2026-11-16.
 
 ## Semantics traps — encode as tests before touching related steps
 

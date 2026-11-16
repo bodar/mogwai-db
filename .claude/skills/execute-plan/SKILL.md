@@ -34,6 +34,11 @@ For each logical item, smallest shippable unit first:
    valid depth/combination in a query (the ceiling, per `docs/outstanding-work.md`'s floor-vs-ceiling
    frame). Prefer extending a generic seam so a whole family lowers at once over special-casing one
    shape. **If a deferral can be dissolved by widening the seam instead of throwing, widen the seam.**
+   **For anything nested — a child traversal under any host — the seam is the scoped-relation
+   connector** (root `CLAUDE.md` locked decision 6, `src/compiler/CLAUDE.md`): a new host is a
+   `CONNECTORS` row, a body that won't lower is fixed in the body's lowering or `src/rel/decorrelate.ts`.
+   Never add a correlated route or ladder rung. Check with `mise run coverage` (the depth curve) and the
+   host-closure ratchet that the fix composes at depth 2–3, not just at the named scenario.
 3. **Cite the references.** Every semantics or lowering decision is grounded in upstream *at the pin*,
    cited as a checkable path: `vendor/tinkerpop/gremlin-core/...` (and `gremlin-language`,
    `gremlin-test`) for Gremlin's WHAT and WHY, `vendor/calcite/...` for algebra and rel→SQL lowering.
@@ -74,7 +79,8 @@ larger move:
 
 - builds **generic or compounding substrate** (a shared seam many items route through), or
 - **removes duplication** (two steps hand-rolling the same SQL, a fast path re-deriving the general
-  path).
+  path) — above all, **moving a case from the old correlated ladder onto the connector and deleting the
+  rung**, which is the standing direction for the compiler.
 
 **Blast radius is never, by itself, a reason not to do the principled thing.** An LSP rename costs the
 same at 1,200 references as at 12 (CLAUDE.md, "Naming"); the type-aware tools (`scripts/refs.ts`,
