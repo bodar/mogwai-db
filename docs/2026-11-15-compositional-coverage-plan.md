@@ -311,6 +311,16 @@ declines (`project('p').out()`, `count().values()`); with the guards, the full-s
 host, hoisted over the host's input, compiles (and, outside a `repeat`, executes). Noise (d) is lattice-only:
 a filter over an always-productive seeded reducer, or a hoisted body the reference rejects.
 
+**G1 decision (owner, 2026-11-16): PROCEED to Phase 2.** Alongside it, run the class (b) step-gap
+clusters found in the workload as their own track (**cc1b**, in workload-reach order):
+- meta-property access (`properties(k).has/hasNot/values/order().by`);
+- `path()` as a value (`path().count(local)`, `path().unfold()`);
+- `tree()`;
+- `where(P.within/without(<side-effect>))`;
+- `where(P.gt('a')).by(k)`.
+
+S4/S5 do not cover these, so they will not fall out of the refactor.
+
 ### Phase 2 — Spike: scoped relations for three hosts, behind a switch. IDs `cc2-*`.
 
 - Implement S1–S3 plus the connector rows for `where`/`not`, `map`, and `project().by` over **every host framing**.
