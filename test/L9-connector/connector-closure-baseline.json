@@ -20,7 +20,7 @@
     "flatMap": {
       "1": {
         "applicable": 200,
-        "executed": 195
+        "executed": 196
       },
       "2": {
         "applicable": 60,
@@ -34,7 +34,7 @@
     "local": {
       "1": {
         "applicable": 200,
-        "executed": 195
+        "executed": 196
       },
       "2": {
         "applicable": 79,
@@ -42,31 +42,31 @@
       },
       "3": {
         "applicable": 65,
-        "executed": 63
+        "executed": 64
       }
     },
     "where": {
       "1": {
         "applicable": 200,
-        "executed": 195
+        "executed": 196
       },
       "2": {
         "applicable": 103,
-        "executed": 95
+        "executed": 96
       },
       "3": {
         "applicable": 64,
-        "executed": 55
+        "executed": 56
       }
     },
     "filter": {
       "1": {
         "applicable": 200,
-        "executed": 195
+        "executed": 196
       },
       "2": {
         "applicable": 63,
-        "executed": 55
+        "executed": 57
       },
       "3": {
         "applicable": 66,
@@ -76,7 +76,7 @@
     "not": {
       "1": {
         "applicable": 200,
-        "executed": 195
+        "executed": 196
       },
       "2": {
         "applicable": 71,
@@ -84,13 +84,13 @@
       },
       "3": {
         "applicable": 77,
-        "executed": 75
+        "executed": 76
       }
     },
     "optional": {
       "1": {
         "applicable": 127,
-        "executed": 123
+        "executed": 125
       },
       "2": {
         "applicable": 51,
@@ -98,13 +98,13 @@
       },
       "3": {
         "applicable": 51,
-        "executed": 42
+        "executed": 44
       }
     },
     "coalesce": {
       "1": {
         "applicable": 127,
-        "executed": 124
+        "executed": 125
       },
       "2": {
         "applicable": 41,
@@ -118,7 +118,7 @@
     "union": {
       "1": {
         "applicable": 127,
-        "executed": 120
+        "executed": 124
       },
       "2": {
         "applicable": 49,
@@ -126,7 +126,7 @@
       },
       "3": {
         "applicable": 58,
-        "executed": 51
+        "executed": 52
       }
     },
     "project": {
@@ -250,7 +250,6 @@
       "6f4842380508",
       "91377bfd1758",
       "93c5b06b2aa4",
-      "e50443e45c08",
       "e8e4539df019"
     ],
     "filter@3": [
@@ -260,24 +259,9 @@
       "7465b982295a",
       "ff5c02df5c1c"
     ],
-    "local@3": [
-      "2851d10680c6",
-      "a06b90a4a18b"
-    ],
-    "union@1": [
-      "5327112e6561",
-      "60b856b5990e",
-      "9f71d16d9386",
-      "a2b60a6fc14f",
-      "a61f9e912271",
-      "c6a4e523d733",
-      "e3eaaa984b19"
-    ],
     "optional@3": [
       "12ab6a5cb6f0",
       "49eeee49ce87",
-      "50fc98d16ae2",
-      "7d70cf5223ab",
       "98946c71d2cd",
       "a024dbac7667",
       "a8b32d5b5100",
@@ -295,12 +279,6 @@
       "d2c43d32a30b",
       "d3c57e448548",
       "e9ebeefd2782"
-    ],
-    "optional@1": [
-      "229804cd0c3e",
-      "6afeba6bdcc4",
-      "8c0438988ac8",
-      "a381e8d99f66"
     ],
     "project@1": [
       "18912596e7d8",
@@ -371,48 +349,7 @@
       "6e89a00dd7d6",
       "6ef38e36c4fb",
       "cb747a79108a",
-      "d250e48f64ed",
       "e1c40581fb0f"
-    ],
-    "flatMap@1": [
-      "0dc5978f45c4",
-      "4b600813cd23",
-      "8478ebc8b9bf",
-      "ed2800b9694c",
-      "f35386374cca"
-    ],
-    "local@1": [
-      "1678c12ce9d8",
-      "3f986d677775",
-      "816baaffc916",
-      "ef11a6c4d0ba",
-      "fc0c55b01ecb"
-    ],
-    "where@1": [
-      "18de1ad74259",
-      "355cc1ca47ae",
-      "5745b4805614",
-      "e799d0eed36a",
-      "eb4b7b234ce3"
-    ],
-    "filter@1": [
-      "062212b27c72",
-      "74181daf1434",
-      "931b5bc823c3",
-      "c1e6eb279074",
-      "c9166ed0b0d6"
-    ],
-    "not@1": [
-      "0331b77a5199",
-      "8ec09eafbde7",
-      "a7d40930297a",
-      "af28931762ea",
-      "b19e621dbf17"
-    ],
-    "coalesce@1": [
-      "4ecb1d09c2b4",
-      "94e58af79f00",
-      "d99e82e79986"
     ],
     "where@2": [
       "3586108077ca",
@@ -421,7 +358,6 @@
       "a0f2139d4591",
       "a85039b21315",
       "a9882f2f2488",
-      "bec7bad94760",
       "e967d987ed77"
     ],
     "project@2": [
@@ -450,6 +386,49 @@
       "9617643e1336",
       "f1d81552153d"
     ],
+    "flatMap@1": [
+      "0dc5978f45c4",
+      "4b600813cd23",
+      "8478ebc8b9bf",
+      "ed2800b9694c"
+    ],
+    "local@1": [
+      "1678c12ce9d8",
+      "3f986d677775",
+      "816baaffc916",
+      "fc0c55b01ecb"
+    ],
+    "where@1": [
+      "355cc1ca47ae",
+      "5745b4805614",
+      "e799d0eed36a",
+      "eb4b7b234ce3"
+    ],
+    "filter@1": [
+      "062212b27c72",
+      "74181daf1434",
+      "931b5bc823c3",
+      "c9166ed0b0d6"
+    ],
+    "not@1": [
+      "0331b77a5199",
+      "8ec09eafbde7",
+      "a7d40930297a",
+      "af28931762ea"
+    ],
+    "optional@1": [
+      "6afeba6bdcc4",
+      "8c0438988ac8"
+    ],
+    "coalesce@1": [
+      "4ecb1d09c2b4",
+      "d99e82e79986"
+    ],
+    "union@1": [
+      "5327112e6561",
+      "9f71d16d9386",
+      "c6a4e523d733"
+    ],
     "union@2": [
       "263f9b2e4993",
       "41deab25d625",
@@ -461,13 +440,11 @@
     ],
     "filter@2": [
       "10141ca7dd4a",
-      "4ca81da881ee",
       "7431629095e2",
       "82aeedf27732",
       "85df55294b6f",
       "a63003d1f9f0",
-      "aafa75218c3c",
-      "c7b92faba790"
+      "aafa75218c3c"
     ],
     "coalesce@2": [
       "5561672814e0",
@@ -476,7 +453,6 @@
       "a5fb65b2944f"
     ],
     "not@3": [
-      "1f2dff7407d1",
       "7f7b0d4d87de"
     ],
     "project@3": [
@@ -489,6 +465,9 @@
       "cb27c437552f",
       "d1377b96d0b5",
       "efbdd8c02897"
+    ],
+    "local@3": [
+      "a06b90a4a18b"
     ],
     "order@2": [
       "02738876e366"

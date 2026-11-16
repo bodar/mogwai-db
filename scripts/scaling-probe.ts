@@ -56,6 +56,22 @@ const SHAPES: readonly Shape[] = [
   { name: 'local(out.count)', query: 'g.V().local(out().count())' },
   { name: 'local(both.dedup)', query: "g.V().local(both('created').dedup())" },
   { name: 'where(out.values.is)', query: "g.V().where(out().values('age').is(30))" },
+  // The ladder audit (Phase 3 (d)): one shape per remaining host family, so every route deleted or kept has
+  // its margin measured here.
+  { name: 'local(choose.option.fold)', query: "g.V().local(choose(values('age')).option(between(26, 30), values('name').fold()).option(none, values('name').fold()))" },
+  { name: 'flatMap(out.out)', query: "g.V().flatMap(out().out()).count()" },
+  { name: 'local(out.limit)', query: "g.V().local(out().order().by('name').limit(1))" },
+  { name: 'coalesce(values,constant)', query: "g.V().coalesce(values('age'), constant(0))" },
+  { name: 'optional(out.knows)', query: "g.V().optional(out('knows')).count()" },
+  { name: 'union(out,in)', query: 'g.V().union(out(), in()).count()' },
+  { name: 'choose(out,values,constant)', query: "g.V().choose(out('created'), values('name'), constant('none'))" },
+  { name: 'choose(values).option', query: "g.V().choose(values('age')).option(between(20, 40), constant('young')).option(none, constant('old'))" },
+  { name: 'order.by(out.count)', query: 'g.V().order().by(out().count()).limit(10)' },
+  { name: 'dedup.by(out.count)', query: 'g.V().dedup().by(out().count())' },
+  { name: 'groupCount.by(out.count)', query: 'g.V().groupCount().by(out().count())' },
+  { name: 'project.by(out.count)', query: "g.V().project('a','b').by(out().count()).by(values('name'))" },
+  { name: 'and(out,in)', query: 'g.V().and(out(), in()).count()' },
+  { name: 'or(out.has,in)', query: "g.V().or(out().has('age', gt(40)), in('created')).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

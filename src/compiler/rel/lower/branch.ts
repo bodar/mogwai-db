@@ -28,7 +28,7 @@ import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, noteUnrolled, withEnc
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
 import { childSeam, hostItself, reductionArm, rootedRead, rootedSteps, selfCollapses, shedBodyAliases } from './reduction.ts';
-import { type Arrival, branchOrderOwed, continueAs, countTail, dropEncounter, freezeParent, mintBranchOrder, positioned, tokenChoice, withoutEncounter } from '../lower.ts';
+import { type Arrival, branchOrderOwed, continueAs, countTail, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned, tokenChoice, withoutEncounter } from '../lower.ts';
 
 // BRANCH / MERGE — the arm-merging steps union/choose/coalesce/optional (branchArms dispatches),
 // the arm builders (unionArms/mergeArms/chooseArms/coalesceMerge/optionalArms) and their variant/scalar
@@ -629,6 +629,23 @@ export function mergeArms(
   const remapped = remapArmAliases(arms, labels, fresh);
   if (!remapped) return null;
   [first, ...rest] = (arms = remapped.arms) as [Tail, ...Tail[]];
+  // AN ARM WITH NO `bulk` BESIDE ONE THAT HAS IT: a row with no multiplicity column IS one traverser, so its
+  // `bulk` is the literal 1 (`ensureBulk`). Inside a child body the seed row carries no `bulk` (a child is handed
+  // one traverser, `seedRow`), and a `dedup()` arm projects its survivors' `bulk = 1`
+  // (`DedupGlobalStep.java:75`) — so `flatMap(union(out().dedup(), out()))` disagreed on a column both arms
+  // mean the same by.
+  if (arms.some((arm) => arm.rel.channels.some((channel) => channel.role === 'bulk'))
+    && arms.some((arm) => !arm.rel.channels.some((channel) => channel.role === 'bulk'))) {
+    arms = arms.map((arm) => ({ ...arm, rel: ensureBulk(arm.rel, fresh) }));
+    [first, ...rest] = arms as [Tail, ...Tail[]];
+  }
+  // AN ARM THAT DROPPED THE CARRIED PATH BESIDE ONE THAT KEPT IT (a `dedup()` drops it, `rowOp`'s rule): the
+  // merge drops it too, the same fail-closed idiom — a later path read declines rather than read a history
+  // one arm no longer has (`union(dedup(), identity())` under a `cyclicPath()`).
+  if (arms.some((arm) => pathCarried(arm.rel)) && arms.some((arm) => !pathCarried(arm.rel))) {
+    arms = arms.map((arm) => ({ ...arm, rel: pathCarried(arm.rel) ? dropPath(arm.rel, fresh) : arm.rel }));
+    [first, ...rest] = arms as [Tail, ...Tail[]];
+  }
   // ARMS THAT DISAGREE ON SHAPE MERGE TO A VARIANT — a per-row tagged union, and the same move the
   // scalar meet above makes one level down: re-project the arms onto a shared payload, then let the
   // ordinary `Union` merge them. It is tried only AFTER the meet, so two scalar arms never reach it.
