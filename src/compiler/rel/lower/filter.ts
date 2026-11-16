@@ -1,7 +1,7 @@
 import { writesAnywhere } from '../../ir/strategies.ts';
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
-import { and, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '../build.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
+import { and, eq, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource, IdQuery } from '../source.ts';
@@ -9,7 +9,7 @@ import type { Elem } from '../../elem.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, hostPresence, presenceOf, type ChildHost, type Subject } from '../child.ts';
-import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, valueTheta, type SubjectType } from '../predicate.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { isMappingTerminal, producesWithoutInput } from '../../ir/productivity.ts';
 import { aliasProjection, liveAliases, rerootPresence, seedOuterAliases, selectSpec } from '../alias.ts';
@@ -18,6 +18,7 @@ import type { AliasMap } from '../../alias.ts';
 import { arg, isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
 import { metaPropertyRead, propertyMetaBag, propertyRowId } from '../property.ts';
+import { readUnfolded } from '../collection.ts';
 import { movement } from './movement.ts';
 import { BULK, NO_ALIASES, bodyOf, elementSubject, noteUnrolled, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
@@ -574,6 +575,12 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
       (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
   }
 
+  // `where(P.within('x'))` / `where(P.without('x'))` naming a SIDE EFFECT — membership in the collection.
+  if (step.name === 'where' && args.length === 1 && isPred(args[0])) {
+    const member = collectionMembership(args[0], subject, ctx, fresh);
+    if (member !== undefined) return member;
+  }
+
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
   // question `has` asks of a property row asked of a whole sub-traversal. The body folds through
   // the SAME movement and filter vocabulary as the outer chain — that reuse is the point, and it
@@ -754,6 +761,53 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, sour
  * scan can be CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the
  * scan as an index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
+/** Does a `where(P)` predicate name a SIDE EFFECT (a collection registered in this chain) as an
+ *  operand? `Scoping.getScopeValue` resolves a scope key against the side effects BEFORE the path labels
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java`),
+ *  so where a name is both, the collection wins and the alias-compare route must not claim it. */
+export const namesACollection = (pred: unknown, ctx: ChainCtx): boolean =>
+  isPred(pred) && pred.operands.some((operand) =>
+    (typeof operand.value === 'string' && ctx.collections.has(operand.value)) || namesACollection(operand.value, ctx));
+
+/**
+ * `where(P.within('x'))` / `where(P.without('x'))` where `x` is a SIDE EFFECT — "is the current traverser
+ * a member of the collection". `WherePredicateStep` reads its select key through `getScopeValue`, which
+ * returns the side effect (an `aggregate`'s BulkSet) before any path label, and sets it as the predicate's
+ * value; `within`/`without` over a Collection value is membership (`getSelectKey`'s own "hack for
+ * within("x")" —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`).
+ * Multiplicity is irrelevant to membership, so the member relation is read as a set via `EXISTS`.
+ *
+ * `undefined` — the predicate names no collection (not this route); `null` — it does, in a form this
+ * does not build (another op, several keys, a seeded/keyed collection, a member kind the subject cannot
+ * equal), so it DECLINES rather than reading the name as a label or a string.
+ */
+function collectionMembership(pred: unknown, subject: Subject, ctx: ChainCtx, fresh: Minter): Expr | null | undefined {
+  if (!namesACollection(pred, ctx) || !isPred(pred)) return undefined;
+  if ((pred.op !== 'within' && pred.op !== 'without') || pred.operands.length !== 1) return null;
+  const name = pred.operands[0]!.value;
+  if (typeof name !== 'string') return null;
+  const collection = ctx.collections.get(name);
+  const members = collection && readUnfolded(collection, fresh);
+  if (!members) return null;
+  const negated = pred.op === 'without';
+  let matches: Expr;
+  if (subject.kind === 'element' && members.kind === 'elements') {
+    // A vertex never equals an edge, so a member list of the other kind holds no match.
+    if (members.elem !== subject.elem) return negated ? CONSTANT.true : CONSTANT.false;
+    matches = eq(col(members.rel.id, 'id'), subject.id);
+  } else if (subject.kind === 'scalar' && members.kind === 'scalars' && members.type) {
+    const tagCol = perRowColumnOf(members.type);
+    const tag = tagCol ? col(members.rel.id, tagCol) : members.type.kind === 'static' ? compilerText(members.type.type) : null;
+    const theta = valueTheta('eq', subjectOperand(subject.value, subject.type), { value: col(members.rel.id, 'v'), tag }, fresh);
+    if (!theta) return null;
+    matches = theta;
+  } else return null;
+  const hit = make.filter({ id: fresh('cmf'), input: members.rel, channels: [], type: members.rel.type, pred: matches });
+  const probe = make.project({ id: fresh('cmp'), input: hit, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  return { kind: 'exists', plan: probe, negated };
+}
+
 function metaFilterClause(step: IRStep, rowid: Expr, rel: Rel, ctx: ChainCtx, fresh: Minter): Expr | null {
   const args = step.args.map((a) => a.value);
   if (step.name === 'hasNot') {

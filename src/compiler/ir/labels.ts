@@ -329,7 +329,15 @@ const JAVA_SCALAR_CLASS: Readonly<Record<string, string>> = {
 
 /** One select key of a `where(P)`, as `configurePredicates` collects it. `unnamed` marks a key whose
  *  resolution this compile does not model (a parameterized predicate, an empty collection). */
-interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unnamed: boolean; }
+interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unnamed: boolean; readonly membership?: boolean }
+
+/** The one SIDE-EFFECT read a `where` key has a lowering for: a bare `where(P.within(k))`/`where(P.without(k))`
+ *  — membership of the current traverser in the collection `k` (`collectionMembership`, `rel/lower/filter.ts`). */
+const isMembershipWhere = (args: readonly { readonly value: unknown }[]): boolean => {
+  const pred = args.length === 1 ? args[0]!.value : undefined;
+  return isPred(pred) && (pred.op === 'within' || pred.op === 'without') && pred.operands.length === 1
+    && typeof pred.operands[0]!.value === 'string';
+};
 
 /**
  * A `where(P)` / `where(startKey, P)` SCOPE KEY this compile cannot resolve the way the reference does —
@@ -349,8 +357,9 @@ interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unn
  *
  * - a key that is not a STRING is the reference's construction-time refusal (`getSelectKey`), raised here
  *   with its exact wording where the boxed class is unambiguous — every depth, before any lowering;
- * - a key a SIDE EFFECT names (`withSideEffect`, `aggregate('x')`, …) declines: the side effect wins over a
- *   label, and no lowering reads the side-effect scope for a `where` key;
+ * - a key a SIDE EFFECT names (`withSideEffect`, `aggregate('x')`, …) declines — the side effect wins over a
+ *   label — EXCEPT the bare membership form `where(P.within(k))`/`where(P.without(k))` (`isMembershipWhere`),
+ *   which `collectionMembership` lowers (and which itself declines a side effect it cannot read as a set);
  * - a key NO `as()`/`match()` binds anywhere in the tree declines: the reference reads a Map entry or
  *   throws, where a lowering would read the string as a value;
  * - a PARAMETERIZED predicate declines (`GraphTraversal.where` refuses a `P` holding a `GValue`).
@@ -370,7 +379,10 @@ export function unresolvableWhereKey(
     const predAt = args.findIndex((a) => isPred(a.value));
     if (predAt < 0) return;
     if (predAt === 1) keys.push({ key: args[0]!.value, type: args[0]!.type, unnamed: !!args[0]!.name });
+    const membership = isMembershipWhere(args);
+    const before = keys.length;
     collectWhereKeys(args[predAt]!.value as Pred, keys);
+    if (membership) for (let i = before; i < keys.length; i++) keys[i] = { ...keys[i]!, membership: true };
   });
   if (!keys.length) return null;
   for (const k of keys) {
@@ -380,7 +392,11 @@ export function unresolvableWhereKey(
     if (!cls) return String(k.key);
     throw new ValueParseError(`where(P) requires a String scope key but encountered ${cls}; use is(P) to compare values`);
   }
-  for (const k of keys) if (sideEffects.has(k.key as string) || !labels.has(k.key as string)) return k.key as string;
+  for (const k of keys) {
+    // A side effect read as a MEMBERSHIP set is lowered (`collectionMembership`); any other read of one is not.
+    if (k.membership && sideEffects.has(k.key as string)) continue;
+    if (sideEffects.has(k.key as string) || !labels.has(k.key as string)) return k.key as string;
+  }
   return null;
 }
 

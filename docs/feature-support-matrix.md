@@ -45,7 +45,7 @@ Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 | `hasKey`, `hasValue` | ✅ | |
 | `is(P)` | ✅ | ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
 | `where(__.…)`, `not`, `filter(__.…)` | ✅ | |
-| `where(P)` / `where('a',P)` | 🟡 | ❌ some `where(P.op)` forms; `by(key)` on an edge label; `where('a',P)` over scalar labels |
+| `where(P)` / `where('a',P)` | 🟡 | `where(P.within('x'))`/`where(P.without('x'))` over an `aggregate('x')` collection (membership, element or value traverser) ✅. ❌ some `where(P.op)` forms; any other read of a side effect as a `where` key (`P.eq('x')`, a `withSideEffect` constant, a seeded/keyed collection, a key that is also a path label); `by(key)` on an edge label; `where('a',P)` over scalar labels |
 | `and`, `or` | ✅ | |
 | `dedup()`, `dedup(labels)` | ✅ | ❌ bare `dedup()` after path tracking |
 | `identity()`, `sample(n)` | ✅ | |

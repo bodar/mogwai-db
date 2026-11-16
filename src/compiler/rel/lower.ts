@@ -80,7 +80,7 @@ import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, noteUnrolled, withEnclosing, type ChainCtx, type HoistedSpine, type SpineHoist, type Tail } from './lower/chain.ts';
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
-import { childHostOf, sourceFilter } from './lower/filter.ts';
+import { childHostOf, namesACollection, sourceFilter } from './lower/filter.ts';
 import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
 import { atLadder, connectorSite, scopedHost } from './lower/scoped.ts';
 import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
@@ -2498,7 +2498,7 @@ function scalarTail(
       // It names a live label: TinkerPop's alias compare with THIS value as the subject (`bareAliasWhere`,
       // the element tail's own arm over a scalar subject). Only that arm — not `aliasWhere`'s leg/theta
       // arms, which read an element or record stream.
-      if (namesALiveLabel(args[0], labels)) {
+      if (namesALiveLabel(args[0], labels) && !namesACollection(args[0], ctx)) {
         const aliased = bareAliasWhere(step, rel, labels, fresh, { kind: 'value', operand: subjectOperand(col(rel.id, 'v'), subjectType()) });
         if (!aliased || aliased === 'decline') return null;
         rel = aliased;
@@ -2506,6 +2506,13 @@ function scalarTail(
       }
       // A `where` leaf that is not a traversal is a SELECT KEY (`whereHasScopeKey`), and here it names no
       // live label — the reference reads a side effect, a Map entry or throws; never the string itself.
+      // A select key naming a SIDE EFFECT is the collection-membership filter (`collectionMembership`).
+      if (step.name === 'where' && namesACollection(args[0], ctx)) {
+        const filtered = hostFilter(rel, step, scalarSubject(), ctx, fresh, labels);
+        if (!filtered) return null;
+        rel = filtered;
+        continue;
+      }
       if (step.name === 'where' && whereHasScopeKey(args[0])) return null;
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
       if (!pred) return null;
@@ -6479,6 +6486,8 @@ function aliasValueWhere(
 
 function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
   if ((step.name !== 'where' && step.name !== 'not') || step.optionArms) return null;
+  // A side-effect name outranks a label (`Scoping.getScopeValue`): `collectionMembership` owns it.
+  if (step.name === 'where' && step.args.length === 1 && namesACollection(step.args[0]!.value, ctx)) return null;
   // Two-variable theta: `where(k1, P.op(k2))[.by(key)]` between two bound ELEMENT aliases — TinkerPop's
   // `WherePredicateStep`. WITHOUT a `by()`, `eq`/`neq` compare the elements' IDENTITY (rowid); WITH a
   // `by(key)` the comparison is over each alias's PROJECTED value (`a.age` vs `b.age`), and any ordering

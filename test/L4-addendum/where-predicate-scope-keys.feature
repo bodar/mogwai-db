@@ -76,7 +76,6 @@ Feature: mogwai addendum — a where(P) operand is a SCOPE KEY, never a literal 
       | result |
       | josh |
 
-  @Unsupported
   Scenario: g_V_aggregateXxX_out_whereXwithinXxXX_count
     Given the modern graph
     And the traversal of
