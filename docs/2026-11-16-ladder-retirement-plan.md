@@ -136,6 +136,13 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
    (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/TopDownGeneralDecorrelator.java:476-482`, "D is
    eliminated"). The pooled `group().by(label).by(count())` plan is 2.8 KB of domain + cross join + LEFT JOIN +
    window today, against the ladder's 1.2 KB single `GROUP BY`. Measure on the R5 shapes and the whole scaling probe.
+   ✅ **LANDED (c0c204bf).** The pooled group row hands `decorrelate` a `KeyProjection` fact (never inferred from
+   an equi-correlation, so selective correlated bodies keep their index seek): the pool is keyed by the members'
+   own columns (null-safe, no domain cross join), a scalar aggregate over a covering input skips the count-bug
+   LEFT JOIN, and first-row/LIMIT over an `atMostOneRow` input emits no `ROW_NUMBER` — `src/rel/decorrelate.ts`,
+   `src/compiler/rel/lower/scoped.ts`. Measured CONN/LADDER at 8k: `group.by(label).by(count)` 1.95 → 1.40,
+   `by(name).by(tail)` 1.37 → 1.30; every shape ~8× from 1k to 8k. Remains for step 1: nothing. Note the
+   label/count shape is still above the 1.2× deletion bar, which the step-4 decision must weigh.
 2. A connector row for keyed `group("a")…cap("a")` (13 sole answers), through the collection substrate.
 3. A child-traversal key together with a child-traversal value (2).
 4. Nested groups (2 L6 workload queries). Then delete if within 1.2×; if step 1 misses the bar, back to the
