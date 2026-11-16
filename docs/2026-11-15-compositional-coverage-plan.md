@@ -409,9 +409,30 @@ from the ladder's deterministic pick (fixed: the seed carries a position only fo
 `otherV()`).
 
 **Cost.** Each scope level is one fenced CTE (self-contained) or one numbered derived table; the decorrelated
-body adds one join per level and one per `by()`. The scaling probe (§5 shapes at 1k/8k, ON vs OFF) and
-`sql-hygiene` are below. Compile work: a DECLINING compile now lowers twice (`compile-work` ceiling
-2016 → 2190 lowerings); a compiling one still lowers once.
+body adds one join per level and one per `by()`. `sql-hygiene` is green with no baseline rise. Compile
+work: a DECLINING compile now lowers twice (`compile-work` ceiling 2016 → 2190 lowerings); a compiling one
+still lowers once.
+
+Scaling probe (synthetic graph, ~2.5 out-edges/vertex; ms at 1k → 8k):
+
+| Shape | ON (shipping) | OFF (connector only) |
+|---|---|---|
+| `order().by(select('a')…)` | 29 → 140 | 33 → 148 |
+| `project('x').by('age')` | 12 → 43 | 16 → 31 |
+| `map(values('age'))` | 7 → 12 | 9 → 29 |
+| `where(out().count().is(gt(1)))` | 8.5 → 4.9 | 7.6 → 15 |
+| `dedup().by('name')` | 5.9 → 21 | 5.8 → 17 |
+| `project … coalesce` | 25 → 86 | 22 → 139 |
+| `map(out().values('name'))` † | 8.3 → 50 | 7.7 → 36 |
+| `project().by(in('knows')…)` † | 9.7 → 24 | 7.4 → 23 |
+| `where(out().simplePath())` † | 6.2 → 24 | 5.7 → 23 |
+| `where(out().where(out().where(has)))` | 5.5 → 31 | 20 → 181 |
+| `project(project(out().count()))` | 3.7 → 3.3 | 11 → 36 |
+
+† connector-only shapes (the ladder declines them; ON and OFF run the same plan). Every shape scales at
+most linearly in N (8× data, ≤ 9× time) in both configurations — no superlinear plan. ON is unchanged on
+every §5 shape because the ladder still runs first. OFF is 2–6× slower on the deeply nested and
+multi-`by()` shapes — that constant factor is the plan-cost work Phase 3 owes before inversion.
 
 ### Phase 3 — Build out and invert. IDs `cc3-*`.
 
