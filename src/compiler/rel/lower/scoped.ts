@@ -19,7 +19,7 @@ import { someStepDeep } from '../../ir/walk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { firstArrival, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { framingCols, type RecordField, type RelFraming } from '../framing.ts';
-import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned } from '../lower.ts';
+import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned, withBranchEffects } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
@@ -909,11 +909,19 @@ interface ChainReadOut { readonly rel: Rel; readonly framing: RelFraming; readon
  * (`unionArms` — emission order, reducing arms and their empty-input gate, the shape meet). A row here so a
  * union's arms are read like every other connector body — a path an arm reads is seeded (`CONNECTOR_HOSTS`).
  */
+/** The ctx a branch host's ARMS lower under: an `otherV()` reading the merged edge stream
+ *  (`coalesce(outE(), inE()).otherV()`) has every arm's tail edge mint its entering vertex, which the peer merge
+ *  carries because every arm mints it alike (`mergeArms`) — the tails' branch dispatch's rule. */
+const armsCtx = ({ steps, at, ctx }: HostSite): ChainCtx => {
+  const feeds = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
+  return feeds === (ctx.needsFromV ?? false) ? ctx : { ...ctx, needsFromV: feeds };
+};
+
 const globalArms: Connector = (site) => {
   const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
-  const merged = unionArms(step, rel, framing, bulked, ctx, fresh, labels, { steps, at });
-  if (!merged || merged.effects?.length) return null;
-  return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases);
+  const merged = unionArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
+  // A write in the one arm (`union(__.addV(…))`) runs before the tail, as a top-level write does (`withBranchEffects`).
+  return merged && withBranchEffects(merged, steps, at, ctx, fresh, () => continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, merged.aliases));
 };
 
 /**
@@ -927,6 +935,13 @@ const globalArms: Connector = (site) => {
  */
 const chooseRoute: Connector = (site) => {
   const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
+  // THE DEPENDENT JOIN FIRST: the host's own routing over the stream, its condition a correlated test per row
+  // (`chooseArms` — an EXISTS, or the bare predicate of `choose(P, …)`; the option-map form is `chooseOptions`).
+  // SQLite's join IS a nested loop, so a condition it can seek per row is the scoped plan's best physical form —
+  // measured 1.9× faster at 8k than scoping the stream (`choose(out('created'), values('name'), constant('none'))`).
+  // Only where it declines is the condition scoped and decorrelated below.
+  const direct = chooseArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
+  if (direct) return withBranchEffects(direct, steps, at, ctx, fresh, () => continueAs(direct.rel, direct.framing, steps, at + 1, bulked, ctx, fresh, direct.aliases));
   if (step.optionArms || step.modulators?.length || step.args.length < 2) return null;
   const choice = step.args[0]!.value;
   if (!isNested(choice)) return null;
@@ -1030,14 +1045,16 @@ const priority: Connector = (site) => {
     const alone = allRows(optional ? 'forward' : 'split')({ ...site, step: { ...step, args: [step.args[0]!] } });
     if (alone) return alone;
   }
-  // ONE correlated host row (a body inside another child, `project().by(coalesce(…))`): there is nothing to
-  // scope, and the dependent join is the plan — each arm over the row, gated by the earlier arms' NOT EXISTS
-  // (`coalesceMerge`, the correlated form cc3b keeps for `map`/`where`). Only where that form declines is the
-  // row scoped and decorrelated below.
-  if (atMostOneRow(rel)) {
-    const branch = optional ? optionalArms(step, rel, framing, bulked, ctx, fresh, labels, { steps, at })
-      : coalesceArms(step, rel, framing, bulked, ctx, fresh, labels, { steps, at });
-    if (branch && !branch.effects?.length) return continueAs(branch.rel, branch.framing, steps, at + 1, bulked, ctx, fresh, branch.aliases);
+  // THE DEPENDENT JOIN FIRST, over one correlated row (a body inside another child, `project().by(coalesce(…))`)
+  // or a whole stream alike: each arm over the row, gated by the earlier arms' NOT EXISTS (`coalesceMerge`, the
+  // correlated form cc3b keeps for `map`/`where`). SQLite's join IS a nested loop, so an arm it can seek per row
+  // is already the scoped plan's best physical form — measured 2.2× (`coalesce(values,constant)`) and 2.9×
+  // (`optional(out('knows'))`) faster at 8k than scoping the stream. Only where that form declines is the stream
+  // scoped and decorrelated below.
+  {
+    const branch = optional ? optionalArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at })
+      : coalesceArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
+    if (branch) return withBranchEffects(branch, steps, at, ctx, fresh, () => continueAs(branch.rel, branch.framing, steps, at + 1, bulked, ctx, fresh, branch.aliases));
   }
   // A consumer that READS the merge's order (`branchOrderOwed`) gets the emission key — host position, then
   // arm, then the result's position within its scope (`mintBranchOrder`): the host is positioned and its
@@ -1604,10 +1621,12 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
  * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
  * `groupCount("m")` — `byValues` leaves both to the host).
  */
-const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount']);
+const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union']);
+/** The hosts whose connector row (`byValues`) claims only the argument-free form. */
+const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
 const ladderless = (step: IRStep, framing: RelFraming): boolean =>
   LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar')
-  && (step.name === 'project' || !step.args.length);
+  && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length);
 
 /**
  * The dispatch at a connector site: the ladder (the `correlatedChild` fast path) and the connector, in the order

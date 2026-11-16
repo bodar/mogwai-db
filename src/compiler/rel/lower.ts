@@ -440,7 +440,7 @@ export const mintBranchOrder = (
  *  — so arm 2's writes run only after arm 1's traversers have gone all the way through the site, and an
  *  arm's own write over an arm-internal stream (`union(__.V(1,2).addLabel('z'))`) interleaves with it as
  *  well. Neither the branch's input nor its merged output counts the traversers through ITS writes. */
-const withBranchEffects = (
+export const withBranchEffects = (
   merged: BranchRel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter, tail: () => Tail | null,
 ): Tail | null => (merged.effects?.length
   ? afterWrite(ctx.writes, null, steps, at, at + 1, merged.effects, ctx.params, fresh, tail) : tail());

@@ -581,16 +581,26 @@ branches and the tails' `collectionArm` project arm), and `order`/`dedup`/`group
 code of their own — the dispatch no longer offers the tail the site alone; `byValues` still hands it the landed
 values). One generic fix moved the largest ladder-only cluster (36 of the 119, `union(<arm>.dedup(), …)` inside a
 body) onto the connector: `mergeArms` reconciles `bulk` and a dropped `path` across arms. The set of ladderless hosts
-is `LADDERLESS` in `lower/scoped.ts`. `return null`: 1360 → 1359.
+is `LADDERLESS` in `lower/scoped.ts`. `return null`: 1360 → 1358 by the rule the audit began under; trunk's guard now
+leaves the connector's own scoped.ts out of the total (L9 guards it), and every site deleted here was in scoped.ts, so
+under it the total is 1279 → 1279 (scoped.ts 81 → 79).
+
+The BRANCH hosts — `choose`, `coalesce`/`optional`, `union` — are deleted too, by making the connector fast for
+them rather than by keeping them: each row now tries the host's own DEPENDENT-JOIN merge over the stream first
+(`chooseArms` with its correlated condition, `coalesceArms`/`optionalArms` gated by NOT EXISTS, `unionArms`), the
+form SQLite runs as the nested loop its join is, and scopes the stream only where that declines; a write in an arm is
+threaded as the tails did (`withBranchEffects`), and the arms see an `otherV()` demand (`armsCtx`). Before → after,
+connector alone at 8k: choose(out,values,constant) 14.5 → 7.3 ms (ladder 7.6), coalesce(values,constant) 13.2 → 6.0
+(6.1), optional(out.knows) 10.8 → 3.9 (3.8), project.coalesce 35.5 → 38.2 on a loaded box (ladder 37.7 there), and the
+option-map `choose(values('age')).option(…)` — no connector row before — 30.0 (ladder 26.6 on trunk, 29.5 alongside).
+The pools lose nothing and change nothing; the option-map form is answered by the connector now, so `choose` is
+no longer a deferred host in practice.
 
 | Family | 8k ladder / connector (worst shape) | Pool queries only it answers | Recommendation |
 |---|---|---|---|
 | existence (`where`/`filter`/`not`/`and`/`or`) | 20.8 / 23.8 (1.14×) | 28 | make the connector total, then delete |
 | per-traverser (`map`/`flatMap`/`local`) | 8.3 / 10.6 (**1.29×**) | 9 + every re-source/draw body | make the connector total + fast, then delete |
-| `choose` | 7.6 / 14.5 (**1.89×**) | 20 | keep |
-| `coalesce`/`optional` | 3.8 / 10.8 (**2.85×**) | 0 | make the connector fast, then delete |
 | `group` (child value `by()`) | 5.9 / 12.6 (**2.14×**) | 17 | keep; make the pool fast |
-| `union` | 3.6 / 3.6 (1.02×) | 0 in the pools; write arms outside them | delete once `globalArms` threads effects |
 
 **1. Existence — `where`/`filter`/`not`/`and`/`or`.**
 - *Where:* the tails' filter dispatch at a connector site — `lower.ts` `hostFilter` (1252) from `elementTail`/
@@ -645,31 +655,7 @@ is `LADDERLESS` in `lower/scoped.ts`. `return null`: 1360 → 1359.
   (the `ladderOwns` refusal, with the reference's answer for a re-source under a maybe-absent value), variant/property
   payloads, the emitted value's marker, and a transparent body inlined.
 
-**3. `choose`.**
-- *Where:* `lower/branch.ts` `chooseArms` (1277-1345, whole-stream condition) and `chooseOptions` (807-1093, the
-  option-map form — no connector row, so this is that form's ONLY lowering: a deferred host, `deferred-hosts.ts`);
-  `lower/reduction.ts` `scalarChooseOptions`/`scalarChoice`/`scalarChooseChild` (1591-1714, `choose` as a
-  correlated scalar child).
-- *Shapes:* **choose(out,values,constant) 0.9/7.6 vs 1.8/14.5 (1.89×)** · choose(values).option 3.5/26.6 vs ✗.
-- *Lines only it uses:* the scalar-child CASE (1591-1714, 74 code lines); `chooseArms`/`chooseOptions` are shared
-  with the connector's `chooseRoute` (`RoutedCondition`).
-- *`return null` it owns:* 15 (the scalar-child CASE); 19 more in the shared builders.
-- *Queries only it answers (20):* 16 option-map forms (at the root and under `map`/`local`; 2 of them L6), 3
-  `choose(P.eq(29), …)` / `choose(is(P.gte(<traversal>)), …)` over a VALUE stream, 1 `inject().choose(is(P.eq(<traversal>)), …)`.
-- *Recommendation:* **keep** — 1.9× on the boolean form and the only lowering of the option form.
-
-**4. `coalesce`/`optional`.**
-- *Where:* `lower/branch.ts` `coalesceArms`/`optionalArms`/`coalesceMerge` (1094-1219) over the WHOLE stream, from the
-  tails' `BRANCH_HOSTS` dispatch. The functions are shared — `priority` takes them over ONE correlated row.
-- *Shapes:* **coalesce(values,constant) 0.7/6.1 vs 1.6/13.2 (2.17×)** · **optional(out.knows) 0.5/3.8 vs 1.3/10.8
-  (2.85×)** · project.coalesce 4.1/31.9 vs 3.8/35.5 (1.11).
-- *Lines / `return null` only it uses:* none — the dispatch entry (the 11 in 1094-1219 are shared).
-- *Queries only it answers:* 0.
-- *Recommendation:* **make the connector fast for this shape, then delete** — `priority` already takes the host's own
-  merge over one correlated row; taking it over the whole stream wherever every arm is per-row (no barrier, no
-  draw) is ladder-speed by construction, and then this dispatch entry is the only thing left to remove.
-
-**5. `group` with a child value `by()` — the keyed pool.**
+**3. `group` with a child value `by()` — the keyed pool.**
 - *Where:* `map.ts` the pooled arm of `groupRows` (417-499), `groupReduced` (913-1086), `groupCollected`
   (1087-1195), `dedupGroupMembers` (1196-1223), `mapOfGroupsPerOrigin` (806-823), `POOLED_RECIPE` (694); `reducer.ts`
   `screenedByTag`/`exactTail`/`mixedRefused` (121-280, the typed reduction they feed).
@@ -683,15 +669,6 @@ is `LADDERLESS` in `lower/scoped.ts`. `return null`: 1360 → 1359.
   `project('name','skills').by('name').by(outE('uses').group().by(inV().values('name')).by(values('skill')))`).
 - *Recommendation:* **keep**; to delete it, make `pooledGroup`'s count/tail plans a plain GROUP BY (they pool through
   a scope today) and give the keyed side-effect form a connector row.
-
-**6. `union`.**
-- *Where:* the tails' `BRANCH_HOSTS` dispatch + `withBranchEffects`; `globalArms` IS `unionArms`, so no code is the
-  ladder's alone.
-- *Shapes:* union(out,in) 0.4/3.6 vs 0.4/3.6 (1.02).
-- *Queries only it answers:* none in the pools — but they exclude writes, and a union whose single arm WRITES is
-  threaded only by the tail (`withBranchEffects`); `globalArms` declines effects.
-- *Recommendation:* **delete** once `globalArms` threads a single arm's effects as the tail does; then `union` joins
-  `LADDERLESS` with no other change.
 
 ### Phase 4 — Structured values across scope. IDs `cc4-*`.
 
