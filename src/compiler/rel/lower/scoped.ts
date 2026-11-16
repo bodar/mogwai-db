@@ -1,10 +1,11 @@
 import { isNested } from '../../../gremlin/frontend.ts';
-import { and, col, compilerInt, eq, type Expr } from '../../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, eq, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelate } from '../../../rel/decorrelate.ts';
+import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
-import { forEachRel, isSelfContained } from '../../../rel/walk.ts';
+import { exprHasSubquery, forEachRel, isSelfContained, relExprs, substRelId } from '../../../rel/walk.ts';
 import { columnIsStored } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -19,7 +20,7 @@ import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf } from '../record.ts';
 import type { Declines } from '../../unsupported.ts';
 import { bodyOf, ENCOUNTER, inBody, type ChainCtx, type Tail } from './chain.ts';
-import { childSeam, perOriginWindow, reductionHost } from './reduction.ts';
+import { childSeam, defaultCollation, perOriginWindow, reductionHost } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
 // §2, S1–S4). Every host here is the same three moves, and only the third differs:
@@ -152,6 +153,49 @@ function correlatedBody(
   return walk ? null : tail;
 }
 
+/** A correlated body as an `EXISTS` operand, projecting its FIRST column alone: an `EXISTS` reads no value, so
+ *  the body's other columns (labels, path) are not spelled; a column rather than a literal keeps an aggregate
+ *  block an aggregate query (the reason `childPredicate`'s probe gives, `filter.ts`). */
+function existenceProbe(tail: Tail, fresh: Minter): Rel {
+  return make.project({
+    id: fresh('sp'), input: tail.rel, channels: [], type: typeOf(meta('one', 'any', true)),
+    exprs: [['one', col(tail.rel.id, tail.rel.type.cols[0]!.name)]],
+  });
+}
+
+/**
+ * The FIRST row of a CORRELATED body, as one correlated scalar subquery per payload column — `ORDER BY` the
+ * body's emission order then its payload, `LIMIT 1`: the same deterministic pick `firstPerScope` makes per
+ * key (`defaultCollation`), made per host row by SQLite's nested loop instead of by a window over every key.
+ *
+ * Each column's subquery evaluates the body again (SQL has no row-valued scalar subquery), so this is a COST
+ * rule on the body's columns: ONE column always (no repetition), TWO — a value and its per-row type tag — only
+ * over a FLAT body (no subplan of its own), so the repeat is one more index seek and never compounds with
+ * nesting (`k` columns per level would be `k^depth` spellings). Anything wider is the decorrelated window's.
+ */
+function correlatedFirst(tail: Tail, names: readonly string[], fresh: Minter): ReadonlyMap<string, Expr> | null {
+  const payload = names.map((name) => tail.rel.type.cols.find((column) => column.name === name));
+  if (!payload.length || payload.length > 2 || payload.some((column) => !column)) return null;
+  let nested = false;
+  forEachRel(tail.rel, (r) => { if (relExprs(r).some(exprHasSubquery)) nested = true; });
+  if (payload.length > 1 && nested) return null;
+  // A body of at most one row (a reducer, a record over the one seed row) IS its first row: no sort. A wider
+  // body is sorted by its payload, and a payload that is itself a correlated subquery may not be a sort term:
+  // SQLite resolves an ORDER BY term's subquery without the scopes beyond its own query (measured, bun:sqlite
+  // 3.51: `SELECT (SELECT (SELECT t.x) v FROM (VALUES (1)) ORDER BY (SELECT t.x) LIMIT 1) FROM t` is "no such
+  // column: t.x"), so such a body stays decorrelated.
+  const single = atMostOneRow(tail.rel);
+  if (!single && nested) return null;
+  const first = single ? tail.rel : make.limit({
+    id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: tail.rel, channels: tail.rel.channels, type: tail.rel.type, terms: defaultCollation(tail.rel) }),
+    channels: tail.rel.channels, type: tail.rel.type, count: compilerInt(1),
+  });
+  return new Map((payload as ColMeta[]).map((column) => [column.name, {
+    kind: 'scalar',
+    plan: make.project({ id: fresh('cv'), input: first, channels: [], type: typeOf({ ...column, nullable: true }), exprs: [[column.name, col(first.id, column.name)]] }),
+  } as Expr]));
+}
+
 /** The scoped input reprojected to the input's own columns (the key shed). */
 function unscoped(rows: Rel, rel: Rel, fresh: Minter): Rel {
   return make.project({
@@ -221,14 +265,7 @@ const existence = (negated: boolean): Connector => (site) => {
   // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
   const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free'));
   if (correlated.every((tail) => tail)) {
-    // The probe projects the body's FIRST column alone: an `EXISTS` reads no value, so the body's other
-    // columns (labels, path) are not spelled; a column rather than a literal keeps an aggregate block an
-    // aggregate query (the reason `childPredicate`'s probe gives, `filter.ts`).
-    const probe = (tail: Tail): Rel => make.project({
-      id: fresh('sp'), input: tail.rel, channels: [], type: typeOf(meta('one', 'any', true)),
-      exprs: [['one', col(tail.rel.id, tail.rel.type.cols[0]!.name)]],
-    });
-    const pred = (correlated as Tail[]).map((tail): Expr => ({ kind: 'exists', plan: probe(tail), negated }))
+    const pred = (correlated as Tail[]).map((tail): Expr => ({ kind: 'exists', plan: existenceProbe(tail, fresh), negated }))
       .reduce((all, one) => and(all, one));
     return continueAs(make.filter({ id: fresh('sj'), input: rel, channels: rel.channels, type: rel.type, pred }), framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
@@ -259,28 +296,59 @@ const firstInner: Connector = (site) => {
   const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
   const body = singleBody(step, ctx);
   if (!body) return null;
-  const sc = scope(rel, fresh);
-  const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read');
-  if (!keyed) return null;
-  const outFraming = keyed.tail.framing;
-  if (!framingCols(outFraming)) return null;
-  const names = payloadCols(keyed.tail.rel).map((column) => column.name);
-  const first = firstPerScope(keyed, names, fresh);
-  const joined = make.join({
-    id: fresh('smj'), left: sc.scoped, right: first.rel, join: 'inner', channels: sc.scoped.channels,
-    type: typeOf(...sc.scoped.type.cols, ...first.rel.type.cols),
-    on: eq(col(sc.scoped.id, sc.key), col(first.rel.id, first.key)),
-  });
-  const bodyPayload = payloadCols(keyed.tail.rel);
   const hostChannel = (channel: Channel): ColMeta => rel.type.cols.find((column) => column.name === channel.col)!;
-  const mapped = make.project({
-    id: fresh('smp'), input: joined, channels: rel.channels,
-    type: typeOf(...bodyPayload, ...rel.channels.map(hostChannel)),
-    exprs: [
-      ...bodyPayload.map((column) => [column.name, col(joined.id, first.renamed.get(column.name)!)] as const),
-      ...rel.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const),
-    ],
-  });
+  let mapped: Rel;
+  let outFraming: RelFraming;
+  const tail = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
+  const first = tail && framingCols(tail.framing) ? correlatedFirst(tail, payloadCols(tail.rel).map((column) => column.name), fresh) : null;
+  if (tail && first) {
+    // The dependent join kept: each payload column the body's first row, read per host row. A host row
+    // whose body is EMPTY is dropped (`TraversalMapStep`) — by the lead column's nullness where the body
+    // never emits a null there, else by an `EXISTS` of the body.
+    outFraming = tail.framing;
+    const bodyPayload = payloadCols(tail.rel);
+    const lead = bodyPayload[0]!;
+    const gated = lead.nullable
+      ? make.filter({ id: fresh('sme'), input: rel, channels: rel.channels, type: rel.type, pred: { kind: 'exists', plan: existenceProbe(tail, fresh), negated: false } })
+      : rel;
+    const projected = make.project({
+      id: fresh('smp'), input: gated, channels: rel.channels,
+      type: typeOf(...bodyPayload.map((column) => ({ ...column, nullable: true })), ...rel.channels.map(hostChannel)),
+      exprs: [...bodyPayload.map((column) => [column.name, gated === rel ? first.get(column.name)! : substRelId(first.get(column.name)!, rel.id, gated.id)] as const),
+        ...rel.channels.map((channel) => [channel.col, col(gated.id, channel.col)] as const)],
+    });
+    const present = lead.nullable ? projected : make.filter({
+      id: fresh('smf'), input: projected, channels: projected.channels, type: projected.type,
+      pred: { kind: 'binary', op: 'is not', left: col(projected.id, lead.name), right: compilerNull() },
+    });
+    mapped = make.project({
+      id: fresh('smq'), input: present, channels: rel.channels, type: typeOf(...bodyPayload, ...rel.channels.map(hostChannel)),
+      exprs: [...bodyPayload.map((column) => [column.name, col(present.id, column.name)] as const),
+        ...rel.channels.map((channel) => [channel.col, col(present.id, channel.col)] as const)],
+    });
+  } else {
+    const sc = scope(rel, fresh);
+    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read');
+    if (!keyed) return null;
+    outFraming = keyed.tail.framing;
+    if (!framingCols(outFraming)) return null;
+    const names = payloadCols(keyed.tail.rel).map((column) => column.name);
+    const firstRow = firstPerScope(keyed, names, fresh);
+    const joined = make.join({
+      id: fresh('smj'), left: sc.scoped, right: firstRow.rel, join: 'inner', channels: sc.scoped.channels,
+      type: typeOf(...sc.scoped.type.cols, ...firstRow.rel.type.cols),
+      on: eq(col(sc.scoped.id, sc.key), col(firstRow.rel.id, firstRow.key)),
+    });
+    const bodyPayload = payloadCols(keyed.tail.rel);
+    mapped = make.project({
+      id: fresh('smp'), input: joined, channels: rel.channels,
+      type: typeOf(...bodyPayload, ...rel.channels.map(hostChannel)),
+      exprs: [
+        ...bodyPayload.map((column) => [column.name, col(joined.id, firstRow.renamed.get(column.name)!)] as const),
+        ...rel.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const),
+      ],
+    });
+  }
   // The emitted value extends the path (`split`) — an element by its id, a value as a value position; any
   // other object has no position this path can append, so the path is dropped and a later read declines.
   const pathed = !pathCarried(mapped) ? mapped
@@ -318,11 +386,17 @@ const recordLeft: Connector = (site) => {
   // path on), or every child body it can lower (off). Decided per slot, so one unanswerable `by()` does not
   // cost the others their fast path. A slot's ring position is `index % bys.length` (`TraversalRing`).
   const owned = new Map<number, { readonly first: ReturnType<typeof firstPerScope>; readonly framing: RelFraming }>();
+  // A slot whose body stays CORRELATED: its first row read per host row (`correlatedFirst`), no join at all.
+  const correlated = new Map<number, { readonly exprs: ReadonlyMap<string, Expr>; readonly framing: RelFraming; readonly total: boolean }>();
   let joined: Rel = rel;
   for (let slot = 0; slot < bys.length; slot++) {
     const by = bys[slot]!;
     if (by.key.kind !== 'child' || by.order !== undefined) continue;
     if (ctx.correlatedChild && byField(step, by, ownHost, framing, (name) => col(rel.id, name), ctx.source, fresh, child)) continue;
+    const tail = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read');
+    const fieldCols = tail && framingCols(tail.framing);
+    const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), fresh);
+    if (tail && exprs) { correlated.set(slot, { exprs, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
     const scoped = sc ??= scope(rel, fresh);
     if (joined === rel) joined = scoped.scoped;
     const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read');
@@ -343,6 +417,14 @@ const recordLeft: Connector = (site) => {
   // is — only the path rule below differs.
   const over = joined;
   const fieldFor = (slot: number): ByField | undefined => {
+    const kept = correlated.get(slot);
+    // A correlated field reads the host row, which every relation the joins built still carries by name.
+    if (kept) return {
+      exprs: framingCols(kept.framing)!.map((column) => [column.name, over === rel ? kept.exprs.get(column.name)! : substRelId(kept.exprs.get(column.name)!, rel.id, over.id)] as const),
+      framing: kept.framing,
+      // A body of exactly one row always yields the field — it is never absent, so never optional.
+      optional: !kept.total && !isProductiveBy(step),
+    };
     const field = owned.get(slot);
     if (!field) return undefined;
     return {

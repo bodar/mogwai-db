@@ -185,7 +185,11 @@ export const columnIsStored = (r: Rel, name: string): boolean => {
       const e = r.exprs.find(([column]) => column === name)?.[1];
       if (!e) return false;
       if (e.kind === 'lit') return true;
-      return e.kind === 'col' && e.rel === r.input.id && columnIsStored(r.input, e.name);
+      if (e.kind !== 'col') return false;
+      // A column of an ENCLOSING row (a correlated seed's read of its host) is that row's to have been
+      // stored — the enclosing correlated read was admitted on exactly this question, and a decorrelated
+      // scope is read by name — so it is re-read, never recomputed, here.
+      return e.rel !== r.input.id || columnIsStored(r.input, e.name);
     }
     case 'filter': case 'sort': case 'limit': case 'distinct': return columnIsStored(r.input, name);
     case 'materialize': return r.fenced === true || columnIsStored(r.input, name);
