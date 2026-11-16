@@ -93,10 +93,16 @@ Each step is independently landable and leaves trunk better even if the next nev
 
 ### R3 — Existence family (smallest; audit says within the bar)
 
-- The 28 sole answers are two shapes:
-  - `project().by(<path read>)` inside a nested body. This overlaps parent Phase 4 "path as a value"; do it there
-    if Phase 4 is near.
-  - The alias-compare `where(a, P).by(<traversal>)`: give it a connector row.
+**DECIDED (owner, 2026-11-16): REPLACE (option A).** Speed is not a factor (connector within 1.14×, and it is already
+the default). Generalise the ladder's one real idea, then delete the route:
+
+- **An existence check ignores everything after the last step that can drop a row.** The ladder does this privately
+  (`withoutMappingTerminal`, `lower/filter.ts`): a trailing `project()` never filters, because an unproductive `by()`
+  drops the KEY, not the row (`vendor/tinkerpop/gremlin-core/.../step/map/ProjectStep.java`, `map()`'s
+  `ifProductive`). Make it a Pass, so every host and the connector get it at any depth. It also covers
+  `sample(n ≥ 1)` (never empties a non-empty stream), so `where(out().sample(1))` is `where(out())`. This closes
+  27 of the 28 sole answers, which come from the random pool generator, plus the draw case.
+- The 28th sole answer is one L1 alias-compare scenario, `where(a, P).by(<traversal>)`: give it a connector row.
 - Then drop the dispatch entries (`hostFilter`, the scan fusion's `correlatedChild` test, `aliasWhere`'s
   traversal leg). Delete `selectRerootSubject`: about 55 lines and 5 `return null`.
 
