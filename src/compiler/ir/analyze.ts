@@ -40,7 +40,7 @@ export interface ChainFacts {
 
 /** Steps that need the linear path threaded through the fold: the source vertex becomes path
  *  position p0 and every hop appends a position. */
-const PATH_STEPS = PATH_FAMILY;
+const PATH_STEPS: ReadonlySet<string> = new Set([...PATH_FAMILY, 'tree']); // `tree()` reads every traverser's path (TreeStep.projectTraverser)
 
 /** A PATH-family step inside a REPEAT body demands whole-chain path tracking exactly as a top-level one
  *  does: the walk seeds the path at the source and the body's own `simplePath()`/`cyclicPath()` reads it

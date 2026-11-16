@@ -5,7 +5,7 @@ import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRo
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
-import { binaryBytes, hasSerializer, isCollectionType, leafTag, propertyTag, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { binaryBytes, hasSerializer, isCollectionType, leafTag, propertyTag, treeBranches, valueNodeFromStored, type FrameNode, type TreeBranch, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
@@ -195,6 +195,9 @@ function frameTypedNode(node: FrameNode): Buffer {
   if (node.t === 'property') return framePropertyRow(node.v, 'edge');
   // A PATH — its positions, each framed by this same rule, so an element position keeps its properties.
   if (node.t === 'path') return framePath(node.v.map(frameTypedNode));
+  // A TREE — the prefix merge of its paths (`treeBranches`), framed as GraphBinary's TREE: a bare int32
+  // child count, then each child as a FULLY-QUALIFIED key and a BARE subtree (the client's TreeSerializer).
+  if (node.t === 'tree') return Buffer.concat([Buffer.from([ioc.DataType.TREE, 0x00]), bareTree(treeBranches(node.v))]);
   // A `T` TOKEN, which is a GraphBinary type of its own rather than the string it prints as — a
   // `valueMap(true)`/`elementMap()` key. One arm here, so a token composes at every depth the tree
   // reaches (a map key today; a list member or a nested map's key the day one produces it) exactly
@@ -219,6 +222,12 @@ function frameTypedNode(node: FrameNode): Buffer {
   if (as !== undefined) return frameValue(as === 'bigdecimal' ? node.v : value, as);
   if (tag != null) return sumBuffer(value, tag);
   return isExactNumber(node.v) ? exactNumberBuffer(node.v) : frameValue(value, undefined);
+}
+
+/** A Tree level, bare: its child count, then each fully-qualified key and its bare subtree. */
+function bareTree(branches: readonly TreeBranch[]): Buffer {
+  return Buffer.concat([ioc.intSerializer.serialize(branches.length, false),
+    ...branches.flatMap((branch) => [frameTypedNode(branch.key), bareTree(branch.children)])]);
 }
 
 // A GraphBinary MAP from ordered typed [key, value] node pairs — keys AND values framed

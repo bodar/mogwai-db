@@ -26,8 +26,8 @@
 // It is UNTYPED: NO `@type`/`@value` wrappers. That is the whole point — the TYPED `graphsonNode`
 // (`src/formats/graphson.ts`) is the io/adjacency form and is deliberately NOT reused here; this is a
 // different, response-shaped rendering.
-import type { FrameNode, ValueNode } from './gremlin/types.ts';
-import { base64OfBinary, numberClassOf, valueNodeFromStored } from './gremlin/types.ts';
+import type { FrameNode, TreeBranch, ValueNode } from './gremlin/types.ts';
+import { base64OfBinary, numberClassOf, treeBranches, valueNodeFromStored } from './gremlin/types.ts';
 import { exactNumberOf, isExactNumber, type ExactNumber } from './json-exact.ts';
 
 const rawJson = JSON as unknown as { rawJSON?: (text: string) => unknown };
@@ -89,6 +89,9 @@ export function untyped(node: FrameNode): unknown {
     // labels-on-path deferred), as the GraphBinary path frames.
     case 'path':
       return { labels: node.v.map(() => []), objects: node.v.map(untyped) };
+    // A TREE (`TreeJacksonSerializer`) → a list of `{ key, value }` entries, the value its own subtree.
+    case 'tree':
+      return untypedTree(treeBranches(node.v));
     // A `T`/`Direction` token as a VALUE renders as its name — a bare string (as a map KEY it is
     // stringified the same way, `untypedMapKey`).
     case 'T':
@@ -100,6 +103,11 @@ export function untyped(node: FrameNode): unknown {
     default:
       return untypedLeaf(node.t, node.v);
   }
+}
+
+/** A Tree level → `[{ key, value }]`, each key rendered as a value and each value its own subtree. */
+function untypedTree(branches: readonly TreeBranch[]): unknown[] {
+  return branches.map((branch) => ({ key: untyped(branch.key), value: untypedTree(branch.children) }));
 }
 
 /** A `{t:'map'}` node → a JS object. JSON object keys are strings, so each key is spelled by the one
@@ -148,6 +156,7 @@ function untypedMapKey(k: FrameNode): string {
     case 'set':
     case 'map':
     case 'path':
+    case 'tree':
       return JSON.stringify(untyped(k));
     default:
       return scalarKey(k.t, k.v);

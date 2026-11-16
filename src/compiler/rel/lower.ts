@@ -5661,6 +5661,10 @@ function elementTail(
       if (!walked) return null;
       return continueAs(walked.rel, walked.framing, steps, at + 1, bulked, ctx, fresh, walked.aliases);
     }
+    if (step.name === 'tree') {
+      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length) return null;
+      return treeTail(rel, steps, at, ctx, fresh);
+    }
     if (step.name === 'path') {
       // `from`/`to` scope to a SUB-path (`subPathMembers`, via the labels-on-path recorded when
       // `ChainFacts.demandsPathLabels` gated them on).
@@ -6134,6 +6138,32 @@ function pathUnfoldTail(
   const unfolded = pathUnfolded(rel, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), fresh);
   if (!unfolded) return undefined;
   return continueAs(unfolded.rel, unfolded.framing, steps, at + 2, bulked, ctx, fresh, labels);
+}
+
+/**
+ * `tree()` — the REDUCING barrier that folds every traverser's path into one prefix tree
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TreeStep.java`):
+ * each path's objects, each through the next `by()` in the ring, become nested children, and an
+ * UNPRODUCTIVE `by()` position is SKIPPED (`projectTraverser` only descends where the product is
+ * productive) rather than dropping the traverser. Over no traversers the seed is the empty Tree.
+ *
+ * The positions are `path().by(…)`'s own (`pathPositions`), built WITHOUT its productivity drop so an
+ * unproductive position is a NULL member, and folded into one list of paths (`foldPaths`). The prefix
+ * merge is the FRAMER's (`frameTypedNode`'s `tree` arm): it is the wire form of that one value — keys
+ * equal by their framed identity — the way a map value's entries are, never a per-row computation. The
+ * result is ONE `{t:'tree'}` typed node, so it is terminal: a step after it declines (`typedNode`).
+ */
+function treeTail(rel: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter): Tail | null {
+  const step = steps[at]!;
+  if (step.from !== undefined || step.to !== undefined) return null;
+  const positions = pathPositions(rel, { ...step, productiveBy: true }, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh);
+  if (!positions) return null;
+  const folded = foldPaths(positions.rel, positions.of, {}, fresh);
+  const node = make.project({
+    id: fresh('tr'), input: folded.rel, channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
+    exprs: [[NODE_COL, { kind: 'json-object', binary: false, entries: [['t', compilerText('tree')], ['v', jsonOf(col(folded.rel.id, LIST_COL))]] }]],
+  });
+  return continueAs(node, { kind: 'typedNode' }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
 }
 
 /**

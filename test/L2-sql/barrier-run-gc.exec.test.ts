@@ -25,25 +25,25 @@ describe('barrier_state run-token GC — no leak on the happy path or on a throw
   test('a single barrier whose tail DECLINES at resume leaks nothing (drop-on-throw)', async () => {
     const store = seeded(MODERN_SEED);
     // The tail after the barrier must DECLINE at the resume's lowering, AFTER pageRank's apply wrote its
-    // run's rows — those must be dropped, not leaked. `tree()` is an unsupported tail here, so the resume
+    // run's rows — those must be dropped, not leaked. `subgraph('sg')` is an unsupported tail here, so the resume
     // raises "no lowering covers the traversal after the barrier"; any resume-tail decline exercises the
-    // same drive-catch path (the specific declining step is incidental — swap it if `tree()` ever lands).
-    await expect(exec(store).framedAsync(`g.V().pageRank().tree()`, {})).rejects.toThrow();
+    // same drive-catch path (the specific declining step is incidental — swap it if `subgraph()` ever lands; it was `tree()` until that landed).
+    await expect(exec(store).framedAsync(`g.V().pageRank().subgraph('sg')`, {})).rejects.toThrow();
     expect(rows(store)).toBe(0);
   });
 
   test('a CHAINED barrier that declines at the final resume drops BOTH runs', async () => {
     const store = seeded(MODERN_SEED);
-    // pageRank apply writes run A; connectedComponent apply writes run B; then the tree() tail declines.
+    // pageRank apply writes run A; connectedComponent apply writes run B; then the subgraph() tail declines.
     // Neither run reaches the framer's cleanup — the drive's catch must drop both.
-    await expect(exec(store).framedAsync(`g.V().pageRank().connectedComponent().tree()`, {})).rejects.toThrow();
+    await expect(exec(store).framedAsync(`g.V().pageRank().connectedComponent().subgraph('sg')`, {})).rejects.toThrow();
     expect(rows(store)).toBe(0);
   });
 
   test('the sync framed() path drops on throw too', () => {
     const store = seeded(MODERN_SEED);
     // pageRank has a synchronous core, so framed() drives it; the same decline must not leak.
-    expect(() => exec(store).framed(`g.V().pageRank().tree()`, {})).toThrow();
+    expect(() => exec(store).framed(`g.V().pageRank().subgraph('sg')`, {})).toThrow();
     expect(rows(store)).toBe(0);
   });
 });

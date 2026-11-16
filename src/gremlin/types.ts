@@ -628,9 +628,50 @@ export type FrameNode =
   // A PATH — its positions in traversal order (labels-on-path deferred). A first-class GraphBinary type,
   // distinct from a list.
   | { t: 'path'; v: FrameNode[] }
+  // A TREE — `tree()`'s one value, carried as the PATHS it is the prefix merge of (each a list of
+  // position nodes, a NULL one an unproductive `by()` position). `treeBranches` is the merge.
+  | { t: 'tree'; v: FrameNode[][] }
   | { t: 'T'; v: TokenName }
   | { t: 'D'; v: DirectionName }
   | null | string | number | boolean | FrameNode[];
+
+/** One level of a Tree: each child KEY with its own subtree, in first-occurrence order. */
+export interface TreeBranch { readonly key: FrameNode; readonly children: TreeBranch[] }
+
+/** A tree key's IDENTITY — `Tree` is a `HashMap<Object, Tree>`, so two keys are one child when they are
+ *  `equals`: an element (and a VertexProperty) by its id (`ElementHelper.areEqual`), anything else by its
+ *  value, which its self-describing node spells canonically. */
+const treeKeyOf = (node: FrameNode): string => {
+  if (node !== null && typeof node === 'object' && !Array.isArray(node) && 't' in node) {
+    if (node.t === 'vertex' || node.t === 'edge') return `${node.t}:${JSON.stringify((node.v as Record<string, unknown>).id)}`;
+    if (node.t === 'vertexProperty') return `vp:${JSON.stringify((node.v as Record<string, unknown>).vpid)}`;
+  }
+  return JSON.stringify(node);
+};
+
+/**
+ * THE PREFIX MERGE of a Tree's paths — `TreeStep.projectTraverser` per path (descend through
+ * `getOrCreateChild` for each PRODUCTIVE position; a null one is skipped) and `TreeBiOperator`'s merge
+ * across them (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TreeStep.java`,
+ * `.../step/util/Tree.java`). The one place a tree's structure is decided, read by both wire framers.
+ */
+export function treeBranches(paths: readonly FrameNode[][]): TreeBranch[] {
+  const root: TreeBranch[] = [];
+  const index = new Map<TreeBranch[], Map<string, TreeBranch>>();
+  for (const path of paths) {
+    let level = root;
+    for (const key of path ?? []) {
+      if (key === null || key === undefined) continue;
+      let byKey = index.get(level);
+      if (!byKey) index.set(level, byKey = new Map());
+      const id = treeKeyOf(key);
+      let branch = byKey.get(id);
+      if (!branch) { branch = { key, children: [] }; byKey.set(id, branch); level.push(branch); }
+      level = branch.children;
+    }
+  }
+  return root;
+}
 
 /** A property node's tag — the class the OWNER decides. Upstream draws the line once: a vertex's
  *  property is a `VertexProperty`, which IS an `Element`; an edge's is a plain `Property`, which is not

@@ -563,6 +563,12 @@
     "compiler": 52,
     "bound": 0
   },
+  "tree": {
+    "binds": 0,
+    "bytes": 2153,
+    "compiler": 26,
+    "bound": 0
+  },
   "trim": {
     "binds": 0,
     "bytes": 2198,

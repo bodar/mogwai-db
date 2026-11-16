@@ -1107,7 +1107,7 @@ Beside the RelIR substrate:
 - **Strategies** (`src/compiler/ir/strategies.ts`) — the largest L3 clusters:
   `SubgraphStrategy(vertexProperties:)`, `includeMetaProperties`,
   ProductiveByStrategy on a non-standard host. No rule yet wraps a criterion around a mutation.
-- **Step vocabulary (matrix-fill).** `tree`, `subgraph('sg')`, `withSack(seed, Operator)`,
+- **Step vocabulary (matrix-fill).** `tree` residue (the side-effect form `tree('a')`+`cap`, any step after `tree()`, `is(typeOf(GType.TREE))`; `tree()`/`tree().by()` landed in cc1b), `subgraph('sg')`, `withSack(seed, Operator)`,
   string steps inside `repeat`, null carriage under `path()`,
   mutation-guard outcomes (`ReadOnlyStrategy` — reject as the reference does). Sizes in L3 telemetry.
 - **Federate.** Run independent sibling RPCs concurrently (federate and `io()`); arms at mid-position or
