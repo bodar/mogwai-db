@@ -1,9 +1,15 @@
 # Retiring the correlated-child ladder
 
 _Status: PROPOSED, 2026-11-16. Not started. No deadline: each step lands on its own when it is ready, and
-any step may stop and be reconsidered. Parent: `docs/2026-11-15-compositional-coverage-plan.md` (Phase 3,
-the "Kept routes" audit holds the measurements this plan starts from). Direction: root `CLAUDE.md` locked
-decision 6._
+any step may stop and be reconsidered._
+
+**The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is
+replaced where the connector genuinely does the job as well or better, and left where it does not. Nothing is
+shoe-horned onto the connector to hit a count. What is GENUINELY SHARED between the connector and the ladder is
+neither's: it is pulled out as shared substrate under its own name, used by both, and is not a deletion target.
+
+_Parent: `docs/2026-11-15-compositional-coverage-plan.md` (Phase 3, the "Kept routes" audit holds the
+measurements this plan starts from). Direction: root `CLAUDE.md` locked decision 6._
 
 ## Where we are
 
@@ -18,13 +24,17 @@ decision 6._
 
 ## What "retired" means — the end state
 
-1. The `correlatedChild` switch, its L5 per-switch sweep entry, and `bothChildOrders` are deleted.
-2. No query that answers today declines afterwards. Zero wrong answers throughout.
-3. No common shape gets slower than the cost-discipline list allows (parent plan §5), unless the owner
+What is deleted is the ROUTING: a `(host, body-shape)` choice made before the connector sees the site, and
+the code only that routing uses. Concretely:
+
+1. Shared code — the correlated forms (`EXISTS`, the correlated first-row scalar), the condition builders —
+   lives as shared substrate under a neutral name. It is not the ladder, so it is never deleted as part of it.
+2. A route goes when the connector answers what it answers, as fast within the bar, with less code. A route
+   where replacement does not make sense stays, as a small, legible, documented switch with its measured reason.
+   Whether the `correlatedChild` switch itself disappears is an OUTCOME of those calls, not a goal.
+3. No query that answers today declines afterwards. Zero wrong answers throughout.
+4. No common shape gets slower than the cost-discipline list allows (parent plan §5), unless the owner
    accepts a named margin.
-4. The correlated FORMS the connector itself uses survive under connector names. An `EXISTS` and a correlated
-   first-row scalar are not the ladder; they are the connector's fast physical forms (cc3b). What is deleted is the
-   ROUTING: a `(host, body-shape)` choice made before the connector sees the site.
 
 ## Hidden dependencies — why this is not "delete the files"
 
@@ -57,13 +67,17 @@ Each step is independently landable and leaves trunk better even if the next nev
 - Classify every `deferred-hosts.ts` entry as `ladder` or `host-owned`, so the end state has an exact scope.
 - *Why first:* every later step is measured by this number. Without it, "done" is a judgement.
 
-### R1 — Re-home the shared correlated forms (rename/move, no behaviour change)
+### R1 — Pull out what is genuinely shared (move/rename, no behaviour change)
 
-- Move `childPredicate`, `correlatedExists`, `scalarChild` and `byField`, or the parts the connector and
-  conditions use, into connector-owned modules with connector names. Use `scripts/move.ts` and `rename.ts`.
-- Shrink `LADDER_FILES` in `scripts/ladder-check.ts` to what is actually ladder routing.
+- Find what both sides call, by line coverage of the pools under ladder-first AND connector-alone (the audit's
+  method): the code BOTH runs is shared. Candidates: `childPredicate`, `correlatedExists`, `scalarChild`,
+  `byField`, and the condition builders `choose`/`repeat`/`coalesce` use.
+- Extract it into its own module(s) — shared substrate, named for what it IS (a correlated existence, a
+  correlated first-row read), owned by neither the ladder nor the connector. Use `scripts/move.ts` and
+  `rename.ts`. Split a function only where one part is shared and the rest is routing.
+- Shrink `LADDER_FILES` in `scripts/ladder-check.ts` to what is left: routing only.
 - *Why:* it separates "the ladder" from "SQL's fast correlated forms". After this, the ladder's real size is
-  visible and every later deletion is honest.
+  visible, and every later replacement decision is about routing, not about substrate that would survive anyway.
 - *Risk:* low. Guards: census plan hashes unchanged, `sql-hygiene` unchanged.
 
 ### R2 — Make the retry unnecessary (connector handles its own declines)
@@ -118,7 +132,11 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
 
 Work them by workload reach, not by list order. `sideEffect` with effects is the likely big one.
 
-### R7 — Delete the switch
+### R7 — Delete the switch, IF the earlier calls left nothing on it
+
+Only if R3–R6 each concluded "replace". If a route was deliberately kept, the switch stays as that route's small,
+documented fast path (the kept-route catalogue entry is its record), and R7 does not happen. That is an
+acceptable end state, not a failure.
 
 - **Preconditions:**
   - R0's count is 0;
@@ -138,7 +156,7 @@ Work them by workload reach, not by list order. `sideEffect` with effects is the
 - R2 and R3 are independent of each other.
 - R4.1, R4.3 and R4.5 can go any time. R4.2 waits for the typed carrier. R4.4 rides with R2.
 - R5 needs the owner's call only if its speed fix misses the bar.
-- R7 is last.
+- R7 is last, and conditional.
 
 ## Guards that already hold the direction
 
@@ -150,7 +168,7 @@ R0 adds the one guard still missing: the count of ladder-only answers may only f
 
 ## Decisions for the owner
 
-1. **The bar at R7.** Is 1.2× still the bar when the last routes go, or is a named, measured margin acceptable
-   to delete the switch entirely? (`group` is the case.)
+1. **Per kept route, at its step:** replace or keep. Settled in principle (considered replacement, not forced);
+   each call is made with that step's measurements in hand. (`group` at R5 is the first likely "keep".)
 2. **Scope of "ladder" vs "host-owned"** (R0's classification). Should `repeat` until/emit's own condition
    lowering stay as it is?
