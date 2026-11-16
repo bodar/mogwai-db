@@ -104,7 +104,6 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
   # The canonical driver (map/Unfold.feature g_V_valueMap_unfold_mapXselectXkeysXX): each
   # vertex's valueMap is exploded to its entries, then select(keys) reads each entry's key.
   @gap:map-unfold
-  @Unsupported
   Scenario: g_V_valueMap_unfold_mapXselectXkeysXX
     Given the modern graph
     And the traversal of

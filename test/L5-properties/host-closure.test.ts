@@ -17,7 +17,7 @@ import { outcomeOf } from './oracle.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { L5_SEED, L5_SEED_SOURCE } from './seed.ts';
 import { HOSTS } from './hosts.ts';
-import { BODY_BUDGET, rate, renderTable, sweep, type ClosureTable, type SweepResult } from './host-closure.ts';
+import { BODY_BUDGET, LEVELS, rate, renderTable, sweep, type ClosureTable, type Level, type SweepResult } from './host-closure.ts';
 import { KNOWN_HOST_DIVERGENCES, KNOWN_HOST_INTERNAL } from './host-known.ts';
 
 const BASELINE_PATH = new URL('./host-closure-baseline.json', import.meta.url);
@@ -70,7 +70,7 @@ describe('L5 — host closure', () => {
 
     const fell: string[] = [];
     const rose: string[] = [];
-    for (const h of HOSTS) for (const lvl of ['1', '2'] as const) {
+    for (const h of HOSTS) for (const lvl of LEVELS) {
       const [now, was] = [r.table[h.name]![lvl], baseline.table[h.name]?.[lvl]];
       if (!was) { rose.push(`${h.name}@${lvl} (new)`); continue; }
       const [a, b] = [rate(now), rate(was)];
@@ -87,7 +87,7 @@ describe('L5 — host closure', () => {
   test('exploration sample (HEAD seed): the host laws hold, no internal error', () => {
     const r = sweep(store, L5_SEED, RUNS, EXPLORE_BODY);
     summary(`L5 host closure (explore, seed ${L5_SEED} ${L5_SEED_SOURCE}): ${r.cases} cases`
-      + ` — L1 ${pct(r, '1')}, L2 ${pct(r, '2')}`);
+      + ` — L1 ${pct(r, '1')}, L2 ${pct(r, '2')}, L3 ${pct(r, '3')}`);
     detail(() => `${renderTable(r.table)}\n  laws:\n${lawCensus(r)}`);
     if (r.knownHits.size) summary(`  diagnosed host divergences hit: ${JSON.stringify(Object.fromEntries(r.knownHits))}`);
     gateSemantics(r);
@@ -110,7 +110,7 @@ describe('L5 — host closure', () => {
   });
 });
 
-function pct(r: SweepResult, lvl: '1' | '2'): string {
+function pct(r: SweepResult, lvl: Level): string {
   const t = Object.values(r.table).reduce((a, x) => ({ applicable: a.applicable + x[lvl].applicable, executed: a.executed + x[lvl].executed }), { applicable: 0, executed: 0 });
   return `${(100 * rate(t)).toFixed(1)}% (${t.executed}/${t.applicable})`;
 }

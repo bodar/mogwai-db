@@ -596,6 +596,11 @@ const COVERED = [
   // reads `containsKey`), which the corpus case pins.
   'g.inject([name:"marko",age:null]).select("name","age")', 'g.inject([a:1,b:2,c:3]).select("a","c")',
   'g.inject([a:1,b:2]).select("b","a")', 'g.inject([a:1,b:2]).select("a","b").unfold()',
+  // The scoped-relation CONNECTOR (`lower/scoped.ts`) answers what the correlated scalar could not: a
+  // `select(label).by(key)` child body, and a fan-out `map()` body's FIRST result per traverser
+  // (`TraversalMapStep.java:49-53`) — the body decorrelated, then `ROW_NUMBER() … = 1` per scope.
+  'g.V().as("a").out("knows").map(__.select("a").by("name"))',
+  "g.V().map(__.out())",
 ];
 
 /**
@@ -659,14 +664,6 @@ const DECLINED = [
   // it — the members' child rows pool and the barrier reduces the pool once — so a SECOND site has
   // nothing to union onto it, and the label declines rather than keeping one site's finished map.
   'g.V().group("a").by(T.label).by(__.outE().values("weight").sum()).out().group("a").by(T.label).by(__.outE().values("weight").sum()).cap("a")',
-  // `select(label).by(key)` as a CHILD BODY — the by() modulator over an alias read, inside a host.
-  // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
-  'g.V().as("a").out("knows").map(__.select("a").by("name"))',
-  // The per-traverser hosts' own refusals, each a CARDINALITY the correlated scalar cannot honour.
-  // A fan-out body has no "first" a correlated subquery can name. (A per-origin `fold()`/slice now
-  // LOWERS — see COVERED — and so does `local(values(k))`: a multi-valued key's every-result policy takes
-  // the rejoin; and so does a bare `local(count())`, the host's one-row self seed.)
-  "g.V().map(__.out())",
 ];
 
 describe('the RelIR spine', () => {

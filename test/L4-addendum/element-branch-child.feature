@@ -9,7 +9,6 @@ Feature: mogwai addendum — a uniform-element branch as a child-body value
   # take this route. @gap:element-branch-child marks the family for a possible gremlin-test PR.
 
   @gap:element-branch-child
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_whereXunionXout__inXX_valuesXnameX
     Given the modern graph
     And the traversal of

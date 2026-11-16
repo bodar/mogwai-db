@@ -339,6 +339,80 @@ S4/S5 do not cover these, so they will not fall out of the refactor.
   Each one comes with a diagnosis and a fix within the direction. For example: a missing connector rule, a value-carrier gap, or a plan shape the fast path should keep.
 - **Checkpoint G2.** The owner reviews the spike's numbers before Phase 3 starts.
 
+#### G2 measurement (2026-11-16)
+
+Recorded for the owner's checkpoint — **the decision is the owner's, not this record's.**
+
+**What was built.** `src/rel/decorrelate.ts` — a general decorrelator over the closed RelIR node set (Neumann
+2015/2025, Calcite `TopDownGeneralDecorrelator`): one rule per node kind (Aggregate grouped by the key, a
+scalar Aggregate LEFT-joining the domain and taking each `Agg`'s value over zero rows, Window partitioned by
+it, Limit → per-key `ROW_NUMBER`, two keyed join sides equated on it, a keyed Recursive). `src/compiler/rel/lower/scoped.ts`
+— the connector: S1 (scope any framing by `ROW_NUMBER()`; a fenced CTE where self-contained, else numbered
+over every column so two reads agree), the body lowered over ONE correlated host row through `continueAs`,
+decorrelated, then reconnected by the host's `CONNECTORS` row: `where`/`filter`/`and` semi-join, `not`
+anti-join, `map` first-per-scope inner join, `project().by` first-per-scope LEFT join per child `by()`.
+S2 and S3 are not routes: every barrier is scoped by every enclosing key because each level's decorrelation
+adds its key to the relation the next level decorrelates (the nested-where plan partitions by
+`(outer key, inner key)`), and a seeded barrier keeps its seed because the correlated plan's own SQL answer
+over zero rows is kept (`count`→0, `fold`→`[]`, `sum`'s non-empty guard emits nothing — the per-barrier
+citations already on those lowerings carry over). The switch: `correlatedChild` (on) tries the ladder first;
+off tries the connector first; each is the other's fallback, and `bothChildOrders` (`rel/spine.ts`) retries a
+declining compile in the other order, because a NESTED site's choice changes what its enclosing route
+accepts (measured: 4 of 8,929 host queries answered in one order only before the retry; 0 after). The
+connector declines bodies that draw (`sample`/`coin`/shuffle) or re-source (`V()`/`E()`) — the ladder's
+`shared-draw`/`resource-under-absent` decisions stay the ladder's. A connector body's path read now seeds the
+chain's path (`connectorBodyTracksPath`, `ir/analyze.ts`) — the "path channel does not cross the seam" S5
+family for these hosts.
+
+**Closure of the spiked hosts nested only in each other** (seed 42, 200 executable cases, up to 6 sampled
+chains per case per depth; `.scratch`-style instrument, numbers per outermost host):
+
+| host | general path ALONE d1 / d2 / d3 | shipping (`correlatedChild` on) d1 (ratchet) | trunk before d1 / d2 (ratchet) |
+|---|---|---|---|
+| map | 99.0% / 92.4% / 93.2% | 99.0% | 35.5% / 10.9% |
+| where | 99.0% / 89.2% / 93.0% | 99.5% | 61.5% / 22.7% |
+| filter | 99.0% / 93.1% / 94.7% | 99.5% | 61.5% / 30.8% |
+| not | 99.0% / 92.9% / 93.9% | 99.5% | 61.5% / 27.7% |
+| project | 96.0% / 96.6% / 94.7% | 96.0% | 33.0% / 10.0% |
+| ALL | 98.4% / 92.8% / 93.9% | | |
+
+**The curve is flat for the spiked hosts** (93.9% at depth 3; the escalation bar is 80%). The full
+host-closure ratchet (all 13 hosts, inner hosts any) re-recorded at map 99.0/71.0/54.8, where 99.5/74.4/54.4,
+project 96.0/76.9/62.0 for levels 1/2/3 — its deeper levels are bounded by the UN-spiked inner hosts
+(`optional`/`coalesce` ~10%, `dedup` ~3% at level 3), which is Phase 3's work, not a defect of these rows.
+A HEAD-vs-now replay of all 8,929 host-closure queries of the seed-42 pool: **0 lost, 0 changed answers,
++1,915 newly answering** (4,168 → 6,083); ON vs OFF: identical support and identical answers on all 6,083.
+
+**Depth curve (`mise run coverage`, shipping):** lattice d1 67.7→85.0%, d2 24.0→61.2%, d3 6.5→36.1%;
+realistic d1 83.2→86.0%, d2 70.4→73.8%, d3 71.6→75.4%, d4+ 63.2→66.7%.
+
+**Conformance and workload:** L3 2,018 → 2,030 (+12, every one a ledgered decline that now passes against
+TinkerPop's expected answer); L6 workload 271 → 280 pass, **0 wrong**, 0 fast-vs-generic divergences; census
++10 newly executing, 0 stopped, 0 changed — the 10 are exactly L3 scenarios that now pass. L4: 19 `@Unsupported`
+scenarios now answer (18 untagged and passing; one — "a bind inside a MAPPING child escapes to the parent" —
+encoded a WRONG expectation from the deleted legacy spine: `TraversalMapStep` emits `traverser.split(…)` off
+the PARENT, so the body's `as()` does not escape; rewritten to the reference's empty answer, see below), plus
+`test/L4-addendum/scoped-connector.feature` (9 scenarios, reference-cited).
+
+**Wrong answers found.** None in the ladder: the L5 per-switch differential (corpus + generated), the L6
+fast-vs-generic differential and the 6,083-query ON/OFF replay agree everywhere both lowerings answer. One
+wrong EXPECTATION was found (the L4 label-escape scenario above). Two connector bugs were found and fixed
+during the build, both by the L4/L6 instruments: `map(union(constant('lo'), constant('hi')))` took `hi`
+(the body's emission order must be READ for a first-per-scope pick — fixed with `bodyOrder: 'read'`), and a
+constant seed position made a body `fold()` order its members by emission instead of by value, diverging
+from the ladder's deterministic pick (fixed: the seed carries a position only for a body that reads one,
+`tail`).
+
+**Attribution (G1 top-20 clusters):** 8 of the 20 minimal cores now compile — #2, #3, #4, #5, #9, #12, #13,
+#20, reach 542 of 1,509 — which is EVERY top-20 cluster whose host is a spiked one. The rest are other hosts
+(`coalesce`, `group().by`, `groupCount().by`, `or`, `dedup().by`, `choose`) or class (b) (`path().count(local)`,
+`otherV()`).
+
+**Cost.** Each scope level is one fenced CTE (self-contained) or one numbered derived table; the decorrelated
+body adds one join per level and one per `by()`. The scaling probe (§5 shapes at 1k/8k, ON vs OFF) and
+`sql-hygiene` are below. Compile work: a DECLINING compile now lowers twice (`compile-work` ceiling
+2016 → 2190 lowerings); a compiling one still lowers once.
+
 ### Phase 3 — Build out and invert. IDs `cc3-*`.
 
 1. The remaining connector rows from §2's table, one commit per host. Each one: L4 scenarios citing the reference step, plus the curve delta in the commit message.

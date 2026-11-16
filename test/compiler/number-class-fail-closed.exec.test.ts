@@ -287,9 +287,10 @@ describe('a raising asNumber raises where only its existence is read', () => {
     "g.V().choose(__.values('name').asNumber(GType.INT), __.constant(1), __.constant(2))",
     "g.V().values('name').asNumber(GType.INT).count()",
     "g.V().coalesce(__.values('name').asNumber(GType.INT), __.constant(0))",
+    // A body the filter could drop as INERT (`count()` always yields) is not dropped: `TraversalFilterStep`
+    // still drains it, so the conversion raises exactly as the reference's does.
+    "g.V().where(__.values('age').math('_*10').asNumber(GType.BYTE).count())",
   ]) test(`defers: ${q}`, () => expect(typed(q)).rejects.toThrow(RaisedByQuery));
-  test('a body the filter could drop as inert is not dropped', () =>
-    expect(typed("g.V().where(__.values('age').math('_*10').asNumber(GType.BYTE).count())")).rejects.toThrow(UnsupportedTraversal));
   test('a converting body still filters', async () => {
     expect(bagOf(await values("g.V().where(__.values('age').asNumber(GType.BYTE)).values('name')"))).toEqual(bagOf(['marko', 'vadas', 'josh', 'peter']));
   });

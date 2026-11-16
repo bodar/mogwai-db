@@ -10,12 +10,12 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   #
   # ESCAPE semantics fall out of the existing child boundaries rather than a per-position rule:
   # a MAPPING consumer pops the child stream (popChildScope carries the child's own carried, so
-  # a bind inside map()/local()/flatMap()/a branch arm rides out), while a FILTER or by()
+  # a bind inside local()/a branch arm rides out — NOT map()/flatMap(), which re-derive from the parent
+  # traverser, see the map() scenario below), while a FILTER or by()
   # consumer re-projects the parent domain (so a bind inside where()/and()/or()/by() stays
   # confined). Both match TinkerPop. @gap:child-body-labels marks the family.
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXxX_mapXoutXcreatedX_selectXxXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -57,20 +57,24 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | lop |
       | ripple |
 
+  # map() does NOT forward its child's traverser — local() does. `TraversalMapStep.processNextStart` emits
+  # `traverser.split(next, this)` off the PARENT traverser
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java:49-53),
+  # and `split` clones the parent's path, extended only by the MAP step's own labels
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_LP_O_S_SE_SL_Traverser.java:66-72).
+  # So the body's as("a") never reaches the parent, and the select("a") after it resolves nothing: an
+  # unresolvable select() is the empty result. (This scenario once claimed the bind escaped; it was written
+  # for the deleted legacy spine, tagged @Unsupported at the single-spine cut, and answered for the first time
+  # by the scoped-relation connector, which is when the claim was checked against the reference.)
   @gap:child-body-labels
-  @Unsupported
-  Scenario: a bind inside a MAPPING child escapes to the parent
+  Scenario: a bind inside a MAPPING child stays confined to it
     Given the modern graph
     And the traversal of
       """
       g.V().hasLabel("person").map(__.out("created").as("a")).select("a").values("name")
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | lop |
-      | lop |
-      | lop |
+    Then the result should be empty
 
   @gap:child-body-labels
   Scenario: a bind inside a FILTER child stays confined to it
@@ -109,7 +113,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | m[{"marko":["marko"],"vadas":[],"josh":["josh","josh"],"peter":["peter"]}] |
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXxX_mapXunionXoutXcreatedX_selectXxX__inXknowsX_selectXxXXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -142,7 +145,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | peter |
 
   @gap:child-body-labels
-  @Unsupported
   Scenario: an unbound label inside a child body drops the traverser, it does not error
     Given the modern graph
     And the traversal of
@@ -181,7 +183,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # The SAME body under filter(): `as("a")` rebinds the current object (an out-neighbour), so the
   # body is `filter(__.out("knows"))` and no out-neighbour of anything has a knows edge.
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_filterXasXaX_outXknowsXX_count
     Given the modern graph
     And the traversal of
@@ -196,7 +197,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # The rebind is CONFINED to the child: a filter() consumer re-projects the parent domain, so the
   # outer "a" still holds the source vertex afterwards.
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXaX_out_filterXasXaX_outX_selectXaX_name
     Given the modern graph
     And the traversal of

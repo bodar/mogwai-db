@@ -84,7 +84,12 @@ describe('a self-rooted fold in a by() arm', () => {
   // the FIRST value of a multi-yield body (`TraversalUtil.produce` returns `traversal.next()`,
   // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java:108-118`),
   // which is a different cardinality (`yields: 'first'`) and belongs to the expression arm, not here.
-  test('a bare labels() arm is not a collect and still declines', () => {
-    expect(() => executeQuery(zooStore(), `g.V(1).project('t').by(__.labels())`)).toThrow(/not supported yet/);
+  // A bare labels() arm is not a COLLECT — the self-rooted fold route does not take it. The scoped-relation
+  // connector does (`lower/scoped.ts`): `ProjectStep` puts the by()'s FIRST result
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ProjectStep.java:64-67`),
+  // and labels() emits in label-dictionary order, the same pick `label()` makes.
+  test('a bare labels() arm is not a collect: it takes the FIRST label, as label() does', async () => {
+    const zoo = zooStore();
+    expect(await rows(zoo, `g.V(1).project('t').by(__.labels())`)).toEqual(await rows(zoo, `g.V(1).project('t').by(__.label())`));
   });
 });

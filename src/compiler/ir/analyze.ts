@@ -63,6 +63,29 @@ function repeatBodyTracksPath(step: IRStep): boolean {
   return false;
 }
 
+/** The CONNECTOR hosts (`compiler/rel/lower/scoped.ts`) — their child body starts from the host traverser,
+ *  path and all, through a seed row that carries the host's path channel, so a path read in the body is
+ *  the host's path read: `TraversalUtil.apply` hands the child a split of the traverser, whose path is the
+ *  parent's (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`). */
+const CONNECTOR_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'and', 'not', 'map', 'project']);
+
+/** Does a CONNECTOR host's body read the path — directly, or through a connector nested in it? Then the
+ *  chain carries the path the body reads, exactly as `repeatBodyTracksPath` seeds one for a repeat body.
+ *  Scoped to the connector hosts for that function's reason: every other host has its own carriage story,
+ *  and seeding a path a working chain never carried makes it decline. */
+function connectorBodyTracksPath(step: IRStep): boolean {
+  if (!CONNECTOR_HOSTS.has(step.name)) return false;
+  const nested = [...step.args.map((a) => a.value), ...(step.name === 'project' ? (step.modulators ?? []).flat() : [])];
+  for (const value of nested) {
+    if (!isNested(value)) continue;
+    try {
+      const body = stepChain((value as { nested: unknown }).nested, NO_PARAMS) as IRStep[];
+      if (body.some((s) => PATH_STEPS.has(s.name) || connectorBodyTracksPath(s))) return true;
+    } catch { /* unnormalizable — declines in the lowering, never mis-seeds here */ }
+  }
+  return false;
+}
+
 // ---------- demandsEncounter ----------
 //
 // A traversal needs a threaded emission-order `encounter` ONLY when something the QUERY says reads
@@ -383,7 +406,7 @@ export function chainCollapseSafe(steps: IRStep[]): boolean {
  *  terminal emission order is owed to nobody — see `computeDemandsEncounter`. */
 export function analyzeChain(steps: IRStep[], opts: { readonly wireTerminal?: boolean } = {}): ChainFacts {
   return {
-    tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s)),
+    tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s) || connectorBodyTracksPath(s)),
     demandsEncounter: computeDemandsEncounter(steps, opts.wireTerminal ?? false),
     demandsSlice: chainDemandsSlice(steps),
     demandsPathLabels: steps.some((s) => PATH_STEPS.has(s.name) && (s.from !== undefined || s.to !== undefined)),

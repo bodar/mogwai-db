@@ -89,7 +89,6 @@ Feature: mogwai addendum — a REDUCING branch arm beside a STREAMING one, in ei
 
   # A FAN-OUT map body takes its FIRST result — a per-start window with no order to read it by. It is not
   # the rejoin, so it declines.
-  @Unsupported
   Scenario: map() over a fan-out body still declines
     Given the modern graph
     And the traversal of

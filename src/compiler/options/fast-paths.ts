@@ -66,6 +66,25 @@ export interface FastPathConfig {
    * relation legitimately changes the emission order of a traversal that never called `order()`.
    */
   readonly propertySeek: boolean;
+  /**
+   * Try the LADDER of specialised correlated child routes (`scalarChild`, `correlatedReduce`,
+   * `flatMapRejoin`, `nestedHostChild`, the per-shape readers) BEFORE the scoped-relation connector at a
+   * connector host (`where`/`filter`/`and`/`not`/`map`/`project().by`, `src/compiler/rel/lower/scoped.ts`),
+   * instead of after it.
+   *
+   * **The NINTH switch, and the first whose generic side is a general DECORRELATION** (`src/rel/decorrelate.ts`,
+   * Neumann/Calcite): the connector scopes the host stream by a row number, lowers the body as the root lowers
+   * a chain, keys it by the scope and joins it back by the host's policy. The ladder is kept because a
+   * correlated scalar subquery is an index seek per outer row — genuinely faster for the common shallow
+   * shapes (`project('x').by('age')`, `where(out().count().is(gt(1)))` over a selective outer) than a grouped
+   * join over the whole domain (`docs/2026-11-15-compositional-coverage-plan.md` §2, "the ladder becomes the
+   * FAST PATH").
+   *
+   * Each side is the other's fallback, so the SUPPORTED set is identical in both positions — only the plan
+   * changes, which is exactly the claim L5's per-switch sweep checks: every traversal both lowerings answer
+   * is compared ladder against connector.
+   */
+  readonly correlatedChild: boolean;
 }
 
 export interface CompileOptions {
@@ -107,6 +126,7 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   movementCollapse: true,
   repeatBodyExpansion: true,
   propertySeek: true,
+  correlatedChild: true,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
@@ -153,6 +173,12 @@ export const GATE_ONLY_FAST_PATHS: Readonly<Record<string, string>> = Object.fre
     + 'actually watching for is the DISTINCT — a Cardinality.list key holding one value twice would '
     + 'multiply a traverser through the seek and not through the filter — and, as telemetry, the '
     + 'emission-order changes that driving from a different relation legitimately causes.',
+  correlatedChild:
+    'test/L5-properties/differential.test.ts — the per-switch sweep, over every corpus and generated '
+    + 'traversal with a where/filter/and/not/map/project().by child. The switch only ORDERS two lowerings '
+    + 'that are each the other\'s fallback (src/compiler/rel/lower/scoped.ts `scopedHost`), so support is '
+    + 'equal by construction and every traversal both answer compares the ladder of correlated routes '
+    + 'against the scoped-relation connector (a general decorrelation, src/rel/decorrelate.ts).',
 });
 
 // ---------- the FastPath contract ----------

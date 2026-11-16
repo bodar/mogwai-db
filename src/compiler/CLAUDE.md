@@ -62,6 +62,15 @@ while what they operate on keeps TinkerPop's.
   access-path strategy). Either position must compile the same traversal — turning one off may change the
   PLAN, never whether there is one — and L5's per-switch sweep is what checks that claim. No new
   switch without its differential + perf evidence in the same change.
+- **A child-taking host is a CONNECTOR as well as a ladder of routes.** `rel/lower/scoped.ts` scopes the
+  host stream by a row number (any framing), lowers the body over ONE correlated host row through
+  `continueAs` — the root's fold — and DECORRELATES it (`src/rel/decorrelate.ts`, Neumann/Calcite
+  `TopDownGeneralDecorrelator`: one rule per RelIR node kind, the scope key added to every grouping/window/
+  limit, a scalar aggregate LEFT-joining the domain for its value over zero rows), then reconnects by the
+  host's row in `CONNECTORS` (keyed by step name). The ladder is the `correlatedChild` fast path; the two
+  are each other's fallback at a site, and `bothChildOrders` (`rel/spine.ts`) retries a declining compile
+  in the other order, so the switch never decides coverage. A body that draws or re-sources stays the
+  ladder's (`scopedBody`). New hosts are new `CONNECTORS` rows, never a shape-specific branch.
 - **Shape is CONSULTED, never CONSTRUCTED — the bright line.** Shape may be an annotation a Pass reads
   and may DECLINE on; it must never be a representation a Pass CONSTRUCTS or a lowering CONSUMES, and
   sharing across shapes is registration into a Map, never a widening fallback chain. This is a

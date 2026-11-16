@@ -135,7 +135,6 @@ Feature: mogwai addendum — a choose arm reading a withSideEffect constant answ
   # A stated-presence arm still declines: over a label bound on only some rows (`optional(…as('b'))`)
   # the constant's presence is the label's per-row predicate, and the choice's compile-time meet cannot
   # carry a stated arm (`meetPresence`). The reference drops the unbound rows and keeps the two bound ones.
-  @Unsupported
   Scenario: g_withSideEffectXk_5X_V_optionalXoutXknowsX_asXbXX_mapXselectXbX_chooseXhasLabelXpersonX_selectXkX_constantX0XXX
     Given the modern graph
     And the traversal of

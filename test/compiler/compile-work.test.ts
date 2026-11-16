@@ -16,8 +16,14 @@ import { compile } from '../../src/compiler/compiler.ts';
  * The ceilings are today's counts. A rise means duplicated work: find it rather than raise the number. A
  * fall is an improvement: lower the number in the same commit. A corpus regeneration (`regen-corpus.ts`)
  * re-records them. Queries compile without their parameters, so some decline; that is deterministic.
+ *
+ * Raised once on purpose (2016/1797 → 2190/1807) by the `correlatedChild` switch: a traversal whose first
+ * lowering DECLINES is lowered once more in the other child order (`bothChildOrders`, `rel/spine.ts`), so a
+ * decline costs two lowerings — that is the price of the switch ordering two lowerings without deciding
+ * coverage; a traversal that compiles still lowers once. The 10 extra emissions are corpus traversals that
+ * newly COMPILE through the scoped-relation connector.
  */
-const CEILING = { lowerings: 2016, emissions: 1797, perQuery: 12 } as const;
+const CEILING = { lowerings: 2190, emissions: 1807, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 

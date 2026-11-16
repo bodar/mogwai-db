@@ -230,7 +230,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
   # the seam declined (unfold, limit, count(local), index, is) recursed until a bare RangeError reached
   # the user. Each scenario carries the REFERENCE answer and pins that the refusal is the clean one.
 
-  @Unsupported
   Scenario: g_V_projectXn_cX_byXnameX_byXvaluesXnameX_localXfoldX_unfoldX
     Given the modern graph
     And the traversal of
@@ -246,7 +245,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | m[{"n":"josh","c":"josh"}] |
       | m[{"n":"ripple","c":"ripple"}] |
       | m[{"n":"peter","c":"peter"}] |
-    And the decline should say "no lowering covers"
 
   Scenario: g_V_projectXn_cX_byXnameX_byXvaluesXageX_localXisXgtX30XX_countXX
     Given the modern graph
@@ -264,7 +262,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | m[{"n":"ripple"}] |
       | m[{"n":"peter","c":"d[1].l"}] |
 
-  @Unsupported
   Scenario: g_V_mapXvaluesXageX_localXfoldX_countXlocalXX
     Given the modern graph
     And the traversal of
@@ -278,7 +275,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | d[1].l |
       | d[1].l |
       | d[1].l |
-    And the decline should say "no lowering covers"
 
   @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXvaluesXnameX_localXfoldX_countXlocalXX_valuesXnameX
@@ -296,7 +292,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | peter |
     And the decline should say "no lowering covers"
 
-  @Unsupported
   Scenario: g_V_whereXvaluesXnameX_localXfoldX_unfold_isXmarkoXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -307,7 +302,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
     Then the result should be unordered
       | result |
       | marko |
-    And the decline should say "no lowering covers"
 
   # ---- a nested host whose body may produce NOTHING, followed by a SEEDED barrier ----
   # fold()/count() over zero traversers emit []/0: FoldStep and CountGlobalStep supply a seed

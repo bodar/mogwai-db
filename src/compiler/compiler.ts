@@ -184,6 +184,7 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,
+    correlatedChild: request.fastPaths.correlatedChild,
     detached: options?.detached ?? false,
     labelRegime: labelRegime(request.sourceOptions),
     services: servicesNamedBy(steps, request.params, request.registry),

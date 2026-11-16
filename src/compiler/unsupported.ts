@@ -106,6 +106,21 @@ export class Declines {
   /** The terminal reason, if one was recorded. */
   terminal(): DeclineReason | null { return this.#terminal; }
 
+  /**
+   * A sink for a SPECULATIVE route — one of two lowerings of the same site, tried in turn
+   * (`lower/scoped.ts`'s connector dispatch). What it records reaches this sink only through `adopt`: when
+   * that route is the one that answered, or when no route did. A route that declined while its sibling
+   * answered is not why the compile did anything, so its reasons are dropped — otherwise the order the
+   * two routes are tried in (a fast-path switch) would decide whether the traversal compiles at all.
+   */
+  fork(): Declines { return new Declines(); }
+
+  /** Take what a `fork` recorded, as if it had been recorded here — first-recorded still wins. */
+  adopt(child: Declines): void {
+    if (child.#terminal && !this.#terminal) { this.#terminal = child.#terminal; this.#hint ??= child.#hint; }
+    if (child.#advisory) this.#advisory ??= child.#advisory;
+  }
+
   /** Add a host's suggestion to the terminal reason of `kind`, once. A nested host of the same kind has
    *  already said it, so its outer host does not repeat it. */
   hint(kind: DeclineReason['kind'], hint: string): void {

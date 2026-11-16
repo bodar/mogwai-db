@@ -19,7 +19,7 @@
 import fc from 'fast-check';
 import { createHash } from 'node:crypto';
 import type { GraphStore } from '../../src/storage.ts';
-import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
+import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import { isNondeterministic, orderIndeterminacy } from '../support/graph.ts';
 import { describeThrow, failsClosed } from '../support/fail-closed.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
@@ -39,8 +39,11 @@ const NESTED_PER_CASE = 4;
 type W = ReadonlyMap<string, bigint>;
 
 export interface Tally { applicable: number; executed: number }
-/** host name → level ('1' | '2') → tally. Level 2 is attributed to the OUTER host. */
-export type ClosureTable = Record<string, Record<'1' | '2', Tally>>;
+/** The nesting levels measured: a host over the body, a host over a host over it, and three deep. */
+export const LEVELS = ['1', '2', '3'] as const;
+export type Level = typeof LEVELS[number];
+/** host name → level → tally. Levels 2 and 3 are attributed to the OUTERMOST host. */
+export type ClosureTable = Record<string, Record<Level, Tally>>;
 
 export interface SweepResult {
   readonly drawn: number;
@@ -88,7 +91,7 @@ const rng = (seed: number) => () => {
 };
 
 export function emptyTable(): ClosureTable {
-  return Object.fromEntries(HOSTS.map((h) => [h.name, { 1: { applicable: 0, executed: 0 }, 2: { applicable: 0, executed: 0 } }]));
+  return Object.fromEntries(HOSTS.map((h) => [h.name, { 1: { applicable: 0, executed: 0 }, 2: { applicable: 0, executed: 0 }, 3: { applicable: 0, executed: 0 } }]));
 }
 
 /** Draw `want` executable cases from `seed`. Over-draws, since many inline forms do not run. */
@@ -113,7 +116,7 @@ export function drawCases(store: GraphStore, seed: number, want: number, body: B
   return { drawn, cases, fingerprint: hash.digest('hex').slice(0, 16) };
 }
 
-export function sweep(store: GraphStore, seed: number, want: number, body: Budget = BODY_BUDGET): SweepResult {
+export function sweep(store: GraphStore, seed: number, want: number, body: Budget = BODY_BUDGET, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): SweepResult {
   const { drawn, cases, fingerprint } = drawCases(store, seed, want, body);
   const table = emptyTable();
   const internal: string[] = [];
@@ -122,7 +125,7 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
   const knownHits = new Map<string, number>();
   const laws = new Map<string, { evaluated: number; indeterminate: number }>();
   const run = (q: string): Outcome => {
-    const o = outcomeOf(store, q, DEFAULT_FAST_PATHS);
+    const o = outcomeOf(store, q, fastPaths);
     if (o.kind === 'threw' && o.error instanceof UnsupportedTraversal) declined.push(q);
     if (o.kind === 'threw' && !failsClosed(o.error)) {
       const known = knownHostInternal(q, o.message);
@@ -161,6 +164,24 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
       const o = run(`${c.prefix}.${h1.render(`__.${h2.render(anon)}`)}`);
       table[h1.name]![2].applicable++;
       if (o.kind === 'rows') table[h1.name]![2].executed++;
+    }
+
+    // ---- level 3: H1(H2(H3(b))), a few well-typed triples per case
+    const triples: [Host, Host, Host][] = [];
+    for (const h3 of HOSTS) {
+      if (!h3.applies(c.from, c.to)) continue;
+      const m3 = h3.out(c.from, c.to);
+      for (const h2 of HOSTS) {
+        if (!h2.applies(c.from, m3)) continue;
+        const m2 = h2.out(c.from, m3);
+        for (const h1 of HOSTS) if (h1.applies(c.from, m2)) triples.push([h1, h2, h3]);
+      }
+    }
+    for (let k = 0; k < NESTED_PER_CASE && triples.length; k++) {
+      const [h1, h2, h3] = triples.splice(Math.floor(r() * triples.length), 1)[0]!;
+      const o = run(`${c.prefix}.${h1.render(`__.${h2.render(`__.${h3.render(anon)}`)}`)}`);
+      table[h1.name]![3].applicable++;
+      if (o.kind === 'rows') table[h1.name]![3].executed++;
     }
 
     // ---- semantics: the laws, over whichever forms ran
@@ -261,12 +282,12 @@ export const rate = (t: Tally): number => (t.applicable === 0 ? 1 : t.executed /
 /** The closure table as aligned text: one row per host, a column per level, plus the overall row. */
 export function renderTable(table: ClosureTable): string {
   const cell = (t: Tally) => `${(100 * rate(t)).toFixed(1).padStart(5)}% (${t.executed}/${t.applicable})`.padEnd(20);
-  const sum = (lvl: '1' | '2') => Object.values(table).reduce((a, r) => ({
+  const sum = (lvl: Level) => Object.values(table).reduce((a, r) => ({
     applicable: a.applicable + r[lvl].applicable, executed: a.executed + r[lvl].executed,
   }), { applicable: 0, executed: 0 });
-  const lines = [`  ${'host'.padEnd(10)}${'level 1'.padEnd(20)}level 2 (outer host)`];
-  for (const h of HOSTS) lines.push(`  ${h.name.padEnd(10)}${cell(table[h.name]![1])}${cell(table[h.name]![2])}`);
-  lines.push(`  ${'ALL'.padEnd(10)}${cell(sum('1'))}${cell(sum('2'))}`);
+  const lines = [`  ${'host'.padEnd(10)}${'level 1'.padEnd(20)}${'level 2 (outer host)'.padEnd(20)}level 3 (outer host)`];
+  for (const h of HOSTS) lines.push(`  ${h.name.padEnd(10)}${cell(table[h.name]![1])}${cell(table[h.name]![2])}${cell(table[h.name]![3])}`);
+  lines.push(`  ${'ALL'.padEnd(10)}${cell(sum('1'))}${cell(sum('2'))}${cell(sum('3'))}`);
   return lines.join('\n');
 }
 

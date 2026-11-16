@@ -9,6 +9,7 @@ import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { Declines } from '../unsupported.ts';
 import type { CompileBudget } from '../../sql/kernel/budget.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
+import { CONNECTOR_ONLY } from './lower/scoped.ts';
 
 /**
  * What the RelIR route needs from the enclosing REQUEST — and the whole of it.
@@ -31,6 +32,9 @@ export interface RelRequest {
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
   readonly ftsSubstringPredicate: boolean;
+  /** The `correlatedChild` fast path: the ladder of correlated child routes tried before the scoped-relation
+   *  connector (on) or after it (off) — `lower/scoped.ts`. */
+  readonly correlatedChild: boolean;
   /** DETACHED-transfer compile mode (set only by `runForeign()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
@@ -128,9 +132,38 @@ export function compileViaRel(
   // THE WIRE READ: `compilePlan`'s final single statement, whose rows nothing downstream reads by
   // position — so an unordered stream owes no emission order (`Lowering.wireTerminal`). The only place
   // it is set; every split/barrier head and federate push lowers through `loweringOptions` without it.
-  const lowered = lowerToRel(steps, { ...loweringOptions(request, params, sideEffects), wireTerminal: true });
+  const lowered = bothChildOrders(request, (attempt) =>
+    lowerToRel(steps, { ...loweringOptions(attempt, params, sideEffects), wireTerminal: true }));
   if (!lowered) return null;
   return finishLowering(lowered);
+}
+
+/**
+ * THE `correlatedChild` SWITCH ORDERS TWO LOWERINGS, IT NEVER DECIDES COVERAGE — at the level of the whole
+ * traversal, not only at one connector site.
+ *
+ * Each connector site (`lower/scoped.ts`) tries the ladder and the scoped-relation connector in the order the
+ * switch names, each the other's fallback. That makes ONE site's support the union of the two — but a NESTED
+ * site's choice changes the relation its enclosing route is handed, and an enclosing route may accept one
+ * plan and refuse the other. So the whole lowering is retried once in the other order where the first
+ * declines (each attempt into its own decline sink, `Declines.fork`), and the traversal compiles in either
+ * position exactly when it compiles in one. Only a DECLINE pays for the second attempt.
+ */
+function bothChildOrders<T>(request: RelRequest, lower: (attempt: RelRequest) => T | null): T | null {
+  const root = request.declines;
+  const attempt = (correlatedChild: boolean) => {
+    const sink = root?.fork();
+    return { sink, lowered: lower({ ...request, correlatedChild, ...(sink ? { declines: sink } : {}) }) };
+  };
+  const first = attempt(request.correlatedChild);
+  // The measurement knob reads the connector ALONE, so it never falls back to the other order.
+  if (CONNECTOR_ONLY && !request.correlatedChild) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
+  if (first.lowered) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
+  const second = attempt(!request.correlatedChild);
+  if (second.lowered) { if (second.sink) root!.adopt(second.sink); return second.lowered; }
+  if (first.sink) root!.adopt(first.sink);
+  if (second.sink) root!.adopt(second.sink);
+  return null;
 }
 
 /**
@@ -146,6 +179,7 @@ export function loweringOptions(
     params,
     collapse: request.collapse,
     correlatedChildren: true,
+    correlatedChild: request.correlatedChild,
     // NOT a strategy switch — the graph's declared label cardinality is a CAPABILITY, and a creation
     // with no label of its own is a compile-time question only because this value is settled before a
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the

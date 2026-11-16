@@ -105,7 +105,6 @@ Feature: mogwai addendum — until(loops().is(P)) on an unnamed repeat is the bo
   # A barrier-free body is the walk's, and the walk does not lower inside a where() child yet — for ANY
   # until (`where(repeat(out()).until(has('name','lop')))` declines the same way). Not a count question:
   # the barrier-body form below answers through the unroll.
-  @Unsupported
   Scenario: g_V_whereXrepeatXoutX_untilXloops_isX2XXX_name
     Given the modern graph
     And the traversal of

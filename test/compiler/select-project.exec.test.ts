@@ -89,9 +89,11 @@ describe('select(label).by(key) as a child body', () => {
   // Classify must admit only what emit serves. A TOKEN by (`by(T.id)`) is rejected by the emitter,
   // so the classifier must not admit it either — a classify/emit mismatch is a crash, not a
   // deferral, because consumers assert on the classification.
-  test('a token by() stays declined, so classify and emit admit the same set', () => {
+  // The scoped-relation connector (`lower/scoped.ts`) lowers the body as the root lowers a chain, so a TOKEN
+  // by() answers there as it does at the top level: marko's id, once per `knows` edge.
+  test('a token by() answers through the connector', () => {
     const store = seededStore();
-    expect(() => run(store, 'g.V().as("a").out("knows").map(__.select("a").by(T.id))')).toThrow();
+    expect(run(store, 'g.V().as("a").out("knows").map(__.select("a").by(T.id))').map((r: any) => r.v ?? r)).toEqual([1, 1]);
   });
 });
 

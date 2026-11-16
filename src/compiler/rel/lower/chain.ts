@@ -132,11 +132,22 @@ export const graphOf = (channels: Channels): Channel | undefined =>
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
 export interface FilterCtx { readonly params: ParamEnv; readonly correlatedChildren: boolean; }
 
+/** The `correlatedChild` switch (`options/fast-paths.ts`): which of the two child lowerings a connector site
+ *  (`lower/scoped.ts`) tries FIRST — the ladder of correlated routes (on), or the scoped-relation connector
+ *  (off). Each is the other's fallback, so the switch changes the PLAN, never whether there is one. */
+export interface ChildStrategy {
+  readonly correlatedChild: boolean;
+  /** The connector site the LADDER is lowering right now — set by `continueAs` when it hands a connector host
+   *  to the ladder, so the tail that lowers it does not hand it straight back (`atLadder`, `lower/scoped.ts`).
+   *  Compared by step-list IDENTITY and index, so a body or a later step never matches it. */
+  readonly ladderAt?: { readonly steps: readonly import('../../ir/step.ts').IRStep[]; readonly at: number };
+}
+
 /** What the ELEMENT loop needs on top of a filter's context: whether this compile asked for the
  *  movement collapse, and the rest of the settled per-compile facts. One record rather than a dozen
  *  positional arguments, because the tails are re-entered from several places and a re-entry that
  *  dropped one would silently pick a different lowering strategy. */
-export interface ChainCtx extends FilterCtx {
+export interface ChainCtx extends FilterCtx, ChildStrategy {
   readonly collapse: boolean;
   readonly tracksPath: boolean;
   /** Gated labels-on-path: a `from`/`to` on a path-family step (`ChainFacts.demandsPathLabels`). When
@@ -269,7 +280,7 @@ export interface ChainCtx extends FilterCtx {
  * graph), `rankedOrders` (keyed by the outer chain's step identity), and the head/resume-only flags.
  */
 export const settledOf = (ctx: ChainCtx) => ({
-  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
+  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren, correlatedChild: ctx.correlatedChild,
   labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects, sideEffectPolicies: ctx.sideEffectPolicies,
   services: ctx.services, sack: ctx.sack, collections: ctx.collections,
   writes: ctx.writes, scopeNames: ctx.scopeNames, declines: ctx.declines, budget: ctx.budget,

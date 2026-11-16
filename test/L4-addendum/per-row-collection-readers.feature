@@ -170,7 +170,6 @@ Feature: mogwai addendum — a per-row-typed stream whose rows may be collection
   # A side-effect constant WINS over a per-row scalar stream (§17 "Map scope"), so `select("k")` here is the
   # constant map itself — a MAP stream, whose `map()` child body is not built yet (as for
   # `inject([x:1]).map(__.count(local))`).
-  @Unsupported
   Scenario: g_withSideEffectXk_mapX_V_valuesXnameX_selectXkX_mapXcountXlocalXX
     Given the empty graph
     And the graph initializer of

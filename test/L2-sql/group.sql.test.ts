@@ -512,7 +512,15 @@ describe('by(__.select(label)) — the alias arm', () => {
     for (const gremlin of [
       'g.V().out().project("x").by(__.select("nope"))',
       'g.V().as("a").out().as("a").project("x").by(__.select(Pop.all, "a"))',
-      'g.V().as("a").as("b").out().project("x").by(__.select("a","b"))',
     ]) expect(() => compile(gremlin, {}), gremlin).toThrow(UnsupportedTraversal);
+  });
+
+  test('a MULTI-label select in a by() slot answers through the scoped-relation connector', () => {
+    // `lower/scoped.ts` lowers the body as a chain, where `select("a","b")` is the record it is at the top
+    // level; the field holds that record's first (only) row per traverser.
+    const store = seededStore();
+    const viaProject = runWith(store, 'g.V().as("a").as("b").out().project("x").by(__.select("a","b")).select("x").select("a").values("name")').map((r) => r.v);
+    const direct = runWith(store, 'g.V().as("a").as("b").out().select("a","b").select("a").values("name")').map((r) => r.v);
+    expect(viaProject.sort()).toEqual(direct.sort());
   });
 });

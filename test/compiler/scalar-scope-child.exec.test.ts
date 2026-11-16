@@ -8,7 +8,7 @@
 // one exists — that is the property, and it is stronger than an expected-value table because it
 // cannot drift if the fixture changes.
 import { test, expect, describe } from 'bun:test';
-import { compile } from '../../src/compiler/compiler.ts';
+import { run, seededStore } from '../support/harness.ts';
 
 /** The traverser's value, in whichever spelling the lowering used. A single-field RECORD is either an
  *  `e0_v` column or a one-entry `map` blob; both are the same one value, and reading only one of them
@@ -31,9 +31,15 @@ describe('the cardinality proof is the gate — a many-valued local() body stays
     // through this route — either it declines here or something else answers, but the arity claim
     // is never made. Asserted through a `first`-cardinality consumer, which is where a wrong claim
     // would surface as an arbitrary pick.
-    let msg = '';
-    try { compile("g.V().project('n').by(__.local(__.out().values('name')))", {}); } catch (e: any) { msg = String(e.message); }
-    expect(msg).not.toBe('');
+    // The scoped-relation connector (`lower/scoped.ts`) now answers it, and makes no arity claim either: it
+    // keeps every row of the body and takes the first per traverser by the body's own emission order
+    // (`ProjectStep.java:64-67`). So whatever answers, a vertex WITH out-neighbours gets one of their names.
+    const store = seededStore();
+    const firsts = run(store, "g.V().project('n').by(__.local(__.out().values('name'))).select('n')").map((r: any) => r.v);
+    // marko, josh and peter have out-neighbours; vadas, lop and ripple have none, so their key is absent.
+    expect(firsts).toHaveLength(3);
+    const reachable = new Set(run(store, "g.V().out().values('name')").map((r: any) => r.v));
+    for (const name of firsts) expect(reachable.has(name)).toBe(true);
   });
 
 });

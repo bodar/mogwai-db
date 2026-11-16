@@ -127,10 +127,13 @@ describe('a side-effect constant read in a choose arm', () => {
     expect(values(run(seededStore(), q)).sort()).toEqual([0, 0, 5, 5, 5, 5]);
   });
 
-  test('over a may-be-absent host the arm states its presence, so the choice still declines', () => {
-    expect(() => run(seededStore(),
+  // The ladder's choice declines over a may-be-absent host; the scoped-relation connector (`lower/scoped.ts`)
+  // answers it — the body runs per traverser, so a row whose `b` is unbound is dropped by `select('b')`
+  // before the choice and `map()` drops it (`TraversalMapStep.java:49-53`): vadas and josh, both persons.
+  test('over a may-be-absent host the connector answers: the unbound rows drop, the bound ones choose', () => {
+    expect(values(run(seededStore(),
       "g.withSideEffect('k',5).V().optional(__.out('knows').as('b')).map(__.select('b').choose(__.hasLabel('person'), __.select('k'), __.constant(0)))",
-    )).toThrow(UnsupportedTraversal);
+    ))).toEqual([5, 5]);
     // …while the bare read over the same host keeps answering, gated on the label.
     expect(bare(run(seededStore(), "g.withSideEffect('k',5).V().optional(__.out('knows').as('b')).project('x').by(__.select('b').select('k'))")))
       .toHaveLength(7);

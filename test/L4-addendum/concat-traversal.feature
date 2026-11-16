@@ -91,7 +91,6 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
   # Composes inside a map() body while a path is tracked: both labels resolve against the SAME
   # traverser. The two 2-hop paths are marko->josh->lop and marko->josh->ripple, so this is
   # marko+lop and marko+ripple. Pre-fix it collapsed to "marko" twice (one distinct value).
-  @Unsupported
   Scenario: g_withPath_V_asXaX_out_out_asXbX_mapXselectXaX_concatXselectXbXXX
     Given the modern graph
     And the traversal of

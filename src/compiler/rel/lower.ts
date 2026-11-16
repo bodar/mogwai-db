@@ -82,6 +82,7 @@ import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movemen
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, sourceFilter } from './lower/filter.ts';
 import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
+import { atLadder, connectorSite, scopedHost } from './lower/scoped.ts';
 import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
 /**
@@ -2105,6 +2106,7 @@ function scalarTail(
   for (let at = from; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, out, steps, at, bulked, ctx, fresh, labels);
     if (step.name === 'V' || step.name === 'E') {
       return reSourceTail(steps, at, rel, out, bulked, ctx, fresh, labels);
     }
@@ -3099,6 +3101,7 @@ function listTail(
   for (let at = from; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, { kind: 'list', of: items, ...(set ? { set: true } : {}) }, steps, at, false, ctx, fresh, labels);
     if (step.name === 'identity') { if ((step.args ?? []).length) return null; continue; }
     if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'list', of: items, ...(set ? { set: true } : {}) }, false, ctx, fresh, labels);
     // A re-source from a LIST traverser is the one GraphStep lowering every tail shares (`continueAs`'s
@@ -3266,6 +3269,7 @@ function pathTail(
   for (let at = from; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, { kind: 'path', of, scalars }, steps, at, false, ctx, fresh, labels);
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
 
@@ -3424,6 +3428,7 @@ function mapTail(
   for (let at = from; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, { kind: 'map', keyOf, valOf, ...facts }, steps, at, false, ctx, fresh, labels);
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
     if (step.name === 'inject') return injectTail(steps, at, rel, { kind: 'map', keyOf, valOf, ...facts }, false, ctx, fresh, labels);
@@ -3740,6 +3745,7 @@ function mapEntryTail(
   for (let at = from; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, { kind: 'mapEntry', keyOf, valOf }, steps, at, false, ctx, fresh, labels);
     const args = step.args.map((a) => a.value);
     if (step.name === 'identity') { if (args.length) return null; continue; }
     if ((step.modulators?.length && !BY_READERS.has(step.name)) || step.optionArms) return null;
@@ -3803,6 +3809,8 @@ export interface Lowering {
   readonly params: ParamEnv;
   readonly collapse?: boolean;
   readonly correlatedChildren?: boolean;
+  /** The `correlatedChild` fast path — see `ChildStrategy` (`lower/chain.ts`). */
+  readonly correlatedChild?: boolean;
   /** May the driving property seek run (`src/rel/passes/semijoin.ts`, `indexSeek`)? A PHYSICAL
    *  rewrite over the finished algebra, so unlike every other flag here it changes no lowering
    *  decision — which is why it is read once, at the pass, rather than threaded into the fold. */
@@ -3968,6 +3976,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   params: opts.params,
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
+  correlatedChild: opts.correlatedChild ?? true,
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
   detached: opts.detached ?? false,
@@ -4972,12 +4981,12 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, budget, wireTerminal } = settle(opts);
+  const { params, collapse, correlatedChildren, correlatedChild, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, budget, wireTerminal } = settle(opts);
   const facts = analyzeChain(steps as IRStep[], { wireTerminal });
   return {
     facts,
     ctx: {
-      params, correlatedChildren, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
+      params, correlatedChildren, correlatedChild, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
       demandsPathLabels: facts.demandsPathLabels,
       labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
@@ -5233,6 +5242,9 @@ function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter,
   let at = 1;
   let elem = elem0;
   for (; at < steps.length; at++) {
+    // A correlated child filter fusing into the scan's WHERE is the LADDER's route for a connector host, so
+    // with the `correlatedChild` switch off it is left to the connector dispatch (`lower/scoped.ts`).
+    if (!readCtx.correlatedChild && connectorSite(steps[at])) break;
     const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx);
     if (!clause) break;
     pred = and(pred, clause);
@@ -5480,6 +5492,7 @@ function elementTail(
   for (; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at];
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, { kind: 'elements', elem }, steps, at, bulked, ctx, fresh, labels);
     if (step.name === 'V' || step.name === 'E') {
       return reSourceTail(steps, at, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
     }
@@ -5986,6 +5999,21 @@ export function continueAs(
   // depth the list is a body (`local(union(a, b).limit(1))`), and the root chain's `sliced` cannot see a
   // body's own slice. With it the branch numbers its merge by the emission key (`branchOrderOwed`).
   if (!ctx.sliced && chainDemandsSlice(steps.slice(from))) ctx = { ...ctx, sliced: true };
+  // A CONNECTOR HOST (`where`/`not`/`map`/`project().by`, …) is lowered by two routes, each the other's
+  // fallback in the order the `correlatedChild` switch names (`lower/scoped.ts`). Every tail loop hands such
+  // a step back here (`connectorSite`), so this is the one place the choice is made.
+  if (atLadder(ctx, steps, from)) return framingDispatch(rel, framing, steps, from, bulked, ctx, fresh, labels);
+  const settled = ctx;
+  const scoped = scopedHost(rel, framing, steps, from, bulked, settled, fresh, labels,
+    (under) => framingDispatch(rel, framing, steps, from, bulked, { ...under, ladderAt: { steps, at: from } }, fresh, labels));
+  return scoped !== undefined ? scoped : framingDispatch(rel, framing, steps, from, bulked, ctx, fresh, labels);
+}
+
+/** `continueAs` past its connector dispatch — the ONE framing dispatcher every tail re-enters through. */
+function framingDispatch(
+  rel: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
   // A re-source changes the payload to an element but is legal from every ordinary traverser shape.
   // Keeping it at the ONE framing dispatcher is what makes a scalar child body (`__.V().count()`),
   // an element tail (`…as('a').V()`), and a branch arm share one GraphStep lowering instead of each
@@ -6499,6 +6527,7 @@ function recordTail(
   for (let at = from; at < steps.length; at++) {
     rel = boundedSpine(rel, steps, ctx, fresh);
     const step = steps[at]!;
+    if (connectorSite(step) && !atLadder(ctx, steps, at)) return continueAs(rel, { kind: 'record', fields }, steps, at, bulked, ctx, fresh, labels);
     if (step.optionArms) return null;
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
     // The record's own MAP SCOPE rides on the host, which is what makes `by(__.select('a'))` read the

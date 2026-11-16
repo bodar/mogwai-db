@@ -23,7 +23,7 @@ import { failsClosed } from '../support/fail-closed.ts';
 import { outcomeOf, ALL_GENERIC } from './oracle.ts';
 import { traversal } from './generate.ts';
 import { realisticTraversal } from './realistic.ts';
-import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
+import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 
 export type Verdict = 'rows' | 'decline' | 'error' | 'internal';
 
@@ -40,9 +40,9 @@ export function childDepth(query: string): number {
 
 /** Run once and classify: an answer, a DECLINE (`UnsupportedTraversal` — our coverage gap), a reference
  *  error the query itself asks for (not a gap), or an INTERNAL error (a defect, never acceptable). */
-export function verdictOf(query: string, generic = false): Verdict {
+export function verdictOf(query: string, generic = false, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): Verdict {
   const store = seeded(MODERN_SEED);
-  const outcome = outcomeOf(store, query, generic ? ALL_GENERIC : DEFAULT_FAST_PATHS);
+  const outcome = outcomeOf(store, query, generic ? ALL_GENERIC : fastPaths);
   if (outcome.kind === 'rows') return 'rows';
   if (outcome.error instanceof UnsupportedTraversal) return 'decline';
   return failsClosed(outcome.error) ? 'error' : 'internal';
@@ -70,7 +70,7 @@ export type Profile = keyof typeof PROFILES;
 const POOL_FROM = 4;
 const depthKey = (d: number): string => (d >= POOL_FROM ? `${POOL_FROM}+` : String(d));
 
-export function measure(profile: Profile, perSeed: number): Curve {
+export function measure(profile: Profile, perSeed: number, fastPaths: FastPathConfig = DEFAULT_FAST_PATHS): Curve {
   const buckets: Record<string, Bucket> = {};
   const internal: string[] = [];
   for (const seed of PROFILES[profile].seeds) {
@@ -78,7 +78,7 @@ export function measure(profile: Profile, perSeed: number): Curve {
       if (isWrite(query)) continue; // a write mutates the graph; the curve is about read composition
       const key = depthKey(childDepth(query));
       const b = buckets[key] ??= { n: 0, rows: 0, decline: 0, error: 0, internal: 0 };
-      const v = verdictOf(query);
+      const v = verdictOf(query, false, fastPaths);
       b.n++; b[v]++;
       if (v === 'internal') internal.push(query);
     }
