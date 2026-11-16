@@ -1,0 +1,156 @@
+# Retiring the correlated-child ladder
+
+_Status: PROPOSED, 2026-11-16. Not started. No deadline: each step lands on its own when it is ready, and
+any step may stop and be reconsidered. Parent: `docs/2026-11-15-compositional-coverage-plan.md` (Phase 3,
+the "Kept routes" audit holds the measurements this plan starts from). Direction: root `CLAUDE.md` locked
+decision 6._
+
+## Where we are
+
+- The scoped-relation connector (`src/compiler/rel/lower/scoped.ts` + `src/rel/decorrelate.ts`) is the
+  DEFAULT at every child site. The ladder is the opt-in `correlatedChild` FastPath, plus the `bothChildOrders`
+  retry (`src/compiler/rel/spine.ts`), which re-lowers a declining compile in the other order.
+- Already off the ladder (`LADDERLESS`, `scoped.ts`): `project`, `order`/`dedup`/`groupCount` `by()`,
+  `coalesce`/`optional`, `choose`, `union`.
+- Still on it, per the audit: existence (`where`/`filter`/`not`/`and`/`or`), per-traverser
+  (`map`/`flatMap`/`local`), and `group` with a child value `by()`.
+- Ladder-only answers over the L1/L6/L9 pools: **66** (from 119 before cc3d). Ladder files: 328 `return null`.
+
+## What "retired" means — the end state
+
+1. The `correlatedChild` switch, its L5 per-switch sweep entry, and `bothChildOrders` are deleted.
+2. No query that answers today declines afterwards. Zero wrong answers throughout.
+3. No common shape gets slower than the cost-discipline list allows (parent plan §5), unless the owner
+   accepts a named margin.
+4. The correlated FORMS the connector itself uses survive under connector names. An `EXISTS` and a correlated
+   first-row scalar are not the ladder; they are the connector's fast physical forms (cc3b). What is deleted is the
+   ROUTING: a `(host, body-shape)` choice made before the connector sees the site.
+
+## Hidden dependencies — why this is not "delete the files"
+
+- **The connector calls ladder helpers.** `scalarChild`/`byField` sit under `byValues`/`recordLeft`
+  (`childSeam.scalar`). `childPredicate`/`correlatedExists` build every `choose`/`repeat`/`coalesce` condition
+  and `childSeam.predicate`. These are shared code, not the ladder's own.
+- **The retry rescues connector declines.** `bothChildOrders` currently turns two connector failures into
+  answers by handing them to the ladder:
+  - a join wider than SQLite's 64 tables (`local(repeat(out()).times(63))`);
+  - a random draw copied by the plan (`CopiedDraw`, e.g. `rooted-sample-scale`).
+
+  Deleting the ladder first would turn those into declines.
+- **`ladderOwns` refuses bodies by design.** The connector refuses any body that re-sources (`map(V().count())`)
+  or draws (`local(out().sample(1))`). Today the ladder is the only thing that answers them.
+- **Deferred hosts** (`test/L9-connector/deferred-hosts.ts`, 48 positions):
+  - Some are the host's own lowering and never were ladder: `repeat` until/emit is a `Recursive` term, which
+    cannot hold a window.
+  - Others need effects threaded through a scoped body (`sideEffect` with effects).
+  - Each needs classifying: "ladder" or "host-owned, not in scope".
+
+## Steps
+
+Each step is independently landable and leaves trunk better even if the next never happens.
+
+### R0 — Make the remaining gap a number CI holds (instrument + guard)
+
+- Promote the audit's `reach.ts` (scratch) into `scripts/` and a `mise` task. Per family, it counts the queries
+  the shipping default answers and connector-only does not.
+- Add that count to L9 as a ratchet. It may only fall, it starts at 66, and it is reported per family.
+- Classify every `deferred-hosts.ts` entry as `ladder` or `host-owned`, so the end state has an exact scope.
+- *Why first:* every later step is measured by this number. Without it, "done" is a judgement.
+
+### R1 — Re-home the shared correlated forms (rename/move, no behaviour change)
+
+- Move `childPredicate`, `correlatedExists`, `scalarChild` and `byField`, or the parts the connector and
+  conditions use, into connector-owned modules with connector names. Use `scripts/move.ts` and `rename.ts`.
+- Shrink `LADDER_FILES` in `scripts/ladder-check.ts` to what is actually ladder routing.
+- *Why:* it separates "the ladder" from "SQL's fast correlated forms". After this, the ladder's real size is
+  visible and every later deletion is honest.
+- *Risk:* low. Guards: census plan hashes unchanged, `sql-hygiene` unchanged.
+
+### R2 — Make the retry unnecessary (connector handles its own declines)
+
+- **Join width:**
+  - carry the scope key as a channel through a decorrelated body instead of re-joining it;
+  - or, when one order is too wide, fall back WITHIN the connector to the correlated form, which needs no
+    scope table.
+- **Copied draws:** a draw under `local`/`flatMap` is independent per scope (the reference applies the body per
+  traverser). Make the decorrelated plan hold ONE draw per scope row, or route draws to a correlated form that
+  evaluates per host row.
+- *Done when:* `bothChildOrders` never fires on the pools. Count it.
+
+### R3 — Existence family (smallest; audit says within the bar)
+
+- The 28 sole answers are two shapes:
+  - `project().by(<path read>)` inside a nested body. This overlaps parent Phase 4 "path as a value"; do it there
+    if Phase 4 is near.
+  - The alias-compare `where(a, P).by(<traversal>)`: give it a connector row.
+- Then drop the dispatch entries (`hostFilter`, the scan fusion's `correlatedChild` test, `aliasWhere`'s
+  traversal leg). Delete `selectRerootSubject`: about 55 lines and 5 `return null`.
+
+### R4 — Per-traverser family (largest prize: ~360 LOC, 13 `return null`)
+
+Each sub-item is its own commit. The audit's "measured and NOT landed" list is the starting evidence.
+
+1. **The reducer's `result` marker on an emitted value.** It closes 4 sole answers. Fix it where the marker is
+   READ (the `match` binding and the arm meet accept it), not where it is shed. Shedding it lost
+   `property(k, local(values('age').sum()))`'s stored type.
+2. **Variant and property payloads through the rejoin.** These close 5. The first attempt raised `sql-hygiene`
+   by 7.5 → 12.7 KB, so it probably wants the typed carrier (parent Phase 4, S5); sequence it there.
+3. **Re-source bodies** (`map(V()…)`). First establish the reference semantics with scenarios: a re-source
+   body under `map`/`local`/`flatMap`, including over a maybe-absent value. The first attempt gave a wrong answer
+   (six nulls for `[]`). Only then remove `ladderOwns`' re-source refusal.
+4. **Draw bodies** (`local(out().sample(1))`): shared with R2's per-scope draw.
+5. **Speed:** `flatMap(out().out())` is 1.29×. Splicing a transparent body measured 1.14×, but a pass test pins
+   "a body that MOVES is left alone". Decide whether that pin is semantic (cite the reference) or a ladder-era
+   fact.
+
+### R5 — `group` with a child value `by()` (owner decision on the margin)
+
+- **Speed:** make `pooledGroup`'s count/tail plans a plain `GROUP BY`. Today they pool through a scope, which
+  is 2.14× on `by(count)` and 1.43× on `by(tail)` at 8k.
+- **Coverage:**
+  - The keyed side-effect `group("a").by(…).by(<child>)` needs a connector row. It meets the collection substrate
+    (`docs/archive/2026-08-09-named-collections-are-bindings-plan.md`).
+  - The two nested-group L6 queries.
+- If the GROUP BY form gets within 1.2×, delete about 200 LOC and 21 `return null`. Otherwise the owner decides
+  whether the margin is worth the code.
+
+### R6 — Deferred hosts classified as `ladder` in R0
+
+Work them by workload reach, not by list order. `sideEffect` with effects is the likely big one.
+
+### R7 — Delete the switch
+
+- **Preconditions:**
+  - R0's count is 0;
+  - R2's retry count is 0;
+  - the scaling probe holds the cost-discipline list.
+- **Delete:**
+  - `correlatedChild` in `options/fast-paths.ts` and its readers;
+  - `bothChildOrders`;
+  - L5's per-switch entry;
+  - `FastPathConfig.connectorOnly`, which becomes the only mode.
+- L9's connector-only ratchet becomes the ordinary coverage ratchet.
+- Update root `CLAUDE.md` decision 6 and `src/compiler/CLAUDE.md`: no ladder remains.
+
+## Order and parallelism
+
+- R0 and R1 come first and are cheap.
+- R2 and R3 are independent of each other.
+- R4.1, R4.3 and R4.5 can go any time. R4.2 waits for the typed carrier. R4.4 rides with R2.
+- R5 needs the owner's call only if its speed fix misses the bar.
+- R7 is last.
+
+## Guards that already hold the direction
+
+- `mise run ladder`: ladder files may not grow.
+- L9: connector-only closure may not fall; every host is a row or a classified deferral.
+- `mise run scaling`: the 1k/8k margins every deletion cites.
+
+R0 adds the one guard still missing: the count of ladder-only answers may only fall.
+
+## Decisions for the owner
+
+1. **The bar at R7.** Is 1.2× still the bar when the last routes go, or is a named, measured margin acceptable
+   to delete the switch entirely? (`group` is the case.)
+2. **Scope of "ladder" vs "host-owned"** (R0's classification). Should `repeat` until/emit's own condition
+   lowering stay as it is?
