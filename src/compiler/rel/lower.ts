@@ -82,7 +82,7 @@ import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, noteUnrolled, 
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, namesACollection, sourceFilter } from './lower/filter.ts';
-import { childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
+import { admitsReSource, childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, perTraverserChild, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
 import { atLadder, connectorSite, scopedHost } from './lower/scoped.ts';
 import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
 
@@ -168,6 +168,20 @@ export interface RelLowering {
  * position arrives but this chain needs one, it is seeded from the new element id like a source scan.
  */
 
+/**
+ * Does a re-source in a CHILD body at `steps[at]` discard a `select()` of a label that may be UNBOUND on some
+ * rows (a label bound inside an `optional()`, a branch arm)? Then the selected value is thrown away and all that
+ * reaches the answer is WHICH rows had the label — the shape `admitsReSource` explains rather than answers
+ * (`select('a').V()` almost always means `select('a').out()` or `V().has(…, select('a'))`). A root traversal
+ * is the user's own pipeline, not a body, and keeps answering.
+ */
+function selectsMaybeUnbound(steps: readonly IRStep[], at: number, rel: Rel, ctx: ChainCtx, labels: AliasMap): boolean {
+  if (ctx.traversal?.rooted !== false || at === 0) return false;
+  const spec = steps[at - 1]!.name === 'select' ? selectSpec(steps[at - 1]!) : null;
+  const live = liveAliases(labels, rel);
+  return !!spec && spec.labels.some((label) => { const entry = live.get(label); return !!entry && entry.binds === undefined; });
+}
+
 /** A non-start `V()`/`E()` at `steps[at]` and the rest of the chain after it — the ONE re-source every
  *  tail dispatches to. A sampled re-source inside a per-traverser body whose prefix is origin-independent
  *  takes the fast path (`reSourcedOnce`: the prefix evaluated once, the draw per origin); everything it
@@ -178,7 +192,7 @@ function reSourceTail(
   if (steps[at]!.idOfValue || traversalIdArg(steps[at]!)) return traversalIdsTail(steps, at, rel, framing, bulked, ctx, fresh, labels);
   const once = reSourcedOnce(steps, at, rel, bulked, ctx, fresh, labels);
   if (once) return once;
-  const reSourced = reSource(steps[at]!, rel, framing, ctx, fresh);
+  const reSourced = admitsReSource(selectsMaybeUnbound(steps, at, rel, ctx, labels), ctx) ? reSource(steps[at]!, rel, framing, ctx, fresh) : null;
   return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
 }
 

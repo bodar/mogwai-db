@@ -1039,7 +1039,7 @@ export type RootedStart = 'source' | 'split';
  * (a string argument that is not really a scope key counts); it never answers wrong. A side-effect key
  * is global, not inherited, so reading one is not host state.
  */
-function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
+export function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
   const { params } = ctx;
   // An opening `V(<traversal>)` resolves its ids by running its child over the HOST traverser, so it is a
   // host read through and through (`__.V(__.identity())` is the host itself), never one shared evaluation.
@@ -1781,11 +1781,20 @@ const RESOURCE_UNDER_ABSENT = 'V()/E() inside this body discards the value befor
  * (`map(__.V().count())`, a `select('a')` the row was already filtered by) answers.
  */
 function reSourcedUnder(host: ChildHost, body: readonly IRStep[], ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  if (mayBeAbsent(host)) {
-    ctx.declines.note({ kind: 'resource-under-absent', message: RESOURCE_UNDER_ABSENT, terminal: true });
-    return null;
-  }
+  if (!admitsReSource(mayBeAbsent(host), ctx)) return null;
   return reSourcedValue(body, ctx, fresh, rootedHosts(host.row?.rel));
+}
+
+/**
+ * THE ONE ADMISSION RULE for a re-source (`V()`/`E()`) under a value it discards: `absent` — that value may be
+ * missing on some rows — declines with the explanation (`RESOURCE_UNDER_ABSENT`, terminal, so no other route
+ * answers around it); anything else is admitted. Both lowerings of a child body ask it, each stating `absent`
+ * in its own terms: the scalar seam from its host's presence (`reSourcedUnder`), the scoped-relation connector
+ * from whether the body's prefix before the re-source may lose its row (`lower/scoped.ts` `reSourcedBody`).
+ */
+export function admitsReSource(absent: boolean, ctx: ChainCtx): boolean {
+  if (absent) ctx.declines.note({ kind: 'resource-under-absent', message: RESOURCE_UNDER_ABSENT, terminal: true });
+  return !absent;
 }
 
 /** A re-sourcing body's value over the graph, whoever the host — `reSourcedUnder`'s one lowering. */

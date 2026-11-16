@@ -36,7 +36,7 @@ describe('the lowering RECORDS a framing-decided decline and returns null — it
   for (const [q, kind] of [
     ["g.inject(1,2).map(__.V().sample(1).values('name'))", 'shared-draw'],
     ["g.V().optional(__.out().as('a')).map(__.select('a').V().count())", 'resource-under-absent'],
-    ["g.V().map(__.values('age').math('_ + 1').by(__.V().count()))", 'resource-under-absent'],
+    ["g.V().optional(__.out().as('a')).flatMap(__.select('a').V())", 'resource-under-absent'],
     ["g.V(1).valueMap().mergeV(__.select('name'))", 'merge-own-entry'],
   ] as const) {
     test(q, () => {
@@ -82,17 +82,20 @@ describe('a terminal reason is the message, and its prefix is a property of its 
     expect(e.message).toContain('did you mean to traverse FROM that value (out()/in()) or to filter by it (V().has(…, …))?');
   });
 
-  test('a re-source under a value run reads as ambiguous and suggests no select() it does not contain', () => {
-    const e = declineOf("g.V().map(__.values('age').math('_ + 1').by(__.V().count()))");
-    expect(e.message).toMatch(AMBIGUOUS);
-    expect(e.message).not.toContain('select(');
+  // A value READ before the body's re-source is an ordinary filter: the row it drops is dropped by the map, and
+  // the row it keeps has its value — nothing about the answer depends on an unbound label. The connector answers
+  // it (each person's `math('_ + 1')` over the graph's count, 7); only a discarded `select()` of a label that may
+  // be unbound is explained (`admitsReSource`).
+  test('a re-source after a value read answers', () => {
+    expect(() => compilePlan("g.V().map(__.values('age').math('_ + 1').by(__.V().count()))", {})).not.toThrow();
+    expect(() => compilePlan("g.V().map(__.values('age').V().count())", {})).not.toThrow();
   });
 
   test('at depth: inside local(), a where() body and a union() arm', () => {
     for (const q of [
       "g.V().local(__.optional(__.out().as('a')).map(__.select('a').V().count()))",
       "g.V().where(__.optional(__.out().as('a')).map(__.select('a').V().count()).is(gt(0)))",
-      "g.V().union(__.map(__.values('age').math('_ + 1').by(__.V().count())), __.constant(1))",
+      "g.V().union(__.optional(__.out().as('a')).map(__.select('a').V().count()), __.constant(1))",
     ]) expect(declineOf(q).message).toMatch(AMBIGUOUS);
   });
 
@@ -114,7 +117,7 @@ describe('a terminal reason is the message, and its prefix is a property of its 
   });
 
   test('a traversal no lowering covers still says so', () => {
-    const q = "g.V().fold().map(__.unfold().values('age').math('_ + 1').by(__.V().count()))";
+    const q = 'g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().sack())';
     const e = declineOf(q);
     expect(e.kind).toBe('uncovered');
     expect(e.message).toBe(`this traversal is not supported yet: no lowering covers ${q}`);

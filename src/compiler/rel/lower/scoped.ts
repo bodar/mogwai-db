@@ -14,11 +14,12 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias } from '..
 import { freshTraverserRow } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { isLocalScope, nondeterministic, type IRStep } from '../../ir/step.ts';
+import { isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
+import { bulkObservedFrom } from '../../ir/bulk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { firstArrival, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { framingCols, perTraverserFraming, type RecordField, type RelFraming } from '../framing.ts';
@@ -29,8 +30,8 @@ import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, 
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import type { Declines } from '../../unsupported.ts';
-import { bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
-import { childSeam, defaultCollation, perOriginWindow, reductionHost } from './reduction.ts';
+import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
+import { childSeam, defaultCollation, perOriginWindow, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
 // §2, S1–S4). Every host here is the same three moves, and only the third differs:
@@ -140,34 +141,127 @@ interface ScopedBody {
  */
 function lowerBody(
   body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', positionedSeed = false,
+  order?: 'free' | 'read', positionedSeed = false, first = false,
 ): Tail | null {
   const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
   const positioned = positionedSeed || someStepDeep(body, ctx.params, (s) => s.name === 'tail');
-  const run = (at: boolean): Tail | null => continueAs(seedRow(rel, from, fresh, at), framing, body, 0, false, bodyCtx, fresh, labels);
+  const run = (at: boolean): Tail | null => {
+    const seed = seedRow(rel, from, fresh, at);
+    const reSourced = reSourcedBody(seed, body, framing, bodyCtx, fresh, labels, first);
+    return reSourced !== undefined ? reSourced : continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
+  };
   const tail = run(positioned);
   if (order === 'read' && tail && !positioned && !encounterOf(tail.rel.channels) && !atMostOneRow(tail.rel)) return run(true);
   return tail;
 }
 
-/** A body that DRAWS or RE-SOURCES stays the ladder's (`scopedBody` says why). */
-const ladderOwns = (body: readonly IRStep[], ctx: ChainCtx): boolean =>
-  nondeterministic(body, ctx.params) || someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true);
+/** The traverser state a re-source's split carries through unchanged (`reSourcedBody`). */
+const CROSSES: ReadonlySet<ChannelRole> = new Set<ChannelRole>(['alias', 'sack', 'loops']);
+
+/** Where a body RE-SOURCES at its top level — the first plain `V()`/`E()` (literal ids, not `V(<traversal>)`,
+ *  whose ids come from the host) — or -1. */
+const reSourceAt = (body: readonly IRStep[]): number =>
+  body.findIndex((s) => (s.name === 'V' || s.name === 'E') && !s.idOfValue && !traversalIdArg(s));
+
+/**
+ * A body that RE-SOURCES (`map(__.V().count())`, `local(__.V().values('name'))`, `__.select('a').V()…`) — the
+ * body from the re-source on, lowered ONCE as the uncorrelated read it is and crossed with the traverser before
+ * it; `undefined` where this does not apply (the body is the fold's as any other), `null` to decline.
+ *
+ * A mid-traversal GraphStep emits the whole graph per incoming traverser, keeping that traverser's carried
+ * state (`head.split(element, this)`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221`),
+ * so the rows after it do not depend on the host's VALUE. Where the part before it holds EXACTLY ONE row (the
+ * seed itself, or a `select` of a label every row binds), every barrier after the re-source is a barrier over the
+ * graph alone: `rest(prefix × G) = prefix × rest(G)`. So `rest(G)` is one ROOTED read (`rootedRead`), fenced and
+ * computed once, and the body is the prefix crossed with it — an uncorrelated subtree the decorrelator leaves
+ * untouched and crosses with the domain once (Neumann/Kemper's rule for a correlation-free side, Calcite
+ * `TopDownGeneralDecorrelator`), never a graph scan per host row. A FIRST-row consumer (`first`: `map`, a `by()`,
+ * an existence test) needs only the read's first row — picked once, by the collation a per-scope pick uses
+ * (`defaultCollation`) — so a host row costs one row however large the graph.
+ *
+ * PRESENCE IS A ROW: a productive null (`__.V().constant(null)`) is a row whose value is NULL, so `map()` keeps
+ * the traverser (`TraversalMapStep` emits whenever the child `hasNext()`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`).
+ *
+ * What it refuses, from the query text: a rest that reads the HOST traverser's state (its sack, path, loops or a
+ * host label — `rootedRead`'s `readsHostState`: one shared evaluation cannot hold them), and a prefix of label
+ * reads that may LOSE its row — the re-source discards the selected value, so the answer would depend only on
+ * which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
+ * lose or multiply its row (`out().V()`, `values('age').V()`) is GraphStep's own cross join, in the fold.
+ */
+function reSourcedBody(
+  seed: Rel, body: readonly IRStep[], framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap, first: boolean,
+): Tail | null | undefined {
+  const at = reSourceAt(body);
+  if (at < 0) return undefined;
+  const prefix: Tail | null = at === 0 ? { rel: seed, framing, aliases: labels, bulked: false }
+    : continueAs(seed, framing, body.slice(0, at), 0, false, ctx, fresh, labels);
+  if (!prefix || prefix.effects?.length) return null;
+  // A prefix that may lose or multiply its row is GraphStep's own cross join, in the fold — which also asks the
+  // explained admission rule of a discarded label read (`reSourceTail`'s `admitsReSource`).
+  if (!exactlyOneRow(prefix.rel)) return undefined;
+  // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
+  // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
+  // own. A path is extended by the split and an entering vertex is a hop's: neither is a contract this cross
+  // states (`reSource`, `lower/movement.ts`).
+  if (!prefix.rel.channels.every((channel) => CROSSES.has(channel.role) || channel.role === 'encounter')) return null;
+  const rooted = rootedRead(body.slice(at), ctx, fresh, 'many');
+  if (!rooted || rooted.effects?.length) return null;
+  // The read's own position and multiplicity ride; the sack and loop counter a FRESH start traverser holds are
+  // superseded by the host's, which the split keeps. Any other state (a label, a path) is not this cross's.
+  const own = rooted.rel.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'bulk');
+  if (!rooted.rel.channels.every((channel) => own.includes(channel) || (channel.role !== 'alias' && CROSSES.has(channel.role)))) return null;
+  const read = first && !atMostOneRow(rooted.rel)
+    ? make.limit({
+      id: fresh('srl'), count: compilerInt(1), channels: rooted.rel.channels, type: rooted.rel.type,
+      input: make.sort({ id: fresh('srs'), input: rooted.rel, channels: rooted.rel.channels, type: rooted.rel.type, terms: defaultCollation(rooted.rel) }),
+    })
+    : rooted.rel;
+  const once = isSelfContained(read) ? make.materialize({ id: fresh('srm'), input: read, channels: read.channels, type: read.type, fenced: true }) : read;
+  // The read's columns under fresh names beside the prefix's, then back under their own.
+  const renamed = new Map(once.type.cols.map((column) => [column.name, fresh('srv') as string]));
+  const right = make.project({
+    id: fresh('srp'), input: once, channels: [], type: typeOf(...once.type.cols.map((column) => ({ ...column, name: renamed.get(column.name)! }))),
+    exprs: once.type.cols.map((column) => [renamed.get(column.name)!, col(once.id, column.name)] as const),
+  });
+  const crossed = make.join({
+    id: fresh('srj'), left: prefix.rel, right, join: 'cross', channels: [], type: typeOf(...prefix.rel.type.cols, ...right.type.cols),
+  });
+  const carried = prefix.rel.channels.filter((channel) => CROSSES.has(channel.role));
+  const channels = carried.reduce(withChannel, own);
+  const fromPrefix = new Set(carried.map((channel) => channel.col));
+  const outCols = [...payloadCols(once), ...channels.map((channel) => (fromPrefix.has(channel.col) ? prefix.rel : once).type.cols.find((column) => column.name === channel.col)!)];
+  const rel = make.project({
+    id: fresh('srx'), input: crossed, channels, type: typeOf(...outCols),
+    exprs: outCols.map((column) => [column.name, col(crossed.id, fromPrefix.has(column.name) ? column.name : renamed.get(column.name)!)] as const),
+  });
+  return { rel, framing: rooted.framing, aliases: prefix.aliases, bulked: !!rooted.bulked };
+}
+
+/** A host whose child body RE-SOURCES at its top level (and does not draw) is the connector's alone
+ *  (`reSourcedBody`): the ladder's re-source is a scalar first-row read that cannot tell a productive null from
+ *  no row, so offering it as a route would answer the same query two ways. */
+export const connectorOwns = (step: IRStep, ctx: ChainCtx): boolean => step.args.some((arg) => {
+  if (!isNested(arg.value)) return false;
+  const body = bodyOf(arg.value.nested, ctx.params, ctx.sideEffects);
+  return !!body && reSourceAt(body) >= 0 && !ladderOwns(body, ctx);
+});
+
+/** A body that DRAWS stays the ladder's (`scopedBody` says why). */
+const ladderOwns = (body: readonly IRStep[], ctx: ChainCtx): boolean => nondeterministic(body, ctx.params);
 
 /** Step 2: the body, lowered as the root lowers a chain, then keyed by the scope. `null` declines. */
 function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null,
+  order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null, first = false,
 ): ScopedBody | null {
-  // Two body forms stay the ladder's, each for a reason about the QUERY TEXT:
-  // - a random DRAW (`sample`/`coin`/`shuffle`, at any depth) — the decorrelated body draws over every scope
-  //   at once, and a draw in a part that does not read the host would be one draw SHARED by every scope,
-  //   the exact defect the ladder's `shared-draw` decline names;
-  // - a RE-SOURCE (`V()`/`E()`) anywhere in the body — whether it is the uncorrelated read the ladder
-  //   answers once, or a re-source under a host value that may be absent (`resource-under-absent`, an
-  //   explained decline), is the ladder's decision, and the connector must not answer around it.
+  // A random DRAW (`sample`/`coin`/`shuffle`, at any depth) stays the ladder's, for a reason about the QUERY
+  // TEXT: the decorrelated body draws over every scope at once, and a draw in a part that does not read the host
+  // would be one draw SHARED by every scope, the exact defect the ladder's `shared-draw` decline names. (A
+  // RE-SOURCE is the connector's own: `reSourcedBody`.)
   if (ladderOwns(body, ctx)) return null;
-  const lowered = lowerBody(body, rel, sc.scoped, framing, ctx, fresh, labels, order, positionedSeed);
+  const lowered = lowerBody(body, rel, sc.scoped, framing, ctx, fresh, labels, order, positionedSeed, first);
   // A body with EFFECTS is not a read the connector may evaluate per scope.
   if (!lowered || lowered.effects?.length) return null;
   // The host's own re-expression of the body's value, BEFORE the key is added (`landValues`' record).
@@ -194,7 +288,7 @@ function rootedBody(
   });
   const domain = make.filter({ id: fresh('sbd'), input: located, channels: [], type, pred: isNot(col(located.id, 'id'), compilerNull()) });
   const element = make.project({ id: fresh('sbe'), input: domain, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(domain.id, 'id')]] });
-  const lowered = lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, fresh, NO_ALIASES, 'read');
+  const lowered = lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, fresh, NO_ALIASES, 'read', false, true);
   if (!lowered || lowered.effects?.length) return null;
   const tail = reframe(lowered);
   if (!tail) return null;
@@ -213,10 +307,10 @@ function rootedBody(
  */
 function correlatedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read',
+  order?: 'free' | 'read', first = false,
 ): Tail | null {
   if (ladderOwns(body, ctx)) return null;
-  const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order);
+  const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order, false, first);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
@@ -739,7 +833,7 @@ const existence = (negated: boolean): Connector => (site) => {
   if (!bodies || bodies.some((b) => !b?.length)) return null;
   // Every body correlated: the semi/anti-join is an `EXISTS` over the body itself, read against the host row
   // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
-  const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free'));
+  const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free', true));
   const probes = correlated.map((tail) => tail && existenceProbe(tail, fresh));
   if (probes.every((probe) => probe && spellsStored(probe, ['one'], rel))) {
     const pred = (probes as Rel[]).map((plan): Expr => ({ kind: 'exists', plan, negated }))
@@ -754,7 +848,7 @@ const existence = (negated: boolean): Connector => (site) => {
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/OrStep.java`).
   const keys: Rel[] = [];
   for (const body of bodies as (readonly IRStep[])[]) {
-    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'free');
+    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'free', false, undefined, true);
     if (!keyed) return null;
     if (step.name === 'or') {
       keys.push(make.project({
@@ -800,7 +894,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
   // decorrelated rejoin carries.
   const feedsOtherV = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
   const hostChannel = (channel: Channel): ColMeta => rel.type.cols.find((column) => column.name === channel.col)!;
-  const tail = feedsOtherV ? null : lowered !== undefined ? lowered : correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
+  const tail = feedsOtherV ? null : lowered !== undefined ? lowered : correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', true);
   // A body over its seed row alone (`seedExpressions`) is a projection of the host row, and its filters are the
   // host's: no subquery, no existence probe.
   const inline = tail && framingCols(tail.framing) ? seedExpressions(tail.rel, payloadCols(tail.rel).map((column) => column.name), rel) : null;
@@ -855,7 +949,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
   }
   // Not SQL-holdable as a dependent join: the decorrelated body, its FIRST row per scope through the rejoin.
   const sc = scope(rel, fresh);
-  const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read');
+  const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, undefined, true);
   if (!keyed) return null;
   const out = rejoin(sc, sc.scoped, keyed, rel, 'split', true, ctx, fresh, labels, false, feedsOtherV);
   return out && continueAs(out.rel, out.framing, steps, at + 1, bulked, ctx, fresh, out.aliases);
@@ -989,7 +1083,7 @@ const chooseRoute: Connector = (site) => {
   const condition = bodyOf(choice.nested, ctx.params, ctx.sideEffects);
   if (!condition) return null;
   const sc = scope(rel, fresh, true);
-  const keyed = scopedBody(condition, sc.scoped, framing, sc, ctx, fresh, labels, 'free');
+  const keyed = scopedBody(condition, sc.scoped, framing, sc, ctx, fresh, labels, 'free', false, undefined, true);
   if (!keyed) return null;
   const routed: RoutedCondition = {
     pred: (source) => (source.type.cols.some((column) => column.name === sc.key) ? {
@@ -1176,14 +1270,14 @@ const recordLeft: Connector = (site) => {
     if (by.key.kind !== 'child' || by.order !== undefined) continue;
     // A RECORD-valued by() (`by(__.project(…))`) is held as the MAP it is (`recordAsMap`): a record's own first
     // column is a SUB-field's, so presence read off it dropped an outer key whose inner map was empty.
-    const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read');
+    const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read', true);
     const tail = lowered && recordAsMap(lowered, ctx, fresh);
     const fieldCols = tail && framingCols(tail.framing);
     const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), rel, fresh);
     if (tail && exprs) { correlated.set(slot, { exprs, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
     const scoped = sc ??= scope(rel, fresh);
     if (joined === rel) joined = scoped.scoped;
-    const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh));
+    const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh), true);
     const cols = keyed && framingCols(keyed.tail.framing);
     if (!keyed || !cols || cols.some((column) => !keyed.tail.rel.type.cols.some((c) => c.name === column.name))) continue;
     const first = firstPerScope(keyed, cols.map((column) => column.name), fresh);
@@ -1319,7 +1413,7 @@ function landValues(
     const root = roots.get(key);
     const reframe = (t: Tail) => recordAsMap(t, ctx, fresh, true);
     const keyed = root ? rootedBody(body, root, rel, sc, ctx, fresh, reframe)
-      : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe);
+      : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe, true);
     const cols = keyed && framingCols(keyed.tail.framing);
     // One value column (and a scalar's per-row type) is what a ChildValue carries.
     if (!keyed || !cols || cols.length > (keyed.tail.framing.kind === 'scalar' ? 2 : 1)) return null;
@@ -1521,6 +1615,20 @@ const aliasCompare: Connector = (site) => {
     : continueAs(tail.rel, tail.framing, site.steps, site.at + 1, tail.bulked, site.ctx, site.fresh, tail.aliases);
 };
 
+/** A pool as ONE traverser standing for all of them — no value, every member's state dropped, a bulk that is the
+ *  pool's traverser count (its members' bulks summed, one each where it carries none). A scalar aggregate, so a
+ *  pool decorrelated against its keys is one row per key. */
+function poolWeight(pool: Rel, fresh: Minter): Rel {
+  const bulk = pool.channels.find((channel) => channel.role === 'bulk');
+  const weight: Expr = bulk ? { kind: 'agg', fn: 'sum', args: [col(pool.id, bulk.col)] } : { kind: 'agg', fn: 'count', args: [] };
+  const total = make.aggregate({
+    id: fresh('pgb'), input: pool, channels: [], type: typeOf(meta('n', 'int')), groupBy: [], aggs: [['n', weight]],
+  });
+  return make.project({
+    id: fresh('pgw'), input: total, channels: BULK, type: typeOf(meta(BULK[0]!.col, 'int')), exprs: [[BULK[0]!.col, col(total.id, 'n')]],
+  });
+}
+
 /**
  * `group().by(k).by(b)` — the VALUE body POOLED PER KEY. `Grouping` runs every traverser of a key up to the value
  * traversal's first barrier into ONE pool and reduces it there (`determineBarrierStep`, `doFinalReduction`,
@@ -1671,7 +1779,16 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
     exprs: seedCols.map((column) => [column.name, col(pooled.id, column.name)] as const),
   });
   const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: rest, rooted: false }, originDomain: undefined, bodyOrder: 'read' };
-  const tail = continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, fresh, labels);
+  // A pool that RE-SOURCES first (`group().by(label).by(__.V().count())`) discards every member's value: each
+  // member splits into the whole graph (`GraphStep`), so where the rest reads none of a member's own state
+  // (`readsHostState`) the pool is ONE traverser of bulk |pool| — the multiset is the same, and the graph is
+  // crossed once per KEY rather than once per member. Only where everything after the re-source READS that
+  // multiplicity (`bulkObservedFrom`, the one positional authority — a `count()`/`sum()` does, a `fold()` reads
+  // rows); otherwise every member crosses the graph, as the reference does.
+  const weighed = reSourceAt(rest) === 0 && !readsHostState(rest, bodyCtx) && bulkObservedFrom(rest, 1) ? poolWeight(seed, fresh) : null;
+  const tail = weighed
+    ? continueAs(weighed, sourceFraming, rest, 0, true, bodyCtx, fresh, labels)
+    : continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, fresh, labels);
   if (!tail || tail.effects?.length) return null;
   // THE KEY PROJECTION: the domain is the members' DISTINCT key terms, so the body keys the pool by those terms
   // read off the pool's traversers themselves — no domain cross join. The members COVER the domain (every key
@@ -1794,7 +1911,8 @@ export function scopedHost(
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, ['local', 'map', 'flatMap'].includes(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
-  const routes = ctx.connectorOnly || ladderless(step!, framing, ctx) ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
+  const routes = ctx.connectorOnly || ladderless(step!, framing, ctx) || connectorOwns(step!, ctx) ? [scoped]
+    : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is
   // tried first (the switch) changes the plan, never whether the traversal compiles.

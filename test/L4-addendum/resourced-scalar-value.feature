@@ -242,10 +242,9 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | d[1].i |
       | d[1].i |
 
-  # A re-sourced body whose FIRST value is null reads as producing nothing (docs/feature-support-matrix.md
-  # §17): SQLite's scalar subquery cannot tell a productive null from no row, so presence is the value's
-  # nullness. Java answers 6 nulls here (`TraversalMapStep` emits `iterator.next()` whenever `hasNext()`,
-  # step/map/TraversalMapStep.java, and Order.feature sorts null first) — an accepted divergence.
+  # A re-sourced body whose FIRST value is null is a PRODUCTIVE null: the body has a row, so map() emits it
+  # (`TraversalMapStep` emits `iterator.next()` whenever `hasNext()`, step/map/TraversalMapStep.java, and
+  # Order.feature sorts null first). The connector joins the body's ROW back, so presence is the row.
   Scenario: g_V_mapXV_chooseXhasLabelXpersonX_valuesXageX_constantXnullXX_order_limitX1XX
     Given the modern graph
     And the traversal of
@@ -253,8 +252,49 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       g.V().map(__.V().choose(__.hasLabel("person"), __.values("age"), __.constant(null)).order().limit(1))
       """
     When iterated to list
-    Then the result should be empty
+    Then the result should be unordered
+      | result |
+      | null |
+      | null |
+      | null |
+      | null |
+      | null |
+      | null |
 
+  Scenario: g_V_mapXV_constantXnullXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().map(__.V().constant(null)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  Scenario: g_V_localXV_valuesXnameXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().local(__.V().values("name")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[36].l |
+
+  Scenario: g_V_groupXX_byXlabelX_byXV_countX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label).by(__.V().count())
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":"d[24].l","software":"d[12].l"}] |
+
+  # The re-sourced coalesce fallback's productive null is a row, so the two software vertices map to null.
   Scenario: g_V_mapXcoalesceXvaluesXageX_V_constantXnullX_limitX1XXX
     Given the modern graph
     And the traversal of
@@ -268,3 +308,5 @@ Feature: mogwai addendum — a re-sourcing scalar child value carries its row's 
       | d[27].i |
       | d[32].i |
       | d[35].i |
+      | null |
+      | null |

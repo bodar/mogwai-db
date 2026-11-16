@@ -214,7 +214,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # Slice: a re-source arm ending in a projection yields the projected values per input (one
   # input here, V(1) = marko), flat-mapped.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_VX1X_valuesXageX_flatMapXV_hasLabelXpersonX_valuesXnameXX
     Given the modern graph
     And the traversal of
@@ -263,7 +262,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # Slice: optional() over a scalar with an element arm → a VariantStream (arm rows where
   # productive, else the value restored). V() is productive → 6 vertices; count() = 6.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_VX1X_valuesXageX_optionalXVX_count
     Given the modern graph
     And the traversal of

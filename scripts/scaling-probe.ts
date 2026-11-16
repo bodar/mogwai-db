@@ -89,6 +89,16 @@ const SHAPES: readonly Shape[] = [
   { name: 'local(where(out.project))', query: "g.V().local(where(out().project('x').by(path()))).count()" },
   { name: 'union(where(out.limit),id)', query: 'g.V().union(where(out().limit(2)), identity()).count()' },
   { name: 'choose(out.project.by(path),a,b)', query: "g.V().choose(out().project('x').by(path()), constant('a'), constant('b')).count()" },
+  // A RE-SOURCING body (`lower/scoped.ts` `reSourcedBody`): the read after `V()` computed once and crossed with
+  // the host, never a graph scan per traverser. `local(V()…)`'s OUTPUT is hosts × matches, so its count is the
+  // probe (the rows are the answer's own size).
+  { name: 'map(V.count)', query: 'g.V().map(V().count())' },
+  { name: 'map(V.values)', query: "g.V().map(V().values('name'))" },
+  { name: 'local(V.has.values).count', query: "g.V().local(V().has('age',gt(30)).values('name')).count()" },
+  { name: 'as.map(select.V.count)', query: "g.V().as('p').map(select('p').V().hasLabel('software').count())" },
+  { name: 'where(V.has)', query: "g.V().where(V().has('age',gt(40))).count()" },
+  { name: 'group.by(label).by(V.count)', query: 'g.V().group().by(label).by(V().count())' },
+  { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

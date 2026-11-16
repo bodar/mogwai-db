@@ -22,7 +22,7 @@ const oneRepeated = (g: string, n: number, members: readonly unknown[], vtype: s
   expect(got).toHaveLength(n);
   expect(new Set(got.map((r) => JSON.stringify(r))).size).toBe(1);
   expect(members).toContain(got[0].v);
-  expect(got[0].vtype).toBe(vtype);
+  expect(got[0].vtype ?? got[0].vt).toBe(vtype);
 };
 
 describe('an unordered re-sourced first value is one member, typed', () => {
@@ -56,38 +56,39 @@ describe('an order-pinned or reduced re-sourced value is exact', () => {
   test('an empty body maps to nothing', () => expect(rows("g.V().map(__.V().values('age').is(gt(100)))")).toEqual([]));
 });
 
-// WHETHER the body produced is read off its first value's NULLNESS: a scalar subquery over no rows is NULL,
-// and SQLite cannot tell that from a productive-null first value, so a re-sourced body whose first value is
-// null reads as producing nothing (docs/feature-support-matrix.md §17 — the reference's TraversalMapStep
-// hasNext()/next() distinction, step/map/TraversalMapStep.java, is not worth an EXISTS per read).
-describe('a re-sourced first value that is null reads as nothing (§17)', () => {
-  const none = (g: string): void => expect(rows(g)).toEqual([]);
+// A re-sourced body's FIRST value that is null is a PRODUCTIVE null: the body has a row, so `map()` emits it
+// (`TraversalMapStep` emits whenever the child `hasNext()`, step/map/TraversalMapStep.java). The connector
+// joins the body's ROW back (`lower/scoped.ts` `reSourcedBody`), so presence is the row, not the value's
+// nullness. Consumers that still read the scalar first-row value (a concat() operand, a by() value) keep the
+// §17 reading (docs/feature-support-matrix.md).
+describe('a re-sourced first value that is null is a value', () => {
+  const nulls = (g: string, n: number): void => expect(rows(g).map((r) => r.v)).toEqual(Array(n).fill(null));
   const CHOOSE = "__.V().choose(__.hasLabel('person'), __.values('age'), __.constant(null)).order().limit(1)";
-  test('choose(…, constant(null)).order().limit(1)', () => none(`g.V().map(${CHOOSE})`));
+  test('choose(…, constant(null)).order().limit(1)', () => nulls(`g.V().map(${CHOOSE})`, 6));
   test('coalesce(values(age), constant(null))', () =>
-    none("g.V().map(__.V().coalesce(__.values('age'), __.constant(null)).order().limit(1))"));
+    nulls("g.V().map(__.V().coalesce(__.values('age'), __.constant(null)).order().limit(1))", 6));
   test('union(values(age), constant(null))', () =>
-    none("g.V().map(__.V().union(__.values('age'), __.constant(null)).order().limit(1))"));
-  test('an inject host', () => none(`g.inject(1).map(${CHOOSE})`));
-  test('constant(null)', () => none('g.V().map(__.V().constant(null))'));
-  test('inside local(map())', () => none(`g.V().local(__.map(${CHOOSE}))`));
-  test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null).limit(1)).count()')[0].v).toBe(0));
-  // An EXISTENCE check never reads the value: `constant(null).limit(1)` cannot empty a non-empty stream, so the
-  // body is its existence prefix `V()` (`existencePrefix`) — a re-source the connector does not own yet
-  // (docs/2026-11-16-ladder-retirement-plan.md R4), a clean decline rather than the null-as-nothing `[]`.
-  test('a where() body over it is asked for existence alone', () =>
-    expect(() => rows('g.V().where(__.V().constant(null).limit(1))')).toThrow(UnsupportedTraversal));
-  test('a concat() operand raises as an empty one does', () =>
+    nulls("g.V().map(__.V().union(__.values('age'), __.constant(null)).order().limit(1))", 6));
+  test('an inject host', () => nulls(`g.inject(1).map(${CHOOSE})`, 1));
+  test('constant(null)', () => nulls('g.V().map(__.V().constant(null))', 6));
+  test('inside local(map())', () => nulls(`g.V().local(__.map(${CHOOSE}))`, 6));
+  test('counted after the map', () => expect(rows('g.V().map(__.V().constant(null)).count()')[0].v).toBe(6));
+  test('local() and flatMap() keep every null row', () => {
+    expect(rows('g.V().local(__.V().constant(null)).count()')[0].v).toBe(36);
+    expect(rows('g.V().flatMap(__.V().constant(null)).count()')[0].v).toBe(36);
+  });
+  test('a where() body over it keeps the row', () => expect(rows('g.V().where(__.V().constant(null).limit(1)).count()')[0].v).toBe(6));
+  test('a concat() operand raises as an empty one does (§17)', () =>
     expect(() => run(s, "g.V().values('name').concat(__.V().constant(null))")).toThrow('does not map to a value'));
-  test('an EMPTY re-source still drops the row', () => none('g.V().map(__.V(99).constant(null))'));
+  test('an EMPTY re-source still drops the row', () => expect(rows('g.V().map(__.V(99).constant(null))')).toEqual([]));
   test('a non-null first value is unaffected', () =>
     expect(rows("g.V().map(__.V().values('age').order().limit(1))").map((r) => r.v)).toEqual(Array(6).fill(27)));
   // A re-sourced FINAL coalesce arm reads its own presence; an earlier arm's value still answers.
   test('a re-sourced coalesce fallback keeps the earlier arm', () =>
     expect(bagOf(rows("g.V().map(__.coalesce(__.values('age'), __.V(99).values('name')))").map((r) => r.v))).toEqual([27, 29, 32, 35]));
-  test('a re-sourced coalesce fallback that is null is no fallback', () =>
+  test('a re-sourced coalesce fallback that is null is a null', () =>
     expect(bagOf(rows("g.V().map(__.coalesce(__.values('age'), __.V().constant(null).limit(1)))").map((r) => r.v)))
-      .toEqual([27, 29, 32, 35]));
+      .toEqual(bagOf([27, 29, 32, 35, null, null])));
   // A null `by()` value is absent (docs/feature-support-matrix.md §17): `project()` omits the key.
   test('a by() null is absent (§17)', () => expect(rows(`g.V().project('a').by(${CHOOSE})`).map((r) => r.map)).toEqual(Array(6).fill('[]')));
   // A write applies a productive null rather than skipping it: the reference REMOVES the key.
@@ -97,6 +98,28 @@ describe('a re-sourced first value that is null reads as nothing (§17)', () => 
     expect(run(store, "g.V().has('age').count()").map((r) => r.v)).toEqual([0]);
   });
 });
+
+// A re-sourcing body's read is computed ONCE and crossed with each host, at any depth and under any host.
+describe('a re-sourcing body composes', () => {
+  test('a per-row total', () => expect(rows("g.V().as('p').map(__.V().hasLabel('software').count())").map((r) => r.v)).toEqual(Array(6).fill(2)));
+  test('local() is every row per host', () => expect(rows("g.V().local(__.V().values('name')).count()")[0].v).toBe(36));
+  test('a select() of a label every row binds is one row', () =>
+    expect(rows("g.V().as('a').map(__.select('a').V().count())").map((r) => r.v)).toEqual(Array(6).fill(6)));
+  test('group() pools each key: |pool| × the graph', () =>
+    expect(rows('g.V().group().by(label).by(__.V().count())')[0].map)
+      .toBe('[[{"t":"string","v":"person"},{"t":"long","v":24}],[{"t":"string","v":"software"},{"t":"long","v":12}]]'));
+  test('group() with a fold keeps every member\'s crossing', () =>
+    expect(rows("g.V().group().by(label).by(__.V().values('name').fold().count(local))")[0].map)
+      .toBe('[[{"t":"string","v":"person"},{"t":"long","v":24}],[{"t":"string","v":"software"},{"t":"long","v":12}]]'));
+  test('nested: inside a where() body and a union() arm', () => {
+    expect(rows("g.V().where(__.map(__.V().has('age', gt(30)).count()).is(2)).count()")[0].v).toBe(6);
+    expect(rows("g.V().union(__.map(__.V().count()), __.constant(0)).sum()")[0].v).toBe(36);
+  });
+  test('local() keeps the HOST\'s sack through the split (GraphStep head.split)', () =>
+    expect(rows("g.withSack(1).V().sack(sum).by(__.constant(2)).local(__.V().hasLabel('software')).sack()").map((r) => r.v)).toEqual(Array(12).fill(3)));
+  test('inside local(flatMap())', () => expect(rows("g.V().local(__.flatMap(__.V().hasLabel('software'))).count()")[0].v).toBe(12));
+});
+
 
 // A mid-traversal V() SPLITS the host traverser (GraphStep.java:196 `head.split(element, this)`), so the
 // body sees the HOST's sack, loops, path and path labels. The rooted read is computed once for every host,
