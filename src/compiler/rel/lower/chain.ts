@@ -137,6 +137,9 @@ export interface FilterCtx { readonly params: ParamEnv; readonly correlatedChild
  *  (off). Each is the other's fallback, so the switch changes the PLAN, never whether there is one. */
 export interface ChildStrategy {
   readonly correlatedChild: boolean;
+  /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): a connector site never falls back to
+   *  the ladder. Off in every product compile. */
+  readonly connectorOnly?: boolean;
   /** The connector site the LADDER is lowering right now — set by `continueAs` when it hands a connector host
    *  to the ladder, so the tail that lowers it does not hand it straight back (`atLadder`, `lower/scoped.ts`).
    *  Compared by step-list IDENTITY and index, so a body or a later step never matches it. */
@@ -285,7 +288,7 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
  * graph), `rankedOrders` (keyed by the outer chain's step identity), and the head/resume-only flags.
  */
 export const settledOf = (ctx: ChainCtx) => ({
-  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren, correlatedChild: ctx.correlatedChild,
+  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren, correlatedChild: ctx.correlatedChild, connectorOnly: ctx.connectorOnly,
   labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects, sideEffectPolicies: ctx.sideEffectPolicies,
   services: ctx.services, sack: ctx.sack, collections: ctx.collections,
   writes: ctx.writes, scopeNames: ctx.scopeNames, declines: ctx.declines, budget: ctx.budget,

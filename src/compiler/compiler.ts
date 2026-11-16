@@ -7,7 +7,7 @@ import { UNCOMPARABLE_LITERAL, uncarriedLiteral, uncomparableLiteral } from './i
 import { type Executable } from '../sql/kernel/render.ts';
 import { type AsyncSegmentPlan, type Plan, type SyncSegmentPlan } from './segment.ts';
 import { labelRegime } from '../api.ts';
-import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
+import { CONNECTOR_ONLY_ENV, resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
 import { compileViaRel, loweringOptions } from './rel/spine.ts';
 import { rankedOrderPlan, segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
@@ -176,6 +176,8 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
   // them is the decline-reason sink, created ONCE here so every route below (the wire read, each segment
   // head and resume, the ranked-order probe) records into the same one.
   const declines = new Declines();
+  // The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`) takes the ladder away entirely.
+  const connectorOnly = request.fastPaths.connectorOnly ?? CONNECTOR_ONLY_ENV;
   const relRequest = {
     declines,
     // The compile's ONE work meter, beside the decline sink and for its reason: every route below — the
@@ -184,7 +186,8 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,
-    correlatedChild: request.fastPaths.correlatedChild,
+    correlatedChild: connectorOnly ? false : request.fastPaths.correlatedChild,
+    connectorOnly,
     detached: options?.detached ?? false,
     labelRegime: labelRegime(request.sourceOptions),
     services: servicesNamedBy(steps, request.params, request.registry),

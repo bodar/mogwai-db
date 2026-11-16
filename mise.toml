@@ -150,6 +150,22 @@ depends = ["install"]
 run = "bun scripts/binds-check.ts"
 sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
 
+# The ladder-size ratchet (scripts/ladder-check.ts): the `return null` decline sites in src/compiler/rel/ may
+# not grow — the TOTAL, and file by file for the correlated-route (ladder) files. Root CLAUDE.md decision 6:
+# nesting composes through the scoped-relation connector, so a new decline site is a new route by another name.
+# A RISE fails; a FALL passes and asks for `ladder-record` (tightening). Source text only — no graph, no
+# traversal, well under a second — so it lives in `gates`. Re-record with the reason in the commit message.
+[tasks.ladder]
+description = "Ladder-size ratchet: return-null decline sites in src/compiler/rel/ never rise (total + ladder files)"
+depends = ["install"]
+run = "bun scripts/ladder-check.ts"
+sources = ["src/compiler/rel/**/*", "scripts/ladder-check.ts", "scripts/ladder-baseline.json"]
+
+[tasks.ladder-record]
+description = "Re-record scripts/ladder-baseline.json (commit it with the reason the count moved)"
+depends = ["install"]
+run = "bun scripts/ladder-check.ts --record"
+
 # An INSTRUMENT, not a gate, and deliberately absent from `ci`. An export with zero references is a
 # question, not a verdict: DI-registered leaves, names reached through the service registry, symbols
 # used only by a .feature step, and the worker/server entry points all look dead to a reference
@@ -346,6 +362,25 @@ description = "Re-record the L5 host-closure baseline (commit test/L5-properties
 depends = ["install", "check", "submodule"]
 run = "L5_HOST_RECORD=1 bun test test/L5-properties/host-closure.test.ts"
 
+# L9 — the CONNECTOR guards (test/L9-connector/), keeping nesting on the scoped-relation connector (root
+# CLAUDE.md decision 6): the host-closure sweep with the ladder OFF and no ladder fallback
+# (`FastPathConfig.connectorOnly`), ratcheted per host × level, plus host totality (every child-taking
+# position is a CONNECTORS row or a written-down deferral). A `test/L9-…` dir, so CI gives it its own
+# `test (L9)` and `L8 (L9)` runners with no ci.yml edit, and `test`/`L8` already run it inside `ci`.
+[tasks.L9]
+alias = "connector"
+description = "L9 — connector guards: connector-only host-closure ratchet + host totality"
+depends = ["install", "check", "submodule"]
+run = "bun test test/L9-connector"
+sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
+
+# Re-record the connector-only closure ratchet — a command for L5-host-record's reason (an auto-record would
+# launder a fall). Run it when a rate ROSE or the generator changed; a downward re-record needs its reason.
+[tasks.connector-record]
+description = "Re-record the L9 connector-only closure baseline (commit test/L9-connector/connector-closure-baseline.json)"
+depends = ["install", "check", "submodule"]
+run = "L9_CONNECTOR_RECORD=1 bun test test/L9-connector/connector-closure.test.ts"
+
 # The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
 # has not CHANGED. `submodule` because it executes traversals (same reason as L5). It lives in
 # `test/L7-census/` so the CI bracket function gives it its OWN runner (`test (L7)`) instead of dragging
@@ -515,8 +550,8 @@ sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.jso
 # within ~7s of `install`, so as a group it is free — it exists to be a JOB, not because anyone needs
 # to run the six separately.
 [tasks.gates]
-description = "The static gates: type-check + lint + architectural + bind-budget + SQL hygiene + deletion & edge ratchets + worker build"
-depends = ["check", "lint", "arch", "binds", "sql-hygiene", "build"]
+description = "The static gates: type-check + lint + architectural + bind-budget + ladder-size + SQL hygiene + deletion & edge ratchets + worker build"
+depends = ["check", "lint", "arch", "binds", "ladder", "sql-hygiene", "build"]
 run = "echo 'gates passed'"
 
 # THE LOCAL one-command gate, and still the complete one: `mise run ci` runs everything CI runs.

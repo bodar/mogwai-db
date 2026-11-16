@@ -1,0 +1,111 @@
+// The hosts the scoped-relation connector does NOT own yet — each with the one-line reason and its blocker.
+//
+// `host-totality.test.ts` demands that every child-taking position the front end can produce is either a
+// `CONNECTORS` row (`src/compiler/rel/lower/scoped.ts`, mirrored as `CONNECTOR_HOSTS` in `ir/analyze.ts`) or
+// an entry here. So a new host cannot quietly get a route of its own: it is a CONNECTORS row, or it is written
+// down here with why not and what would let it be one (root CLAUDE.md, locked decision 6).
+//
+// KEYS. A plain step name is the step's ARGUMENT position (`sideEffect(__.x)`); `<step>.by` / `<step>.with`
+// is that step's `by()`/`with()` MODULATOR position (`path().by(__.x)`). `P(traversal)` is a predicate's
+// traversal operand (`is(P.eq(__.x))`). A connector host covers both its positions, so `order.by` needs no row.
+//
+// When a host becomes a CONNECTORS row, DELETE its entry — the totality test fails on an entry that names a
+// connector host, so the table can only describe what is genuinely deferred.
+
+export interface Deferred {
+  /** Why the connector does not own this position today. */
+  readonly reason: string;
+  /** What has to exist before it can — the work that would turn this into a CONNECTORS row. */
+  readonly blocker: string;
+}
+
+// Shared rows, for positions deferred for ONE reason.
+const WRITE_ARG: Deferred = {
+  reason: "a write's value/endpoint child — lowered inside the write plan (`rel/write.ts`) through the child seam's scalar/rooted answer",
+  blocker: 'a scoped body inside a write: effects threaded through a decorrelated body (the same blocker as sideEffect)',
+};
+const VALUE_ARG: Deferred = {
+  reason: "a traversal-valued ARGUMENT of a value step (list/string/date ops) — the step's own payload builder reads it",
+  blocker: 'a CONNECTORS row landing the argument as a join column (`byValues`, the S5 typed carrier)',
+};
+const PREDICATE_OPERAND: Deferred = {
+  reason: 'a predicate whose operand is a traversal — lowered by the filter family, not a host',
+  blocker: 'a CONNECTORS row landing the operand per traverser as a join column, the predicate reading it (`byValues`)',
+};
+const PROJECTION_BY: Deferred = {
+  reason: "by() of a projection step that is not a connector host — the step's payload builder reads it through the child seam",
+  blocker: "a CONNECTORS row for the step, landing each by() value as a join column read through `childSeam` (as order/group/project do)",
+};
+const OLAP_WITH: Deferred = {
+  reason: 'a with() option of a graph-computer / service step — configuration, not a per-traverser body',
+  blocker: 'none — not a per-traverser child; a CONNECTORS row would need the step to run its option per traverser first',
+};
+const RESOURCE: Deferred = {
+  reason: 're-sources the stream (reads ids/start rows from a child) — a body that draws or re-sources stays the ladder\'s (`scopedBody`)',
+  blocker: 'a connector body that re-sources (the nested scope stack, plan Phase 3 item 2)',
+};
+const REPEAT: Deferred = {
+  reason: 'repeat()\'s body/loop condition — bounded is the IR unroll, unbounded a `Recursive` term (docs/archive/2026-08-09-repeat-two-regimes-plan.md)',
+  blocker: 'a Recursive term may hold no window (`BARRIER_IN_TERM`), so no per-iteration ROW_NUMBER scope key; bounded phases could take RoutedCondition-style scoped predicates (not built)',
+};
+const OPTION_MAP: Deferred = {
+  reason: 'the option-map form (`choose(k).option(…)`, `branch(t).option(…)`, `mergeV().option(Merge.x, …)`) stays the host\'s own',
+  blocker: 'a landed key value (the by()-values-as-join-columns primitive) routing each option arm',
+};
+
+export const DEFERRED_HOSTS: Readonly<Record<string, Deferred>> = {
+  sideEffect: {
+    reason: 'an effect-free body is removed by a Pass (`dropEffectFreeSideEffect`); one WITH effects is the collection substrate\'s, and a scoped body declines effects',
+    blocker: 'effects threaded through a decorrelated body',
+  },
+  repeat: REPEAT,
+  until: REPEAT,
+  emit: REPEAT,
+  option: OPTION_MAP,
+  branch: OPTION_MAP,
+  match: {
+    reason: 'declarative match() is its own lowering (`rel/match.ts`) — patterns join on labels, not a per-traverser body',
+    blocker: 'deprecated in TinkerPop 4; a pattern as connector bodies joined on bound labels (not planned)',
+  },
+  select: { reason: 'select(traversal) — the KEY is the child\'s value', blocker: VALUE_ARG.blocker },
+  V: RESOURCE,
+  E: RESOURCE,
+  call: { reason: "a service's parameter traversal — the service owns it (`src/services/`)", blocker: 'services are barriers/streams, not per-traverser bodies' },
+  addE: WRITE_ARG,
+  addV: WRITE_ARG,
+  addLabel: WRITE_ARG,
+  dropLabel: WRITE_ARG,
+  property: WRITE_ARG,
+  from: WRITE_ARG,
+  to: WRITE_ARG,
+  mergeV: WRITE_ARG,
+  mergeE: WRITE_ARG,
+  concat: VALUE_ARG,
+  dateDiff: VALUE_ARG,
+  combine: VALUE_ARG,
+  difference: VALUE_ARG,
+  disjunct: VALUE_ARG,
+  intersect: VALUE_ARG,
+  merge: VALUE_ARG,
+  product: VALUE_ARG,
+  has: PREDICATE_OPERAND,
+  hasId: PREDICATE_OPERAND,
+  hasKey: PREDICATE_OPERAND,
+  hasLabel: PREDICATE_OPERAND,
+  hasValue: PREDICATE_OPERAND,
+  is: PREDICATE_OPERAND,
+  none: PREDICATE_OPERAND,
+  'P(traversal)': PREDICATE_OPERAND,
+  'path.by': PROJECTION_BY,
+  'select.by': PROJECTION_BY,
+  'valueMap.by': PROJECTION_BY,
+  'sack.by': PROJECTION_BY,
+  'math.by': PROJECTION_BY,
+  'format.by': PROJECTION_BY,
+  'aggregate.by': PROJECTION_BY,
+  'call.with': OLAP_WITH,
+  'connectedComponent.with': OLAP_WITH,
+  'pageRank.with': OLAP_WITH,
+  'peerPressure.with': OLAP_WITH,
+  'shortestPath.with': OLAP_WITH,
+};

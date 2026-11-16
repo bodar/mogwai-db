@@ -56,6 +56,9 @@ export interface SweepResult {
   /** Every host query that DECLINED (`UnsupportedTraversal`), levels 1 and 2 — the seam gaps the
    *  attribution shrinks (`attribution.ts`, cc1-shrink). */
   readonly declined: string[];
+  /** Per `host@level` cell (the outermost host), the host queries that did NOT run — the members of each
+   *  closure-rate denominator outside its numerator (L9's ratchet names the NEW ones on a fall). */
+  readonly unrun: Record<string, string[]>;
   /** Law violations not diagnosed in host-known.ts. */
   readonly divergences: string[];
   /** Diagnosed (known) law violations hit, by entry id. */
@@ -123,6 +126,12 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
   const declined: string[] = [];
   const divergences: string[] = [];
   const knownHits = new Map<string, number>();
+  const unrun: Record<string, string[]> = {};
+  const tally = (host: string, lvl: Level, q: string, o: Outcome) => {
+    table[host]![lvl].applicable++;
+    if (o.kind === 'rows') table[host]![lvl].executed++;
+    else (unrun[`${host}@${lvl}`] ??= []).push(q);
+  };
   const laws = new Map<string, { evaluated: number; indeterminate: number }>();
   const run = (q: string): Outcome => {
     const o = outcomeOf(store, q, fastPaths);
@@ -146,8 +155,7 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
       if (!h.applies(c.from, c.to)) continue;
       const q = hostQuery(h);
       const o = run(q);
-      table[h.name]![1].applicable++;
-      if (o.kind === 'rows') table[h.name]![1].executed++;
+      tally(h.name, '1', q, o);
       at.set(h.name, { q, o });
     }
 
@@ -161,9 +169,8 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
     const r = rng(seed * 7919 + i);
     for (let k = 0; k < NESTED_PER_CASE && pairs.length; k++) {
       const [h1, h2] = pairs.splice(Math.floor(r() * pairs.length), 1)[0]!;
-      const o = run(`${c.prefix}.${h1.render(`__.${h2.render(anon)}`)}`);
-      table[h1.name]![2].applicable++;
-      if (o.kind === 'rows') table[h1.name]![2].executed++;
+      const q = `${c.prefix}.${h1.render(`__.${h2.render(anon)}`)}`;
+      tally(h1.name, '2', q, run(q));
     }
 
     // ---- level 3: H1(H2(H3(b))), a few well-typed triples per case
@@ -179,9 +186,8 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
     }
     for (let k = 0; k < NESTED_PER_CASE && triples.length; k++) {
       const [h1, h2, h3] = triples.splice(Math.floor(r() * triples.length), 1)[0]!;
-      const o = run(`${c.prefix}.${h1.render(`__.${h2.render(`__.${h3.render(anon)}`)}`)}`);
-      table[h1.name]![3].applicable++;
-      if (o.kind === 'rows') table[h1.name]![3].executed++;
+      const q = `${c.prefix}.${h1.render(`__.${h2.render(`__.${h3.render(anon)}`)}`)}`;
+      tally(h1.name, '3', q, run(q));
     }
 
     // ---- semantics: the laws, over whichever forms ran
@@ -274,7 +280,7 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
     }
   });
 
-  return { drawn, cases: cases.length, fingerprint, table, internal, declined, divergences, knownHits, laws };
+  return { drawn, cases: cases.length, fingerprint, table, internal, declined, unrun, divergences, knownHits, laws };
 }
 
 export const rate = (t: Tally): number => (t.applicable === 0 ? 1 : t.executed / t.applicable);

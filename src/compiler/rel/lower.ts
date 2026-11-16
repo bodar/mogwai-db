@@ -3827,6 +3827,8 @@ export interface Lowering {
   readonly correlatedChildren?: boolean;
   /** The `correlatedChild` fast path — see `ChildStrategy` (`lower/chain.ts`). */
   readonly correlatedChild?: boolean;
+  /** The connector-ALONE measurement mode — see `ChildStrategy.connectorOnly` (`lower/chain.ts`). */
+  readonly connectorOnly?: boolean;
   /** May the driving property seek run (`src/rel/passes/semijoin.ts`, `indexSeek`)? A PHYSICAL
    *  rewrite over the finished algebra, so unlike every other flag here it changes no lowering
    *  decision — which is why it is read once, at the pass, rather than threaded into the fold. */
@@ -3993,6 +3995,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
   correlatedChild: opts.correlatedChild ?? true,
+  connectorOnly: opts.connectorOnly ?? false,
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
   detached: opts.detached ?? false,
@@ -4997,12 +5000,12 @@ export function lowerMapResumeOf(maps: readonly unknown[], steps: readonly IRSte
  * telemetry, `ms` is the gate).
  */
 function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
-  const { params, collapse, correlatedChildren, correlatedChild, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, budget, wireTerminal } = settle(opts);
+  const { params, collapse, correlatedChildren, correlatedChild, connectorOnly, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections, source, writes, scopeNames, rankedOrders, declines, budget, wireTerminal } = settle(opts);
   const facts = analyzeChain(steps as IRStep[], { wireTerminal });
   return {
     facts,
     ctx: {
-      params, correlatedChildren, correlatedChild, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
+      params, correlatedChildren, correlatedChild, connectorOnly, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
       demandsPathLabels: facts.demandsPathLabels,
       labelRegime, source, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),

@@ -25,7 +25,7 @@
   function in `scripts/brackets.ts`). `mise run L1`..`L5` run one level each (`mise run L8` re-runs the whole fan-out perturbed); `mise run ci` is the
   full gate. Re-runs are incremental (`sources` in `mise.toml`) — an unchanged tree skips.
 - **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
-  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `sql-hygiene`, `rel-sweep`, `test`, `L8` and
+  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `ladder`, `sql-hygiene`, `rel-sweep`, `test`, `L8` and
   `build`, and `test` fans one `bun test` per bracket over ALL discovered files (`scripts/test-all.ts`),
   so **L1–L5, `test/L7-census` and L8 are inside it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
   what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks
@@ -122,6 +122,15 @@
   and a WRONG answer can only be baselined with a human-written reason. `mise run L6` prints the full report.
 - **L8** (no folder — a MODE) — the whole suite re-run under `reverse_unordered_selects`, gated at zero:
   every order an answer relies on is pinned by the SQL. See "L8 — the perturbation rung" below.
+- **L9** (`test/L9-connector/`, `mise run L9` alias `connector`) — the CONNECTOR guards that keep nesting on
+  the scoped-relation connector (root CLAUDE.md decision 6). (1) The L5 host-closure sweep (same engine, seed
+  42, 200 cases) with the ladder OFF and no fallback (`FastPathConfig.connectorOnly`, set per compile),
+  ratcheted ONE-WAY per host × level in `connector-closure-baseline.json` — a fall names the cell and the
+  queries that newly decline; internal errors and law divergences fail as in L5; re-record with
+  `mise run connector-record` (a downward one needs its reason). (2) Host totality: every child-taking position
+  — derived from the grammar, the L1 corpus and L5's `hosts.ts` — is a `CONNECTORS` row or a
+  `deferred-hosts.ts` entry with its reason and blocker, so a new host cannot quietly get a route of its own.
+  Its static sibling is `mise run ladder` (in `gates`): the `return null` count in `src/compiler/rel/` never rises.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
   (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they
   live in neither.

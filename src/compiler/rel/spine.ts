@@ -9,7 +9,6 @@ import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { Declines } from '../unsupported.ts';
 import type { CompileBudget } from '../../sql/kernel/budget.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
-import { CONNECTOR_ONLY } from './lower/scoped.ts';
 
 /**
  * What the RelIR route needs from the enclosing REQUEST — and the whole of it.
@@ -35,6 +34,8 @@ export interface RelRequest {
   /** The `correlatedChild` fast path: the ladder of correlated child routes tried before the scoped-relation
    *  connector (on) or after it (off) — `lower/scoped.ts`. */
   readonly correlatedChild: boolean;
+  /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): no ladder at any site, no retry. */
+  readonly connectorOnly?: boolean;
   /** DETACHED-transfer compile mode (set only by `runForeign()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
@@ -157,7 +158,7 @@ function bothChildOrders<T>(request: RelRequest, lower: (attempt: RelRequest) =>
   };
   const first = attempt(request.correlatedChild);
   // The measurement knob reads the connector ALONE, so it never falls back to the other order.
-  if (CONNECTOR_ONLY && !request.correlatedChild) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
+  if (request.connectorOnly) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
   if (first.lowered) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
   const second = attempt(!request.correlatedChild);
   if (second.lowered) { if (second.sink) root!.adopt(second.sink); return second.lowered; }
@@ -180,6 +181,7 @@ export function loweringOptions(
     collapse: request.collapse,
     correlatedChildren: true,
     correlatedChild: request.correlatedChild,
+    connectorOnly: request.connectorOnly ?? false,
     // NOT a strategy switch — the graph's declared label cardinality is a CAPABILITY, and a creation
     // with no label of its own is a compile-time question only because this value is settled before a
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the

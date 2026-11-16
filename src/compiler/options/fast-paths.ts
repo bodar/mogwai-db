@@ -85,7 +85,21 @@ export interface FastPathConfig {
    * is compared ladder against connector.
    */
   readonly correlatedChild: boolean;
+  /**
+   * NOT a fast path — a MEASUREMENT mode, and deliberately optional and absent from `DEFAULT_FAST_PATHS` so L5's
+   * per-switch sweep never flips it. On, the scoped-relation connector answers every connector site ALONE: the
+   * ladder is neither tried first nor a fallback, at a site (`scopedHost`) or for the whole compile
+   * (`bothChildOrders`), and `correlatedChild` is forced off. It CHANGES COVERAGE, which no product setting
+   * may, so it exists only for the instruments that read what the general path answers by itself:
+   * `test/L9-connector` (in-process, per compile), `mise run scaling` and `mise run coverage` (through
+   * `MOGWAI_CONNECTOR_ONLY=1`, the default when this field is absent — `CONNECTOR_ONLY_ENV`).
+   */
+  readonly connectorOnly?: boolean;
 }
+
+/** `MOGWAI_CONNECTOR_ONLY=1`: the process-wide default for `FastPathConfig.connectorOnly`, for the scripts that
+ *  measure a configuration per child process. Read once; absent outside Bun/Node. */
+export const CONNECTOR_ONLY_ENV: boolean = typeof process !== 'undefined' && process.env?.MOGWAI_CONNECTOR_ONLY === '1';
 
 export interface CompileOptions {
   readonly fastPaths?: Partial<FastPathConfig>;

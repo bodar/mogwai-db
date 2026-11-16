@@ -1108,7 +1108,7 @@ export function scopedHost(
   if (!connectorSite(step)) return undefined;
   const connector = CONNECTORS.get(step!.name)!;
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
-  const routes = ctx.correlatedChild ? [ladder, scoped] : CONNECTOR_ONLY ? [scoped] : [scoped, ladder];
+  const routes = ctx.connectorOnly ? [scoped] : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is
   // tried first (the switch) changes the plan, never whether the traversal compiles.
@@ -1122,11 +1122,4 @@ export function scopedHost(
   for (const sink of tried) ctx.declines.adopt(sink);
   return null;
 }
-
-/**
- * A MEASUREMENT knob, never a product setting: `MOGWAI_CONNECTOR_ONLY=1` with the switch OFF takes the ladder
- * fallback away at a connector site, so the depth curve and the host-closure table can read what the general
- * path answers ALONE (the plan's Phase 2 G2 measurement). Read once; absent outside Bun/Node.
- */
-export const CONNECTOR_ONLY: boolean = typeof process !== 'undefined' && process.env?.MOGWAI_CONNECTOR_ONLY === '1';
 
