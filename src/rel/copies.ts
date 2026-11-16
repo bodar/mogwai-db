@@ -2,7 +2,8 @@ import type { Expr } from './expr.ts';
 import { shapeOf, spliceable } from './block.ts';
 import { isAbort } from './raise.ts';
 import type { Rel } from './rel.ts';
-import { exprChildren, exprRels, isSelfContained, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
+import { exprChildren, exprRels, forEachExpr, isSelfContained, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
+import type { RelId } from './types.ts';
 
 /**
  * WHAT IT COSTS TO SPELL A RELATION MORE THAN ONCE — three node facts, for the consumers that name one
@@ -202,3 +203,77 @@ export const columnIsStored = (r: Rel, name: string): boolean => {
     default: return false;
   }
 };
+
+/**
+ * WHICH COLUMNS OF AN OUTER ROW A CORRELATED PLAN SPELLS, read as `outputs` — the outer columns some
+ * expression of the plan COMPUTES WITH, as opposed to merely carrying. A column copied unchanged through a
+ * projection, a filter or a join is a pass-through the emitter writes as a name (or not at all where nothing
+ * reads it); a column an expression reads — a predicate, a sort term, a computed projection, an aggregate's
+ * argument, a correlated subplan's read — is spelled there, and an outer column spelled inside a correlated
+ * subplan is spelled as its DEFINITION (`columnIsStored`). `null` where the plan holds a node this does not
+ * follow (a walk), which a caller reads as "every column".
+ */
+export function spelledOuterColumns(plan: Rel, outer: RelId, outputs: readonly string[]): ReadonlySet<string> | null {
+  const NONE: ReadonlySet<string> = new Set();
+  const alias = new Map<RelId, Map<string, ReadonlySet<string>>>();
+  const reads = new Set<string>();
+  let opaque = false;
+  const of = (rel: RelId, name: string): ReadonlySet<string> =>
+    rel === outer ? new Set([name]) : alias.get(rel)?.get(name) ?? NONE;
+  const read = (e: Expr): void => forEachExpr(e, (node) => {
+    if (node.kind === 'col') of(node.rel, node.name).forEach((c) => reads.add(c));
+    for (const sub of exprRels(node)) {
+      visit(sub);
+      // A scalar or `IN` subplan's own output is read where it is compared or returned.
+      if (node.kind !== 'exists') sub.type.cols.forEach((column) => of(sub.id, column.name).forEach((c) => reads.add(c)));
+    }
+  });
+  const set = (r: Rel, name: string, from: ReadonlySet<string>): void => {
+    const cols = alias.get(r.id) ?? new Map<string, ReadonlySet<string>>();
+    cols.set(name, from);
+    alias.set(r.id, cols);
+  };
+  const passes = (r: Rel, input: Rel): void => r.type.cols.forEach((column) => set(r, column.name, of(input.id, column.name)));
+  const seen = new Set<Rel>();
+  const visit = (r: Rel): void => {
+    if (seen.has(r)) return;
+    seen.add(r);
+    relChildren(r).forEach(visit);
+    switch (r.kind) {
+      case 'scan': case 'ref': case 'self-ref': return;
+      case 'values':
+        r.rows.forEach((row) => row.forEach((e, i) => {
+          if (e.kind === 'col') set(r, r.type.cols[i]!.name, of(e.rel, e.name));
+          else read(e);
+        }));
+        return;
+      case 'project':
+        r.exprs.forEach(([name, e]) => { if (e.kind === 'col') set(r, name, of(e.rel, e.name)); else read(e); });
+        return;
+      case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': case 'window':
+        passes(r, r.input);
+        relExprs(r).forEach(read);
+        return;
+      case 'explode':
+        if (r.input) passes(r, r.input);
+        read(r.expr);
+        return;
+      case 'aggregate':
+        relExprs(r).forEach(read);
+        return;
+      case 'join': {
+        const sides = [...r.left.type.cols.map((column) => of(r.left.id, column.name)), ...r.right.type.cols.map((column) => of(r.right.id, column.name))];
+        r.type.cols.forEach((column, i) => set(r, column.name, sides[i] ?? NONE));
+        if (r.on) read(r.on);
+        return;
+      }
+      case 'union':
+        r.type.cols.forEach((column, i) => set(r, column.name, new Set(r.inputs.flatMap((input) => [...of(input.id, input.type.cols[i]!.name)]))));
+        return;
+      case 'recursive': opaque = true; return;
+    }
+  };
+  visit(plan);
+  outputs.forEach((name) => of(plan.id, name).forEach((c) => reads.add(c)));
+  return opaque ? null : reads;
+}

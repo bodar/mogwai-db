@@ -1,12 +1,12 @@
 import { isNested } from '../../../gremlin/frontend.ts';
-import { and, col, compilerInt, compilerNull, eq, type Expr } from '../../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, eq, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelate } from '../../../rel/decorrelate.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import { exprHasSubquery, forEachRel, isSelfContained, relExprs, substRelId } from '../../../rel/walk.ts';
-import { columnIsStored } from '../../../rel/copies.ts';
+import { columnIsStored, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { nondeterministic, type IRStep } from '../../ir/step.ts';
@@ -140,17 +140,24 @@ function correlatedBody(
 ): Tail | null {
   if (nondeterministic(body, ctx.params) || someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true)) return null;
   const seed = seedRow(rel, rel, fresh, someStepDeep(body, ctx.params, (s) => s.name === 'tail'));
-  // The body re-reads every host column its seed carries, and a correlated read SPELLS that column inside
-  // the subquery — a COMPUTED one (a label's `jsonb_array`, a path) would be computed again per inner row,
-  // where the decorrelated form reads it once off the scoped input. A carried column is there to be read
-  // (`copyRepeatsWork`'s rule), so any computed one keeps the body decorrelated.
-  if (!seed.type.cols.every((column) => column.name === ENCOUNTER.col || columnIsStored(rel, column.name))) return null;
   const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
   const tail = continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
   return walk ? null : tail;
+}
+
+/**
+ * Does a correlated plan, read as `outputs`, COMPUTE only with stored host columns? A correlated read spells
+ * the host column it computes with INSIDE the subquery (`spelledOuterColumns`), so a COMPUTED one — a label's
+ * `jsonb_array`, a path, a normalized value — would be computed again per inner row, where the decorrelated
+ * form reads it once, by name, off the scoped input. Such a plan stays decorrelated (`columnIsStored`). A
+ * column the body only CARRIES (a label it never reads) is not spelled, so it costs nothing.
+ */
+function spellsStored(plan: Rel, outputs: readonly string[], host: Rel): boolean {
+  const spelled = spelledOuterColumns(plan, host.id, outputs);
+  return !!spelled && [...spelled].every((name) => columnIsStored(host, name));
 }
 
 /** A correlated body as an `EXISTS` operand, projecting its FIRST column alone: an `EXISTS` reads no value, so
@@ -173,7 +180,7 @@ function existenceProbe(tail: Tail, fresh: Minter): Rel {
  * over a FLAT body (no subplan of its own), so the repeat is one more index seek and never compounds with
  * nesting (`k` columns per level would be `k^depth` spellings). Anything wider is the decorrelated window's.
  */
-function correlatedFirst(tail: Tail, names: readonly string[], fresh: Minter): ReadonlyMap<string, Expr> | null {
+function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh: Minter): ReadonlyMap<string, Expr> | null {
   const payload = names.map((name) => tail.rel.type.cols.find((column) => column.name === name));
   if (!payload.length || payload.length > 2 || payload.some((column) => !column)) return null;
   let nested = false;
@@ -190,10 +197,10 @@ function correlatedFirst(tail: Tail, names: readonly string[], fresh: Minter): R
     id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: tail.rel, channels: tail.rel.channels, type: tail.rel.type, terms: defaultCollation(tail.rel) }),
     channels: tail.rel.channels, type: tail.rel.type, count: compilerInt(1),
   });
-  return new Map((payload as ColMeta[]).map((column) => [column.name, {
-    kind: 'scalar',
-    plan: make.project({ id: fresh('cv'), input: first, channels: [], type: typeOf({ ...column, nullable: true }), exprs: [[column.name, col(first.id, column.name)]] }),
-  } as Expr]));
+  const plans = (payload as ColMeta[]).map((column) => [column.name,
+    make.project({ id: fresh('cv'), input: first, channels: [], type: typeOf({ ...column, nullable: true }), exprs: [[column.name, col(first.id, column.name)]] })] as const);
+  if (!plans.every(([name, plan]) => spellsStored(plan, [name], host))) return null;
+  return new Map(plans.map(([name, plan]) => [name, { kind: 'scalar', plan } as Expr]));
 }
 
 /** The scoped input reprojected to the input's own columns (the key shed). */
@@ -264,8 +271,9 @@ const existence = (negated: boolean): Connector => (site) => {
   // Every body correlated: the semi/anti-join is an `EXISTS` over the body itself, read against the host row
   // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
   const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free'));
-  if (correlated.every((tail) => tail)) {
-    const pred = (correlated as Tail[]).map((tail): Expr => ({ kind: 'exists', plan: existenceProbe(tail, fresh), negated }))
+  const probes = correlated.map((tail) => tail && existenceProbe(tail, fresh));
+  if (probes.every((probe) => probe && spellsStored(probe, ['one'], rel))) {
+    const pred = (probes as Rel[]).map((plan): Expr => ({ kind: 'exists', plan, negated }))
       .reduce((all, one) => and(all, one));
     return continueAs(make.filter({ id: fresh('sj'), input: rel, channels: rel.channels, type: rel.type, pred }), framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
@@ -300,30 +308,31 @@ const firstInner: Connector = (site) => {
   let mapped: Rel;
   let outFraming: RelFraming;
   const tail = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
-  const first = tail && framingCols(tail.framing) ? correlatedFirst(tail, payloadCols(tail.rel).map((column) => column.name), fresh) : null;
-  if (tail && first) {
-    // The dependent join kept: each payload column the body's first row, read per host row. A host row
-    // whose body is EMPTY is dropped (`TraversalMapStep`) — by the lead column's nullness where the body
-    // never emits a null there, else by an `EXISTS` of the body.
+  const first = tail && framingCols(tail.framing) ? correlatedFirst(tail, payloadCols(tail.rel).map((column) => column.name), rel, fresh) : null;
+  const lead = tail && payloadCols(tail.rel)[0];
+  const probe = tail && lead?.nullable ? existenceProbe(tail, fresh) : null;
+  if (tail && first && (!probe || spellsStored(probe, ['one'], rel))) {
+    // The dependent join kept: each payload column the body's first row, read per host row (beside the host's
+    // own columns, under fresh names). A host row whose body is EMPTY is dropped (`TraversalMapStep`): a
+    // present lead value proves a row, and only where the lead may be a NULL value is the body's `EXISTS` asked
+    // — after the `OR`, so a row whose value is present never pays for it.
     outFraming = tail.framing;
     const bodyPayload = payloadCols(tail.rel);
-    const lead = bodyPayload[0]!;
-    const gated = lead.nullable
-      ? make.filter({ id: fresh('sme'), input: rel, channels: rel.channels, type: rel.type, pred: { kind: 'exists', plan: existenceProbe(tail, fresh), negated: false } })
-      : rel;
+    const named = new Map(bodyPayload.map((column) => [column.name, fresh('smv') as string]));
     const projected = make.project({
-      id: fresh('smp'), input: gated, channels: rel.channels,
-      type: typeOf(...bodyPayload.map((column) => ({ ...column, nullable: true })), ...rel.channels.map(hostChannel)),
-      exprs: [...bodyPayload.map((column) => [column.name, gated === rel ? first.get(column.name)! : substRelId(first.get(column.name)!, rel.id, gated.id)] as const),
-        ...rel.channels.map((channel) => [channel.col, col(gated.id, channel.col)] as const)],
+      id: fresh('smp'), input: rel, channels: rel.channels,
+      type: typeOf(...rel.type.cols, ...bodyPayload.map((column) => ({ ...column, name: named.get(column.name)!, nullable: true }))),
+      exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+        ...bodyPayload.map((column) => [named.get(column.name)!, first.get(column.name)!] as const)],
     });
-    const present = lead.nullable ? projected : make.filter({
+    const leadPresent: Expr = { kind: 'binary', op: 'is not', left: col(projected.id, named.get(lead!.name)!), right: compilerNull() };
+    const present = make.filter({
       id: fresh('smf'), input: projected, channels: projected.channels, type: projected.type,
-      pred: { kind: 'binary', op: 'is not', left: col(projected.id, lead.name), right: compilerNull() },
+      pred: probe ? or(leadPresent, substRelId({ kind: 'exists', plan: probe, negated: false }, rel.id, projected.id)) : leadPresent,
     });
     mapped = make.project({
       id: fresh('smq'), input: present, channels: rel.channels, type: typeOf(...bodyPayload, ...rel.channels.map(hostChannel)),
-      exprs: [...bodyPayload.map((column) => [column.name, col(present.id, column.name)] as const),
+      exprs: [...bodyPayload.map((column) => [column.name, col(present.id, named.get(column.name)!)] as const),
         ...rel.channels.map((channel) => [channel.col, col(present.id, channel.col)] as const)],
     });
   } else {
@@ -395,7 +404,7 @@ const recordLeft: Connector = (site) => {
     if (ctx.correlatedChild && byField(step, by, ownHost, framing, (name) => col(rel.id, name), ctx.source, fresh, child)) continue;
     const tail = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read');
     const fieldCols = tail && framingCols(tail.framing);
-    const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), fresh);
+    const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), rel, fresh);
     if (tail && exprs) { correlated.set(slot, { exprs, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
     const scoped = sc ??= scope(rel, fresh);
     if (joined === rel) joined = scoped.scoped;

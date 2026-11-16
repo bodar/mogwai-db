@@ -43,6 +43,10 @@ const SHAPES: readonly Shape[] = [
   { name: 'not(out.has)', query: "g.V().not(out().has('age',gt(40)))" },
   { name: 'where(out.out)', query: "g.V().where(out('knows').out('knows'))" },
   { name: 'map(out.count)', query: 'g.V().map(out().count())' },
+  // A host carrying an `as()` label (a COMPUTED column) the body does not read, and a host after a hop.
+  { name: 'as.where(out.has)', query: "g.V().as('a').where(out().has('age',gt(40))).select('a')" },
+  { name: 'as.map(out.count)', query: "g.V().as('a').map(out().count())" },
+  { name: 'out.map(values)', query: "g.V().out().map(values('age'))" },
 ];
 
 const MODES = { ON: {}, OFF: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;
