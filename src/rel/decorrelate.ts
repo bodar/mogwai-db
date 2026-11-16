@@ -1,5 +1,5 @@
 import { atMostOneRow, rowBounds } from './bounds.ts';
-import { draws, exprDraws } from './copies.ts';
+import { ownDraws } from './copies.ts';
 import type { Expr } from './expr.ts';
 import { and, col, compilerInt, compilerNull, compilerText, eq } from './expr.ts';
 import * as make from './factory.ts';
@@ -46,6 +46,10 @@ import { freeRelIds, mapRelChildren, recursiveStep, relChildren, relExprs, rewri
  * read (or, under a `KeyProjection`, the projected columns), such that its rows whose `Decorrelated.key`
  * matches an outer row are exactly `plan`'s rows evaluated for that outer row. `null` where a node cannot be rewritten (a multi-row correlated `Values`, a
  * correlated `LIMIT` count) — the caller declines.
+ *
+ * `owns` names the nodes the CALLER built for this plan (default: all of them). A random draw in an owned node
+ * is drawn per outer row, so it is keyed like a read of the outer row; a draw in a node it does not own is a
+ * value drawn ONCE elsewhere (an upstream side effect the plan reads), so it stays one shared relation.
  *
  * Every rewritten node keeps its ORIGINAL id, so the expressions above it still resolve; a wrapper the
  * rewrite adds takes a fresh one and the parent's references are moved onto it (`substRelId`).
@@ -118,7 +122,10 @@ function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
   }
 }
 
-export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter, projection?: KeyProjection): Decorrelated | null {
+export function decorrelate(
+  plan: Rel, outer: Rel, key: string, fresh: Minter, projection?: KeyProjection, owns: (r: Rel) => boolean = () => true,
+): Decorrelated | null {
+  const drawn = ownDraws(owns);
   const h = outer.id;
   // THE DOMAIN: the key and every outer column the plan reads, renamed so it cannot collide with a column
   // of the plan. One row per outer row (the key is unique), so D IS the domain of the free variables.
@@ -273,14 +280,16 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter, p
       const self = selfs.get(r.id);
       return self ? { rel: self, keyed: true } : { rel: r, keyed: false };
     }
-    // A DRAW counts as touching the scope (`draws`, `src/rel/copies.ts`): the correlated plan drew once PER
-    // OUTER ROW, so a subtree that draws is NOT the same relation for every key, even where it reads nothing of
-    // the outer row (`local(inject(1,2,3).sample(1))`, a re-source's `V().sample(1)`). Left unkeyed it would be
-    // one pick shared by every key. Keyed, the domain enters beneath the draw and the existing rules scope it —
-    // the `ORDER BY RANDOM()` of a `Sort`/`Window` partitioned by the key, a `Limit` a per-key `ROW_NUMBER` —
-    // so it is one sort over the rows drawn from, never a draw per key evaluated separately.
-    if (!freeRelIds(r).has(h) && !touchesSelf(r) && !draws(r)) return { rel: r, keyed: false };
-    const own = relExprs(r).some((e) => exprTouches(e) || exprDraws(e));
+    // The plan's OWN DRAW counts as touching the scope (`ownDraws`, `src/rel/copies.ts`): the correlated plan
+    // drew once PER OUTER ROW, so a subtree that draws is NOT the same relation for every key, even where it reads
+    // nothing of the outer row (`local(inject(1,2,3).sample(1))`, a re-source's `V().sample(1)`). Left unkeyed it
+    // would be one pick shared by every key. Keyed, the domain enters beneath the draw and the existing rules
+    // scope it — the `ORDER BY RANDOM()` of a `Sort`/`Window` partitioned by the key, a `Limit` a per-key
+    // `ROW_NUMBER` — so it is one sort over the rows drawn from, never a draw per key evaluated separately.
+    // A drawn relation the plan only READS (a node `owns` rejects: a side effect collected upstream of the host)
+    // was drawn once, before the plan, and stays the one shared value it is.
+    if (!freeRelIds(r).has(h) && !touchesSelf(r) && !drawn.rel(r)) return { rel: r, keyed: false };
+    const own = relExprs(r).some((e) => exprTouches(e) || drawn.expr(e));
     switch (r.kind) {
       case 'scan': case 'ref': return { rel: r, keyed: false };
       case 'values': {

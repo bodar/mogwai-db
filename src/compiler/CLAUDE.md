@@ -90,8 +90,11 @@ while what they operate on keeps TinkerPop's.
     declining compile in the other order, so the switch never decides coverage. A body that re-sources
     (`V()`/`E()`) is the connector's alone (`reSourcedBody`, `connectorOwns`) — its read after the re-source is
     one uncorrelated relation crossed with the host, so a productive null is a row. A body that DRAWS is the
-    connector's too and always DECORRELATED (never `correlatedBody`): a draw counts as touching the scope in
-    `decorrelate.ts`, so it is one draw per scope row, and `name.ts` fences a shared drawing CTE.
+    connector's too and always DECORRELATED (never `correlatedBody`): the body's OWN draw counts as touching the
+    scope in `decorrelate.ts`, so it is one draw per scope row, and `name.ts` fences a shared drawing CTE.
+    A relation drawn UPSTREAM that the body only reads (a side effect, a binding) is not the body's
+    (`owning` in `scoped.ts`, `ownDraws` in `rel/copies.ts`) and stays one shared, unkeyed pick — keying
+    it redraws per scope: a wrong count and an N×N cross.
   - **Three CI guards hold this direction:** `mise run ladder` (the `return null` count in `rel/` never rises —
     the total, and per file for the ladder files; the connector's own `scoped.ts` is outside the total because
     L9 guards its reach by coverage, not by site count), and L9 (`test/L9-connector/`): the host-closure ratchet with the

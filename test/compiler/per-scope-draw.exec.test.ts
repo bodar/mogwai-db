@@ -82,6 +82,36 @@ describe('a draw in local()/flatMap()/map() answers per scope row', () => {
   }
 });
 
+describe('a drawn relation the body only READS stays one shared pick', () => {
+  // Drawn ONCE, upstream of the host, into a side effect: every scope reads that one value. Only the body's OWN
+  // draws are per scope (`ownDraws`, src/rel/copies.ts) — keying the upstream draw redrew it per scope, a
+  // 1-member collection read as up to |V| distinct members, and an N×N cross of the domain with the source.
+  const WITNESSES: readonly (readonly [string, (v: number) => boolean])[] = [
+    ["g.V().sample(2).aggregate('x').V().local(select('x').unfold()).dedup().count()", (v) => v === 2],
+    ["g.V().sample(1).aggregate('x').V().local(cap('x').unfold()).dedup().count()", (v) => v === 1],
+    ["g.V().sample(1).aggregate('x').V().project('p').by(cap('x').unfold().id()).dedup().count()", (v) => v === 1],
+    ["g.V().sample(3).group('g').by(id).V().local(select('g').select(keys).unfold()).dedup().count()", (v) => v === 3],
+    // The collection holds one pick per vertex with an out-neighbour — at most 3 distinct, never the union of redraws.
+    ["g.V().local(out().sample(1)).aggregate('x').V().local(select('x').unfold()).dedup().count()", (v) => v >= 1 && v <= 3],
+    // The body's own draw over a shared read: per scope, but from the one collected pick.
+    ["g.V().sample(1).aggregate('x').V().map(cap('x').unfold().sample(1)).dedup().count()", (v) => v === 1],
+    ["g.V().sample(1).aggregate('x').V().local(local(cap('x').unfold())).dedup().count()", (v) => v === 1],
+    ["g.V().sample(1).aggregate('x').V().filter(cap('x').unfold().count().is(1)).count()", (v) => v === 6],
+    ["g.V().sample(2).fold().as('f').V().local(select('f').unfold()).dedup().count()", (v) => v === 2],
+    ["g.V().sample(3).group().by(label).by(count()).select(values).unfold().sum()", (v) => v === 3],
+  ];
+  for (const [mode, options] of MODES) {
+    test(`${mode}: every scope reads the one upstream pick`, () => {
+      for (let i = 0; i < 20; i++) {
+        for (const [q, ok] of WITNESSES) {
+          const [{ v }] = rows(q, options);
+          if (!ok(v)) throw new Error(`${q} answered ${v}`);
+        }
+      }
+    });
+  }
+});
+
 describe('the plan', () => {
   test('the draw is partitioned by the scope key, never a correlated subquery', () => {
     const plan = compile('g.V().local(out().sample(1)).count()', {}, CONNECTOR);

@@ -44,11 +44,57 @@ import type { RelId } from './types.ts';
  */
 export const draws: (r: Rel) => boolean = nodeFact((r: Rel): boolean =>
   relExprs(r).some(exprDraws) || relChildren(r).some(draws));
-export const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
+const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
   if (isAbort(e)) return false;
-  if (e.kind === 'call' && e.fn.toUpperCase() === 'RANDOM') return true;
+  if (isRandom(e)) return true;
   return exprChildren(e).some(exprDraws) || exprRels(e).some(draws);
 });
+const isRandom = (e: Expr): boolean => e.kind === 'call' && e.fn.toUpperCase() === 'RANDOM';
+
+/** `draws` and its expression half, cut at the nodes a caller does not own (`ownDraws`). */
+export interface OwnDraws {
+  readonly rel: (r: Rel) => boolean;
+  readonly expr: (e: Expr) => boolean;
+}
+
+/**
+ * DOES EVALUATING THIS RELATION DRAW, counting only its OWN draws — `draws` cut at every FOREIGN subtree: one
+ * holding no node `owns` claims. A relation is immutable and built bottom-up, so a subtree that existed before
+ * the caller began cannot hold a node the caller built; a foreign subtree is therefore a relation built
+ * elsewhere that the caller only reads — a VALUE drawn elsewhere, not a draw of this relation's own. A node
+ * the caller built over its own nodes without claiming it (a wrapper) is still the caller's.
+ *
+ * The decorrelator asks this (`src/rel/decorrelate.ts`): a child body's OWN draw (`local(out().sample(1))`) is
+ * one draw per scope row and must be keyed by the scope, but a drawn relation the body only READS — a side
+ * effect collected upstream of the host (`g.V().sample(1).aggregate('x').V().local(cap('x').unfold())`), a
+ * shared binding — was drawn ONCE, before the body, and every scope reads that one pick. Keying it would redraw
+ * it per scope: a wrong answer (a 1-member collection read as up to |V| distinct members), and an N×N cross of
+ * the domain with the whole re-drawn source.
+ *
+ * Memoized per call, so one decorrelation pays O(DAG).
+ */
+export function ownDraws(owns: (r: Rel) => boolean): OwnDraws {
+  const mine = new Map<Rel, boolean>();
+  /** Is this subtree the caller's: a node it claims, or one built over such a node. */
+  const own = (r: Rel): boolean => {
+    let hit = mine.get(r);
+    if (hit === undefined) mine.set(r, hit = owns(r) || relsBeneath(r).some(own));
+    return hit;
+  };
+  const rels = new Map<Rel, boolean>();
+  const exprs = new Map<Expr, boolean>();
+  const rel = (r: Rel): boolean => {
+    let hit = rels.get(r);
+    if (hit === undefined) rels.set(r, hit = own(r) && (relExprs(r).some(expr) || relChildren(r).some(rel)));
+    return hit;
+  };
+  const expr = (e: Expr): boolean => {
+    let hit = exprs.get(e);
+    if (hit === undefined) exprs.set(e, hit = !isAbort(e) && (isRandom(e) || exprChildren(e).some(expr) || exprRels(e).some(rel)));
+    return hit;
+  };
+  return { rel, expr };
+}
 
 /**
  * HOW MANY DOUBLED READS LIE BENEATH THIS RELATION — the most nodes, along any one path from `r` to a
