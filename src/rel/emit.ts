@@ -415,7 +415,25 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     ? [...built.subqueryCols ?? []]
     : built.select.filter(([, spelled]) => subqueryCols.has(spelled)).map(([name]) => name);
 
+  /**
+   * THE SPELLINGS THAT ARE A LITERAL — tracked like `subqueryCols`, through fusion (a column's spelling
+   * IS the expression that computes it, so a constant column read downstream is the same object).
+   * SQLite reads an integer literal in a SELECT's `ORDER BY` or `GROUP BY` as a result-column ORDINAL
+   * (`resolveOrderGroupBy`, through parentheses and a unary sign alike), so a constant that fusion
+   * carried into one of those slots — the `0` encounter of a one-row scope — is not a value there but
+   * a column number, and SQLite refuses it ("1st ORDER BY term out of range"). A constant sort key
+   * orders nothing, so `sort` DROPS it; a constant group key still decides whether an empty input
+   * yields a group, so the render spells it as an expression (`groupKey`). Only an INTEGER literal is
+   * an ordinal; any other literal is an ordinary constant in both slots.
+   */
+  const integerLiterals = new WeakSet<Expression>();
+  const groupKey = (key: Expression): Expression => (integerLiterals.has(key) ? q`CAST(${key} AS INTEGER)` : key);
   const expr = (e: Expr, scope: Scope): Expression => {
+    const out = spell(e, scope);
+    if (e.kind === 'lit' && e.source === 'compiler-int') integerLiterals.add(out);
+    return out;
+  };
+  const spell = (e: Expr, scope: Scope): Expression => {
     const self = (x: Expr): Expression => expr(x, scope);
     // An ENTRY of a JSON writer: a literal whose 15-significant-digit form is ANOTHER Double — SQLite's JSON writer prints a REAL at
     // 15 digits, so `json_array(1.2345678901234568E16)` is `[1.23456789012346e+16]` and `0.30000000000000004`
@@ -521,7 +539,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     list(b.select.map(([name, e]) => q`${e} AS ${ident(name)}`))
   } FROM ${fromText(b.from)}${concat(b.joins.map(joinText))}${
     b.where ? q` WHERE ${b.where}` : empty
-  }${b.groupBy?.length ? q` GROUP BY ${list(b.groupBy)}` : empty}${
+  }${b.groupBy?.length ? q` GROUP BY ${list(b.groupBy.map(groupKey))}` : empty}${
     b.having ? q` HAVING ${b.having}` : empty
   }${b.orderBy?.length ? q` ORDER BY ${list(b.orderBy)}` : empty}${
     b.limit ? q` LIMIT ${b.limit}` : empty
@@ -921,7 +939,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         const hoisted = once(r, input, outer, r.terms.map((term) => term.expr));
         const b = hoisted?.b ?? input;
         const terms = hoisted ? r.terms.map((term) => ({ ...term, expr: hoisted.rewrite(term.expr) })) : r.terms;
-        return { ...b, orderBy: terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
+        // A constant key orders nothing — and an INTEGER one is an ordinal to SQLite (`integerLiterals`).
+        const keyed = terms.filter((term) => !integerLiterals.has(expr(term.expr, b.scope)));
+        return { ...b, orderBy: keyed.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
       case 'limit': {

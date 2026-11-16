@@ -83,6 +83,22 @@ const subqueryReadsAggregate = (e: Expr, input: Rel): boolean => {
 };
 
 /**
+ * AN AGGREGATE MAY NOT BE RE-INLINED INSIDE A SUBQUERY — the rule for EVERY node that fuses over a
+ * grouped block, not a property of one kind. Fusing spells a read of an aggregate-valued column as the
+ * aggregate itself, and an aggregate spelled inside a correlated subquery belongs to no query SQLite can
+ * evaluate it in: in the subquery's WHERE it is `misuse of aggregate: sum()` (`dedup().by(__.is(…).count())`
+ * over a `count()` — a window's key), in a `json_each(<json_group_array(…)>)` source `misuse of aggregate
+ * function json_group_array()` (a `select(key)` over a `group()` map — a filter). A derived table turns the
+ * aggregate into a plain column the subquery may read; Calcite makes the same move for an aggregate
+ * referenced by a nested query (`SqlImplementor.needNewSubQuery`,
+ * `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2167`).
+ */
+const nestsAggregate = (b: Slots, node: Rel): boolean => {
+  const input = 'input' in node ? node.input : undefined;
+  return grouped(b) && input !== undefined && relExprs(node).some((e) => subqueryReadsAggregate(e, input));
+};
+
+/**
  * No alias this side would lift collides with one the other side already took. Splicing lifts a
  * side's own FROM items into the join's own FROM, so two sides reading the SAME shared relation lift
  * the same alias twice — measured: `FROM r0 x INNER JOIN r0 x` → `ambiguous column name`. A collision
@@ -130,28 +146,21 @@ export const NEEDS_SUBQUERY: { readonly [K in RelKind]: (input: Slots, node: Rel
   // A derived table evaluates the projection over the sliced rows alone.
   project: (b, node) => b.distinct || (grouped(b) && b.groupBy?.length === 0)
     || (b.orderBy !== undefined && (b.limit !== undefined || b.offset !== undefined)
-      && node.kind === 'project' && node.exprs.some(([, e]) => exprMayRaise(e))),
-  // Over an aggregate a Filter IS `HAVING` — one of §3's declared collapses, not a second node.
-  //
-  // …EXCEPT when the predicate reads an AGGREGATE-VALUED column from INSIDE a subquery. Fusing re-inlines
-  // the read as the expression that computes it — the aggregate itself — and an
-  // aggregate spelled inside a correlated subquery of `HAVING` (a `json_each(<json_group_array(…)>)`
-  // source, the shape a `select(key)` over a `group()` map takes) belongs to no query SQLite can
-  // evaluate it in: `misuse of aggregate function json_group_array()`. A derived table turns the
-  // aggregate into a plain column the subquery may read; Calcite makes the same move for an aggregate
-  // referenced by a nested query (`SqlImplementor.needNewSubQuery`,
-  // `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2167`).
-  filter: (b, node) => b.windowed || tailUsed(b) || b.having !== undefined
-    || (grouped(b) && node.kind === 'filter' && subqueryReadsAggregate(node.pred, node.input)),
+      && node.kind === 'project' && node.exprs.some(([, e]) => exprMayRaise(e)))
+    || nestsAggregate(b, node),
+  // Over an aggregate a Filter IS `HAVING` — one of §3's declared collapses, not a second node —
+  // EXCEPT when the predicate reads an aggregate-valued column from inside a subquery (`nestsAggregate`).
+  filter: (b, node) => b.windowed || tailUsed(b) || b.having !== undefined || nestsAggregate(b, node),
   aggregate: (b) => b.windowed || grouped(b) || tailUsed(b),
   // An `ORDER BY` cannot name a select alias, so fusing re-inlines the expression that computes its
   // subject — and over a windowed input that expression is a whole window function.
-  sort: (b) => tailUsed(b) || b.windowed,
+  sort: (b, node) => tailUsed(b) || b.windowed || nestsAggregate(b, node),
   limit: (b) => b.limit !== undefined || b.offset !== undefined,
   distinct: (b) => tailUsed(b),
   // A window's own `OVER (…)` may never reference a window function, so a spec reading a column its
-  // input computed with one has no legal spelling in the same SELECT.
-  window: (b) => tailUsed(b) || b.windowed,
+  // input computed with one has no legal spelling in the same SELECT — nor an aggregate inside a
+  // subquery (`nestsAggregate`: `dedup().by(__.is(P.gt(0)).count())` over a `count()`).
+  window: (b, node) => tailUsed(b) || b.windowed || nestsAggregate(b, node),
   explode: (b) => b.windowed || grouped(b) || tailUsed(b),
   // The one whose whole purpose is a boundary — but the boundary is a CTE the `Name` pass makes, not
   // a derived table here, so as a block it fuses like anything else.

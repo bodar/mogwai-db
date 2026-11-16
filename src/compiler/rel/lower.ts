@@ -2121,7 +2121,7 @@ function scalarTail(
     // it (fail-safe — a later `path()` then declines with no channel rather than framing a gap).
     if (pathCarried(rel)) {
       if (step.name === 'path' && (step.args ?? []).length === 0) {
-        const positions = pathPositions(rel, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh);
+        const positions = pathPositions(rel, step, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh);
         if (!positions) return null;
         return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
       }
@@ -2129,7 +2129,7 @@ function scalarTail(
         if ((step.args ?? []).length) return null;
         const cyclic = step.name === 'cyclicPath';
         const pred = step.modulators?.length
-          ? pathSimpleByPredicate(rel, cyclic, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh)
+          ? pathSimpleByPredicate(rel, cyclic, step, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh)
           : pathSimplePredicate(rel, cyclic, step.from, step.to, fresh);
         if (!pred) return null;
         rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
@@ -5637,7 +5637,7 @@ function elementTail(
       // `from`/`to` scope to a SUB-path (`subPathMembers`, via the labels-on-path recorded when
       // `ChainFacts.demandsPathLabels` gated them on).
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length) return null;
-      const positions = pathPositions(rel, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh);
+      const positions = pathPositions(rel, step, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -5652,7 +5652,7 @@ function elementTail(
       // (`pathSimpleByPredicate`); the bare form compares the raw objects (`pathSimplePredicate`).
       const cyclic = step.name === 'cyclicPath';
       const pred = step.modulators?.length
-        ? pathSimpleByPredicate(rel, cyclic, step, pathPositionKinds(steps, at), childSeam(ctx, fresh), ctx.source, fresh)
+        ? pathSimpleByPredicate(rel, cyclic, step, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh)
         : pathSimplePredicate(rel, cyclic, step.from, step.to, fresh);
       if (!pred) return null;
       rel = make.filter({ id: fresh('spf'), input: rel, channels: rel.channels, type: rel.type, pred });
@@ -5907,6 +5907,11 @@ function freshTraversers(rows: FramedRel, like: Channels, ctx: ChainCtx, fresh: 
   });
 }
 
+/** Is `steps` the reference's WHOLE traversal from its source (`ChainCtx.traversal`, compared by identity)?
+ *  A child body, a resumed tail or a rewritten chain is not: its prefix is not everything that ran. */
+const beginsTraversal = (steps: readonly IRStep[], ctx: ChainCtx): boolean =>
+  ctx.traversal?.rooted === true && ctx.traversal.steps === steps;
+
 /**
  * `inject(x…)` PAST THE SOURCE — the incoming stream PLUS one fresh traverser per argument, i.e.
  * `UNION ALL` of the stream with the source inject's literal relation (`injectedRows`), merged the way a
@@ -5933,7 +5938,7 @@ function injectTail(
   const step = steps[at]!;
   if (step.modulators?.length || step.optionArms) return null;
   if (!step.args.length) return continueAs(rel, framing, steps, at + 1, bulked, ctx, fresh, labels);
-  if (!(ctx.traversal?.rooted && ctx.traversal.steps === steps)) {
+  if (!beginsTraversal(steps, ctx)) {
     ctx.declines.note({
       kind: 'inject-in-child', terminal: false,
       message: 'inject() with values inside a child traversal (a local/map/flatMap/by/branch or repeat body) is not supported, '

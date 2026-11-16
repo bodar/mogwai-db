@@ -330,8 +330,18 @@ export type PathPositionKind = ElementKind | 'value';
  * Like `elementKindAt`, this stays a local element-kind question and must not grow into a shape
  * annotation (`src/compiler/CLAUDE.md`, the bright line): it answers vertex/edge/value/cannot-say and
  * nothing about member encodings or framings.
+ *
+ * The walk sees only `steps[0..at)`, so its set is the PATH's only when `steps` begins where the path
+ * does — `rooted`, the caller's `ChainCtx.traversal` fact (a rooted chain lowered from its source).
+ * A CHILD body (`local`/`map`/`by`/a branch arm) is handed a path its parent already grew — TinkerPop's
+ * child traverser keeps its parent's whole path (`Scoping.getScopeValue` reads `traverser.path()`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:119-135`)
+ * — so a body's own prefix is not every position: `g.E().simplePath().local(__.outV().path())` proved
+ * `{vertex}` and framed the edge position NULL, and `local(__.path())` proved `∅` and built no arm at
+ * all. Not rooted is cannot-say.
  */
-export function pathPositionKinds(steps: readonly IRStep[], at: number): ReadonlySet<PathPositionKind> | undefined {
+export function pathPositionKinds(steps: readonly IRStep[], at: number, rooted: boolean): ReadonlySet<PathPositionKind> | undefined {
+  if (!rooted) return undefined;
   const kinds = new Set<PathPositionKind>();
   for (let i = 0; i < at && i < steps.length; i++) {
     const name = steps[i].name;
