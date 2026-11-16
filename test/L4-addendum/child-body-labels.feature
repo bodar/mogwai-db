@@ -130,7 +130,6 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # Every element here is productive under the by() (each created something), so this pins the
   # label read inside an order() modulator WITHOUT also pinning unproductive-by() ordering.
   @gap:child-body-labels
-  @Unsupported
   Scenario: g_V_asXxX_orderXX_byXoutXcreatedX_selectXxX_valuesXageXX_valuesXnameX
     Given the modern graph
     And the traversal of

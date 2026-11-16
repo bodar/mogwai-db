@@ -21,9 +21,10 @@ import { compile } from '../../src/compiler/compiler.ts';
  * lowering DECLINES is lowered once more in the other child order (`bothChildOrders`, `rel/spine.ts`), so a
  * decline costs two lowerings — that is the price of the switch ordering two lowerings without deciding
  * coverage; a traversal that compiles still lowers once. The 10 extra emissions are corpus traversals that
- * newly COMPILE through the scoped-relation connector.
+ * newly COMPILE through the scoped-relation connector; 1809 → 1817 for the 8 more the cc3a rows (coalesce/optional/
+ * order/dedup/group(Count)/or/flatMap/local/choose/union) compile — each an emission, not a repeated one.
  */
-const CEILING = { lowerings: 2190, emissions: 1809, perQuery: 12 } as const;
+const CEILING = { lowerings: 2190, emissions: 1817, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 

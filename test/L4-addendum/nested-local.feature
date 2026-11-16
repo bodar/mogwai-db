@@ -276,7 +276,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | d[1].l |
       | d[1].l |
 
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXvaluesXnameX_localXfoldX_countXlocalXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -290,7 +289,6 @@ Feature: mogwai addendum — a per-traverser host nested inside another one's bo
       | vadas |
       | josh |
       | peter |
-    And the decline should say "no lowering covers"
 
   Scenario: g_V_whereXvaluesXnameX_localXfoldX_unfold_isXmarkoXX_valuesXnameX
     Given the modern graph

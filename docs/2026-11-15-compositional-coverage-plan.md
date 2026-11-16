@@ -510,6 +510,43 @@ connector-only agree; `map`'s pick changed to emission order wherever a body had
 **What this means for ladder deletion (Phase 3 step 4):** the existence routes (`childPredicate`/`correlatedExists`)
 and the `map`/`project().by` correlated-scalar routes have no measured win left on these shapes; the `coalesce`
 by() field is the one route with a margin (1.6×) until `coalesce` lowers flat.
+#### cc3a record (2026-11-16) — remaining connector rows
+
+Rows landed (commits `cc3a: …`): `coalesce`/`optional` (PRIORITY: each arm's host anti-joined on every earlier
+arm's key), `order`/`dedup`/`groupCount`/`group` key `by()` (values LANDED as join columns the host's own
+lowering reads through `childSeam`), `group().by(k).by(<barrier body>)` (a POOL scoped by the group key),
+`or` (semi-join on the union of keys), `flatMap`/`local` (the rejoin, `split`/`forward` policies),
+`choose` (the condition scoped, the options the host's own via `RoutedCondition`), `union` (global arms — the
+row is the arm merge; it makes an arm's path read seed the chain). Every row is built from the five reconnect
+primitives named in `scoped.ts`'s header; no row is a shape branch.
+
+Closure, connector ALONE, all ratchet hosts nested in each other (seed 42): **96.3 / 88.8 / 87.8%** at levels
+1/2/3 (G2: 98.4/92.8/93.9 over five hosts; the trunk-before shipping ratchet read 77.7/56.9/42.9). Shipping
+ratchet **96.8 / 91.8 / 91.0%**. Curve: lattice d1/d2/d3 85.0→89.6, 61.2→81.7, 36.1→65.7; realistic
+d1–d4+ 86.0→96.5, 73.8→84.2, 75.4→94.0, 66.7→96.5. L3 2030→2039, L6 280→285 (0 wrong), census +9, all verified.
+
+Reference corrections the connector exposed: `coalesce` is a `FlatMapStep` (head.split) — a carried path is
+the head's plus the one result and an arm's label does not escape; the ladder and three tests had read it as a
+branch.
+
+**Escalation (below the 80% bar at depth 3, connector alone): `group` 79.5%, `dedup` 78.5%.** Diagnosis: one
+FRAMING gap, not a connector one — a MAP value holding element rowids nested inside another value (a
+`group()` of elements as a group value, a key, a member) frames the rowids as bare numbers, because a nested
+map node is rebuilt as it stands and never expands its elements. A pooled group value of that shape shipped a
+wrong answer in the first cc3a commit and is now declined (as are such keys); the same gap answers wrong on
+trunk BEFORE this work through `project('x').by(out().group().by(label))` (frames `[2,4]`). Fix in the
+direction: give the map-node builder the element expansion `listNodeExpr` already has (S5's typed carrier) —
+then both rows return to ~95%.
+
+Deferred hosts, with the reason: `sideEffect(b)` — an effect-free body is already removed by a Pass
+(`dropEffectFreeSideEffect`), and one WITH effects is the collection substrate's (a scoped body declines
+effects); its row needs effects threaded through a decorrelated body. `repeat` until/emit — the unbounded
+regime is a `Recursive` term, which may hold no window (`BARRIER_IN_TERM`), so a per-iteration ROW_NUMBER scope
+key cannot exist there; the bounded regime's phases could use `RoutedCondition`-style scoped predicates, not
+built. `choose(k).option(…)` (the option-map form) stays the host's own; a landed key value would serve it.
+Unordered FIRST picks: the ladder is not self-consistent (a `map(coalesce(outE…))` first is edge order, a
+`project().by(flatMap(coalesce…))` first is id order), so a connector body can match only one; no L5 run has
+flagged one, and §17's unordered-slice divergence covers both.
 
 ### Phase 4 — Structured values across scope. IDs `cc4-*`.
 

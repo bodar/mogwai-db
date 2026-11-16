@@ -335,7 +335,7 @@ const dedupBeforeFold = (pre: readonly IRStep[]): boolean => {
 };
 
 /** Is this value-body step a non-local `Barrier` — what `Grouping.determineBarrierStep` stops at? */
-const isValueBarrier = (step: IRStep): boolean =>
+export const isValueBarrier = (step: IRStep): boolean =>
   reducesPool(step) || (NON_REDUCING_BARRIERS.has(step.name) && !isLocalScope(step));
 
 export function groupRows(
@@ -2162,3 +2162,26 @@ export function mapEntryPayload(
 // `items.map` over the node object. The list precision is for CONSUMERS (`select`/`unfold`-then-op),
 // never for the entry's own node framing (`docs/archive/2026-08-21-map-value-shape-plan.md`).
 const framed = (of: MapOf): MapOf => (of.kind === 'scalar' ? of : { kind: 'scalar' });
+
+/** The EQUALITY TERMS a grouping keys a key by (`groupKeyed`): an element key's rowid, else the node's
+ *  `nodeEquality` — so a caller that pools a key's members itself (`lower/scoped.ts`, a pooled value `by()`)
+ *  draws the very groups `groupMap` will. */
+export const groupKeyTerms = (key: Expr, elementKey: boolean): readonly Expr[] => (elementKey ? [key] : nodeEquality(key));
+
+/**
+ * A grouping whose VALUE is already ONE node per key — a value `by()` POOLED per key and reduced by the
+ * caller (`lower/scoped.ts`, `Grouping.java:74-125`): `groupMap`'s single-value arm over one row per key. `rows`
+ * holds the key (`key`, a node or an element rowid) and the value node (`value`), one row per key.
+ */
+export function keyedValuesMap(
+  rows: Rel, key: Expr, keyElem: Elem | undefined, value: Expr, singleOf: MapOf, step: IRStep, source: GraphSource, fresh: Minter,
+): GroupedMap {
+  const projected = make.project({
+    id: fresh('gk'), input: rows, channels: [],
+    type: typeOf(meta(KEY_COL, keyElem ? 'int' : 'json', true), meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int')),
+    exprs: [[KEY_COL, key], [MEMBER_COL, value], [ORD_COL, compilerInt(0)]],
+  });
+  return groupMap(projected, {
+    counting: false, keyElem, member: { kind: 'node' }, single: true, singleOf, memberDrop: false, bulkCol: undefined, step,
+  }, source, fresh);
+}

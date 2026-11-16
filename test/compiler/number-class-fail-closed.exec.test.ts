@@ -124,10 +124,19 @@ describe('a sum over a known long class compares as a number', () => {
     "g.inject(1L,2L).fold().sum(local).union(__.identity(), __.constant(5L)).sum()",
     "g.inject(1L,2L).sum().union(__.identity(), __.constant(5)).sum()",
     "g.inject(1L,2L).sum().union(__.identity(), __.constant(5)).max()",
-    "g.inject(1L,2L).sum().coalesce(__.is(4), __.constant(0))",
     "g.inject(1L,2L).sum().choose(__.is(3), __.identity(), __.constant(1))",
     "g.inject(9007199254740993L, 1L).max().union(__.identity(), __.constant(5L)).sum()",
   ]) test(`declines: ${q}`, () => expect(typed(q)).rejects.toThrow(UnsupportedTraversal));
+
+  // The scoped `coalesce` connector (`src/compiler/rel/lower/scoped.ts`) merges a reducer arm by moving its
+  // class onto the merged per-row vtype (`reconcileCollapsed`), so a follow-on reducer reads a Long, not a storage
+  // class: the reference's Long + Long is a Long (NumberHelper.java:452).
+  test.each([
+    ['g.inject(1L,2L).sum().coalesce(__.is(4), __.constant(0))', [[0, T.int]] as [unknown, number][]],
+    ['g.inject(1L,2L).sum().coalesce(__.is(3), __.constant(0)).sum()', [[3, T.long]] as [unknown, number][]],
+  ])('a coalesce over a reducer keeps its class: %s', async (q, want) => {
+    expect(await typed(q)).toEqual(want);
+  });
 
   test('asNumber over a known long sum narrows as before: in range, or the reference overflow message', async () => {
     expect(await typed('g.inject(1L,2L).sum().asNumber(GType.INT)')).toEqual([[3, T.int]]);

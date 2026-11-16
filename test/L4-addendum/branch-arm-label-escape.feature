@@ -38,6 +38,10 @@ Feature: mogwai addendum — branch-arm label escape
       | m[{"a":"josh","b":"ripple"}] |
       | m[{"a":"peter","b":"lop"}] |
 
+  # coalesce() is NOT a BranchStep: `CoalesceStep extends FlatMapStep`, which emits `head.split(result)` off the
+  # PRE-child traverser (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java,
+  # .../step/map/FlatMapStep.java:42-52), so a label bound in an arm does not escape and select("a","b") has no b.
+  # (This scenario once asserted the escape, reading coalesce as a branch; the reference says otherwise.)
   @gap:branch-arm-label-escape
   Scenario: g_V_asXaX_coalesceXoutXcreatedX_asXbX_outXknowsX_asXbXX_selectXa_bX_byXnameX
     Given the modern graph
@@ -46,9 +50,4 @@ Feature: mogwai addendum — branch-arm label escape
       g.V().as("a").coalesce(__.out("created").as("b"), __.out("knows").as("b")).select("a", "b").by("name")
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | m[{"a":"marko","b":"lop"}] |
-      | m[{"a":"josh","b":"lop"}] |
-      | m[{"a":"josh","b":"ripple"}] |
-      | m[{"a":"peter","b":"lop"}] |
+    Then the result should be empty

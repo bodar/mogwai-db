@@ -228,7 +228,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
   # scenario only because marko is the one person with a knows() edge (so a global and a per-traverser
   # limit agree); `g.V().coalesce(__.out().limit(1), __.constant("x")).count()` answered 4 for a
   # reference 6. Now a clean decline (branch-arm-decline.feature).
-  @gap:branch-traverser-major @Unsupported
+  @gap:branch-traverser-major
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_coalesceXoutXknowsX_limitX1X_outXcreatedXX_valuesXnameX_limitX2X
     Given the modern graph
     And the traversal of

@@ -411,7 +411,8 @@ export const mintBranchOrder = (
         : channel === SEQ_KEY ? (own ? col(arm.rel.id, own.col) : compilerInt(0)) : null), fresh),
     };
   });
-  const merged = mergeArms(tagged, labels, graph, fresh);
+  // ONE arm has nothing to merge — only to number (a per-scope rejoin's results, `lower/scoped.ts`).
+  const merged = tagged.length === 1 ? { rel: tagged[0]!.rel, framing: tagged[0]!.framing, aliases: tagged[0]!.aliases } : mergeArms(tagged, labels, graph, fresh);
   if (!merged) return null;
   const rel = merged.rel;
   const origin = originOf(rel.channels);

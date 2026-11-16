@@ -144,7 +144,6 @@ Feature: mogwai addendum — a child body whose HEAD is a reducer reduces the ho
   # (`valueColIsDetached`) rather than fail at run time. ----
 
   @gap:scalar-seed-argmax
-  @Unsupported
   Scenario: g_V_valuesXageX_localXmaxX
     Given the modern graph
     And the traversal of

@@ -66,6 +66,11 @@ Feature: mogwai addendum — a where().by() operand over an UNBOUND label drops 
       | result |
       | d[4].l |
 
+  # A coalesce arm's label never escapes (`CoalesceStep extends FlatMapStep`, whose `head.split` re-derives the
+  # traverser from the pre-child head — vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52),
+  # so no traverser carries `a` and every one is dropped. (This once read 6, treating coalesce as a branch.) A
+  # where() over a label NO position binds is the same gap as `flatMap(__.out().as("a"))…where("a", …)`.
+  @Unsupported
   Scenario: g_V_coalesceXout_asXaX_identityX_asXbX_whereXa_eqXbXX_byXconstantX1XX_count
     Given the modern graph
     And the traversal of
@@ -75,7 +80,7 @@ Feature: mogwai addendum — a where().by() operand over an UNBOUND label drops 
     When iterated to list
     Then the result should be unordered
       | result |
-      | d[6].l |
+      | d[0].l |
 
   Scenario: g_V_unionXasXaX_identityX_asXbX_unionXwhereXa_eqXbXX_byXconstantX1XX_constantX0XX_count
     Given the modern graph

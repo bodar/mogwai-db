@@ -273,7 +273,6 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       | d[2].l |
       | d[1].l |
 
-  @Unsupported
   Scenario: g_V_groupXlabelX_byXvaluesXageX_foldX0_sumXX
     Given the modern graph
     And the traversal of
@@ -288,7 +287,6 @@ Feature: mogwai addendum — fold(seed, Operator.x) is a seeded left fold at eve
       | result                                       |
       | m[{"person":"d[123].i","software":"d[0].i"}] |
 
-  @Unsupported
   Scenario: g_V_groupXlabelX_byXvaluesXageX_foldX0_sumX_foldX
     Given the modern graph
     And the traversal of

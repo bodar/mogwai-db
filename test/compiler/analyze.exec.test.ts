@@ -44,8 +44,11 @@ describe('ChainFacts.tracksPath', () => {
     // path even with no trailing `path()` step.
     expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6)).path()').tracksPath).toBe(true);
     expect(facts('g.V().repeat(__.both().simplePath()).until(__.hasId(6))').tracksPath).toBe(true);
-    // …but ONLY a repeat body — a path-family step in a branch/by/local body is not admitted here.
-    expect(facts('g.V().union(__.out().simplePath(), __.identity())').tracksPath).toBe(false);
+    // …and a CONNECTOR host's body (`CONNECTOR_HOSTS`, every row of `lower/scoped.ts`'s `CONNECTORS` — a union
+    // arm among them): the arm reads the path its traverser carries, so the chain seeds one.
+    expect(facts('g.V().union(__.out().simplePath(), __.identity())').tracksPath).toBe(true);
+    // A host that is no connector row keeps its own carriage story: a sideEffect() body is not admitted.
+    expect(facts('g.V().sideEffect(__.out().simplePath().aggregate("x"))').tracksPath).toBe(false);
   });
 });
 

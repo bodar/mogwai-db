@@ -2039,6 +2039,22 @@ export function listPayloadExpr(list: Expr, of: ListOf, source: GraphSource, fre
 
 /** The ordered `json_group_array` of a per-member expression, COALESCEd to `[]` and re-`json()`ed so the
  *  members' JSON subtype survives the enclosing aggregate. The shared tail of both list expanders. */
+/**
+ * A list value whose members must state their own type wherever the list is NESTED (a map value, a member
+ * of a member): a STATIC member type (`count().fold()` → longs) is written onto each member as a `{t,v}` node,
+ * because the tree framer (`frameTypedNode`) infers a bare member from its storage class and a `long` would
+ * frame as an `int`. Any other member encoding already describes itself (an envelope) or infers exactly as it
+ * would at the top level (unknown), and is returned as is. The answer's `of` describes the members it holds.
+ */
+export function selfDescribingList(list: Expr, of: ListOf, fresh: Minter): { readonly list: Expr; readonly of: ListOf } {
+  if (of.kind !== 'scalar' || of.type.kind !== 'static') return { list, of };
+  const members = membersOf(jsonOf(list), fresh);
+  return {
+    list: rebuiltMembers(members, typedNode(col(members.id, MEMBER.value), compilerText(of.type.type)), fresh),
+    of: withMemberType(of, PER_ROW_ENVELOPE),
+  };
+}
+
 function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
   const rebuilt = make.aggregate({
     id: fresh('lp'), input: members, channels: [], type: typeOf(meta('members', 'json', true)),

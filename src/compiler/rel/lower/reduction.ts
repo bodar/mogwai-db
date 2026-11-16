@@ -42,6 +42,7 @@ import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
 import { RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, noteUnrolled, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
+import { scopedValue } from './scoped.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './filter.ts';
 import { crossCarried, movement } from './movement.ts';
 import { nondeterministic } from '../../ir/step.ts';
@@ -66,7 +67,8 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   sideEffects: ctx.sideEffects,
   scopeNames: ctx.scopeNames,
   writes: ctx.writes,
-  scalar: (body, host) => scalarChild(body, host, ctx, fresh),
+  // A by() value a connector already landed as a join column (`scopedValue`, `lower/scoped.ts`) is read there.
+  scalar: (body, host) => scopedValue(ctx, body, host) ?? scalarChild(body, host, ctx, fresh),
   // THE ONE predicate entry `where()`/`filter()`/`not()` already use, so a body lowered through the seam
   // gets the same `select(<label>)` re-root over the row's aliases — not a second, scope-less ladder.
   predicate: (body, subject, negated, aliases) => childPredicate(body, subject, fresh, ctx, negated, aliases),

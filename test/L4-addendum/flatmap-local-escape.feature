@@ -91,9 +91,9 @@ Feature: mogwai addendum — local() carries its body frame out, plain flatMap()
       | p[marko,lop] |
       | p[marko,vadas] |
 
-  # ---- non-element output under path() stays fail-closed (a scalar has no id to append as a position) ----
+  # ---- a SCALAR output under path(): `head.split(r)` appends the emitted value itself as the one new position
+  # (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52) ----
 
-  @Unsupported
   Scenario: g_V_flatMapXout_valuesXnameXX_path
     Given the modern graph
     And the traversal of
@@ -103,4 +103,9 @@ Feature: mogwai addendum — local() carries its body frame out, plain flatMap()
     When iterated to list
     Then the result should be unordered
       | result |
-      | p[x] |
+      | p[v[marko],vadas] |
+      | p[v[marko],josh] |
+      | p[v[marko],lop] |
+      | p[v[josh],lop] |
+      | p[v[josh],ripple] |
+      | p[v[peter],lop] |

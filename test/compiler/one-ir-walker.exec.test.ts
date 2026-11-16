@@ -74,8 +74,12 @@ describe('the defects the walker closed, and their neighbours', () => {
   test.each([
     "g.V().as('a').out('knows').local(union(select('a'), identity()).count())",
     "g.V(1).as('a').out().map(union(select('a'), identity()).count())",
-    "g.V(1).as('a').out().local(union(math('1'), select('a').values('age')).sum())",
   ])('a scope read of a host label the child was not handed declines: %s', (q) => declines(q));
+
+  // …and where the child IS handed it — the scoped `local` connector seeds the body with the host row's alias
+  // channels — the read answers: math('1') is the Double 1.0, so each of marko's three out() sums to 30.0.
+  test('a scope read of a host label inside a local() body answers', async () =>
+    expect(await framed("g.V(1).as('a').out().local(union(math('1'), select('a').values('age')).sum())")).toEqual([30, 30, 30]));
 
   // Contents only: the within-fold ARM order of a `local(union(…).fold())` is a separate, pre-existing
   // matter (`local(union(constant('x'), values('name')).fold())` folds by content too).
@@ -180,15 +184,19 @@ describe('path entries: a map/flatMap identity host is kept where the path is re
     ["g.V(1).optional(out().map(identity())).path()", [[1, 2, 2], [1, 4, 4], [1, 3, 3]]],
     ["g.V(1).optional(out().flatMap(identity())).path()", [[1, 2, 2], [1, 4, 4], [1, 3, 3]]],
     ["g.V(2).optional(out().map(identity())).path()", [[2]]],
-    ["g.V(1).coalesce(out().map(identity()),identity()).path()", [[1, 2, 2], [1, 4, 4], [1, 3, 3]]],
     ["g.V(1).optional(out().flatMap(identity()).out()).path()", [[1, 4, 4, 3], [1, 4, 4, 5]]],
     ["g.V(1).optional(out().flatMap(out())).path()", [[1, 4, 3], [1, 4, 5]]],
   ])('an arm host behind a movement under a path read: %s', async (q, expected) =>
     expect(bagOf(await paths(q))).toEqual(bagOf(expected)));
 
+  // A COALESCE is not a branch: `CoalesceStep extends FlatMapStep`, so each result's path is the PRE-child path
+  // extended by exactly the emitted value — the arm's own hops (a map entry included) are hidden
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52).
   test.each([
-    "g.V(1).coalesce(map(identity())).path()",
-  ])('a kept nested host the lowering does not cover declines: %s', (q) => declines(q));
+    ["g.V(1).coalesce(out().map(identity()),identity()).path()", [[1, 2], [1, 4], [1, 3]]],
+    ["g.V(1).coalesce(map(identity())).path()", [[1, 1]]],
+  ])('a coalesce under a path read extends the head by its one result: %s', async (q, expected) =>
+    expect(bagOf(await paths(q))).toEqual(bagOf(expected)));
 
   // A same-label re-bind across a branch host ANSWERS: the entry is not followed out of the host, so a
   // `Pop.all` read may list the element once more than the reference (a deliberate divergence).
@@ -221,13 +229,18 @@ describe('every child re-root hands its host labels in as enclosing', () => {
   // channel, exactly as a correlated value does; a scope read of the chain's label declines there too.
   test.each([
     "g.V().as('a').out('knows').choose(union(select('a'), identity()).count().is(2), constant('y'), constant('n'))",
-    "g.V().as('a').out('knows').choose(local(select('a')).count().is(1), constant('y'), constant('n'))",
-    "g.V().as('a').out('knows').choose(flatMap(select('a')).count().is(1), constant('y'), constant('n'))",
     "g.V().as('a').out('knows').repeat(out()).until(union(select('a'), identity()).count().is(2))",
     "g.V().as('a').out('knows').repeat(out()).until(local(select('a')).count().is(1))",
     "g.V().as('a').out('knows').until(union(select('a'), identity()).count().is(2)).repeat(out())",
     "g.V().as('a').out('knows').repeat(out()).emit(union(select('a'), identity()).count().is(2))",
   ])('%s', (q) => declines(q));
+
+  // The scoped choose() condition is lowered from a seed row that CARRIES the host's alias channels, so a
+  // label read through a nested local()/flatMap() there answers: the condition sees marko, once.
+  test.each([
+    "g.V().as('a').out('knows').choose(local(select('a')).count().is(1), constant('y'), constant('n'))",
+    "g.V().as('a').out('knows').choose(flatMap(select('a')).count().is(1), constant('y'), constant('n'))",
+  ])('a scoped condition reads the host label: %s', async (q) => expect(await framed(q)).toEqual(['y', 'y']));
 
   test('a condition that reads no label still answers', async () => {
     expect(await framed("g.V().as('a').out('knows').choose(has('age'), constant('y'), constant('n'))")).toEqual(['y', 'y']);
@@ -250,12 +263,26 @@ describe('a map-valued member of a map frames as a map', () => {
 
 // `Grouping.determineBarrierStep` pools every member of a key into ONE value traversal
 // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125);
-// a `by(<pre>.fold())` the pool cannot build must not fall through to a per-member fold.
-describe('a group value fold the pool cannot build declines', () => {
+// a `by(<pre>.fold())` must never fall through to a per-member fold: the scoped connector pools it per KEY
+// (`pooledGroup`, `src/compiler/rel/lower/scoped.ts`), and a keyed side-effect group it does not own declines.
+describe('a group value fold pools per key, never per member', () => {
+  const sortedValues = async (q: string) => {
+    const [m] = (await framed(q)) as Map<unknown, string[]>[];
+    return new Map([...m!].map(([k, v]) => [k instanceof Object && 'id' in (k as object) ? (k as { id: unknown }).id : k, [...v].sort()]));
+  };
+  test('keyed by a label\'s name', async () =>
+    expect(await sortedValues("g.V().as('a').out().group().by(select('a').values('name')).by(values('name').fold())"))
+      .toEqual(new Map([['marko', ['josh', 'lop', 'vadas']], ['josh', ['lop', 'ripple']], ['peter', ['lop']]])));
+  test('keyed by a label\'s element', async () =>
+    expect(await sortedValues("g.V().as('a').out().group().by(select('a')).by(values('name').fold())"))
+      .toEqual(new Map([[1, ['josh', 'lop', 'vadas']], [4, ['lop', 'ripple']], [6, ['lop']]])));
   test.each([
-    "g.V().as('a').out().group().by(select('a').values('name')).by(values('name').fold())",
-    "g.V().as('a').out().group().by(select('a')).by(values('name').fold())",
     "g.V().as('a').out().group('m').by(select('a')).by(values('name').fold()).cap('m')",
+    // A pooled value that is a MAP OF ELEMENTS: nested in the outer map, its element rowids would frame as
+    // bare numbers (`{created:{created:[9,10,11,12]}}`), so it declines until a nested map expands them.
+    "g.E().group().by(label).by(group().by(label))",
+    "g.V().group().by(label).by(out().group().by(label))",
+    "g.V().hasLabel('person').groupCount().by(out().group().by(label))",
   ])('%s', (q) => declines(q));
 
   test('…while a bare by(fold()) still collects the traversers', async () => {

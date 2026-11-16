@@ -141,6 +141,11 @@ export interface ChildStrategy {
    *  to the ladder, so the tail that lowers it does not hand it straight back (`atLadder`, `lower/scoped.ts`).
    *  Compared by step-list IDENTITY and index, so a body or a later step never matches it. */
   readonly ladderAt?: { readonly steps: readonly import('../../ir/step.ts').IRStep[]; readonly at: number };
+  /** CHILD VALUES A CONNECTOR PRE-JOINED (`lower/scoped.ts` `byValues`, §2 S5): a `by()` body's first result per
+   *  scope landed as JOIN COLUMNS of the relation `over`, keyed by the body's fingerprint, so the one step the
+   *  ladder lowers over that relation reads a column where it would build a correlated subquery
+   *  (`childSeam`'s `scalar`). A host over any other relation never matches. */
+  readonly scopedValues?: { readonly over: import('../../../rel/types.ts').RelId; readonly values: ReadonlyMap<string, import('../child.ts').ChildValue> };
 }
 
 /** What the ELEMENT loop needs on top of a filter's context: whether this compile asked for the

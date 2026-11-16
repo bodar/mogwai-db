@@ -8,7 +8,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, jsonOf, listNode, mapNode, meta, PROPERTIES, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
@@ -447,7 +447,23 @@ export function byEqualityKey(
   const typed = byTyped(modulation, host, source, fresh, child);
   if (typed) return { ...typed, terms: familyKey(typed.value, knownClass(typed.evidence)) };
   const projected = byProjection(modulation, host, source, fresh, false, child);
-  return projected && { ...projected, terms: [projected.value] };
+  if (projected) return { ...projected, terms: [projected.value] };
+  // An ELEMENT-valued child key is the element's IDENTITY: `DedupGlobalStep` keeps a traverser whose produced
+  // object its set has not seen (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:78`),
+  // and two elements are equal by kind and id (`…/structure/util/ElementHelper.java:458-470`) — one kind per
+  // framing, so the rowid. An equality key only: an element is no ORDERING value here (`byProjection`).
+  if (modulation.key.kind === 'child' && child) {
+    const produced = child.scalar(modulation.key.body, host);
+    if (produced?.framing.kind === 'elements') return { terms: [produced.expr], value: produced.expr, present: produced.present };
+    // A LIST or MAP value is equal by its contents (`List.equals`/`Map.equals`): its JSON under the one member
+    // encoding its framing states — a list in its member order, a map in the canonical key order every map
+    // here is built in — read as TEXT (`json()`), since two JSONB encodings of one document need not agree.
+    if (produced?.framing.kind === 'list' || produced?.framing.kind === 'map') {
+      const text = jsonOf(produced.expr);
+      return { terms: [text], value: text, present: produced.present };
+    }
+  }
+  return null;
 }
 
 /** What `familyKey` is told of a value's type, from the evidence `byTyped` gathered. */

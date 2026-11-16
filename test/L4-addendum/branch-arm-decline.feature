@@ -40,7 +40,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[4].l |
 
-  @Unsupported
   Scenario: g_V_coalesceXout_limitX1X__constantXxXX_count
     Given the modern graph
     And the traversal of
@@ -66,7 +65,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[6].l |
 
-  @Unsupported
   Scenario: g_V_coalesceXout_dedup__constantXxXX_count
     Given the modern graph
     And the traversal of
@@ -79,7 +77,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[9].l |
 
-  @Unsupported
   Scenario: g_V_coalesceXrepeatXout_limitX1XX_timesX1X__constantXxXX_count
     Given the modern graph
     And the traversal of
@@ -92,7 +89,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[6].l |
 
-  @Unsupported
   Scenario: g_V_optionalXout_limitX1XX_count
     Given the modern graph
     And the traversal of
@@ -121,7 +117,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
   # counts ONE. The per-traverser `reductionArm` route covers `out().count()` over elements; a body it cannot
   # take (a bare `count()`, a scalar stream) fell to the ordinary route and reduced over EVERY traverser's
   # rows — `inject(1,2,3).optional(count())` answered `3`, `optional(is(2).count())` answered `1`.
-  @Unsupported
   Scenario: g_injectX1_2_3X_optionalXcountX
     Given the empty graph
     And the traversal of
@@ -148,7 +143,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | d[1].l |
       | d[0].l |
 
-  @Unsupported
   Scenario: g_injectX1_2_3X_coalesceXcount__constantX0XX
     Given the empty graph
     And the traversal of

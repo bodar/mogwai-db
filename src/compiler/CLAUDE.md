@@ -73,7 +73,10 @@ while what they operate on keeps TinkerPop's.
   window/limit, a scalar aggregate LEFT-joining the domain for its value over zero rows). This is what
   flattened the nesting-depth decline cliff (measured: `docs/2026-11-15-compositional-coverage-plan.md`
   G1/G2 and Phase 3) — composition comes from the ALGEBRA, not from enumerating routes. So:
-  - **A new child-taking host is a `CONNECTORS` row** built from the shared reconnect primitives.
+  - **A new child-taking host is a `CONNECTORS` row** built from the shared reconnect primitives
+    (existence join, `rejoin` under the `split`/`forward` traverser policy, arm priority, `by()` values
+    landed as JOIN COLUMNS the host's own lowering reads through `childSeam`, a pool scoped by a GROUP key).
+    The rows' host names are also `ir/analyze.ts` `CONNECTOR_HOSTS`; the two sets are checked equal at load.
     **Never** a new correlated route, ladder rung or `(host, body-shape)` branch — that is the pattern
     that produced ~890 decline sites and a 98% decline rate at depth 5.
   - **A body that does not lower is fixed in the body's lowering or in `decorrelate.ts`** (one rule per

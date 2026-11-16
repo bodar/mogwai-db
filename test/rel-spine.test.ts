@@ -653,8 +653,9 @@ const DECLINED = [
   'g.V().order().by(T.key)',          // an element has no key
   'g.E().properties().id()',          // an edge `Property` is not an Element — no id, no label
   'g.E().properties().label()',
-  'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
-  'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
+  // `order()`/`dedup().by(__.constant(null))` LEFT this list: the scoped connector lands the by() value as a
+  // join column, and a null `by()` value is absent — the row drops (`docs/feature-support-matrix.md` §17,
+  // "A null `by()` value").
   // A `groupCount` site beside a `group` site on ONE label is not one grouping: `registerIfAbsent` keeps
   // the FIRST reducer, so the reference merges a `Map<K,Long>` with a `Map<K,List<V>>` through
   // `GroupCountBiOperator` and raises. Refusing is what comparing the aggregation recipe as DATA buys —

@@ -27,7 +27,7 @@ import { pathCarried } from '../path.ts';
 import { BULK, NO_ALIASES, bodyOf, encounterOf, inArmBody, noteUnrolled, withEnclosing, type ChainCtx, type Tail } from './chain.ts';
 import { bodyPredicate, branchSubject, childHostOf, childPredicate } from './filter.ts';
 import { dedupOn, sliceOp } from './slice.ts';
-import { childSeam, hostItself, reductionArm, rootedRead, rootedSteps, selfCollapses } from './reduction.ts';
+import { childSeam, hostItself, reductionArm, rootedRead, rootedSteps, selfCollapses, shedBodyAliases } from './reduction.ts';
 import { type Arrival, branchOrderOwed, continueAs, countTail, dropEncounter, freezeParent, mintBranchOrder, positioned, tokenChoice, withoutEncounter } from '../lower.ts';
 
 // BRANCH / MERGE — the arm-merging steps union/choose/coalesce/optional (branchArms dispatches),
@@ -201,7 +201,7 @@ export function mixedBranch(arms: readonly Tail[], input: Rel, graph: GraphSourc
  * frames a list-of-elements member by the same `listPayloadExpr` expansion the non-variant list uses. A
  * map/record/path/property arm declines (no variant `vk`).
  */
-function reconcileCollapsed(arms: readonly Tail[], fresh: Minter): readonly Tail[] | null {
+export function reconcileCollapsed(arms: readonly Tail[], fresh: Minter): readonly Tail[] | null {
   const normalized: Tail[] = [];
   for (const arm of arms) {
     const fr = arm.framing;
@@ -1079,12 +1079,22 @@ export function coalesceArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
 ): BranchRel | null {
   if (step.modulators?.length || step.optionArms) return null;
+  // A CARRIED PATH is the scoped connector's (`lower/scoped.ts`): `CoalesceStep` is a `FlatMapStep`, so a
+  // result's path is the PRE-child path extended by exactly the emitted value
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`)
+  // — `g.V(2).coalesce(out(), identity()).path()` is `[v[2], v[2]]` — where this merge keeps each arm's own
+  // path (its hops visible, an identity arm's value not appended).
+  if (ctx.tracksPath && pathCarried(input)) return null;
   const args = step.args.map((a) => a.value);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
   for (const body of bodies) noteUnrolled(body, ctx, null);
-  return coalesceMerge(bodies as readonly (readonly IRStep[])[], input, framing, bulked, ctx, fresh, labels, position);
+  const merged = coalesceMerge(bodies as readonly (readonly IRStep[])[], input, framing, bulked, ctx, fresh, labels, position);
+  // …and a LABEL bound in an arm does not escape either: `head.split` re-derives the traverser from the
+  // pre-child head, so `V(1).coalesce(out('knows').as('x'), identity()).select('x')` is empty. The arm-bound
+  // alias channels are shed and the pre-coalesce map continues (`shedBodyAliases`, as `flatMap` does).
+  return merged && { ...merged, rel: shedBodyAliases(merged.rel, labels, fresh), aliases: labels };
 }
 
 /**
@@ -1239,9 +1249,17 @@ function routedReduction(arm: Tail, routedTo: Rel, fresh: Minter): Tail {
   };
 }
 
+/** A choose condition a CALLER already decided per row (`lower/scoped.ts`, the scoped connector): the predicate
+ *  over the branch's source rows, and how to shed the columns it read once the rows are routed, so no arm
+ *  carries them. */
+export interface RoutedCondition {
+  readonly pred: (source: Rel) => Expr | null;
+  readonly shed: (rel: Rel) => Rel;
+}
+
 export function chooseArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, position?: Arrival, routed?: RoutedCondition,
 ): BranchRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels, position);
@@ -1273,7 +1291,7 @@ export function chooseArms(
 
   // The condition is a child of THIS chain, rooted afresh at the subject row with no alias channel, so
   // the chain's labels ride in as enclosing (`withEnclosing`).
-  const pred = bodyPredicate(condition, subject, fresh, withEnclosing(ctx, labels));
+  const pred = routed ? routed.pred(source) : bodyPredicate(condition, subject, fresh, withEnclosing(ctx, labels));
   if (!pred) return null;
   // A `choose` routes on the condition's PRODUCTIVITY, not a two-valued boolean: `ChooseStep` takes the
   // TRUE arm iff the condition traversal PRODUCED for this traverser, and the FALSE arm otherwise
@@ -1282,10 +1300,13 @@ export function chooseArms(
   // `is(P.eq(__.V(9999)…))`), and `NOT NULL` is NULL, which would drop the row from BOTH arms where the
   // reference routes it to the else. `notProduced` (`pred IS NOT 1`) sends a false-OR-null condition to
   // the else, which is the productivity split; it is identical to `NOT pred` wherever pred cannot be null.
-  const guarded = (negated: boolean): Rel => make.filter({
-    id: fresh('cg'), input: source, channels: source.channels, type: source.type,
-    pred: negated ? notProduced(pred) : pred,
-  });
+  const guarded = (negated: boolean): Rel => {
+    const routedRows = make.filter({
+      id: fresh('cg'), input: source, channels: source.channels, type: source.type,
+      pred: negated ? notProduced(pred) : pred,
+    });
+    return routed ? routed.shed(routedRows) : routedRows;
+  };
 
   const armThen = continueAs(guarded(false), framing, then, 0, bulked, armCtx(then), fresh, labels);
   // The else arm over ZERO steps is `identity` on the complement — see above.

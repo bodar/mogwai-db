@@ -49,7 +49,6 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
       | m[{"person":"l[d[1].i]","software":"l[d[1].i]"}] |
 
   # A FilteringBarrier before a reducer dedups ACROSS the key: josh and vadas share one `1`.
-  @Unsupported
   Scenario: g_VX1X_out_group_byXlabelX_byXconstantX1X_dedup_countX
     Given the modern graph
     And the traversal of
@@ -61,7 +60,6 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
       | result |
       | m[{"person":"d[1].l","software":"d[1].l"}] |
 
-  @Unsupported
   Scenario: g_VX1X_out_group_byXlabelX_byXconstantX1X_limitX1X_foldX
     Given the modern graph
     And the traversal of
@@ -73,7 +71,6 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
       | result |
       | m[{"person":"l[d[1].i]","software":"l[d[1].i]"}] |
 
-  @Unsupported
   Scenario: g_VX1X_out_group_byXlabelX_byXconstantX1X_rangeX0_1X_countX
     Given the modern graph
     And the traversal of
@@ -87,7 +84,6 @@ Feature: mogwai addendum — a group VALUE body with a barrier is pooled PER KEY
 
   # A key the pool cannot recompute from the member element (a sack is per TRAVERSER) cannot pool; the
   # assign arm would keep only the last member, so it declines.
-  @Unsupported
   Scenario: g_withSackXkX_VX1X_out_group_bySack_byXname_order_foldX
     Given the modern graph
     And the traversal of
