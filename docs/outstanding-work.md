@@ -787,7 +787,9 @@ Beside the RelIR substrate:
 - **Exact decimal arithmetic.** `values('p').sum()` over `1.5m` and `2` defers (decimal-TEXT values
   can't go through SQL `sum`); `fold(seed, Operator.x)` declines classes outside int/long/double.
 - **Path as a value.** `path().order()`, `path().group()` (needs a `{t:'path'}` arm in
-  `frameTypedNode`/`listNodeExpr`), `path().fold().unfold()`.
+  `frameTypedNode`/`listNodeExpr`), `path().fold().unfold()`; `path().unfold()` over a MIXED-kind element
+  path (vertex+edge) needs a per-row element kind on the unfolded stream (`pathUnfolded` serves one kind).
+  `count(local)` and single-kind `unfold()` landed (cc1b).
 - **Per-origin slice in a batched `union`/`choose` arm or bounded-`repeat` body** under an outer
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
 

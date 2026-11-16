@@ -3,10 +3,11 @@ import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../r
 import { deferralExpr } from '../../rel/raise.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { perRowColumnOf, TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import type { ColMeta } from '../../rel/types.ts';
+import { PER_ROW, perRowColumnOf, TYPED_MEMBERS, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep, PathPositionKind } from '../ir/step.ts';
 import { SHAPE_K, type AliasMap } from '../alias.ts';
-import { byEncounter, carriedCols, jsonField, jsonOf, meta, typeOf, type Minter } from './build.ts';
+import { byEncounter, carriedCols, jsonField, jsonOf, meta, renumber, typeOf, type Minter } from './build.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL } from './list.ts';
 import { byNode, modulations, type Modulation } from './modulator.ts';
@@ -550,4 +551,60 @@ export function pathPayload(
     }),
     shape: { kind: 'jsonbPath', items: of },
   };
+}
+
+/**
+ * `path().unfold()` — the path's OBJECTS as a stream, read straight off the carried history rather than
+ * off the framed Path value.
+ *
+ * `unfold()` over a Path iterates its objects (`UnfoldStep` takes any `Iterable`, and a `Path` is one —
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/UnfoldStep.java`),
+ * so building the positions into one list value and exploding it straight back is the identity on the
+ * history entries — the consumer-driven read `cap("a").unfold()` makes (`readUnfolded`). Reading the
+ * HISTORY keeps each element position a ROWID, which is what lets the stream re-enter the element loop:
+ * the framed Path holds public element payloads, from which no rowid can be recovered.
+ *
+ * ONE position kind only (`pathPositionKinds`, the chain's own text): a vertex-only or edge-only path is
+ * an element stream, a value-only path a per-row-typed scalar stream. A MIXED path (a vertex beside an
+ * edge or a value), or one the text cannot type, returns `null` — the caller keeps the framed-Path route.
+ *
+ * Each object keeps its path traverser's channels (bulk, labels): an unfolded traverser is a split of the
+ * one that held the path. The emission order is the path traverser's, then the position within it.
+ */
+export function pathUnfolded(
+  rel: Rel, kinds: ReadonlySet<PathPositionKind> | undefined, fresh: Minter,
+): { readonly rel: Rel; readonly framing: { readonly kind: 'elements'; readonly elem: 'vertex' | 'edge' } | { readonly kind: 'scalar'; readonly type: ScalarType } } | null {
+  if (!pathCarried(rel) || !kinds || kinds.size !== 1) return null;
+  const [kind] = [...kinds];
+  // The fence `pathPositions` documents: `json_each` reads from the FROM clause, so the path column must
+  // be a real column rather than the nested append chain re-inlined into the table-valued argument.
+  const fenced = rel.kind === 'materialize' ? rel : make.materialize({ id: fresh('pum'), input: rel, channels: rel.channels, type: rel.type });
+  const channels = fenced.channels.filter((channel) => channel.role !== 'path');
+  const each = make.explode({
+    id: fresh('pux'), input: fenced, channels: fenced.channels, expr: jsonOf(col(fenced.id, PATH_COL)), as: { value: 'pv', ord: 'po' },
+    type: typeOf(...fenced.type.cols, meta('pv', 'any', true), meta('po', 'int')),
+  });
+  const entry = col(each.id, 'pv');
+  const payload: readonly (readonly [ColMeta, Expr])[] = kind === 'value'
+    ? [[meta('v', 'any', true), jsonField(entry, 'v')], [meta('vtype', 'text', true), jsonField(entry, 't')]]
+    : [[meta('id', 'int'), jsonField(entry, 'v')]];
+  const payloadCols = payload.map(([column]) => column);
+  const positioned = make.project({
+    id: fresh('pup'), input: each, channels,
+    type: typeOf(...payloadCols, meta('po', 'int'), ...carriedCols(channels)),
+    exprs: [...payload.map(([column, expr]) => [column.name, expr] as const), ['po', col(each.id, 'po')],
+      ...channels.map((channel) => [channel.col, col(each.id, channel.col)] as const)],
+  });
+  const encounter = channels.find((channel) => channel.role === 'encounter');
+  const out = encounter
+    ? renumber(positioned, [{ expr: col(positioned.id, encounter.col), dir: 'asc' }, { expr: col(positioned.id, 'po'), dir: 'asc' }],
+      [...payloadCols, ...carriedCols(channels)], channels, fresh)
+    : make.project({
+      id: fresh('pud'), input: positioned, channels, type: typeOf(...payloadCols, ...carriedCols(channels)),
+      exprs: [...payloadCols.map((column) => [column.name, col(positioned.id, column.name)] as const),
+        ...channels.map((channel) => [channel.col, col(positioned.id, channel.col)] as const)],
+    });
+  return kind === 'value'
+    ? { rel: out, framing: { kind: 'scalar', type: PER_ROW('vtype') } }
+    : { rel: out, framing: { kind: 'elements', elem: kind } };
 }

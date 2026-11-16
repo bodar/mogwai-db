@@ -120,7 +120,7 @@ limit is the backstop.
 
 | Step | | Notes |
 |---|:--:|---|
-| `path()`, `path().by(…)` | ✅ | |
+| `path()`, `path().by(…)` | ✅ | As a value: `count(local)` ✅ over any positions; `unfold()` ✅ over a vertex-only, edge-only or value-only path (and any `by()`-projected one). ❌ `unfold()` over a MIXED element path (`outE().inV().path().unfold()`), `path().order()`/`group()` |
 | `simplePath`, `cyclicPath` | ✅ | |
 | `tree`, `subgraph` | ❌ | |
 

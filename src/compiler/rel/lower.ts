@@ -67,7 +67,7 @@ import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { PairSpec } from '../../services/spi/types.ts';
-import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, seedPath } from './path.ts';
+import { appendPathLabel, appendValuePosition, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, pathSimpleByPredicate, pathUnfolded, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
@@ -2123,6 +2123,8 @@ function scalarTail(
     // it (fail-safe — a later `path()` then declines with no channel rather than framing a gap).
     if (pathCarried(rel)) {
       if (step.name === 'path' && (step.args ?? []).length === 0) {
+        const unfolded = pathUnfoldTail(rel, steps, at, bulked, ctx, fresh, labels);
+        if (unfolded !== undefined) return unfolded;
         const positions = pathPositions(rel, step, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh);
         if (!positions) return null;
         return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
@@ -3279,6 +3281,12 @@ function pathTail(
       rel = typed;
       continue;
     }
+
+    // `count(local)` is the path's LENGTH (`CountLocalStep` over a `Path`, an `Iterable` of its objects —
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CountLocalStep.java`).
+    // It reads the member COUNT and never decodes a member, so it is the list vocabulary's answer whatever
+    // the positions hold — the `scalars` boundary below guards decoding, which this does not do.
+    if (step.name === 'count' && isLocalScope(step)) return listTail(rel, of, steps, at, ctx, fresh, labels);
 
     if (step.name === 'count') {
       if (args.length || step.modulators?.length || step.optionArms) return null;
@@ -5650,6 +5658,8 @@ function elementTail(
       // `from`/`to` scope to a SUB-path (`subPathMembers`, via the labels-on-path recorded when
       // `ChainFacts.demandsPathLabels` gated them on).
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length) return null;
+      const unfolded = pathUnfoldTail(rel, steps, at, bulked, ctx, fresh, labels);
+      if (unfolded !== undefined) return unfolded;
       const positions = pathPositions(rel, step, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
@@ -6101,6 +6111,22 @@ function capUnfolded(
     return scalarTail(positioned, { kind: 'scalar', type: members.type!, ...(members.productiveNull ? { productiveNull: true } : {}) },
       steps, from, false, ctx, fresh, NO_ALIASES);
   return continueAs(positioned, { kind: 'typedNode' }, steps, from, false, ctx, fresh, NO_ALIASES);
+}
+
+/**
+ * `path().unfold()` WITHOUT the fold — the carried history re-entered as a stream (`pathUnfolded`), the
+ * `capUnfolded` twin. `undefined` when this is not that shape (a modulated/sub-path `path()`, no `unfold()`
+ * after it, a mixed-kind path): the caller then builds the Path value as before.
+ */
+function pathUnfoldTail(
+  rel: Rel, steps: readonly IRStep[], at: number, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null | undefined {
+  const step = steps[at]!, next = steps[at + 1];
+  if (next?.name !== 'unfold' || (next.args ?? []).length || next.modulators?.length || next.optionArms) return undefined;
+  if (step.modulators?.length || step.from !== undefined || step.to !== undefined) return undefined;
+  const unfolded = pathUnfolded(rel, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), fresh);
+  if (!unfolded) return undefined;
+  return continueAs(unfolded.rel, unfolded.framing, steps, at + 2, bulked, ctx, fresh, labels);
 }
 
 /**
