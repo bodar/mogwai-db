@@ -151,6 +151,15 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
 3. **Re-source bodies** (`map(V()…)`). First establish the reference semantics with scenarios: a re-source
    body under `map`/`local`/`flatMap`, including over a maybe-absent value. The first attempt gave a wrong answer
    (six nulls for `[]`). Only then remove `ladderOwns`' re-source refusal.
+   ✅ **LANDED (f4742d44).** The connector owns a re-sourcing body (`map`/`local`/`flatMap`/`where`/`group().by`
+   over `V()…`): `reSourcedBody` (`lower/scoped.ts`) lowers the rest after the re-source ONCE as a rooted read and
+   crosses it with an exactly-one-row prefix (first-row consumers cross only its first row); `connectorOwns` keeps
+   the ladder from answering the same query a second way, and `ladderOwns` now refuses only draws. Presence is the
+   body's ROW, so a productive null is a value (`resourced-scalar-value.feature` asserts the six nulls; the §17
+   line narrowed to scalar operands). `admitsReSource` (`lower/reduction.ts`) is the one explained
+   resource-under-absent rule, asked by the scalar seam and the fold's `reSourceTail`. A pooled re-source is one
+   traverser of bulk |pool| (`group().by(label).by(V().count())`: 2.1 ms at 1k, 18.5 ms at 8k, from the ladder's
+   850 ms at 1k). No baselines moved. Remains: nothing.
 4. **Draw bodies** (`local(out().sample(1))`): shared with R2's per-scope draw.
 5. **Speed:** `flatMap(out().out())` is 1.29×. Splicing a transparent body measured 1.14×, but a pass test pins
    "a body that MOVES is left alone". Decide whether that pin is semantic (cite the reference) or a ladder-era
