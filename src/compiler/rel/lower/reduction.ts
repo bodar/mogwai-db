@@ -31,7 +31,7 @@ import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, extendPath, PATH_CHANNEL, PATH_COL, pathCarried, subPathMembers } from '../path.ts';
 import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
-import { propertyReadOf } from '../property.ts';
+import { metaPropertyRead, propertyMetaBag, propertyReadOf } from '../property.ts';
 import { raisingWhen, transformOffences } from '../receiver.ts';
 import { evidenceOf } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
@@ -2235,6 +2235,13 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
         // A property traverser IS one property, so its key and its value are each exactly one.
         yields: 'one',
       }, host.row, childSeam(ctx, fresh), ctx.source, fresh);
+    // `values('k')` over a VertexProperty reads its META-property `k` — at most ONE value (the meta bag
+    // holds one value per key), produced exactly where it is non-null (`metaPropertyRead`).
+    if (first.name === 'values' && host.ownerElem === 'vertex' && first.args.length === 1 && typeof first.args[0]!.value === 'string' && !first.modulators?.length) {
+      const read = metaPropertyRead(propertyMetaBag(host.id, host.row?.rel, fresh), first.args[0]!.value);
+      return valueRun(body, 1, { value: storedValueOn(read.value, read.vtype), type: UNKNOWN, vtype: read.vtype, present: 'value-nullness', yields: 'one' },
+        host.row, childSeam(ctx, fresh), ctx.source, fresh);
+    }
     return null;
   }
 

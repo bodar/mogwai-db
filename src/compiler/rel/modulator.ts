@@ -8,12 +8,12 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, listNode, mapNode, meta, PROPERTIES, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { propertyNode, propertyReadOf } from './property.ts';
+import { metaPropertyRead, propertyMetaBag, propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './tag.ts';
 
 /** The floating tags whose by(select(label)) key reuses the label's exactly-spelled entry (`aliasEntryNode`). */
@@ -330,10 +330,16 @@ function projectionOf(
         ? storedCompareOn(propertyReadOf(host.id, host.ownerElem, 'vtype', fresh))(read)
         : read);
     }
+    // `by('k')` over a VertexProperty — an Element — reads its META-property `k` (`ElementValueTraversal`
+    // over the VertexProperty), present where it is non-null, ordered through its per-row tag as a stored
+    // value is. An edge `Property` has no properties and declines.
+    if (key.kind === 'property' && host.ownerElem === 'vertex') {
+      const read = metaRead(host, key.key, fresh);
+      return { value: ordering ? storedCompareOn(read.vtype)(read.value) : read.value, present: 'value-nullness' };
+    }
     // What is left is the vocabulary an ELEMENT has and a property does not: a bare `by()` over one is
-    // the VertexProperty itself (not a comparable value), `by('x')` would be a meta-property read, and
-    // `element()` is a STEP and therefore the child arm's. All three decline rather than being answered
-    // off the wrong row.
+    // the VertexProperty itself (not a comparable value) and `element()` is a STEP and therefore the
+    // child arm's. Both decline rather than being answered off the wrong row.
     return null;
   }
 
@@ -363,6 +369,11 @@ function projectionOf(
   const value = source.propertyScalar(host.elem, host.id, key.key, ordering, fresh);
   return value && { value, present: 'value-nullness' };
 }
+
+/** A VertexProperty host's META-property `key` — the bag off the host row's own column where the row is the
+ *  property join, else a correlated read by the property's rowid (`propertyMetaBag`). */
+const metaRead = (host: Extract<ChildHost, { kind: 'property' }>, key: string, fresh: Minter) =>
+  metaPropertyRead(propertyMetaBag(host.id, host.row?.rel, fresh), key);
 
 const isNotNull = (value: Expr): Expr => ({ kind: 'binary', op: 'is not', left: value, right: compilerNull() });
 
@@ -459,6 +470,8 @@ function typedArm(modulation: Modulation, value: Expr, host: ChildHost, fresh: M
     return key.token === 'key'
       ? { value, evidence: { kind: 'static', tag: 'string' }, productiveNull: true }
       : { value, evidence: { kind: 'tag', tag: propertyReadOf(host.id, host.ownerElem, 'vtype', fresh) }, productiveNull: true };
+  if (host.kind === 'property' && key.kind === 'property' && host.ownerElem === 'vertex')
+    return { value, evidence: { kind: 'tag', tag: metaRead(host, key.key, fresh).vtype, nullOnlyForNull: true }, productiveNull: false };
   if (host.kind === 'element' && key.kind === 'token')
     return key.token === 'label'
       ? { value, evidence: { kind: 'static', tag: 'string' }, productiveNull: true }
@@ -744,6 +757,10 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
         ? compilerText('string')
         : propertyReadOf(host.id, host.ownerElem, 'vtype', fresh));
     }
+    if (key.kind === 'property' && host.ownerElem === 'vertex') {
+      const read = metaRead(host, key.key, fresh);
+      return gatedOn('value-nullness', read.value, typedNode(storedValueOn(read.value, read.vtype), read.vtype));
+    }
     if (key.kind !== 'identity') return null;
     return propertyNode(host.id, host.ownerElem, fresh);
   }
@@ -900,6 +917,16 @@ export function byField(
       exprs: [['v', value]],
       framing: { kind: 'scalar', type: key.token === 'label' || key.token === 'key' ? STATIC('string') : UNKNOWN },
       optional: false,
+    };
+  }
+
+  // A VertexProperty's META-property as a field — its value and per-row tag, absent where it lacks one.
+  if (host.kind === 'property' && key.kind === 'property' && host.ownerElem === 'vertex') {
+    const read = metaRead(host, key.key, fresh);
+    return {
+      exprs: [['v', storedValueOn(read.value, read.vtype)], ['vtype', read.vtype]],
+      framing: { kind: 'scalar', type: PER_ROW('vtype') },
+      optional: droppable(),
     };
   }
 

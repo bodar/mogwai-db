@@ -9,6 +9,7 @@ import type { Arg } from '../../gremlin/frontend.ts';
 import type { RelFraming } from './framing.ts';
 import type { Elem } from '../elem.ts';
 import { propertyTag } from '../../gremlin/types.ts';
+import { inferredVtype } from './tag.ts';
 
 // ---------- the PROPERTY shape: a traverser that IS a property, not its value ----------
 //
@@ -418,8 +419,9 @@ export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr 
 }
 
 /** WHICH single column of the stored property row a child body asks for. Named rather than passed as a
- *  raw string so a caller cannot spell a column this module does not carry. */
-export type PropertyRead = 'key' | 'value' | 'vtype' | 'owner';
+ *  raw string so a caller cannot spell a column this module does not carry. `meta` is VERTEX-ONLY (an
+ *  edge `Property` has no meta-properties; `propCols`). */
+export type PropertyRead = 'key' | 'value' | 'vtype' | 'owner' | 'meta';
 
 /**
  * ONE stored column of the property at `rowid`, as a correlated expression.
@@ -429,6 +431,7 @@ export type PropertyRead = 'key' | 'value' | 'vtype' | 'owner';
  */
 export function propertyReadOf(rowid: Expr, ownerElem: Elem, read: PropertyRead, fresh: Minter): Expr {
   const { rel, owner } = propertyRow(rowid, ownerElem, fresh);
+  if (read === 'meta' && ownerElem !== 'vertex') return compilerNull();
   const value = read === 'owner' ? col(rel.id, owner)
     : read === 'value' ? storedValueOn(col(rel.id, 'value'), col(rel.id, 'vtype'))
       : col(rel.id, read);
@@ -437,4 +440,83 @@ export function propertyReadOf(rowid: Expr, ownerElem: Elem, read: PropertyRead,
     exprs: [['v', value]],
   });
   return { kind: 'scalar', plan: only };
+}
+
+// ---------- META-PROPERTIES: a VertexProperty's own properties ----------
+//
+// A `VertexProperty` IS an `Element`, so it answers the element property vocabulary about ITS OWN
+// properties — the meta-properties: `has(k[, P])`/`hasNot(k)` test them (`HasContainer.test` reads
+// `element.properties(key)`, which on a VertexProperty is its meta-properties —
+// `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/HasContainer.java`),
+// `values(k…)` streams their values and `by('k')` reads the first one (`PropertiesStep`/`ElementValueTraversal`
+// over the VertexProperty). An edge `Property` is not an Element and has none of this, so every caller
+// asks only for a VERTEX owner and declines an edge one.
+//
+// The meta bag is the property row's own `meta` JSON object (`src/storage.ts`, `{metaKey: scalar}`), so a
+// meta read is a JSON read of that column — a direct column off the property join where the row is in
+// scope, a correlated read by the property's rowid where only that is (a `by()` host).
+
+/** The JSON path naming one top-level key of the meta bag — quoted, so a key that is not an identifier
+ *  (`'start time'`, a key with a `.`) addresses that key and nothing else. */
+const metaPath = (key: string): string => `$."${key.replace(/"/g, '""')}"`;
+
+/**
+ * A meta value's per-row Gremlin TYPE TAG, from its JSON class. The meta bag stores values untyped
+ * (a JSON scalar per key — `metaExpr` in `write.ts`), so the class is all there is: an INTEGER/REAL/TEXT
+ * reads exactly as an untagged value's storage class does (`inferredVtype`, the framer's own inference),
+ * and a JSON ARRAY is a stored collection's `{t,v}` member list, framed as the list it was written as.
+ * ⚠️ The write loses what a JSON class cannot carry (a Boolean lands as `1`, a set/map's outer tag is
+ * dropped) — `docs/outstanding-work.md` o-meta-typed — and this read is exactly as faithful as that store.
+ */
+const metaTagOf = (jsonType: Expr, value: Expr): Expr => ({
+  kind: 'case',
+  whens: [[eq(jsonType, compilerText('array')), compilerText('list')], [eq(jsonType, compilerText('object')), compilerNull('text')]],
+  else: inferredVtype(value),
+});
+
+/**
+ * THE META BAG of a VertexProperty — the `p_meta` column where `rel` is the property join itself, else a
+ * correlated read of the stored row at `rowid`. The column and the rowid are read off the same row, so
+ * the two spellings are one value; the column is preferred because it costs nothing per row.
+ */
+export function propertyMetaBag(rowid: Expr, rel: Rel | undefined, fresh: Minter): Expr {
+  const own = rel?.type.cols.some((column) => column.name === PROP('meta'));
+  return own ? col(rel!.id, PROP('meta')) : propertyReadOf(rowid, 'vertex', 'meta', fresh);
+}
+
+/** ONE meta-property's value at `key` and its per-row tag — NULL (both) where the VertexProperty has no
+ *  meta-property under `key`, which is how absence reads (a meta value is never a JSON null: a null
+ *  argument is not a value `property()` stores). */
+export function metaPropertyRead(bag: Expr, key: string): { readonly value: Expr; readonly vtype: Expr } {
+  const value = jsonExtract(bag, metaPath(key));
+  return { value, vtype: metaTagOf({ kind: 'call', fn: 'json_type', args: [bag, compilerText(metaPath(key))] }, value) };
+}
+
+/**
+ * `values(k…)` over a VertexProperty stream — one traverser per matching META-property, its value typed
+ * per row. The meta bag is exploded (`json_each`), so every key the step names yields its value and a key
+ * the property lacks yields nothing; `keys` is `null` for every key (`values()`). The carried channels ride
+ * through, as every retype's do: a meta read changes what a row IS, never what state it carries.
+ */
+export function metaPropertyValues(input: Rel, keys: readonly string[] | null, fresh: Minter): { rel: Rel; framing: RelFraming } {
+  const M = { key: 'mk', value: 'mv', type: 'mt' } as const;
+  const each = make.explode({
+    id: fresh('mpe'), input, channels: input.channels, expr: col(input.id, PROP('meta')), as: M,
+    type: typeOf(...input.type.cols, meta(M.key, 'text', true), meta(M.value, 'any', true), meta(M.type, 'text', true)),
+  });
+  const membership = keyMembership(col(each.id, M.key), keys);
+  const wanted = membership ? make.filter({ id: fresh('mpf'), input: each, channels: input.channels, type: each.type, pred: membership }) : each;
+  const tag = metaTagOf(col(wanted.id, M.type), col(wanted.id, M.value));
+  return {
+    rel: make.project({
+      id: fresh('mpv'), input: wanted, channels: input.channels,
+      type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
+      exprs: [
+        ['v', storedValueOn(col(wanted.id, M.value), tag)],
+        ['vtype', tag],
+        ...input.channels.map((channel) => [channel.col, col(wanted.id, channel.col)] as const),
+      ],
+    }),
+    framing: { kind: 'scalar', type: PER_ROW('vtype') },
+  };
 }

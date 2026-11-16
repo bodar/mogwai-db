@@ -888,7 +888,14 @@ Beside the RelIR substrate:
   `union(constant('x')).path()`, steps after it; `opensOffStarter` and `unionArms` disagree (r1101-fu4).
 - **Path / property streams** (corpus) — `dedup()` before `path().from()` (o-subpath); `id`/`label`/
   `valueMap` positions and mixed `path().unfold()` (o-pathvals); `where(<body>)` over a property host,
-  meta-properties (o-propstream).
+  the meta-property STREAM `properties().properties()` (a Property owned by a VertexProperty — a third
+  property owner kind) and `valueMap()` over a VertexProperty (o-propstream). Meta filters/values/`by(k)`
+  landed (cc1b). `__.properties(k)…` as an ELEMENT's `where()`/`by()` body declines at the child seam (a
+  `properties` head is neither a movement nor a value read) — scoped relations' S1, not a step gap.
+- **Meta values store untyped (o-meta-typed)** — the `meta` bag is `json_object` over the raw values
+  (`rel/write.ts` `metaExpr`, `src/bulk.ts`), so a Boolean lands as `1` and a collection loses its outer
+  `{t}` (a set/map reads back as a list). Reads frame by JSON class (`property.ts` `metaTagOf`), as
+  faithful as the store; the fix is a typed `{t,v}` meta node at write plus `execute.ts` `vertexPropertyBuffer`.
 - **Values** (corpus) — set ops lose member types (o-setop-types); global `order()` over element lists (o-order-elemlist); local split (o-split); sack merge
   seed and `normSack` (o-sack); inject list/set residue `g.inject({1,1})` (r6-fu2-r); `combine`/`merge`/`disjunct`/`product`
   between a scalar-membered list and an ELEMENT-list operand (`values('tags').combine(V().fold())`, and the

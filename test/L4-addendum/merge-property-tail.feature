@@ -9,7 +9,6 @@ Feature: mogwai addendum — a property() tail after mergeV/mergeE
   # form; the created branch, the mergeE host and a correlated traversal value are unpinned upstream.
 
   @gap:merge-property-tail
-  @Unsupported
   Scenario: g_mergeVXlabel_person_name_markoX_propertyXname_vadas_acl_publicX_matched
     Given the empty graph
     And the graph initializer of

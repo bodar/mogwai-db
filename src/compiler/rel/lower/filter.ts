@@ -1,6 +1,6 @@
 import { writesAnywhere } from '../../ir/strategies.ts';
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
 import { and, labelSetArgs, meta, notProduced, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
@@ -17,7 +17,7 @@ import { scopeKeyReads } from '../../ir/labels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { arg, isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
 import type { TypeNode } from '../../../gremlin/types.ts';
-import { propertyRowId } from '../property.ts';
+import { metaPropertyRead, propertyMetaBag, propertyRowId } from '../property.ts';
 import { movement } from './movement.ts';
 import { BULK, NO_ALIASES, bodyOf, elementSubject, noteUnrolled, inOrderFreeBody, withEnclosing, type ChainCtx, type ElementSubject } from './chain.ts';
 import { continueAs, edgeFeedsOtherV } from '../lower.ts';
@@ -646,6 +646,13 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     return clause ?? null;
   }
 
+  // A VERTEXPROPERTY is an Element, so `has`/`hasNot` over one ask about ITS properties — the
+  // meta-properties (`metaFilterClause`). An edge `Property` is not an Element and declines.
+  if ((step.name === 'has' || step.name === 'hasNot') && subject.kind === 'property') {
+    if (subject.ownerElem !== 'vertex') return null;
+    return metaFilterClause(step, subject.id, subject.rel, ctx, fresh);
+  }
+
   // `hasNot(key)` is a bare `has(key)` NEGATED, and it reuses that clause rather than spelling a second
   // absence test — the two must agree about what "carries a property" means, and one builder is how.
   if (step.name === 'hasNot') {
@@ -747,6 +754,25 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, sour
  * scan can be CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the
  * scan as an index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
+function metaFilterClause(step: IRStep, rowid: Expr, rel: Rel, ctx: ChainCtx, fresh: Minter): Expr | null {
+  const args = step.args.map((a) => a.value);
+  if (step.name === 'hasNot') {
+    // `hasNot(null)` keeps everything (a null key is carried by nothing), as on an element.
+    if (args.length === 1 && args[0] === null) return CONSTANT.true;
+    if (args.length !== 1 || typeof args[0] !== 'string') return null;
+    return { kind: 'binary', op: 'is', left: metaPropertyRead(propertyMetaBag(rowid, rel, fresh), args[0]).value, right: compilerNull() };
+  }
+  // `has(key[, value-or-predicate])` only: the three-argument label form and a `T`-token key ask about
+  // the VertexProperty's label/id/key/value, which are not meta-properties — they decline here.
+  const [key, val, extra] = args;
+  if (extra !== undefined) return null;
+  if (key === null) return CONSTANT.false;
+  if (typeof key !== 'string') return null;
+  const { value, vtype } = metaPropertyRead(propertyMetaBag(rowid, rel, fresh), key);
+  return predicateExpr(value, val, perRowSubject(vtype, value), step.args[1]?.type ?? null, step.args[1]?.name ?? null, fresh,
+    (nested) => foldedListSet(nested, ctx, fresh));
+}
+
 function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
   // The VALUE COMPARISON is the vocabulary's — Gremlin `P` semantics, vtype-aware compare, a bare
   // value's declared type/param name riding through so it inlines (a literal) or binds (a `$x`). The
