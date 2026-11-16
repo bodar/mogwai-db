@@ -128,16 +128,18 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
    "a body that MOVES is left alone". Decide whether that pin is semantic (cite the reference) or a ladder-era
    fact.
 
-### R5 — `group` with a child value `by()` (owner decision on the margin)
+### R5 — `group` with a child value `by()`
 
-- **Speed:** make `pooledGroup`'s count/tail plans a plain `GROUP BY`. Today they pool through a scope, which
-  is 2.14× on `by(count)` and 1.43× on `by(tail)` at 8k.
-- **Coverage:**
-  - The keyed side-effect `group("a").by(…).by(<child>)` needs a connector row. It meets the collection substrate
-    (`docs/archive/2026-08-09-named-collections-are-bindings-plan.md`).
-  - The two nested-group L6 queries.
-- If the GROUP BY form gets within 1.2×, delete about 200 LOC and 21 `return null`. Otherwise the owner decides
-  whether the margin is worth the code.
+**DECIDED (owner, 2026-11-16): REPLACE IN STAGES (option A); the route stays until the last stage passes.**
+1. **Domain elimination** in `decorrelate.ts`, the general rule: when the body only equates the scope key with a
+   column the members already carry, group the members by it directly instead of joining a domain
+   (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/TopDownGeneralDecorrelator.java:476-482`, "D is
+   eliminated"). The pooled `group().by(label).by(count())` plan is 2.8 KB of domain + cross join + LEFT JOIN +
+   window today, against the ladder's 1.2 KB single `GROUP BY`. Measure on the R5 shapes and the whole scaling probe.
+2. A connector row for keyed `group("a")…cap("a")` (13 sole answers), through the collection substrate.
+3. A child-traversal key together with a child-traversal value (2).
+4. Nested groups (2 L6 workload queries). Then delete if within 1.2×; if step 1 misses the bar, back to the
+   owner with the numbers.
 
 ### R6 — Deferred hosts classified as `ladder` in R0
 
