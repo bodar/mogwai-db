@@ -2,59 +2,61 @@
  "header": {
   "status": "INTERIM — hand-verified goldens only. The TinkerGraph goldens have NOT been generated yet: the session that built this suite had no docker daemon (and could not install a JVM). Run `bun scripts/workload-goldens/generate.ts` on a machine with docker; it overwrites every entry with source \"tinkergraph\" and prints any hand golden the reference disagrees with.",
   "hand": "source \"hand\": the expected answer derived by reasoning over the 6-vertex modern / crew graph (number classes per the reference: count() Long, sum() of Ints Int — Sum.feature, mean() Double — Mean.feature, math() Double), checked value by value against mogwai where mogwai answers; a `note` explains the non-obvious ones. air-routes has no hand goldens (too large to verify by hand).",
-  "reference": "tinkerpop/gremlin-server:4.0.0-beta.3 (to be generated)",
-  "imageDigest": "(not yet generated)"
+  "reference": "tinkerpop/gremlin-server:4.0.0-beta.3",
+  "imageDigest": "tinkerpop/gremlin-server@sha256:aacdb1172c1d8d4db1ca6d6cc02d0da32ca3226e80f883e3e3a22f24af8a2c55",
+  "generatedBy": "scripts/workload-goldens/generate.ts",
+  "generatedAt": "2026-11-16T04:52:39.389Z",
+  "tinkerpop": "4.0.0-beta.3",
+  "graphs": "crew,air-routes"
  },
  "goldens": {
   "app-age-inside": {
    "query": "g.V().hasLabel('person').has('age',P.inside(25,30)).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"vadas\"",
-    "\"marko\""
+    "\"marko\"",
+    "\"vadas\""
    ]
   },
   "app-age-stats": {
    "query": "g.V().hasLabel('person').values('age').fold().project('min','max','mean').by(__.unfold().min()).by(__.unfold().max()).by(__.unfold().mean())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"max\":35i,\"mean\":30.75d,\"min\":27i}"
-   ],
-   "note": "ages 29,27,32,35"
+   ]
   },
   "app-age-sum-props": {
    "query": "g.V().hasLabel('person').properties('age').value().sum()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "123i"
    ]
   },
   "app-aggregate-within": {
    "query": "g.V().hasLabel('person').aggregate('all').out('knows').where(P.within('all')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\"",
     "\"josh\""
-   ],
-   "note": "everyone marko knows is a person"
+   ]
   },
   "app-bothE-label-count": {
    "query": "g.V().has('name','josh').bothE().groupCount().by(T.label)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"created\":2l,\"knows\":1l}"
    ]
   },
   "app-cap-count": {
    "query": "g.V().out('knows').aggregate('k').cap('k').count(local)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "2l"
    ]
   },
   "app-cap-names": {
    "query": "g.V().hasLabel('person').out('created').aggregate('s').cap('s').unfold().dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\""
@@ -62,41 +64,41 @@
   },
   "app-choose-by-label": {
    "query": "g.V().choose(T.label).option('person', __.values('age')).option('software', __.values('lang'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "29i",
     "27i",
-    "32i",
-    "35i",
     "\"java\"",
-    "\"java\""
+    "32i",
+    "\"java\"",
+    "35i"
    ]
   },
   "app-choose-option": {
    "query": "g.V().hasLabel('person').choose(__.out('created').count()).option(0L, __.constant('none')).option(1L, __.constant('one')).option(Pick.none, __.constant('many'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
+    "\"one\"",
     "\"none\"",
-    "\"one\"",
-    "\"one\"",
-    "\"many\""
+    "\"many\"",
+    "\"one\""
    ]
   },
   "app-coalesce-lang-age": {
    "query": "g.V().coalesce(__.values('lang'), __.values('age').math('_ * 1'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"java\"",
-    "\"java\"",
     "29d",
     "27d",
+    "\"java\"",
     "32d",
+    "\"java\"",
     "35d"
    ]
   },
   "app-concat-label": {
    "query": "g.V().hasLabel('person').values('name').concat(' (person)')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko (person)\"",
     "\"vadas (person)\"",
@@ -106,7 +108,7 @@
   },
   "app-containing": {
    "query": "g.V().has('name',TextP.containing('a')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"vadas\""
@@ -114,28 +116,28 @@
   },
   "app-count-by-label": {
    "query": "g.V().group().by(T.label).by(__.count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"person\":4l,\"software\":2l}"
    ]
   },
   "app-count-is": {
    "query": "g.V().hasLabel('person').count().is(P.gt(3))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "4l"
    ]
   },
   "app-count-not-marko": {
    "query": "g.V().hasLabel('person').where(__.values('name').is(P.neq('marko'))).count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "3l"
    ]
   },
   "app-created-distinct": {
    "query": "g.V().out('created').dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\""
@@ -143,14 +145,14 @@
   },
   "app-creator-count": {
    "query": "g.V().hasLabel('software').in('created').hasLabel('person').dedup().count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "3l"
    ]
   },
   "app-decade": {
    "query": "g.V().hasLabel('person').project('n','decade').by('name').by(__.values('age').math('floor(_ / 10)'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"decade\":2d,\"n\":\"marko\"}",
     "{\"decade\":2d,\"n\":\"vadas\"}",
@@ -160,35 +162,34 @@
   },
   "app-dedup-by-count": {
    "query": "g.V().hasLabel('person').dedup().by(__.out('created').count()).count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "3l"
    ]
   },
   "app-deep-choose-where": {
    "query": "g.V().hasLabel('person').choose(__.where(__.out('created')), __.constant('creator'), __.constant('consumer'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"creator\"",
+    "\"consumer\"",
     "\"creator\"",
-    "\"creator\"",
-    "\"consumer\""
+    "\"creator\""
    ]
   },
   "app-deep-coalesce-project": {
    "query": "g.V().hasLabel('person').project('name','best').by('name').by(__.coalesce(__.outE('created').has('weight',P.gte(1.0)).inV().values('name'), __.constant('none')))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"best\":\"none\",\"name\":\"marko\"}",
     "{\"best\":\"none\",\"name\":\"vadas\"}",
     "{\"best\":\"ripple\",\"name\":\"josh\"}",
     "{\"best\":\"none\",\"name\":\"peter\"}"
-   ],
-   "note": "only josh has a created edge of weight ≥ 1.0 (ripple)"
+   ]
   },
   "app-deep-coworker-ages": {
    "query": "g.V().hasLabel('person').project('name','coworkerAges').by('name').by(__.out('created').in('created').where(__.not(__.has('name','marko'))).values('age').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"coworkerAges\":[32i,35i],\"name\":\"marko\"}",
     "{\"coworkerAges\":[],\"name\":\"vadas\"}",
@@ -198,28 +199,28 @@
   },
   "app-deep-filter-3": {
    "query": "g.V().hasLabel('person').filter(__.out('knows').where(__.out('created').where(__.in('created').count().is(P.gt(2))))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "app-deep-group-project": {
    "query": "g.V().hasLabel('person').group().by('name').by(__.out('created').project('n','creators').by('name').by(__.in('created').count()).fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"josh\":[{\"creators\":1l,\"n\":\"ripple\"},{\"creators\":3l,\"n\":\"lop\"}],\"marko\":[{\"creators\":3l,\"n\":\"lop\"}],\"peter\":[{\"creators\":3l,\"n\":\"lop\"}],\"vadas\":[]}"
    ]
   },
   "app-deep-group-where": {
    "query": "g.V().hasLabel('software').group().by('name').by(__.in('created').where(__.out('knows')).count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"lop\":1l,\"ripple\":0l}"
    ]
   },
   "app-deep-java-friends": {
    "query": "g.V().hasLabel('person').project('name','javaFriends').by('name').by(__.out('knows').where(__.out('created').has('lang','java')).values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"javaFriends\":[\"josh\"],\"name\":\"marko\"}",
     "{\"javaFriends\":[],\"name\":\"vadas\"}",
@@ -229,7 +230,7 @@
   },
   "app-deep-local-where": {
    "query": "g.V().hasLabel('person').local(__.out('created').where(__.in('created').count().is(P.gt(1))).values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "[\"lop\"]",
     "[]",
@@ -239,25 +240,25 @@
   },
   "app-deep-not-java": {
    "query": "g.V().has('name','marko').out().where(__.not(__.out('created').where(__.has('lang','java')))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"vadas\"",
-    "\"lop\""
+    "\"lop\"",
+    "\"vadas\""
    ]
   },
   "app-deep-project-others": {
    "query": "g.V().hasLabel('person').project('name','projects').by('name').by(__.out('created').project('name','others').by('name').by(__.in('created').where(__.not(__.has('name','josh'))).values('name').fold()).fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"name\":\"marko\",\"projects\":[{\"name\":\"lop\",\"others\":[\"marko\",\"peter\"]}]}",
     "{\"name\":\"vadas\",\"projects\":[]}",
-    "{\"name\":\"josh\",\"projects\":[{\"name\":\"lop\",\"others\":[\"marko\",\"peter\"]},{\"name\":\"ripple\",\"others\":[]}]}",
+    "{\"name\":\"josh\",\"projects\":[{\"name\":\"ripple\",\"others\":[]},{\"name\":\"lop\",\"others\":[\"marko\",\"peter\"]}]}",
     "{\"name\":\"peter\",\"projects\":[{\"name\":\"lop\",\"others\":[\"marko\",\"peter\"]}]}"
    ]
   },
   "app-deep-union-where": {
    "query": "g.V().has('name','marko').union(__.out('knows').where(__.out('created')), __.out('created').where(__.in('created').count().is(P.gt(2)))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"lop\""
@@ -265,7 +266,7 @@
   },
   "app-deep-where-4": {
    "query": "g.V().hasLabel('person').where(__.out('created').where(__.in('created').where(__.out('knows').where(__.has('age',P.gt(30)))))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -274,14 +275,21 @@
   },
   "app-edge-id-lookup": {
    "query": "g.E(7).inV().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\""
    ]
   },
+  "app-edge-weights-by-person": {
+   "query": "g.V().hasLabel('person').group().by('name').by(__.outE().values('weight').sum())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"josh\":1.4d,\"marko\":1.9d,\"peter\":0.2d}"
+   ]
+  },
   "app-elementmap-edges": {
    "query": "g.E().hasLabel('knows').elementMap()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"weight\":0.5d,Direction.IN:{T.id:2i,T.label:\"person\"},Direction.OUT:{T.id:1i,T.label:\"person\"},T.id:7i,T.label:\"knows\"}",
     "{\"weight\":1d,Direction.IN:{T.id:4i,T.label:\"person\"},Direction.OUT:{T.id:1i,T.label:\"person\"},T.id:8i,T.label:\"knows\"}"
@@ -289,50 +297,49 @@
   },
   "app-emit-paths": {
    "query": "g.V().has('name','marko').emit().repeat(__.out()).times(2).path().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "path[\"marko\"]",
+    "path[\"marko\",\"lop\"]",
     "path[\"marko\",\"vadas\"]",
     "path[\"marko\",\"josh\"]",
-    "path[\"marko\",\"lop\"]",
-    "path[\"marko\",\"josh\",\"lop\"]",
-    "path[\"marko\",\"josh\",\"ripple\"]"
+    "path[\"marko\",\"josh\",\"ripple\"]",
+    "path[\"marko\",\"josh\",\"lop\"]"
    ]
   },
   "app-filter-by-friend-age": {
    "query": "g.V().hasLabel('person').where(__.out('knows').values('age').mean().is(P.gt(30))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": []
   },
   "app-flatmap-names": {
    "query": "g.V().hasLabel('person').flatMap(__.out('created').values('name'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
-    "\"lop\"",
     "\"ripple\"",
+    "\"lop\"",
     "\"lop\""
    ]
   },
   "app-friend-summary": {
    "query": "g.V().has('name','marko').project('friends','avgFriendAge').by(__.out('knows').values('name').fold()).by(__.out('knows').values('age').mean())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"avgFriendAge\":29.5d,\"friends\":[\"josh\",\"vadas\"]}"
+    "{\"avgFriendAge\":29.5d,\"friends\":[\"vadas\",\"josh\"]}"
    ]
   },
   "app-friends-coworkers": {
    "query": "g.V().has('name','marko').out('knows').aggregate('friends').out('created').in('created').where(P.without('friends')).dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"peter\""
-   ],
-   "note": "josh's co-creators marko, josh, josh, peter minus {vadas, josh}"
+   ]
   },
   "app-friends-java-devs": {
    "query": "g.V().hasLabel('person').local(__.out('knows').where(__.out('created').has('lang','java')).values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "[\"josh\"]",
     "[]",
@@ -342,29 +349,28 @@
   },
   "app-group-in-group": {
    "query": "g.V().hasLabel('software').group().by('name').by(__.in('created').group().by('name').by(__.values('age')))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"lop\":{\"josh\":[32i],\"marko\":[29i],\"peter\":[35i]},\"ripple\":{\"josh\":[32i]}}"
-   ],
-   "note": "a non-reducing group value traversal is folded (GroupStep), so each age is a one-element list"
+    "{\"lop\":{\"josh\":32i,\"marko\":29i,\"peter\":35i},\"ripple\":{\"josh\":32i}}"
+   ]
   },
   "app-groupcount-sideeffect": {
    "query": "g.V().out('created').groupCount('c').by('name').cap('c')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"lop\":3l,\"ripple\":1l}"
    ]
   },
   "app-has-age-no-lang": {
    "query": "g.V().hasLabel('person').has('age').hasNot('lang').count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "4l"
    ]
   },
   "app-has-coworkers": {
    "query": "g.V().hasLabel('person').as('p').where(__.out('created').in('created').where(P.neq('p'))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -373,14 +379,14 @@
   },
   "app-heaviest-created": {
    "query": "g.E().hasLabel('created').order().by('weight',desc).limit(1).project('who','what').by(__.outV().values('name')).by(__.inV().values('name'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"what\":\"ripple\",\"who\":\"josh\"}"
    ]
   },
   "app-id-lookup": {
    "query": "g.V(1,4).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\""
@@ -388,7 +394,7 @@
   },
   "app-ids-of-friends": {
    "query": "g.V().has('name','marko').out('knows').id()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "2i",
     "4i"
@@ -396,7 +402,7 @@
   },
   "app-in-out-degree": {
    "query": "g.V().hasLabel('person').project('name','in','out').by('name').by(__.inE().count()).by(__.outE().count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"in\":0l,\"name\":\"marko\",\"out\":3l}",
     "{\"in\":1l,\"name\":\"vadas\",\"out\":0l}",
@@ -406,7 +412,7 @@
   },
   "app-is-friend-of-creator": {
    "query": "g.V().hasLabel('software').where(__.in('created').in('knows')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\""
@@ -414,14 +420,14 @@
   },
   "app-is-in-range": {
    "query": "g.V().values('age').is(P.within(27,29,35)).count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "3l"
    ]
   },
   "app-is-known": {
    "query": "g.V().hasLabel('person').where(__.in('knows')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\"",
     "\"josh\""
@@ -429,14 +435,14 @@
   },
   "app-known-by": {
    "query": "g.V().has('person','name','vadas').in('knows').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "app-knows-older": {
    "query": "g.V().hasLabel('person').project('name','olderFriends').by('name').by(__.out('knows').where(__.values('age').is(P.gt(30))).count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"name\":\"marko\",\"olderFriends\":1l}",
     "{\"name\":\"vadas\",\"olderFriends\":0l}",
@@ -446,31 +452,31 @@
   },
   "app-label-of": {
    "query": "g.V().has('name','lop').in().label().dedup()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"person\""
    ]
   },
   "app-local-fold": {
    "query": "g.V().hasLabel('person').local(__.out('created').values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "[\"lop\"]",
     "[]",
-    "[\"lop\",\"ripple\"]",
+    "[\"ripple\",\"lop\"]",
     "[\"lop\"]"
    ]
   },
   "app-lop-and-friends": {
    "query": "g.V().hasLabel('person').where(__.out('created').has('name','lop')).where(__.out('knows')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "app-map-count": {
    "query": "g.V().hasLabel('person').map(__.out('created').count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "1l",
     "0l",
@@ -480,33 +486,33 @@
   },
   "app-match-coworkers": {
    "query": "g.V().match(__.as('p').hasLabel('person'), __.as('p').out('created').as('s'), __.as('s').in('created').as('q'), __.where('p',P.neq('q'))).select('p','q').by('name').dedup()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"p\":\"josh\",\"q\":\"marko\"}",
-    "{\"p\":\"josh\",\"q\":\"peter\"}",
     "{\"p\":\"marko\",\"q\":\"josh\"}",
     "{\"p\":\"marko\",\"q\":\"peter\"}",
-    "{\"p\":\"peter\",\"q\":\"josh\"}",
-    "{\"p\":\"peter\",\"q\":\"marko\"}"
+    "{\"p\":\"josh\",\"q\":\"marko\"}",
+    "{\"p\":\"josh\",\"q\":\"peter\"}",
+    "{\"p\":\"peter\",\"q\":\"marko\"}",
+    "{\"p\":\"peter\",\"q\":\"josh\"}"
    ]
   },
   "app-max-age": {
    "query": "g.V().hasLabel('person').values('age').max()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "35i"
    ]
   },
   "app-max-age-ordered": {
    "query": "g.V().hasLabel('person').values('age').order().by(desc).limit(1)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "35i"
    ]
   },
   "app-max-collaborator-age": {
    "query": "g.V().hasLabel('person').project('name','oldestCollaborator').by('name').by(__.out('created').in('created').values('age').max())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"name\":\"marko\",\"oldestCollaborator\":35i}",
     "{\"name\":\"vadas\"}",
@@ -516,21 +522,21 @@
   },
   "app-mean-age": {
    "query": "g.V().hasLabel('person').values('age').mean()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "30.75d"
    ]
   },
   "app-names-by-label": {
    "query": "g.V().group().by(T.label).by(__.values('name').order().fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"person\":[\"josh\",\"marko\",\"peter\",\"vadas\"],\"software\":[\"lop\",\"ripple\"]}"
    ]
   },
   "app-neighbours-names-sorted": {
    "query": "g.V().hasLabel('person').project('name','neighbours').by('name').by(__.both().values('name').dedup().order().fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"name\":\"marko\",\"neighbours\":[\"josh\",\"lop\",\"vadas\"]}",
     "{\"name\":\"vadas\",\"neighbours\":[\"marko\"]}",
@@ -540,21 +546,21 @@
   },
   "app-no-projects": {
    "query": "g.V().hasLabel('person').where(__.out('created').count().is(0)).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\""
    ]
   },
   "app-not-creators": {
    "query": "g.V().hasLabel('person').not(__.out('created')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\""
    ]
   },
   "app-not-within": {
    "query": "g.V().hasLabel('person').has('name',P.without('marko','vadas')).values('age')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "32i",
     "35i"
@@ -562,14 +568,14 @@
   },
   "app-older-than-friend": {
    "query": "g.V().has('name','marko').out('knows').has('age',P.gt(30)).in('knows').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "app-oldest-first": {
    "query": "g.V().hasLabel('person').order().by('age',desc).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"peter\"",
     "\"josh\"",
@@ -579,26 +585,24 @@
   },
   "app-optional-project": {
    "query": "g.V().hasLabel('person').project('name','manager').by('name').by(__.coalesce(__.in('knows').values('name'), __.constant('none')))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"manager\":\"none\",\"name\":\"marko\"}",
     "{\"manager\":\"marko\",\"name\":\"vadas\"}",
     "{\"manager\":\"marko\",\"name\":\"josh\"}",
     "{\"manager\":\"none\",\"name\":\"peter\"}"
-   ],
-   "note": "marko and peter are known by no one"
+   ]
   },
   "app-path-lengths": {
    "query": "g.V().has('name','marko').repeat(__.out()).emit().path().count(local).groupCount()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{2l:3l,3l:2l}"
-   ],
-   "note": "emitted paths m-v, m-j, m-l (2) and m-j-r, m-j-l (3)"
+   ]
   },
   "app-path-unfold-names": {
    "query": "g.V().has('name','marko').out('created').in('created').path().by('name').unfold().dedup()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"lop\"",
@@ -608,21 +612,21 @@
   },
   "app-person-card": {
    "query": "g.V().has('person','name','josh').project('name','age','projects').by('name').by('age').by(__.out('created').values('name').order().fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"age\":32i,\"name\":\"josh\",\"projects\":[\"lop\",\"ripple\"]}"
    ]
   },
   "app-person-lookup": {
    "query": "g.V().has('person','name','josh').valueMap('name','age')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"age\":[32i],\"name\":[\"josh\"]}"
    ]
   },
   "app-popular-first": {
    "query": "g.V().hasLabel('person').order().by(__.out('knows').count(), desc).by('name').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -630,51 +634,66 @@
     "\"vadas\""
    ]
   },
+  "app-portfolio": {
+   "query": "g.V().hasLabel('person').project('name','software').by('name').by(__.out('created').project('n','w').by('name').by(__.inE('created').values('weight').sum()).fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"name\":\"marko\",\"software\":[{\"n\":\"lop\",\"w\":1d}]}",
+    "{\"name\":\"vadas\",\"software\":[]}",
+    "{\"name\":\"josh\",\"software\":[{\"n\":\"ripple\",\"w\":1d},{\"n\":\"lop\",\"w\":1d}]}",
+    "{\"name\":\"peter\",\"software\":[{\"n\":\"lop\",\"w\":1d}]}"
+   ]
+  },
   "app-project-path": {
    "query": "g.V().has('name','marko').out('created').project('software','path').by('name').by(__.path().by('name'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"path\":path[\"marko\",\"lop\"],\"software\":\"lop\"}"
-   ],
-   "note": "marko created only lop"
+   ]
   },
   "app-property-keys": {
    "query": "g.V().hasLabel('software').properties().key().dedup()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"lang\"",
-    "\"name\""
+    "\"name\"",
+    "\"lang\""
    ]
   },
   "app-range-local": {
    "query": "g.V().hasLabel('person').values('name').order().fold().range(local,1,3)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "[\"marko\",\"peter\"]"
    ]
   },
   "app-repeat-to-leaves": {
    "query": "g.V().has('name','marko').repeat(__.out()).until(__.outE().count().is(0)).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
+    "\"lop\"",
     "\"vadas\"",
-    "\"lop\"",
-    "\"lop\"",
-    "\"ripple\""
+    "\"ripple\"",
+    "\"lop\""
    ]
   },
   "app-sack-path-weight": {
    "query": "g.withSack(0.0d).V().has('name','marko').repeat(__.outE().sack(sum).by('weight').inV()).times(2).project('to','w').by('name').by(__.sack())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"to\":\"ripple\",\"w\":2d}",
     "{\"to\":\"lop\",\"w\":1.4d}"
-   ],
-   "note": "marko→josh 1.0, then →ripple 1.0 / →lop 0.4"
+   ]
+  },
+  "app-select-keys": {
+   "query": "g.V().hasLabel('person').group().by('name').by('age').select(Column.keys)",
+   "source": "tinkergraph",
+   "results": [
+    "set[\"josh\",\"marko\",\"peter\",\"vadas\"]"
+   ]
   },
   "app-select-triple": {
    "query": "g.V().has('name','marko').as('a').out('created').as('b').in('created').as('c').select('a','b','c').by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"a\":\"marko\",\"b\":\"lop\",\"c\":\"marko\"}",
     "{\"a\":\"marko\",\"b\":\"lop\",\"c\":\"josh\"}",
@@ -683,7 +702,7 @@
   },
   "app-senior-collaborators": {
    "query": "g.V().hasLabel('person').where(__.out('created').where(__.in('created').where(__.values('age').is(P.gt(33))))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -692,7 +711,7 @@
   },
   "app-skip": {
    "query": "g.V().hasLabel('person').order().by('age').skip(2).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"peter\""
@@ -700,23 +719,22 @@
   },
   "app-software-valuemap": {
    "query": "g.V().hasLabel('software').valueMap('name','lang').by(__.unfold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"lang\":\"java\",\"name\":\"lop\"}",
     "{\"lang\":\"java\",\"name\":\"ripple\"}"
-   ],
-   "note": "by(unfold()) unwraps the cardinality lists"
+   ]
   },
   "app-sorted-names-fold": {
    "query": "g.V().hasLabel('person').values('name').order().by(desc).fold()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "[\"vadas\",\"peter\",\"marko\",\"josh\"]"
    ]
   },
   "app-sorted-projects": {
    "query": "g.V().has('name','josh').out('created').values('name').order()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\""
@@ -724,28 +742,36 @@
   },
   "app-starts-with": {
    "query": "g.V().has('name',TextP.startingWith('m')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "app-store-group": {
    "query": "g.V().hasLabel('person').group('g').by('name').by(__.out('created').count()).cap('g')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"josh\":2l,\"marko\":1l,\"peter\":1l,\"vadas\":0l}"
    ]
   },
   "app-strong-created": {
    "query": "g.V().has('name','josh').outE('created').has('weight',P.gte(0.5)).inV().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"ripple\""
    ]
   },
+  "app-sum-weights-by-software": {
+   "query": "g.V().hasLabel('software').project('name','weight').by('name').by(__.inE('created').values('weight').sum())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"name\":\"lop\",\"weight\":1d}",
+    "{\"name\":\"ripple\",\"weight\":1d}"
+   ]
+  },
   "app-tail": {
    "query": "g.V().hasLabel('person').order().by('age').tail(2).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"peter\""
@@ -753,24 +779,32 @@
   },
   "app-teams": {
    "query": "g.V().hasLabel('person').project('name','projects').by('name').by(__.out('created').project('name','team').by('name').by(__.in('created').where(__.out('knows')).values('name').fold()).fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"name\":\"marko\",\"projects\":[{\"name\":\"lop\",\"team\":[\"marko\"]}]}",
     "{\"name\":\"vadas\",\"projects\":[]}",
-    "{\"name\":\"josh\",\"projects\":[{\"name\":\"lop\",\"team\":[\"marko\"]},{\"name\":\"ripple\",\"team\":[]}]}",
+    "{\"name\":\"josh\",\"projects\":[{\"name\":\"ripple\",\"team\":[]},{\"name\":\"lop\",\"team\":[\"marko\"]}]}",
     "{\"name\":\"peter\",\"projects\":[{\"name\":\"lop\",\"team\":[\"marko\"]}]}"
    ]
   },
   "app-two-hop-groupcount": {
    "query": "g.V().has('name','marko').both().both().groupCount().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"josh\":1l,\"lop\":1l,\"marko\":3l,\"peter\":1l,\"ripple\":1l}"
    ]
   },
+  "app-unfold-map": {
+   "query": "g.V().has('name','marko').valueMap('name','age').unfold()",
+   "source": "tinkergraph",
+   "results": [
+    "{\"name\":[\"marko\"]}",
+    "{\"age\":[29i]}"
+   ]
+  },
   "app-union-counts": {
    "query": "g.V().has('name','marko').union(__.out().count(), __.in().count(), __.both().count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "3l",
     "0l",
@@ -779,7 +813,7 @@
   },
   "app-upper-names": {
    "query": "g.V().hasLabel('person').values('name').toUpper()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"MARKO\"",
     "\"VADAS\"",
@@ -789,14 +823,14 @@
   },
   "app-where-select": {
    "query": "g.V().hasLabel('person').as('p').out('created').as('s').where(__.in('created').count().is(1)).select('p').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\""
    ]
   },
   "app-who-knows-whom": {
    "query": "g.V().hasLabel('person').as('a').out('knows').as('b').select('a','b').by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"a\":\"marko\",\"b\":\"vadas\"}",
     "{\"a\":\"marko\",\"b\":\"josh\"}"
@@ -804,7 +838,7 @@
   },
   "app-within-names": {
    "query": "g.V().has('name',P.within('marko','josh')).out('created').dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\""
@@ -812,7 +846,7 @@
   },
   "crew-develops-and-uses": {
    "query": "g.V().hasLabel('person').where(__.out('develops').has('name','tinkergraph')).where(__.outE('uses').has('skill',P.gte(4))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"stephen\""
@@ -820,14 +854,21 @@
   },
   "crew-distinct-locations": {
    "query": "g.V().hasLabel('person').values('location').dedup().count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "14l"
    ]
   },
+  "crew-first-developed": {
+   "query": "g.V().hasLabel('person').group().by('name').by(__.outE('develops').values('since').min())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"marko\":2009i,\"matthias\":2012i,\"stephen\":2010i}"
+   ]
+  },
   "crew-gremlin-experts": {
    "query": "g.V().has('software','name','gremlin').inE('uses').order().by('skill',desc).by(__.outV().values('name')).outV().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"daniel\"",
     "\"stephen\"",
@@ -837,7 +878,7 @@
   },
   "crew-location-count": {
    "query": "g.V().hasLabel('person').project('name','moves').by('name').by(__.properties('location').count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"moves\":4l,\"name\":\"marko\"}",
     "{\"moves\":3l,\"name\":\"stephen\"}",
@@ -847,39 +888,37 @@
   },
   "crew-location-meta": {
    "query": "g.V().has('name','matthias').properties('location').project('where','from').by(__.value()).by(__.values('startTime'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"from\":2004i,\"where\":\"bremen\"}",
     "{\"from\":2007i,\"where\":\"baltimore\"}",
     "{\"from\":2011i,\"where\":\"oakland\"}",
     "{\"from\":2014i,\"where\":\"seattle\"}"
-   ],
-   "note": "matthias's four locations with their startTime (Int)"
+   ]
   },
   "crew-locations-fold": {
    "query": "g.V().hasLabel('person').project('n','locs').by('name').by(__.values('location').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"locs\":[\"brussels\",\"san diego\",\"santa cruz\",\"santa fe\"],\"n\":\"marko\"}",
+    "{\"locs\":[\"san diego\",\"santa cruz\",\"brussels\",\"santa fe\"],\"n\":\"marko\"}",
     "{\"locs\":[\"centreville\",\"dulles\",\"purcellville\"],\"n\":\"stephen\"}",
-    "{\"locs\":[\"baltimore\",\"bremen\",\"oakland\",\"seattle\"],\"n\":\"matthias\"}",
-    "{\"locs\":[\"aachen\",\"kaiserslautern\",\"spremberg\"],\"n\":\"daniel\"}"
+    "{\"locs\":[\"bremen\",\"baltimore\",\"oakland\",\"seattle\"],\"n\":\"matthias\"}",
+    "{\"locs\":[\"spremberg\",\"kaiserslautern\",\"aachen\"],\"n\":\"daniel\"}"
    ]
   },
   "crew-skill-matrix": {
    "query": "g.V().hasLabel('person').project('name','skills').by('name').by(__.outE('uses').group().by(__.inV().values('name')).by(__.values('skill')))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"name\":\"marko\",\"skills\":{\"gremlin\":[4i],\"tinkergraph\":[5i]}}",
-    "{\"name\":\"stephen\",\"skills\":{\"gremlin\":[5i],\"tinkergraph\":[4i]}}",
-    "{\"name\":\"matthias\",\"skills\":{\"gremlin\":[3i],\"tinkergraph\":[3i]}}",
-    "{\"name\":\"daniel\",\"skills\":{\"gremlin\":[5i],\"tinkergraph\":[3i]}}"
-   ],
-   "note": "a non-reducing group value is folded, so each skill is a one-element list"
+    "{\"name\":\"marko\",\"skills\":{\"gremlin\":4i,\"tinkergraph\":5i}}",
+    "{\"name\":\"stephen\",\"skills\":{\"gremlin\":5i,\"tinkergraph\":4i}}",
+    "{\"name\":\"matthias\",\"skills\":{\"gremlin\":3i,\"tinkergraph\":3i}}",
+    "{\"name\":\"daniel\",\"skills\":{\"gremlin\":5i,\"tinkergraph\":3i}}"
+   ]
   },
   "crew-skilled": {
    "query": "g.V().hasLabel('person').where(__.outE('uses').has('skill',5)).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"stephen\"",
@@ -888,7 +927,7 @@
   },
   "crew-software-users": {
    "query": "g.V().hasLabel('software').project('n','users','avgSkill').by('name').by(__.in('uses').count()).by(__.inE('uses').values('skill').mean())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"avgSkill\":4.25d,\"n\":\"gremlin\",\"users\":4l}",
     "{\"avgSkill\":3.75d,\"n\":\"tinkergraph\",\"users\":4l}"
@@ -896,23 +935,1697 @@
   },
   "crew-stephen-since-2000": {
    "query": "g.V().has('name','stephen').properties('location').has('startTime',P.gte(2000)).value()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"dulles\"",
     "\"purcellville\""
-   ],
-   "note": "dulles 2000, purcellville 2006"
+   ]
   },
   "crew-traverses": {
    "query": "g.V().has('name','gremlin').out('traverses').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"tinkergraph\""
    ]
   },
+  "pg-aggregate-revisit": {
+   "query": "g.V().has('code','AUS').out().aggregate('a').out().where(P.within('a')).dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "98l"
+   ]
+  },
+  "pg-airport-count": {
+   "query": "g.V().hasLabel('airport').count()",
+   "source": "tinkergraph",
+   "results": [
+    "3504l"
+   ]
+  },
+  "pg-aus-2hop-dedup": {
+   "query": "g.V().has('code','AUS').out().out().dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "1044l"
+   ]
+  },
+  "pg-aus-codes-sorted": {
+   "query": "g.V().has('code','AUS').out().order().by('code').values('code').fold()",
+   "source": "tinkergraph",
+   "results": [
+    "[\"ABQ\",\"AMA\",\"AMS\",\"ASE\",\"ATL\",\"BHM\",\"BKG\",\"BNA\",\"BOI\",\"BOS\",\"BTR\",\"BUF\",\"BUR\",\"BWI\",\"BZN\",\"CHS\",\"CLE\",\"CLT\",\"CMH\",\"CUN\",\"CVG\",\"CZM\",\"DAL\",\"DCA\",\"DEN\",\"DFW\",\"DSM\",\"DTW\",\"ECP\",\"ELP\",\"EWR\",\"FLL\",\"FRA\",\"GDL\",\"GRR\",\"HDN\",\"HNL\",\"HOU\",\"HRL\",\"IAD\",\"IAH\",\"IND\",\"JAX\",\"JFK\",\"LAS\",\"LAX\",\"LBB\",\"LGB\",\"LGW\",\"LHR\",\"LIR\",\"LIT\",\"MCI\",\"MCO\",\"MDW\",\"MEM\",\"MEX\",\"MIA\",\"MKE\",\"MSP\",\"MSY\",\"NAS\",\"OAK\",\"OKC\",\"OMA\",\"ONT\",\"ORD\",\"PDX\",\"PHL\",\"PHX\",\"PIE\",\"PIT\",\"PNS\",\"PVD\",\"PVR\",\"RDU\",\"RNO\",\"SAN\",\"SAT\",\"SDF\",\"SEA\",\"SFB\",\"SFO\",\"SJC\",\"SJD\",\"SLC\",\"SMF\",\"SNA\",\"STL\",\"TPA\",\"TUL\",\"TUS\",\"TYS\",\"VPS\",\"XNA\",\"YVR\",\"YYC\",\"YYZ\"]"
+   ]
+  },
+  "pg-aus-countries": {
+   "query": "g.V().has('code','AUS').out().values('country').dedup().fold()",
+   "source": "tinkergraph",
+   "results": [
+    "[\"US\",\"MX\",\"BS\",\"CR\",\"CA\",\"UK\",\"DE\",\"NL\"]"
+   ]
+  },
+  "pg-aus-country-continent": {
+   "query": "g.V().has('airport','code','AUS').in('contains').values('desc')",
+   "source": "tinkergraph",
+   "results": [
+    "\"United States\"",
+    "\"North America\""
+   ]
+  },
+  "pg-aus-country-nested": {
+   "query": "g.V().has('code','AUS').project('code','country').by('code').by(__.in('contains').hasLabel('country').project('code','name').by('code').by('desc'))",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"AUS\",\"country\":{\"code\":\"US\",\"name\":\"United States\"}}"
+   ]
+  },
+  "pg-aus-dest-cont": {
+   "query": "g.V().has('code','AUS').out().in('contains').hasLabel('continent').groupCount().by('desc')",
+   "source": "tinkergraph",
+   "results": [
+    "{\"Europe\":4l,\"North America\":94l}"
+   ]
+  },
+  "pg-aus-dest-countries-nested": {
+   "query": "g.V().has('code','AUS').out().group().by(__.in('contains').hasLabel('country').values('desc')).by(__.count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"Bahamas\":1l,\"Canada\":3l,\"Costa Rica\":1l,\"Germany\":1l,\"Mexico\":6l,\"Netherlands\":1l,\"United Kingdom\":2l,\"United States\":83l}"
+   ]
+  },
+  "pg-aus-dest-deep": {
+   "query": "g.V().has('code','AUS').project('code','foreign').by('code').by(__.out().has('country',P.neq('US')).project('to','onward').by('code').by(__.out().has('country','US').count()).fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"AUS\",\"foreign\":[{\"onward\":40l,\"to\":\"CUN\"},{\"onward\":19l,\"to\":\"PVR\"},{\"onward\":22l,\"to\":\"NAS\"},{\"onward\":7l,\"to\":\"CZM\"},{\"onward\":30l,\"to\":\"GDL\"},{\"onward\":13l,\"to\":\"LIR\"},{\"onward\":23l,\"to\":\"SJD\"},{\"onward\":57l,\"to\":\"YYZ\"},{\"onward\":26l,\"to\":\"YVR\"},{\"onward\":30l,\"to\":\"LHR\"},{\"onward\":14l,\"to\":\"LGW\"},{\"onward\":28l,\"to\":\"FRA\"},{\"onward\":22l,\"to\":\"AMS\"},{\"onward\":23l,\"to\":\"YYC\"},{\"onward\":31l,\"to\":\"MEX\"}]}"
+   ]
+  },
+  "pg-aus-dest-report": {
+   "query": "g.V().has('code','AUS').out().has('country',P.neq('US')).project('code','country','routes').by('code').by(__.in('contains').hasLabel('country').values('desc')).by(__.out().count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"CUN\",\"country\":\"Mexico\",\"routes\":111l}",
+    "{\"code\":\"PVR\",\"country\":\"Mexico\",\"routes\":33l}",
+    "{\"code\":\"NAS\",\"country\":\"Bahamas\",\"routes\":48l}",
+    "{\"code\":\"CZM\",\"country\":\"Mexico\",\"routes\":12l}",
+    "{\"code\":\"GDL\",\"country\":\"Mexico\",\"routes\":58l}",
+    "{\"code\":\"LIR\",\"country\":\"Costa Rica\",\"routes\":21l}",
+    "{\"code\":\"SJD\",\"country\":\"Mexico\",\"routes\":36l}",
+    "{\"code\":\"YYZ\",\"country\":\"Canada\",\"routes\":195l}",
+    "{\"code\":\"YVR\",\"country\":\"Canada\",\"routes\":106l}",
+    "{\"code\":\"LHR\",\"country\":\"United Kingdom\",\"routes\":221l}",
+    "{\"code\":\"LGW\",\"country\":\"United Kingdom\",\"routes\":232l}",
+    "{\"code\":\"FRA\",\"country\":\"Germany\",\"routes\":310l}",
+    "{\"code\":\"AMS\",\"country\":\"Netherlands\",\"routes\":283l}",
+    "{\"code\":\"YYC\",\"country\":\"Canada\",\"routes\":75l}",
+    "{\"code\":\"MEX\",\"country\":\"Mexico\",\"routes\":116l}"
+   ]
+  },
+  "pg-aus-dfw-short": {
+   "query": "g.V().has('code','AUS').out().has('code','DFW').outE().has('dist',P.lt(200)).inV().values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"OKC\"",
+    "\"SHV\"",
+    "\"TXK\"",
+    "\"ABI\"",
+    "\"ACT\"",
+    "\"CLL\"",
+    "\"GGG\"",
+    "\"GRK\"",
+    "\"LAW\"",
+    "\"SPS\"",
+    "\"TYR\"",
+    "\"AUS\""
+   ]
+  },
+  "pg-aus-dist-max": {
+   "query": "g.V().has('code','AUS').outE('route').values('dist').max()",
+   "source": "tinkergraph",
+   "results": [
+    "5294i"
+   ]
+  },
+  "pg-aus-dist-mean": {
+   "query": "g.V().has('code','AUS').outE('route').values('dist').mean()",
+   "source": "tinkergraph",
+   "results": [
+    "1165.234693877551d"
+   ]
+  },
+  "pg-aus-dist-min": {
+   "query": "g.V().has('code','AUS').outE('route').values('dist').min()",
+   "source": "tinkergraph",
+   "results": [
+    "66i"
+   ]
+  },
+  "pg-aus-dist-sum": {
+   "query": "g.V().has('code','AUS').outE('route').values('dist').sum()",
+   "source": "tinkergraph",
+   "results": [
+    "114193i"
+   ]
+  },
+  "pg-aus-edge-labels": {
+   "query": "g.V().has('airport','code','AUS').bothE().groupCount().by(T.label)",
+   "source": "tinkergraph",
+   "results": [
+    "{\"contains\":2l,\"route\":196l}"
+   ]
+  },
+  "pg-aus-elementmap": {
+   "query": "g.V().has('airport','code','AUS').elementMap()",
+   "source": "tinkergraph",
+   "results": [
+    "{\"city\":\"Austin\",\"code\":\"AUS\",\"country\":\"US\",\"desc\":\"Austin Bergstrom International Airport\",\"elev\":542i,\"icao\":\"KAUS\",\"lat\":30.1944999694824d,\"lon\":-97.6698989868164d,\"longest\":12250i,\"region\":\"US-TX\",\"runways\":2i,\"type\":\"airport\",T.id:3i,T.label:\"airport\"}"
+   ]
+  },
+  "pg-aus-first-codes": {
+   "query": "g.V().has('code','AUS').out().values('code').order().limit(5)",
+   "source": "tinkergraph",
+   "results": [
+    "\"ABQ\"",
+    "\"AMA\"",
+    "\"AMS\"",
+    "\"ASE\"",
+    "\"ATL\""
+   ]
+  },
+  "pg-aus-foreign": {
+   "query": "g.V().has('code','AUS').out().has('country',P.neq('US')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"CUN\"",
+    "\"PVR\"",
+    "\"NAS\"",
+    "\"CZM\"",
+    "\"GDL\"",
+    "\"LIR\"",
+    "\"SJD\"",
+    "\"YYZ\"",
+    "\"YVR\"",
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"FRA\"",
+    "\"AMS\"",
+    "\"YYC\"",
+    "\"MEX\""
+   ]
+  },
+  "pg-aus-group-country": {
+   "query": "g.V().has('code','AUS').out().group().by('country').by(__.values('code').fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"BS\":[\"NAS\"],\"CA\":[\"YYZ\",\"YVR\",\"YYC\"],\"CR\":[\"LIR\"],\"DE\":[\"FRA\"],\"MX\":[\"CUN\",\"PVR\",\"CZM\",\"GDL\",\"SJD\",\"MEX\"],\"NL\":[\"AMS\"],\"UK\":[\"LHR\",\"LGW\"],\"US\":[\"PHL\",\"PDX\",\"DTW\",\"OKC\",\"ONT\",\"CLT\",\"MEM\",\"CVG\",\"IND\",\"MCI\",\"DAL\",\"STL\",\"ABQ\",\"MKE\",\"MDW\",\"OMA\",\"TUL\",\"LIT\",\"JAX\",\"PVD\",\"SMF\",\"BHM\",\"SDF\",\"BUF\",\"BOI\",\"LBB\",\"ECP\",\"HRL\",\"RNO\",\"CMH\",\"DSM\",\"AMA\",\"BTR\",\"CHS\",\"GRR\",\"PNS\",\"TYS\",\"VPS\",\"XNA\",\"HDN\",\"SFB\",\"BUR\",\"ASE\",\"BZN\",\"BKG\",\"PIE\",\"ATL\",\"BNA\",\"BOS\",\"BWI\",\"DCA\",\"DFW\",\"FLL\",\"IAD\",\"IAH\",\"JFK\",\"LAX\",\"MCO\",\"MIA\",\"MSP\",\"ORD\",\"PHX\",\"RDU\",\"SEA\",\"SFO\",\"SJC\",\"TPA\",\"SAN\",\"LGB\",\"SNA\",\"SLC\",\"LAS\",\"DEN\",\"SAT\",\"HNL\",\"MSY\",\"EWR\",\"HOU\",\"ELP\",\"CLE\",\"OAK\",\"TUS\",\"PIT\"]}"
+   ]
+  },
+  "pg-aus-groupcount-country": {
+   "query": "g.V().has('code','AUS').out().groupCount().by('country')",
+   "source": "tinkergraph",
+   "results": [
+    "{\"BS\":1l,\"CA\":3l,\"CR\":1l,\"DE\":1l,\"MX\":6l,\"NL\":1l,\"UK\":2l,\"US\":83l}"
+   ]
+  },
+  "pg-aus-highest-dest": {
+   "query": "g.V().has('code','AUS').out().order().by('elev',desc).by('code').limit(1).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"ASE\""
+   ]
+  },
+  "pg-aus-hub-dests": {
+   "query": "g.V().has('code','AUS').out().order().by(__.out().count(),desc).by('code').limit(3).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"FRA\"",
+    "\"AMS\"",
+    "\"ORD\""
+   ]
+  },
+  "pg-aus-id": {
+   "query": "g.V().has('airport','code','AUS').id()",
+   "source": "tinkergraph",
+   "results": [
+    "3i"
+   ]
+  },
+  "pg-aus-in-out": {
+   "query": "g.V().has('code','AUS').union(__.out().count(), __.in().count())",
+   "source": "tinkergraph",
+   "results": [
+    "98l",
+    "100l"
+   ]
+  },
+  "pg-aus-in-out-project": {
+   "query": "g.V().has('code','AUS').project('in','out').by(__.inE('route').count()).by(__.outE('route').count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"in\":98l,\"out\":98l}"
+   ]
+  },
+  "pg-aus-km": {
+   "query": "g.V().has('code','AUS').outE().has('dist',P.gt(1500)).project('to','km').by(__.inV().values('code')).by(__.values('dist').math('_ * 1.609'))",
+   "source": "tinkergraph",
+   "results": [
+    "{\"km\":2754.608d,\"to\":\"PDX\"}",
+    "{\"km\":2670.94d,\"to\":\"PVD\"}",
+    "{\"km\":2513.258d,\"to\":\"LIR\"}",
+    "{\"km\":2719.21d,\"to\":\"BOS\"}",
+    "{\"km\":2445.68d,\"to\":\"JFK\"}",
+    "{\"km\":2844.712d,\"to\":\"SEA\"}",
+    "{\"km\":6041.795d,\"to\":\"HNL\"}",
+    "{\"km\":3007.221d,\"to\":\"YVR\"}",
+    "{\"km\":7885.709d,\"to\":\"LHR\"}",
+    "{\"km\":7917.889d,\"to\":\"LGW\"}",
+    "{\"km\":8518.046d,\"to\":\"FRA\"}",
+    "{\"km\":8164.066d,\"to\":\"AMS\"}",
+    "{\"km\":2688.639d,\"to\":\"YYC\"}"
+   ]
+  },
+  "pg-aus-last-codes": {
+   "query": "g.V().has('code','AUS').out().values('code').order().tail(3)",
+   "source": "tinkergraph",
+   "results": [
+    "\"YVR\"",
+    "\"YYC\"",
+    "\"YYZ\""
+   ]
+  },
+  "pg-aus-latlon": {
+   "query": "g.V().has('airport','code','AUS').values('lat','lon')",
+   "source": "tinkergraph",
+   "results": [
+    "-97.6698989868164d",
+    "30.1944999694824d"
+   ]
+  },
+  "pg-aus-lhr-2hop": {
+   "query": "g.V().has('airport','code','AUS').repeat(__.out()).times(2).has('code','LHR').path().by('code')",
+   "source": "tinkergraph",
+   "results": [
+    "path[\"AUS\",\"PHL\",\"LHR\"]",
+    "path[\"AUS\",\"PDX\",\"LHR\"]",
+    "path[\"AUS\",\"DTW\",\"LHR\"]",
+    "path[\"AUS\",\"CLT\",\"LHR\"]",
+    "path[\"AUS\",\"NAS\",\"LHR\"]",
+    "path[\"AUS\",\"CHS\",\"LHR\"]",
+    "path[\"AUS\",\"ATL\",\"LHR\"]",
+    "path[\"AUS\",\"BNA\",\"LHR\"]",
+    "path[\"AUS\",\"BOS\",\"LHR\"]",
+    "path[\"AUS\",\"BWI\",\"LHR\"]",
+    "path[\"AUS\",\"DFW\",\"LHR\"]",
+    "path[\"AUS\",\"IAD\",\"LHR\"]",
+    "path[\"AUS\",\"IAH\",\"LHR\"]",
+    "path[\"AUS\",\"JFK\",\"LHR\"]",
+    "path[\"AUS\",\"LAX\",\"LHR\"]",
+    "path[\"AUS\",\"MIA\",\"LHR\"]",
+    "path[\"AUS\",\"MSP\",\"LHR\"]",
+    "path[\"AUS\",\"ORD\",\"LHR\"]",
+    "path[\"AUS\",\"PHX\",\"LHR\"]",
+    "path[\"AUS\",\"RDU\",\"LHR\"]",
+    "path[\"AUS\",\"SEA\",\"LHR\"]",
+    "path[\"AUS\",\"SFO\",\"LHR\"]",
+    "path[\"AUS\",\"SJC\",\"LHR\"]",
+    "path[\"AUS\",\"SAN\",\"LHR\"]",
+    "path[\"AUS\",\"SLC\",\"LHR\"]",
+    "path[\"AUS\",\"LAS\",\"LHR\"]",
+    "path[\"AUS\",\"DEN\",\"LHR\"]",
+    "path[\"AUS\",\"YYZ\",\"LHR\"]",
+    "path[\"AUS\",\"YVR\",\"LHR\"]",
+    "path[\"AUS\",\"MSY\",\"LHR\"]",
+    "path[\"AUS\",\"EWR\",\"LHR\"]",
+    "path[\"AUS\",\"FRA\",\"LHR\"]",
+    "path[\"AUS\",\"AMS\",\"LHR\"]",
+    "path[\"AUS\",\"YYC\",\"LHR\"]",
+    "path[\"AUS\",\"MEX\",\"LHR\"]",
+    "path[\"AUS\",\"PIT\",\"LHR\"]"
+   ]
+  },
+  "pg-aus-lhr-or-cdg": {
+   "query": "g.V().has('code','AUS').out().filter(__.or(__.out().has('code','LHR'), __.out().has('code','CDG'))).count()",
+   "source": "tinkergraph",
+   "results": [
+    "44l"
+   ]
+  },
+  "pg-aus-long-hops": {
+   "query": "g.V().has('code','AUS').outE().has('dist',P.gt(1500)).inV().values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"PDX\"",
+    "\"PVD\"",
+    "\"LIR\"",
+    "\"BOS\"",
+    "\"JFK\"",
+    "\"SEA\"",
+    "\"HNL\"",
+    "\"YVR\"",
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"FRA\"",
+    "\"AMS\"",
+    "\"YYC\""
+   ]
+  },
+  "pg-aus-mx-ca": {
+   "query": "g.V().has('code','AUS').union(__.out().has('country','MX'), __.out().has('country','CA')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"CUN\"",
+    "\"PVR\"",
+    "\"CZM\"",
+    "\"GDL\"",
+    "\"SJD\"",
+    "\"MEX\"",
+    "\"YYZ\"",
+    "\"YVR\"",
+    "\"YYC\""
+   ]
+  },
+  "pg-aus-nearest": {
+   "query": "g.V().has('code','AUS').outE().order().by('dist').by(__.inV().values('code')).limit(3).inV().values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"SAT\"",
+    "\"IAH\"",
+    "\"HOU\""
+   ]
+  },
+  "pg-aus-neighbours": {
+   "query": "g.V().has('airport','code','AUS').both('route').dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "98l"
+   ]
+  },
+  "pg-aus-new-at-2hop": {
+   "query": "g.V().has('code','AUS').out().aggregate('stop1').out().where(P.without('stop1')).dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "946l"
+   ]
+  },
+  "pg-aus-one-way": {
+   "query": "g.V().has('code','AUS').out().not(__.out().has('code','AUS')).values('code')",
+   "source": "tinkergraph",
+   "results": []
+  },
+  "pg-aus-otherv": {
+   "query": "g.V().has('airport','code','AUS').inE('contains').otherV().values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"US\"",
+    "\"NA\""
+   ]
+  },
+  "pg-aus-project": {
+   "query": "g.V().has('airport','code','AUS').project('code','routes').by('code').by(__.out().count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"AUS\",\"routes\":98l}"
+   ]
+  },
+  "pg-aus-prop-count": {
+   "query": "g.V().has('code','AUS').properties().count()",
+   "source": "tinkergraph",
+   "results": [
+    "12l"
+   ]
+  },
+  "pg-aus-route-count": {
+   "query": "g.V().has('airport','code','AUS').out('route').count()",
+   "source": "tinkergraph",
+   "results": [
+    "98l"
+   ]
+  },
+  "pg-aus-routes": {
+   "query": "g.V().has('airport','code','AUS').out('route').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"PHL\"",
+    "\"PDX\"",
+    "\"DTW\"",
+    "\"OKC\"",
+    "\"ONT\"",
+    "\"CLT\"",
+    "\"CUN\"",
+    "\"MEM\"",
+    "\"CVG\"",
+    "\"IND\"",
+    "\"MCI\"",
+    "\"DAL\"",
+    "\"STL\"",
+    "\"ABQ\"",
+    "\"MKE\"",
+    "\"MDW\"",
+    "\"OMA\"",
+    "\"TUL\"",
+    "\"PVR\"",
+    "\"NAS\"",
+    "\"LIT\"",
+    "\"JAX\"",
+    "\"PVD\"",
+    "\"SMF\"",
+    "\"BHM\"",
+    "\"SDF\"",
+    "\"BUF\"",
+    "\"BOI\"",
+    "\"LBB\"",
+    "\"ECP\"",
+    "\"HRL\"",
+    "\"RNO\"",
+    "\"CMH\"",
+    "\"DSM\"",
+    "\"CZM\"",
+    "\"AMA\"",
+    "\"BTR\"",
+    "\"CHS\"",
+    "\"GDL\"",
+    "\"GRR\"",
+    "\"LIR\"",
+    "\"PNS\"",
+    "\"SJD\"",
+    "\"TYS\"",
+    "\"VPS\"",
+    "\"XNA\"",
+    "\"HDN\"",
+    "\"SFB\"",
+    "\"BUR\"",
+    "\"ASE\"",
+    "\"BZN\"",
+    "\"BKG\"",
+    "\"PIE\"",
+    "\"ATL\"",
+    "\"BNA\"",
+    "\"BOS\"",
+    "\"BWI\"",
+    "\"DCA\"",
+    "\"DFW\"",
+    "\"FLL\"",
+    "\"IAD\"",
+    "\"IAH\"",
+    "\"JFK\"",
+    "\"LAX\"",
+    "\"MCO\"",
+    "\"MIA\"",
+    "\"MSP\"",
+    "\"ORD\"",
+    "\"PHX\"",
+    "\"RDU\"",
+    "\"SEA\"",
+    "\"SFO\"",
+    "\"SJC\"",
+    "\"TPA\"",
+    "\"SAN\"",
+    "\"LGB\"",
+    "\"SNA\"",
+    "\"SLC\"",
+    "\"LAS\"",
+    "\"DEN\"",
+    "\"SAT\"",
+    "\"YYZ\"",
+    "\"HNL\"",
+    "\"YVR\"",
+    "\"MSY\"",
+    "\"LHR\"",
+    "\"EWR\"",
+    "\"LGW\"",
+    "\"HOU\"",
+    "\"FRA\"",
+    "\"ELP\"",
+    "\"AMS\"",
+    "\"CLE\"",
+    "\"YYC\"",
+    "\"OAK\"",
+    "\"MEX\"",
+    "\"TUS\"",
+    "\"PIT\""
+   ]
+  },
+  "pg-aus-syd-2hop-count": {
+   "query": "g.V().has('code','AUS').out().out().has('code','SYD').path().by('code').count()",
+   "source": "tinkergraph",
+   "results": [
+    "6l"
+   ]
+  },
+  "pg-aus-to-dfw": {
+   "query": "g.V().has('code','AUS').out().has('code','DFW').count()",
+   "source": "tinkergraph",
+   "results": [
+    "1l"
+   ]
+  },
+  "pg-aus-to-europe": {
+   "query": "g.V().has('code','AUS').out().where(__.in('contains').has('code','EU')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"FRA\"",
+    "\"AMS\""
+   ]
+  },
+  "pg-aus-to-europe-select": {
+   "query": "g.V().has('code','AUS').out().as('x').in('contains').has('code','EU').select('x').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"FRA\"",
+    "\"AMS\""
+   ]
+  },
+  "pg-aus-valuemap": {
+   "query": "g.V().has('airport','code','AUS').valueMap('code','icao','city')",
+   "source": "tinkergraph",
+   "results": [
+    "{\"city\":[\"Austin\"],\"code\":[\"AUS\"],\"icao\":[\"KAUS\"]}"
+   ]
+  },
+  "pg-busiest-airports": {
+   "query": "g.V().hasLabel('airport').order().by(__.outE('route').count(),desc).by('code').limit(5).project('code','routes').by('code').by(__.outE('route').count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"FRA\",\"routes\":310l}",
+    "{\"code\":\"IST\",\"routes\":309l}",
+    "{\"code\":\"CDG\",\"routes\":293l}",
+    "{\"code\":\"AMS\",\"routes\":283l}",
+    "{\"code\":\"MUC\",\"routes\":270l}"
+   ]
+  },
+  "pg-canada-regions": {
+   "query": "g.V().has('airport','country','CA').group().by('region').by(__.count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"CA-AB\":11l,\"CA-BC\":29l,\"CA-MB\":7l,\"CA-NB\":5l,\"CA-NL\":15l,\"CA-NS\":2l,\"CA-NT\":18l,\"CA-NU\":24l,\"CA-ON\":46l,\"CA-PE\":1l,\"CA-QC\":44l,\"CA-SK\":2l,\"CA-YT\":1l}"
+   ]
+  },
+  "pg-cap-count": {
+   "query": "g.V().has('code','AUS').out().aggregate('x').cap('x').count(local)",
+   "source": "tinkergraph",
+   "results": [
+    "98l"
+   ]
+  },
+  "pg-choose-runways": {
+   "query": "g.V().has('code',P.within('AUS','DFW','SAF')).choose(__.values('runways').is(P.gt(2)), __.constant('big'), __.constant('small'))",
+   "source": "tinkergraph",
+   "results": [
+    "\"small\"",
+    "\"big\"",
+    "\"big\""
+   ]
+  },
+  "pg-coalesce-city": {
+   "query": "g.V().has('code',P.within('AUS','LHR')).coalesce(__.values('nickname'), __.values('city'))",
+   "source": "tinkergraph",
+   "results": [
+    "\"Austin\"",
+    "\"London\""
+   ]
+  },
+  "pg-coalesce-none": {
+   "query": "g.V().has('airport','code','AUS').coalesce(__.out().has('code','XYZ').values('code'), __.constant('none'))",
+   "source": "tinkergraph",
+   "results": [
+    "\"none\""
+   ]
+  },
+  "pg-concat-city": {
+   "query": "g.V().has('airport','region','US-NM').values('city').dedup().concat(', NM')",
+   "source": "tinkergraph",
+   "results": [
+    "\"Santa Fe, NM\"",
+    "\"Albuquerque, NM\"",
+    "\"Roswell, NM\"",
+    "\"Farmington, NM\"",
+    "\"Hobbs, NM\"",
+    "\"Silver City, NM\"",
+    "\"Carlsbad, NM\"",
+    "\"Los Alamos, NM\"",
+    "\"Clovis, NM\""
+   ]
+  },
+  "pg-continent-airport-avg-runways": {
+   "query": "g.V().hasLabel('continent').project('cont','avgRunways').by('code').by(__.out('contains').values('runways').mean())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"avgRunways\":1.4347107438016529d,\"cont\":\"EU\"}",
+    "{\"avgRunways\":1.3021806853582554d,\"cont\":\"AF\"}",
+    "{\"avgRunways\":1.7583417593528816d,\"cont\":\"NA\"}",
+    "{\"avgRunways\":1.1469648562300319d,\"cont\":\"SA\"}",
+    "{\"avgRunways\":1.1750772399588054d,\"cont\":\"AS\"}",
+    "{\"avgRunways\":1.4918032786885247d,\"cont\":\"OC\"}",
+    "{\"cont\":\"AN\"}"
+   ]
+  },
+  "pg-continent-counts": {
+   "query": "g.V().hasLabel('continent').project('cont','count').by('desc').by(__.out('contains').count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"cont\":\"Europe\",\"count\":605l}",
+    "{\"cont\":\"Africa\",\"count\":321l}",
+    "{\"cont\":\"North America\",\"count\":989l}",
+    "{\"cont\":\"South America\",\"count\":313l}",
+    "{\"cont\":\"Asia\",\"count\":971l}",
+    "{\"cont\":\"Oceania\",\"count\":305l}",
+    "{\"cont\":\"Antarctica\",\"count\":0l}"
+   ]
+  },
+  "pg-continent-group": {
+   "query": "g.V().hasLabel('continent').group().by('desc').by(__.out().count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"Africa\":321l,\"Antarctica\":0l,\"Asia\":971l,\"Europe\":605l,\"North America\":989l,\"Oceania\":305l,\"South America\":313l}"
+   ]
+  },
+  "pg-continents-ordered": {
+   "query": "g.V().hasLabel('continent').order().by('code').values('desc')",
+   "source": "tinkergraph",
+   "results": [
+    "\"Africa\"",
+    "\"Antarctica\"",
+    "\"Asia\"",
+    "\"Europe\"",
+    "\"North America\"",
+    "\"Oceania\"",
+    "\"South America\""
+   ]
+  },
+  "pg-count-by-label": {
+   "query": "g.V().groupCount().by(T.label)",
+   "source": "tinkergraph",
+   "results": [
+    "{\"airport\":3504l,\"continent\":7l,\"country\":237l,\"version\":1l}"
+   ]
+  },
+  "pg-count-local-group": {
+   "query": "g.V().has('airport','country','IE').group().by('region').by(__.values('code').fold()).count(local)",
+   "source": "tinkergraph",
+   "results": [
+    "7l"
+   ]
+  },
+  "pg-country-most-airports": {
+   "query": "g.V().hasLabel('country').order().by(__.out('contains').count(),desc).by('code').limit(3).values('desc')",
+   "source": "tinkergraph",
+   "results": [
+    "\"United States\"",
+    "\"China\"",
+    "\"Canada\""
+   ]
+  },
+  "pg-deep-aus-euro-asia": {
+   "query": "g.V().has('code','AUS').project('code','euro').by('code').by(__.out().where(__.in('contains').has('code','EU')).project('to','asia').by('code').by(__.out().where(__.in('contains').has('code','AS')).count()).fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"AUS\",\"euro\":[{\"asia\":54l,\"to\":\"LHR\"},{\"asia\":30l,\"to\":\"LGW\"},{\"asia\":64l,\"to\":\"FRA\"},{\"asia\":47l,\"to\":\"AMS\"}]}"
+   ]
+  },
+  "pg-deep-group-where": {
+   "query": "g.V().has('code','AUS').out().group().by('country').by(__.where(__.out().has('code','LHR')).count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"BS\":1l,\"CA\":3l,\"CR\":0l,\"DE\":1l,\"MX\":1l,\"NL\":1l,\"UK\":0l,\"US\":29l}"
+   ]
+  },
+  "pg-deep-order-by-sub": {
+   "query": "g.V().has('code','AUS').out().has('country','US').order().by(__.out().where(__.in('contains').has('code','EU')).count(), desc).by('code').limit(3).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"EWR\"",
+    "\"JFK\"",
+    "\"MIA\""
+   ]
+  },
+  "pg-deep-tx-europe": {
+   "query": "g.V().has('airport','region','US-TX').project('code','europe').by('code').by(__.out().where(__.in('contains').has('code','EU')).values('code').fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"AUS\",\"europe\":[\"LHR\",\"LGW\",\"FRA\",\"AMS\"]}",
+    "{\"code\":\"DFW\",\"europe\":[\"LHR\",\"CDG\",\"FRA\",\"HEL\",\"DUB\",\"FCO\",\"AMS\",\"MAD\",\"MUC\",\"IST\",\"DUS\",\"KEF\"]}",
+    "{\"code\":\"IAH\",\"europe\":[\"LHR\",\"CDG\",\"FRA\",\"AMS\",\"MUC\",\"MAN\",\"DME\",\"IST\"]}",
+    "{\"code\":\"SAT\",\"europe\":[]}",
+    "{\"code\":\"HOU\",\"europe\":[]}",
+    "{\"code\":\"ELP\",\"europe\":[]}",
+    "{\"code\":\"DAL\",\"europe\":[]}",
+    "{\"code\":\"LBB\",\"europe\":[]}",
+    "{\"code\":\"HRL\",\"europe\":[]}",
+    "{\"code\":\"MAF\",\"europe\":[]}",
+    "{\"code\":\"CRP\",\"europe\":[]}",
+    "{\"code\":\"ABI\",\"europe\":[]}",
+    "{\"code\":\"ACT\",\"europe\":[]}",
+    "{\"code\":\"CLL\",\"europe\":[]}",
+    "{\"code\":\"BPT\",\"europe\":[]}",
+    "{\"code\":\"AMA\",\"europe\":[]}",
+    "{\"code\":\"BRO\",\"europe\":[]}",
+    "{\"code\":\"GGG\",\"europe\":[]}",
+    "{\"code\":\"GRK\",\"europe\":[]}",
+    "{\"code\":\"LRD\",\"europe\":[]}",
+    "{\"code\":\"MFE\",\"europe\":[]}",
+    "{\"code\":\"SJT\",\"europe\":[]}",
+    "{\"code\":\"SPS\",\"europe\":[]}",
+    "{\"code\":\"TYR\",\"europe\":[]}",
+    "{\"code\":\"VCT\",\"europe\":[]}",
+    "{\"code\":\"AFW\",\"europe\":[]}",
+    "{\"code\":\"DRT\",\"europe\":[]}"
+   ]
+  },
+  "pg-deep-tx-hub-report": {
+   "query": "g.V().has('airport','region','US-TX').where(__.out().count().is(P.gt(100))).project('code','foreignToLHR').by('code').by(__.out().has('country',P.neq('US')).where(__.out().has('code','LHR')).count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"DFW\",\"foreignToLHR\":31l}",
+    "{\"code\":\"IAH\",\"foreignToLHR\":25l}"
+   ]
+  },
+  "pg-dfw": {
+   "query": "g.V().has('airport','code','DFW').values('city')",
+   "source": "tinkergraph",
+   "results": [
+    "\"Dallas\""
+   ]
+  },
+  "pg-dfw-lhr-direct-dist": {
+   "query": "g.V().has('code','DFW').outE().where(__.inV().has('code','LHR')).values('dist')",
+   "source": "tinkergraph",
+   "results": [
+    "4736i"
+   ]
+  },
+  "pg-domestic-foreign": {
+   "query": "g.V().has('code',P.within('AUS','LHR','CDG')).choose(__.values('country')).option('US', __.constant('domestic')).option(Pick.none, __.constant('foreign'))",
+   "source": "tinkergraph",
+   "results": [
+    "\"domestic\"",
+    "\"foreign\"",
+    "\"foreign\""
+   ]
+  },
+  "pg-edge-count-by-label": {
+   "query": "g.E().groupCount().by(T.label)",
+   "source": "tinkergraph",
+   "results": [
+    "{\"contains\":7008l,\"route\":50637l}"
+   ]
+  },
+  "pg-elev-buckets": {
+   "query": "g.V().has('airport','country','CH').groupCount().by(__.values('elev').choose(__.is(P.gt(1500)), __.constant('high'), __.constant('low')))",
+   "source": "tinkergraph",
+   "results": [
+    "{\"high\":2l,\"low\":4l}"
+   ]
+  },
+  "pg-flatmap-codes": {
+   "query": "g.V().has('code','SAF').flatMap(__.out().values('code'))",
+   "source": "tinkergraph",
+   "results": [
+    "\"DFW\"",
+    "\"LAX\"",
+    "\"PHX\"",
+    "\"DEN\""
+   ]
+  },
+  "pg-fold-unfold-range": {
+   "query": "g.V().has('code','AUS').out().values('code').order().fold().unfold().range(2,4)",
+   "source": "tinkergraph",
+   "results": [
+    "\"AMS\"",
+    "\"ASE\""
+   ]
+  },
+  "pg-fr-de-airports": {
+   "query": "g.V().hasLabel('country').has('code',P.within('FR','DE')).project('country','airports').by('desc').by(__.out('contains').order().by('code').values('code').fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"airports\":[\"AGB\",\"BER\",\"BRE\",\"CGN\",\"DRS\",\"DTM\",\"DUS\",\"ERF\",\"FDH\",\"FKB\",\"FMM\",\"FMO\",\"FRA\",\"GWT\",\"HAJ\",\"HAM\",\"HDF\",\"HHN\",\"KSF\",\"LBC\",\"LEJ\",\"MHG\",\"MUC\",\"NDZ\",\"NRN\",\"NUE\",\"PAD\",\"RLG\",\"SCN\",\"STR\",\"SXF\",\"TXL\",\"XFW\",\"ZQW\"],\"country\":\"Germany\"}",
+    "{\"airports\":[\"AGF\",\"AJA\",\"ANE\",\"ANG\",\"AUR\",\"AVN\",\"BES\",\"BIA\",\"BIQ\",\"BOD\",\"BSL\",\"BVA\",\"BVE\",\"BZR\",\"CCF\",\"CDG\",\"CFE\",\"CFR\",\"CHR\",\"CLY\",\"CMF\",\"DCM\",\"DIJ\",\"DLE\",\"DNR\",\"DOL\",\"EBU\",\"EGC\",\"ETZ\",\"FNI\",\"FSC\",\"GNB\",\"LAI\",\"LDE\",\"LEH\",\"LIG\",\"LIL\",\"LPY\",\"LRH\",\"LRT\",\"LYS\",\"MPL\",\"MRS\",\"NCE\",\"NTE\",\"ORY\",\"PGF\",\"PGX\",\"PIS\",\"PUF\",\"RDZ\",\"RNS\",\"SXB\",\"TLN\",\"TLS\",\"TUF\",\"UIP\",\"URO\",\"XCR\"],\"country\":\"France\"}"
+   ]
+  },
+  "pg-france-airports": {
+   "query": "g.V().has('country','code','FR').out('contains').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"FNI\"",
+    "\"LAI\"",
+    "\"UIP\"",
+    "\"DNR\"",
+    "\"BSL\"",
+    "\"TLN\"",
+    "\"BZR\"",
+    "\"BVA\"",
+    "\"ANE\"",
+    "\"URO\"",
+    "\"NTE\"",
+    "\"CDG\"",
+    "\"LDE\"",
+    "\"EBU\"",
+    "\"CHR\"",
+    "\"AVN\"",
+    "\"LEH\"",
+    "\"XCR\"",
+    "\"DIJ\"",
+    "\"LYS\"",
+    "\"MRS\"",
+    "\"LIL\"",
+    "\"DLE\"",
+    "\"DOL\"",
+    "\"BVE\"",
+    "\"BES\"",
+    "\"LIG\"",
+    "\"ETZ\"",
+    "\"CFE\"",
+    "\"FSC\"",
+    "\"PUF\"",
+    "\"TLS\"",
+    "\"CFR\"",
+    "\"BIQ\"",
+    "\"CLY\"",
+    "\"RNS\"",
+    "\"EGC\"",
+    "\"PIS\"",
+    "\"ORY\"",
+    "\"NCE\"",
+    "\"BOD\"",
+    "\"BIA\"",
+    "\"AJA\"",
+    "\"MPL\"",
+    "\"SXB\"",
+    "\"CMF\"",
+    "\"ANG\"",
+    "\"LRH\"",
+    "\"RDZ\"",
+    "\"CCF\"",
+    "\"PGF\"",
+    "\"TUF\"",
+    "\"AGF\"",
+    "\"GNB\"",
+    "\"PGX\"",
+    "\"DCM\"",
+    "\"LPY\"",
+    "\"AUR\"",
+    "\"LRT\""
+   ]
+  },
+  "pg-germany-big": {
+   "query": "g.V().has('country','desc','Germany').out('contains').has('runways',P.gte(3)).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"CGN\"",
+    "\"FRA\"",
+    "\"HAJ\""
+   ]
+  },
+  "pg-germany-count": {
+   "query": "g.V().hasLabel('country').has('desc','Germany').out('contains').count()",
+   "source": "tinkergraph",
+   "results": [
+    "34l"
+   ]
+  },
+  "pg-has-icao-not": {
+   "query": "g.V().hasLabel('airport').hasNot('icao').count()",
+   "source": "tinkergraph",
+   "results": [
+    "0l"
+   ]
+  },
+  "pg-hasid": {
+   "query": "g.V().hasId(1,2,3).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"ATL\"",
+    "\"ANC\"",
+    "\"AUS\""
+   ]
+  },
+  "pg-high-elev": {
+   "query": "g.V().has('airport','elev',P.gt(12000)).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"LPB\"",
+    "\"JUL\"",
+    "\"YUS\"",
+    "\"POI\"",
+    "\"UYU\"",
+    "\"NGQ\"",
+    "\"BPX\"",
+    "\"DCY\"",
+    "\"KGT\"",
+    "\"ORU\"",
+    "\"RKZ\"",
+    "\"GMQ\""
+   ]
+  },
+  "pg-hub-and-big": {
+   "query": "g.V().has('airport','region','US-TX').and(__.values('runways').is(P.gte(4)), __.out().count().is(P.gt(50))).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"DFW\"",
+    "\"IAH\"",
+    "\"HOU\""
+   ]
+  },
+  "pg-id-lookup": {
+   "query": "g.V(3).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"AUS\""
+   ]
+  },
+  "pg-intercontinental": {
+   "query": "g.V().has('airport','desc',TextP.containing('Intercontinental')).count()",
+   "source": "tinkergraph",
+   "results": [
+    "2l"
+   ]
+  },
+  "pg-label-groupcount": {
+   "query": "g.V().label().groupCount()",
+   "source": "tinkergraph",
+   "results": [
+    "{\"airport\":3504l,\"continent\":7l,\"country\":237l,\"version\":1l}"
+   ]
+  },
+  "pg-lcy-dist-paths": {
+   "query": "g.V().has('code','LCY').outE().inV().path().by('code').by('dist')",
+   "source": "tinkergraph",
+   "results": [
+    "path[\"LCY\",204i,\"CDG\"]",
+    "path[\"LCY\",384i,\"FRA\"]",
+    "path[\"LCY\",297i,\"DUB\"]",
+    "path[\"LCY\",882i,\"FCO\"]",
+    "path[\"LCY\",208i,\"AMS\"]",
+    "path[\"LCY\",626i,\"PRG\"]",
+    "path[\"LCY\",780i,\"MAD\"]",
+    "path[\"LCY\",472i,\"ZRH\"]",
+    "path[\"LCY\",456i,\"GVA\"]",
+    "path[\"LCY\",564i,\"MUC\"]",
+    "path[\"LCY\",161i,\"MAN\"]",
+    "path[\"LCY\",697i,\"VCE\"]",
+    "path[\"LCY\",891i,\"ARN\"]",
+    "path[\"LCY\",337i,\"EDI\"]",
+    "path[\"LCY\",353i,\"GLA\"]",
+    "path[\"LCY\",217i,\"ORY\"]",
+    "path[\"LCY\",636i,\"NCE\"]",
+    "path[\"LCY\",903i,\"BUD\"]",
+    "path[\"LCY\",875i,\"IBZ\"]",
+    "path[\"LCY\",828i,\"MAH\"]",
+    "path[\"LCY\",890i,\"WAW\"]",
+    "path[\"LCY\",310i,\"NTE\"]",
+    "path[\"LCY\",299i,\"LUX\"]",
+    "path[\"LCY\",289i,\"DUS\"]",
+    "path[\"LCY\",984i,\"LIS\"]",
+    "path[\"LCY\",1187i,\"KEF\"]",
+    "path[\"LCY\",835i,\"PMI\"]",
+    "path[\"LCY\",1048i,\"AGP\"]",
+    "path[\"LCY\",404i,\"ABZ\"]",
+    "path[\"LCY\",187i,\"JER\"]",
+    "path[\"LCY\",254i,\"NCL\"]",
+    "path[\"LCY\",430i,\"BSL\"]",
+    "path[\"LCY\",326i,\"BHD\"]",
+    "path[\"LCY\",593i,\"LIN\"]",
+    "path[\"LCY\",190i,\"RTM\"]",
+    "path[\"LCY\",820i,\"OPO\"]",
+    "path[\"LCY\",473i,\"BLL\"]",
+    "path[\"LCY\",461i,\"BRN\"]",
+    "path[\"LCY\",264i,\"IOM\"]",
+    "path[\"LCY\",1006i,\"GRX\"]",
+    "path[\"LCY\",741i,\"FLR\"]",
+    "path[\"LCY\",591i,\"DRS\"]",
+    "path[\"LCY\",148i,\"DOL\"]",
+    "path[\"LCY\",451i,\"BVE\"]",
+    "path[\"LCY\",290i,\"BES\"]",
+    "path[\"LCY\",191i,\"ANR\"]",
+    "path[\"LCY\",384i,\"BRE\"]",
+    "path[\"LCY\",146i,\"CWL\"]",
+    "path[\"LCY\",1063i,\"VNO\"]",
+    "path[\"LCY\",1411i,\"JSI\"]",
+    "path[\"LCY\",484i,\"CMF\"]"
+   ]
+  },
+  "pg-lhr-longest": {
+   "query": "g.V().has('code','LHR').outE().order().by('dist',desc).by(__.inV().values('code')).limit(5).inV().values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"PER\"",
+    "\"DPS\"",
+    "\"CGK\"",
+    "\"SCL\"",
+    "\"EZE\""
+   ]
+  },
+  "pg-local-limit": {
+   "query": "g.V().has('region','US-TX').has('runways',P.gte(4)).local(__.out().has('country','US').limit(3)).count()",
+   "source": "tinkergraph",
+   "results": [
+    "14l"
+   ]
+  },
+  "pg-local-top-dest": {
+   "query": "g.V().has('code',P.within('AUS','DFW')).local(__.outE().order().by('dist',desc).by(__.inV().values('code')).limit(1).inV()).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"FRA\"",
+    "\"SYD\""
+   ]
+  },
+  "pg-london": {
+   "query": "g.V().has('airport','city','London').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"LCY\"",
+    "\"STN\"",
+    "\"LTN\"",
+    "\"YXU\""
+   ]
+  },
+  "pg-long-routes": {
+   "query": "g.E().has('dist',P.gt(8000)).count()",
+   "source": "tinkergraph",
+   "results": [
+    "64l"
+   ]
+  },
+  "pg-longest-routes": {
+   "query": "g.E().order().by('dist',desc).by(__.outV().values('code')).limit(4).project('from','to','dist').by(__.outV().values('code')).by(__.inV().values('code')).by('dist')",
+   "source": "tinkergraph",
+   "results": [
+    "{\"dist\":9526i,\"from\":\"JFK\",\"to\":\"SIN\"}",
+    "{\"dist\":9526i,\"from\":\"SIN\",\"to\":\"JFK\"}",
+    "{\"dist\":9523i,\"from\":\"EWR\",\"to\":\"SIN\"}",
+    "{\"dist\":9523i,\"from\":\"SIN\",\"to\":\"EWR\"}"
+   ]
+  },
+  "pg-map-count": {
+   "query": "g.V().has('region','US-NM').map(__.out().count())",
+   "source": "tinkergraph",
+   "results": [
+    "4l",
+    "29l",
+    "2l",
+    "3l",
+    "1l",
+    "1l",
+    "2l",
+    "1l",
+    "1l"
+   ]
+  },
+  "pg-match-aus-lhr": {
+   "query": "g.V().match(__.as('a').has('code','AUS'), __.as('a').out().as('b'), __.as('b').out().has('code','LHR')).select('b').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"PHL\"",
+    "\"PDX\"",
+    "\"DTW\"",
+    "\"CLT\"",
+    "\"NAS\"",
+    "\"CHS\"",
+    "\"ATL\"",
+    "\"BNA\"",
+    "\"BOS\"",
+    "\"BWI\"",
+    "\"DFW\"",
+    "\"IAD\"",
+    "\"IAH\"",
+    "\"JFK\"",
+    "\"LAX\"",
+    "\"MIA\"",
+    "\"MSP\"",
+    "\"ORD\"",
+    "\"PHX\"",
+    "\"RDU\"",
+    "\"SEA\"",
+    "\"SFO\"",
+    "\"SJC\"",
+    "\"SAN\"",
+    "\"SLC\"",
+    "\"LAS\"",
+    "\"DEN\"",
+    "\"YYZ\"",
+    "\"YVR\"",
+    "\"MSY\"",
+    "\"EWR\"",
+    "\"FRA\"",
+    "\"AMS\"",
+    "\"YYC\"",
+    "\"MEX\"",
+    "\"PIT\""
+   ]
+  },
+  "pg-math-elev-m": {
+   "query": "g.V().has('code','DEN').values('elev').math('_ / 3.28')",
+   "source": "tinkergraph",
+   "results": [
+    "1656.4024390243903d"
+   ]
+  },
+  "pg-max-runways": {
+   "query": "g.V().hasLabel('airport').values('runways').max()",
+   "source": "tinkergraph",
+   "results": [
+    "7i"
+   ]
+  },
+  "pg-most-runways": {
+   "query": "g.V().hasLabel('airport').order().by('runways',desc).by('code').limit(5).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"DFW\"",
+    "\"ORD\"",
+    "\"AMS\"",
+    "\"BOS\"",
+    "\"DEN\""
+   ]
+  },
+  "pg-no-outgoing": {
+   "query": "g.V().hasLabel('airport').where(__.out('route').count().is(0)).count()",
+   "source": "tinkergraph",
+   "results": [
+    "29l"
+   ]
+  },
+  "pg-no-routes": {
+   "query": "g.V().hasLabel('airport').not(__.bothE('route')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"TXL\"",
+    "\"SXF\"",
+    "\"ILG\"",
+    "\"TWB\"",
+    "\"TUA\"",
+    "\"BVS\"",
+    "\"KGG\"",
+    "\"RIG\"",
+    "\"INT\"",
+    "\"APA\"",
+    "\"BWU\"",
+    "\"BID\"",
+    "\"NBW\"",
+    "\"SFH\"",
+    "\"CVT\"",
+    "\"AFW\"",
+    "\"PSY\"",
+    "\"EKA\"",
+    "\"ISL\"",
+    "\"APK\"",
+    "\"CRC\"",
+    "\"GYZ\"",
+    "\"HFN\"",
+    "\"HZK\"",
+    "\"NFO\"",
+    "\"SFD\"",
+    "\"VCV\"",
+    "\"YEI\""
+   ]
+  },
+  "pg-one-stop-jfk": {
+   "query": "g.V().has('code','AUS').out().where(__.out().has('code','JFK')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"PHL\"",
+    "\"PDX\"",
+    "\"DTW\"",
+    "\"ONT\"",
+    "\"CLT\"",
+    "\"CUN\"",
+    "\"CVG\"",
+    "\"IND\"",
+    "\"STL\"",
+    "\"ABQ\"",
+    "\"PVR\"",
+    "\"NAS\"",
+    "\"JAX\"",
+    "\"SMF\"",
+    "\"SDF\"",
+    "\"BUF\"",
+    "\"RNO\"",
+    "\"CMH\"",
+    "\"CHS\"",
+    "\"GDL\"",
+    "\"LIR\"",
+    "\"BUR\"",
+    "\"ATL\"",
+    "\"BNA\"",
+    "\"BOS\"",
+    "\"BWI\"",
+    "\"DCA\"",
+    "\"DFW\"",
+    "\"FLL\"",
+    "\"IAD\"",
+    "\"IAH\"",
+    "\"LAX\"",
+    "\"MCO\"",
+    "\"MIA\"",
+    "\"MSP\"",
+    "\"ORD\"",
+    "\"PHX\"",
+    "\"RDU\"",
+    "\"SEA\"",
+    "\"SFO\"",
+    "\"SJC\"",
+    "\"TPA\"",
+    "\"SAN\"",
+    "\"LGB\"",
+    "\"SNA\"",
+    "\"SLC\"",
+    "\"LAS\"",
+    "\"DEN\"",
+    "\"SAT\"",
+    "\"YYZ\"",
+    "\"HNL\"",
+    "\"YVR\"",
+    "\"MSY\"",
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"HOU\"",
+    "\"FRA\"",
+    "\"AMS\"",
+    "\"CLE\"",
+    "\"YYC\"",
+    "\"OAK\"",
+    "\"MEX\"",
+    "\"TUS\"",
+    "\"PIT\""
+   ]
+  },
+  "pg-optional-europe": {
+   "query": "g.V().has('code',P.within('AUS','SAF')).optional(__.out().has('code','LHR')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"LHR\"",
+    "\"SAF\""
+   ]
+  },
+  "pg-paged-codes": {
+   "query": "g.V().hasLabel('airport').order().by('code').range(10,15).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"ABB\"",
+    "\"ABD\"",
+    "\"ABE\"",
+    "\"ABI\"",
+    "\"ABJ\""
+   ]
+  },
+  "pg-path-count-local": {
+   "query": "g.V().has('code','SAF').out().out().has('code','LHR').path().count(local).dedup()",
+   "source": "tinkergraph",
+   "results": [
+    "3l"
+   ]
+  },
+  "pg-repeat-emit-saf": {
+   "query": "g.V().has('code','SAF').repeat(__.out().simplePath()).emit().times(2).dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "382l"
+   ]
+  },
+  "pg-round-trip": {
+   "query": "g.V().has('code','AUS').as('a').out().as('b').out().where(P.eq('a')).select('b').values('code').dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "98l"
+   ]
+  },
+  "pg-route-count": {
+   "query": "g.E().hasLabel('route').count()",
+   "source": "tinkergraph",
+   "results": [
+    "50637l"
+   ]
+  },
+  "pg-runway-histogram": {
+   "query": "g.V().hasLabel('airport').values('runways').groupCount()",
+   "source": "tinkergraph",
+   "results": [
+    "{1i:2429l,2i:775l,3i:227l,4i:53l,5i:14l,6i:4l,7i:2l}"
+   ]
+  },
+  "pg-runways-between": {
+   "query": "g.V().has('airport','runways',P.between(5,7)).count()",
+   "source": "tinkergraph",
+   "results": [
+    "18l"
+   ]
+  },
+  "pg-sack-min-dist": {
+   "query": "g.withSack(0).V().has('code','AUS').outE().sack(sum).by('dist').inV().outE().sack(sum).by('dist').inV().has('code','LHR').sack().min()",
+   "source": "tinkergraph",
+   "results": [
+    "4893i"
+   ]
+  },
+  "pg-saf-paths": {
+   "query": "g.V().has('code','SAF').out().path().by('code')",
+   "source": "tinkergraph",
+   "results": [
+    "path[\"SAF\",\"DFW\"]",
+    "path[\"SAF\",\"LAX\"]",
+    "path[\"SAF\",\"PHX\"]",
+    "path[\"SAF\",\"DEN\"]"
+   ]
+  },
+  "pg-saf-valuemap-tokens": {
+   "query": "g.V().has('code','SAF').valueMap('code','city').with(WithOptions.tokens)",
+   "source": "tinkergraph",
+   "results": [
+    "{\"city\":[\"Santa Fe\"],\"code\":[\"SAF\"],T.id:44i,T.label:\"airport\"}"
+   ]
+  },
+  "pg-sea-to-lhr-paths": {
+   "query": "g.V().has('code','SEA').out().out().has('code','LHR').path().by('code').count()",
+   "source": "tinkergraph",
+   "results": [
+    "56l"
+   ]
+  },
+  "pg-select-by-dist": {
+   "query": "g.V().has('code','AUS').as('a').outE().as('e').inV().has('code','LHR').select('a','e').by('code').by('dist')",
+   "source": "tinkergraph",
+   "results": [
+    "{\"a\":\"AUS\",\"e\":4901i}"
+   ]
+  },
+  "pg-starts-x": {
+   "query": "g.V().has('airport','code',TextP.startingWith('X')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"XNA\"",
+    "\"XMN\"",
+    "\"XRY\"",
+    "\"XIY\"",
+    "\"XUZ\"",
+    "\"XSB\"",
+    "\"XCH\"",
+    "\"XIL\"",
+    "\"XFN\"",
+    "\"XNN\"",
+    "\"XGR\"",
+    "\"XFW\"",
+    "\"XCR\"",
+    "\"XSC\"",
+    "\"XQP\"",
+    "\"XMH\"",
+    "\"XBJ\"",
+    "\"XAP\"",
+    "\"XMS\"",
+    "\"XKH\"",
+    "\"XIC\"",
+    "\"XTG\"",
+    "\"XKS\"",
+    "\"XBE\"",
+    "\"XTO\"",
+    "\"XSP\"",
+    "\"XAI\"",
+    "\"XWA\""
+   ]
+  },
+  "pg-sum-runways-by-country": {
+   "query": "g.V().has('airport','country',P.within('IE','IS')).group().by('country').by(__.values('runways').sum())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"IE\":14i,\"IS\":10i}"
+   ]
+  },
+  "pg-top-countries": {
+   "query": "g.V().hasLabel('airport').groupCount().by('country').order(local).by(Column.values, desc).limit(local,5)",
+   "source": "tinkergraph",
+   "results": [
+    "{\"AU\":132l,\"CA\":205l,\"CN\":217l,\"RU\":129l,\"US\":586l}"
+   ]
+  },
+  "pg-tree-saf": {
+   "query": "g.V().has('code','SAF').out().has('code',P.within('DFW','DEN')).out().has('code','LHR').tree().by('code')",
+   "source": "tinkergraph",
+   "results": [
+    "tree{\"SAF\":tree{\"DEN\":tree{\"LHR\":tree{}},\"DFW\":tree{\"LHR\":tree{}}}}"
+   ]
+  },
+  "pg-tx-busiest": {
+   "query": "g.V().has('airport','region','US-TX').order().by(__.out().count(),desc).by('code').limit(3).project('code','n').by('code').by(__.out().count())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"DFW\",\"n\":253l}",
+    "{\"code\":\"IAH\",\"n\":199l}",
+    "{\"code\":\"AUS\",\"n\":98l}"
+   ]
+  },
+  "pg-tx-cities": {
+   "query": "g.V().has('airport','region','US-TX').values('city').dedup()",
+   "source": "tinkergraph",
+   "results": [
+    "\"Austin\"",
+    "\"Dallas\"",
+    "\"Houston\"",
+    "\"San Antonio\"",
+    "\"El Paso\"",
+    "\"Lubbock\"",
+    "\"Harlingen\"",
+    "\"Midland\"",
+    "\"Corpus Christi\"",
+    "\"Abilene\"",
+    "\"Waco\"",
+    "\"College Station\"",
+    "\"Beaumont/Port Arthur\"",
+    "\"Amarillo\"",
+    "\"Brownsville\"",
+    "\"Longview\"",
+    "\"Fort Hood/Killeen\"",
+    "\"Laredo\"",
+    "\"Mc Allen\"",
+    "\"San Angelo\"",
+    "\"Wichita Falls\"",
+    "\"Tyler\"",
+    "\"Victoria\"",
+    "\"Fort Worth\"",
+    "\"Del Rio\""
+   ]
+  },
+  "pg-tx-desc-upper": {
+   "query": "g.V().has('airport','region','US-TX').has('runways',P.gte(4)).values('code').toLower()",
+   "source": "tinkergraph",
+   "results": [
+    "\"dfw\"",
+    "\"iah\"",
+    "\"hou\"",
+    "\"maf\"",
+    "\"sps\"",
+    "\"vct\""
+   ]
+  },
+  "pg-tx-hubs-nested": {
+   "query": "g.V().has('airport','region','US-TX').where(__.out().where(__.out().has('code','SYD'))).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"AUS\"",
+    "\"DFW\"",
+    "\"IAH\"",
+    "\"SAT\"",
+    "\"HOU\"",
+    "\"ELP\"",
+    "\"DAL\"",
+    "\"LBB\"",
+    "\"HRL\"",
+    "\"MAF\"",
+    "\"CRP\"",
+    "\"ABI\"",
+    "\"ACT\"",
+    "\"CLL\"",
+    "\"BPT\"",
+    "\"AMA\"",
+    "\"BRO\"",
+    "\"GGG\"",
+    "\"GRK\"",
+    "\"LRD\"",
+    "\"MFE\"",
+    "\"SJT\"",
+    "\"SPS\"",
+    "\"TYR\"",
+    "\"VCT\"",
+    "\"DRT\""
+   ]
+  },
+  "pg-tx-route-totals": {
+   "query": "g.V().has('airport','region','US-TX').group().by('code').by(__.outE('route').values('dist').sum())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"ABI\":157i,\"ACT\":89i,\"AMA\":4699i,\"AUS\":114193i,\"BPT\":270i,\"BRO\":2026i,\"CLL\":238i,\"CRP\":1359i,\"DAL\":47365i,\"DFW\":364927i,\"DRT\":335i,\"ELP\":13378i,\"GGG\":140i,\"GRK\":1102i,\"HOU\":62963i,\"HRL\":4337i,\"IAH\":312071i,\"LBB\":4141i,\"LRD\":1789i,\"MAF\":3431i,\"MFE\":3724i,\"SAT\":54093i,\"SJT\":228i,\"SPS\":113i,\"TYR\":266i,\"VCT\":123i}"
+   ]
+  },
+  "pg-tx-to-mexico": {
+   "query": "g.V().has('airport','region','US-TX').project('code','mexico').by('code').by(__.out().has('country','MX').values('code').fold())",
+   "source": "tinkergraph",
+   "results": [
+    "{\"code\":\"AUS\",\"mexico\":[\"CUN\",\"PVR\",\"CZM\",\"GDL\",\"SJD\",\"MEX\"]}",
+    "{\"code\":\"DFW\",\"mexico\":[\"MEX\",\"CUN\",\"PVR\",\"CZM\",\"AGU\",\"MTY\",\"BJX\",\"CUU\",\"GDL\",\"MLM\",\"MZT\",\"PBC\",\"QRO\",\"SJD\",\"SLP\",\"TRC\",\"ZCL\",\"MID\",\"DGO\",\"ACA\",\"OAX\"]}",
+    "{\"code\":\"IAH\",\"mexico\":[\"MEX\",\"CUN\",\"PVR\",\"CZM\",\"AGU\",\"MTY\",\"BJX\",\"CUU\",\"GDL\",\"MLM\",\"MZT\",\"PBC\",\"QRO\",\"SJD\",\"SLP\",\"TRC\",\"MID\",\"DGO\",\"ZIH\",\"ZLO\",\"ACA\",\"HUX\",\"CME\",\"SLW\",\"OAX\",\"TAM\",\"VSA\",\"VER\"]}",
+    "{\"code\":\"SAT\",\"mexico\":[\"MEX\",\"CUN\",\"MTY\",\"GDL\",\"TLC\"]}",
+    "{\"code\":\"HOU\",\"mexico\":[\"MEX\",\"CUN\",\"PVR\",\"SJD\"]}",
+    "{\"code\":\"ELP\",\"mexico\":[]}",
+    "{\"code\":\"DAL\",\"mexico\":[]}",
+    "{\"code\":\"LBB\",\"mexico\":[]}",
+    "{\"code\":\"HRL\",\"mexico\":[]}",
+    "{\"code\":\"MAF\",\"mexico\":[]}",
+    "{\"code\":\"CRP\",\"mexico\":[]}",
+    "{\"code\":\"ABI\",\"mexico\":[]}",
+    "{\"code\":\"ACT\",\"mexico\":[]}",
+    "{\"code\":\"CLL\",\"mexico\":[]}",
+    "{\"code\":\"BPT\",\"mexico\":[]}",
+    "{\"code\":\"AMA\",\"mexico\":[]}",
+    "{\"code\":\"BRO\",\"mexico\":[]}",
+    "{\"code\":\"GGG\",\"mexico\":[]}",
+    "{\"code\":\"GRK\",\"mexico\":[]}",
+    "{\"code\":\"LRD\",\"mexico\":[]}",
+    "{\"code\":\"MFE\",\"mexico\":[\"MEX\",\"SLP\"]}",
+    "{\"code\":\"SJT\",\"mexico\":[]}",
+    "{\"code\":\"SPS\",\"mexico\":[]}",
+    "{\"code\":\"TYR\",\"mexico\":[]}",
+    "{\"code\":\"VCT\",\"mexico\":[]}",
+    "{\"code\":\"AFW\",\"mexico\":[]}",
+    "{\"code\":\"DRT\",\"mexico\":[]}"
+   ]
+  },
+  "pg-uk-to-us": {
+   "query": "g.V().has('airport','country','UK').where(__.out().has('country','US')).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"LHR\"",
+    "\"LGW\"",
+    "\"MAN\"",
+    "\"STN\"",
+    "\"EDI\"",
+    "\"GLA\"",
+    "\"BRS\"",
+    "\"BHX\"",
+    "\"BFS\"",
+    "\"DSA\""
+   ]
+  },
+  "pg-unfold-group": {
+   "query": "g.V().has('airport','country','IE').groupCount().by('region').unfold().count()",
+   "source": "tinkergraph",
+   "results": [
+    "7l"
+   ]
+  },
+  "pg-unordered-limit": {
+   "query": "g.V().has('code','AUS').out().limit(10).values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"PHL\"",
+    "\"PDX\"",
+    "\"DTW\"",
+    "\"OKC\"",
+    "\"ONT\"",
+    "\"CLT\"",
+    "\"CUN\"",
+    "\"MEM\"",
+    "\"CVG\"",
+    "\"IND\""
+   ]
+  },
+  "pg-until-lhr": {
+   "query": "g.V().has('code','SAF').repeat(__.out().simplePath()).until(__.has('code','LHR').or().loops().is(2)).has('code','LHR').path().by('code').count()",
+   "source": "tinkergraph",
+   "results": [
+    "4l"
+   ]
+  },
+  "pg-us-airports": {
+   "query": "g.V().has('airport','country','US').count()",
+   "source": "tinkergraph",
+   "results": [
+    "586l"
+   ]
+  },
+  "pg-us-regions": {
+   "query": "g.V().hasLabel('airport').has('country','US').values('region').dedup().count()",
+   "source": "tinkergraph",
+   "results": [
+    "51l"
+   ]
+  },
+  "pg-us-regions-dedup": {
+   "query": "g.V().hasLabel('airport').has('country','US').dedup().by('region').count()",
+   "source": "tinkergraph",
+   "results": [
+    "51l"
+   ]
+  },
+  "pg-us-to-lhr": {
+   "query": "g.V().hasLabel('airport').where(__.out().has('code','LHR')).has('country','US').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"ATL\"",
+    "\"AUS\"",
+    "\"BNA\"",
+    "\"BOS\"",
+    "\"BWI\"",
+    "\"DFW\"",
+    "\"IAD\"",
+    "\"IAH\"",
+    "\"JFK\"",
+    "\"LAX\"",
+    "\"MIA\"",
+    "\"MSP\"",
+    "\"ORD\"",
+    "\"PHX\"",
+    "\"RDU\"",
+    "\"SEA\"",
+    "\"SFO\"",
+    "\"SJC\"",
+    "\"SAN\"",
+    "\"SLC\"",
+    "\"LAS\"",
+    "\"DEN\"",
+    "\"MSY\"",
+    "\"EWR\"",
+    "\"PHL\"",
+    "\"DTW\"",
+    "\"PIT\"",
+    "\"PDX\"",
+    "\"CLT\"",
+    "\"CHS\""
+   ]
+  },
+  "pg-version": {
+   "query": "g.V().hasLabel('version').values('code')",
+   "source": "tinkergraph",
+   "results": [
+    "\"1.0\""
+   ]
+  },
+  "pg-where-by": {
+   "query": "g.V().has('code','AUS').as('a').out().where(P.gt('a')).by('elev').order().by('code').values('code').limit(5)",
+   "source": "tinkergraph",
+   "results": [
+    "\"ABQ\"",
+    "\"AMA\"",
+    "\"ASE\"",
+    "\"ATL\"",
+    "\"BHM\""
+   ]
+  },
+  "pg-within-cities": {
+   "query": "g.V().has('airport','code',P.within('AUS','DFW','SAT')).values('city')",
+   "source": "tinkergraph",
+   "results": [
+    "\"Austin\"",
+    "\"Dallas\"",
+    "\"San Antonio\""
+   ]
+  },
   "rec-all-paths": {
    "query": "g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).path().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "path[\"marko\",\"lop\",\"peter\"]",
     "path[\"marko\",\"josh\",\"lop\",\"peter\"]"
@@ -920,85 +2633,81 @@
   },
   "rec-between-named": {
    "query": "g.V().has('name','marko').outE().where(__.inV().has('name','josh')).values('weight')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "1d"
    ]
   },
   "rec-between-vertices": {
    "query": "g.V(1).bothE().where(__.otherV().hasId(2)).values('weight')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "0.5d"
-   ],
-   "note": "edge 7 marko-knows->vadas"
+   ]
   },
   "rec-centrality-max": {
    "query": "g.V().group().by('name').by(__.both().count()).order(local).by(Column.values, desc).limit(local,1)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"josh\":3l}"
    ]
   },
   "rec-collection-size": {
    "query": "g.V().hasLabel('person').values('age').fold().count(local)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "4l"
    ]
   },
   "rec-collection-sorted": {
    "query": "g.V().hasLabel('person').values('name').order().fold()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "[\"josh\",\"marko\",\"peter\",\"vadas\"]"
    ]
   },
   "rec-crew-current-location": {
    "query": "g.V().hasLabel('person').project('name','current').by('name').by(__.properties('location').hasNot('endTime').value())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"current\":\"santa fe\",\"name\":\"marko\"}",
     "{\"current\":\"purcellville\",\"name\":\"stephen\"}",
     "{\"current\":\"seattle\",\"name\":\"matthias\"}",
     "{\"current\":\"aachen\",\"name\":\"daniel\"}"
-   ],
-   "note": "the location with no endTime"
+   ]
   },
   "rec-crew-locations-ordered": {
    "query": "g.V().has('name','marko').properties('location').order().by('startTime').value()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"san diego\"",
     "\"santa cruz\"",
     "\"brussels\"",
     "\"santa fe\""
-   ],
-   "note": "marko by startTime 1997, 2001, 2004, 2005"
+   ]
   },
   "rec-crew-where-2005": {
    "query": "g.V().hasLabel('person').where(__.properties('location').has('startTime',P.lte(2005)).has('endTime',P.gt(2005))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"stephen\"",
     "\"matthias\"",
     "\"daniel\""
-   ],
-   "note": "a location spanning 2005: stephen dulles 2000–2006, matthias bremen 2004–2007, daniel kaiserslautern 2005–2009; marko brussels ends AT 2005 and santa fe has no endTime"
+   ]
   },
   "rec-cycle-count": {
    "query": "g.V().as('a').repeat(__.both().simplePath()).times(2).where(__.both().as('a')).count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "6l"
    ]
   },
   "rec-cycle-triangles": {
    "query": "g.V().as('a').repeat(__.both().simplePath()).times(2).where(__.both().as('a')).path().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "path[\"marko\",\"josh\",\"lop\"]",
     "path[\"marko\",\"lop\",\"josh\"]",
+    "path[\"marko\",\"josh\",\"lop\"]",
     "path[\"lop\",\"marko\",\"josh\"]",
     "path[\"lop\",\"josh\",\"marko\"]",
     "path[\"josh\",\"lop\",\"marko\"]",
@@ -1007,7 +2716,7 @@
   },
   "rec-degree": {
    "query": "g.V().project('v','degree').by('name').by(__.bothE().count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"degree\":3l,\"v\":\"marko\"}",
     "{\"degree\":1l,\"v\":\"vadas\"}",
@@ -1019,36 +2728,33 @@
   },
   "rec-duplicate-edges": {
    "query": "g.E().group().by(__.project('o','i','l').by(__.outV().id()).by(__.inV().id()).by(T.label)).by(__.count()).unfold().where(__.select(Column.values).is(P.gt(1)))",
-   "source": "hand",
-   "results": [],
-   "note": "modern has no parallel edges"
+   "source": "tinkergraph",
+   "results": []
   },
   "rec-if-then-group": {
    "query": "g.V().hasLabel('person').groupCount().by(__.values('age').choose(__.is(P.lt(28)), __.constant('young'), __.choose(__.is(P.lt(30)), __.constant('old'), __.constant('very old'))))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"old\":1l,\"very old\":2l,\"young\":1l}"
-   ],
-   "note": "vadas 27 young; marko 29 old; josh 32 & peter 35 very old"
+   ]
   },
   "rec-in-degree": {
    "query": "g.V().group().by('name').by(__.inE().count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"josh\":1l,\"lop\":3l,\"marko\":0l,\"peter\":0l,\"ripple\":1l,\"vadas\":1l}"
    ]
   },
   "rec-induced-older-friends": {
    "query": "g.V().has('name','marko').as('m').out('knows').where(P.gt('m')).by('age').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\""
-   ],
-   "note": "marko 29 knows vadas 27 and josh 32"
+   ]
   },
   "rec-out-degree-top": {
    "query": "g.V().order().by(__.outE().count(), desc).by('name').limit(3).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -1057,7 +2763,7 @@
   },
   "rec-pagination-page": {
    "query": "g.V().hasLabel('person').order().by('name').range(0,2).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"marko\""
@@ -1065,54 +2771,57 @@
   },
   "rec-pagination-total": {
    "query": "g.V().hasLabel('person').fold().as('persons','count').select('persons','count').by(__.range(local,0,2)).by(__.count(local))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"count\":4l,\"persons\":[\"josh\",\"marko\"]}"
-   ],
-   "note": "one map (count-compared)"
+    "{\"count\":4l,\"persons\":[v[1],v[2]]}"
+   ]
   },
   "rec-recommend": {
    "query": "g.V().has('name','marko').out('created').aggregate('x').in('created').out('created').where(P.without('x')).groupCount().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"ripple\":1l}"
-   ],
-   "note": "co-creators of lop created lop×3 and ripple; without lop → ripple once"
+   ]
   },
   "rec-recommend-friends": {
    "query": "g.V().has('name','vadas').in('knows').out('knows').where(__.not(__.has('name','vadas'))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\""
    ]
   },
   "rec-sack-mult": {
    "query": "g.withSack(1.0d).V(1).repeat(__.outE().sack(mult).by('weight').inV()).times(2).sack()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "1d",
     "0.4d"
-   ],
-   "note": "1.0·1.0(marko→josh)·1.0(→ripple), ·0.4(→lop)"
+   ]
   },
   "rec-shortest-path": {
    "query": "g.V(1).repeat(__.out().simplePath()).until(__.hasId(5)).path().limit(1)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "path[v[1],v[4],v[5]]"
    ]
   },
   "rec-shortest-path-len": {
    "query": "g.V(1).repeat(__.both().simplePath()).until(__.hasId(6)).path().count(local).min()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "3l"
-   ],
-   "note": "marko→peter: marko-lop-peter (3) and marko-josh-lop-peter (4)"
+   ]
+  },
+  "rec-tree": {
+   "query": "g.V(1).out().out().tree().by('name')",
+   "source": "tinkergraph",
+   "results": [
+    "tree{\"marko\":tree{\"josh\":tree{\"lop\":tree{},\"ripple\":tree{}}}}"
+   ]
   },
   "seed-01": {
    "query": "g.V().has('person','name','marko').out('knows').values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\"",
     "\"josh\""
@@ -1120,7 +2829,7 @@
   },
   "seed-02": {
    "query": "g.V().hasLabel('person').where(__.out('created').has('lang','java')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -1129,24 +2838,24 @@
   },
   "seed-03": {
    "query": "g.V().hasLabel('person').where(__.out('knows').count().is(P.gt(0))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "seed-04": {
    "query": "g.V().hasLabel('person').project('name','friends','projects').by('name').by(__.out('knows').count()).by(__.out('created').values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"friends\":2l,\"name\":\"marko\",\"projects\":[\"lop\"]}",
     "{\"friends\":0l,\"name\":\"vadas\",\"projects\":[]}",
-    "{\"friends\":0l,\"name\":\"josh\",\"projects\":[\"lop\",\"ripple\"]}",
+    "{\"friends\":0l,\"name\":\"josh\",\"projects\":[\"ripple\",\"lop\"]}",
     "{\"friends\":0l,\"name\":\"peter\",\"projects\":[\"lop\"]}"
    ]
   },
   "seed-05": {
    "query": "g.V().hasLabel('person').project('n','avgw').by('name').by(__.outE('created').values('weight').mean())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"avgw\":0.4d,\"n\":\"marko\"}",
     "{\"n\":\"vadas\"}",
@@ -1156,7 +2865,7 @@
   },
   "seed-06": {
    "query": "g.V().hasLabel('person').order().by(__.outE('created').count(), desc).limit(2).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"marko\""
@@ -1164,29 +2873,29 @@
   },
   "seed-07": {
    "query": "g.V().hasLabel('person').group().by('age').by(__.values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{27i:[\"vadas\"],29i:[\"marko\"],32i:[\"josh\"],35i:[\"peter\"]}"
    ]
   },
   "seed-08": {
    "query": "g.V().hasLabel('person').groupCount().by(__.out('created').count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{0l:1l,1l:2l,2l:1l}"
    ]
   },
   "seed-09": {
    "query": "g.V().has('name','marko').repeat(__.out()).times(2).path().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "path[\"marko\",\"josh\",\"lop\"]",
-    "path[\"marko\",\"josh\",\"ripple\"]"
+    "path[\"marko\",\"josh\",\"ripple\"]",
+    "path[\"marko\",\"josh\",\"lop\"]"
    ]
   },
   "seed-10": {
    "query": "g.V().has('name','marko').repeat(__.both().simplePath()).until(__.has('name','ripple')).path().by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "path[\"marko\",\"josh\",\"ripple\"]",
     "path[\"marko\",\"lop\",\"josh\",\"ripple\"]"
@@ -1194,17 +2903,17 @@
   },
   "seed-11": {
    "query": "g.V().has('name','marko').repeat(__.out()).emit().values('name').dedup()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"josh\"",
     "\"lop\"",
-    "\"ripple\"",
-    "\"vadas\""
+    "\"vadas\"",
+    "\"josh\"",
+    "\"ripple\""
    ]
   },
   "seed-12": {
    "query": "g.V().has('name','marko').as('a').out('created').in('created').where(P.neq('a')).values('name').dedup()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"peter\""
@@ -1212,7 +2921,7 @@
   },
   "seed-13": {
    "query": "g.V().has('name','marko').out('created').in('created').where(__.not(__.has('name','marko'))).dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"peter\""
@@ -1220,7 +2929,7 @@
   },
   "seed-14": {
    "query": "g.V().match(__.as('a').out('created').as('b'), __.as('b').has('name','lop'), __.as('b').in('created').as('c')).select('a','c').by('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"a\":\"marko\",\"c\":\"marko\"}",
     "{\"a\":\"marko\",\"c\":\"josh\"}",
@@ -1235,7 +2944,7 @@
   },
   "seed-15": {
    "query": "g.V().hasLabel('person').coalesce(__.values('nickname'), __.values('name'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"vadas\"",
@@ -1245,17 +2954,17 @@
   },
   "seed-16": {
    "query": "g.V().hasLabel('person').choose(__.has('age',P.gt(30)), __.constant('old'), __.constant('young'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"old\"",
-    "\"old\"",
     "\"young\"",
-    "\"young\""
+    "\"young\"",
+    "\"old\"",
+    "\"old\""
    ]
   },
   "seed-17": {
    "query": "g.V().hasLabel('person').union(__.out('knows'), __.out('created')).dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"vadas\"",
     "\"josh\"",
@@ -1265,7 +2974,7 @@
   },
   "seed-18": {
    "query": "g.V().hasLabel('person').local(__.outE('created').order().by('weight',desc).limit(1)).inV().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\"",
@@ -1274,7 +2983,7 @@
   },
   "seed-19": {
    "query": "g.V().hasLabel('person').filter(__.or(__.has('age',P.gt(30)), __.out('created').has('lang','ripple'))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"peter\""
@@ -1282,14 +2991,14 @@
   },
   "seed-20": {
    "query": "g.V().hasLabel('person').and(__.out('knows'), __.out('created')).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\""
    ]
   },
   "seed-21": {
    "query": "g.V().hasLabel('person').where(__.out('created').where(__.in('created').count().is(P.gt(1)))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"josh\"",
@@ -1298,7 +3007,7 @@
   },
   "seed-22": {
    "query": "g.V().hasLabel('person').project('name','coworkers').by('name').by(__.out('created').in('created').where(__.not(__.has('name','marko'))).dedup().values('name').fold())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"coworkers\":[\"josh\",\"peter\"],\"name\":\"marko\"}",
     "{\"coworkers\":[],\"name\":\"vadas\"}",
@@ -1308,37 +3017,34 @@
   },
   "seed-23": {
    "query": "g.V().hasLabel('person').project('p','top').by('name').by(__.outE('created').order().by('weight',desc).limit(1).inV().project('n','l').by('name').by('lang'))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"p\":\"marko\",\"top\":{\"l\":\"java\",\"n\":\"lop\"}}",
     "{\"p\":\"vadas\"}",
     "{\"p\":\"josh\",\"top\":{\"l\":\"java\",\"n\":\"ripple\"}}",
     "{\"p\":\"peter\",\"top\":{\"l\":\"java\",\"n\":\"lop\"}}"
-   ],
-   "note": "top created edge by weight per person; vadas has none, so project() omits `top` (ProjectStep.map: only a productive by() is put)"
+   ]
   },
   "seed-24": {
    "query": "g.V().hasLabel('person').path().count(local)",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "1l",
     "1l",
     "1l",
     "1l"
-   ],
-   "note": "a one-vertex path has length 1 (Long)"
+   ]
   },
   "seed-25": {
    "query": "g.V().out().out().path().unfold().dedup().count()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "4l"
-   ],
-   "note": "paths marko→josh→ripple, marko→josh→lop; their vertices dedup to 4"
+   ]
   },
   "seed-26": {
    "query": "g.E().hasLabel('knows').project('from','to','w').by(__.outV().values('name')).by(__.inV().values('name')).by('weight')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"from\":\"marko\",\"to\":\"vadas\",\"w\":0.5d}",
     "{\"from\":\"marko\",\"to\":\"josh\",\"w\":1d}"
@@ -1346,15 +3052,15 @@
   },
   "seed-27": {
    "query": "g.V().hasLabel('software').project('name','creators','avgAge').by('name').by(__.in('created').values('name').fold()).by(__.in('created').values('age').mean())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"avgAge\":32d,\"creators\":[\"josh\",\"marko\",\"peter\"],\"name\":\"lop\"}",
+    "{\"avgAge\":32d,\"creators\":[\"marko\",\"josh\",\"peter\"],\"name\":\"lop\"}",
     "{\"avgAge\":32d,\"creators\":[\"josh\"],\"name\":\"ripple\"}"
    ]
   },
   "seed-28": {
    "query": "g.V().hasLabel('person').as('p').out('created').as('s').select('p','s').by('name').by('lang')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"p\":\"marko\",\"s\":\"java\"}",
     "{\"p\":\"josh\",\"s\":\"java\"}",
@@ -1364,24 +3070,22 @@
   },
   "seed-29": {
    "query": "g.V().hasLabel('person').sideEffect(__.out('created').aggregate('x')).cap('x').unfold().dedup().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"lop\"",
     "\"ripple\""
-   ],
-   "note": "created = lop×3, ripple"
+   ]
   },
   "seed-30": {
    "query": "g.V().hasLabel('person').map(__.out('created').values('name').fold()).where(__.count(local).is(P.gt(1)))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "[\"lop\",\"ripple\"]"
-   ],
-   "note": "only josh created more than one"
+    "[\"ripple\",\"lop\"]"
+   ]
   },
   "seed-31": {
    "query": "g.V().hasLabel('person').where(__.values('age').is(P.between(28,33))).elementMap()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{\"age\":29i,\"name\":\"marko\",T.id:1i,T.label:\"person\"}",
     "{\"age\":32i,\"name\":\"josh\",T.id:4i,T.label:\"person\"}"
@@ -1389,24 +3093,24 @@
   },
   "seed-32": {
    "query": "g.V().has('name','marko').repeat(__.out().where(__.has('age').or().hasLabel('software'))).times(2).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "\"lop\"",
-    "\"ripple\""
+    "\"ripple\"",
+    "\"lop\""
    ]
   },
   "seed-33": {
    "query": "g.V().has('name','marko').bothE().otherV().values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
+    "\"lop\"",
     "\"vadas\"",
-    "\"josh\"",
-    "\"lop\""
+    "\"josh\""
    ]
   },
   "seed-34": {
    "query": "g.V().hasLabel('person').optional(__.out('knows').has('age',P.gt(30))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"vadas\"",
@@ -1416,18 +3120,17 @@
   },
   "seed-35": {
    "query": "g.V().hasLabel('person').project('n','k').by('name').by(__.coalesce(__.out('knows').values('name').fold(), __.constant([])))",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
-    "{\"k\":[\"josh\",\"vadas\"],\"n\":\"marko\"}",
+    "{\"k\":[\"vadas\",\"josh\"],\"n\":\"marko\"}",
     "{\"k\":[],\"n\":\"vadas\"}",
     "{\"k\":[],\"n\":\"josh\"}",
     "{\"k\":[],\"n\":\"peter\"}"
-   ],
-   "note": "fold() always yields, so coalesce takes its first arm; [] for people who know no one"
+   ]
   },
   "seed-36": {
    "query": "g.V().hasLabel('person').fold().unfold().has('age',P.gt(30)).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"josh\"",
     "\"peter\""
@@ -1435,7 +3138,7 @@
   },
   "seed-37": {
    "query": "g.V().hasLabel('person').order().by(__.values('name'), asc).range(1,3).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"peter\""
@@ -1443,21 +3146,21 @@
   },
   "seed-38": {
    "query": "g.V().hasLabel('person').group().by(__.out('created').values('lang').fold()).by(__.count())",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "{[\"java\",\"java\"]:1l,[\"java\"]:2l,[]:1l}"
    ]
   },
   "seed-39": {
    "query": "g.V().hasLabel('person').values('age').sum()",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "123i"
    ]
   },
   "seed-40": {
    "query": "g.V().hasLabel('person').where(__.both().both().count().is(P.gte(3))).values('name')",
-   "source": "hand",
+   "source": "tinkergraph",
    "results": [
     "\"marko\"",
     "\"vadas\"",

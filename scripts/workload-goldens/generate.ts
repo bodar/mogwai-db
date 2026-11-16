@@ -34,7 +34,7 @@
 // is smoke-tested without docker (`bun src/bun/server.ts --port 18182` then
 // `--url http://localhost:18182 --alias wl-modern --seed --graph modern --dry`).
 import { parseArgs } from 'node:util';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CORPUS, type GraphName, type WorkloadQuery } from '../../test/L6-workload/corpus.ts';
@@ -83,6 +83,9 @@ async function submit(base: string, alias: string, gremlin: string): Promise<{ v
 /** Start a Gremlin Server for one dataset; returns its base URL and a stop function. */
 async function startServer(graph: GraphName): Promise<{ base: string; stop: () => void }> {
   const dir = mkdtempSync(join(tmpdir(), 'mogwai-wl-'));
+  // The image's entrypoint edits the yaml IN PLACE (`sed -i` on `host:`), as the container's `gremlin`
+  // user, so the mounted dir must be writable by that user, and it cannot be mounted read-only.
+  chmodSync(dir, 0o777);
   writeFileSync(join(dir, 'tinkergraph-int.properties'), [
     'gremlin.graph=org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerGraph',
     'gremlin.tinkergraph.vertexIdManager=INTEGER',
@@ -107,11 +110,24 @@ async function startServer(graph: GraphName): Promise<{ base: string; stop: () =
     'resultIterationBatchSize: 64',
     '',
   ].join('\n'));
-  const id = sh(['docker', 'run', '-d', '--rm', '-p', '127.0.0.1::8182', '-v', `${dir}:/opt/gremlin-server/conf/workload:ro`,
+  // NOT `--rm`: a container that dies at start-up must keep its logs until we have printed them.
+  const id = sh(['docker', 'run', '-d', '-p', '127.0.0.1::8182', '-v', `${dir}:/opt/gremlin-server/conf/workload`,
     args.image!, 'conf/workload/workload.yaml']);
   const stop = () => { try { sh(['docker', 'rm', '-f', id]); } catch { /* already gone */ } };
+  const logs = () => { try { return sh(['docker', 'logs', id]).slice(-4000); } catch (e) { return String(e); } };
+  const died = (why: string) => new Error(`gremlin-server for ${graph} ${why}. Container logs:\n${logs()}`);
   try {
-    const port = sh(['docker', 'port', id, '8182/tcp']).split('\n')[0]!.split(':').pop();
+    // The port mapping appears only once the container is RUNNING. A container that exits on a bad
+    // config never publishes it, so check that it is still alive before each lookup.
+    let port: string | undefined;
+    for (let i = 0; i < 30 && port === undefined; i++) {
+      const running = Bun.spawnSync(['docker', 'inspect', '-f', '{{.State.Running}}', id], { stdout: 'pipe' }).stdout.toString().trim();
+      if (running !== 'true') throw died('exited at start-up');
+      const r = Bun.spawnSync(['docker', 'port', id, '8182/tcp'], { stdout: 'pipe', stderr: 'pipe' });
+      if (r.exitCode === 0) port = r.stdout.toString().split('\n')[0]!.split(':').pop();
+      else await Bun.sleep(500);
+    }
+    if (port === undefined) throw died('never published port 8182');
     const base = `http://127.0.0.1:${port}`;
     for (let i = 0; i < 180; i++) {
       try { const r = await submit(base, 'g', 'g.inject(1)'); if (r.values) return { base, stop }; } catch { /* not up yet */ }
