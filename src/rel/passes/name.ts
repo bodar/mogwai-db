@@ -1,6 +1,7 @@
 import { CopiedDraw } from '../../sql/kernel/budget.ts';
 import { draws } from '../copies.ts';
-import { ref } from '../factory.ts';
+import { materialize, ref } from '../factory.ts';
+import { relId } from '../types.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
 import { exprRels, forEachExpr, isSelfContained, relChildren, relExprs, rewriteRels } from '../walk.ts';
@@ -96,16 +97,22 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
    * correlated subquery is re-evaluated per reference, measured), so this declines. A bound one is a CTE,
    * and a CTE read twice is evaluated once only when SQLite cannot flatten it into its readers: a CTE
    * whose top SELECT is a plain projection or filter IS flattened into each reader, under a plain compound
-   * and a MERGE UNION ALL alike (measured; `copyRepeatsWork`, `src/rel/copies.ts`). The drawing relations
-   * that reach here — a shuffle `order()` (its `ORDER BY … LIMIT` or position window) and `sample()` (its
-   * draw window) — keep that barrier at the CTE's top, so each is materialized once and its readers agree
-   * (`g.V().order().by(shuffle).limit(1).as('x').union(identity(), identity()).select('x').dedup().count()`
-   * is always 1). A reader that can read its input once instead (`hopJoin`'s direction row) asks
+   * and a MERGE UNION ALL alike (measured; `copyRepeatsWork`, `src/rel/copies.ts`). So a bound relation that
+   * DRAWS is FENCED (`fencedDraw` below): its CTE renders `AS MATERIALIZED`, evaluated once, and every reader
+   * sees one pick. Its top need not be a barrier — a per-scope draw the decorrelator keyed
+   * (`src/rel/decorrelate.ts`) tops out in the `ROW_NUMBER` filter's projection, which SQLite flattened into
+   * each reader: `local(out().order().by(shuffle).limit(1).union(identity(), identity()).dedup().count())`
+   * answered 2 (measured). A reader that can read its input once instead (`hopJoin`'s direction row) asks
    * `doubledReads` first and never reaches here.
    */
   for (const [rel, seen] of counts) {
     if (seen > 1 && !isRoot.has(rel) && !binds(rel) && draws(rel)) throw new CopiedDraw();
   }
+  /** A shared, bound relation that draws, as the fenced `Materialize` its CTE must be (see above). */
+  const fencedDraw = (original: Rel, mapped: Rel): Rel =>
+    (counts.get(original) ?? 0) > 1 && draws(original) && !(mapped.kind === 'materialize' && mapped.fenced)
+      ? materialize({ id: relId(`${original.id}_draw`), input: mapped, channels: mapped.channels, type: mapped.type, fenced: true })
+      : mapped;
 
   const bindings: Binding[] = [];
   // Bottom-up and memoised — ONE memo across every root — so a binding is pushed after every binding it
@@ -119,7 +126,7 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
     const declared = original.kind === 'recursive' ? original.name
       : original.kind === 'materialize' ? original.name : undefined;
     const bound = declared ?? generate();
-    bindings.push({ name: bound, node: mapped });
+    bindings.push({ name: bound, node: fencedDraw(original, mapped) });
     return ref({ id: original.id, name: bound, channels: mapped.channels, type: mapped.type });
   }, memo);
   for (const binding of hoisted) {

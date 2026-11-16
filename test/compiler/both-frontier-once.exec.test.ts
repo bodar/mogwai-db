@@ -393,16 +393,20 @@ describe('a drawing frontier is read once — no reader mixes two picks', () => 
     expect(sqlOf('g.V(1).local(__.out().order().by(shuffle).limit(1).both().count())')).toContain('VALUES (0), (1)');
   });
 
-  // Two BRANCHES over one drawn frontier cannot read it once: each arm is its own reference, and SQLite has
-  // no way to evaluate a correlated relation once for two readers. They answered 5 and 11 — counts no single
-  // pick has — so they decline, naming the draw and the spelling that answers (the test above). optional()
-  // and coalesce() are two branches too (an arm and its absence test): they answered 0 and 5.
-  for (const q of ['g.V(1).local(__.out().order().by(shuffle).limit(1).union(__.out(), __.in()).count())',
-    'g.V(1).local(__.out().order().by(shuffle).limit(1).optional(__.out()).count())',
-    'g.V(1).local(__.out().order().by(shuffle).limit(1).coalesce(__.out(), __.in()).count())',
-    "g.V(1).local(__.out().order().by(shuffle).limit(1).choose(__.hasLabel('software'), __.in(), __.out()).both().count())"]) {
-    test(`declines, naming the draw: ${q}`, () => {
-      expect(() => compile(q, {})).toThrow(/random draw .* more than one branch reads/);
+  // Two BRANCHES over one drawn frontier: each arm is its own reference, and SQLite has no way to evaluate a
+  // CORRELATED relation once for two readers. They answered 5 and 11 — counts no single pick has — and
+  // optional()/coalesce() (an arm and its absence test) 0 and 5, so they used to decline. A drawing body now
+  // always takes the DECORRELATED form (`scopedBody`, src/compiler/rel/lower/scoped.ts): the draw is keyed by
+  // the scope, the relation is self-contained, and `name` binds it as a FENCED CTE that every arm reads — one
+  // pick per traverser. Each answer is therefore one pick's: v1's out-neighbours 2, 3 and 4.
+  for (const [q, picks] of [
+    ['g.V(1).local(__.out().order().by(shuffle).limit(1).union(__.out(), __.in()).count())', [1, 3]],
+    ['g.V(1).local(__.out().order().by(shuffle).limit(1).optional(__.out()).count())', [1, 2]],
+    ['g.V(1).local(__.out().order().by(shuffle).limit(1).coalesce(__.out(), __.in()).count())', [1, 2, 3]],
+    ["g.V(1).local(__.out().order().by(shuffle).limit(1).choose(__.hasLabel('software'), __.in(), __.out()).both().count())", [0, 4, 7]],
+  ] as const) {
+    test(`two branches read one pick: ${q} is one of ${picks.join('/')}`, () => {
+      for (const n of scalars(q)) expect(picks as readonly number[]).toContain(Number(n));
     });
   }
 });

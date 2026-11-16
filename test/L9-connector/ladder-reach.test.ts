@@ -14,9 +14,11 @@ const store = seeded(MODERN_SEED);
 const run = (q: string) => reach([{ pool: 'W', q, store }]);
 
 describe('L9 — ladder reach engine', () => {
-  test('a draw a later step filters, under an existence host: the default answers, the connector alone declines', () => {
+  test('a draw a later step filters, under an existence host: CLOSED (R2b) — the connector alone answers it, per scope row', () => {
+    // A draw is the connector's: always decorrelated, one draw per host row (`scopedBody`, `decorrelate.ts`).
+    // A random answer is left out of `differ` (two runs of it differ whatever the modes do).
     const r = run("g.V().where(out().sample(1).has('age')).values('name')");
-    expect(r.ladderOnly.map((x) => [x.family, x.rescued])).toEqual([['existence', false]]);
+    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, pools: r.pools.W }).toEqual({ ladderOnly: 0, differ: [], pools: { queries: 1, byDefault: 1, connectorOnly: 1 } });
   });
 
   // A TRAILING draw is trimmed from an existence body (`existencePrefix`), so the connector answers it.

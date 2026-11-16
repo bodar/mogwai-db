@@ -87,10 +87,11 @@ while what they operate on keeps TinkerPop's.
     joins `LADDERLESS` (`lower/scoped.ts`, so the dispatch offers no ladder there); every route still standing is
     in the plan's "Kept routes" catalogue with its margin, its sole-answer queries and the owner's call to make.
   - The two orders are each other's fallback at a site and `bothChildOrders` (`rel/spine.ts`) retries a
-    declining compile in the other order, so the switch never decides coverage. A body that draws stays
-    the ladder's (`scopedBody`); a body that re-sources (`V()`/`E()`) is the connector's alone
-    (`reSourcedBody`, `connectorOwns`) — its read after the re-source is one uncorrelated relation crossed
-    with the host, so a productive null is a row.
+    declining compile in the other order, so the switch never decides coverage. A body that re-sources
+    (`V()`/`E()`) is the connector's alone (`reSourcedBody`, `connectorOwns`) — its read after the re-source is
+    one uncorrelated relation crossed with the host, so a productive null is a row. A body that DRAWS is the
+    connector's too and always DECORRELATED (never `correlatedBody`): a draw counts as touching the scope in
+    `decorrelate.ts`, so it is one draw per scope row, and `name.ts` fences a shared drawing CTE.
   - **Three CI guards hold this direction:** `mise run ladder` (the `return null` count in `rel/` never rises —
     the total, and per file for the ladder files; the connector's own `scoped.ts` is outside the total because
     L9 guards its reach by coverage, not by site count), and L9 (`test/L9-connector/`): the host-closure ratchet with the

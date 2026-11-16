@@ -201,6 +201,9 @@ function reSourcedBody(
   // A prefix that may lose or multiply its row is GraphStep's own cross join, in the fold — which also asks the
   // explained admission rule of a discarded label read (`reSourceTail`'s `admitsReSource`).
   if (!exactlyOneRow(prefix.rel)) return undefined;
+  // A rest that DRAWS is one draw PER host traverser (`scopedBody`), never one read shared by every scope: it is
+  // GraphStep's own cross join, in the fold, where the decorrelator keys the draw by the scope.
+  if (nondeterministic(body.slice(at), ctx.params)) return undefined;
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
   // own. A path is extended by the split and an entering vertex is a hop's: neither is a contract this cross
@@ -239,28 +242,28 @@ function reSourcedBody(
   return { rel, framing: rooted.framing, aliases: prefix.aliases, bulked: !!rooted.bulked };
 }
 
-/** A host whose child body RE-SOURCES at its top level (and does not draw) is the connector's alone
+/** A host whose child body RE-SOURCES at its top level is the connector's alone
  *  (`reSourcedBody`): the ladder's re-source is a scalar first-row read that cannot tell a productive null from
  *  no row, so offering it as a route would answer the same query two ways. */
 export const connectorOwns = (step: IRStep, ctx: ChainCtx): boolean => step.args.some((arg) => {
   if (!isNested(arg.value)) return false;
   const body = bodyOf(arg.value.nested, ctx.params, ctx.sideEffects);
-  return !!body && reSourceAt(body) >= 0 && !ladderOwns(body, ctx);
+  return !!body && reSourceAt(body) >= 0;
 });
-
-/** A body that DRAWS stays the ladder's (`scopedBody` says why). */
-const ladderOwns = (body: readonly IRStep[], ctx: ChainCtx): boolean => nondeterministic(body, ctx.params);
 
 /** Step 2: the body, lowered as the root lowers a chain, then keyed by the scope. `null` declines. */
 function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
   order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null, first = false,
 ): ScopedBody | null {
-  // A random DRAW (`sample`/`coin`/`shuffle`, at any depth) stays the ladder's, for a reason about the QUERY
-  // TEXT: the decorrelated body draws over every scope at once, and a draw in a part that does not read the host
-  // would be one draw SHARED by every scope, the exact defect the ladder's `shared-draw` decline names. (A
-  // RE-SOURCE is the connector's own: `reSourcedBody`.)
-  if (ladderOwns(body, ctx)) return null;
+  // A RE-SOURCE is the connector's own (`reSourcedBody`).
+  //
+  // A random DRAW (`sample`/`coin`/`shuffle`, at any depth) is the connector's, and this is the form that
+  // answers it: the reference hands the body ONE traverser at a time (`TraversalUtil.apply`,
+  // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java),
+  // so it draws once PER SCOPE ROW. The decorrelator counts a draw as touching the scope (`decorrelate`), so
+  // the domain is pushed beneath it and every `ORDER BY RANDOM()`/`ROW_NUMBER` it feeds is partitioned by the
+  // scope key — one sort, linear in the rows drawn from, and no pick shared by two scopes.
   const lowered = lowerBody(body, rel, sc.scoped, framing, ctx, fresh, labels, order, positionedSeed, first);
   // A body with EFFECTS is not a read the connector may evaluate per scope.
   if (!lowered || lowered.effects?.length) return null;
@@ -280,7 +283,6 @@ function scopedBody(
 function rootedBody(
   body: readonly IRStep[], root: LandedRoot, rel: Rel, sc: Scope, ctx: ChainCtx, fresh: Minter, reframe: (tail: Tail) => Tail | null,
 ): ScopedBody | null {
-  if (ladderOwns(body, ctx)) return null;
   const type = typeOf(meta('id', 'int'), meta(sc.key, 'int'));
   const located = make.project({
     id: fresh('sbr'), input: sc.scoped, channels: [], type,
@@ -309,7 +311,10 @@ function correlatedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
   order?: 'free' | 'read', first = false,
 ): Tail | null {
-  if (ladderOwns(body, ctx)) return null;
+  // A body that DRAWS never stays correlated: SQLite may evaluate a subquery (or a part of one) that does not
+  // read the host ONCE for every host row, so a draw there would be one pick shared by every scope. It takes
+  // the decorrelated form (`scopedBody`), which keys the draw per scope by construction.
+  if (nondeterministic(body, ctx.params)) return null;
   const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order, false, first);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
@@ -1735,7 +1740,7 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
     aggs: [[KEY, firstArrival(col(members.id, KEY), enc ? [col(members.id, enc.col)] : [])]],
   });
   const sc = scope(domain, fresh);
-  if (ladderOwns(body, ctx)) return null;
+  if (nondeterministic(body, ctx.params)) return null;
   // THE POOL'S TRAVERSERS: the members themselves — or, where the pre-barrier part must run per member
   // (`perMember`), each member's own results of it: that part lowered as a `local()` body over the members (the
   // connector's `forward` rejoin, host-major then the body's order), each result keeping its member's key terms
@@ -1881,9 +1886,8 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
 const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union', 'where', 'filter', 'not', 'and', 'or']);
 /** The hosts whose connector row (`byValues`) claims only the argument-free form. */
 const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
-/** The EXISTENCE hosts, LADDERLESS except over a body the connector leaves to the ladder by design
- *  (`ladderOwns`: a draw or a re-source, `docs/2026-11-16-ladder-retirement-plan.md` R2/R4) — the one form of
- *  their route still standing. */
+/** The EXISTENCE hosts, LADDERLESS except over a body that does not resolve (`bodyOf`). A draw and a re-source
+ *  are the connector's (`docs/2026-11-16-ladder-retirement-plan.md` R2b/R4.3/R4.4). */
 const EXISTENCE_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or']);
 const ladderless = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =>
   LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar')
@@ -1891,7 +1895,7 @@ const ladderless = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =
   && (!EXISTENCE_HOSTS.has(step.name) || ![...step.args.map((arg) => arg.value), ...(step.modulators ?? []).flat()].some((value) => {
     if (!isNested(value)) return false;
     const body = bodyOf(value.nested, ctx.params, ctx.sideEffects);
-    return !body || ladderOwns(body, ctx);
+    return !body;
   }));
 
 /**

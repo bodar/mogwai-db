@@ -52,7 +52,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[6].l |
 
-  @Unsupported
   Scenario: g_V_coalesceXout_sampleX1X__constantXxXX_count
     Given the modern graph
     And the traversal of
@@ -101,7 +100,6 @@ Feature: mogwai addendum — user input never reaches a RelIR internal error; a 
       | result |
       | d[6].l |
 
-  @Unsupported
   Scenario: g_V_optionalXout_sampleX1XX_count
     Given the modern graph
     And the traversal of

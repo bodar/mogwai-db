@@ -44,7 +44,7 @@ import type { RelId } from './types.ts';
  */
 export const draws: (r: Rel) => boolean = nodeFact((r: Rel): boolean =>
   relExprs(r).some(exprDraws) || relChildren(r).some(draws));
-const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
+export const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
   if (isAbort(e)) return false;
   if (e.kind === 'call' && e.fn.toUpperCase() === 'RANDOM') return true;
   return exprChildren(e).some(exprDraws) || exprRels(e).some(draws);

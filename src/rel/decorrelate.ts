@@ -1,4 +1,5 @@
 import { atMostOneRow, rowBounds } from './bounds.ts';
+import { draws, exprDraws } from './copies.ts';
 import type { Expr } from './expr.ts';
 import { and, col, compilerInt, compilerNull, compilerText, eq } from './expr.ts';
 import * as make from './factory.ts';
@@ -272,8 +273,14 @@ export function decorrelate(plan: Rel, outer: Rel, key: string, fresh: Minter, p
       const self = selfs.get(r.id);
       return self ? { rel: self, keyed: true } : { rel: r, keyed: false };
     }
-    if (!freeRelIds(r).has(h) && !touchesSelf(r)) return { rel: r, keyed: false };
-    const own = relExprs(r).some(exprTouches);
+    // A DRAW counts as touching the scope (`draws`, `src/rel/copies.ts`): the correlated plan drew once PER
+    // OUTER ROW, so a subtree that draws is NOT the same relation for every key, even where it reads nothing of
+    // the outer row (`local(inject(1,2,3).sample(1))`, a re-source's `V().sample(1)`). Left unkeyed it would be
+    // one pick shared by every key. Keyed, the domain enters beneath the draw and the existing rules scope it —
+    // the `ORDER BY RANDOM()` of a `Sort`/`Window` partitioned by the key, a `Limit` a per-key `ROW_NUMBER` —
+    // so it is one sort over the rows drawn from, never a draw per key evaluated separately.
+    if (!freeRelIds(r).has(h) && !touchesSelf(r) && !draws(r)) return { rel: r, keyed: false };
+    const own = relExprs(r).some((e) => exprTouches(e) || exprDraws(e));
     switch (r.kind) {
       case 'scan': case 'ref': return { rel: r, keyed: false };
       case 'values': {
