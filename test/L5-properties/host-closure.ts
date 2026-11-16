@@ -65,6 +65,9 @@ export interface SweepResult {
   readonly knownHits: Map<string, number>;
   /** Per law: evaluated / skipped-indeterminate. */
   readonly laws: Map<string, { evaluated: number; indeterminate: number }>;
+  /** Every host query (levels 1–3) with its outcome under the sweep's configuration — so a caller comparing
+   *  configurations (L9's ladder-reach ratchet) compiles each in this one only once. */
+  readonly outcomes: ReadonlyMap<string, Outcome>;
 }
 
 const total = (w: W): bigint => [...w.values()].reduce((a, b) => a + b, 0n);
@@ -127,7 +130,9 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
   const divergences: string[] = [];
   const knownHits = new Map<string, number>();
   const unrun: Record<string, string[]> = {};
+  const outcomes = new Map<string, Outcome>();
   const tally = (host: string, lvl: Level, q: string, o: Outcome) => {
+    outcomes.set(q, o);
     table[host]![lvl].applicable++;
     if (o.kind === 'rows') table[host]![lvl].executed++;
     else (unrun[`${host}@${lvl}`] ??= []).push(q);
@@ -280,7 +285,7 @@ export function sweep(store: GraphStore, seed: number, want: number, body: Budge
     }
   });
 
-  return { drawn, cases: cases.length, fingerprint, table, internal, declined, unrun, divergences, knownHits, laws };
+  return { drawn, cases: cases.length, fingerprint, table, internal, declined, unrun, divergences, knownHits, laws, outcomes };
 }
 
 export const rate = (t: Tally): number => (t.applicable === 0 ? 1 : t.executed / t.applicable);

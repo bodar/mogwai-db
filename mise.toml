@@ -381,6 +381,15 @@ description = "Re-record the L9 connector-only closure baseline (commit test/L9-
 depends = ["install", "check", "submodule"]
 run = "L9_CONNECTOR_RECORD=1 bun test test/L9-connector/connector-closure.test.ts"
 
+# Re-record L9's ladder-reach ratchet (test/L9-connector/ladder-reach-baseline.json) — the ladder-only answer count
+# per pool × family and the bothChildOrders rescue count (docs/2026-11-16-ladder-retirement-plan.md R0). A command
+# for connector-record's reason: run it when a count FELL (the test prints the hint) or a pool changed size; an
+# upward re-record needs its reason in the commit message.
+[tasks.ladder-reach-record]
+description = "Re-record the L9 ladder-reach baseline (commit test/L9-connector/ladder-reach-baseline.json)"
+depends = ["install", "check", "submodule"]
+run = "L9_REACH_RECORD=1 bun test test/L9-connector/connector-closure.test.ts -t 'ladder reach'"
+
 # The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
 # has not CHANGED. `submodule` because it executes traversals (same reason as L5). It lives in
 # `test/L7-census/` so the CI bracket function gives it its OWN runner (`test (L7)`) instead of dragging
@@ -423,6 +432,15 @@ run = "bun scripts/coverage-attribution.ts"
 description = "Scaling probe: probe shapes at 1k/8k, ladder vs connector vs connector-only (ms, SQL bytes, joins)"
 depends = ["install"]
 run = "bun scripts/scaling-probe.ts"
+
+# The ladder-reach instrument (docs/2026-11-16-ladder-retirement-plan.md R0): what the default answers and the
+# connector ALONE does not, per pool × family, plus the bothChildOrders rescues — over L1, L6 and the generator's
+# hosts at level 1 and every level-2 pair (~25k traversals). The GATE is L9's ratchet over L9's pools; this wider
+# sample is an INSTRUMENT (minutes), deliberately not in `ci`. `-- --list` prints every ladder-only traversal.
+[tasks.ladder-reach]
+description = "Ladder reach: traversals the default answers and the connector alone does not, per pool × family (+ retry rescues)"
+depends = ["install", "submodule"]
+run = "bun scripts/ladder-reach.ts"
 
 [tasks.census-record]
 description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"

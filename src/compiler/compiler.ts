@@ -188,6 +188,7 @@ function compileUnguarded(gremlin: string, wireParams: Record<string, any>, opti
     ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,
     correlatedChild: connectorOnly ? false : request.fastPaths.correlatedChild,
     connectorOnly,
+    childOrderRetry: request.fastPaths.childOrderRetry ?? true,
     detached: options?.detached ?? false,
     labelRegime: labelRegime(request.sourceOptions),
     services: servicesNamedBy(steps, request.params, request.registry),

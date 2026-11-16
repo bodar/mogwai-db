@@ -36,6 +36,8 @@ export interface RelRequest {
   readonly correlatedChild: boolean;
   /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): no ladder at any site, no retry. */
   readonly connectorOnly?: boolean;
+  /** The retry measurement mode (`FastPathConfig.childOrderRetry`): `false` lowers in the first child order only. */
+  readonly childOrderRetry?: boolean;
   /** DETACHED-transfer compile mode (set only by `runForeign()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
@@ -178,7 +180,8 @@ function bothChildOrders<T>(request: RelRequest, lower: (attempt: RelRequest) =>
   const first = attempt(request.correlatedChild);
   // The measurement knob reads the connector ALONE, so it never falls back to the other order.
   if (first.lowered) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
-  if (request.connectorOnly) return declined(first);
+  // So does the retry measurement mode, which counts what the second order rescues.
+  if (request.connectorOnly || request.childOrderRetry === false) return declined(first);
   const second = attempt(!request.correlatedChild);
   if (second.lowered) { if (second.sink) root!.adopt(second.sink); return second.lowered; }
   return declined(first, second);

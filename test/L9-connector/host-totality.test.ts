@@ -96,6 +96,14 @@ describe('L9 — host totality', () => {
     expect(Object.entries(DEFERRED_HOSTS).filter(([, d]) => !d.reason.trim() || !d.blocker.trim()).map(([k]) => k)).toEqual([]);
   });
 
+  test('every deferral is classified as in the ladder retirement\'s scope or host-owned', () => {
+    // docs/2026-11-16-ladder-retirement-plan.md R0: the end state has an exact scope only if each deferral says
+    // which it is. Checked at RUN time too, since an `as Deferred` cast would let a missing field type-check.
+    expect(Object.entries(DEFERRED_HOSTS).filter(([, d]) => d.scope !== 'ladder' && d.scope !== 'host-owned').map(([k]) => k)).toEqual([]);
+    const ladder = Object.keys(DEFERRED_HOSTS).filter((k) => DEFERRED_HOSTS[k]!.scope === 'ladder');
+    summary(`  deferred: ${ladder.length} in the ladder retirement's scope (R6), ${Object.keys(DEFERRED_HOSTS).length - ladder.length} host-owned`);
+  });
+
   test('the discovery is live (each source finds positions, and the known connector hosts among them)', () => {
     // A discovery that silently found nothing would pass the totality test vacuously.
     expect(grammar.size).toBeGreaterThan(20);

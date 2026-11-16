@@ -129,7 +129,13 @@
   queries that newly decline; internal errors and law divergences fail as in L5; re-record with
   `mise run connector-record` (a downward one needs its reason). (2) Host totality: every child-taking position
   — derived from the grammar, the L1 corpus and L5's `hosts.ts` — is a `CONNECTORS` row or a
-  `deferred-hosts.ts` entry with its reason and blocker, so a new host cannot quietly get a route of its own.
+  `deferred-hosts.ts` entry with its reason, blocker and retirement `scope` (`ladder` | `host-owned`), so a new
+  host cannot quietly get a route of its own. (3) The LADDER-REACH ratchet (same file as (1), sharing its sweep;
+  engine `ladder-reach.ts`): the traversals the default answers and the connector alone does not, per pool (L1,
+  L6, the sweep's host queries) × family, and the answers only `bothChildOrders`' second order rescues
+  (`FastPathConfig.childOrderRetry: false`), in `ladder-reach-baseline.json` — neither may rise, and where both
+  modes answer the multisets must agree. Re-record with `mise run ladder-reach-record`; the wider ~25k sample is
+  the instrument `mise run ladder-reach`.
   Its static sibling is `mise run ladder` (in `gates`): the `return null` count in `src/compiler/rel/` never rises.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
   (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they

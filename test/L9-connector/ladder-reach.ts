@@ -1,0 +1,182 @@
+// LADDER REACH — what does the ladder of correlated child routes still answer that the connector alone does not?
+//
+// The engine behind the L9 ratchet (`ladder-reach.test.ts`) and the instrument (`scripts/ladder-reach.ts`,
+// `mise run ladder-reach`). `docs/2026-11-16-ladder-retirement-plan.md` R0: every later retirement step is
+// measured by two numbers, and this computes both, per query pool and per ladder FAMILY:
+//
+//   • LADDER-ONLY — a traversal the shipping default answers and `FastPathConfig.connectorOnly` (the connector
+//     ALONE: no ladder at any site, no whole-compile retry) declines. The ladder's remaining reach. R7's
+//     precondition is 0.
+//   • RESCUED — a traversal the shipping default answers and `FastPathConfig.childOrderRetry: false` declines:
+//     only `bothChildOrders`' (`src/compiler/rel/spine.ts`) second child order answered it. R2 is done at 0.
+//     Every rescue is ladder-only (where the connector alone answers, the first order builds the same plan and
+//     answers), so it is measured over the ladder-only set — no third compile of the whole pool.
+//
+// And one HARD invariant: where both modes answer, they answer the SAME MULTISET (`differ`). A different
+// emission order of an unordered stream is not a difference (`docs/feature-support-matrix.md` §17), and a
+// positional window over an unordered stream fixes only how many members it took, not which — the comparison
+// L5's host laws make (`orderIndeterminacy`, `test/support/graph.ts`).
+import { readFileSync } from 'node:fs';
+import type { GraphStore } from '../../src/storage.ts';
+import { CONNECTOR_HOSTS } from '../../src/compiler/ir/analyze.ts';
+import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
+import { parseGremlin, stepChain, isNested, type Step } from '../../src/gremlin/frontend.ts';
+import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
+import { valueNodes } from '../../src/compiler/ir/walk.ts';
+import { isNondeterministic, isWrite, orderIndeterminacy, seeded } from '../support/graph.ts';
+import { MODERN_SEED } from '../fixtures/seed-modern.ts';
+import { outcomeOf, type Outcome } from '../L5-properties/oracle.ts';
+import { CORPUS } from '../L6-workload/corpus.ts';
+import { MINT } from '../L6-workload/workload.ts';
+import type { GraphName } from '../L6-workload/corpus.ts';
+
+/** The connector ALONE (L9's configuration). */
+export const CONNECTOR_ONLY: FastPathConfig = { ...DEFAULT_FAST_PATHS, correlatedChild: false, connectorOnly: true };
+/** The shipping default without `bothChildOrders`' second order. */
+export const NO_RETRY: FastPathConfig = { ...DEFAULT_FAST_PATHS, childOrderRetry: false };
+
+/**
+ * The ladder FAMILIES — the kept routes of `docs/2026-11-16-ladder-retirement-plan.md` (R3 existence, R4
+ * per-traverser, R5 group), each retired by its own step, so each gets its own count. `other` is a ladder-only
+ * answer with no family host in it (a ladderless host under a framing or step form the connector row does not
+ * claim, a deferred host, a whole-compile retry over no family site).
+ */
+export const FAMILIES = ['existence', 'per-traverser', 'group', 'other'] as const;
+export type Family = typeof FAMILIES[number];
+const FAMILY_OF: Readonly<Record<string, Family>> = {
+  where: 'existence', filter: 'existence', not: 'existence', and: 'existence', or: 'existence',
+  map: 'per-traverser', flatMap: 'per-traverser', local: 'per-traverser',
+  group: 'group', groupCount: 'group',
+};
+const MODULATORS = new Set(['by', 'with', 'option']);
+
+/**
+ * The family a ladder-only answer is charged to: the family of its DEEPEST family host holding a child (a
+ * decline happens where a body fails to lower, and the deepest body is the one an enclosing host hands the
+ * rest of the query to); the first in pre-order breaks a tie. A static rule over the query text, so the
+ * attribution is the same in every run and on every machine.
+ */
+export function familyOf(q: string): Family {
+  let best: { family: Family; depth: number } | undefined;
+  const walk = (chain: readonly Step[], depth: number): void => chain.forEach((s, i) => {
+    for (const arg of s.args ?? []) for (const n of valueNodes(arg.value)) {
+      if (!isNested(n)) continue;
+      let host = s.name;
+      if (MODULATORS.has(s.name)) {
+        let j = i - 1;
+        while (j >= 0 && MODULATORS.has(chain[j]!.name)) j--;
+        host = j >= 0 ? chain[j]!.name : s.name;
+      }
+      const family = CONNECTOR_HOSTS.has(host) ? FAMILY_OF[host] : undefined;
+      if (family && (!best || depth > best.depth)) best = { family, depth };
+      try { walk(stepChain(n.nested, NO_PARAMS), depth + 1); } catch { /* an unparameterized body — skip */ }
+    }
+  });
+  try { walk(stepChain(parseGremlin(q), NO_PARAMS), 0); } catch { /* unparsable — `other` */ }
+  return best?.family ?? 'other';
+}
+
+/** One traversal of a pool and the store it runs against: a READ shares one store; a traversal that is not a
+ *  read (`isWrite` — the compiler's own answer, so `dropLabels()` and a keyed side effect are caught where no
+ *  regex over step names would be) gets a FRESH store per mode, so no mode sees another's mutations. */
+export interface PoolQuery { readonly pool: string; readonly q: string; readonly store: GraphStore | (() => GraphStore) }
+const storeOf = (p: PoolQuery): GraphStore => (typeof p.store === 'function' ? p.store() : p.store);
+const placed = (q: string, shared: GraphStore, mint: () => GraphStore): GraphStore | (() => GraphStore) => (isWrite(q) ? mint : shared);
+
+/** The L1 corpus (TinkerPop's `.feature` traversals), each over `modern` — a coverage question, which the graph a
+ *  scenario names does not change. A random result is left out: two runs of it differ whatever the modes do. */
+export function l1Pool(): PoolQuery[] {
+  const mint = () => seeded(MODERN_SEED);
+  const shared = mint();
+  const corpus = readFileSync(new URL('../L1-corpus/corpus.txt', import.meta.url), 'utf8').split('\n').filter(Boolean);
+  return corpus.filter((q) => !isNondeterministic(q)).map((q) => ({ pool: 'L1', q, store: placed(q, shared, mint) }));
+}
+
+/** The L6 workload corpus, each over its own graph (one shared store per graph, as L6 runs it). */
+export function l6Pool(): PoolQuery[] {
+  const stores = new Map<GraphName, GraphStore>();
+  return CORPUS.filter((e) => !isNondeterministic(e.query)).map((e) => {
+    if (!stores.has(e.graph)) stores.set(e.graph, MINT[e.graph]());
+    return { pool: 'L6', q: e.query, store: placed(e.query, stores.get(e.graph)!, MINT[e.graph]) };
+  });
+}
+
+export interface LadderOnly { readonly pool: string; readonly q: string; readonly family: Family; readonly rescued: boolean; readonly declined: string }
+
+export interface ReachResult {
+  /** Per pool: queries run, answered by default, answered by the connector alone. */
+  readonly pools: Record<string, { queries: number; byDefault: number; connectorOnly: number }>;
+  readonly ladderOnly: LadderOnly[];
+  /** Both answered, different multisets — a WRONG ANSWER in one of the two. Never legal. */
+  readonly differ: string[];
+  /** The connector alone answered and the default did not — the fallback LOST an answer. Never legal. */
+  readonly connectorOnlyAnswers: string[];
+}
+
+type W = ReadonlyMap<string, bigint>;
+const total = (w: W): bigint => [...w.values()].reduce((a, b) => a + b, 0n);
+const sameMultiset = (q: string, a: W, b: W): boolean => {
+  const window = orderIndeterminacy(q);
+  if (window === 'cardinality') return true;
+  if (window === 'members') return total(a) === total(b);
+  return a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
+};
+
+/**
+ * Compare the default against the connector alone over `queries`. `known` supplies an already computed
+ * connector-only outcome (L9's closure sweep runs that mode itself), so a query is compiled in that mode once.
+ */
+export function reach(queries: readonly PoolQuery[], known?: ReadonlyMap<string, Outcome>): ReachResult {
+  const pools: ReachResult['pools'] = {};
+  const ladderOnly: LadderOnly[] = [];
+  const differ: string[] = [];
+  const connectorOnlyAnswers: string[] = [];
+  const seen = new Set<string>();
+  for (const p of queries) {
+    const { pool, q } = p;
+    const key = `${pool}\t${q}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const t = (pools[pool] ??= { queries: 0, byDefault: 0, connectorOnly: 0 });
+    t.queries++;
+    const d = outcomeOf(storeOf(p), q, DEFAULT_FAST_PATHS);
+    const c = known?.get(q) ?? outcomeOf(storeOf(p), q, CONNECTOR_ONLY);
+    if (d.kind === 'rows') t.byDefault++;
+    if (c.kind === 'rows') t.connectorOnly++;
+    if (d.kind === 'rows' && c.kind === 'rows') {
+      if (!sameMultiset(q, d.weighed, c.weighed)) differ.push(`${pool}\t${q}`);
+    } else if (d.kind === 'rows') {
+      const rescued = outcomeOf(storeOf(p), q, NO_RETRY).kind !== 'rows';
+      ladderOnly.push({ pool, q, family: familyOf(q), rescued, declined: c.kind === 'threw' ? c.message : '' });
+    } else if (c.kind === 'rows') connectorOnlyAnswers.push(`${pool}\t${q}`);
+  }
+  return { pools, ladderOnly, differ, connectorOnlyAnswers };
+}
+
+/** `pool → family → count`, and the rescue count — the numbers the ratchet holds. */
+export interface ReachCounts {
+  readonly ladderOnly: Record<string, Record<Family, number>>;
+  readonly rescued: number;
+}
+
+export function counts(r: ReachResult): ReachCounts {
+  const ladderOnly: Record<string, Record<Family, number>> = {};
+  for (const pool of Object.keys(r.pools)) ladderOnly[pool] = Object.fromEntries(FAMILIES.map((f) => [f, 0])) as Record<Family, number>;
+  for (const x of r.ladderOnly) ladderOnly[x.pool]![x.family]++;
+  return { ladderOnly, rescued: r.ladderOnly.filter((x) => x.rescued).length };
+}
+
+/** The counts as aligned text: a row per pool, a column per family, plus the totals. */
+export function renderCounts(c: ReachCounts): string {
+  const pools = Object.keys(c.ladderOnly);
+  const col = (s: string | number) => String(s).padStart(15);
+  const lines = [`  ${'pool'.padEnd(6)}${FAMILIES.map(col).join('')}${col('total')}`];
+  const sum = (f: Family) => pools.reduce((a, p) => a + c.ladderOnly[p]![f], 0);
+  for (const p of pools) {
+    const row = FAMILIES.map((f) => c.ladderOnly[p]![f]);
+    lines.push(`  ${p.padEnd(6)}${row.map(col).join('')}${col(row.reduce((a, b) => a + b, 0))}`);
+  }
+  lines.push(`  ${'ALL'.padEnd(6)}${FAMILIES.map((f) => col(sum(f))).join('')}${col(FAMILIES.reduce((a, f) => a + sum(f), 0))}`);
+  lines.push(`  rescued by bothChildOrders: ${c.rescued}`);
+  return lines.join('\n');
+}
