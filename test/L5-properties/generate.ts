@@ -49,47 +49,82 @@ export const traversal = (budget: Budget): fc.Arbitrary<Generated> =>
     // shrinking can simplify a literal choice as well as the chain structure.
     const pick = <T>(options: readonly T[]): T => options[gen(fc.nat, { max: options.length - 1 })]!;
 
-    const walk = (from: Shape, budgetLeft: Budget): { src: string; shape: Shape } => {
-      const parts: string[] = [];
-      let shape = from;
-      // What a following `unfold()` would restore. Set when `fold()` folds a shape away; that is
-      // the one transition whose output shape isn't a function of its input shape alone.
-      let folded: Shape = from;
-      const n = gen(fc.nat, { max: Math.max(0, budgetLeft.steps) });
-      for (let i = 0; i < n; i++) {
-        // THE CONFINEMENT: only this shape's transitions are candidates. A step needing a child
-        // body is out of the running once the nesting budget is spent, and a list transition that
-        // needs numeric members is out unless that is what was folded.
-        const legal = TRANSITIONS[shape].filter((t) =>
-          ((t.bodies?.length ?? 0) === 0 || budgetLeft.depth > 0)
-          && (t.requiresListOf === undefined || t.requiresListOf === folded));
-        if (legal.length === 0) break;
-        const t = pick(legal);
-        const bodies = (t.bodies ?? []).map((bodyShape) => {
-          const inner = walk(bodyShape, { steps: Math.max(1, budgetLeft.steps - 1), depth: budgetLeft.depth - 1 });
-          // An empty child body is not valid Gremlin — fall back to identity() so a body is always
-          // a real anonymous traversal. Where the host's output inherits its body, a body ending at
-          // another shape would also make the generator's declared shape a lie; identity() is the
-          // always-legal, shape-preserving fallback.
-          const wrongEnd = t.bodyEnds !== undefined && inner.shape !== t.bodyEnds;
-          return `__.${inner.src === '' || wrongEnd ? 'identity()' : inner.src}`;
-        });
-        parts.push(t.render(ctxFrom(bodies, pick)));
-        // Only fold() establishes the member shape an ensuing unfold() restores.
-        // List-preserving transforms such as order(local) must not replace that
-        // remembered pre-fold shape with `list` itself.
-        if (t.name === 'fold') folded = shape;
-        shape = t.to === 'inherit' ? folded : t.to;
-        if (t.terminal) break; // nothing meaningful follows a reducer
-      }
-      return { src: parts.join('.'), shape };
-    };
-
     const source = pick(SOURCES);
     const head = source.render(ctxFrom([], pick));
-    const body = walk(source.to, budget);
+    const body = walkShape(source.to, budget, pick, gen);
     const query = `g.${head}${body.src ? '.' + body.src : ''}`;
     return { query, steps: stepNames(query), shape: body.shape };
+  });
+
+/** The lattice walk: a chain from `from`, drawn under `budgetLeft`, reporting the shape it ENDS at
+ *  (which `walkAny` does not). Shared by `traversal` and `hostCase`; it was `traversal`'s inner
+ *  closure, lifted unchanged — same draws in the same order, so a seed generates the same traversals. */
+function walkShape(from: Shape, budgetLeft: Budget, pick: <T>(o: readonly T[]) => T, gen: any): { src: string; shape: Shape } {
+  const parts: string[] = [];
+  let shape = from;
+  // What a following `unfold()` would restore. Set when `fold()` folds a shape away; that is
+  // the one transition whose output shape isn't a function of its input shape alone.
+  let folded: Shape = from;
+  const n = gen(fc.nat, { max: Math.max(0, budgetLeft.steps) });
+  for (let i = 0; i < n; i++) {
+    // THE CONFINEMENT: only this shape's transitions are candidates. A step needing a child
+    // body is out of the running once the nesting budget is spent, and a list transition that
+    // needs numeric members is out unless that is what was folded.
+    const legal = TRANSITIONS[shape].filter((t) =>
+      ((t.bodies?.length ?? 0) === 0 || budgetLeft.depth > 0)
+      && (t.requiresListOf === undefined || t.requiresListOf === folded));
+    if (legal.length === 0) break;
+    const t = pick(legal);
+    const bodies = (t.bodies ?? []).map((bodyShape) => {
+      const inner = walkShape(bodyShape, { steps: Math.max(1, budgetLeft.steps - 1), depth: budgetLeft.depth - 1 }, pick, gen);
+      // An empty child body is not valid Gremlin — fall back to identity() so a body is always
+      // a real anonymous traversal. Where the host's output inherits its body, a body ending at
+      // another shape would also make the generator's declared shape a lie; identity() is the
+      // always-legal, shape-preserving fallback.
+      const wrongEnd = t.bodyEnds !== undefined && inner.shape !== t.bodyEnds;
+      return `__.${inner.src === '' || wrongEnd ? 'identity()' : inner.src}`;
+    });
+    parts.push(t.render(ctxFrom(bodies, pick)));
+    // Only fold() establishes the member shape an ensuing unfold() restores.
+    // List-preserving transforms such as order(local) must not replace that
+    // remembered pre-fold shape with `list` itself.
+    if (t.name === 'fold') folded = shape;
+    shape = t.to === 'inherit' ? folded : t.to;
+    if (t.terminal) break; // nothing meaningful follows a reducer
+  }
+  return { src: parts.join('.'), shape };
+}
+
+/**
+ * A HOST CASE — an outer `prefix` plus an anonymous `body` well-typed over the prefix's output shape,
+ * for the host-closure law (`host-closure.test.ts`): if `prefix.body` runs inline, every host
+ * `prefix.H(__.body)` should run too, and agree with it.
+ *
+ * The prefix is an ordinary `traversal` walk (any landing shape, reducers included); the body is a walk
+ * FROM that shape, so the pair is typed by construction exactly as one chain is. A body is never empty
+ * — an empty body has no host form — so a zero-step draw falls back to `identity()`.
+ */
+export interface HostCase {
+  readonly prefix: string;
+  /** The shape the prefix lands on — the body's input shape. */
+  readonly from: Shape;
+  /** The body's chain WITHOUT `__.`, so the inline form is `${prefix}.${body}`. */
+  readonly body: string;
+  /** The shape the body ends at. */
+  readonly to: Shape;
+}
+
+export const hostCase = (prefixBudget: Budget, bodyBudget: Budget): fc.Arbitrary<HostCase> =>
+  fc.gen().map((gen): HostCase => {
+    const pick = <T>(options: readonly T[]): T => options[gen(fc.nat, { max: options.length - 1 })]!;
+    const source = pick(SOURCES);
+    const head = source.render(ctxFrom([], pick));
+    const p = walkShape(source.to, prefixBudget, pick, gen);
+    const prefix = `g.${head}${p.src ? '.' + p.src : ''}`;
+    const b = walkShape(p.shape, bodyBudget, pick, gen);
+    return b.src === ''
+      ? { prefix, from: p.shape, body: 'identity()', to: p.shape }
+      : { prefix, from: p.shape, body: b.src, to: b.shape };
   });
 
 /** Step names, read off the generated source. Cheap and good enough for reporting: the generator

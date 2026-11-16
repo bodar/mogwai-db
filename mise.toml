@@ -316,6 +316,16 @@ depends = ["install", "check", "submodule"]
 # integer explicitly, then pass it through the normal L5_SEED reproduction channel.
 run = "L5_SEED=$(bun -e 'console.log(Math.floor(Math.random() * 0x7fffffff))') L5_RUNS=3000 bun test test/L5-properties"
 
+# Re-record the host-closure ratchet (test/L5-properties/host-closure-baseline.json) — the closure rate
+# per host × nesting level at a FIXED seed. A command, not an auto-record, for the census's reason: the
+# test fails when a rate FALLS, and an auto-record would launder exactly that. Run it when a rate ROSE
+# (the test prints the hint) or the generator changed (the baseline's fingerprint no longer matches);
+# a downward re-record needs its reason in the commit message.
+[tasks.L5-host-record]
+description = "Re-record the L5 host-closure baseline (commit test/L5-properties/host-closure-baseline.json)"
+depends = ["install", "check", "submodule"]
+run = "L5_HOST_RECORD=1 bun test test/L5-properties/host-closure.test.ts"
+
 # The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
 # has not CHANGED. `submodule` because it executes traversals (same reason as L5). It lives in
 # `test/L7-census/` so the CI bracket function gives it its OWN runner (`test (L7)`) instead of dragging

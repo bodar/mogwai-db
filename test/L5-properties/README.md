@@ -9,6 +9,9 @@ mise run L5          # HEAD-derived seed, 300 generated traversals; also runs in
 mise run L5-random   # random seed, 3,000 traversals — the deeper sweep (size keeps it out of `ci`)
 L5_SEED=n L5_RUNS=n  # override seed / generated-traversal count
 L5_LAW_RUNS=n        # per-law instantiations for the metamorphic oracle
+L5_HOST_RUNS=n       # host-closure exploration cases (default L5_RUNS/5, min 60)
+L5_HOST_DEPTH=n      # child-nesting depth of an exploration body (default 1)
+mise run L5-host-record   # re-record host-closure-baseline.json (after a rate ROSE or the generator changed)
 ```
 
 **CI runs exactly this** — `ci → test → L5`, no CI-specific seed, sample size or skip. The generated
@@ -22,8 +25,9 @@ has. Parsing and compiling are submodule-free; running is not.
 
 ## Status
 
-**Two oracles.** The differential compares the two *lowerings*; the metamorphic laws compare against a
-*law*, which is the only way to see a defect both lowerings share.
+**Three oracles.** The differential compares the two *lowerings*; the metamorphic laws compare against a
+*law*, which is the only way to see a defect both lowerings share; the host-closure law compares a body
+against itself under every host that takes a child traversal.
 
 - **The differential ratchet (`known.ts`) is EMPTY.** No known fast-path divergence.
 - **Laws: 19, all holding, and `knownBroken` is EMPTY.** It carried two diagnosed contexts —
@@ -133,6 +137,56 @@ change what is supported); here it only means the law is not evaluable, so it is
 split by whether the *prefix* or the law's own *form* was unsupported. Only both-ran-and-disagreed
 fails a run.
 
+## Oracle 3 — the host-closure law (cc0-host-law)
+
+The plan is `docs/2026-11-15-compositional-coverage-plan.md` §3 Phase 0. The law: **for any body `b` that
+executes at the top level (`p.b`), every host `p.H(__.b)` executes too, and agrees with it.** It is the most
+direct measure of compositionality. A decline under a host, for a body the root lowers, is a seam gap by
+definition.
+
+`generate.ts` `hostCase` draws a prefix `p` and a body `b` typed over `p`'s landing shape. A pair is kept
+only when `p.b` runs inline. `b` is then wrapped in each host where it is well-typed (`hosts.ts`, typed
+by Java's generics, not by what we lower): `map`, `flatMap`, `local`, `where`, `filter`, `not`,
+`optional`, `coalesce(b, identity())`, `union(b, identity())`, `project('x').by(b)`,
+`group().by(label).by(b.fold())`, `order().by(b)` (scalar `b`) and `dedup().by(b)`. Level 2 wraps a host
+in a host, `H1(H2(b))`, with four random well-typed pairs per case.
+
+- **Capability: a one-way ratchet.** `host-closure-baseline.json` holds the closure rate per host ×
+  level for a FIXED sample (seed 42, 200 cases). It also holds the generator's fingerprint. A falling
+  rate fails the run. A rising rate prints the hint to run `mise run L5-host-record`. A changed
+  fingerprint fails and asks for a re-record, because the rates then describe a different sample.
+- **Semantics: gated at zero.** Twelve laws, each citing the `gremlin-core` step that defines it:
+  - `flatMap`/`local` ≡ `b` for a barrier-free `b`;
+  - `where` ≡ `filter`, and `where ⊎ not ≡ p`;
+  - `|map| = |where|`, and `map ≡ flatMap` when `b` is single-valued;
+  - `optional ≡ coalesce(b, identity()) ≡ flatMap ⊎ not`;
+  - `union(b, identity()) ≡ b ⊎ p`, which is empty over an empty `p` (`BranchStep.java:143-145`);
+  - `|project| = |p|`, `|project.select(x)| = |where|`, and `project.select(x) ≡ flatMap` when `b` is
+    single-valued.
+
+  A both-ran-and-disagreed result is a wrong answer. A throw that is not fail-closed
+  (`test/support/fail-closed.ts`) is an internal error. Each one fails the run unless it is diagnosed in
+  `host-known.ts`, one entry per root cause, with a repro that the stale-entry test re-runs. Unordered
+  windows are compared on count (`orderIndeterminacy`), as the metamorphic oracle does.
+- **Exploration** at the HEAD seed (`L5_HOST_RUNS` cases) gates on the same semantics and prints its
+  closure, but its closure is never ratcheted.
+
+**This subsumes the typed-value-carrier plan's T8 law** (`docs/2026-11-05-typed-value-carrier-plan.md`).
+T8 asked for three properties: `map(b) ≡ b` per traverser; `where(b)` keeps exactly the productive
+traversers; and `project('x').by(b)` holds `x` exactly when `b` is productive, with its first value.
+All three are laws here, over generated bodies.
+
+**State (2026-11-16).** No semantic divergence over 8,000 exploration cases (seeds 1–8, 1,000 each).
+The one false alarm narrowed the `union` law: an arm's seeded reducer never runs over an empty stream.
+Closure at the ratchet seed is 58.4% at level 1 and 28.4% at level 2. The lowest hosts are the
+first-value hosts: `dedup().by` at 30.5%, `project().by` at 33.0% and `map` at 35.5%, against `flatMap`
+and `local` at 80.5%. The dominant cause is an element-valued body: `g.V().map(__.out())`,
+`project('x').by(__.out())` and `dedup().by(__.hasLabel(…))` all decline. `host-known.ts` diagnoses three
+internal errors:
+- a leading `path()` in `local()` under `simplePath()`;
+- a constant `ORDER BY 0` from a windowed `union` arm folded under a per-traverser host;
+- `misuse of aggregate` in `count().dedup().by(filter.count())`.
+
 ## Files
 
 | File | |
@@ -145,3 +199,8 @@ fails a run.
 | `table.test.ts` | the lattice's own guards (parse/chain, transition coverage, corpus gap) |
 | `laws.ts` | oracle 2: the metamorphic law table, each with its spec reasoning |
 | `metamorphic.test.ts` | every law over generated prefixes; `L5_LAW_RUNS` sets the per-law count |
+| `hosts.ts` | oracle 3: the host table (typing, rendering, output shape) |
+| `host-closure.ts` | oracle 3: the sweep — closure tally per host × level, and the host laws with their citations |
+| `host-closure.test.ts` | the ratchet sample (fixed seed) + the exploration sample (HEAD seed) |
+| `host-closure-baseline.json` | the closure-rate floor; `mise run L5-host-record` re-records it |
+| `host-known.ts` | diagnosed host-law divergences and internal errors (one per root cause) |

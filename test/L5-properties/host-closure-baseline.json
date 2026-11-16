@@ -1,0 +1,137 @@
+{
+  "seed": 42,
+  "cases": 200,
+  "fingerprint": "33916904504a3831",
+  "table": {
+    "map": {
+      "1": {
+        "applicable": 200,
+        "executed": 71
+      },
+      "2": {
+        "applicable": 64,
+        "executed": 7
+      }
+    },
+    "flatMap": {
+      "1": {
+        "applicable": 200,
+        "executed": 161
+      },
+      "2": {
+        "applicable": 70,
+        "executed": 27
+      }
+    },
+    "local": {
+      "1": {
+        "applicable": 200,
+        "executed": 161
+      },
+      "2": {
+        "applicable": 79,
+        "executed": 35
+      }
+    },
+    "where": {
+      "1": {
+        "applicable": 200,
+        "executed": 123
+      },
+      "2": {
+        "applicable": 75,
+        "executed": 17
+      }
+    },
+    "filter": {
+      "1": {
+        "applicable": 200,
+        "executed": 123
+      },
+      "2": {
+        "applicable": 65,
+        "executed": 20
+      }
+    },
+    "not": {
+      "1": {
+        "applicable": 200,
+        "executed": 123
+      },
+      "2": {
+        "applicable": 65,
+        "executed": 18
+      }
+    },
+    "optional": {
+      "1": {
+        "applicable": 136,
+        "executed": 79
+      },
+      "2": {
+        "applicable": 56,
+        "executed": 11
+      }
+    },
+    "coalesce": {
+      "1": {
+        "applicable": 136,
+        "executed": 79
+      },
+      "2": {
+        "applicable": 46,
+        "executed": 9
+      }
+    },
+    "union": {
+      "1": {
+        "applicable": 136,
+        "executed": 120
+      },
+      "2": {
+        "applicable": 47,
+        "executed": 27
+      }
+    },
+    "project": {
+      "1": {
+        "applicable": 200,
+        "executed": 66
+      },
+      "2": {
+        "applicable": 60,
+        "executed": 6
+      }
+    },
+    "group": {
+      "1": {
+        "applicable": 165,
+        "executed": 108
+      },
+      "2": {
+        "applicable": 83,
+        "executed": 43
+      }
+    },
+    "order": {
+      "1": {
+        "applicable": 47,
+        "executed": 21
+      },
+      "2": {
+        "applicable": 10,
+        "executed": 2
+      }
+    },
+    "dedup": {
+      "1": {
+        "applicable": 200,
+        "executed": 61
+      },
+      "2": {
+        "applicable": 80,
+        "executed": 5
+      }
+    }
+  }
+}
