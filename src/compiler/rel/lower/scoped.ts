@@ -20,7 +20,7 @@ import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { firstArrival, listNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { framingCols, type RelFraming } from '../framing.ts';
 import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned } from '../lower.ts';
-import { chooseArms, ensureBulk, isReductionArm, mergeArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
+import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
 import { byField, byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
@@ -617,6 +617,15 @@ const priority: Connector = (site) => {
   // An EMPTY body (one a Pass reduced to nothing, `where(count())`) is admitted: it lowers as the identity,
   // the traverser itself. Only an unreadable one declines.
   if (bodies.some((body) => !body)) return null;
+  // ONE correlated host row (a body inside another child, `project().by(coalesce(…))`): there is nothing to
+  // scope, and the dependent join is the plan — each arm over the row, gated by the earlier arms' NOT EXISTS
+  // (`coalesceMerge`, the correlated form cc3b keeps for `map`/`where`). Only where that form declines is the
+  // row scoped and decorrelated below.
+  if (atMostOneRow(rel)) {
+    const branch = optional ? optionalArms(step, rel, framing, bulked, ctx, fresh, labels, { steps, at })
+      : coalesceArms(step, rel, framing, bulked, ctx, fresh, labels, { steps, at });
+    if (branch && !branch.effects?.length) return continueAs(branch.rel, branch.framing, steps, at + 1, bulked, ctx, fresh, branch.aliases);
+  }
   // A consumer that READS the merge's order (`branchOrderOwed`) gets the emission key — host position, then
   // arm, then the result's position within its scope (`mintBranchOrder`): the host is positioned and its
   // position frozen into a parent key, and each body runs from a positioned seed so it carries its own.
@@ -895,7 +904,12 @@ const byValues: Connector = (site) => {
   const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
   if (!bys) return null;
   if (step.name === 'group' && bys[1]?.key.kind === 'child') return pooledGroup(site, bys);
-  const bodies = perTraverserBodies(step, bys);
+  const all = perTraverserBodies(step, bys);
+  // A body the host's own seam answers as a CORRELATED value (`scalarChild` — one index seek per row) keeps the
+  // dependent join, as cc3b's `map`/`project` rows do: only the bodies it cannot hold are landed as join columns.
+  const seam = childSeam(ctx, fresh);
+  const host = framing.kind === 'elements' || framing.kind === 'scalar' ? reductionHost(rel, framing, labels) : null;
+  const bodies = new Map([...all].filter(([, body]) => !host || !seam.scalar(body, host)));
   // No child body to land (a `by(__.identity())` IS a bare `by()`): the host's own lowering, over the input.
   const landed = bodies.size
     ? landValues(rel, framing, bodies, ctx, fresh, labels, step.name !== 'dedup' && step.name !== 'order')
