@@ -436,6 +436,18 @@ multi-`by()` shapes — that constant factor is the plan-cost work Phase 3 owes 
 
 ### Phase 3 — Build out and invert. IDs `cc3-*`.
 
+**G2 DECISION (owner, 2026-11-16): PROCEED — full implementation.** Convert every remaining host, make the
+general path fast enough on the slow shapes, invert it to the default, and do the performance work. The
+generic mechanism is the priority because it COMPOUNDS: move as much as possible onto it. An old route
+(ladder rung, correlated fast path) is kept ONLY if it earns its keep, and the bar is:
+- **a measured win** on a realistic shape at 1k/8k after the general path's cost work — not a theoretical one;
+- **weighed against its complexity.** A complex route that the general path replaces is a reason to delete it
+  even at a small speed cost; a kept route is a small, legible switch with an L5 differential.
+Each kept route is listed in this doc with its measured margin. Everything else is deleted.
+
+Work order: (a) remaining connector rows and (b) general-path plan cost run in parallel; (c) inversion and
+(d) the ladder audit/deletion follow, with the `return null` count as the tracked metric.
+
 1. The remaining connector rows from §2's table, one commit per host. Each one: L4 scenarios citing the reference step, plus the curve delta in the commit message.
 2. The nested scope stack (S2) end to end. It closes §3.8's residue and §0's "a correlated body that is a relation of its own" (the tree-Plan promotion, which `outstanding-work.md` cites as a prerequisite in four places).
 3. **Inversion.** The general path becomes the semantic authority. `correlatedChild` stays a switch, under L5's per-switch sweep.
