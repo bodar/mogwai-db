@@ -46,19 +46,19 @@
       },
       "2": {
         "n": 260,
-        "rows": 219,
-        "decline": 41,
+        "rows": 250,
+        "decline": 10,
         "error": 0,
         "internal": 0,
-        "executeRate": 0.842
+        "executeRate": 0.962
       },
       "3": {
         "n": 134,
-        "rows": 126,
-        "decline": 8,
+        "rows": 127,
+        "decline": 7,
         "error": 0,
         "internal": 0,
-        "executeRate": 0.94
+        "executeRate": 0.948
       },
       "4+": {
         "n": 114,

@@ -1,6 +1,7 @@
 import type { Expr } from './expr.ts';
 import { shapeOf, spliceable } from './block.ts';
 import { isAbort } from './raise.ts';
+import { atMostOneRow } from './bounds.ts';
 import type { Rel } from './rel.ts';
 import { exprChildren, exprRels, forEachExpr, isSelfContained, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
 import type { RelId } from './types.ts';
@@ -201,6 +202,85 @@ export const columnIsStored = (r: Rel, name: string): boolean => {
       return at < leftN ? columnIsStored(r.left, r.left.type.cols[at]!.name) : columnIsStored(r.right, r.right.type.cols[at - leftN]!.name);
     }
     default: return false;
+  }
+};
+
+/**
+ * IS COLUMN `name` OF `r` A KEY OF `r` — one scanned table's rowid, carried up through operators that keep or
+ * drop rows but never repeat one (a `Project`, a `Filter`, a `Sort`, a `Limit`, a `Distinct`, a window)? Then no
+ * two rows of `r` share it, and a sort term after it orders nothing. Conservative: a join, a union or an explode
+ * on the way answers no.
+ */
+const ROWID_TABLES: ReadonlySet<string> = new Set(['nodes', 'edges', 'vertex_properties', 'edge_properties', 'labels', 'tombstones']);
+export const columnIsRowKey = (r: Rel, name: string): boolean => {
+  switch (r.kind) {
+    case 'scan': return name === 'id' && ROWID_TABLES.has(r.table);
+    case 'project': {
+      const e = r.exprs.find(([column]) => column === name)?.[1];
+      return e?.kind === 'col' && e.rel === r.input.id && columnIsRowKey(r.input, e.name);
+    }
+    case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': return columnIsRowKey(r.input, name);
+    case 'window': return !r.specs.some(([minted]) => minted === name) && columnIsRowKey(r.input, name);
+    case 'join': {
+      // A side's key stays a key where the OTHER side has at most one row (a correlated seed row joined to
+      // the relation it starts): no row of this side is repeated.
+      if (r.join === 'semi' || r.join === 'anti') return columnIsRowKey(r.left, name);
+      const at = r.type.cols.findIndex((column) => column.name === name);
+      const leftN = r.left.type.cols.length;
+      if (at < 0) return false;
+      return at < leftN
+        ? atMostOneRow(r.right) && columnIsRowKey(r.left, r.left.type.cols[at]!.name)
+        : atMostOneRow(r.left) && columnIsRowKey(r.right, r.right.type.cols[at - leftN]!.name);
+    }
+    default: return false;
+  }
+};
+
+/**
+ * DOES COLUMN `name` OF `r` COMPUTE WITH A SUBQUERY — is a scalar/`EXISTS`/`IN` subplan anywhere in the
+ * expressions that DEFINE it, followed down through the operators that carry it? The question a correlated
+ * `ORDER BY` asks of its terms: SQLite resolves a sort term's subquery without the scopes beyond its own query
+ * (measured, bun:sqlite 3.51 — "no such column" for an outer column read there), so a term that is, or
+ * flattens to, a subquery cannot sort a correlated body; a subquery that only FILTERS the body (an arm's
+ * priority guard) or is only carried can. Conservative: a node this does not follow answers yes.
+ */
+export const columnReadsSubquery = (r: Rel, name: string): boolean => {
+  const exprReads = (e: Expr, input: Rel | undefined): boolean => {
+    let hit = false;
+    forEachExpr(e, (node) => {
+      if (hit) return;
+      if (exprRels(node).length) hit = true;
+      else if (node.kind === 'col' && input && node.rel === input.id) hit = columnReadsSubquery(input, node.name);
+    });
+    return hit;
+  };
+  switch (r.kind) {
+    case 'scan': case 'ref': case 'self-ref': return false;
+    case 'values': {
+      const at = r.type.cols.findIndex((column) => column.name === name);
+      return at < 0 || r.rows.some((row) => !row[at] || exprReads(row[at]!, undefined));
+    }
+    case 'project': {
+      const e = r.exprs.find(([column]) => column === name)?.[1];
+      return !e || exprReads(e, r.input);
+    }
+    case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': return columnReadsSubquery(r.input, name);
+    case 'window': {
+      const spec = r.specs.find(([minted]) => minted === name)?.[1];
+      if (!spec) return columnReadsSubquery(r.input, name);
+      return [...spec.args, ...spec.spec.partitionBy, ...spec.spec.orderBy.map((term) => term.expr)].some((e) => exprReads(e, r.input));
+    }
+    case 'union': {
+      const at = r.type.cols.findIndex((column) => column.name === name);
+      return at < 0 || r.inputs.some((input) => columnReadsSubquery(input, input.type.cols[at]!.name));
+    }
+    case 'join': {
+      const at = r.type.cols.findIndex((column) => column.name === name);
+      const leftN = r.left.type.cols.length;
+      if (at < 0) return true;
+      return at < leftN ? columnReadsSubquery(r.left, r.left.type.cols[at]!.name) : columnReadsSubquery(r.right, r.right.type.cols[at - leftN]!.name);
+    }
+    default: return true;
   }
 };
 

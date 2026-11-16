@@ -7,9 +7,9 @@
  * `correlatedChild` configurations and reports, per shape and N: the median execute time, the SQL bytes and
  * the JOIN count of the plan.
  *
- *   ON    — the shipping default: the ladder of correlated routes first, the connector its fallback;
- *   OFF   — the connector first, the ladder its fallback;
- *   CONN  — the connector ALONE (`MOGWAI_CONNECTOR_ONLY=1`): what the general path costs with no ladder.
+ *   LADDER  — `correlatedChild` on (opt-in): the ladder of correlated routes first, the connector its fallback;
+ *   DEFAULT — the shipping default since the Phase 3 inversion: the connector first, the ladder its fallback;
+ *   CONN    — the connector ALONE (`MOGWAI_CONNECTOR_ONLY=1`): what the general path costs with no ladder.
  *
  * `MOGWAI_CONNECTOR_ONLY` is read once at module load, so each configuration is a CHILD process
  * (`--child <mode> <n>`) and this parent only tabulates. An INSTRUMENT, deliberately not in `ci`: its numbers
@@ -47,9 +47,18 @@ const SHAPES: readonly Shape[] = [
   { name: 'as.where(out.has)', query: "g.V().as('a').where(out().has('age',gt(40))).select('a')" },
   { name: 'as.map(out.count)', query: "g.V().as('a').map(out().count())" },
   { name: 'out.map(values)', query: "g.V().out().map(values('age'))" },
+  // The Phase 3 inversion (cc3c) put `group().by(k).by(<barrier>)` on the connector's pooled group, and
+  // `local`/`flatMap` and `coalesce` on its rows: the app idioms those take.
+  { name: 'group.by(label).by(count)', query: 'g.V().group().by(label).by(count())' },
+  { name: 'group.by(name).by(both.count)', query: "g.V().group().by('name').by(both().count())" },
+  { name: 'group.by(label).by(fold)', query: "g.V().group().by(label).by(values('name').order().by(desc).fold())" },
+  { name: 'group.by(name).by(tail)', query: "g.V().group().by('name').by(tail())" },
+  { name: 'local(out.count)', query: 'g.V().local(out().count())' },
+  { name: 'local(both.dedup)', query: "g.V().local(both('created').dedup())" },
+  { name: 'where(out.values.is)', query: "g.V().where(out().values('age').is(30))" },
 ];
 
-const MODES = { ON: {}, OFF: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;
+const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;
 type Mode = keyof typeof MODES;
 
 /** Deterministic xorshift, so every child and every run sees one graph. */
@@ -84,7 +93,7 @@ interface Row { readonly name: string; readonly ms: number | null; readonly byte
 
 function child(mode: Mode, n: number, only: string | undefined, sqlOf: string | undefined): void {
   const store = graph(n);
-  const fastPaths = { correlatedChild: mode === 'ON' };
+  const fastPaths = { correlatedChild: mode === 'LADDER' };
   const out: Row[] = [];
   for (const shape of SHAPES) {
     if (only && !shape.name.includes(only)) continue;
@@ -135,14 +144,14 @@ if (argv[0] === '--child') {
       results.set(`${mode}@${n}`, new Map(rows.map((r) => [r.name, r])));
     }
     const cell = (r: Row | undefined): string => (!r ? '-' : r.ms === null ? `✗${r.error ?? ''}` : r.ms.toFixed(1));
-    const header = ['shape', ...sizes.flatMap((n) => (Object.keys(MODES) as Mode[]).map((m) => `${m}@${n / 1000}k`)), 'CONN/ON', 'bytes ON/CONN', 'joins ON/CONN'];
+    const header = ['shape', ...sizes.flatMap((n) => (Object.keys(MODES) as Mode[]).map((m) => `${m}@${n / 1000}k`)), 'CONN/LADDER', 'bytes LADDER/CONN', 'joins LADDER/CONN'];
     console.log(`| ${header.join(' | ')} |`);
     console.log(`|${header.map(() => '---').join('|')}|`);
     const last = sizes[sizes.length - 1]!;
     for (const shape of SHAPES) {
       if (only && !shape.name.includes(only)) continue;
       const at = (m: Mode, n: number) => results.get(`${m}@${n}`)?.get(shape.name);
-      const on = at('ON', last), conn = at('CONN', last);
+      const on = at('LADDER', last), conn = at('CONN', last);
       const ratio = on?.ms && conn?.ms ? (conn.ms / on.ms).toFixed(2) : '-';
       console.log(`| ${[shape.name, ...sizes.flatMap((n) => (Object.keys(MODES) as Mode[]).map((m) => cell(at(m, n)))), ratio,
         `${on?.bytes ?? '-'}/${conn?.bytes ?? '-'}`, `${on?.joins ?? '-'}/${conn?.joins ?? '-'}`].join(' | ')} |`);

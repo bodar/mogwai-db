@@ -51,7 +51,7 @@
 export interface KnownDivergence {
   /** The minimal reproduction, verbatim. Also what the stale-entry check re-runs. */
   readonly query: string;
-  /** Which fast-path switch attributes the divergence (`onlyDisabled(name)` reproduces it). */
+  /** Which fast-path switch attributes the divergence (`onlyFlipped(name)` reproduces it). */
   readonly fastPath: string;
   /** What actually goes wrong. Required — see the header. */
   readonly diagnosis: string;

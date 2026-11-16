@@ -255,9 +255,22 @@ export function rewriteExpr(e: Expr, f: (node: Expr) => Expr, rel: (plan: Rel) =
  *  moved copy still reads a column from the relation it was lifted off of. `rename` maps a column name
  *  of `from` to its name in `to`, for a move through a renaming projection (`fuse`'s filter transpose). */
 export function substRelId(e: Expr, from: RelId, to: RelId, rename: (name: string) => string = (name) => name): Expr {
-  const inSubplan = (plan: Rel): Rel =>
-    mapRelExprs(mapRelChildren(plan, inSubplan), (x) => substRelId(x, from, to, rename));
-  return rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to, name: rename(node.name) } : node), inSubplan);
+  // ONE memo for the whole substitution, nested subplans included: a node the subplans SHARE (a correlated
+  // body's seed row, read both as a filter's input and inside that filter's own EXISTS) must stay ONE node.
+  // Rebuilt once per occurrence it became two relations under one id, which the checker rejects ("relation
+  // id 'ssN' names two different relations in one scope", `g.inject(1).map(__.where(__.union(__.identity(),
+  // __.identity())))`).
+  const memo = new Map<Rel, Rel>();
+  const col = (node: Expr): Expr => (node.kind === 'col' && node.rel === from ? { ...node, rel: to, name: rename(node.name) } : node);
+  const inExpr = (x: Expr): Expr => rewriteExpr(x, col, inSubplan);
+  function inSubplan(plan: Rel): Rel {
+    const done = memo.get(plan);
+    if (done) return done;
+    const mapped = mapRelExprs(mapRelChildren(plan, inSubplan), inExpr);
+    memo.set(plan, mapped);
+    return mapped;
+  }
+  return inExpr(e);
 }
 
 /**

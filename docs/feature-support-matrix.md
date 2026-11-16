@@ -314,7 +314,7 @@ wrong number class.
 | Per-start sorted bodies | `flatMap`/`local` keep each start's sorted run; a terminal `coalesce()`/`optional()` over a sorted arm is unordered |
 | Branch emission order | each start's arms in written order; an arm's `order()` sorts only that start's output — put `order()` after the branch |
 | Disabled strategies | `withoutStrategies` of `IdentityRemoval`/`LazyBarrier`/`PathRetraction`/`RepeatUnroll` answers as the default traversal |
-| A null `by()` value | null is absent: `project()` omits the key, `select`/`order`/`dedup`/`where`/`sack` drop the row; `coalesce` is SQL `COALESCE` |
+| A null `by()` value | null is absent: `project()` omits the key of a `by()` that may produce nothing, `select`/`order`/`dedup`/`where`/`sack` drop the row. A child body whose one result IS a null (`sack()` holding null, an all-null `mean()`, a stored null property) produces it, as the reference does: `map`/`coalesce`/`project().by` keep the null |
 | An unbound `where`/`dedup` key | a `where(k,…)`/`where().by()`/`dedup(labels)` key unbound on a traverser drops that traverser, under `ProductiveByStrategy` too (Java raises `IllegalArgumentException` from `Scoping.getSafeScopeValue`) |
 | A re-sourced body's null first value | a re-sourced body (`__.V()…`) whose first value is null is read as producing nothing — SQLite's scalar subquery cannot tell the two apart: `V().map(__.V().constant(null)).count()` is `0` (Java `6`), a `where()` over it drops the row, a `concat()` operand raises `does not map to a value` |
 | A null-valued label in a child body | a label bound to `null` inside a branch arm reads as unbound there: `inject(0).union(constant(null).as('a'), constant(2)).map(select('a')).count()` is `0` (Java `1`) |

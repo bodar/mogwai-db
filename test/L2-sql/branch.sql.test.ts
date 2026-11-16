@@ -8,7 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { read, run, seededStore } from '../support/harness.ts';
+import { LADDER, read, run, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -40,7 +40,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // literal — a `?` serves a user PARAMETER and nothing else.
     expect(a.binds).toEqual([]);
     // or() → (p0 OR p1); OR binds looser so mixed a.and().b.or().c groups as ((a AND b) OR c)
-    expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toMatch(/EXISTS \(.*\) OR EXISTS \(/s);
+    expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toMatch(/EXISTS \([^]*\bOR\b[^]*EXISTS \(/);
     const mixed = read('g.V().where(__.hasLabel("person").and().out("created").or().hasLabel("software"))');
     expect(mixed.sql).toMatch(/\(\(.*AND.*\).*OR.*\)/s);
     // choose() infix predicate now routes through the same split (movement conjunct →
@@ -65,13 +65,15 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(run(seededStore(), 'g.union().count()')).toEqual([{ v: 0 }]);
   });
 
-  test('local(<body>.order().by().limit()) is a per-origin WINDOW, not a global slice', () => {
+  test('local(<body>.order().by().limit()) is a per-host slice, not a global one', () => {
     // A slice inside a fan-out body is scoped PER HOST: `local(out().order().by('name').limit(1))` is the
-    // first out-neighbour BY NAME of each vertex, so it lowers to ROW_NUMBER() OVER (PARTITION BY origin
-    // ORDER BY <the order key>) filtered to the rank — never a global `LIMIT 1`. The body's `order()` is
-    // lowered inside the window's input, minting the `encounter` the window ranks by.
+    // first out-neighbour BY NAME of each vertex — never a global `LIMIT 1`. A body of at most one row is the
+    // connector's correlated first-row form (`firstInner`, `lower/scoped.ts`): the `ORDER BY … LIMIT 1` sits
+    // INSIDE a subquery correlated to each host row (a wider slice is the per-scope window).
     const p = read('g.V().local(__.out().order().by("name").limit(1))');
-    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    expect(p.sql).toContain('LIMIT 1)');
+    expect(p.sql).not.toMatch(/LIMIT 1\s*$/);
+    expect(read('g.V().local(__.out().order().by("name").limit(2))').sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
     const first = run(seededStore(), 'g.V().local(__.out().order().by("name").limit(1)).values("name")') as any[];
     // marko→{vadas,josh,lop} first=josh; josh→{lop,ripple} first=lop; peter→{lop} first=lop.
     expect(first.map((r: any) => r.v).sort()).toEqual(['josh', 'lop', 'lop']);
@@ -84,7 +86,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // `dedup()` inside a per-parent body is DISTINCT within each parent: `local(both("created").dedup())`
     // keeps each vertex's distinct created-neighbours. It lowers to a ranked window PARTITIONed by the
     // origin (parent) plus the identity key — never a global Distinct that would collapse across parents.
-    const p = read('g.V().local(__.both("created").dedup())');
+    const p = read('g.V().local(__.both("created").dedup())', { fastPaths: LADDER });
     expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
     // Per-vertex distinct both-created counts: marko 1, josh 2 (lop,ripple), peter 1, lop 3, ripple 1 = 8.
     const n = run(seededStore(), 'g.V().local(__.both("created").dedup()).count()') as any[];

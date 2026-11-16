@@ -25,7 +25,7 @@ import { readFileSync } from 'node:fs';
 import fc from 'fast-check';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import {
-    differential, gatingDivergences, ran, onlyDisabled, FAST_PATH_NAMES, GATING,
+    differential, gatingDivergences, ran, onlyFlipped, FAST_PATH_NAMES, GATING,
     type Divergence,
 } from './oracle.ts';
 import { isNondeterministic, seeded } from '../support/graph.ts';
@@ -124,7 +124,7 @@ describe('L5 — fast-path differential', () => {
         const unknown: string[] = [];
         fc.assert(
           fc.property(traversal({ steps: 4, depth: 2 }), (g) => {
-            const news = unexplained(g.query, onlyDisabled(name));
+            const news = unexplained(g.query, onlyFlipped(name));
             if (news.length === 0) return true;
             unknown.push(report(g.query, news));
             return false;

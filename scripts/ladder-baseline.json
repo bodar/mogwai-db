@@ -1,5 +1,5 @@
 {
-  "total": 1337,
+  "total": 1360,
   "files": {
     "src/compiler/rel/alias.ts": 15,
     "src/compiler/rel/asstring-barrier.ts": 3,
@@ -18,7 +18,7 @@
     "src/compiler/rel/lower/filter.ts": 60,
     "src/compiler/rel/lower/movement.ts": 11,
     "src/compiler/rel/lower/reduction.ts": 134,
-    "src/compiler/rel/lower/scoped.ts": 58,
+    "src/compiler/rel/lower/scoped.ts": 81,
     "src/compiler/rel/lower/slice.ts": 22,
     "src/compiler/rel/map.ts": 48,
     "src/compiler/rel/match.ts": 69,

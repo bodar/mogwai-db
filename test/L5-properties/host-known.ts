@@ -37,21 +37,7 @@ export interface KnownHostInternal {
   readonly repro: string;
 }
 
-export const KNOWN_HOST_INTERNAL: readonly KnownHostInternal[] = [
-  {
-    id: 'seed-twice-in-decorrelated-exists',
-    family: /(?:where|filter|not)\(__\.union\(__\.identity\(\), __\.identity\(\)\)\)/,
-    message: /names two different relations in one scope/,
-    diagnosis: 'Pre-existing on trunk (bb433d7f), drawn by the HEAD-derived exploration seed. An existence host '
-      + '(where/filter/not) whose body is union(identity(), identity()) over a SCALAR stream, nested in a DECORRELATED '
-      + 'connector body (map, order().by, …): the union arms ARE the seed row (`seedRow`, lower/scoped.ts), so the '
-      + "EXISTS subquery holds the seed relation itself; most likely (unconfirmed) `decorrelate` (src/rel/decorrelate.ts) rebuilds the seed's "
-      + 'project keyed under the SAME id and re-points column reads, but not the relation object inside the subquery — '
-      + 'so one id names the old and the keyed seed. Over an element stream the body lowers as a seek and never meets it. '
-      + 'Fix in decorrelate: rewrite a subquery plan held in an expression through the same memoized `go`.',
-    repro: 'g.inject(1).map(__.where(__.union(__.identity(), __.identity())))',
-  },
-];
+export const KNOWN_HOST_INTERNAL: readonly KnownHostInternal[] = [];
 
 /** The id of the diagnosed internal-error entry covering this throw, if any. */
 export const knownHostInternal = (query: string, message: string): string | undefined =>

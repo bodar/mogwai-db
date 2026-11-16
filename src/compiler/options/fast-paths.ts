@@ -67,22 +67,23 @@ export interface FastPathConfig {
    */
   readonly propertySeek: boolean;
   /**
-   * Try the LADDER of specialised correlated child routes (`scalarChild`, `correlatedReduce`,
-   * `flatMapRejoin`, `nestedHostChild`, the per-shape readers) BEFORE the scoped-relation connector at a
-   * connector host (every row of `CONNECTORS`, `src/compiler/rel/lower/scoped.ts`),
-   * instead of after it.
+   * PREFER the LADDER of specialised correlated child routes (the per-shape readers still standing in the host
+   * tails) over the scoped-relation connector at a connector host (every row of `CONNECTORS`,
+   * `src/compiler/rel/lower/scoped.ts`). **OFF by default** — the one switch whose default position is its
+   * generic side.
    *
    * **The NINTH switch, and the first whose generic side is a general DECORRELATION** (`src/rel/decorrelate.ts`,
    * Neumann/Calcite): the connector scopes the host stream by a row number, lowers the body as the root lowers
-   * a chain, keys it by the scope and joins it back by the host's policy. The ladder is kept because a
-   * correlated scalar subquery is an index seek per outer row — genuinely faster for the common shallow
-   * shapes (`project('x').by('age')`, `where(out().count().is(gt(1)))` over a selective outer) than a grouped
-   * join over the whole domain (`docs/2026-11-15-compositional-coverage-plan.md` §2, "the ladder becomes the
-   * FAST PATH").
+   * a chain, keys it by the scope and joins it back by the host's policy — keeping the dependent join correlated
+   * (an `EXISTS`, a correlated first-row scalar) wherever SQL can hold it, which is what made it as fast as the
+   * ladder on the cost-discipline shapes. Since the Phase 3 inversion (`docs/2026-11-15-compositional-coverage-plan.md`
+   * §3, cc3c) the connector is the default and the semantic authority; ON puts the ladder first again, and
+   * exists only so the routes still standing keep a differential while they are audited and deleted (cc3d,
+   * the plan's "Kept routes" table).
    *
    * Each side is the other's fallback, so the SUPPORTED set is identical in both positions — only the plan
-   * changes, which is exactly the claim L5's per-switch sweep checks: every traversal both lowerings answer
-   * is compared ladder against connector.
+   * changes, which is exactly the claim L5's per-switch sweep checks (it FLIPS each switch from its default,
+   * so this one is swept ON): every traversal both lowerings answer is compared ladder against connector.
    */
   readonly correlatedChild: boolean;
   /**
@@ -140,7 +141,9 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   movementCollapse: true,
   repeatBodyExpansion: true,
   propertySeek: true,
-  correlatedChild: true,
+  // OFF by default since the Phase 3 inversion: the scoped-relation connector is the authority and is tried
+  // first; the ladder is the opt-in side (see the field's comment).
+  correlatedChild: false,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({

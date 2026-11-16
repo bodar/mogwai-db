@@ -81,7 +81,11 @@ Feature: mogwai addendum — a by() that yields a NULL is ABSENT at every consum
     When iterated to list
     Then the result should be empty
 
-  # coalesce() is null-coalescing: a null sack falls through to the constant.
+  # A null sack IS a result: `sack()` emits one traverser holding null, so `coalesce()`'s first arm has a next
+  # and is taken (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:52-62),
+  # and `project()` puts the key with that null (…/step/map/ProjectStep.java:64-67). The scoped-relation
+  # connector (the default since the Phase 3 inversion) answers as the reference does; the old ladder spelled
+  # coalesce as SQL COALESCE and fell through to the constant.
   Scenario: g_withSackXnullX_VX1X_projectXxX_byXcoalesceXsack_constantX1XXX
     Given the modern graph
     And the traversal of
@@ -91,7 +95,7 @@ Feature: mogwai addendum — a by() that yields a NULL is ABSENT at every consum
     When iterated to list
     Then the result should be unordered
       | result |
-      | m[{"x":"d[1].i"}] |
+      | m[{"x":null}] |
 
   # A nested project() is a MAP field, embedded as one (it was an internal error).
   Scenario: g_VX1X_projectXxX_byXprojectXyX_byXconstantX1XXX

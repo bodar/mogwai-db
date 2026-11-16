@@ -1,10 +1,10 @@
 {
  "note": "L6 workload ratchet — written by `mise run workload-record`. A `wrong`/`divergent` entry must carry a human reason; an UNTRIAGED one fails the test.",
  "counts": {
-  "pass": 304,
+  "pass": 305,
   "wrong": 0,
   "unverified": 0,
-  "declined": 8,
+  "declined": 7,
   "error": 0
  },
  "outcomes": {
@@ -42,7 +42,7 @@
   "seed-32": "pass",
   "seed-33": "pass",
   "seed-34": "pass",
-  "seed-35": "declined",
+  "seed-35": "pass",
   "seed-36": "pass",
   "seed-37": "pass",
   "seed-38": "pass",

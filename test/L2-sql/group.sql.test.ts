@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
+import { LADDER, bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
 import { t } from '../../src/io.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
@@ -248,7 +248,7 @@ describe('group / properties SQL', () => {
     expect(await dec("g.V().has('lang').group().by('lang').by(__.count())")).toEqual([new Map([['java', 2]])]);
     // The ORIGIN CHANNEL is the mechanism, and the SQL says so: the seed names it, the movement's arms
     // carry it, and the KEY is re-read off it rather than carried through the join.
-    const sql = bare_read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql;
+    const sql = bare_read("g.V().group().by('name').by(__.bothE().values('weight').sum())", { fastPaths: LADDER }).sql;
     expect(sql).toContain('AS origin');
     expect(sql).toMatch(/rp\d+\.node = \w+\.origin/);
     // A body reading a LABEL resolves, because the host's labels ride into the sub-fold — handing over
@@ -300,7 +300,7 @@ describe('group / properties SQL', () => {
   // It is the collecting arm plus one `$[0]`, which is why it declares `mapValue` like every other map and
   // needs no shape of its own.
   test('group().by(key).by(__.tail()) is the FIRST member, through the collecting arm', () => {
-    const p = read('g.V().group().by("name").by(__.tail())');
+    const p = read('g.V().group().by("name").by(__.tail())', { fastPaths: LADDER });
     expect(p.shape).toEqual({ kind: 'mapValue' });
     expect(p.sql).toContain("'$[0]'");
   });
@@ -318,7 +318,7 @@ describe('group / properties SQL', () => {
   });
 
   test('group().by(tail()) reads the FIRST arrival and carries no null sort key', () => {
-    const p = read('g.V().both().group().by(T.label).by(__.tail())');
+    const p = read('g.V().both().group().by(T.label).by(__.tail())', { fastPaths: LADDER });
     expect(p.sql).toContain("'$[0]'");
     expect(p.sql).not.toContain("'$.t'), 'null') = 'null') DESC");
   });
@@ -388,7 +388,7 @@ describe('group / properties SQL', () => {
   // ordinary `mapValue`.
   test('group().by(__.project) — a RECORD-keyed group over an edge stream (upstream getEdges)', () => {
     const gremlin = 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())';
-    const p = read(gremlin);
+    const p = read(gremlin, { fastPaths: LADDER });
     expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'mapValue' });
     // The key IS the record's map node, named once as a column and grouped by that column — the

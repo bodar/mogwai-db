@@ -3994,7 +3994,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   params: opts.params,
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
-  correlatedChild: opts.correlatedChild ?? true,
+  correlatedChild: opts.correlatedChild ?? false,
   connectorOnly: opts.connectorOnly ?? false,
   propertySeek: opts.propertySeek ?? true,
   ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,

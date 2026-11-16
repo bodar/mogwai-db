@@ -9,7 +9,7 @@
 import { test, expect, describe } from 'bun:test';
 import { type CompileOptions } from '../../src/compiler/compiler.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
-import { read, run, runWith, seededStore } from '../support/harness.ts';
+import { LADDER, read, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -22,7 +22,7 @@ describe('call / search service SQL', () => {
     // absolutely. A `streaming` service contributes a per-parent VALUE, and a body that projects a
     // value and then tests it is a COMPARISON — so there is no EXISTS, no pushed child ordinal and no
     // LEFT JOIN rejoin.
-    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', { ...withReg }).sql;
+    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', { ...withReg, fastPaths: LADDER }).sql;
     expect(wsql).not.toContain('EXISTS');
     expect(wsql).not.toContain('LEFT JOIN');
     expect(wsql).toContain('= 3');

@@ -495,7 +495,18 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [textLiteral(key), jsonEntry(val)]))})`;
       case 'json-array': return q`${raw(e.binary ? 'jsonb_array' : 'json_array')}(${list(e.items.map(jsonEntry))})`;
       case 'scalar': return q`(${renderRel(e.plan, scope)})`;
-      case 'exists': return q`${e.negated ? raw('NOT ') : empty}EXISTS (${renderRel(e.plan, scope)})`;
+      case 'exists': {
+        // An EXISTS over ONE constant row and a WHERE — a correlated body that only TESTS its seed row
+        // (`not(is(gt(0)))` over one traverser) — is that test: `EXISTS (SELECT … FROM (VALUES (1)) WHERE p)`
+        // holds exactly where `p` is true, the truth WHERE itself applies. Spelled as a CASE so the value is
+        // the EXISTS's own 0/1 whatever `p` evaluates to; no subquery is run per row.
+        const built = build(e.plan, scope);
+        if (built.kind === 'block' && built.from.unit && !built.joins.length && built.where && !built.groupBy?.length
+          && !built.having && !built.limit && !built.offset
+          && !qualifiers(render(built.where).sql).includes(render(ident(built.from.alias)).sql))
+          return e.negated ? q`CASE WHEN ${built.where} THEN 0 ELSE 1 END` : q`CASE WHEN ${built.where} THEN 1 ELSE 0 END`;
+        return q`${e.negated ? raw('NOT ') : empty}EXISTS (${renderBuilt(built)})`;
+      }
       case 'in-list': return q`${self(e.expr)} IN (${list(e.values.map(self))})`;
       case 'in-query': return q`${self(e.expr)} ${e.negated ? raw('NOT ') : empty}IN (${renderRel(e.plan, scope)})`;
     }

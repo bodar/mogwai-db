@@ -29,9 +29,11 @@ export const ALL_GENERIC: FastPathConfig = Object.freeze(
 
 export const FAST_PATH_NAMES = Object.keys(DEFAULT_FAST_PATHS) as (keyof FastPathConfig)[];
 
-/** Default config with exactly one fast path disabled — isolates which switch a diff belongs to. */
-export const onlyDisabled = (name: keyof FastPathConfig): FastPathConfig =>
-  Object.freeze({ ...DEFAULT_FAST_PATHS, [name]: false });
+/** Default config with exactly one switch FLIPPED from its default — isolates which switch a diff belongs to.
+ *  Flipped rather than disabled: `correlatedChild` defaults OFF (the connector is the authority since the
+ *  Phase 3 inversion), so disabling it would compare the default against itself. */
+export const onlyFlipped = (name: keyof FastPathConfig): FastPathConfig =>
+  Object.freeze({ ...DEFAULT_FAST_PATHS, [name]: !DEFAULT_FAST_PATHS[name] });
 
 /** The result of running one traversal under one config. A THROW is an outcome, not a crash: the
  *  project's fail-closed rule means an unsupported shape must throw a clear deferral, and whether
