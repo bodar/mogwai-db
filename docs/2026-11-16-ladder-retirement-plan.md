@@ -1,8 +1,9 @@
 # Retiring the correlated-child ladder
 
 _Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; round 2
-landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; round 4 landed N5, K1+P15, Q2 (both halves), P12, M2, R6's first item (+R6.0) and N3 partially. The next round starts at
-"Next round (written 2026-11-17, after round 4)" at the end. No deadline: each step lands on its own when it is ready, and
+landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; round 4 landed N5, K1+P15, Q2 (both halves), P12, M2, R6's first item (+R6.0) and N3 partially; round 5 landed S1, S2, S3, S4, S5's first bullet, S6, K5 (+P19) and R6's
+follow-ups. The next round starts at "Next round (written 2026-11-17, after round 5)" at the end (T1 is a regression:
+do it first). No deadline: each step lands on its own when it is ready, and
 any step may stop and be reconsidered._
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is
@@ -1057,7 +1058,7 @@ per 8× (`test/compiler/walk-condition-hub-scale.exec.test.ts`; refusals pinned 
 exposes each answer's `domain`, so `scopedSite` reads the host encounter off the domain (the scope CTE is read once).
 **Remains:** Witness 2, `local(out().out().where(in().has(..)).count())`, is still super-linear (about 16–19× per
 8×). It is a per-row correlated EXISTS over a hub's in-neighbourhood with no self-semijoin, so this rule does not
-reach it. It needs its own item.
+reach it. It needs its own item: T3 (after round 5).
 
 Q2b's remaining **scope-free-subterm** (`docs/outstanding-work.md` §1b): a filtering condition under
 `where`/`local`/`map` is keyed per scope by the decorrelator, which costs 16–23× at a hub. That holds connector-wide on
@@ -1177,3 +1178,172 @@ routing, not on where the decline is:
    equality by() compare as a propertySeek term." (Witness: `g.V().as('a').where(V().where(eq('a')).by('name').where(neq('a'))).values('name')`,
    1.16 s → 79 s at 1k → 8k. The reference's `TraversalFilterStep` also scans the graph per host when there is no
    match. An index answers it in N log N. This decides S5's second bullet.)
+
+## Next round (written 2026-11-17, after round 5)
+
+Round 5 landed S1 (11992908), R6's two cheap follow-ups (3537cd84), K5 + P19 (38fe5827), S4 (5b19bb55), S6
+(90d70f16, 9a4d34ee), S2 (e2b515da, 01f29c3a), S3 (7e2def6f) and S5's first bullet (f59b6ece). Every round-5 branch
+landed, so no branch is parked as a resume point. Not built this round: **S6a** (the N3 remainder's prerequisite,
+above) — still open, unchanged. Still open from earlier rounds: M1b (behind H1), M6, N3 remainder (behind S6a), N8,
+N9, K2, K3, K4, P2, P5, P6, P8, P9, P11, P13, P14, P16–P18, P20, R4.2, R4.5, R5.2–R5.4, R6 (other hosts), R7, S5's
+second bullet (owner question 2, round 4), and the round-4 cheap follow-ups (N5 root CASE, Q2a, P12 pins, M2 probe
+witnesses). Ordered so that each prerequisite comes BEFORE the item it unblocks; major items first.
+
+### T1 — The walk's EXIT column is not payload (MAJOR — REGRESSION from S4, do first)
+
+S4 (5b19bb55) added the `EXIT` column `wx` to the walk relation (`src/compiler/rel/walk.ts`). It is neither a carried
+channel nor payload, but `payloadCols` (`src/compiler/rel/build.ts` ~82) counts every non-channel column as payload.
+`emits(walk)`/`leaves(walk)` ask the emit condition with the walk itself as subject, and `correlatedExistence`
+(`src/compiler/rel/lower/scoped.ts`) needs `payload = [id]`, sees two columns and returns null. The same subject check
+guards `local`'s first-row pick. Result: a walk with an `until` AND an `emit` whose condition uses the correlated
+fallback (`local`/`union`/`coalesce`/`choose`) now DECLINES where 1c8653e7 answered — in every modulator position, at
+the root and under a host. Re-measured on trunk (dc811656):
+`g.V().repeat(out()).until(hasLabel('software')).emit(local(in().limit(1))).values('name')` and
+`…emit(coalesce(in('created').has('age',gt(30)),out('nope')))` decline; the same `emit(local(…))` without `until`
+answers. The corpus has no until+emit(local/union/coalesce/choose) scenario, which is why CI stayed green.
+**Item:** ask emit conditions over a traverser-only projection of the walk (as the term already does with `wt`), or
+carry EXIT so `payloadCols` does not count it — prefer whichever keeps ONE authority on "what is payload". Add an
+exec test for until+emit(local/union/coalesce/choose) at the root, under `where`, and under `local`.
+
+### T2 — Fence the walk in `perState` (MAJOR — compute-once rule; S6 widened its reach)
+
+`perState` reads the walk relation twice: in the DISTINCT that builds the passing set (fenced) and in the semi-join it
+filters (not fenced), so SQLite runs the recursive CO-ROUTINE twice (EXPLAIN plan ids 110 and 214 for
+`g.V().hasLabel('person').where(repeat(out('knows')).emit(in('knows').has('age',gt(40)))).count()`). It was already so
+at the root; S6 deleted S4's gate, so it now runs under every scoping host: non-hub scoped walks are 1.2–2.1× slower
+in absolute time (still linear; e.g. `where(repeat(out('knows')).emit(…))` 61.6 ms vs 29.4 ms at 1,050 chains).
+Fencing the CTE by hand gave identical answers and 34.5 → 24.4 ms. **Item:** fence the walk in `perState`
+(`MATERIALIZED` / a materialize node), which also helps the root route; and say in `walk.ts` that per-state costs a
+constant factor where no state is shared. Cheap, same item: `sql-hygiene` checks a subquery evaluated twice per row
+but not a CTE inlined twice per query — teach it that, so the next one is a gate failure, not a review finding.
+
+### T3 — One correlated EXISTS per owner scan; per-row correlated EXISTS at a hub (MAJOR, super-linear, common reach)
+
+Three findings share one root: a correlated EXISTS evaluated per candidate per host, with no rewrite to a
+once-per-statement set.
+- **S6's witness 2**, `g.V().local(out().out().where(in().has('age',gt(45))).count()).sum()`: 7.2 → 142.5 ms at 130 →
+  1,050 hub chains (19.8×; trunk 21×). The condition never forms a self-semijoin, so `existenceOverOwnRows` does not
+  reach it. Common reach.
+- **S5a, multi-conjunct `is()`:** `leadingRead` calls `ownerJoined` once per spine conjunct, so
+  `values('name').is(containing('zz'))` becomes three EXISTS (type guard, `like`, `instr`). Only the type guard is
+  lifted into the `vp_key_value` IN, and it narrows nothing: 757 ms → 50 s at 1k → 8k (66×); `endingWith` 89×;
+  `startingWith` 645 ms → 2.6 s at 1k → 2k. Pre-existing (parent was already quadratic). Each EXISTS also re-spells
+  the CASE/json value expression.
+- **S2's boundary:** correlated re-sources outside the one-row-seed shape stay N×G —
+  `hasLabel('person').property('best', V().has('name','p5').values('name'))` (json_each snapshot × nodes before the
+  `has()` EXISTS; 742 ms → 11.5 s at 1k → 4k) and `as('a').optional(V().where(neq('a')).has('name','p3'))` /
+  `coalesce(…)` / `local(V().where(neq('a')).out().limit(1))` / `map(E().where(outV().where(eq('a'))))` over a
+  root-level decorrelated CROSS on an unindexed CTE (~400 ms → 1.6 s at 1k → 2k).
+**Item, in order:** (a) in `src/rel/passes/leading.ts`, group the conjuncts that resolve to the same owner-joined
+property scan into ONE EXISTS, so the IN subquery carries the `like`/`instr` test (cheap, concrete); (b) one
+`src/rel/decorrelate.ts` rule (or an S2-style physical pass) that turns a correlated EXISTS whose right side reads the
+outer row only through an equality on an indexed column into a once-per-statement semi-join — witness 2 and the S2
+boundary shapes are its tests. (b) needs a design pass before building; say if it is a new node rule or an extension
+of `existenceOverOwnRows`.
+
+### T4 — `where(is(c))` / `filter(is(c))` over a value lowers like `is(c)` (minor, depth gap next to S5a's witness)
+
+`V().where(neq('a')).values('age').where(is(99))` and `.filter(is(99))` do not get S5a's narrowing and are roughly
+CUBIC: 8.5 s at N=250, 73 s at N=500 (same on parent). The fix belongs in the lowering — `where(is())`/`filter(is())`
+over a value traverser should produce the same spine filter as `is()`, so `ownerJoined` sees one conjunct. Not a new
+`leading.ts` case. After T3(a).
+
+### T5 — The keyed-group advisory is raised where the connector body declines (minor, explain-don't-baffle)
+
+K5's advisory for `g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')` (also `local(...)`,
+`by(values('age').sum())`) exists only on the ladder route; connector-only mode gives a bare "no lowering covers".
+When the ladder retires (R7) the hint disappears with no test noticing. **Item:** note it where the connector body
+declines (`keyedBody`), and pin the message under connector-only mode in `test/compiler/existence-prefix.exec.test.ts`.
+
+### T6 — S3's trial lowering compounds compile time with nesting (minor, compile time only)
+
+`correlatedReSources` runs a full throw-away `correlatedBody` lowering for every non-rooted landed `by()` body (trunk
+did so only for bodies naming `V()`/`E()`), and nested bodies recurse, so the per-level multiplier went ~5× → ~7×:
+`g.V().group().by(local(out().order().by(in().count()).limit(1)).values('name')).by(count())` 30.0 → 46.8 ms; a
+synthetic depth-4 nest 7.1 → 26.5 s. Not data-dependent. **Item:** memoise the trial per body key and minter scope, or
+reuse the trial's tail when it says re-source, so the cost fact adds no second lowering per level. Also fork
+`ctx.declines` (and roll back `budget.noteUnroll`) around the trial, so a thrown-away trial cannot leave a reason.
+
+### T7 — S1 remainders (after P16–P18; shared root with them)
+
+- **Arg-min/arg-max keyed pick for a min/max body.** S1's witnesses 1–2 keep two scalar reads (value, type tag),
+  banked in `scripts/sql-hygiene-respelled.json`. The reducer (`src/compiler/rel/reducer.ts`) must expose the winning
+  row's key while keeping its eligibility, mixed-class and decimal raises. This is the SAME substrate as P16
+  (`min/max(local)` on N5's arg-extremum Aggregate), P17 (`firstArrival` → `arg_min`) and P18 (dedup-first windows →
+  `arg_min`): **one arg-extremum Aggregate builder** pulled out of `lower.ts` ~2620–2645. Build P16 first (it extracts
+  the builder), then this.
+- **Other double spellings the new hygiene gate banked:** `format()`/`concat()` reading one value twice and
+  `choose()`/`branch()` option arms (priorityArms, needs an arm-tagged key). Each entry leaving
+  `sql-hygiene-respelled.json` is the measure.
+- **`group().by(id()).by(map(V().where(neq('a'))…))`** still declines (separate finding; joins N8).
+- **`scalarPick`'s synthetic `{kind:'call', fn:'pick'}` node** (`scoped.ts`) exists only so one `substRelId` moves
+  several expressions; replace it with a helper that moves an expression list, so a fake SQL function can never reach
+  the emitter. `abstractOver` compares by `JSON.stringify` of every subexpression including nested subplans
+  (compile-time quadratic in body size) — compare structurally or by id.
+- **Scaling-probe graph:** use a reference vertex whose degree is held fixed, so a `both().both()` pick's 1k→8k ratio
+  reads per host (S1 measured 26× raw, flat per pick).
+
+### N8 additions (round 5 depth gaps; clean declines today; a body or host row, never a rung)
+
+- **S1/S2:** `map(V().where(neq('a')).bothE().otherV().id())`; `map(V().where(neq('a')).order().by('name').values('name'))`
+  and `…outE().order().by('weight',desc).inV().id()`; `map(V().where(neq('a')).out().id()).as('b').select('a','b')`;
+  `hasLabel('software').coalesce(V().has('name','p7'),constant('none'))`; `as('a').choose(V().where(neq('a')).has('age',30),…)`;
+  `addE('next').to(V().where(neq('a')).has('age',30))` and `from(V().where(neq('a')).where(eq('a')).by('age'))`;
+  `as('a').map(V().where(neq('a')).values('name').is('marko')).values('name')` (the `count()` form answers).
+- **Trunk declines next to S1's witnesses, common idiom first:** `g.V().project('n').by(out().values('name')).aggregate('x').cap('x')`;
+  `group('m')`/`groupCount('m')` after a `project().by()`; `g.V().group().by('name').by(map(out().id()))`.
+- **R6:** membership followed by `path()` (`…aggregate('x').out().where(P.not(within('x'))).path().by('name')`,
+  same as the `without` form); membership over a SEEDED side effect (`withSideEffect('x',['lop','josh'])…where(P.not(within('x')))`);
+  the startKey form `where('a', P.not(within('x')))`; membership over a PATH LABEL (`as('x').both().where(within('x'))`,
+  `without`, `P.not(within)` — uniform; `neq('x')` answers); `.and()` of two memberships; an aggregate read inside its
+  own repeat body.
+- **S6:** an emit condition reading a label bound before or inside the walk under a scoping host
+  (`local(__.as('s').repeat(out()).emit(in('created').where(neq('s'))).count())`, `…repeat(out().as('x'))…select('x')`,
+  and unscoped `as('s').repeat(out()).emit(…where(neq('s')))`) — blocked before S6's rule, joins Q2a/Q2b's label item.
+- **S5a (narrowing does not fire, answers correct):** reducing bodies (`map(…values('age').is(gt(30)).fold())`,
+  `project().by(…is(…).count())`, `order().by(…count())`) and coalesce/optional/flatMap/choose hosts.
+
+### Next round — reuse sweep (round 5's proposals)
+
+**One column-lineage authority (SUBSTRATE: the shared root of five review findings and five proposals; do as one
+item, in this order).** S1 added `columnLineage` (`src/rel/copies.ts`) and S2 added `definingPath`/`columnAt`
+(`src/rel/lineage.ts`); private walkers still answer "which column below defines this one":
+- **P21 — one positional join-side mapper** `joinSide(r, name)` in `src/rel/walk.ts` or `copies.ts`, replacing the
+  4-line block written 5× (`columnIsStored`, `columnIsRowKey`, `columnLineage`, `constantOver`,
+  `priorityArms.constantIn`). Fixes `definingPath`'s by-NAME join case, which gives up when both sides carry the name
+  and would silently drop a leading key to the N×G whole-cross sort (latent today; names are minted distinct). Do first.
+- **P22 — `definingPath` passes through `limit`/`distinct`/`materialize`** (identity-preserving, as the other walkers
+  already are); delete `reSourceCross`'s materialize loop and `decorrelate.ts` `existenceOverOwnRows`' private
+  `carried`. Check: S2's byte-identity sweep over the L1 corpus.
+- **P23 — `leading.ts` `definingSeed` + `inSeed` → `columnLineage`** (reject if a leaf is the seed's own relation or
+  the result has a subquery).
+- **P24 — `priorityArms.constantIn` → two `columnLineage` calls** (~25 lines). Strictly safer at a LEFT join's right
+  side; check with the choose()/branch() priority tests and the respelled baseline.
+- `semijoin.ts` `columnPath` folds into the same authority.
+
+**Small helpers, one home each:**
+- **P25 — `conjoin` everywhere** (`src/rel/expr.ts`, beside S2's `conjuncts`): delete `semijoin.ts` `andAll` and the
+  19 hand-written `.reduce((a,b) => and(a,b))` folds (leading.ts, decorrelate.ts, scoped.ts, slice.ts, map.ts,
+  lower.ts, write.ts — a seeded `eq(1,1)` becomes `conjoin(xs) ?? always`). Emitted SQL identical but for grouping.
+- **P26 — one memoised "is this relation id defined inside this plan"** in `src/rel/walk.ts` (export `definesId` or a
+  `definedRelIds` nodeFact) for `scoped.ts` `isOuterOf` (a full walk per column node — compile-time O(cols × plan)),
+  `constantOver`'s `inside`, `semijoin.ts` `idsWithin`, `leading.ts` `inSeed`.
+- **P27 — one `columnsRead`** in `src/rel/walk.ts`: S6's `decorrelate.ts` `columnsRead` = `fuse.ts` `colsOf`, and
+  `scoped.ts` `colsRead` is a shallow variant; `exprReads`/`exprTouchesSelf` share `exprTouches`' traversal. Move
+  S1's `freeIds` there too, beside `freeRelIds`.
+- **P28 — one property side-table fact** (table, owner column, keyed by element table) in `src/rel`, from which
+  `semijoin.ts` `SEEK_PROPERTIES`/`PROPERTY_OWNER`/`FTS_PROPERTIES`/`propertyOwner` and `build.ts` `PROPERTIES` derive.
+- **P29 — one `B.owner = X` reader** `ownerOperand(conjunct, props)` beside `propertyOwner`, shared by `leading.ts`
+  `ownerJoined` and `semijoin.ts` `ownerColumn`. After P28.
+- **P30 — `isGraphStep(s)`** in `src/compiler/ir/step.ts` for the 16 hand-written `V`||`E` tests, plus one exported
+  "draws over a re-source" predicate for `scoped.ts` `ladderOwns` and `per-traverser.ts` (identical today).
+- **P31 — `namesACollection` reads `collectWhereKeys`** (LOWER CONFIDENCE): one select-key authority instead of three.
+  Today `namesACollection` claims any list member; `collectWhereKeys` takes only the first, as getSelectKey does
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`).
+  Lands only if `within(['y','x'])` still declines the same way — check `test/compiler/not-within-membership.exec.test.ts`.
+
+### Needs-human questions (round 5)
+
+None raised this round. Round 4's two questions are still open: question 1 (movement-head `until` at a hub, 22.8×;
+S3 confirmed the two reducer walk-condition witnesses `sum().is`/`dedup().count().is` stay at 56×/49× pending it) and
+question 2 (decides S5's second bullet).
