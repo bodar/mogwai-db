@@ -1012,6 +1012,13 @@ in the domain.
 
 ### K5 — The decline signal: a host records its own decline (minor x4, one item; replaces the position watermark)
 
+✅ **LANDED (38fe5827, with P19).** A connector host that declines before handing its stream on records that itself
+(`Declines.hostDeclined`, in `scopedHost`, `src/compiler/rel/lower/scoped.ts`), and `lowerChain` names a child write
+only where its top-level host recorded it; the record reaches the compile only through the fork sink's `adopt`, so
+route order cannot change the message. `Declines.#furthest`/`reach`/`furthest` are deleted. The write reason now
+displaces the effect-in-child advisory, and a keyed `group('x')` with a reducing `by()` in a child gets the advisory
+where `registerGrouping` refuses. Remains: nothing.
+
 K1's `Declines.furthest` advances only in `continueAs`, so whether a write hint is certain or hedged depends on
 routing, not on where the decline is:
 - `sideEffect(property(...))`, `sideEffect(drop())` and `repeat(addV(...)).times(2)` became "may not be supported
@@ -1092,7 +1099,9 @@ routing, not on where the decline is:
   `dedupGroupMembers` and the `list.ts` `dedup(local)` arm (~505). Both use ROW_NUMBER only because "an Aggregate
   cannot give the value of the row with MIN(mo)", which arg_min now does. This also moves them onto decorrelate's
   Aggregate rule. `slice.ts` `dedupOn`/`dedupOnTyped` are not candidates (multi-key order).
-- **P19 — Hoist the path-tracked write decline.** Use one
+- ✅ **LANDED with K5 (38fe5827)** — one `pathCarried → writeOnPath` check at the top of `elementTail`'s loop; the
+  scalar tail keeps its single check (hoisting it would blame the path for scalar `property()`/`drop()`). Remains:
+  nothing. **P19 — Hoist the path-tracked write decline.** Use one
   `if (MUTATING_STEPS.has(step.name) && pathCarried(rel)) return writeOnPath(step, ctx)` at the top of `elementTail`'s
   loop (`lower.ts` ~5755–5859) and at the scalar-tail site (~2802). It replaces 6 repeated lines, and a new write step
   is covered automatically. Do it with K5.
