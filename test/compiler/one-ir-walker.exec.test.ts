@@ -272,7 +272,7 @@ describe('a map-valued member of a map frames as a map', () => {
 // `Grouping.determineBarrierStep` pools every member of a key into ONE value traversal
 // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125);
 // a `by(<pre>.fold())` must never fall through to a per-member fold: the scoped connector pools it per KEY
-// (`pooledGroup`, `src/compiler/rel/lower/scoped.ts`), and a keyed side-effect group it does not own declines.
+// (`pooledGroupMap`, `src/compiler/rel/lower/scoped.ts`) — the keyed side-effect form too, through the same pool.
 describe('a group value fold pools per key, never per member', () => {
   const sortedValues = async (q: string) => {
     const [m] = (await framed(q)) as Map<unknown, string[]>[];
@@ -284,9 +284,9 @@ describe('a group value fold pools per key, never per member', () => {
   test('keyed by a label\'s element', async () =>
     expect(await sortedValues("g.V().as('a').out().group().by(select('a')).by(values('name').fold())"))
       .toEqual(new Map([[1, ['josh', 'lop', 'vadas']], [4, ['lop', 'ripple']], [6, ['lop']]])));
-  test.each([
-    "g.V().as('a').out().group('m').by(select('a')).by(values('name').fold()).cap('m')",
-  ])('%s', (q) => declines(q));
+  test('keyed by a label\'s element, as a side effect', async () =>
+    expect(await sortedValues("g.V().as('a').out().group('m').by(select('a')).by(values('name').fold()).cap('m')"))
+      .toEqual(new Map([[1, ['josh', 'lop', 'vadas']], [4, ['lop', 'ripple']], [6, ['lop']]])));
 
   // A MAP OF ELEMENTS nested in another value — a pooled group value, a groupCount key — frames its elements
   // (`mapNodePayload`, recursive over the value side), never their bare rowids.

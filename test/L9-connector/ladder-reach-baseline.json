@@ -8,13 +8,13 @@
     "L1": {
       "existence": 0,
       "per-traverser": 1,
-      "group": 14,
+      "group": 3,
       "other": 4
     },
     "L6": {
       "existence": 0,
       "per-traverser": 0,
-      "group": 3,
+      "group": 2,
       "other": 0
     },
     "H": {
@@ -28,24 +28,12 @@
     "087edf71dbf5",
     "0a5bfd28f164",
     "0c5314a1ad95",
-    "1c9811ba2c44",
-    "2824f76c5ea0",
-    "37b7aef162be",
-    "453bbb7434cd",
-    "476dc6bdc71c",
     "61063cb6084b",
     "687c561137bb",
     "7563378b7437",
-    "7a163fa20b84",
-    "a547c5f00084",
-    "a789a12466fd",
     "c068d1eaa2b6",
     "ca52f8047492",
-    "cbd5e1b42527",
-    "d0e288cd2be4",
-    "deff90325220",
     "ef9c2a2f38ea",
-    "f6be844c87ab",
-    "f9c88ebe9e3e"
+    "f6be844c87ab"
   ]
 }

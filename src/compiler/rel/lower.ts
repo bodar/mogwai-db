@@ -66,7 +66,7 @@ import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/wri
 import { Declines, writeInChild, writeOnTrackedPath, type ChildWrite } from '../unsupported.ts';
 import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
-import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
+import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap, type GroupRows } from './map.ts';
 import { FOREIGN_ORD, foreignMapRejoin, foreignMapRelation, foreignNodeStream, foreignRejoin, landForeignRows, landedCols, landedStream, PARENT_COL, parentsRelation } from './foreign.ts';
 import { BaseGraph, type GraphSource } from './source.ts';
 import { boundGraph, type MergedGraph } from './boundgraph.ts';
@@ -1384,6 +1384,35 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
 type ArmOutcome = { readonly tail: Tail | null } | 'continue' | 'pass';
 
 /**
+ * THE KEYED `group("a")`/`groupCount("a")` TAIL — the ONE authority for registering a grouping's rows (or a
+ * pooled value's finished map, `GroupRows.done`) under its label, draining a raising site, and re-entering the
+ * chain with the traversers the side effect passes on. Both the host's own lowering (`collectionArm`) and the
+ * connector's pooled group (`byValues`, `lower/scoped.ts`) call it, so the guards are stated once:
+ * - a carried PATH declines — the member rows would have to carry it, which is not built;
+ * - a PER-ORIGIN scope declines — the keyed side effect in a `local`/`flatMap` body is a separate feature;
+ * - ⚠️ a PROGRAM WITH EFFECTS declines, and the reason narrowed rather than went away: the sites hold
+ *   `(key, contribution)` MEMBER rows, but the KEY column holds a JSONB node, and a retained binding travels as
+ *   JSON (`src/program.ts`), which fails closed on exactly that. Projecting `json(gk)` at the binding is the
+ *   remaining step;
+ * - `registerGrouping` refuses a POOLED value inside a connector body (the connector row names why,
+ *   `refuseKeyedPool`), a second pooled site on one label, and a declared merge policy.
+ * `'continue'` — the caller's own fold continues with its relation unchanged; `reenter` is that fold from a
+ * position, for the one case (a drained raising site) that must prepend an effect.
+ */
+export function keyedGroupTail(
+  step: IRStep, rel: Rel, rows: GroupRows, at: number, ctx: ChainCtx, fresh: Minter,
+  reenter: (at: number) => Tail | null,
+): { readonly tail: Tail | null } | 'continue' {
+  if (pathCarried(rel) || originOf(rel.channels) || ctx.mutating) return { tail: null };
+  if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
+  const drained = drainRaisingSite(step, ctx.collections, fresh);
+  if (drained === null) return { tail: null };
+  if (!drained) return 'continue';
+  const tail = reenter(at + 1);
+  return { tail: tail && { ...tail, effects: [drained, ...(tail.effects ?? [])] } };
+}
+
+/**
  * THE COLLECTION-VOCABULARY ARMS BOTH TAILS SHARE — `select`, `group`/`groupCount`, `aggregate`, `cap` —
  * one lowering at both hosts (`project` is the connector's `recordLeft`, `lower/scoped.ts`) (§6·6: a shape works wherever it is legal). Each differs
  * between the scalar and element folds ONLY by the `host` it reads a `by()` through and the `framing` it
@@ -1453,22 +1482,7 @@ function collectionArm(
     if (origin && (!ctx.originDomain || step.args.length)) return { tail: null };
     // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, so the loop
     // CONTINUES and only the unkeyed form becomes the traverser. One rule, two hosts (§6·6).
-    if (step.args.length) {
-      // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed rather
-      // than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what Phase 4 said
-      // would let them take the aggregate sites' `snapshot` binding — but the KEY column holds a JSONB
-      // node, and a retained binding travels as JSON (`src/program.ts`), which fails closed on exactly
-      // that. Projecting `json(gk)` at the binding is the remaining step.
-      if (ctx.mutating) return { tail: null };
-      // A POOLED value (`GroupRows.done`) in a connector body is refused here, and the CONNECTOR ROW says why
-      // (`refuseKeyedPool`, `lower/scoped.ts`) — on every route, so the explanation does not depend on which ran.
-      if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
-      const drained = drainRaisingSite(step, ctx.collections, fresh);
-      if (drained === null) return { tail: null };
-      if (!drained) return 'continue';
-      const tail = reenter(at + 1);
-      return { tail: tail && { ...tail, effects: [drained, ...(tail.effects ?? [])] } };
-    }
+    if (step.args.length) return keyedGroupTail(step, rel, rows, at, ctx, fresh, reenter);
     const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, ctx.source, fresh, undefined, origin ? ctx.originDomain : undefined);
     return { tail: continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES) };
   }

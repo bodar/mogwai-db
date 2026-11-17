@@ -22,7 +22,7 @@ import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, PresentWhen, Subject } from '../child.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
-import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep } from '../map.ts';
+import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
@@ -30,7 +30,7 @@ import { bulkObservedFrom } from '../../ir/bulk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { defaultCollation, firstArrival, firstRow, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { framingCols, perTraverserFraming, type RecordField, type RelFraming } from '../framing.ts';
-import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned, withBranchEffects } from '../lower.ts';
+import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, keyedGroupTail, mintBranchOrder, positioned, withBranchEffects } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
@@ -2275,9 +2275,13 @@ const byValues: Connector = (site) => {
   const { step, rel, framing, ctx, fresh, labels } = site;
   // An ARGUMENT changes what the by() runs over: `dedup("a")` projects each scope LABEL's value on a NEW traverser
   // (`freshTraverserRow`), and `group("m")`/`groupCount("m")` is a keyed SIDE EFFECT — neither is a per-traverser
-  // by() over this stream, so both stay the host's own.
+  // by() over this stream, so both stay the host's own, except a keyed group whose value POOLS (`keyedPooledGroup`).
   if (step.optionArms || !step.modulators?.length) return null;
-  if (step.args.length) { refuseKeyedPool(step, ctx); return null; }
+  if (step.args.length) {
+    const keyed = keyedPooledGroup(site);
+    if (!keyed) refuseKeyedPool(step, ctx);
+    return keyed;
+  }
   const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
   if (!bys) return null;
   if (step.name === 'group' && bys[1]?.key.kind === 'child') return pooledGroup(site, bys);
@@ -2304,7 +2308,7 @@ const byValues: Connector = (site) => {
  * A KEYED `group("a")` IN A CONNECTOR BODY whose value `by()` POOLS (`poolingStep` — `by(count())`,
  * `by(values('age').sum())`, `by(out().fold())`) has no lowering on any route: the pool reduces once per BODY,
  * so its finished map cannot key as one grouping per host row (`registerGrouping` refuses it, `collection.ts`),
- * and this row leaves the keyed form to the host's own lowering. Recorded ON THE FORK (`refuseSite`), so the one
+ * whether `keyedPooledGroup` or the host's own lowering reached it. Recorded ON THE FORK (`refuseSite`), so the one
  * raiser — `keyedBody`, which knows the host the body runs under — names it whichever route reached it.
  */
 function refuseKeyedPool(step: IRStep, ctx: ChainCtx): void {
@@ -2440,9 +2444,9 @@ function poolWeight(pool: Rel, fresh: Minter): Rel {
  * takes each traverser's first value and keeps the last (`Operator.assign`), which is not a pool: the ladder's.
  * The key `by()` is the host's own (a child key is landed as a join column first, `landValues`).
  */
-function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): Tail | null {
-  const { step, rel, framing, steps, at, ctx, fresh, labels } = site;
-  if (step.args.length || (framing.kind !== 'elements' && framing.kind !== 'scalar')) return null;
+function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]): GroupedMap | null {
+  const { step, rel, framing, ctx, fresh, labels } = site;
+  if (framing.kind !== 'elements' && framing.kind !== 'scalar') return null;
   const valueBy = bys[1]!;
   if (valueBy.key.kind !== 'child' || valueBy.order !== undefined) return null;
   let body = valueBy.key.body;
@@ -2630,8 +2634,33 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   if (!node) return null;
   const singleOf: MapOf = valueFraming.kind === 'list' ? { kind: 'list', of: listed!.of, ...(valueFraming.set ? { set: true } : {}) }
     : valueFraming.kind === 'map' ? { kind: 'map', of: valueFraming.valOf } : { kind: 'scalar' };
-  const grouped = keyedValuesMap(joined, col(joined.id, KEY), keyElem, node, singleOf, step, ctx.source, fresh);
-  return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+  return keyedValuesMap(joined, col(joined.id, KEY), keyElem, node, singleOf, step, ctx.source, fresh);
+}
+
+/** The UNKEYED pooled `group().by(k).by(b)` — a reducing barrier: the map IS the traverser. */
+function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): Tail | null {
+  const { steps, at, ctx, fresh } = site;
+  const grouped = pooledGroupMap(site, bys);
+  return grouped && continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+}
+
+/**
+ * The KEYED pooled `group("a").by(k).by(b)` — a SIDE EFFECT: the same map `pooledGroupMap` builds for the
+ * barrier form, registered under its label through the host's own keyed tail (`keyedGroupTail`, `lower.ts` —
+ * one authority for registration, drain and re-entry, with its guards), and the stream continues as the
+ * INCOMING traversers (`GroupSideEffectStep` passes them on). A pooled keyed form inside a connector body still
+ * declines in `registerGrouping` (its pool reduces once per body), and so does a second pooled site on one label.
+ */
+function keyedPooledGroup(site: HostSite): Tail | null {
+  const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
+  if (step.name !== 'group' || step.args.length !== 1 || typeof step.args[0]!.value !== 'string') return null;
+  const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
+  if (!bys || bys[1]?.key.kind !== 'child') return null;
+  const done = pooledGroupMap(site, bys);
+  if (!done) return null;
+  const onward = (from: number): Tail | null => continueAs(rel, framing, steps, from, bulked, ctx, fresh, labels);
+  const out = keyedGroupTail(step, rel, { rel: done.rel, recipe: POOLED_RECIPE(step), done }, at, ctx, fresh, onward);
+  return out === 'continue' ? onward(at + 1) : out.tail;
 }
 
 /**

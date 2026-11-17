@@ -700,7 +700,7 @@ export function groupRows(
 
 /** A pooled-value grouping's recipe — never read, because `GroupRows.done` carries the finished map. It
  *  exists so `GroupRows` stays a total shape rather than growing an optional `recipe`. */
-const POOLED_RECIPE = (step: IRStep): GroupRecipe =>
+export const POOLED_RECIPE = (step: IRStep): GroupRecipe =>
   ({ counting: false, keyElem: undefined, member: undefined, single: false, memberDrop: false, bulkCol: undefined, step });
 
 /**
