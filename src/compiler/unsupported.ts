@@ -12,6 +12,10 @@ export type DeclineKind =
   | 'shared-draw'
   /** A re-sourcing V()/E() body under a host value that MAY be absent (`reSourcedUnder`). */
   | 'resource-under-absent'
+  /** A re-sourcing V()/E() body under a FIRST-row host (`map`/`by()`/a filter) whose steps after the re-source
+   *  read the host traverser's state, where the host cannot read it per host row (its decorrelated fallback)
+   *  (`reSourcedBody`). Always ADVISORY. */
+  | 'resource-reads-host'
   /** A re-sourcing V()/E() body on a traverser whose path is tracked, where the child's path would leave the shared
    *  read: under a host that forwards the child's traverser (`local`), or a body that reads the path itself
    *  (`reSourcedBody`). `flatMap` splits the HOST's traverser, so a path around it is not this. Always ADVISORY. */
@@ -52,6 +56,7 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'uncovered': 'this traversal is not supported yet',
   'shared-draw': 'this traversal is not supported yet',
   'resource-under-absent': 'this traversal is ambiguous',
+  'resource-reads-host': 'this traversal is not supported yet',
   'resource-path': 'this traversal is not supported yet',
   'merge-map-scope': 'this traversal is not supported yet',
   'merge-own-entry': 'this traversal is not supported yet',

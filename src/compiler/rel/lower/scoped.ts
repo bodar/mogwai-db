@@ -13,7 +13,7 @@ import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfC
 import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
-import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias } from '../alias.ts';
+import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, Subject } from '../child.ts';
@@ -149,13 +149,13 @@ interface ScopedBody {
  */
 function lowerBody(
   body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', positionedSeed = false, contract: RejoinContract = 'forward',
+  order?: 'free' | 'read', positionedSeed = false, contract: RejoinContract = 'forward', correlated = false,
 ): Tail | null {
   const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
   const positioned = positionedSeed || someStepDeep(body, ctx.params, (s) => s.name === 'tail');
   const run = (at: boolean): Tail | null => {
     const seed = seedRow(rel, from, fresh, at);
-    const reSourced = reSourcedBody(seed, body, framing, bodyCtx, fresh, labels, contract);
+    const reSourced = reSourcedBody(seed, body, framing, bodyCtx, fresh, labels, contract, correlated);
     return reSourced !== undefined ? reSourced : continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
   };
   // The retry lowers the body AGAIN, so the side-effect sites the first lowering registered are put back first —
@@ -224,7 +224,8 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * stops at the first row: an `EXISTS`, or a first-row pick that finds its leading element first
  * (`leadingFirst`) and slices by position keys (`slicesByKeys`) — what `TraversalMapStep`'s one `next()` and
  * `TraversalFilterStep`'s one `hasNext()` read. A body with no row reads the whole graph for that host, as the
- * reference's exhausted child does.
+ * reference's exhausted child does. Where the host cannot hold that read per host row (its decorrelated fallback,
+ * `correlated` false), the cross would be every host × the graph ahead of the pick: declined, naming the shape.
  *
  * What it refuses, from the query text: under `forward` a traverser whose path is tracked (the child's own
  * path, emitted, is the host's EXTENDED by the read's positions), under `split` a tracked path the rest READS (the
@@ -234,6 +235,7 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  */
 function reSourcedBody(
   seed: Rel, body: readonly IRStep[], framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap, contract: RejoinContract,
+  correlated: boolean,
 ): Tail | null | undefined {
   const first = contract === 'first';
   const at = reSourceAt(body);
@@ -257,7 +259,16 @@ function reSourcedBody(
   // `sharedEnd`), and a FIRST-row host pays a correlated read that stops at its first row — the host tries
   // `correlatedBody` first (`firstInnerOver`'s correlated first-row pick, the existence probe's `EXISTS`), so
   // inside it the cross is ONE host row × the graph up to its first match (`leadingFirst`).
-  if (first && readsHostState(rest, ctx)) return undefined;
+  //
+  // A first-row read that is NOT per host row (the decorrelated scope, the host's fallback where SQL cannot hold
+  // the dependent join) would cross EVERY host with the graph ahead of its first-row pick: N × G where the
+  // reference reads one host × the graph up to its first match. Declined, naming the query shape, rather than an
+  // answer that is quadratic in the hosts.
+  if (first && readsHostState(rest, ctx)) {
+    if (correlated) return undefined;
+    ctx.declines.note({ kind: 'resource-reads-host', message: hostStateMessage(rest, ctx), terminal: false });
+    return null;
+  }
   // Under an ALL-rows contract (`split`, `forward`) a host label the rest reads is the host's. The rest SPLITS only where it first reads the host (`sharedEnd`): the part before is one shared read
   // crossed with the prefix — `rest(prefix × G) = rest₂(prefix × rest₁(G))`, where `rest₁` reads nothing of the
   // host — and the fold continues over that cross. A label the read BINDS reads nothing of the host either, so it
@@ -379,6 +390,21 @@ function resourcePathMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
     ? `a path(), simplePath() or cyclicPath() inside ${/^[aeiou]/.test(host) ? 'an' : 'a'} ${host} body that starts with V()/E() is not supported yet`
     : `a V()/E() inside ${host} on a traverser whose path is tracked (a path(), simplePath() or cyclicPath() `
       + 'around it) is not supported yet';
+}
+
+/**
+ * Why a FIRST-row host's re-sourcing body declines when the steps after its `V()`/`E()` read the incoming
+ * traverser and the host cannot read it per host row (`reSourcedBody`). Named in the user's terms; where the rest
+ * is nothing but a `select` of an outer label the `V()` discards everything it read, so the likely intent is
+ * suggested.
+ */
+function hostStateMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
+  const shape = 'this V()/E() inside map(), by() or a filter, whose later steps read the incoming traverser '
+    + '(a select/where of an outer as() label, its sack, path or loops), is not supported yet';
+  const spec = rest.length === 2 ? selectSpec(rest[1]!) : null;
+  const label = spec?.labels.length === 1 && ctx.scopeNames.labels.has(spec.labels[0]!) ? spec.labels[0] : undefined;
+  return label === undefined ? shape
+    : `${shape} — here the V() is discarded by select('${label}'); did you mean select('${label}').out(), or V().has(…, select('${label}'))?`;
 }
 
 /** A host whose child body RE-SOURCES at its top level (and does not draw: `ladderOwns`) is the connector's alone
@@ -603,7 +629,7 @@ function correlatedBody(
   // A body that COLLECTS a side effect never stays correlated either: its sites are per host row, and only the
   // decorrelated form keys them into one relation over every scope (`keyedBody`).
   if (someStepDeep(body, ctx.params, (s) => collectsSideEffect(s as IRStep))) return null;
-  const tail = lowerBody(body, rel, from, framing, ctx, fresh, labels, order, false, contract);
+  const tail = lowerBody(body, rel, from, framing, ctx, fresh, labels, order, false, contract, true);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
@@ -777,11 +803,15 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   if (payload.length > 2) return null;
   // The repetition must not COMPOUND: two columns spell the body twice, so a body whose own subplans hold
   // subplans (a nested first-row pick, two per level) would be `2^depth` spellings. A subplan that is itself
-  // flat — an arm's priority guard, one seek — is repeated once per column and no further.
+  // flat — an arm's priority guard, one seek — is repeated once per column and no further. Nor does an
+  // UNCORRELATED subplan (a `hasLabel()`'s label-id membership): SQLite evaluates it once per statement, and it
+  // holds no correlated pick of its own to compound.
   let deep = false;
   forEachRel(tail.rel, (r) => {
     for (const e of relExprs(r)) forEachExpr(e, (node) => {
-      for (const sub of exprRels(node)) forEachRel(sub, (s) => { if (relExprs(s).some(exprHasSubquery)) deep = true; });
+      for (const sub of exprRels(node)) {
+        if (!isSelfContained(sub)) forEachRel(sub, (s) => { if (relExprs(s).some(exprHasSubquery)) deep = true; });
+      }
     });
   });
   if (payload.length > 1 && deep) return null;
@@ -799,13 +829,17 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   // A sort term that is, or is defined by, a subquery may not sort a correlated body: SQLite resolves an ORDER
   // BY term's subquery without the scopes beyond its own query (measured, bun:sqlite 3.51: `SELECT (SELECT
   // (SELECT t.x) v FROM (VALUES (1)) ORDER BY (SELECT t.x) LIMIT 1) FROM t` is "no such column: t.x"), so such a
-  // body stays decorrelated. A subquery that only FILTERS the body is not a term and costs nothing here.
-  if (!single && terms.some((term) => term.expr.kind !== 'col' ? exprHasSubquery(term.expr)
-    : term.expr.rel !== base.id || columnReadsSubquery(base, term.expr.name))) return null;
+  // body stays decorrelated. A subquery that only FILTERS the body is not a term and costs nothing here. Only a
+  // term that ORDERS anything is asked (`untilKey`): the payload after a row key breaks no tie, so a computed
+  // payload (`id()`'s `COALESCE(uid, id)` lookup) behind the scanned element's rowid is never a term.
+  const readsSubquery = (ts: readonly SortTerm[]): boolean => ts.some((term) => term.expr.kind !== 'col' ? exprHasSubquery(term.expr)
+    : term.expr.rel !== base.id || columnReadsSubquery(base, term.expr.name));
+  const sorted = untilKey(base, terms);
+  if (!single && readsSubquery(sorted)) return null;
   // A body that is a MERGE of arms in a fixed priority (a `coalesce`, a `union`'s arm-major order): its first
   // row is the first arm's first row where that arm has one, else the next arm's — one seek per arm, never a
   // sort over the merge.
-  const arms = single ? null : priorityArms(base, terms, fresh);
+  const arms = single || readsSubquery(terms) ? null : priorityArms(base, terms, fresh);
   if (arms) {
     const firstOf = (arm: PriorityArm): Rel => (atMostOneRow(arm.rel) ? arm.rel : make.limit({
       id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: arm.rel, channels: arm.rel.channels, type: arm.rel.type, terms: untilKey(arm.rel, arm.terms) }),
@@ -822,7 +856,6 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
     }
     return exprs;
   }
-  const sorted = untilKey(base, terms);
   const led = single || deep ? base : leadingFirst(base, sorted, fresh);
   const first = single ? tail.rel : make.limit({
     id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: led, channels: base.channels, type: base.type, terms: sorted.map((term) => ({ ...term, expr: substRelId(term.expr, base.id, led.id) })) }),
@@ -1465,6 +1498,10 @@ const existence = (negated: boolean): Connector => (site) => {
       .reduce((all, one) => (step.name === 'or' ? or(all, one) : and(all, one)));
     return continueAs(make.filter({ id: fresh('sj'), input: rel, channels: rel.channels, type: rel.type, pred }), framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
+  // The host's COMPUTED columns kept a correlated body out (`spellsStored`): the host computed once (`fencedHost`),
+  // where every body is at least as correlated as here — the shared fallback of every first-row host.
+  const fenced = correlated.every((tail) => tail) ? fencedHost(rel, fresh) : null;
+  if (fenced) return existence(negated)({ ...site, rel: fenced });
   const sc = scope(rel, fresh);
   let kept = sc.scoped;
   // `and(b1, b2, …)` is every body's semi-join in turn (`AndStep`, a `ConnectiveStep` over its children);
@@ -1580,7 +1617,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
  * A host whose COMPUTED columns keep a dependent join out (`spellsStored` — a correlated read would compute them
  * again per inner row: an `as()` label's `jsonb_array`, a path), computed ONCE: a fenced CTE whose columns the
  * correlated read then names, stored. `null` where there is nothing to gain (already stored, or not self-contained
- * — a CTE cannot hold a host that reads an enclosing scope). The first-row hosts' shared fallback (`firstInnerOver`,
+ * — a CTE cannot hold a host that reads an enclosing scope). The first-row hosts' shared fallback (`firstInnerOver`, the existence probe,
  * `recordLeft`) before the decorrelated window: a chain of maps (`repeat(local(out().limit(1))).times(n)`) is one
  * CTE and one seek per phase rather than a scope, a window and a rejoin per phase, and a body that re-sources and
  * reads a host label (`project().by(V().where(neq('a')).values('name'))`) is one host row × its first match rather

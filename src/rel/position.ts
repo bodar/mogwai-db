@@ -129,7 +129,15 @@ function rewritePosition(r: Rel, name: string, fresh: Minter): Keyed {
       const extras = extraCols(inner.keys, inner.rel);
       const id = fresh('pkj');
       const left = onLeft ? inner.rel : r.left, right = onLeft ? r.right : inner.rel;
-      const cols = onLeft ? [...r.type.cols.slice(0, leftN), ...extras, ...r.type.cols.slice(leftN)] : [...r.type.cols, ...extras];
+      // A join names its sides' columns BY POSITION, so the rebuilt side's columns are re-declared in the order
+      // that side now has them: its own columns under this join's names, the key columns wherever the side put
+      // them. A side that is itself a join inserts its keys after ITS left side, not at its end, and declaring
+      // them at the end shifted every later name one column over (`both().both()`'s direction read its frontier's
+      // position: a wrong vertex).
+      let k = onLeft ? 0 : leftN;
+      const extraNames = new Set(extras.map((column) => column.name));
+      const sideCols = inner.rel.type.cols.map((column) => (extraNames.has(column.name) ? column : r.type.cols[k++]!));
+      const cols = onLeft ? [...sideCols, ...r.type.cols.slice(k)] : [...r.type.cols.slice(0, leftN), ...sideCols];
       const on = r.on && substRelId(r.on, side.id, inner.rel.id);
       const rel = make.join({
         id, left, right, join: r.join, channels: r.channels, type: { cols },

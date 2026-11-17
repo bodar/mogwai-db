@@ -245,6 +245,8 @@ export const columnIsStored = (r: Rel, name: string): boolean => {
     }
     case 'filter': case 'sort': case 'limit': case 'distinct': return columnIsStored(r.input, name);
     case 'materialize': return r.fenced === true || columnIsStored(r.input, name);
+    // A window's input columns pass through it unchanged; only what it numbers is computed.
+    case 'window': return !r.specs.some(([minted]) => minted === name) && columnIsStored(r.input, name);
     case 'join': {
       const at = r.type.cols.findIndex((column) => column.name === name);
       const leftN = r.left.type.cols.length;

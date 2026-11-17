@@ -195,6 +195,60 @@ describe('a first-row host keeps ONE shared read under a tracked path: the host 
   test('a first-row pick of a multi-row read', () => expect(count("g.V().out().map(V().limit(1).values('name')).path().count()")).toBe(6));
 });
 
+describe("a first-row pick is a member of its host's own body", () => {
+  // The pick must lie in the multiset the same body folds for that host: which member is first follows the
+  // body's emission order, but a value outside the body is a wrong answer. `project('n','x').by('name')` keys
+  // each host's pick by its name, against `by(<body>.fold())` over the same hosts.
+  const picked = (host: string, body: string): [string, unknown][] =>
+    rows(`${host}.project('n','x').by('name').by(${body})`).map((r) => {
+      const entries = JSON.parse(r.map) as [{ v: string }, { v: unknown }][];
+      return [entries[0]![1].v as string, entries[1]?.[1].v];
+    });
+  const folded = (host: string, body: string): Map<string, unknown[]> =>
+    new Map(rows(`${host}.project('n','x').by('name').by(${body}.fold())`).map((r): [string, unknown[]] => {
+      const entries = JSON.parse(r.map) as [{ v: string }, { v: any }][];
+      return [entries[0]![1].v as string, (entries[1]![1].v as unknown[]).map((m: any) => (m !== null && typeof m === 'object' && 'v' in m ? m.v : m))];
+    }));
+  test.each([
+    // A second both() read its direction off the first one's position column (a join side's key columns were
+    // declared at the end, not where the side put them): a vertex outside the friend-of-friend set.
+    ['g.V()', 'both().both().values(\'name\')'],
+    ["g.V().as('a')", "both().both().where(neq('a')).values('name')"],
+    ["g.V().as('a')", "both().both().simplePath().values('name')"],
+    ["g.V().hasLabel('person').as('a')", "both('knows').both('knows').where(neq('a')).values('name')"],
+    ["g.V().as('a')", "V().has('name','lop').where(neq('a')).both().values('name')"],
+    ["g.V().as('a')", "V().where(neq('a')).both().values('name')"],
+    ["g.V().as('a')", "V().where(neq('a')).id()"],
+    ["g.V().as('a')", "V().hasLabel('software').where(neq('a')).values('name')"],
+    ["g.V().hasLabel('person').as('p')", "V().hasLabel('person').where(gt('p')).by('age').values('name')"],
+    ["g.V().as('a')", "V().not(where(eq('a'))).values('name')"],
+    ["g.V().as('a')", "E().where(outV().where(neq('a'))).values('weight')"],
+  ])('%s.by(%s)', (host, body) => {
+    const all = folded(host, body);
+    const got = picked(host, body);
+    expect(got.map(([n]) => n).sort()).toEqual([...all.keys()].sort());
+    for (const [n, x] of got) {
+      const members = all.get(n)!;
+      if (members.length) expect(members).toContain(x);
+      else expect(x).toBeUndefined();
+    }
+  });
+  test('the friend-of-friend picks', () => {
+    // marko knows vadas and josh, who know only marko: no friend-of-friend but marko himself, so no key.
+    expect(new Map(picked("g.V().hasLabel('person').as('a')", "both('knows').both('knows').where(neq('a')).values('name')")))
+      .toEqual(new Map([['marko', undefined], ['vadas', 'josh'], ['josh', 'vadas'], ['peter', undefined]]));
+  });
+});
+
+describe('a first-row host the correlated read cannot hold declines, naming the shape', () => {
+  // Its decorrelated fallback would cross every host with the graph ahead of the pick (N × G for one row per
+  // host), so a re-source whose rest reads the host declines there rather than answer quadratically.
+  test("choose(V().has(lop).where(neq('a')), …)", () => {
+    expect(() => run(s, "g.V().as('a').choose(V().has('name','lop').where(neq('a')), constant('y'), constant('n'))"))
+      .toThrow('this V()/E() inside map(), by() or a filter, whose later steps read the incoming traverser');
+  });
+});
+
 describe('a label the shared read binds rides out of an all-rows host, never a cut', () => {
   // The read's own label reads nothing of the host, so it stays inside the ONE shared read and rides out of
   // the cross as an alias channel: the reducer, slice or filter after it is computed once, not per host.

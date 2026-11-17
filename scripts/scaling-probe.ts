@@ -148,6 +148,18 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource first: as.out.as.map(V.where(neq(b)).out.out.values)', query: "g.V().as('a').out().as('b').map(V().where(neq('b')).out().out().values('name')).count()" },
   { name: 'resource first: as.map(V.where(neq(a)).range(2,4).values)', query: "g.V().as('a').map(V().where(neq('a')).range(2,4).values('name')).count()" },
   { name: 'resource first: as.map(V.has(age,gt(30)).where(neq(a)).out.values)', query: "g.V().as('a').map(V().has('age',gt(30)).where(neq('a')).out().values('name')).count()" },
+  // The M2 re-review's shapes, each now one correlated read per host (a `hasLabel()` membership is not a nested
+  // pick; an `id()` payload behind the element's rowid is not a sort term; a nested filter's host label is a
+  // stored outer column), and the friend-of-friend first-row pick.
+  { name: 'resource first: as.map(V.hasLabel.where(neq(a)).values)', query: "g.V().as('a').map(V().hasLabel('software').where(neq('a')).values('name')).count()" },
+  { name: 'resource first: as.map(V.where(neq(a)).id)', query: "g.V().as('a').map(V().where(neq('a')).id()).count()" },
+  { name: 'resource first: as.map(V.not(where(eq(a))).values)', query: "g.V().as('a').map(V().not(where(eq('a'))).values('name')).count()" },
+  { name: 'resource first: as.map(E.where(outV.where(neq(a))).values)', query: "g.V().as('a').map(E().where(outV().where(neq('a'))).values('weight')).count()" },
+  { name: 'as.project.by(both.both.where(neq(a)).values)', query: "g.V().as('a').project('n','fof').by('name').by(both().both().where(neq('a')).values('name')).count()" },
+  // A lookup whose MISSES grow with the graph (the max-age persons): the reference reads the whole graph for each,
+  // so its own work is ~40× from 1k to 8k on this graph (1 070 950 / 26 720 element visits) — xNG by the data.
+  { name: 'resource xNG: person.as.map(V.hasLabel.where(gt(p)).by(age).values)', query: "g.V().hasLabel('person').as('p').map(V().hasLabel('person').where(gt('p')).by('age').values('name')).count()" },
+  { name: 'resource xNG: person.as.where(V.hasLabel.where(gt(p)).by(age))', query: "g.V().hasLabel('person').as('p').where(V().hasLabel('person').where(gt('p')).by('age')).count()" },
   { name: 'resource xNG: as.coalesce(V.where(neq(a)).out.has(p3).values,constant)', query: "g.V().as('a').coalesce(V().where(neq('a')).out().has('name','p3').values('name'), constant('none')).count()" },
   // The first-row hosts the N1 review measured quadratic when a path-carrying or simplePath prefix fell to the
   // fold's per-row cross: the shared read must stay ONE read under them.
