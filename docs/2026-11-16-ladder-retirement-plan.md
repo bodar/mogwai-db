@@ -289,6 +289,15 @@ after its owner Worker died", `reopened = {vertexCount:0}`; later shas passed it
 
 ### N1 — Fix R4.3's coverage regression (MAJOR — breaks end-state rule 3, "no query that answers today declines")
 
+✅ **LANDED (6e58b6d2, 942cf358, 1c0d8cd3).** `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) now keeps a
+re-source ONE shared read crossed with the prefix: under a first-row host the prefix's path crosses unchanged and the
+read's own labels/path are shed; under an all-rows host the read's label binds ride out as alias channels
+(`ownLabels`) and the rest splits only at a real host-state read or a rebind of a prefix label (`sharedEnd`), the fold
+continuing over the cross (`reSource` in `lower/movement.ts` admits a path and a sack via one `splitRefuses`).
+Query-text declines with advisory reasons remain for an all-rows host on a tracked path (`resource-path`) and a
+first-row host reading host state (`resource-reads-host`). Witnesses in
+`test/compiler/resource-general-cross.exec.test.ts`; scaling ~7-8x for 8x input; no baseline moved. Remains: nothing.
+
 `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) returns `null` (hard decline) where it should return
 `undefined` (fall through to the fold's GraphStep cross join, `reSource` in `lower/movement.ts`, which handles a
 path) in two cases: (a) the prefix carries a channel outside alias/sack/loops/encounter — a `path` or a
