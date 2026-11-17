@@ -159,6 +159,16 @@ const SHAPES: readonly Shape[] = [
   // seek drives, and first-row picks under a nested map, a union arm, a flatMap and a where(map(...)).
   { name: 'resource first: as.where(V.where(neq(a)).has(p7))', query: "g.V().as('a').where(V().where(neq('a')).has('name','p7')).count()" },
   { name: 'resource first: as.not(V.where(neq(a)).has(p7))', query: "g.V().as('a').not(V().where(neq('a')).has('name','p7')).count()" },
+  // S5: a filter over an OWNER-JOINED property row (`values(k).is(c)`, `properties(k).hasValue(c)`) narrows the
+  // candidates by the property seek as `has(k, c)` does — a hit, a miss, and a sparse key.
+  { name: 'seek: as.where(V.where(neq(a)).values.is(p7))', query: "g.V().as('a').where(V().where(neq('a')).values('name').is('p7')).count()" },
+  { name: 'seek: as.map(V.where(neq(a)).values.is(p7))', query: "g.V().as('a').map(V().where(neq('a')).values('name').is('p7')).count()" },
+  { name: 'seek: as.where(V.where(neq(a)).properties.hasValue(p7))', query: "g.V().as('a').where(V().where(neq('a')).properties('name').hasValue('p7')).count()" },
+  { name: 'seek: as.where(V.where(neq(a)).values.is(zzz)) — a miss', query: "g.V().as('a').where(V().where(neq('a')).values('name').is('zzz')).count()" },
+  { name: 'seek: as.where(V.where(neq(a)).values(age).is(99)) — sparse', query: "g.V().as('a').where(V().where(neq('a')).values('age').is(99)).count()" },
+  { name: 'seek: as.not(V.where(neq(a)).values.is(p7))', query: "g.V().as('a').not(V().where(neq('a')).values('name').is('p7')).count()" },
+  { name: 'seek: as.local(where(V.where(neq(a)).values.is(p7)))', query: "g.V().as('a').local(where(V().where(neq('a')).values('name').is('p7'))).count()" },
+  { name: 'seek: as.project.by(V.where(neq(a)).values.is(p7))', query: "g.V().as('a').project('x').by(V().where(neq('a')).values('name').is('p7')).count()" },
   { name: 'resource first: as.map(V.where(neq(a)).map(V.where(neq(a)).values))', query: "g.V().as('a').map(V().where(neq('a')).map(V().where(neq('a')).values('name'))).count()" },
   { name: 'resource first: as.flatMap(V.where(neq(a)).out.values.limit)', query: "g.V().as('a').flatMap(V().where(neq('a')).out().values('name').limit(1)).count()" },
   { name: 'resource first: as.where(map(V.where(neq(a)).out.values).is(p3))', query: "g.V().as('a').where(map(V().where(neq('a')).out().values('name')).is('p3')).count()" },

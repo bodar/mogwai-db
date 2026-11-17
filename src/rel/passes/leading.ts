@@ -2,9 +2,10 @@ import { type Expr, and, col, compilerInt, compilerNull, conjuncts, eq, isNot } 
 import * as make from '../factory.ts';
 import { brandRel, type Rel } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
-import { nestsCorrelatedSubplans } from '../copies.ts';
 import { atMostOneRow } from '../bounds.ts';
 import { columnAt, reSourceCross, spinePath } from '../lineage.ts';
+import { columnLineage, nestsCorrelatedSubplans } from '../copies.ts';
+import { propertyOwner } from './semijoin.ts';
 import type { ColMeta, RelId, RelType, SortTerm } from '../types.ts';
 import { deepColsRead, exprHasSubquery, forEachExpr, forEachRel, freeRelIds, mapColsDeep, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
 
@@ -134,7 +135,9 @@ function leadingFirst(base: Rel, sorted: readonly SortTerm[], read: LeadingRead,
  * The candidates carry every filter above the cross that reads only the element and the HOST (the seed row's
  * columns are the host's): a `has()` after the re-source, which the property seek then drives, so a lookup that
  * matches nothing reads its index rather than the graph; and a test of the host alone (`where(eq('a')).by('age')`
- * over a host with no age), which SQLite evaluates once per read, ahead of the scan. Each stays in the body too —
+ * over a host with no age), which SQLite evaluates once per read, ahead of the scan. A filter over a property row
+ * joined to the element by its owner (`values(k).is(c)`) is carried as the property `EXISTS` a `has(k, c)` is
+ * (`ownerJoined`), so the same seek drives it. Each stays in the body too —
  * a candidate only NARROWS, the `EXISTS` decides. Every copy is FRESH (`freshCopy`), so it may stand beside the
  * original: two relations never share an id.
  */
@@ -185,6 +188,10 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
       const moved = traced && freshCopy(mapColsDeep(conjunct, filter.input.id, (name) => mapped.get(name)!), mint);
       if (moved && [...mapped.values()].some((e) => e.kind === 'col' && e.rel === source.plan.id)) pushed.push(moved);
       else if (moved) guards.push(moved);
+      else {
+        const owned = ownerJoined(conjunct, filter.input, spine, side, key, col(source.plan.id, key), mint);
+        if (owned) pushed.push(owned);
+      }
     }
   }
   // A test of the HOST alone is asked ONCE per read, over one unit row ahead of the scan: SQLite places a WHERE
@@ -205,6 +212,53 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
   const probe = make.project({ id: mint.id('clp'), input: one, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(one.id, one.type.cols[0]!.name)]] });
   const kept = make.filter({ id: mint.id('clf'), input: candidates, channels: candidates.channels, type: candidates.type, pred: { kind: 'exists', plan: probe, negated: false } });
   return { side, key, kept, at, guarded };
+}
+
+/**
+ * A spine conjunct over a PROPERTY ROW joined to the leading element by its owner — `values(k).is(c)`,
+ * `properties(k).hasValue(c)`, any filter whose every column is spelled (`columnLineage`) over one property scan
+ * `B` that a spine join holds as `B.owner = <the element's rowid>` — as a NECESSARY candidate conjunct:
+ * `EXISTS(SELECT … FROM B' WHERE B'.owner = cand.key AND <the join's own conditions on B> AND <conjunct over B'>)`.
+ * Necessary because a body row restricted to the candidate carries exactly such a `B` row. It is the shape
+ * `has(k, c)` lowers to (`ownerColumn`, `src/rel/passes/semijoin.ts`), so the property seek (`indexSeek`) narrows the
+ * candidates by `vp_key_value` once per statement, rather than every candidate being asked the body. `null` on any
+ * other conjunct — one reading the host, a hop's property, a subquery — which the body alone then decides.
+ */
+function ownerJoined(conjunct: Expr, input: Rel, spine: readonly Rel[], side: Rel, key: string, candidate: Expr, mint: Minter): Expr | null {
+  if (exprHasSubquery(conjunct)) return null;
+  let foreign = false;
+  forEachExpr(conjunct, (node) => { if (node.kind === 'col' && node.rel !== input.id) foreign = true; });
+  if (foreign) return null;
+  const leaves = new Map<RelId, Rel>();
+  const spelled = new Map<string, Expr>();
+  for (const name of deepColsRead(conjunct, input.id)) {
+    const e = columnLineage(input, name, leaves);
+    if (!e) return null;
+    spelled.set(name, e);
+  }
+  const props = leaves.size === 1 ? [...leaves.values()][0]! : null;
+  const owner = props?.kind === 'scan' ? propertyOwner(props.table) : null;
+  if (!props || !owner) return null;
+  const join = spine.find((r): r is Extract<Rel, { readonly kind: 'join' }> => r.kind === 'join' && r.right === props);
+  if (!join?.on || join.join !== 'inner') return null;
+  const own: Expr[] = [];
+  let owned = false;
+  for (const on of conjuncts(join.on)) {
+    const reads = new Set<RelId>();
+    forEachExpr(on, (node) => { if (node.kind === 'col') reads.add(node.rel); });
+    if (exprHasSubquery(on)) continue;
+    if (reads.size === 1 && reads.has(props.id)) { own.push(on); continue; }
+    // `B.owner = <left column>`, where the left column is the leading element's rowid.
+    if (on.kind !== 'binary' || on.op !== '=' || on.left.kind !== 'col' || on.right.kind !== 'col') continue;
+    const other = on.left.rel === props.id && on.left.name === owner ? on.right : on.right.rel === props.id && on.right.name === owner ? on.left : null;
+    if (other?.kind === 'col' && other.rel === join.left.id && columnAt(join.left, other.name, side) === key) owned = true;
+  }
+  if (!owned) return null;
+  const pred = [eq(col(props.id, owner), candidate), ...own, mapColsDeep(conjunct, input.id, (name) => spelled.get(name)!)].reduce((a, b) => and(a, b));
+  const held = make.filter({ id: mint.id('clo'), input: props, channels: [], type: props.type, pred });
+  const probe = make.project({ id: mint.id('clop'), input: held, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', col(held.id, owner)]] });
+  // Fresh ids throughout (`freshCopy`): `B` stays in the body, and two relations never share an id.
+  return freshCopy({ kind: 'exists', plan: probe, negated: false }, mint);
 }
 
 /** Seed column `name` as the expression of the seed that DEFINES it, through its renaming projections; `null` where

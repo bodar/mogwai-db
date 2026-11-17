@@ -355,6 +355,10 @@ const SEEK_PROPERTIES: Partial<Record<Table, { readonly table: Table; readonly o
 /** The owner column of each property table — `SEEK_PROPERTIES` read the other way. */
 const PROPERTY_OWNER: Partial<Record<Table, string>> = { vertex_properties: 'node', edge_properties: 'edge' };
 
+/** The column of property table `table` naming its owner element, or `null` for a table that holds no properties —
+ *  the one authority for which rows an owner seek reads (`leading` builds its owner-joined candidate filter by it). */
+export const propertyOwner = (table: Table): string | null => PROPERTY_OWNER[table] ?? null;
+
 /**
  * May a seek's predicate read what `e` reads? A SELF-CONTAINED seek (`local === null`) may read the
  * property row alone, and no subplan — it is lifted into a `FROM`, where nothing else is in scope. A
