@@ -126,6 +126,10 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource: out.map(V.limit.values).path', query: "g.V().out().map(V().limit(1).values('name')).path().count()" },
   // `flatMap` splits the HOST (`FlatMapStep` `head.split(r)`): the host path crosses the shared read as `map`'s does.
   { name: 'resource: out.flatMap(V.has).path', query: "g.V().out().flatMap(V().has('name','p1')).path()" },
+  // `tree()` collects the same paths in the rejoin's encounter order (one sort, not a per-row term).
+  { name: 'resource: out.flatMap(V.has).tree', query: "g.V().out().flatMap(V().has('name','p1')).tree().by('name')" },
+  { name: 'flatMap(out).tree', query: "g.V().flatMap(out()).tree().by('name')" },
+  { name: 'union(out,in).tree', query: "g.V().union(out(),in()).tree().by('name')" },
   { name: 'resource: out.local(V.order.limit).path', query: "g.V().out().local(V().order().by('name').limit(1)).path().count()" },
   { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
   // The unit row is never a CTE (`isUnitValues`, `src/rel/block.ts`): first-row `map(<traversal>)` reads, at depth.

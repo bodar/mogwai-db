@@ -211,6 +211,35 @@ describe('flatMap() splits the HOST: a tracked path crosses the shared read and 
   });
 });
 
+describe('tree() folds the paths a split or forward rejoin emits, in traverser order', () => {
+  // `TreeStep.projectTraverser` reads each traverser's path
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TreeStep.java),
+  // so its members are exactly the `path()` stream; the rejoin threads an emission-order encounter, and the
+  // collection must consume it (src/rel/obligations.ts `collectionConsumesEncounter`) — it once leaked a bare Error.
+  const treePaths = (g: string): string[] => {
+    const [row] = run(s, g);
+    return bagOf(JSON.parse(row.node).v.map((p: any[]) => JSON.stringify(bare(p).map((m: any) => (m && typeof m === 'object' && 'id' in m ? `v${m.id}` : m)))));
+  };
+  const pathsBy = (g: string): string[] => bagOf(rows(g).map((r) => JSON.stringify(members(r))));
+  for (const body of [
+    "out().flatMap(V().has('name','marko'))",
+    "out().flatMap(V().has('name','marko').out())",
+    "out().flatMap(V().has('name','marko')).out()",
+    "has('name','marko').out().flatMap(V().has('name','lop'))",
+    'out().flatMap(out())',
+    'flatMap(out())',
+    'out().local(out())',
+    'union(out(), in())',
+    'coalesce(out())',
+    'optional(out())',
+  ]) {
+    test(`${body}.tree() is its path() stream`, () => {
+      expect(treePaths(`g.V().${body}.tree()`)).toEqual(pathsBy(`g.V().${body}.path()`));
+      expect(treePaths(`g.V().${body}.tree().by('name')`)).toEqual(pathsBy(`g.V().${body}.path().by('name')`));
+    });
+  }
+});
+
 describe('a forward (local()) host on a traverser whose path is tracked declines, naming the shape', () => {
   // `LocalStep` emits the CHILD's own traverser, whose path the read's GraphStep extends.
   test('out().local(V().has(marko)).path()', () => {

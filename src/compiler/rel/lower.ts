@@ -6190,7 +6190,11 @@ function treeTail(rel: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx,
   if (step.from !== undefined || step.to !== undefined) return null;
   const positions = pathPositions(rel, { ...step, productiveBy: true }, pathPositionKinds(steps, at, beginsTraversal(steps, ctx)), childSeam(ctx, fresh), ctx.source, fresh);
   if (!positions) return null;
-  const folded = foldPaths(positions.rel, positions.of, {}, fresh);
+  // The members collect in TRAVERSER order, the `fold()` path arm's own law: an encounter-carrying input
+  // (a `flatMap`/`union`/`coalesce`/`local` rejoin threads one) orders by it, as
+  // `collectionConsumesEncounter` (`src/rel/obligations.ts`) requires of every linear collection.
+  const encounter = encounterOf(positions.rel.channels);
+  const folded = foldPaths(positions.rel, positions.of, { ...(encounter ? { order: [encounter.col] } : {}) }, fresh);
   const node = make.project({
     id: fresh('tr'), input: folded.rel, channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
     exprs: [[NODE_COL, { kind: 'json-object', binary: false, entries: [['t', compilerText('tree')], ['v', jsonOf(col(folded.rel.id, LIST_COL))]] }]],
