@@ -194,7 +194,10 @@ export function repeatWalk(
    * filters, so it needs no scope key (`existenceOverOwnRows`, `src/rel/decorrelate.ts`): the states are
    * distinct ACROSS scopes and a hub's condition is asked once, not once per start (measured: a scoped
    * `where(repeat(out()).emit(in('created').has(…)))` 17× → 6× per 8× growth). Per row and per state answer
-   * the same rows; the choice is cost alone.
+   * the same rows; the choice is cost alone. Where no state is shared (every walk row its own state) per-state
+   * costs a constant factor — one DISTINCT and one materialized passing set — never a second walk: the walk
+   * rows are read twice (the states, the semi-join), and `name.ts` fences that shared relation
+   * (`copyRerunsBarrier`, `src/rel/copies.ts`) so the recursive CTE beneath it runs once.
    */
   /** `rows` restricted to those whose STATE passes `body`, asked once per distinct state; `null` where `body`
    *  does not lower over a state row. */

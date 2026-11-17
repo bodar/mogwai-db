@@ -1,6 +1,6 @@
 import { CopiedDraw } from '../../sql/kernel/budget.ts';
 import { isUnitValues } from '../block.ts';
-import { draws } from '../copies.ts';
+import { copyRerunsBarrier, draws } from '../copies.ts';
 import { materialize, ref } from '../factory.ts';
 import { relId } from '../types.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
@@ -105,7 +105,7 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
    * and a CTE read twice is evaluated once only when SQLite cannot flatten it into its readers: a CTE
    * whose top SELECT is a plain projection or filter IS flattened into each reader, under a plain compound
    * and a MERGE UNION ALL alike (measured; `copyRepeatsWork`, `src/rel/copies.ts`). So a bound relation that
-   * DRAWS is FENCED (`fencedDraw` below): its CTE renders `AS MATERIALIZED`, evaluated once, and every reader
+   * DRAWS is FENCED (`fenced` below): its CTE renders `AS MATERIALIZED`, evaluated once, and every reader
    * sees one pick. Its top need not be a barrier — a per-scope draw the decorrelator keyed
    * (`src/rel/decorrelate.ts`) tops out in the `ROW_NUMBER` filter's projection, which SQLite flattened into
    * each reader: `local(out().order().by(shuffle).limit(1).union(identity(), identity()).dedup().count())`
@@ -115,10 +115,29 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
   for (const [rel, seen] of counts) {
     if (seen > 1 && !isRoot.has(rel) && !binds(rel) && draws(rel)) throw new CopiedDraw();
   }
-  /** A shared, bound relation that draws, as the fenced `Materialize` its CTE must be (see above). */
-  const fencedDraw = (original: Rel, mapped: Rel): Rel =>
-    (counts.get(original) ?? 0) > 1 && draws(original) && !(mapped.kind === 'materialize' && mapped.fenced)
-      ? materialize({ id: relId(`${original.id}_draw`), input: mapped, channels: mapped.channels, type: mapped.type, fenced: true })
+  /**
+   * A shared, bound relation SQLite would evaluate once PER READER, as the fenced `Materialize` its CTE must
+   * be. One rule for two reasons, both "SQLite flattens this CTE into each reader and evaluates a copy":
+   *
+   * - it DRAWS (`draws`): each copy picks differently, a wrong ANSWER (above);
+   * - a copy RE-RUNS A BARRIER OR A WALK (`copyRerunsBarrier`, `src/rel/copies.ts` — `copyRepeatsWork`'s
+   *   measured model of SQLite's flattener, less the computed-column half a fence does not pay for): a
+   *   compute-once violation. It is asked of the REWRITTEN node, where a shared input bound below is
+   *   already a `Ref` evaluated once. `repeat(out('knows')).emit(in('knows').has('age', gt(40)))` reads its walk's
+   *   `lp0 > 0` filter twice — once to collect the ids the emit condition is asked of, once to keep the
+   *   rows it admits — and SQLite flattened that filter into both readers, so the recursive CTE was walked
+   *   twice per statement (two `CO-ROUTINE wk_…` sites in one plan). Fenced, it is one `MATERIALIZE` and
+   *   each reader scans the temp table (or an automatic index on it).
+   *
+   * A walk bound under its own name is already one CTE in the `WITH RECURSIVE` list — SQLite cannot flatten
+   * a recursive CTE — so it is never wrapped (the emitter renders a bound `Recursive` itself, not a
+   * `Materialize` over one). `sql-hygiene` checks the outcome independently, from SQLite's own plan: no
+   * named CTE evaluated twice in one statement.
+   */
+  const fenced = (original: Rel, mapped: Rel): Rel =>
+    (counts.get(original) ?? 0) > 1 && original.kind !== 'recursive' && (draws(original) || copyRerunsBarrier(mapped))
+      && !(mapped.kind === 'materialize' && mapped.fenced)
+      ? materialize({ id: relId(`${original.id}_fence`), input: mapped, channels: mapped.channels, type: mapped.type, fenced: true })
       : mapped;
 
   const bindings: Binding[] = [];
@@ -133,7 +152,7 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
     const declared = original.kind === 'recursive' ? original.name
       : original.kind === 'materialize' ? original.name : undefined;
     const bound = declared ?? generate();
-    bindings.push({ name: bound, node: fencedDraw(original, mapped) });
+    bindings.push({ name: bound, node: fenced(original, mapped) });
     return ref({ id: original.id, name: bound, channels: mapped.channels, type: mapped.type });
   }, memo);
   for (const binding of hoisted) {

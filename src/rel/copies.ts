@@ -206,6 +206,33 @@ const copiedWork: (r: Rel) => boolean = nodeFact((r: Rel): boolean => {
 });
 
 /**
+ * WOULD SQLITE RE-RUN A BARRIER OR A WALK FOR EACH READER OF THIS SHARED CTE? — the part of
+ * `copyRepeatsWork` that a fence (`AS MATERIALIZED`, `name`'s `fenced`, `src/rel/passes/name.ts`) pays for.
+ * A CTE whose top SQLite flattens into each reader re-runs everything beneath that top per reader, as a
+ * co-routine (measured: `repeat(out('knows')).emit(in('knows').has('age', gt(40)))` walked its recursive CTE
+ * twice in one statement — two `CO-ROUTINE wk_…` sites — under the `lp0 > 0` filter both readers shared).
+ *
+ * It is `copyRepeatsWork` WITHOUT the computed-column half, because the two answer different consumers. A
+ * per-row computed column (a path's `jsonb_array`, a label's carrier) is cheap to recompute and costly to
+ * spool: fenced, `emit().repeat(out()).times(2).path()` wrote every seed path into a temp table and ran 5.2 →
+ * 8.1 ms at 8 000 vertices. A barrier or a walk beneath a flattened top is the opposite: re-running it costs
+ * the whole relation per reader, and the fence measured faster on every such plan (the walk above 58 → 38 ms).
+ * So: a non-barrier top (`barrierTop`) over a node beneath it that is neither row-wise (`Project`/`Filter`/
+ * `Join`/`Union`/`Explode`) nor a leaf, nor already evaluated once (a `Ref`, a fenced `Materialize`).
+ *
+ * Asked of a self-contained (bindable) relation; memoized per node, so O(DAG).
+ */
+export const copyRerunsBarrier = (r: Rel): boolean => !barrierTop(r) && barrierBeneath(r);
+const barrierBeneath: (r: Rel) => boolean = nodeFact((r: Rel): boolean => {
+  switch (r.kind) {
+    case 'scan': case 'values': case 'ref': case 'self-ref': return false;
+    case 'materialize': return r.fenced ? false : barrierBeneath(r.input);
+    case 'project': case 'filter': case 'join': case 'union': case 'explode': return relChildren(r).some(barrierBeneath);
+    default: return true;
+  }
+});
+
+/**
  * IS A COPY OF THIS RELATION ONE MORE INDEX SCAN? — a base-table read: a `Scan` or `Values` under nothing
  * but row-wise `Project`/`Filter`, whose expressions correlate only against relations of the same kind.
  * `doubledReads` counts a join's or union's inputs by it. A `Ref` (a named CTE), a `SelfRef` and every

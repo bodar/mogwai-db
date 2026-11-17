@@ -235,7 +235,7 @@
   },
   "groupCount": {
     "binds": 0,
-    "bytes": 3857,
+    "bytes": 3870,
     "compiler": 68,
     "bound": 0
   },
@@ -583,7 +583,7 @@
   },
   "union": {
     "binds": 0,
-    "bytes": 5091,
+    "bytes": 5169,
     "compiler": 79,
     "bound": 0
   },

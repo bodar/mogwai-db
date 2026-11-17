@@ -21,6 +21,7 @@ import { forEachExpr, forEachRel, isSelfContained, relExprs, stmtChildren, stmtE
 import type { Rel } from '../src/rel/rel.ts';
 import { isStmt } from '../src/rel/stmt.ts';
 import { nestedSnapshotScans, type PlanRow } from '../test/support/snapshot-scans.ts';
+import { reevaluatedCtes } from '../test/support/cte-runs.ts';
 
 const corpus = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
@@ -186,6 +187,7 @@ for (const query of corpus) {
     const plan = planOf(step.emitted.sql, step.emitted.binds);
     const repeats = respelled(plan);
     if (repeats) failures.push(`${query} [statement ${index + 1}]: SQLite evaluates ${repeats} subquery spelling(s) more than once per row — compute the column once`);
+    for (const twice of reevaluatedCtes(step.emitted.sql, plan)) failures.push(`${query} [statement ${index + 1}]: ${twice}`);
     // A TAKEN SNAPSHOT IS NEVER AN INNER LOOP (`test/support/snapshot-scans.ts`): a `json_each(?)` re-decoded
     // per outer row is O(N·M), the production-only CPU wall `spools` (`src/rel/emit.ts`) removes.
     const nested = nestedSnapshotScans(step.emitted.sql, plan);
@@ -295,4 +297,4 @@ if (ratchetFailures.length) {
   for (const failure of ratchetFailures) console.log(`  RATCHET ${failure}`);
   throw new Error(`sql-hygiene: ${ratchetFailures.length} ratchet violation(s)`);
 }
-console.log('sql-hygiene: 0 DO-wall violations; no subquery evaluated twice per row; no taken snapshot scanned as an inner loop; literal provenance counted before emission');
+console.log('sql-hygiene: 0 DO-wall violations; no subquery evaluated twice per row; no named CTE evaluated twice per statement; no taken snapshot scanned as an inner loop; literal provenance counted before emission');
