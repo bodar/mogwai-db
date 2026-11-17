@@ -581,6 +581,10 @@ Unblocks N7.
     every subplan, which no longer holds.
   - `src/compiler/rel/write.ts` `reScope` (~l.4800): it stops at subplans, so a correlated subquery over `incoming`
     would keep naming the old scope (a latent unresolved column).
+  ✅ **LANDED (620df051).** All three copies are gone. `semijoin.ts` `retarget`, `build.ts` `reread` and `write.ts`
+  `reScope` now call `src/rel/walk.ts` `substRelId`, which keeps subplans it does not touch shared and does go into
+  correlated subplans. Answers and plans did not change: census, sql-hygiene and l3-state are as before. Remains:
+  nothing.
 - **P8 — Route the remaining hand-rolled `sort`+`LIMIT 1` first-row picks through `firstRow`.** The sites:
   - `scoped.ts` priority-arm `firstOf` (~l.570) and `first` (~l.585)
   - `reduction.ts` ~l.957 (min/max winner)
