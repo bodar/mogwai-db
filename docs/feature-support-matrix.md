@@ -99,7 +99,7 @@ Where we answer under JS/SQLite semantics rather than Java's, §17 lists it.
 | `coalesce` | ✅ | ❌ an unseeded reducer arm (`max`/`sum`); a `number`-reducer merged with a plain scalar; a member step (`unfold`, keyed `dedup`) over a variant stream |
 | `optional` | ✅ | ❌ an element re-source arm (`optional(__.V())`) |
 | `map(__.…)`, `flatMap(__.…)`, `local(__.…)` | ✅ | ❌ `map` over a fan-out body (`map(__.out())`) |
-| `sideEffect(__.…)` | ❌ | |
+| `sideEffect(__.…)` | ✅ | a body that collects (`aggregate(k)`, keyed `group(k)`/`groupCount(k)`, at any depth); an effect-free body is dropped. ❌ a body whose only effect is a write or a raise (`sideEffect(addV(…))`) |
 
 Heterogeneous arms merge into a **variant stream**: `count`, slices and bare `dedup` work over it; a
 member step (`unfold`, a member transform, keyed `dedup`) does not.
@@ -207,7 +207,7 @@ A write chain is a sequence of statements, O(write steps), never O(rows).
 
 | Step | | Notes |
 |---|:--:|---|
-| `aggregate(k)`, `cap(k)`, `group(k)`, `groupCount(k)` | ✅ | |
+| `aggregate(k)`, `cap(k)`, `group(k)`, `groupCount(k)` | ✅ | also collected inside any child body (`sideEffect`/`local`/`flatMap`/`map`/`where`/`optional`/…, at any depth): one member relation over every host traverser, host-major. ❌ inside a child: a read of the collection in the same child that fills it, a `by()` that can raise, a pooled `group(k).by(…).by(<reducer>)`, a keyed `group(k)` in a writing chain; inside a `repeat()` body |
 | `withSideEffect(k, v)`, `withSideEffect(k, seed, Operator)` | ✅ | |
 | `withSack(seed)`, `sack()`, `sack(op).by(…)` | ✅ | ❌ `withSack(seed, Operator.x)`; a BigInteger/BigDecimal sack or operand |
 | `store(k)` | 🚫 | removed from the language upstream |
@@ -325,5 +325,5 @@ wrong number class.
 | Untyped JSON result shapes | a path is `{labels, objects}` with empty labels; a VertexProperty `{id, key, value}`, an edge's Property `{key, value}`; an edge endpoint is its bare id |
 | Read-only child message | a mutating step in a value child raises a `ValueParseError` naming our step, not Java's internal class |
 | Map scope | `select(k)` (chain, child body, `where()`, a `math()`/`format()` variable) over a value stream that may hold stored Maps (`values('m')`) reads a `withSideEffect` constant, named collection or path label `k` where one exists — that scope WINS and no row is probed for a same-named key of a stored Map — else the row's own `k`, else drops the row; a merge follows the same rule in both spellings (`values('m').mergeV(__.select(k))` merges by the side effect exactly as `values('m').select(k).mergeV()`), while a `select(k)` merge argument or option arm over a stream of Maps (`inject([…]).mergeV().option(onCreate, __.select(k))`) reads the side effect where no Map can hold `k`, declines naming the collision where one MAY hold `k` beside a side effect `k`, and otherwise declines as an unsupported own-entry merge argument. Over a map (a `project()` record collapsed to one included): a key no row can hold is the named scope, and ANY key a row may hold beside a same-named side-effect constant or path label declines — even a key every row holds (a map literal's), since the key fact is a MAY set only — in every form (`select(k)`, `select(k, …)`, `by(select(k))`, `dedup(k)`, `math()`, `format()`) with the reason appended to the decline (`select('name') is ambiguous here: each Map may hold a key 'name' and a path label 'name' is also bound …`, one classifier `mapKeyCollision`), and beside a named collection keeps the entry and drops a row lacking it. `select(keys)` over a row that is no Map raises `does not have accessible keys` without the Java class; `values('m').unfold()` and `format()` over such a stream still decline |
-| Side-effect reads | a side-effect read sees the completed collection (`local(aggregate('a')).select('a').count(local)` is `6` each time) |
+| Side-effect reads | a side-effect read sees the completed collection (`local(aggregate('a')).select('a').count(local)` is `6` each time), a collection filled inside a child body (`sideEffect(out().aggregate('a'))`) included |
 | Path entries of a re-bound label | a label re-bound after a branch host may appear once more (or fewer) in `select(Pop.all, k)` than in Java |

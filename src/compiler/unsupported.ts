@@ -40,7 +40,10 @@ export type DeclineKind =
    *  traversal): no write lowering appends its element as a path position yet. Always ADVISORY. */
   | 'write-on-path'
   /** A random draw inside a `group()` value `by()` (`pooledGroup`, `lower/scoped.ts`). Always ADVISORY. */
-  | 'draw-in-group-value';
+  | 'draw-in-group-value'
+  /** A side effect collected inside a child body (`aggregate`/`group`/`groupCount` with a label) that the
+   *  connector could not key per traverser (`keyedBody`, `lower/scoped.ts`). Always ADVISORY. */
+  | 'effect-in-child';
 
 /**
  * THE PREFIX IS A PROPERTY OF THE KIND, kept in this one table. Most declines say the traversal is
@@ -63,6 +66,7 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'write-in-child': 'this traversal is not supported yet',
   'write-on-path': 'this traversal is not supported yet',
   'draw-in-group-value': 'this traversal is not supported yet',
+  'effect-in-child': 'this traversal is not supported yet',
 };
 
 /**
@@ -152,6 +156,15 @@ export const drawInGroupValue: DeclineReason = {
   kind: 'draw-in-group-value', terminal: false,
   message: 'a random draw (sample()/coin()/order().by(shuffle)) inside a group() value by() is not supported yet',
 };
+
+/** The `effect-in-child` decline (`keyedBody`, `lower/scoped.ts`): the collection(s) a child body of `host`
+ *  filled, named as the user wrote them, and the one form that is known not to key — a read of the collection
+ *  inside the body that fills it. */
+export const effectInChild = (host: string, labels: readonly string[]): DeclineReason => ({
+  kind: 'effect-in-child', terminal: false,
+  message: `a side effect (${labels.map((label) => `'${label}'`).join(', ')}) collected inside ${host}() is not supported `
+    + 'in this form yet (for example, read with cap()/select() inside the same child that fills it)',
+});
 
 /** One reason the lowering recorded. `terminal` is a decline that holds whatever else the compile
  *  finds (today's throw). Otherwise it is ADVISORY: a hint about why a probe declined, which may be a

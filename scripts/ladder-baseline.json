@@ -1,5 +1,5 @@
 {
-  "total": 1278,
+  "total": 1277,
   "files": {
     "src/compiler/rel/alias.ts": 15,
     "src/compiler/rel/asstring-barrier.ts": 3,
@@ -20,7 +20,7 @@
     "src/compiler/rel/lower/movement.ts": 11,
     "src/compiler/rel/lower/per-traverser.ts": 12,
     "src/compiler/rel/lower/reduction.ts": 122,
-    "src/compiler/rel/lower/scoped.ts": 87,
+    "src/compiler/rel/lower/scoped.ts": 97,
     "src/compiler/rel/lower/slice.ts": 22,
     "src/compiler/rel/map.ts": 48,
     "src/compiler/rel/match.ts": 69,
@@ -40,7 +40,7 @@
     "src/compiler/rel/segment.ts": 9,
     "src/compiler/rel/shortestpath.ts": 2,
     "src/compiler/rel/source.ts": 8,
-    "src/compiler/rel/spine.ts": 2,
+    "src/compiler/rel/spine.ts": 1,
     "src/compiler/rel/split.ts": 3,
     "src/compiler/rel/transform.ts": 14,
     "src/compiler/rel/variant.ts": 3,

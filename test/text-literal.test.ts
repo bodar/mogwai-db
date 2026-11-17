@@ -165,8 +165,6 @@ describe('a compiler-minted bind name is one no user parameter can spell', () =>
 
 describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never an internal error', () => {
   test.each([
-    // A sideEffect() body WITH an effect (an effect-free one is the identity and simply answers, below).
-    ["g.V().has('name', regex('m')).sideEffect(out().groupCount('x')).values('name')"],
     ["g.V().has('name', regex('m')).local(out().has('name', regex('l'))).values('name')"],
     ["g.V().has('name', regex('m')).repeat(out()).until(has('name', regex('l'))).values('name')"],
     ["g.V().has('name', regex('m')).sideEffect(out().has('name', regex('l')).aggregate('x')).values('name')"],
@@ -180,7 +178,9 @@ describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never 
   test.each([
     ["g.V().has('name', regex('m')).sideEffect(out()).values('name')"],
     ["g.V().has('name', regex('m')).sideEffect(out().has('name', regex('l'))).values('name')"],
-  ])('an effect-free sideEffect() after a regex barrier is the identity: %s', (gremlin) => {
+    // A body that COLLECTS is the connector's (`sideEffect` row): the stream passes through unchanged.
+    ["g.V().has('name', regex('m')).sideEffect(out().groupCount('x')).values('name')"],
+  ])('a sideEffect() after a regex barrier passes its stream through: %s', (gremlin) => {
     expect(typedAll(executeQuery(seededStore(), gremlin))).toEqual(['"marko"']);
   });
   test('a resumed local(values(k)) answers every value', () => {

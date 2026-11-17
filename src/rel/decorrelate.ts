@@ -128,6 +128,20 @@ function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
 export function decorrelate(
   plan: Rel, outer: Rel, key: string, fresh: Minter, projection: KeyProjection | undefined, owns: (r: Rel) => boolean,
 ): Decorrelated | null {
+  return decorrelateAll([plan], outer, key, fresh, projection, owns)?.[0] ?? null;
+}
+
+/**
+ * SEVERAL PLANS correlated to the SAME outer row, decorrelated in ONE pass — one domain, ONE memo. A plan that
+ * shares a subtree with another (a connector body's tail and the side-effect sites it collected on the way,
+ * `keyedBody` in `src/compiler/rel/lower/scoped.ts`) gets the SAME keyed node for that subtree, so the shared
+ * prefix stays one relation the `name` pass makes one CTE — two `decorrelate` calls would each rewrite it afresh
+ * (the memo is per call) and compute it twice. The answers are in `plans`' order, each under `decorrelate`'s
+ * contract; `null` where any plan cannot be rewritten.
+ */
+export function decorrelateAll(
+  plans: readonly Rel[], outer: Rel, key: string, fresh: Minter, projection: KeyProjection | undefined, owns: (r: Rel) => boolean,
+): readonly Decorrelated[] | null {
   const drawn = ownDraws(owns);
   const h = outer.id;
   // THE DOMAIN: the key and every outer column the plan reads, renamed so it cannot collide with a column
@@ -144,7 +158,7 @@ export function decorrelate(
     if (r.kind === 'recursive') walkPlan(recursiveStep(r));
     relChildren(r).forEach(walkPlan);
   };
-  walkPlan(plan);
+  plans.forEach(walkPlan);
   // The key projection is usable only where the plan reads nothing of the outer row but its projected columns.
   const eliminating = projection && [...read].every((name) => projection.cols.has(name)) ? projection : undefined;
   read.delete(key);
@@ -591,9 +605,12 @@ export function decorrelate(
     }
   };
 
-  const out = go(plan);
-  if (!out) return null;
-  const keyed = ensureKeyed(out);
   const [first, ...more] = keyOf(dNames);
-  return { rel: keyed.rel, key: [first!, ...more] };
+  const answers: Decorrelated[] = [];
+  for (const plan of plans) {
+    const out = go(plan);
+    if (!out) return null;
+    answers.push({ rel: ensureKeyed(out).rel, key: [first!, ...more] });
+  }
+  return answers;
 }

@@ -8,8 +8,8 @@ Feature: mogwai addendum — a read of a side effect sees the COMPLETED collecti
   # that is the answer here (a deliberate divergence, docs/feature-support-matrix.md).
   #
   # A collector inside a CORRELATED body — a filter's, an `optional`'s, a `coalesce` arm's — after a
-  # movement is not lowered (its member relation names the outer row); it must DECLINE, never surface an
-  # internal error.
+  # movement collects every host traverser's body rows: the connector keys the body and its collector sites
+  # in one decorrelation (`keyedBody`, src/compiler/rel/lower/scoped.ts). It used to decline.
 
   @gap:side-effect-lazy-read
   Scenario: g_V_localXaggregateXaXX_selectXaX_countXlocalX
@@ -173,9 +173,8 @@ Feature: mogwai addendum — a read of a side effect sees the COMPLETED collecti
       | d[6].l |
       | d[6].l |
 
-  # A collector in a CORRELATED body after a movement: declines (it raised an internal RelIR error).
+  # A collector in a CORRELATED body after a movement: collected per host traverser.
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_whereXout_aggregateXaXX_capXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -188,7 +187,6 @@ Feature: mogwai addendum — a read of a side effect sees the COMPLETED collecti
       | d[6].l |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_notXout_aggregateXaXX_capXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -201,7 +199,6 @@ Feature: mogwai addendum — a read of a side effect sees the COMPLETED collecti
       | d[6].l |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_whereXout_groupCountXaX_byXlabelXX_capXaX
     Given the modern graph
     And the traversal of
@@ -214,7 +211,6 @@ Feature: mogwai addendum — a read of a side effect sees the COMPLETED collecti
       | m[{"software":"d[4].l","person":"d[2].l"}] |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_optionalXout_aggregateXaXX_capXaX_countXlocalX
     Given the modern graph
     And the traversal of
@@ -227,7 +223,6 @@ Feature: mogwai addendum — a read of a side effect sees the COMPLETED collecti
       | d[6].l |
 
   @gap:side-effect-lazy-read
-  @Unsupported
   Scenario: g_V_coalesceXout_aggregateXaX_identityX_capXaX_countXlocalX
     Given the modern graph
     And the traversal of

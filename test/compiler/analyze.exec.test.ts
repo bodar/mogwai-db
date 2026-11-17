@@ -47,8 +47,10 @@ describe('ChainFacts.tracksPath', () => {
     // …and a CONNECTOR host's body (`CONNECTOR_HOSTS`, every row of `lower/scoped.ts`'s `CONNECTORS` — a union
     // arm among them): the arm reads the path its traverser carries, so the chain seeds one.
     expect(facts('g.V().union(__.out().simplePath(), __.identity())').tracksPath).toBe(true);
-    // A host that is no connector row keeps its own carriage story: a sideEffect() body is not admitted.
-    expect(facts('g.V().sideEffect(__.out().simplePath().aggregate("x"))').tracksPath).toBe(false);
+    // `sideEffect` is a connector row too (its body's collectors are keyed per traverser)…
+    expect(facts('g.V().sideEffect(__.out().simplePath().aggregate("x"))').tracksPath).toBe(true);
+    // …while a host that is no connector row keeps its own carriage story: a write's value child is not admitted.
+    expect(facts('g.V().property("c", __.out().simplePath().count())').tracksPath).toBe(false);
   });
 });
 

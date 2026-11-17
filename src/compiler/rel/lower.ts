@@ -1352,7 +1352,9 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
   const site = typeof label === 'string' ? collections.get(label)?.sites.at(-1) : undefined;
   if (!site || !mayRaise(site.rel)) return undefined;
   const rel = site.rel;
-  if (!rel.type.cols.length) return null;
+  // A connector body's PENDING site is not a relation of its own until the connector keys it, so its drain has
+  // nothing to read yet: decline rather than skip the raise.
+  if (site.pending || !rel.type.cols.length) return null;
   const never: Expr = rel.type.cols
     .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') }))
     .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));

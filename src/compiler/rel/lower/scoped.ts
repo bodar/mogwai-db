@@ -1,10 +1,12 @@
 import { isNested, isPred } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
-import { decorrelate, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
+import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
+import { commitScope, forkCollections, isScopedFork, pendingLabels, pendingSites, restoreCollections, type Collections, type Site } from '../collection.ts';
 import { positionKeys } from '../../../rel/position.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
+import type { Binding } from '../../../rel/plan.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, relExprs, rewriteExpr, substRelId } from '../../../rel/walk.ts';
 import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
@@ -14,7 +16,7 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpe
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -30,7 +32,7 @@ import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, option
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
-import { drawInGroupValue, type Declines } from '../../unsupported.ts';
+import { drawInGroupValue, effectInChild, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
 import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
@@ -121,6 +123,8 @@ interface ScopedBody {
   readonly rel: Rel;
   readonly keyCol: string;
   readonly tail: Tail;
+  /** How many side-effect sites the body collected and `keyedBody` committed. */
+  readonly collected: number;
 }
 
 /**
@@ -151,8 +155,14 @@ function lowerBody(
     const reSourced = reSourcedBody(seed, body, framing, bodyCtx, fresh, labels, contract);
     return reSourced !== undefined ? reSourced : continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
   };
+  // The retry lowers the body AGAIN, so the side-effect sites the first lowering registered are put back first —
+  // each collector is one site, however many times its body is lowered.
+  const saved = new Map(ctx.collections);
   const tail = run(positioned);
-  if (order === 'read' && tail && !positioned && !encounterOf(tail.rel.channels) && !atMostOneRow(tail.rel)) return run(true);
+  if (order === 'read' && tail && !positioned && !encounterOf(tail.rel.channels) && !atMostOneRow(tail.rel)) {
+    restoreCollections(ctx.collections, saved);
+    return run(true);
+  }
   return tail;
 }
 
@@ -415,16 +425,117 @@ function owning(fresh: Minter): { readonly fresh: Minter; readonly owns: (r: Rel
  * `null` declines.
  */
 function keyedBody(
-  lower: (fresh: Minter) => Tail | null, outer: Rel, key: string, fresh: Minter,
+  lower: (fresh: Minter, collections: Collections) => Tail | null, outer: Rel, key: string, ctx: ChainCtx, fresh: Minter,
   reframe?: (tail: Tail) => Tail | null, projection?: KeyProjection,
-): { readonly keyed: Decorrelated; readonly tail: Tail } | null {
+): { readonly keyed: Decorrelated; readonly tail: Tail; readonly collected: number } | null {
   const mine = owning(fresh);
-  const lowered = lower(mine.fresh);
+  // THE BODY'S SIDE EFFECTS go into a FORK of the host's registry (`forkCollections`): each site it registers
+  // is PENDING — correlated to the body's one host row — and the host's registry sees nothing unless the whole
+  // body keys.
+  const fork = forkCollections(ctx.collections);
+  const out = keyedInFork(lower, outer, key, ctx, fresh, mine, fork, reframe, projection);
+  // A body that COLLECTED and still declined says so, naming what it collected (R6.0) — rather than only "no
+  // lowering covers". Advisory: a sibling route that answers is never shadowed by it.
+  const collected = out ? [] : pendingLabels(fork);
+  if (collected.length && ctx.host) ctx.declines.note(effectInChild(ctx.host, collected));
+  return out;
+}
+
+/** `keyedBody`'s work over the body's fork. */
+function keyedInFork(
+  lower: (fresh: Minter, collections: Collections) => Tail | null, outer: Rel, key: string, ctx: ChainCtx, fresh: Minter,
+  mine: ReturnType<typeof owning>, fork: Collections, reframe?: (tail: Tail) => Tail | null, projection?: KeyProjection,
+): { readonly keyed: Decorrelated; readonly tail: Tail; readonly collected: number } | null {
+  const lowered = lower(mine.fresh, fork);
   if (!lowered || lowered.effects?.length) return null;
   const tail = reframe ? reframe(lowered) : lowered;
   if (!tail) return null;
-  const keyed = decorrelate(tail.rel, outer, key, fresh, projection, mine.owns);
-  return keyed && { keyed, tail };
+  const sites = pendingSites(fork);
+  // A pending site's rows are the body's rows at the collector, so they are keyed by the SAME decorrelation as
+  // the body's tail — one memo, so the prefix they share is one relation, computed once (`decorrelateAll`).
+  // A pooled key projection names no single scope row a site could be ordered by, so a pool with a collector
+  // declines; a snapshot with no connector site to place it at (`ChainCtx.siteEffects`) likewise.
+  const snapshots = ctx.mutating && !isScopedFork(ctx.collections);
+  if (sites.length && (projection || (snapshots && !ctx.siteEffects))) return null;
+  const all = decorrelateAll([tail.rel, ...sites.map((site) => site.rel)], outer, key, fresh, projection, mine.owns);
+  if (!all) return null;
+  const [keyed, ...keyedSites] = all;
+  const committed = new Map<Site, Site>();
+  for (const [i, site] of sites.entries()) {
+    const done = scopedSite(site, keyedSites[i]!, outer, key, ctx.hostBulked ?? true, fresh);
+    if (!done) return null;
+    committed.set(site, done);
+  }
+  if (sites.length) {
+    ctx.siteEffects?.push(...commitScope(fork, ctx.collections, committed, ctx.mutating, fresh));
+  }
+  return { keyed: keyed!, tail, collected: sites.length };
+}
+
+/**
+ * A BODY'S SITE, KEYED — the member rows of every scope (the site's relation decorrelated with the body), each
+ * ordered by its HOST row's position and then by the body's own order at the collector: `(host encounter, body
+ * encounter)`, which is the reference's order — `TraversalSideEffectStep`/`LocalStep` drain the child for one
+ * traverser before the next arrives. The unit of a per-traverser barrier is the host row (the scope key), which
+ * an `Operator.assign` reads (`Site.unit`, `lastMember`).
+ *
+ * The MULTIPLICITY is the body's rows: the body was handed one traverser at bulk 1 (`TraversalUtil.apply`), so a
+ * host row standing for several traversers would owe each of them its contribution. A host that carries a `bulk`
+ * channel is therefore refused rather than counted once — the bulk scan (`ir/bulk.ts`) never collapses ahead of
+ * a host whose body reads rows, so this is a fail-closed backstop, not a reachable decline.
+ *
+ * `null` where the keyed relation still names a relation outside the scope (a site registered under a nested
+ * route that kept its own correlation): it cannot be read where the collection is.
+ */
+function scopedSite(site: Site, keyed: Decorrelated, outer: Rel, key: string, hostBulked: boolean, fresh: Minter): Site | null {
+  if (hostBulked && outer.channels.some((channel) => channel.role === 'bulk')) return null;
+  const outerFree = freeRelIds(outer);
+  if ([...freeRelIds(keyed.rel)].some((id) => !outerFree.has(id))) return null;
+  const k = keyed.key[0].col;
+  const own = site.rel.type.cols;
+  const hostEnc = encounterOf(outer.channels);
+  const unitCol = fresh('shk') as string;
+  if (!hostEnc) {
+    // No host position to read: the scope key (the host stream's own numbering) orders the units.
+    const rel = make.project({
+      id: fresh('shp'), input: keyed.rel, channels: [], type: typeOf(...own, meta(unitCol, 'int')),
+      exprs: [...own.map((column) => [column.name, col(keyed.rel.id, column.name)] as const), [unitCol, col(keyed.rel.id, k)]],
+    });
+    return { rel, order: [unitCol, ...site.order], perTraverser: true, unit: unitCol };
+  }
+  const hostCol = fresh('she') as string;
+  const hostKey = fresh('shj') as string;
+  const hosts = make.project({
+    id: fresh('shh'), input: outer, channels: [], type: typeOf(meta(hostKey, 'int'), meta(hostCol, 'int')),
+    exprs: [[hostKey, col(outer.id, key)], [hostCol, col(outer.id, hostEnc.col)]],
+  });
+  const joined = make.join({
+    id: fresh('shx'), left: keyed.rel, right: hosts, join: 'inner', channels: [],
+    type: typeOf(...keyed.rel.type.cols, ...hosts.type.cols), on: eq(col(keyed.rel.id, k), col(hosts.id, hostKey)),
+  });
+  const rel = make.project({
+    id: fresh('shp'), input: joined, channels: [], type: typeOf(...own, meta(hostCol, 'int'), meta(unitCol, 'int')),
+    exprs: [...own.map((column) => [column.name, col(joined.id, column.name)] as const),
+      [hostCol, col(joined.id, hostCol)], [unitCol, col(joined.id, hostKey)]],
+  });
+  return { rel, order: [hostCol, ...site.order], perTraverser: true, unit: unitCol };
+}
+
+/**
+ * A LOWERING ATTEMPT a connector may abandon for another form of the same site — the dependent join before the
+ * scoped plan, a fenced host before the plain one. A body's side-effect sites are committed as its body keys
+ * (`keyedBody`), and an arm lowered over the whole stream registers its own, so an attempt that declines puts the
+ * named collections back (and drops the snapshots it took): the form that answers is the one that collects.
+ */
+function attempt<T>(ctx: ChainCtx, run: () => T | null): T | null {
+  const saved = new Map(ctx.collections);
+  const taken = ctx.siteEffects?.length ?? 0;
+  const out = run();
+  if (out === null) {
+    restoreCollections(ctx.collections, saved);
+    ctx.siteEffects?.splice(taken);
+  }
+  return out;
 }
 
 /** Step 2: the body, lowered as the root lowers a chain, then keyed by the scope. `null` declines. */
@@ -444,9 +555,10 @@ function scopedBody(
   if (ladderOwns(body, ctx)) return null;
   // `reframe` is the host's own re-expression of the body's value (`landValues`' record).
   const out = keyedBody(
-    (mf) => lowerBody(body, rel, sc.scoped, framing, ctx, mf, labels, order, positionedSeed, contract), sc.scoped, sc.key, fresh, reframe,
+    (mf, collections) => lowerBody(body, rel, sc.scoped, framing, { ...ctx, collections }, mf, labels, order, positionedSeed, contract),
+    sc.scoped, sc.key, ctx, fresh, reframe,
   );
-  return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail };
+  return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail, collected: out.collected };
 }
 
 /**
@@ -468,10 +580,10 @@ function rootedBody(
   const element = make.project({ id: fresh('sbe'), input: domain, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(domain.id, 'id')]] });
   // Only the body's OWN draws are per scope (`keyedBody`): the domain built above is the scope's, not the body's.
   const out = keyedBody(
-    (mf) => lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, mf, NO_ALIASES, 'read', false, 'first'),
-    domain, sc.key, fresh, reframe,
+    (mf, collections) => lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, { ...ctx, collections }, mf, NO_ALIASES, 'read', false, 'first'),
+    domain, sc.key, ctx, fresh, reframe,
   );
-  return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail };
+  return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail, collected: out.collected };
 }
 
 /**
@@ -491,6 +603,9 @@ function correlatedBody(
   // read the host ONCE for every host row, so a draw there would be one pick shared by every scope. It takes
   // the decorrelated form (`scopedBody`), which keys the draw per scope by construction.
   if (nondeterministic(body, ctx.params)) return null;
+  // A body that COLLECTS a side effect never stays correlated either: its sites are per host row, and only the
+  // decorrelated form keys them into one relation over every scope (`keyedBody`).
+  if (someStepDeep(body, ctx.params, (s) => collectsSideEffect(s as IRStep))) return null;
   const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order, false, contract);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
@@ -1127,7 +1242,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
   // CTE and one seek per phase rather than a scope, a window and a rejoin per phase.
   if (tail && rel.kind !== 'materialize' && isSelfContained(rel) && rel.type.cols.some((column) => !columnIsStored(rel, column.name))) {
     const fencedHost = make.materialize({ id: fresh('smh'), input: rel, channels: rel.channels, type: rel.type, fenced: true });
-    const over = firstInner({ ...site, rel: fencedHost });
+    const over = attempt(ctx, () => firstInner({ ...site, rel: fencedHost }));
     if (over) return over;
   }
   // Not SQL-holdable as a dependent join: the decorrelated body, its FIRST row per scope through the rejoin.
@@ -1258,8 +1373,11 @@ const chooseRoute: Connector = (site) => {
   // SQLite's join IS a nested loop, so a condition it can seek per row is the scoped plan's best physical form —
   // measured 1.9× faster at 8k than scoping the stream (`choose(out('created'), values('name'), constant('none'))`).
   // Only where it declines is the condition scoped and decorrelated below.
-  const direct = chooseArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
-  if (direct) return withBranchEffects(direct, steps, at, ctx, fresh, () => continueAs(direct.rel, direct.framing, steps, at + 1, bulked, ctx, fresh, direct.aliases));
+  const answered = attempt(ctx, () => {
+    const direct = chooseArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
+    return direct && withBranchEffects(direct, steps, at, ctx, fresh, () => continueAs(direct.rel, direct.framing, steps, at + 1, bulked, ctx, fresh, direct.aliases));
+  });
+  if (answered) return answered;
   if (step.optionArms || step.modulators?.length || step.args.length < 2) return null;
   const choice = step.args[0]!.value;
   if (!isNested(choice)) return null;
@@ -1316,7 +1434,7 @@ const allRows = (policy: 'split' | 'forward'): Connector => (site) => {
   const ownsNothing = (r: Rel): boolean => r.channels.every((channel) => HOST_ONLY.has(channel.role));
   const probe = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', policy);
   if (probe && atMostOneRow(probe.rel) && (policy === 'split' || (ownsNothing(rel) && ownsNothing(probe.rel)))) {
-    const mapped = firstInnerOver(site, probe);
+    const mapped = attempt(ctx, () => firstInnerOver(site, probe));
     if (mapped) return mapped;
   }
   // An order the BODY imposes (`local(out().order().by('name'))`) is meaningful past the host — through a
@@ -1361,7 +1479,7 @@ const priority: Connector = (site) => {
   const policy = optional ? 'forward' : 'split';
   const leading = bodies[0]!.length ? correlatedBody(bodies[0]!, rel, framing, ctx, fresh, labels, 'read', policy) : null;
   if (leading && exactlyOneRow(leading.rel)) {
-    const alone = allRows(policy)({ ...site, step: { ...step, args: [step.args[0]!] } });
+    const alone = attempt(ctx, () => allRows(policy)({ ...site, step: { ...step, args: [step.args[0]!] } }));
     if (alone) return alone;
   }
   // THE DEPENDENT JOIN FIRST, over one correlated row (a body inside another child, `project().by(coalesce(…))`)
@@ -1371,9 +1489,12 @@ const priority: Connector = (site) => {
   // (`optional(out('knows'))`) faster at 8k than scoping the stream. Only where that form declines is the stream
   // scoped and decorrelated below.
   {
-    const branch = optional ? optionalArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at })
-      : coalesceArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
-    if (branch) return withBranchEffects(branch, steps, at, ctx, fresh, () => continueAs(branch.rel, branch.framing, steps, at + 1, bulked, ctx, fresh, branch.aliases));
+    const direct = attempt(ctx, () => {
+      const branch = optional ? optionalArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at })
+        : coalesceArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
+      return branch && withBranchEffects(branch, steps, at, ctx, fresh, () => continueAs(branch.rel, branch.framing, steps, at + 1, bulked, ctx, fresh, branch.aliases));
+    });
+    if (direct) return direct;
   }
   // A consumer that READS the merge's order (`branchOrderOwed`) gets the emission key — host position, then
   // arm, then the result's position within its scope (`mintBranchOrder`): the host is positioned and its
@@ -1982,10 +2103,10 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   };
   // The pool and its seed are the HOST's (minted outside `keyedBody`); only what `rest` builds is the body's own.
   const pool = keyedBody(
-    (mf) => weighed
-      ? continueAs(weighed, sourceFraming, rest, 0, true, bodyCtx, mf, labels)
-      : continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, mf, labels),
-    sc.scoped, sc.key, fresh, undefined, projection,
+    (mf, collections) => weighed
+      ? continueAs(weighed, sourceFraming, rest, 0, true, { ...bodyCtx, collections }, mf, labels)
+      : continueAs(seed, sourceFraming, rest, 0, restBulked, { ...bodyCtx, collections }, mf, labels),
+    sc.scoped, sc.key, ctx, fresh, undefined, projection,
   );
   if (!pool) return null;
   const { keyed, tail } = pool;
@@ -2020,6 +2141,26 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
 }
 
+/**
+ * `sideEffect(b)` — the host stream passes through UNCHANGED, and the body is lowered only for what it COLLECTS.
+ * `TraversalSideEffectStep` drains its child over a split of each traverser and emits the traverser itself
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/TraversalSideEffectStep.java:46-49`),
+ * so nothing the body does to its own traverser comes back; what does is its side effects. The body is keyed
+ * like any connector body, and `keyedBody` commits its collectors' sites — one relation over every scope, at
+ * the collector's position in the body, ordered host-major. A body with no effect never reaches here
+ * (`dropEffectFreeSideEffect`); one whose effect is not a collected site (a write, a raise) declines in
+ * `keyedBody`, and so does one that collected nothing — the effect it had would otherwise be silently dropped.
+ */
+const drained: Connector = (site) => {
+  const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
+  const body = singleBody(step, ctx);
+  if (!body) return null;
+  const sc = scope(rel, fresh);
+  const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'free', false, undefined, 'forward');
+  if (!keyed || !keyed.collected) return null;
+  return continueAs(unscoped(sc.scoped, rel, fresh), framing, steps, at + 1, bulked, ctx, fresh, labels);
+};
+
 /** THE CONNECTOR TABLE — one row per host, keyed by step name (§2 S4). */
 const CONNECTORS: ReadonlyMap<string, Connector> = new Map<string, Connector>([
   ['where', (site) => (whereOperands(site.step) ? aliasCompare(site) : existence(false)(site))],
@@ -2039,6 +2180,7 @@ const CONNECTORS: ReadonlyMap<string, Connector> = new Map<string, Connector>([
   ['dedup', byValues],
   ['groupCount', byValues],
   ['group', byValues],
+  ['sideEffect', drained],
 ]);
 
 // The chain facts seed a path for a connector body that reads one (`CONNECTOR_HOSTS`, `ir/analyze.ts`), so the
@@ -2105,11 +2247,21 @@ export function scopedHost(
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is
   // tried first (the switch) changes the plan, never whether the traversal compiles.
+  // Each route is also a TRANSACTION over the named collections: a body's side-effect sites are committed as its
+  // body keys (`keyedBody`), so a route that then declines puts the registry back, and the snapshots a route's
+  // bodies took (`siteEffects`) enter the effect sequence HERE, at the host's position, only for the route that
+  // answered.
   const tried: Declines[] = [];
   for (const route of routes) {
     const sink = ctx.declines.fork();
-    const tail = route({ ...ctx, declines: sink });
-    if (tail) { ctx.declines.adopt(sink); return tail; }
+    const saved = new Map(ctx.collections);
+    const siteEffects: Binding[] = [];
+    const tail = route({ ...ctx, declines: sink, siteEffects, hostBulked: bulked });
+    if (tail) {
+      ctx.declines.adopt(sink);
+      return siteEffects.length ? { ...tail, effects: [...siteEffects, ...(tail.effects ?? [])] } : tail;
+    }
+    restoreCollections(ctx.collections, saved);
     tried.push(sink);
   }
   for (const sink of tried) ctx.declines.adopt(sink);

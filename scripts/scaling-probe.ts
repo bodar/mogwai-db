@@ -171,6 +171,18 @@ const SHAPES: readonly Shape[] = [
   { name: 'emit: local(repeat.emit(has).times(2).count)', query: "g.V().local(repeat(out()).emit(has('age')).times(2).count())" },
   { name: 'emit: where(repeat.emit(has).times(2))', query: "g.V().where(repeat(out()).emit(has('age', gt(40))).times(2)).count()" },
   { name: 'emit: repeat.emit(has).times(3)', query: "g.V().repeat(out()).emit(has('age', gt(40))).times(3).count()" },
+  // R6: a side effect collected inside a child body — the body and its collector sites keyed in ONE
+  // decorrelation (`keyedBody`), the sites one relation over every scope, read at the cap.
+  { name: 'collect: sideEffect(out.aggregate).cap.count', query: "g.V().sideEffect(out().aggregate('x')).cap('x').unfold().count()" },
+  { name: 'collect: sideEffect(where(out).aggregate)', query: "g.V().sideEffect(where(out()).aggregate('x')).cap('x').unfold().count()" },
+  { name: 'collect: both.sideEffect(aggregate)', query: "g.V().both().sideEffect(aggregate('x')).cap('x').unfold().count()" },
+  { name: 'collect: sideEffect(out.groupCount.by(name))', query: "g.V().sideEffect(out().groupCount('x').by('name')).cap('x')" },
+  { name: 'collect: local(out.aggregate).cap.count', query: "g.V().local(out().aggregate('x')).cap('x').unfold().count()" },
+  { name: 'collect: sideEffect(out.aggregate).cap (fold)', query: "g.V().sideEffect(out().aggregate('x')).cap('x').count(local)" },
+  { name: 'collect: nested sideEffect(out.sideEffect(out.aggregate))', query: "g.V().sideEffect(out().sideEffect(out().aggregate('x'))).cap('x').unfold().count()" },
+  { name: 'collect: where(out.aggregate)', query: "g.V().where(out().aggregate('x')).cap('x').unfold().count()" },
+  { name: 'collect: optional(out.aggregate)', query: "g.V().optional(out().aggregate('x')).cap('x').unfold().count()" },
+  { name: 'collect: sideEffect(out.aggregate).values', query: "g.V().sideEffect(out().aggregate('x')).values('name').count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

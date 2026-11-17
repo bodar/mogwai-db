@@ -32,7 +32,7 @@ export interface Deferred {
 // Shared rows, for positions deferred for ONE reason.
 const WRITE_ARG: Deferred = {
   reason: "a write's value/endpoint child — lowered inside the write plan (`rel/write.ts`) through the child seam's scalar/rooted answer",
-  blocker: 'a scoped body inside a write: effects threaded through a decorrelated body (the same blocker as sideEffect)',
+  blocker: 'a scoped body inside a write: a graph WRITE threaded through a decorrelated body (collected side effects already are — `keyedBody`)',
   scope: 'host-owned',
 };
 const VALUE_ARG: Deferred = {
@@ -75,13 +75,6 @@ const OPTION_MAP: Deferred = {
 };
 
 export const DEFERRED_HOSTS: Readonly<Record<string, Deferred>> = {
-  sideEffect: {
-    reason: 'an effect-free body is removed by a Pass (`dropEffectFreeSideEffect`); one WITH effects is the collection substrate\'s, and a scoped body declines effects',
-    blocker: 'effects threaded through a decorrelated body',
-    // A per-traverser body like local()'s, kept off the connector only by its effects — the plan's likely
-    // biggest R6 item.
-    scope: 'ladder',
-  },
   repeat: REPEAT,
   until: REPEAT,
   emit: REPEAT,

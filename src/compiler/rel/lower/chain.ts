@@ -196,6 +196,15 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
    */
   readonly collections: Collections;
   /**
+   * THE SNAPSHOTS A CONNECTOR SITE'S BODIES TOOK — set by the connector dispatch (`scopedHost`, `lower/scoped.ts`)
+   * for each attempt at a site, filled by `keyedBody` when it commits a body's side-effect sites into the ROOT
+   * registry of a program with effects, and placed by the dispatch at the host's position in the effect sequence.
+   */
+  readonly siteEffects?: Binding[];
+  /** May a row of the connector site's HOST stream stand for several traversers (the host's `bulked`)? Set by
+   *  the connector dispatch beside `siteEffects`; a body's committed site is that host row's multiplicity. */
+  readonly hostBulked?: boolean;
+  /**
    * Does this chain MUTATE the graph? Read once from the step list rather than discovered as the fold
    * proceeds, because the question it answers is about the WHOLE chain: a shared read node is
    * re-evaluated by every statement that names it, so a named collection in a program with effects

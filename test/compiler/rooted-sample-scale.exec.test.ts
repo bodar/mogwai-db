@@ -256,13 +256,18 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     "g.V().local(__.V().group('x').by(label).sample(2)).cap('x')",
     "g.V().property('c', __.V().groupCount('x').sample(1).id()).cap('x').select(values).unfold().sum()",
     "g.V().local(__.V().aggregate('a').sample(1)).cap('a')",
-    "g.V().local(__.V().sideEffect(__.groupCount('a')).sample(1)).count()",
-    "g.V().local(__.V().where(__.aggregate('x')).sample(100)).count()",
     "g.V().local(__.V().coin(0.5).sample(1)).count()",
     "g.V().local(__.V().where(__.coin(0.5)).sample(100)).count()",
     "g.V().local(__.out().V().union(__.count(), __.constant(0)).sample(100)).count()",
   ])('declines %s', (q) => {
     expect(() => compile(q, {})).toThrow(/not supported/);
+  });
+
+  // A collector in a CHILD body of the rooted read (a `sideEffect`/`where` body) is the connector's: keyed per
+  // scope with its body (`keyedBody`), so every origin's re-sourced V() reaches it — six origins × six vertices.
+  test('a collector in a child body of the rooted read collects per origin', () => {
+    expect(count(seededStore(), "g.V().local(__.V().sideEffect(__.groupCount('a')).sample(1)).count()")).toBe(6);
+    expect(count(seededStore(), "g.V().local(__.V().where(__.aggregate('x')).sample(100)).cap('x').unfold().count()")).toBe(36);
   });
 });
 

@@ -63,7 +63,7 @@ function repeatBodyTracksPath(step: IRStep): boolean {
  *  path and all, through a seed row that carries the host's path channel, so a path read in the body is
  *  the host's path read: `TraversalUtil.apply` hands the child a split of the traverser, whose path is the
  *  parent's (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`). */
-export const CONNECTOR_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'and', 'or', 'not', 'map', 'flatMap', 'local', 'choose', 'union', 'project', 'coalesce', 'optional', 'order', 'dedup', 'groupCount', 'group']);
+export const CONNECTOR_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'and', 'or', 'not', 'map', 'flatMap', 'local', 'choose', 'union', 'project', 'coalesce', 'optional', 'order', 'dedup', 'groupCount', 'group', 'sideEffect']);
 
 /** Does a CONNECTOR host's body read the path — directly, or through a connector nested in it? Then the
  *  chain carries the path the body reads, exactly as `repeatBodyTracksPath` seeds one for a repeat body.

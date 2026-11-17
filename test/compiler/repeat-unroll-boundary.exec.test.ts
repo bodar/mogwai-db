@@ -409,6 +409,10 @@ describe('the repeat() unroll boundary', () => {
     expect(count("g.V(1).times(1).repeat(__.out().aggregate('x')).emit()")).toBe(6);
     expect(vals("g.V(1).times(1).repeat(__.out().groupCount('x')).emit().cap('x').select(values).unfold().sum()")).toEqual([3]);
     expect(count("g.V(1).repeat(__.out().aggregate('x')).emit().times(1).cap('x').unfold()")).toBe(3);
+    // …and the same single-arm form inside a `local()` body: the connector keys the unrolled body's one site
+    // per host traverser (`keyedBody`), so the body's side effect is still written once per traverser.
+    expect(count("g.V(1).local(__.times(1).repeat(__.out().aggregate('x')).emit()).cap('x').unfold()")).toBe(3);
+    expect(count("g.V().local(__.times(1).repeat(__.out().aggregate('x')).emit()).cap('x').unfold()")).toBe(6);
     // Every other emit form is ≥ 2 INDEPENDENT arms, each re-running the body prefix for traversers the
     // reference ran through it once (the reference aggregates 5 members from marko; the arms gave 8 and
     // 13). DECLINED, at every depth — and so is the recursive walk, whose term cannot hold an aggregate
@@ -420,7 +424,6 @@ describe('the repeat() unroll boundary', () => {
       "g.V(1).times(2).repeat(__.out().aggregate('x')).emit().cap('x')",
       "g.V(1).emit().repeat(__.out().group('x')).times(1).cap('x')",
       "g.V(1).union(__.emit().repeat(__.out().groupCount('x')).times(2), __.identity()).cap('x')",
-      "g.V(1).local(__.times(1).repeat(__.out().aggregate('x')).emit()).cap('x')",
       "g.V(1).repeat(__.out().aggregate('x')).emit().cap('x')",
       "g.V(1).emit().repeat(__.out().aggregate('x')).cap('x')",
       "g.V(1).repeat(__.out().groupCount('x')).until(__.outE().count().is(0)).cap('x')",

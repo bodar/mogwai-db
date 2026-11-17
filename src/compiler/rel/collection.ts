@@ -120,6 +120,98 @@ export interface Site {
    * that erased the wrapper is the only thing that still knew.
    */
   readonly perTraverser: boolean;
+  /**
+   * THE COLUMN NAMING THE BARRIER UNIT a per-traverser site's members came in, where one unit may hold SEVERAL
+   * members — a collector inside a connector body (`local(out().aggregate("a"))`) runs once per HOST traverser,
+   * so the unit is the host row and its members are every body row that reached the collector. `undefined`:
+   * each member is its own unit (the spliced `local(aggregate("a"))`, one traverser per barrier). Read only by
+   * a per-traverser `Operator.assign` (`lastMember`), which keeps the last UNIT's members.
+   */
+  readonly unit?: string;
+  /**
+   * COLLECTED INSIDE A SCOPED BODY AND NOT YET KEYED — the site's relation names the body's ONE correlated host
+   * row, so it means nothing outside the body until the connector decorrelates it against the scope and commits
+   * it (`commitScope`). Until then nothing may READ the collection (`settled`): a cap inside the same body would
+   * reduce a relation that is not one yet.
+   *
+   * The value is the FORK it was registered into — the scope that keys it. A nested body's fork copies its
+   * host body's registry, pending sites included, so "pending" alone would not say WHICH connector keys a site:
+   * an outer body's site decorrelated against an inner scope would be crossed with every inner row.
+   */
+  readonly pending?: Collections;
+}
+
+/** Can the collection be READ — is every site a relation of its own (no `pending` body site)? */
+const settled = (collection: Collection): boolean => collection.sites.every((site) => !site.pending);
+
+/**
+ * THE REGISTRIES A CONNECTOR BODY COLLECTS INTO — a FORK of its host's registry, so a body that declines (or a
+ * lowering attempt a connector abandons) leaves the host's untouched, and a site registered in it is PENDING:
+ * per host row, correlated to the body's seed, waiting for the one decorrelation that keys it (`keyedBody`,
+ * `lower/scoped.ts`). Identity-keyed, so the fact follows the map into every context the body lowers under —
+ * a branch arm, a `by()`, a nested rooted read — without a field each of them must remember to carry.
+ */
+const SCOPED_FORKS = new WeakSet<Collections>();
+
+/** A fresh scoped fork of `parent` (see `SCOPED_FORKS`). */
+export function forkCollections(parent: Collections): Collections {
+  const fork: Collections = new Map(parent);
+  SCOPED_FORKS.add(fork);
+  return fork;
+}
+
+/** Is `collections` a connector body's fork — is a site registered into it per HOST row? */
+export const isScopedFork = (collections: Collections): boolean => SCOPED_FORKS.has(collections);
+
+/** Put `collections` back to `saved` IN PLACE — the map's identity is its scope (`SCOPED_FORKS`), so a
+ *  restore never replaces it. Used where a lowering attempt that registered sites is abandoned. */
+export function restoreCollections(collections: Collections, saved: ReadonlyMap<string, Collection>): void {
+  collections.clear();
+  for (const [name, collection] of saved) collections.set(name, collection);
+}
+
+/** The labels a body COLLECTED into its fork — what a decline names. */
+export const pendingLabels = (fork: Collections): readonly string[] =>
+  [...fork].filter(([, collection]) => collection.sites.some((site) => site.pending === fork)).map(([label]) => label);
+
+/** The sites a body registered into ITS fork (not an enclosing body's), each once, in registration order. */
+export function pendingSites(fork: Collections): readonly Site[] {
+  const out = new Set<Site>();
+  for (const collection of fork.values()) for (const site of collection.sites) if (site.pending === fork) out.add(site);
+  return [...out];
+}
+
+/**
+ * COMMIT A BODY'S COLLECTIONS to its host's registry — every pending site replaced by its KEYED form (`keyed`,
+ * built by the connector from the one decorrelation of the body and its sites). Into a host that is itself a
+ * body's fork, the committed site stays PENDING: it is per host row of THAT scope, and keyed in turn when that
+ * scope's connector decorrelates. Into the root registry it is a relation of its own, and in a program with
+ * effects it is SNAPSHOTTED here, after decorrelation — the bindings come back for the caller to place at the
+ * host's position. `keyed` holds every one of `pendingSites(fork)` — the caller keyed them all or declined.
+ */
+export function commitScope(
+  fork: Collections, parent: Collections, keyed: ReadonlyMap<Site, Site>, mutating: boolean, fresh: Minter,
+): readonly Binding[] {
+  const nested = isScopedFork(parent);
+  const bindings: Binding[] = [];
+  const updates: (readonly [string, Collection])[] = [];
+  for (const [label, collection] of fork) {
+    if (parent.get(label) === collection) continue;
+    const sites: Site[] = [];
+    for (const site of collection.sites) {
+      if (site.pending !== fork) { sites.push(site); continue; }
+      const done = keyed.get(site)!;
+      if (nested) { sites.push({ ...done, pending: parent }); continue; }
+      const { pending: _pending, ...own } = done;
+      if (!mutating) { sites.push(own); continue; }
+      const taken = snapshotSite(own, collection.of, fresh);
+      bindings.push(taken.binding);
+      sites.push(taken.site);
+    }
+    updates.push([label, { ...collection, sites }]);
+  }
+  for (const [label, collection] of updates) parent.set(label, collection);
+  return bindings;
 }
 
 /**
@@ -246,9 +338,12 @@ export function registerCollection(
   const built = bys[0]
     ? projectedMembers(step, input, host, framing, bys[0], encounter, child, source, fresh)
     : traverserMembers(step, input, framing, encounter);
-  if (!built || correlatedSite(built)) return null;
-  const policied = { ...built, merge };
-  const { collection: retained, bindings } = mutating ? snapshotted(policied, fresh) : { collection: policied, bindings: [] };
+  // INSIDE A CONNECTOR BODY the site is PENDING — per host row, keyed and committed (and, with effects,
+  // snapshotted) by the connector (`commitScope`). Anywhere else a correlated site has no scope to key it.
+  const scoped = isScopedFork(collections);
+  if (!built || (!scoped && correlatedSite(built))) return null;
+  const policied = { ...built, merge, ...(scoped ? { sites: built.sites.map((site) => pendingIn(site, collections)) } : {}) };
+  const { collection: retained, bindings } = mutating && !scoped ? snapshotted(policied, fresh) : { collection: policied, bindings: [] };
   const held = collections.get(label);
   if (!held) { collections.set(label, retained); return bindings; }
   // A label a KEYED form already filled holds `(key, contribution)` members, and an `aggregate` site's
@@ -280,20 +375,33 @@ export function registerCollection(
 function snapshotted(
   collection: Collection, fresh: Minter,
 ): { readonly collection: Collection; readonly bindings: readonly Binding[] } {
-  const cols = [...memberCols(collection.of), ...collection.sites[0]!.order];
   const bindings: Binding[] = [];
   const sites = collection.sites.map((site) => {
-    const narrowed = make.project({
-      id: fresh('cs'), input: site.rel, channels: [],
-      type: typeOf(...cols.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'))),
-      exprs: cols.map((name) => [name, col(site.rel.id, name)] as const),
-    });
-    const name = fresh('agg');
-    bindings.push({ name, node: narrowed, snapshot: true });
-    return { ...site, rel: make.ref({ id: fresh('r'), name, channels: [], type: narrowed.type }) };
+    const taken = snapshotSite(site, collection.of, fresh);
+    bindings.push(taken.binding);
+    return taken.site;
   });
   return { collection: { ...collection, sites }, bindings };
 }
+
+/** ONE site taken — `snapshotted`'s per-site step, shared with `commitScope`, which snapshots a body's site
+ *  only once it is keyed. Narrowed to the member columns, the site's own order and its barrier unit. */
+function snapshotSite(site: Site, of: Members, fresh: Minter): { readonly site: Site; readonly binding: Binding } {
+  const cols = [...new Set([...memberCols(of), ...site.order, ...(site.unit ? [site.unit] : [])])];
+  const narrowed = make.project({
+    id: fresh('cs'), input: site.rel, channels: [],
+    type: typeOf(...cols.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'))),
+    exprs: cols.map((name) => [name, col(site.rel.id, name)] as const),
+  });
+  const name = fresh('agg');
+  return {
+    binding: { name, node: narrowed, snapshot: true },
+    site: { ...site, rel: make.ref({ id: fresh('r'), name, channels: [], type: narrowed.type }) },
+  };
+}
+
+/** A site registered inside a connector body — PENDING until the connector keys it (`commitScope`). */
+const pendingIn = (site: Site, fork: Collections): Site => ({ ...site, pending: fork });
 
 /**
  * IS A SITE CORRELATED to a relation outside itself? A collector inside a CORRELATED child body — a
@@ -408,17 +516,21 @@ function envelopeSites(collection: Collection, source: GraphSource, fresh: Minte
   if (collection.of.kind === 'mixed') return collection.sites;
   return collection.sites.map((site) => {
     const envelope = memberEnvelope(site.rel, collection.of, source, fresh);
-    const orderMeta = site.order.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'));
+    // The barrier unit rides beside the order where it is a column of its own (`Site.unit`).
+    const kept = site.unit && !site.order.includes(site.unit) ? [...site.order, site.unit] : site.order;
+    const keptMeta = kept.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'));
     return {
       rel: make.project({
         id: fresh('mez'), input: site.rel, channels: [],
-        type: typeOf(meta(MEMBER_ENVELOPE, 'json', true), ...orderMeta),
+        type: typeOf(meta(MEMBER_ENVELOPE, 'json', true), ...keptMeta),
         // `jsonb(<envelope>)` so the blob survives the union; the envelope itself is `json_object` text.
         exprs: [[MEMBER_ENVELOPE, { kind: 'call', fn: 'jsonb', args: [envelope] }],
-          ...site.order.map((name) => [name, col(site.rel.id, name)] as const)],
+          ...kept.map((name) => [name, col(site.rel.id, name)] as const)],
       }),
       order: site.order,
       perTraverser: site.perTraverser,
+      ...(site.unit ? { unit: site.unit } : {}),
+      ...(site.pending ? { pending: site.pending } : {}),
     };
   });
 }
@@ -469,7 +581,7 @@ export function registerGrouping(
   // A POOLED value registers its FINISHED map instead, and `accumulate` then refuses a second site: the
   // group's members' child rows pool and the barrier reduces the pool once, so there is no
   // `(key, contribution)` row a union could take. See the `reduced` arm.
-  const added: Collection = rows.done
+  let added: Collection = rows.done
     ? {
       sites: [{ rel: rows.done.rel, order: [], perTraverser: true }],
       of: { kind: 'reduced', framing: { kind: 'map', keyOf: rows.done.keyOf, valOf: rows.done.valOf } },
@@ -480,7 +592,12 @@ export function registerGrouping(
       of: { kind: 'grouped', recipe: rows.recipe },
       merge: undefined,
     };
-  if (correlatedSite(added)) return false;
+  // Inside a connector body the site is PENDING (see `registerCollection`) — but a POOLED map reduced its pool
+  // once per BODY, so keying it would be one finished map per host row, not one grouping: it declines.
+  const scoped = isScopedFork(collections);
+  if (scoped && rows.done) return false;
+  if (!scoped && correlatedSite(added)) return false;
+  if (scoped) added = { ...added, sites: added.sites.map((site) => pendingIn(site, collections)) };
   const held = collections.get(label);
   if (!held) { collections.set(label, added); return true; }
   const accumulated = accumulate(held, added, source, fresh);
@@ -597,8 +714,11 @@ export function reduce(collection: Collection, source: GraphSource, fresh: Minte
   if (collection.of.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: collection.of.framing };
   if (collection.of.kind === 'grouped') {
     const { recipe } = collection.of;
+    // One site's order is its own where it states more than the grouping's `go` (a body site ordered by its
+    // host's position first, `commitScope`); else the grouping's `go`, as a chain-position site always was.
+    const only = collection.sites[0]!;
     const grouped = collection.sites.length === 1
-      ? { site: collection.sites[0]!, order: [ORD_COL] as readonly string[] }
+      ? { site: only, order: (only.order.length > 1 ? only.order : [ORD_COL]) as readonly string[] }
       : (() => {
         const site = accumulated(collection.sites, groupRowCols(recipe), fresh);
         return { site, order: site.order };
@@ -693,11 +813,24 @@ function lastMember(site: Site, fresh: Minter): Site {
     id: fresh('sy'), input: site.rel, channels: carried, type: site.rel.type,
     terms: site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'desc' as const })),
   });
-  return {
-    rel: make.limit({ id: fresh('sz'), input: ordered, channels: carried, type: ordered.type, count: compilerInt(1) }),
-    order: site.order,
-    perTraverser: site.perTraverser,
-  };
+  const last = make.limit({ id: fresh('sz'), input: ordered, channels: carried, type: ordered.type, count: compilerInt(1) });
+  // A UNIT of several members (a body's collector, one barrier per HOST traverser — `Site.unit`) is assigned
+  // whole: every member of the last member's unit, read through one uncorrelated scalar (evaluated once).
+  if (site.unit) {
+    const unit = site.unit;
+    const lastUnit = make.project({
+      id: fresh('sw'), input: last, channels: [], type: typeOf(site.rel.type.cols.find((column) => column.name === unit) ?? meta(unit, 'int')),
+      exprs: [[unit, col(last.id, unit)]],
+    });
+    return {
+      rel: make.filter({
+        id: fresh('sv'), input: site.rel, channels: carried, type: site.rel.type,
+        pred: eq(col(site.rel.id, unit), { kind: 'scalar', plan: lastUnit }),
+      }),
+      order: site.order, perTraverser: site.perTraverser, unit,
+    };
+  }
+  return { rel: last, order: site.order, perTraverser: site.perTraverser };
 }
 
 /**
@@ -838,19 +971,24 @@ function accumulated(sites: readonly Site[], cols: readonly string[], fresh: Min
   // the sites agree on `Members`, so they agree on what `v`/`id` holds, and inventing a storage class
   // here would be a second authority on a fact the relation already states.
   const first = sites[0]!.rel.type.cols;
+  // A site may order its members by SEVERAL columns (a body's collector: its host's position, then the body's
+  // own — `commitScope`), so the accumulation carries as many order columns as the longest site, each shorter
+  // site padding with a constant. One column — every chain-position site — is the plan it always was.
+  const width = Math.max(1, ...sites.map((site) => site.order.length));
+  const encounterCols = Array.from({ length: width }, (_, i) => (i === 0 ? SITE_ENCOUNTER_COL : `${SITE_ENCOUNTER_COL}${i}`));
   const type = typeOf(...cols.map((name) => first.find((column) => column.name === name) ?? meta(name, 'any')),
-    meta(SITE_COL, 'int'), meta(SITE_ENCOUNTER_COL, 'int'));
+    meta(SITE_COL, 'int'), ...encounterCols.map((name) => meta(name, 'int')));
   const arms = sites.map((site, ordinal) => make.project({
     id: fresh('cm'), input: site.rel, channels: [], type,
     exprs: [...cols.map((name) => [name, col(site.rel.id, name)] as const),
       [SITE_COL, compilerInt(ordinal)],
       // A site with NO order of its own contributes a constant, which orders its members among
       // themselves incidentally — the same answer that site alone would have given.
-      [SITE_ENCOUNTER_COL, site.order[0] === undefined ? compilerInt(0) : col(site.rel.id, site.order[0])]],
+      ...encounterCols.map((name, i) => [name, site.order[i] === undefined ? compilerInt(0) : col(site.rel.id, site.order[i]!)] as const)],
   }));
   return {
     rel: make.union({ id: fresh('cu'), inputs: arms, all: true, channels: [], type }),
-    order: [SITE_COL, SITE_ENCOUNTER_COL],
+    order: [SITE_COL, ...encounterCols],
     // The ACCUMULATION's granularity is the LAST site's, because that is the barrier whose merge lands
     // last and `assign` keeps only the last one. Every other operator ignores it.
     perTraverser: sites[sites.length - 1]!.perTraverser,
@@ -878,7 +1016,7 @@ export function readCollection(step: IRStep, collections: Collections, source: G
   const label = labelOf(step);
   if (label === null) return null;
   const collection = collections.get(label);
-  return collection ? reduce(collection, source, fresh) : null;
+  return collection && settled(collection) ? reduce(collection, source, fresh) : null;
 }
 
 /** The collection a `cap("a")` names, WITHOUT reducing it — so a consumer-driven read can pick the
@@ -886,7 +1024,8 @@ export function readCollection(step: IRStep, collections: Collections, source: G
 export function collectionOf(step: IRStep, collections: Collections): Collection | undefined {
   if (step.modulators?.length) return undefined;
   const label = labelOf(step);
-  return label === null ? undefined : collections.get(label);
+  const collection = label === null ? undefined : collections.get(label);
+  return collection && settled(collection) ? collection : undefined;
 }
 
 /**
@@ -913,7 +1052,7 @@ export function readUnfolded(
   collection: Collection, fresh: Minter,
 ): { readonly rel: Rel; readonly order: readonly string[]; readonly kind: 'elements' | 'scalars' | 'mixed';
   readonly elem?: Elem; readonly type?: ScalarType; readonly productiveNull?: boolean } | null {
-  if (collection.merge) return null;
+  if (collection.merge || !settled(collection)) return null;
   const of = collection.of;
   if (of.kind === 'grouped' || of.kind === 'reduced') return null;
   const site = collection.sites.length === 1 ? collection.sites[0]! : accumulated(collection.sites, memberCols(of), fresh);
@@ -955,7 +1094,7 @@ export function readUnfolded(
  * `Column.values` needs the per-key reduction and is a separate read.
  */
 export function groupedKeys(collection: Collection, fresh: Minter): ListedRel | null {
-  if (collection.of.kind !== 'grouped') return null;
+  if (collection.of.kind !== 'grouped' || !settled(collection)) return null;
   const { recipe } = collection.of;
   if (recipe.keyElem === undefined) return null;
   // N sites are a UNION of member rows, exactly as `reduce`'s grouped arm accumulates them.
