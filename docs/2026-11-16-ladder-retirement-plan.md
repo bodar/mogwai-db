@@ -1191,6 +1191,16 @@ witnesses). Ordered so that each prerequisite comes BEFORE the item it unblocks;
 
 ### T1 — The walk's EXIT column is not payload (MAJOR — REGRESSION from S4, do first)
 
+✅ **LANDED (6e6e45ca, 6b6619f6, 1274c293).** `emits` (`src/compiler/rel/walk.ts`) asks a finished-walk emit condition
+of `traverserView(rel)` — the term's existing `wt` projection, extracted (id + carried channels) — and retargets it onto
+the walk with `substRelId`, so `payloadCols` and `correlatedExistence`'s guard stay the ONE authority and `wx` is never
+seen as payload; until+emit(local/union/coalesce/choose) answers again at the root and under where/local/map/not
+(`test/compiler/walk-exit-not-payload.exec.test.ts`). Follow-ons found on the way: every walk condition is now handed
+the walk's `aliases` (a label minted inside an until/emit no longer reaches `channel column 'a0' is already carried`;
+`bindAliases` declines a new label over a carried column), and the `edgePair` physical pass
+(`src/rel/passes/edge-pair.ts`) reads an edge pinned at both endpoints through all three index columns, so the
+newly reachable adjacency-to-a-label conditions scale 5–8× per 8× rather than 24–45×. Remains: nothing.
+
 S4 (5b19bb55) added the `EXIT` column `wx` to the walk relation (`src/compiler/rel/walk.ts`). It is neither a carried
 channel nor payload, but `payloadCols` (`src/compiler/rel/build.ts` ~82) counts every non-channel column as payload.
 `emits(walk)`/`leaves(walk)` ask the emit condition with the walk itself as subject, and `correlatedExistence`
