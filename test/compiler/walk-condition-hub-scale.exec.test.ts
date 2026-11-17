@@ -80,6 +80,18 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     // the condition reads (which keys its states by that label's history, still linear).
     ["g.V().as('a').repeat(out()).until(hasLabel('software')).emit(as('b').in().where(neq('b'))).count()", 7410],
     ["g.V().as('s').where(repeat(out()).until(hasLabel('software')).emit(as('x').where('s',neq('x')).in('created'))).count()", 780],
+    // A condition testing ADJACENCY to an outer label pins both endpoints of one edge read, with no label: a point
+    // lookup only once the scan is read through the label vocabulary (`edgePair`, `src/rel/passes/edge-pair.ts`) —
+    // before, each probe read a hub's whole in-neighbourhood (24–45× per 8×). The same rule serves it outside a walk.
+    ["g.V().as('a').repeat(out()).emit(where(__.in().as('a'))).count()", 2210],
+    ["g.V().as('a').repeat(out()).until(where(__.in().as('a'))).count()", 2210],
+    ["g.V().as('a').repeat(out()).emit(as('c').select('a').out().where(eq('c'))).count()", 2210],
+    ["g.V().as('a').repeat(out()).emit(where(__.both().as('a'))).count()", 2210],
+    ["g.V().as('a').where(repeat(out()).emit(as('c').select('a').out().where(eq('c')))).count()", 780],
+    ["g.V().as('a').local(repeat(out()).until(hasLabel('software')).emit(where(__.in().as('a'))).count()).sum()", 6110],
+    ["g.V().as('a').out().where(__.in().as('a')).count()", 2210],
+    ["g.V().as('a').in().where(__.out().as('a')).count()", 2210],
+    ["g.V().as('a').out().as('b').where(__.both().as('a')).count()", 2210],
   ] as const) {
     test(q, () => {
       expect(count(small, q)).toBe(atSmall);
