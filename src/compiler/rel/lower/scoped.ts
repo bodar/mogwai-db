@@ -10,6 +10,7 @@ import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
 import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
+import { fromTree } from '../../../rel/block.ts';
 import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -772,7 +773,10 @@ export function correlatedExistence(
   // A bounded input (`limit(n)`, the count bound a walk condition's `count().is(P)` takes — `boundConditionCount`,
   // `ir/strategies.ts`) costs O(n). The linear form for the rest needs the condition evaluated per distinct
   // element INSIDE the recursion, a substrate SQLite's recursive term does not offer, so it declines.
-  if (rel.kind !== 'self-ref') return { kind: 'exists', plan, negated };
+  // "Inside the term" is an algebra fact: the subject's row stands on the walk's self-reference in its own FROM
+  // tree — the frontier itself, or the row the term PRODUCES from it (the `until` answer the walk lands as a
+  // column, `walk.ts` `EXIT`).
+  if (!fromTree(rel).some((source) => source.kind === 'self-ref')) return { kind: 'exists', plan, negated };
   const unbounded = (r: Rel): boolean => rowBounds(r).max === Infinity;
   let perRowBounded = true;
   forEachRel(plan, (r) => {

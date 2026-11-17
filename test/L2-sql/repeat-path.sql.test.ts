@@ -160,17 +160,21 @@ describe('repeat / path SQL', () => {
   test('until(predicate) carries loops and guards the recursive frontier with the shared predicate', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.has("name","ripple"))');
     expect(p.kind).toBe('read');
-    expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
+    // The until answer is a column of the walk (`wx`), asked once as each row is produced and READ by the
+    // term's stop test and by the exit filter — the predicate is spelled once.
+    expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk, wx\)/);
+    expect(p.sql.match(/'ripple'/g)).toHaveLength(1);
+    expect(p.sql).toMatch(/WHERE w\d+\.wx$/);
     expect(p.sql).toMatch(/w\d+\.lp0 \+ 1/);
-    expect(p.sql).toContain('IS NOT 1');             // NULL-safe: only predicate TRUE stops expansion
+    expect(p.sql).toContain('wx IS NOT 1');          // NULL-safe: only predicate TRUE stops expansion
     expect(p.sql).not.toContain('depth <');          // no artificial depth cap — runs to fixpoint
   });
 
   test('until(loops().is(n)) tests the depth counter, not an element', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
     // `loops()` is a read of CARRIED STATE, named by the walk's `loops` channel and compared to the
-    // literal 2.
-    expect(p.sql).toMatch(/w\d+\.lp0 = 2/);
+    // literal 2 — as the term produces the row, so the counter it reads is the bumped one.
+    expect(p.sql).toMatch(/\(w\d+\.lp0 \+ 1\) = 2\) AS wx/);
   });
 
   test('until(loops().is(n)) over a BARRIER body is a count — it unrolls as times(n), no walk', () => {
@@ -187,19 +191,20 @@ describe('repeat / path SQL', () => {
   test('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {
     const p = read('g.V(3).until(__.has("name","lop")).repeat(__.out())');
     expect(p.kind).toBe('read');
-    // Both the seed and later rows are tested through the walk relation's qualified id, never the
-    // `node=id` self-match that would read the wrong property row.
-    expect(p.sql).toMatch(/rp\d+\.node = w\d+\.id/);
+    // Both the seed and later rows are tested through the produced row's qualified id — the seed's source
+    // row and the term's hop target — never the `node=id` self-match that would read the wrong property row.
+    expect(p.sql).toMatch(/rp\d+\.node = rn\.id\).*AS wx FROM nodes rn/);
+    expect(p.sql).toMatch(/rp\d+\.node = rme\d+\.tgt\).*AS wx FROM wk_w/);
     expect(p.sql).not.toContain('node = id');
   });
 
 
   test('until(__.out()) correlates the EXISTS on the walk row via the FROM boundary', () => {
     // The walk uses the SAME child predicate as where()/choose(), so its movement EXISTS is
-    // correlated directly to the qualified SelfRef row rather than to a private repeat compiler.
+    // correlated directly to the row the term produces rather than to a private repeat compiler.
     const p = read('g.V(1).repeat(__.out()).until(__.out())');
     expect(p.kind).toBe('read');
-    expect(p.sql).toMatch(/EXISTS \(SELECT rme\d+\.tgt AS one FROM edges rme\d+ WHERE \(rme\d+\.src = w\d+\.id\)\)/);
+    expect(p.sql).toMatch(/EXISTS \(SELECT rme\d+\.tgt AS one FROM edges rme\d+ WHERE \(rme\d+\.src = rme\d+\.tgt\)\) AS wx/);
   });
 
 
@@ -260,7 +265,7 @@ describe('repeat / path SQL', () => {
     expect(bare.sql).not.toContain(') OR (');
     const pred = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit(__.hasLabel("person"))');
     expect(pred.kind).toBe('read');
-    expect(pred.sql).toContain(') OR (');
+    expect(pred.sql).toMatch(/w\d+\.wx OR \(/);
     expect(pred.sql).toMatch(/w\d+\.lp0 > 0/);
   });
 
@@ -274,7 +279,7 @@ describe('repeat / path SQL', () => {
     // name because its `SelfRef` is BOUND, not free; asking containment instead made every walk
     // unbindable and spelled this block twice (measured: 1,928 → 1,482 bytes).
     expect(p.sql.match(/WITH RECURSIVE/g)).toHaveLength(1);
-    expect(p.sql.match(/wk_w\d+\(id, lp0, bulk\) AS \(/g)).toHaveLength(1);
+    expect(p.sql.match(/wk_w\d+\(id, lp0, bulk, wx\) AS \(/g)).toHaveLength(1);
   });
 
   // ---------- sack folded through the recursive walk (foldable carried column) ----------
@@ -296,6 +301,8 @@ describe('repeat / path SQL', () => {
       // The walk header is the rowid then the channels in ROLE_ORDER, so the sack rides beside the
       // loop counter rather than in a column of its own invention. Its TYPE TAG (`sackt`) is a second
       // column of the same role, so it rides the walk exactly as the value does.
+      // No `wx` column: the sack is COMPUTED by the term, so a landed until would re-spell the fold inside its
+      // own test; the walk stays unlanded and the test reads the stored walk row (`walk.ts` `landed`).
       expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, sack, sackt, lp0, bulk\)/);
       expect(p.sql).toMatch(/CAST\(w\d+\.sack AS INT\) >= 50/);
       // A sack holds whatever its seed was, so the comparison is TYPE-GUARDED by the sack's own per-row

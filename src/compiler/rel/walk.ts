@@ -1,9 +1,11 @@
 import { CHANNEL_GROUP_POLICY, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
 import { col, compilerInt, eq, type Expr } from '../../rel/expr.ts';
-import { exprRels, forEachExpr, forEachRel } from '../../rel/walk.ts';
+import { exprRels, forEachExpr, forEachRel, freeRelIds } from '../../rel/walk.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
+import type { RelType } from '../../rel/types.ts';
+import { columnIsStored, spelledOuterColumns } from '../../rel/copies.ts';
 import { TRAVERSER_STATE_READS, type IRStep } from '../ir/step.ts';
 import { someStepDeep } from '../ir/walk.ts';
 import { scopeKeyReads } from '../ir/labels.ts';
@@ -31,6 +33,10 @@ function readsAdjacency(e: Expr): boolean {
 /** "Every row the walk holds" — an output condition that needs no filter, distinct from the absence
  *  of a condition. */
 const ALL = Symbol('walk.all');
+
+/** The walk's `until` answer column (`repeatWalk`'s `walkType`). Never escapes the walk: its output projection
+ *  carries the traverser's own columns only. */
+const EXIT = 'wx';
 
 /** A recursive element walk before the enclosing fold consumes its remaining steps. */
 interface WalkRead {
@@ -134,8 +140,24 @@ export function repeatWalk(
     role: 'loops',
   };
   const carried: Channels = withChannel(input.channels, depth);
-  const header = elementCols(carried);
-  const walkType = typeOf(...header);
+  /** The traverser's own columns — what the body reads and the walk hands on. */
+  const traverserType = typeOf(...elementCols(carried));
+  /**
+   * THE `until` TEST IS SPELLED ONCE, as a column of the walk (`EXIT`): each row the walk produces asks it
+   * once, as it is produced, and everything downstream READS the answer — the term's stop test, the exit arm,
+   * and the not-exiting rows an `emit` arm takes. Spelled at each use, a hub-reading `until` was evaluated
+   * three times per walk row (term, exit arm, emit arm), the compute-once rule in the root `CLAUDE.md`.
+   * Raw, not two-valued: a NULL (unproductive) test is not an exit, which `notProduced` and a `WHERE` both read
+   * correctly. No `until`, no column.
+   *
+   * Landed only where the test reads STORED columns of the produced row (`columnIsStored`) or the counter.
+   * SQL cannot name a sibling output column, so the test is written over the row's DEFINITIONS: over a value
+   * the body COMPUTES — a folded sack, an appended path — it would re-spell that computation inside itself, the
+   * very repetition it removes. There the walk is rebuilt unlanded and the test is asked where it is used,
+   * of the stored walk row, as before (`landed`).
+   */
+  let landed = !!predicate;
+  const walkTypeOf = (): RelType => landed ? typeOf(...traverserType.cols, meta(EXIT, 'int', true)) : traverserType;
   const loops = (rel: Rel): Expr => col(rel.id, depth.col);
   const subject = (rel: Rel): Subject => ({ kind: 'element', id: col(rel.id, 'id'), rel, elem });
   const deeper = (rel: Rel): Expr => ({
@@ -164,8 +186,14 @@ export function repeatWalk(
    * Only the `emit` condition, and only one that reads adjacency (`readsAdjacency`: a condition over the row's
    * own columns, labels or properties — `loops()`, `has(k,v)` — costs one seek per row as it is). Inside the term (`self`) the frontier row is all there
    * is — a recursive SELECT may not DISTINCT or aggregate (`src/rel/recursive.ts` `BARRIER_IN_TERM`) — so the
-   * `until` test stays per row there, and its output-side twin with it: it costs no more than the term already
-   * paid. What keeps the term's per-row work bounded is `correlatedExistence`'s rule (`lower/scoped.ts`).
+   * `until` test stays per row there, and the output side READS its answer (`EXIT`) rather than asking again.
+   * What keeps the term's per-row work bounded is `correlatedExistence`'s rule (`lower/scoped.ts`).
+   *
+   * ONLY OVER AN UNCORRELATED WALK (`freeRelIds(walk)` empty). A walk that reads an outer relation runs under a
+   * host that keeps it correlated (an `EXISTS` re-evaluated per outer row) or that the decorrelator keys by scope
+   * — either way the state is per outer row, so the DISTINCT merges nothing and its spool and semi-join are pure
+   * cost (measured ≈2.4× slower than per row under `where`). There the condition stays per row. Per row and per
+   * state answer the same rows; the choice is cost alone.
    */
   /** `rows` restricted to those whose STATE passes `body`, asked once per distinct state; `null` where `body`
    *  does not lower over a state row. */
@@ -201,11 +229,15 @@ export function repeatWalk(
       on: stateType.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name))).reduce((all, one) => and(all, one)),
     });
   };
-  /** The `until` exit condition at `rel` — `null` where the predicate does not lower, `undefined`
-   *  where there is no `until` at all and the walk therefore never exits early. */
+  /** The `until` predicate asked of `rel`'s row — `null` where it does not lower. */
+  const tests = (rel: Rel): Expr | null => predicate ? child.predicate(predicate, subject(rel), false) ?? null : null;
+  /** The `until` exit condition at a walk row — its `EXIT` column where `landed`, else the test asked of the
+   *  row; `null` where the predicate does not lower, `undefined` where there is no `until` at all and the walk
+   *  therefore never exits early. */
   const exits = (rel: Rel): Expr | null | undefined => {
     if (!predicate) return undefined;
-    const tested = child.predicate(predicate, subject(rel), false);
+    if (landed) return col(rel.id, EXIT);
+    const tested = tests(rel);
     if (!tested) return null;
     // `untilFirst` tests the traverser as it ARRIVES, so the seed can exit untouched (while-do).
     // After `repeat` the test follows `incrLoops`, so the body always runs once (do-while).
@@ -229,7 +261,7 @@ export function repeatWalk(
    * routes are separate ARMS, not a disjunction.
    *
    * The one simplification is BARE `emit` after `repeat`: it is exactly `deeper`, which SUBSUMES an
-   * `until`-after exit because that exit is literally `and(deeper, …)`. With `emit(pred)` the two
+   * `until`-after exit because that exit never holds on a seed row (`EXIT` is `0` there). With `emit(pred)` the two
    * conditions are independent and the disjunction is spelled.
    */
   const leaves = (rel: Rel): Expr | typeof ALL | null => {
@@ -242,64 +274,95 @@ export function repeatWalk(
     return emitted ? or(exiting, emitting) : emitting;
   };
 
-  const seed = make.project({
-    id: fresh('ws'), input, channels: carried, type: walkType,
+  /** The traverser columns of `rel`, unchanged — `id` and every carried channel. */
+  const traverserExprs = (rel: Rel): readonly (readonly [string, Expr])[] =>
+    [['id', col(rel.id, 'id')], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)];
+  /** `rel` with its `EXIT` answer landed beside it; `null` where the `until` predicate does not lower. */
+  const withExit = (rel: Rel, exit: Expr | null): Rel | null => !landed ? rel : !exit ? null : make.project({
+    id: fresh('wx'), input: rel, channels: carried, type: walkTypeOf(), exprs: [...traverserExprs(rel), [EXIT, exit]],
+  });
+
+  const start = make.project({
+    id: fresh('ws'), input, channels: carried, type: traverserType,
     exprs: [['id', col(input.id, 'id')], ...carried.map((channel) => [channel.col,
       channel === depth ? compilerInt(0) : col(input.id, channel.col),
     ] as const)],
   });
 
-  let termValid = true;
-  const walkId = fresh('w');
-  const walkName = `wk_${walkId}`;
-  const walk = make.recursive({
-    id: walkId, name: walkName, channels: carried, type: walkType,
-    cols: header.map((column) => column.name), seed,
-    step: (self) => {
-      const stop = exits(self);
-      if (stop === null) { termValid = false; return self; }
-      // An unproductive until predicate is NOT an exit. `NOT NULL` would be NULL and would wrongly
-      // discard the traverser, so use the shared two-valued answer. With no `until` nothing is
-      // filtered: an emit-only walk expands every row and stops when the BODY is unproductive.
-      const guarded = stop === undefined ? self : make.filter({
-        id: fresh('wg'), input: self, channels: carried, type: walkType, pred: notProduced(stop),
-      });
-      const term = child.chain(guarded, { kind: 'elements', elem }, body, aliases);
-      if (!term || term.effects?.length || term.framing.kind !== 'elements'
-        || term.framing.elem !== elem || !sameChannels(term.rel.channels, carried)
-        || term.aliases !== aliases) {
-        termValid = false;
-        return self;
-      }
-      /** The counter bump — one projection incrementing `loops`, carrying every other column and
-       *  channel (the path column the body just appended to included) through unchanged. */
-      const bump = make.project({
-        id: fresh('wi'), input: term.rel, channels: carried, type: walkType,
-        exprs: [['id', col(term.rel.id, 'id')], ...carried.map((channel) => [channel.col,
-          channel === depth
-            ? { kind: 'binary', op: '+', left: col(term.rel.id, channel.col), right: compilerInt(1) } as Expr
-            : col(term.rel.id, channel.col),
-        ] as const)],
-      });
-      /**
-       * ⚠️ **THE TERM REFERENCES THE WALK ONCE, and nothing here has to make it so.** A projection over
-       * a compound whose arms each read the `SelfRef` would take a DERIVED TABLE collecting both
-       * references into one subquery — `circular reference` (§6). That used to be every `both()` body
-       * (two `HOPS` arms unioned `ALL`), and a `Project`/`Filter`/`Join`-through-`UNION ALL` transpose
-       * (Calcite's `*SetOpTransposeRule`s) pushed the bump into the arms. A multi-direction hop now
-       * reads its frontier ONCE through a direction row (`hopJoin`, `lower/movement.ts` — a `SelfRef` is
-       * never free to read twice), so no body this route admits builds a self-referencing compound
-       * (measured: zero over the L1 corpus and the repeat tests), and the transpose was deleted with
-       * it. A body that ever did would be refused by name by `recursiveViolation` below, never
-       * mis-executed; a `union()` body declines before reaching here.
-       */
-      return bump;
-    },
-  });
-
-  // The lowering and checker share one authority for SQLite's recursive-term laws. Calling it also
-  // constructs the memoized step, so `termValid` reports any fold-level decline above.
-  if (recursiveViolation(walk) || !termValid) return null;
+  /** The recursive walk, landed or not; `null` where it does not lower. `cheap` is false where a landed test
+   *  would re-spell a computed column of the produced row. */
+  const build = (): { readonly walk: Extract<Rel, { readonly kind: 'recursive' }>; readonly cheap: boolean } | null => {
+    const walkType = walkTypeOf();
+    // `untilFirst` tests the traverser as it ARRIVES, so the seed can exit untouched (while-do). After `repeat`
+    // the test follows `incrLoops`, so the body always runs once (do-while): a seed row never exits, and every
+    // row the term produces has run the body, so the term's test needs no depth guard.
+    const seed = withExit(start, untilFirst ? tests(start) : compilerInt(0));
+    if (!seed) return null;
+    let termValid = true;
+    let cheap = true;
+    const walkId = fresh('w');
+    const walk = make.recursive({
+      id: walkId, name: `wk_${walkId}`, channels: carried, type: walkType,
+      cols: walkType.cols.map((column) => column.name), seed,
+      step: (self) => {
+        const stop = exits(self);
+        if (stop === null) { termValid = false; return self; }
+        // An unproductive until predicate is NOT an exit. `NOT NULL` would be NULL and would wrongly
+        // discard the traverser, so use the shared two-valued answer. With no `until` nothing is
+        // filtered: an emit-only walk expands every row and stops when the BODY is unproductive.
+        // The body reads the traverser's own columns, never `EXIT`.
+        const staying = stop === undefined ? self
+          : make.filter({ id: fresh('wg'), input: self, channels: carried, type: walkType, pred: notProduced(stop) });
+        const guarded = !landed ? staying : make.project({
+          id: fresh('wt'), input: staying, channels: carried, type: traverserType, exprs: traverserExprs(staying),
+        });
+        const term = child.chain(guarded, { kind: 'elements', elem }, body, aliases);
+        if (!term || term.effects?.length || term.framing.kind !== 'elements'
+          || term.framing.elem !== elem || !sameChannels(term.rel.channels, carried)
+          || term.aliases !== aliases) {
+          termValid = false;
+          return self;
+        }
+        /** The counter bump — one projection incrementing `loops`, carrying every other column and
+         *  channel (the path column the body just appended to included) through unchanged. */
+        const bump = make.project({
+          id: fresh('wi'), input: term.rel, channels: carried, type: traverserType,
+          exprs: [['id', col(term.rel.id, 'id')], ...carried.map((channel) => [channel.col,
+            channel === depth
+              ? { kind: 'binary', op: '+', left: col(term.rel.id, channel.col), right: compilerInt(1) } as Expr
+              : col(term.rel.id, channel.col),
+          ] as const)],
+        });
+        /**
+         * ⚠️ **THE TERM REFERENCES THE WALK ONCE, and nothing here has to make it so.** A projection over
+         * a compound whose arms each read the `SelfRef` would take a DERIVED TABLE collecting both
+         * references into one subquery — `circular reference` (§6). That used to be every `both()` body
+         * (two `HOPS` arms unioned `ALL`), and a `Project`/`Filter`/`Join`-through-`UNION ALL` transpose
+         * (Calcite's `*SetOpTransposeRule`s) pushed the bump into the arms. A multi-direction hop now
+         * reads its frontier ONCE through a direction row (`hopJoin`, `lower/movement.ts` — a `SelfRef` is
+         * never free to read twice), so no body this route admits builds a self-referencing compound
+         * (measured: zero over the L1 corpus and the repeat tests), and the transpose was deleted with
+         * it. A body that ever did would be refused by name by `recursiveViolation` below, never
+         * mis-executed; a `union()` body declines before reaching here.
+         */
+        if (!landed) return bump;
+        const produced = withExit(bump, tests(bump));
+        if (!produced) { termValid = false; return self; }
+        const spelled = spelledOuterColumns(produced, bump.id, [EXIT]);
+        cheap = !!spelled && [...spelled].every((name) => name === depth.col || columnIsStored(bump, name));
+        return produced;
+      },
+    });
+    // The lowering and checker share one authority for SQLite's recursive-term laws. Calling it also
+    // constructs the memoized step, so `termValid` reports any fold-level decline above.
+    if (recursiveViolation(walk) || !termValid) return null;
+    return { walk, cheap };
+  };
+  let built = build();
+  if (landed && !built?.cheap) { landed = false; built = build(); }
+  if (!built) return null;
+  const { walk } = built;
+  const walkType = walkTypeOf();
 
   /**
    * A WALK WITH NEITHER MODULATOR EMITS NOTHING, so the walk itself is dead code.
@@ -338,11 +401,11 @@ export function repeatWalk(
 
   let surviving: Rel;
   const emitting = emits(walk);
-  if (emitted && emitting !== null && emitting !== ALL && readsAdjacency(emitting)) {
-    // An `emit` condition that reads ADJACENCY is asked once per distinct STATE (`perState`): the rows past
-    // the depth test, semi-joined to the states that pass. With an `until` it is the rows that do NOT exit —
-    // `exit ∪ (¬exit ∧ emit)` is the disjunction `leaves` spells, as two disjoint arms — or, `twice`, every
-    // emitting row beside every exiting one (a multiset sum).
+  if (emitted && emitting !== null && emitting !== ALL && readsAdjacency(emitting) && !freeRelIds(walk).size) {
+    // An `emit` condition that reads ADJACENCY over an UNCORRELATED walk is asked once per distinct STATE
+    // (`perState`): the rows past the depth test, semi-joined to the states that pass. With an `until` it is the
+    // rows that do NOT exit — `exit ∪ (¬exit ∧ emit)` is the disjunction `leaves` spells, as two disjoint arms —
+    // or, `twice`, every emitting row beside every exiting one (a multiset sum).
     const base = emitFirst ? walk : arm('wd', deeper(walk));
     const exiting = exits(walk);
     if (exiting === null) return null;
