@@ -767,3 +767,23 @@ const exprSubplans = (e: Expr): readonly Rel[] => {
   forEachExpr(e, (node) => out.push(...exprRels(node)));
   return out;
 };
+
+/** `e` with every column of `rel` it reads — its correlated subplans included — replaced by `f(name)`. */
+export function mapColsDeep(e: Expr, rel: RelId, f: (name: string) => Expr): Expr {
+  const memo = new Map<Rel, Rel>();
+  const swap = (node: Expr): Expr => (node.kind === 'col' && node.rel === rel ? f(node.name) : node);
+  const inExpr = (x: Expr): Expr => rewriteExpr(x, swap, inPlan);
+  function inPlan(plan: Rel): Rel { return rewriteRels(plan, (mapped) => mapRelExprs(mapped, (x) => rewriteExpr(x, swap)), memo); }
+  return inExpr(e);
+}
+
+/** The columns of `rel` an expression reads, its correlated subplans included. */
+export function deepColsRead(e: Expr, rel: RelId): Set<string> {
+  const names = new Set<string>();
+  const visit = (x: Expr): void => forEachExpr(x, (node) => {
+    if (node.kind === 'col' && node.rel === rel) names.add(node.name);
+    for (const plan of exprRels(node)) forEachRel(plan, (r) => relExprs(r).forEach(visit));
+  });
+  visit(e);
+  return names;
+}

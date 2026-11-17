@@ -3,7 +3,7 @@ import { shapeOf, spliceable } from './block.ts';
 import { isAbort } from './raise.ts';
 import { atMostOneRow } from './bounds.ts';
 import type { Rel } from './rel.ts';
-import { exprChildren, exprRels, forEachExpr, isSelfContained, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
+import { deepColsRead, exprChildren, exprRels, forEachExpr, isSelfContained, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
 import type { RelId } from './types.ts';
 
 /**
@@ -44,7 +44,7 @@ import type { RelId } from './types.ts';
  */
 export const draws: (r: Rel) => boolean = nodeFact((r: Rel): boolean =>
   relExprs(r).some(exprDraws) || relChildren(r).some(draws));
-const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
+export const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
   if (isAbort(e)) return false;
   if (isRandom(e)) return true;
   return exprChildren(e).some(exprDraws) || exprRels(e).some(draws);
@@ -292,6 +292,55 @@ export const columnIsRowKey = (r: Rel, name: string): boolean => {
     default: return false;
   }
 };
+
+/**
+ * COLUMN `name` OF `r` SPELLED OVER THE ROWS IT IS COMPUTED FROM — its defining expression with every read of a
+ * relation on `r`'s spine replaced by what THAT column is defined as, down to its LEAVES (`leaves`, filled with
+ * each relation the walk stopped at), so the answer reads only leaf columns, outer columns `r` is correlated
+ * against, and the relations of its own subplans (a lookup's `(SELECT … FROM nodes WHERE id = e.tgt)` reads
+ * `e.tgt`).
+ *
+ * The functional-dependency question `columnIsRowKey` asks of one column, asked of a computed one: a column whose
+ * lineage reads only the columns of ONE stored row is a function of that row, so the row's key determines it; one
+ * whose lineage reads ONE leaf column is a function of that column's value. It follows the operators that pass a
+ * row through unchanged — a `Project` (substituting), a `Filter`/`Sort`/`Limit`/`Distinct`, a window's input
+ * columns, an inner or cross join's sides, a semi/anti join's left, a LEFT join's left side — and stops anywhere
+ * else at the column itself as a leaf: a scan (storage), and an operator whose column no single input row defines
+ * (an aggregate's, a union's, a window's number, a LEFT join's right side, NULL where unmatched).
+ */
+export function columnLineage(r: Rel, name: string, leaves: Map<RelId, Rel>): Expr | null {
+  if (!r.type.cols.some((column) => column.name === name)) return null;
+  const leaf = (): Expr => {
+    leaves.set(r.id, r);
+    return { kind: 'col', rel: r.id, name };
+  };
+  switch (r.kind) {
+    case 'scan': return leaf();
+    case 'project': {
+      const e = r.exprs.find(([column]) => column === name)?.[1];
+      if (!e) return null;
+      const input = r.input;
+      const defined = new Map<string, Expr>();
+      for (const read of deepColsRead(e, input.id)) {
+        const d = columnLineage(input, read, leaves);
+        if (!d) return null;
+        defined.set(read, d);
+      }
+      return defined.size ? mapColsDeep(e, input.id, (read) => defined.get(read)!) : e;
+    }
+    case 'filter': case 'sort': case 'limit': case 'distinct': return columnLineage(r.input, name, leaves);
+    case 'window': return r.specs.some(([minted]) => minted === name) ? leaf() : columnLineage(r.input, name, leaves);
+    case 'join': {
+      if (r.join === 'semi' || r.join === 'anti') return columnLineage(r.left, name, leaves);
+      const at = r.type.cols.findIndex((column) => column.name === name);
+      const leftN = r.left.type.cols.length;
+      if (at < 0) return null;
+      if (at < leftN) return columnLineage(r.left, r.left.type.cols[at]!.name, leaves);
+      return r.join === 'left' ? leaf() : columnLineage(r.right, r.right.type.cols[at - leftN]!.name, leaves);
+    }
+    default: return leaf();
+  }
+}
 
 /**
  * DOES COLUMN `name` OF `r` COMPUTE WITH A SUBQUERY — is a scalar/`EXISTS`/`IN` subplan anywhere in the

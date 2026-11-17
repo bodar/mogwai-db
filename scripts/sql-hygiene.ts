@@ -17,7 +17,8 @@ import { isRowsBind, renderedSteps } from '../src/rel/emit.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { bindsAsParameter, type Expr } from '../src/rel/expr.ts';
-import { forEachExpr, forEachRel, relExprs, stmtChildren, stmtExprs } from '../src/rel/walk.ts';
+import { forEachExpr, forEachRel, isSelfContained, relExprs, stmtChildren, stmtExprs } from '../src/rel/walk.ts';
+import type { Rel } from '../src/rel/rel.ts';
 import { isStmt } from '../src/rel/stmt.ts';
 import { nestedSnapshotScans, type PlanRow } from '../test/support/snapshot-scans.ts';
 
@@ -76,6 +77,44 @@ const respelled = (plan: readonly PlanRow[]): number => {
   }
   return repeats;
 };
+/**
+ * ONE CORRELATED READ PER SELECT LIST — no two items of one projection may each spell the same correlated
+ * subquery. `respelled` above cannot see this: SQLite gives each item's copy its own select id, so a first-row
+ * pick read once for its value and again for its type tag (two items, `(SELECT v … LIMIT 1)` and
+ * `(SELECT vtype … LIMIT 1)` over one body) is two subqueries to the planner, and the body is searched twice per
+ * row. Asked of the ALGEBRA: two items whose correlated scalar subplans read the same body — the subplan under
+ * its one-column projection, compared by shape with relation ids and aliases normalised — are one search spelled
+ * twice. The cure is one read per host whose columns the items share (`correlatedFirst`'s keyed pick).
+ *
+ * A RATCHET, not a zero gate: the traversals that still spell a pick per column are banked in
+ * `sql-hygiene-respelled.json` (today the arm-priority first-row read, `priorityArms`, which needs an arm-tagged
+ * key), and a traversal not on the list fails. `--record` re-banks it.
+ */
+const respelledBaseline = new Set(JSON.parse(await Bun.file(new URL('./sql-hygiene-respelled.json', import.meta.url)).text()) as string[]);
+const respelledNow: string[] = [];
+const shapeKey = (plan: Rel): string => {
+  const canon = new Map<string, string>();
+  const token = (value: string): string => {
+    if (!canon.has(value)) canon.set(value, `#${canon.size}`);
+    return canon.get(value)!;
+  };
+  return JSON.stringify(plan, (key, value) => (typeof value === 'string' && (key === 'id' || key === 'rel' || key === 'alias') ? token(value) : value));
+};
+const repeatedPicks = (rels: readonly Rel[]): boolean => {
+  let found = false;
+  forEachRel(rels, (r) => {
+    if (found || r.kind !== 'project') return;
+    const owner = new Map<string, number>();
+    r.exprs.forEach(([, e], item) => forEachExpr(e, (node) => {
+      if (node.kind !== 'scalar' || isSelfContained(node.plan)) return;
+      const body = shapeKey(node.plan.kind === 'project' ? node.plan.input : node.plan);
+      const first = owner.get(body);
+      if (first === undefined) owner.set(body, item);
+      else if (first !== item) found = true;
+    }));
+  });
+  return found;
+};
 let admitted = 0;
 let statements = 0;
 let pairedReads = 0;
@@ -133,6 +172,8 @@ for (const query of corpus) {
       stmtChildren(binding.node).forEach(visitRel);
     } else visitRel(binding.node);
   }
+  const roots = [lowered.plan.result, ...lowered.plan.bindings.flatMap((binding) => (isStmt(binding.node) ? stmtChildren(binding.node) : [binding.node]))];
+  if (repeatedPicks(roots)) respelledNow.push(query);
   // The terminal step is the vocabulary family whose generated statement this is; a whole chain
   // would turn every corpus spelling into a separate baseline and would not detect a family regression.
   const family = steps.at(-1)?.name ?? 'empty';
@@ -192,6 +233,11 @@ for (const [family, metric] of Object.entries(baseline)) {
 }
 const lostCoverage = Object.keys(expected).filter((family) => !baseline[family]);
 for (const family of lostCoverage) ratchetFailures.push(`${family}: baseline family no longer has coverage`);
+const respelledSet = new Set(respelledNow);
+for (const query of respelledSet) if (!respelledBaseline.has(query))
+  ratchetFailures.push(`${query}: one SELECT list spells the same correlated subquery in two items — read it once (correlatedFirst's keyed pick)`);
+for (const query of respelledBaseline) if (!respelledSet.has(query))
+  ratchetFailures.push(`${query}: no longer spells a correlated subquery twice — drop it from sql-hygiene-respelled.json (--record)`);
 /**
  * `--record` BANKS the new baseline, and the reason it lives in the script rather than in a shell
  * redirect is that not every ratchet failure means the same thing to a recorder.
@@ -217,6 +263,7 @@ if (record) {
     throw new Error(`sql-hygiene --record: ${lostCoverage.length} family/families lost coverage; banked nothing`);
   }
   await Bun.write(path, `${JSON.stringify(baseline, null, 2)}\n`);
+  await Bun.write(new URL('./sql-hygiene-respelled.json', import.meta.url), `${JSON.stringify([...respelledSet].sort(), null, 2)}\n`);
   const moved = ratchetFailures.filter((failure) => !failure.includes('no longer has coverage'));
   for (const failure of moved) console.log(`  BANKED ${failure}`);
   console.log(`sql-hygiene --record: banked ${Object.keys(baseline).length} families, ${moved.length} ratchet move(s) — put the reason in the commit message`);

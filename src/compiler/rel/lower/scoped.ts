@@ -8,16 +8,17 @@ import { atMostOneRow, exactlyOneRow, rowBounds } from '../../../rel/bounds.ts';
 import { brandRel, type Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
+import { exprMayAbort } from '../../../rel/raise.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
-import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
+import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
-import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
+import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
-import type { ChildHost, ChildValue, Subject } from '../child.ts';
+import type { ChildHost, ChildValue, PresentWhen, Subject } from '../child.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
@@ -717,9 +718,14 @@ function spellsStored(plan: Rel, outputs: readonly string[], host: Rel): boolean
 function existenceProbe(tail: Tail, fresh: Minter): Rel {
   const enc = encounterOf(tail.rel.channels);
   const rows = (enc && positionKeys(tail.rel, enc.col, fresh)?.rel) || tail.rel;
+  return probeOver(rows, tail.rel.type.cols[0]!.name, leadingRead(rows, fresh), fresh);
+}
+
+/** `existenceProbe` over rows already keyed, and their leading read where the caller built one — so a pick's
+ *  value and its presence test read ONE relation (`correlatedFirst`), never two copies of it. */
+function probeOver(rows: Rel, lead: string, read: LeadingRead | null, fresh: Minter): Rel {
   // A body that re-sources is tested element by element (`leadingRead`): its candidates carry the filters the
   // property seek drives and the host-only tests SQLite asks once, so a miss reads an index, not the graph.
-  const read = leadingRead(rows, fresh);
   if (read) {
     const first = make.limit({ id: fresh('spl'), input: read.kept, channels: read.kept.channels, type: read.kept.type, count: compilerInt(1) });
     const any: Expr = read.guarded({ kind: 'scalar', plan: make.project({ id: fresh('spk'), input: first, channels: [], type: typeOf(meta('k', 'int', true)), exprs: [['k', col(first.id, read.key)]] }) }, meta('k', 'int', true));
@@ -729,7 +735,7 @@ function existenceProbe(tail: Tail, fresh: Minter): Rel {
   }
   return make.project({
     id: fresh('sp'), input: rows, channels: [], type: typeOf(meta('one', 'any', true)),
-    exprs: [['one', col(rows.id, tail.rel.type.cols[0]!.name)]],
+    exprs: [['one', col(rows.id, lead)]],
   });
 }
 
@@ -788,28 +794,55 @@ export function correlatedExistence(
 }
 
 /**
- * The FIRST row of a CORRELATED body, as one correlated scalar subquery per payload column — `ORDER BY` the
- * body's emission order then its payload, `LIMIT 1`: the same deterministic pick `firstPerScope` makes per
- * key (`defaultCollation`), made per host row by SQLite's nested loop instead of by a window over every key.
- *
- * Each column's subquery evaluates the body again (SQL has no row-valued scalar subquery), so this is a COST
- * rule on the body's columns: ONE column always (no repetition), TWO — a value and its per-row type tag — only
- * over a FLAT body (no subplan of its own), so the repeat is one more index seek and never compounds with
- * nesting (`k` columns per level would be `k^depth` spellings). Anything wider is the decorrelated window's.
+ * WHAT A PER-HOST PICK LANDS ON THE RELATION THAT READS IT: `input` (carrying the host's columns by name) with
+ * the body's first row as COLUMNS — each payload column under a fresh name (`cols`) — and its presence over that
+ * relation. Every reader of the pick (`map`'s rejoin, a `project().by` field, a landed `by()` value) reads these
+ * columns, so the body is searched ONCE per host row however many columns, and its presence, it is read for.
  */
-function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh: Minter): ReadonlyMap<string, Expr> | null {
+interface Attached {
+  readonly rel: Rel;
+  readonly cols: ReadonlyMap<string, string>;
+  readonly present: 'always' | 'value-nullness' | PresentWhen;
+}
+/** A pick, attached over `input`; `from` is the host relation the pick was lowered against. */
+type Pick = (input: Rel, from: RelId) => Attached;
+
+/**
+ * The FIRST row of a CORRELATED body, read per host row — `ORDER BY` the body's emission order then its payload,
+ * `LIMIT 1`: the same deterministic pick `firstPerScope` makes per key (`defaultCollation`), made per host row by
+ * SQLite's nested loop instead of by a window over every key. SQL has no row-valued scalar subquery and SQLite
+ * no LATERAL, so the row comes back in one of two forms:
+ *
+ * - KEYED (`pickKey`) — wherever every payload column is a function of ONE stored row whose key the body carries
+ *   (a vertex/edge rowid, a property row's id for `values(k)`, or the one stored column a lookup reads — an
+ *   `id()` after a hop reads `edges.tgt`): ONE correlated scalar returns the winning key, and the payload is read
+ *   off it — a rowid `LEFT JOIN` of the stored row, or the lookup over the key itself. One search per host row,
+ *   at any width, and its presence is the key's (`k IS NOT NULL`): no `EXISTS`.
+ * - SCALAR — anything else: one correlated scalar per payload column, so a COST rule on the body's columns: ONE
+ *   column always, TWO — a value and its per-row type tag — only over a FLAT body (no subplan of its own), so the
+ *   repeat is one more index seek and never compounds with nesting (`k` columns per level would be `k^depth`
+ *   spellings). Anything wider is the decorrelated window's. Its presence, where the lead value may be a NULL, is
+ *   the body's `EXISTS` (`probeOver`), asked only where `presence` says a reader needs it.
+ */
+function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh: Minter, presence = true): Pick | null {
   const payload = names.map((name) => tail.rel.type.cols.find((column) => column.name === name));
   if (!payload.length || payload.some((column) => !column)) return null;
+  const lead = payload[0]!;
+  const total = exactlyOneRow(tail.rel);
   // A body that reads NOTHING but its seed row (`math('_ + 1')`, `select('a')`, `identity()`, a test of the value)
   // is an expression of the host row: no subquery at all, at any width.
   const inline = seedExpressions(tail.rel, names, host);
-  if (inline) return seedValues(inline);
-  if (payload.length > 2) return null;
-  // The repetition must not COMPOUND: two columns spell the body twice, so a body whose own subplans hold
-  // subplans (a nested first-row pick, two per level) would be `2^depth` spellings. A subplan that is itself
-  // flat — an arm's priority guard, one seek — is repeated once per column and no further. Nor does an
-  // UNCORRELATED subplan (a `hasLabel()`'s label-id membership): SQLite evaluates it once per statement, and it
-  // holds no correlated pick of its own to compound.
+  if (inline) {
+    const probe = presence && !total && lead.nullable ? existenceProbe(tail, fresh) : null;
+    if (probe && !spellsStored(probe, ['one'], host)) return null;
+    return scalarPick(payload as ColMeta[], seedValues(inline), probe, total, fresh);
+  }
+  // The repetition must not COMPOUND: a first-row read spells its body more than once — a SCALAR pick once per
+  // column, a re-source's leading read (`leadingFirst`) once to find the element and once to read it — so a body
+  // whose own subplans hold subplans (a nested first-row pick) would be `2^depth` spellings. A subplan that is
+  // itself flat — an arm's priority guard, one seek — is repeated once and no further. Nor does an UNCORRELATED
+  // subplan (a `hasLabel()`'s label-id membership): SQLite evaluates it once per statement, and it holds no
+  // correlated pick of its own to compound.
   let deep = false;
   forEachRel(tail.rel, (r) => {
     for (const e of relExprs(r)) forEachExpr(e, (node) => {
@@ -818,7 +851,6 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
       }
     });
   });
-  if (payload.length > 1 && deep) return null;
   // A body of at most one row (a reducer, a record over the one seed row) IS its first row: no sort.
   const single = atMostOneRow(tail.rel);
   // The FIRST row in EMISSION order (`lowerBody`): sorted by the position's own keys where the body numbered
@@ -827,8 +859,10 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   const enc = encounterOf(tail.rel.channels);
   const keyed = !single && enc ? positionKeys(tail.rel, enc.col, fresh) : null;
   const base = keyed?.rel ?? tail.rel;
+  const key = pickKey(base, names, keyed?.keys ?? [], fresh);
+  // A payload that is a function of a key the position already orders by breaks no tie, so it is no term.
   const terms = keyed
-    ? [...keyed.keys, ...payloadCols(tail.rel).map((column) => ({ expr: col(base.id, column.name), dir: 'asc' as const }))]
+    ? [...keyed.keys, ...(key?.ordered ? [] : payloadCols(tail.rel).map((column) => ({ expr: col(base.id, column.name), dir: 'asc' as const })))]
     : defaultCollation(tail.rel);
   // A sort term that is, or is defined by, a subquery may not sort a correlated body: SQLite resolves an ORDER
   // BY term's subquery without the scopes beyond its own query (measured, bun:sqlite 3.51: `SELECT (SELECT
@@ -845,6 +879,7 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   // sort over the merge.
   const arms = single || readsSubquery(terms) ? null : priorityArms(base, terms, fresh);
   if (arms) {
+    if (payload.length > 2 || (payload.length > 1 && deep)) return null;
     const firstOf = (arm: PriorityArm): Rel => (atMostOneRow(arm.rel) ? arm.rel : make.limit({
       id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: arm.rel, channels: arm.rel.channels, type: arm.rel.type, terms: untilKey(arm.rel, arm.terms) }),
       channels: arm.rel.channels, type: arm.rel.type, count: compilerInt(1),
@@ -858,17 +893,209 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
       const last: Expr = { kind: 'scalar', plan: plans[plans.length - 1]! };
       exprs.set(column.name, whens.length ? { kind: 'case', whens, else: last } : last);
     }
-    return exprs;
+    const probe = presence && !total && lead.nullable ? probeOver(base, lead.name, leadingRead(base, fresh), fresh) : null;
+    if (probe && !spellsStored(probe, ['one'], host)) return null;
+    return scalarPick(payload as ColMeta[], exprs, probe, total, fresh);
   }
-  const led = single || deep ? base : leadingFirst(base, sorted, fresh);
+  // ONE leading read of a re-source, shared by the pick and its presence test.
+  const read = single || deep ? null : leadingRead(base, fresh);
+  const led = read ? leadingFirst(base, sorted, read, fresh) : base;
   const first = single ? tail.rel : make.limit({
     id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: led, channels: base.channels, type: base.type, terms: sorted.map((term) => ({ ...term, expr: substRelId(term.expr, base.id, led.id) })) }),
     channels: base.channels, type: base.type, count: compilerInt(1),
   });
+  // The keyed form where the scalar form would search twice — a second column, or a presence `EXISTS` beside the
+  // value. One column read once stays one scalar: a key and a read of the payload off it would be one more step.
+  if (key && (payload.length > 1 || (presence && !total && lead.nullable))) {
+    const picked = keyedPick(key, first, names, payload as ColMeta[], host, total, fresh);
+    if (picked) return picked;
+  }
+  if (payload.length > 2 || (payload.length > 1 && deep)) return null;
   const plans = (payload as ColMeta[]).map((column) => [column.name,
     make.project({ id: fresh('cv'), input: first, channels: [], type: typeOf({ ...column, nullable: true }), exprs: [[column.name, col(first.id, column.name)]] })] as const);
   if (!plans.every(([name, plan]) => spellsStored(plan, [name], host))) return null;
-  return new Map(plans.map(([name, plan]) => [name, { kind: 'scalar', plan } as Expr]));
+  const probeRows = single ? (enc && positionKeys(tail.rel, enc.col, fresh)?.rel) || tail.rel : base;
+  const probe = presence && !total && lead.nullable ? probeOver(probeRows, lead.name, single ? leadingRead(probeRows, fresh) : read, fresh) : null;
+  if (probe && !spellsStored(probe, ['one'], host)) return null;
+  return scalarPick(payload as ColMeta[], new Map(plans.map(([name, plan]) => [name, { kind: 'scalar', plan } as Expr])), probe, total, fresh);
+}
+
+/**
+ * The SCALAR pick: each payload column its own expression over the host, projected beside the host's columns.
+ * The columns move to `input` as ONE substitution, so two columns reading one first-row relation still read ONE
+ * relation, not two copies under one id. The presence test is a FRESH copy (`freshCopy`) — its own relation,
+ * never a second spelling of the value's under the same ids.
+ */
+function scalarPick(payload: readonly ColMeta[], exprs: ReadonlyMap<string, Expr>, probe: Rel | null, total: boolean, fresh: Minter): Pick {
+  return (input, from) => {
+    const bundle: Expr = { kind: 'call', fn: 'pick', args: payload.map((column) => exprs.get(column.name)!) };
+    const moved = from === input.id ? bundle : substRelId(bundle, from, input.id);
+    const values = (moved as Extract<Expr, { kind: 'call' }>).args;
+    const named = new Map(payload.map((column) => [column.name, fresh('smv') as string]));
+    const rel = make.project({
+      id: fresh('smp'), input, channels: input.channels,
+      type: typeOf(...input.type.cols, ...payload.map((column) => ({ ...column, name: named.get(column.name)!, nullable: true }))),
+      exprs: [...input.type.cols.map((column) => [column.name, col(input.id, column.name)] as const), ...payload.map((column, i) => [named.get(column.name)!, values[i]!] as const)],
+    });
+    if (total) return { rel, cols: named, present: 'always' };
+    if (!probe) return { rel, cols: named, present: 'value-nullness' };
+    const exists: Expr = substRelId({ kind: 'exists', plan: probe, negated: false }, from, rel.id);
+    return { rel, cols: named, present: { when: freshCopy(exists, mintOf(fresh)) ?? exists, orValue: true } };
+  };
+}
+
+/**
+ * WHAT THE PAYLOAD IS A FUNCTION OF (`columnLineage`): a column of `rows` — the KEY — that determines every payload
+ * column, so a pick may return the key alone and compute the payload over it:
+ *
+ * - BY ROWID (`stored`): every payload column reads only ONE stored row (a property row for `values(k)`, a vertex
+ *   or an edge), and the key is that row's rowid — the payload is read back by a rowid join;
+ * - BY VALUE: the payload, with every occurrence of the key's own lineage abstracted out, reads nothing else — an
+ *   `id()` after a hop is a lookup over `edges.tgt`, after a `both()` over the direction's `CASE` of `tgt`/`src`,
+ *   and the hop's position already orders by exactly that.
+ *
+ * Its payload is spelled over a placeholder relation (`at`): `col(at, 'k')` for the key, `col(at, c)` for a stored
+ * column `c`'s fresh name. `ordered`: the key is one of the position's own sort terms, so the payload breaks no tie
+ * after it. `null` where no key determines the payload (it reads two rows, or an outer column), where the payload
+ * draws, or where the key may be NULL (its presence would be wrong).
+ */
+interface PickKey {
+  readonly key: string;
+  readonly keyMeta: ColMeta;
+  readonly at: RelId;
+  /** The stored row read back by rowid: the scan, and each stored column the payload reads → its fresh name. */
+  readonly stored: { readonly leaf: Rel; readonly cols: ReadonlyMap<string, string> } | null;
+  readonly payload: ReadonlyMap<string, Expr>;
+  readonly ordered: boolean;
+}
+
+function pickKey(rows: Rel, names: readonly string[], keys: readonly SortTerm[], fresh: Minter): PickKey | null {
+  const leaves = new Map<RelId, Rel>();
+  const defined = new Map<string, Expr>();
+  for (const name of names) {
+    const lineage = columnLineage(rows, name, leaves);
+    if (!lineage || exprDraws(lineage)) return null;
+    // Only the body's own rows: an outer column (the host's) is not a function of the key.
+    for (const id of freeIds(lineage)) if (!leaves.has(id)) return null;
+    defined.set(name, lineage);
+  }
+  const readsLeaf = (e: Expr): boolean => [...leaves.keys()].some((id) => deepColsRead(e, id).size > 0);
+  const sortCols = new Set(keys.flatMap((term) => (term.expr.kind === 'col' && term.expr.rel === rows.id ? [term.expr.name] : [])));
+  const candidates = [...rows.type.cols].sort((a, b) => Number(sortCols.has(b.name)) - Number(sortCols.has(a.name)));
+  const at = fresh('skh');
+  for (const column of candidates) {
+    const lineage = columnLineage(rows, column.name, leaves);
+    if (!lineage || !readsLeaf(lineage) || [...freeIds(lineage)].some((id) => !leaves.has(id)) || !nonNull(lineage, leaves)) continue;
+    const ordered = sortCols.has(column.name);
+    // BY ROWID: the key is a stored row's rowid and the payload reads that row alone.
+    const leaf = lineage.kind === 'col' ? leaves.get(lineage.rel) : undefined;
+    if (leaf?.kind === 'scan' && lineage.kind === 'col' && lineage.name === 'id' && columnIsRowKey(leaf, 'id')) {
+      const read = new Set<string>(['id']);
+      let other = false;
+      for (const e of defined.values()) for (const id of leaves.keys()) for (const name of deepColsRead(e, id)) {
+        if (id === leaf.id) read.add(name);
+        else other = true;
+      }
+      if (!other) {
+        const cols = new Map([...read].map((name) => [name, fresh('skc') as string]));
+        const payload = new Map([...defined].map(([name, e]) => [name, mapColsDeep(e, leaf.id, (c) => col(at, cols.get(c)!))] as const));
+        return { key: column.name, keyMeta: { ...column, type: 'int' }, at, stored: { leaf, cols }, payload, ordered };
+      }
+    }
+    // BY VALUE: the payload abstracted over the key's lineage reads no row of the body.
+    const payload = new Map([...defined].map(([name, e]) => [name, abstractOver(e, lineage, col(at, 'k'))] as const));
+    if ([...payload.values()].some(readsLeaf)) continue;
+    return { key: column.name, keyMeta: column, at, stored: null, payload, ordered };
+  }
+  return null;
+}
+
+/** `e` with every sub-expression structurally equal to `target` — in its correlated subplans too — replaced. */
+function abstractOver(e: Expr, target: Expr, placeholder: Expr): Expr {
+  const spelled = JSON.stringify(target);
+  const memo = new Map<Rel, Rel>();
+  const go = (x: Expr): Expr => (JSON.stringify(x) === spelled ? placeholder
+    : mapExprChildren(x, go, (plan) => rewriteRels(plan, (mapped) => mapRelExprs(mapped, go), memo)));
+  return go(e);
+}
+
+/** Is a lineage NEVER NULL: a leaf column declared not null, or an expression of such that cannot yield one. */
+function nonNull(e: Expr, leaves: ReadonlyMap<RelId, Rel>): boolean {
+  switch (e.kind) {
+    case 'col': return leaves.get(e.rel)?.type.cols.find((column) => column.name === e.name)?.nullable === false;
+    case 'lit': return e.value !== null;
+    case 'case': return !!e.else && nonNull(e.else, leaves) && e.whens.every(([, then]) => nonNull(then, leaves));
+    case 'call': return e.fn.toUpperCase() === 'COALESCE' && e.args.some((arg) => nonNull(arg, leaves));
+    default: return false;
+  }
+}
+
+/** The relation ids an expression reads that it does not define — its own column reads, and its subplans' free ids. */
+function freeIds(e: Expr): Set<RelId> {
+  const ids = new Set<RelId>();
+  forEachExpr(e, (node) => {
+    if (node.kind === 'col') ids.add(node.rel);
+    for (const plan of exprRels(node)) for (const id of freeRelIds(plan)) ids.add(id as RelId);
+  });
+  return ids;
+}
+
+/**
+ * The KEYED pick: `k = (SELECT key FROM <first row> LIMIT 1)` once per host row, then the payload over `k`. With
+ * the row's rowid as the key, the stored row is read back by `LEFT JOIN <table> p ON p.id = (k's subquery)`: an
+ * outer-only right-hand side SQLite evaluates once per outer row to drive the rowid seek, and a join whose row
+ * nothing reads is dropped (`dropUnreadJoins`, `src/rel/passes/prune.ts`), so an unread value is never searched
+ * for — the scalar form's pruning, kept. Otherwise the payload is computed over the key itself. Lossless where a
+ * packed row is not (a JSON pack returns a REAL with 15 digits); the presence is the key's.
+ */
+function keyedPick(key: PickKey, first: Rel, names: readonly string[], payload: readonly ColMeta[], host: Rel, total: boolean, fresh: Minter): Pick | null {
+  const plan = make.project({ id: fresh('ck'), input: first, channels: [], type: typeOf({ ...key.keyMeta, name: 'k', nullable: true }), exprs: [['k', col(first.id, key.key)]] });
+  if (!spellsStored(plan, ['k'], host)) return null;
+  // The payload's own subplans are fresh copies: the body's lookups are no longer read inside the pick, and two
+  // relations never share an id.
+  const exprs = new Map<string, Expr>();
+  for (const name of names) {
+    const copied = freshCopy(key.payload.get(name)!, mintOf(fresh));
+    if (!copied) return null;
+    exprs.set(name, copied);
+  }
+  // A payload that may ABORT (a `math()` over a non-number raises) is computed only over a picked row: the
+  // body computed it only for the row it picked, and a host with none reads NULLs, which the value would
+  // otherwise raise on — an error where the reference simply has no value.
+  const guard = (value: Expr, picked: Expr): Expr => (exprMayAbort(value) ? { kind: 'case', whens: [[isNot(picked, compilerNull()), value]] } : value);
+  const { stored } = key;
+  return (input, from) => {
+    const search: Expr = substRelId({ kind: 'scalar', plan }, from, input.id);
+    let over: Rel;
+    let picked: string;
+    if (stored) {
+      const row = brandRel({ ...stored.leaf, id: fresh('skr'), alias: fresh('rsk') as string } as Rel);
+      const cols = make.project({
+        id: fresh('skq'), input: row, channels: [],
+        type: typeOf(...[...stored.cols].map(([column, name]) => ({ ...stored.leaf.type.cols.find((c) => c.name === column)!, name, nullable: true }))),
+        exprs: [...stored.cols].map(([column, name]) => [name, col(row.id, column)] as const),
+      });
+      over = make.join({
+        id: fresh('skj'), left: input, right: cols, join: 'left', channels: input.channels,
+        type: typeOf(...input.type.cols, ...cols.type.cols), on: eq(col(cols.id, stored.cols.get('id')!), search),
+      });
+      picked = stored.cols.get('id')!;
+    } else {
+      picked = fresh('smk') as string;
+      over = make.project({
+        id: fresh('skp'), input, channels: input.channels, type: typeOf(...input.type.cols, { ...key.keyMeta, name: picked, nullable: true }),
+        exprs: [...input.type.cols.map((column) => [column.name, col(input.id, column.name)] as const), [picked, search] as const],
+      });
+    }
+    const named = new Map(names.map((name) => [name, fresh('smv') as string]));
+    const rel = make.project({
+      id: fresh('skv'), input: over, channels: over.channels,
+      type: typeOf(...over.type.cols, ...payload.map((column) => ({ ...column, name: named.get(column.name)!, nullable: true }))),
+      exprs: [...over.type.cols.map((column) => [column.name, col(over.id, column.name)] as const),
+        ...names.map((name) => [named.get(name)!, guard(substRelId(exprs.get(name)!, key.at, over.id, (column) => (stored ? column : picked)), col(over.id, picked))] as const)],
+    });
+    return { rel, cols: named, present: total ? 'always' : { when: isNot(col(rel.id, picked), compilerNull()) } };
+  };
 }
 
 /**
@@ -894,11 +1121,10 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
  * `base` unchanged where the leading term is not an uncorrelated scan's rowid (a hop off the seed row is already a
  * seek per host).
  */
-function leadingFirst(base: Rel, sorted: readonly SortTerm[], fresh: Minter): Rel {
+function leadingFirst(base: Rel, sorted: readonly SortTerm[], read: LeadingRead, fresh: Minter): Rel {
   const lead = sorted[0];
   if (sorted.length < 2 || lead?.expr.kind !== 'col' || lead.expr.rel !== base.id) return base;
-  const read = leadingRead(base, fresh);
-  if (!read || traceDown(base, lead.expr.name, read.side) !== read.key) return base;
+  if (traceDown(base, lead.expr.name, read.side) !== read.key) return base;
   const least = make.limit({
     id: fresh('cll'), input: make.sort({ id: fresh('csl'), input: read.kept, channels: read.kept.channels, type: read.kept.type, terms: [{ ...lead, expr: col(read.kept.id, read.key) }] }),
     channels: read.kept.channels, type: read.kept.type, count: compilerInt(1),
@@ -928,18 +1154,9 @@ interface LeadingRead {
   readonly guarded: (value: Expr, type: ColMeta) => Expr;
 }
 
-/** MEMOIZED per body (a relation is immutable): a first-row pick and its presence probe read ONE set of
- *  candidates, so the property seek that narrows them (`rel/passes/semijoin.ts`, one narrowing per element) meets
- *  one relation rather than two copies of which it may narrow only the first. */
-const leadingReads = new WeakMap<Rel, LeadingRead | null>();
+/** Built ONCE per pick by its caller (`correlatedFirst`), which hands the same read to the pick and to its
+ *  presence test: no memo keyed on relation identity is needed for the two to agree. */
 function leadingRead(base: Rel, fresh: Minter): LeadingRead | null {
-  if (leadingReads.has(base)) return leadingReads.get(base)!;
-  const read = buildLeadingRead(base, fresh);
-  leadingReads.set(base, read);
-  return read;
-}
-
-function buildLeadingRead(base: Rel, fresh: Minter): LeadingRead | null {
   const found = elementSource(base);
   if (!found) return null;
   const { side, key, seed, spine } = found;
@@ -1037,28 +1254,8 @@ function scanKey(r: Rel, name: string): boolean {
   }
 }
 
-/** `e` with every column of `rel` it reads — its correlated subplans included — replaced by `f(name)`. */
-function mapColsDeep(e: Expr, rel: RelId, f: (name: string) => Expr): Expr {
-  const memo = new Map<Rel, Rel>();
-  const swap = (node: Expr): Expr => (node.kind === 'col' && node.rel === rel ? f(node.name) : node);
-  const inExpr = (x: Expr): Expr => rewriteExpr(x, swap, inPlan);
-  function inPlan(plan: Rel): Rel { return rewriteRels(plan, (mapped) => mapRelExprs(mapped, (x) => rewriteExpr(x, swap)), memo); }
-  return inExpr(e);
-}
-
 /** The conjuncts of a predicate. */
 const conjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e]);
-
-/** The columns of `rel` an expression reads, its correlated subplans included. */
-function deepColsRead(e: Expr, rel: RelId): Set<string> {
-  const names = new Set<string>();
-  const visit = (x: Expr): void => forEachExpr(x, (node) => {
-    if (node.kind === 'col' && node.rel === rel) names.add(node.name);
-    for (const plan of exprRels(node)) forEachRel(plan, (r) => relExprs(r).forEach(visit));
-  });
-  visit(e);
-  return names;
-}
 
 /** Column `name` of `r` as the column of `target` (below it, on `elementSource`'s spine) it copies, or `null`. */
 function traceDown(r: Rel, name: string, target: Rel): string | null {
@@ -1573,32 +1770,26 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
     });
     return continueAs(splitPath(mapped, tail.framing, ctx, fresh), perTraverserFraming(tail.framing), steps, at + 1, bulked, ctx, fresh, labels);
   }
-  const first = tail && framingCols(tail.framing) ? correlatedFirst(tail, payloadCols(tail.rel).map((column) => column.name), rel, fresh) : null;
-  const lead = tail && payloadCols(tail.rel)[0];
-  const probe = tail && lead?.nullable ? existenceProbe(tail, fresh) : null;
-  if (tail && first && (!probe || spellsStored(probe, ['one'], rel))) {
-    // The dependent join kept: each payload column the body's first row, read per host row (beside the host's
-    // own columns, under fresh names). A host row whose body is EMPTY is dropped (`TraversalMapStep`): a
-    // present lead value proves a row, and only where the lead may be a NULL value is the body's `EXISTS` asked
-    // — after the `OR`, so a row whose value is present never pays for it.
+  const pick = tail && framingCols(tail.framing) ? correlatedFirst(tail, payloadCols(tail.rel).map((column) => column.name), rel, fresh) : null;
+  if (tail && pick) {
+    // The dependent join kept: the body's first row read per host row, its payload landed beside the host's own
+    // columns (`Attached`). A host row whose body is EMPTY is dropped (`TraversalMapStep`) by the pick's presence:
+    // a keyed pick's key, else a present lead value proves a row, and only where the lead may be a NULL value is
+    // the body's `EXISTS` asked — after the `OR`, so a row whose value is present never pays for it.
     const bodyPayload = payloadCols(tail.rel);
-    const named = new Map(bodyPayload.map((column) => [column.name, fresh('smv') as string]));
-    const projected = make.project({
-      id: fresh('smp'), input: rel, channels: rel.channels,
-      type: typeOf(...rel.type.cols, ...bodyPayload.map((column) => ({ ...column, name: named.get(column.name)!, nullable: true }))),
-      exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const),
-        ...bodyPayload.map((column) => [named.get(column.name)!, first.get(column.name)!] as const)],
-    });
-    const leadPresent: Expr = { kind: 'binary', op: 'is not', left: col(projected.id, named.get(lead!.name)!), right: compilerNull() };
+    const attached = pick(rel, rel.id);
+    const projected = attached.rel;
+    const leadPresent: Expr = isNot(col(projected.id, attached.cols.get(bodyPayload[0]!.name)!), compilerNull());
     // A body of EXACTLY one row (a seeded reducer — `fold()`, `count()`) is never empty, so no host row is
     // dropped and nothing reads its value to ask: a value no consumer reads is not computed (§17 error timing).
-    const present = exactlyOneRow(tail.rel) ? projected : make.filter({
+    const { present: presence } = attached;
+    const present = presence === 'always' ? projected : make.filter({
       id: fresh('smf'), input: projected, channels: projected.channels, type: projected.type,
-      pred: probe ? or(leadPresent, substRelId({ kind: 'exists', plan: probe, negated: false }, rel.id, projected.id)) : leadPresent,
+      pred: presence === 'value-nullness' ? leadPresent : presence.orValue ? or(leadPresent, presence.when) : presence.when,
     });
     const mapped = make.project({
       id: fresh('smq'), input: present, channels: rel.channels, type: typeOf(...bodyPayload, ...rel.channels.map(hostChannel)),
-      exprs: [...bodyPayload.map((column) => [column.name, col(present.id, named.get(column.name)!)] as const),
+      exprs: [...bodyPayload.map((column) => [column.name, col(present.id, attached.cols.get(column.name)!)] as const),
         ...rel.channels.map((channel) => [channel.col, col(present.id, channel.col)] as const)],
     });
     return continueAs(splitPath(mapped, tail.framing, ctx, fresh), perTraverserFraming(tail.framing), steps, at + 1, bulked, ctx, fresh, labels);
@@ -1947,7 +2138,7 @@ const recordLeft: Connector = (site) => {
   // unanswerable `by()` does not cost the others. A slot's ring position is `index % bys.length` (`TraversalRing`).
   const owned = new Map<number, { readonly first: ReturnType<typeof firstPerScope>; readonly framing: RelFraming }>();
   // A slot whose body stays CORRELATED: its first row read per host row (`correlatedFirst`), no join at all.
-  const correlated = new Map<number, { readonly exprs: ReadonlyMap<string, Expr>; readonly framing: RelFraming; readonly total: boolean }>();
+  const correlated = new Map<number, { readonly pick: Pick; readonly framing: RelFraming; readonly total: boolean }>();
   let joined: Rel = rel;
   for (let slot = 0; slot < bys.length; slot++) {
     const by = bys[slot]!;
@@ -1957,8 +2148,9 @@ const recordLeft: Connector = (site) => {
     const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read', 'first');
     const tail = lowered && recordAsMap(lowered, ctx, fresh);
     const fieldCols = tail && framingCols(tail.framing);
-    const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), rel, fresh);
-    if (tail && exprs) { correlated.set(slot, { exprs, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
+    // A field is present by its value's nullness (`ProjectStep`'s optional key), so no presence test is built.
+    const pick = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), rel, fresh, false);
+    if (tail && pick) { correlated.set(slot, { pick, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
     // The host's computed columns kept this slot's dependent join out: the whole record over the host computed
     // once (`fencedHost`), where every slot is at least as correlated as here.
     const fenced = tail && fencedHost(rel, fresh);
@@ -1978,12 +2170,20 @@ const recordLeft: Connector = (site) => {
   }
   // No slot a child this connector owns: the record is the builder's own over the host row, as the ladder's
   // is — only the path rule below differs.
+  // Each correlated slot's pick lands its columns on the joined input — it reads the host row, which every
+  // relation the joins built still carries by name.
+  const landed = new Map<number, Attached>();
+  for (const [slot, kept] of correlated) {
+    const attached = kept.pick(joined, rel.id);
+    landed.set(slot, attached);
+    joined = attached.rel;
+  }
   const over = joined;
   const fieldFor = (slot: number): ByField | undefined => {
     const kept = correlated.get(slot);
-    // A correlated field reads the host row, which every relation the joins built still carries by name.
-    if (kept) return {
-      exprs: framingCols(kept.framing)!.map((column) => [column.name, over === rel ? kept.exprs.get(column.name)! : substRelId(kept.exprs.get(column.name)!, rel.id, over.id)] as const),
+    const attached = landed.get(slot);
+    if (kept && attached) return {
+      exprs: framingCols(kept.framing)!.map((column) => [column.name, col(over.id, attached.cols.get(column.name)!)] as const),
       framing: kept.framing,
       // A body of exactly one row always yields the field — it is never absent, so never optional.
       optional: !kept.total && !isProductiveBy(step),
@@ -2137,61 +2337,58 @@ function landValues(
       ? { node: mapNode(mapNodePayload(col(over.id, first.renamed.get(cols[0]!.name)!), valueFraming.valOf, ctx.source, fresh)) } : {}),
   } satisfies ChildValue]));
   if (!kept.size) return { over, values };
-  // The correlated values become COLUMNS of the joined input, as a landed value is: the host's own lowering reads
-  // them by name (and may re-project its input, a path dropped), never re-spelling the subquery's host reads.
-  const exprs: (readonly [string, Expr])[] = [];
-  const added: ColMeta[] = [];
-  const column = (e: Expr, type: ColMeta): string => {
-    const name = fresh('sbv') as string;
-    exprs.push([name, substRelId(e, sc.scoped.id, over.id)]);
-    added.push({ ...type, name, nullable: true });
+  // The correlated values become COLUMNS of the joined input, as a landed value is (`Attached`): the host's own
+  // lowering reads them by name (and may re-project its input, a path dropped), never re-spelling the subquery's
+  // host reads. A presence stated as its own test is a column too.
+  let valued: Rel = over;
+  const named = [...kept].map(([key, { pick, framing: valueFraming, cols }]) => {
+    const attached = pick(valued, sc.scoped.id);
+    valued = attached.rel;
+    return { key, attached, valueFraming, cols };
+  });
+  const presence: (readonly [string, Expr])[] = [];
+  const at = valued;
+  const stated = named.map(({ attached }) => {
+    if (typeof attached.present !== 'object') return undefined;
+    const name = fresh('sbp') as string;
+    presence.push([name, substRelId(attached.present.when, attached.rel.id, at.id)]);
     return name;
-  };
-  const named = [...kept].map(([key, { value, type }]) => {
-    const v = column(value.expr, type);
-    const t = value.vtype && column(value.vtype, meta('t', 'text'));
-    const p = typeof value.present === 'object' ? column(value.present.when, meta('p', 'int')) : undefined;
-    return { key, value, v, t, p };
   });
-  const valued = make.project({
-    id: fresh('sbk'), input: over, channels: over.channels, type: typeOf(...over.type.cols, ...added),
-    exprs: [...over.type.cols.map((c) => [c.name, col(over.id, c.name)] as const), ...exprs],
+  const final = presence.length ? make.project({
+    id: fresh('sbk'), input: at, channels: at.channels, type: typeOf(...at.type.cols, ...presence.map(([name]) => meta(name, 'int', true))),
+    exprs: [...at.type.cols.map((c) => [c.name, col(at.id, c.name)] as const), ...presence],
+  }) : at;
+  const all = new Map([...values].map(([key, value]) => [key, substChildValue(value, over.id, final.id)]));
+  named.forEach(({ key, attached, valueFraming, cols }, i) => {
+    const { present } = attached;
+    const p = stated[i];
+    all.set(key, {
+      expr: col(final.id, attached.cols.get(cols[0]!)!), ...(cols[1] ? { vtype: col(final.id, attached.cols.get(cols[1])!) } : {}),
+      framing: valueFraming, yields: 'first',
+      present: typeof present === 'object' && p ? { ...present, when: col(final.id, p) } : present,
+    });
   });
-  const all = new Map([...values].map(([key, value]) => [key, substChildValue(value, over.id, valued.id)]));
-  for (const { key, value, v, t, p } of named) all.set(key, {
-    ...value, expr: col(valued.id, v), ...(t ? { vtype: col(valued.id, t) } : {}),
-    present: p && typeof value.present === 'object' ? { ...value.present, when: col(valued.id, p) } : value.present,
-  });
-  return { over: valued, values: all };
+  return { over: final, values: all };
 }
 
 /**
  * A `by()` body's value as a CORRELATED read of the host row (`landValues`' first try): the body lowered over one
- * host row (`correlatedBody`) and its first row read per host row (`correlatedFirst`). Produced where the body
- * has a row: a present lead value proves one, and only where the lead may be a NULL value is the body's `EXISTS`
- * asked — `firstInnerOver`'s presence rule. `null` where the dependent join is not SQL-holdable (or the value is
- * not ONE column, and a scalar's per-row type).
+ * host row (`correlatedBody`) and its first row read per host row (`correlatedFirst`), with its presence — the
+ * pick's key, else a present lead value, and only where the lead may be a NULL value the body's `EXISTS`
+ * (`firstInnerOver`'s presence rule). `null` where the dependent join is not SQL-holdable (or the value is not ONE
+ * column, and a scalar's per-row type).
  */
 function correlatedValue(
   body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): { readonly value: ChildValue; readonly type: ColMeta } | null {
+): { readonly pick: Pick; readonly framing: RelFraming; readonly cols: readonly string[] } | null {
   const lowered = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', 'first', from);
   const tail = lowered && recordAsMap(lowered, ctx, fresh, true);
   const cols = tail && framingCols(tail.framing);
   if (!tail || !cols || !cols.length || cols.length > (tail.framing.kind === 'scalar' ? 2 : 1)) return null;
   if (tail.framing.kind === 'map' && mapHoldsRowids(tail.framing.valOf)) return null;
-  const exprs = correlatedFirst(tail, cols.map((column) => column.name), from, fresh);
-  if (!exprs) return null;
-  const lead = tail.rel.type.cols.find((column) => column.name === cols[0]!.name)!;
-  const value = exprs.get(lead.name)!;
-  const probe = !exactlyOneRow(tail.rel) && lead.nullable ? existenceProbe(tail, fresh) : null;
-  if (probe && !spellsStored(probe, ['one'], from)) return null;
-  const present: ChildValue['present'] = exactlyOneRow(tail.rel) ? 'always'
-    : probe ? { when: { kind: 'exists', plan: probe, negated: false }, orValue: true } : 'value-nullness';
-  return {
-    value: { expr: value, ...(cols[1] ? { vtype: exprs.get(cols[1].name)! } : {}), framing: tail.framing, present, yields: 'first' },
-    type: lead,
-  };
+  const names = cols.map((column) => column.name);
+  const pick = correlatedFirst(tail, names, from, fresh);
+  return pick && { pick, framing: tail.framing, cols: names };
 }
 
 /** Does a body read the graph afresh — a `V()`/`E()` at any depth? */

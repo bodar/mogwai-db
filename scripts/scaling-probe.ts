@@ -204,6 +204,18 @@ const SHAPES: readonly Shape[] = [
   { name: 'minmax: group.by(label).by(values.max)', query: "g.V().group().by(label).by(values('age').max())" },
   { name: 'minmax: where(map(outE.max).is)', query: "g.V().where(map(outE().values('weight').max()).is(gt(0.5))).count()" },
   { name: 'minmax: order.by(outE.values.min)', query: "g.V().order().by(outE().values('weight').min()).limit(5)" },
+  // S1: one correlated row read per host — a keyed pick returns the winning key once and reads its payload off it
+  // (a rowid join, or a lookup over the key), so value, type tag and presence are one search.
+  { name: 'pick: as.map(V.where(neq(a)).out.id)', query: "g.V().as('a').map(V().where(neq('a')).out().id()).count()" },
+  { name: 'pick: as.project.by(V.where(neq(a)).values)', query: "g.V().as('a').project('n').by(V().where(neq('a')).values('name'))" },
+  { name: 'pick: as.map(V.where(neq(a)).both.both.id)', query: "g.V().as('a').map(V().where(neq('a')).both().both().id()).count()" },
+  { name: 'pick: as.map(V.where(neq(a)).both.both.values)', query: "g.V().as('a').map(V().where(neq('a')).both().both().values('name')).count()" },
+  { name: 'pick: as.map(E.where(outV.where(neq(a))).inV.id)', query: "g.V().as('a').map(E().where(outV().where(neq('a'))).inV().id()).count()" },
+  { name: 'pick: map(out.values)', query: "g.V().map(out().values('name'))" },
+  { name: 'pick: map(both.id)', query: 'g.V().map(both().id())' },
+  { name: 'pick: project.by(out.values.toUpper).count', query: "g.V().project('n').by(out().values('name').toUpper()).count()" },
+  { name: 'pick: order.by(as.V.where(neq(a)).out.id)', query: "g.V().as('a').order().by(V().where(neq('a')).out().id()).limit(5)" },
+  { name: 'pick: map(out.map(out.values))', query: "g.V().map(out().map(out().values('name'))).count()" },
   // A predicate emit on a bounded repeat: each tested level is its phases + the connector's filter row.
   { name: 'emit: repeat.emit(has).times(2)', query: "g.V().repeat(out()).emit(has('age')).times(2).count()" },
   { name: 'emit: emit(hasLabel).repeat.times(2)', query: "g.V().emit(hasLabel('person')).repeat(out()).times(2).count()" },

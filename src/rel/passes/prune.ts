@@ -4,10 +4,15 @@ import { aggregate, project, recursive, values } from '../factory.ts';
 import { mintedColumns, preservesColumns } from '../obligations.ts';
 import type { Rel } from '../rel.ts';
 import type { ColMeta, RelId } from '../types.ts';
-import { exprRels, forEachExpr, mapRelChildren, recursiveStep, relChildren, relExprs } from '../walk.ts';
+import { compilerNull } from '../expr.ts';
+import { columnIsRowKey } from '../copies.ts';
+import { deepColsRead, exprRels, forEachExpr, forEachRel, mapRelChildren, recursiveStep, relChildren, relExprs, rewriteRels } from '../walk.ts';
 
-const refs = (expression: Expr, relation: RelId, out: Set<string>): void =>
-  forEachExpr(expression, (e) => { if (e.kind === 'col' && e.rel === relation) out.add(e.name); });
+/** The columns of `relation` an expression reads — its correlated subplans included, since a subquery reads
+ *  the row it is correlated against as surely as the expression around it does. */
+const refs = (expression: Expr, relation: RelId, out: Set<string>): void => {
+  for (const name of deepColsRead(expression, relation)) out.add(name);
+};
 
 const names = (cols: readonly ColMeta[]): readonly string[] => cols.map((column) => column.name);
 /** The columns a child still emits after its own rebuild — the only honest way to learn what a
@@ -91,6 +96,16 @@ export function prune(
   substitute?: SelfSubstitution,
 ): Rel {
   const needs = new Map<Rel, Set<string>>();
+  liveColumns(needs, plan, required);
+  return rebuild(needs, plan, substitute);
+}
+
+/**
+ * PASS 1 — each node's NEED (the columns some consumer reads), as the union over its consumers, to a
+ * fixpoint, accumulated into `needs` from `plan` read as `required`. Spine only: a correlated subplan is a
+ * root of its own (`dropUnreadJoins` asks it separately), so a node that has no entry was never asked.
+ */
+function liveColumns(needs: Map<Rel, Set<string>>, plan: Rel, required: Iterable<string>): void {
   const queue: Rel[] = [];
   const require = (r: Rel, cols: Iterable<string>): void => {
     const need = needs.get(r) ?? new Set<string>();
@@ -177,7 +192,10 @@ export function prune(
       require(child, childNeed);
     }
   }
+}
 
+/** PASS 2 — rebuild `plan` to the needs pass 1 recorded. */
+function rebuild(needs: Map<Rel, Set<string>>, plan: Rel, substitute?: SelfSubstitution): Rel {
   /**
    * ⚠️ **Pass 2 constructs each node with its new type IN ONE STEP, which is why it is not built on
    * `rewrite`.** `rewrite` rebuilds a node's children and only then hands it to a callback, and a
@@ -306,4 +324,72 @@ export function prune(
   }
 
   return go(plan);
+}
+
+/**
+ * A LEFT JOIN NOTHING READS THE RIGHT SIDE OF IS ITS LEFT SIDE — where the right side is UNIQUE on the `ON`
+ * key (`columnIsRowKey`), every left row meets at most one right row, so the join neither adds nor drops a
+ * row, and with no right column read it adds nothing at all. Calcite's `ProjectJoinRemoveRule`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/ProjectJoinRemoveRule.java`) is the same
+ * rule. SQLite applies it itself in a plain SELECT, and not under an aggregate (measured, 3.51:
+ * `SELECT sum(1) FROM t LEFT JOIN p ON p.id = t.a` still seeks `p`), which is where a correlated first-row
+ * pick read back by rowid (`correlatedFirst`'s keyed form) is most often unread — a `count()` after a
+ * `project()` — and its key search would otherwise run, and may raise, for a value nobody reads.
+ *
+ * Liveness is `prune`'s pass 1 over every root — the plans and every correlated subplan, each read whole —
+ * seeded with every column ANY expression names, so a read from inside a subquery, at any depth, keeps a
+ * column live. The join is replaced by a projection of its left side under the join's own id, the right
+ * columns NULL: dead by the analysis, so no reader evaluates them.
+ */
+export function dropUnreadJoins(plans: readonly Rel[]): readonly Rel[] {
+  const named = new Map<RelId, Set<string>>();
+  const roots: Rel[] = [...plans];
+  const nodes: Rel[] = [];
+  forEachRel(plans, (r) => {
+    nodes.push(r);
+    const own = new Set(relChildren(r).map((child) => child.id));
+    relExprs(r).forEach((e) => forEachExpr(e, (node) => {
+      // A read of the node's own input is pass 1's to follow; any other — a correlated read of an enclosing
+      // row, from a subquery at any depth — is a consumer the spine walk cannot see, so it is live outright.
+      if (node.kind === 'col' && !own.has(node.rel)) {
+        if (!named.has(node.rel)) named.set(node.rel, new Set());
+        named.get(node.rel)!.add(node.name);
+      }
+      roots.push(...exprRels(node));
+    }));
+  });
+  const candidates = nodes.filter(removable);
+  if (!candidates.length) return plans;
+  const needs = new Map<Rel, Set<string>>();
+  for (const root of roots) liveColumns(needs, root, names(root.type.cols));
+  for (const r of nodes) {
+    const read = named.get(r.id);
+    if (read) liveColumns(needs, r, read);
+  }
+  const dead = new Set(candidates.filter((r) => {
+    const need = needs.get(r);
+    const leftWidth = (r as Extract<Rel, { readonly kind: 'join' }>).left.type.cols.length;
+    return need && !r.type.cols.some((column, i) => i >= leftWidth && need.has(column.name));
+  }));
+  if (!dead.size) return plans;
+  const memo = new Map<Rel, Rel>();
+  return plans.map((plan) => rewriteRels(plan, (mapped, original) => {
+    if (!dead.has(original) || mapped.kind !== 'join') return mapped;
+    const left = mapped.left;
+    const leftWidth = left.type.cols.length;
+    return project({
+      id: mapped.id, input: left, channels: mapped.channels,
+      type: { cols: mapped.type.cols.map((column, i) => (i < leftWidth ? column : { ...column, nullable: true })) },
+      exprs: mapped.type.cols.map((column, i) => [column.name, i < leftWidth ? { kind: 'col', rel: left.id, name: left.type.cols[i]!.name } : compilerNull()] as const),
+    });
+  }, memo));
+}
+
+/** A LEFT join whose `ON` is one equality of a right-side row key with an expression of the left alone. */
+function removable(r: Rel): boolean {
+  if (r.kind !== 'join' || r.join !== 'left' || !r.on || r.on.kind !== 'binary' || r.on.op !== '=') return false;
+  const { left, right } = r.on;
+  const keyOf = (e: Expr, other: Expr): boolean => e.kind === 'col' && e.rel === r.right.id && columnIsRowKey(r.right, e.name)
+    && !deepColsRead(other, r.right.id).size;
+  return keyOf(left, right) || keyOf(right, left);
 }

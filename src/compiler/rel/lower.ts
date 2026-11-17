@@ -9,6 +9,7 @@ import { renderLowered, type RenderedPlan } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoinAll, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { fuseAll } from '../../rel/passes/fuse.ts';
+import { dropUnreadJoins } from '../../rel/passes/prune.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
@@ -4406,7 +4407,7 @@ const lowered = (
   // A long spine the fold CUT (`boundedSpine`) is part of the same program: its pieces and the result run
   // through every pass as one plan, so a node they share stays one node and is named once.
   const hoisted = liveHoisted(chain.hoisted ?? [], [wire.rel, ...(chain.effects ?? []).map((effect) => effect.node)]);
-  const passed = semijoinAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel]), [
+  const passed = semijoinAll(dropUnreadJoins(fuseAll([...hoisted.map((piece) => piece.node), wire.rel])), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
   ]);

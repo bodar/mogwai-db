@@ -31,20 +31,9 @@ type Minter = (hint: string) => RelId;
  */
 type Keyed = { readonly rel: Rel; readonly keys: readonly SortTerm[] } | null;
 
-/** MEMOIZED per (relation, column): a relation is immutable, so two consumers asking one position — a correlated
- *  first-row read's value and its presence `EXISTS` — get ONE rewritten relation, not two copies under fresh
- *  names that every later pass sees as different query blocks (the property seek narrows one, not the other). */
-const positionMemo = new WeakMap<Rel, Map<string, Keyed>>();
+/** Not memoized: a correlated first-row read asks it ONCE and hands the one rewritten relation to its value and
+ *  its presence alike (`correlatedFirst`, `src/compiler/rel/lower/scoped.ts`). */
 export function positionKeys(r: Rel, name: string, fresh: Minter): Keyed {
-  let known = positionMemo.get(r);
-  if (!known) positionMemo.set(r, known = new Map());
-  if (known.has(name)) return known.get(name)!;
-  const answer = rewritePosition(r, name, fresh);
-  known.set(name, answer);
-  return answer;
-}
-
-function rewritePosition(r: Rel, name: string, fresh: Minter): Keyed {
   const readsCol = (e: Expr, rel: RelId, column: string): boolean => {
     let hit = false;
     forEachExpr(e, (node) => { if (node.kind === 'col' && node.rel === rel && node.name === column) hit = true; });
