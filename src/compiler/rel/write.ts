@@ -35,8 +35,7 @@ import { constLit } from './const.ts';
 import { fieldCol, framingCols, type MapKeyFacts, type RelFraming } from './framing.ts';
 import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, traversalIdArg, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
-import { firstWrite, nondeterministic } from '../ir/step.ts';
-import { FILTER_HOSTS } from '../unsupported.ts';
+import { FILTER_HOSTS, firstWrite, nondeterministic } from '../ir/step.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 import { pastBudget } from '../../sql/kernel/budget.ts';
 

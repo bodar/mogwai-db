@@ -14,7 +14,7 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpe
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { firstWrite, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { FAN_OUT_HOSTS, FILTER_HOSTS, firstWrite, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -2040,17 +2040,16 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
  * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
  * `groupCount("m")` — `byValues` leaves both to the host).
  */
-const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union', 'where', 'filter', 'not', 'and', 'or']);
+const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union', ...FILTER_HOSTS]);
 /** The hosts whose connector row (`byValues`) claims only the argument-free form. */
 const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
-/** The EXISTENCE hosts, LADDERLESS except over a body the connector leaves to the ladder by design (`ladderOwns`:
+/** The EXISTENCE hosts (`FILTER_HOSTS`) are LADDERLESS except over a body the connector leaves to the ladder by design (`ladderOwns`:
  *  a draw over a re-source, `docs/2026-11-16-ladder-retirement-plan.md` R2b/R4.3/R4.4) — the one form of their
  *  route still standing. */
-const EXISTENCE_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or']);
 const ladderless = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =>
   LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar')
   && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length)
-  && (!EXISTENCE_HOSTS.has(step.name) || ![...step.args.map((arg) => arg.value), ...(step.modulators ?? []).flat()].some((value) => {
+  && (!FILTER_HOSTS.has(step.name) || ![...step.args.map((arg) => arg.value), ...(step.modulators ?? []).flat()].some((value) => {
     if (!isNested(value)) return false;
     const body = bodyOf(value.nested, ctx.params, ctx.sideEffects);
     return !body || ladderOwns(body, ctx);
@@ -2070,7 +2069,7 @@ export function scopedHost(
   // The bodies' unroll provenance, as the hosts' own lowering records it, so a width or size decline names the
   // repeat() and the host it could move out of (`noteUnrolled`).
   for (const arg of step!.args) if (isNested(arg.value)) {
-    noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, ['local', 'map', 'flatMap'].includes(step!.name) ? step!.name : null);
+    noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, FAN_OUT_HOSTS.has(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
   const routes = ctx.connectorOnly || ladderless(step!, framing, ctx) || connectorOwns(step!, ctx) ? [scoped]

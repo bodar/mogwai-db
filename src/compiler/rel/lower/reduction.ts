@@ -14,7 +14,7 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
-import { collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS } from '../../ir/step.ts';
+import { collectsSideEffect, countOf, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
@@ -1580,8 +1580,9 @@ export function reSourcesOncePerOrigin(steps: readonly IRStep[], at: number, inp
 }
 
 /** The filter steps whose child runs PER TRAVERSER (`TraversalUtil.test` on one traverser at a time), so a
- *  prefix holding one is still R copies of one evaluation. */
-const ONCE_FILTER_HOSTS: ReadonlySet<string> = new Set(['has', 'where', 'not', 'filter', 'is', 'and', 'or']);
+ *  prefix holding one is still R copies of one evaluation. A new filter host belongs here for that reason:
+ *  its body is a per-traverser test, never a read of the stream. */
+const ONCE_FILTER_HOSTS: ReadonlySet<string> = new Set([...FILTER_HOSTS, 'has', 'is']);
 
 /** Does this step hold a child traversal? An unreadable body counts as one. */
 const hasChild = (step: IRStep, read: BodyReader): boolean => {

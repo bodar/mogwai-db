@@ -17,7 +17,7 @@ import { forEachExpr, isSelfContained, largestExpression, refNames, relDepth } f
 import { columnIsStored } from '../../rel/copies.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SortTerm } from '../../rel/types.ts';
-import { collectionAssert, EDGE_MOVES, elementKindAt, FAN_OUT_HOSTS, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
+import { collectionAssert, EDGE_MOVES, elementKindAt, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_LIST_OPS, pathPositionKinds, splitTraversalIds, traversalIdArg } from '../ir/step.ts';
 import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
@@ -991,7 +991,9 @@ export function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh
  * label row, which a scalar traverser does not have. A non-terminal `discard()` is the constant-false
  * filter (`sourceFilter`), so a value stream hosts it like any other filter.
  */
-const SCALAR_FILTER_HOSTS = new Set(['and', 'or', 'not', 'filter', 'where', 'discard']);
+// A new filter host belongs here because its test reads only whether its body produces, which a scalar
+// traverser answers as well as an element does.
+const SCALAR_FILTER_HOSTS: ReadonlySet<string> = new Set([...FILTER_HOSTS, 'discard']);
 /** The Scope.local POSITION slices over a MAP entry order — the subset of `LIST_LOCAL_TX` that keeps the
  *  entries in place (a window), NOT `order`/`dedup`, which re-key the map and are a different question. */
 const MAP_LOCAL_SLICE = new Set(['limit', 'range', 'skip', 'tail']);
@@ -1008,7 +1010,7 @@ const namesALiveLabel = (pred: unknown, labels: AliasMap): boolean =>
  *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`.
  *  The connectives are here for the same reason `is` is, and more so: each ARM re-inlines the value
  *  expression, so an unfenced `and(is(…), is(…))` pays the projection twice over. */
-const CLAUSE_READERS = new Set(['is', 'order', ...[...SCALAR_FILTER_HOSTS].filter((name) => name !== 'discard')]);
+const CLAUSE_READERS = new Set(['is', 'order', ...FILTER_HOSTS]);
 
 /**
  * The tail steps that HOST a `by()` — `BY_HOSTS` itself, imported rather than restated.

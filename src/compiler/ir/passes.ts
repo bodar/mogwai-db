@@ -12,7 +12,7 @@ import {
     type IRStep,
 } from './strategies.ts';
 import { verifyLabelMutationTarget, verifyWriteArgs } from './write-args.ts';
-import { LABEL_MUTATIONS, SLICE_STEPS } from './step.ts';
+import { FILTER_HOSTS, LABEL_MUTATIONS, SLICE_STEPS } from './step.ts';
 import { earlyLimit } from './early-limit.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 
@@ -175,7 +175,7 @@ const SIMPLIFY: Pass[] = group('simplify', [
   // filter whose body trimmed to `identity()`.
   {
     name: 'trimExistenceSuffix',
-    applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or', 'choose'].includes(s.name) || !!s.repeatRegion),
+    applies: (steps) => steps.some((s) => FILTER_HOSTS.has(s.name) || s.name === 'choose' || !!s.repeatRegion),
     run: (steps, ctx) => trimExistenceSuffix(steps, ctx.params) as IRStep[],
   },
   {
@@ -185,7 +185,7 @@ const SIMPLIFY: Pass[] = group('simplify', [
     // generic gate ever sees the step, so they cannot answer differently. See
     // isAlwaysProductiveFilterNoOp for why this is not a gap in the child-existence gate.
     name: 'isAlwaysProductiveFilterNoOp',
-    applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
+    applies: (steps) => steps.some((s) => FILTER_HOSTS.has(s.name)),
     run: (steps, ctx) => isAlwaysProductiveFilterNoOp(steps, ctx.params) as IRStep[],
   },
   // The same category of fact: a `sideEffect()` whose drained body writes, collects and raises nothing

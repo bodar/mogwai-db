@@ -79,9 +79,6 @@ export class UnsupportedTraversal extends Error {
   }
 }
 
-/** The filter hosts — `TraversalFilterStep` and its kin keep a traverser on whether their body has a next. */
-export const FILTER_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or']);
-
 /** The `write-in-filter` decline: a graph write (`write`) inside a filter body (`host`). Terminal — no route
  *  runs an effect inside an existence test, and the write must never be silently skipped. One message for
  *  both sites that refuse it (the `existence` connector, `lower/scoped.ts`, and a filter's first-result

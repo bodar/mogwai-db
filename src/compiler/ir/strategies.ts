@@ -4,7 +4,7 @@ import { bodyAlwaysProduces, existencePrefix } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
-import { collectsSideEffect, FAN_OUT_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
+import { collectsSideEffect, FAN_OUT_HOSTS, SINGLE_BODY_FILTER_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -180,11 +180,9 @@ export function markProductiveBy(steps: Step[]): Step[] {
 //
 // Impurity is the one guard (ir/productivity.ts `isImpure`): a body that writes a side effect or
 // binds an `as()` is not inert even when it always produces, so those decline and keep their
-// existing behaviour.
-
-/** Filter hosts whose whole meaning is "did the body produce a traverser?" — so an always-producing
- *  body makes the step a constant. `not()` is the same test negated, hence the inverse rewrite. */
-const EXISTENCE_FILTER_HOSTS = new Set(['where', 'filter', 'not']);
+// existing behaviour. The hosts are `SINGLE_BODY_FILTER_HOSTS`: their whole meaning is "did the body
+// produce a traverser?", so an always-producing body makes the step a constant (`not()` is the same test
+// negated, hence the inverse rewrite).
 
 /**
  * Remove provably-inert existence filters; replace their negations with a drop-everything.
@@ -199,7 +197,7 @@ export function isAlwaysProductiveFilterNoOp(steps: Step[], params: ParamEnv): S
     const out: Step[] = [];
     for (const s of level) {
       const nested = s.args.filter((a) => isNested(a.value));
-      if (EXISTENCE_FILTER_HOSTS.has(s.name) && s.args.length === 1 && bodyAlwaysProduces(s.args[0].value, params)) {
+      if (SINGLE_BODY_FILTER_HOSTS.has(s.name) && s.args.length === 1 && bodyAlwaysProduces(s.args[0].value, params)) {
         if (s.name === 'not') out.push({ name: 'limit', args: [arg(0)] } as Step);
         continue; // where()/filter(): inert, drop the step
       }
@@ -249,7 +247,7 @@ export function trimExistenceSuffix(steps: Step[], params: ParamEnv): Step[] {
   };
   const level = (s: Step): Step => {
     const ir = s as IRStep;
-    if ((EXISTENCE_FILTER_HOSTS.has(s.name) && s.args.length === 1) || s.name === 'and' || s.name === 'or')
+    if ((SINGLE_BODY_FILTER_HOSTS.has(s.name) && s.args.length === 1) || s.name === 'and' || s.name === 'or')
       return { ...s, args: s.args.map(trimmed) };
     if (s.name === 'choose' && !ir.optionArms && s.args.length >= 2 && s.args.length <= 3 && s.args.every((a) => isNested(a.value)))
       return { ...s, args: [trimmed(s.args[0]!), ...s.args.slice(1)] };

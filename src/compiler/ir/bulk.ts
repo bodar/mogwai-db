@@ -1,5 +1,5 @@
 import { NO_PARAMS } from '../../gremlin/param-env.ts';
-import { type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
+import { FILTER_HOSTS, type IRStep, isLocalScope, isPlainOrder, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 import { isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 
 // ---------- WHO OBSERVES A TRAVERSER MULTIPLICITY — one authority, asked at a POSITION ----------
@@ -189,7 +189,9 @@ function reducingGroupCollapseTerminal(step: IRStep): boolean {
  *  `identity` and `barrier` are deliberately NOT in the filter set, because a chain-global verdict
  *  cannot tell an `as()` bound before a collapse from one bound after it. */
 export { COLLAPSE_PROJ };
-export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
+/** A new filter host belongs here because a filter only REMOVES traversers — it never changes a survivor's
+ *  multiplicity, so a collapse ahead of it stays exact. */
+export const COLLAPSE_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', ...FILTER_HOSTS]);
 
 // ---------- STREAM DISTINCTNESS — what a WRITE asks of the stream reaching it ----------
 //

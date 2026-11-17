@@ -209,13 +209,22 @@ export const addsUnlabelledTraversers = (s: { readonly name: string; readonly ar
  *  window/aggregate in the relation the host lowers to, which a recursive term cannot hold. */
 export const FAN_OUT_HOSTS: ReadonlySet<string> = new Set(['map', 'flatMap', 'local']);
 
-/** The filter steps whose child is a per-traverser TEST (`WhereTraversalStep`, `TraversalFilterStep`,
- *  `NotStep`, `AndStep`/`OrStep` — each runs it through `TraversalUtil.test`, which resets it first). */
-const PER_TRAVERSER_FILTER_HOSTS = ['where', 'filter', 'not', 'and', 'or'] as const;
+/** THE FILTER HOSTS — the steps whose child is a per-traverser TEST: a traverser is kept on whether its body
+ *  has a next (`WhereTraversalStep`, `TraversalFilterStep`, `NotStep`, `AndStep`/`OrStep` — each runs it
+ *  through `TraversalUtil.test`, which resets it first; vendor/tinkerpop/gremlin-core/src/main/java/org/
+ *  apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java). The ONE authority: every set that
+ *  means "the filter hosts" (the existence connector, the write-in-filter decline, the bulk-collapse prefix,
+ *  the scalar-tail and once-evaluable filters) is this set or derived from it, so a new filter host is
+ *  learned in one place rather than declined by whichever copy was not updated. */
+export const FILTER_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or']);
+
+/** The filter hosts with ONE body — every filter host but the `and`/`or` connectives, whose N arms are N
+ *  bodies. A new filter host belongs here iff it tests a single child traversal. */
+export const SINGLE_BODY_FILTER_HOSTS: ReadonlySet<string> = new Set([...FILTER_HOSTS].filter((name) => name !== 'and' && name !== 'or'));
 
 /** Every host whose children the reference RESETS before each traverser: the fan-out hosts plus the
  *  filter hosts. Derived rather than listed so the two vocabularies cannot drift. */
-export const PER_TRAVERSER_RESET_HOSTS: ReadonlySet<string> = new Set([...FAN_OUT_HOSTS, ...PER_TRAVERSER_FILTER_HOSTS]);
+export const PER_TRAVERSER_RESET_HOSTS: ReadonlySet<string> = new Set([...FAN_OUT_HOSTS, ...FILTER_HOSTS]);
 
 // ---------- Scope.local, and what a slice step's arguments MEAN ----------
 //
