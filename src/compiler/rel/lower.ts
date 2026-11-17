@@ -59,7 +59,7 @@ import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, isLongSumClass, is
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { Declines, writeInFilter } from '../unsupported.ts';
+import { Declines, writeInChild } from '../unsupported.ts';
 import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
@@ -5046,12 +5046,17 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   // that `EarlyLimitStrategy` could not move, or a body read for its first result — is one the plan would
   // perform for the whole stream: a different answer, so the whole traversal declines. `programWrites`
   // walks every depth.
-  if (writes.truncated) {
-    // A filter's write is named in the user's terms (`writeInFilter`), as the `existence` connector names it.
-    if (writes.truncatedFilter) settle(opts).declines.note(writeInFilter(writes.truncatedFilter.host, writes.truncatedFilter.write));
-    return null;
-  }
+  //
+  // A WRITE IN A CHILD BODY is named in the user's terms (`writeInChild`) — here, because `programWrites` is
+  // the one walk that visits every child at every depth with its host (a connector host, a `by()`, a
+  // `sideEffect`, a write's own argument). In a FILTER body it is terminal: no route runs an effect inside an
+  // existence test, and the write must never be skipped (`stepHasEffect` keeps the existence trim off it). In
+  // any other body it is only a hint, given where the chain declines — never in place of a route that answers.
+  const { declines } = settle(opts);
+  if (writes.filterWrite) declines.note(writeInChild(writes.filterWrite.host, writes.filterWrite.write, FILTER_HOSTS));
+  if (writes.truncated || writes.filterWrite) return null;
   const tail = lowerChainOf(steps, { ...opts, writes }, fresh, root);
+  if (!tail && writes.childWrite) declines.note(writeInChild(writes.childWrite.host, writes.childWrite.write, FILTER_HOSTS));
   // The program-start questions its guards asked (`ProgramWrites.preChecks`), ahead of every statement.
   return tail && withPreChecks(writes, tail, fresh);
 }

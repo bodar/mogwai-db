@@ -204,7 +204,7 @@ export class CopiedDraw extends UnsupportedTraversal {
   constructor() {
     const sentence = 'a random draw (order().by(shuffle), sample(), coin()) that more than one branch reads inside a '
       + 'per-traverser body (local(), map(), a by() or a branch arm) is not supported: each branch would draw again '
-      + 'and see a different pick. Draw in the outer traversal instead, e.g. local(out().sample(1)).union(…)';
+      + 'and see a different pick. Draw once in the outer traversal, e.g. with local(…), and branch on that';
     super(sentence);
     this.message = UnsupportedTraversal.because(sentence).message;
   }

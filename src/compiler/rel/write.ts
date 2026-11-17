@@ -35,7 +35,7 @@ import { constLit } from './const.ts';
 import { fieldCol, framingCols, type MapKeyFacts, type RelFraming } from './framing.ts';
 import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, traversalIdArg, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
-import { FILTER_HOSTS, firstWrite, nondeterministic } from '../ir/step.ts';
+import { FILTER_HOSTS, nondeterministic } from '../ir/step.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 import { pastBudget } from '../../sql/kernel/budget.ts';
 
@@ -1038,10 +1038,14 @@ export interface ProgramWrites {
    * `by()` body, or spliced out of one (`ranPerTraverser`) — since a later `cap`/`select` observes it.
    */
   readonly truncated: boolean;
-  /** A FILTER host (`FILTER_HOSTS`) whose first-result read truncated a body that writes, and that write —
-   *  what the decline names (`writeInFilter`). Absent when the truncation is another host's or a slice's. */
-  readonly truncatedFilter?: { readonly host: string; readonly write: string };
+  /** The first graph write found in a FILTER host's body (`FILTER_HOSTS`), and the first in any OTHER child
+   *  body — the innermost host first, as the user would name it (`group().by` for a `by()`). What the decline
+   *  names (`writeInChild`, `compiler/unsupported.ts`), read by `lowerChain`: no route runs an effect inside an
+   *  existence test (terminal), and none yet inside any other child (advisory). */
+  readonly filterWrite?: ChildWrite;
+  readonly childWrite?: ChildWrite;
 }
+interface ChildWrite { readonly host: string; readonly write: string }
 interface KeyWriter { readonly run: number; readonly keys: ReadonlySet<string> | 'all'; readonly fresh: boolean }
 interface PreCheck { readonly name: string; readonly ids: readonly (number | string)[] }
 
@@ -1097,7 +1101,14 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
   const sites: WriteSite[] = [];
   const runOf = new Map<IRStep, number>();
   let runs = 0, anyKey = false, labels = false, creates = false, edges = false, drops = false, unreadable = false, truncated = false;
-  let truncatedFilter: ProgramWrites['truncatedFilter'];
+  let filterWrite: ChildWrite | undefined, childWrite: ChildWrite | undefined;
+  // The write a child body of `host` holds, named for the decline (`ProgramWrites.childWrite`) — whether or not
+  // it counts as an effect here (a `mergeV` that creates once is still a write the child cannot run). The walk
+  // records a body's own nested hosts before the body, so the INNERMOST host is the one named.
+  const noteWrite = (host: string, write: string | null): void => {
+    if (write && FILTER_HOSTS.has(host)) filterWrite ??= { host, write };
+    else if (write) childWrite ??= { host, write };
+  };
   // What one nested body contributes to its step: whether it has a side effect at all, and whether one of
   // them is `lazy` — made after the body's stream fanned out past one traverser, so a consumer that stops
   // pulling early cuts it short. Every node of the value is enumerated by the one IR walker (`valueNodes`);
@@ -1110,14 +1121,12 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
       // and a `choose`'s absorbed option arms are judged as they will run.
       try { body = childSteps(node.nested, params); } catch (error) { pastBudget(error); unreadable = true; continue; }
       const inner = walk(body, false, pull === 'loop' ? false : true);
+      noteWrite(host, inner.write);
+      into.write ??= inner.write;
       if (!inner.effects) continue;
       into.effects = true;
       // A body read for its first result abandons every write it would have made after that result.
-      if (pull === 'first' && inner.lazy) {
-        truncated = true;
-        const write = FILTER_HOSTS.has(host) ? firstWrite(body, params) : null;
-        if (write) truncatedFilter ??= { host, write };
-      }
+      if (pull === 'first' && inner.lazy) truncated = true;
       // A body emitted lazily hands its results on as it makes them; one iterated out first does not.
       if (pull !== 'drained') into.lazy ||= inner.lazy;
     }
@@ -1127,13 +1136,14 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
   // only from a one-traverser source). Answers whether the chain has a side effect, and whether one is lazy.
   const walk = (chain: readonly IRStep[], ownable: boolean, single: boolean): ChainEffects => {
     let fresh = false, run = -1, pending = false, effects = false, lazy = false;
+    let write: string | null = null;
     if (ownable) single = singleSource(chain);
     for (const [index, step] of chain.entries()) {
       if (truncates(step) && pending) truncated = true;
       const args = step.args.map((a) => a.value);
       if (step.name !== 'property') run = -1;
       const site = writeSiteOf(step);
-      if (site) sites.push(site);
+      if (site) { sites.push(site); write ??= step.name; }
       switch (step.name) {
         case 'addV': creates = true; break;
         // An `addE` creates an EDGE and no vertex: a body re-sourcing `V()` cannot see it, only one that
@@ -1159,17 +1169,20 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
         }
       }
       fresh = step.name === 'addV' || step.name === 'addE' || (fresh && KEEPS_FRESH.has(step.name));
-      const bodies: ChainEffects = { effects: false, lazy: false };
+      const bodies: ChainEffects = { effects: false, lazy: false, write: null };
       args.forEach((value, at) => nested(value, bodyPull(step, at), bodies, step.name));
-      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value, 'first', bodies, 'by');
-      for (const [, value] of step.withArgs ?? []) nested(value, 'first', bodies, 'with');
+      for (const modulator of step.modulators ?? []) for (const value of modulator) nested(value, 'first', bodies, `${step.name}().by`);
+      for (const [, value] of step.withArgs ?? []) nested(value, 'first', bodies, `${step.name}().with`);
       if (step.repeatRegion) {
         const inner = walk(step.repeatRegion as IRStep[], false, false);
+        noteWrite(step.name, inner.write);
         bodies.effects ||= inner.effects;
         bodies.lazy ||= inner.lazy;
+        bodies.write ??= inner.write;
       }
       // A `choose`'s arms: the selector is read for its first result, the arm emitted lazily.
       for (const option of step.optionArms ?? []) option.args.forEach((a, at) => nested(a.value, at === 0 ? 'first' : 'lazy', bodies, step.name));
+      write ??= bodies.write;
       // A side effect HERE — this step's own, or one in a body it pulls — runs for every traverser that
       // reaches this step, or (`bodies.lazy`) fans out inside the body; either way more than one write
       // that a consumer stopping early cuts short. Over one traverser with an eager body it cannot be cut.
@@ -1196,11 +1209,11 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
       // (The top-level source is `singleSource`'s to judge.)
       single &&= (ownable && index === 0) || KEEPS_ONE.has(step.name) || (REDUCERS.has(step.name) && !isLocalScope(step));
     }
-    return { effects, lazy };
+    return { effects, lazy, write };
   };
   walk(steps, true, false);
   return unreadable ? everythingWritten(truncated)
-    : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated, ...(truncatedFilter && { truncatedFilter }) };
+    : { writers, sites, runOf, anyKey, labels, creates, edges, drops, draws: nondeterministic(steps, params), upstream: [], preChecks: [], truncated, ...(filterWrite && { filterWrite }), ...(childWrite && { childWrite }) };
 }
 
 /**
@@ -1216,8 +1229,9 @@ export function programWrites(steps: readonly IRStep[], params: ParamEnv): Progr
  */
 type BodyPull = 'first' | 'lazy' | 'drained' | 'loop';
 
-/** What one chain of `programWrites`' walk answers: whether it has a side effect, and whether one is lazy. */
-interface ChainEffects { effects: boolean; lazy: boolean }
+/** What one chain of `programWrites`' walk answers: whether it has a side effect, whether one is lazy, and the
+ *  first graph write at any depth of it (the step name a decline quotes), effect or not. */
+interface ChainEffects { effects: boolean; lazy: boolean; write: string | null }
 const LAZY_BODIES: ReadonlySet<string> = new Set(['union', 'local', 'flatMap', 'coalesce', 'optional']);
 const SELECTING_BODIES: ReadonlySet<string> = new Set(['choose', 'branch']);
 function bodyPull(step: IRStep, at: number): BodyPull {

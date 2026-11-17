@@ -250,6 +250,9 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
    * different array, and the consumer declines.
    */
   readonly traversal?: { readonly steps: readonly IRStep[]; readonly rooted: boolean };
+  /** The connector host (a step name) whose child body is lowering — set by the connector dispatch
+   *  (`scopedHost`, `lower/scoped.ts`) so a decline the body's lowering explains names the host it fired under. */
+  readonly host?: string;
   /**
    * WHERE A LONG SPINE IS CUT — set only on an effect-free ROOT chain over the base graph, and honoured
    * only while a tail folds that very step list (`steps`, compared BY IDENTITY like `traversal`), so a

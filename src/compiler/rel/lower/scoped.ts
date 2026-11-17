@@ -14,7 +14,7 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpe
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { FAN_OUT_HOSTS, FILTER_HOSTS, firstWrite, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -30,7 +30,7 @@ import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, option
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
-import { writeInFilter, type Declines } from '../../unsupported.ts';
+import { drawInGroupValue, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
 import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
@@ -211,7 +211,7 @@ function reSourcedBody(
   const rest = body.slice(at);
   // A tracked path out of an ALL-rows host is the host's EXTENDED by the read's positions (below): declined.
   if (!first && pathCarried(prefix.rel)) {
-    ctx.declines.note({ kind: 'resource-path', message: RESOURCE_PATH, terminal: false });
+    ctx.declines.note({ kind: 'resource-path', message: resourcePathMessage(rest, ctx), terminal: false });
     return null;
   }
   // A rest that reads the HOST traverser's state (an outer label, its sack, path or loops) cannot be one
@@ -326,9 +326,16 @@ function sharedEnd(rest: readonly IRStep[], carried: AliasMap, ctx: ChainCtx): n
   return ends.length ? Math.min(...ends) : rest.length;
 }
 
-/** Why an ALL-rows host's re-sourcing body declines on a traverser whose path is tracked (`reSourcedBody`). */
-const RESOURCE_PATH = 'a V()/E() inside local() or flatMap() on a traverser whose path is tracked (a path(), '
-  + 'simplePath() or cyclicPath() around it) is not supported yet';
+/** Why an ALL-rows host's re-sourcing body declines on a traverser whose path is tracked (`reSourcedBody`),
+ *  named by WHERE the path is asked for: in the re-sourced body itself, or around the host. */
+function resourcePathMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
+  const host = `${ctx.host ?? 'local'}()`;
+  return someStepDeep(rest, ctx.params, (s) => PATH_STEPS.has(s.name))
+    ? `a path(), simplePath() or cyclicPath() inside a ${host} body that starts with V()/E() is not supported yet`
+    : `a V()/E() inside ${host} on a traverser whose path is tracked (a path(), simplePath() or cyclicPath() `
+      + 'around it) is not supported yet';
+}
+const PATH_STEPS: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
 /**
  * Why a FIRST-row host's re-sourcing body declines when the steps after its `V()`/`E()` read the incoming
@@ -982,14 +989,8 @@ const existence = (negated: boolean): Connector => (site) => {
       : null
     : [singleBody(step, ctx)];
   if (!bodies || bodies.some((b) => !b?.length)) return null;
-  // A WRITE in a filter body is an effect the existence test has nowhere to run: both routes below refuse a
-  // body with effects, as does the ladder's `writesAnywhere`. Say so in the user's terms rather than "no
-  // lowering covers" — the write must never be skipped (`stepHasEffect` keeps the existence trim off it).
-  const write = (bodies as (readonly IRStep[])[]).map((body) => firstWrite(body, ctx.params)).find((name) => name !== null);
-  if (write) {
-    ctx.declines.note(writeInFilter(step.name, write));
-    return null;
-  }
+  // (A WRITE in a filter body never reaches here: the program's write summary declines it, naming the write
+  // and the filter — `ProgramWrites.filterWrite`, read by `lowerChain`.)
   // Every body correlated: the semi/anti-join is an `EXISTS` over the body itself, read against the host row
   // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
   const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free', true));
@@ -1810,10 +1811,15 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   // The POOL exists only where the value traversal has a `Barrier` (`isValueBarrier`, the step `determineBarrierStep`
   // stops at); without one each traverser's first value is assigned, last wins — the host's own arm.
   if (!body.some(isValueBarrier)) return null;
+  // A DRAW in the value body (`sample()`, `coin()`, `order().by(shuffle)`) is a pick per traverser the pool —
+  // one evaluation per key — cannot reproduce. Declined, and named in the user's terms.
+  if (nondeterministic(body, ctx.params)) {
+    ctx.declines.note(drawInGroupValue);
+    return null;
+  }
   // Only what runs BEFORE the barrier is per traverser in the reference (`GroupStep` pushes each traverser
   // through the value traversal's pre-barrier part, `Grouping.determineBarrierStep`); the pool lowers the whole
-  // body over the key's members at once, so two forms would differ and stay the host's own arm:
-  // - `sample()` first — a draw per key the pool cannot reproduce;
+  // body over the key's members at once, so a form that would differ stays the host's own arm:
   // - a barrier NESTED in the pre-barrier part (`union(out().order().limit(2))`) — it cuts per traverser there,
   //   across the whole pool here.
   // A `tail(n)` first is a `limit(n)` of the pool: as a group's barrier its per-key merge is a
@@ -1821,7 +1827,6 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/TailGlobalStep.java:129-131),
   // which is what a cut of the pool by arrival is — `group().by(label).by(tail())` is the key's first member.
   const cut = body.findIndex(isValueBarrier);
-  if (body[cut]!.name === 'sample') return null;
   // Only where the tail reads the MEMBERS themselves (`by(tail(n))`, nothing before it): each member contributes
   // itself, so the merge is the first n members. After a fan-out (`constant([1,2,1,3]).unfold().tail(2)`) each
   // member contributes ITS OWN last n before the merge, which the pool's tail over all members answers for a
@@ -1894,7 +1899,6 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
     aggs: [[KEY, firstArrival(col(members.id, KEY), enc ? [col(members.id, enc.col)] : [])]],
   });
   const sc = scope(domain, fresh);
-  if (nondeterministic(body, ctx.params)) return null;
   // THE POOL'S TRAVERSERS: the members themselves — or, where the pre-barrier part must run per member
   // (`perMember`), each member's own results of it: that part lowered as a `local()` body over the members (the
   // connector's `forward` rejoin, host-major then the body's order), each result keeping its member's key terms
@@ -2071,7 +2075,7 @@ export function scopedHost(
   for (const arg of step!.args) if (isNested(arg.value)) {
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, FAN_OUT_HOSTS.has(step!.name) ? step!.name : null);
   }
-  const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: under, fresh, labels });
+  const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: { ...under, host: step!.name }, fresh, labels });
   const routes = ctx.connectorOnly || ladderless(step!, framing, ctx) || connectorOwns(step!, ctx) ? [scoped]
     : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that

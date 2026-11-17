@@ -809,7 +809,7 @@ Beside the RelIR substrate:
   MATERIALIZED` CTE inside a correlated subquery is re-evaluated per reference, measured). A single `both()`
   over such a frontier answers (`doubledReads` treats a drawing relation as unbounded, so `hopJoin` reads it
   once), and so does the draw in the outer traversal (`local(out().sample(1)).union(…)`), which the message
-  suggests. PREREQUISITE: a read-once branch form, with the arm index crossed onto the frontier like
+  suggests in shape-neutral words ("draw once in the outer traversal … and branch on that"). PREREQUISITE: a read-once branch form, with the arm index crossed onto the frontier like
   `hopJoin`'s direction row, so the arms read one evaluation. Reach: rare. (The decorrelated twin answers
   WRONG today — §1 copied-draw-cte; fix that first.)
 - **`where()` over a `math()` result after a hop declines (where-math-depth, predates cc7)** —

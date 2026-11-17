@@ -168,9 +168,15 @@ describe('an all-rows host on a traverser whose path is tracked declines, naming
   test('out().local(V().order().limit(1)).path()', () => {
     try { run(s, "g.V().out().local(V().order().by('name').limit(1)).path().count()"); } catch (error) {
       expect(error).toBeInstanceOf(UnsupportedTraversal);
-      expect((error as Error).message).toContain('a V()/E() inside local() or flatMap() on a traverser whose path is tracked');
+      expect((error as Error).message).toContain('a V()/E() inside local() on a traverser whose path is tracked');
       return;
     }
     throw new Error('expected a decline');
   });
+  // Where the path is asked for INSIDE the re-sourced body, the message says so, and names the host it fired under.
+  for (const [q, host] of [['g.V().local(V().simplePath().count())', 'local'], ['g.V().flatMap(V().path())', 'flatMap']] as const) {
+    test(q, () => {
+      expect(() => run(s, q)).toThrow(`a path(), simplePath() or cyclicPath() inside a ${host}() body that starts with V()/E()`);
+    });
+  }
 });

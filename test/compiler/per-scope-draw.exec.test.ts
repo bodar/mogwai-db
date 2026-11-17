@@ -158,3 +158,17 @@ describe('decorrelate: a draw counts as touching the scope', () => {
     expect(out !== null && partitioned(out.rel)).toBe(false);
   });
 });
+
+// The draws we cannot keep per scope DECLINE in the user's terms (M4): a draw inside a group() value by() (the pool
+// reduces one key at once, `pooledGroup`), and a draw several branches read — the suggestion is shape-neutral, so
+// a choose() predicate is not told to use union().
+describe('a draw we cannot keep per scope declines, naming the shape', () => {
+  test('a draw inside a group() value by()', () => {
+    for (const q of ["g.V().group().by(label).by(out().sample(1))", "g.V().map(group().by(label).by(out().coin(0.5).count()))"])
+      expect(() => rows(q), q).toThrow('a random draw (sample()/coin()/order().by(shuffle)) inside a group() value by() is not supported yet');
+  });
+  test('a draw a choose() predicate and its arms read', () => {
+    expect(() => rows("g.V().choose(out().sample(1).hasLabel('person'), constant(1), constant(2))"))
+      .toThrow('Draw once in the outer traversal, e.g. with local(…), and branch on that');
+  });
+});

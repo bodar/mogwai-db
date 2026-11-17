@@ -270,14 +270,6 @@ export function collectsSideEffect(step: IRStep): boolean {
  *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
 export const MUTATING_STEPS: ReadonlySet<string> = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
 
-/** The name of the first graph write (`MUTATING_STEPS`) at any depth of `steps`, or `null` — what a decline
- *  quotes to name the write it refuses. An unreadable body is skipped: this NAMES a write, it decides nothing. */
-export function firstWrite(steps: readonly Step[], params: ParamEnv): string | null {
-  let found: string | null = null;
-  someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name) && (found = s.name, true));
-  return found;
-}
-
 /** Steps that may RAISE, or whose effect the IR cannot see — a service runs arbitrary code (and `io()`
  *  and the graph algorithms desugar to one), and `fail()` is an explicit raise rather than an erroneous
  *  value nothing reads. A drained body holding one is not inert. */

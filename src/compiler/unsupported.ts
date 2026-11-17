@@ -29,9 +29,14 @@ export type DeclineKind =
   /** `inject(x)` with values inside a CHILD traversal (a `local`/`map`/`by`/branch-arm body), where the
    *  reference injects only for the FIRST host it runs for (`injectTail`, `rel/lower.ts`). Always ADVISORY. */
   | 'inject-in-child'
-  /** A graph write inside a filter body (`where`/`filter`/`not`/`and`/`or` — the `existence` connector,
-   *  `lower/scoped.ts`): no route lowers an effect inside an existence test yet. */
-  | 'write-in-filter';
+  /** A graph write inside a filter body (`where`/`filter`/`not`/`and`/`or`, found by `programWrites`,
+   *  `rel/write.ts`): no route lowers an effect inside an existence test yet. */
+  | 'write-in-filter'
+  /** A graph write inside any OTHER child body (`local`/`union`/`coalesce`/`sideEffect`/a `by()`, … — found by
+   *  `programWrites`): no lowering runs an effect inside a child yet. Always ADVISORY. */
+  | 'write-in-child'
+  /** A random draw inside a `group()` value `by()` (`pooledGroup`, `lower/scoped.ts`). Always ADVISORY. */
+  | 'draw-in-group-value';
 
 /**
  * THE PREFIX IS A PROPERTY OF THE KIND, kept in this one table. Most declines say the traversal is
@@ -51,6 +56,8 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'map-key-collision': 'this traversal is ambiguous',
   'inject-in-child': 'this traversal is not supported yet',
   'write-in-filter': 'this traversal is not supported yet',
+  'write-in-child': 'this traversal is not supported yet',
+  'draw-in-group-value': 'this traversal is not supported yet',
 };
 
 /**
@@ -79,15 +86,43 @@ export class UnsupportedTraversal extends Error {
   }
 }
 
-/** The `write-in-filter` decline: a graph write (`write`) inside a filter body (`host`). Terminal — no route
- *  runs an effect inside an existence test, and the write must never be silently skipped. One message for
- *  both sites that refuse it (the `existence` connector, `lower/scoped.ts`, and a filter's first-result
- *  read in `programWrites`, `rel/write.ts`). */
-export const writeInFilter = (host: string, write: string): DeclineReason => ({
-  kind: 'write-in-filter', terminal: true,
-  message: `a write (${write}()) inside ${host}() — a filter body that writes; to write and then filter, put the `
-    + `write before or after ${host}()`,
-});
+/** The branch hosts whose write is most often an UPSERT (`fold().coalesce(unfold(), addV(…))`). */
+const UPSERT_HOSTS: ReadonlySet<string> = new Set(['coalesce', 'optional', 'choose', 'union']);
+
+/**
+ * THE ONE BUILDER for a graph write (`write`, a step name) in a child body of `host` (a step name, or
+ * `group().by` for a `by()`), worded per host family — the one site that asks is `programWrites`' walk over
+ * every child (`rel/write.ts`), read by `lowerChain`.
+ *
+ *  - A FILTER host (`filterHosts`: the caller's `FILTER_HOSTS`, passed in so this module stays a leaf) is
+ *    `write-in-filter`, TERMINAL: no route runs an effect inside an existence test, and the write must never
+ *    be silently skipped.
+ *  - A BRANCH host is most often the upsert idiom, which `mergeV()`/`mergeE()` answer.
+ *  - Any other host is told to move the write out.
+ *
+ * The two non-filter wordings are ADVISORY — a hint appended to "no lowering covers …" — so the day a child
+ * write lowers, a route that answers is never shadowed by it.
+ */
+export const writeInChild = (host: string, write: string, filterHosts: ReadonlySet<string>): DeclineReason =>
+  filterHosts.has(host)
+    ? {
+      kind: 'write-in-filter', terminal: true,
+      message: `a write (${write}()) inside ${host}() — a filter body that writes; to write and then filter, put the `
+        + `write before or after ${host}()`,
+    }
+    : {
+      kind: 'write-in-child', terminal: false,
+      message: `a write (${write}()) inside ${host}() is not supported yet; `
+        + (UPSERT_HOSTS.has(host)
+          ? 'for an upsert (fold().coalesce(unfold(), addV(…))) use mergeV()/mergeE()'
+          : 'put the write in the outer traversal'),
+    };
+
+/** The `draw-in-group-value` decline (`pooledGroup`, `lower/scoped.ts`). */
+export const drawInGroupValue: DeclineReason = {
+  kind: 'draw-in-group-value', terminal: false,
+  message: 'a random draw (sample()/coin()/order().by(shuffle)) inside a group() value by() is not supported yet',
+};
 
 /** One reason the lowering recorded. `terminal` is a decline that holds whatever else the compile
  *  finds (today's throw). Otherwise it is ADVISORY: a hint about why a probe declined, which may be a

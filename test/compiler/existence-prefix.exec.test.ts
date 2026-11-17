@@ -159,3 +159,47 @@ describe('an effect in an existence body is never trimmed away', () => {
     expect(agreed("g.V().where(__.group().by('name').count()).count()")).toEqual(['6']);
   });
 });
+
+// M4: a write in ANY child body is named in the user's terms, by the one builder (`writeInChild`,
+// src/compiler/unsupported.ts) at the one site that sees every child with its host — the program's write summary
+// (`programWrites`, src/compiler/rel/write.ts). A filter host keeps the terminal write-in-filter wording (above).
+// A branch host is most often the UPSERT idiom, so it is pointed at mergeV()/mergeE(), which we support; any other
+// host is told to move the write out. Both are hints after "no lowering covers …", never a decline of their own.
+describe('a write in a non-filter child body declines, naming the write, the host and the likely intent', () => {
+  const declined = (q: string, options?: object): string => {
+    try { runWith(seededStore(), q, options as never); } catch (error) { return (error as Error).message; }
+    throw new Error(`answered: ${q}`);
+  };
+  const UPSERT = 'for an upsert (fold().coalesce(unfold(), addV(…))) use mergeV()/mergeE()';
+  const OUTER = 'put the write in the outer traversal';
+  for (const [q, write, host, advice] of [
+    // one case per write kind
+    ["g.V().has('name','zz').fold().coalesce(unfold(), addV('person').property('name','zz'))", 'addV', 'coalesce', UPSERT],
+    ["g.V().has('name','marko').coalesce(outE('knows').has('weight',0.5), addE('knows').to(V(2)))", 'addE', 'coalesce', UPSERT],
+    ["g.V().local(property('x', 1))", 'property', 'local', OUTER],
+    ['g.V().sideEffect(drop())', 'drop', 'sideEffect', OUTER],
+    ["g.V().local(mergeV([name: 'zz']))", 'mergeV', 'local', OUTER],
+    ["g.V().optional(addV('x'))", 'addV', 'optional', UPSERT],
+    ["g.V().group().by(addV('x'))", 'addV', 'group().by', OUTER],
+    // at depth: the innermost host is the one named
+    ["g.V().local(coalesce(out(), addV('x')))", 'addV', 'coalesce', UPSERT],
+    ["g.V().union(local(sideEffect(drop())), identity())", 'drop', 'sideEffect', OUTER],
+    ["g.V().addE('x').to(coalesce(V(1), addV('y')))", 'addV', 'coalesce', UPSERT],
+  ] as const) {
+    test(q, () => {
+      for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST]) {
+        const message = declined(q, options);
+        expect(message, q).toContain('no lowering covers');
+        expect(message, q).toContain(`a write (${write}()) inside ${host}() is not supported yet; ${advice}`);
+      }
+    });
+  }
+  test('nothing is written by a declined child write', () => {
+    const graph = seededStore();
+    expect(() => runWith(graph, "g.V().local(addV('x'))")).toThrow();
+    expect(bare(runWith(graph, "g.V().hasLabel('x').count()"))).toEqual([{ v: 0 }]);
+  });
+  test('a child write that lowers is untouched by the hint', () => {
+    expect(bare(runWith(seededStore(), "g.V().hasLabel('software').union(addV('x')).label()"))).toEqual([{ v: 'x' }, { v: 'x' }]);
+  });
+});
