@@ -70,6 +70,12 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     ["g.V().repeat(out()).emit(local(in().order().by('age').limit(1))).count()", 7410],
     ["g.V().repeat(out()).until(has('age',gt(40))).emit(in('created').has('age',gt(45))).count()", 1980],
     ["g.V().repeat(out()).until(optional(in('created').has('age',gt(45)))).count()", 2210],
+    // Beside a landed `until`, an emit condition is asked of the TRAVERSER, not of the walk row with its `EXIT`
+    // column (`asked`, `walk.ts`) — so it still takes the per-state route.
+    ["g.V().repeat(out()).until(hasLabel('software')).emit(local(in().limit(1))).count()", 7410],
+    ["g.V().repeat(out()).until(hasLabel('software')).emit(coalesce(in('created').has('age',gt(30)),out('nope'))).count()", 5460],
+    ["g.V().until(hasLabel('software')).repeat(out()).emit(coalesce(in('created').has('age',gt(30)),out('nope'))).count()", 10636],
+    ["g.V().emit(local(in().limit(1))).repeat(out()).until(hasLabel('software')).count()", 8860],
   ] as const) {
     test(q, () => {
       expect(count(small, q)).toBe(atSmall);
@@ -87,6 +93,9 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     ["g.V().map(repeat(out()).emit(in('created').has('age',gt(30))).count()).sum()", 4376],
     ["g.V().choose(repeat(out()).emit(in('created').has('age',gt(45))),constant(1),constant(2)).sum()", 2406],
     ["g.V().local(local(repeat(out()).emit(in('created').has('age',gt(30))).count())).sum()", 4376],
+    ["g.V().where(repeat(out()).until(hasLabel('software')).emit(union(in('created'),out('nope')))).count()", 780],
+    ["g.V().local(repeat(out()).until(hasLabel('software')).emit(choose(in('created'),constant(1))).count()).sum()", 7410],
+    ["g.V().not(repeat(out()).until(hasLabel('software')).emit(local(in().limit(1)).hasLabel('person'))).count()", 800],
   ] as const) {
     test(`scoped: ${q}`, () => {
       expect(count(small, q)).toBe(atSmall);

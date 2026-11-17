@@ -1,6 +1,6 @@
 import { CHANNEL_GROUP_POLICY, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
 import { col, compilerInt, eq, type Expr } from '../../rel/expr.ts';
-import { exprRels, forEachExpr, forEachRel } from '../../rel/walk.ts';
+import { exprRels, forEachExpr, forEachRel, substRelId } from '../../rel/walk.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -252,7 +252,7 @@ export function repeatWalk(
    */
   const emits = (rel: Rel): Expr | typeof ALL | null => {
     if (!emitted) return emitFirst ? ALL : deeper(rel);
-    const tested = child.predicate(emitted, subject(rel), false);
+    const tested = asked(emitted, rel);
     if (!tested) return null;
     return emitFirst ? tested : and(deeper(rel), tested);
   };
@@ -278,6 +278,32 @@ export function repeatWalk(
   /** The traverser columns of `rel`, unchanged — `id` and every carried channel. */
   const traverserExprs = (rel: Rel): readonly (readonly [string, Expr])[] =>
     [['id', col(rel.id, 'id')], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)];
+  /** `rel` seen as the TRAVERSER it holds — `id` and every carried channel, NAME-PRESERVING, without the walk's
+   *  own `EXIT` column. */
+  const traverserView = (rel: Rel, tag = 'wv'): Rel => make.project({
+    id: fresh(tag), input: rel, channels: carried, type: traverserType, exprs: traverserExprs(rel),
+  });
+  /**
+   * A FINISHED-WALK CONDITION IS ASKED OF THE TRAVERSER, never of the walk relation's internal columns.
+   *
+   * The landed walk carries `EXIT` beside the traverser, and `EXIT` is not payload: a condition lowered over the
+   * walk row itself sees a two-column payload, which `correlatedExistence` rightly refuses (its seed copies the
+   * subject's payload), so `until(…).emit(local(…))` declined. The condition is lowered over `traverserView(rel)`
+   * — a subject whose payload IS `id` — and RETARGETED onto `rel` (`substRelId`): the view is name-preserving, so
+   * every column the condition reads has the same name on `rel`. The retarget is sound only where the condition
+   * reads the view as an OUTER row (a correlated body seeds through a unit row, `lower/scoped.ts` `seedRow`); a
+   * plan that holds the view in a FROM tree would be left reading a relation nothing defines, so it declines.
+   */
+  const asked = (steps: readonly IRStep[], rel: Rel): Expr | null => {
+    const view = traverserView(rel);
+    const tested = child.predicate(steps, subject(view), false);
+    if (!tested) return null;
+    let held = false;
+    forEachExpr(tested, (node) => {
+      for (const plan of exprRels(node)) forEachRel(plan, (r) => { if (r.id === view.id) held = true; });
+    });
+    return held ? null : substRelId(tested, view.id, rel.id);
+  };
   /** `rel` with its `EXIT` answer landed beside it; `null` where the `until` predicate does not lower. */
   const withExit = (rel: Rel, exit: Expr | null): Rel | null => !landed ? rel : !exit ? null : make.project({
     id: fresh('wx'), input: rel, channels: carried, type: walkTypeOf(), exprs: [...traverserExprs(rel), [EXIT, exit]],
@@ -314,9 +340,7 @@ export function repeatWalk(
         // The body reads the traverser's own columns, never `EXIT`.
         const staying = stop === undefined ? self
           : make.filter({ id: fresh('wg'), input: self, channels: carried, type: walkType, pred: notProduced(stop) });
-        const guarded = !landed ? staying : make.project({
-          id: fresh('wt'), input: staying, channels: carried, type: traverserType, exprs: traverserExprs(staying),
-        });
+        const guarded = !landed ? staying : traverserView(staying, 'wt');
         const term = child.chain(guarded, { kind: 'elements', elem }, body, aliases);
         if (!term || term.effects?.length || term.framing.kind !== 'elements'
           || term.framing.elem !== elem || !sameChannels(term.rel.channels, carried)
