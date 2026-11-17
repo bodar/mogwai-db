@@ -1018,6 +1018,11 @@ project's ≈16×.
   `g.V().as('a').where(V().where(neq('a')).values('name').is('p7')).count()` takes 14.6 → 3135 ms at 1k → 8k (215×),
   while the `has('name','p7')` spelling is 2×. Drive `values(k).is(c)` after a re-source through `propertySeek`, as
   `has(k,c)` already is.
+  ✅ **LANDED (f59b6ece).** Semi-join reduction in `src/rel/passes/leading.ts`: a re-source's candidates are narrowed
+  by a filter whose columns are spelled over one owner-joined property scan, so `values(k).is(c)` seeks like
+  `has(k,c)` (no rewrite into `has`, which would differ under list cardinality; a property row joined to a hop
+  declines). Measured: the `is('zzz')` miss went 767 ms at 1k → 3.2 s at 2k to 0.53 ms at 1k → 4.2 ms at 8k
+  (`scripts/scaling-probe.ts`; `test/leading-owner-seek.test.ts`). **Remains:** nothing.
 - **The correlated equality `by()` compare** (`where(V().where(eq('a')).by('name').where(neq('a')))`, a duplicate-name
   finder): 1.16 s → 79 s at 1k → 8k (68×). It was newly reachable with M2; the `coalesce`/`optional` spellings were
   already on trunk at the same cost. The `vp_key_value` index could answer it in N log N. Whether to build this is an
