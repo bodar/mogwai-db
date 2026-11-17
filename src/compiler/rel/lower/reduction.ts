@@ -790,7 +790,7 @@ export function rootedRead(
   // never what the caller remembered to pass.
   const chain = lowerChain(steps, settledOf(ctx), fresh);
   if (!chain) return null;
-  const read = { rel: chain.rel, framing: chain.framing, bulked: chain.bulked };
+  const read = { rel: chain.rel, framing: chain.framing, bulked: chain.bulked, aliases: chain.aliases };
   return chain.effects ? { ...read, effects: chain.effects } : read;
 }
 

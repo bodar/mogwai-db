@@ -515,4 +515,6 @@ export interface RootedRead {
   readonly effects?: readonly Binding[];
   /** Whether a row may stand for more than one traverser (`Tail.bulked`); absent where nobody asked. */
   readonly bulked?: boolean;
+  /** The labels the read binds of its own and still carries on `rel` (`Tail.aliases`). */
+  readonly aliases?: AliasMap;
 }

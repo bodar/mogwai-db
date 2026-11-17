@@ -4,8 +4,8 @@
 //
 // In a child body (`lower/scoped.ts` `reSourcedBody`) the read after the re-source stays ONE shared read: under a
 // FIRST-row host (`map`/`by()`/a filter) a tracked host path crosses unchanged (the child's positions never leave
-// it); under an ALL-rows host (`local`/`flatMap`) the rest splits where it first binds a label or reads the host,
-// and the fold continues over the cross from there. At the ROOT the fold's cross (`lower/movement.ts` `reSource`)
+// it); under an ALL-rows host (`local`/`flatMap`) the rest splits only where it first reads the host, and the fold
+// continues over the cross from there — a label the read binds rides out of the shared read as an alias channel. At the ROOT the fold's cross (`lower/movement.ts` `reSource`)
 // extends a carried path and keeps a sack.
 //
 // A FIRST-row host whose rest reads the host traverser, and an ALL-rows host on a traverser whose path is
@@ -111,7 +111,42 @@ describe('a first-row host keeps ONE shared read under a tracked path: the host 
   test('a first-row pick of a multi-row read', () => expect(count("g.V().out().map(V().limit(1).values('name')).path().count()")).toBe(6));
 });
 
-describe('an all-rows host splits its rest where it first binds or reads the host', () => {
+describe('a label the shared read binds rides out of an all-rows host, never a cut', () => {
+  // The read's own label reads nothing of the host, so it stays inside the ONE shared read and rides out of
+  // the cross as an alias channel: the reducer, slice or filter after it is computed once, not per host.
+  test('local(V().as(x).values(age).max())', () => expect(scalars("g.V().local(V().as('x').values('age').max())")).toEqual(Array(6).fill(35)));
+  test('local(V().as(x).limit(1)).select(x)', () => {
+    // An unordered limit: one shared pick, so every host selects the same vertex (which one is the planner's).
+    const names = scalars("g.V().local(V().as('x').limit(1)).select('x').values('name')");
+    expect(names).toHaveLength(6);
+    expect(new Set(names).size).toBe(1);
+  });
+  test('local(V().as(x).has(lop)).select(x)', () => {
+    expect(scalars("g.V().local(V().as('x').has('name','lop')).select('x').values('name')")).toEqual(Array(6).fill('lop'));
+  });
+  test('two read labels beside a host label', () => {
+    expect(count("g.V().as('h').local(V().has('age').as('x').values('age').as('y').limit(1)).select('h','x','y').count()")).toBe(6);
+  });
+  test('a read label beside a host label of another name keeps both', () => {
+    expect(bagOf(rows("g.V().as('a').local(V().has('name','lop').as('b').limit(1)).select('a','b').by('name')").map((r) => r.map)))
+      .toHaveLength(6);
+  });
+  test('the read label does not leave flatMap() (head.split)', () => {
+    expect(count("g.V().flatMap(V().as('x').has('name','lop')).select('x').count()")).toBe(0);
+  });
+  test('nested: local(local(V().as(x).limit(2)).select(x))', () => {
+    expect(count("g.V().local(local(V().as('x').limit(2)).select('x')).count()")).toBe(12);
+  });
+  test('under where()', () => {
+    expect(count("g.V().where(local(V().as('x').has('name','lop')).select('x').values('name').is('lop')).count()")).toBe(6);
+  });
+  test('a read label of a host label\'s name extends the host\'s history', () => {
+    expect(scalars("g.V().as('x').local(V().has('name','lop').as('x')).select(first,'x').values('name').dedup().count()")).toEqual([6]);
+    expect(scalars("g.V().as('x').local(V().has('name','lop').as('x')).select(last,'x').values('name').dedup()")).toEqual(['lop']);
+  });
+});
+
+describe('an all-rows host splits its rest where it first reads the host', () => {
   test('a slice before the bind is shared: local(V().order().limit(1).as(x))', () => {
     expect(scalars("g.V().local(V().order().by('name').limit(1).as('x')).select('x').values('name')")).toEqual(Array(6).fill('josh'));
   });

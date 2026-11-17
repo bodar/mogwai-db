@@ -11,7 +11,7 @@ import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumn
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
-import { freshTraverserRow } from '../child.ts';
+import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
 import { firstWrite, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
@@ -185,10 +185,10 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * the traverser (`TraversalMapStep` emits whenever the child `hasNext()`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`).
  *
- * Under an ALL-rows host (`local`, `flatMap`) the shared read stops where the rest first binds a label or reads
- * the host's state (`sharedEnd`), and the fold continues over the cross from there — so the cross holds the
- * traversers the reference's split has reached at that step, never the whole graph per host ahead of a filter,
- * order or slice the shared part holds.
+ * Under an ALL-rows host (`local`, `flatMap`) the shared read stops only where the rest first reads the host's
+ * state (`sharedEnd`), and the fold continues over the cross from there — so the cross holds the traversers the
+ * reference's split has reached at that step, never the whole graph per host ahead of a filter, order or slice
+ * the shared part holds. A label the read binds reads nothing of the host: it rides out as an alias channel.
  *
  * What it refuses, from the query text: under a FIRST-row host a rest that reads the HOST traverser's state (its
  * sack, path, loops or a host label — `readsHostState`: one shared evaluation cannot hold them, and a per-host
@@ -221,32 +221,32 @@ function reSourcedBody(
     ctx.declines.note({ kind: 'resource-reads-host', message: hostStateMessage(rest, ctx), terminal: false });
     return null;
   }
-  // An ALL-rows host (`local`, `flatMap`) emits the child's own traversers, so a label the rest binds rides out
-  // and a host label the rest reads is the host's. The rest SPLITS where it first does either (`sharedEnd`): the
-  // part before is one shared read crossed with the prefix — `rest(prefix × G) = rest₂(prefix × rest₁(G))`, where
-  // `rest₁` reads nothing of the host — and the fold continues over that cross, which holds exactly the
-  // traversers the reference's GraphStep split has reached by then (never the whole graph per host ahead of a
-  // filter, order or slice that `rest₁` holds).
-  const cut = first ? rest.length : sharedEnd(rest, ctx);
+  // An ALL-rows host (`local`, `flatMap`) emits the child's own traversers, so a host label the rest reads is the
+  // host's. The rest SPLITS only where it first reads the host (`sharedEnd`): the part before is one shared read
+  // crossed with the prefix — `rest(prefix × G) = rest₂(prefix × rest₁(G))`, where `rest₁` reads nothing of the
+  // host — and the fold continues over that cross. A label the read BINDS reads nothing of the host either, so it
+  // stays inside `rest₁` and rides out of the cross as an alias channel beside the host's (`ownLabels`) — never a
+  // cut, which would put the whole graph per host ahead of a reducer, filter or slice the shared read holds.
+  const cut = first ? rest.length : sharedEnd(rest, prefix.aliases, ctx);
   if (cut < 1) return undefined;
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
   // own. A PATH crosses unchanged under a FIRST-row host too: `map`/`by()`/a filter emit a traverser split from
   // the HOST (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`), so the positions the child's
   // GraphStep appends never leave it (and the rest reads none of them: `readsHostState`). Out of an ALL-rows host
-  // (`local`/`flatMap` emit the child's own traversers) the path is the host's EXTENDED by the read's positions —
-  // a concatenation this cross does not state — and the fold's per-row GraphStep cross would pay the whole graph
-  // per host where the answer may hold one row per host (`out().local(V().order().limit(1)).path()`): declined,
-  // from the query text. An entering vertex (`fromV`) is a hop's: the fold's.
+  // a tracked path is declined above. An entering vertex (`fromV`) is a hop's: the fold's.
   const crosses = (role: ChannelRole): boolean => CROSSES.has(role) || (first && role === 'path');
   if (!prefix.rel.channels.every((channel) => crosses(channel.role) || channel.role === 'encounter')) return undefined;
   const rooted = rootedRead(rest.slice(0, cut), ctx, fresh, 'many');
   if (!rooted || rooted.effects?.length) return null;
   // The read's own position and multiplicity ride; the sack and loop counter a FRESH start traverser holds are
   // superseded by the host's, which the split keeps. A label or path the read binds of its own is shed under a
-  // FIRST-row host — its traversers never leave the child. An all-rows host's read is cut before any top-level
-  // bind (`sharedEnd`), so a label still on it is bound below the top level: the fold's general cross.
-  const own = rooted.rel.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'bulk');
+  // FIRST-row host — its traversers never leave the child. Out of an ALL-rows host the read's labels ride out
+  // (`local` emits the child's own traversers), each under a column the prefix does not carry.
+  const labelled = first ? undefined : ownLabels(rooted, prefix);
+  if (labelled === null) return undefined;
+  const own = rooted.rel.channels.filter((channel) =>
+    channel.role === 'encounter' || channel.role === 'bulk' || (labelled !== undefined && channel.role === 'alias'));
   const kept = (channel: Channel): boolean =>
     own.includes(channel) || (channel.role === 'alias' || channel.role === 'path' ? first : CROSSES.has(channel.role));
   if (!rooted.rel.channels.every(kept)) return undefined;
@@ -257,7 +257,8 @@ function reSourcedBody(
     })
     : rooted.rel;
   const once = isSelfContained(read) ? make.materialize({ id: fresh('srm'), input: read, channels: read.channels, type: read.type, fenced: true }) : read;
-  // The read's columns under fresh names beside the prefix's, then back under their own.
+  // The read's columns under fresh names beside the prefix's, then back under their own (a label under the column
+  // `ownLabels` gave it).
   const renamed = new Map(once.type.cols.map((column) => [column.name, fresh('srv') as string]));
   const right = make.project({
     id: fresh('srp'), input: once, channels: [], type: typeOf(...once.type.cols.map((column) => ({ ...column, name: renamed.get(column.name)! }))),
@@ -266,25 +267,66 @@ function reSourcedBody(
   const crossed = make.join({
     id: fresh('srj'), left: prefix.rel, right, join: 'cross', channels: [], type: typeOf(...prefix.rel.type.cols, ...right.type.cols),
   });
+  const outName = (name: string): string => labelled?.cols.get(name) ?? name;
   const carried = prefix.rel.channels.filter((channel) => crosses(channel.role));
-  const channels = carried.reduce(withChannel, own);
+  const channels = carried.reduce(withChannel, own.map((channel) => ({ ...channel, col: outName(channel.col) })));
   const fromPrefix = new Set(carried.map((channel) => channel.col));
-  const outCols = [...payloadCols(once), ...channels.map((channel) => (fromPrefix.has(channel.col) ? prefix.rel : once).type.cols.find((column) => column.name === channel.col)!)];
+  const source = new Map<string, string>();
+  const readCol = (channelCol: string): ColMeta => {
+    const original = [...(labelled?.cols ?? [])].find(([, to]) => to === channelCol)?.[0] ?? channelCol;
+    source.set(channelCol, renamed.get(original)!);
+    const column = once.type.cols.find((c) => c.name === original)!;
+    return { ...column, name: channelCol };
+  };
+  const outCols = [
+    ...payloadCols(once).map((column) => (source.set(column.name, renamed.get(column.name)!), column)),
+    ...channels.map((channel) => (fromPrefix.has(channel.col) ? prefix.rel.type.cols.find((column) => column.name === channel.col)! : readCol(channel.col))),
+  ];
   const rel = make.project({
     id: fresh('srx'), input: crossed, channels, type: typeOf(...outCols),
-    exprs: outCols.map((column) => [column.name, col(crossed.id, fromPrefix.has(column.name) ? column.name : renamed.get(column.name)!)] as const),
+    exprs: outCols.map((column) => [column.name, col(crossed.id, fromPrefix.has(column.name) ? column.name : source.get(column.name)!)] as const),
   });
+  const aliases = labelled ? labelled.aliases : prefix.aliases;
   return cut < rest.length
-    ? continueAs(rel, rooted.framing, rest, cut, !!rooted.bulked, ctx, fresh, prefix.aliases)
-    : { rel, framing: rooted.framing, aliases: prefix.aliases, bulked: !!rooted.bulked };
+    ? continueAs(rel, rooted.framing, rest, cut, !!rooted.bulked, ctx, fresh, aliases)
+    : { rel, framing: rooted.framing, aliases, bulked: !!rooted.bulked };
+}
+
+/**
+ * The labels an ALL-rows host's shared read binds, riding out beside the prefix's (`reSourcedBody`): each read
+ * label's column renamed to one the prefix does not carry (`a<n>`, the name `bindAliases` would mint), and the
+ * merged alias map. `null` where a read label is not a channel this cross can carry — the read binds a label the
+ * prefix carries too (its history is the prefix's EXTENDED by the read's, which `sharedEnd` cuts ahead of, so only
+ * a bind below the top level reaches here) — the fold's general cross.
+ */
+function ownLabels(rooted: RootedRead, prefix: Tail): { readonly cols: ReadonlyMap<string, string>; readonly aliases: AliasMap } | null {
+  const reads = [...(rooted.aliases ?? [])].filter(([, entry]) => rooted.rel.channels.some((channel) => channel.role === 'alias' && channel.col === entry.col));
+  const aliasCols = rooted.rel.channels.filter((channel) => channel.role === 'alias');
+  // Every alias channel the read carries must be a label it names (a channel no entry names cannot be renamed).
+  if (aliasCols.some((channel) => !reads.some(([, entry]) => entry.col === channel.col))) return null;
+  if (reads.some(([label]) => prefix.aliases.has(label))) return null;
+  const taken = new Set(prefix.rel.type.cols.map((column) => column.name));
+  const aliases = new Map(prefix.aliases);
+  const cols = new Map<string, string>();
+  for (const [label, entry] of reads) {
+    let n = aliases.size;
+    while (taken.has(`a${n}`)) n++;
+    const name = `a${n}`;
+    taken.add(name);
+    cols.set(entry.col, name);
+    const { pathPos: _dropped, ...rest } = entry;
+    aliases.set(label, { ...rest, col: name });
+  }
+  return { cols, aliases };
 }
 
 /** Where an all-rows host's re-sourced rest stops being one shared read (`reSourcedBody`): the first top-level
- *  step that binds a label (`as()`, a `match()`) or reads host state (`hostStateAt`), else its length. */
-function sharedEnd(rest: readonly IRStep[], ctx: ChainCtx): number {
-  const binds = rest.findIndex((step) => asLabelsOf(step).length > 0 || matchLabelsOf(step, ctx.params).length > 0);
+ *  step that reads host state (`hostStateAt`) or REBINDS a label the prefix carries (`as()`, a `match()`) — a
+ *  rebind extends the host's history, which is the host's state — else its length. */
+function sharedEnd(rest: readonly IRStep[], carried: AliasMap, ctx: ChainCtx): number {
+  const rebinds = rest.findIndex((step) => [...asLabelsOf(step), ...matchLabelsOf(step, ctx.params)].some((label) => carried.has(label)));
   const reads = hostStateAt(rest, ctx);
-  const ends = [binds, reads].filter((at) => at >= 0);
+  const ends = [rebinds, reads].filter((at) => at >= 0);
   return ends.length ? Math.min(...ends) : rest.length;
 }
 
