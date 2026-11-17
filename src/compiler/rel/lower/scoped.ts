@@ -22,7 +22,7 @@ import { someStepDeep } from '../../ir/walk.ts';
 import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
 import { bulkObservedFrom } from '../../ir/bulk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
-import { firstArrival, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
+import { defaultCollation, firstArrival, firstRow, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
 import { framingCols, perTraverserFraming, type RecordField, type RelFraming } from '../framing.ts';
 import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, mintBranchOrder, positioned, withBranchEffects } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
@@ -32,7 +32,7 @@ import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import { writeInFilter, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
-import { childSeam, defaultCollation, hostStateAt, perOriginWindow, readsHostState, reductionHost, rootedRead } from './reduction.ts';
+import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
 // §2, S1–S4). Every host here is the same three moves, and only the third differs:
@@ -250,12 +250,8 @@ function reSourcedBody(
   const kept = (channel: Channel): boolean =>
     own.includes(channel) || (channel.role === 'alias' || channel.role === 'path' ? first : CROSSES.has(channel.role));
   if (!rooted.rel.channels.every(kept)) return undefined;
-  const read = first && !atMostOneRow(rooted.rel)
-    ? make.limit({
-      id: fresh('srl'), count: compilerInt(1), channels: rooted.rel.channels, type: rooted.rel.type,
-      input: make.sort({ id: fresh('srs'), input: rooted.rel, channels: rooted.rel.channels, type: rooted.rel.type, terms: defaultCollation(rooted.rel) }),
-    })
-    : rooted.rel;
+  // ONE fenced relation is the read's value AND its presence: a first-row host reads both off `once`.
+  const read = first ? firstRow(rooted.rel, defaultCollation(rooted.rel), fresh) : rooted.rel;
   const once = isSelfContained(read) ? make.materialize({ id: fresh('srm'), input: read, channels: read.channels, type: read.type, fenced: true }) : read;
   // The read's columns under fresh names beside the prefix's, then back under their own (a label under the column
   // `ownLabels` gave it).
@@ -918,8 +914,8 @@ function keyedRows(body: ScopedBody, names: readonly string[], fresh: Minter, fi
 function rowsKeyedBy(
   rel: Rel, correlated: Rel, keyCols: readonly string[], names: readonly string[], fresh: Minter, firstOnly: boolean,
 ): KeyedRows {
-  const first = firstOnly && !atMostOneRow(correlated)
-    ? perOriginWindow(rel, keyCols.map((name) => col(rel.id, name)), [], { scope: 'global', offset: 0, limit: 1 }, fresh)
+  const first = firstOnly
+    ? firstRow(rel, defaultCollation(rel), fresh, { by: keyCols.map((name) => col(rel.id, name)), perScope: correlated })
     : rel;
   const renamed = new Map(names.map((name) => [name, fresh('sf') as string]));
   const keys = keyCols.map(() => fresh('sfk') as string);

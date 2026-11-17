@@ -11,6 +11,8 @@ import type { Arg } from '../../gremlin/frontend.ts';
 import type { RootedRead } from './child.ts';
 import { exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapExprChildren, substRelId } from '../../rel/walk.ts';
 import { exprMayAbort } from '../../rel/raise.ts';
+import { atMostOneRow } from '../../rel/bounds.ts';
+import { countLit } from './const.ts';
 
 /**
  * THE CONSTRUCTION LEAF every RelIR lowering module sits on — the physical schema as the algebra sees
@@ -939,7 +941,7 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed?: false)
 export function firstRootedValue(read: RootedRead, fresh: Minter, typed: true): FirstRootedRow | null;
 export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false): { readonly value: Expr } | FirstRootedRow | null {
   if (read.effects?.length || read.framing.kind !== 'scalar') return null;
-  const encounter = read.rel.channels.find((channel) => channel.role === 'encounter');
+  const encounter = encounterOf(read.rel.channels);
   if (typed) {
     const tag = relHostTag(read.rel, read.framing.type);
     const perRow = tag && tag.kind !== 'lit' ? tag : undefined;
@@ -950,10 +952,7 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
       type: typeOf(meta('v', 'any', true), ...(perRow ? [meta('t', 'text', true)] : []), ...(encounter ? [meta('k', 'any', true)] : [])),
       exprs: [['v', col(read.rel.id, 'v')], ...(perRow ? [['t', perRow] as const] : []), ...(encounter ? [['k', col(read.rel.id, encounter.col)] as const] : [])],
     });
-    const sorted = encounter
-      ? make.sort({ id: fresh('rfs'), input: projected, channels: [], type: projected.type, terms: [{ expr: col(projected.id, 'k'), dir: 'asc' }] })
-      : projected;
-    const one = make.limit({ id: fresh('rfl'), input: sorted, channels: [], type: sorted.type, count: compilerInt(1) });
+    const one = firstRow(projected, encounter ? [{ expr: col(projected.id, 'k'), dir: 'asc' }] : [], fresh);
     const row = make.materialize({ id: fresh('rfm'), input: one, channels: [], type: one.type, fenced: true });
     const readOne = (name: 'v' | 't', type: SqlType): Expr => ({ kind: 'scalar', plan: make.project({
       id: fresh('rfv'), input: row, channels: [], type: typeOf(meta(name, type, true)), exprs: [[name, col(row.id, name)]],
@@ -967,19 +966,97 @@ export function firstRootedValue(read: RootedRead, fresh: Minter, typed = false)
  *  read carries one (`firstRootedValue`'s untyped form, for any payload column: a map read's pairs). NULL
  *  over no rows. The caller has checked the read's framing names `column`. */
 export function firstRootedColumn(read: RootedRead, column: string, fresh: Minter): Expr {
-  const encounter = read.rel.channels.find((channel) => channel.role === 'encounter');
-  const ordered = encounter
-    ? make.limit({
-      id: fresh('rfl'),
-      input: make.sort({ id: fresh('rfs'), input: read.rel, channels: read.rel.channels, type: read.rel.type,
-        terms: [{ expr: col(read.rel.id, encounter.col), dir: 'asc' }] }),
-      channels: read.rel.channels, type: read.rel.type, count: compilerInt(1),
-    })
-    : read.rel;
+  // The read's emission order only: where the encounter is a renumbered unique position, a payload tie-break
+  // would be per-row sort cost with no answer it changes. With no encounter the scalar subquery's first row is
+  // the read's own.
+  const encounter = encounterOf(read.rel.channels);
+  const ordered = encounter ? firstRow(read.rel, [{ expr: col(read.rel.id, encounter.col), dir: 'asc' }], fresh) : read.rel;
   return { kind: 'scalar', plan: make.project({
     id: fresh('rfv'), input: ordered, channels: [], type: typeOf(meta(column, 'any', true)),
     exprs: [[column, col(ordered.id, column)]],
   }) };
+}
+
+const encounterOf = (channels: Channels): Channel | undefined => channels.find((channel) => channel.role === 'encounter');
+
+/**
+ * THE FIRST ROW of `rows` under `order` — the ONE builder every first-row read lands on: a `map(V()…)`/`by(V()…)`
+ * re-source's shared read (`reSourcedBody`), a decorrelated first-row body's pick per scope (`rowsKeyedBy`), a
+ * rooted read's first value (`firstRootedColumn`, `firstRootedValue`). Each caller passes ITS order, since what
+ * makes an order total differs: a re-source or a decorrelated body picks by `defaultCollation` (encounter, then
+ * the payload, so the pick survives `test:perturbed`), a rooted read by its renumbered unique encounter alone.
+ *
+ * Unpartitioned it is `ORDER BY … LIMIT 1` (no order: whichever row the read yields first); `partition` asks for
+ * the first row PER scope key, the per-origin window with a slice of one. A relation that already yields at most one row (per scope: `perScope` is the
+ * CORRELATED body the bound is read off, since the decorrelated rows span every scope) is its own first row —
+ * no sort, no window.
+ */
+export function firstRow(
+  rows: Rel, order: readonly SortTerm[], fresh: Minter, partition?: { readonly by: readonly Expr[]; readonly perScope: Rel },
+): Rel {
+  if (partition) return atMostOneRow(partition.perScope) ? rows : perOriginWindow(rows, partition.by, order, { offset: 0, limit: 1 }, fresh);
+  if (atMostOneRow(rows)) return rows;
+  return make.limit({
+    id: fresh('frl'), count: compilerInt(1), channels: rows.channels, type: rows.type,
+    input: order.length ? make.sort({ id: fresh('frs'), input: rows, channels: rows.channels, type: rows.type, terms: order }) : rows,
+  });
+}
+
+/** The default per-origin collation when the body supplied no `order()`: encounter, then the whole
+ *  payload. TinkerPop leaves an un-ordered per-origin slice IMPL-DEFINED (the corpus asserts "result
+ *  should be OF … count N"), so a deterministic pick from the accepted set is correct and keeps
+ *  `test:perturbed` stable. */
+export function defaultCollation(rows: Rel): SortTerm[] {
+  const position = encounterOf(rows.channels);
+  return [...(position ? [{ expr: col(rows.id, position.col), dir: 'asc' as const }] : []),
+    ...payloadCols(rows).map((column) => ({ expr: col(rows.id, column.name), dir: 'asc' as const }))];
+}
+
+/** The default collation REVERSED — a `tail(n)` is the last n, i.e. the first n under the flipped order.
+ *  When a body `order()` precedes the tail, its order is baked into the `encounter` channel, so flipping
+ *  the encounter-led default collation yields "last n of the ordered stream". The result multiset is the
+ *  same rows either way (a flattened body is a multiset); only the pick is from the tail end. */
+export function reverseCollation(rows: Rel): SortTerm[] {
+  return defaultCollation(rows).map((term) => ({ ...term, dir: term.dir === 'asc' ? 'desc' as const : 'asc' as const }));
+}
+
+/**
+ * THE PER-ORIGIN WINDOW — `ROW_NUMBER() OVER (PARTITION BY <partitionBy> ORDER BY <order>)` filtered to
+ * the slice, then reprojected. The ONE primitive every fan-out body's per-origin slice lands on;
+ * `partitionBy` is the origin-key seam that differs per consumer (an `origin` channel column for
+ * `local`/`flatMap`, a bound alias's id for a `match` pattern, a `by`-host id, an arm's incoming
+ * traverser). `order` empty ⇒ `defaultCollation`.
+ *
+ * `dedupOn`'s shape and Calcite's per-partition top-N EXACTLY: `convertDistinctOn`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`)
+ * projects `ROW_NUMBER() OVER (PARTITION BY keys ORDER BY collation)`, filters the rank, then projects it
+ * away — `ROW_NUMBER` (positional) NOT `rank`, so a `limit` never keeps ties as extra rows. Calcite's
+ * DISTINCT ON keeps `rn = 1`; this keeps `offset < rn ≤ offset+limit` (`limit === null` is the open
+ * `skip`/`range(k,-1)` upper bound), the top-N + range generalization. The corpus pins these as *"result
+ * should be OF … count N"* — the pick per origin is IMPL-DEFINED — but the default order is `encounter` then
+ * the whole payload so the choice is DETERMINISTIC and survives `test:perturbed`.
+ */
+export function perOriginWindow(
+  rows: Rel, partitionBy: Expr | readonly Expr[] | null, order: readonly SortTerm[],
+  slice: { readonly offset: number; readonly limit: number | null }, fresh: Minter, fenced = false,
+): Rel {
+  const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
+  const RN = 'prn';
+  const orderBy = order.length ? order : defaultCollation(rows);
+  const window = rowNumberWindow(rows, RN, rows.channels, { partitionBy: !partitionBy ? [] : Array.isArray(partitionBy) ? partitionBy : [partitionBy as Expr], orderBy }, fresh);
+  // FENCED for a RANDOM() collation (`sample`): the filter reads a column the window computed, and an
+  // inlined window re-evaluates RANDOM() at the clause-reader boundary — the wrong cardinality.
+  const ranked = fenced ? make.materialize({ id: fresh('sm'), input: window, channels: window.channels, type: window.type }) : window;
+  // `ROW_NUMBER` starts at 1, so a zero offset states no lower bound.
+  const upper = (n: number): Expr => ({ kind: 'binary', op: '<=', left: col(ranked.id, RN), right: countLit(n) });
+  const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(slice.offset) };
+  const pred: Expr = slice.limit === null ? lower
+    : slice.offset === 0 ? upper(slice.limit) : and(lower, upper(slice.offset + slice.limit));
+  const kept = make.filter({ id: fresh('pf'), input: ranked, channels: ranked.channels, type: ranked.type, pred });
+  return make.project({
+    id: fresh('pk'), input: kept, channels: rows.channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+  });
 }
 
 /** A rooted body's FIRST ROW, read off one fenced row (`firstRootedValue`'s typed form): its value and

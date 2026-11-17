@@ -5,7 +5,7 @@ import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp,
 import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
-import type { ColMeta, SortTerm } from '../../../rel/types.ts';
+import type { ColMeta } from '../../../rel/types.ts';
 import { exprHasSubquery, forEachExpr, forEachRel, isSelfContained } from '../../../rel/walk.ts';
 import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -14,13 +14,13 @@ import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
 import { optionArms, type OptionArm } from '../../ir/option-map.ts';
 import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
-import { collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS, type Slice } from '../../ir/step.ts';
+import { collectsSideEffect, countOf, FAN_OUT_HOSTS, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
-import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
+import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, perOriginWindow, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeAbsent, meetPresence, presenceDischarged, presenceOf, presentOfHost, statedPresence, type ChildHost, type ChildRows, type HostPresence, type ChildSeam, type ChildValue, type HostRow, type Presence, type RootedRead, type Subject } from '../child.ts';
-import { constLit, countLit, declaredScalarType } from '../const.ts';
+import { constLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
@@ -50,8 +50,9 @@ import { pastBudget } from '../../../sql/kernel/budget.ts';
 
 // CHILD / CORRELATED-REDUCTION — the child seam every host body folds through (childSeam), the correlated
 // first-row read (scalarChild, the index-seeking correlated scalar), the per-origin primitives
-// (childRows/perOriginWindow/mintRowOrigin), the correlated reducers (correlatedReduce/reductionTail) and their
-// rooting helpers (rootedRead/hostSelf/rerootedHost). SHARED substrate, owned by neither the ladder nor the
+// (childRows/mintRowOrigin — the window and first-row builders they share, `perOriginWindow`/`firstRow`, live in
+// `../build.ts`), the correlated reducers (correlatedReduce/reductionTail) and their rooting helpers
+// (rootedRead/hostSelf/rerootedHost). SHARED substrate, owned by neither the ladder nor the
 // scoped-relation connector (`docs/2026-11-16-ladder-retirement-plan.md` R1): the connector's rows read it
 // through `childSeam`/`reductionHost`, and the ladder's per-traverser ROUTE that chooses between its forms is
 // `lower/per-traverser.ts`. The densest slice of the fold; it calls the fold core back.
@@ -300,73 +301,6 @@ export function childResultPath(tail: Tail, opensEntry: boolean, fresh: Minter):
   if (opensEntry && tail.framing.kind === 'scalar' && tail.rel.type.cols.some((column) => column.name === 'v'))
     return { ...tail, rel: appendValuePosition(tail.rel, tail.framing.type, fresh) };
   return { ...tail, rel: dropPath(tail.rel, fresh) };
-}
-
-/**
- * A PER-ORIGIN SLICE — `local(__.out().limit(n))`'s "n per HOST", a `row_number` window PARTITIONED by
- * the `origin` channel. `dedupOn`'s shape (window → filter the rank → reproject), which is Calcite's
- * per-partition top-N EXACTLY: `convertDistinctOn`
- * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`)
- * projects `ROW_NUMBER() OVER (PARTITION BY keys ORDER BY collation)`, filters the rank, then projects
- * it away — with `ROW_NUMBER` (positional) NOT `rank`, so a `limit` never keeps ties as extra rows.
- * Calcite's DISTINCT ON filters `rn = 1`; this keeps the rank where `offset < rn ≤ offset+limit`
- * (`limit === null` is the open `skip`/`range(k,-1)` upper bound), the top-N + range generalization.
- * The corpus pins these as *"result should be OF … count N"* — the pick per origin is IMPL-DEFINED —
- * but the order is `encounter` then the whole payload so the choice is DETERMINISTIC and survives
- * `test:perturbed`, one valid member of the accepted set rather than a scan-luck row.
- */
-/** The default per-origin collation when the body supplied no `order()`: encounter, then the whole
- *  payload. TinkerPop leaves an un-ordered per-origin slice IMPL-DEFINED (the corpus asserts "result
- *  should be OF … count N"), so a deterministic pick from the accepted set is correct and keeps
- *  `test:perturbed` stable. */
-export function defaultCollation(rows: Rel): SortTerm[] {
-  const position = encounterOf(rows.channels);
-  return [...(position ? [{ expr: col(rows.id, position.col), dir: 'asc' as const }] : []),
-    ...payloadCols(rows).map((column) => ({ expr: col(rows.id, column.name), dir: 'asc' as const }))];
-}
-
-/** The default collation REVERSED — a `tail(n)` is the last n, i.e. the first n under the flipped order.
- *  When a body `order()` precedes the tail, its order is baked into the `encounter` channel, so flipping
- *  the encounter-led default collation yields "last n of the ordered stream". The result multiset is the
- *  same rows either way (a flattened body is a multiset); only the pick is from the tail end. */
-export function reverseCollation(rows: Rel): SortTerm[] {
-  return defaultCollation(rows).map((term) => ({ ...term, dir: term.dir === 'asc' ? 'desc' as const : 'asc' as const }));
-}
-
-/**
- * THE PER-ORIGIN WINDOW — `ROW_NUMBER() OVER (PARTITION BY <partitionBy> ORDER BY <order>)` filtered to
- * the slice, then reprojected. The ONE primitive every fan-out body's per-origin slice lands on;
- * `partitionBy` is the origin-key seam that differs per consumer (an `origin` channel column for
- * `local`/`flatMap`, a bound alias's id for a `match` pattern, a `by`-host id, an arm's incoming
- * traverser). `order` empty ⇒ `defaultCollation`.
- *
- * `dedupOn`'s shape and Calcite's per-partition top-N EXACTLY: `convertDistinctOn`
- * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`)
- * projects `ROW_NUMBER() OVER (PARTITION BY keys ORDER BY collation)`, filters the rank, then projects it
- * away — `ROW_NUMBER` (positional) NOT `rank`, so a `limit` never keeps ties as extra rows. Calcite's
- * DISTINCT ON keeps `rn = 1`; this keeps `offset < rn ≤ offset+limit` (`limit === null` is the open
- * `skip`/`range(k,-1)` upper bound), the top-N + range generalization.
- */
-export function perOriginWindow(
-  rows: Rel, partitionBy: Expr | readonly Expr[] | null, order: readonly SortTerm[], slice: Slice, fresh: Minter, fenced = false,
-): Rel {
-  const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
-  const RN = 'prn';
-  const orderBy = order.length ? order : defaultCollation(rows);
-  const window = rowNumberWindow(rows, RN, rows.channels, { partitionBy: !partitionBy ? [] : Array.isArray(partitionBy) ? partitionBy : [partitionBy as Expr], orderBy }, fresh);
-  // FENCED for a RANDOM() collation (`sample`): the filter reads a column the window computed, and an
-  // inlined window re-evaluates RANDOM() at the clause-reader boundary — the wrong cardinality.
-  const ranked = fenced ? make.materialize({ id: fresh('sm'), input: window, channels: window.channels, type: window.type }) : window;
-  // `ROW_NUMBER` starts at 1, so a zero offset states no lower bound.
-  const upper = (n: number): Expr => ({ kind: 'binary', op: '<=', left: col(ranked.id, RN), right: countLit(n) });
-  const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(slice.offset) };
-  const pred: Expr = slice.limit === null ? lower
-    : slice.offset === 0 ? upper(slice.limit) : and(lower, upper(slice.offset + slice.limit));
-  const kept = make.filter({ id: fresh('pf'), input: ranked, channels: ranked.channels, type: ranked.type, pred });
-  return make.project({
-    id: fresh('pk'), input: kept, channels: rows.channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
-  });
 }
 
 /**
@@ -1597,7 +1531,7 @@ export function reSourcedOnce(
       id: fresh('sj'), left: rows, right: candidates, join: 'cross', channels: [], type: typeOf(...rows.type.cols, ...candidates.type.cols),
     });
     const keyed = project(pairs, [int(O), int(RI), int(KI)], (name) => col(pairs.id, name === O ? origin.col : name === RI ? R : K));
-    return perOriginWindow(keyed, col(keyed.id, O), [RANDOM_ORDER], { scope: 'global', offset: 0, limit: n }, fresh, true);
+    return perOriginWindow(keyed, col(keyed.id, O), [RANDOM_ORDER], { offset: 0, limit: n }, fresh, true);
   };
   const n = countOf(draw);
   const chosen = n === 1 ? drawOne() : rankPairs();

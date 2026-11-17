@@ -16,7 +16,7 @@ import { byEqualityKey, modulations, productivityFilter, type Modulation } from 
 import type { AliasMap } from '../../alias.ts';
 import { aliasElementHost, aliasGuard, aliasIdAt, isElementAlias, aliasKeyAt, aliasListAt, aliasProjection } from '../alias.ts';
 import { groupableChannels } from '../../../channels.ts';
-import { payloadCols } from '../build.ts';
+import { payloadCols, perOriginWindow, reverseCollation } from '../build.ts';
 import { exprChildren, freeRelIds } from '../../../rel/walk.ts';
 import { ValueParseError } from '../../../gremlin/coerce.ts';
 import { BY_HOSTS as BY_READERS } from '../../ir/strategies.ts';
@@ -27,7 +27,7 @@ import { pathCarried } from '../path.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
 import { dropPath, mapKeyCollidedOwn, orderRows } from '../lower.ts';
-import { childSeam, perOriginWindow, reverseCollation } from './reduction.ts';
+import { childSeam } from './reduction.ts';
 
 export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
@@ -60,7 +60,7 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
   if (step.name === 'sample') {
     if (bulked) return null;
     return perOriginWindow(input, origin ? col(input.id, origin.col) : null, [RANDOM_ORDER],
-      { scope: 'global', offset: 0, limit: countOf(step) }, fresh, true);
+      { offset: 0, limit: countOf(step) }, fresh, true);
   }
 
   // PER-ORIGIN when an `origin` channel is live: a DETERMINISTIC slice inside a per-parent body (a
@@ -75,7 +75,7 @@ export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter
     // `reverseCollation` falls back to the payload when the body minted no `encounter` (no `order()`),
     // so an unordered per-origin tail is a deterministic impl-defined pick rather than a decline — unlike
     // a GLOBAL tail, which has no position to read and declines below.
-    if (step.name === 'tail') return perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { scope: 'global', offset: 0, limit: countOf(step) }, fresh);
+    if (step.name === 'tail') return perOriginWindow(input, col(input.id, origin.col), reverseCollation(input), { offset: 0, limit: countOf(step) }, fresh);
     if (sliceParamNames(step).some((name) => name != null)) return null;
     let w; try { w = sliceOf(step); } catch (e) { if (e instanceof ValueParseError) throw e; return null; }
     return perOriginWindow(input, col(input.id, origin.col), [], w, fresh);
