@@ -111,6 +111,15 @@ SELECT every 64 tables and answers in either child order; `bothChildOrders` lost
 and `JoinWidthExceeded` remains only as the assembler's assertion. Tests: `test/compiler/host-unroll-width.exec.test.ts`.
 Remains for R2a: nothing. (The copied-draws bullet is a separate item.)
 
+✅ **R2b (copied draws) + R4.4 LANDED (5c656e99, a43f1af1, 760b3d5f).** A drawing body is the connector's and
+always DECORRELATED (never `correlatedBody`): the decorrelator counts the body's OWN draw as touching the scope
+(`decorrelate.ts`; `owning` in `lower/scoped.ts`, `ownDraws` in `src/rel/copies.ts`), so every
+`ORDER BY RANDOM()`/`ROW_NUMBER` is partitioned by the scope key — one draw per scope row, linear (7.9×–8.2× 1k→8k);
+`name.ts` fences a shared drawing CTE; an upstream pick the body only reads stays one shared draw. `ladderOwns` is
+now exactly a draw over a re-source (one shared read: the ladder's explained `shared-draw` decline). Tests:
+`test/compiler/per-scope-draw.exec.test.ts`; L4 dropped two `@Unsupported` tags; L9's existence-draw witness is
+closed. Remains for R2b/R4.4: nothing.
+
 ### R3 — Existence family (smallest; audit says within the bar)
 
 **DECIDED (owner, 2026-11-16): REPLACE (option A).** Speed is not a factor (connector within 1.14×, and it is already
@@ -168,6 +177,7 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
    traverser of bulk |pool| (`group().by(label).by(V().count())`: 2.1 ms at 1k, 18.5 ms at 8k, from the ladder's
    850 ms at 1k). No baselines moved. Remains: nothing.
 4. **Draw bodies** (`local(out().sample(1))`): shared with R2's per-scope draw.
+   ✅ **LANDED with R2b (above).** Remains: nothing.
 5. **Speed:** `flatMap(out().out())` is 1.29×. Splicing a transparent body measured 1.14×, but a pass test pins
    "a body that MOVES is left alone". Decide whether that pin is semantic (cite the reference) or a ladder-era
    fact.
