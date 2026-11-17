@@ -29,7 +29,22 @@ type Minter = (hint: string) => RelId;
  * value — which is why every node on the path must not read it but to copy it, and the rewrite answers `null`
  * (the caller keeps sorting by the number) wherever one does, or wherever a node is not one of the above.
  */
-export function positionKeys(r: Rel, name: string, fresh: Minter): { readonly rel: Rel; readonly keys: readonly SortTerm[] } | null {
+type Keyed = { readonly rel: Rel; readonly keys: readonly SortTerm[] } | null;
+
+/** MEMOIZED per (relation, column): a relation is immutable, so two consumers asking one position — a correlated
+ *  first-row read's value and its presence `EXISTS` — get ONE rewritten relation, not two copies under fresh
+ *  names that every later pass sees as different query blocks (the property seek narrows one, not the other). */
+const positionMemo = new WeakMap<Rel, Map<string, Keyed>>();
+export function positionKeys(r: Rel, name: string, fresh: Minter): Keyed {
+  let known = positionMemo.get(r);
+  if (!known) positionMemo.set(r, known = new Map());
+  if (known.has(name)) return known.get(name)!;
+  const answer = rewritePosition(r, name, fresh);
+  known.set(name, answer);
+  return answer;
+}
+
+function rewritePosition(r: Rel, name: string, fresh: Minter): Keyed {
   const readsCol = (e: Expr, rel: RelId, column: string): boolean => {
     let hit = false;
     forEachExpr(e, (node) => { if (node.kind === 'col' && node.rel === rel && node.name === column) hit = true; });

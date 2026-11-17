@@ -132,6 +132,52 @@ describe('a first-row host whose rest reads the host traverser answers through t
   });
 });
 
+describe('a first-row read over the cross stops at the leading element the body keeps', () => {
+  // `scoped.ts` `leadingFirst`: the first scanned element whose body has a row is found first (one rowid-ordered
+  // read with an EXISTS per element), then the body is read at that element alone. These pin the ANSWERS of the
+  // shapes it rewrites — a hop, a property row, a lookup keyed on a host value, a has() the seek drives.
+  test('map(V().where(neq(a)).out().values(name)): the first other vertex WITH an out-edge', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).out().values('name'))"))).toEqual(bagOf(['lop', ...Array(5).fill('vadas')]));
+  });
+  test('two hops', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).out().out().values('name'))"))).toEqual(Array(5).fill('lop'));
+  });
+  test('a lookup keyed on a host value: the first vertex of the same age', () => {
+    // Ages are distinct, so each person finds itself; a software vertex has no age, so by('age') is unproductive.
+    expect(bagOf(scalars("g.V().as('a').map(V().where(eq('a')).by('age').values('name'))"))).toEqual(bagOf(['josh', 'marko', 'peter', 'vadas']));
+    expect(bagOf(rows("g.V().as('a').project('m').by(V().where(eq('a')).by('age').values('name'))").map((r) => JSON.parse(r.map).length)))
+      .toEqual(bagOf([1, 1, 1, 1, 0, 0]));
+  });
+  test('a has() after the re-source: a match, and none', () => {
+    expect(scalars("g.V().as('a').map(V().has('name','josh').where(neq('a')).values('name'))")).toEqual(Array(5).fill('josh'));
+    expect(count("g.V().as('a').map(V().has('name','zzz').where(neq('a')).values('name')).count()")).toBe(0);
+    expect(count("g.V().as('a').order().by(V().has('name','zzz').where(neq('a')).values('name')).count()")).toBe(0);
+    expect(bagOf(scalars("g.V().as('a').map(V().has('age',gt(30)).where(neq('a')).out().values('name'))"))).toEqual(Array(6).fill('lop'));
+  });
+  test('project().by() of a non-barrier body', () => {
+    expect(bagOf(rows("g.V().as('a').project('n').by(V().where(neq('a')).values('name'))").map((r) => JSON.parse(r.map)[0][1].v)))
+      .toEqual(bagOf(['vadas', ...Array(5).fill('marko')]));
+  });
+  test('an existence test over a hop', () => {
+    expect(bagOf(scalars("g.V().as('a').where(V().where(neq('a')).out().has('name','josh')).values('name')")))
+      .toEqual(bagOf(['josh', 'lop', 'peter', 'ripple', 'vadas']));
+  });
+});
+
+describe('a slice inside a correlated body reads its position\'s keys (`scoped.ts` `slicesByKeys`)', () => {
+  test('limit(1)', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).limit(1).values('name'))"))).toEqual(bagOf(['vadas', ...Array(5).fill('marko')]));
+  });
+  test('range(2,4): the third other vertex', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).range(2,4).values('name'))"))).toEqual(bagOf([...Array(3).fill('josh'), ...Array(3).fill('lop')]));
+  });
+  test('tail(1) and tail(2): the last others', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).tail(1).values('name'))"))).toEqual(bagOf(['ripple', ...Array(5).fill('peter')]));
+    expect(bagOf(rows("g.V().as('a').map(V().where(neq('a')).tail(2).values('name').fold())").map((r) => r.list)))
+      .toEqual(bagOf(['["josh","peter"]', '["josh","ripple"]', ...Array(4).fill('["ripple","peter"]')]));
+  });
+});
+
 describe('a first-row host keeps ONE shared read under a tracked path: the host path crosses unchanged', () => {
   // `map`/`where` emit a traverser split from the HOST, so the child's GraphStep positions never leave it
   // (`TraversalMapStep`): the path is the host's plus map's own result — never a graph cross per host.

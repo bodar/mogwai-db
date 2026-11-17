@@ -137,12 +137,15 @@ export function semijoinAll(plans: readonly Rel[], strategies: readonly OwnerSee
  * - `constantSeek`: a CONSTANT `has(k, v)` on the element gives a seek computed once per statement,
  *   which a correlated seek re-run per outer row must not displace — strategy order, across Filters.
  * - `narrowed`: elements a narrowing already drives, filled as the walk places them, so an element gets
- *   ONE — a second correlated `IN` could only be a per-row CHECK re-running its subquery per candidate.
+ *   ONE — a second correlated `IN` could only be a per-row CHECK re-running its subquery per candidate. Keyed
+ *   to the FILTER that placed it: the same Filter met again (its id, re-built by a substitution that reached
+ *   into one spelling of a correlated read and not another) is a COPY of that one query block, so it narrows
+ *   the same way — else the copy scans the element per host row where the original seeks it.
  */
 interface ElementFacts {
   readonly reached: ReadonlySet<RelId>;
   readonly constantSeek: ReadonlySet<RelId>;
-  readonly narrowed: Set<RelId>;
+  readonly narrowed: Map<RelId, RelId>;
 }
 
 function elementFacts(plans: readonly Rel[], strategies: readonly OwnerSeek[]): ElementFacts {
@@ -169,7 +172,7 @@ function elementFacts(plans: readonly Rel[], strategies: readonly OwnerSeek[]): 
         constantSeek.add(leaf.id);
     }
   });
-  return { reached, constantSeek, narrowed: new Set() };
+  return { reached, constantSeek, narrowed: new Map() };
 }
 
 /**
@@ -237,11 +240,11 @@ function narrowFilter(node: Extract<Rel, { readonly kind: 'filter' }>, terms: re
       for (const term of terms) {
         const target = drivenElement(node, term, correlated);
         const element = target && columnPath(node.input, target.rel, target.name)!.rels.at(-1)!.id;
-        if (!target || !element || facts.reached.has(element) || facts.narrowed.has(element)) continue;
+        if (!target || !element || facts.reached.has(element) || (facts.narrowed.get(element) ?? node.id) !== node.id) continue;
         if (correlated && facts.constantSeek.has(element)) continue;
         const owners = seek(term, target, mint);
         if (!owners) continue;
-        facts.narrowed.add(element);
+        facts.narrowed.set(element, node.id);
         // `IN` is a set test, so the strategy's `DISTINCT` (load-bearing only for a JOIN) is dropped.
         const ids = owners.kind === 'distinct' ? owners.input : owners;
         return make.filter({

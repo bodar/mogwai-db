@@ -196,7 +196,7 @@ export function buildRankedOrderSegment(
   for (let at = 0; at < steps.length; at++) {
     const step = steps[at]!;
     if (step.name !== 'order' || isLocalScope(step) || ranked.has(step)) continue;
-    const keyed = lowerRankHead(steps.slice(0, at + 1), lowering, step);
+    const keyed = lowerRankHead(steps, lowering, step);
     if (!keyed) continue;
     const head = finishLowering(keyed.head);
     if (head.kind !== 'read') continue;

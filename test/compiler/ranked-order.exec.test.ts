@@ -125,6 +125,18 @@ describe('ranked order: the two statements must see ONE stream', () => {
     expect(() => store.query(sql, binds)).toThrow(UNRANKED_KEY);
   });
 
+  // The head lowers the WHOLE chain the resume does (`lowerRankHead`), so a key that reads the chain's order — a
+  // fold of a body, its members in emission order where the chain is ordered — is one text in both statements.
+  // Lowered from the prefix alone, the head's chain was ordered and the resume's was not, and every key missed.
+  test.each([
+    ["g.V().as('a').order().by(V().where(neq('a')).values('name').fold()).limit(2).values('name')", 2],
+    ["g.V().hasLabel('person').as('p').order().by(V().hasLabel('person').where(gt('p')).by('age').values('name').fold()).limit(2).values('name')", 2],
+    ["g.V().hasLabel('person').as('p').order().by(V().hasLabel('person').where(gt('p')).by('age').values('age').fold()).count()", 1],
+    ["g.V().order().by(__.out().values('name').fold()).limit(3).values('name')", 3],
+  ] as const)('a key whose fold reads the chain\'s order ranks in both statements: %s', async (q, n) => {
+    expect(await framed(q)).toHaveLength(n);
+  });
+
   test('the ranking is ONE materialized relation joined once, not a correlated lookup per traverser', () => {
     const plan = compilePlan('g.V().order().by(__.out().values("name").fold()).values("name")', {});
     if (plan.kind !== 'segment' || plan.mode !== 'sync') throw new Error('expected a sync segment');

@@ -131,6 +131,24 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource first: as.local(map(V.where(neq(a)).values))', query: "g.V().as('a').local(map(V().where(neq('a')).values('name'))).count()" },
   { name: 'resource first: as.out.as.map(V.where(neq(a)).where(neq(b)).values)', query: "g.V().as('a').out().as('b').map(V().where(neq('a')).where(neq('b')).values('name')).count()" },
   { name: 'resource first: withSack.map(V.sack)', query: 'g.withSack(1).V().map(V().sack()).count()' },
+  // The M2 review's quadratic shapes: a non-barrier body is one next()/hasNext() per host by meaning, so linear.
+  { name: 'resource first: as.project.by(V.where(neq(a)).values)', query: "g.V().as('a').project('n').by(V().where(neq('a')).values('name')).count()" },
+  { name: 'resource first: as.project.by(V.where(eq(a)).by(age).values).select', query: "g.V().as('a').project('m').by(V().where(eq('a')).by('age').values('name')).select('m').count()" },
+  { name: 'resource first: as.map(V.where(eq(a)).by(age).values)', query: "g.V().as('a').map(V().where(eq('a')).by('age').values('name')).count()" },
+  { name: 'resource first: as.map(V.where(neq(a)).out.values)', query: "g.V().as('a').map(V().where(neq('a')).out().values('name')).count()" },
+  { name: 'resource first: as.map(V.where(neq(a)).limit.values)', query: "g.V().as('a').map(V().where(neq('a')).limit(1).values('name')).count()" },
+  // A MISS reads the whole graph per host, as the reference's exhausted child does (`TraversalFilterStep` `hasNext()` over
+  // `V().where(neq(a)).out().has(zzz)`): N × (G + E) by the query's meaning, where no index answers the miss.
+  { name: 'resource xNG: as.where(V.where(neq(a)).out.has(zzz)) — a miss', query: "g.V().as('a').where(V().where(neq('a')).out().has('name','zzz')).count()" },
+  { name: 'resource first: as.map(V.has(zzz).where(neq(a)).values)', query: "g.V().as('a').map(V().has('name','zzz').where(neq('a')).values('name')).count()" },
+  { name: 'resource first: as.order.by(V.has(zzz).where(neq(a)).values)', query: "g.V().as('a').order().by(V().has('name','zzz').where(neq('a')).values('name')).count()" },
+  { name: 'resource first: as.project.by(V.where(neq(a)).values).select', query: "g.V().as('a').project('n').by(V().where(neq('a')).values('name')).select('n').count()" },
+  { name: 'resource first: as.local(map(V.where(neq(a)).out.values))', query: "g.V().as('a').local(map(V().where(neq('a')).out().values('name'))).count()" },
+  { name: 'resource first: as.union(map(V.where(neq(a)).out.values),constant)', query: "g.V().as('a').union(map(V().where(neq('a')).out().values('name')), constant('x')).count()" },
+  { name: 'resource first: as.out.as.map(V.where(neq(b)).out.out.values)', query: "g.V().as('a').out().as('b').map(V().where(neq('b')).out().out().values('name')).count()" },
+  { name: 'resource first: as.map(V.where(neq(a)).range(2,4).values)', query: "g.V().as('a').map(V().where(neq('a')).range(2,4).values('name')).count()" },
+  { name: 'resource first: as.map(V.has(age,gt(30)).where(neq(a)).out.values)', query: "g.V().as('a').map(V().has('age',gt(30)).where(neq('a')).out().values('name')).count()" },
+  { name: 'resource xNG: as.coalesce(V.where(neq(a)).out.has(p3).values,constant)', query: "g.V().as('a').coalesce(V().where(neq('a')).out().has('name','p3').values('name'), constant('none')).count()" },
   // The first-row hosts the N1 review measured quadratic when a path-carrying or simplePath prefix fell to the
   // fold's per-row cross: the shared read must stay ONE read under them.
   { name: 'resource: out.map(V.max).path', query: "g.V().out().map(V().values('age').max()).path().count()" },

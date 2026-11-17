@@ -1194,9 +1194,17 @@ function rankedRows(
 }
 
 /**
- * THE HEAD of a ranked-order barrier — the chain through `steps[last]` (a GLOBAL `order()` SQL cannot
- * compare) read as the DISTINCT key texts of its traversers, one scalar `v` per key, or `null` where the
- * step is not one this lowering had to rank (SQL compared it after all, or the prefix does not lower).
+ * THE HEAD of a ranked-order barrier — the chain through `step` (a GLOBAL `order()` SQL cannot compare)
+ * read as the DISTINCT key texts of its traversers, one scalar `v` per key, or `null` where the step is not
+ * one this lowering had to rank (SQL compared it after all, or the prefix does not lower).
+ *
+ * It lowers the WHOLE chain the resume lowers, and keeps only what the step deposits: the key text is
+ * matched across the two statements by byte equality, so both must lower the prefix under ONE set of chain
+ * facts. A head lowered from the prefix alone analysed a different chain — one whose `order()` is the wire
+ * terminal, so it demanded an emission order the whole chain does not — and a key that reads the order (a
+ * `fold()` of a body, whose members follow emission order where the chain is ordered and value order where
+ * it is not) came out as two texts: a resume meeting a key the head never ranked
+ * (`order().by(V().where(neq('a')).values('name').fold())`).
  *
  * A chain that WRITES declines: the resume re-reads the prefix, and a key a mutation moved between the
  * two statements would be ranked against the wrong graph. So do effects — a head is a pure read. So does
@@ -1213,8 +1221,10 @@ export function lowerRankHead(
   const fresh = minter();
   const sink: RankSink = {};
   const settled = settle({ ...opts, rankedOrders: new Map([...(opts.rankedOrders ?? []), [step, { kind: 'keys', sink }]]) });
+  // The steps after `step` lower over its unsorted pass-through and are discarded; the head never needed them
+  // to lower — the resume's own plan is checked by the caller.
   const chain = lowerChain(steps, settled, fresh);
-  if (!chain || chain.effects?.length || !sink.rel || !sink.dirs) return null;
+  if (chain?.effects?.length || !sink.rel || !sink.dirs) return null;
   const keyed = sink.rel;
   const keys = make.distinct({
     id: fresh('okd'), channels: [], type: typeOf(meta('v', 'text')),
