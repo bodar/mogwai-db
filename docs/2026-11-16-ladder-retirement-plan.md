@@ -1251,6 +1251,17 @@ outer row only through an equality on an indexed column into a once-per-statemen
 boundary shapes are its tests. (b) needs a design pass before building; say if it is a new node rule or an extension
 of `existenceOverOwnRows`.
 
+✅ **T3(a) LANDED (614a69e4, 6b1457dd, 4231ed52).** `leading.ts` splits `ownerJoined` into `ownerScan` + `ownerProbe`:
+every spine conjunct over one owner-joined property row becomes ONE `EXISTS`, holding the place of its first conjunct,
+so the seek lifts the whole TextP conjunction (`values('name').is(containing('zz'))` after a re-source in `where()`:
+646 ms → 43.9 s @1k→8k before, 6 → 10 ms now). `narrowFilter` (`src/rel/passes/semijoin.ts`) now narrows by the
+INTERSECTION of every self-contained seek on the element (`allOwners`, one uncorrelated IN per statement) instead of
+ranking one, and a stack of Filters joins its lowest Filter's intersection (`ElementFacts.above`); all witnesses
+linear 1k→8k (`test/leading-owner-seek.test.ts`). No baseline moved. **Remains:** (b), and two quadratic re-source
+shapes left for follow-up items because each needs different substrate: the leading candidate filter cannot see an
+owner conjunct inside a nested `where(values(k).is(c))` (T4's lowering fix is its natural home); and the decorrelated
+`flatMap(V().where(neq('a'))…)` cross-joins a materialized nodes CTE that no seek can narrow (part of (b)'s design).
+
 ### T4 — `where(is(c))` / `filter(is(c))` over a value lowers like `is(c)` (minor, depth gap next to S5a's witness)
 
 `V().where(neq('a')).values('age').where(is(99))` and `.filter(is(99))` do not get S5a's narrowing and are roughly
