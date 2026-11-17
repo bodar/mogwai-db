@@ -665,3 +665,30 @@ Unblocks N7.
    Should vertex-quadratic but traverser-linear cost be in the performance rule's scope? If yes, build it as one fuse.ts
    AggregateJoinTransposeRule (COUNT/SUM over a cross join), not a pooledGroup law; if no, strike N3 from the plan."
    (M2's reducing-rest policy is the same question in another host. Answer them together.)
+
+### Owner answers (2026-11-17) — questions 2–5 are DECIDED; build from these
+
+- **Q2 — `repeat` until/emit: option B.** Bounded (`times(n)`) `emit`/`until` conditions lower through the
+  connector's existence row at each unrolled phase — today a bounded loop declines conditions the unbounded one
+  answers (measured: `emit(out().count().is(gt(1))).repeat(out()).times(2)` declines, the same without `times`
+  answers; also `emit(map(…))`, `emit(where(…mean()…))`, `emit(coalesce(…))`, `emit(local(…limit(1)))`, and the L1
+  `emit(hasLabel('person')).repeat(out().order().by('name')).times(2)`). Then MEASURE whether the unbounded condition
+  can take the connector's correlated form (SQLite forbids aggregates/windows in the recursive SELECT, not inside a
+  correlated subquery — `count().is()` already works there). Only what SQLite genuinely cannot hold stays
+  `host-owned`, with that limit as its recorded reason. Owner: "the implementation there has to be a limited one" —
+  a partial is accepted where SQLite forces it, so users don't have to think about it elsewhere.
+- **Q3 — margins.** (a) ACCEPT the `group` margins (`by(label).by(count())` 1.40×, `by('name').by(tail())` 1.30×) as
+  named margins; R5 step 4 deletes the route. Default users already run the connector, so the delete slows no one.
+  QUEUE (not a gate) a decorrelation rule that closes the remaining join-then-GROUP BY gap. (b) N5 is a FIX, not a
+  margin: a plain per-key `MIN`/`MAX` where only the value is read — a 4.3× default-mode regression R4.1 introduced.
+- **Q4 — deferred-host split: option B (widest scope).** Confirmed, plus: writes (`WRITE_ARG`) and option maps
+  (`OPTION_MAP`) come INTO scope as CONNECTORS rows (they answer connector-only today through the shared substrate;
+  the point is that no position is a special case); `V`/`E` (`RESOURCE`) is stale since R4.3 (`map(V().count())`
+  answers connector-only) — make it a row; bounded `repeat` per Q2; `sideEffect` with effects is R6's FIRST item —
+  `g.V().sideEffect(out().aggregate('x')).cap('x')` declines in EVERY mode today. Not this plan:
+  `g.V().as('a').mergeV(project('name').by(select('a').values('name')))` declines in every mode → `docs/outstanding-work.md`.
+- **Q5 — N3 + M2: option A.** Vertex-quadratic but traverser-linear cost IS in scope. Build the general
+  `AggregateJoinTransposeRule` (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/AggregateJoinTransposeRule.java`)
+  in `fuse.ts` — COUNT/SUM over a cross join factored per side — not a pooledGroup law. First scenario: bulk/
+  multiplicity (the count×count arithmetic is where it can go wrong). M2: make the policies consistent by the first-row
+  path ANSWERING the cross it declines today — never decline on cost.
