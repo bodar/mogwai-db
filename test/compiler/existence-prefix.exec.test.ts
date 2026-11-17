@@ -182,7 +182,7 @@ describe('a write in a non-filter child body declines, naming the write, the hos
     ["g.V().has('name','zz').fold().coalesce(unfold(), addV('person').property('name','zz'))", 'addV', 'coalesce', UPSERT, SURE],
     ["g.V().has('name','marko').coalesce(outE('knows').has('weight',0.5), addE('knows').to(V(2)))", 'addE', 'coalesce', UPSERT, SURE],
     ["g.V().local(property('x', 1))", 'property', 'local', OUTER, SURE],
-    ['g.V().sideEffect(drop())', 'drop', 'sideEffect', OUTER, MAYBE],
+    ['g.V().sideEffect(drop())', 'drop', 'sideEffect', OUTER, SURE], // R6: sideEffect() is a CONNECTORS host, so the fold declines AT it
     ["g.V().local(mergeV([name: 'zz']))", 'mergeV', 'local', OUTER, SURE],
     ["g.V().optional(addV('x'))", 'addV', 'optional', UPSERT, SURE],
     ["g.V().group().by(addV('x'))", 'addV', 'group().by', OUTER, SURE],
