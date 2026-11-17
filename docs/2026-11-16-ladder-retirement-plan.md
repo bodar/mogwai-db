@@ -886,6 +886,23 @@ BEFORE the item it unblocks. Major items come first.
 
 ### S1 — One correlated row read per host (SUBSTRATE: shared root cause of four findings; do first)
 
+✅ **LANDED (11992908).** `correlatedFirst` (`src/compiler/rel/lower/scoped.ts`) returns one Pick the host attaches:
+where every payload column is a function of one carried key (`pickKey` over the new `columnLineage` authority in
+`src/rel/copies.ts`), the key is searched once and value, vtype and presence are read off it; otherwise the scalar
+columns move as one substitution with a presence probe built from the same `positionKeys`/`leadingRead`. The
+`positionKeys`/`leadingRead` WeakMaps and semijoin's Filter-id `narrowed` key are deleted; `dropUnreadJoins`
+(`src/rel/passes/prune.ts`) drops an unread keyed pick. sql-hygiene now fails a SELECT list that spells one
+correlated subquery twice; the remaining cases are banked in `scripts/sql-hygiene-respelled.json`. **Remains:**
+1. Arg-min/arg-max keyed pick for min/max bodies (witnesses 1–2). The reducer (`src/compiler/rel/reducer.ts`) needs a
+   form that exposes the winning row's key while keeping its eligibility, mixed-class and decimal raises. Until then
+   they stay as two scalar reads (value and type tag), recorded in `scripts/sql-hygiene-respelled.json`.
+2. The `priorityArms` per-arm-per-column path (out of scope; needs an arm-tagged key).
+3. Other double spellings the new hygiene gate surfaced: `format()`/`concat()` reading one value twice, and
+   `choose().option` arms. All are banked in `sql-hygiene-respelled.json`.
+4. The `both().both()` re-source pick's super-linear 1k→8k ratio predates this item (trunk's values variant is 28×);
+   it would need S2/S3-style bounded per-host work.
+5. Separate finding: `group().by(id()).by(map(V().where(neq('a'))…))` still declines.
+
 Several round-4 reviewers found the same root cause from different sides. A correlated per-host pick is emitted as
 one scalar subquery PER COLUMN, plus a presence `EXISTS`, and each one re-spells the same body. That breaks the rule
 that an expression is computed once:
