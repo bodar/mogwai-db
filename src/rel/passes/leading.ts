@@ -173,10 +173,9 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
     forEachExpr(path, (node) => { if (node.kind === 'col' && inSeed.has(node.rel)) own = true; });
     return own || exprHasSubquery(path) ? null : path;
   };
-  // Candidate conjuncts in SPINE ORDER. A group of owner-joined conjuncts holds the place of its FIRST member, so
-  // grouping never reorders what the seek sees: `semijoin`'s `narrowFilter` lifts the first seekable term by
-  // position, and a probe moved behind a later `has()` term hands the seek that term instead (measured: a
-  // `has('age', gt(30))` range seek displacing a `values('name').is('p7')` probe went 18x over 4x N).
+  // Candidate conjuncts in SPINE ORDER; a group of owner-joined conjuncts holds the place of its FIRST member. The
+  // narrowing seek does not depend on it — `semijoin`'s `narrowFilter` intersects every seekable term
+  // (`allOwners`) — but the candidate filter then reads in the query's own order.
   const pushed: (Expr | OwnerScan[])[] = [];
   const guards: Expr[] = [];
   // Conjuncts over an owner-joined property row, grouped by the one scan each resolves to (`ownerScan`).

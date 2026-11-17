@@ -10,7 +10,7 @@ import { seededStore, zooStore } from './support/harness.ts';
 
 // A CORRELATED re-source filtered over an OWNER-JOINED property row — `V().where(neq('a')).values('name').is(c)`,
 // `properties('name').hasValue(c)` — narrows its candidates by the property seek exactly as `has('name', c)` does
-// (`ownerJoined`, `src/rel/passes/leading.ts`): the spine conjunct over the property row becomes a candidate
+// (`ownerScan`/`ownerProbe`, `src/rel/passes/leading.ts`): the spine conjunct over the property row becomes a candidate
 // `EXISTS(props WHERE props.owner = cand.id AND …)`, the shape `semijoin`'s `ownerColumn`/`indexSeek` recognise, so
 // the candidates read `vp_key_value` once per statement. Before it a MISS read the whole graph per host:
 // measured 767 ms at 1k → 3.2 s at 2k vertices on the `is('zzz')` shape below.
@@ -53,11 +53,19 @@ const SEEKS = [
   "g.V().as('a').where(V().where(neq('a')).values('name').is(endingWith('sh'))).values('name')",
   "g.V().as('a').where(V().where(neq('a')).values('name').is(startingWith('m')).is(endingWith('o'))).values('name')",
   "g.V().as('a').not(V().where(neq('a')).values('name').is(notContaining('o'))).values('name')",
-  // A `has()` conjunct beside the owner-joined one: the seek drives from whichever the index can BOUND (an
-  // equality, `seekOrder` in `semijoin.ts`), whatever order the query states them in.
+  // A `has()` conjunct beside the owner-joined one: the narrowing is the INTERSECTION of every seek on the element
+  // (`allOwners` in `semijoin.ts`), never a choice of one, whatever order the query states them in.
   "g.V().as('a').where(V().where(neq('a')).has('age', gt(30)).values('name').is('josh')).values('name')",
   "g.V().as('a').where(V().where(neq('a')).has('name', 'josh').values('age').is(gt(30))).values('name')",
+  "g.V().as('a').where(V().where(neq('a')).has('label', 'person').values('name').is('josh')).values('name')",
+  "g.V().as('a').not(V().where(neq('a')).has('lang', 'java').values('name').is('zz')).values('name')",
+  "g.V().as('a').where(V().where(neq('a')).has('lang', 'java').properties('name').hasValue('lop')).values('name')",
+  "g.V().as('a').where(V().where(neq('a')).has('lang', 'java').has('name', 'ripple')).values('name')",
+  "g.V().as('a').where(V().where(neq('a')).has('age', gt(26)).has('name', 'josh')).values('name')",
 ];
+
+/** The narrowing seeks, intersected: `IN (SELECT … FROM vertex_properties … AND rsk.node IN (SELECT …))`. */
+const intersected = (q: string): boolean => /rsk\d+\.node IN \(SELECT rsk\d+\.node AS sid FROM vertex_properties/.test(sql(q));
 
 /** The owner-probe `EXISTS`es `leading` puts on the candidates — `SELECT <props>.node AS one FROM vertex_properties`. */
 const ownerProbes = (q: string): number => sql(q).match(/EXISTS \(SELECT \w+\.node AS one FROM vertex_properties/g)?.length ?? 0;
@@ -78,6 +86,18 @@ describe('a filter over an owner-joined property row narrows the leading candida
   ]) {
     test(`every conjunct over the one property row is ONE owner EXISTS: ${q}`, () => {
       expect(ownerProbes(q)).toBe(1);
+    });
+  }
+
+  // A low-cardinality `has()` (`kind`, `type`, `status`) beside a selective one must not drive the narrowing
+  // alone: the candidates and the body's stacked Filters are each narrowed by the intersection of every seek.
+  for (const q of [
+    "g.V().as('a').where(V().where(neq('a')).has('lang', 'java').values('name').is('zz')).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('lang', 'java').properties('name').hasValue('zz')).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('lang', 'java').has('name', 'zz')).count()",
+  ]) {
+    test(`every seek on the element narrows it together: ${q}`, () => {
+      expect(intersected(q)).toBe(true);
     });
   }
 
@@ -127,12 +147,12 @@ describe('the narrowing NARROWS and never decides', () => {
 });
 
 describe('scaling', () => {
-  /** `n` vertices `p{i}` aged `i % 100` with a ring of edges — enough for a re-source per host. */
+  /** `n` vertices `p{i}` aged `i % 100`, all of `kind` person, with a ring of edges — enough for a re-source per host. */
   const graph = (n: number): GraphStore => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     loadBulk(
       store,
-      Array.from({ length: n }, (_, i) => ({ id: i + 1, labels: ['person'], properties: [{ key: 'name', value: `p${i + 1}` }, { key: 'age', value: (i + 1) % 100 }] })),
+      Array.from({ length: n }, (_, i) => ({ id: i + 1, labels: ['person'], properties: [{ key: 'name', value: `p${i + 1}` }, { key: 'age', value: (i + 1) % 100 }, { key: 'kind', value: 'person' }] })),
       Array.from({ length: n }, (_, i) => ({ label: 'knows', src: i + 1, tgt: ((i + 1) % n) + 1 })),
     );
     return store;
@@ -160,6 +180,14 @@ describe('scaling', () => {
     "g.V().as('a').where(V().where(neq('a')).has('age', gt(30)).values('name').is('p7')).count()",
     "g.V().as('a').where(V().where(neq('a')).has('name', 'p7').values('age').is(gt(30))).count()",
     "g.V().as('a').where(V().where(neq('a')).has('age', gt(30)).values('name').is(containing('zz'))).count()",
+    // A `has()` every vertex meets beside a selective probe or `has()`: the narrowing is their intersection, so
+    // the unselective one never drives alone (it did: 755 ms @1k → 3.05 s @2k).
+    "g.V().as('a').where(V().where(neq('a')).has('kind','person').values('name').is('zz')).count()",
+    "g.V().as('a').not(V().where(neq('a')).has('kind','person').values('name').is('zz')).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('kind','person').properties('name').hasValue('zz')).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('kind','person').values('name').is(containing('zz'))).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('kind','person').has('name','zz')).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('kind','person').has('age', gt(200))).count()",
   ]) {
     test(`linear from 1k to 8k: ${q}`, async () => {
       const t1 = await timed(() => answer(small, q));
