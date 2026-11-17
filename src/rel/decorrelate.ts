@@ -1,4 +1,4 @@
-import { atMostOneRow, rowBounds } from './bounds.ts';
+import { atMostOneRow, rowBounds, rowBoundsWith } from './bounds.ts';
 import { ownDraws } from './copies.ts';
 import type { Expr } from './expr.ts';
 import { and, col, compilerInt, compilerNull, compilerText, eq } from './expr.ts';
@@ -70,9 +70,10 @@ import { freeRelIds, mapRelChildren, recursiveStep, relChildren, relExprs, rewri
  * - the FILTER `input.c IS outer.d` (null-safe, so a NULL key keeps its bucket) is the key projection itself:
  *   the input is keyed by its own columns, read in place of the domain's — `D` is never joined;
  * - the KEY is then those columns jointly (`Decorrelated.key`), not the outer relation's row key;
- * - a SCALAR aggregate whose input COVERS the domain (every key has at least one row — `Out.covering`, which
- *   the eliminated filter establishes under `covers`: every key tuple has a member) needs no LEFT JOIN to `D`,
- *   whatever the aggregate is. That is a STRONGER fact than the one Calcite's `Aggregate` rule keys on: it
+ * - a SCALAR aggregate whose input COVERS the domain (every key has at least one row) needs no LEFT JOIN to
+ *   `D`, whatever the aggregate is. Covering is `rowBounds` of the CORRELATED input, `min >= 1` (read per
+ *   outer row, `src/rel/bounds.ts`), told one fact the plan does not state: the eliminated filter, under
+ *   `covers`, has a row for every key tuple (`covered`). That is a STRONGER fact than the one Calcite's `Aggregate` rule keys on: it
  *   keeps the join for a `COUNT` (the count bug), because it knows the key is equi-correlated, not that each
  *   key has a row. Without `covers` the LEFT JOIN stays, matched null-safely on the key tuple.
  */
@@ -106,8 +107,7 @@ export function keyMatch(key: readonly KeyColumn[], left: (k: KeyColumn) => Expr
 }
 
 type Minter = (hint: string) => RelId;
-/** `covering`: every domain key has at least one row (a scalar aggregate over it needs no LEFT JOIN). */
-interface Out { readonly rel: Rel; readonly keyed: boolean; readonly covering?: boolean }
+interface Out { readonly rel: Rel; readonly keyed: boolean }
 
 /** The value an aggregate function takes over ZERO rows — SQL's own rule, which the correlated plan obeyed. */
 function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
@@ -197,7 +197,6 @@ export function decorrelate(
     });
     return {
       keyed: true,
-      covering: rowBounds(r).min >= 1,
       rel: make.project({
         id: fresh('dxp'), input: crossed, channels: r.channels, type: { cols: withD(r.type.cols) },
         exprs: [...r.type.cols.map((c) => [c.name, col(crossed.id, c.name)] as const), ...dPass(crossed.id)],
@@ -221,9 +220,19 @@ export function decorrelate(
     return { rel, names };
   };
 
+  /** The key-projection filters eliminated with no conjunct left, under `covers`: each has a row for EVERY
+   *  key tuple (every outer row has a member) — the one fact `covered` adds to `rowBounds`. */
+  const coveringFilters = new Set<Rel>();
+  /** THE COVERING QUESTION — does `input` (the CORRELATED plan, read per outer row: `rowBounds`' per-evaluation
+   *  reading) yield at least one row for every key? `rowBounds` decides it, told the one fact the plan does not
+   *  state: an eliminated key-projection filter in `coveringFilters` keeps a row for every key. */
+  const covered = (input: Rel): boolean =>
+    rowBoundsWith(input, (x) => (coveringFilters.has(x) ? { min: 1, max: rowBounds(x).max } : undefined)).min >= 1;
+
   /** The filter `input.c IS outer.d` over the projection's own input, for every projected pair: the input keyed
-   *  by its own columns, `D` never joined. Covering — every key tuple has a member. `null` where the filter is
-   *  not that (a pair missing, `=` rather than the null-safe `IS`, another conjunct reading the outer row). */
+   *  by its own columns, `D` never joined. Under `covers` with no other conjunct, every key tuple has a member
+   *  (`coveringFilters`). `null` where the filter is not that (a pair missing, `=` rather than the null-safe
+   *  `IS`, another conjunct reading the outer row). */
   const keyProjected = (r: Extract<Rel, { kind: 'filter' }>): Out | null => {
     const projection = eliminating!;
     const conjuncts: Expr[] = [];
@@ -242,8 +251,9 @@ export function decorrelate(
     const base = rest.length
       ? make.filter({ id: fresh('dkf'), input: r.input, channels: r.channels, type: r.input.type, pred: rest.reduce((a, b) => and(a, b)) })
       : r.input;
+    if (projection.covers && !rest.length) coveringFilters.add(r);
     return {
-      keyed: true, covering: projection.covers && !rest.length,
+      keyed: true,
       rel: make.project({
         id: r.id, input: base, channels: r.channels, type: { cols: withD(r.type.cols) },
         exprs: [...r.type.cols.map((c) => [c.name, col(base.id, c.name)] as const),
@@ -298,7 +308,7 @@ export function decorrelate(
         // A one-row correlated VALUES is the outer row itself: read it off the domain.
         const row = r.rows[0]!;
         return {
-          keyed: true, covering: true,
+          keyed: true,
           rel: make.project({
             id: r.id, input: domain, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.type.cols.map((c, i) => [c.name, fromDomain(row[i]!, domain.id)] as const), ...dPass(domain.id)],
@@ -319,7 +329,7 @@ export function decorrelate(
             return at < 0 ? n : unit.rows[0]![at]!;
           });
           return {
-            keyed: true, covering: true,
+            keyed: true,
             rel: make.project({
               id: r.id, input: domain, channels: r.channels, type: { cols: withD(r.type.cols) },
               exprs: [...r.exprs.map(([n, e]) => [n, fromDomain(literal(e), domain.id)] as const), ...dPass(domain.id)],
@@ -328,7 +338,7 @@ export function decorrelate(
         }
         const k = ensureKeyed(input);
         return {
-          keyed: true, covering: k.covering,
+          keyed: true,
           rel: make.project({
             id: r.id, input: k.rel, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.exprs.map(([n, e]) => [n, moved(e, r.input.id, k.rel.id)] as const), ...dPass(k.rel.id)],
@@ -349,9 +359,9 @@ export function decorrelate(
         switch (r.kind) {
           case 'filter': return { keyed: true, rel: make.filter({ ...base, pred: at(r.pred) }) };
           // The key LEADS: an order inside one key is the plan's order, and a consumer reads it per key.
-          case 'sort': return { keyed: true, covering: k.covering, rel: make.sort({ ...base, terms: [...keyTerms(k.rel.id), ...r.terms.map((t) => ({ ...t, expr: at(t.expr) }))] }) };
-          case 'distinct': return { keyed: true, covering: k.covering, rel: make.distinct(base) };
-          case 'materialize': return { keyed: true, covering: k.covering, rel: make.materialize({ ...base, ...(r.name ? { name: r.name } : {}), ...(r.fenced ? { fenced: r.fenced } : {}) }) };
+          case 'sort': return { keyed: true, rel: make.sort({ ...base, terms: [...keyTerms(k.rel.id), ...r.terms.map((t) => ({ ...t, expr: at(t.expr) }))] }) };
+          case 'distinct': return { keyed: true, rel: make.distinct(base) };
+          case 'materialize': return { keyed: true, rel: make.materialize({ ...base, ...(r.name ? { name: r.name } : {}), ...(r.fenced ? { fenced: r.fenced } : {}) }) };
         }
       }
       case 'limit': {
@@ -369,7 +379,7 @@ export function decorrelate(
         // no per-key window. A PARAMETER count is the user's to vary, so the plan does not depend on it.
         if (keeps && (!r.count || (r.count.kind === 'lit' && r.count.source !== 'parameter')) && atMostOneRow(r.input)) {
           return {
-            keyed: true, covering: k.covering,
+            keyed: true,
             rel: make.project({ id: r.id, input: k.rel, channels: r.channels, type: k.rel.type, exprs: k.rel.type.cols.map((c) => [c.name, col(k.rel.id, c.name)] as const) }),
           };
         }
@@ -389,7 +399,7 @@ export function decorrelate(
           : { kind: 'binary', op: 'and', left: lower, right: { kind: 'binary', op: '<=', left: rn, right: compilerInt((offset ?? 0) + count) } };
         const kept = make.filter({ id: fresh('dlf'), input: windowed, channels: windowed.channels, type: windowed.type, pred });
         return {
-          keyed: true, covering: keeps && k.covering,
+          keyed: true,
           rel: make.project({
             id: r.id, input: kept, channels: r.channels, type: k.rel.type,
             exprs: k.rel.type.cols.map((c) => [c.name, col(kept.id, c.name)] as const),
@@ -412,7 +422,7 @@ export function decorrelate(
           id: fresh('dwn'), input: k.rel, channels: r.channels, type: { cols: [...k.rel.type.cols, ...minted] }, specs,
         });
         return {
-          keyed: true, covering: k.covering,
+          keyed: true,
           rel: make.project({
             id: r.id, input: windowed, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.type.cols.map((c) => [c.name, col(windowed.id, c.name)] as const), ...dPass(windowed.id)],
@@ -457,11 +467,12 @@ export function decorrelate(
           aggs: r.aggs.map(([n, e]) => [n, at(e)] as const),
           ...(r.having ? { having: at(r.having) } : {}),
         });
-        // A grouping over a COVERING input has a group for every key — and so does a SCALAR one, which then
-        // needs no LEFT JOIN to the domain for an empty key's value, whatever the aggregate is.
-        if (r.groupBy.length || k.covering) {
+        // A grouping emits a group per key it has rows for, and nothing for one it has none for — as the
+        // correlated plan did. A SCALAR one over an input that COVERS the domain (`covered`: a row for every
+        // key) has no empty key, so needs no LEFT JOIN to the domain for one, whatever the aggregate is.
+        if (r.groupBy.length || covered(r.input)) {
           return {
-            keyed: true, covering: k.covering && !r.having,
+            keyed: true,
             rel: make.project({
               id: r.id, input: grouped, channels: r.channels, type: { cols: withD(r.type.cols) },
               exprs: [...r.type.cols.map((c) => [c.name, col(grouped.id, c.name)] as const),
@@ -483,7 +494,7 @@ export function decorrelate(
         const missing: Expr = { kind: 'binary', op: 'is', left: col(joined.id, marker ?? gNames[0]!), right: compilerNull() };
         const overNothing = (e: Expr): Expr => substRelId(rewriteExpr(e, (n) => (n.kind === 'agg' ? emptyAgg(n) : n)), k.rel.id, joined.id);
         return {
-          keyed: true, covering: true,
+          keyed: true,
           rel: make.project({
             id: r.id, input: joined, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [
@@ -535,7 +546,7 @@ export function decorrelate(
         // The domain is read off the side that carries it (the left whenever the left is keyed).
         const dFrom = L.keyed ? dNames : (renamed?.names ?? dNames);
         return {
-          keyed: true, covering: r.join === 'left' && L.keyed && !!L.covering,
+          keyed: true,
           rel: make.project({
             id: r.id, input: joined, channels: r.channels, type: { cols: withD(r.type.cols) },
             exprs: [...r.type.cols.map((c) => [c.name, col(joined.id, c.name)] as const),
@@ -550,7 +561,7 @@ export function decorrelate(
         if (!outs.some((x) => x.keyed))
           return outs.every((x, i) => x.rel === r.inputs[i]) ? { rel: r, keyed: false } : { rel: mapRelChildren(r, (c) => outs[r.inputs.indexOf(c)]!.rel), keyed: false };
         const keyed = outs.map(ensureKeyed);
-        return { keyed: true, covering: keyed.some((x) => x.covering), rel: make.union({ id: r.id, channels: r.channels, type: { cols: withD(r.type.cols) }, inputs: keyed.map((x) => x.rel), all: r.all }) };
+        return { keyed: true, rel: make.union({ id: r.id, channels: r.channels, type: { cols: withD(r.type.cols) }, inputs: keyed.map((x) => x.rel), all: r.all }) };
       }
       case 'recursive': {
         const seed = go(r.seed);
@@ -572,7 +583,7 @@ export function decorrelate(
         });
         recursiveStep(rec);
         if (failed) return null;
-        return { rel: rec, keyed: true, covering: keyedSeed.covering };
+        return { rel: rec, keyed: true };
       }
     }
   };

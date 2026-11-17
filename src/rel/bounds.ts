@@ -63,24 +63,48 @@ function uniqueKeyMatches(pred: Expr, scan: Extract<Rel, { readonly kind: 'scan'
  * MEMOISED per node, as Calcite caches its metadata per `RelNode`: a node is immutable, so its bounds
  * are too, and the plan is a DAG — a `Union` of two arms reading ONE input, chained k deep, is 2^k visits
  * to an unmemoised walk (`freeRelIds` carries the measurement).
+ *
+ * A CORRELATED plan (one that reads an outer row — a child body before decorrelation) is read PER
+ * EVALUATION: its bounds are how many rows it yields for ONE outer row, because that is how often SQL
+ * evaluates it. So `rowBounds(body).min >= 1` is the per-key covering question decorrelation asks — does
+ * every outer row get at least one row — and a correlated `Values` row or filter counts exactly as an
+ * uncorrelated one does.
  */
-export const rowBounds: (rel: Rel) => RowBounds = nodeFact((rel: Rel): RowBounds => boundsOf(rel));
+export const rowBounds: (rel: Rel) => RowBounds = nodeFact((rel: Rel): RowBounds => boundsOf(rel, rowBounds));
 
-function boundsOf(rel: Rel): RowBounds {
+/**
+ * `rowBounds` with facts the CALLER knows and the plan does not state: where `known(r)` answers, that is
+ * `r`'s bounds; everywhere else the per-kind rules of `boundsOf` apply, over children read through the same
+ * override. Memoised per CALL — the override is the call's, so the per-node cache cannot hold it — for the
+ * same 2^k reason as `rowBounds`. Decorrelation is the caller: a key-projection filter it eliminated
+ * (`src/rel/decorrelate.ts` `keyProjected`) has a row for every key by the caller's construction.
+ */
+export function rowBoundsWith(rel: Rel, known: (r: Rel) => RowBounds | undefined): RowBounds {
+  const memo = new Map<Rel, RowBounds>();
+  const of = (r: Rel): RowBounds => {
+    let b = memo.get(r);
+    if (!b) { b = known(r) ?? boundsOf(r, of); memo.set(r, b); }
+    return b;
+  };
+  return of(rel);
+}
+
+/** One node's bounds, its children's read through `of` — the per-kind rules, shared by both walks. */
+function boundsOf(rel: Rel, of: (r: Rel) => RowBounds): RowBounds {
   switch (rel.kind) {
     case 'values': return { min: rel.rows.length, max: rel.rows.length };
     // A reducing barrier with no grouping is one row by definition — `HAVING` can reject it.
     case 'aggregate': {
-      const input = rowBounds(rel.input);
+      const input = of(rel.input);
       if (rel.groupBy.length === 0) return { min: rel.having ? 0 : 1, max: 1 };
       return { min: rel.having ? 0 : Math.min(input.min, 1), max: input.max };
     }
     case 'distinct': {
-      const input = rowBounds(rel.input);
+      const input = of(rel.input);
       return { min: Math.min(input.min, 1), max: input.max };
     }
     case 'limit': {
-      const input = rowBounds(rel.input);
+      const input = of(rel.input);
       const offset = rel.offset ? literalCount(rel.offset) : 0;
       const count = rel.count ? literalCount(rel.count) : Infinity;
       if (count === null) return { min: 0, max: offset === null ? input.max : Math.max(0, input.max - offset) };
@@ -90,28 +114,28 @@ function boundsOf(rel: Rel): RowBounds {
     // A filter keeps at most its input's rows — and, directly over an element scan, at most as many as
     // a unique-key membership it states (`uniqueKeyMatches`), which is how `V(1)` is known to be one row.
     case 'filter': {
-      const input = rowBounds(rel.input).max;
+      const input = of(rel.input).max;
       const keyed = rel.input.kind === 'scan' ? uniqueKeyMatches(rel.pred, rel.input) : null;
       return { min: 0, max: keyed === null ? input : Math.min(keyed, input) };
     }
-    case 'project': case 'sort': case 'window': case 'materialize': return rowBounds(rel.input);
+    case 'project': case 'sort': case 'window': case 'materialize': return of(rel.input);
     case 'join': {
-      const left = rowBounds(rel.left);
+      const left = of(rel.left);
       if (rel.join === 'semi' || rel.join === 'anti') return { min: 0, max: left.max };
-      const right = rowBounds(rel.right);
+      const right = of(rel.right);
       const max = left.max === 0 || right.max === 0 ? 0 : left.max * right.max;
       if (rel.join === 'left') return { min: left.min, max: left.max === 0 ? 0 : left.max * Math.max(1, right.max) };
       const min = rel.join === 'cross' || provablyTrue(rel.on) ? left.min * right.min : 0;
       return { min, max };
     }
     case 'union': {
-      const each = rel.inputs.map(rowBounds);
+      const each = rel.inputs.map(of);
       const max = each.reduce((sum, b) => sum + b.max, 0);
       if (rel.all) return { min: each.reduce((sum, b) => sum + b.min, 0), max };
       return { min: each.some((b) => b.min > 0) ? 1 : 0, max };
     }
     // `WITH RECURSIVE … seed UNION ALL step` (`emit.ts`): every seed row is a row, and the walk is unbounded.
-    case 'recursive': return { min: rowBounds(rel.seed).min, max: Infinity };
+    case 'recursive': return { min: of(rel.seed).min, max: Infinity };
     // A `Ref` the lowering hoisted carries its binding's bounds (`boundedSpine`); any other names a
     // binding this walk cannot see.
     case 'ref': return rel.bounds ?? UNBOUNDED;

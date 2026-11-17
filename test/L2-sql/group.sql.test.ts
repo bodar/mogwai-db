@@ -14,6 +14,12 @@ import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { decodeAll } from '../support/decode.ts';
 import { LADDER, bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
 import { t } from '../../src/io.ts';
+import { decorrelate } from '../../src/rel/decorrelate.ts';
+import { col as relCol } from '../../src/rel/expr.ts';
+import { aggregate as relAggregate, distinct as relDistinct, filter as relFilter, scan as relScan } from '../../src/rel/factory.ts';
+import type { Rel } from '../../src/rel/rel.ts';
+import { relId } from '../../src/rel/types.ts';
+import { forEachRel } from '../../src/rel/walk.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -591,5 +597,55 @@ describe('pooled group — the domain is the members\' key projection', () => {
     // property inferred from an equi-correlation.
     expect(read('g.V(1).map(__.outE().count())').sql).toContain('WHERE (rme6.src = rn.id)');
     expect(read('g.V(1).where(__.out().count().is(P.gt(1)))').sql).toContain('(rme6.src = rn.id)');
+  });
+});
+
+// THE KEY-PROJECTION FILTER ↔ `keyProjected` (`src/rel/decorrelate.ts`). `pooledGroup` (`lower/scoped.ts`) pools a
+// key's members with the filter `member.term IS scoped.term` per key term (null-safe) and states the projection
+// `covers` when the members ARE the pool. The decorrelator recognises exactly that filter and, under `covers`,
+// tells `rowBounds` (`src/rel/bounds.ts`, read per outer row) the one fact the plan does not state: every key has
+// a member — so a SCALAR aggregate over it needs no LEFT JOIN. These pin the recognition to that shape: change
+// the filter `pooledGroup` builds (`=` for `IS`) and the domain is joined again.
+describe('decorrelate: the key-projection filter is pooledGroup\'s `member.term IS scoped.term`', () => {
+  const intCol = (name: string) => ({ name, type: 'int', nullable: true }) as const;
+  const members = relScan({ id: relId('m'), table: 'nodes', alias: 'm', channels: [], type: { cols: [intCol('id'), intCol('term')] } });
+  const scoped = relScan({ id: relId('s'), table: 'nodes', alias: 's', channels: [], type: { cols: [intCol('key'), intCol('t')] } });
+  const pooled = (op: 'is' | '='): Rel => relFilter({
+    id: relId('pf'), input: members, channels: [], type: members.type,
+    pred: { kind: 'binary', op, left: relCol(members.id, 'term'), right: relCol(scoped.id, 't') },
+  });
+  const counted = (input: Rel): Rel => relAggregate({
+    id: relId('agg'), input, channels: [], type: { cols: [{ name: 'v', type: 'int', nullable: false }] },
+    groupBy: [], aggs: [['v', { kind: 'agg', fn: 'count', args: [] }]],
+  });
+  let n = 0;
+  const fresh = (hint: string) => relId(`${hint}${n++}`);
+  const projection = (covers: boolean) => ({ input: members.id, cols: new Map([['t', 'term']]), covers });
+  const shape = (r: Rel) => {
+    let left = false, outer = false;
+    forEachRel(r, (x) => { if (x.kind === 'join' && x.join === 'left') left = true; if (x === scoped) outer = true; });
+    return { left, outer };
+  };
+
+  test('`IS` under `covers`: the members are keyed in place, and a scalar count needs no LEFT JOIN', () => {
+    const out = decorrelate(counted(pooled('is')), scoped, 'key', fresh, projection(true));
+    expect(out && shape(out.rel)).toEqual({ left: false, outer: false });
+    expect(out!.key.map((k) => k.outer)).toEqual(['t']);
+  });
+
+  test('the covering fact flows through the per-kind rules — a DISTINCT over the filter still covers', () => {
+    const distinctOver = relDistinct({ id: relId('d'), input: pooled('is'), channels: [], type: members.type });
+    const out = decorrelate(counted(distinctOver), scoped, 'key', fresh, projection(true));
+    expect(out && shape(out.rel)).toEqual({ left: false, outer: false });
+  });
+
+  test('without `covers` the filter is still the key projection, but an empty key needs the LEFT JOIN', () => {
+    const out = decorrelate(counted(pooled('is')), scoped, 'key', fresh, projection(false));
+    expect(out && shape(out.rel).left).toBe(true);
+  });
+
+  test('`=` is not the key projection — the domain is joined', () => {
+    const out = decorrelate(counted(pooled('=')), scoped, 'key', fresh, projection(true));
+    expect(out && shape(out.rel)).toEqual({ left: true, outer: true });
   });
 });
