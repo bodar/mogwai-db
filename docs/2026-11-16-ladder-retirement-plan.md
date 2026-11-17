@@ -953,6 +953,12 @@ needs-human question on walk-until-hub below.
 
 ### S4 — `perState` only where the state key merges rows (MAJOR, regression in scoped walks)
 
+✅ **LANDED (5b19bb55).** `perState` applies only over an uncorrelated walk (`freeRelIds(walk)` empty — an algebra
+fact, not a host name), so the scoped witness is back to its pre-Q2b cost (14 → 256 ms at 130 → 1050 chains). The
+until test is spelled once as the walk's EXIT column (`wx`), read by the stop test and both arms
+(`src/compiler/rel/walk.ts`). **Remains:** the scoped shapes stay super-linear (about 16–25× per 8×) until S6 is
+built. Their 16× assertion should be tightened then, and S6 can delete the `freeRelIds` gate.
+
 Q2b's `perState` (`src/compiler/rel/walk.ts`) makes a query trunk already answered slower when the walk runs under a
 decorrelated host. `g.V().where(repeat(out()).emit(in('created').has('age',gt(45)))).count()` went from 14.3 → 265 ms
 to 30.7 → 640 ms at 130 → 1050 chains, and from 993 ms to 2356 ms at 2100 (about 2.4×).
