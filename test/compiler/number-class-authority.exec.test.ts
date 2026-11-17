@@ -744,13 +744,11 @@ describe('a min/max TIE is answered, never deferred', () => {
   // NumberHelper's `max` is `x >= y ? x : y` and `min` `x <= y ? x : y` (`NumberHelper.java:252-310`): the
   // FIRST argument keeps a tie. `MaxLocalStep`/`MinLocalStep` fold `max(next, result)` (`MaxLocalStep.java:52`),
   // so a LOCAL reducer's later member wins; a sack/fold applies `(accumulator, value)`, so the accumulator
-  // wins; a GLOBAL reducer's first traverser wins (`ReducingBarrierStep.java:110`) — an arrival order the
-  // stream does not carry, so it takes whichever the order puts first (a deliberate divergence). A zero has no
+  // wins; a GLOBAL reducer's first traverser wins (`ReducingBarrierStep.java:110`). Global and local min/max
+  // are one arg-extremum aggregate here (`reducer.ts` `argExtremum`), so a tie takes whichever row or member
+  // SQLite's `MIN`/`MAX` lands on (a deliberate divergence, `docs/feature-support-matrix.md` §17). A zero has no
   // sign (a deliberate divergence), so `-0.0` beside `0.0` is no observable tie and answers `0.0`.
   const answered: [string, string[]][] = [
-    ['g.inject(1.0m,1.00m).fold().max(local)', ['100e-2M']],
-    ['g.inject(1.0m,1.00m).fold().min(local)', ['100e-2M']],
-    ['g.inject(1.00m,1.0m).fold().max(local)', ['10e-1M']],
     ['g.inject(-0.0d,0.0d).max()', ['0d']],
     ['g.inject(0, -0.0d).max()', ['0i']],
     ['g.inject([0.0d,-0.0d]).min(local)', ['0d']],
@@ -761,8 +759,9 @@ describe('a min/max TIE is answered, never deferred', () => {
     ['g.inject(1, 1.0d).max()', ['1i']],
   ];
   for (const [q, expected] of answered) test(q, async () => expect(outer(q, await classes(q))).toEqual(outer(q, expected)));
-  // A global tie of two representations answers ONE of them — the value is the same either way.
-  for (const q of ['g.inject(1.0m, 1.00m).max()', 'g.inject(1.00m, 1.0m).min()'])
+  // A tie of two representations answers ONE of them — the value is the same either way — globally and per list.
+  for (const q of ['g.inject(1.0m, 1.00m).max()', 'g.inject(1.00m, 1.0m).min()', 'g.inject(1.0m,1.00m).fold().max(local)',
+    'g.inject(1.0m,1.00m).fold().min(local)', 'g.inject(1.00m,1.0m).fold().max(local)'])
     test(q, async () => expect(['10e-1M', '100e-2M']).toContain((await classes(q))[0]!));
   // A BigDecimal SUM/MEAN is BigDecimal scale arithmetic — named as such, not as a 2^53 tail.
   for (const q of ['g.inject(1.5m,1.5m).sum()', "g.V().values('age').asNumber(GType.DOUBLE).asNumber(GType.BIGDECIMAL).sum()",

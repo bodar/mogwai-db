@@ -375,6 +375,11 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       // is what SQLite drives the join's index seeks from (measured: a value join `V().values('name').as('e')
       // .V().has('name', select('e'))` fenced its product of every vertex with every name, 1k → 8k 66× slower).
       if (spelled && n > 1 && render(spelled).sql.length > COMPUTED_TEXT && !(reader.kind === 'filter' && b.joins.length)) return true;
+      // A FILTER over an AGGREGATE is `HAVING`, which spells the aggregate column it tests a second time beside
+      // the select list's own — so ONE read is already a repeat, as for a subquery column. Closed, the filter is
+      // a `WHERE` on the aggregate's output and reads the column by name (an arg-extremum's guarded row count,
+      // `reducer.ts` `argExtremum`, was spelled twice in every min/max). No index seek is driven from a HAVING.
+      if (spelled && reader.kind === 'filter' && grouped(b) && once(spelled) && render(spelled).sql.length > COMPUTED_TEXT) return true;
     }
     return false;
   };

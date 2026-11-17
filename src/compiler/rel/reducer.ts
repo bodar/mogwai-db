@@ -1,5 +1,7 @@
 import { col, compilerInt, compilerNull, compilerReal, compilerText, type AggFn, type BinaryOp, type Expr } from '../../rel/expr.ts';
-import type { RelId } from '../../rel/types.ts';
+import type { ColMeta, RelId } from '../../rel/types.ts';
+import type { Rel } from '../../rel/rel.ts';
+import * as make from '../../rel/factory.ts';
 import { INTEGER_OVERFLOW, raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { NUMBER_STORED_NON_NUMBERS, REDUCER_CLASSES } from '../../gremlin/types.ts';
 import { NUMERIC_VTYPES } from './predicate.ts';
@@ -323,6 +325,67 @@ export function reducerAggregate(value: Expr, reducer: Reducer, tag: ReducerRowT
     ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk })
     : agg(reducer, arg);
   return { value: reducer === 'sum' ? reduced : mixedRefused(reduced, value) };
+}
+
+/** A column the arg-extremum winner carries beside its value (`argExtremum`): read off the SAME row. */
+export interface WinnerColumn { readonly col: ColMeta; readonly value: Expr }
+
+/** The arg-extremum's row-count column — what the empty-input Filter reads, and where the mixed-class
+ *  refusal raises. */
+const WINNER_COUNT = 'red_n';
+
+/**
+ * THE ARG-EXTREMUM AGGREGATE — `min`/`max` as the WINNING ROW of `input`, wherever the rows come from: a
+ * stream (the global reducer, `lower.ts`) or a list's members (`min(local)`/`max(local)`, `list.ts`). One
+ * authority, so the null, empty-input, mixed-class and exactness rules below are stated once for both.
+ *
+ * - **The winner is the ORIGINAL row** (`arg_min(value, key)`, Calcite's `ARG_MIN`), not a `MIN()` over the
+ *   cast `key`: the stored value keeps its class and its digits, so a long past 2^53 carried as decimal TEXT
+ *   comes back exact. SQLite spells it natively — `MIN(key)` with the winner's columns as BARE columns, one
+ *   pass, no window, no sort, no fence (`src/rel/emit.ts` `bareWinner`). `carried` columns ride out off the
+ *   same row (a type tag), so they are read once, off the winner. A TIE on the key is SQLite's to break —
+ *   a deliberate divergence (`docs/feature-support-matrix.md` §17), not the reference's member/stream order.
+ * - **`key` orders in ONE type space** — the caller passes `storedCompareOn` over the row's own type (the
+ *   `order().by()` cast authority), so a text-carried long orders as the number it is.
+ * - **NULL is SKIPPED, not FILTERED.** `NumberHelper.max/min` return the non-null side, so a null never wins
+ *   (SQL's `MIN`/`MAX` skip it too); but an all-null input reduces to null and the reference EMITS it
+ *   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MaxGlobalStep.java`,
+ *   `MaxLocalStep.java`) — the aggregate's winner is then a null row.
+ * - **ZERO rows emit NOTHING** (`ReducingBarrierStep` supplies no seed for min/max; `MaxLocalStep` skips an
+ *   empty list), where a scalar `MIN()` emits one NULL row: the row count rides beside the winner and a
+ *   Filter drops the empty group. A Filter, not `HAVING`: the decorrelator keys a scalar aggregate by
+ *   LEFT-joining the domain, so an empty scope's count reads 0 there and the same Filter drops it.
+ * - **Mixed comparability classes REFUSE** (`cls` non-null, `predicate.ts` `comparabilityClass`): the count of
+ *   distinct classes is an aggregate beside the winner — a `count`, not a `min`/`max`, so the bare-column law
+ *   holds (`checkAggregateShape`) — and the row count raises when it is above one. `null` where the input is
+ *   statically one type and cannot mix.
+ *
+ * The answer is a RELATION of at most one row — `v`, the `carried` columns, the row count — so a caller that
+ * reads two of its columns per host must read it ONCE (decorrelated, or one scalar over a fenced pair), never
+ * one scalar subquery per column.
+ */
+export function argExtremum(
+  input: Rel, value: Expr, key: Expr, carried: readonly WinnerColumn[], cls: Expr | null, reducer: 'min' | 'max', fresh: (hint: string) => RelId,
+): Rel {
+  const fn = reducer === 'min' ? 'arg_min' : 'arg_max';
+  const rows: Expr = { kind: 'agg', fn: 'count', args: [] };
+  const counted: Expr = cls === null ? rows : refusedWhen(
+    { kind: 'binary', op: '>', left: { kind: 'agg', fn: 'count', args: [cls], distinct: true }, right: compilerInt(1) },
+    MIXED_COMPARABLES, rows);
+  const reduced = make.aggregate({
+    id: fresh('red'), input, channels: [],
+    type: { cols: [{ name: 'v', type: 'any', nullable: true }, ...carried.map(({ col: c }) => ({ ...c, nullable: true })), { name: WINNER_COUNT, type: 'int', nullable: false }] },
+    groupBy: [],
+    aggs: [
+      ['v', { kind: 'agg', fn, args: [value, key] }],
+      ...carried.map(({ col: c, value: carriedValue }) => [c.name, { kind: 'agg', fn, args: [carriedValue, key] }] as const),
+      [WINNER_COUNT, counted],
+    ],
+  });
+  return make.filter({
+    id: fresh('rk'), input: reduced, channels: [], type: reduced.type,
+    pred: { kind: 'binary', op: '>', left: col(reduced.id, WINNER_COUNT), right: compilerInt(0) },
+  });
 }
 
 /**

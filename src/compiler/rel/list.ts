@@ -16,13 +16,13 @@ import type { RelFraming } from './framing.ts';
 import { raiseInRow } from '../../rel/raise.ts';
 import { mapHoldsRowids, mapNodePayload } from './map.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedColumn, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
-import { comparabilityClass, mixedClassesRefused, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { comparabilityClass, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { realJsonText, stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
 import type { GraphSource } from './source.ts';
 import type { Elem } from '../elem.ts';
-import { exactWideTotal, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
+import { argExtremum, exactWideTotal, isLongSumClass, isReducer, numberClassPair, pairedNumberClass, REDUCED_TYPE, reducerAggregate, sumTower, towerOperand } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 /** The column a list reducer carries its members' class pair in (`numberClassPair`). */
 const CLASS_PAIR = 'cw';
@@ -757,70 +757,41 @@ export function listRetype(
     // `productiveNull` is unconditional rather than read off the member shape's flag.
     const productive = { productiveNull: true } as const;
 
-    // **`min`/`max` ORDER, so they take the ARGMIN/ARGMAX — the winning MEMBER, projected whole —
-    // exactly as the row-level pair does.** Two things follow that a `MIN()`/`MAX()` over a cast key
-    // cannot give: the winner is chosen by `memberCompareKey` (so a decimal-TEXT long orders
-    // numerically instead of lexicographically), and the value returned is the RAW member, so a
-    // >2^53 long is not rounded through the cast on its way out. The `vt` is that member's own
-    // GREMLIN vtype rather than SQLite's `typeof`, which is what lets the `result:'number'` framer
-    // send it back as a `long` through `vtypeToValueType` — before this it came back the string
-    // `"9007199254740993"`.
+    // **`min`/`max` are the WINNING MEMBER — the row-level reducer's own arg-extremum (`argExtremum`,
+    // `reducer.ts`) over the members**, so the null-skip, empty-list, mixed-class and exactness rules are
+    // the row-level ones, stated once. The winner is chosen by `memberCompareKey` (so a decimal-TEXT long
+    // orders numerically instead of lexicographically), and the value returned is the RAW member, so a
+    // >2^53 long is not rounded through the cast on its way out. The `vt` is that member's own GREMLIN
+    // vtype rather than SQLite's `typeof`, which is what lets the `result:'number'` framer send it back
+    // as a `long` through `vtypeToValueType`. A tie on the key (`[1, 1.0d]`) is SQLite's to break, not
+    // `MaxLocalStep`'s later member — the global min/max's deliberate divergence (`docs/feature-support-matrix.md` §17).
     if (step.name === 'min' || step.name === 'max') {
-      const dir: 'asc' | 'desc' = step.name === 'min' ? 'asc' : 'desc';
-      // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never WINS —
-      // but it is not FILTERED, because a NON-EMPTY all-null list reduces to null and
-      // `MaxLocalStep` splits on that null rather than skipping the traverser
-      // (`gremlin-core/.../step/map/MaxLocalStep.java:45-56`). Nulls therefore sort LAST in both
-      // directions, which needs an explicit `IS NULL` term: SQLite puts NULLs first ascending.
-      const present = members;
-      const key = memberCompareKey(of, present);
-      const winner = make.limit({
-        id: fresh('mw'),
-        input: make.sort({
-          id: fresh('mo'), input: present, channels: [], type: present.type,
-          // A total tie-break on the member's list position keeps the survivor deterministic: the
-          // LATER member, as `MaxLocalStep`/`MinLocalStep`'s `result = max(next, result)` keeps it.
-          terms: [
-            { expr: { kind: 'binary', op: 'is', left: memberPayload(of, present), right: compilerNull() }, dir: 'asc' },
-            { expr: key, dir }, memberOrder(present, 'desc'),
-          ],
-        }),
-        channels: [], type: present.type, count: compilerInt(1),
-      });
-      // THE WINNER IS PICKED ONCE. `v` and `vt` are two columns of one row, and giving each its own
-      // correlated subquery would emit the whole sort twice — measured, that alone took the `max`
-      // family's statement from 1,250 bytes to 4,108, against a platform that caps a statement at
-      // 100 KB. So the pick projects a `{v,t}` pair as ONE value and the payload columns read its
-      // two fields, which is the same trick the member ENVELOPE already is.
-      const pickedRaw: Expr = {
-        kind: 'scalar',
-        plan: make.project({
-          id: fresh('mp'), input: winner, channels: [], type: typeOf(meta('w', 'json')),
-          // The pair is a JSON WRITE, so the winner crosses it exactly: a bare member through
-          // `exactMember` (a 17-digit REAL), and an ENVELOPE member AS the `{v,t}`
-          // pair it already is — re-writing its `json_extract`ed `v` would round it the same way.
-          exprs: [['w', ((): Expr => {
-            const bare: Expr = {
-              kind: 'json-object',
-              entries: [['v', exactMember(col(winner.id, MEMBER.value))], ['t', memberTypeTag(of, winner)]],
-              binary: false,
-            };
-            return isTypedList(of)
-              ? { kind: 'case', whens: [[eqText(col(winner.id, MEMBER.type), 'object'), jsonOf(col(winner.id, MEMBER.value))]], else: bare }
-              : bare;
-          })()]],
-        }),
+      // THE WINNER IS READ ONCE PER HOST. `v` and `vt` are two columns of one member, and giving each its
+      // own correlated subquery would run the aggregate twice per list. So the winning member is a `{v,t}`
+      // PAIR — one value, one scalar — and the payload columns read its two fields, the same trick the
+      // member ENVELOPE already is. The pair is a JSON WRITE, so the winner crosses it exactly: a bare
+      // member through `exactMember` (a 17-digit REAL), and an ENVELOPE member AS the `{v,t}` pair it
+      // already is — re-writing its `json_extract`ed `v` would round it the same way.
+      const bare: Expr = {
+        kind: 'json-object',
+        entries: [['v', exactMember(col(members.id, MEMBER.value))], ['t', memberTypeTag(of, members)]],
+        binary: false,
       };
+      const pair: Expr = isTypedList(of)
+        ? { kind: 'case', whens: [[eqText(col(members.id, MEMBER.type), 'object'), jsonOf(col(members.id, MEMBER.value))]], else: bare }
+        : bare;
       // Members that may mix comparability classes refuse rather than let SQLite's class order pick
       // (`comparabilityClass`); a statically-typed list cannot mix.
-      const picked = memberType?.kind === 'static' ? pickedRaw
-        : mixedClassesRefused(pickedRaw, present, comparabilityClass(memberTypeTag(of, present)), fresh);
+      const won = argExtremum(members, pair, memberCompareKey(of, members), [],
+        memberType?.kind === 'static' ? null : comparabilityClass(memberTypeTag(of, members)), step.name, fresh);
+      const picked: Expr = {
+        kind: 'scalar',
+        plan: make.project({ id: fresh('mp'), input: won, channels: [], type: typeOf(meta('w', 'json', true)), exprs: [['w', col(won.id, 'v')]] }),
+      };
       // FENCED, and that is the whole point of naming it: without a materialization boundary the
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
       // fenced, for the same plan).
-      // The winner keeps its OWN class (`lower.ts`'s global min/max — a deliberate divergence from
-      // NumberHelper's promotion).
       const held = fenced(withPayload(host, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
       return {
         rel: withPayload(held,

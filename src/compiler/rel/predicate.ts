@@ -1,8 +1,6 @@
 import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
-import { raiseExpr } from '../../rel/raise.ts';
-import { MIXED_COMPARABLES } from './reducer.ts';
 import { inferredVtype } from './tag.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -1261,17 +1259,4 @@ export function comparabilityClass(tag: Expr): Expr {
     else: tag,
   };
   return { kind: 'call', fn: 'nullif', args: [{ kind: 'call', fn: 'replace', args: [numberOrTag, compilerText('text'), compilerText('string')] }, compilerText('null')] };
-}
-
-/** `value`, unless the classes `cls` takes over `members` differ — then a deferral. One aggregate over the
- *  members, read as a scalar subquery, for a min/max that picks its winner by sort rather than by window. */
-export function mixedClassesRefused(value: Expr, members: Rel, cls: Expr, fresh: Minter): Expr {
-  // The refusal is INSIDE the aggregate — it raises there or yields 0 — so neither it nor `value` is
-  // spelled twice: `coalesce(nullif(<0 or raise>, 0), value)`.
-  const count: Expr = { kind: 'agg', fn: 'count', args: [cls], distinct: true };
-  const verdict = make.aggregate({
-    id: fresh('mxc'), input: members, channels: [], type: typeOf(meta('n', 'int')),
-    groupBy: [], aggs: [['n', { kind: 'case', whens: [[binary('>', count, compilerInt(1)), raiseExpr(MIXED_COMPARABLES, { kind: 'agg', fn: 'count', args: [] })]], else: compilerInt(0) }]],
-  });
-  return { kind: 'call', fn: 'coalesce', args: [{ kind: 'call', fn: 'nullif', args: [{ kind: 'scalar', plan: verdict }, compilerInt(0)] }, value] };
 }

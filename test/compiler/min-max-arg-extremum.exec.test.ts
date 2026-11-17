@@ -82,3 +82,39 @@ describe('the bare-column law is structural', () => {
       .toThrow('may hold no other min/max');
   });
 });
+
+// min(local)/max(local) ARE THE SAME AGGREGATE over a list's members (`src/compiler/rel/list.ts`, `argExtremum` in
+// `src/compiler/rel/reducer.ts`): the null skip, the empty input, the mixed-class refusal and the exact winner carry
+// over from the global form, and `MaxLocalStep`'s later-member tie-break becomes SQLite's (§17). The semantics
+// pinned here (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MaxLocalStep.java`):
+// a non-empty all-null list emits ONE null, an empty list emits NOTHING, null never wins.
+const LOCAL_ANSWERS: readonly (readonly [string, readonly string[]])[] = [
+  ["g.V().local(out().values('age').fold().max(local))", ['32i']],
+  ["g.V().local(out().values('age').fold().min(local))", ['27i']],
+  ['g.inject([1,2.0d,3L]).max(local)', ['3L']],
+  ['g.inject([1,2.0d,3L]).min(local)', ['1i']],
+  ['g.inject(9007199254740993L, 1L).fold().max(local)', ['9007199254740993L']],
+  ['g.inject(9007199254740993L, 10007199254740993L).fold().min(local)', ['9007199254740993L']],
+  ['g.inject([null,null]).max(local)', ['null']],
+  ['g.inject([]).max(local)', []],
+  ['g.inject([1,null,3]).min(local)', ['1i']],
+  ["g.V().values('name').fold().min(local)", ['"josh"']],
+  // Deeper: a project field, a branch arm, a filter body, a group value, a label, repeat, a list of reduced values.
+  ["g.V().project('m').by(out().values('age').fold().max(local))", ['{"m":32i}', '{}', '{}', '{}', '{}', '{}']],
+  ["g.V().choose(hasLabel('person'), out().values('age').fold().max(local), constant(-1))", ['32i', '-1i', '-1i']],
+  ["g.V().where(values('age').fold().min(local).is(gt(30))).values('name')", ['"josh"', '"peter"']],
+  ["g.V().group().by(label).by(values('age').fold().max(local))", ['{"person":35i}']],
+  ["g.V().map(outE().values('weight').fold().min(local).is(lt(0.5)))", ['0.4d', '0.4d', '0.2d']],
+  ["g.V().as('a').map(out().values('age').fold().max(local)).as('b').select('a','b').by('name').by()", ['{"a":"marko","b":32i}']],
+  ["g.V().repeat(map(out().values('age').fold().max(local))).times(1)", ['32i']],
+  ["g.V().map(values('age').fold().max(local)).fold().max(local)", ['35i']],
+];
+
+describe('min(local)/max(local) answer as the same arg-extremum aggregate, at the root and in every body', () => {
+  for (const [q, expected] of LOCAL_ANSWERS)
+    for (const [mode, fastPaths] of MODES)
+      test(`${q} (${mode})`, () => expect(typed(q, fastPaths)).toEqual(bagOf(expected)));
+  for (const q of ["g.inject([1,'a']).max(local)", "g.V().local(union(values('age'), constant('x')).fold().max(local))"])
+    for (const [mode, fastPaths] of MODES)
+      test(`refuses: ${q} (${mode})`, () => expect(() => typed(q, fastPaths)).toThrow('min/max over values of different types is not supported'));
+});
