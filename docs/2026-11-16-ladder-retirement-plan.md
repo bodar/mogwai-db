@@ -956,6 +956,15 @@ after S1, which removes the identity memos this code relies on.
 
 ### S3 — One "per-host work is bounded" fact for first-row and existence hosts (MAJOR, special-case; after S1)
 
+✅ **LANDED (7e2def6f).** `perHostWork(plan)` (`src/rel/work.ts`, a memoised sibling of `rowBounds`) reads two facts
+off the LOWERED Rel: `reSources` (S2's one `reSourceCross` recogniser, widened to `seed: 'any'` and to look through
+a `materialize`) and `exhausts` (a barrier or rejection over an unbounded input; `distinct` deliberately excluded,
+SQLite streams it). `landValues` asks the body's correlated plan instead of the `reSourcesDeep` name test;
+`correlatedExistence` reads `exhausts` instead of its node-kind list. Nothing trunk answers declines and no plan moves
+(A/B over 67 compositions: identical answers and SQL); the walk-condition decline set is pinned in
+`test/compiler/per-host-work.exec.test.ts`; `work:` scaling probes 6.8–8.7× per 8×. **Remains:** nothing (the
+movement-head `correlatedExists` quadratic shapes stay with owner question 1, unchanged).
+
 Two syntactic choices stand in for a cost fact:
 - **M2:** `landValues` picks the correlated route with `reSourcesDeep(body)`, a name test for `V()`/`E()` at any
   depth. That makes it a (host, body-shape) branch for order/dedup/group/groupCount `by()`. A by() body that reaches
