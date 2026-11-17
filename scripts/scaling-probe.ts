@@ -94,6 +94,8 @@ const SHAPES: readonly Shape[] = [
   // probe (the rows are the answer's own size).
   { name: 'map(V.count)', query: 'g.V().map(V().count())' },
   { name: 'map(V.values)', query: "g.V().map(V().values('name'))" },
+  // `dedup()` added by 6e58b6d2 (N1): the undeduped output is hosts × matches, so the dedup keeps the row probing the
+  // shared read rather than the answer's own N × G size.
   { name: 'local(V.has.values).count', query: "g.V().local(V().has('age',gt(30)).values('name')).dedup().count()" },
   { name: 'as.map(select.V.count)', query: "g.V().as('p').map(select('p').V().hasLabel('software').count())" },
   { name: 'where(V.has)', query: "g.V().where(V().has('age',gt(40))).count()" },
@@ -114,12 +116,16 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource xNG: as.local(V.as.select(a,b))', query: "g.V().as('a').local(V().as('b').select('a','b')).count()" },
   { name: 'resource xNG: local(V.has.as).select', query: "g.V().local(V().has('age',gt(30)).as('x')).select('x').count()" },
   { name: 'resource xNG: sack.V.sack', query: 'g.V().sack(assign).by(constant(1)).V().sack().count()' },
+  // Reach contrived (M2): an instrument, no fix owed.
+  { name: 'resource xNG: as.local(V.as.out.where(neq(a))).count', query: "g.V().as('a').local(V().as('x').out().where(neq('a')).count()).count()" },
   // The first-row hosts the N1 review measured quadratic when a path-carrying or simplePath prefix fell to the
   // fold's per-row cross: the shared read must stay ONE read under them.
   { name: 'resource: out.map(V.max).path', query: "g.V().out().map(V().values('age').max()).path().count()" },
   { name: 'resource: out.where(V.out.has).path', query: "g.V().out().where(V().out().has('name','zzz')).path().count()" },
   { name: 'resource: both.simplePath.map(V.max)', query: "g.V().both().simplePath().map(V().values('age').max()).count()" },
   { name: 'resource: out.map(V.limit.values).path', query: "g.V().out().map(V().limit(1).values('name')).path().count()" },
+  // `flatMap` splits the HOST (`FlatMapStep` `head.split(r)`): the host path crosses the shared read as `map`'s does.
+  { name: 'resource: out.flatMap(V.has).path', query: "g.V().out().flatMap(V().has('name','p1')).path()" },
   { name: 'resource: out.local(V.order.limit).path', query: "g.V().out().local(V().order().by('name').limit(1)).path().count()" },
   { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
   // The unit row is never a CTE (`isUnitValues`, `src/rel/block.ts`): first-row `map(<traversal>)` reads, at depth.

@@ -2,15 +2,16 @@
 // sack and extends its path:
 // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221.
 //
-// In a child body (`lower/scoped.ts` `reSourcedBody`) the read after the re-source stays ONE shared read: under a
-// FIRST-row host (`map`/`by()`/a filter) a tracked host path crosses unchanged (the child's positions never leave
-// it); under an ALL-rows host (`local`/`flatMap`) the rest splits only where it first reads the host, and the fold
-// continues over the cross from there — a label the read binds rides out of the shared read as an alias channel. At the ROOT the fold's cross (`lower/movement.ts` `reSource`)
-// extends a carried path and keeps a sack.
+// In a child body (`lower/scoped.ts` `reSourcedBody`) the read after the re-source stays ONE shared read, by the
+// host's REJOIN CONTRACT: under `first` (`map`/`by()`/a filter) and `split` (`flatMap`/`coalesce`) the emitted
+// traverser is split from the HOST, so a tracked host path crosses unchanged (the child's positions never leave
+// it); under `split` and `forward` (`local`) the rest splits only where it first reads the host, and the fold
+// continues over the cross from there — under `forward` a label the read binds rides out of the shared read as an
+// alias channel. At the ROOT the fold's cross (`lower/movement.ts` `reSource`) extends a carried path and keeps a sack.
 //
-// A FIRST-row host whose rest reads the host traverser, and an ALL-rows host on a traverser whose path is
-// tracked, decline from the query text, naming the shape; a rest that is only `select` of an outer label
-// suggests the likely intent.
+// A FIRST-row host whose rest reads the host traverser, a `forward` host on a traverser whose path is tracked, and
+// a body reading a tracked path itself decline from the query text, naming the shape; a rest that is only
+// `select` of an outer label suggests the likely intent.
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare, bagOf } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
@@ -164,7 +165,58 @@ describe('an all-rows host splits its rest where it first reads the host', () =>
   });
 });
 
-describe('an all-rows host on a traverser whose path is tracked declines, naming the shape', () => {
+describe('flatMap() splits the HOST: a tracked path crosses the shared read and gains the result alone', () => {
+  // `FlatMapStep` emits `head.split(r)` per result
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52),
+  // so the path is the host's plus r — the child's GraphStep positions never leave it.
+  const paths = (g: string): string[] => bagOf(rows(g).map((r) => JSON.stringify(members(r))));
+  const hostPaths = paths('g.V().out().path()');
+  test('out().flatMap(V().has(marko)).path() is [v, w, marko] per edge', () => {
+    expect(paths("g.V().out().flatMap(V().has('name','marko')).path()"))
+      .toEqual(bagOf(hostPaths.map((p) => JSON.stringify([...JSON.parse(p), 'v1']))));
+  });
+  test('out().flatMap(V().has(marko).out()).path() is [v, w, x] per edge × marko\'s out', () => {
+    expect(paths("g.V().out().flatMap(V().has('name','marko').out()).path()"))
+      .toEqual(bagOf(hostPaths.flatMap((p) => ['v2', 'v3', 'v4'].map((x) => JSON.stringify([...JSON.parse(p), x])))));
+  });
+  test('the count', () => expect(count("g.V().out().flatMap(V().has('name','marko')).path().count()")).toBe(6));
+  test('a value result is its value position', () => {
+    expect(paths("g.V().out().flatMap(V().has('name','marko').values('name')).path()"))
+      .toEqual(bagOf(hostPaths.map((p) => JSON.stringify([...JSON.parse(p), 'marko']))));
+  });
+  test('a host label read after the split', () => {
+    expect(bagOf(rows("g.V().as('a').out().flatMap(V().has('name','lop').select('a')).path().by('name')").map((r) => JSON.stringify(members(r)))))
+      .toEqual(bagOf(rows("g.V().as('a').out().path().by('name')").map((r) => JSON.stringify([...members(r), members(r)[0]]))));
+  });
+  test("the read's own label, selected past a host read", () => {
+    expect(bagOf(rows("g.V().as('a').out().flatMap(V().as('x').has('name','lop').select('a').select('x')).path().by('name')").map((r) => JSON.stringify(members(r)))))
+      .toEqual(bagOf(rows("g.V().as('a').out().path().by('name')").map((r) => JSON.stringify([...members(r), 'lop']))));
+  });
+  test('coalesce() splits the host too', () => {
+    expect(paths("g.V().out().coalesce(V().has('name','zzz'), V().has('name','marko')).path()"))
+      .toEqual(bagOf(hostPaths.map((p) => JSON.stringify([...JSON.parse(p), 'v1']))));
+  });
+  test('at depth: under local(), where(), map() and repeat()', () => {
+    expect(count("g.V().local(out().flatMap(V().has('name','marko')).path()).count()")).toBe(6);
+    expect(count("g.V().out().where(flatMap(V().has('name','marko')).path().count(local).is(3)).count()")).toBe(6);
+    expect(scalars("g.V().out().map(flatMap(V().has('name','marko')).path()).count(local)")).toEqual(Array(6).fill(3));
+    expect(count("g.V().repeat(flatMap(V().has('name','lop'))).times(2).path().count()")).toBe(6);
+  });
+  test('the read label still does not leave flatMap()', () => {
+    expect(count("g.V().flatMap(V().has('name','marko').as('x')).select('x').count()")).toBe(0);
+  });
+  test('a path read INSIDE the body still declines, naming it', () => {
+    expect(() => run(s, "g.V().out().flatMap(V().has('name','marko').simplePath()).count()"))
+      .toThrow('a path(), simplePath() or cyclicPath() inside a flatMap() body that starts with V()/E()');
+  });
+});
+
+describe('a forward (local()) host on a traverser whose path is tracked declines, naming the shape', () => {
+  // `LocalStep` emits the CHILD's own traverser, whose path the read's GraphStep extends.
+  test('out().local(V().has(marko)).path()', () => {
+    expect(() => run(s, "g.V().out().local(V().has('name','marko')).path().count()"))
+      .toThrow('a V()/E() inside local() on a traverser whose path is tracked');
+  });
   test('out().local(V().order().limit(1)).path()', () => {
     try { run(s, "g.V().out().local(V().order().by('name').limit(1)).path().count()"); } catch (error) {
       expect(error).toBeInstanceOf(UnsupportedTraversal);

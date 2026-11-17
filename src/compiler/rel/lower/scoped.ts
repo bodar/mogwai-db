@@ -14,7 +14,7 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpe
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_FAMILY, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -142,19 +142,29 @@ interface ScopedBody {
  */
 function lowerBody(
   body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', positionedSeed = false, first = false,
+  order?: 'free' | 'read', positionedSeed = false, contract: RejoinContract = 'forward',
 ): Tail | null {
   const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
   const positioned = positionedSeed || someStepDeep(body, ctx.params, (s) => s.name === 'tail');
   const run = (at: boolean): Tail | null => {
     const seed = seedRow(rel, from, fresh, at);
-    const reSourced = reSourcedBody(seed, body, framing, bodyCtx, fresh, labels, first);
+    const reSourced = reSourcedBody(seed, body, framing, bodyCtx, fresh, labels, contract);
     return reSourced !== undefined ? reSourced : continueAs(seed, framing, body, 0, false, bodyCtx, fresh, labels);
   };
   const tail = run(positioned);
   if (order === 'read' && tail && !positioned && !encounterOf(tail.rel.channels) && !atMostOneRow(tail.rel)) return run(true);
   return tail;
 }
+
+/**
+ * WHICH TRAVERSER A HOST EMITS FOR ITS BODY'S RESULT — the body's REJOIN CONTRACT, read by `reSourcedBody`: `first`
+ * (`map`, a `by()`, an existence test — one result, split from the host), `split` (`flatMap`, `coalesce` — every
+ * result, each `head.split(result)`: the payload is the body's, every channel and the path the host's extended by
+ * the result alone) or `forward` (`local`, `optional`, a pool's per-member part — the CHILD's own traverser:
+ * its path and labels). The same vocabulary as `rejoin`'s policy plus the first-row pick; a site with no rejoin
+ * policy of its own takes `forward`, the most demanding.
+ */
+type RejoinContract = 'first' | 'split' | 'forward';
 
 /** The traverser state a re-source's split carries through unchanged (`reSourcedBody`). */
 const CROSSES: ReadonlySet<ChannelRole> = new Set<ChannelRole>(['alias', 'sack', 'loops']);
@@ -177,29 +187,34 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * graph alone: `rest(prefix × G) = prefix × rest(G)`. So `rest(G)` is one ROOTED read (`rootedRead`), fenced and
  * computed once, and the body is the prefix crossed with it — an uncorrelated subtree the decorrelator leaves
  * untouched and crosses with the domain once (Neumann/Kemper's rule for a correlation-free side, Calcite
- * `TopDownGeneralDecorrelator`), never a graph scan per host row. A FIRST-row consumer (`first`: `map`, a `by()`,
- * an existence test) needs only the read's first row — picked once, by the collation a per-scope pick uses
+ * `TopDownGeneralDecorrelator`), never a graph scan per host row. A FIRST-row consumer (contract `first`: `map`, a
+ * `by()`, an existence test) needs only the read's first row — picked once, by the collation a per-scope pick uses
  * (`defaultCollation`) — so a host row costs one row however large the graph.
  *
  * PRESENCE IS A ROW: a productive null (`__.V().constant(null)`) is a row whose value is NULL, so `map()` keeps
  * the traverser (`TraversalMapStep` emits whenever the child `hasNext()`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`).
  *
- * Under an ALL-rows host (`local`, `flatMap`) the shared read stops only where the rest first reads the host's
+ * Under an ALL-rows contract (`split`, `forward`) the shared read stops only where the rest first reads the host's
  * state (`sharedEnd`), and the fold continues over the cross from there — so the cross holds the traversers the
  * reference's split has reached at that step, never the whole graph per host ahead of a filter, order or slice
  * the shared part holds. A label the read binds reads nothing of the host: it rides out as an alias channel.
+ * Under `split` (`flatMap`) the emitted traverser is the HOST's split by the result (`FlatMapStep`), so a tracked
+ * path crosses unchanged as it does under `first` and `rejoin` extends it by the result alone — the read's own
+ * GraphStep positions never leave the child.
  *
- * What it refuses, from the query text: under a FIRST-row host a rest that reads the HOST traverser's state (its
+ * What it refuses, from the query text: under `first` a rest that reads the HOST traverser's state (its
  * sack, path, loops or a host label — `readsHostState`: one shared evaluation cannot hold them, and a per-host
- * cross would pay the graph for one row), under an ALL-rows host a traverser whose path is tracked (the read's
- * positions would extend the host's), and a prefix of label reads that may LOSE its row — the re-source discards
+ * cross would pay the graph for one row), under `forward` a traverser whose path is tracked (the child's own
+ * path, emitted, is the host's EXTENDED by the read's positions), under `split` a tracked path the rest READS (the
+ * child's path inside the body is likewise extended), and a prefix of label reads that may LOSE its row — the re-source discards
  * the selected value, so the answer would depend only on which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
  * lose or multiply its row (`out().V()`, `values('age').V()`) is GraphStep's own cross join, in the fold.
  */
 function reSourcedBody(
-  seed: Rel, body: readonly IRStep[], framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap, first: boolean,
+  seed: Rel, body: readonly IRStep[], framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap, contract: RejoinContract,
 ): Tail | null | undefined {
+  const first = contract === 'first';
   const at = reSourceAt(body);
   if (at < 0) return undefined;
   const prefix: Tail | null = at === 0 ? { rel: seed, framing, aliases: labels, bulked: false }
@@ -209,8 +224,9 @@ function reSourcedBody(
   // explained admission rule of a discarded label read (`reSourceTail`'s `admitsReSource`).
   if (!exactlyOneRow(prefix.rel)) return undefined;
   const rest = body.slice(at);
-  // A tracked path out of an ALL-rows host is the host's EXTENDED by the read's positions (below): declined.
-  if (!first && pathCarried(prefix.rel)) {
+  // A tracked path the CHILD's traverser carries out (`forward`), or that a `split` body reads inside itself, is
+  // the host's EXTENDED by the read's positions, which the shared read does not hold: declined.
+  if (pathCarried(prefix.rel) && (contract === 'forward' || (contract === 'split' && readsPath(rest, ctx)))) {
     ctx.declines.note({ kind: 'resource-path', message: resourcePathMessage(rest, ctx), terminal: false });
     return null;
   }
@@ -221,8 +237,7 @@ function reSourcedBody(
     ctx.declines.note({ kind: 'resource-reads-host', message: hostStateMessage(rest, ctx), terminal: false });
     return null;
   }
-  // An ALL-rows host (`local`, `flatMap`) emits the child's own traversers, so a host label the rest reads is the
-  // host's. The rest SPLITS only where it first reads the host (`sharedEnd`): the part before is one shared read
+  // Under an ALL-rows contract (`split`, `forward`) a host label the rest reads is the host's. The rest SPLITS only where it first reads the host (`sharedEnd`): the part before is one shared read
   // crossed with the prefix — `rest(prefix × G) = rest₂(prefix × rest₁(G))`, where `rest₁` reads nothing of the
   // host — and the fold continues over that cross. A label the read BINDS reads nothing of the host either, so it
   // stays inside `rest₁` and rides out of the cross as an alias channel beside the host's (`ownLabels`) — never a
@@ -231,24 +246,28 @@ function reSourcedBody(
   if (cut < 1) return undefined;
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
-  // own. A PATH crosses unchanged under a FIRST-row host too: `map`/`by()`/a filter emit a traverser split from
-  // the HOST (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`), so the positions the child's
-  // GraphStep appends never leave it (and the rest reads none of them: `readsHostState`). Out of an ALL-rows host
-  // a tracked path is declined above. An entering vertex (`fromV`) is a hop's: the fold's.
-  const crosses = (role: ChannelRole): boolean => CROSSES.has(role) || (first && role === 'path');
+  // own. A PATH crosses unchanged under `first` and `split` too: `map`/`by()`/a filter and `flatMap` emit a
+  // traverser split from the HOST (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`, `FlatMapStep`
+  // `head.split(r)`), so the positions the child's GraphStep appends never leave it (and the rest reads none of
+  // them: `readsHostState`, `readsPath`). Under `forward` a tracked path is declined above. An entering vertex
+  // (`fromV`) is a hop's: the fold's.
+  const splits = contract !== 'forward';
+  const crosses = (role: ChannelRole): boolean => CROSSES.has(role) || (splits && role === 'path');
   if (!prefix.rel.channels.every((channel) => crosses(channel.role) || channel.role === 'encounter')) return undefined;
   const rooted = rootedRead(rest.slice(0, cut), ctx, fresh, 'many');
   if (!rooted || rooted.effects?.length) return null;
   // The read's own position and multiplicity ride; the sack and loop counter a FRESH start traverser holds are
-  // superseded by the host's, which the split keeps. A label or path the read binds of its own is shed under a
-  // FIRST-row host — its traversers never leave the child. Out of an ALL-rows host the read's labels ride out
-  // (`local` emits the child's own traversers), each under a column the prefix does not carry.
-  const labelled = first ? undefined : ownLabels(rooted, prefix);
+  // superseded by the host's, which the split keeps. A label or path the read binds of its own is shed under
+  // `first` and `split` — those traversers never leave the child (`rejoin`'s `split` keeps the host's channels).
+  // Under `forward` the read's labels ride out (`local` emits the child's own traversers), each under a column the
+  // prefix does not carry; under `split` they ride only as far as a rest the fold continues past the cut, which
+  // may still select them inside the body.
+  const labelled = first || (contract === 'split' && cut === rest.length) ? undefined : ownLabels(rooted, prefix);
   if (labelled === null) return undefined;
   const own = rooted.rel.channels.filter((channel) =>
     channel.role === 'encounter' || channel.role === 'bulk' || (labelled !== undefined && channel.role === 'alias'));
   const kept = (channel: Channel): boolean =>
-    own.includes(channel) || (channel.role === 'alias' || channel.role === 'path' ? first : CROSSES.has(channel.role));
+    own.includes(channel) || (channel.role === 'alias' || channel.role === 'path' ? splits : CROSSES.has(channel.role));
   if (!rooted.rel.channels.every(kept)) return undefined;
   // ONE fenced relation is the read's value AND its presence: a first-row host reads both off `once`.
   const read = first ? firstRow(rooted.rel, defaultCollation(rooted.rel), fresh) : rooted.rel;
@@ -326,16 +345,20 @@ function sharedEnd(rest: readonly IRStep[], carried: AliasMap, ctx: ChainCtx): n
   return ends.length ? Math.min(...ends) : rest.length;
 }
 
-/** Why an ALL-rows host's re-sourcing body declines on a traverser whose path is tracked (`reSourcedBody`),
- *  named by WHERE the path is asked for: in the re-sourced body itself, or around the host. */
+/** Does a re-sourced rest read the traverser's PATH (a path-family step or a `tree()`, at any depth)? */
+const readsPath = (rest: readonly IRStep[], ctx: ChainCtx): boolean =>
+  someStepDeep(rest, ctx.params, (s) => PATH_FAMILY.has(s.name) || s.name === 'tree');
+
+/** Why a re-sourcing body declines on a traverser whose path is tracked (`reSourcedBody`) — under `local()` (the
+ *  `forward` contract), or where the body itself reads the path — named by WHERE the path is asked for: in the
+ *  re-sourced body itself, or around the host. */
 function resourcePathMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
   const host = `${ctx.host ?? 'local'}()`;
-  return someStepDeep(rest, ctx.params, (s) => PATH_STEPS.has(s.name))
+  return readsPath(rest, ctx)
     ? `a path(), simplePath() or cyclicPath() inside a ${host} body that starts with V()/E() is not supported yet`
     : `a V()/E() inside ${host} on a traverser whose path is tracked (a path(), simplePath() or cyclicPath() `
       + 'around it) is not supported yet';
 }
-const PATH_STEPS: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
 /**
  * Why a FIRST-row host's re-sourcing body declines when the steps after its `V()`/`E()` read the incoming
@@ -407,7 +430,7 @@ function keyedBody(
 /** Step 2: the body, lowered as the root lowers a chain, then keyed by the scope. `null` declines. */
 function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null, first = false,
+  order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null, contract: RejoinContract = 'forward',
 ): ScopedBody | null {
   // A RE-SOURCE is the connector's own (`reSourcedBody`) — unless the body also draws (`ladderOwns`).
   //
@@ -421,7 +444,7 @@ function scopedBody(
   if (ladderOwns(body, ctx)) return null;
   // `reframe` is the host's own re-expression of the body's value (`landValues`' record).
   const out = keyedBody(
-    (mf) => lowerBody(body, rel, sc.scoped, framing, ctx, mf, labels, order, positionedSeed, first), sc.scoped, sc.key, fresh, reframe,
+    (mf) => lowerBody(body, rel, sc.scoped, framing, ctx, mf, labels, order, positionedSeed, contract), sc.scoped, sc.key, fresh, reframe,
   );
   return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail };
 }
@@ -445,7 +468,7 @@ function rootedBody(
   const element = make.project({ id: fresh('sbe'), input: domain, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(domain.id, 'id')]] });
   // Only the body's OWN draws are per scope (`keyedBody`): the domain built above is the scope's, not the body's.
   const out = keyedBody(
-    (mf) => lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, mf, NO_ALIASES, 'read', false, true),
+    (mf) => lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, mf, NO_ALIASES, 'read', false, 'first'),
     domain, sc.key, fresh, reframe,
   );
   return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail };
@@ -462,13 +485,13 @@ function rootedBody(
  */
 function correlatedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', first = false,
+  order?: 'free' | 'read', contract: RejoinContract = 'forward',
 ): Tail | null {
   // A body that DRAWS never stays correlated: SQLite may evaluate a subquery (or a part of one) that does not
   // read the host ONCE for every host row, so a draw there would be one pick shared by every scope. It takes
   // the decorrelated form (`scopedBody`), which keys the draw per scope by construction.
   if (nondeterministic(body, ctx.params)) return null;
-  const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order, false, first);
+  const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order, false, contract);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
@@ -993,7 +1016,7 @@ const existence = (negated: boolean): Connector => (site) => {
   // and the filter — `ProgramWrites.filterWrite`, read by `lowerChain`.)
   // Every body correlated: the semi/anti-join is an `EXISTS` over the body itself, read against the host row
   // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
-  const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free', true));
+  const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free', 'first'));
   const probes = correlated.map((tail) => tail && existenceProbe(tail, fresh));
   if (probes.every((probe) => probe && spellsStored(probe, ['one'], rel))) {
     const pred = (probes as Rel[]).map((plan): Expr => ({ kind: 'exists', plan, negated }))
@@ -1008,7 +1031,7 @@ const existence = (negated: boolean): Connector => (site) => {
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/OrStep.java`).
   const keys: Rel[] = [];
   for (const body of bodies as (readonly IRStep[])[]) {
-    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'free', false, undefined, true);
+    const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'free', false, undefined, 'first');
     if (!keyed) return null;
     if (step.name === 'or') {
       keys.push(make.project({
@@ -1054,7 +1077,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
   // decorrelated rejoin carries.
   const feedsOtherV = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
   const hostChannel = (channel: Channel): ColMeta => rel.type.cols.find((column) => column.name === channel.col)!;
-  const tail = feedsOtherV ? null : lowered !== undefined ? lowered : correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', true);
+  const tail = feedsOtherV ? null : lowered !== undefined ? lowered : correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', 'first');
   // A body over its seed row alone (`seedExpressions`) is a projection of the host row, and its filters are the
   // host's: no subquery, no existence probe.
   const inline = tail && framingCols(tail.framing) ? seedExpressions(tail.rel, payloadCols(tail.rel).map((column) => column.name), rel) : null;
@@ -1109,7 +1132,7 @@ function firstInnerOver(site: HostSite, lowered?: Tail | null): Tail | null {
   }
   // Not SQL-holdable as a dependent join: the decorrelated body, its FIRST row per scope through the rejoin.
   const sc = scope(rel, fresh);
-  const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, undefined, true);
+  const keyed = scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, undefined, 'first');
   if (!keyed) return null;
   const out = rejoin(sc, sc.scoped, keyed, rel, 'split', true, ctx, fresh, labels, false, feedsOtherV);
   return out && continueAs(out.rel, out.framing, steps, at + 1, bulked, ctx, fresh, out.aliases);
@@ -1243,7 +1266,7 @@ const chooseRoute: Connector = (site) => {
   const condition = bodyOf(choice.nested, ctx.params, ctx.sideEffects);
   if (!condition) return null;
   const sc = scope(rel, fresh, true);
-  const keyed = scopedBody(condition, sc.scoped, framing, sc, ctx, fresh, labels, 'free', false, undefined, true);
+  const keyed = scopedBody(condition, sc.scoped, framing, sc, ctx, fresh, labels, 'free', false, undefined, 'first');
   if (!keyed) return null;
   const routed: RoutedCondition = {
     pred: (source) => (source.type.cols.some((column) => column.name === sc.key) ? {
@@ -1291,7 +1314,7 @@ const allRows = (policy: 'split' | 'forward'): Connector => (site) => {
   // owns (no path, no label): then forwarding the child's IS splitting the host on its value. (A reducing
   // child mints its traverser afresh — `local(out().count()).path()` is `[3]`, not the host's path plus 3.)
   const ownsNothing = (r: Rel): boolean => r.channels.every((channel) => HOST_ONLY.has(channel.role));
-  const probe = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read');
+  const probe = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', policy);
   if (probe && atMostOneRow(probe.rel) && (policy === 'split' || (ownsNothing(rel) && ownsNothing(probe.rel)))) {
     const mapped = firstInnerOver(site, probe);
     if (mapped) return mapped;
@@ -1303,7 +1326,7 @@ const allRows = (policy: 'split' | 'forward'): Connector => (site) => {
   const frozen = owed ? freezeParent(positioned(rel, fresh), fresh) : null;
   const input = frozen ? frozen.rel : rel;
   const sc = scope(input, fresh);
-  const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body));
+  const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body), undefined, policy);
   if (!keyed) return null;
   const out = rejoin(sc, sc.scoped, keyed, input, policy, false, ctx, fresh, labels, owed, edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false));
   if (!out) return null;
@@ -1335,9 +1358,10 @@ const priority: Connector = (site) => {
   // priority: no later arm is ever asked (`CoalesceStep` returns the first arm that `hasNext()`). Where it is the
   // FIRST arm the host is that arm alone, a `flatMap` (`coalesce`) or a `local` (`optional`, whose own fallback is
   // dead too) — so the arm's value is computed only where something reads it.
-  const leading = bodies[0]!.length ? correlatedBody(bodies[0]!, rel, framing, ctx, fresh, labels, 'read') : null;
+  const policy = optional ? 'forward' : 'split';
+  const leading = bodies[0]!.length ? correlatedBody(bodies[0]!, rel, framing, ctx, fresh, labels, 'read', policy) : null;
   if (leading && exactlyOneRow(leading.rel)) {
-    const alone = allRows(optional ? 'forward' : 'split')({ ...site, step: { ...step, args: [step.args[0]!] } });
+    const alone = allRows(policy)({ ...site, step: { ...step, args: [step.args[0]!] } });
     if (alone) return alone;
   }
   // THE DEPENDENT JOIN FIRST, over one correlated row (a body inside another child, `project().by(coalesce(…))`)
@@ -1364,9 +1388,9 @@ const priority: Connector = (site) => {
     // Where the merge's order is read, a STREAMING arm runs from a positioned seed, so its results are numbered
     // in its own emission order; a REDUCING arm (`isReductionArm`) has one result per scope and no position to
     // keep — the ladder's own split between its positioned arms and its per-traverser reduction arm.
-    const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body));
+    const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body), undefined, policy);
     if (!keyed) return null;
-    const out = rejoin(sc, remaining, keyed, input, optional ? 'forward' : 'split', false, ctx, fresh, labels, owed,
+    const out = rejoin(sc, remaining, keyed, input, policy, false, ctx, fresh, labels, owed,
       edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false));
     if (!out) return null;
     arms.push({ ...out, rel: owed ? out.rel : dropEncounter(out.rel, fresh), bulked: bulked || out.bulked });
@@ -1430,14 +1454,14 @@ const recordLeft: Connector = (site) => {
     if (by.key.kind !== 'child' || by.order !== undefined) continue;
     // A RECORD-valued by() (`by(__.project(…))`) is held as the MAP it is (`recordAsMap`): a record's own first
     // column is a SUB-field's, so presence read off it dropped an outer key whose inner map was empty.
-    const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read', true);
+    const lowered = correlatedBody(by.key.body, rel, framing, ctx, fresh, labels, 'read', 'first');
     const tail = lowered && recordAsMap(lowered, ctx, fresh);
     const fieldCols = tail && framingCols(tail.framing);
     const exprs = tail && fieldCols && correlatedFirst(tail, fieldCols.map((column) => column.name), rel, fresh);
     if (tail && exprs) { correlated.set(slot, { exprs, framing: tail.framing, total: exactlyOneRow(tail.rel) }); continue; }
     const scoped = sc ??= scope(rel, fresh);
     if (joined === rel) joined = scoped.scoped;
-    const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh), true);
+    const keyed = scopedBody(by.key.body, rel, framing, scoped, ctx, fresh, labels, 'read', false, (t) => recordAsMap(t, ctx, fresh), 'first');
     const cols = keyed && framingCols(keyed.tail.framing);
     if (!keyed || !cols || cols.some((column) => !keyed.tail.rel.type.cols.some((c) => c.name === column.name))) continue;
     const first = firstPerScope(keyed, cols.map((column) => column.name), fresh);
@@ -1573,7 +1597,7 @@ function landValues(
     const root = roots.get(key);
     const reframe = (t: Tail) => recordAsMap(t, ctx, fresh, true);
     const keyed = root ? rootedBody(body, root, rel, sc, ctx, fresh, reframe)
-      : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe, true);
+      : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe, 'first');
     const cols = keyed && framingCols(keyed.tail.framing);
     // One value column (and a scalar's per-row type) is what a ChildValue carries.
     if (!keyed || !cols || cols.length > (keyed.tail.framing.kind === 'scalar' ? 2 : 1)) return null;
