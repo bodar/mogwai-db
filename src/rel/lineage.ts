@@ -2,7 +2,7 @@ import { atMostOneRow } from './bounds.ts';
 import { columnIsRowKey } from './copies.ts';
 import type { Rel } from './rel.ts';
 import type { RelId } from './types.ts';
-import { freeRelIds, relChildren } from './walk.ts';
+import { freeRelIds, joinSide, relChildren } from './walk.ts';
 
 /**
  * COLUMN LINEAGE ALONG A RELATION'S SPINE — where a column a relation exposes comes from, as the relations it is
@@ -23,8 +23,8 @@ export interface ColumnPath {
 
 /**
  * Where column `rel.name` comes from, seen from `top`: every relation on the way down to the one that
- * DEFINES it — through filters, sorts, renaming projections and the join side that carries the name — with its
- * name there. It stops at anything else (that relation computes the column), so the last relation is a
+ * DEFINES it — through filters, sorts, limits, `distinct`s, `materialize`s, renaming projections and the join
+ * side that holds the column's POSITION (never a LEFT join's null-padded right side) — with its name there. It stops at anything else (that relation computes the column), so the last relation is a
  * scan only when the column is a stored one. `null` when `rel` is not on `top`'s spine — an OUTER row.
  */
 export function columnPath(top: Rel, rel: RelId, name: string): ColumnPath | null {
@@ -40,18 +40,30 @@ export function definingPath(rel: Rel, name: string): ColumnPath {
   const through = (rest: ColumnPath, ...hops: readonly Rel[]): ColumnPath =>
     ({ rels: [rel, ...hops, ...rest.rels], names: [name, ...hops.map(() => null), ...rest.names], name: rest.name });
   switch (rel.kind) {
-    case 'filter': case 'sort': return through(definingPath(rel.input, name));
+    // Each carries its input's rows (or a subset of them) with the columns unchanged: a `materialize` computes
+    // its input once and fences it, a `limit`/`distinct` keeps some of its rows.
+    case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize': return through(definingPath(rel.input, name));
     case 'project': {
       const e = rel.exprs.find(([output]) => output === name)?.[1];
       const hops = e?.kind === 'col' ? spinePath(rel.input, e.rel) : null;
       return e?.kind === 'col' && hops ? through(definingPath(hops.at(-1)!, e.name), ...hops.slice(0, -1)) : here;
     }
     case 'join': {
-      const sides = [rel.left, rel.right].filter((child) => child.type.cols.some((c) => c.name === name));
-      return sides.length === 1 ? through(definingPath(sides[0]!, name)) : here;
+      // POSITIONALLY (`joinSide`): two sides may carry one name. A LEFT join's right side is NULL where the left
+      // row is unmatched, so no row below defines it — the join does.
+      const from = joinSide(rel, name);
+      return from && !from.nullable ? through(definingPath(from.side, from.name)) : here;
     }
     default: return here;
   }
+}
+
+/** The SCAN column `rel.name` (seen from `top`) is the stored rowid of — its defining path ends at a scan's `id` —
+ *  or `null`: the one "which element row is this" question a seek asks (`semijoin`). */
+export function rowidScan(top: Rel, rel: RelId, name: string): Extract<Rel, { readonly kind: 'scan' }> | null {
+  const path = columnPath(top, rel, name);
+  const leaf = path?.rels.at(-1);
+  return path?.name === 'id' && leaf?.kind === 'scan' ? leaf : null;
 }
 
 /** Column `name` of `top` as the column of `target` — a relation on its defining path — it carries, or `null`. */
@@ -83,8 +95,8 @@ export function spinePath(top: Rel, id: RelId): readonly Rel[] | null {
  * `movement.ts` `reSource`), and the one place a per-seed read reads the WHOLE graph rather than a seek off
  * the seed. Its parts: the `seed` (the left, at most one row), the element relation (`side`, the right, which
  * reads nothing outside itself), and `key` — a column of the side that is its scanned `nodes`/`edges` rowid
- * (`columnIsRowKey`, down to the scan along `definingPath` — and through a `materialize`, which carries its input's
- * rows unchanged: the read a re-source computes once and fences, `reSourcedBody`). `null` for any other node. ONE
+ * (`columnIsRowKey`, down to the scan along `definingPath` — which passes a `materialize`, the read a re-source
+ * computes once and fences, `reSourcedBody`). `null` for any other node. ONE
  * predicate, so every question about a whole-relation read under a seed (`leading`'s first-hit read, the per-host
  * work fact `perHostWork`, `src/rel/work.ts`) recognises the same shape.
  *
@@ -106,8 +118,7 @@ export function reSourceCross(r: Rel, seed: 'one-row' | 'any' = 'one-row'): ReSo
   if (freeRelIds(side).size) return null;
   const key = side.type.cols.find((column) => {
     if (!columnIsRowKey(side, column.name)) return false;
-    let path = definingPath(side, column.name);
-    for (let at = path.rels.at(-1)!; at.kind === 'materialize'; at = path.rels.at(-1)!) path = definingPath(at.input, path.name);
+    const path = definingPath(side, column.name);
     const leaf = path.rels.at(-1)!;
     return leaf.kind === 'scan' && path.name === 'id' && (leaf.table === 'nodes' || leaf.table === 'edges');
   })?.name;

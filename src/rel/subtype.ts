@@ -1,6 +1,6 @@
 import { isArgExtremum, type Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
-import { forEachRel } from './walk.ts';
+import { forEachRel, joinSide } from './walk.ts';
 
 /**
  * MAY THIS VALUE CARRY SQLITE'S JSON SUBTYPE — the invisible tag that makes `json_array(x)` nest `x` as
@@ -71,10 +71,8 @@ export function mayCarryJsonSubtype(e: Expr, outer: (rel: string, name: string) 
         if (name === r.as.key || name === r.as.ord || name === r.as.type) return false;
         return r.input ? column(r.input, name) : true;
       case 'join': {
-        const i = at(r, name);
-        const left = r.left.type.cols.length;
-        if (i < 0) return true;
-        return i < left ? column(r.left, r.left.type.cols[i]!.name) : column(r.right, r.right.type.cols[i - left]!.name);
+        const from = joinSide(r, name);
+        return from === null || column(from.side, from.name);
       }
       case 'union': { const i = at(r, name); return i < 0 || r.inputs.some((input) => column(input, input.type.cols[i]!.name)); }
     }

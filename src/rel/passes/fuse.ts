@@ -4,7 +4,7 @@ import { minter } from '../mint.ts';
 import type { Rel } from '../rel.ts';
 import type { ColMeta, RelId } from '../types.ts';
 import {
-  exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, mapExprChildren, relChildren, relExprs,
+  exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, joinSide, mapExprChildren, relChildren, relExprs,
   rewriteExpr, rewriteRels, substRelId,
 } from '../walk.ts';
 
@@ -315,16 +315,17 @@ function factor(a: Aggregate, mint: () => (hint: string) => RelId): Rel | undefi
   let lateral = false;
   if (free.size) forEachRel(j.left, (r) => { lateral ||= free.has(r.id); });
   if (lateral) return undefined;
-  const width = j.left.type.cols.length;
-  const sideOf = (name: string): 0 | 1 => (j.type.cols.findIndex((column) => column.name === name) < width ? 0 : 1);
+  // A cross join's every output column is one side's (`joinSide`, positionally).
+  const sideOf = (name: string): 0 | 1 => (joinSide(j, name)!.side === j.left ? 0 : 1);
   /** The side an expression over the join reads (-1 neither, 2 both), and its spelling over that side. */
   const local = (e: Expr): readonly [number, Expr] => {
     let side = -1;
     const expr = rewriteExpr(e, (n) => {
       if (n.kind !== 'col' || n.rel !== j.id) return n;
-      const s = sideOf(n.name);
+      const from = joinSide(j, n.name)!;
+      const s = from.side === j.left ? 0 : 1;
       side = side === -1 || side === s ? s : 2;
-      return { ...n, rel: sides[s].id, name: sides[s].type.cols[j.type.cols.findIndex((column) => column.name === n.name) - s * width]!.name };
+      return { ...n, rel: from.side.id, name: from.name };
     });
     return [side, expr];
   };

@@ -11,7 +11,7 @@ import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
 import { exprMayAbort } from '../../../rel/raise.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
-import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
+import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, joinSide, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
 import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, nestsCorrelatedSubplans, spelledOuterColumns, threadingRowKey } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
@@ -1253,12 +1253,11 @@ function constantOver(rows: Rel, name: string, outer?: (id: RelId) => boolean, c
     // Through a join, the side the column comes from (positionally, as the join's own type lists them) — the
     // body's seed row joined to the relation it starts carries the host's columns on its side.
     if (computed && r.kind === 'join' && r.join !== 'semi' && r.join !== 'anti') {
-      const at = r.type.cols.findIndex((c) => c.name === column);
-      if (at < 0) return false;
-      const leftN = r.left.type.cols.length;
-      const side: Rel = at < leftN ? r.left : r.right;
-      column = side.type.cols[at < leftN ? at : at - leftN]!.name;
-      r = side;
+      // A LEFT join's right side is NULL on an unmatched row: not the same on every row.
+      const from = joinSide(r, column);
+      if (!from || from.nullable) return false;
+      column = from.name;
+      r = from.side;
       continue;
     }
     if (r.kind !== 'project') return false;
@@ -1308,37 +1307,15 @@ function priorityArms(rows: Rel, terms: readonly SortTerm[], fresh: Minter): rea
   }
   if (at.kind !== 'union' || !at.all || at.inputs.length < 2 || at.inputs.length > 4) return null;
   const union = at;
-  // The value of `rows`' column `name` in arm `i`, where it is a constant there.
+  // The value of `rows`' column `name` in arm `i`, where it is a constant there: its lineage (`columnLineage`)
+  // down the copying chain to a literal or the union column it copies, then that column's down arm `i`.
+  const numberOf = (e: Expr | null): number | null => (e?.kind === 'lit' && typeof e.value === 'number' ? e.value : null);
   const constantIn = (named: string, i: number): number | null => {
-    let column = named;
-    for (const p of chain) {
-      const e = p.exprs.find(([n]) => n === column)?.[1];
-      if (!e) return null;
-      if (e.kind === 'lit') return typeof e.value === 'number' ? e.value : null;
-      column = (e as Extract<Expr, { kind: 'col' }>).name;
-    }
-    const pos = union.type.cols.findIndex((c) => c.name === column);
-    if (pos < 0) return null;
-    // Down the arm through what carries the column unchanged, to the literal that defines it.
-    let r: Rel = union.inputs[i]!;
-    let name = r.type.cols[pos]!.name;
-    for (;;) {
-      if (r.kind === 'filter' || r.kind === 'sort' || r.kind === 'limit') { r = r.input; continue; }
-      if (r.kind === 'window' && !r.specs.some(([minted]) => minted === name)) { r = r.input; continue; }
-      if (r.kind === 'join') {
-        const at = r.type.cols.findIndex((column) => column.name === name);
-        const leftN = r.left.type.cols.length;
-        if (at < 0) return null;
-        [r, name] = at < leftN ? [r.left, r.left.type.cols[at]!.name] : [r.right, r.right.type.cols[at - leftN]!.name];
-        continue;
-      }
-      if (r.kind !== 'project') return null;
-      const e: Expr | undefined = r.exprs.find(([n]) => n === name)?.[1];
-      if (e?.kind === 'lit') return typeof e.value === 'number' ? e.value : null;
-      if (e?.kind !== 'col' || e.rel !== r.input.id) return null;
-      name = e.name;
-      r = r.input;
-    }
+    const above = columnLineage(rows, named, new Map());
+    if (above?.kind !== 'col' || above.rel !== union.id) return numberOf(above);
+    const pos = union.type.cols.findIndex((c) => c.name === above.name);
+    const arm = union.inputs[i]!;
+    return pos < 0 ? null : numberOf(columnLineage(arm, arm.type.cols[pos]!.name, new Map()));
   };
   // The leading terms constant in every arm, and the arms' order under them.
   let lead = 0;

@@ -4,7 +4,7 @@ import { isAbort } from './raise.ts';
 import { atMostOneRow } from './bounds.ts';
 import type { Rel } from './rel.ts';
 import * as make from './factory.ts';
-import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath, substRelId } from './walk.ts';
+import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, joinSide, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath, substRelId } from './walk.ts';
 import type { RelId } from './types.ts';
 
 /**
@@ -276,10 +276,8 @@ export const columnIsStored = (r: Rel, name: string): boolean => {
     // A window's input columns pass through it unchanged; only what it numbers is computed.
     case 'window': return !r.specs.some(([minted]) => minted === name) && columnIsStored(r.input, name);
     case 'join': {
-      const at = r.type.cols.findIndex((column) => column.name === name);
-      const leftN = r.left.type.cols.length;
-      if (at < 0) return false;
-      return at < leftN ? columnIsStored(r.left, r.left.type.cols[at]!.name) : columnIsStored(r.right, r.right.type.cols[at - leftN]!.name);
+      const from = joinSide(r, name);
+      return from !== null && columnIsStored(from.side, from.name);
     }
     default: return false;
   }
@@ -309,13 +307,10 @@ export const columnIsRowKey = (r: Rel, name: string): boolean => {
     case 'join': {
       // A side's key stays a key where the OTHER side has at most one row (a correlated seed row joined to
       // the relation it starts): no row of this side is repeated.
-      if (r.join === 'semi' || r.join === 'anti') return columnIsRowKey(r.left, name);
-      const at = r.type.cols.findIndex((column) => column.name === name);
-      const leftN = r.left.type.cols.length;
-      if (at < 0) return false;
-      return at < leftN
-        ? atMostOneRow(r.right) && columnIsRowKey(r.left, r.left.type.cols[at]!.name)
-        : atMostOneRow(r.left) && columnIsRowKey(r.right, r.right.type.cols[at - leftN]!.name);
+      const from = joinSide(r, name);
+      if (!from) return false;
+      if (r.join === 'semi' || r.join === 'anti') return columnIsRowKey(from.side, from.name);
+      return atMostOneRow(from.side === r.left ? r.right : r.left) && columnIsRowKey(from.side, from.name);
     }
     default: return false;
   }
@@ -373,12 +368,9 @@ export function columnLineage(r: Rel, name: string, leaves: Map<RelId, Rel>, win
     case 'filter': case 'sort': case 'limit': case 'distinct': return columnLineage(r.input, name, leaves, winners);
     case 'window': return r.specs.some(([minted]) => minted === name) ? leaf() : columnLineage(r.input, name, leaves, winners);
     case 'join': {
-      if (r.join === 'semi' || r.join === 'anti') return columnLineage(r.left, name, leaves, winners);
-      const at = r.type.cols.findIndex((column) => column.name === name);
-      const leftN = r.left.type.cols.length;
-      if (at < 0) return null;
-      if (at < leftN) return columnLineage(r.left, r.left.type.cols[at]!.name, leaves, winners);
-      return r.join === 'left' ? leaf() : columnLineage(r.right, r.right.type.cols[at - leftN]!.name, leaves, winners);
+      const from = joinSide(r, name);
+      if (!from) return null;
+      return from.nullable ? leaf() : columnLineage(from.side, from.name, leaves, winners);
     }
     default: return leaf();
   }
@@ -498,10 +490,8 @@ const readsSubqueryOf = (r: Rel, name: string): boolean => {
       return at < 0 || r.inputs.some((input) => columnReadsSubquery(input, input.type.cols[at]!.name));
     }
     case 'join': {
-      const at = r.type.cols.findIndex((column) => column.name === name);
-      const leftN = r.left.type.cols.length;
-      if (at < 0) return true;
-      return at < leftN ? columnReadsSubquery(r.left, r.left.type.cols[at]!.name) : columnReadsSubquery(r.right, r.right.type.cols[at - leftN]!.name);
+      const from = joinSide(r, name);
+      return from === null || columnReadsSubquery(from.side, from.name);
     }
     default: return true;
   }

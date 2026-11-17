@@ -5,7 +5,7 @@ import { freshCopy, minter, type Minter } from '../mint.ts';
 import { rowBounds } from '../bounds.ts';
 import type { RelId } from '../types.ts';
 import { exprRels, forEachExpr, forEachRel, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
-import { columnPath } from '../lineage.ts';
+import { columnPath, rowidScan } from '../lineage.ts';
 
 /**
  * `semijoin` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the
@@ -186,10 +186,8 @@ function elementFacts(plans: readonly Rel[], strategies: readonly OwnerSeek[]): 
   // A throwaway minter: probing whether a constant seek exists must not spend names the rewrite mints.
   const probe = minter(...plans);
   const elementOf = (top: Rel, e: Expr | null): Extract<Rel, { readonly kind: 'scan' }> | null => {
-    if (e?.kind !== 'col') return null;
-    const path = columnPath(top, e.rel, e.name);
-    const leaf = path?.rels.at(-1);
-    return path?.name === 'id' && leaf?.kind === 'scan' && SEEK_PROPERTIES[leaf.table] ? leaf : null;
+    const leaf = e?.kind === 'col' ? rowidScan(top, e.rel, e.name) : null;
+    return leaf && SEEK_PROPERTIES[leaf.table] ? leaf : null;
   };
   for (const plan of plans) forEachRel(plan, (r) => {
     if (r.kind !== 'filter') return;
@@ -277,7 +275,7 @@ function narrowFilter(
   const owners: Rel[] = [];
   for (const term of [...terms, ...above]) {
     const target = drivenElement(node, term, false);
-    const element = target && columnPath(node.input, target.rel, target.name)!.rels.at(-1)!.id;
+    const element = target && rowidScan(node.input, target.rel, target.name)?.id;
     if (!target || !element || facts.reached.has(element) || facts.narrowed.has(element)) continue;
     if (driven && element !== driven.element) continue;
     const seeked = strategies.reduce<Rel | null>((found, seek) => found ?? seek(term, target, mint), null);
@@ -290,7 +288,7 @@ function narrowFilter(
   for (const seek of strategies) {
     for (const term of terms) {
       const target = drivenElement(node, term, true);
-      const element = target && columnPath(node.input, target.rel, target.name)!.rels.at(-1)!.id;
+      const element = target && rowidScan(node.input, target.rel, target.name)?.id;
       if (!target || !element || facts.reached.has(element) || facts.narrowed.has(element) || facts.constantSeek.has(element)) continue;
       const seeked = seek(term, target, mint);
       if (seeked) return narrowed(node, terms, target, element, allOwners([seeked], mint), facts);

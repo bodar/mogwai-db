@@ -73,6 +73,26 @@ export function relChildren(r: Rel): readonly Rel[] {
   }
 }
 
+/**
+ * WHICH SIDE OF A JOIN CARRIES ITS COLUMN `name`, and under what name there — POSITIONALLY. A join's output is
+ * its sides' columns left then right (the left alone for `semi`/`anti`), and its declared type supplies the
+ * names (`factory.ts` `join`), so two sides routinely carry the same name and a lookup BY NAME into a side can
+ * pick the wrong one; the position cannot. `nullable` marks the right side of a LEFT join: NULL where the left
+ * row is unmatched, so no row of that side alone defines it — a caller following lineage treats it as a derived
+ * leaf, as Calcite's `RelMdColumnOrigins` marks an outer join's null-generating side as derived
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/metadata/RelMdColumnOrigins.java`). `null` where
+ * the join has no such column. The one name→side mapper; the inverse (side column → output) is positional too.
+ */
+export interface JoinSide { readonly side: Rel; readonly name: string; readonly nullable: boolean }
+export function joinSide(r: Extract<Rel, { readonly kind: 'join' }>, name: string): JoinSide | null {
+  const at = r.type.cols.findIndex((column) => column.name === name);
+  if (at < 0) return null;
+  const leftN = r.left.type.cols.length;
+  if (at < leftN) return { side: r.left, name: r.left.type.cols[at]!.name, nullable: false };
+  const right = r.right.type.cols[at - leftN];
+  return right ? { side: r.right, name: right.name, nullable: r.join === 'left' } : null;
+}
+
 /** Expressions a node owns, in declaration order. Correlated subplans inside them are reached
  * through `exprRels`, never by an analysis re-walking the expression union itself. */
 export function relExprs(r: Rel): readonly Expr[] {

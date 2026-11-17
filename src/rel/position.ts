@@ -3,7 +3,7 @@ import { col, compilerInt } from './expr.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import type { ColMeta, RelId, SortTerm } from './types.ts';
-import { forEachExpr, relExprs, substRelId } from './walk.ts';
+import { forEachExpr, joinSide, relExprs, substRelId } from './walk.ts';
 
 type Minter = (hint: string) => RelId;
 
@@ -105,13 +105,11 @@ export function positionKeys(r: Rel, name: string, fresh: Minter): Keyed {
     }
     case 'join': {
       if (r.on && (readsCol(r.on, r.left.id, name) || readsCol(r.on, r.right.id, name))) return null;
-      const at = r.type.cols.findIndex((column) => column.name === name);
+      const from = joinSide(r, name);
+      if (!from) return null;
+      const { side, name: sideName } = from;
+      const onLeft = side === r.left;
       const leftN = r.join === 'semi' || r.join === 'anti' ? r.type.cols.length : r.left.type.cols.length;
-      if (at < 0) return null;
-      const onLeft = at < leftN;
-      const side = onLeft ? r.left : r.right;
-      const sideName = side.type.cols[onLeft ? at : at - leftN]?.name;
-      if (!sideName) return null;
       if (r.on && readsCol(r.on, side.id, sideName)) return null;
       const inner = positionKeys(side, sideName, fresh);
       if (!inner) return null;

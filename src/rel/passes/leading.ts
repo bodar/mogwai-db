@@ -7,7 +7,7 @@ import { columnAt, reSourceCross, spinePath } from '../lineage.ts';
 import { columnLineage, nestsCorrelatedSubplans } from '../copies.ts';
 import { propertyOwner } from './semijoin.ts';
 import type { ColMeta, RelId, RelType, SortTerm } from '../types.ts';
-import { deepColsRead, exprHasSubquery, forEachExpr, forEachRel, freeRelIds, mapColsDeep, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
+import { deepColsRead, exprHasSubquery, forEachExpr, freeRelIds, mapColsDeep, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
 
 /**
  * `leading` — a PHYSICAL rewrite: a CORRELATED read of a re-source is read ELEMENT BY ELEMENT, so it stops at its
@@ -162,16 +162,18 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
   };
   const source = freshCopy({ kind: 'scalar', plan: side }, mint);
   if (source?.kind !== 'scalar') return null;
-  // A seed column as the HOST expression it copies (`seedRow` reads the host's columns over one unit row), through
-  // the projections over it (`ensureBulk`); one read off the seed's own rows is not the host's.
-  const inSeed = new Set<RelId>();
-  forEachRel(seed, (r) => inSeed.add(r.id));
+  // A seed column as the HOST expression it copies (`seedRow` reads the host's columns over one unit row), spelled
+  // over its leaves (`columnLineage`, through the projections over it — `ensureBulk`): one a relation of the seed
+  // defines (its own unit row, an aggregate) is not the host's, so the spelling must read no leaf at all — only the
+  // outer rows the seed is correlated against.
+  const outer = freeRelIds(seed);
   const seedExpr = (name: string): Expr | null => {
-    const path = definingSeed(seed, name);
-    if (!path) return null;
+    const leaves = new Map<RelId, Rel>();
+    const spelled = columnLineage(seed, name, leaves);
+    if (!spelled || leaves.size || exprHasSubquery(spelled)) return null;
     let own = false;
-    forEachExpr(path, (node) => { if (node.kind === 'col' && inSeed.has(node.rel)) own = true; });
-    return own || exprHasSubquery(path) ? null : path;
+    forEachExpr(spelled, (node) => { if (node.kind === 'col' && !outer.has(node.rel)) own = true; });
+    return own ? null : spelled;
   };
   // Candidate conjuncts in SPINE ORDER; a group of owner-joined conjuncts holds the place of its FIRST member. The
   // narrowing seek does not depend on it — `semijoin`'s `narrowFilter` intersects every seekable term
@@ -297,19 +299,6 @@ function ownerProbe(group: readonly OwnerScan[], candidate: Expr, mint: Minter):
   const probe = make.project({ id: mint.id('clop'), input: held, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', col(held.id, owner)]] });
   // Fresh ids throughout (`freshCopy`): `B` stays in the body, and two relations never share an id.
   return freshCopy({ kind: 'exists', plan: probe, negated: false }, mint);
-}
-
-/** Seed column `name` as the expression of the seed that DEFINES it, through its renaming projections; `null` where
- *  a non-projection defines it (the seed's own unit row). */
-function definingSeed(seed: Rel, name: string): Expr | null {
-  for (let r: Rel = seed, at = name; ;) {
-    if (r.kind !== 'project') return null;
-    const e = r.exprs.find(([column]) => column === at)?.[1];
-    if (!e) return null;
-    if (e.kind !== 'col' || e.rel !== r.input.id) return e;
-    r = r.input;
-    at = e.name;
-  }
 }
 
 /**

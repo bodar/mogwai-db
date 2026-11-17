@@ -1,5 +1,6 @@
 import { atMostOneRow, rowBounds, rowBoundsWith } from './bounds.ts';
 import { ownDraws } from './copies.ts';
+import { columnAt } from './lineage.ts';
 import type { Expr } from './expr.ts';
 import { and, col, compilerInt, compilerNull, compilerText, conjuncts, eq } from './expr.ts';
 import * as make from './factory.ts';
@@ -361,17 +362,8 @@ export function decorrelateAll(
     }
     if (!spine.length || !r.on) return null;
     // `on` must PAIR the left row with its own image: every conjunct `L.c = R.b` where R's `b` is L's `c` carried
-    // unchanged down the spine. Those columns are `paired`.
-    const carried = (name: string): string | null => {
-      let at = name;
-      for (const node of spine) {
-        if (node.kind !== 'project') continue;
-        const e = node.exprs.find(([n]) => n === at)?.[1];
-        if (e?.kind !== 'col' || e.rel !== node.input.id) return null;
-        at = e.name;
-      }
-      return at;
-    };
+    // unchanged down the spine (`columnAt`, the defining-path authority). Those columns are `paired`.
+    const carried = (name: string): string | null => columnAt(r.right, name, r.left);
     const paired = new Set<string>();
     for (const e of conjuncts(r.on)) {
       if (e.kind !== 'binary' || (e.op !== '=' && e.op !== 'is')) return null;
