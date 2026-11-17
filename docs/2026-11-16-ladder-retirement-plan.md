@@ -973,8 +973,8 @@ needs-human question on walk-until-hub below.
 ✅ **LANDED (5b19bb55).** `perState` applies only over an uncorrelated walk (`freeRelIds(walk)` empty — an algebra
 fact, not a host name), so the scoped witness is back to its pre-Q2b cost (14 → 256 ms at 130 → 1050 chains). The
 until test is spelled once as the walk's EXIT column (`wx`), read by the stop test and both arms
-(`src/compiler/rel/walk.ts`). **Remains:** the scoped shapes stay super-linear (about 16–25× per 8×) until S6 is
-built. Their 16× assertion should be tightened then, and S6 can delete the `freeRelIds` gate.
+(`src/compiler/rel/walk.ts`). ✅ **Remainder done with S6 (90d70f16):** the `freeRelIds` gate is deleted and the
+scoped witnesses assert the project's 16× bound (measured about 6× per 8×).
 
 Q2b's `perState` (`src/compiler/rel/walk.ts`) makes a query trunk already answered slower when the walk runs under a
 decorrelated host. `g.V().where(repeat(out()).emit(in('created').has('age',gt(45)))).count()` went from 14.3 → 265 ms
@@ -1024,6 +1024,17 @@ cross join and `fuse`'s AggregateJoinTransposeRule never fires.
   distinct from their column names (`fa0.fa2 * fa2.fa1`).
 
 ### S6 — Scope-free subterm: a decorrelator rule (prerequisite for walk conditions under a host)
+
+✅ **LANDED (90d70f16, 9a4d34ee).** `existenceOverOwnRows` (`src/rel/decorrelate.ts`): a Semi/Anti join whose right
+side is a ROW-WISE image of its own left (project/filter/distinct/materialize only, joined on paired columns, no outer
+read) is rebuilt over the keyed left with no scope-key equality, so the condition is asked once per distinct state
+ACROSS scopes. S4's `freeRelIds` gate in `walk.ts` is deleted; the scoped walk-condition witnesses went from 17× to 6×
+per 8× (`test/compiler/walk-condition-hub-scale.exec.test.ts`; refusals pinned in
+`test/compiler/decorrelate-self-semijoin.test.ts`). The R6 rejoin is gone too: `decorrelateAll` takes `carry` and
+exposes each answer's `domain`, so `scopedSite` reads the host encounter off the domain (the scope CTE is read once).
+**Remains:** Witness 2, `local(out().out().where(in().has(..)).count())`, is still super-linear (about 16–19× per
+8×). It is a per-row correlated EXISTS over a hub's in-neighbourhood with no self-semijoin, so this rule does not
+reach it. It needs its own item.
 
 Q2b's remaining **scope-free-subterm** (`docs/outstanding-work.md` §1b): a filtering condition under
 `where`/`local`/`map` is keyed per scope by the decorrelator, which costs 16–23× at a hub. That holds connector-wide on
