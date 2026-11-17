@@ -229,6 +229,10 @@ const exprIsBaseRead = (e: Expr): boolean => exprRels(e).every(isBaseRead) && ex
 export const columnIsStored = (r: Rel, name: string): boolean => {
   switch (r.kind) {
     case 'scan': case 'values': return true;
+    // A WALK's row — the recursive CTE outside its term, its self-reference inside — is only ever READ by name
+    // (a recursive relation is never inlined, and a correlated subquery may read the self-reference: P2,
+    // `recursive.ts`), so no column of it is spelled again per inner row.
+    case 'recursive': case 'self-ref': return true;
     case 'project': {
       const e = r.exprs.find(([column]) => column === name)?.[1];
       if (!e) return false;

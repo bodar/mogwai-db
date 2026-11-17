@@ -62,7 +62,11 @@ const RESOURCE: Deferred = {
 };
 const REPEAT: Deferred = {
   reason: 'repeat()\'s body/loop condition — bounded is the IR unroll, unbounded a `Recursive` term (docs/archive/2026-08-09-repeat-two-regimes-plan.md)',
-  blocker: 'a Recursive term may hold no window (`BARRIER_IN_TERM`), so no per-iteration ROW_NUMBER scope key; bounded phases could take RoutedCondition-style scoped predicates (not built)',
+  // An unbounded until/emit condition of ANY head (coalesce/local/union/choose …) is the existence connector's
+  // CORRELATED body over the walk row (`correlatedExistence`, `lower/scoped.ts`) — a nested SELECT, where SQLite
+  // admits aggregates, windows, ORDER and LIMIT (`src/rel/recursive.ts` P2). What stays refused is exactly what
+  // cannot stay correlated: a decorrelated (keyed) body is a join the recursive term cannot take.
+  blocker: "SQLite's recursive-term law: no aggregate/window in the recursive SELECT itself (`BARRIER_IN_TERM`), so no per-iteration scope key and no decorrelated condition body — a condition that DRAWS (`sample`/`coin`), holds its own walk, or orders/groups by a host column (`correlatedBody`'s refusals) declines",
   // The plan's open owner question ("should repeat until/emit's own condition lowering stay as it is?"): yes,
   // provisionally — the regime split IS the host's lowering, and its conditions use the shared correlated
   // predicate builders R1 extracts as substrate, not a ladder route.

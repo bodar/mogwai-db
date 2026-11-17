@@ -15,7 +15,7 @@ import type { AliasMap } from '../../alias.ts';
 import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
-import type { ChildHost, ChildValue } from '../child.ts';
+import type { ChildHost, ChildValue, Subject } from '../child.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
@@ -83,7 +83,9 @@ interface Scope {
 function scope(rel: Rel, fresh: Minter, asChannel = false): Scope {
   const key = fresh('sk') as string;
   const selfContained = isSelfContained(rel);
-  const order = selfContained ? [] : rel.type.cols.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const }));
+  // At most ONE row (a correlated body's seed) has one numbering under any order — so it orders by nothing, rather
+  // than by the host columns it copies, which a window two subqueries down cannot resolve (`correlatedBody`).
+  const order = selfContained || atMostOneRow(rel) ? [] : rel.type.cols.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const }));
   const window = rowNumberWindow(rel, key, rel.channels, { partitionBy: [], orderBy: order }, fresh);
   // `asChannel`: the key rides as a CHANNEL (an enclosing scope key, `branchKey`) rather than a payload column,
   // for a host whose own lowering carries the scoped rows onward (`chooseRoute`) — every tail carries a channel.
@@ -623,7 +625,8 @@ function correlatedBody(
     forEachExpr(e, (node) => {
       if (node.kind !== 'col') return;
       const owner = byId.get(node.rel);
-      if (!owner || constantOver(owner, node.name, (id) => !byId.has(id))) hit = true;
+      // A LITERAL (a one-arm merge's `bka`, a one-row position) reads no host: only an outer column counts.
+      if (!owner || constantOver(owner, node.name, (id) => !byId.has(id), false, false)) hit = true;
     });
     return hit;
   };
@@ -660,6 +663,33 @@ function existenceProbe(tail: Tail, fresh: Minter): Rel {
     id: fresh('sp'), input: rows, channels: [], type: typeOf(meta('one', 'any', true)),
     exprs: [['one', col(rows.id, tail.rel.type.cols[0]!.name)]],
   });
+}
+
+/**
+ * A CHILD BODY AS A CORRELATED `[NOT] EXISTS` over an element SUBJECT row — the existence connector's correlated
+ * form (`existence`'s probes), offered to a position that needs the answer as an EXPRESSION rather than a
+ * filtered relation: `childPredicate`'s last fallback (`exists.ts`), so any head the fold lowers — `coalesce`,
+ * `local`, `union`, `choose` — is a predicate wherever a predicate is asked for. The one consumer that cannot
+ * take the relation form is a WALK's `emit`/`until` condition (`walk.ts`): its subject is the recursive
+ * self-reference, which a correlated subquery may read (`src/rel/recursive.ts` P2) but a decorrelated join
+ * cannot, since a recursive term takes no join to a keyed domain. So this stays correlated, never keyed, and
+ * `correlatedBody`'s own refusals (a draw, a nested walk, a host-reading GROUP BY/ORDER/window term) are its
+ * refusals — a decline, never a different plan.
+ *
+ * Only a subject that IS its relation's row (payload `id`, no partial presence): the seed row copies the
+ * relation's payload, so a rerooted subject (`select('a')…`) would seed the wrong element.
+ */
+export function correlatedExistence(
+  body: readonly IRStep[], subject: Subject, ctx: ChainCtx, fresh: Minter, labels: AliasMap, negated: boolean,
+): Expr | null {
+  if (subject.kind !== 'element' || subject.present) return null;
+  const { id, rel } = subject;
+  const payload = payloadCols(rel);
+  if (id.kind !== 'col' || id.rel !== rel.id || id.name !== 'id' || payload.length !== 1 || payload[0]!.name !== 'id') return null;
+  const tail = correlatedBody(body, rel, { kind: 'elements', elem: subject.elem }, ctx, fresh, labels, 'free', 'first');
+  if (!tail) return null;
+  const plan = existenceProbe(tail, fresh);
+  return spellsStored(plan, ['one'], rel) ? { kind: 'exists', plan, negated } : null;
 }
 
 /**
@@ -884,8 +914,9 @@ function untilKey(rows: Rel, terms: readonly SortTerm[]): readonly SortTerm[] {
  *  last question; a caller that already holds the relations of a tree passes it, so a term asked of every node of
  *  a long chain is not a walk of the chain per step (measured: quadratic in an unrolled body's length).
  *  `computed` also follows a COMPUTED definition and a join's sides — the question a sort term asks (`untilKey`);
- *  without it only a copied column or a literal counts, the narrower question of whether a term READS the host. */
-function constantOver(rows: Rel, name: string, outer?: (id: RelId) => boolean, computed = false): boolean {
+ *  without it only a copied column or a literal counts, the narrower question of whether a term READS the host.
+ *  `literal` false drops the literal case: then the answer is "is it a copy of an OUTER column" alone. */
+function constantOver(rows: Rel, name: string, outer?: (id: RelId) => boolean, computed = false, literal = true): boolean {
   let inside: Set<string> | undefined;
   const isOuter = outer ?? ((id: RelId): boolean => {
     if (!inside) { const ids = new Set<string>(); forEachRel(rows, (x) => ids.add(x.id)); inside = ids; }
@@ -910,7 +941,7 @@ function constantOver(rows: Rel, name: string, outer?: (id: RelId) => boolean, c
     if (r.kind !== 'project') return false;
     const e = r.exprs.find(([n]) => n === column)?.[1];
     if (!e) return false;
-    if (e.kind === 'lit') return true;
+    if (e.kind === 'lit') return literal;
     // A COMPUTED term of columns constant here (a selected path label's id, `CAST(json_extract(a0, …) AS INT)`
     // over the host's carried `a0`) is as constant per host row as they are — no subquery, aggregate, window or
     // draw in it. (Measured: such a term left in a correlated first-row pick's ORDER BY is "no such column".)

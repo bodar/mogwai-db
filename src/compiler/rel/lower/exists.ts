@@ -16,6 +16,7 @@ import type { GraphSource } from '../source.ts';
 import { BULK, NO_ALIASES, elementSubject, inOrderFreeBody, withEnclosing, type ChainCtx } from './chain.ts';
 import { childHostOf, sourceFilter } from './filter.ts';
 import { movement } from './movement.ts';
+import { correlatedExistence } from './scoped.ts';
 import { foldedListSet, nestedFirstValue, readsScopeValue, scalarChild } from './reduction.ts';
 
 // A CHILD BODY AS A BOOLEAN — the correlated existence and its predicate forms: correlatedExists (a body as a
@@ -293,7 +294,13 @@ export function childPredicate(
   // per-member type dispatch, the shape a GraphQL union field takes. An empty prefix produces wherever reached.
   const prefix = existencePrefix(body, ctx.params);
   if (prefix && !prefix.length) return negated ? CONSTANT.false : CONSTANT.true;
-  return prefix ? childPredicate(prefix, subject, fresh, ctx, negated, aliases) : null;
+  const viaPrefix = prefix ? childPredicate(prefix, subject, fresh, ctx, negated, aliases) : null;
+  if (viaPrefix) return viaPrefix;
+  // THE GENERIC CORRELATED BODY — the existence connector's own correlated form (`correlatedExistence`,
+  // `lower/scoped.ts`), for a head none of the shapes above starts from (`coalesce`, `local`, `union`, `choose`):
+  // the body lowered by the root's fold over the subject row, existence-probed. Last, so every body answered
+  // above keeps its SQL. It is what answers a WALK's `emit`/`until` condition whatever its head (`walk.ts`).
+  return correlatedExistence(body, subject, ctx, fresh, aliases, negated);
 }
 
 /**
