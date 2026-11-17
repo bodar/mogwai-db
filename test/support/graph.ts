@@ -119,6 +119,33 @@ export const isNondeterministic = (q: string): boolean => NONDETERMINISTIC.test(
 const POSITIONAL_WINDOW = /\b(?:range|limit|tail|skip)\s*\(/g;
 
 /**
+ * Does an `order()` earlier in the window's OWN scope supply its channel? Only one at the window's
+ * nesting level counts: in `V().order().by('name').local(__.out().limit(1))` the order sorts the outer
+ * stream, while `limit(1)` slices each vertex's unordered `out()` — WHICH neighbour it takes is still
+ * the plan's scan order (measured: L5's correlatedChild differential picks different ones under L8's
+ * reversed scans). An `order()` inside a sibling argument (`where(__.order()…)`) does not count either.
+ * Conservative in the same direction as the walk below: missing an order costs coverage, never
+ * soundness.
+ */
+function orderedInScope(q: string, windowAt: number): boolean {
+  // Walk back to the unmatched `(` that opens the window's scope (or the start of the query).
+  let depth = 0, start = windowAt - 1;
+  for (; start >= 0; start--) {
+    if (q[start] === ')') depth++;
+    else if (q[start] === '(') { if (depth === 0) break; depth--; }
+  }
+  // Keep only the text at the scope's own level, then look for an order() there.
+  let level = '';
+  depth = 0;
+  for (let i = start + 1; i < windowAt; i++) {
+    if (q[i] === '(') { if (depth === 0) level += '('; depth++; }
+    else if (q[i] === ')') { depth--; if (depth === 0) level += ')'; }
+    else if (depth === 0) level += q[i];
+  }
+  return /\border\s*\(/.test(level);
+}
+
+/**
  * How much of the result an un-ordered positional window leaves undetermined:
  *
  *   `null`          — nothing (no window, or an `order()` supplies the channel).
@@ -137,7 +164,7 @@ export function orderIndeterminacy(q: string): 'members' | 'cardinality' | null 
   let worst: 'members' | 'cardinality' | null = null;
   for (const at of q.matchAll(POSITIONAL_WINDOW)) {
     const start = at.index + at[0].length;
-    if (/\border\s*\(/.test(q.slice(0, at.index))) continue; // ordered: determinate
+    if (orderedInScope(q, at.index)) continue; // ordered: determinate
     // Walk to the window call's matching `)`; a chained step after it consumes the picked rows.
     let depth = 1, i = start;
     for (; i < q.length && depth > 0; i++) depth += q[i] === '(' ? 1 : q[i] === ')' ? -1 : 0;
