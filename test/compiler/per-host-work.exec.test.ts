@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadBulk, type BulkEdge, type BulkVertex } from '../../src/bulk.ts';
+import { compile } from '../../src/compiler/compiler.ts';
+import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 import { bagOf, run, runWith, seededStore } from '../support/harness.ts';
 
 // THE PER-HOST WORK FACT (`perHostWork`, `src/rel/work.ts`) — one cost fact read off the lowered algebra, beside
@@ -71,6 +73,55 @@ describe('a landed by() that re-sources is read per host', () => {
       expect(timed(large, q) / Math.max(timed(small, q), 2)).toBeLessThan(16);
     }
   }, 60_000);
+});
+
+// THE RE-SOURCE TRIAL (`reSourcingBody`, `src/compiler/rel/lower/scoped.ts`) — `landValues` asks a by() body's
+// correlated plan whether it re-sources. It is asked only of a body holding a `V()`/`E()` at some depth (the re-source
+// cross's one producer, `reSource` in `movement.ts`), its plan is the correlated read when it says yes (never lowered
+// twice), and a "no" leaves nothing behind. Nested by() bodies used to pay one trial PER LEVEL on top of the real
+// lowering, so compile time compounded with depth.
+describe('the re-source trial', () => {
+  const store = seededStore();
+  const depth = (n: number): string => {
+    let key = "in().count()";
+    for (let i = 1; i < n; i++) key = `local(${i % 2 ? 'in' : 'out'}().order().by(${key}).limit(1)).values('name')`;
+    return `g.V().group().by(local(out().order().by(${key}).limit(1)).values('name')).by(count())`;
+  };
+
+  test('a nested by() body with no V()/E() answers at every depth', () => {
+    for (const n of [1, 2, 3]) expect(run(store, depth(n))).toHaveLength(1);
+  });
+
+  test('compile time does not compound with the trial at depth', () => {
+    const compileMs = (q: string): number => {
+      compile(q, {});
+      let best = Infinity;
+      for (let i = 0; i < 3; i++) { const t0 = performance.now(); compile(q, {}); best = Math.min(best, performance.now() - t0); }
+      return best;
+    };
+    // Measured: depth 3 / depth 1 was ~40× with a trial per level, ~17× without (what remains is the other
+    // speculative lowerings a nested body takes — `lowerBody`'s positioned retry among them).
+    expect(compileMs(depth(3)) / Math.max(compileMs(depth(1)), 1)).toBeLessThan(30);
+  }, 60_000);
+
+  test('a re-sourcing body nested inside another by() keeps the correlated read', () => {
+    const q = "g.V().as('a').order().by(local(out().order().by(V().where(neq('a')).values('name')).limit(1)).values('name')).values('name')";
+    expect(bagOf(names(run(store, q)))).toEqual(bagOf(['josh', 'peter', 'marko']));
+  });
+
+  test('a trial that declines leaves the decline message as it was', () => {
+    const declineOf = (q: string): string => {
+      try { compile(q, {}); } catch (error) {
+        expect(error).toBeInstanceOf(UnsupportedTraversal);
+        return (error as Error).message;
+      }
+      throw new Error(`expected ${q} to decline`);
+    };
+    expect(declineOf('g.V().group().by(V().path())'))
+      .toBe('this traversal is not supported yet: no lowering covers g.V().group().by(V().path()) — a path(), simplePath() or cyclicPath() inside a group() body that starts with V()/E() is not supported yet');
+    expect(declineOf("g.V().order().by(V().sample(1).values('name'))"))
+      .toBe('this traversal is not supported yet: a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body may run for more than one traverser — it would be drawn once and shared by every row');
+  });
 });
 
 describe('a walk condition: the decline set is pinned', () => {

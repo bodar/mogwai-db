@@ -90,6 +90,10 @@ export class CompileBudget {
 
   /** The largest unroll the lowering met, or `null` when none was noted. */
   get unroll(): UnrollNote | null { return this.#unroll; }
+
+  /** Put the unroll record back to `note` (a prior `unroll`): a SPECULATIVE lowering the compile then
+   *  discards (`lower/scoped.ts` `reSourcingBody`) must not leave the unroll it met as one the plan holds. */
+  restoreUnroll(note: UnrollNote | null): void { this.#unroll = note; }
 }
 
 /**

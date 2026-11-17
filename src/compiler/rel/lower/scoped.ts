@@ -10,7 +10,7 @@ import { brandRel, type Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
 import { exprMayAbort } from '../../../rel/raise.ts';
-import { relId, type ColMeta, type RelId, type SortTerm } from '../../../rel/types.ts';
+import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
 import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
 import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, nestsCorrelatedSubplans, spelledOuterColumns } from '../../../rel/copies.ts';
@@ -2085,12 +2085,21 @@ function landValues(
     // `map`'s and `project`'s: read per host row where SQL can hold the dependent join, its first row under
     // `LIMIT 1` (`correlatedValue`). Any other body's decorrelated read is bounded by the host's own
     // neighbourhood, and the landed window is its measured form (the order family's plans, `sql-hygiene`).
-    const correlated = root || !correlatedReSources(body, rel, sc.scoped, framing, ctx, labels) ? null
-      : correlatedValue(body, rel, sc.scoped, framing, ctx, fresh, labels);
+    // The trial's plan IS the correlated read (`reSourcingBody`): it is not lowered a second time.
+    const trial = root ? null : reSourcingBody(body, rel, sc.scoped, framing, ctx, fresh, labels);
+    const correlated = trial?.tail ? correlatedValue(body, rel, sc.scoped, framing, ctx, fresh, labels, trial.tail) : null;
     if (correlated) { kept.set(key, correlated); continue; }
+    // A declined trial's reasons reach the compile only where the decorrelated form declines too, and ahead of its
+    // own, as when the trial recorded straight into the compile's sink.
+    const sink = trial?.declines ? ctx.declines.fork() : ctx.declines;
+    const keyedCtx: ChainCtx = sink === ctx.declines ? ctx : { ...ctx, declines: sink };
     const reframe = (t: Tail) => recordAsMap(t, ctx, fresh, true);
-    const keyed = root ? rootedBody(body, root, rel, sc, ctx, fresh, reframe)
-      : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe, 'first');
+    const keyed = root ? rootedBody(body, root, rel, sc, keyedCtx, fresh, reframe)
+      : scopedBody(body, rel, framing, sc, keyedCtx, fresh, labels, 'read', false, reframe, 'first');
+    if (trial?.declines) {
+      if (!keyed) ctx.declines.adopt(trial.declines);
+      ctx.declines.adopt(sink);
+    }
     const cols = keyed && framingCols(keyed.tail.framing);
     // One value column (and a scalar's per-row type) is what a ChildValue carries.
     if (!keyed || !cols || cols.length > (keyed.tail.framing.kind === 'scalar' ? 2 : 1)) return null;
@@ -2161,8 +2170,8 @@ function landValues(
  */
 function correlatedValue(
   body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  lowered: Tail | null = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', 'first', from),
 ): { readonly pick: Pick; readonly framing: RelFraming; readonly cols: readonly string[] } | null {
-  const lowered = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', 'first', from);
   const tail = lowered && recordAsMap(lowered, ctx, fresh, true);
   const cols = tail && framingCols(tail.framing);
   if (!tail || !cols || !cols.length || cols.length > (tail.framing.kind === 'scalar' ? 2 : 1)) return null;
@@ -2173,29 +2182,45 @@ function correlatedValue(
 }
 
 /**
- * Does a body's CORRELATED plan re-source (`perHostWork`'s `reSources`, `src/rel/work.ts`)? Asked of a TRIAL
- * lowering the compile then forgets: its relations are discarded, its ids come from a scratch minter whose ids end
- * in a letter (the compile's own are a hint and a NUMBER, `minter`), so none can name a relation of the plan, and
- * the named collections and site effects are put back. The compile's ids — hence its SQL — are as if it never ran.
+ * A body's CORRELATED plan where it re-sources (`perHostWork`'s `reSources`, `src/rel/work.ts`), else `null` with
+ * its `declines` sink — the reasons a declined trial recorded, for the caller to adopt only if its other route
+ * declines too. A SPECULATIVE lowering, and the one `correlatedValue` then reads (never lowered twice): a body
+ * nested N `by()`s deep would otherwise be lowered 2^N times, one trial plus one real lowering per level.
+ *
+ * Two things keep the cost to bodies that can answer "yes":
+ *  - a NECESSARY condition first: a re-source cross is only ever built for a mid-traversal `V()`/`E()` (`reSource`,
+ *    `movement.ts`, its one producer), so a body with no such step at any depth cannot re-source and pays no
+ *    trial. The decision itself stays the ALGEBRA's (`perHostWork`); this only skips asking where the answer is
+ *    known. A body that cannot be read is asked.
+ *  - the trial mints with the compile's own `fresh`, so its plan is kept as is. A "no" discards its relations (an
+ *    id gap, never a name collision) and puts back what it recorded: the named collections, the site effects, the
+ *    budget's unroll note and its decline reasons (a fork, so a trial that declined while the decorrelated form
+ *    answered never fails the compile).
  * A trial that declines is a "no": the body then takes its decorrelated form, which answers or declines for itself.
  */
-function correlatedReSources(
-  body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, labels: AliasMap,
-): boolean {
-  let n = 0;
-  const scratch: Minter = (hint) => relId(`${hint}${n++}t`);
+function reSourcingBody(
+  body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): { readonly tail: Tail | null; readonly declines: Declines | null } {
+  if (!someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true)) return { tail: null, declines: null };
   const saved = new Map(ctx.collections);
   const taken = ctx.siteEffects?.length ?? 0;
+  const unroll = ctx.budget.unroll;
+  const declines = ctx.declines.fork();
+  let kept: Tail | null = null;
   try {
-    const tail = correlatedBody(body, rel, framing, ctx, scratch, labels, 'read', 'first', from);
-    return !!tail && perHostWork(tail.rel).reSources;
+    const tail = correlatedBody(body, rel, framing, { ...ctx, declines }, fresh, labels, 'read', 'first', from);
+    kept = tail && perHostWork(tail.rel).reSources ? tail : null;
   } catch (error) {
-    if (error instanceof UnsupportedTraversal) return false;
-    throw error;
+    if (!(error instanceof UnsupportedTraversal)) throw error;
   } finally {
-    restoreCollections(ctx.collections, saved);
-    ctx.siteEffects?.splice(taken);
+    if (!kept) {
+      restoreCollections(ctx.collections, saved);
+      ctx.siteEffects?.splice(taken);
+      ctx.budget.restoreUnroll(unroll);
+    }
   }
+  if (kept) ctx.declines.adopt(declines);
+  return { tail: kept, declines: kept ? null : declines };
 }
 
 /** A correlated `ChildValue` re-pointed from the host relation to one that carries its columns by name. */
