@@ -10,7 +10,7 @@ import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfC
 import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
-import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias } from '../alias.ts';
+import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
 import { freshTraverserRow } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
@@ -201,17 +201,32 @@ function reSourcedBody(
   // A prefix that may lose or multiply its row is GraphStep's own cross join, in the fold — which also asks the
   // explained admission rule of a discarded label read (`reSourceTail`'s `admitsReSource`).
   if (!exactlyOneRow(prefix.rel)) return undefined;
+  const rest = body.slice(at);
+  // A rest that reads the HOST traverser's state (an outer label, its sack, path or loops) cannot be one
+  // shared read. An ALL-ROWS host (`local`, `flatMap`) emits every one of the prefix × G traversers, so the
+  // fold's per-row cross IS the answer's flow — linear in what it returns. A FIRST-row host (`map`, a `by()`,
+  // a filter) would pay that whole cross for one row per host: declined, from the query text.
+  if (readsHostState(rest, ctx)) {
+    if (!first) return undefined;
+    ctx.declines.note({ kind: 'resource-reads-host', message: hostStateMessage(rest, ctx), terminal: false });
+    return null;
+  }
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
   // own. A path is extended by the split and an entering vertex is a hop's: neither is a contract this cross
-  // states (`reSource`, `lower/movement.ts`).
-  if (!prefix.rel.channels.every((channel) => CROSSES.has(channel.role) || channel.role === 'encounter')) return null;
-  const rooted = rootedRead(body.slice(at), ctx, fresh, 'many');
+  // states, so such a prefix is GraphStep's general cross in the fold (`reSource`, `lower/movement.ts`).
+  if (!prefix.rel.channels.every((channel) => CROSSES.has(channel.role) || channel.role === 'encounter')) return undefined;
+  const rooted = rootedRead(rest, ctx, fresh, 'many');
   if (!rooted || rooted.effects?.length) return null;
   // The read's own position and multiplicity ride; the sack and loop counter a FRESH start traverser holds are
-  // superseded by the host's, which the split keeps. Any other state (a label, a path) is not this cross's.
+  // superseded by the host's, which the split keeps. A label the read binds of its own is shed under a
+  // FIRST-row host — `map`/`by()`/a filter emit a new traverser split from the HOST, so the child's labels never
+  // leave it (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`) — but rides out of an all-rows
+  // host (`local` emits the child's own traversers), which is not this cross's state: the fold's general cross.
   const own = rooted.rel.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'bulk');
-  if (!rooted.rel.channels.every((channel) => own.includes(channel) || (channel.role !== 'alias' && CROSSES.has(channel.role)))) return null;
+  const kept = (channel: Channel): boolean =>
+    own.includes(channel) || (channel.role === 'alias' ? first : CROSSES.has(channel.role));
+  if (!rooted.rel.channels.every(kept)) return undefined;
   const read = first && !atMostOneRow(rooted.rel)
     ? make.limit({
       id: fresh('srl'), count: compilerInt(1), channels: rooted.rel.channels, type: rooted.rel.type,
@@ -237,6 +252,20 @@ function reSourcedBody(
     exprs: outCols.map((column) => [column.name, col(crossed.id, fromPrefix.has(column.name) ? column.name : renamed.get(column.name)!)] as const),
   });
   return { rel, framing: rooted.framing, aliases: prefix.aliases, bulked: !!rooted.bulked };
+}
+
+/**
+ * Why a FIRST-row host's re-sourcing body declines when the steps after its `V()`/`E()` read the incoming
+ * traverser (`reSourcedBody`). Named in the user's terms; where the rest is nothing but a `select` of an outer
+ * label the `V()` discards everything it read, so the likely intent is suggested.
+ */
+function hostStateMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
+  const shape = 'a V()/E() inside map(), by() or a filter whose later steps read the incoming traverser '
+    + '(a select/where of an outer as() label, its sack, path or loops) is not supported yet';
+  const spec = rest.length === 2 ? selectSpec(rest[1]!) : null;
+  const label = spec?.labels.length === 1 && ctx.scopeNames.labels.has(spec.labels[0]!) ? spec.labels[0] : undefined;
+  return label === undefined ? shape
+    : `${shape} — here the V() is discarded by select('${label}'); did you mean select('${label}').out(), or V().has(…, select('${label}'))?`;
 }
 
 /** A host whose child body RE-SOURCES at its top level (and does not draw: `ladderOwns`) is the connector's alone

@@ -22,12 +22,23 @@ import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { copyRepeatsWork, doubledReads } from '../../../rel/copies.ts';
 
+/**
+ * The carried state a GraphStep split cannot keep — the ONE refusal `reSource` and `idLookup` share.
+ * `head.split(element, this)` keeps the traverser's labels, sack and loop counter and extends its path with
+ * the element it meets
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221`),
+ * so a sack crosses as any carried channel does (`crossCarried`). An `otherV` entry (`fromV`) is a preceding
+ * edge hop's and names nothing on the element a split lands on: refused. A PATH is extended by the split as a
+ * hop extends it (`extendPath`); a caller that does not make that extension passes `extendsPath: false`.
+ */
+export const splitRefuses = (input: Rel, extendsPath: boolean): boolean =>
+  input.channels.some((channel) => channel.role === 'fromV' || (!extendsPath && channel.role === 'path'));
+
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
 ): { rel: Rel; elem: Elem } | null {
   if ((step.name !== 'V' && step.name !== 'E') || step.modulators?.length || step.optionArms) return null;
-  if (framing.kind === 'path' || input.channels.some((channel) =>
-    channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
+  if (framing.kind === 'path' || splitRefuses(input, true)) return null;
   const elem: Elem = step.name === 'E' ? 'edge' : 'vertex';
   const seeded = ctx.source.elementScan(elem, step.args, fresh);
   if (!seeded) return null;
@@ -47,7 +58,9 @@ export function reSource(
     id: fresh('j'), left: parent, right: ids, join: 'cross', channels: parent.channels,
     type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
-  return { elem, rel: crossCarried(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, ctx, fresh) };
+  const met = crossCarried(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, ctx, fresh);
+  // The split's path gains the element it meets — a hop's own extension (`movement`, `otherVertex`).
+  return { elem, rel: pathCarried(met) ? extendPath(met, { kind: 'element', elem, id: col(met.id, 'id') }, fresh, ctx.demandsPathLabels) : met };
 }
 
 /**
@@ -69,12 +82,13 @@ export function reSource(
  * Collection result — list-framed, or a per-row list/set row of a scalar stream — is unpacked one level by
  * the caller before it reaches here (`traversalIdsTail`, `collectionMembersOrSelf`).
  *
- * The state `reSource` refuses (a path, a sack, an otherV entry) is refused here for the same reason.
+ * The state a split cannot keep is `splitRefuses`'s, shared with `reSource`. A PATH is refused here as
+ * well: this lookup does not yet append the element it finds to the path, which `reSource` does.
  */
 export function idLookup(
   input: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, elem: Elem, ctx: ChainCtx, fresh: Minter,
 ): Rel | null {
-  if (input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
+  if (splitRefuses(input, false)) return null;
   const parent = ensureBulk(input, fresh);
   if (framing.kind === 'elements' && framing.elem === elem) return parent;
   if (!ctx.source.elementById) return null;

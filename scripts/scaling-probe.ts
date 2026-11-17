@@ -94,10 +94,26 @@ const SHAPES: readonly Shape[] = [
   // probe (the rows are the answer's own size).
   { name: 'map(V.count)', query: 'g.V().map(V().count())' },
   { name: 'map(V.values)', query: "g.V().map(V().values('name'))" },
-  { name: 'local(V.has.values).count', query: "g.V().local(V().has('age',gt(30)).values('name')).count()" },
+  { name: 'local(V.has.values).count', query: "g.V().local(V().has('age',gt(30)).values('name')).dedup().count()" },
   { name: 'as.map(select.V.count)', query: "g.V().as('p').map(select('p').V().hasLabel('software').count())" },
   { name: 'where(V.has)', query: "g.V().where(V().has('age',gt(40))).count()" },
   { name: 'group.by(label).by(V.count)', query: 'g.V().group().by(label).by(V().count())' },
+  // GraphStep's general cross in the fold (N1): a prefix carrying a path, a read binding its own label, a rest
+  // reading host state under an all-rows host. The `local` shapes' OUTPUT is N × G, so probe them by
+  // TRAVERSERS (`--sizes 32,90` puts N × G near 1k and 8k), the others at 1k/8k vertices.
+  { name: 'resource: map(V.count).path', query: 'g.V().map(V().count()).path()' },
+  { name: 'resource: out.map(V.count).path', query: 'g.V().out().map(V().count()).path()' },
+  { name: 'resource: both.simplePath.map(V.count)', query: 'g.V().both().simplePath().map(V().count()).sum()' },
+  { name: 'resource: map(V.has.as.out.select)', query: "g.V().map(V().has('name','p1').as('m').out().select('m').values('name')).dedup().count()" },
+  { name: 'resource: out.map(V.values).path', query: "g.V().out().map(V().values('name')).path()" },
+  { name: 'resource: out.V.has.path', query: "g.V().out().V().has('name','p1').path().count()" },
+  { name: 'resource: sack.V.sack', query: 'g.V().sack(assign).by(constant(1)).V().has(\'name\',\'p1\').sack().count()' },
+  { name: 'resource xNG: local(V.as.out.select)', query: "g.V().local(V().as('x').out().select('x')).count()" },
+  { name: 'resource xNG: local(V.as.out.where(neq))', query: "g.V().local(V().as('x').out().where(neq('x'))).count()" },
+  { name: 'resource xNG: local(V.values.as.select)', query: "g.V().local(V().values('name').as('n').select('n')).count()" },
+  { name: 'resource xNG: as.local(V.as.select(a,b))', query: "g.V().as('a').local(V().as('b').select('a','b')).count()" },
+  { name: 'resource xNG: local(V.has.as).select', query: "g.V().local(V().has('age',gt(30)).as('x')).select('x').count()" },
+  { name: 'resource xNG: sack.V.sack', query: 'g.V().sack(assign).by(constant(1)).V().sack().count()' },
   { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
 ];
 

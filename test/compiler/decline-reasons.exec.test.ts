@@ -120,7 +120,8 @@ describe('a terminal reason is the message, and its prefix is a property of its 
     const q = 'g.withSack(1).V().sack(sum).by(__.constant(2)).map(__.V().sack())';
     const e = declineOf(q);
     expect(e.kind).toBe('uncovered');
-    expect(e.message).toBe(`this traversal is not supported yet: no lowering covers ${q}`);
+    // The re-source's advisory reason (`reSourcedBody`) is a hint after the decline, never in its place.
+    expect(e.message).toStartWith(`this traversal is not supported yet: no lowering covers ${q} — a V()/E() inside map()`);
   });
 });
 
