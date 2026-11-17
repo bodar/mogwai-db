@@ -88,8 +88,8 @@ while what they operate on keeps TinkerPop's.
     connector replaces is deleted. Never extend it. Deleting a rung is scope worth taking. A deleted route's host
     joins `LADDERLESS` (`lower/scoped.ts`, so the dispatch offers no ladder there); every route still standing is
     in the plan's "Kept routes" catalogue with its margin, its sole-answer queries and the owner's call to make.
-  - The two orders are each other's fallback at a site and `bothChildOrders` (`rel/spine.ts`) retries a
-    declining compile in the other order, so the switch never decides coverage. A body that re-sources
+  - The two orders are each other's fallback at a site; there is no whole-compile retry in the other order
+    (`bothChildOrders` was deleted once the wide ladder-reach sample measured it rescuing nothing). A body that re-sources
     (`V()`/`E()`) is the connector's alone (`reSourcedBody`, `connectorOwns`) — its read after the re-source is
     one uncorrelated relation crossed with the host, so a productive null is a row. A body that DRAWS is the
     connector's too and always DECORRELATED (never `correlatedBody`): the body's OWN draw counts as touching the

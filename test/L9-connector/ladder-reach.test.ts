@@ -10,7 +10,8 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { seeded } from '../support/graph.ts';
 import { runWith } from '../support/harness.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
-import { reach, familyOf, counts, CONNECTOR_ONLY } from './ladder-reach.ts';
+import { CopiedDraw } from '../../src/sql/kernel/budget.ts';
+import { reach, familyOf, CONNECTOR_ONLY } from './ladder-reach.ts';
 
 const store = seeded(MODERN_SEED);
 const run = (q: string) => reach([{ pool: 'W', q, store }]);
@@ -47,9 +48,9 @@ describe('L9 — ladder reach engine', () => {
   });
 
   // R2: the emitter closes a join side past SQLite's width, so neither order needs the other's plan.
-  test('a join too wide for one SELECT is answered by the connector alone, with no retry', () => {
+  test('a join too wide for one SELECT is answered by the connector alone', () => {
     const r = run('g.V().local(repeat(out()).times(63)).count()');
-    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, rescued: counts(r).rescued }).toEqual({ ladderOnly: 0, differ: [], rescued: 0 });
+    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ }).toEqual({ ladderOnly: 0, differ: [] });
   });
 
   test('a traversal both modes answer is not ladder-only, and agrees', () => {
@@ -84,10 +85,24 @@ describe('L9 — ladder reach engine', () => {
     expect(familyOf("g.V().sideEffect(__.map(__.out()))")).toBe('per-traverser');
   });
 
-  // FIRES (`ladder-reach.ts`): a draw is compiled under its first child order alone, so a `CopiedDraw` there is
-  // counted whatever the default did. After R2b no draw's first order declines with it; N7 reads 0 over the pools.
-  test('a draw is checked for a CopiedDraw retry fire, and does not fire once R2b closed it', () => {
+  // A per-scope draw that branches read: the connector decorrelates it, one draw per scope row (R2b), so both
+  // modes answer it in the ONE lowering there is (N7 deleted the whole-compile retry).
+  test('a draw two branches read inside a per-traverser body answers in both modes', () => {
     const r = reach(["g.V().local(out().sample(1).union(identity(), identity()))", "g.V().project('a','b').by(out().sample(1)).by(out().sample(1))"].map((q) => ({ pool: 'W', q, store })));
-    expect({ fires: r.fires, counted: counts(r).fires, differ: r.differ, random: r.random.length }).toEqual({ fires: [], counted: 0, differ: [], random: 2 });
+    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, random: r.random.length }).toEqual({ ladderOnly: 0, differ: [], random: 2 });
+  });
+
+  // `CopiedDraw` (the `name` pass) declines the ONE lowering's plan and reaches the user as the specific reason —
+  // a property of the query text — rather than being retried in the other child order (N7). Under a choose()
+  // predicate and at depth (inside map()/local()), in both modes.
+  test('a draw a choose() predicate and its arm both read declines with the CopiedDraw reason, at any depth', () => {
+    for (const q of [
+      "g.V().choose(out().sample(1).values('name'), identity(), out())",
+      "g.V().choose(out().sample(1).hasLabel('person'), constant(1), constant(2))",
+      "g.V().map(choose(out().sample(1).values('name'), identity(), out()).fold())",
+      "g.V().local(choose(out().sample(1).values('name'), identity(), out()))",
+    ]) for (const fastPaths of [DEFAULT_FAST_PATHS, CONNECTOR_ONLY]) {
+      expect(() => runWith(store, q, { fastPaths }), q).toThrow(CopiedDraw);
+    }
   });
 });

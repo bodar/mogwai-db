@@ -12,7 +12,7 @@
 //    every runtime (`at most 64 tables in a join`). That is a property of the query text, and the assembler
 //    owns it: a join that would pass 64 closes its wider side into one `OFFSET 0`-fenced derived table
 //    (`side`'s `fence`, src/rel/emit.ts), so the unroll nests a SELECT every 64 tables and ANSWERS — in either
-//    child order, so neither needs the other (`bothChildOrders`). It used to decline (`JoinWidthExceeded`).
+//    child order. It used to decline (`JoinWidthExceeded`).
 //
 // The meter is deterministic, not a wall clock: `relChildren` calls during a compile, spied on the module
 // namespace as `node-facts.test.ts` does. Linear work doubles with K; the old ordering grew 2.9–6.2× per

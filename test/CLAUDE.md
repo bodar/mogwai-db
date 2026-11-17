@@ -133,9 +133,7 @@
   `deferred-hosts.ts` entry with its reason, blocker and retirement `scope` (`ladder` | `host-owned`), so a new
   host cannot quietly get a route of its own. (3) The LADDER-REACH ratchet (same file as (1), sharing its sweep;
   engine `ladder-reach.ts`): the traversals the default answers and the connector alone does not, per pool (L1,
-  L6, the sweep's host queries) × family, and the answers only `bothChildOrders`' second order rescues
-  (`FastPathConfig.childOrderRetry: false`), and the traversals whose first order declines with `CopiedDraw` (the
-  retry arm's FIRES), in `ladder-reach-baseline.json` — none may rise; a family host beneath a `host-owned`
+  L6, the sweep's host queries) × family, in `ladder-reach-baseline.json` — none may rise; a family host beneath a `host-owned`
   position is charged `other`; and where both
   modes answer the multisets must agree. Re-record with `mise run ladder-reach-record`; the wider ~25k sample is
   the instrument `mise run ladder-reach`.

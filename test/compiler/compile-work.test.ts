@@ -17,14 +17,14 @@ import { compile } from '../../src/compiler/compiler.ts';
  * fall is an improvement: lower the number in the same commit. A corpus regeneration (`regen-corpus.ts`)
  * re-records them. Queries compile without their parameters, so some decline; that is deterministic.
  *
- * Raised once on purpose (2016/1797 → 2190/1807) by the `correlatedChild` switch: a traversal whose first
- * lowering DECLINES is lowered once more in the other child order (`bothChildOrders`, `rel/spine.ts`), so a
- * decline costs two lowerings — that is the price of the switch ordering two lowerings without deciding
- * coverage; a traversal that compiles still lowers once. The 10 extra emissions are corpus traversals that
+ * Raised once on purpose (2016/1797 → 2190/1807) by the `correlatedChild` switch: a declining traversal was
+ * lowered once more in the other child order (`bothChildOrders`), so a decline cost two lowerings. N7 deleted
+ * that retry once the wide ladder-reach sample measured it rescuing nothing, so lowerings fell back 2190 → 2016:
+ * every traversal, declining or not, lowers once. The 10 extra emissions are corpus traversals that
  * newly COMPILE through the scoped-relation connector; 1809 → 1817 for the 8 more the cc3a rows (coalesce/optional/
  * order/dedup/group(Count)/or/flatMap/local/choose/union) compile — each an emission, not a repeated one.
  */
-const CEILING = { lowerings: 2190, emissions: 1817, perQuery: 12 } as const;
+const CEILING = { lowerings: 2016, emissions: 1817, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 

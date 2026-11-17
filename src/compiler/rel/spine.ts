@@ -7,7 +7,7 @@ import type { Service } from '../../services/spi/types.ts';
 import type { MergePolicy, SideEffectConstants } from '../../gremlin/frontend.ts';
 import type { ProgramScopeNames } from '../ir/labels.ts';
 import type { Declines } from '../unsupported.ts';
-import { CopiedDraw, type CompileBudget } from '../../sql/kernel/budget.ts';
+import type { CompileBudget } from '../../sql/kernel/budget.ts';
 import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
 /**
@@ -34,10 +34,8 @@ export interface RelRequest {
   /** The `correlatedChild` fast path: the ladder of correlated child routes tried before the scoped-relation
    *  connector (on) or after it (off) — `lower/scoped.ts`. */
   readonly correlatedChild: boolean;
-  /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): no ladder at any site, no retry. */
+  /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): no ladder at any site. */
   readonly connectorOnly?: boolean;
-  /** The retry measurement mode (`FastPathConfig.childOrderRetry`): `false` lowers in the first child order only. */
-  readonly childOrderRetry?: boolean;
   /** DETACHED-transfer compile mode (set only by `runForeign()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
@@ -135,54 +133,15 @@ export function compileViaRel(
   // THE WIRE READ: `compilePlan`'s final single statement, whose rows nothing downstream reads by
   // position — so an unordered stream owes no emission order (`Lowering.wireTerminal`). The only place
   // it is set; every split/barrier head and federate push lowers through `loweringOptions` without it.
-  const lowered = bothChildOrders(request, (attempt) =>
-    lowerToRel(steps, { ...loweringOptions(attempt, params, sideEffects), wireTerminal: true }));
+  //
+  // ONE lowering, in the child order the switch names. Each connector site (`lower/scoped.ts`) tries the ladder
+  // and the connector in that order, each the other's fallback; there is no whole-compile retry in the other
+  // order. It used to exist (`bothChildOrders`) for a NESTED site whose choice an enclosing route refused, and
+  // for a plan decline (`CopiedDraw`) the other order's plan avoided — measured over L1, L6 and the ~25k host
+  // sample (`mise run ladder-reach`), it rescued nothing, so a decline is now the first order's own reason.
+  const lowered = lowerToRel(steps, { ...loweringOptions(request, params, sideEffects), wireTerminal: true });
   if (!lowered) return null;
   return finishLowering(lowered);
-}
-
-/**
- * THE `correlatedChild` SWITCH ORDERS TWO LOWERINGS, IT NEVER DECIDES COVERAGE — at the level of the whole
- * traversal, not only at one connector site.
- *
- * Each connector site (`lower/scoped.ts`) tries the ladder and the scoped-relation connector in the order the
- * switch names, each the other's fallback. That makes ONE site's support the union of the two — but a NESTED
- * site's choice changes the relation its enclosing route is handed, and an enclosing route may accept one
- * plan and refuse the other. So the whole lowering is retried once in the other order where the first
- * declines (each attempt into its own decline sink, `Declines.fork`), and the traversal compiles in either
- * position exactly when it compiles in one. Only a DECLINE pays for the second attempt.
- */
-function bothChildOrders<T>(request: RelRequest, lower: (attempt: RelRequest) => T | null): T | null {
-  const root = request.declines;
-  // A decline raised from the finished ALGEBRA inside the lowering declines THIS order's plan — a property of
-  // the query text, never of the data — and the other order builds a different plan: a random draw two branches
-  // would read through two copies (`CopiedDraw`, the `name` pass), where which relation is shared depends on
-  // which route lowered each nested site. So it is retried like a decline, and rethrown — the specific reason —
-  // only when neither order lowers. (A join past SQLite's width is no longer one: the emitter closes a side.)
-  interface Attempt { readonly sink: Declines | undefined; readonly lowered: T | null; readonly planDecline?: CopiedDraw }
-  const attempt = (correlatedChild: boolean): Attempt => {
-    const sink = root?.fork();
-    try {
-      return { sink, lowered: lower({ ...request, correlatedChild, ...(sink ? { declines: sink } : {}) }) };
-    } catch (error) {
-      if (!(error instanceof CopiedDraw)) throw error;
-      return { sink, lowered: null, planDecline: error };
-    }
-  };
-  const declined = (...attempts: readonly Attempt[]): null => {
-    for (const a of attempts) if (a.sink) root!.adopt(a.sink);
-    const planDecline = attempts.find((a) => a.planDecline)?.planDecline;
-    if (planDecline) throw planDecline;
-    return null;
-  };
-  const first = attempt(request.correlatedChild);
-  // The measurement knob reads the connector ALONE, so it never falls back to the other order.
-  if (first.lowered) { if (first.sink) root!.adopt(first.sink); return first.lowered; }
-  // So does the retry measurement mode, which counts what the second order rescues.
-  if (request.connectorOnly || request.childOrderRetry === false) return declined(first);
-  const second = attempt(!request.correlatedChild);
-  if (second.lowered) { if (second.sink) root!.adopt(second.sink); return second.lowered; }
-  return declined(first, second);
 }
 
 /**

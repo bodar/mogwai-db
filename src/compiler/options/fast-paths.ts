@@ -89,21 +89,13 @@ export interface FastPathConfig {
   /**
    * NOT a fast path — a MEASUREMENT mode, and deliberately optional and absent from `DEFAULT_FAST_PATHS` so L5's
    * per-switch sweep never flips it. On, the scoped-relation connector answers every connector site ALONE: the
-   * ladder is neither tried first nor a fallback, at a site (`scopedHost`) or for the whole compile
-   * (`bothChildOrders`), and `correlatedChild` is forced off. It CHANGES COVERAGE, which no product setting
+   * ladder is neither tried first nor a fallback at any site (`scopedHost`), and `correlatedChild` is forced off.
+   * It CHANGES COVERAGE, which no product setting
    * may, so it exists only for the instruments that read what the general path answers by itself:
    * `test/L9-connector` (in-process, per compile), `mise run scaling` and `mise run coverage` (through
    * `MOGWAI_CONNECTOR_ONLY=1`, the default when this field is absent — `CONNECTOR_ONLY_ENV`).
    */
   readonly connectorOnly?: boolean;
-  /**
-   * NOT a fast path — a MEASUREMENT mode, optional and absent from `DEFAULT_FAST_PATHS` for `connectorOnly`'s
-   * reason. `false` stops `bothChildOrders` (`rel/spine.ts`) from re-lowering a declining compile in the other
-   * child order, so a traversal that compiles by default but not with this off was RESCUED by the retry. Read
-   * only by the ladder-reach ratchet (`test/L9-connector/ladder-reach.test.ts`), which counts those rescues
-   * (`docs/2026-11-16-ladder-retirement-plan.md` R2: done when the count is 0). Absent: the retry runs.
-   */
-  readonly childOrderRetry?: boolean;
 }
 
 /** `MOGWAI_CONNECTOR_ONLY=1`: the process-wide default for `FastPathConfig.connectorOnly`, for the scripts that

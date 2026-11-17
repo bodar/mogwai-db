@@ -72,9 +72,7 @@ describe('L9 — connector-only host closure', () => {
 //
 // `docs/2026-11-16-ladder-retirement-plan.md` R0: the closure ratchet above holds the connector's FLOOR; this
 // holds the ladder's REACH — the traversals the shipping default answers and the connector alone does not —
-// so it may only fall, per pool × family (`ladder-reach.ts` `familyOf`), and the count of answers only
-// `bothChildOrders`' second order rescues may only fall too (R2's "done when"), as may the traversals for which
-// its `CopiedDraw` retry arm FIRES at all (`ladder-reach.ts` FIRES — N7's precondition). Over the pools L9 already
+// so it may only fall, per pool × family (`ladder-reach.ts` `familyOf`). Over the pools L9 already
 // sweeps: the L1 corpus, the L6 workload and the closure sweep's host queries (`H`, its connector-only
 // outcomes reused). Where both answer they must agree as multisets — a wrong answer in one of them, never legal.
 
@@ -89,13 +87,13 @@ interface ReachBaseline extends ReachCounts {
 }
 
 describe('L9 — ladder reach', () => {
-  test('the ladder-only answer count per pool × family, the retry rescues and fires, never rise; both modes agree', () => {
+  test('the ladder-only answer count per pool × family never rises; both modes agree', () => {
     const swept = closure();
     const hostPool = [...swept.outcomes.keys()].map((q) => ({ pool: 'H', q, store }));
     const r = reach([...l1Pool(),...l6Pool(), ...hostPool], swept.outcomes);
     const now = counts(r);
     summary(`L9 ladder reach — answered by default, not by the connector alone:\n${renderCounts(now)}`);
-    detail(() => r.ladderOnly.map((x) => `  ${x.pool} ${x.family}${x.rescued ? ' (rescued)' : ''}\t${x.q}`).join('\n'));
+    detail(() => r.ladderOnly.map((x) => `  ${x.pool} ${x.family}\t${x.q}`).join('\n'));
     expect(
       { differ: r.differ, connectorOnlyAnswers: r.connectorOnlyAnswers },
       'the default and the connector alone both answered and disagree (a wrong answer in one), or the connector alone answered what the default did not',
@@ -121,17 +119,13 @@ describe('L9 — ladder reach', () => {
       if (a > b) rose.push(`${pool}/${f}: ${b} → ${a}`);
       if (a < b) fell.push(`${pool}/${f}: ${b} → ${a}`);
     }
-    if (now.rescued > baseline.rescued) rose.push(`rescued by bothChildOrders: ${baseline.rescued} → ${now.rescued}`);
-    if (now.rescued < baseline.rescued) fell.push(`rescued by bothChildOrders: ${baseline.rescued} → ${now.rescued}`);
-    if (now.fires > baseline.fires) rose.push(`CopiedDraw retry fires: ${baseline.fires} → ${now.fires} (${r.fires.join('; ')})`);
-    if (now.fires < baseline.fires) fell.push(`CopiedDraw retry fires: ${baseline.fires} → ${now.fires}`);
     // Held per QUERY as well as per count: a traversal newly ladder-only fails even where another left the set
     // and held its cell's count level (the same swap the closure ratchet names).
     if (fresh.length && !rose.length) rose.push(`${fresh.length} newly ladder-only at a level count — a swap`);
     if (fell.length) summary(`  ladder reach FELL — lower the ceiling with \`mise run ladder-reach-record\`: ${fell.join('; ')}`);
-    // A rise is a traversal the connector alone stopped answering while the ladder still does (or a new retry
-    // rescue or fire): fix it in the body's lowering or in `decorrelate.ts`, never by leaning on the ladder.
+    // A rise is a traversal the connector alone stopped answering while the ladder still does: fix it in the
+    // body's lowering or in `decorrelate.ts`, never by leaning on the ladder.
     expect(rose, `the ladder answers more than the connector than it did (root CLAUDE.md decision 6); newly ladder-only:\n${
-      fresh.slice(0, SHOW).map((x) => `      ${x.pool} ${x.family}${x.rescued ? ' (rescued)' : ''}\t${x.q}`).join('\n')}`).toEqual([]);
+      fresh.slice(0, SHOW).map((x) => `      ${x.pool} ${x.family}\t${x.q}`).join('\n')}`).toEqual([]);
   }, 600_000);
 });

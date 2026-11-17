@@ -382,7 +382,7 @@ depends = ["install", "check", "submodule"]
 run = "L9_CONNECTOR_RECORD=1 bun test test/L9-connector/connector-closure.test.ts"
 
 # Re-record L9's ladder-reach ratchet (test/L9-connector/ladder-reach-baseline.json) — the ladder-only answer count
-# per pool × family and the bothChildOrders rescue count (docs/2026-11-16-ladder-retirement-plan.md R0). A command
+# per pool × family (docs/2026-11-16-ladder-retirement-plan.md R0). A command
 # for connector-record's reason: run it when a count FELL (the test prints the hint) or a pool changed size; an
 # upward re-record needs its reason in the commit message.
 [tasks.ladder-reach-record]
@@ -434,11 +434,11 @@ depends = ["install"]
 run = "bun scripts/scaling-probe.ts"
 
 # The ladder-reach instrument (docs/2026-11-16-ladder-retirement-plan.md R0): what the default answers and the
-# connector ALONE does not, per pool × family, plus the bothChildOrders rescues — over L1, L6 and the generator's
+# connector ALONE does not, per pool × family — over L1, L6 and the generator's
 # hosts at level 1 and every level-2 pair (~25k traversals). The GATE is L9's ratchet over L9's pools; this wider
 # sample is an INSTRUMENT (minutes), deliberately not in `ci`. `-- --list` prints every ladder-only traversal.
 [tasks.ladder-reach]
-description = "Ladder reach: traversals the default answers and the connector alone does not, per pool × family (+ retry rescues)"
+description = "Ladder reach: traversals the default answers and the connector alone does not, per pool × family"
 depends = ["install", "submodule"]
 run = "bun scripts/ladder-reach.ts"
 

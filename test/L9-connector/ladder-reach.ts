@@ -2,21 +2,13 @@
 //
 // The engine behind the L9 ratchet (`ladder-reach.test.ts`) and the instrument (`scripts/ladder-reach.ts`,
 // `mise run ladder-reach`). `docs/2026-11-16-ladder-retirement-plan.md` R0: every later retirement step is
-// measured by two numbers, and this computes both, per query pool and per ladder FAMILY:
+// measured by this number, per query pool and per ladder FAMILY:
 //
 //   • LADDER-ONLY — a traversal the shipping default answers and `FastPathConfig.connectorOnly` (the connector
-//     ALONE: no ladder at any site, no whole-compile retry) declines. The ladder's remaining reach. R7's
-//     precondition is 0.
-//   • RESCUED — a traversal the shipping default answers and `FastPathConfig.childOrderRetry: false` declines:
-//     only `bothChildOrders`' (`src/compiler/rel/spine.ts`) second child order answered it. R2 is done at 0.
-//     Every rescue is ladder-only (where the connector alone answers, the first order builds the same plan and
-//     answers), so it is measured over the ladder-only set — no third compile of the whole pool.
-//   • FIRES — a traversal whose first child order alone declines with `CopiedDraw`, the plan decline
-//     `bothChildOrders` retries in the other order (`spine.ts`): whatever the default then did (rescued, or the
-//     specific reason rethrown), the retry arm ran for it. Counted over the WHOLE pool — N7 deletes that arm, so
-//     its precondition is 0. A `CopiedDraw` needs a random draw in the plan, and every draw a traversal can spell
-//     (`sample`, `coin`, `shuffle`) is `isNondeterministic`, so the third compile runs only over draws (and the
-//     ladder-only set, for RESCUED).
+//     ALONE: no ladder at any site) declines. The ladder's remaining reach. R7's precondition is 0.
+//
+// (It also counted the rescues and `CopiedDraw` fires of the whole-compile child-order retry, `bothChildOrders`;
+// N7 deleted that retry once the wide sample measured both at 0, and the two counters with it.)
 //
 // And one HARD invariant: where both modes answer, they answer the SAME MULTISET (`differ`). A different
 // emission order of an unordered stream is not a difference (`docs/feature-support-matrix.md` §17), and a
@@ -36,15 +28,12 @@ import { isNondeterministic, isWrite, orderIndeterminacy, seeded } from '../supp
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { outcomeOf, type Outcome } from '../L5-properties/oracle.ts';
 import { CORPUS } from '../L6-workload/corpus.ts';
-import { CopiedDraw } from '../../src/sql/kernel/budget.ts';
 import { DEFERRED_HOSTS } from './deferred-hosts.ts';
 import { MINT } from '../L6-workload/workload.ts';
 import type { GraphName } from '../L6-workload/corpus.ts';
 
 /** The connector ALONE (L9's configuration). */
 export const CONNECTOR_ONLY: FastPathConfig = { ...DEFAULT_FAST_PATHS, correlatedChild: false, connectorOnly: true };
-/** The shipping default without `bothChildOrders`' second order. */
-export const NO_RETRY: FastPathConfig = { ...DEFAULT_FAST_PATHS, childOrderRetry: false };
 
 /**
  * The ladder FAMILIES — the kept routes of `docs/2026-11-16-ladder-retirement-plan.md` (R3 existence, R4
@@ -111,7 +100,7 @@ const storeOf = (p: PoolQuery): GraphStore => (typeof p.store === 'function' ? p
 const placed = (q: string, shared: GraphStore, mint: () => GraphStore): GraphStore | (() => GraphStore) => (isWrite(q) ? mint : shared);
 
 /** The L1 corpus (TinkerPop's `.feature` traversals), each over `modern` — a coverage question, which the graph a
- *  scenario names does not change. A DRAW is in the pool — counted, possibly ladder-only, a possible retry FIRE —
+ *  scenario names does not change. A DRAW is in the pool — counted, possibly ladder-only —
  *  only its answers go uncompared (`random`); whether it compiles is a property of its text, so its counts are as
  *  stable as any other's. */
 export function l1Pool(): PoolQuery[] {
@@ -130,7 +119,7 @@ export function l6Pool(): PoolQuery[] {
   });
 }
 
-export interface LadderOnly { readonly pool: string; readonly q: string; readonly family: Family; readonly rescued: boolean; readonly declined: string }
+export interface LadderOnly { readonly pool: string; readonly q: string; readonly family: Family; readonly declined: string }
 
 export interface ReachResult {
   /** Per pool: queries run, answered by default, answered by the connector alone. */
@@ -140,8 +129,6 @@ export interface ReachResult {
   readonly differ: string[];
   /** Both answered a DRAW (`isNondeterministic`): counted in its pool, its answers not compared. */
   readonly random: string[];
-  /** `pool\tq` whose first child order declined with `CopiedDraw`: the retry arm fired (FIRES above). */
-  readonly fires: string[];
   /** The connector alone answered and the default did not — the fallback LOST an answer. Never legal. */
   readonly connectorOnlyAnswers: string[];
 }
@@ -165,7 +152,6 @@ export function reach(queries: readonly PoolQuery[], known?: ReadonlyMap<string,
   const differ: string[] = [];
   const random: string[] = [];
   const connectorOnlyAnswers: string[] = [];
-  const fires: string[] = [];
   const seen = new Set<string>();
   for (const p of queries) {
     const { pool, q } = p;
@@ -178,34 +164,26 @@ export function reach(queries: readonly PoolQuery[], known?: ReadonlyMap<string,
     const c = known?.get(q) ?? outcomeOf(storeOf(p), q, CONNECTOR_ONLY);
     if (d.kind === 'rows') t.byDefault++;
     if (c.kind === 'rows') t.connectorOnly++;
-    const isLadderOnly = d.kind === 'rows' && c.kind !== 'rows';
-    // The first child order alone (`NO_RETRY`): for a ladder-only answer (is it a rescue?) and for a draw (did the
-    // retry arm fire?) — every other traversal cannot fire it (FIRES above), so it pays no third compile.
-    const first = isLadderOnly || isNondeterministic(q) ? outcomeOf(storeOf(p), q, NO_RETRY) : undefined;
-    if (first?.kind === 'threw' && first.error instanceof CopiedDraw) fires.push(key);
     if (d.kind === 'rows' && c.kind === 'rows') {
       if (isNondeterministic(q)) random.push(key);
       else if (!sameMultiset(q, d.weighed, c.weighed)) differ.push(key);
-    } else if (isLadderOnly) {
-      ladderOnly.push({ pool, q, family: familyOf(q), rescued: first!.kind !== 'rows', declined: c.kind === 'threw' ? c.message : '' });
+    } else if (d.kind === 'rows') {
+      ladderOnly.push({ pool, q, family: familyOf(q), declined: c.kind === 'threw' ? c.message : '' });
     } else if (c.kind === 'rows') connectorOnlyAnswers.push(key);
   }
-  return { pools, ladderOnly, differ, random, fires, connectorOnlyAnswers };
+  return { pools, ladderOnly, differ, random, connectorOnlyAnswers };
 }
 
-/** `pool → family → count`, and the rescue count — the numbers the ratchet holds. */
+/** `pool → family → count` — the numbers the ratchet holds. */
 export interface ReachCounts {
   readonly ladderOnly: Record<string, Record<Family, number>>;
-  readonly rescued: number;
-  /** Traversals whose first child order declined with `CopiedDraw` (FIRES above). N7's precondition is 0. */
-  readonly fires: number;
 }
 
 export function counts(r: ReachResult): ReachCounts {
   const ladderOnly: Record<string, Record<Family, number>> = {};
   for (const pool of Object.keys(r.pools)) ladderOnly[pool] = Object.fromEntries(FAMILIES.map((f) => [f, 0])) as Record<Family, number>;
   for (const x of r.ladderOnly) ladderOnly[x.pool]![x.family]++;
-  return { ladderOnly, rescued: r.ladderOnly.filter((x) => x.rescued).length, fires: r.fires.length };
+  return { ladderOnly };
 }
 
 /** The counts as aligned text: a row per pool, a column per family, plus the totals. */
@@ -219,6 +197,5 @@ export function renderCounts(c: ReachCounts): string {
     lines.push(`  ${p.padEnd(6)}${row.map(col).join('')}${col(row.reduce((a, b) => a + b, 0))}`);
   }
   lines.push(`  ${'ALL'.padEnd(6)}${FAMILIES.map((f) => col(sum(f))).join('')}${col(FAMILIES.reduce((a, f) => a + sum(f), 0))}`);
-  lines.push(`  rescued by bothChildOrders: ${c.rescued}; CopiedDraw retry fires: ${c.fires}`);
   return lines.join('\n');
 }

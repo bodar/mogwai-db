@@ -1,13 +1,12 @@
 // LADDER REACH — the instrument (`mise run ladder-reach`): what the shipping default answers that the scoped-relation
-// connector ALONE does not, per pool and per ladder family, plus the answers only `bothChildOrders`' second child
-// order rescues. `docs/2026-11-16-ladder-retirement-plan.md` R0.
+// connector ALONE does not, per pool and per ladder family. `docs/2026-11-16-ladder-retirement-plan.md` R0.
 //
 // The GATE is L9's ladder-reach ratchet (`test/L9-connector/connector-closure.test.ts`), over the pools L9 already
 // sweeps. This is the WIDER sample the retirement audit measured with, deliberately not in `ci` (minutes, not
 // seconds): the L1 corpus, the L6 workload, and the generator's hosts over 200 distinct bodies at level 1 (`H1`)
 // and EVERY well-typed host pair at level 2 (`H2`, ~25k traversals). Same engine (`ladder-reach.ts`), so the two
-// agree on what a ladder-only answer, a family and a rescue are. All modes run in this one process: the modes are
-// per-compile options (`FastPathConfig.connectorOnly`, `childOrderRetry`), not process state.
+// agree on what a ladder-only answer and a family are. Both modes run in this one process: the mode is a
+// per-compile option (`FastPathConfig.connectorOnly`), not process state.
 //
 //   bun scripts/ladder-reach.ts [--cases N] [--list]
 //     --cases N  distinct bodies for H1/H2 (default 200)
@@ -45,7 +44,7 @@ const r = reach([...l1Pool(),...l6Pool(), ...hostPool]);
 const secs = ((performance.now() - t0) / 1000).toFixed(1);
 for (const [pool, t] of Object.entries(r.pools)) console.log(`  ${pool}: ${t.queries} traversals, default answers ${t.byDefault}, connector alone ${t.connectorOnly}`);
 console.log(`ladder-only (answered by default, not by the connector alone), ${secs}s:\n${renderCounts(counts(r))}`);
-if (LIST) for (const x of r.ladderOnly) console.log(`  ${x.pool}\t${x.family}${x.rescued ? ' (rescued)' : ''}\t${x.q}`);
+if (LIST) for (const x of r.ladderOnly) console.log(`  ${x.pool}\t${x.family}\t${x.q}`);
 if (r.differ.length) console.log(`DIFFER — both answered, different multisets (${r.differ.length}):\n${r.differ.map((q) => `  ${q}`).join('\n')}`);
 if (r.connectorOnlyAnswers.length) console.log(`CONNECTOR-ONLY answers the default lost (${r.connectorOnlyAnswers.length}):\n${r.connectorOnlyAnswers.map((q) => `  ${q}`).join('\n')}`);
 if (r.differ.length || r.connectorOnlyAnswers.length) process.exit(1);

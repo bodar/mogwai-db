@@ -242,7 +242,7 @@ acceptable end state, not a failure.
   - the scaling probe holds the cost-discipline list.
 - **Delete:**
   - `correlatedChild` in `options/fast-paths.ts` and its readers;
-  - `bothChildOrders`;
+  - `bothChildOrders` (deleted by N7);
   - L5's per-switch entry;
   - `FastPathConfig.connectorOnly`, which becomes the only mode.
 - L9's connector-only ratchet becomes the ordinary coverage ratchet.
@@ -379,6 +379,15 @@ FIRES (first child order alone declines with `CopiedDraw`) over pools that keep 
 
 After R2a and R2b, `bothChildOrders` (`src/compiler/rel/spine.ts`) retries only on `CopiedDraw`. Once N6 counts
 fires and the count is 0 on the pools, delete the arm and the retry (R7's precondition "R2's retry count is 0").
+
+✅ **LANDED.** The wide instrument (`mise run ladder-reach`, L1 2395 + L6 312 + H1 2200 + H2 24594 traversals,
+1155 s) read `rescued 0; fires 0`, ladder-only 22 (unchanged). Measured over those pools, not proved in general:
+FIRES compiles only draws, and the H pools exclude draws, so the fire count covers L1/L6. So the whole retry went,
+not only its `CopiedDraw` arm: `bothChildOrders`, `FastPathConfig.childOrderRetry`, `NO_RETRY` and the
+rescued/fires counters and baseline fields. A plan decline (`CopiedDraw`) is now the ONE lowering's own reason,
+pinned at depth in `test/L9-connector/ladder-reach.test.ts` (both modes). L1 compile work fell 2190 → 2016
+lowerings (`test/compiler/compile-work.test.ts`). R7's "R2's retry count is 0" holds by deletion. M5 is absorbed:
+its counter has no subject.
 
 ### N8 — Depth gaps (clean declines today; each is a body or a host row, never a rung)
 
@@ -532,6 +541,9 @@ with its host. A filter host keeps the write-in-filter wording; coalesce/optiona
 value. `CopiedDraw`'s suggestion now fits a predicate. No SQL change. Remains: nothing.
 
 ### M5 — Refine N6's FIRES count before N7 (cheap; then N7)
+
+✅ **ABSORBED BY N7** — the retry and its FIRES counter were deleted; the positive witness below is now a
+`CopiedDraw` decline test.
 
 `fires` counts four ordinary `choose()` queries whose first order throws `CopiedDraw` and whose second order ALSO
 declines (`g.V().choose(out().sample(1).hasLabel('person'), constant(1), constant(2))`, the no-else form,
