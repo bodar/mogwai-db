@@ -266,6 +266,13 @@ export function substRelId(e: Expr, from: RelId, to: RelId, rename: (name: strin
   function inSubplan(plan: Rel): Rel {
     const done = memo.get(plan);
     if (done) return done;
+    // A subplan that does not read `from` is UNTOUCHED, and an untouched subplan is the SAME node — the
+    // rule Calcite keeps (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/RelShuttleImpl.java`
+    // `visitChild`: a child that comes back `==` leaves its parent unrebuilt). Rebuilt
+    // anyway it became a fresh node per occurrence, so a first-row read the filter and its presence test
+    // both hold (`g.V().map(V().values('name'))`) was named TWICE: two byte-identical MATERIALIZED CTEs,
+    // the graph scanned and sorted twice.
+    if (!freeRelIds(plan).has(from)) { memo.set(plan, plan); return plan; }
     const mapped = mapRelExprs(mapRelChildren(plan, inSubplan), inExpr);
     memo.set(plan, mapped);
     return mapped;
