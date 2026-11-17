@@ -793,6 +793,11 @@ sideEffect() …"), not "no lowering covers".
   `PATH_STEPS`, M1's inline `readsPath` in `scoped.ts` ~l.349 and M4's `PATH_STEPS` in `scoped.ts` ~l.338 (a copy of
   `PATH_FAMILY` that also misses `tree`) with the one set; consider `TRAVERSER_STATE_READS` = {sack, loops} ∪
   `PATH_READERS`. Pin the tree() answer.
+  ✅ **LANDED (7f715408).** `PATH_READERS` = `PATH_FAMILY` ∪ {tree} is exported from `src/compiler/ir/step.ts` and is
+  the one "is a path position observable" authority: the identity-host splice, `analyze.ts` `tracksPath` (private
+  `PATH_STEPS` deleted), `scoped.ts` `readsPath`, and `TRAVERSER_STATE_READS` derive from it; `PATH_FAMILY` stays only
+  where the question is from()/to() hosting or label emission. `map(identity()).out('created').tree()` now gives
+  `{v1:{v1:{v3}}}` (pinned). No baseline moved. Remains: nothing.
 - **P13 — `rejoin()` takes the `RejoinContract`** (`scoped.ts` ~l.1154) instead of `(policy, firstOnly)`: ('split',
   true) is `'first'`; `allRows`/`priority` take `Exclude<RejoinContract,'first'>`; the meaningless ('forward', true) can
   no longer be written. 4 call sites, no SQL change.
