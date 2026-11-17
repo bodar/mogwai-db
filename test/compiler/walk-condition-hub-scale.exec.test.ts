@@ -4,16 +4,15 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadBulk } from '../../src/bulk.ts';
 import { runWith } from '../support/harness.ts';
 
-// AN UNBOUNDED WALK'S emit/until CONDITION RUNS PER FRONTIER ROW, so its per-row work must not be a hub's
-// neighbourhood. The condition is a correlated subquery inside the recursive term (`correlatedExistence`,
-// `src/compiler/rel/lower/scoped.ts`), and many frontier rows reach one hub:
-//  - `local(in().limit(1))` was a per-key ROW_NUMBER numbering the hub's WHOLE in-neighbourhood per row
-//    (measured 41× per 8× growth). A one-row scope has one key, so the limit is now a plain LIMIT
-//    (`src/rel/decorrelate.ts`), which stops at the first row.
-//  - `count().is(gt(1))` counted the hub's whole in-neighbourhood per row (27×); a walk condition's count now
-//    reads only as far as its predicate can tell (`boundConditionCount`, `src/compiler/ir/strategies.ts`).
-//  - a condition whose per-row work stays a neighbourhood (an unbounded ORDER) declines rather than run
-//    quadratically.
+// AN UNBOUNDED WALK'S CONDITION MUST NOT COST A HUB'S NEIGHBOURHOOD PER WALK ROW — many walk rows reach one hub.
+//  - `emit(c)` is asked over the FINISHED walk once per DISTINCT traverser state (`perState`,
+//    `src/compiler/rel/walk.ts`): any head, a filtered union/coalesce/choose, an ORDER — measured 24–35× per 8×
+//    when it was asked per row, ~6–7× now.
+//  - `until(c)` runs INSIDE the recursive term, per frontier row (`correlatedExistence`,
+//    `src/compiler/rel/lower/scoped.ts`): a `limit(n)` there is a plain LIMIT (a one-row scope has one key,
+//    `src/rel/decorrelate.ts`; was 41×), a `count().is(P)` reads only as far as P can tell
+//    (`boundConditionCount`, `src/compiler/ir/strategies.ts`; was 27×), and a condition whose per-row work stays a
+//    neighbourhood — a barrier, or a filter, over an unbounded input — declines rather than run quadratically.
 
 /** `chains` chains of 6 persons (knows), each person `created` one of 20 shared software HUBS and a private leaf. */
 function hubGraph(chains: number): GraphStore {
@@ -57,6 +56,14 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     ["g.V().repeat(out()).until(local(in('created').limit(1).has('age',gt(40)))).count()", 756],
     ["g.V().repeat(out()).until(union(out('knows'),in('created')).count().is(gt(1))).count()", 2730],
     ["g.V().repeat(out()).until(in('created').count().is(gt(1))).count()", 2730],
+    ["g.V().repeat(out()).emit(union(in('created'),out('knows')).has('age',gt(45))).count()", 2680],
+    ["g.V().repeat(out()).emit(coalesce(in('created').has('age',gt(45)),out('nope'))).count()", 2520],
+    ["g.V().repeat(out()).emit(choose(hasLabel('software'),in('created').has('age',gt(45)),out('knows'))).count()", 3820],
+    ["g.V().repeat(out()).emit(optional(in('created').has('age',gt(45)))).count()", 7410],
+    ["g.V().repeat(out()).emit(in('created').has('age',gt(45))).count()", 2520],
+    ["g.V().repeat(out()).emit(local(in().order().by('age').limit(1))).count()", 7410],
+    ["g.V().repeat(out()).until(has('age',gt(40))).emit(in('created').has('age',gt(45))).count()", 1980],
+    ["g.V().repeat(out()).until(optional(in('created').has('age',gt(45)))).count()", 2210],
   ] as const) {
     test(q, () => {
       expect(count(small, q)).toBe(atSmall);
@@ -64,7 +71,13 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     }, SCALE_TIMEOUT_MS);
   }
 
-  test('a condition whose per-row work is a whole neighbourhood declines', () => {
-    expect(() => runWith(small, "g.V().repeat(out()).emit(local(in().order().by('age').limit(1))).count()")).toThrow(/not supported/);
-  });
+  for (const q of [
+    "g.V().repeat(out()).until(local(in().order().by('age').limit(1))).count()",
+    "g.V().repeat(out()).until(union(in('created'),out('knows')).has('age',gt(45))).count()",
+    "g.V().repeat(out()).until(coalesce(in('created').has('age',gt(45)),out('nope'))).count()",
+  ]) {
+    test(`an until whose per-row work is a whole neighbourhood declines: ${q}`, () => {
+      expect(() => runWith(small, q)).toThrow(/not supported/);
+    });
+  }
 });

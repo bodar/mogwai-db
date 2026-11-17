@@ -8,6 +8,12 @@ Feature: mogwai addendum — an unbounded repeat()'s until/emit condition may le
   # (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/RepeatStep.java`
   # `doUntil`/`doEmit` → `TraversalUtil.test`), which is exactly an EXISTS per walk row.
   #
+  # An emit() condition is asked over the FINISHED walk, once per DISTINCT traverser state (element + loops/path/
+  # labels), not per walk row (`perState`, `src/compiler/rel/walk.ts`) — so any head, ORDER and aggregates
+  # included, stays linear where many walk rows reach one hub. An until() condition runs INSIDE the recursive term,
+  # per frontier row, where SQLite allows no DISTINCT; there a condition whose per-row work is a neighbourhood (a
+  # barrier or a filter over an unbounded input) declines rather than run quadratically (`correlatedExistence`).
+  #
   # Modern graph: marko -> vadas, lop, josh; josh -> ripple, lop; peter -> lop. Walk rows after the first
   # step: vadas, lop, josh (from marko); ripple, lop (from josh, both starts); lop (from peter).
   @gap:repeat-condition-any-head
@@ -109,10 +115,10 @@ Feature: mogwai addendum — an unbounded repeat()'s until/emit condition may le
       | result |
       | d[4].l |
 
-  # A per-row ORDER inside the condition reads the WHOLE neighbourhood per walk row — a hub's degree for every
-  # frontier row reaching it, quadratic in the walk. The linear form evaluates the condition once per DISTINCT
-  # element, which a recursive term cannot hold (no aggregate, no keyed join) — so it declines rather than
-  # landing a quadratic route.
+  # A per-row ORDER inside an UNTIL condition reads the WHOLE neighbourhood per frontier row — a hub's degree for
+  # every frontier row reaching it, quadratic in the walk. The linear form evaluates the condition once per
+  # DISTINCT element, which a recursive term cannot hold (no DISTINCT, no aggregate, no keyed join) — so it
+  # declines rather than landing a quadratic route.
   @Unsupported
   Scenario: g_V_repeatXoutX_untilXlocalXout_order_byXname_descX_limitX1X_hasXname_rippleXXX_name
     Given the modern graph
@@ -125,7 +131,10 @@ Feature: mogwai addendum — an unbounded repeat()'s until/emit condition may le
       | result |
       | josh |
 
-  # optional(out('knows')) is the row itself where it knows no one: the exit holds of vadas.
+  # optional(out('knows')) is the row itself where it knows no one, so the exit would hold of vadas — but a has()
+  # FILTERING an unbounded neighbourhood inside the recursive term scans all of it whenever it fails, once per
+  # frontier row: quadratic at a hub. It declines (the same condition as an emit() answers — next scenario).
+  @Unsupported
   Scenario: g_V_repeatXoutX_untilXoptionalXoutXknowsXX_hasXname_vadasXX_name
     Given the modern graph
     And the traversal of
@@ -136,6 +145,66 @@ Feature: mogwai addendum — an unbounded repeat()'s until/emit condition may le
     Then the result should be unordered
       | result |
       | vadas |
+
+  # The same condition as an EMIT is asked once per distinct state over the finished walk, so it answers.
+  Scenario: g_V_repeatXoutX_emitXoptionalXoutXknowsXX_hasXname_vadasXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).emit(__.optional(__.out("knows")).has("name", "vadas")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+
+  # A filtered union in an emit: lop (creators 29/32/35) and ripple (josh, 32) pass; vadas and josh have neither.
+  Scenario: g_V_repeatXoutX_emitXunionXinXcreatedX_outXknowsXX_hasXage_gtX30XXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).emit(__.union(__.in("created"), __.out("knows")).has("age", P.gt(30))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+      | ripple |
+      | ripple |
+
+  # A per-row ORDER in an emit is asked once per distinct state: ripple's oldest in-neighbour is josh, lop's peter.
+  Scenario: g_V_repeatXoutX_emitXlocalXin_order_byXage_descX_limitX1XX_hasXname_joshXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).emit(__.local(__.in().order().by("age", Order.desc).limit(1)).has("name", "josh")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | ripple |
+      | ripple |
+
+  # until(optional(…)) always holds (`OptionalStep` yields at least the traverser itself), so every walk row exits
+  # after its first step — the six out-edges' heads.
+  Scenario: g_V_repeatXoutX_untilXoptionalXoutXknowsXXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).until(__.optional(__.out("knows"))).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | josh |
+      | lop |
+      | lop |
+      | lop |
+      | ripple |
 
   # The condition composes inside a host: a walk under where() under local().
   Scenario: g_V_whereXrepeatXoutX_emitXlocalXout_limitX1XXXX_count

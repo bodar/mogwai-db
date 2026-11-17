@@ -1,9 +1,12 @@
-import { sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, type Expr } from '../../rel/expr.ts';
+import { CHANNEL_GROUP_POLICY, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
+import { col, compilerInt, eq, type Expr } from '../../rel/expr.ts';
+import { exprRels, forEachExpr, forEachRel } from '../../rel/walk.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { IRStep } from '../ir/step.ts';
+import { TRAVERSER_STATE_READS, type IRStep } from '../ir/step.ts';
+import { someStepDeep } from '../ir/walk.ts';
+import { scopeKeyReads } from '../ir/labels.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import type { AliasMap } from '../alias.ts';
 import type { Elem } from '../elem.ts';
@@ -11,6 +14,19 @@ import { and, carriedCols, elementCols, meta, notProduced, or, typeOf, type Mint
 import type { ChildSeam, Subject } from './child.ts';
 import { CONSTANT } from './predicate.ts';
 import type { RelFraming } from './framing.ts';
+
+/**
+ * Does a condition read a NEIGHBOURHOOD — a subquery over `edges`? That is the work a hub multiplies: a per-row
+ * read of the element's own labels or properties is one index seek whatever the graph's shape, so a condition
+ * that reads only those stays per row (no spool, no semi-join); one that moves is asked per distinct state.
+ */
+function readsAdjacency(e: Expr): boolean {
+  let moves = false;
+  forEachExpr(e, (node) => {
+    for (const plan of exprRels(node)) forEachRel(plan, (r) => { if (r.kind === 'scan' && r.table === 'edges') moves = true; });
+  });
+  return moves;
+}
 
 /** "Every row the walk holds" — an output condition that needs no filter, distinct from the absence
  *  of a condition. */
@@ -125,6 +141,66 @@ export function repeatWalk(
   const deeper = (rel: Rel): Expr => ({
     kind: 'binary', op: '>', left: loops(rel), right: compilerInt(0),
   });
+  /**
+   * A CONDITION OVER THE FINISHED WALK IS ASKED ONCE PER DISTINCT TRAVERSER STATE, not once per walk row.
+   *
+   * A walk row is not a distinct element: every frontier row reaching a hub is another row FOR the hub, so a
+   * condition evaluated per row repeats the hub's whole neighbourhood once per row reaching it — quadratic in
+   * the walk exactly where the graph has hubs (measured: `emit(union(in('created'),out('knows')).has(…))`
+   * 24× per 8× growth). The condition's answer is a function of what the traverser HOLDS and the condition
+   * READS — its element, plus the per-traverser state a grouping cannot merge (`CHANNEL_GROUP_POLICY`
+   * `undefined`) that the body can observe — never of its multiplicity (`TraversalUtil.test` sets the split's
+   * bulk to 1, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalUtil.java`).
+   * The KEY is therefore only what the body reads: the path, loops and sack where it reads split-inherited state
+   * (`TRAVERSER_STATE_READS`), the labels where it reads a scope key (`scopeKeyReads`). The enclosing host's
+   * scoping keys (`origin`, `branchKey`) are this compiler's, never visible to a condition — keyed on them, a
+   * walk under `where`/`local` asked a hub's condition once per START (measured 19× per 8×), and keyed on a path
+   * every state is a row. The graph tag and an edge's `fromV` are identity and stay.
+   * So the states are DISTINCTED, the condition is asked of each (`child.predicate`, any head), and a walk row
+   * passes iff its state passed: one semi-join, a hub's condition evaluated once per distinct state it is
+   * reached in — a DISTINCT pushed below a semi-join, Calcite's `SemiJoinRule` family
+   * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/SemiJoinRule.java`).
+   *
+   * Only the `emit` condition, and only one that reads adjacency (`readsAdjacency`: a condition over the row's
+   * own columns, labels or properties — `loops()`, `has(k,v)` — costs one seek per row as it is). Inside the term (`self`) the frontier row is all there
+   * is — a recursive SELECT may not DISTINCT or aggregate (`src/rel/recursive.ts` `BARRIER_IN_TERM`) — so the
+   * `until` test stays per row there, and its output-side twin with it: it costs no more than the term already
+   * paid. What keeps the term's per-row work bounded is `correlatedExistence`'s rule (`lower/scoped.ts`).
+   */
+  /** `rows` restricted to those whose STATE passes `body`, asked once per distinct state; `null` where `body`
+   *  does not lower over a state row. */
+  const perState = (rows: Rel, body: readonly IRStep[]): Rel | null => {
+    const readsState = someStepDeep(body, child.params, (s) => TRAVERSER_STATE_READS.has(s.name), true);
+    const labelReads = scopeKeyReads(body, child.params);
+    const readsLabels = labelReads.all || labelReads.labels.size > 0;
+    const observed = (role: ChannelRole): boolean => {
+      switch (role) {
+        case 'path': case 'loops': case 'sack': return readsState;
+        case 'alias': return readsLabels;
+        case 'origin': case 'branchKey': return false;
+        default: return true;
+      }
+    };
+    const stateChannels = carried.filter((channel) => CHANNEL_GROUP_POLICY[channel.role] === 'undefined' && observed(channel.role));
+    const stateType = typeOf(...elementCols(stateChannels));
+    const keys = make.project({
+      id: fresh('wsk'), input: rows, channels: stateChannels, type: stateType,
+      exprs: [['id', col(rows.id, 'id')], ...stateChannels.map((channel) => [channel.col, col(rows.id, channel.col)] as const)],
+    });
+    const states = make.distinct({ id: fresh('wsd'), input: keys, channels: stateChannels, type: stateType });
+    const tested = child.predicate(body, subject(states), false);
+    if (!tested) return null;
+    // FENCED (`AS MATERIALIZED`): the passing states are ONE relation computed once. Unfenced, SQLite flattens
+    // the condition into the semi-join's probe and asks it again per walk row — the quadratic form this replaces.
+    const passing = make.materialize({
+      id: fresh('wsp'), channels: stateChannels, type: stateType, fenced: true,
+      input: make.filter({ id: fresh('wst'), input: states, channels: stateChannels, type: stateType, pred: tested }),
+    });
+    return make.join({
+      id: fresh('wsj'), left: rows, right: passing, join: 'semi', channels: rows.channels, type: rows.type,
+      on: stateType.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name))).reduce((all, one) => and(all, one)),
+    });
+  };
   /** The `until` exit condition at `rel` — `null` where the predicate does not lower, `undefined`
    *  where there is no `until` at all and the walk therefore never exits early. */
   const exits = (rel: Rel): Expr | null | undefined => {
@@ -261,14 +337,30 @@ export function repeatWalk(
     make.filter({ id: fresh(tag), input: walk, channels: carried, type: walkType, pred });
 
   let surviving: Rel;
-  if (twice) {
+  const emitting = emits(walk);
+  if (emitted && emitting !== null && emitting !== ALL && readsAdjacency(emitting)) {
+    // An `emit` condition that reads ADJACENCY is asked once per distinct STATE (`perState`): the rows past
+    // the depth test, semi-joined to the states that pass. With an `until` it is the rows that do NOT exit —
+    // `exit ∪ (¬exit ∧ emit)` is the disjunction `leaves` spells, as two disjoint arms — or, `twice`, every
+    // emitting row beside every exiting one (a multiset sum).
+    const base = emitFirst ? walk : arm('wd', deeper(walk));
+    const exiting = exits(walk);
+    if (exiting === null) return null;
+    const staying = exiting === undefined || twice ? undefined : exits(base);
+    if (staying === null) return null;
+    const emitArm = perState(!staying ? base
+      : make.filter({ id: fresh('wn'), input: base, channels: carried, type: walkType, pred: notProduced(staying) }), emitted);
+    if (!emitArm) return null;
+    surviving = exiting === undefined ? emitArm : make.union({
+      id: fresh('wu'), channels: carried, type: walkType, all: true, inputs: [arm('wf', exiting), emitArm],
+    });
+  } else if (twice) {
     // The two routes fire independently, so a row satisfying both leaves TWICE — a MULTISET sum,
     // which is a `UNION ALL` of the two arms (Calcite's `RepeatUnion.all`,
     // `vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/RepeatUnion.java`), never a
     // disjunction. Both arms read the SAME walk node and `name.ts` binds it once, so the walk is one
     // CTE the two arms share rather than a block spelled per reference.
     const exited = exits(walk);
-    const emitting = emits(walk);
     // `ALL` cannot arise here — it needs `emitFirst`, which `twice` excludes — but the walk declines
     // rather than assuming that, because an unfiltered arm would double every row in the walk.
     if (!exited || emitting === null || emitting === ALL) return null;

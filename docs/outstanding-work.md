@@ -566,7 +566,26 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   COVERING INDEX` and every witness is 2.5–5× for 8× on bun. If DO's SQLite runs with `automatic_index` off,
   it is O(N·M) in production only. Check DO's pragma default (cite it in the `listSetOp` doc) or teach
   `CfLimitedSql` (`src/cf-limits.ts`) to run with `PRAGMA automatic_index=OFF` so CI sees it; if it is off
-  on DO, index the spool explicitly.
+  on DO, index the spool explicitly. The same reliance: a walk's per-state `emit` condition semi-joins the walk to
+  a fenced spool of passing `(id, loops, …)` states (`perState`, `src/compiler/rel/walk.ts`).
+- **A movement-led `until` that FILTERS a neighbourhood is quadratic at a hub (walk-until-hub).** The in-term
+  `until` test runs per frontier row, and `until(in('created').has('age',gt(45)))` (the `correlatedExists`
+  movement-head shape, answering long before Q2b) scans the hub's whole in-neighbourhood whenever it fails:
+  22.8× per 8× on the hub graph of `test/compiler/walk-condition-hub-scale.exec.test.ts`. Its non-movement
+  siblings (`until(union(…).has(…))`, `until(optional(…).has(…))`) decline by `correlatedExistence`'s
+  bounded-work rule; the emit spellings are linear via `perState`. The linear form needs the condition asked
+  once per distinct element INSIDE the recursion, which SQLite's recursive term cannot hold (no DISTINCT, no
+  keyed join) — e.g. a reachability pre-pass whose condition set the term joins. Declining the movement head
+  would retire trunk answers, so it is an owner call.
+- **A filtering correlated body under a host, reached at a hub, is keyed per SCOPE (scope-free-subterm).** The
+  decorrelator keys every node over a scoped input (`src/rel/decorrelate.ts`), so a condition that reads only
+  the element is still asked once per (scope, element): `g.V().where(out().out().where(in('created').has('age',
+  gt(45))))` 22.8× per 8× on the hub graph (trunk), its `local(…count())` twin 20×, and a walk under a host —
+  `g.V().where(repeat(out()).emit(<filtering condition, any head>))` 18–21× — even though the top-level walk's
+  emit is now per distinct state (`perState`, `src/compiler/rel/walk.ts`, ~6×). Needs a decorrelator rule that
+  leaves a subterm UNKEYED when its consumer only tests membership of a scope-independent fact (a semi-join to
+  passing elements matched on the element alone) — Calcite's analogue is pulling an uncorrelated aggregate out
+  of a correlate (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/RelDecorrelator.java`).
 
 - ✅ **LANDED (8dbb8b44, with cc-7) — A chain of value-run `is()` re-inlines its input per `CASE` (rf3-is-chain-size)**
   — `valueRun` members read `once()`'s value: three `is()` 142,217 → 3,883 bytes, four now compile. Remains:

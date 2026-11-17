@@ -690,18 +690,30 @@ export function correlatedExistence(
   if (!tail) return null;
   const plan = existenceProbe(tail, fresh);
   if (!spellsStored(plan, ['one'], rel)) return null;
-  // BOUNDED WORK PER SUBJECT ROW. An `EXISTS` stops at its first row, but not inside a barrier: an aggregate,
-  // sort or window reads ALL of its input first. Over an unbounded input (a neighbourhood) that is the
-  // neighbourhood's size per subject row — and a walk revisits a hub once per frontier row reaching it, so it is
-  // quadratic in the walk exactly where the graph has hubs (measured: `local(in().order().by(k).limit(1))`
-  // 52x per 8x). A bounded input (`limit(n)`, the count bound a walk condition's `count().is(P)` takes —
-  // `boundConditionCount`, `ir/strategies.ts`) costs O(n). The linear form needs the condition evaluated
-  // per DISTINCT element, which a recursive term cannot hold (no aggregate, no keyed join: `recursive.ts`).
-  let unbounded = false;
+  // BOUNDED WORK PER FRONTIER ROW — inside a WALK's recursive term only. There the subject is the frontier
+  // (`self`), and a walk re-reaches a hub once per path to it, so a condition whose per-row work is a hub's
+  // neighbourhood is quadratic in the walk (measured on a hub graph at 8× the walk: a failing
+  // `until(union(in('created'),out('knows')).has('age',gt(45)))` 26×, `local(in().order().by(k).limit(1))` 52×).
+  // Over a FINISHED walk a condition is asked once per distinct traverser state instead (`perState`, `walk.ts`),
+  // and outside a walk the host's rows are the host's — the connector's ordinary correlated form. A recursive
+  // SELECT holds neither a DISTINCT nor a keyed join (`src/rel/recursive.ts` `BARRIER_IN_TERM`), so in the term
+  // the per-row work itself must be bounded, and two things make it a neighbourhood:
+  //  - a BARRIER over an unbounded input — an aggregate, sort or window reads ALL of it before the EXISTS can stop;
+  //  - a REJECTION of an unbounded input — a filter, or a join it drives, may discard every row it reads, so a
+  //    FAILING probe scans the whole neighbourhood. A filter straight over a base table is the index seek itself
+  //    (an edge or property lookup by its key), not a rejection of rows already read.
+  // A bounded input (`limit(n)`, the count bound a walk condition's `count().is(P)` takes — `boundConditionCount`,
+  // `ir/strategies.ts`) costs O(n). The linear form for the rest needs the condition evaluated per distinct
+  // element INSIDE the recursion, a substrate SQLite's recursive term does not offer, so it declines.
+  if (rel.kind !== 'self-ref') return { kind: 'exists', plan, negated };
+  const unbounded = (r: Rel): boolean => rowBounds(r).max === Infinity;
+  let perRowBounded = true;
   forEachRel(plan, (r) => {
-    if ((r.kind === 'aggregate' || r.kind === 'sort' || r.kind === 'window') && rowBounds(r.input).max === Infinity) unbounded = true;
+    if ((r.kind === 'aggregate' || r.kind === 'sort' || r.kind === 'window') && unbounded(r.input)) perRowBounded = false;
+    if (r.kind === 'filter' && r.input.kind !== 'scan' && unbounded(r.input)) perRowBounded = false;
+    if (r.kind === 'join' && r.join !== 'left' && r.join !== 'cross' && unbounded(r.left)) perRowBounded = false;
   });
-  return unbounded ? null : { kind: 'exists', plan, negated };
+  return perRowBounded ? { kind: 'exists', plan, negated } : null;
 }
 
 /**

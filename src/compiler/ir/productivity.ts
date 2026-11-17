@@ -107,6 +107,9 @@ const literalAtLeastOne = (a: Step['args'][number] | undefined): boolean =>
  *   whole stream) and no `by()`: each keeps at least one of a non-empty stream
  *   (`.../step/filter/RangeGlobalStep.java`, `TailGlobalStep.java`; `SampleGlobalStep.java:103-105` returns the
  *   whole set when it is no larger than the amount). A weighted `sample().by()` may draw nothing.
+ * - `optional(b)`: the traverser itself where `b` yields nothing, `b`'s results otherwise — at least one either way
+ *   (`.../step/branch/OptionalStep.java`), so `emit(optional(…))` asks nothing at all. `b`'s effects and binds
+ *   still stop the trim (`isImpure` reads the whole cluster, nested bodies included).
  *
  * `select`, `dedup().by` and `order().by` are NOT here and never may be: an unproductive `by()` or a missing
  * key drops the traverser there (`SelectStep.java:65-90`; §17's by() line).
@@ -114,6 +117,7 @@ const literalAtLeastOne = (a: Step['args'][number] | undefined): boolean =>
 const neverEmpties = (s: Step): boolean => {
   const ir = s as Step & { modulators?: unknown[]; from?: string; to?: string };
   if (isMappingTerminal(s)) return true;
+  if (s.name === 'optional') return s.args.length === 1 && !ir.modulators?.length;
   if (ir.modulators?.length || isLocalScope(s)) return false;
   if (s.name === 'id' || s.name === 'label') return !s.args.length;
   if (s.name === 'path') return !s.args.length && ir.from === undefined && ir.to === undefined;
