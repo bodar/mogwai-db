@@ -314,6 +314,12 @@ scenario uses them.
 
 ### N2 — One fenced first-row read in `reSourcedBody` (MAJOR — compute-once rule)
 
+✅ **LANDED with P4 (a2a1715f, eb11bdd8).** The twin CTEs came from `substRelId` (`src/rel/walk.ts`) rebuilding
+every correlated subplan it walked; an untouched subplan now stays the same node (Calcite's
+`RelShuttleImpl.visitChild` rule), so value and presence share one fenced read: `map(V().values('name'))` 1430 → 1024
+bytes, `map(V().order().by('name').values('name'))` 2779 → 1642. Witness `test/L2-sql/first-row-once.sql.test.ts`.
+Remains: nothing.
+
 The first-row read is referenced twice (value and presence `EXISTS`) and emitted as two byte-identical
 `MATERIALIZED` CTEs, so the graph scan + sort runs twice: `g.V().map(V().values('name'))` 757 → 1430 bytes,
 `map(V().order().by('name').values('name'))` 1367 → 2779. Give both uses one fenced node, or read presence off the
@@ -416,6 +422,10 @@ fires and the count is 0 on the pools, delete the arm and the retry (R7's precon
 - **P4 — One first-row builder** that returns the relation itself when `atMostOneRow` (replacing the hand-rolled
   sort+LIMIT 1 / `ROW_NUMBER` forms in `reSourcedBody`, the scalar first-row, `rowsKeyedBy`, `build.ts`
   `firstRootedColumn`); the short-circuit lives in `perOriginWindow`. Carries N2.
+  ✅ **LANDED (eb11bdd8, with N2 a2a1715f).** `firstRow(rows, order, fresh, partition?)` in `src/compiler/rel/build.ts`
+  builds every first-row read (each caller keeps its own order); a relation already at most one row is its own first
+  row. It lives in `build.ts`, not `lower/reduction.ts`, to avoid a cross-family import cycle. Corpus plans
+  byte-identical. Remains: nothing.
 - **P5 — `typeColumnOf(framing)`** in `framing.ts`: the one "which column holds a scalar's per-row type (`vt` vs
   `vtype`)" authority for the six sites that re-derive it; variant/merge admission becomes
   `scalarArmType(arm) && !reducedGlobally`.
