@@ -1306,21 +1306,6 @@ export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undef
 
 
 /**
- * `e` reading relation `to` wherever it read `from` — `substRelId`, asked first whether there is anything to
- * re-point: `substRelId` rebuilds every subplan it passes through, so over an expression that does not name
- * `from` it would only unshare a subquery two expressions shared.
- */
-const reread = (e: Expr, from: RelId, to: RelId): Expr => {
-  let found = false;
-  forEachExpr(e, (node) => {
-    if (found) return;
-    if (node.kind === 'col' && node.rel === from) found = true;
-    else exprRels(node).forEach((plan) => { if (freeRelIds(plan).has(from)) found = true; });
-  });
-  return found ? substRelId(e, from, to) : e;
-};
-
-/**
  * `rel` FILTERED by `keep` — the productivity filter a `by()` key owes — with `exprs`, the key terms the
  * NEXT node spells, re-pointed to read the filter. A node may read only its own input: the key terms were
  * built over `rel`, and a window over the filter that still named `rel` resolved only while the emitter
@@ -1331,7 +1316,7 @@ const reread = (e: Expr, from: RelId, to: RelId): Expr => {
 export function keptBy(rel: Rel, keep: Expr | undefined, exprs: readonly Expr[], fresh: Minter): { readonly rel: Rel; readonly exprs: readonly Expr[] } {
   if (!keep) return { rel, exprs };
   const kept = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: keep });
-  return { rel: kept, exprs: exprs.map((e) => reread(e, rel.id, kept.id)) };
+  return { rel: kept, exprs: exprs.map((e) => substRelId(e, rel.id, kept.id)) };
 }
 
 /**
@@ -1417,7 +1402,7 @@ export function withSubqueryColumns(rel: Rel, exprs: readonly Expr[], fresh: Min
     rebuilt.set(plan, next);
     return next;
   };
-  const rewritten = exprs.map((e) => reread(hoist(e), rel.id, keyed.id));
+  const rewritten = exprs.map((e) => substRelId(hoist(e), rel.id, keyed.id));
   const reads = new Set<string>();
   rewritten.forEach((e) => forEachExpr(e, (node) => {
     if (node.kind === 'col') reads.add(node.rel);

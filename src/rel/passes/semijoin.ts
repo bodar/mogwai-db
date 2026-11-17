@@ -4,7 +4,7 @@ import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
 import { rowBounds } from '../bounds.ts';
 import type { RelId } from '../types.ts';
-import { exprRels, forEachExpr, forEachRel, mapRelExprs, relChildren, relExprs, rewrite, rewriteExpr, rewriteRels } from '../walk.ts';
+import { exprRels, forEachExpr, forEachRel, relChildren, relExprs, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
 
 /**
  * `semijoin` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the
@@ -206,7 +206,7 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
       // still there, under the same names, one position later.
       return make.filter({
         id: node.id, input: joined, channels: node.channels, type: joined.type,
-        pred: retarget(node.pred, element.id, joined.id),
+        pred: substRelId(node.pred, element.id, joined.id),
       });
     }
   }
@@ -384,16 +384,6 @@ function conjuncts(e: Expr): readonly Expr[] {
 
 const andAll = (parts: readonly Expr[]): Expr => parts.reduce(and);
 
-/** Re-point every `Col` naming `from` at `to`, THROUGH correlated subplans — a correlation inside an
- *  `EXISTS` names the enclosing relation, so leaving it behind would resolve to a relation that is no
- *  longer the input. */
-function retarget(e: Expr, from: RelId, to: RelId): Expr {
-  const swap = (node: Expr): Expr => (node.kind === 'col' && node.rel === from ? col(to, node.name) : node);
-  const go = (expression: Expr): Expr =>
-    rewriteExpr(expression, swap, (nested) => rewrite(nested, (mapped) => mapRelExprs(mapped, go)));
-  return go(e);
-}
-
 /** `a = b` where one side is `col(left, leftName)` and the other `col(right, rightName)`. */
 function isCorrelation(expr: Expr, left: RelId, leftName: string, right: RelId, rightName: string): boolean {
   if (expr.kind !== 'binary' || expr.op !== '=') return false;
@@ -480,7 +470,7 @@ export const indexSeek: OwnerSeek = (term, target, mint) => {
   const scan = make.scan({ id: mint.id('sk'), table: props.table, alias: mint.alias('rsk'), channels: [], type: props.type });
   const filtered = make.filter({
     id: mint.id('sf'), input: scan, channels: [], type: scan.type,
-    pred: retarget(pred, props.id, scan.id),
+    pred: substRelId(pred, props.id, scan.id),
   });
   const owners = make.project({
     id: mint.id('sp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] },
@@ -557,7 +547,7 @@ function necessaryTextAtom(parts: readonly Expr[], rel: RelId):
   return null;
 }
 /** Does `e` read nothing but the property value — no other column, no subplan? Such a body can be re-asked
- *  of the FTS copy of that value (`retarget`) and give the same answer. */
+ *  of the FTS copy of that value (`substRelId`) and give the same answer. */
 function readsOnlyValue(e: Expr, rel: RelId): boolean {
   let only = true;
   forEachExpr(e, (x) => { if ((x.kind === 'col' && !(x.rel === rel && x.name === 'value')) || exprRels(x).length) only = false; });

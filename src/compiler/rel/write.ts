@@ -24,7 +24,7 @@ import {
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
-import { rewriteExpr } from '../../rel/walk.ts';
+import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
 import { NUMERIC_VTYPES, typedValueEq, typedValueKey } from './predicate.ts';
@@ -4663,7 +4663,7 @@ export function elementAddE(
     type: typeOf(...(idCol ? [idMeta] : []), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
     exprs: [
       ...(idCol ? [[idCol, idExpr!] as const] : []),
-      ['src', reScope(src, incoming.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, incoming.id, paired.id)],
+      ['src', substRelId(src, incoming.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', substRelId(tgt, incoming.id, paired.id)],
     ],
   });
   const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
@@ -4793,11 +4793,6 @@ function matching(
  *  coercing (`addV`/`addE`'s `T.id` decline the same non-string/number values). */
 const idOrNull = (id: unknown): string | number | null | false =>
   id === null || id === undefined ? null : typeof id === 'string' || typeof id === 'number' ? id : false;
-
-/** Rewrite a `Col` written against `from` so it names `to` instead — what a CROSS JOIN's projection
- *  needs, because a join's outputs are spelled in ITS scope and not its sides'. */
-const reScope = (e: Expr, from: RelId, to: RelId): Expr =>
-  rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node));
 
 /**
  * An input relation projected to the columns a write needs, IN EMISSION ORDER, carrying its own
