@@ -1294,6 +1294,19 @@ census and sql-hygiene review.
   (`min/max(local)` on N5's arg-extremum Aggregate), P17 (`firstArrival` → `arg_min`) and P18 (dedup-first windows →
   `arg_min`): **one arg-extremum Aggregate builder** pulled out of `lower.ts` ~2620–2645. Build P16 first (it extracts
   the builder), then this.
+
+✅ **P16 + the keyed pick LANDED (97b6e161, c93e6a1c).** One arg-extremum Aggregate builder, `argExtremum`
+(`src/compiler/rel/reducer.ts`), serves the global min/max reducer and `min(local)`/`max(local)`; a per-host pick of a
+min/max body threads the winning row's rowid (`threadingRowKey`, `src/rel/copies.ts`) and `keyedPick`
+(`lower/scoped.ts`) searches for that key once, reading value and tag back by a rowid join. `map(out().values('age').max())`
+6,129 → 1,980 B, 7.4/75.3 → 2.4/19.1 ms at 1k/8k.
+
+**Remains:** the plan's 7,883 B target for `local(out().values('age').fold().max(local))` was not reached: it is now
+12,097 B (was 17,101 B). The remaining cost is the connector's `correlatedFirst`, which still reads a list-valued body's
+`v` and `vt` as two scalars plus a presence check. The keyed pick only applies when the winner is a stored row, and a
+list member is not one. Reading two columns of a per-host relation once would need either decorrelating such bodies or
+a LATERAL-like way to attach a relation per host. Neither exists, so the list form keeps its pair-and-fence and the
+fence was not deleted.
 - **Other double spellings the new hygiene gate banked:** `format()`/`concat()` reading one value twice and
   `choose()`/`branch()` option arms (priorityArms, needs an arm-tagged key). Each entry leaving
   `sql-hygiene-respelled.json` is the measure.
