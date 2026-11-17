@@ -133,14 +133,20 @@ describe('the access path', () => {
     expect(correlatedSeek(plan("g.V().values('name').as('e').V().has(T.id, lt(4)).has('name', select('e')).count()"))).toBe(false);
   });
 
-  test('a CONSTANT seek outranks the correlated one', () => {
-    const q = "g.V().values('name').as('e').V().has('k', 1).has('name', select('e')).count()";
-    const p = compile(q, {});
-    if (p.kind !== 'read') throw new Error('expected a read plan');
-    // The constant `has('k', 1)` is the lifted seek the re-source is driven from; no correlated seek joins it.
-    expect(p.sql).toContain("key = 'k'");
-    expect(correlatedSeek(plan(q))).toBe(false);
-  });
+  // The correlated equality IS the join predicate, so it drives (one seek per outer row); a constant `has()` is a
+  // local filter — an UNCORRELATED `IN` set SQLite builds once per statement — whichever the query states first.
+  for (const q of [
+    "g.V().values('name').as('e').V().has('k', 1).has('name', select('e')).count()",
+    "g.V().values('name').as('e').V().has('name', select('e')).has('k', 1).count()",
+  ]) {
+    test(`a correlated seek drives, a constant is a once-per-statement set: ${q}`, () => {
+      const details = plan(q);
+      expect(correlatedSeek(details)).toBe(true);
+      const constant = details.findIndex((d) => d.startsWith('LIST SUBQUERY'));
+      expect(constant).toBeGreaterThanOrEqual(0);
+      expect(details[constant + 1]).toContain('vp_key_value (key=?');
+    });
+  }
 
   test('an element reached by a join key (out()) is not narrowed — the edge already drives it', () => {
     expect(correlatedSeek(plan("g.V().as('a').values('name').as('e').select('a').out().has('name', select('e')).count()"))).toBe(false);
@@ -223,4 +229,41 @@ describe('a federated sibling reads its per-parent value through the same seek',
     const q = "g.V().hasLabel('p').values('i').as('e').call('federate',['graph':'x','traversal':__.V().has('age', select('e')).count()])";
     await expect(run(mgr, q)).rejects.toMatchObject({ name: 'UnsupportedTraversal' });
   });
+});
+
+// A correlated `has(k, select(…))` BESIDE a constant `has()` — "the others with my name who are people". The
+// constant used to drive (it was computed once per statement), which handed every outer row every element the
+// constant admits and checked the correlated EXISTS on each: outer × |K|, measured 606 ms @1k → 2.4 s @2k. The
+// correlated equality is the join predicate, so it drives and the constants narrow it as uncorrelated IN sets
+// (`narrowFilter`, `src/rel/passes/semijoin.ts`): linear in the rows the join produces.
+describe('a correlated seek drives past a constant has() on the same element', () => {
+  /** `n` vertices: each name held by 2, each city by 4; kind 'rare' on 1%, 'thing' on ~a quarter, else 'person'. */
+  const people = (n: number): GraphStore => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    loadBulk(store, Array.from({ length: n }, (_, i) => ({ labels: ['v'], properties: [
+      { key: 'name', value: `n${i % (n / 2)}` }, { key: 'city', value: `c${i % (n / 4)}` },
+      { key: 'kind', value: i % 100 === 7 ? 'rare' : i % 4 === 0 ? 'thing' : 'person' }] })), []);
+    return store;
+  };
+  const small = people(1_000);
+  const large = people(8_000);
+  // Witnesses with their closed forms at 1k and 8k (0.74 of the vertices are people; the rare are 1%).
+  for (const [q, at1k, at8k] of [
+    ["g.V().values('name').as('n').V().has('name', select('n')).has('kind', 'person').count()", 1_480, 11_840],
+    ["g.V().values('name').as('n').V().has('kind', 'person').has('name', select('n')).count()", 1_480, 11_840],
+    ["g.V().as('a').values('city').as('c').V().has('city', select('c')).has('kind', 'person').where(neq('a')).count()", 2_220, 17_760],
+    ["g.V().values('name').as('n').V().has('name', select('n')).has('kind', 'rare').count()", 20, 160],
+    ["g.V().values('name').as('n').union(__.V().has('name', select('n')).has('kind', 'person'), __.V().has('kind', 'thing').has('name', select('n'))).count()", 1_980, 15_840],
+    ["g.V().as('a').where(__.values('name').as('n').V().has('name', select('n')).has('kind', 'person').where(neq('a'))).count()", 740, 5_920],
+    ["g.V().local(__.values('name').as('n').V().has('name', select('n')).has('kind', 'person')).count()", 1_480, 11_840],
+  ] as const) {
+    test(`closed form, propertySeek on = off, under 16× from 1k to 8k: ${q}`, async () => {
+      expect(await answer(small, q)).toEqual([at1k]);
+      expect(await answer(large, q)).toEqual([at8k]);
+      expect(await answer(small, q)).toEqual(await answer(small, q, {}, OFF));
+      const t1 = await timed(() => answer(small, q));
+      const t8 = await timed(() => answer(large, q));
+      expect(t8 / Math.max(t1, 5)).toBeLessThan(16);
+    }, SCALE_TIMEOUT_MS);
+  }
 });

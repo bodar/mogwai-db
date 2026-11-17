@@ -264,13 +264,13 @@ Shared roots, each proposed ONCE as the substrate item to build before what it u
    the frontier's row count rather than inline it downstream. Add the match(), 3- and 4-hop label shapes to
    the scaling witnesses in `test/compiler/both-frontier-once.exec.test.ts`. Cheap: `copiedWork`'s doc says
    "any projected expression…" but a computed FILTER predicate counts as no work — say so.
-4. **r7-fu3: a constant has() outranks a correlated seek even when it is not sargable (MAJOR, plausible).**
-   `ElementFacts.constantSeek` (`src/rel/passes/semijoin.ts`) counts a numeric `has('k',1)` or a range
-   `has('age', gt(40))`, which lower to a CASE over `vtype` → `SEARCH … vp_key_value (key=?)`, a key-only
-   scan of every holder: `g.V().values('name').as('e').V().has('name', select('e')).has('age', gt(40))
-   .count()` 369 ms → 27.5 s at 1k → 8k (trunk 65×, so not newly reachable, but this commit adds the fact
-   keeping it there). Minimum fix: a constant outranks only as a literal equality the index can use on
-   `value`. The general case is S1.
+4. ✅ **r7-fu3 constant-outranks-correlated — LANDED (U4).** `ElementFacts.constantSeek` is deleted: a
+   correlated seek on the element drives and every constant `has()` (sargable or not) is an uncorrelated `IN`
+   set beneath it (`narrowFilter`), linear in the join's rows. The traded case, recorded: a correlated value
+   on a LOW-cardinality key beside a selective constant
+   (`g.V().values('kind').as('k').V().has('kind', select('k')).has('name', 'zz').count()`, 3 kinds) costs the
+   user's own equi-join — 3 ms → 73 ms @1k, 4.6 s @8k (N²/3 same-kind pairs). Making it cheap again needs a
+   selectivity fact (S1).
 5. **r7-fu3: the correlated value is spelled twice — the narrowing IN and the EXISTS it sits beside (MAJOR,
    common).** `narrowFilter` (and `indexSeek` via `freshCopy`) copies the whole typed-value normaliser
    (`json_extract(jsonb_array(jsonb_object(… printf('%!.17g' …))),'$[#-1].v')`) into the IN and keeps the
@@ -606,8 +606,7 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   count get it too; a correlated value's subplan is copied (`freshCopy`, `src/rel/mint.ts`). It only ADDS an
   access path to an element the query gives none (`ElementFacts`, read off the whole plan, so a label above
   the seek's Filter or past an `as()` counts): any id membership — a label, `V('u0')`, `hasId`,
-  `has(T.id, lt(4))` — keeps the query's own access path, so no shape is slower than before; a constant seek
-  outranks a correlated one. Measured 1k → 8k: value join 818 ms/50.6 s → 5.5/31.6 ms; `inject($xs)`
+  `has(T.id, lt(4))` — keeps the query's own access path, so no shape is slower than before. Measured 1k → 8k: value join 818 ms/50.6 s → 5.5/31.6 ms; `inject($xs)`
   383 ms/22.8 s → 6.1/33.6 ms; federate `….call('federate',['graph':'x']).V().has('name', select('e'))` 568 ms
   at 1k/7.7 s at 4k → 16.4/88.6 ms. Tests: `test/correlated-value-seek.test.ts`, `test/plan-stability.test.ts`
   (value-join shapes). Remains (still quadratic, unchanged from trunk): **a LABELLED value join** (`…V().hasLabel('person').has('name', select('e'))`,
@@ -619,9 +618,8 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   index-probed per outer row (measured: a `MATERIALIZED` CTE read through a correlated `IN` is SCANNED per
   row, so it must be a real join, the RelIR `flatten` §4 decorrelation, not a narrowing conjunct); an
   element reached through a join key (`V().outE().has('w', select('w'))`, 1.07 s → 71 s) — the narrowing
-  declines there by design (the edge join drives it), so the fix is a join REORDER, not a seek; and a
-  constant seek on a LOW-cardinality key outranking a selective correlated one (`has('k', 1).has('name',
-  select('e'))` with 3 values of `k`: 428 ms → 28 s) — needs a selectivity fact the platform does not have.
+  declines there by design (the edge join drives it), so the fix is a join REORDER, not a seek. (A constant
+  seek outranking a correlated one is gone — U4: the correlated seek drives, constants are `IN` sets.)
 - **`fuse` runs only in the read `lowered()` (rf3-fuse-write, r4-fu0)** — a write fed by
   `order().by(…).V().has(…)`, or a write-body `V()` re-source's label filter, renumbers holders×V first.
 - **K-entry map driver (r7-fu9)** — `inject([k0:0,…]).mergeV()` 55× (`json_extract` re-reads per entry); a
