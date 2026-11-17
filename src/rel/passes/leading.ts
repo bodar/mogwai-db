@@ -137,7 +137,8 @@ function leadingFirst(base: Rel, sorted: readonly SortTerm[], read: LeadingRead,
  * matches nothing reads its index rather than the graph; and a test of the host alone (`where(eq('a')).by('age')`
  * over a host with no age), which SQLite evaluates once per read, ahead of the scan. A filter over a property row
  * joined to the element by its owner (`values(k).is(c)`) is carried as the property `EXISTS` a `has(k, c)` is
- * (`ownerJoined`), so the same seek drives it. Each stays in the body too —
+ * (`ownerScan`; every conjunct over one property row goes in ONE `EXISTS`, `ownerProbe`), so the same seek
+ * drives it. Each stays in the body too —
  * a candidate only NARROWS, the `EXISTS` decides. Every copy is FRESH (`freshCopy`), so it may stand beside the
  * original: two relations never share an id.
  */
@@ -174,6 +175,8 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
   };
   const pushed: Expr[] = [];
   const guards: Expr[] = [];
+  // Conjuncts over an owner-joined property row, grouped by the one scan each resolves to (`ownerScan`).
+  const owned = new Map<RelId, OwnerScan[]>();
   for (const filter of spine) {
     if (filter.kind !== 'filter') continue;
     for (const conjunct of conjuncts(filter.pred)) {
@@ -189,10 +192,14 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
       if (moved && [...mapped.values()].some((e) => e.kind === 'col' && e.rel === source.plan.id)) pushed.push(moved);
       else if (moved) guards.push(moved);
       else {
-        const owned = ownerJoined(conjunct, filter.input, spine, side, key, col(source.plan.id, key), mint);
-        if (owned) pushed.push(owned);
+        const scan = ownerScan(conjunct, filter.input, spine, side, key);
+        if (scan) owned.set(scan.props.id, [...(owned.get(scan.props.id) ?? []), scan]);
       }
     }
+  }
+  for (const group of owned.values()) {
+    const probe = ownerProbe(group, col(source.plan.id, key), mint);
+    if (probe) pushed.push(probe);
   }
   // A test of the HOST alone is asked ONCE per read, over one unit row ahead of the scan: SQLite places a WHERE
   // term that reads none of the scan's tables inside the scan's loop all the same, so as a candidate filter it
@@ -217,14 +224,18 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
 /**
  * A spine conjunct over a PROPERTY ROW joined to the leading element by its owner — `values(k).is(c)`,
  * `properties(k).hasValue(c)`, any filter whose every column is spelled (`columnLineage`) over one property scan
- * `B` that a spine join holds as `B.owner = <the element's rowid>` — as a NECESSARY candidate conjunct:
- * `EXISTS(SELECT … FROM B' WHERE B'.owner = cand.key AND <the join's own conditions on B> AND <conjunct over B'>)`.
- * Necessary because a body row restricted to the candidate carries exactly such a `B` row. It is the shape
- * `has(k, c)` lowers to (`ownerColumn`, `src/rel/passes/semijoin.ts`), so the property seek (`indexSeek`) narrows the
- * candidates by `vp_key_value` once per statement, rather than every candidate being asked the body. `null` on any
- * other conjunct — one reading the host, a hop's property, a subquery — which the body alone then decides.
+ * `B` that a spine join holds as `B.owner = <the element's rowid>`: that scan (`props`), its owner column, the
+ * join's own conditions on `B` alone (`own`), and the conjunct re-spelled over `B` (`spelled`). `null` on any other
+ * conjunct — one reading the host, a hop's property, a subquery — which the body alone then decides.
  */
-function ownerJoined(conjunct: Expr, input: Rel, spine: readonly Rel[], side: Rel, key: string, candidate: Expr, mint: Minter): Expr | null {
+interface OwnerScan {
+  readonly props: Extract<Rel, { readonly kind: 'scan' }>;
+  readonly owner: string;
+  readonly own: readonly Expr[];
+  readonly spelled: Expr;
+}
+
+function ownerScan(conjunct: Expr, input: Rel, spine: readonly Rel[], side: Rel, key: string): OwnerScan | null {
   if (exprHasSubquery(conjunct)) return null;
   let foreign = false;
   forEachExpr(conjunct, (node) => { if (node.kind === 'col' && node.rel !== input.id) foreign = true; });
@@ -237,8 +248,9 @@ function ownerJoined(conjunct: Expr, input: Rel, spine: readonly Rel[], side: Re
     spelled.set(name, e);
   }
   const props = leaves.size === 1 ? [...leaves.values()][0]! : null;
-  const owner = props?.kind === 'scan' ? propertyOwner(props.table) : null;
-  if (!props || !owner) return null;
+  if (props?.kind !== 'scan') return null;
+  const owner = propertyOwner(props.table);
+  if (!owner) return null;
   const join = spine.find((r): r is Extract<Rel, { readonly kind: 'join' }> => r.kind === 'join' && r.right === props);
   if (!join?.on || join.join !== 'inner') return null;
   const own: Expr[] = [];
@@ -254,7 +266,22 @@ function ownerJoined(conjunct: Expr, input: Rel, spine: readonly Rel[], side: Re
     if (other?.kind === 'col' && other.rel === join.left.id && columnAt(join.left, other.name, side) === key) owned = true;
   }
   if (!owned) return null;
-  const pred = [eq(col(props.id, owner), candidate), ...own, mapColsDeep(conjunct, input.id, (name) => spelled.get(name)!)].reduce((a, b) => and(a, b));
+  return { props, owner, own, spelled: mapColsDeep(conjunct, input.id, (name) => spelled.get(name)!) };
+}
+
+/**
+ * Every spine conjunct over ONE owner-joined property scan `B` (`ownerScan`) as ONE NECESSARY candidate conjunct:
+ * `EXISTS(SELECT B'.owner FROM B' WHERE B'.owner = cand.key AND <own> AND c1 AND c2 …)`. Necessary because a body
+ * row restricted to the candidate carries exactly ONE such `B` row, and every spine conjunct holds of it TOGETHER —
+ * so the grouped conjunction is strictly tighter than a probe per conjunct, each of which a DIFFERENT row of a
+ * list-cardinality key could satisfy; and `B`'s value spelling is read once per probe, not once per conjunct. It
+ * is the shape `has(k, c)` lowers to (`ownerColumn`, `src/rel/passes/semijoin.ts`), so the property seek
+ * (`indexSeek`, or `trigramSeek` for a TextP) lifts the WHOLE conjunction and narrows the candidates once per
+ * statement, rather than every candidate being asked the body. The body still decides; this only narrows.
+ */
+function ownerProbe(group: readonly OwnerScan[], candidate: Expr, mint: Minter): Expr | null {
+  const { props, owner, own } = group[0]!;
+  const pred = [eq(col(props.id, owner), candidate), ...own, ...group.map((scan) => scan.spelled)].reduce((a, b) => and(a, b));
   const held = make.filter({ id: mint.id('clo'), input: props, channels: [], type: props.type, pred });
   const probe = make.project({ id: mint.id('clop'), input: held, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', col(held.id, owner)]] });
   // Fresh ids throughout (`freshCopy`): `B` stays in the body, and two relations never share an id.
