@@ -337,6 +337,12 @@ owner question 3.
 
 ### N6 — R0 ratchet follow-ups (cheap, concrete)
 
+✅ **LANDED (1c2b861f).** The closure ratchet is held per QUERY (`test/L9-connector/closure-ratchet.ts`
+`compareClosure`): any fresh decline fails its cell even at an unchanged rate, and ladder-reach gets the same rule.
+`familyOf` charges everything beneath a `host-owned` `DEFERRED_HOSTS` position to `other`. Ladder-reach now counts
+FIRES (first child order alone declines with `CopiedDraw`) over pools that keep draws; recorded `fires 0` and
+`rescued 0`, so N7's precondition already holds. Remains: nothing.
+
 - Fail (or at least print) when `fresh` is non-empty in `test/L9-connector/connector-closure.test.ts`: the ratchet
   gates COUNTS, so a swap within one pool×family cell (one query closes, another regresses) lands silently.
 - `familyOf` (`test/L9-connector/ladder-reach.ts`): a family host under a `host-owned` `DEFERRED_HOSTS` position
