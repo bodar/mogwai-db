@@ -1031,6 +1031,17 @@ project's ≈16×.
 
 ### N3 remainder — gated on S6a (prerequisite, ordered first)
 
+✅ **S6a + N3 remainder LANDED (fac4c754).** `fuse` (`src/rel/passes/fuse.ts`) normalises an Aggregate over
+`(Filter | inner Join)* → Join(cross)` by pushing each side-local Filter and inner Join below the cross (Calcite's
+FilterJoinRule / JoinPushThroughJoinRule), so AggregateJoinTransposeRule now reaches the hop or predicate after a
+re-source; `groupedOn` looks through renames and factored aggregates mint `ajt*` ids (both cheap follow-ups done).
+Measured 1k → 8k: `by(V().values('age').sum())` 9.4 → 70.4 ms (7.5×), `by(V().out().count())` 6.5 → 48.1 ms (7.4×),
+`by(V().has('age',gt(30)).count())` 6.7 → 53.2 ms (7.9×). **Remains:** `g.V().group().by('name').by(V().values('age')
+.max()/min()/mean())` is still not factored — `max`/`min` lower as `arg_max`/`arg_min` (they carry the value's type
+tag) and `mean`'s reducer is one `factor` cannot split. The probes found no shape that normalisation turned into a
+wrong answer. A `group().by(...)` whose value by() holds `coin()`/`sample()` is declined before this pass; that decline
+predates this change.
+
 Witness 4 `g.V().group().by('name').by(V().values('age').sum())` (1.5 s → 89 s) and the name-keyed
 `by(V().out().count())` / `by(V().has('age',gt(30)).count())` are still quadratic, the same as on trunk. In the
 weighted pool the cross is at `V()`, and the hops and filters stack ABOVE it, so no Aggregate sits directly over the
@@ -1184,7 +1195,7 @@ routing, not on where the decline is:
 Round 5 landed S1 (11992908), R6's two cheap follow-ups (3537cd84), K5 + P19 (38fe5827), S4 (5b19bb55), S6
 (90d70f16, 9a4d34ee), S2 (e2b515da, 01f29c3a), S3 (7e2def6f) and S5's first bullet (f59b6ece). Every round-5 branch
 landed, so no branch is parked as a resume point. Not built this round: **S6a** (the N3 remainder's prerequisite,
-above) — still open, unchanged. Still open from earlier rounds: M1b (behind H1), M6, N3 remainder (behind S6a), N8,
+above) — since LANDED (fac4c754). Still open from earlier rounds: M1b (behind H1), M6, N8,
 N9, K2, K3, K4, P2, P5, P6, P8, P9, P11, P13, P14, P16–P18, P20, R4.2, R4.5, R5.2–R5.4, R6 (other hosts), R7, S5's
 second bullet (owner question 2, round 4), and the round-4 cheap follow-ups (N5 root CASE, Q2a, P12 pins, M2 probe
 witnesses). Ordered so that each prerequisite comes BEFORE the item it unblocks; major items first.
