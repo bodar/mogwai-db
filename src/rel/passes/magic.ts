@@ -4,9 +4,10 @@ import type { Rel } from '../rel.ts';
 import { rowBounds } from '../bounds.ts';
 import { minter, freshCopy, type Minter } from '../mint.ts';
 import { draws, exprDraws } from '../copies.ts';
+import { readInFull } from '../work.ts';
 import { decorrelate, semiJoinPerDistinct } from '../decorrelate.ts';
 import type { RelId } from '../types.ts';
-import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained, mapRelChildren, mapRelExprs, relChildren, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
+import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained, mapRelChildren, mapRelExprs, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
 
 /**
  * `magic` — a PHYSICAL rewrite: a correlated test of ONE element, asked inside a body evaluated per host row, is
@@ -38,8 +39,8 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  * ## When — the domain must be work the plan does anyway
  *
  * The domain is every row `F` WOULD read for every host — so it is built only where they ARE all read
- * (`demanded`): `F` is consumed in full by its body (under an aggregate, a sort, a window, or at most one row), and
- * the host's rows are all asked (likewise up to the plan root). An `EXISTS` body or a first-row pick stops at its
+ * (`readInFull`'s spine mode, `src/rel/work.ts`): `F` is consumed in full by its body (under a barrier —
+ * `readsInputInFull` — or at most one row), and the host's rows are all asked (likewise up to the plan root). An `EXISTS` body or a first-row pick stops at its
  * first row instead, and there the domain would be the whole un-short-circuited work: measured on a uniform graph
  * of out-degree 20, `g.V().where(out().out().where(in().has('age',gt(20)))).count()` went 10.6 ms → 505 ms at 8k
  * vertices with the rewrite, because every host passes on its first two-hop row. Without statistics
@@ -60,7 +61,7 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  * `leading` and before `semijoin`, so the property seek still drives the test inside the passing set.
  */
 export function magicAll(plans: readonly Rel[]): readonly Rel[] {
-  const whole = demanded(plans);
+  const whole = readInFull(plans, 'spine').full;
   const mint = minter(...plans);
   const memo = new Map<Rel, Rel>();
   return plans.map((plan) => rewriteRels(plan, (mapped, original) => (whole.has(original) ? atHost(mapped, null, mint) : mapped), memo));
@@ -95,7 +96,7 @@ function atHost(r: Rel, within: Hosts | null, mint: Minter): Rel {
 /** `body` with every Filter it reads in full that tests one element by a subquery asking it once per element, and
  *  every host it reads in full rewritten in turn. */
 function inBody(body: Rel, hosts: Hosts, mint: Minter): Rel {
-  const whole = demanded([body], false);
+  const whole = readInFull([body], 'spine', false).full;
   return rewriteRels(body, (mapped, original) => {
     const hosted = whole.has(original) ? atHost(mapped, hosts, mint) : mapped;
     const out = hosted.kind === 'filter' && whole.has(original) ? atFilter(hosted, hosts, mint) : hosted;
@@ -106,7 +107,7 @@ function inBody(body: Rel, hosts: Hosts, mint: Minter): Rel {
 /** Is `mapped` — `original` rebuilt by `rewriteRels` — the same relation: every relation beneath it the original's
  *  own? Then the ORIGINAL node is kept, so a relation the body shares with the rest of the plan (a fenced first-row
  *  read both the value and its presence test hold) stays ONE node, and `name` binds it once. A walk's term is never
- *  rewritten here (`demanded` does not enter it), so a walk is the same when its seed is. */
+ *  rewritten here (`readInFull` does not enter it on the spine), so a walk is the same when its seed is. */
 function unchanged(mapped: Rel, original: Rel): boolean {
   if (mapped.kind === 'recursive' && original.kind === 'recursive') return mapped.seed === original.seed;
   const now = relsBeneath(mapped), before = relsBeneath(original);
@@ -219,32 +220,4 @@ function withoutDistinct(r: Rel): Rel {
   if (input === r.input) return r;
   const moved = mapRelExprs(r, (e) => substRelId(e, r.input.id, input.id));
   return mapRelChildren(moved, () => input);
-}
-
-/**
- * The relations of `roots` whose EVERY output row is read wherever they are read — the rows a magic domain may be
- * built from without doing work the plan would have skipped. A root is read in full (`all`) unless it is a body
- * SQLite stops early: an `EXISTS` or a scalar subquery reads to its first row. Below a node read in full, an
- * aggregate, sort, window or materialization reads its input in full and a `LIMIT` does not; a semi/anti join probes
- * its right side to a first match; anything else passes the demand through. A relation of at most one row
- * (`rowBounds`) is read in full by any reader. Only the spine — a body's own subplans are asked when their host is
- * rewritten — and never into a recursive term. Read in full only if read in full on EVERY path.
- */
-function demanded(roots: readonly Rel[], all = true): ReadonlySet<Rel> {
-  const full = new Set<Rel>(), partial = new Set<Rel>();
-  const visit = (r: Rel, read: boolean): void => {
-    const whole = read || rowBounds(r).max <= 1;
-    const seen = whole ? full : partial;
-    if (seen.has(r)) return;
-    seen.add(r);
-    switch (r.kind) {
-      case 'aggregate': case 'sort': case 'window': case 'materialize': visit(r.input, true); return;
-      case 'limit': visit(r.input, false); return;
-      case 'join': visit(r.left, whole); visit(r.right, whole && r.join !== 'semi' && r.join !== 'anti'); return;
-      case 'recursive': visit(r.seed, whole); return;
-      default: relChildren(r).forEach((child) => visit(child, whole));
-    }
-  };
-  roots.forEach((root) => visit(root, all));
-  return new Set([...full].filter((r) => !partial.has(r)));
 }
