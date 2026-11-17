@@ -1,7 +1,7 @@
 import { isNested, isPred } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
-import { decorrelate, keyMatch, type KeyProjection } from '../../../rel/decorrelate.ts';
+import { decorrelate, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
 import { positionKeys } from '../../../rel/position.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -377,6 +377,26 @@ function owning(fresh: Minter): { readonly fresh: Minter; readonly owns: (r: Rel
   };
 }
 
+/**
+ * A BODY KEYED BY ITS SCOPE — the one sequence every decorrelated connector body ends in, and the ONE place a body
+ * with EFFECTS is refused (a write is not a read the connector may evaluate per scope; `stepHasEffect` is the
+ * vocabulary): lower it with a minter that records what it built (`owning`), let the host re-express its value
+ * BEFORE the key is added (`reframe`), and decorrelate it against `outer` — keying only the body's OWN draws.
+ * `null` declines.
+ */
+function keyedBody(
+  lower: (fresh: Minter) => Tail | null, outer: Rel, key: string, fresh: Minter,
+  reframe?: (tail: Tail) => Tail | null, projection?: KeyProjection,
+): { readonly keyed: Decorrelated; readonly tail: Tail } | null {
+  const mine = owning(fresh);
+  const lowered = lower(mine.fresh);
+  if (!lowered || lowered.effects?.length) return null;
+  const tail = reframe ? reframe(lowered) : lowered;
+  if (!tail) return null;
+  const keyed = decorrelate(tail.rel, outer, key, fresh, projection, mine.owns);
+  return keyed && { keyed, tail };
+}
+
 /** Step 2: the body, lowered as the root lowers a chain, then keyed by the scope. `null` declines. */
 function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -392,15 +412,11 @@ function scopedBody(
   // scope key — one sort, linear in the rows drawn from, and no pick shared by two scopes. Only the body's OWN
   // draws (`owning`): a relation drawn upstream that the body only reads stays one shared pick.
   if (ladderOwns(body, ctx)) return null;
-  const mine = owning(fresh);
-  const lowered = lowerBody(body, rel, sc.scoped, framing, ctx, mine.fresh, labels, order, positionedSeed, first);
-  // A body with EFFECTS is not a read the connector may evaluate per scope.
-  if (!lowered || lowered.effects?.length) return null;
-  // The host's own re-expression of the body's value, BEFORE the key is added (`landValues`' record).
-  const tail = reframe ? reframe(lowered) : lowered;
-  if (!tail) return null;
-  const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh, undefined, mine.owns);
-  return keyed && { rel: keyed.rel, keyCol: keyed.key[0].col, tail };
+  // `reframe` is the host's own re-expression of the body's value (`landValues`' record).
+  const out = keyedBody(
+    (mf) => lowerBody(body, rel, sc.scoped, framing, ctx, mf, labels, order, positionedSeed, first), sc.scoped, sc.key, fresh, reframe,
+  );
+  return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail };
 }
 
 /**
@@ -420,14 +436,12 @@ function rootedBody(
   });
   const domain = make.filter({ id: fresh('sbd'), input: located, channels: [], type, pred: isNot(col(located.id, 'id'), compilerNull()) });
   const element = make.project({ id: fresh('sbe'), input: domain, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(domain.id, 'id')]] });
-  // Only the body's OWN draws are per scope (`owning`, as `scopedBody`).
-  const mine = owning(fresh);
-  const lowered = lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, mine.fresh, NO_ALIASES, 'read', false, true);
-  if (!lowered || lowered.effects?.length) return null;
-  const tail = reframe(lowered);
-  if (!tail) return null;
-  const keyed = decorrelate(tail.rel, domain, sc.key, fresh, undefined, mine.owns);
-  return keyed && { rel: keyed.rel, keyCol: keyed.key[0].col, tail };
+  // Only the body's OWN draws are per scope (`keyedBody`): the domain built above is the scope's, not the body's.
+  const out = keyedBody(
+    (mf) => lowerBody(body, element, domain, { kind: 'elements', elem: root.elem }, ctx, mf, NO_ALIASES, 'read', false, true),
+    domain, sc.key, fresh, reframe,
+  );
+  return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail };
 }
 
 /**
@@ -1931,11 +1945,6 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   // multiplicity (`bulkObservedFrom`, the one positional authority — a `count()`/`sum()` does, a `fold()` reads
   // rows); otherwise every member crosses the graph, as the reference does.
   const weighed = reSourceAt(rest) === 0 && !readsHostState(rest, bodyCtx) && bulkObservedFrom(rest, 1) ? poolWeight(seed, fresh) : null;
-  const mine = owning(fresh);
-  const tail = weighed
-    ? continueAs(weighed, sourceFraming, rest, 0, true, bodyCtx, mine.fresh, labels)
-    : continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, mine.fresh, labels);
-  if (!tail || tail.effects?.length) return null;
   // THE KEY PROJECTION: the domain is the members' DISTINCT key terms, so the body keys the pool by those terms
   // read off the pool's traversers themselves — no domain cross join. The members COVER the domain (every key
   // has one), so no LEFT JOIN either; a per-member prefix's results need not (a key whose members all produced
@@ -1943,8 +1952,15 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   const projection: KeyProjection = {
     input: source.id, cols: new Map(termCols.map((column, i) => [column.name, memberCols[i]!.name])), covers: source === members,
   };
-  const keyed = decorrelate(tail.rel, sc.scoped, sc.key, fresh, projection, mine.owns);
-  if (!keyed) return null;
+  // The pool and its seed are the HOST's (minted outside `keyedBody`); only what `rest` builds is the body's own.
+  const pool = keyedBody(
+    (mf) => weighed
+      ? continueAs(weighed, sourceFraming, rest, 0, true, bodyCtx, mf, labels)
+      : continueAs(seed, sourceFraming, rest, 0, restBulked, bodyCtx, mf, labels),
+    sc.scoped, sc.key, fresh, undefined, projection,
+  );
+  if (!pool) return null;
+  const { keyed, tail } = pool;
   // THE VALUE NODE: the reduced value of the key's pool, one row per key (a FIRST, for a body whose last
   // barrier is not its last step and could still fan out — `doFinalReduction` reads `next()`).
   const valueCols = framingCols(tail.framing);

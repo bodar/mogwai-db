@@ -628,24 +628,24 @@ describe('decorrelate: the key-projection filter is pooledGroup\'s `member.term 
   };
 
   test('`IS` under `covers`: the members are keyed in place, and a scalar count needs no LEFT JOIN', () => {
-    const out = decorrelate(counted(pooled('is')), scoped, 'key', fresh, projection(true));
+    const out = decorrelate(counted(pooled('is')), scoped, 'key', fresh, projection(true), () => true);
     expect(out && shape(out.rel)).toEqual({ left: false, outer: false });
     expect(out!.key.map((k) => k.outer)).toEqual(['t']);
   });
 
   test('the covering fact flows through the per-kind rules — a DISTINCT over the filter still covers', () => {
     const distinctOver = relDistinct({ id: relId('d'), input: pooled('is'), channels: [], type: members.type });
-    const out = decorrelate(counted(distinctOver), scoped, 'key', fresh, projection(true));
+    const out = decorrelate(counted(distinctOver), scoped, 'key', fresh, projection(true), () => true);
     expect(out && shape(out.rel)).toEqual({ left: false, outer: false });
   });
 
   test('without `covers` the filter is still the key projection, but an empty key needs the LEFT JOIN', () => {
-    const out = decorrelate(counted(pooled('is')), scoped, 'key', fresh, projection(false));
+    const out = decorrelate(counted(pooled('is')), scoped, 'key', fresh, projection(false), () => true);
     expect(out && shape(out.rel).left).toBe(true);
   });
 
   test('`=` is not the key projection — the domain is joined', () => {
-    const out = decorrelate(counted(pooled('=')), scoped, 'key', fresh, projection(true));
+    const out = decorrelate(counted(pooled('=')), scoped, 'key', fresh, projection(true), () => true);
     expect(out && shape(out.rel)).toEqual({ left: true, outer: true });
   });
 });

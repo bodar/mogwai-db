@@ -149,12 +149,12 @@ describe('decorrelate: a draw counts as touching the scope', () => {
   };
 
   test('an uncorrelated draw is keyed — its window partitioned by the scope key', () => {
-    const out = decorrelate(drawn(true), outer, 'id', fresh);
+    const out = decorrelate(drawn(true), outer, 'id', fresh, undefined, () => true);
     expect(out !== null && partitioned(out.rel)).toBe(true);
   });
 
   test('an uncorrelated deterministic subtree stays the same relation for every key', () => {
-    const out = decorrelate(drawn(false), outer, 'id', fresh);
+    const out = decorrelate(drawn(false), outer, 'id', fresh, undefined, () => true);
     expect(out !== null && partitioned(out.rel)).toBe(false);
   });
 });

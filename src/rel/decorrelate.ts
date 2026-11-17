@@ -40,16 +40,19 @@ import { freeRelIds, mapRelChildren, recursiveStep, relChildren, relExprs, rewri
  *
  * ## The contract
  *
- * `decorrelate(plan, outer, key, fresh, projection?)` — `plan` may reference columns of `outer` (a relation
+ * `decorrelate(plan, outer, key, fresh, projection, owns)` — `plan` may reference columns of `outer` (a relation
  * carrying a column `key` that is UNIQUE per row) anywhere, including inside correlated subqueries. The answer
  * is a relation with `plan`'s columns followed by the domain's: `key` and a copy of each `outer` column the plan
  * read (or, under a `KeyProjection`, the projected columns), such that its rows whose `Decorrelated.key`
  * matches an outer row are exactly `plan`'s rows evaluated for that outer row. `null` where a node cannot be rewritten (a multi-row correlated `Values`, a
  * correlated `LIMIT` count) — the caller declines.
  *
- * `owns` names the nodes the CALLER built for this plan (default: all of them). A random draw in an owned node
- * is drawn per outer row, so it is keyed like a read of the outer row; a draw in a node it does not own is a
- * value drawn ONCE elsewhere (an upstream side effect the plan reads), so it stays one shared relation.
+ * `owns` names the nodes the CALLER built for this plan, and it is REQUIRED: an own-everything default keys an
+ * upstream draw per outer row, splitting one shared pick into one per scope (a wrong count and an N×N cross —
+ * `g.V().sample(1).aggregate('x').V().local(cap('x').unfold())`). A random draw in an owned node is drawn per
+ * outer row, so it is keyed like a read of the outer row; a draw in a node it does not own is a value drawn
+ * ONCE elsewhere (an upstream side effect the plan reads), so it stays one shared relation. A connector body
+ * gets it from `keyedBody` (`src/compiler/rel/lower/scoped.ts`), which records what the body minted.
  *
  * Every rewritten node keeps its ORIGINAL id, so the expressions above it still resolve; a wrapper the
  * rewrite adds takes a fresh one and the parent's references are moved onto it (`substRelId`).
@@ -123,7 +126,7 @@ function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
 }
 
 export function decorrelate(
-  plan: Rel, outer: Rel, key: string, fresh: Minter, projection?: KeyProjection, owns: (r: Rel) => boolean = () => true,
+  plan: Rel, outer: Rel, key: string, fresh: Minter, projection: KeyProjection | undefined, owns: (r: Rel) => boolean,
 ): Decorrelated | null {
   const drawn = ownDraws(owns);
   const h = outer.id;
