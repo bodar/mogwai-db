@@ -5,7 +5,7 @@ import { and, col, compilerInt, compilerNull, compilerText, eq } from './expr.ts
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import type { ColMeta, RelId, SortTerm } from './types.ts';
-import { freeRelIds, mapRelChildren, recursiveStep, relChildren, relExprs, rewriteExpr, substRelId } from './walk.ts';
+import { exprRels, forEachExpr, forEachRel, freeRelIds, mapRelChildren, mapRelExprs, recursiveStep, relChildren, relExprs, rewriteExpr, substRelId } from './walk.ts';
 
 /**
  * GENERAL DECORRELATION — a plan correlated to ONE outer row, re-expressed as an ordinary relation KEYED by
@@ -110,6 +110,17 @@ export function keyMatch(key: readonly KeyColumn[], left: (k: KeyColumn) => Expr
 }
 
 type Minter = (hint: string) => RelId;
+
+/** The columns of relation `id` that `e` reads, inside the subplans it correlates included. */
+function columnsRead(e: Expr, id: RelId): ReadonlySet<string> {
+  const out = new Set<string>();
+  const visit = (node: Expr): void => { if (node.kind === 'col' && node.rel === id) out.add(node.name); };
+  forEachExpr(e, (node) => {
+    visit(node);
+    for (const sub of exprRels(node)) forEachRel(sub, (rel) => relExprs(rel).forEach((x) => forEachExpr(x, visit)));
+  });
+  return out;
+}
 interface Out { readonly rel: Rel; readonly keyed: boolean }
 
 /** The value an aggregate function takes over ZERO rows — SQL's own rule, which the correlated plan obeyed. */
@@ -300,6 +311,123 @@ export function decorrelateAll(
     };
     visit(r);
     return hit;
+  };
+
+  /** Does `e` (or a plan it correlates) read relation `id`? */
+  const exprReads = (e: Expr, id: RelId): boolean => {
+    let hit = false;
+    rewriteExpr(e, (n) => { if (n.kind === 'col' && n.rel === id) hit = true; return n; }, (p) => { if (freeRelIds(p).has(id)) hit = true; return p; });
+    return hit;
+  };
+  /** Does `e` read a recursive term's self-reference that this rewrite keyed? */
+  const exprTouchesSelf = (e: Expr): boolean => {
+    let hit = false;
+    rewriteExpr(e, (n) => n, (p) => { if (touchesSelf(p)) hit = true; return p; });
+    return hit;
+  };
+
+  /**
+   * A SEMI/ANTI JOIN WHOSE RIGHT SIDE IS A ROW-WISE FUNCTION OF ITS OWN LEFT needs no scope key on the right.
+   *
+   * `Semi(L, R, on x = R.x)` where R's spine bottoms out at L ITSELF (the same node) through ROW-WISE operators
+   * only — `project`, `filter`, `distinct`, `materialize` — and no expression of R reads the outer row (or a
+   * keyed recursive term, or draws). Decorrelated by the general rule, R would be keyed by scope like any
+   * subtree over a keyed input: its DISTINCT per scope (merging nothing across scopes), its filter asked once
+   * per scope row. But for a row-wise `f = σ_P ∘ π_x`, `x ∈ f(L_d) ⟺ x ∈ π_x(L_d) ∧ P(x)`, and the left row
+   * `(d, x)` is itself in `L_d`, so the test reduces to `P(x)` — the same answer under the WHOLE keyed `L`. So
+   * R is rebuilt over the keyed L with the domain projected away, and the join is on `x` alone (no key
+   * equality): one passing set for every scope, asked once per distinct `x` across scopes.
+   *
+   * The row-wise restriction IS the soundness condition: an `aggregate`, `window`, `limit` or `sort` in R would
+   * observe the scope's ROW SET (a count, a rank, the first n), which is not a function of `x` alone — such an R
+   * keeps the general rule. The producer this serves is `perState` (`src/compiler/rel/walk.ts`), whose emit
+   * condition is asked of the walk's distinct states; any producer of the same algebra gets it. This is
+   * Calcite's semi-join over a self-derived right side seen as a FILTER of the left
+   * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/SemiJoinRule.java`): `L ⋉ σ_P(π_x L)` is
+   * `σ_{P(x)} L`, whose predicate never reads the scope.
+   */
+  const existenceOverOwnRows = (r: Extract<Rel, { kind: 'join' }>): Out | null => {
+    if (r.join !== 'semi' && r.join !== 'anti') return null;
+    const spine: Extract<Rel, { kind: 'project' | 'filter' | 'distinct' | 'materialize' }>[] = [];
+    for (let x: Rel = r.right; x !== r.left; ) {
+      if (x.kind !== 'project' && x.kind !== 'filter' && x.kind !== 'distinct' && x.kind !== 'materialize') return null;
+      const lowest = x.input === r.left;
+      if (relExprs(x).some((e) => exprTouches(e) || exprTouchesSelf(e) || drawn.expr(e) || (!lowest && exprReads(e, r.left.id)))) return null;
+      spine.push(x);
+      x = x.input;
+    }
+    if (!spine.length || !r.on) return null;
+    // `on` must PAIR the left row with its own image: every conjunct `L.c = R.b` where R's `b` is L's `c` carried
+    // unchanged down the spine. Those columns are `paired`.
+    const carried = (name: string): string | null => {
+      let at = name;
+      for (const node of spine) {
+        if (node.kind !== 'project') continue;
+        const e = node.exprs.find(([n]) => n === at)?.[1];
+        if (e?.kind !== 'col' || e.rel !== node.input.id) return null;
+        at = e.name;
+      }
+      return at;
+    };
+    const paired = new Set<string>();
+    const conjuncts: Expr[] = [];
+    const split = (e: Expr): void => { if (e.kind === 'binary' && e.op === 'and') { split(e.left); split(e.right); } else conjuncts.push(e); };
+    split(r.on);
+    for (const e of conjuncts) {
+      if (e.kind !== 'binary' || (e.op !== '=' && e.op !== 'is')) return null;
+      const [l, rt] = e.left.kind === 'col' && e.left.rel === r.left.id ? [e.left, e.right] : [e.right, e.left];
+      if (l.kind !== 'col' || l.rel !== r.left.id || rt.kind !== 'col' || rt.rel !== r.right.id) return null;
+      if (carried(rt.name) !== l.name) return null;
+      paired.add(l.name);
+    }
+    // …and the spine COMPUTES only with paired columns, so `P` is a function of the pair: an image matching the
+    // left row passes iff the left row's own image does. A filter on an unpaired column (`π_x(σ_{P(y)} L)`) asks
+    // whether SOME row of the scope with that `x` passes — the scope's row set — and keeps the general rule.
+    // Bottom-up: each spine column's L columns, and the L columns some expression computes with.
+    const spelled = new Set<string>();
+    let deps = new Map(r.left.type.cols.map((c) => [c.name, new Set([c.name])] as const));
+    const depsOf = (e: Expr, input: RelId): Set<string> => {
+      const out = new Set<string>();
+      columnsRead(e, input).forEach((c) => deps.get(c)?.forEach((x) => out.add(x)));
+      return out;
+    };
+    for (const node of [...spine].reverse()) {
+      if (node.kind === 'project') {
+        const input = node.input.id;
+        deps = new Map(node.exprs.map(([n, e]) => {
+          const from = depsOf(e, input);
+          if (e.kind !== 'col') from.forEach((c) => spelled.add(c));
+          return [n, from] as const;
+        }));
+      } else if (node.kind === 'filter') depsOf(node.pred, node.input.id).forEach((c) => spelled.add(c));
+    }
+    if ([...spelled].some((c) => !paired.has(c))) return null;
+    const left = go(r.left);
+    if (!left?.keyed) return null;
+    // L's own columns, the domain projected away: the right side cannot see the scope.
+    const stripped = make.project({
+      id: fresh('dsl'), input: left.rel, channels: r.left.channels, type: r.left.type,
+      exprs: r.left.type.cols.map((c) => [c.name, col(left.rel.id, c.name)] as const),
+    });
+    // Rebuilt bottom-up, keeping each node's id: only the lowest node read L's id, now the stripped copy's.
+    let right: Rel = stripped;
+    for (const node of spine.reverse()) {
+      const below = right;
+      const rebuilt = mapRelChildren(node, () => below);
+      right = node.input === r.left ? mapRelExprs(rebuilt, (e) => substRelId(e, r.left.id, stripped.id)) : rebuilt;
+    }
+    const on = substRelId(r.on, r.left.id, left.rel.id);
+    const joined = make.join({
+      id: fresh('dj'), left: left.rel, right, join: r.join, channels: r.channels,
+      type: { cols: [...r.type.cols, ...dMeta] }, on,
+    });
+    return {
+      keyed: true,
+      rel: make.project({
+        id: r.id, input: joined, channels: r.channels, type: { cols: withD(r.type.cols) },
+        exprs: [...r.type.cols.map((c) => [c.name, col(joined.id, c.name)] as const), ...dPass(joined.id)],
+      }),
+    };
   };
 
   const rewriteNode = (r: Rel): Out | null => {
@@ -529,6 +657,8 @@ export function decorrelateAll(
         };
       }
       case 'join': {
+        const selfTest = existenceOverOwnRows(r);
+        if (selfTest) return selfTest;
         const left = go(r.left), right = go(r.right);
         if (!left || !right) return null;
         if (!left.keyed && !right.keyed && !own) {

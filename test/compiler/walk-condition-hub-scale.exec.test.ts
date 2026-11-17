@@ -15,11 +15,10 @@ import { read, runWith } from '../support/harness.ts';
 //    neighbourhood — a barrier, or a filter, over an unbounded input — declines rather than run quadratically.
 //    Its answer is a column of the walk (`EXIT`), asked once per produced row and READ by the term's stop test,
 //    the exit arm and the emit arm alike.
-//  - Under a scoping host (`where`/`local`/`not`) the walk is correlated or keyed by scope, so a per-state DISTINCT
-//    merges nothing (measured ≈2.4× slower); the emit condition stays per row there (`freeRelIds(walk)`). Those
-//    shapes are still super-linear — measured ≈17× (`where`) and ≈26× (`local`/`map` over `out()`) per 8× —
-//    because the scoped walk is re-evaluated per host row; scope-free keying is
-//    `docs/2026-11-16-ladder-retirement-plan.md` S6, and their 16× assertion waits for it.
+//  - Under a scoping host (`where`/`local`/`not`/`map`/`choose`) the walk is keyed by scope, but the passing set is
+//    a row-wise function of the walk rows it filters, so the decorrelator leaves it UNKEYED
+//    (`existenceOverOwnRows`, `src/rel/decorrelate.ts`): one DISTINCT across scopes, a hub's condition asked once.
+//    Measured `where(…emit(in('created').has(…)))` ≈17× → ≈6× per 8×.
 
 /** `chains` chains of 6 persons (knows), each person `created` one of 20 shared software HUBS and a private leaf. */
 function hubGraph(chains: number): GraphStore {
@@ -78,18 +77,21 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     }, SCALE_TIMEOUT_MS);
   }
 
-  // A SCOPED walk keeps its emit condition per row — no per-state DISTINCT, which would merge nothing. The ratio
-  // bound only catches a cliff until S6; the plan assertion is the guard against the 2.4× regression.
+  // A SCOPED walk asks its emit condition once per distinct state ACROSS scopes: the DISTINCT is over the state
+  // alone, never the scope key (which would merge nothing and cost ≈2.4× the per-row form).
   for (const [q, atSmall] of [
     ["g.V().where(repeat(out()).emit(in('created').has('age',gt(45)))).count()", 754],
     ["g.V().where(repeat(out()).emit(union(in('created'),out('knows')).has('age',gt(45)))).count()", 754],
     ["g.V().hasLabel('person').local(repeat(out('knows')).emit(out('knows').has('age',gt(45))).count()).sum()", 160],
     ["g.V().not(repeat(out()).emit(in('created').has('age',gt(45)))).count()", 826],
+    ["g.V().map(repeat(out()).emit(in('created').has('age',gt(30))).count()).sum()", 4376],
+    ["g.V().choose(repeat(out()).emit(in('created').has('age',gt(45))),constant(1),constant(2)).sum()", 2406],
+    ["g.V().local(local(repeat(out()).emit(in('created').has('age',gt(30))).count())).sum()", 4376],
   ] as const) {
     test(`scoped: ${q}`, () => {
       expect(count(small, q)).toBe(atSmall);
-      expect(read(q).sql).not.toContain('DISTINCT');
-      expect(timed(() => runWith(large, q)) / Math.max(timed(() => runWith(small, q)), 5)).toBeLessThan(48);
+      expect(read(q).sql.match(/SELECT DISTINCT [^)]*\)/g)).toEqual([expect.stringMatching(/^SELECT DISTINCT \w+\.id AS id FROM \w+ \w+\)$/)]);
+      expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));
     }, SCALE_TIMEOUT_MS);
   }
 

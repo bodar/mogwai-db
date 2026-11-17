@@ -1,6 +1,6 @@
 import { CHANNEL_GROUP_POLICY, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
 import { col, compilerInt, eq, type Expr } from '../../rel/expr.ts';
-import { exprRels, forEachExpr, forEachRel, freeRelIds } from '../../rel/walk.ts';
+import { exprRels, forEachExpr, forEachRel } from '../../rel/walk.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -189,11 +189,12 @@ export function repeatWalk(
    * `until` test stays per row there, and the output side READS its answer (`EXIT`) rather than asking again.
    * What keeps the term's per-row work bounded is `correlatedExistence`'s rule (`lower/scoped.ts`).
    *
-   * ONLY OVER AN UNCORRELATED WALK (`freeRelIds(walk)` empty). A walk that reads an outer relation runs under a
-   * host that keeps it correlated (an `EXISTS` re-evaluated per outer row) or that the decorrelator keys by scope
-   * — either way the state is per outer row, so the DISTINCT merges nothing and its spool and semi-join are pure
-   * cost (measured ≈2.4× slower than per row under `where`). There the condition stays per row. Per row and per
-   * state answer the same rows; the choice is cost alone.
+   * UNDER A SCOPING HOST TOO (`where`/`local`/`not`/`map`/…): the walk there reads the host row, and the
+   * decorrelator keys it by scope — but the passing set is a ROW-WISE function of the walk rows the semi-join
+   * filters, so it needs no scope key (`existenceOverOwnRows`, `src/rel/decorrelate.ts`): the states are
+   * distinct ACROSS scopes and a hub's condition is asked once, not once per start (measured: a scoped
+   * `where(repeat(out()).emit(in('created').has(…)))` 17× → 6× per 8× growth). Per row and per state answer
+   * the same rows; the choice is cost alone.
    */
   /** `rows` restricted to those whose STATE passes `body`, asked once per distinct state; `null` where `body`
    *  does not lower over a state row. */
@@ -401,8 +402,8 @@ export function repeatWalk(
 
   let surviving: Rel;
   const emitting = emits(walk);
-  if (emitted && emitting !== null && emitting !== ALL && readsAdjacency(emitting) && !freeRelIds(walk).size) {
-    // An `emit` condition that reads ADJACENCY over an UNCORRELATED walk is asked once per distinct STATE
+  if (emitted && emitting !== null && emitting !== ALL && readsAdjacency(emitting)) {
+    // An `emit` condition that reads ADJACENCY is asked once per distinct STATE
     // (`perState`): the rows past the depth test, semi-joined to the states that pass. With an `until` it is the
     // rows that do NOT exit — `exit ∪ (¬exit ∧ emit)` is the disjunction `leaves` spells, as two disjoint arms —
     // or, `twice`, every emitting row beside every exiting one (a multiset sum).
