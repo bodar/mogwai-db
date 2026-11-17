@@ -281,7 +281,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_VX1_2_3X_repeatXboth_barrierX_emit_timesX2X_path',
     'g_VX3X_repeatXbothX_createdXX_untilXloops_is_40XXemit_repeatXin_knowsXX_emit_loopsXisX1Xdedup_values',
     'g_VX6X_repeatXa_bothXcreatedX_simplePathX_emitXrepeatXb_bothXknowsXX_untilXloopsXbX_asXb_whereXloopsXaX_asXbX_hasXname_vadasXX_dedup_name',
-    'g_V_emitXhasLabelXpersonXX_repeatXout_order_byXnameXX_timesX2X_valuesXnameX',
     'g_V_emit_repeatXa_outXknows_filterXloops_isX0XX_lang',
     'g_V_hasXnameXHEY_BO_DIDDLEYXX_repeatXunionXoutXfollowedByX_order_byXnameX_limitX2X_outXsungByX_order_byXnameX_limitX1XXX_timesX2X',
     'g_V_playlist_paths',

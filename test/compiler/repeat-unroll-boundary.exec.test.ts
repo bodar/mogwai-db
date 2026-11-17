@@ -331,8 +331,48 @@ describe('the repeat() unroll boundary', () => {
       // n = 1: a dedup seen-set spans iterations, so n ≥ 2 declines (see the decline test above).
       'g.V().emit().repeat(__.dedup()).times(1)',
     ]) expect(() => compile(q, {})).not.toThrow();
-    // emit(pred) — a predicate emit — is NOT a union of prefixes; it declines to the walk / a refusal.
-    expect(() => compile('g.V().repeat(__.out()).emit(__.has("name","x")).times(2)', {})).toThrow();
+  });
+
+  test('emit(<traversal>) unrolls — each tested level is its phases + filter(<emit body>)', () => {
+    // RepeatStep.java (vendor/tinkerpop/gremlin-core/.../step/branch/RepeatStep.java) `doUntil` precedes
+    // `doEmit` at both the entry (`processTraverser`) and `RepeatEndStep`, so level n's exit is untested,
+    // every other emitted level is tested once. Pinned against the UNBOUNDED twin (`until(loops().is(n))`,
+    // the walk — a different lowering of the same question) and, where it exists, the corpus.
+    const count = (q: string) => vals(`${q}.count()`)[0];
+    const bag = (q: string) => bagOf(vals(q));
+    for (const [bounded, unbounded] of [
+      ["g.V().repeat(__.out()).emit(__.has('age')).times(2)", "g.V().repeat(__.out()).emit(__.has('age')).until(__.loops().is(2))"],
+      ["g.V().emit(__.hasLabel('person')).repeat(__.out()).times(2)", "g.V().emit(__.hasLabel('person')).repeat(__.out()).until(__.loops().is(2))"],
+      ["g.V().times(2).repeat(__.out()).emit(__.hasLabel('person'))", "g.V().until(__.loops().is(2)).repeat(__.out()).emit(__.hasLabel('person'))"],
+      ["g.V().emit(__.out().count().is(gt(1))).repeat(__.out()).times(2)", "g.V().emit(__.out().count().is(gt(1))).repeat(__.out()).until(__.loops().is(2))"],
+      ["g.V().repeat(__.both()).emit(__.has('age')).times(3)", "g.V().repeat(__.both()).emit(__.has('age')).until(__.loops().is(3))"],
+      ["g.V().repeat(__.out()).emit(__.loops().is(1)).times(2)", "g.V().repeat(__.out()).emit(__.loops().is(1)).until(__.loops().is(2))"],
+      ["g.V().emit(__.loops().is(0)).repeat(__.out()).times(2)", "g.V().emit(__.loops().is(0)).repeat(__.out()).until(__.loops().is(2))"],
+    ] as const) expect(bag(bounded)).toEqual(bag(unbounded));
+    // By hand, modern graph: level 1 = {2,3,4,3,5,3}, level 2 = {3,5}.
+    expect(count("g.V().repeat(__.out()).emit(__.has('age')).times(2)")).toBe(4);          // {2,4} ∪ level 2
+    expect(count("g.V().emit(__.hasLabel('person')).repeat(__.out()).times(2)")).toBe(8);  // 4 + {2,4} + 2
+    // Written repeat-first, `times` is until-LAST: no double.
+    expect(count("g.V().repeat(__.out()).times(2).emit(__.hasLabel('person'))")).toBe(4);
+    // Until-FIRST, emit-last: level 2 = filter(person) over {3,5} (none) ∪ the untested exit copy {3,5}.
+    expect(count("g.V().times(2).repeat(__.out()).emit(__.hasLabel('person'))")).toBe(4);
+    expect(count("g.V().times(2).repeat(__.out()).emit(__.hasLabel('software'))")).toBe(4 + 2 + 2); // level 1 {3,3,5,3}; level 2 {3,5} tested AND exited
+    expect(count("g.V().times(1).repeat(__.out()).emit(__.has('lang'))")).toBe(4 + 6);   // level 1 tested, doubled
+    // loops().is(P) is decided per level at compile time; an arm whose count fails P vanishes.
+    expect(count("g.V().repeat(__.out()).emit(__.loops().is(1)).times(2)")).toBe(8);
+    expect(count("g.V().repeat(__.out()).emit(__.loops().is(5)).times(2)")).toBe(2);
+    expect(count("g.V().times(2).repeat(__.out()).emit(__.loops().is(1))")).toBe(8);       // level 2 not re-emitted
+    expect(count("g.V().times(2).repeat(__.out()).emit(__.loops().is(2))")).toBe(4);       // level 2 doubled
+    // Corpus: Repeat.feature g_V_emitXhasLabelXpersonXX_repeatXout_order_byXnameXX_timesX2X_valuesXnameX.
+    expect(bag("g.V().emit(__.hasLabel('person')).repeat(__.out().order().by('name')).times(2).values('name')"))
+      .toEqual(bagOf(['marko', 'josh', 'lop', 'ripple', 'vadas', 'vadas', 'josh', 'peter']));
+    // At depth: the same unroll under a per-traverser host and inside a filter body.
+    expect(bag("g.V().local(__.repeat(__.out()).emit(__.has('age')).times(2).count())")).toEqual(bagOf([4, 0, 0, 0, 0, 0]));
+    expect(bag("g.V().where(__.repeat(__.out()).emit(__.has('lang')).times(2)).values('name')")).toEqual(bagOf(['marko', 'josh', 'peter']));
+    expect(count("g.V().union(__.repeat(__.out()).emit(__.has('age')).times(2), __.constant(1))")).toBe(10);
+    // Any OTHER read of loops() in the test has no counter to read once unrolled: declined by name.
+    expect(() => compile("g.V().repeat(__.out()).emit(__.out().loops().is(1)).times(2)", {}))
+      .toThrow(/emit\(\) test that reads loops\(\)/);
   });
 
   test('bare emit() emits EXACTLY the reference levels — level n always, doubled when until is first', () => {

@@ -1782,11 +1782,9 @@ function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, ne
   const emit = region.find((s) => s.name === 'emit');
   if (!rep || !times) return null;
   if (region.length === 3 && !emit) return null; // the third step, if any, must be `emit` (until declined above)
-  // `emit(pred)` — a predicate emit — emits only the levels where the predicate holds, which a flat
-  // union of level-prefixes cannot express (each arm would need the predicate as a trailing filter, and
-  // the emit-first/last position interacts with it). Bare `emit()` is a constant-true predicate and IS a
-  // union of prefixes; a predicate emit declines here (fail closed) and reaches the walk or a refusal.
-  // (Unless the region never iterates at all — the `times(n ≤ 0)`-first case just below.)
+  // `emit(<traversal>)` emits only the levels where the test holds: each tested level's arm carries the
+  // test as a trailing `filter` (`emitLevelTest`; the arm rules are at the union below). Bare `emit()` is
+  // the constant-true test.
   const count = (times.args ?? [])[0]?.value;
   if (typeof count !== 'number' || !Number.isInteger(count)) return null;
   // `times(n ≤ 0)` is `until(loops() >= n)` already true at loop 0, and WHERE the until sits decides
@@ -1798,7 +1796,8 @@ function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, ne
   // LITERAL for `times` (`Gremlin.g4` `traversalMethod_times`), so the count is always known here.
   if (count < 1 && region.indexOf(times) < region.indexOf(rep)) return [{ name: 'identity', args: [], ctx: rep.ctx }];
   const n = Math.max(count, 1);
-  if (emit && (emit.args ?? []).length) return null;
+  const emitTest = emit ? emitLevelTest(emit, params, childBody) : undefined;
+  if (emitTest === null) return null;
   // A named `repeat("a", body)` carries a loop counter `loops("a")` can read from arbitrarily deep
   // inside the body, including from a NESTED repeat's — so the phases have no counter to attach it to
   // and unrolling silently drops the identity. §3.4: this refusal must stay a refusal.
@@ -1858,7 +1857,9 @@ function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, ne
   // at once instead of compiling for minutes.
   const levels = Math.min(n, lastLevel);
   const copies = emit ? (levels * (levels + 1)) / 2 : levels; // emit: one arm per level, arm k holds k copies
-  const spliced = copies * unrolledSize(body, read, STEPS_IN_BUDGET);
+  // A predicate emit's test is spliced once per TESTED level (at most `levels + 1` of them).
+  const testCopies = emitTest?.filter ? (levels + 1) * unrolledSize(emitTest.filter, read, STEPS_IN_BUDGET) : 0;
+  const spliced = copies * unrolledSize(body, read, STEPS_IN_BUDGET) + testCopies;
   const barrier = needsPhases(body, read);
   if (spliced > STEPS_IN_BUDGET) {
     // `until(loops())` is offered only on the ROOT chain: there the walk takes a barrier-free body, while a
@@ -1918,14 +1919,28 @@ function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, ne
   // re-spliced the body re-ran every `aggregate`/`groupCount` in it (`g.V(1).times(1).repeat(out()
   // .aggregate('x')).emit().cap('x')` counted each vertex twice) and would re-choose every `limit`.
   // Levels past `lastLevel` are empty (the dedup argument above), so they contribute no arm and no double.
+  //
+  // A PREDICATE emit (`emit(p)`) tests each emitted level once per traverser at that level, and level n's
+  // exit is untested (the until fires first: `doUntil` precedes `doEmit` in both `RepeatEndStep` and
+  // `processTraverser`). So a tested level's arm is its phases + `filter(p)` — the connector's ordinary
+  // filter row, each level's test in exactly ONE arm, which is the reference's count of emit-test
+  // evaluations — and level n stays unconditional. Emit-first tests level 0 too (`filter(p)` over the
+  // origin); until-first/emit-last's double becomes `union(filter(p), identity())`: the emitted split is
+  // tested, the until's exit copy is not. `loops().is(P)` is decided per arm at compile time
+  // (`emitLevelTest`): a level whose count fails P contributes no arm at all.
   const doubleTop = untilFirst && !emitFirst && n <= lastLevel;
   const arms: Step[][] = [];
   for (let level = emitFirst ? 0 : 1; level <= Math.min(n, lastLevel); level++) {
+    const tested = level < n || doubleTop;
+    const test = tested ? emitTest!.at(level) : [];
+    if (test === undefined) return null; // a count predicate this pass cannot decide
+    if (test === false && !(doubleTop && level === n)) continue;
     const arm: Step[] = [];
     for (let k = 0; k < level; k++) arm.push(...phase());
     if (doubleTop && level === n) {
-      arm.push({ name: 'union', args: [arg({ nested: [identity()] }), arg({ nested: [identity()] })], ctx: rep.ctx });
-    }
+      const emitted: Step[] = test === false ? [] : test.length ? test : [identity()];
+      if (emitted.length) arm.push({ name: 'union', args: [arg({ nested: emitted }), arg({ nested: [identity()] })], ctx: rep.ctx });
+    } else if (tested && test !== false) arm.push(...test);
     // Level 0 is the origin unchanged — `identity()` so the arm is a legal non-empty traversal.
     arms.push(arm.length ? arm : [identity()]);
   }
@@ -1952,7 +1967,48 @@ function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, ne
   // A single level is just that arm spliced inline — a one-arm `union` is not a thing the lowering
   // accepts (`unionArms` requires ≥2), and it would mean the same rows anyway. Two or more levels are a
   // `union` (UNION ALL, so multiset-exact). `n < 1` cannot reach here (`times(n<1)` is normalised above).
+  // Every level dropped by its count test (and the top level past `lastLevel`): the chain's empty.
+  if (!arms.length) return [{ name: 'limit', args: [arg(0)], ctx: rep.ctx }];
   return arms.length === 1 ? arms[0]! : [{ name: 'union', args: arms.map((a) => arg({ nested: a })), ctx: rep.ctx, unrolled: mark } as IRStep];
+}
+
+/** How an `emit` tests a level: `at(k)` is the steps appended to level k's arm (`[]` = emitted
+ *  unconditionally), `false` when level k emits nothing, or undefined when a count test is undecidable
+ *  here. `filter` is the spliced test, for the early budget charge. */
+interface EmitTest {
+  readonly at: (k: number) => Step[] | false | undefined;
+  readonly filter?: Step[];
+}
+
+/**
+ * The unroll's reading of an `emit` step: bare `emit()` emits every level; `emit(<traversal>)` filters each
+ * tested level by the traversal — `filter(p)`, the connector's filter row, since `doEmit` asks
+ * `TraversalUtil.test`, exactly a filter's question (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/
+ * tinkerpop/gremlin/process/traversal/step/branch/RepeatStep.java `doEmit`). Null leaves the region alone
+ * (the `emit(P)` overload or a multi-argument form, which `repeatWalk` declines the same way).
+ *
+ * `loops()` in the test reads the loop counter, which no spliced phase carries. Exactly `loops().is(P)` is
+ * still a compile-time fact — every traverser at level k reads k, at `RepeatEndStep` (after `incrLoops`) and
+ * at the emit-first entry test alike — so it is decided per level with `loopCountHolds`. Any other read of
+ * `loops()` declines BY NAME rather than being unrolled against a counter it cannot see.
+ */
+function emitLevelTest(emit: Step, params: ParamEnv, childBody: ChildBody): EmitTest | null {
+  const args = emit.args ?? [];
+  if (!args.length) return { at: () => [] };
+  const value = args[0]!.value;
+  if (args.length !== 1 || !isNested(value)) return null;
+  const test = childBody(value.nested, params);
+  if (!test.length) return null;
+  const [head, is] = test;
+  if (test.length === 2 && head!.name === 'loops' && !(head!.args ?? []).length && is!.name === 'is' && (is!.args ?? []).length === 1) {
+    const p = is!.args[0]!.value;
+    return { at: (k) => { const holds = loopCountHolds(p, k); return holds === undefined ? undefined : holds ? [] : false; } };
+  }
+  if (someStepDeep(test, rawBodies(params), (s) => s.name === 'loops', true)) {
+    throw UnsupportedTraversal.because('repeat()…times(n) with an emit() test that reads loops() other than as loops().is(<count>) — a bounded repeat is unrolled into one copy per level, so there is no loop counter for the test to read; write the level test as emit(loops().is(…))');
+  }
+  const filter: Step[] = [{ name: 'filter', args: [args[0]!], ctx: emit.ctx }];
+  return { at: () => filter, filter };
 }
 
 /**

@@ -151,6 +151,16 @@ const SHAPES: readonly Shape[] = [
   { name: 'minmax: group.by(label).by(values.max)', query: "g.V().group().by(label).by(values('age').max())" },
   { name: 'minmax: where(map(outE.max).is)', query: "g.V().where(map(outE().values('weight').max()).is(gt(0.5))).count()" },
   { name: 'minmax: order.by(outE.values.min)', query: "g.V().order().by(outE().values('weight').min()).limit(5)" },
+  // A predicate emit on a bounded repeat: each tested level is its phases + the connector's filter row.
+  { name: 'emit: repeat.emit(has).times(2)', query: "g.V().repeat(out()).emit(has('age')).times(2).count()" },
+  { name: 'emit: emit(hasLabel).repeat.times(2)', query: "g.V().emit(hasLabel('person')).repeat(out()).times(2).count()" },
+  { name: 'emit: times(2).repeat.emit(hasLabel)', query: "g.V().times(2).repeat(out()).emit(hasLabel('person')).count()" },
+  { name: 'emit: emit(out.count.is).repeat.times(2)', query: "g.V().emit(out().count().is(gt(1))).repeat(out()).times(2).count()" },
+  { name: 'emit: emit(person).repeat(out.order).times(2)', query: "g.V().emit(hasLabel('person')).repeat(out().order().by('name')).times(2).values('name')" },
+  { name: 'emit: repeat.emit(loops.is(1)).times(2)', query: "g.V().repeat(out()).emit(loops().is(1)).times(2).count()" },
+  { name: 'emit: local(repeat.emit(has).times(2).count)', query: "g.V().local(repeat(out()).emit(has('age')).times(2).count())" },
+  { name: 'emit: where(repeat.emit(has).times(2))', query: "g.V().where(repeat(out()).emit(has('age', gt(40))).times(2)).count()" },
+  { name: 'emit: repeat.emit(has).times(3)', query: "g.V().repeat(out()).emit(has('age', gt(40))).times(3).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

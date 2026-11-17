@@ -22,9 +22,10 @@ import { compile } from '../../src/compiler/compiler.ts';
  * that retry once the wide ladder-reach sample measured it rescuing nothing, so lowerings fell back 2190 → 2016:
  * every traversal, declining or not, lowers once. The 10 extra emissions are corpus traversals that
  * newly COMPILE through the scoped-relation connector; 1809 → 1817 for the 8 more the cc3a rows (coalesce/optional/
- * order/dedup/group(Count)/or/flatMap/local/choose/union) compile — each an emission, not a repeated one.
+ * order/dedup/group(Count)/or/flatMap/local/choose/union) compile — each an emission, not a repeated one; 1817 → 1818 for
+ * the bounded `emit(<traversal>)` unroll (`emit(hasLabel(person)).repeat(out().order().by(name)).times(2)` newly compiles).
  */
-const CEILING = { lowerings: 2016, emissions: 1817, perQuery: 12 } as const;
+const CEILING = { lowerings: 2016, emissions: 1818, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 
