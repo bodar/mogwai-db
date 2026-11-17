@@ -1,9 +1,10 @@
-import type { Expr } from './expr.ts';
+import { isArgExtremum, type Expr } from './expr.ts';
 import { shapeOf, spliceable } from './block.ts';
 import { isAbort } from './raise.ts';
 import { atMostOneRow } from './bounds.ts';
 import type { Rel } from './rel.ts';
-import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
+import * as make from './factory.ts';
+import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath, substRelId } from './walk.ts';
 import type { RelId } from './types.ts';
 
 /**
@@ -307,39 +308,114 @@ export const columnIsRowKey = (r: Rel, name: string): boolean => {
  * columns, an inner or cross join's sides, a semi/anti join's left, a LEFT join's left side — and stops anywhere
  * else at the column itself as a leaf: a scan (storage), and an operator whose column no single input row defines
  * (an aggregate's, a union's, a window's number, a LEFT join's right side, NULL where unmatched).
+ *
+ * `winners` asks it to follow one more operator: an ARG-EXTREMUM aggregate's column (`arg_min(value, key)`, the
+ * min/max reducer's `argExtremum`). Every arg-extremum of one Aggregate reads the SAME winning row (the bare-column
+ * law, `structure.ts` `checkArgExtremumLaw`), so such a column is its `value` spelled over that row — a key read off
+ * the winner determines the others. It is opt-in because it holds only for a reader that asks per winning row:
+ * a scalar aggregate over NO rows still emits one row whose arg-extrema are NULL, which no input row defines, so
+ * the reader must take its presence from the aggregate's own row (the keyed pick does — `exactlyOneRow`, or the
+ * key's nullness under the reducer's empty-input Filter), never from the lineage.
  */
-export function columnLineage(r: Rel, name: string, leaves: Map<RelId, Rel>): Expr | null {
+export function columnLineage(r: Rel, name: string, leaves: Map<RelId, Rel>, winners = false): Expr | null {
   if (!r.type.cols.some((column) => column.name === name)) return null;
   const leaf = (): Expr => {
     leaves.set(r.id, r);
     return { kind: 'col', rel: r.id, name };
   };
+  /** `e`, an expression over `input`'s columns, with each read replaced by that column's lineage. */
+  const over = (e: Expr, input: Rel): Expr | null => {
+    const defined = new Map<string, Expr>();
+    for (const read of deepColsRead(e, input.id)) {
+      const d = columnLineage(input, read, leaves, winners);
+      if (!d) return null;
+      defined.set(read, d);
+    }
+    return defined.size ? mapColsDeep(e, input.id, (read) => defined.get(read)!) : e;
+  };
   switch (r.kind) {
     case 'scan': return leaf();
     case 'project': {
       const e = r.exprs.find(([column]) => column === name)?.[1];
-      if (!e) return null;
-      const input = r.input;
-      const defined = new Map<string, Expr>();
-      for (const read of deepColsRead(e, input.id)) {
-        const d = columnLineage(input, read, leaves);
-        if (!d) return null;
-        defined.set(read, d);
-      }
-      return defined.size ? mapColsDeep(e, input.id, (read) => defined.get(read)!) : e;
+      return e ? over(e, r.input) : null;
     }
-    case 'filter': case 'sort': case 'limit': case 'distinct': return columnLineage(r.input, name, leaves);
-    case 'window': return r.specs.some(([minted]) => minted === name) ? leaf() : columnLineage(r.input, name, leaves);
+    case 'aggregate': {
+      const e = winners ? r.aggs.find(([column]) => column === name)?.[1] : undefined;
+      return e?.kind === 'agg' && isArgExtremum(e.fn) ? over(e.args[0]!, r.input) : leaf();
+    }
+    case 'filter': case 'sort': case 'limit': case 'distinct': return columnLineage(r.input, name, leaves, winners);
+    case 'window': return r.specs.some(([minted]) => minted === name) ? leaf() : columnLineage(r.input, name, leaves, winners);
     case 'join': {
-      if (r.join === 'semi' || r.join === 'anti') return columnLineage(r.left, name, leaves);
+      if (r.join === 'semi' || r.join === 'anti') return columnLineage(r.left, name, leaves, winners);
       const at = r.type.cols.findIndex((column) => column.name === name);
       const leftN = r.left.type.cols.length;
       if (at < 0) return null;
-      if (at < leftN) return columnLineage(r.left, r.left.type.cols[at]!.name, leaves);
-      return r.join === 'left' ? leaf() : columnLineage(r.right, r.right.type.cols[at - leftN]!.name, leaves);
+      if (at < leftN) return columnLineage(r.left, r.left.type.cols[at]!.name, leaves, winners);
+      return r.join === 'left' ? leaf() : columnLineage(r.right, r.right.type.cols[at - leftN]!.name, leaves, winners);
     }
     default: return leaf();
   }
+}
+
+/**
+ * `rows` rebuilt to ALSO carry, as column `as`, the rowid of the stored row `leaf` — the one row a caller's payload
+ * columns are a function of (`columnLineage` with `winners`) — threaded up its spine from the first relation that
+ * has it as a column: through a `Project` (one more passthrough), a `Filter`/`Sort`/`Limit` (retyped), and an
+ * ARG-EXTREMUM `Aggregate` (one more arg-extremum over the SAME key, so the rowid is the winner's — the bare-column
+ * law, `structure.ts` `checkArgExtremumLaw`). `null` where the spine holds any other operator before the rowid is
+ * found. Every rebuilt node takes a fresh id; what lies below the first carrier is shared, unchanged.
+ *
+ * Built only for a reader that asks for the key (`lower/scoped.ts` `pickKey`): a reducer's winner then becomes ONE
+ * key searched per host, its value and tag read back off the stored row, rather than one correlated scalar per
+ * column — so the column costs nothing in a plan that never reads it.
+ */
+export function threadingRowKey(rows: Rel, leaf: Rel, as: string, mint: (hint: string) => RelId): Rel | null {
+  if (!columnIsRowKey(leaf, 'id') || rows.type.cols.some((column) => column.name === as)) return null;
+  const carrier = (r: Rel): string | undefined => r.type.cols.find((column) => {
+    const lineage = columnLineage(r, column.name, new Map(), true);
+    return lineage?.kind === 'col' && lineage.rel === leaf.id && lineage.name === 'id';
+  })?.name;
+  const keyMeta = { name: as, type: 'int' as const, nullable: true };
+  /** `r` widened, and the name its rowid column has there. */
+  const widen = (r: Rel): { readonly rel: Rel; readonly col: string } | null => {
+    const has = carrier(r);
+    if (has) return { rel: r, col: has };
+    if (r.kind !== 'project' && r.kind !== 'filter' && r.kind !== 'sort' && r.kind !== 'limit' && r.kind !== 'aggregate') return null;
+    const below = widen(r.input);
+    if (!below) return null;
+    const input = below.rel;
+    const moved = (e: Expr): Expr => (input === r.input ? e : substRelId(e, r.input.id, input.id));
+    const read: Expr = { kind: 'col', rel: input.id, name: below.col };
+    switch (r.kind) {
+      case 'project':
+        return { rel: make.project({ id: mint('rkp'), input, channels: r.channels, type: { cols: [...r.type.cols, keyMeta] },
+          exprs: [...r.exprs.map(([name, e]) => [name, moved(e)] as const), [as, read]] }), col: as };
+      case 'filter':
+        return { rel: make.filter({ id: mint('rkf'), input, channels: r.channels, type: input.type, pred: moved(r.pred) }), col: below.col };
+      case 'sort':
+        return { rel: make.sort({ id: mint('rks'), input, channels: r.channels, type: input.type, terms: r.terms.map((term) => ({ ...term, expr: moved(term.expr) })) }), col: below.col };
+      case 'limit':
+        return { rel: make.limit({ id: mint('rkl'), input, channels: r.channels, type: input.type,
+          ...(r.count ? { count: moved(r.count) } : {}), ...(r.offset ? { offset: moved(r.offset) } : {}) }), col: below.col };
+      case 'aggregate': {
+        const winner = r.aggs.map(([, e]) => e).find((e): e is Extract<Expr, { readonly kind: 'agg' }> => e.kind === 'agg' && isArgExtremum(e.fn));
+        if (!winner) return null;
+        return { rel: make.aggregate({
+          id: mint('rka'), input, channels: r.channels, type: { cols: [...r.type.cols, keyMeta] },
+          groupBy: r.groupBy.map(moved), ...(r.having ? { having: moved(r.having) } : {}),
+          aggs: [...r.aggs.map(([name, e]) => [name, moved(e)] as const), [as, { kind: 'agg', fn: winner.fn, args: [read, moved(winner.args[1]!)] }]],
+        }), col: as };
+      }
+    }
+  };
+  const widened = widen(rows);
+  if (!widened || widened.rel === rows) return null;
+  // The key leaves under the caller's name: a Filter/Sort/Limit on top keeps its input's column name.
+  return widened.col === as ? widened.rel : make.project({
+    id: mint('rkp'), input: widened.rel, channels: rows.channels, type: { cols: [...rows.type.cols, keyMeta] },
+    exprs: [...rows.type.cols.map((column) => [column.name, { kind: 'col', rel: widened.rel.id, name: column.name }] as const),
+      [as, { kind: 'col', rel: widened.rel.id, name: widened.col }]],
+  });
 }
 
 /**

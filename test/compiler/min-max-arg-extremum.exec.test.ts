@@ -11,7 +11,7 @@
 import { describe, expect, test } from 'bun:test';
 import { exec } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
-import { bagOf, LADDER, seededStore } from '../support/harness.ts';
+import { bagOf, LADDER, read, seededStore } from '../support/harness.ts';
 import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import { aggregate, values } from '../../src/rel/factory.ts';
@@ -117,4 +117,37 @@ describe('min(local)/max(local) answer as the same arg-extremum aggregate, at th
   for (const q of ["g.inject([1,'a']).max(local)", "g.V().local(union(values('age'), constant('x')).fold().max(local))"])
     for (const [mode, fastPaths] of MODES)
       test(`refuses: ${q} (${mode})`, () => expect(() => typed(q, fastPaths)).toThrow('min/max over values of different types is not supported'));
+});
+
+// A PER-HOST PICK of a min/max over a stored property is ONE KEYED search (`lower/scoped.ts` `pickKey` over
+// `threadingRowKey`, `src/rel/copies.ts`): the winner's property rowid is searched once per host and its value and
+// type tag are read back off that row, where the value and the tag were each a correlated scalar re-running the
+// whole aggregate (and a third copy tested presence). The search keeps the reducer's own raise and empty-input
+// filter, so a mixed-type group still refuses, an empty host still drops, and a wide long comes back exact.
+describe('a per-host min/max is searched once, its value and tag read off the winning row', () => {
+  const mutated = (q: string, fastPaths?: FastPathConfig): string[] => {
+    const store = seededStore();
+    const parts = q.split(' ;; ');
+    for (const part of parts.slice(0, -1)) exec(store, undefined, fastPaths).buffers(part, {});
+    return bagOf(typedAll(exec(store, undefined, fastPaths).buffers(parts.at(-1)!, {})));
+  };
+  const ANSWERED: readonly (readonly [string, readonly string[]])[] = [
+    ["g.V(2).property(single,'age',9007199254740993L) ;; g.V().map(out().values('age').max())", ['9007199254740993L']],
+    ["g.V(2).property(single,'age',9007199254740993L) ;; g.V().map(out().values('age').min())", ['32i']],
+    ["g.V(2).property(single,'age',9007199254740993L) ;; g.V().project('m').by(out().values('age').max())", ['{"m":9007199254740993L}', '{}', '{}', '{}', '{}', '{}']],
+    ["g.V().map(out().values('age').is(gt(28)).max())", ['32i']],
+    ["g.V().map(out().values('age').max()).is(gt(30))", ['32i']],
+    ["g.V().map(outE().values('weight').max()).fold()", ['[1d,1d,0.2d]']],
+  ];
+  for (const [q, expected] of ANSWERED)
+    for (const [mode, fastPaths] of MODES)
+      test(`${q} (${mode})`, () => expect(mutated(q, fastPaths)).toEqual(bagOf(expected)));
+  for (const [mode, fastPaths] of MODES)
+    test(`refuses a mixed-type group (${mode})`, () =>
+      expect(() => mutated("g.V(2).property(single,'age','old') ;; g.V().map(out().values('age').max())", fastPaths))
+        .toThrow('min/max over values of different types is not supported'));
+  // ONE search: the reducer's class-count raise is spelled once, where the value, the tag and the presence test
+  // each spelled it.
+  for (const q of ["g.V().map(out().values('age').max())", "g.V().project('n','m').by('name').by(outE().values('weight').min())"])
+    test(`one search: ${q}`, () => expect(read(q).sql.split('count(DISTINCT').length - 1).toBe(1));
 });

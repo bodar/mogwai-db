@@ -13,7 +13,7 @@ import { exprMayAbort } from '../../../rel/raise.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
 import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
-import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, nestsCorrelatedSubplans, spelledOuterColumns } from '../../../rel/copies.ts';
+import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, nestsCorrelatedSubplans, spelledOuterColumns, threadingRowKey } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
@@ -39,6 +39,7 @@ import { recordOf, recordToMap } from '../record.ts';
 import { drawInGroupValue, effectInChild, UnsupportedTraversal, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type HostProgress, type Tail } from './chain.ts';
 import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
+import { prune } from '../../../rel/passes/prune.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
 // §2, S1–S4). Every host here is the same three moves, and only the third differs:
@@ -834,7 +835,7 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   const enc = encounterOf(tail.rel.channels);
   const keyed = !single && enc ? positionKeys(tail.rel, enc.col, fresh) : null;
   const base = keyed?.rel ?? tail.rel;
-  const key = pickKey(base, names, keyed?.keys ?? [], fresh);
+  const key = pickKey(base, names, keyed?.keys ?? [], fresh, single);
   // A payload that is a function of a key the position already orders by breaks no tie, so it is no term.
   const terms = keyed
     ? [...keyed.keys, ...(key?.ordered ? [] : payloadCols(tail.rel).map((column) => ({ expr: col(base.id, column.name), dir: 'asc' as const })))]
@@ -881,7 +882,7 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
   // The keyed form where the scalar form would search twice — a second column, or a presence `EXISTS` beside the
   // value. One column read once stays one scalar: a key and a read of the payload off it would be one more step.
   if (key && (payload.length > 1 || (presence && !total && lead.nullable))) {
-    const picked = keyedPick(key, first, names, payload as ColMeta[], host, total, fresh);
+    const picked = keyedPick(key, key.rows ?? first, names, payload as ColMeta[], host, total, fresh);
     if (picked) return picked;
   }
   if (payload.length > 2 || (payload.length > 1 && deep)) return null;
@@ -932,6 +933,12 @@ function scalarPick(payload: readonly ColMeta[], exprs: ReadonlyMap<string, Expr
  * column `c`'s fresh name. `ordered`: the key is one of the position's own sort terms, so the payload breaks no tie
  * after it. `null` where no key determines the payload (it reads two rows, or an outer column), where the payload
  * draws, or where the key may be NULL (its presence would be wrong).
+ *
+ * A body of at most ONE row (`threads`) whose payload reads one stored row but carries no key for it — a min/max
+ * reducer's winner, an arg-extremum Aggregate over a property read (`reducer.ts` `argExtremum`) — is rebuilt to
+ * carry that row's rowid (`threadingRowKey`, `src/rel/copies.ts`), and the pick searches the rebuilt body (`rows`):
+ * the winner is ONE key per host, its value and tag read back off the stored row, where one correlated scalar per
+ * column re-ran the aggregate.
  */
 interface PickKey {
   readonly key: string;
@@ -941,13 +948,15 @@ interface PickKey {
   readonly stored: { readonly leaf: Rel; readonly cols: ReadonlyMap<string, string> } | null;
   readonly payload: ReadonlyMap<string, Expr>;
   readonly ordered: boolean;
+  /** The body rebuilt to carry the key (`threadingRowKey`), where the body did not: the search reads THIS. */
+  readonly rows?: Rel;
 }
 
-function pickKey(rows: Rel, names: readonly string[], keys: readonly SortTerm[], fresh: Minter): PickKey | null {
+function pickKey(rows: Rel, names: readonly string[], keys: readonly SortTerm[], fresh: Minter, threads = false): PickKey | null {
   const leaves = new Map<RelId, Rel>();
   const defined = new Map<string, Expr>();
   for (const name of names) {
-    const lineage = columnLineage(rows, name, leaves);
+    const lineage = columnLineage(rows, name, leaves, true);
     if (!lineage || exprDraws(lineage)) return null;
     // Only the body's own rows: an outer column (the host's) is not a function of the key.
     for (const id of freeIds(lineage)) if (!leaves.has(id)) return null;
@@ -958,7 +967,7 @@ function pickKey(rows: Rel, names: readonly string[], keys: readonly SortTerm[],
   const candidates = [...rows.type.cols].sort((a, b) => Number(sortCols.has(b.name)) - Number(sortCols.has(a.name)));
   const at = fresh('skh');
   for (const column of candidates) {
-    const lineage = columnLineage(rows, column.name, leaves);
+    const lineage = columnLineage(rows, column.name, leaves, true);
     if (!lineage || !readsLeaf(lineage) || [...freeIds(lineage)].some((id) => !leaves.has(id)) || !nonNull(lineage, leaves)) continue;
     const ordered = sortCols.has(column.name);
     // BY ROWID: the key is a stored row's rowid and the payload reads that row alone.
@@ -981,7 +990,10 @@ function pickKey(rows: Rel, names: readonly string[], keys: readonly SortTerm[],
     if ([...payload.values()].some(readsLeaf)) continue;
     return { key: column.name, keyMeta: column, at, stored: null, payload, ordered };
   }
-  return null;
+  const [leaf, ...more] = leaves.values();
+  const threaded = threads && leaf && !more.length ? threadingRowKey(rows, leaf, fresh('pkr') as string, fresh) : null;
+  const key = threaded ? pickKey(threaded, names, keys, fresh) : null;
+  return key && threaded ? { ...key, rows: threaded } : null;
 }
 
 /** `e` with every sub-expression structurally equal to `target` — in its correlated subplans too — replaced. */
@@ -1023,7 +1035,10 @@ function freeIds(e: Expr): Set<RelId> {
  * packed row is not (a JSON pack returns a REAL with 15 digits); the presence is the key's.
  */
 function keyedPick(key: PickKey, first: Rel, names: readonly string[], payload: readonly ColMeta[], host: Rel, total: boolean, fresh: Minter): Pick | null {
-  const plan = make.project({ id: fresh('ck'), input: first, channels: [], type: typeOf({ ...key.keyMeta, name: 'k', nullable: true }), exprs: [['k', col(first.id, key.key)]] });
+  const searched = make.project({ id: fresh('ck'), input: first, channels: [], type: typeOf({ ...key.keyMeta, name: 'k', nullable: true }), exprs: [['k', col(first.id, key.key)]] });
+  // A body rebuilt to carry its key (`key.rows`) searches for the key ALONE: the winner's other columns are read
+  // back off the stored row, so the copies the rebuilt aggregate still holds are dropped from the search.
+  const plan = key.rows ? prune(searched, ['k']) : searched;
   if (!spellsStored(plan, ['k'], host)) return null;
   // The payload's own subplans are fresh copies: the body's lookups are no longer read inside the pick, and two
   // relations never share an id.
