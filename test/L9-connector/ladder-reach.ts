@@ -15,7 +15,10 @@
 // And one HARD invariant: where both modes answer, they answer the SAME MULTISET (`differ`). A different
 // emission order of an unordered stream is not a difference (`docs/feature-support-matrix.md` §17), and a
 // positional window over an unordered stream fixes only how many members it took, not which — the comparison
-// L5's host laws make (`orderIndeterminacy`, `test/support/graph.ts`).
+// L5's host laws make (`orderIndeterminacy`, `test/support/graph.ts`). A DRAW (`isNondeterministic`, the one
+// authority the census and L5 already share) is outside that invariant: two runs of it differ whatever the
+// modes do. It still counts in its pool (and can still be ladder-only), but its answers are not compared — it
+// goes to `random`, never to `differ`. A draw whose OUTCOME is deterministic is checked by value instead.
 import { readFileSync } from 'node:fs';
 import type { GraphStore } from '../../src/storage.ts';
 import { CONNECTOR_HOSTS } from '../../src/compiler/ir/analyze.ts';
@@ -109,6 +112,8 @@ export interface ReachResult {
   readonly ladderOnly: LadderOnly[];
   /** Both answered, different multisets — a WRONG ANSWER in one of the two. Never legal. */
   readonly differ: string[];
+  /** Both answered a DRAW (`isNondeterministic`): counted in its pool, its answers not compared. */
+  readonly random: string[];
   /** The connector alone answered and the default did not — the fallback LOST an answer. Never legal. */
   readonly connectorOnlyAnswers: string[];
 }
@@ -130,6 +135,7 @@ export function reach(queries: readonly PoolQuery[], known?: ReadonlyMap<string,
   const pools: ReachResult['pools'] = {};
   const ladderOnly: LadderOnly[] = [];
   const differ: string[] = [];
+  const random: string[] = [];
   const connectorOnlyAnswers: string[] = [];
   const seen = new Set<string>();
   for (const p of queries) {
@@ -144,13 +150,14 @@ export function reach(queries: readonly PoolQuery[], known?: ReadonlyMap<string,
     if (d.kind === 'rows') t.byDefault++;
     if (c.kind === 'rows') t.connectorOnly++;
     if (d.kind === 'rows' && c.kind === 'rows') {
-      if (!sameMultiset(q, d.weighed, c.weighed)) differ.push(`${pool}\t${q}`);
+      if (isNondeterministic(q)) random.push(`${pool}\t${q}`);
+      else if (!sameMultiset(q, d.weighed, c.weighed)) differ.push(`${pool}\t${q}`);
     } else if (d.kind === 'rows') {
       const rescued = outcomeOf(storeOf(p), q, NO_RETRY).kind !== 'rows';
       ladderOnly.push({ pool, q, family: familyOf(q), rescued, declined: c.kind === 'threw' ? c.message : '' });
     } else if (c.kind === 'rows') connectorOnlyAnswers.push(`${pool}\t${q}`);
   }
-  return { pools, ladderOnly, differ, connectorOnlyAnswers };
+  return { pools, ladderOnly, differ, random, connectorOnlyAnswers };
 }
 
 /** `pool → family → count`, and the rescue count — the numbers the ratchet holds. */

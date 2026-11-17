@@ -8,7 +8,9 @@
 import { describe, expect, test } from 'bun:test';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { seeded } from '../support/graph.ts';
-import { reach, familyOf, counts } from './ladder-reach.ts';
+import { runWith } from '../support/harness.ts';
+import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
+import { reach, familyOf, counts, CONNECTOR_ONLY } from './ladder-reach.ts';
 
 const store = seeded(MODERN_SEED);
 const run = (q: string) => reach([{ pool: 'W', q, store }]);
@@ -16,9 +18,19 @@ const run = (q: string) => reach([{ pool: 'W', q, store }]);
 describe('L9 — ladder reach engine', () => {
   test('a draw a later step filters, under an existence host: CLOSED (R2b) — the connector alone answers it, per scope row', () => {
     // A draw is the connector's: always decorrelated, one draw per host row (`scopedBody`, `decorrelate.ts`).
-    // A random answer is left out of `differ` (two runs of it differ whatever the modes do).
-    const r = run("g.V().where(out().sample(1).has('age')).values('name')");
-    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, pools: r.pools.W }).toEqual({ ladderOnly: 0, differ: [], pools: { queries: 1, byDefault: 1, connectorOnly: 1 } });
+    // A draw (`isNondeterministic`) still counts in its pool, but its answers are not compared: two runs of it
+    // differ whatever the modes do, so it lands in `random`, never in `differ`.
+    const q = "g.V().where(out().sample(1).has('age')).values('name')";
+    const r = run(q);
+    expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, random: r.random, pools: r.pools.W })
+      .toEqual({ ladderOnly: 0, differ: [], random: [`W\t${q}`], pools: { queries: 1, byDefault: 1, connectorOnly: 1 } });
+  });
+
+  // The per-scope draw checked BY VALUE: of the modern vertices only marko has a `knows` edge, and both vertices
+  // he knows (vadas, josh) have an age, so whichever is drawn the answer is [marko] — in both modes, every run.
+  test('a draw whose outcome is deterministic: [marko] under the default and the connector alone', () => {
+    const q = "g.V().where(out('knows').sample(1).has('age')).values('name')";
+    for (const fastPaths of [DEFAULT_FAST_PATHS, CONNECTOR_ONLY]) expect(runWith(store, q, { fastPaths }).map((r) => r.v)).toEqual(['marko']);
   });
 
   // A TRAILING draw is trimmed from an existence body (`existencePrefix`), so the connector answers it.
