@@ -1280,7 +1280,7 @@ shapes left for follow-up items because each needs different substrate: the lead
 owner conjunct inside a nested `where(values(k).is(c))` (T4's lowering fix is its natural home); and the decorrelated
 `flatMap(V().where(neq('a'))…)` cross-joins a materialized nodes CTE that no seek can narrow (part of (b)'s design).
 
-✅ **T3(b) LANDED IN PART — the read-in-full bodies.** A physical pass, `magic` (`src/rel/passes/magic.ts`, between
+✅ **T3(b) LANDED IN PART (7971f932) — the read-in-full bodies.** A physical pass, `magic` (`src/rel/passes/magic.ts`, between
 `leading` and `semijoin`): a Filter conjunct `[NOT] EXISTS B(x)` inside a correlated body, `B` reading one never-NULL
 column `x` of the Filter's input and nothing else, becomes a semi/anti-join on `x` to the passing set of the MAGIC
 SET — the distinct `x` over the Filter's input for every host row, decorrelated by `decorrelate` (the domain is the
@@ -1293,7 +1293,7 @@ now; `map(…)`, `local(local(…))`, `local(…not(…)…)`, `local(union(…)
 Uniform out-degree 4 graph, 1k → 8k: every rewritten form as fast or faster (`local(…gt(50)…)` 145 → 75 ms);
 out-degree 20: 3.3 s → 1.2 s. Point query `g.V(21).local(…)` unchanged (~3 ms at both sizes). Witnesses in
 `test/compiler/walk-condition-hub-scale.exec.test.ts`.
-**Not landed — witness 2, the EXISTS body (`g.V().where(out().out().where(in().has(…)))`, still 48× at a hub).**
+**Remains: witness 2, the existence body (`where(...)`, `filter(...)`, a first-row `map`; `g.V().where(out().out().where(in().has(…)))`), still about 48× at a hub.**
 The pass fires only where every row of the domain is work the plan does anyway (`demanded`: under an aggregate,
 sort, window or ≤1 row, up to the plan root). An EXISTS body stops at its first passing row, and built there the
 domain cost `g.V().where(out().out().where(in().has('age',gt(20)))).count()` 10.6 → 505 ms at 8k on the
