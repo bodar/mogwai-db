@@ -373,10 +373,7 @@ export function decorrelateAll(
       return at;
     };
     const paired = new Set<string>();
-    const conjuncts: Expr[] = [];
-    const split = (e: Expr): void => { if (e.kind === 'binary' && e.op === 'and') { split(e.left); split(e.right); } else conjuncts.push(e); };
-    split(r.on);
-    for (const e of conjuncts) {
+    for (const e of conjuncts(r.on)) {
       if (e.kind !== 'binary' || (e.op !== '=' && e.op !== 'is')) return null;
       const [l, rt] = e.left.kind === 'col' && e.left.rel === r.left.id ? [e.left, e.right] : [e.right, e.left];
       if (l.kind !== 'col' || l.rel !== r.left.id || rt.kind !== 'col' || rt.rel !== r.right.id) return null;
