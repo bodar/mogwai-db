@@ -1227,6 +1227,13 @@ Fencing the CTE by hand gave identical answers and 34.5 → 24.4 ms. **Item:** f
 constant factor where no state is shared. Cheap, same item: `sql-hygiene` checks a subquery evaluated twice per row
 but not a CTE inlined twice per query — teach it that, so the next one is a gate failure, not a review finding.
 
+✅ **LANDED (ec2db3de).** `fenced` (`src/rel/passes/name.ts`) renders a shared, bound relation `AS MATERIALIZED` when it
+draws OR when `copyRerunsBarrier` (`src/rel/copies.ts`, the flattener model minus the computed-column half) says a
+flattenable top would re-run a walk or barrier per reader — so `perState`'s two reads (and every other such shared CTE)
+run the walk once (witness 58.7 → 38.8 ms at 8k). `sql-hygiene` now fails any WITH-defined CTE that EXPLAIN lists as
+CO-ROUTINE/MATERIALIZE more than once per statement (`test/support/cte-runs.ts`); corpus at zero. `walk.ts` documents
+per-state's constant factor. Remains: nothing.
+
 ### T3 — One correlated EXISTS per owner scan; per-row correlated EXISTS at a hub (MAJOR, super-linear, common reach)
 
 Three findings share one root: a correlated EXISTS evaluated per candidate per host, with no rewrite to a
