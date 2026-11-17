@@ -1,7 +1,7 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, isPred, stepChain, type Arg, type Pred, type Step } from '../../gremlin/frontend.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { PATH_FAMILY, REDUCERS, addsUnlabelledTraversers, isLocalScope, isStreamBarrier, type IRStep } from './step.ts';
+import { PATH_FAMILY, REDUCERS, addsUnlabelledTraversers, isLocalScope, isStreamBarrier, membershipOf, type IRStep } from './step.ts';
 import { eachChainDeep, eachChildChain, eachStepDeep, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 
 // ---------- labels: who BINDS one, who READS one ----------
@@ -332,13 +332,11 @@ const JAVA_SCALAR_CLASS: Readonly<Record<string, string>> = {
  *  resolution this compile does not model (a parameterized predicate, an empty collection). */
 interface WhereKey { readonly key: unknown; readonly type: unknown; readonly unnamed: boolean; readonly membership?: boolean }
 
-/** The one SIDE-EFFECT read a `where` key has a lowering for: a bare `where(P.within(k))`/`where(P.without(k))`
- *  — membership of the current traverser in the collection `k` (`collectionMembership`, `rel/lower/filter.ts`). */
-const isMembershipWhere = (args: readonly { readonly value: unknown }[]): boolean => {
-  const pred = args.length === 1 ? args[0]!.value : undefined;
-  return isPred(pred) && (pred.op === 'within' || pred.op === 'without') && pred.operands.length === 1
-    && typeof pred.operands[0]!.value === 'string';
-};
+/** The one SIDE-EFFECT read a `where` key has a lowering for: a bare `where(P)` that `membershipOf` decodes —
+ *  membership of the current traverser in the collection `k`, under any `not`s (`collectionMembership`,
+ *  `rel/lower/filter.ts`). */
+const isMembershipWhere = (args: readonly { readonly value: unknown }[]): boolean =>
+  args.length === 1 && membershipOf(args[0]!.value) !== null;
 
 /**
  * A `where(P)` / `where(startKey, P)` SCOPE KEY this compile cannot resolve the way the reference does —
@@ -359,7 +357,8 @@ const isMembershipWhere = (args: readonly { readonly value: unknown }[]): boolea
  * - a key that is not a STRING is the reference's construction-time refusal (`getSelectKey`), raised here
  *   with its exact wording where the boxed class is unambiguous — every depth, before any lowering;
  * - a key a SIDE EFFECT names (`withSideEffect`, `aggregate('x')`, …) declines — the side effect wins over a
- *   label — EXCEPT the bare membership form `where(P.within(k))`/`where(P.without(k))` (`isMembershipWhere`),
+ *   label — EXCEPT the bare membership form `where(P.within(k))`/`where(P.without(k))`, under any `not`s
+ *   (`isMembershipWhere`),
  *   which `collectionMembership` lowers (and which itself declines a side effect it cannot read as a set);
  * - a key NO `as()`/`match()` binds anywhere in the tree declines: the reference reads a Map entry or
  *   throws, where a lowering would read the string as a value;

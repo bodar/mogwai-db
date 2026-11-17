@@ -599,6 +599,40 @@ export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choo
 export const asBranchKind = (name: string): BranchKind | null =>
   BRANCH_KINDS.has(name) ? name as BranchKind : null;
 
+// ---------- `where(P.within(k))` as COLLECTION MEMBERSHIP: the one decode ----------
+
+/** A `where(P)` predicate read as membership of the current traverser in the side effect `key`;
+ *  `negated` is non-membership. */
+export interface Membership { readonly key: string; readonly negated: boolean }
+
+/**
+ * PURE. Decode a `where(P)` predicate as collection membership — a single-operand `within(k)`/`without(k)`
+ * over a string key (or a one-member list of one), under any number of `not`s — else null. The ONE recogniser both the whole-tree key
+ * check (`unresolvableWhereKey`, `ir/labels.ts`) and the lowering (`collectionMembership`,
+ * `rel/lower/filter.ts`) read, so they cannot disagree on what is a membership test.
+ *
+ * `P.not(p)` is `p.negate()` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/P.java:782`),
+ * and `Contains.within`'s negation is `without`, so each `not` flips the polarity and keeps the operand —
+ * `WherePredicateStep` then reads that operand as its select key exactly as it would un-negated. Several
+ * operands (`within('x','y')`) are not membership in ONE collection (`getSelectKey` reads only the first
+ * member), so they are not decoded here.
+ */
+export function membershipOf(pred: unknown): Membership | null {
+  let negated = false;
+  while (isPred(pred) && pred.op === 'not' && pred.operands.length === 1) {
+    negated = !negated;
+    pred = pred.operands[0]!.value;
+  }
+  if (!isPred(pred) || (pred.op !== 'within' && pred.op !== 'without') || pred.operands.length !== 1) return null;
+  const operand = pred.operands[0]!.value;
+  // A one-member list is the same key — `P.within(Collection)` holds the list and `getSelectKey` takes its
+  // first member — and it is what every GLV sends: gremlin-js renders `P.within("x")` as `within(["x"])`
+  // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/lib/process/gremlin-lang.ts` `_predicateAsString`).
+  const key = Array.isArray(operand) && operand.length === 1 ? operand[0] : operand;
+  if (typeof key !== 'string') return null;
+  return { key, negated: negated !== (pred.op === 'without') };
+}
+
 // ---------- `is(typeOf(GType.X))` as a RETYPE: the one decode ----------
 //
 // A `typeOf` assert is a FILTER wherever the traverser's GType is already known — that is

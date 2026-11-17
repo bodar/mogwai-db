@@ -306,7 +306,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXbothE_otherV_hasXage_ltX30XXX_timesX2X',
   ],
   'group-side-effect': [
-    'g_VX1X_out_aggregateXxX_out_whereXnotXwithinXaXXX',
     'g_V_aggregateXxX_byXout_order_byXnameXX_capXxX',
     'g_V_asXaX_groupXmX_by_byXbothE_countX_barrier_selectXmX_selectXselectXaXX',
     'g_V_asXaX_groupXmX_by_byXbothE_countX_barrier_selectXmX_selectXselectXaXX_byXmathX_plus_XX',

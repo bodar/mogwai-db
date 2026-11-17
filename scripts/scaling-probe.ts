@@ -241,6 +241,13 @@ const SHAPES: readonly Shape[] = [
   { name: 'collect: values.aggregate.fold.V.out.values.where(within)', query: "g.V().values('name').aggregate('x').fold().V().out().values('name').where(within('x')).count()" },
   { name: 'collect: sideEffect(out.aggregate).where(without).repeat', query: "g.V().sideEffect(out().aggregate('x')).where(without('x')).repeat(out()).times(1).count()" },
   { name: 'collect: union(sideEffect(aggregate)).where(without)', query: "g.V().union(sideEffect(out().aggregate('x')), identity()).where(without('x')).count()" },
+  // `P.not(within(k))` is non-membership (`membershipOf`): the same one uncorrelated probe as `without`.
+  { name: 'membership: out.aggregate.out.where(not(within))', query: "g.V().out().aggregate('x').out().where(P.not(within('x'))).count()" },
+  { name: 'membership: out.aggregate.out.where(not(not(within)))', query: "g.V().out().aggregate('x').out().where(P.not(P.not(within('x')))).count()" },
+  { name: 'membership: person.out(created).aggregate.in.out.where(not(within))', query: "g.V().hasLabel('person').out('created').aggregate('stash').in('created').out('created').where(P.not(within('stash'))).count()" },
+  { name: 'membership: local(where(not(within)))', query: "g.V().out().aggregate('x').out().local(where(P.not(within('x')))).count()" },
+  { name: 'membership: project.by(out.where(not(within)).count)', query: "g.V().out().aggregate('x').fold().V().project('c').by(out().where(P.not(within('x'))).count()).count()" },
+  { name: 'membership: values.aggregate.fold.V.values.where(not(within))', query: "g.V().values('age').aggregate('x').fold().V().values('age').where(P.not(within('x'))).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

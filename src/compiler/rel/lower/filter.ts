@@ -5,7 +5,7 @@ import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource, IdQuery } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
-import { collectionAssert } from '../../ir/step.ts';
+import { collectionAssert, membershipOf } from '../../ir/step.ts';
 import type { ChildHost, Subject } from '../child.ts';
 import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, typedValueKey, type TypedOperand } from '../predicate.ts';
 import { inferredVtype } from '../tag.ts';
@@ -335,9 +335,14 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, sour
  *  operand? `Scoping.getScopeValue` resolves a scope key against the side effects BEFORE the path labels
  *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java`),
  *  so where a name is both, the collection wins and the alias-compare route must not claim it. */
-export const namesACollection = (pred: unknown, ctx: ChainCtx): boolean =>
-  isPred(pred) && pred.operands.some((operand) =>
-    (typeof operand.value === 'string' && ctx.collections.has(operand.value)) || namesACollection(operand.value, ctx));
+export const namesACollection = (pred: unknown, ctx: ChainCtx): boolean => {
+  const names = (v: unknown): boolean => typeof v === 'string' && ctx.collections.has(v);
+  // A list operand's members are select keys too (`getSelectKey` reads a collection's first member, and a GLV
+  // sends `within("x")` as `within(["x"])`), so a list naming a collection is claimed here — and declines in
+  // `collectionMembership` unless `membershipOf` reads it as one key.
+  return isPred(pred) && pred.operands.some((operand) =>
+    names(operand.value) || (Array.isArray(operand.value) && operand.value.some(names)) || namesACollection(operand.value, ctx));
+};
 
 /**
  * `where(P.within('x'))` / `where(P.without('x'))` where `x` is a SIDE EFFECT — "is the current traverser
@@ -346,21 +351,21 @@ export const namesACollection = (pred: unknown, ctx: ChainCtx): boolean =>
  * value; `within`/`without` over a Collection value is membership (`getSelectKey`'s own "hack for
  * within("x")" —
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`).
- * Multiplicity is irrelevant to membership, so the member relation is read as a set via `EXISTS`.
+ * Multiplicity is irrelevant to membership, so the member relation is read as a set via `EXISTS`. A `not`
+ * over the predicate is its negation (`P.not(within('x'))` is `without('x')`) — `membershipOf` decodes both.
  *
  * `undefined` — the predicate names no collection (not this route); `null` — it does, in a form this
  * does not build (another op, several keys, a seeded/keyed collection, a member kind the subject cannot
  * equal), so it DECLINES rather than reading the name as a label or a string.
  */
 function collectionMembership(pred: unknown, subject: Subject, ctx: ChainCtx, fresh: Minter): Expr | null | undefined {
-  if (!namesACollection(pred, ctx) || !isPred(pred)) return undefined;
-  if ((pred.op !== 'within' && pred.op !== 'without') || pred.operands.length !== 1) return null;
-  const name = pred.operands[0]!.value;
-  if (typeof name !== 'string') return null;
-  const collection = ctx.collections.get(name);
+  if (!namesACollection(pred, ctx)) return undefined;
+  const membership = membershipOf(pred);
+  if (!membership) return null;
+  const collection = ctx.collections.get(membership.key);
   const members = collection && readUnfolded(collection, fresh);
   if (!members) return null;
-  const negated = pred.op === 'without';
+  const { negated } = membership;
   // MEMBERSHIP IS AN UNCORRELATED `IN (SELECT …)` — SQLite evaluates the member set ONCE into an ephemeral
   // index and probes it per row, O(N log M) wherever the test lands. A correlated `EXISTS` leans on the
   // planner building an AUTOMATIC index on the member relation, which it does not do everywhere (under a
@@ -413,9 +418,15 @@ const memberOf = (expr: Expr, plan: Rel): Expr => ({
  */
 function scalarMembership(subject: TypedOperand, members: Rel, member: TypedOperand, fresh: Minter): Expr {
   const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
-  const [mf, mk] = typedValueKey(member.value, member.tag ?? inferredVtype(member.value));
+  // The member's tag is projected ONCE as a column under the key — `typedValueKey` reads its vtype in every
+  // arm of both key columns, and a tag that is a `coalesce` over `inferredVtype` would be re-spelled at each.
+  const tagged = make.project({
+    id: fresh('cmt'), input: members, channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)),
+    exprs: [['v', member.value], ['t', member.tag ?? inferredVtype(member.value)]],
+  });
+  const [mf, mk] = typedValueKey(col(tagged.id, 'v'), col(tagged.id, 't'));
   const set = make.project({
-    id: fresh('cmk'), input: members, channels: [], type: typeOf(meta('f', 'text', true), meta('k', 'any', true)), exprs: [['f', mf], ['k', mk]],
+    id: fresh('cmk'), input: tagged, channels: [], type: typeOf(meta('f', 'text', true), meta('k', 'any', true)), exprs: [['f', mf], ['k', mk]],
   });
   const nulls = make.project({
     id: fresh('cmn'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
