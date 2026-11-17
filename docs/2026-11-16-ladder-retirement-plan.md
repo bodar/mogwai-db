@@ -524,6 +524,13 @@ runs. Either revert that or record it in the probe.
   (`where(property(..))`, `not(drop())`, `where(addE(..))`, `where(mergeV(..))`), not only label writes. Say so in
   `test/compiler/existence-prefix.exec.test.ts`.
 
+✅ **LANDED (ee8157e8).** One builder, `writeInChild` (`src/compiler/unsupported.ts`), names a graph write in any
+child body. It is called from `programWrites`' walk (`src/compiler/rel/write.ts`), which already visits every child
+with its host. A filter host keeps the write-in-filter wording; coalesce/optional/choose/union point at
+`mergeV()`/`mergeE()`; every other host says to move the write out. `resource-path` names its host
+(`ChainCtx.host`) and says when the path is asked for inside the body. `pooledGroup` names a random draw in a group
+value. `CopiedDraw`'s suggestion now fits a predicate. No SQL change. Remains: nothing.
+
 ### M5 — Refine N6's FIRES count before N7 (cheap; then N7)
 
 `fires` counts four ordinary `choose()` queries whose first order throws `CopiedDraw` and whose second order ALSO
