@@ -1280,6 +1280,26 @@ shapes left for follow-up items because each needs different substrate: the lead
 owner conjunct inside a nested `where(values(k).is(c))` (T4's lowering fix is its natural home); and the decorrelated
 `flatMap(V().where(neq('a'))…)` cross-joins a materialized nodes CTE that no seek can narrow (part of (b)'s design).
 
+✅ **T3(b) LANDED IN PART — the read-in-full bodies.** A physical pass, `magic` (`src/rel/passes/magic.ts`, between
+`leading` and `semijoin`): a Filter conjunct `[NOT] EXISTS B(x)` inside a correlated body, `B` reading one never-NULL
+column `x` of the Filter's input and nothing else, becomes a semi/anti-join on `x` to the passing set of the MAGIC
+SET — the distinct `x` over the Filter's input for every host row, decorrelated by `decorrelate` (the domain is the
+host's rows, so a point query stays a point query), the test asked once each, fenced. `semiJoinPerDistinct`
+(`src/rel/decorrelate.ts`) is the one builder for that form; `perState` (`src/compiler/rel/walk.ts`) now uses it
+too. Guards: the host rows self-contained (nested hosts reach theirs through the enclosing host's), nothing draws
+(so `owns: () => false` is sound), one host column read. Measured on the hub graph (130 → 1050 chains):
+`local(out().out().where(in().has('age',gt(50))).count()).sum()` 13.1 → 526 ms (40×) before, 8.8 → 25.5 ms (2.9×)
+now; `map(…)`, `local(local(…))`, `local(…not(…)…)`, `local(union(…))`, `dedup()` before the test all 16–20× → 3–5×.
+Uniform out-degree 4 graph, 1k → 8k: every rewritten form as fast or faster (`local(…gt(50)…)` 145 → 75 ms);
+out-degree 20: 3.3 s → 1.2 s. Point query `g.V(21).local(…)` unchanged (~3 ms at both sizes). Witnesses in
+`test/compiler/walk-condition-hub-scale.exec.test.ts`.
+**Not landed — witness 2, the EXISTS body (`g.V().where(out().out().where(in().has(…)))`, still 48× at a hub).**
+The pass fires only where every row of the domain is work the plan does anyway (`demanded`: under an aggregate,
+sort, window or ≤1 row, up to the plan root). An EXISTS body stops at its first passing row, and built there the
+domain cost `g.V().where(out().out().where(in().has('age',gt(20)))).count()` 10.6 → 505 ms at 8k on the
+out-degree-20 graph (48× slower), `gt(50)` 16 → 509 ms. With no statistics neither form dominates — owner call
+(`docs/outstanding-work.md`). The S2-boundary shapes stay with S6a, as the review moved them.
+
 ### T4 — `where(is(c))` / `filter(is(c))` over a value lowers like `is(c)` (minor, depth gap next to S5a's witness)
 
 `V().where(neq('a')).values('age').where(is(99))` and `.filter(is(99))` do not get S5a's narrowing and are roughly

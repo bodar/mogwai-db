@@ -1,11 +1,12 @@
 import { CHANNEL_GROUP_POLICY, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
-import { col, compilerInt, eq, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import { exprRels, forEachExpr, forEachRel, substRelId } from '../../rel/walk.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { RelType } from '../../rel/types.ts';
 import { columnIsStored, spelledOuterColumns } from '../../rel/copies.ts';
+import { semiJoinPerDistinct } from '../../rel/decorrelate.ts';
 import { TRAVERSER_STATE_READS, type IRStep } from '../ir/step.ts';
 import { someStepDeep } from '../ir/walk.ts';
 import { scopeKeyReads } from '../ir/labels.ts';
@@ -219,19 +220,8 @@ export function repeatWalk(
       id: fresh('wsk'), input: rows, channels: stateChannels, type: stateType,
       exprs: [['id', col(rows.id, 'id')], ...stateChannels.map((channel) => [channel.col, col(rows.id, channel.col)] as const)],
     });
-    const states = make.distinct({ id: fresh('wsd'), input: keys, channels: stateChannels, type: stateType });
-    const tested = child.predicate(body, subject(states), false, aliases);
-    if (!tested) return null;
-    // FENCED (`AS MATERIALIZED`): the passing states are ONE relation computed once. Unfenced, SQLite flattens
-    // the condition into the semi-join's probe and asks it again per walk row — the quadratic form this replaces.
-    const passing = make.materialize({
-      id: fresh('wsp'), channels: stateChannels, type: stateType, fenced: true,
-      input: make.filter({ id: fresh('wst'), input: states, channels: stateChannels, type: stateType, pred: tested }),
-    });
-    return make.join({
-      id: fresh('wsj'), left: rows, right: passing, join: 'semi', channels: rows.channels, type: rows.type,
-      on: stateType.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name))).reduce((all, one) => and(all, one)),
-    });
+    // The distinct states, the condition asked of each, the passing set fenced, one semi-join (`semiJoinPerDistinct`).
+    return semiJoinPerDistinct(rows, keys, (states) => child.predicate(body, subject(states), false, aliases) ?? null, fresh, 'ws');
   };
   // EVERY CONDITION IS HANDED THE WALK'S LABELS (`aliases`): a condition traverser is a split of the walk's and
   // carries its path (`B_O_S_SE_SL_Traverser.split`,

@@ -115,6 +115,38 @@ export function keyMatch(key: readonly KeyColumn[], left: (k: KeyColumn) => Expr
 
 type Minter = (hint: string) => RelId;
 
+/**
+ * A TEST OF A ROW'S KEY ALONE, ASKED ONCE PER DISTINCT KEY: `rows ⋉ Materialize(fenced, σ_test(Distinct(keys)))`,
+ * joined on every column of `keys` (each a column of `rows` under the same name). `keys` is the KEY PROJECTION —
+ * of `rows` itself, or of a relation every key `rows` holds is also in (a DOMAIN); `test` asks the condition of
+ * one distinct key row, `null` where it does not lower over one. `join: 'anti'` keeps the rows whose key FAILS —
+ * a negated test, `NOT EXISTS`, on the same passing set.
+ *
+ * Asked per row, a condition repeats its whole work once per row holding the same key — at a hub, quadratic in
+ * the rows reaching it. Asked of the distinct keys it is one test per key, and a row passes iff its key passed:
+ * a DISTINCT pushed below a semi-join (Calcite's `SemiJoinRule` family,
+ * `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/SemiJoinRule.java`). The passing set is FENCED
+ * (`AS MATERIALIZED`): unfenced, SQLite flattens the condition into the semi-join's probe and asks it per row
+ * again — the form this replaces. Built where a key's answer is known to be a function of the key (`perState`'s
+ * traverser state, `src/compiler/rel/walk.ts`; the `magic` pass's element, `src/rel/passes/magic.ts`); a scoped
+ * one is the right side `existenceOverOwnRows` (below) leaves unkeyed, so it stays one set across scopes.
+ */
+export function semiJoinPerDistinct(
+  rows: Rel, keys: Rel, test: (states: Rel) => Expr | null, fresh: Minter, hint: string, join: 'semi' | 'anti' = 'semi',
+): Rel | null {
+  const states = make.distinct({ id: fresh(`${hint}d`), input: keys, channels: keys.channels, type: keys.type });
+  const tested = test(states);
+  if (!tested) return null;
+  const passing = make.materialize({
+    id: fresh(`${hint}p`), channels: keys.channels, type: keys.type, fenced: true,
+    input: make.filter({ id: fresh(`${hint}t`), input: states, channels: keys.channels, type: keys.type, pred: tested }),
+  });
+  return make.join({
+    id: fresh(`${hint}j`), left: rows, right: passing, join, channels: rows.channels, type: rows.type,
+    on: keys.type.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name))).reduce((all, one) => and(all, one)),
+  });
+}
+
 /** The columns of relation `id` that `e` reads, inside the subplans it correlates included. */
 function columnsRead(e: Expr, id: RelId): ReadonlySet<string> {
   const out = new Set<string>();

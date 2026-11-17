@@ -10,6 +10,7 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoinAll, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { fuseAll } from '../../rel/passes/fuse.ts';
 import { leadingAll } from '../../rel/passes/leading.ts';
+import { magicAll } from '../../rel/passes/magic.ts';
 import { dropUnreadJoins } from '../../rel/passes/prune.ts';
 import { edgePairAll } from '../../rel/passes/edge-pair.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
@@ -4360,9 +4361,11 @@ const lowered = (
   // A long spine the fold CUT (`boundedSpine`) is part of the same program: its pieces and the result run
   // through every pass as one plan, so a node they share stays one node and is named once.
   const hoisted = liveHoisted(chain.hoisted ?? [], [wire.rel, ...(chain.effects ?? []).map((effect) => effect.node)]);
+  // `magic` (`src/rel/passes/magic.ts`, physical: a correlated body's one-element test asked once per distinct
+  // element across hosts) runs after `leading` and before `semijoin`, so the seek still drives the shared test.
   // `edgePair` (`src/rel/passes/edge-pair.ts`, physical, always on: an edge read pinned at BOTH endpoints is given
   // an index prefix it can seek) runs last, over the access paths the others settled.
-  const passed = edgePairAll(semijoinAll(dropUnreadJoins(leadingAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel]))), [
+  const passed = edgePairAll(semijoinAll(dropUnreadJoins(magicAll(leadingAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel])))), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
   ]));

@@ -577,15 +577,13 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   once per distinct element INSIDE the recursion, which SQLite's recursive term cannot hold (no DISTINCT, no
   keyed join) — e.g. a reachability pre-pass whose condition set the term joins. Declining the movement head
   would retire trunk answers, so it is an owner call.
-- **A filtering correlated body under a host, reached at a hub, is keyed per SCOPE (scope-free-subterm).** The
-  decorrelator keys every node over a scoped input (`src/rel/decorrelate.ts`), so a condition that reads only
-  the element is still asked once per (scope, element): `g.V().where(out().out().where(in('created').has('age',
-  gt(45))))` 22.8× per 8× on the hub graph (trunk), its `local(…count())` twin 20×, and a walk under a host —
-  `g.V().where(repeat(out()).emit(<filtering condition, any head>))` 18–21× — even though the top-level walk's
-  emit is now per distinct state (`perState`, `src/compiler/rel/walk.ts`, ~6×). Needs a decorrelator rule that
-  leaves a subterm UNKEYED when its consumer only tests membership of a scope-independent fact (a semi-join to
-  passing elements matched on the element alone) — Calcite's analogue is pulling an uncorrelated aggregate out
-  of a correlate (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/RelDecorrelator.java`).
+- **A correlated EXISTS body at a hub asks its element test once per host (scope-free-subterm, EXISTS half).**
+  The read-in-full half LANDED as the `magic` pass (`src/rel/passes/magic.ts`, T3(b)): `local(…count())`,
+  `map(…count())`, `local(local(…))`, `not(…)` inside a counted body went 16–41× → 3–4× per 8× on the hub graph.
+  What remains is an EXISTS / first-row body: `g.V().where(out().out().where(in().has('age',gt(50))))` 48× per
+  8× at a hub. A magic domain there is all the work the short-circuit skips (measured 10.6 ms → 505 ms at 8k on a
+  uniform out-degree-20 graph with a passing test), so with no statistics neither form wins. Owner call: accept
+  the hub case, or a substrate that keeps the short-circuit and still shares the test (none known on SQLite).
 
 - ✅ **LANDED (8dbb8b44, with cc-7) — A chain of value-run `is()` re-inlines its input per `CASE` (rf3-is-chain-size)**
   — `valueRun` members read `once()`'s value: three `is()` 142,217 → 3,883 bytes, four now compile. Remains:

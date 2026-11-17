@@ -120,6 +120,41 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     }, SCALE_TIMEOUT_MS);
   }
 
+  // A body READ IN FULL whose filter tests one element by a subquery asks it once per distinct element across
+  // every host — the magic set (`src/rel/passes/magic.ts`): the hub's in-neighbourhood is read once, not once per
+  // host reaching it (measured 16–41× per 8× before, ~3–4× now).
+  for (const [q, atSmall] of [
+    ["g.V().local(out().out().where(in().has('age',gt(50))).count()).sum()", 0],
+    ["g.V().local(out().out().where(in().has('age',gt(45))).count()).sum()", 664],
+    ["g.V().map(out().out().where(in().has('age',gt(45))).count()).sum()", 664],
+    ["g.V().local(local(out().out().where(in().has('age',gt(45))).count())).sum()", 664],
+    ["g.V().local(out().out().not(in().has('age',gt(45))).count()).sum()", 1156],
+    ["g.V().local(union(out().out().where(in().has('age',gt(45))),out()).count()).sum()", 2874],
+    ["g.V().local(out().out().dedup().where(in().has('age',gt(45))).count()).sum()", 664],
+  ] as const) {
+    test(`magic: ${q}`, () => {
+      expect(count(small, q)).toBe(atSmall);
+      expect(read(q).sql).toContain('AS MATERIALIZED');
+      expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));
+    }, SCALE_TIMEOUT_MS);
+  }
+
+  // A SELECTIVE host keeps its own size: the domain is the host's rows, never the whole graph — one vertex's
+  // two-hop neighbourhood at either size.
+  test("magic: a point query stays a point query — g.V('p0_1').local(out().out().where(in().has('age',gt(45))).count())", () => {
+    const q = "g.V('p0_1').local(out().out().where(in().has('age',gt(45))).count())";
+    expect(count(small, q)).toBe(1);
+    expect(read(q).sql).toContain('AS MATERIALIZED');
+    expect(timed(() => runWith(large, q)) / Math.max(timed(() => runWith(small, q)), 5)).toBeLessThan(2);
+  }, SCALE_TIMEOUT_MS);
+
+  // An EXISTS body stops at its first row, so a domain would be all the work it skips: on a uniform graph of
+  // out-degree 20 a passing `where` measured 10.6 ms → 505 ms at 8k with the rewrite. It keeps its short-circuit.
+  test('magic: an existence body is not rewritten', () => {
+    expect(read("g.V().where(out().out().where(in().has('age',gt(50)))).count()").sql).not.toContain('MATERIALIZED');
+    expect(read("g.V().local(out().out().where(in().has('age',gt(50))).count()).limit(3)").sql).not.toContain('MATERIALIZED');
+  });
+
   test('an until is asked once per walk row and read everywhere else', () => {
     const { sql } = read("g.V().repeat(out()).until(has('age',gt(40))).emit(in('created').has('age',gt(45))).count()");
     expect(sql.match(/> 40\)/g)).toHaveLength(2); // the INT and REAL spellings of the one test
