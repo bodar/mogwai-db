@@ -4,7 +4,7 @@
 // the SAME node (`src/rel/walk.ts` `substRelId`, Calcite's `RelShuttleImpl.visitChild` rule), or it is named
 // twice: two byte-identical MATERIALIZED CTEs, the graph scanned and sorted once per copy.
 import { test, expect, describe } from 'bun:test';
-import { read, seededStore, run, bare } from '../support/harness.ts';
+import { bagOf, read, seededStore, run, bare } from '../support/harness.ts';
 
 /** Every MATERIALIZED body in a plan, as text — two equal bodies are one relation named twice. */
 const materializedBodies = (sql: string): string[] => {
@@ -56,4 +56,37 @@ describe('the answers are unchanged', () => {
     expect(scalars('g.V().map(V().constant(null))')).toEqual(Array(6).fill(null)));
   test('a filter over the read', () =>
     expect(bare(run(s, "g.V().where(map(V().values('name')).is('marko')).count()"))[0].v).toBe(6));
+});
+
+// THE UNIT ROW IS NEVER A CTE (`isUnitValues`, `src/rel/block.ts`). Every correlated block re-sourcing from the
+// constant one-row seed shares it, and `name` used to bind it — `rN AS (SELECT … FROM (VALUES (1)) …)`, read
+// through a `Ref` the emitter's fold cannot erase, re-entered per host row. Left inline, each block's fold
+// (`withoutUnit`) erases it.
+describe('the constant unit row is not bound into a CTE', () => {
+  const unitCte = /\w+ AS (MATERIALIZED )?\(SELECT [^()]* FROM \(VALUES \(1\)\) \w+\)/;
+  for (const q of [
+    "g.V().map(values('name'))",
+    "g.V().map(out().values('name'))",
+    "g.withPath().V().as('a').out().map(select('a').values('name'))",
+    "g.V().out().map(values('age'))",
+    "g.V().local(map(out().values('name')))",
+    "g.V().where(map(out().values('name')).is('lop'))",
+    "g.V().union(map(values('name')), map(out().values('name')))",
+    "g.V().project('a').by(map(out().values('name')))",
+    "g.V().coalesce(map(out().values('name')), constant('x'))",
+    "g.V().repeat(out()).times(2).map(values('name'))",
+  ])
+    test(q, () => expect(read(q).sql).not.toMatch(unitCte));
+
+  // Measured 1423 bytes while the unit row was bound, 1314 after.
+  test('map(out().values(name)) stays within its byte bound', () =>
+    expect(read("g.V().map(out().values('name'))").sql.length).toBeLessThanOrEqual(1314));
+
+  test('the answers are unchanged', () => {
+    expect(bagOf(scalars("g.V().map(values('name'))"))).toEqual(bagOf(['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']));
+    expect(bagOf(scalars("g.V().map(out().values('name'))"))).toEqual(bagOf(['vadas', 'lop', 'lop']));
+    expect(bagOf(scalars("g.withPath().V().as('a').out().map(select('a').values('name'))")))
+      .toEqual(bagOf(['marko', 'marko', 'marko', 'josh', 'josh', 'peter']));
+    expect(bagOf(scalars("g.V().out().map(values('age'))"))).toEqual(bagOf([27, 32]));
+  });
 });

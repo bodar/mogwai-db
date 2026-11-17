@@ -1,4 +1,5 @@
 import { CopiedDraw } from '../../sql/kernel/budget.ts';
+import { isUnitValues } from '../block.ts';
 import { draws } from '../copies.ts';
 import { materialize, ref } from '../factory.ts';
 import { relId } from '../types.ts';
@@ -83,11 +84,17 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
    * ⚠️ **The question is FREE reference, not containment**, and the difference is a whole `Recursive`
    * node: it binds its own name, so moving it moves the definition too. `containsSelfRef` made every
    * walk unbindable — a walk always holds its own reference — so a SHARED walk lost its CTE and was
-   * spelled, and computed, once per occurrence (`hasFreeSelfRef` carries the measurement). */
+   * spelled, and computed, once per occurrence (`hasFreeSelfRef` carries the measurement).
+   *
+   * **The constant unit row is never bound** (`isUnitValues`, `src/rel/block.ts` — the one classification
+   * the emitter's `directSource` also asks). Shared by every correlated block that re-sources from it, it
+   * became `rN AS (SELECT … FROM (VALUES (1)) …)`, read through a `Ref` the emitter's fold cannot erase and
+   * re-entered per host row. Left inline it reaches each block as the `unit` source `withoutUnit` erases;
+   * spelling it again costs no bind, no read, no multiplicity and no draw. */
   const isRoot = new Set(roots);
   const binds = (rel: Rel): boolean =>
     !isRoot.has(rel) && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
-    && isSelfContained(rel);
+    && isSelfContained(rel) && !isUnitValues(rel);
   /**
    * ⚠️ **A SHARED relation that stays INLINE is evaluated once per spelling** — so if it DRAWS (`draws`,
    * `src/rel/copies.ts`), each spelling picks differently and the readers disagree about one traverser:

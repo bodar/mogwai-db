@@ -206,6 +206,18 @@ export const DIRECT_SOURCE: { readonly [K in RelKind]: boolean } = {
 };
 /** A relation that can stand in a FROM clause without a wrapping SELECT. */
 export const isDirectSource = (r: Rel): boolean => DIRECT_SOURCE[r.kind];
+/**
+ * THE UNIT ROW — a one-row `VALUES` whose every cell is a compiler constant (`(VALUES (1))`, the seed a
+ * re-sourced or correlated body starts from). It carries no bind, reads nothing, has multiplicity one and
+ * cannot draw, so spelling it again costs nothing; that is why two askers share this ONE classification:
+ * the emitter (`directSource`, `emit.ts`) marks it `unit` so a correlated block's fold erases it
+ * (`withoutUnit`), and `name` (`passes/name.ts`) never binds it into a CTE — a bound one reaches each
+ * correlated block as a `Ref`, which the fold cannot erase, and SQLite re-enters that CTE per host row.
+ * A multi-row or user-bound `VALUES` is not a unit and keeps the ordinary rules.
+ */
+export const isUnitValues = (r: Rel): boolean =>
+  r.kind === 'values' && r.rows.length === 1
+  && r.rows[0]!.every((e) => e.kind === 'lit' && e.source.startsWith('compiler-'));
 /** How the emitter aliases a FROM item: a `Scan` carries its own, everything else uses its `RelId`. */
 export const aliasOf = (r: Rel): string => (r.kind === 'scan' ? r.alias : r.id);
 /** A relation the block reaches only through a derived table: a fresh SELECT, one alias, no sources

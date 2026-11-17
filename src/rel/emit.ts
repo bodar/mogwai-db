@@ -1,5 +1,5 @@
 import { empty, identifier, jsonEachValues, keyedValue, list, q, raw, render, runTimeHole, textLiteral, value, type Expression, type RunTimeHole } from '../sql/kernel/q.ts';
-import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, maySplice, type Slots } from './block.ts';
+import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, isUnitValues, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import { col, compilerInt, type Expr } from './expr.ts';
 import { materialize } from './factory.ts';
@@ -633,7 +633,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         const alias = freshAlias(r, outer);
         const cols: Cols = new Map(r.type.cols.map((column, i) => [column.name, qualified(alias, `column${i + 1}`)]));
         for (const spelled of cols.values()) jsonText.add(spelled);
-        const unit = r.rows.length === 1 && r.rows[0]!.every((e) => e.kind === 'lit' && e.source.startsWith('compiler-'));
+        const unit = isUnitValues(r);
         return { item: { text: q`(VALUES ${rows})`, alias, ...(unit ? { unit: true as const } : {}) }, cols };
       }
     }

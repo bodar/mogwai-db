@@ -122,6 +122,14 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource: out.map(V.limit.values).path', query: "g.V().out().map(V().limit(1).values('name')).path().count()" },
   { name: 'resource: out.local(V.order.limit).path', query: "g.V().out().local(V().order().by('name').limit(1)).path().count()" },
   { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
+  // The unit row is never a CTE (`isUnitValues`, `src/rel/block.ts`): first-row `map(<traversal>)` reads, at depth.
+  { name: 'unit: map(values(name))', query: "g.V().map(values('name'))" },
+  { name: 'unit: withPath.as.out.map(select.values)', query: "g.withPath().V().as('a').out().map(select('a').values('name'))" },
+  { name: 'unit: local(map(out.values))', query: "g.V().local(map(out().values('name')))" },
+  { name: 'unit: where(map(out.values).is)', query: "g.V().where(map(out().values('name')).is('p1')).count()" },
+  { name: 'unit: union(map(values),map(out.values))', query: "g.V().union(map(values('name')), map(out().values('name')))" },
+  { name: 'unit: project.by(map(out.values))', query: "g.V().project('a').by(map(out().values('name')))" },
+  { name: 'unit: repeat(out).times(2).map(values)', query: "g.V().repeat(out()).times(2).map(values('name'))" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;
