@@ -59,7 +59,7 @@ import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, isLongSumClass, is
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { Declines } from '../unsupported.ts';
+import { Declines, writeInFilter } from '../unsupported.ts';
 import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
@@ -5044,7 +5044,11 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   // that `EarlyLimitStrategy` could not move, or a body read for its first result — is one the plan would
   // perform for the whole stream: a different answer, so the whole traversal declines. `programWrites`
   // walks every depth.
-  if (writes.truncated) return null;
+  if (writes.truncated) {
+    // A filter's write is named in the user's terms (`writeInFilter`), as the `existence` connector names it.
+    if (writes.truncatedFilter) settle(opts).declines.note(writeInFilter(writes.truncatedFilter.host, writes.truncatedFilter.write));
+    return null;
+  }
   const tail = lowerChainOf(steps, { ...opts, writes }, fresh, root);
   // The program-start questions its guards asked (`ProgramWrites.preChecks`), ahead of every statement.
   return tail && withPreChecks(writes, tail, fresh);

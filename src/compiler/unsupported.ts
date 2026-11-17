@@ -22,7 +22,10 @@ export type DeclineKind =
   | 'map-key-collision'
   /** `inject(x)` with values inside a CHILD traversal (a `local`/`map`/`by`/branch-arm body), where the
    *  reference injects only for the FIRST host it runs for (`injectTail`, `rel/lower.ts`). Always ADVISORY. */
-  | 'inject-in-child';
+  | 'inject-in-child'
+  /** A graph write inside a filter body (`where`/`filter`/`not`/`and`/`or` — the `existence` connector,
+   *  `lower/scoped.ts`): no route lowers an effect inside an existence test yet. */
+  | 'write-in-filter';
 
 /**
  * THE PREFIX IS A PROPERTY OF THE KIND, kept in this one table. Most declines say the traversal is
@@ -39,6 +42,7 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   // Advisory only, so the generic prefix is what the user reads; listed because the table is total.
   'map-key-collision': 'this traversal is ambiguous',
   'inject-in-child': 'this traversal is not supported yet',
+  'write-in-filter': 'this traversal is not supported yet',
 };
 
 /**
@@ -66,6 +70,19 @@ export class UnsupportedTraversal extends Error {
     return declined;
   }
 }
+
+/** The filter hosts — `TraversalFilterStep` and its kin keep a traverser on whether their body has a next. */
+export const FILTER_HOSTS: ReadonlySet<string> = new Set(['where', 'filter', 'not', 'and', 'or']);
+
+/** The `write-in-filter` decline: a graph write (`write`) inside a filter body (`host`). Terminal — no route
+ *  runs an effect inside an existence test, and the write must never be silently skipped. One message for
+ *  both sites that refuse it (the `existence` connector, `lower/scoped.ts`, and a filter's first-result
+ *  read in `programWrites`, `rel/write.ts`). */
+export const writeInFilter = (host: string, write: string): DeclineReason => ({
+  kind: 'write-in-filter', terminal: true,
+  message: `a write (${write}()) inside ${host}() — a filter body that writes; to write and then filter, put the `
+    + `write before or after ${host}()`,
+});
 
 /** One reason the lowering recorded. `terminal` is a decline that holds whatever else the compile
  *  finds (today's throw). Otherwise it is ADVISORY: a hint about why a probe declined, which may be a

@@ -256,6 +256,36 @@ export function collectsSideEffect(step: IRStep): boolean {
     || (KEYED_REDUCERS.has(step.name) && step.args.some((a) => typeof a.value === 'string'));
 }
 
+/** The mutating-step vocabulary — the one source of truth for "this traversal writes":
+ *  ReadOnlyStrategy rejects any of these, and SubgraphStrategy defers over them (a write's
+ *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
+export const MUTATING_STEPS: ReadonlySet<string> = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
+
+/** The name of the first graph write (`MUTATING_STEPS`) at any depth of `steps`, or `null` — what a decline
+ *  quotes to name the write it refuses. An unreadable body is skipped: this NAMES a write, it decides nothing. */
+export function firstWrite(steps: readonly Step[], params: ParamEnv): string | null {
+  let found: string | null = null;
+  someStepDeep(steps, params, (s) => MUTATING_STEPS.has(s.name) && (found = s.name, true));
+  return found;
+}
+
+/** Steps that may RAISE, or whose effect the IR cannot see — a service runs arbitrary code (and `io()`
+ *  and the graph algorithms desugar to one), and `fail()` is an explicit raise rather than an erroneous
+ *  value nothing reads. A drained body holding one is not inert. */
+const OPAQUE_OR_RAISING: ReadonlySet<string> = new Set(['fail', 'call', 'io', 'pageRank', 'peerPressure', 'connectedComponent', 'shortestPath']);
+
+/**
+ * THE EFFECT VOCABULARY — does this step do something beyond its own traverser stream, which deleting it
+ * would skip? A graph write (`MUTATING_STEPS`), a keyed side-effect collector (`collectsSideEffect`), or a
+ * raise / opaque service (`OPAQUE_OR_RAISING`). ONE predicate for every rewrite that deletes steps whose
+ * output nothing reads: `dropEffectFreeSideEffect` (a drained `sideEffect` body, `ir/strategies.ts`) and
+ * the existence trim (`isImpure`, `ir/productivity.ts`). A second, partial list there once missed
+ * `addLabel`/`dropLabel(s)` and a keyed `tree('t')`, so `where(__.addLabel('x').count())` trimmed to
+ * `where(identity())` and the write silently never happened.
+ */
+export const stepHasEffect = (s: Step): boolean =>
+  MUTATING_STEPS.has(s.name) || collectsSideEffect(s as IRStep) || OPAQUE_OR_RAISING.has(s.name);
+
 /** The three steps that MUTATE an element's labels. A base here rather than a private set in a
  *  lowering, because the question "is this traversal a label mutation" is now asked ABOVE the routing
  *  switch (`verifyLabelMutationTarget`) as well as inside one. */

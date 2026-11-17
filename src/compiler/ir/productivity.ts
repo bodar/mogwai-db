@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
 import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
-import { isLocalScope, SCALAR_TRANSFORMS } from './step.ts';
+import { isLocalScope, SCALAR_TRANSFORMS, stepHasEffect } from './step.ts';
 import { someStepDeep } from './walk.ts';
 
 // ---------- productivity: does a child body ALWAYS yield a traverser? ----------
@@ -161,28 +161,6 @@ export function existencePrefix<S extends Step>(body: readonly S[], params: Para
 /** The modulator steps a raw chain spells after their host (`absorbModulators` folds them later). */
 const RAW_MODULATORS: ReadonlySet<string> = new Set(['by', 'from', 'to', 'with']);
 
-/**
- * Steps that touch state beyond their own traverser stream, keyed by the arity that makes them do so.
- *
- * `true` = always side-effecting. A predicate is the KEYED form only: bare `group()`/`groupCount()`
- * are reducers, while `group('x')` writes a named side effect; bare `sack()` reads the accumulator,
- * `sack(op)` mutates it. Getting that distinction right is what lets the no-op Pass fire on
- * `where(__.group().by('name').count())` — a pure reducer body — while declining
- * `where(__.aggregate('x').count())`, where removing the step would skip the aggregate.
- */
-const SIDE_EFFECTING: Record<string, true | ((s: Step) => boolean)> = {
-  aggregate: true, store: true, subgraph: true,
-  property: true, addV: true, addE: true, mergeV: true, mergeE: true, drop: true,
-  group: (s) => s.args.length > 0,
-  groupCount: (s) => s.args.length > 0,
-  sack: (s) => s.args.length > 0,
-};
-
-const isSideEffecting = (s: Step): boolean => {
-  const rule = SIDE_EFFECTING[s.name];
-  return rule === true || (typeof rule === 'function' && rule(s));
-};
-
 /** A step whose evaluation can THROW over the data it meets — a value transform (`asNumber(GType.BYTE)`
  *  overflows, `toUpper()` rejects a non-String: `NumberHelper.java:724-800`, the `*GlobalStep.map`s) or
  *  `math()`. The reference evaluates a filter body whether or not the filter could reject
@@ -190,15 +168,16 @@ const isSideEffecting = (s: Step): boolean => {
  *  the input stream where the reference throws. */
 const mayRaise = (s: Step): boolean => SCALAR_TRANSFORMS.has(s.name) || s.name === 'math';
 
-/** Does this chain (or anything nested inside it) write a side effect, or bind an `as()` label?
- *  Both make a filter step unsafe to REMOVE even when its body always produces a traverser: the
- *  side effect would be skipped, and — although a filter consumer confines its body's binds today
+/** Does this chain (or anything nested inside it) have an EFFECT — `stepHasEffect`, the one effect
+ *  vocabulary `dropEffectFreeSideEffect` asks too (a graph write, a keyed collector, a raise) — mutate the
+ *  sack (`sack(op)`; a bare `sack()` only reads it), or bind an `as()` label? Each makes a filter step
+ *  unsafe to REMOVE even when its body always produces a traverser: the effect would be skipped, and — although a filter consumer confines its body's binds today
  *  (see the child-seam guardrail in steps/CLAUDE.md) — declining on `as()` keeps this Pass from
  *  depending on that asymmetry holding. Fail closed: an unrecognisable arg counts as impure. */
 function isImpure(steps: readonly Step[], params: ParamEnv): boolean {
   // EVERY child position (`ir/walk.ts`), an unreadable body impure: a folded `by()` body
   // (`project('a').by(__.as('x'))`) is a child as much as an argument is.
-  return someStepDeep(steps, params, (s) => isSideEffecting(s) || s.name === 'as' || mayRaise(s), true);
+  return someStepDeep(steps, params, (s) => stepHasEffect(s) || (s.name === 'sack' && s.args.length > 0) || s.name === 'as' || mayRaise(s), true);
 }
 
 /**

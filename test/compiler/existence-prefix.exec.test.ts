@@ -113,3 +113,49 @@ describe('the alias compare by() a traversal is a connector row', () => {
     expect(agreed("g.V().as('a').optional(out().as('b')).where('a', neq('b')).by(out().count()).values('name')"))
       .toEqual(bagOf(['"vadas"', '"josh"', '"lop"', '"lop"', '"ripple"', '"lop"'])));
 });
+
+// P1 (one effect vocabulary): the trim's impurity guard asks the SAME effect predicate `dropEffectFreeSideEffect`
+// asks (`stepHasEffect`, src/compiler/ir/step.ts). Its old private list missed addLabel/dropLabel(s) and keyed
+// tree('t'), so `where(addLabel('x').count())` trimmed to `where(identity())`: every vertex answered, and the write
+// silently never ran. Now the trim keeps the write and the filter declines, naming it.
+describe('an effect in an existence body is never trimmed away', () => {
+  const declined = (q: string, options?: object): string => {
+    try { runWith(seededStore(), q, options as never); } catch (error) { return (error as Error).message; }
+    throw new Error(`answered: ${q}`);
+  };
+  test('the trim stops at every effect the sideEffect() rewrite counts', () => {
+    expect(bodyAfterPasses("g.V().where(addLabel('x').count())", 'where')).toEqual(['addLabel', 'count']);
+    expect(bodyAfterPasses("g.V().where(out().dropLabel('person').count())", 'where')).toEqual(['out', 'dropLabel', 'count']);
+    expect(bodyAfterPasses("g.V().where(dropLabels().count())", 'where')).toEqual(['dropLabels', 'count']);
+    expect(bodyAfterPasses("g.V().where(tree('t').count())", 'where')).toEqual(['tree', 'count']);
+    expect(bodyAfterPasses("g.V().where(sack(sum).by('age').count())", 'where')).toEqual(['sack', 'by', 'count']);
+    // A pure reducer body still trims: bare group()/tree() are reducers, not side effects.
+    expect(bodyAfterPasses("g.V().where(group().by('name').count())", 'where')).toEqual([]);
+    expect(bodyAfterPasses("g.V().where(out().tree().count())", 'where')).toEqual([]);
+  });
+  test('a write in a filter body declines, naming the write and the filter — at every filter host and depth', () => {
+    for (const [q, write, host] of [
+      ["g.V().where(__.addLabel('x').count())", 'addLabel', 'where'],
+      ["g.V().where(__.out().addLabel('w').count()).count()", 'addLabel', 'where'],
+      ["g.V().where(__.dropLabels().count())", 'dropLabels', 'where'],
+      ["g.V().filter(__.addLabel('x').count())", 'addLabel', 'filter'],
+      ["g.V().not(__.dropLabel('person').count())", 'dropLabel', 'not'],
+      ["g.V().and(__.out(), __.out().property('x', 1))", 'property', 'and'],
+      ["g.V().local(__.where(__.addLabel('x').count()))", 'addLabel', 'where'],
+      ["g.V().union(__.where(__.map(__.addLabel('x')).count()))", 'addLabel', 'where'],
+      ["g.V().where(__.where(__.out().drop()).count())", 'drop', 'where'],
+    ] as const) {
+      for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST])
+        expect(declined(q, options), q).toContain(`a write (${write}()) inside ${host}()`);
+    }
+  });
+  test('nothing is written by a declined filter', () => {
+    const graph = seededStore();
+    expect(() => runWith(graph, "g.V().where(__.addLabel('x').count())")).toThrow();
+    expect(bare(runWith(graph, "g.V().hasLabel('x').count()"))).toEqual([{ v: 0 }]);
+  });
+  test('a keyed collector in a filter body is no longer trimmed away; a pure reducer still answers', () => {
+    expect(declined("g.V().where(__.tree('t').count())")).toContain('not supported');
+    expect(agreed("g.V().where(__.group().by('name').count()).count()")).toEqual(['6']);
+  });
+});

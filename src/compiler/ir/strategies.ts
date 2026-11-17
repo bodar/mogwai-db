@@ -4,7 +4,7 @@ import { bodyAlwaysProduces, existencePrefix } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
-import { collectsSideEffect, FAN_OUT_HOSTS, isStreamBarrier, nondeterministic, PER_TRAVERSER_RESET_HOSTS, type IRStep } from './step.ts';
+import { collectsSideEffect, FAN_OUT_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -260,11 +260,6 @@ export function trimExistenceSuffix(steps: Step[], params: ParamEnv): Step[] {
   return recurseInject(steps, params, (chain) => chain.map(level));
 }
 
-/** Steps that may RAISE, or whose effect the IR cannot see — a service runs arbitrary code (and `io()`
- *  and the graph algorithms desugar to one), and `fail()` is an explicit raise rather than an erroneous
- *  value nothing reads. A drained body holding one is not inert. */
-const OPAQUE_OR_RAISING: ReadonlySet<string> = new Set(['fail', 'call', 'io', 'pageRank', 'peerPressure', 'connectedComponent', 'shortestPath']);
-
 /**
  * Remove a `sideEffect(body)` whose body has NO EFFECT — no write, no keyed collector, no raise.
  *
@@ -272,18 +267,16 @@ const OPAQUE_OR_RAISING: ReadonlySet<string> = new Set(['fail', 'call', 'io', 'p
  * (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/
  * sideEffect/TraversalSideEffectStep.java), and the body runs on a SPLIT of the traverser
  * (`TraversalUtil.apply`), so nothing it does to its own traverser — a sack, a label, a path — comes back.
- * Without a write (`MUTATING_STEPS`), a side-effect collector (`collectsSideEffect`) or a raise
- * (`OPAQUE_OR_RAISING`) at any depth, what the body computes is read by nothing, so the step is the
+ * Without an effect (`stepHasEffect`, `ir/step.ts`: a write, a side-effect collector or a raise) at any depth, what the body computes is read by nothing, so the step is the
  * identity on the stream; an erroneous value inside it is §17's "unread erroneous values". An unreadable
  * body counts as an effect (fail closed: the step stays and the lowering answers for it).
  */
 export function dropEffectFreeSideEffect(steps: Step[], params: ParamEnv): Step[] {
   const read = rawBodies(params);
-  const hasEffect = (s: Step): boolean => MUTATING_STEPS.has(s.name) || collectsSideEffect(s) || OPAQUE_OR_RAISING.has(s.name);
   const kept = steps.filter((s) => {
     if (s.name !== 'sideEffect' || s.args.length !== 1 || !isNested(s.args[0]!.value)) return true;
     const body = read(s.args[0]!.value.nested);
-    return body === null || someStepDeep(body, read, hasEffect, true);
+    return body === null || someStepDeep(body, read, stepHasEffect, true);
   });
   // A body that WAS only such steps is the identity traversal — spelled as one, as `tryUnroll` spells
   // its level-0 arm, because an empty chain is no body at all to the hosts that lower one.
@@ -308,10 +301,8 @@ const EXPLODE_FARV: Record<string, string> = { out: 'inV', in: 'outV', both: 'ot
 /** Edge-traversal steps EdgeLabelVerificationStrategy guards (a bare, unlabelled one
  *  is "a vertex step without any specified edge label"). */
 const EDGE_TRAVERSAL_STEPS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE', 'to']);
-/** The mutating-step vocabulary — the one source of truth for "this traversal writes":
- *  ReadOnlyStrategy rejects any of these, and SubgraphStrategy defers over them (a write's
- *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
-export const MUTATING_STEPS: ReadonlySet<string> = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
+// The mutating-step vocabulary lives in ir/step.ts, beside the effect predicate it feeds (`stepHasEffect`).
+export { MUTATING_STEPS } from './step.ts';
 
 /** Does any step at ANY depth WRITE — every child position, through the one walker (`someStepDeep`)?
  *  An unreadable body answers `true`: the question's `true` is a refusal, so it fails closed. The ONE

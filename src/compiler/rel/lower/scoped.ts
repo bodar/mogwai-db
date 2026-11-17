@@ -14,7 +14,7 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias } from '..
 import { freshTraverserRow } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { firstWrite, isLocalScope, nondeterministic, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -29,7 +29,7 @@ import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, option
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
-import type { Declines } from '../../unsupported.ts';
+import { writeInFilter, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
 import { childSeam, defaultCollation, perOriginWindow, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
@@ -863,6 +863,14 @@ const existence = (negated: boolean): Connector => (site) => {
       : null
     : [singleBody(step, ctx)];
   if (!bodies || bodies.some((b) => !b?.length)) return null;
+  // A WRITE in a filter body is an effect the existence test has nowhere to run: both routes below refuse a
+  // body with effects, as does the ladder's `writesAnywhere`. Say so in the user's terms rather than "no
+  // lowering covers" — the write must never be skipped (`stepHasEffect` keeps the existence trim off it).
+  const write = (bodies as (readonly IRStep[])[]).map((body) => firstWrite(body, ctx.params)).find((name) => name !== null);
+  if (write) {
+    ctx.declines.note(writeInFilter(step.name, write));
+    return null;
+  }
   // Every body correlated: the semi/anti-join is an `EXISTS` over the body itself, read against the host row
   // (the dependent join kept as such — `correlatedBody`); `and`'s bodies are a conjunction of them.
   const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free', true));
