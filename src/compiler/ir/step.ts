@@ -135,6 +135,13 @@ export const EDGE_SOURCE: ReadonlySet<string> = new Set(['E']);
 /** The path-family steps: they thread a path AND host from()/to() scoping modulators. */
 export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
+/** Every step whose answer reads the traverser's PATH: the path family, and `tree`, which is built from
+ *  it (`TreeStep.projectTraverser` walks `traverser.path()`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TreeStep.java`).
+ *  The ONE authority for "is a path position observable": a Pass that would delete a position consults
+ *  this, never `PATH_FAMILY`, which answers the narrower from()/to()-host question `tree` is not part of. */
+export const PATH_READERS: ReadonlySet<string> = new Set([...PATH_FAMILY, 'tree']);
+
 /**
  * The steps whose answer reads state a traverser SPLIT inherits from its parent: the sack (read or
  * folded), the loop counter, and the path (the path family, and `tree`, which is built from it). A
@@ -142,7 +149,7 @@ export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', '
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:196`),
  * so a body that re-sources under a host still sees the HOST traverser's sack, loops and path.
  */
-export const TRAVERSER_STATE_READS: ReadonlySet<string> = new Set(['sack', 'loops', 'tree', ...PATH_FAMILY]);
+export const TRAVERSER_STATE_READS: ReadonlySet<string> = new Set(['sack', 'loops', ...PATH_READERS]);
 
 /** The `Operator` tokens a `sack()` may fold with — TinkerPop's `Operator` enum, minus the ones the
  *  lowering does not express (`and`/`or`/`addAll`/`sumLong`). DATA the lowering and its emission layer

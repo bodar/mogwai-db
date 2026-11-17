@@ -14,7 +14,7 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpe
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue } from '../child.ts';
-import { FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_FAMILY, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -347,7 +347,7 @@ function sharedEnd(rest: readonly IRStep[], carried: AliasMap, ctx: ChainCtx): n
 
 /** Does a re-sourced rest read the traverser's PATH (a path-family step or a `tree()`, at any depth)? */
 const readsPath = (rest: readonly IRStep[], ctx: ChainCtx): boolean =>
-  someStepDeep(rest, ctx.params, (s) => PATH_FAMILY.has(s.name) || s.name === 'tree');
+  someStepDeep(rest, ctx.params, (s) => PATH_READERS.has(s.name));
 
 /** Why a re-sourcing body declines on a traverser whose path is tracked (`reSourcedBody`) — under `local()` (the
  *  `forward` contract), or where the body itself reads the path — named by WHERE the path is asked for: in the

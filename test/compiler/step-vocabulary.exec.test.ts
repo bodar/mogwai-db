@@ -17,7 +17,7 @@
 import { test, expect, describe } from 'bun:test';
 import {
     unionOf, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_SOURCE, EDGE_SOURCE,
-    PATH_FAMILY, NUMERIC_REDUCERS, REDUCERS,
+    PATH_FAMILY, PATH_READERS, TRAVERSER_STATE_READS, NUMERIC_REDUCERS, REDUCERS,
 } from '../../src/compiler/ir/step.ts';
 import { COLLAPSE_MOVES } from '../../src/compiler/ir/bulk.ts';
 
@@ -34,6 +34,13 @@ describe('step-name vocabulary bases', () => {
     expect(sorted(VERTEX_SOURCE)).toEqual(['V']);
     expect(sorted(EDGE_SOURCE)).toEqual(['E']);
     expect(sorted(PATH_FAMILY)).toEqual(['cyclicPath', 'path', 'simplePath']);
+  });
+
+  test('PATH_READERS is the path family plus tree; TRAVERSER_STATE_READS derives from it', () => {
+    // `tree()` reads the path but hosts no from()/to(), so it is a reader and NOT in the family.
+    expect(sorted(PATH_READERS)).toEqual(['cyclicPath', 'path', 'simplePath', 'tree']);
+    expect(PATH_FAMILY.has('tree')).toBe(false);
+    expect(sorted(TRAVERSER_STATE_READS)).toEqual(['cyclicPath', 'loops', 'path', 'sack', 'simplePath', 'tree']);
   });
 
   test('REDUCERS is NUMERIC_REDUCERS plus count', () => {

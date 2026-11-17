@@ -31,6 +31,26 @@ describe('tree()', () => {
     expect(tree[0].key).toBe('marko');
     expect(tree[0].value.map((b: { key: string }) => b.key).sort()).toEqual(['josh', 'vadas']);
   });
+  // A `map(identity())` opens a path position (`MapStep` extends the path), and `tree()` reads the path
+  // exactly as `path()` does — so the identity-host splice must keep it when ONLY `tree()` reads the
+  // path (`PATH_READERS`, src/compiler/ir/step.ts), at chain position and under an arm alike.
+  describe('a map(identity()) position is a level of the tree, as it is a position of the path', () => {
+    test('chain position, elements', () =>
+      expect(trees("g.V(1).map(identity()).out('created').tree()")).toEqual(['tree{v[1]:tree{v[1]:tree{v[3]:tree{}}}}']));
+    test('chain position, by()', () =>
+      expect(trees("g.V(1).map(identity()).out('created').tree().by('name')")).toEqual(['tree{"marko":tree{"marko":tree{"lop":tree{}}}}']));
+    test('the path agrees', () =>
+      expect(exec(store).framed("g.V(1).map(identity()).out('created').path().by('name')", {}).map((f) => canon(f.buf, {})))
+        .toEqual(['path["marko","marko","lop"]']));
+    for (const q of [
+      "g.V(1).union(map(identity()).out('created')).tree().by('name')",
+      "g.V(1).optional(map(identity()).out('created')).tree().by('name')",
+      "g.V(1).union(union(map(identity()).out('created'))).tree().by('name')",
+      "g.V(1).choose(constant(true), map(identity()).out('created')).tree().by('name')",
+      "g.V(1).flatMap(identity()).out('created').tree().by('name')",
+      "g.V(1).as('a').map(identity()).out('created').tree().by('name')",
+    ]) test(`under an arm or host: ${q}`, () => expect(trees(q)).toEqual(['tree{"marko":tree{"marko":tree{"lop":tree{}}}}']));
+  });
   test('a step after tree() and the side-effect form still decline', () => {
     expect(() => trees("g.V().out().tree().count(local)")).toThrow(UnsupportedTraversal);
     expect(() => trees("g.V().out().tree('a').cap('a')")).toThrow(UnsupportedTraversal);

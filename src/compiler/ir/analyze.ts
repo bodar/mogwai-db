@@ -1,7 +1,7 @@
 import { NO_PARAMS } from '../../gremlin/param-env.ts';
 import { type IRStep, MUTATING_STEPS } from './strategies.ts';
 import { isNested, stepChain } from '../../gremlin/frontend.ts';
-import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
+import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, PATH_READERS, REDUCERS } from './step.ts';
 import { bulkGroupCollapseTerminal, bulkObservedFrom, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
@@ -38,10 +38,6 @@ export interface ChainFacts {
   readonly demandsPathLabels: boolean;
 }
 
-/** Steps that need the linear path threaded through the fold: the source vertex becomes path
- *  position p0 and every hop appends a position. */
-const PATH_STEPS: ReadonlySet<string> = new Set([...PATH_FAMILY, 'tree']); // `tree()` reads every traverser's path (TreeStep.projectTraverser)
-
 /** A PATH-family step inside a REPEAT body demands whole-chain path tracking exactly as a top-level one
  *  does: the walk seeds the path at the source and the body's own `simplePath()`/`cyclicPath()` reads it
  *  (`repeatWalk`), so `repeat(__.both().simplePath())` with no trailing `path()` still needs a seed.
@@ -57,7 +53,7 @@ function repeatBodyTracksPath(step: IRStep): boolean {
     if (!isNested(value)) continue;
     try {
       const body = stepChain((value as { nested: unknown }).nested, NO_PARAMS) as IRStep[];
-      if (body.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s))) return true;
+      if (body.some((s) => PATH_READERS.has(s.name) || repeatBodyTracksPath(s))) return true;
     } catch { /* unnormalizable — declines in the lowering, never mis-seeds here */ }
   }
   return false;
@@ -80,7 +76,7 @@ function connectorBodyTracksPath(step: IRStep): boolean {
     if (!isNested(value)) continue;
     try {
       const body = stepChain((value as { nested: unknown }).nested, NO_PARAMS) as IRStep[];
-      if (body.some((s) => PATH_STEPS.has(s.name) || connectorBodyTracksPath(s))) return true;
+      if (body.some((s) => PATH_READERS.has(s.name) || connectorBodyTracksPath(s))) return true;
     } catch { /* unnormalizable — declines in the lowering, never mis-seeds here */ }
   }
   return false;
@@ -315,7 +311,7 @@ function computeDemandsEncounter(steps: IRStep[], wireTerminal = false): boolean
       || terminal.name === 'group' || terminal.name === 'groupCount'
       || (REDUCERS.has(terminal.name) && (terminal.args?.length ?? 0) === 0)))
     return false;
-  if (steps.some((s) => PATH_STEPS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name)
+  if (steps.some((s) => PATH_READERS.has(s.name) || BRANCH_MERGE_STEPS.has(s.name)
     || (DROP_SLICES.has(s.name) && !isLocalScope(s)))) return false;
   // A trailing `order()` (the loop's `ordered`, not cleared by a later fan-out) has ALREADY pinned the
   // emission order as an `ORDER BY` in the SQL, so no encounter is owed — and forcing one changes how a
@@ -406,9 +402,10 @@ export function chainCollapseSafe(steps: IRStep[]): boolean {
  *  terminal emission order is owed to nobody — see `computeDemandsEncounter`. */
 export function analyzeChain(steps: IRStep[], opts: { readonly wireTerminal?: boolean } = {}): ChainFacts {
   return {
-    tracksPath: steps.some((s) => PATH_STEPS.has(s.name) || repeatBodyTracksPath(s) || connectorBodyTracksPath(s)),
+    tracksPath: steps.some((s) => PATH_READERS.has(s.name) || repeatBodyTracksPath(s) || connectorBodyTracksPath(s)),
     demandsEncounter: computeDemandsEncounter(steps, opts.wireTerminal ?? false),
     demandsSlice: chainDemandsSlice(steps),
-    demandsPathLabels: steps.some((s) => PATH_STEPS.has(s.name) && (s.from !== undefined || s.to !== undefined)),
+    // `PATH_FAMILY`, not `PATH_READERS`: only the from()/to() hosts scope by label; `tree()` hosts neither.
+    demandsPathLabels: steps.some((s) => PATH_FAMILY.has(s.name) && (s.from !== undefined || s.to !== undefined)),
   };
 }

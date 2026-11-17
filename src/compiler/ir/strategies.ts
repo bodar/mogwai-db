@@ -7,7 +7,7 @@ import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, SINGLE_BODY_FILTER_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
+import { PATH_FAMILY, PATH_READERS, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 import { COMPILE_BUDGET_BYTES, CompileBudgetExceeded, UNROLLED_STEP_BYTES } from '../../sql/kernel/budget.ts';
@@ -42,7 +42,7 @@ export const BY_HOSTS: ReadonlySet<string> = new Set(['order', 'select', 'projec
  *  to the positions between two as() labels). `simplePath`/`cyclicPath` are hosts here only
  *  (not general BY_HOSTS) so their by()/from()/to() fold too. `to` also names a movement
  *  step; the fold only fires when it immediately follows a path host, so no collision. */
-const PATH_MODULATOR_HOSTS = PATH_FAMILY;
+const PATH_MODULATOR_HOSTS = PATH_FAMILY; // not PATH_READERS: `tree()` reads the path but takes no from()/to()
 
 // ---------- withStrategies / withoutStrategies: the decoration + verify bodies ----------
 //
@@ -759,7 +759,7 @@ function identityHostBody(s: Step, params: ParamEnv): Step[] | null {
  * of the position, not of who happens to read it today.
  */
 export function inlineIdentityHostBody(steps: Step[], params: ParamEnv, nested: boolean): Step[] {
-  const readsPath = someStepDeep(steps, params, (s) => PATH_FAMILY.has(s.name));
+  const readsPath = someStepDeep(steps, params, (s) => PATH_READERS.has(s.name));
   // A path read is a WHOLE-TRAVERSAL fact: the root's `.path()` observes the entry a `map(identity())`
   // opens inside a `union`/`optional`/`repeat` body, and that body is normalized LATER and in isolation
   // (`childSteps`), where it reads no path of its own. So the root marks every such host at every

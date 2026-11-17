@@ -102,6 +102,7 @@ function walkReads(chain: readonly Step[], read: BodyReader, acc: Acc): void {
   for (const s of chain) {
     // `path()` emits the labels bound along it; `simplePath()`/`cyclicPath()` do not, but they share
     // the family's from()/to() scoping and cost nothing to treat alike.
+    // `PATH_FAMILY`, not `PATH_READERS`: `tree()` reads path OBJECTS but emits and reads no label.
     if (PATH_FAMILY.has(s.name)) acc.all = true;
     const ir = s as IRStep;
     // A `match()` PATTERN'S VARIABLES ARE READS OF THE ENCLOSING SCOPE, even though each is spelled
@@ -530,7 +531,7 @@ export function unlocatableSubPath(steps: readonly Step[], params: ParamEnv): st
   let found: string | null = null;
   eachChainDeep(steps, rawBodies(params), (chain) => {
     for (let i = 0; i < chain.length && found === null; i++) {
-      if (!PATH_FAMILY.has(chain[i]!.name)) continue;
+      if (!PATH_FAMILY.has(chain[i]!.name)) continue; // the from()/to() hosts — `tree()` takes neither
       // A passed chain carries the modulators folded onto the host (`absorbModulators`); a nested body
       // re-read raw still spells them as the steps that follow it. Both are read.
       let { from, to } = chain[i] as IRStep;
