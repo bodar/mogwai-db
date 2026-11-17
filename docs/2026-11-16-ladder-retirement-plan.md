@@ -1255,6 +1255,11 @@ K5's advisory for `g.V().sideEffect(out().group('x').by('name').by(count())).cap
 When the ladder retires (R7) the hint disappears with no test noticing. **Item:** note it where the connector body
 declines (`keyedBody`), and pin the message under connector-only mode in `test/compiler/existence-prefix.exec.test.ts`.
 
+✅ **LANDED (846f4e35).** `keyedBody` (`src/compiler/rel/lower/scoped.ts`) is now the ONE raiser: the group connector
+row records a pooled keyed `group('x')` as a fork refusal (`refuseSite`, `src/compiler/rel/collection.ts`), and the
+declining body names it with the pooling step the user wrote; the `lower.ts` raiser is deleted. Pinned under
+connector-only mode in `test/compiler/existence-prefix.exec.test.ts`. Message only, no baseline moved. Remains: nothing.
+
 ### T6 — S3's trial lowering compounds compile time with nesting (minor, compile time only)
 
 `correlatedReSources` runs a full throw-away `correlatedBody` lowering for every non-rooted landed `by()` body (trunk
