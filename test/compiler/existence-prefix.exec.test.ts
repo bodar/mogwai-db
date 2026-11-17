@@ -163,8 +163,12 @@ describe('an effect in an existence body is never trimmed away', () => {
 // M4: a write in ANY child body is named in the user's terms, by the one builder (`writeInChild`,
 // src/compiler/unsupported.ts) at the one site that sees every child with its host — the program's write summary
 // (`programWrites`, src/compiler/rel/write.ts). A filter host keeps the terminal write-in-filter wording (above).
-// A branch host is most often the UPSERT idiom, so it is pointed at mergeV()/mergeE(), which we support; any other
-// host is told to move the write out. Both are hints after "no lowering covers …", never a decline of their own.
+// The ADVICE follows the write's SHAPE, classified once where the write is found: an addV()/addE() in a branch body
+// is the UPSERT idiom, pointed at mergeV()/mergeE(), which we support; a property()/drop() (or a merge, already an
+// upsert) is told to move the write out. The hint is given only where the fold declined AT the write's top-level
+// host (`noteChildWrite`, src/compiler/rel/lower.ts); where that is not known — the host never reached a lowering of
+// its own (`sideEffect`, a write's own argument) — it says the write MAY be why. Both are hints after "no lowering
+// covers …", never a decline of their own.
 describe('a write in a non-filter child body declines, naming the write, the host and the likely intent', () => {
   const declined = (q: string, options?: object): string => {
     try { runWith(seededStore(), q, options as never); } catch (error) { return (error as Error).message; }
@@ -172,28 +176,59 @@ describe('a write in a non-filter child body declines, naming the write, the hos
   };
   const UPSERT = 'for an upsert (fold().coalesce(unfold(), addV(…))) use mergeV()/mergeE()';
   const OUTER = 'put the write in the outer traversal';
-  for (const [q, write, host, advice] of [
+  const SURE = 'is not supported yet', MAYBE = 'may not be supported here';
+  for (const [q, write, host, advice, certainty] of [
     // one case per write kind
-    ["g.V().has('name','zz').fold().coalesce(unfold(), addV('person').property('name','zz'))", 'addV', 'coalesce', UPSERT],
-    ["g.V().has('name','marko').coalesce(outE('knows').has('weight',0.5), addE('knows').to(V(2)))", 'addE', 'coalesce', UPSERT],
-    ["g.V().local(property('x', 1))", 'property', 'local', OUTER],
-    ['g.V().sideEffect(drop())', 'drop', 'sideEffect', OUTER],
-    ["g.V().local(mergeV([name: 'zz']))", 'mergeV', 'local', OUTER],
-    ["g.V().optional(addV('x'))", 'addV', 'optional', UPSERT],
-    ["g.V().group().by(addV('x'))", 'addV', 'group().by', OUTER],
+    ["g.V().has('name','zz').fold().coalesce(unfold(), addV('person').property('name','zz'))", 'addV', 'coalesce', UPSERT, SURE],
+    ["g.V().has('name','marko').coalesce(outE('knows').has('weight',0.5), addE('knows').to(V(2)))", 'addE', 'coalesce', UPSERT, SURE],
+    ["g.V().local(property('x', 1))", 'property', 'local', OUTER, SURE],
+    ['g.V().sideEffect(drop())', 'drop', 'sideEffect', OUTER, MAYBE],
+    ["g.V().local(mergeV([name: 'zz']))", 'mergeV', 'local', OUTER, SURE],
+    ["g.V().optional(addV('x'))", 'addV', 'optional', UPSERT, SURE],
+    ["g.V().group().by(addV('x'))", 'addV', 'group().by', OUTER, SURE],
+    // the advice is the write's shape, not the host's family: a property() write in a branch is no upsert
+    ["g.V().has('person','name','marko').choose(has('age',gt(20)), property('adult',true), property('adult',false))", 'property', 'choose', OUTER, SURE],
+    ["g.V().union(addV('x'), identity()).count()", 'addV', 'union', UPSERT, SURE],
     // at depth: the innermost host is the one named
-    ["g.V().local(coalesce(out(), addV('x')))", 'addV', 'coalesce', UPSERT],
-    ["g.V().union(local(sideEffect(drop())), identity())", 'drop', 'sideEffect', OUTER],
-    ["g.V().addE('x').to(coalesce(V(1), addV('y')))", 'addV', 'coalesce', UPSERT],
+    ["g.V().local(coalesce(out(), addV('x')))", 'addV', 'coalesce', UPSERT, SURE],
+    ["g.V().union(local(sideEffect(drop())), identity())", 'drop', 'sideEffect', OUTER, SURE],
+    ["g.V().local(union(addV('x'), identity()).count())", 'addV', 'union', UPSERT, SURE],
+    ["g.V().map(union(addV('x'), identity()).fold())", 'addV', 'union', UPSERT, SURE],
+    ["g.V().addE('x').to(coalesce(V(1), addV('y')))", 'addV', 'coalesce', UPSERT, MAYBE],
   ] as const) {
     test(q, () => {
       for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST]) {
         const message = declined(q, options);
         expect(message, q).toContain('no lowering covers');
-        expect(message, q).toContain(`a write (${write}()) inside ${host}() is not supported yet; ${advice}`);
+        expect(message, q).toContain(`a write (${write}()) inside ${host}() ${certainty}; ${advice}`);
       }
     });
   }
+  // A child write that lowers fine is not blamed for a decline elsewhere: the hint is only where the fold declined
+  // AT the write's host. Here the write's own lowering declines on a framing fact — the traverser's path is tracked
+  // (the simplePath() in the later local()) — and that is what the user reads, from the write itself.
+  test('a write is blamed for the fact that declined it, not for its host', () => {
+    for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST]) {
+      const message = declined("g.V().hasLabel('software').union(addV('x')).local(V().simplePath().count())", options);
+      expect(message).not.toContain('inside union()');
+      expect(message).toContain('a write (addV()) on a traverser whose path is tracked');
+      expect(declined("g.V().addV('x').path()", options)).toContain('a write (addV()) on a traverser whose path is tracked');
+    }
+  });
+  test('a write whose host lowered is not blamed for a decline after it, or before it', () => {
+    for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST])
+      for (const q of [
+        "g.V().has('person','name','marko').union(addV('x')).valueMap().unfold().unfold()",
+        "g.V().valueMap().unfold().unfold().union(addV('x'))",
+      ]) {
+        const message = declined(q, options);
+        expect(message, q).toContain('no lowering covers');
+        expect(message, q).not.toContain('a write');
+      }
+  });
+  test('a write that lowers inside its host answers, with no hint', () => {
+    expect(bare(runWith(seededStore(), "g.V().has('person','name','marko').union(addV('x')).count()"))).toEqual([{ v: 1 }]);
+  });
   test('nothing is written by a declined child write', () => {
     const graph = seededStore();
     expect(() => runWith(graph, "g.V().local(addV('x'))")).toThrow();

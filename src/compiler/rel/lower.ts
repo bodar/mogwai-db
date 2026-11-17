@@ -59,7 +59,7 @@ import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, isLongSumClass, is
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { Declines, writeInChild } from '../unsupported.ts';
+import { Declines, writeInChild, writeOnTrackedPath, type ChildWrite } from '../unsupported.ts';
 import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
@@ -2785,7 +2785,7 @@ function scalarTail(
     // therefore reaches exactly the forms whose endpoints are named outright, which is the reference's
     // own rule (`AddEdgeStartStep` defaults both ends to `null` and raises).
     if (step.name === 'addV' || step.name === 'addE' || step.name === 'mergeV' || step.name === 'mergeE') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       const written = step.name === 'addV' ? addedVertices(rel, steps, at, ctx, fresh)
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
           // A scalar driver is not MAP-FRAMED, so a whole-arg `select(k)` folds to its side effect. A
@@ -5053,12 +5053,35 @@ export function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Mint
   // existence test, and the write must never be skipped (`stepHasEffect` keeps the existence trim off it). In
   // any other body it is only a hint, given where the chain declines — never in place of a route that answers.
   const { declines } = settle(opts);
-  if (writes.filterWrite) declines.note(writeInChild(writes.filterWrite.host, writes.filterWrite.write, FILTER_HOSTS));
+  if (writes.filterWrite) declines.note(writeInChild(writes.filterWrite));
   if (writes.truncated || writes.filterWrite) return null;
   const tail = lowerChainOf(steps, { ...opts, writes }, fresh, root);
-  if (!tail && writes.childWrite) declines.note(writeInChild(writes.childWrite.host, writes.childWrite.write, FILTER_HOSTS));
+  if (!tail && writes.childWrite) noteChildWrite(writes.childWrite, steps, declines);
   // The program-start questions its guards asked (`ProgramWrites.preChecks`), ahead of every statement.
   return tail && withPreChecks(writes, tail, fresh);
+}
+
+/**
+ * Name a write in a child body where it is why the chain declined — grounded in how far the fold got
+ * (`Declines.furthest`), never in "a write is somewhere in the traversal". The write is the reason only if the
+ * fold declined AT the top-level step holding it (`ChildWrite.at`). Past it, the host lowered and the decline is
+ * a later step's; short of it, an earlier step's — and blaming the write there sends the user debugging a step
+ * that works. Where the fold never continued this list, or the write's host has no lowering of its own (`at` is
+ * `null`), the hint is softened to "may not be supported here".
+ */
+/** A write on a traverser whose path is tracked declines, saying so (`writeOnTrackedPath`) — at the write's own
+ *  lowering, so wherever it stands (top level, a branch arm, any depth) the user reads the framing fact rather
+ *  than a host that is not why. */
+function writeOnPath(step: IRStep, ctx: ChainCtx): null {
+  ctx.declines.note(writeOnTrackedPath(step.name));
+  return null;
+}
+
+function noteChildWrite(child: ChildWrite, steps: readonly IRStep[], declines: Declines): void {
+  const at = child.at === null ? -1 : steps.indexOf(child.at as IRStep);
+  const furthest = declines.furthest(steps);
+  if (at < 0 || furthest === undefined) declines.note(writeInChild(child, false));
+  else if (furthest === at) declines.note(writeInChild(child));
 }
 
 function lowerChainOf(steps: readonly IRStep[], opts: Lowering, fresh: Minter, root: boolean): Tail | null {
@@ -5725,7 +5748,7 @@ function elementTail(
       continue;
     }
     if (step.name === 'addE') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       const added = addedEdges(rel, elem, steps, at, labels, ctx, fresh);
       if (!added) return null;
       // The LABELS carry, for `addV`'s reason and by its mechanism — the created edges correlate back
@@ -5775,7 +5798,7 @@ function elementTail(
       continue;
     }
     if (step.name === 'mergeV' || step.name === 'mergeE') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       const merged = mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
@@ -5785,7 +5808,7 @@ function elementTail(
         () => elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels));
     }
     if (step.name === 'addV') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       const added = addedVertices(rel, steps, at, ctx, fresh, elem, labels);
       if (!added) return null;
       // The LABELS carry, because the relation carries their columns: `addV` correlates its new rows
@@ -5796,7 +5819,7 @@ function elementTail(
         () => elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, labels));
     }
     if (step.name === 'property') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       // The whole RUN of property() steps, because they share one target: taking them one at a time
       // would snapshot the same elements once per step and, worse, let a later step read a graph an
       // earlier one had already written. `elementProperty` re-enters this loop at `at`, so a read
@@ -5816,7 +5839,7 @@ function elementTail(
         () => elementTail(written.result, elem, steps, end, bulked, ctx, fresh, labels));
     }
     if (step.name === 'addLabel' || step.name === 'dropLabel' || step.name === 'dropLabels') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       if (step.modulators?.length || step.optionArms) return null;
       // A sideEffect that mutates labels and passes the SAME vertices through, so the tail is the
       // ordinary fold after it. Both lowerings decline an edge or an immutable graph; a constant name the
@@ -5829,7 +5852,7 @@ function elementTail(
         () => elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels));
     }
     if (step.name === 'drop') {
-      if (pathCarried(rel)) return null;
+      if (pathCarried(rel)) return writeOnPath(step, ctx);
       // TERMINAL by the grammar, and asserted rather than assumed: a step after `drop()` would be a
       // read over a stream that no longer exists, and the honest answer to a chain the passes should
       // have rejected is to decline it, not to lower the prefix and forget the rest.
@@ -6048,6 +6071,9 @@ export function continueAs(
   rel: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
+  // Every step before `from` lowered — what `lowerChain` asks to tell a write's host that declined from one
+  // that lowered fine ahead of a decline elsewhere.
+  ctx.declines.reach(steps, from);
   // A POSITIONAL SLICE IN THIS STEP LIST reads the order of a branch merged ahead of it here, at whatever
   // depth the list is a body (`local(union(a, b).limit(1))`), and the root chain's `sliced` cannot see a
   // body's own slice. With it the branch numbers its merge by the emission key (`branchOrderOwed`).

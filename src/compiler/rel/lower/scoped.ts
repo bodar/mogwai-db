@@ -355,7 +355,7 @@ const readsPath = (rest: readonly IRStep[], ctx: ChainCtx): boolean =>
 function resourcePathMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
   const host = `${ctx.host ?? 'local'}()`;
   return readsPath(rest, ctx)
-    ? `a path(), simplePath() or cyclicPath() inside a ${host} body that starts with V()/E() is not supported yet`
+    ? `a path(), simplePath() or cyclicPath() inside ${/^[aeiou]/.test(host) ? 'an' : 'a'} ${host} body that starts with V()/E() is not supported yet`
     : `a V()/E() inside ${host} on a traverser whose path is tracked (a path(), simplePath() or cyclicPath() `
       + 'around it) is not supported yet';
 }

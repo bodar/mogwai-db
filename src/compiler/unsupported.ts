@@ -36,6 +36,9 @@ export type DeclineKind =
   /** A graph write inside any OTHER child body (`local`/`union`/`coalesce`/`sideEffect`/a `by()`, … — found by
    *  `programWrites`): no lowering runs an effect inside a child yet. Always ADVISORY. */
   | 'write-in-child'
+  /** A graph write on a traverser whose PATH is tracked (a `path()`/`simplePath()`/`cyclicPath()`/`tree()` in the
+   *  traversal): no write lowering appends its element as a path position yet. Always ADVISORY. */
+  | 'write-on-path'
   /** A random draw inside a `group()` value `by()` (`pooledGroup`, `lower/scoped.ts`). Always ADVISORY. */
   | 'draw-in-group-value';
 
@@ -58,6 +61,7 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'inject-in-child': 'this traversal is not supported yet',
   'write-in-filter': 'this traversal is not supported yet',
   'write-in-child': 'this traversal is not supported yet',
+  'write-on-path': 'this traversal is not supported yet',
   'draw-in-group-value': 'this traversal is not supported yet',
 };
 
@@ -87,37 +91,61 @@ export class UnsupportedTraversal extends Error {
   }
 }
 
-/** The branch hosts whose write is most often an UPSERT (`fold().coalesce(unfold(), addV(…))`). */
-const UPSERT_HOSTS: ReadonlySet<string> = new Set(['coalesce', 'optional', 'choose', 'union']);
+/**
+ * A GRAPH WRITE FOUND IN A CHILD BODY, classified ONCE where it is found (`programWrites`' walk over every
+ * child, `rel/write.ts`), so the decline that names it never re-tests the host.
+ *
+ *  - `host`: the innermost host, as the user would name it (a step name, or `group().by` for a `by()`);
+ *  - `write`: the write's own step name;
+ *  - `filter`: the host is an existence test (`FILTER_HOSTS`);
+ *  - `upsert`: the write has the UPSERT idiom's shape — an `addV`/`addE` in a branch body
+ *    (`fold().coalesce(unfold(), addV(…))`), which `mergeV()`/`mergeE()` answer. A `property()`/`drop()`, or a
+ *    merge (already an upsert), is told to move out instead;
+ *  - `at`: the TOP-LEVEL step whose body holds the write — the position the fold must have declined AT for the
+ *    write to be why the traversal declined (`lowerChain`); `null` where the host has no lowering of its own to
+ *    decline at (a write as another write's argument).
+ */
+export interface ChildWrite {
+  readonly host: string;
+  readonly write: string;
+  readonly filter: boolean;
+  readonly upsert: boolean;
+  readonly at: object | null;
+}
 
 /**
- * THE ONE BUILDER for a graph write (`write`, a step name) in a child body of `host` (a step name, or
- * `group().by` for a `by()`), worded per host family — the one site that asks is `programWrites`' walk over
- * every child (`rel/write.ts`), read by `lowerChain`.
+ * THE ONE BUILDER for the decline that names a graph write in a child body (`ChildWrite`), read by `lowerChain`.
  *
- *  - A FILTER host (`filterHosts`: the caller's `FILTER_HOSTS`, passed in so this module stays a leaf) is
- *    `write-in-filter`, TERMINAL: no route runs an effect inside an existence test, and the write must never
- *    be silently skipped.
- *  - A BRANCH host is most often the upsert idiom, which `mergeV()`/`mergeE()` answer.
- *  - Any other host is told to move the write out.
- *
- * The two non-filter wordings are ADVISORY — a hint appended to "no lowering covers …" — so the day a child
- * write lowers, a route that answers is never shadowed by it.
+ *  - A FILTER host is `write-in-filter`, TERMINAL: no route runs an effect inside an existence test, and the
+ *    write must never be silently skipped.
+ *  - Any other host is ADVISORY — a hint appended to "no lowering covers …", so the day a child write lowers, a
+ *    route that answers is never shadowed by it — given only where the fold declined at the write's host.
+ *    `certain` says whether that is known: where it is not, the hint says the write MAY be why rather than
+ *    blaming it for a decline it may not have caused.
  */
-export const writeInChild = (host: string, write: string, filterHosts: ReadonlySet<string>): DeclineReason =>
-  filterHosts.has(host)
+export const writeInChild = (child: ChildWrite, certain = true): DeclineReason =>
+  child.filter
     ? {
       kind: 'write-in-filter', terminal: true,
-      message: `a write (${write}()) inside ${host}() — a filter body that writes; to write and then filter, put the `
-        + `write before or after ${host}()`,
+      message: `a write (${child.write}()) inside ${child.host}() — a filter body that writes; to write and then filter, put the `
+        + `write before or after ${child.host}()`,
     }
     : {
       kind: 'write-in-child', terminal: false,
-      message: `a write (${write}()) inside ${host}() is not supported yet; `
-        + (UPSERT_HOSTS.has(host)
+      message: `a write (${child.write}()) inside ${child.host}() ${certain ? 'is not supported yet' : 'may not be supported here'}; `
+        + (child.upsert
           ? 'for an upsert (fold().coalesce(unfold(), addV(…))) use mergeV()/mergeE()'
           : 'put the write in the outer traversal'),
     };
+
+/** The `write-on-path` decline: the write step (`write`, its name) meets a traverser whose path is tracked. Noted
+ *  where the write's own lowering declines on that framing fact, at any depth — so a write in a branch arm is not
+ *  blamed on the branch (`writeInChild`) when the path is why: an advisory recorded first is the one kept. */
+export const writeOnTrackedPath = (write: string): DeclineReason => ({
+  kind: 'write-on-path', terminal: false,
+  message: `a write (${write}()) on a traverser whose path is tracked (a path(), simplePath(), cyclicPath() or tree() `
+    + 'in the traversal) is not supported yet',
+});
 
 /** The `draw-in-group-value` decline (`pooledGroup`, `lower/scoped.ts`). */
 export const drawInGroupValue: DeclineReason = {
@@ -154,6 +182,21 @@ export class Declines {
   #terminal: DeclineReason | null = null;
   #hint: string | null = null;
   #advisory: DeclineReason | null = null;
+  /** How far the fold got into each step list it continued (`continueAs`'s `from`): every step before that
+   *  position LOWERED on some route. Shared with every `fork` — a speculative route that got past a step proves
+   *  the step lowers, whatever the route's outcome. What a child write's decline asks (`lowerChain`), never a
+   *  routing input. */
+  readonly #furthest: WeakMap<readonly object[], number>;
+
+  constructor(furthest: WeakMap<readonly object[], number> = new WeakMap()) { this.#furthest = furthest; }
+
+  /** The fold has reached position `at` of `steps` — every step before it lowered. */
+  reach(steps: readonly object[], at: number): void {
+    if (at > (this.#furthest.get(steps) ?? -1)) this.#furthest.set(steps, at);
+  }
+
+  /** The furthest position of `steps` the fold reached, or `undefined` if it never continued that list. */
+  furthest(steps: readonly object[]): number | undefined { return this.#furthest.get(steps); }
 
   /** Record a reason. The first terminal one and the first advisory one are kept. */
   note(reason: DeclineReason): void {
@@ -171,7 +214,7 @@ export class Declines {
    * answered is not why the compile did anything, so its reasons are dropped — otherwise the order the
    * two routes are tried in (a fast-path switch) would decide whether the traversal compiles at all.
    */
-  fork(): Declines { return new Declines(); }
+  fork(): Declines { return new Declines(this.#furthest); }
 
   /** Take what a `fork` recorded, as if it had been recorded here — first-recorded still wins. */
   adopt(child: Declines): void {
