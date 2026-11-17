@@ -165,3 +165,93 @@ describe('fuse: an Aggregate factored over a cross Join', () => {
     expect(fuse(once)).toBe(once);
   });
 });
+
+// THE NORMALISATION `factor` needs (`fuse.ts` `normalise`): a pooled re-source's body lands ABOVE its cross
+// join — a hop as an inner Join over it, a predicate as a Filter — so the cross is brought up to the Aggregate
+// by JoinAssociate / FilterJoin, KEPT only when `factor` then fires. Each plan is executed beside the
+// unrewritten one; a shape the rule must refuse comes back as the SAME node, so its SQL is byte-identical.
+describe('fuse: the cross join brought up to an Aggregate so it factors', () => {
+  const side = (id: string): Rel => scanRel({ id: relId(`${id}s`), table: 'nodes', alias: id, channels, type: { cols } });
+  const wide: readonly ColMeta[] = [...cols, { name: 'rid', type: 'int', nullable: false }, { name: 'rname', type: 'text', nullable: false }];
+  const crossOf = (): Rel => join({ id: relId('j'), left: side('l'), right: side('r'), join: 'cross', channels, type: { cols: wide } });
+  const renamed = (j: Rel): Rel => project({ id: relId('q'), input: j, channels, type: j.type, exprs: wide.map((c) => [c.name, col(j.id, c.name)] as const) });
+  /** `Join(kind, Rename → Join(cross, l, r), c)` ON `c.id = <onCol> + 1` — a hop from one side of the product. */
+  const hop = (kind: 'inner' | 'left', onCol: string): Rel => {
+    const q = renamed(crossOf());
+    const c = side('c');
+    return join({ id: relId('h'), left: q, right: c, join: kind, channels,
+      on: { kind: 'binary', op: '=', left: col(c.id, 'id'), right: { kind: 'binary', op: '+', left: col(q.id, onCol), right: lit(1, 'int') } },
+      type: { cols: [...wide, { name: 'cid', type: 'int', nullable: kind === 'left' }, { name: 'cname', type: 'text', nullable: kind === 'left' }] } });
+  };
+  const agg = (fn: 'sum' | 'count' | 'max', ...args: Expr[]): Expr => ({ kind: 'agg', fn, args });
+  const groupedOver = (input: Rel, keys: readonly string[], aggs: (r: Rel) => readonly (readonly [string, Expr])[]): Rel => {
+    const out = aggs(input);
+    return aggregate({ id: relId('a'), input, channels, groupBy: keys.map((k) => col(input.id, k)), aggs: out,
+      type: { cols: [...keys.map((k) => input.type.cols.find((c) => c.name === k)!), ...out.map(([name]): ColMeta => ({ name, type: 'any', nullable: true }))] } });
+  };
+  const sorted = (rows: unknown[]): unknown[] => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  /** Is there a cross join beneath an Aggregate whose sides are not both grouped — the |L|×|R| product kept? */
+  const crossUnderAggregate = (plan: Rel): boolean => {
+    let found = false;
+    const go = (r: Rel, under: boolean): void => {
+      if (r.kind === 'join') {
+        const grouped = [r.left, r.right].every((s) => s.kind === 'aggregate' || (s.kind === 'filter' && s.input.kind === 'aggregate'));
+        found ||= under && r.join === 'cross' && !grouped;
+        go(r.left, under && r.join !== 'cross'); go(r.right, under && r.join !== 'cross'); return;
+      }
+      if ('input' in r && r.input) go(r.input as Rel, under || r.kind === 'aggregate');
+    };
+    go(plan, false);
+    return found;
+  };
+  const same = (plan: Rel): Rel => {
+    const fused = fuse(plan);
+    expect(() => check(fused)).not.toThrow();
+    expect(sorted(rowsOf(fused))).toEqual(sorted(rowsOf(plan)));
+    return fused;
+  };
+
+  test('JoinAssociate: an inner hop from the KEY-LESS side moves under it, and the product factors', () => {
+    // Keyed on the left's name, the hop reads the right: `Join(cross, l, Join(inner, r, c))`, then factored.
+    const plan = groupedOver(hop('inner', 'rid'), ['name'], (h) => [
+      ['n', agg('count')], ['s', agg('sum', col(h.id, 'cid'))], ['m', agg('max', col(h.id, 'cname'))], ['w', agg('sum', col(h.id, 'id'))],
+    ]);
+    expect(crossUnderAggregate(plan)).toBe(true);
+    const fused = same(plan);
+    expect(crossUnderAggregate(fused)).toBe(false);
+    expect(sorted(rowsOf(fused))).toContainEqual({ name: 'a', n: 5, s: 20, m: 'x', w: 5 });
+  });
+
+  test('a hop from the KEYED side moves that side under it instead; a LEFT hop is never re-associated', () => {
+    // `Join(cross, r, Join(inner, l, c))`: the key is the inner side's, the plain side is the key-less one.
+    const keyed = groupedOver(hop('inner', 'id'), ['name'], () => [['n', agg('count')]]);
+    expect(crossUnderAggregate(same(keyed))).toBe(false);
+    expect(sorted(rowsOf(fuse(keyed)))).toContainEqual({ name: 'x', n: 12 });
+    // LEFT: an unmatched row of the product is padded once PER PAIR, which the move would not keep.
+    const left = groupedOver(hop('left', 'rid'), ['name'], () => [['n', agg('count')]]);
+    expect(fuse(left)).toBe(left);
+  });
+
+  test('FilterJoin: a predicate on the key-less side moves under the cross, conjunct by conjunct', () => {
+    const q = renamed(crossOf());
+    const f = filter({ id: relId('f'), input: q, channels, type: q.type, pred: {
+      kind: 'binary', op: 'and',
+      left: { kind: 'binary', op: '>', left: col(q.id, 'rid'), right: lit(2, 'int') },
+      right: { kind: 'binary', op: '!=', left: col(q.id, 'rname'), right: lit('x', 'text') } } });
+    const plan = groupedOver(f, ['name'], (r) => [['n', agg('count')], ['s', agg('sum', col(r.id, 'rid'))]]);
+    const fused = same(plan);
+    expect(crossUnderAggregate(fused)).toBe(false);
+    expect(sorted(rowsOf(fused))).toContainEqual({ name: 'a', n: 3, s: 13 });
+    // A conjunct reading BOTH sides has no place below: the plan is kept as it was.
+    const mixed = groupedOver(filter({ id: relId('f'), input: q, channels, type: q.type,
+      pred: { kind: 'binary', op: '<', left: col(q.id, 'id'), right: col(q.id, 'rid') } }), ['name'], () => [['n', agg('count')]]);
+    expect(fuse(mixed)).toBe(mixed);
+  });
+
+  test('no Aggregate, or one factor cannot split: the plan is the SAME node — its SQL byte-identical', () => {
+    const bare = hop('inner', 'rid');
+    expect(fuse(bare)).toBe(bare);
+    const avg = groupedOver(hop('inner', 'rid'), ['name'], (h) => [['v', { kind: 'agg', fn: 'avg', args: [col(h.id, 'cid')] }]]);
+    expect(fuse(avg)).toBe(avg);
+  });
+});

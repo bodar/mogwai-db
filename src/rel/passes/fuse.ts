@@ -1,10 +1,11 @@
-import { compilerInt, type Expr } from '../expr.ts';
+import { draws, exprDraws } from '../copies.ts';
+import { col, compilerInt, conjoin, conjuncts, type Expr } from '../expr.ts';
 import * as make from '../factory.ts';
 import { minter } from '../mint.ts';
 import type { Rel } from '../rel.ts';
 import type { ColMeta, RelId } from '../types.ts';
 import {
-  exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, joinSide, mapExprChildren, relChildren, relExprs,
+  deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, joinSide, mapColsDeep, mapExprChildren, relChildren, relExprs,
   rewriteExpr, rewriteRels, substRelId,
 } from '../walk.ts';
 
@@ -13,7 +14,7 @@ import {
  * buy something the block assembler and SQLite cannot.
  *
  * TWO rewrites live here: an `Aggregate` FACTORED over a cross `Join` (`factor`, below — Calcite's
- * AggregateJoinTransposeRule), and **a `Filter` pushed below a `ROW_NUMBER()` renumber `Window`** (through
+ * AggregateJoinTransposeRule, with the normalisation that brings a cross join up to it), and **a `Filter` pushed below a `ROW_NUMBER()` renumber `Window`** (through
  * a renaming `Project` directly above it), when nothing reads the window's column as a VALUE. Why
  * SQLite cannot do it: a window is an optimisation barrier — a predicate above `ROW_NUMBER()` cannot
  * move below it in general, because the window would then number a DIFFERENT row set. Why the
@@ -41,7 +42,10 @@ import {
  *
  * DOES NOT BELONG HERE — each already has a home, so adding it here would be a SECOND implementation:
  *   - Adjacent `Filter`s conjoining into one `WHERE`, or a `Filter` over a `Join`: the EMITTER already
- *     renders both as one block's `WHERE` (`src/rel/emit.ts`), and SQLite pushes from there.
+ *     renders both as one block's `WHERE` (`src/rel/emit.ts`), and SQLite pushes from there. A Filter
+ *     pushed below a cross join, and an inner join re-associated over one, live here ONLY as `factor`'s
+ *     enabling normalisation (`normalise`, below): attempted under an Aggregate and kept only when `factor`
+ *     then fires — never a free-standing round that re-shapes every re-source-then-hop plan.
  *   - `Sort` + `Limit`: that is one SELECT's slots, filled by the block assembler (build-plan §5).
  *   - Collapsing a run of nodes into a `Select` mega-node: REFUSED — it would put the SQL surface
  *     inside the IR and hand every pass two forms of one thing (build-plan §5, §7).
@@ -279,19 +283,29 @@ function overCross(a: Aggregate, single: (r: Rel) => boolean): { readonly join: 
   return { join: node, inline };
 }
 
-/** Is `r` (through filters) an Aggregate grouped on nothing but `keys` — at most one row per key? */
+/** Is `r` (through filters and column renames) an Aggregate grouped on nothing but `keys` — at most one row
+ *  per key? A rename carries each key to the column of its input it reads; a key it computes is not a key. */
 const groupedOn = (r: Rel, keys: readonly string[]): boolean => {
-  for (; r.kind === 'filter'; r = r.input);
-  return r.kind === 'aggregate' && r.type.cols.slice(0, r.groupBy.length).every((column) => keys.includes(column.name));
+  let names: readonly (string | undefined)[] = keys;
+  for (; r.kind === 'filter' || (r.kind === 'project' && renames(r)); r = r.input) {
+    if (r.kind !== 'project') continue;
+    const exprs = new Map(r.exprs);
+    names = names.map((name) => { const e = name === undefined ? undefined : exprs.get(name); return e?.kind === 'col' ? e.name : undefined; });
+  }
+  return r.kind === 'aggregate' && r.type.cols.slice(0, r.groupBy.length).every((column) => names.includes(column.name));
 };
 
-const aggOf = (fn: 'sum' | 'count', ...args: Expr[]): Expr => ({ kind: 'agg', fn, args });
+/** A projection of nothing but bare columns of its input — a rename, which a rewrite below it may see through. */
+const renames = (p: Project): boolean => p.exprs.every(([, e]) => e.kind === 'col' && e.rel === p.input.id);
+
+const aggOf = (fn: 'sum' | 'count' | 'min' | 'max', ...args: Expr[]): Expr => ({ kind: 'agg', fn, args });
 const times = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '*', left, right });
 
 /**
  * Calcite's `AggregateJoinTransposeRule`
  * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/AggregateJoinTransposeRule.java`), for a
- * CROSS join and the two splittable functions (`SqlSplittableAggFunction`'s `CountSplitter`/`SumSplitter`):
+ * CROSS join and the splittable functions (`SqlSplittableAggFunction`'s `CountSplitter`/`SumSplitter`, and
+ * `SelfSplitter` for a MIN/MAX of one side — the reducers' class-width bookkeeping beside a `sum()`):
  * `Aggregate(G; aggs) → Join(cross, L, R)` becomes `Aggregate(G; aggs') → Join(cross, Aggregate(L; G_L; c_L,
  * sums), Aggregate(R; G_R; c_R, sums))`. Why SQLite cannot: it never transposes an aggregate and has no hash
  * join, so a GROUP BY over a cross join materialises |L|×|R| rows — the pooled re-source
@@ -350,6 +364,12 @@ function factor(a: Aggregate, mint: () => (hint: string) => RelId): Rel | undefi
   const split = (e: Extract<Expr, { kind: 'agg' }>): Expr | undefined => {
     if (e.distinct || e.filter || e.orderBy?.length) return undefined;
     if (e.fn === 'count' && !e.args.length) return aggOf('sum', times(counts[0], counts[1]));
+    // `SelfSplitter`: a MIN/MAX over one side is the extreme of that side's per-group extremes — every pair of
+    // a top group holds ≥ 1 row of each side, so no sub-extreme is taken over an empty group.
+    if ((e.fn === 'min' || e.fn === 'max') && e.args.length === 1) {
+      const [side, x] = local(e.args[0]!);
+      return side === 2 ? undefined : aggOf(e.fn, push(Math.max(side, 0), aggOf(e.fn, x)));
+    }
     if (e.fn !== 'sum' || e.args.length !== 1) return undefined;
     const [side, x] = local(e.args[0]!);
     if (side !== 2) return aggOf('sum', times(push(Math.max(side, 0), aggOf('sum', x)), counts[side === 1 ? 0 : 1]));
@@ -373,11 +393,11 @@ function factor(a: Aggregate, mint: () => (hint: string) => RelId): Rel | undefi
   const built = sides.map((side, s) => {
     const [count] = pushed[s]![0]!;
     const agg = make.aggregate({
-      id: id('fa'), input: side, channels: [], groupBy: keys[s]!.map((name) => local({ kind: 'col', rel: j.id, name })[1]), aggs: pushed[s]!,
+      id: id('ajt'), input: side, channels: [], groupBy: keys[s]!.map((name) => local({ kind: 'col', rel: j.id, name })[1]), aggs: pushed[s]!,
       type: { cols: [...keys[s]!.map(meta), ...pushed[s]!.map(([name]): ColMeta => ({ name, type: name === count ? 'int' : 'any', nullable: name !== count }))] },
     });
     return keys[s]!.length ? agg : make.filter({
-      id: id('fa'), input: agg, channels: [], type: agg.type,
+      id: id('ajt'), input: agg, channels: [], type: agg.type,
       pred: { kind: 'binary', op: '>', left: { kind: 'col', rel: agg.id, name: count }, right: compilerInt(0) },
     });
   });
@@ -386,14 +406,175 @@ function factor(a: Aggregate, mint: () => (hint: string) => RelId): Rel | undefi
   return make.aggregate({ id: a.id, input: joined, channels: a.channels, type: a.type, groupBy, aggs });
 }
 
+// ---------- factor's enabling normalisation: the cross join brought up to the Aggregate ----------
+//
+// The connector's re-source crosses the pool with the body's FIRST read (`V()`), and the rest of the body
+// lands ABOVE that cross: a hop is an inner Join over it (`V().out()`, `V().values('age')`), a predicate a
+// Filter (`V().has('age', gt(30))`). So `factor` meets `Aggregate → (Filter | inner Join)* → Join(cross)` and
+// the pool × graph product stays. Two transposes bring the cross up — Calcite's `JoinAssociateRule`
+// (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/JoinAssociateRule.java`) and the
+// FilterJoin push of `RelOptUtil.classifyFilters`
+// (`vendor/calcite/core/src/main/java/org/apache/calcite/plan/RelOptUtil.java`) — and they are NOT
+// free-standing rounds: re-shaping every re-source-then-hop plan buys nothing where no Aggregate collapses
+// the product. They run only under an Aggregate, and the result is KEPT ONLY when `factor` then fires.
+
+/** The renaming projections from `r` down to a cross join (top first), and each of `r`'s columns traced to
+ *  the join column it reads. */
+interface OverRenames { readonly chain: readonly Project[]; readonly join: Join; readonly trace: (name: string) => string | undefined }
+
+function overRenames(r: Rel): OverRenames | undefined {
+  const chain: Project[] = [];
+  let node = r;
+  for (; node.kind === 'project' && renames(node); node = node.input) chain.push(node);
+  if (node.kind !== 'join' || node.join !== 'cross') return undefined;
+  const trace = (name: string): string | undefined => chain.reduce<string | undefined>((at, p) => {
+    const e = at === undefined ? undefined : p.exprs.find(([out]) => out === at)?.[1];
+    return e?.kind === 'col' ? e.name : undefined;
+  }, name);
+  return { chain, join: node, trace };
+}
+
+/** Which side of a cross join carries its column `name`: 0 left, 1 right — POSITIONALLY, so a join of a node
+ *  with itself still has two sides. */
+const sideIndex = (j: Join, name: string): 0 | 1 | undefined => {
+  const at = j.type.cols.findIndex((column) => column.name === name);
+  return at < 0 ? undefined : at < j.left.type.cols.length ? 0 : 1;
+};
+
+/** `chain` rebuilt over `bottom`, the top taking `top`'s id and channels (the node it replaces). */
+function restack(chain: readonly Project[], bottom: Rel, top: Rel): Rel {
+  return chain.reduceRight<Rel>((input, p, i) => make.project({
+    id: i ? p.id : top.id, channels: i ? p.channels : top.channels, type: p.type, input, exprs: p.exprs,
+  }), bottom);
+}
+
+/**
+ * FilterJoin: `Filter(p) → Q → Join(cross, L, R)`, `Q` renames, becomes `Q → Join(cross, Filter(p_L, L),
+ * Filter(p_R, R))`, conjunct by conjunct — each to the one side it reads. A conjunct reading both sides has no
+ * place below, so the push fails (a residue above would keep `factor` from firing anyway); so does one that
+ * DRAWS (`coin()`), which below the cross would be one draw per side row instead of one per pair. The top
+ * takes the filter's id, so every reader above resolves unchanged.
+ */
+function pushFilter(f: Filter, input: Rel, id: (hint: string) => RelId): Rel | undefined {
+  const under = overRenames(input);
+  if (!under) return undefined;
+  const { chain, join: j, trace } = under;
+  const parts: [Expr[], Expr[]] = [[], []];
+  for (const c of conjuncts(f.pred)) {
+    if (exprDraws(c)) return undefined;
+    let side: 0 | 1 | undefined;
+    for (const name of deepColsRead(c, input.id)) {
+      const at = trace(name);
+      const s = at === undefined ? undefined : sideIndex(j, at);
+      if (s === undefined || (side !== undefined && side !== s)) return undefined;
+      side = s;
+    }
+    parts[side ?? 1].push(mapColsDeep(c, input.id, (name) => { const from = joinSide(j, trace(name)!)!; return col(from.side.id, from.name); }));
+  }
+  const [left, right] = [j.left, j.right].map((side, s) => {
+    const pred = conjoin(parts[s]!);
+    return pred ? make.filter({ id: id('ajf'), input: side, channels: side.channels, type: side.type, pred }) : side;
+  }) as [Rel, Rel];
+  const joined = make.join({ id: chain.length ? j.id : f.id, left, right, join: 'cross', channels: chain.length ? j.channels : f.channels, type: j.type });
+  return restack(chain, joined, f);
+}
+
+/**
+ * JoinAssociate: `Join(inner, Q → Join(cross, A, B), C)`, `Q` renames and the ON reading no column of A,
+ * becomes `Project(Q's columns) → Join(cross, A, Join(inner, B, C))`. The cross keeps its id and its column
+ * names; the new inner join gets a fresh id, its ON moved onto B's own columns positionally (`joinSide`),
+ * its order pin kept (B is still the outer loop C seeks from). The projection takes the old join's id and
+ * columns, so every reader above resolves unchanged. Inner only — a LEFT join's null-padding is per B-row
+ * of the product and does not survive the move; a C correlated against the left, or a draw on the moved
+ * sides, is refused.
+ */
+function associate(i: Join, left: Rel, id: (hint: string) => RelId): Rel | undefined {
+  const under = overRenames(left);
+  if (!under) return undefined;
+  const { join: j, trace } = under;
+  const free = freeRelIds(i.right);
+  let lateral = false;
+  if (free.size) forEachRel(left, (r) => { lateral ||= free.has(r.id); });
+  if (lateral || draws(i.right) || (i.on && exprDraws(i.on))) return undefined;
+  let k: 0 | 1 | undefined;
+  for (const name of i.on ? deepColsRead(i.on, left.id) : []) {
+    const at = trace(name);
+    const s = at === undefined ? undefined : sideIndex(j, at);
+    if (s === undefined || (k !== undefined && k !== s)) return undefined;
+    k = s;
+  }
+  const s = k ?? 1;
+  const moved = s ? j.right : j.left, kept = s ? j.left : j.right;
+  if (draws(moved)) return undefined;
+  const leftN = j.left.type.cols.length;
+  const colsOfSide = (side: 0 | 1): readonly ColMeta[] => (side ? j.type.cols.slice(leftN) : j.type.cols.slice(0, leftN));
+  const taken = new Set(j.type.cols.map((column) => column.name));
+  const fresh = (name: string): string => {
+    let out = name;
+    for (let n = 0; taken.has(out); n++) out = `${name}_${n}`;
+    taken.add(out);
+    return out;
+  };
+  const cCols = i.type.cols.slice(left.type.cols.length).map((column) => ({ ...column, name: fresh(column.name) }));
+  const on = i.on && mapColsDeep(i.on, left.id, (name) => { const from = joinSide(j, trace(name)!)!; return col(from.side.id, from.name); });
+  const inner = make.join({
+    id: id('ajn'), left: moved, right: i.right, join: i.join, on, ordered: i.ordered, channels: [],
+    type: { cols: [...colsOfSide(s), ...cCols] },
+  });
+  const cross = make.join({
+    id: j.id, left: s ? kept : inner, right: s ? inner : kept, join: 'cross', channels: [],
+    type: { cols: s ? [...colsOfSide(0), ...inner.type.cols] : [...inner.type.cols, ...colsOfSide(1)] },
+  });
+  return make.project({
+    id: i.id, channels: i.channels, type: i.type, input: cross,
+    exprs: i.type.cols.map((column, p) => [column.name,
+      col(j.id, p < left.type.cols.length ? trace(left.type.cols[p]!.name)! : cCols[p - left.type.cols.length]!.name)] as const),
+  });
+}
+
+/**
+ * The Aggregate's input chain normalised to `Project* → Join(cross)`, or `undefined`. Walks the rewritten
+ * node `m` and its original `o` together — `single` is a census fact of the ORIGINAL plan, and every node the
+ * rewrite drops must be single, or it would stay behind for its other reader with the work done twice. Each
+ * result has `m`'s id and columns.
+ */
+function normalise(m: Rel, o: Rel, single: (r: Rel) => boolean, id: (hint: string) => RelId): Rel | undefined {
+  if (!single(o) || m.kind !== o.kind) return undefined;
+  switch (m.kind) {
+    case 'project': {
+      if (m.exprs.some(([, e]) => exprHasSubquery(e))) return undefined;
+      const input = normalise(m.input, (o as Project).input, single, id);
+      return input && make.project({ id: m.id, channels: m.channels, type: m.type, input, exprs: m.exprs });
+    }
+    case 'filter': {
+      const input = normalise(m.input, (o as Filter).input, single, id);
+      return input && pushFilter(m, input, id);
+    }
+    case 'join': {
+      if (m.join === 'cross') return m;
+      if (m.join !== 'inner') return undefined;
+      const left = normalise(m.left, (o as Join).left, single, id);
+      return left && associate(m, left, id);
+    }
+    default: return undefined;
+  }
+}
+
 function factorRound(plans: readonly Rel[], c: Census): readonly Rel[] {
   const single = (r: Rel): boolean => (c.parents.get(r)?.length ?? 0) === 1 && !c.roots.has(r);
   let mint: ((hint: string) => RelId) | undefined;
+  const id = (): ((hint: string) => RelId) => (mint ??= minter(...plans).id);
   let changed = false;
   const memo = new Map<Rel, Rel>();
   const next = plans.map((plan) => rewriteRels(plan, (mapped, original) => {
-    if (mapped.kind !== 'aggregate' || original.kind !== 'aggregate' || !overCross(original, single)) return mapped;
-    const factored = factor(mapped, () => (mint ??= minter(...plans).id));
+    if (mapped.kind !== 'aggregate' || original.kind !== 'aggregate') return mapped;
+    let candidate: Aggregate | undefined = mapped;
+    if (!overCross(original, single)) {
+      if (!mapped.groupBy.length || mapped.having || mapped.channels.length) return mapped;
+      const input = normalise(mapped.input, original.input, single, id());
+      candidate = input && make.aggregate({ id: mapped.id, channels: mapped.channels, type: mapped.type, input, groupBy: mapped.groupBy, aggs: mapped.aggs });
+    }
+    const factored = candidate && factor(candidate, id);
     if (factored) changed = true;
     return factored ?? mapped;
   }, memo));

@@ -7,9 +7,14 @@
 // shape: no Aggregate over the cross join in the emitted SQL's pooled value.
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { bare, grouped, run, seededStore } from '../support/harness.ts';
+import { bare, grouped, run, seededStore, storeSeededWith } from '../support/harness.ts';
 
 const store = seededStore();
+const WITNESSES = [
+  "g.V().group().by('name').by(V().values('age').sum())",
+  "g.V().group().by('name').by(V().out().count())",
+  "g.V().group().by('name').by(V().has('age',gt(30)).count())",
+] as const;
 const values = (q: string): Record<string, unknown> => grouped(bare(run(store, q)));
 const sqlOf = (q: string): string => {
   const plan = compile(q, {});
@@ -41,6 +46,32 @@ describe('fuse: an Aggregate over a pooled re-source cross join is factored per 
       .toEqual({ josh: 0, lop: 0, marko: 0, peter: 0, ripple: 0, vadas: 0 });
     const summed = bare(run(store, "g.V().group().by('name').by(V().values('age').sum())"));
     expect(JSON.stringify(summed)).toContain('{\\"t\\":\\"int\\",\\"v\\":123}');
+  });
+
+  // The body's hop / predicate lands ABOVE the cross join; `fuse`'s normalisation (JoinAssociate, FilterJoin)
+  // brings the cross up to the Aggregate, so these factor too (was 641 ms at 1k vertices, 2 662 ms at 2k).
+  test('a hop or a predicate after the re-source factors: V().values().sum(), V().out().count(), V().has().count()', () => {
+    for (const q of WITNESSES) expect(sqlOf(q)).toMatch(/ajt/);
+    expect(values(WITNESSES[0])).toEqual({ josh: 123, lop: 123, marko: 123, peter: 123, ripple: 123, vadas: 123 });
+    expect(values(WITNESSES[1])).toEqual({ josh: 6, lop: 6, marko: 6, peter: 6, ripple: 6, vadas: 6 });
+    expect(values(WITNESSES[2])).toEqual({ josh: 2, lop: 2, marko: 2, peter: 2, ripple: 2, vadas: 2 });
+    // The integer class survives the split (sum × count of integers).
+    expect(JSON.stringify(bare(run(store, WITNESSES[0])))).toContain('{\\"t\\":\\"int\\",\\"v\\":123}');
+    expect(values("g.V().both().group().by('name').by(V().out().has('age',gt(30)).count())"))
+      .toEqual({ josh: 3, lop: 3, marko: 3, peter: 1, ripple: 1, vadas: 1 });
+  });
+
+  test('over a graph with REPEATED keys every key is its pool weight × the body total', () => {
+    const big = storeSeededWith([
+      'g.addV("person").property("name","a").property("age",10).as("a").addV("person").property("name","a").property("age",20).as("b")'
+        + '.addV("person").property("name","b").property("age",31).as("c").addV("software").property("name","c").as("d")'
+        + '.addE("knows").from("a").to("b").addE("knows").from("a").to("c").addE("created").from("c").to("d")',
+    ]);
+    const of = (q: string): Record<string, unknown> => grouped(bare(run(big, q)));
+    expect(of("g.V().group().by('name').by(V().values('age').sum())")).toEqual({ a: 122, b: 61, c: 61 });
+    expect(of("g.V().group().by('name').by(V().out().count())")).toEqual({ a: 6, b: 3, c: 3 });
+    expect(of("g.V().group().by('name').by(V().has('age',gt(30)).count())")).toEqual({ a: 2, b: 1, c: 1 });
+    expect(of("g.V().group().by('name').by(V().out().out().count())")).toEqual({ a: 2, b: 1, c: 1 });
   });
 
   test('at depth: inside project().by(), and read back through select(values)', () => {
