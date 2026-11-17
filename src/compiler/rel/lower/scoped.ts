@@ -482,12 +482,14 @@ function keyedInFork(
   // declines; a snapshot with no connector site to place it at (`ChainCtx.siteEffects`) likewise.
   const snapshots = ctx.mutating && !isScopedFork(ctx.collections);
   if (sites.length && (projection || (snapshots && !ctx.siteEffects))) return null;
-  const all = decorrelateAll([tail.rel, ...sites.map((site) => site.rel)], outer, key, fresh, projection, mine.owns);
+  // A site is ordered by its host row's position, which the domain CARRIES (`scopedSite`) — no rejoin to `outer`.
+  const hostEnc = sites.length ? encounterOf(outer.channels) : undefined;
+  const all = decorrelateAll([tail.rel, ...sites.map((site) => site.rel)], outer, key, fresh, projection, mine.owns, hostEnc ? [hostEnc.col] : []);
   if (!all) return null;
   const [keyed, ...keyedSites] = all;
   const committed = new Map<Site, Site>();
   for (const [i, site] of sites.entries()) {
-    const done = scopedSite(site, keyedSites[i]!, outer, key, ctx.hostBulked ?? true, fresh);
+    const done = scopedSite(site, keyedSites[i]!, outer, ctx.hostBulked ?? true, fresh);
     if (!done) return null;
     committed.set(site, done);
   }
@@ -512,7 +514,7 @@ function keyedInFork(
  * `null` where the keyed relation still names a relation outside the scope (a site registered under a nested
  * route that kept its own correlation): it cannot be read where the collection is.
  */
-function scopedSite(site: Site, keyed: Decorrelated, outer: Rel, key: string, hostBulked: boolean, fresh: Minter): Site | null {
+function scopedSite(site: Site, keyed: Decorrelated, outer: Rel, hostBulked: boolean, fresh: Minter): Site | null {
   if (hostBulked && outer.channels.some((channel) => channel.role === 'bulk')) return null;
   const outerFree = freeRelIds(outer);
   if ([...freeRelIds(keyed.rel)].some((id) => !outerFree.has(id))) return null;
@@ -520,28 +522,22 @@ function scopedSite(site: Site, keyed: Decorrelated, outer: Rel, key: string, ho
   const own = site.rel.type.cols;
   const hostEnc = encounterOf(outer.channels);
   const unitCol = fresh('shk') as string;
+  const owned = own.map((column) => [column.name, col(keyed.rel.id, column.name)] as const);
   if (!hostEnc) {
     // No host position to read: the scope key (the host stream's own numbering) orders the units.
     const rel = make.project({
       id: fresh('shp'), input: keyed.rel, channels: [], type: typeOf(...own, meta(unitCol, 'int')),
-      exprs: [...own.map((column) => [column.name, col(keyed.rel.id, column.name)] as const), [unitCol, col(keyed.rel.id, k)]],
+      exprs: [...owned, [unitCol, col(keyed.rel.id, k)]],
     });
     return { rel, order: [unitCol, ...site.order], perTraverser: true, unit: unitCol };
   }
+  // The host's position is a domain column (`keyedBody` asks the decorrelator to carry it): read in place.
+  const carried = keyed.domain.get(hostEnc.col);
+  if (!carried) return null;
   const hostCol = fresh('she') as string;
-  const hostKey = fresh('shj') as string;
-  const hosts = make.project({
-    id: fresh('shh'), input: outer, channels: [], type: typeOf(meta(hostKey, 'int'), meta(hostCol, 'int')),
-    exprs: [[hostKey, col(outer.id, key)], [hostCol, col(outer.id, hostEnc.col)]],
-  });
-  const joined = make.join({
-    id: fresh('shx'), left: keyed.rel, right: hosts, join: 'inner', channels: [],
-    type: typeOf(...keyed.rel.type.cols, ...hosts.type.cols), on: eq(col(keyed.rel.id, k), col(hosts.id, hostKey)),
-  });
   const rel = make.project({
-    id: fresh('shp'), input: joined, channels: [], type: typeOf(...own, meta(hostCol, 'int'), meta(unitCol, 'int')),
-    exprs: [...own.map((column) => [column.name, col(joined.id, column.name)] as const),
-      [hostCol, col(joined.id, hostCol)], [unitCol, col(joined.id, hostKey)]],
+    id: fresh('shp'), input: keyed.rel, channels: [], type: typeOf(...own, meta(hostCol, 'int'), meta(unitCol, 'int')),
+    exprs: [...owned, [hostCol, col(keyed.rel.id, carried)], [unitCol, col(keyed.rel.id, k)]],
   });
   return { rel, order: [hostCol, ...site.order], perTraverser: true, unit: unitCol };
 }

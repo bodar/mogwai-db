@@ -85,6 +85,9 @@ export interface Decorrelated {
   /** The key `rel`'s rows are keyed by: each `col` of `rel` equals the outer relation's column `outer`, and
    *  jointly they name ONE outer row. Without a `KeyProjection` it is the single `key` the caller passed. */
   readonly key: readonly [KeyColumn, ...KeyColumn[]];
+  /** Each outer column the domain carries → its name in `rel`: the key, every column the plan read, and the
+   *  columns the caller asked to `carry`. */
+  readonly domain: ReadonlyMap<string, string>;
 }
 
 export interface KeyColumn {
@@ -152,6 +155,7 @@ export function decorrelate(
  */
 export function decorrelateAll(
   plans: readonly Rel[], outer: Rel, key: string, fresh: Minter, projection: KeyProjection | undefined, owns: (r: Rel) => boolean,
+  carry: readonly string[] = [],
 ): readonly Decorrelated[] | null {
   const drawn = ownDraws(owns);
   const h = outer.id;
@@ -170,6 +174,8 @@ export function decorrelateAll(
     relChildren(r).forEach(walkPlan);
   };
   plans.forEach(walkPlan);
+  // A column the CALLER reads off each answer's domain (a host's encounter, `scopedSite`) is one the domain carries.
+  carry.forEach((name) => read.add(name));
   // The key projection is usable only where the plan reads nothing of the outer row but its projected columns.
   const eliminating = projection && [...read].every((name) => projection.cols.has(name)) ? projection : undefined;
   read.delete(key);
@@ -747,7 +753,7 @@ export function decorrelateAll(
   for (const plan of plans) {
     const out = go(plan);
     if (!out) return null;
-    answers.push({ rel: ensureKeyed(out).rel, key: [first!, ...more] });
+    answers.push({ rel: ensureKeyed(out).rel, key: [first!, ...more], domain: dName });
   }
   return answers;
 }

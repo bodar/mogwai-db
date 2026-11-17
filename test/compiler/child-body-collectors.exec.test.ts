@@ -59,6 +59,17 @@ describe('a collector in a child body', () => {
     expect(JSON.parse(names)).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   });
 
+  test('the host position orders the members off the domain — no rejoin of the site to the host stream', () => {
+    // `scopedSite` reads the host's encounter from the decorrelation's domain (`decorrelateAll`'s `carry`); a second
+    // read of the scoped host relation would be a self-join of every site row back to it.
+    const { sql } = read("g.V().order().by('name').local(out().aggregate('x')).cap('x')");
+    const scope = sql.match(/^WITH (r\d+) AS/)![1]!;
+    // The scope relation is read ONCE by the site: its body's own scan, with the host position beside it.
+    expect(sql.match(new RegExp(`(FROM|JOIN) ${scope} `, 'g'))).toHaveLength(1);
+    const names = (bare(run(store, "g.V().order().by('name').local(out().values('name').aggregate('x')).cap('x')")) as { list: string }[])[0]!.list;
+    expect(JSON.parse(names).sort()).toEqual(['josh', 'lop', 'lop', 'lop', 'ripple', 'vadas']);
+  });
+
   test('a body whose collection is read inside the same body declines, naming the collection and the host', () => {
     expect(() => run(store, "g.V().local(out().aggregate('x').cap('x'))")).toThrow(UnsupportedTraversal);
     expect(() => run(store, "g.V().local(out().aggregate('x').cap('x'))")).toThrow(/a side effect \('x'\) collected inside local\(\)/);
