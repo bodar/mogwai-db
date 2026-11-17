@@ -1038,12 +1038,13 @@ routing, not on where the decline is:
 
 ### Cheap, concrete follow-ups (round 4)
 
-- **R6 — `P.not(within('x'))` → `without('x')`.** Normalize this at the one `memberOf` helper. Corpus
-  `g_VX1X_out_aggregateXxX_out_whereXnotXwithinXaXXX` and `g_V_classic_recommendation` still decline; the
-  `without` spelling answers `[ripple]`.
-- **R6 — compute the membership key once.** `scalarMembership` (`src/compiler/rel/lower/filter.ts`) spells
-  `typedValueKey(v, coalesce(tag, inferredVtype(v)))` about 6 times per member row (2649 → 3941 bytes). Project the
-  member's total tag as one column under `set`, then key over that column.
+- ✅ **R6 — `P.not(within('x'))` → `without('x')` — LANDED (3537cd84).** `membershipOf(pred)`
+  (`src/compiler/ir/step.ts`) is the one decode of a `where(P)` membership test: it peels every `not` (flipping
+  polarity) down to a single-key within/without, and both `labels.ts` `isMembershipWhere` and `filter.ts`
+  `collectionMembership` read it. L3 +1 (`g_VX1X_out_aggregateXxX_out_whereXnotXwithinXaXXX`). Remains: nothing
+  for this item (`g_V_classic_recommendation` still declines on its own `group-side-effect` blocker, ledgered).
+- ✅ **R6 — compute the membership key once — LANDED (3537cd84).** `scalarMembership` projects the member tag
+  `coalesce(tag, inferredVtype(v))` once as a column under the key set; scaling 1k→8k ≈ 7.7–9.0×. Remains: nothing.
 - **N5 — root min/max re-inlines the per-row value CASE** (`CASE WHEN vtype IN ('list','map','set') THEN json(value)
   …`) into the compare key, the bare value and the class. Project it once below the Aggregate.
 - **Q2a — one `loopCountPredicate(test): P | null`** in `src/compiler/ir/strategies.ts`, shared by `emitLevelTest`
