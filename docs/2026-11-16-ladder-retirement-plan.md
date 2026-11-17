@@ -1480,6 +1480,13 @@ consumer read this relation IN FULL (aggregate, sort, window, ≤1 row, up to th
 question. No behaviour change by itself (magic's answers byte-identical; L1 compilePlan diff). Then U2 and U3 each
 become one extra condition on that fact, not a new private model.
 
+✅ **LANDED (cab95bf4).** `readInFull(roots, mode)` in `src/rel/work.ts` beside `perHostWork`, with ONE blocking-kind
+predicate `readsInputInFull` (aggregate/sort/window/materialize) shared with `exhaustsInput`. `'spine'` is magic's old
+`demanded`, byte-identical (whole-L1-corpus plan dump unchanged); `'once'` (U3's fence) also counts a correlated
+subplan, `IN (SELECT)`, recursive term and per-row-re-read join side as full, and returns the complement as
+`stopsEarly` so a consumer fences by default. The per-call cost half stays `perHostWork`'s `exhausts`. Tests:
+`test/rel-reader-demand.test.ts`. Remains: nothing.
+
 ### U1 — `edgePair` costs |label vocabulary| per probe (MAJOR, common reach; regression from T1's 1274c293)
 
 `edgePair` (`src/rel/passes/edge-pair.ts`) reads every both-endpoint-pinned, label-free edge probe through
