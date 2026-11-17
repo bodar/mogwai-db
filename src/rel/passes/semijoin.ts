@@ -195,7 +195,7 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
   if (element.kind !== 'scan') return narrowFilter(node, terms, strategies, mint, facts) ?? node;
   const target: SeekTarget = { rel: element.id, name: 'id', table: element.table, local: null };
   for (const seek of strategies) {
-    for (const term of terms) {
+    for (const term of seekOrder(terms)) {
       const lifted = seek(term, target, mint);
       if (!lifted) continue;
       const joined = make.join({
@@ -217,6 +217,30 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
 }
 
 /**
+ * The terms in the order a seek tries them: a property `EXISTS` whose value the index can SEEK — `value = x` or
+ * `value IN (…)`, read as a `vp_key_value (key, value)` point — ahead of one that constrains the key alone and only
+ * FILTERS the value (a range, a type-dispatching `CASE`: SQLite cannot bound the index by it, so the "seek" walks
+ * every row of the key). Not a selectivity guess: which terms bound the index is a fact of their SPELLING, and
+ * SQLite's own planner ranks an equality constraint ahead of a range the same way. Stable otherwise, so the query's
+ * own order still breaks ties. Measured on `V().where(neq('a')).has('name','p7').values('age').is(gt(30))` inside
+ * `where()`: the range driving went 289 ms @1k → 18.6 s @8k (x64); the equality driving is linear.
+ */
+function seekOrder(terms: readonly Expr[]): readonly Expr[] {
+  const point = terms.filter(valueSeekable);
+  return point.length === 0 || point.length === terms.length ? terms : [...point, ...terms.filter((t) => !point.includes(t))];
+}
+
+/** Does `term` — a property `EXISTS` — constrain its row's `value` by an equality or a membership list? */
+function valueSeekable(term: Expr): boolean {
+  if (term.kind !== 'exists' || term.negated || term.plan.kind !== 'project' || term.plan.input.kind !== 'filter') return false;
+  const props = term.plan.input.input;
+  if (props.kind !== 'scan' || !PROPERTY_OWNER[props.table]) return false;
+  const isValue = (e: Expr): boolean => e.kind === 'col' && e.rel === props.id && e.name === 'value';
+  return conjuncts(term.plan.input.pred).some((e) =>
+    (e.kind === 'binary' && e.op === '=' && (isValue(e.left) || isValue(e.right))) || (e.kind === 'in-list' && isValue(e.expr)));
+}
+
+/**
  * The NARROWING placement: `element.id IN (<owner ids>)` beside the predicate — or `null` where no term
  * gives one.
  *
@@ -230,14 +254,14 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, strateg
  * `g.V().values('name').as('e').V().has('name', select('e')).count()`, and 3.6 ms with the conjunct.
  *
  * It ADDS an access path to an element the query gives none (`ElementFacts.reached`) and never chooses
- * between two on a selectivity guess. SELF-CONTAINED seeks are tried before CORRELATED ones, and a
+ * between two on a selectivity guess (only on which terms the index can bound at all, `seekOrder`). SELF-CONTAINED seeks are tried before CORRELATED ones, and a
  * correlated one yields to a constant seek anywhere on the element (`ElementFacts.constantSeek`), so a
  * constant `has(k, v)` drives in preference to a value read per outer row.
  */
 function narrowFilter(node: Extract<Rel, { readonly kind: 'filter' }>, terms: readonly Expr[], strategies: readonly OwnerSeek[], mint: Minter, facts: ElementFacts): Rel | null {
   for (const correlated of [false, true]) {
     for (const seek of strategies) {
-      for (const term of terms) {
+      for (const term of seekOrder(terms)) {
         const target = drivenElement(node, term, correlated);
         const element = target && columnPath(node.input, target.rel, target.name)!.rels.at(-1)!.id;
         if (!target || !element || facts.reached.has(element) || facts.narrowed.has(element)) continue;

@@ -173,7 +173,11 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
     forEachExpr(path, (node) => { if (node.kind === 'col' && inSeed.has(node.rel)) own = true; });
     return own || exprHasSubquery(path) ? null : path;
   };
-  const pushed: Expr[] = [];
+  // Candidate conjuncts in SPINE ORDER. A group of owner-joined conjuncts holds the place of its FIRST member, so
+  // grouping never reorders what the seek sees: `semijoin`'s `narrowFilter` lifts the first seekable term by
+  // position, and a probe moved behind a later `has()` term hands the seek that term instead (measured: a
+  // `has('age', gt(30))` range seek displacing a `values('name').is('p7')` probe went 18x over 4x N).
+  const pushed: (Expr | OwnerScan[])[] = [];
   const guards: Expr[] = [];
   // Conjuncts over an owner-joined property row, grouped by the one scan each resolves to (`ownerScan`).
   const owned = new Map<RelId, OwnerScan[]>();
@@ -193,14 +197,22 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
       else if (moved) guards.push(moved);
       else {
         const scan = ownerScan(conjunct, filter.input, spine, side, key);
-        if (scan) owned.set(scan.props.id, [...(owned.get(scan.props.id) ?? []), scan]);
+        if (!scan) continue;
+        const group = owned.get(scan.props.id);
+        if (group) group.push(scan);
+        else {
+          const first = [scan];
+          owned.set(scan.props.id, first);
+          pushed.push(first);
+        }
       }
     }
   }
-  for (const group of owned.values()) {
-    const probe = ownerProbe(group, col(source.plan.id, key), mint);
-    if (probe) pushed.push(probe);
-  }
+  const narrowing = pushed.flatMap((term) => {
+    if (!Array.isArray(term)) return [term];
+    const probe = ownerProbe(term, col(source.plan.id, key), mint);
+    return probe ? [probe] : [];
+  });
   // A test of the HOST alone is asked ONCE per read, over one unit row ahead of the scan: SQLite places a WHERE
   // term that reads none of the scan's tables inside the scan's loop all the same, so as a candidate filter it
   // would be asked per element — and a host it rejects (no age to compare) would still scan the graph.
@@ -211,8 +223,8 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
     const held = make.filter({ id: mint.id('clg'), input: unit, channels: [], type: unit.type, pred: guard });
     return { kind: 'scalar', plan: make.project({ id: mint.id('clq'), input: held, channels: [], type: typeOf({ ...type, nullable: true }), exprs: [[type.name, value]] }) };
   };
-  const candidates = pushed.length
-    ? make.filter({ id: mint.id('clc'), input: source.plan, channels: source.plan.channels, type: source.plan.type, pred: pushed.reduce((a, b) => and(a, b)) })
+  const candidates = narrowing.length
+    ? make.filter({ id: mint.id('clc'), input: source.plan, channels: source.plan.channels, type: source.plan.type, pred: narrowing.reduce((a, b) => and(a, b)) })
     : source.plan;
   const one = at(col(candidates.id, key));
   if (!one) return null;

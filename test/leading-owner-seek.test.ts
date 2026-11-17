@@ -53,6 +53,10 @@ const SEEKS = [
   "g.V().as('a').where(V().where(neq('a')).values('name').is(endingWith('sh'))).values('name')",
   "g.V().as('a').where(V().where(neq('a')).values('name').is(startingWith('m')).is(endingWith('o'))).values('name')",
   "g.V().as('a').not(V().where(neq('a')).values('name').is(notContaining('o'))).values('name')",
+  // A `has()` conjunct beside the owner-joined one: the seek drives from whichever the index can BOUND (an
+  // equality, `seekOrder` in `semijoin.ts`), whatever order the query states them in.
+  "g.V().as('a').where(V().where(neq('a')).has('age', gt(30)).values('name').is('josh')).values('name')",
+  "g.V().as('a').where(V().where(neq('a')).has('name', 'josh').values('age').is(gt(30))).values('name')",
 ];
 
 /** The owner-probe `EXISTS`es `leading` puts on the candidates — `SELECT <props>.node AS one FROM vertex_properties`. */
@@ -123,12 +127,12 @@ describe('the narrowing NARROWS and never decides', () => {
 });
 
 describe('scaling', () => {
-  /** `n` vertices `p{i}` with a ring of edges — enough for a re-source per host. */
+  /** `n` vertices `p{i}` aged `i % 100` with a ring of edges — enough for a re-source per host. */
   const graph = (n: number): GraphStore => {
     const store = new GraphStore(new BunSqlite(':memory:'));
     loadBulk(
       store,
-      Array.from({ length: n }, (_, i) => ({ id: i + 1, labels: ['person'], properties: [{ key: 'name', value: `p${i + 1}` }] })),
+      Array.from({ length: n }, (_, i) => ({ id: i + 1, labels: ['person'], properties: [{ key: 'name', value: `p${i + 1}` }, { key: 'age', value: (i + 1) % 100 }] })),
       Array.from({ length: n }, (_, i) => ({ label: 'knows', src: i + 1, tgt: ((i + 1) % n) + 1 })),
     );
     return store;
@@ -151,6 +155,11 @@ describe('scaling', () => {
     "g.V().as('a').where(V().where(neq('a')).values('name').is(containing('zz'))).count()",
     "g.V().as('a').where(V().where(neq('a')).values('name').is(startingWith('zz'))).count()",
     "g.V().as('a').where(V().where(neq('a')).values('name').is(endingWith('zz'))).count()",
+    // A `has()` conjunct BEFORE the owner-joined one: the grouped probe keeps the place of its first conjunct, so
+    // the seek stays on the selective equality, not the range a reordering would hand it.
+    "g.V().as('a').where(V().where(neq('a')).has('age', gt(30)).values('name').is('p7')).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('name', 'p7').values('age').is(gt(30))).count()",
+    "g.V().as('a').where(V().where(neq('a')).has('age', gt(30)).values('name').is(containing('zz'))).count()",
   ]) {
     test(`linear from 1k to 8k: ${q}`, async () => {
       const t1 = await timed(() => answer(small, q));
