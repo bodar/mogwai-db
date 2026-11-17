@@ -150,7 +150,7 @@ describe('format() renders every token as its asString() text', () => {
   });
 
   // An ELEMENT-valued scope key (`v[1]`), a side-effect key — a `withSideEffect` constant OR any keyed
-  // writer's, wherever it stands — or a label bound past a re-rooting `V()` is read where the property is
+  // writer's, wherever it stands — is read where the property is
   // ABSENT (`Scoping.getScopeValue`, `.../traversal/step/Scoping.java:119-131`), so an absent property must
   // not drop the traverser: the reference appends the scoped value. It defers, at every depth.
   test.each([
@@ -159,7 +159,6 @@ describe('format() renders every token as its asString() text', () => {
     ["g.V().groupCount('w').format('%{w}')"], ["g.V().group('w').by('name').format('%{w}')"],
     ["g.V().format('%{w}').aggregate('w')"], ["g.V().local(__.format('%{w}')).aggregate('w')"],
     ["g.V().aggregate('w').union(__.format('%{w}'))"], ["g.V().aggregate('w').project('f').by(__.format('%{w}'))"],
-    ["g.V().values('age').as('x').project('a').by(__.V().has('name','marko').format('%{name}%{x}'))"],
   ])('a named token this cannot read defers rather than drop the traverser: %s', (gremlin) => {
     expect(() => runP(gremlin)).toThrow(/not supported/);
   });
@@ -172,6 +171,9 @@ describe('format() renders every token as its asString() text', () => {
     ["g.withSideEffect('w',1).V(1).format('%{name}')", ['marko']],
     // Existence alone: the token is productive either way, so nothing is read and nothing defers.
     ["g.V().union(__.format('%{w}'), __.aggregate('w')).count()", [12]],
+    // A label of the HOST read past a re-rooting `V()`: the split traverser keeps the host's labels
+    // (`GraphStep` `head.split`), and the body is the cross with the host, read per host row.
+    ["g.V().values('age').as('x').project('a').by(__.V().has('name','marko').format('%{name}%{x}')).select('a')", ['marko29', 'marko27', 'marko32', 'marko35']],
   ] as const)('%s', (gremlin, expected) => {
     expect(bagOf(runP(gremlin))).toEqual(bagOf(expected.map((e) => typeof e === 'string' ? str(e) : `${e}L`)));
   });

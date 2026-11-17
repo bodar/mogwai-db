@@ -9,9 +9,10 @@
 // continues over the cross from there — under `forward` a label the read binds rides out of the shared read as an
 // alias channel. At the ROOT the fold's cross (`lower/movement.ts` `reSource`) extends a carried path and keeps a sack.
 //
-// A FIRST-row host whose rest reads the host traverser, a `forward` host on a traverser whose path is tracked, and
-// a body reading a tracked path itself decline from the query text, naming the shape; a rest that is only
-// `select` of an outer label suggests the likely intent.
+// A FIRST-row host whose rest reads the host traverser is the fold's cross, which the host's correlated-first
+// policy reads per host row and stops at its first row (a `by()` value too: `landValues`' `correlatedValue`).
+// A `forward` host on a traverser whose path is tracked, and a body reading a tracked path itself, decline from
+// the query text, naming the shape.
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare, bagOf } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
@@ -77,21 +78,57 @@ describe('a sack crosses a root re-source', () => {
   });
 });
 
-describe('a first-row host whose rest reads the host traverser declines, naming the shape', () => {
-  const declines = (g: string): string => {
-    try { run(s, g); } catch (error) { expect(error).toBeInstanceOf(UnsupportedTraversal); return (error as Error).message; }
-    throw new Error(`expected a decline: ${g}`);
-  };
-  test('map(V().select(a)) suggests the likely intent', () => {
-    const message = declines("g.V().as('a').map(V().select('a'))");
-    expect(message).toContain('a V()/E() inside map(), by() or a filter');
-    expect(message).toContain("select('a').out()");
+describe('a first-row host whose rest reads the host traverser answers through the cross, kept correlated', () => {
+  // GraphStep's cross in the fold (`movement.ts` `reSource`); the host's correlated-first policy reads it per
+  // host row and stops at the first row (`TraversalMapStep` one `next()`, `TraversalFilterStep` one `hasNext()`).
+  const names = ['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas'];
+  test('map(V().where(neq(a)).values(name)): the first OTHER vertex', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).values('name'))"))).toEqual(bagOf(['vadas', ...Array(5).fill('marko')]));
   });
-  test('a self-join idiom is named, not called confused', () => {
-    const message = declines("g.V().as('a').map(V().as('b').where(eq('a')).by('name')).values('name')");
-    expect(message).toContain('a V()/E() inside map(), by() or a filter');
-    expect(message).not.toContain("select('a').out()");
-    expect(message).not.toContain('ambiguous');
+  test('map(V().as(x).out().where(neq(a)).count()) is a barrier over the whole cross', () => {
+    // Per host: the out-edges of every vertex whose target is not the host (6 edges, minus the host's in-degree).
+    expect(bagOf(scalars("g.V().as('a').map(V().as('x').out().where(neq('a')).count())").map(Number))).toEqual(bagOf([6, 5, 3, 5, 5, 6]));
+  });
+  test('where(V().has(age,gt(30)).where(neq(a))): another such vertex exists for every host', () => {
+    expect(count("g.V().as('a').where(V().has('age',gt(30)).where(neq('a'))).count()")).toBe(6);
+  });
+  test('where(V().has(age,gt(32)).where(neq(a))): peter alone matches, so only peter fails', () => {
+    expect(count("g.V().as('a').where(V().has('age',gt(32)).where(neq('a'))).count()")).toBe(5);
+  });
+  test('not(V().has(age,gt(32)).where(neq(a))) keeps only peter', () => {
+    expect(scalars("g.V().as('a').not(V().has('age',gt(32)).where(neq('a'))).values('name')")).toEqual(['peter']);
+  });
+  test('project(n).by(V().where(neq(a)).count())', () => {
+    expect(rows("g.V().as('a').project('n').by(V().where(neq('a')).count())").map((r) => JSON.parse(r.map)[0][1].v)).toEqual(Array(6).fill(5));
+  });
+  test('map(V().where(neq(a)).values(name).fold()) is every other name', () => {
+    expect(bagOf(rows("g.V().as('a').map(V().where(neq('a')).values('name').fold())").map((r) => JSON.parse(r.list).length))).toEqual(Array(6).fill(5));
+  });
+  test('a self-join idiom: the first vertex sharing the host name is itself', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().as('b').where(eq('a')).by('name')).values('name')"))).toEqual(names);
+  });
+  test('a sack the rest reads is the host\'s', () => expect(scalars("g.withSack(1).V().map(V().sack())")).toEqual(Array(6).fill(1)));
+  test('order().by(V().where(neq(a)).values(name)): marko sorts last', () => {
+    expect(scalars("g.V().as('a').order().by(V().where(neq('a')).values('name')).values('name')").at(-1)).toBe('marko');
+  });
+  test('dedup().by(...) keys on the first other name', () => {
+    expect(count("g.V().as('a').dedup().by(V().where(neq('a')).values('name')).count()")).toBe(2);
+  });
+  test('groupCount().by(...)', () => {
+    expect(rows("g.V().as('a').groupCount().by(V().where(neq('a')).values('name'))").map((r) => JSON.parse(r.map).map(([k, v]: any) => [k.v, v.v]).sort())[0])
+      .toEqual([['marko', 5], ['vadas', 1]]);
+  });
+  test('two host labels', () => {
+    expect(count("g.V().as('a').out().as('b').map(V().where(neq('a')).where(neq('b')).count()).dedup().count()")).toBe(1);
+  });
+  test('inside local(), a filter and a repeat body', () => {
+    expect(bagOf(scalars("g.V().as('a').local(map(V().where(neq('a')).values('name')))"))).toEqual(bagOf(['vadas', ...Array(5).fill('marko')]));
+    expect(count("g.V().as('a').where(map(V().where(neq('a')).count()).is(5)).count()")).toBe(6);
+    // An unordered limit(1) is the planner's pick (§17); every pick is another vertex than the host's label.
+    expect(count("g.V().as('a').repeat(map(V().where(neq('a')).limit(1))).times(2).where(neq('a')).count()")).toBe(6);
+  });
+  test('a discarded re-source under select(a) is the host itself', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().select('a')).values('name')"))).toEqual(names);
   });
 });
 

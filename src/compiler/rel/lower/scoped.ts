@@ -12,7 +12,7 @@ import { exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfC
 import { columnIsRowKey, columnIsStored, columnReadsSubquery, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
-import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
+import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias } from '../alias.ts';
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, Subject } from '../child.ts';
@@ -215,9 +215,13 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * path crosses unchanged as it does under `first` and `rejoin` extends it by the result alone — the read's own
  * GraphStep positions never leave the child.
  *
- * What it refuses, from the query text: under `first` a rest that reads the HOST traverser's state (its
- * sack, path, loops or a host label — `readsHostState`: one shared evaluation cannot hold them, and a per-host
- * cross would pay the graph for one row), under `forward` a traverser whose path is tracked (the child's own
+ * ONE POLICY prices a rest that reads the HOST traverser's state (its sack, path, loops or a host label —
+ * `readsHostState`), which one shared evaluation cannot hold: an ALL-rows host pays the cross the query asks for
+ * (split at `sharedEnd`), and a FIRST-row host returns `undefined` — GraphStep's own cross, in the fold — which its
+ * host's correlated-first policy (`firstInnerOver`, `recordLeft`, `landValues`' `correlatedValue`, the existence
+ * probe) reads per host row and stops at the first row: one host row × G under `LIMIT 1`, or an `EXISTS`.
+ *
+ * What it refuses, from the query text: under `forward` a traverser whose path is tracked (the child's own
  * path, emitted, is the host's EXTENDED by the read's positions), under `split` a tracked path the rest READS (the
  * child's path inside the body is likewise extended), and a prefix of label reads that may LOSE its row — the re-source discards
  * the selected value, so the answer would depend only on which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
@@ -243,12 +247,12 @@ function reSourcedBody(
     return null;
   }
   // A rest that reads the HOST traverser's state (an outer label, its sack, path or loops) cannot be one
-  // shared read. A FIRST-row host (`map`, a `by()`, a filter) would pay a per-host cross of the graph for one
-  // row per host: declined, from the query text.
-  if (first && readsHostState(rest, ctx)) {
-    ctx.declines.note({ kind: 'resource-reads-host', message: hostStateMessage(rest, ctx), terminal: false });
-    return null;
-  }
+  // shared read: it is GraphStep's own cross with the host, in the fold (`movement.ts` `reSource`). One policy
+  // prices it by the host's contract: an ALL-rows host pays the cross the query asks for (below, split at
+  // `sharedEnd`), and a FIRST-row host pays a correlated read that stops at its first row — the host tries
+  // `correlatedBody` first (`firstInnerOver`'s correlated first-row pick, the existence probe's `EXISTS`), so
+  // inside it the cross is ONE host row × G under `LIMIT 1`.
+  if (first && readsHostState(rest, ctx)) return undefined;
   // Under an ALL-rows contract (`split`, `forward`) a host label the rest reads is the host's. The rest SPLITS only where it first reads the host (`sharedEnd`): the part before is one shared read
   // crossed with the prefix — `rest(prefix × G) = rest₂(prefix × rest₁(G))`, where `rest₁` reads nothing of the
   // host — and the fold continues over that cross. A label the read BINDS reads nothing of the host either, so it
@@ -370,20 +374,6 @@ function resourcePathMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
     ? `a path(), simplePath() or cyclicPath() inside ${/^[aeiou]/.test(host) ? 'an' : 'a'} ${host} body that starts with V()/E() is not supported yet`
     : `a V()/E() inside ${host} on a traverser whose path is tracked (a path(), simplePath() or cyclicPath() `
       + 'around it) is not supported yet';
-}
-
-/**
- * Why a FIRST-row host's re-sourcing body declines when the steps after its `V()`/`E()` read the incoming
- * traverser (`reSourcedBody`). Named in the user's terms; where the rest is nothing but a `select` of an outer
- * label the `V()` discards everything it read, so the likely intent is suggested.
- */
-function hostStateMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
-  const shape = 'a V()/E() inside map(), by() or a filter whose later steps read the incoming traverser '
-    + '(a select/where of an outer as() label, its sack, path or loops) is not supported yet';
-  const spec = rest.length === 2 ? selectSpec(rest[1]!) : null;
-  const label = spec?.labels.length === 1 && ctx.scopeNames.labels.has(spec.labels[0]!) ? spec.labels[0] : undefined;
-  return label === undefined ? shape
-    : `${shape} — here the V() is discarded by select('${label}'); did you mean select('${label}').out(), or V().has(…, select('${label}'))?`;
 }
 
 /** A host whose child body RE-SOURCES at its top level (and does not draw: `ladderOwns`) is the connector's alone
@@ -599,7 +589,7 @@ function rootedBody(
  */
 function correlatedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', contract: RejoinContract = 'forward',
+  order?: 'free' | 'read', contract: RejoinContract = 'forward', from: Rel = rel,
 ): Tail | null {
   // A body that DRAWS never stays correlated: SQLite may evaluate a subquery (or a part of one) that does not
   // read the host ONCE for every host row, so a draw there would be one pick shared by every scope. It takes
@@ -608,7 +598,7 @@ function correlatedBody(
   // A body that COLLECTS a side effect never stays correlated either: its sites are per host row, and only the
   // decorrelated form keys them into one relation over every scope (`keyedBody`).
   if (someStepDeep(body, ctx.params, (s) => collectsSideEffect(s as IRStep))) return null;
-  const tail = lowerBody(body, rel, rel, framing, ctx, fresh, labels, order, false, contract);
+  const tail = lowerBody(body, rel, from, framing, ctx, fresh, labels, order, false, contract);
   if (!tail || tail.effects?.length) return null;
   let walk = false;
   forEachRel(tail.rel, (r) => { if (r.kind === 'recursive') walk = true; });
@@ -1769,8 +1759,16 @@ function landValues(
   const sc = scope(rel, fresh);
   let joined = sc.scoped;
   const landed: { readonly key: string; readonly first: KeyedRows; readonly framing: RelFraming; readonly cols: readonly ColMeta[] }[] = [];
+  const kept = new Map<string, NonNullable<ReturnType<typeof correlatedValue>>>();
   for (const [key, body] of bodies) {
     const root = roots.get(key);
+    // A body that RE-SOURCES (`V()`/`E()`, at any depth) reads the whole graph, so its decorrelated form crosses
+    // every scope row with the graph ahead of the first-row pick — N × G for one row per host. It takes the host's
+    // correlated-first policy, as `map`'s and `project`'s: read per host row where SQL can hold the dependent join,
+    // its first row under `LIMIT 1` (`correlatedValue`). Any other body's decorrelated read is bounded by the host's
+    // own neighbourhood, and the landed window is its measured form (the order family's plans, `sql-hygiene`).
+    const correlated = root || !reSourcesDeep(body, ctx) ? null : correlatedValue(body, rel, sc.scoped, framing, ctx, fresh, labels);
+    if (correlated) { kept.set(key, correlated); continue; }
     const reframe = (t: Tail) => recordAsMap(t, ctx, fresh, true);
     const keyed = root ? rootedBody(body, root, rel, sc, ctx, fresh, reframe)
       : scopedBody(body, rel, framing, sc, ctx, fresh, labels, 'read', false, reframe, 'first');
@@ -1787,7 +1785,7 @@ function landValues(
     landed.push({ key, first, framing: keyed.tail.framing, cols });
   }
   const over = joined;
-  const values = new Map(landed.map(({ key, first, framing: valueFraming, cols }) => [key, {
+  const values = new Map<string, ChildValue>(landed.map(({ key, first, framing: valueFraming, cols }) => [key, {
     expr: col(over.id, first.renamed.get(cols[0]!.name)!),
     ...(cols[1] ? { vtype: col(over.id, first.renamed.get(cols[1].name)!) } : {}),
     framing: valueFraming,
@@ -1800,7 +1798,75 @@ function landValues(
     ...(valueFraming.kind === 'map' && mapHoldsRowids(valueFraming.valOf)
       ? { node: mapNode(mapNodePayload(col(over.id, first.renamed.get(cols[0]!.name)!), valueFraming.valOf, ctx.source, fresh)) } : {}),
   } satisfies ChildValue]));
-  return { over, values };
+  if (!kept.size) return { over, values };
+  // The correlated values become COLUMNS of the joined input, as a landed value is: the host's own lowering reads
+  // them by name (and may re-project its input, a path dropped), never re-spelling the subquery's host reads.
+  const exprs: (readonly [string, Expr])[] = [];
+  const added: ColMeta[] = [];
+  const column = (e: Expr, type: ColMeta): string => {
+    const name = fresh('sbv') as string;
+    exprs.push([name, substRelId(e, sc.scoped.id, over.id)]);
+    added.push({ ...type, name, nullable: true });
+    return name;
+  };
+  const named = [...kept].map(([key, { value, type }]) => {
+    const v = column(value.expr, type);
+    const t = value.vtype && column(value.vtype, meta('t', 'text'));
+    const p = typeof value.present === 'object' ? column(value.present.when, meta('p', 'int')) : undefined;
+    return { key, value, v, t, p };
+  });
+  const valued = make.project({
+    id: fresh('sbk'), input: over, channels: over.channels, type: typeOf(...over.type.cols, ...added),
+    exprs: [...over.type.cols.map((c) => [c.name, col(over.id, c.name)] as const), ...exprs],
+  });
+  const all = new Map([...values].map(([key, value]) => [key, substChildValue(value, over.id, valued.id)]));
+  for (const { key, value, v, t, p } of named) all.set(key, {
+    ...value, expr: col(valued.id, v), ...(t ? { vtype: col(valued.id, t) } : {}),
+    present: p && typeof value.present === 'object' ? { ...value.present, when: col(valued.id, p) } : value.present,
+  });
+  return { over: valued, values: all };
+}
+
+/**
+ * A `by()` body's value as a CORRELATED read of the host row (`landValues`' first try): the body lowered over one
+ * host row (`correlatedBody`) and its first row read per host row (`correlatedFirst`). Produced where the body
+ * has a row: a present lead value proves one, and only where the lead may be a NULL value is the body's `EXISTS`
+ * asked — `firstInnerOver`'s presence rule. `null` where the dependent join is not SQL-holdable (or the value is
+ * not ONE column, and a scalar's per-row type).
+ */
+function correlatedValue(
+  body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): { readonly value: ChildValue; readonly type: ColMeta } | null {
+  const lowered = correlatedBody(body, rel, framing, ctx, fresh, labels, 'read', 'first', from);
+  const tail = lowered && recordAsMap(lowered, ctx, fresh, true);
+  const cols = tail && framingCols(tail.framing);
+  if (!tail || !cols || !cols.length || cols.length > (tail.framing.kind === 'scalar' ? 2 : 1)) return null;
+  if (tail.framing.kind === 'map' && mapHoldsRowids(tail.framing.valOf)) return null;
+  const exprs = correlatedFirst(tail, cols.map((column) => column.name), from, fresh);
+  if (!exprs) return null;
+  const lead = tail.rel.type.cols.find((column) => column.name === cols[0]!.name)!;
+  const value = exprs.get(lead.name)!;
+  const probe = !exactlyOneRow(tail.rel) && lead.nullable ? existenceProbe(tail, fresh) : null;
+  if (probe && !spellsStored(probe, ['one'], from)) return null;
+  const present: ChildValue['present'] = exactlyOneRow(tail.rel) ? 'always'
+    : probe ? { when: { kind: 'exists', plan: probe, negated: false }, orValue: true } : 'value-nullness';
+  return {
+    value: { expr: value, ...(cols[1] ? { vtype: exprs.get(cols[1].name)! } : {}), framing: tail.framing, present, yields: 'first' },
+    type: lead,
+  };
+}
+
+/** Does a body read the graph afresh — a `V()`/`E()` at any depth? */
+const reSourcesDeep = (body: readonly IRStep[], ctx: ChainCtx): boolean =>
+  someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E');
+
+/** A correlated `ChildValue` re-pointed from the host relation to one that carries its columns by name. */
+function substChildValue(value: ChildValue, from: RelId, to: RelId): ChildValue {
+  const present = typeof value.present === 'object' ? { ...value.present, when: substRelId(value.present.when, from, to) } : value.present;
+  return {
+    ...value, expr: substRelId(value.expr, from, to), present,
+    ...(value.vtype ? { vtype: substRelId(value.vtype, from, to) } : {}), ...(value.node ? { node: substRelId(value.node, from, to) } : {}),
+  };
 }
 
 /** Can the tree framer (`listNodeExpr`) walk a list of these members, at every depth? A map member's element

@@ -302,8 +302,9 @@ re-source ONE shared read crossed with the prefix: under a first-row host the pr
 read's own labels/path are shed; under an all-rows host the read's label binds ride out as alias channels
 (`ownLabels`) and the rest splits only at a real host-state read or a rebind of a prefix label (`sharedEnd`), the fold
 continuing over the cross (`reSource` in `lower/movement.ts` admits a path and a sack via one `splitRefuses`).
-Query-text declines with advisory reasons remain for an all-rows host on a tracked path (`resource-path`) and a
-first-row host reading host state (`resource-reads-host`). Witnesses in
+A query-text decline with an advisory reason remains for an all-rows host on a tracked path (`resource-path`); a
+first-row host reading host state (once `resource-reads-host`) now ANSWERS through the fold's cross, kept correlated
+by the host's correlated-first policy (M2). Witnesses in
 `test/compiler/resource-general-cross.exec.test.ts`; scaling ~7-8x for 8x input; no baseline moved. Remains: nothing.
 
 `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) returns `null` (hard decline) where it should return

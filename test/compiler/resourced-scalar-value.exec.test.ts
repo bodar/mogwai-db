@@ -122,25 +122,27 @@ describe('a re-sourcing body composes', () => {
 
 
 // A mid-traversal V() SPLITS the host traverser (GraphStep.java:196 `head.split(element, this)`), so the
-// body sees the HOST's sack, loops, path and path labels. The rooted read is computed once for every host,
-// so it cannot hold any of them: a body that reads one refuses (`rootedRead`'s `readsHostState`) rather
-// than answering with the withSack seed or a one-element path. Reference answers in the comments.
-describe('a re-sourced body that reads host traverser state refuses', () => {
+// body sees the HOST's sack, loops, path and path labels. The shared rooted read cannot hold any of them, so
+// under a first-row host (`map`/`by()`/a filter) such a body is GraphStep's cross with the host, read per host
+// row by the host's correlated-first policy (`lower/scoped.ts` `reSourcedBody`) — never the withSack seed or a
+// one-element path. The scalar seam alone (a `P` operand, a walk's `loops()`) still refuses.
+describe('a re-sourced body that reads host traverser state answers per host', () => {
+  const values = (g: string): unknown[] => rows(g).map((r) => r.v);
   const refuses = (g: string): void => { expect(() => run(s, g)).toThrow(UnsupportedTraversal); };
   const SACK3 = 'g.withSack(1).V().sack(sum).by(__.constant(2))';
-  test('sack()', () => refuses(`${SACK3}.map(__.V().sack())`)); // 6 x 3
-  test('sack().sum()', () => refuses(`${SACK3}.map(__.V().sack().sum())`)); // 6 x 18
-  test('values().sack()', () => refuses(`${SACK3}.map(__.V().values('age').sack())`)); // 6 x 3
-  test('sack().order()', () => refuses(`${SACK3}.map(__.V().sack().order())`)); // 6 x 3
-  test('a per-row host sack', () => refuses("g.withSack(1).V().sack(sum).by('age').map(__.V().sack())")); // 30, 28, 33, 36
-  test('project().by()', () => refuses(`${SACK3}.project('s').by(__.V().sack())`)); // 6 x {s:3}
-  test('a sack fold in the body', () => refuses(`${SACK3}.map(__.V().sack(sum).by(__.constant(1)).sack())`)); // 6 x 4
-  test('a where() body', () => refuses(`${SACK3}.where(__.V().sack().is(3))`)); // all 6
-  test('a P operand', () => refuses(`${SACK3}.where(__.constant(3).is(eq(__.V().sack())))`)); // all 6
-  test('a nested choose arm', () => refuses(`${SACK3}.choose(__.hasLabel('person'), __.map(__.V().sack()), __.constant(0))`));
-  test('simplePath()', () => refuses("g.V().out().map(__.V().simplePath().count())")); // 6 x 4
-  test('a host path label', () => refuses("g.V().as('x').map(__.V().as('y').select('x').count())")); // 6 x 6
-  test('loops() inside a walk', () => refuses("g.V().repeat(__.out()).times(1).map(__.V().loops())"));
+  test('sack()', () => expect(values(`${SACK3}.map(__.V().sack())`)).toEqual(Array(6).fill(3)));
+  test('sack().sum()', () => expect(values(`${SACK3}.map(__.V().sack().sum())`)).toEqual(Array(6).fill(18)));
+  test('values().sack()', () => expect(values(`${SACK3}.map(__.V().values('age').sack())`)).toEqual(Array(6).fill(3)));
+  test('sack().order()', () => expect(values(`${SACK3}.map(__.V().sack().order())`)).toEqual(Array(6).fill(3)));
+  test('a per-row host sack', () => expect(bagOf(values("g.withSack(1).V().sack(sum).by('age').map(__.V().sack())"))).toEqual(bagOf([30, 28, 33, 36])));
+  test('project().by()', () => expect(rows(`${SACK3}.project('s').by(__.V().sack())`).map((r) => JSON.parse(r.map)[0][1].v)).toEqual(Array(6).fill(3)));
+  test('a sack fold in the body', () => expect(values(`${SACK3}.map(__.V().sack(sum).by(__.constant(1)).sack())`)).toEqual(Array(6).fill(4)));
+  test('a where() body', () => expect(values(`${SACK3}.where(__.V().sack().is(3)).count()`)).toEqual([6]));
+  test('a nested choose arm', () => expect(bagOf(values(`${SACK3}.choose(__.hasLabel('person'), __.map(__.V().sack()), __.constant(0))`))).toEqual(bagOf([3, 3, 3, 3, 0, 0])));
+  test('simplePath()', () => expect(values("g.V().out().map(__.V().simplePath().count())")).toEqual(Array(6).fill(4)));
+  test('a host path label', () => expect(values("g.V().as('x').map(__.V().as('y').select('x').count())")).toEqual(Array(6).fill(6)));
+  test('a P operand still refuses', () => refuses(`${SACK3}.where(__.constant(3).is(eq(__.V().sack())))`)); // all 6
+  test('loops() inside a walk still refuses', () => refuses("g.V().repeat(__.out()).times(1).map(__.V().loops())"));
 });
 
 describe('a SOURCE union arm starts fresh', () => {
