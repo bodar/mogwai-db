@@ -183,6 +183,21 @@ const SHAPES: readonly Shape[] = [
   { name: 'collect: where(out.aggregate)', query: "g.V().where(out().aggregate('x')).cap('x').unfold().count()" },
   { name: 'collect: optional(out.aggregate)', query: "g.V().optional(out().aggregate('x')).cap('x').unfold().count()" },
   { name: 'collect: sideEffect(out.aggregate).values', query: "g.V().sideEffect(out().aggregate('x')).values('name').count()" },
+  // A body-filled collection READ by a membership test: the keyed site is one MATERIALIZED binding of its own
+  // (`commitScope`), so the read probes one narrowed relation instead of re-deriving the scope per outer row.
+  { name: 'collect: sideEffect(out.aggregate).where(without)', query: "g.V().sideEffect(out().aggregate('x')).where(without('x')).count()" },
+  { name: 'collect: sideEffect(out.aggregate).where(within)', query: "g.V().sideEffect(out().aggregate('x')).where(within('x')).count()" },
+  { name: 'collect: local(out.aggregate).where(without)', query: "g.V().local(out().aggregate('x')).where(without('x')).count()" },
+  { name: 'collect: sideEffect(out.aggregate).where(without).values', query: "g.V().sideEffect(out().aggregate('x')).where(without('x')).values('name').count()" },
+  { name: 'collect: sideEffect(out.aggregate).out.where(within)', query: "g.V().sideEffect(out().aggregate('x')).out().where(within('x')).count()" },
+  { name: 'collect: nested sideEffect.where(without)', query: "g.V().sideEffect(out().sideEffect(out().aggregate('x'))).where(without('x')).count()" },
+  { name: 'collect: optional(out.aggregate).where(without)', query: "g.V().optional(out().aggregate('x')).where(without('x')).count()" },
+  { name: 'collect: sideEffect(out.aggregate).not(within)', query: "g.V().sideEffect(out().aggregate('x')).not(where(within('x'))).count()" },
+  // A VALUE membership: `(family, key) IN (SELECT …)`, one probe (`scalarMembership`) — the barrier form was N² too.
+  { name: 'collect: sideEffect(out.values.aggregate).values.where(within)', query: "g.V().sideEffect(out().values('name').aggregate('x')).values('name').where(within('x')).count()" },
+  { name: 'collect: values.aggregate.fold.V.out.values.where(within)', query: "g.V().values('name').aggregate('x').fold().V().out().values('name').where(within('x')).count()" },
+  { name: 'collect: sideEffect(out.aggregate).where(without).repeat', query: "g.V().sideEffect(out().aggregate('x')).where(without('x')).repeat(out()).times(1).count()" },
+  { name: 'collect: union(sideEffect(aggregate)).where(without)', query: "g.V().union(sideEffect(out().aggregate('x')), identity()).where(without('x')).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

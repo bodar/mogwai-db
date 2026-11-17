@@ -22,7 +22,7 @@ export function mayCarryJsonSubtype(e: Expr, outer: (rel: string, name: string) 
   const index = (plan: Rel): void => forEachRel(plan, (node) => { defs.set(node.id, node); });
   const expr = (x: Expr): boolean => {
     switch (x.kind) {
-      case 'lit': case 'unary': case 'binary': case 'cast': case 'exists': case 'in-list': case 'in-query': return false;
+      case 'lit': case 'unary': case 'binary': case 'cast': case 'exists': case 'in-list': case 'in-query': case 'row': return false;
       case 'col': {
         const def = defs.get(x.rel);
         return def ? column(def, x.name) : outer(x.rel, x.name);

@@ -190,3 +190,61 @@ Feature: mogwai addendum — a side effect collected inside a child traversal ho
     Then the result should be unordered
       | result |
       | d[6].l |
+
+  # A body-filled collection READ by a membership test: the keyed site is one relation computed once
+  # (`spooledSite`, src/compiler/rel/collection.ts) and the test one uncorrelated probe of it (`memberOf`,
+  # src/compiler/rel/lower/filter.ts). The answers are the barrier form's.
+  @gap:child-body-collectors
+  Scenario: g_V_sideEffectXout_aggregateXxXX_whereXwithoutXxXX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().sideEffect(__.out().aggregate("x")).where(P.without("x")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | peter |
+
+  @gap:child-body-collectors
+  Scenario: g_V_sideEffectXout_aggregateXxXX_out_whereXwithinXxXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().sideEffect(__.out().aggregate("x")).out().where(P.within("x")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  @gap:child-body-collectors
+  Scenario: g_V_sideEffectXout_valuesXnameX_aggregateXxXX_valuesXnameX_whereXwithinXxXX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().sideEffect(__.out().values("name").aggregate("x")).values("name").where(P.within("x"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | vadas |
+      | lop |
+      | josh |
+      | ripple |
+
+  @gap:child-body-collectors
+  Scenario: g_V_sideEffectXout_sideEffectXout_aggregateXxXXX_whereXwithoutXxXX_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().sideEffect(__.out().sideEffect(__.out().aggregate("x"))).where(P.without("x")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | marko |
+      | vadas |
+      | josh |
+      | peter |

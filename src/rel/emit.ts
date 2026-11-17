@@ -543,6 +543,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       }
       case 'in-list': return q`${self(e.expr)} IN (${list(e.values.map(self))})`;
       case 'in-query': return q`${self(e.expr)} ${e.negated ? raw('NOT ') : empty}IN (${renderRel(e.plan, scope)})`;
+      case 'row': return q`(${list(e.items.map(self))})`;
     }
   };
 

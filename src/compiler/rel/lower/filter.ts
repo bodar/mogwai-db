@@ -1,13 +1,14 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
-import { and, eq, labelSetArgs, meta, or, typeOf, type Minter } from '../build.ts';
+import { and, labelSetArgs, meta, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource, IdQuery } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert } from '../../ir/step.ts';
 import type { ChildHost, Subject } from '../child.ts';
-import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, valueTheta } from '../predicate.ts';
+import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, typedValueKey, type TypedOperand } from '../predicate.ts';
+import { inferredVtype } from '../tag.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
 import { arg, isNested, isPred, isTokenArg, type Arg } from '../../../gremlin/frontend.ts';
@@ -360,21 +361,81 @@ function collectionMembership(pred: unknown, subject: Subject, ctx: ChainCtx, fr
   const members = collection && readUnfolded(collection, fresh);
   if (!members) return null;
   const negated = pred.op === 'without';
-  let matches: Expr;
+  // MEMBERSHIP IS AN UNCORRELATED `IN (SELECT …)` — SQLite evaluates the member set ONCE into an ephemeral
+  // index and probes it per row, O(N log M) wherever the test lands. A correlated `EXISTS` leans on the
+  // planner building an AUTOMATIC index on the member relation, which it does not do everywhere (under a
+  // `GROUP BY … HAVING` — the movement collapse's — it re-scans the members per outer row, measured 15 → 915 ms
+  // from 1k to 8k vertices), and a per-pair comparison (`valueTheta`'s CASE) has no index at all.
   if (subject.kind === 'element' && members.kind === 'elements') {
     // A vertex never equals an edge, so a member list of the other kind holds no match.
     if (members.elem !== subject.elem) return negated ? CONSTANT.true : CONSTANT.false;
-    matches = eq(col(members.rel.id, 'id'), subject.id);
-  } else if (subject.kind === 'scalar' && members.kind === 'scalars' && members.type) {
+    const ids = make.project({ id: fresh('cmi'), input: members.rel, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(members.rel.id, 'id')]] });
+    // `within` stays the bare `IN` a predicate position reads (and `semijoin.ts` may lift into a seek); `without`
+    // is the NEGATED 0/1 test, never `NOT IN` (`memberOf`).
+    if (!negated) return { kind: 'in-query', expr: subject.id, plan: ids, negated: false };
+    return { kind: 'unary', op: 'not', arg: memberOf(subject.id, ids) };
+  }
+  if (subject.kind === 'scalar' && members.kind === 'scalars' && members.type) {
     const tagCol = perRowColumnOf(members.type);
-    const tag = tagCol ? col(members.rel.id, tagCol) : members.type.kind === 'static' ? compilerText(members.type.type) : null;
-    const theta = valueTheta('eq', subjectOperand(subject.value, subject.type), { value: col(members.rel.id, 'v'), tag }, fresh);
-    if (!theta) return null;
-    matches = theta;
-  } else return null;
-  const hit = make.filter({ id: fresh('cmf'), input: members.rel, channels: [], type: members.rel.type, pred: matches });
-  const probe = make.project({ id: fresh('cmp'), input: hit, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-  return { kind: 'exists', plan: probe, negated };
+    const v = col(members.rel.id, 'v');
+    // A per-row tag column is NULL where a member's type is its value's own (an `inject`'s natural int or string),
+    // read off the value exactly as a per-row SUBJECT's is (`perRowSubject`) — else `1` is not `within` [1].
+    const tag: Expr | null = tagCol ? { kind: 'call', fn: 'coalesce', args: [col(members.rel.id, tagCol), inferredVtype(v)] }
+      : members.type.kind === 'static' ? compilerText(members.type.type) : null;
+    const member = scalarMembership(subjectOperand(subject.value, subject.type), members.rel, { value: v, tag }, fresh);
+    return negated ? { kind: 'unary', op: 'not', arg: member } : member;
+  }
+  return null;
+}
+
+/**
+ * `x IN (SELECT …)` AS A 0/1 VALUE — `CASE WHEN x IN (…) THEN 1 ELSE 0 END`, never `NOT IN` or a `coalesce` over
+ * the `IN`. Where SQLite must tell a NULL answer from a FALSE one (a value position, a `NOT IN`), a probe that
+ * MISSES falls back to SCANNING the whole set for a NULL member unless it can prove the set's columns NOT NULL —
+ * which it cannot for a computed column — so every non-member costs O(M) and the read is O(N·M) (measured on
+ * the bytecode: `Found`, then `Rewind`/`Ne`/`Next` over the ephemeral table). A `CASE WHEN` condition treats NULL
+ * as false, so SQLite emits the index probe alone.
+ */
+const memberOf = (expr: Expr, plan: Rel): Expr => ({
+  kind: 'case', whens: [[{ kind: 'in-query', expr, plan, negated: false }, compilerInt(1)]], else: compilerInt(0),
+});
+
+/**
+ * IS A TYPED VALUE ONE OF A RELATION'S MEMBERS — `valueTheta`'s `eq` (`GremlinValueComparator.equals`: `30` is
+ * `30.0`, `true` is not `1`, null equals null alone) against ANY member row, as ONE indexed probe. Each side is
+ * reduced to `typedValueKey`'s `(family, key)` pair — equal exactly where `typedValueEq` holds — so the test is the
+ * row-value `(f, k) IN (SELECT f, k …)`, evaluated once. NULL is decided first, as `valueTheta` decides it: a
+ * null subject is a member iff a member is null. A member whose key is NULL meets nothing (`memberOf`'s CASE reads
+ * the unknown as a miss), so `NOT` over the answer is `without` exactly — the answer is 0/1, never SQL's unknown.
+ *
+ * A subject that is not a bare column or literal is evaluated ONCE, as the one row of a `VALUES` the test is
+ * projected over (`valueTheta`'s own shape).
+ */
+function scalarMembership(subject: TypedOperand, members: Rel, member: TypedOperand, fresh: Minter): Expr {
+  const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
+  const [mf, mk] = typedValueKey(member.value, member.tag ?? inferredVtype(member.value));
+  const set = make.project({
+    id: fresh('cmk'), input: members, channels: [], type: typeOf(meta('f', 'text', true), meta('k', 'any', true)), exprs: [['f', mf], ['k', mk]],
+  });
+  const nulls = make.project({
+    id: fresh('cmn'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
+    input: make.filter({ id: fresh('cmz'), input: members, channels: [], type: members.type, pred: isNull(member.value) }),
+  });
+  const test = (value: Expr, tag: Expr | null): Expr => {
+    const [f, k] = typedValueKey(value, tag ?? inferredVtype(value));
+    const hit = memberOf({ kind: 'row', items: [f, k] }, set);
+    return { kind: 'case', whens: [[isNull(value), { kind: 'exists', plan: nulls, negated: false }]], else: hit };
+  };
+  const cheap = (e: Expr | null): boolean => !e || e.kind === 'col' || e.kind === 'lit';
+  if (cheap(subject.value) && cheap(subject.tag)) return test(subject.value, subject.tag);
+  const one = make.values({
+    id: fresh('cmo'), channels: [], type: typeOf(meta('a', 'any', true), meta('at', 'text', true)),
+    rows: [[subject.value, subject.tag ?? compilerNull('text')]],
+  });
+  const at: Expr | null = subject.tag ? col(one.id, 'at') : null;
+  return { kind: 'scalar', plan: make.project({
+    id: fresh('cmq'), input: one, channels: [], type: typeOf(meta('m', 'int')), exprs: [['m', test(col(one.id, 'a'), at)]],
+  }) };
 }
 
 function metaFilterClause(step: IRStep, rowid: Expr, rel: Rel, ctx: ChainCtx, fresh: Minter): Expr | null {

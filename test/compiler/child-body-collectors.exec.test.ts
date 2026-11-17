@@ -11,7 +11,7 @@ import type { Rel } from '../../src/rel/rel.ts';
 import { relId } from '../../src/rel/types.ts';
 import { forEachRel } from '../../src/rel/walk.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
-import { bare, run, runWith, seededStore } from '../support/harness.ts';
+import { bare, read, run, runWith, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
 const one = (q: string): unknown => (bare(run(store, q)) as { v: unknown }[])[0]!.v;
@@ -66,5 +66,38 @@ describe('a collector in a child body', () => {
 
   test('a write in a sideEffect() body still declines with its own reason', () => {
     expect(() => run(seededStore(), "g.V().sideEffect(addV('z'))")).toThrow(/a write \(addV\(\)\) inside sideEffect\(\)/);
+  });
+});
+
+// THE COST OF READING A BODY-FILLED COLLECTION. Inlined, the keyed site re-joins the whole scope relation inside a
+// membership probe evaluated per outer row — O(N²), measured 59–75× from 1k to 8k vertices. Spooled (one fenced
+// relation, `spooledSite`) and probed by one uncorrelated `IN` (`memberOf`), it is linear: ~8–9× (`bun
+// scripts/scaling-probe.ts --only collect`). These pin the plan facts that make it so.
+describe('reading a body-filled collection', () => {
+  test('the keyed site is ONE materialized relation, probed by an uncorrelated IN — never a per-row EXISTS', () => {
+    for (const q of [
+      "g.V().sideEffect(out().aggregate('x')).where(without('x')).count()",
+      "g.V().local(out().aggregate('x')).where(within('x')).count()",
+      "g.V().sideEffect(out().values('name').aggregate('x')).values('name').where(within('x')).count()",
+    ]) {
+      const { sql } = read(q);
+      expect(sql.match(/AS MATERIALIZED/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+      expect(sql).toMatch(/ IN \(SELECT/);
+      expect(sql).not.toMatch(/EXISTS \(SELECT 1 AS one FROM \(SELECT/);
+    }
+  });
+
+  test('without() is the negated 0/1 probe, never NOT IN (whose miss rescans the set for a NULL member)', () => {
+    const { sql } = read("g.V().sideEffect(out().aggregate('x')).where(without('x')).count()");
+    expect(sql).not.toMatch(/NOT IN/);
+    expect(sql).toMatch(/CASE WHEN \S+ IN \(SELECT/);
+  });
+
+  test('answers what the barrier form does', () => {
+    const names = (q: string): string[] => (bare(run(store, q)) as { v: string }[]).map((row) => row.v).sort();
+    expect(names("g.V().sideEffect(out().aggregate('x')).where(without('x')).values('name')")).toEqual(['marko', 'peter']);
+    expect(names("g.V().local(out().aggregate('x')).where(without('x')).values('name')")).toEqual([]);
+    expect(names("g.V().sideEffect(out().values('name').aggregate('x')).values('name').where(without('x'))")).toEqual(['marko', 'peter']);
+    expect(one("g.V().sideEffect(out().aggregate('x')).where(within('x')).count()")).toBe(4);
   });
 });

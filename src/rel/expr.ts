@@ -34,7 +34,11 @@ export type Expr =
   | { readonly kind: 'scalar'; readonly plan: Rel }
   | { readonly kind: 'exists'; readonly plan: Rel; readonly negated: boolean }
   | { readonly kind: 'in-list'; readonly expr: Expr; readonly values: readonly Expr[] }
-  | { readonly kind: 'in-query'; readonly expr: Expr; readonly plan: Rel; readonly negated: boolean };
+  | { readonly kind: 'in-query'; readonly expr: Expr; readonly plan: Rel; readonly negated: boolean }
+  /** A ROW VALUE `(a, b, …)` — SQLite's composite operand, meaningful only where SQL takes one: the left side
+   *  of an `in-query` whose plan projects as many columns (`(f, k) IN (SELECT f, k …)`), so a several-column
+   *  equality is ONE uncorrelated membership SQLite evaluates once into an index. */
+  | { readonly kind: 'row'; readonly items: readonly Expr[] };
 
 /**
  * SQLite's aggregate functions, as the algebra names them. A NAME rather than a node kind, so adding one

@@ -125,6 +125,7 @@ export function exprChildren(e: Expr): readonly Expr[] {
     case 'json-array': return e.items;
     case 'in-list': return [e.expr, ...e.values];
     case 'in-query': return [e.expr];
+    case 'row': return e.items;
   }
 }
 
@@ -133,7 +134,7 @@ export function exprRels(e: Expr): readonly Rel[] {
   switch (e.kind) {
     case 'col': case 'lit': case 'unary': case 'binary': case 'case': case 'cast':
     case 'call': case 'agg': case 'window-expr': case 'json-object': case 'json-array':
-    case 'in-list': return [];
+    case 'in-list': case 'row': return [];
     case 'scalar': case 'exists': case 'in-query': return [e.plan];
   }
 }
@@ -240,6 +241,7 @@ export function mapExprChildren(e: Expr, f: (child: Expr) => Expr, rel: (plan: R
     case 'in-list': return { ...e, expr: f(e.expr), values: e.values.map(f) };
     case 'scalar': case 'exists': return { ...e, plan: rel(e.plan) };
     case 'in-query': return { ...e, expr: f(e.expr), plan: rel(e.plan) };
+    case 'row': return { ...e, items: e.items.map(f) };
   }
 }
 

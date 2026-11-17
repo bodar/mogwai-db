@@ -69,3 +69,31 @@ Feature: mogwai addendum — where(P.within/without(<side effect>))
       | vadas |
       | josh |
       | peter |
+
+  # Membership is `GremlinValueComparator` equality (the `eq` every value compare uses): `1.0` is a member of
+  # [1], `true` is not `1`. A member whose type is its value's own (an `inject`'s natural int) is typed by its
+  # value, exactly as a subject is.
+  Scenario: g_injectX1_a_trueX_aggregateXxX_fold_unfold_unionXconstantsX_whereXwithinXxXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, "a", true).aggregate("x").fold().limit(1).union(__.constant(1.0d), __.constant(true), __.constant(1), __.constant("b"), __.constant(2)).where(P.within("x"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1.0].d |
+      | true |
+      | d[1].i |
+
+  Scenario: g_injectX1_a_trueX_aggregateXxX_fold_unfold_unionXconstantsX_whereXwithoutXxXX
+    Given the empty graph
+    And the traversal of
+      """
+      g.inject(1, "a", true).aggregate("x").fold().limit(1).union(__.constant(1.0d), __.constant(true), __.constant(1), __.constant("b"), __.constant(2)).where(P.without("x"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | b |
+      | d[2].i |

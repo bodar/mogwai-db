@@ -185,9 +185,11 @@ export function pendingSites(fork: Collections): readonly Site[] {
  * COMMIT A BODY'S COLLECTIONS to its host's registry — every pending site replaced by its KEYED form (`keyed`,
  * built by the connector from the one decorrelation of the body and its sites). Into a host that is itself a
  * body's fork, the committed site stays PENDING: it is per host row of THAT scope, and keyed in turn when that
- * scope's connector decorrelates. Into the root registry it is a relation of its own, and in a program with
- * effects it is SNAPSHOTTED here, after decorrelation — the bindings come back for the caller to place at the
- * host's position. `keyed` holds every one of `pendingSites(fork)` — the caller keyed them all or declined.
+ * scope's connector decorrelates. Into the root registry it is a relation of its own, computed ONCE: in a
+ * program with effects it is SNAPSHOTTED here, after decorrelation — the bindings come back for the caller to
+ * place at the host's position — and in a read it is SPOOLED (`spooledSite`). Either way a reader of the
+ * collection probes one narrowed relation rather than re-deriving the keyed body (the scope it was crossed
+ * with) per outer row. `keyed` holds every one of `pendingSites(fork)` — the caller keyed them all or declined.
  */
 export function commitScope(
   fork: Collections, parent: Collections, keyed: ReadonlyMap<Site, Site>, mutating: boolean, fresh: Minter,
@@ -203,7 +205,7 @@ export function commitScope(
       const done = keyed.get(site)!;
       if (nested) { sites.push({ ...done, pending: parent }); continue; }
       const { pending: _pending, ...own } = done;
-      if (!mutating) { sites.push(own); continue; }
+      if (!mutating) { sites.push(spooledSite(own, collection.of, fresh)); continue; }
       const taken = snapshotSite(own, collection.of, fresh);
       bindings.push(taken.binding);
       sites.push(taken.site);
@@ -387,17 +389,36 @@ function snapshotted(
 /** ONE site taken — `snapshotted`'s per-site step, shared with `commitScope`, which snapshots a body's site
  *  only once it is keyed. Narrowed to the member columns, the site's own order and its barrier unit. */
 function snapshotSite(site: Site, of: Members, fresh: Minter): { readonly site: Site; readonly binding: Binding } {
-  const cols = [...new Set([...memberCols(of), ...site.order, ...(site.unit ? [site.unit] : [])])];
-  const narrowed = make.project({
-    id: fresh('cs'), input: site.rel, channels: [],
-    type: typeOf(...cols.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'))),
-    exprs: cols.map((name) => [name, col(site.rel.id, name)] as const),
-  });
+  const narrowed = narrowedSite(site, of, fresh);
   const name = fresh('agg');
   return {
     binding: { name, node: narrowed, snapshot: true },
     site: { ...site, rel: make.ref({ id: fresh('r'), name, channels: [], type: narrowed.type }) },
   };
+}
+
+/** A site's relation NARROWED to the member columns, the site's own order and its barrier unit — all a reader of
+ *  the collection addresses, and all a taken copy of it needs to hold. */
+function narrowedSite(site: Site, of: Members, fresh: Minter): Rel {
+  const cols = [...new Set([...memberCols(of), ...site.order, ...(site.unit ? [site.unit] : [])])];
+  return make.project({
+    id: fresh('cs'), input: site.rel, channels: [],
+    type: typeOf(...cols.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'))),
+    exprs: cols.map((name) => [name, col(site.rel.id, name)] as const),
+  });
+}
+
+/**
+ * A BODY-FILLED SITE IN A READ, SPOOLED — narrowed and fenced (`AS MATERIALIZED`), so it is ONE table computed
+ * once. Unfenced, the keyed body is inlined into every reader, and a membership read (`where(within(k))`,
+ * `without(k)`) becomes a correlated subquery re-joining the whole scope relation per outer row — O(N²),
+ * measured 59–75× from 1k to 8k vertices. A fenced table gets SQLite's automatic index on the probed column, so
+ * the read is O(N log N). The read-side twin of `snapshotSite` (a program with effects TAKES the rows instead);
+ * Calcite's `Spool` is the same node (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/Spool.java`).
+ */
+function spooledSite(site: Site, of: Members, fresh: Minter): Site {
+  const narrowed = narrowedSite(site, of, fresh);
+  return { ...site, rel: make.materialize({ id: fresh('csm'), input: narrowed, channels: [], type: narrowed.type, fenced: true }) };
 }
 
 /** A site registered inside a connector body — PENDING until the connector keys it (`commitScope`). */
