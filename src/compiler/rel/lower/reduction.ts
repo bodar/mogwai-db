@@ -6,7 +6,7 @@ import * as make from '../../../rel/factory.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
-import { exprHasSubquery, forEachExpr, forEachRel, isSelfContained } from '../../../rel/walk.ts';
+import { forEachRel, isSelfContained } from '../../../rel/walk.ts';
 import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
 import type { Elem } from '../../elem.ts';
@@ -24,18 +24,18 @@ import { constLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
 import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
-import { collectionReaderOf, comparableClass, continueAs, dropPath, lowerChain, mapKeyCollided, mapKeyCollision, minMaxOrder, namedBeyondMap, sideEffectConstant, minMaxWinnerVt, serviceValue, streamRowTag } from '../lower.ts';
+import { collectionReaderOf, continueAs, dropPath, lowerChain, mapKeyCollided, mapKeyCollision, namedBeyondMap, sideEffectConstant, serviceValue, streamRowTag } from '../lower.ts';
 import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, PATH_CHANNEL, pathCarried, subPathMembers } from '../path.ts';
-import { mixedClassesRefused, perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { metaPropertyRead, propertyMetaBag, propertyReadOf } from '../property.ts';
 import { raisingWhen, transformOffences } from '../receiver.ts';
 import { evidenceOf } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
-import { isReducer, REDUCED_TYPE } from '../reducer.ts';
+import { isReducer } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
 import { BaseGraph, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
@@ -865,51 +865,6 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
  * impossible — which is exactly why the value used to reach the wire untagged (§6·7).
  */
 
-/** Is the relation `id` defined inside `rel` — a column of it is in scope there, not the outer row's? */
-const reaches = (rel: Rel, id: string): boolean => {
-  let found = false;
-  forEachRel(rel, (r) => { if (r.id === id) found = true; });
-  return found;
-};
-
-/** Is `rel`'s `name` column DETACHED from the tables the relation scans — computed by a correlated
- *  SUBQUERY, or read off the OUTER row (a scalar host's own value seeding a self root, `hostSelfRow`)?
- *  Follows only the projection chain (project/window/sort/limit/filter/distinct/materialize are
- *  passthroughs for a column they do not compute, and a computed column is detached where any column it
- *  reads is); reaching any real relation source (scan/join/values/aggregate/…) means the column is
- *  table-backed and the answer is false. Used by the correlated min/max argmax, whose ORDER BY re-inlines
- *  the value: SQLite resolves neither a second correlation level nor an outer column there (`no such
- *  column` at run time) — see its call site. */
-function valueColIsDetached(rel: Rel, name: string): boolean {
-  let cur: Rel = rel;
-  let column = name;
-  for (;;) {
-    switch (cur.kind) {
-      case 'project': {
-        const entry = cur.exprs.find(([n]) => n === column);
-        if (!entry) return false;
-        const input = cur.input;
-        if (entry[1].kind === 'col' && entry[1].rel === input.id) { column = entry[1].name; cur = input; continue; }
-        if (exprHasSubquery(entry[1])) return true;
-        // A COMPUTED column (`math('_+1')` over the value): detached where it reads the outer row directly,
-        // or reads an input column that is itself detached.
-        let detached = false;
-        forEachExpr(entry[1], (node) => {
-          if (node.kind === 'col' && !detached) detached = node.rel === input.id ? valueColIsDetached(input, node.name) : !reaches(input, node.rel);
-        });
-        return detached;
-      }
-      case 'window':
-        if (cur.specs.some(([n]) => n === column)) return false;
-        cur = cur.input; continue;
-      case 'filter': case 'sort': case 'limit': case 'distinct': case 'materialize':
-        cur = cur.input; continue;
-      default:
-        return false;
-    }
-  }
-}
-
 /**
  * A REDUCER OVER A CORRELATED BODY, rooted at `root` — `by(__.inE('created').values('weight').sum())`
  * and `by(__.values('age').max())` are the SAME lowering rooted differently (a movement hop, or a
@@ -926,53 +881,6 @@ export function correlatedReduce(
   root: Rel, rootAs: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' } | { readonly kind: 'list' } | { readonly kind: 'map' }>,
   body: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
 ): ChildValue | null {
-  // A TRAILING min/max is an ARGMAX, which the global reducer lowers as a window+materialize a
-  // correlated subquery cannot host — a fence forces a named CTE that cannot reference the outer row,
-  // so the numeric arm below declines it. The correlated pick is the SAME element as a `sort`+`limit(1)`
-  // over the SAME single-type-space order (`minMaxOrder`, shared with the global barrier so the two
-  // cannot drift), and the winner's own vtype is `minMaxWinnerVt`. Productivity for min/max is NOT the
-  // value's nullness — ZERO rows emit NOTHING, an all-NULL input emits ONE null (`ReducingBarrierStep`)
-  // — so a per-host EXISTS over the value rows is the `present` signal.
-  const last = body.at(-1);
-  if (last && (last.name === 'min' || last.name === 'max') && !last.args.length && !isLocalScope(last) && body.length > from) {
-    const values = continueAs(root, rootAs, body.slice(0, -1), from, false, inBody(ctx), fresh, NO_ALIASES);
-    let fenced = false;
-    if (values) forEachRel(values.rel, (rel) => { if (rel.kind === 'materialize') fenced = true; });
-    const probeCol = values?.rel.type.cols[0];
-    if (values && !fenced && probeCol && values.framing.kind === 'scalar' && values.framing.result === undefined) {
-      // The argmax is `SELECT … FROM (VALUES (1)) … ORDER BY <value> LIMIT 1` inside a subquery already
-      // correlated to the outer row. `ORDER BY` cannot name a select alias, so the emitter RE-INLINES the
-      // value expression there — and when the VALUE is itself a correlated subquery (a `by(__.id().min())` /
-      // `by(__.label().min())`, whose value is the DETACHED `(SELECT … FROM nodes WHERE id = <outer>)` read
-      // rather than a column off a table the body scans), that read sits TWO subquery levels deep, in the
-      // ORDER BY of a subquery, where SQLite cannot resolve the outer reference (`no such column: rn.id` at
-      // run time). A JOINED value (`by(__.values(k).min())`/`by(__.inE().values(k).min())` read a
-      // `vertex_properties` column) resolves to a local column and is safe. Decline the subquery-valued
-      // case rather than emit SQL that fails only in execution — fail closed, the class `capability.test.ts`
-      // guards.
-      if (payloadCols(values.rel).some((column) => valueColIsDetached(values.rel, column.name))) return null;
-      // The winner keeps its OWN class (`lower.ts`'s global min/max — a deliberate divergence from
-      // NumberHelper's promotion).
-      const ordered = make.sort({ id: fresh('ms'), input: values.rel, channels: values.rel.channels, type: values.rel.type, terms: minMaxOrder(values.rel, values.framing, last.name === 'min') });
-      const winner = make.limit({ id: fresh('ml'), input: ordered, channels: ordered.channels, type: ordered.type, count: compilerInt(1) });
-      // A stream that may mix comparability classes refuses rather than let SQLite's class order pick.
-      const cls = comparableClass(values.rel, values.framing);
-      const picked = cls ? mixedClassesRefused(col(winner.id, 'v'), values.rel, cls, fresh) : col(winner.id, 'v');
-      const vExpr = make.project({ id: fresh('mv'), input: winner, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', picked]] });
-      const vtExpr = make.project({ id: fresh('mt'), input: winner, channels: [], type: typeOf(meta('vt', 'text', true)), exprs: [['vt', minMaxWinnerVt(winner, values.framing)]] });
-      return {
-        expr: { kind: 'scalar', plan: vExpr },
-        // The result's class rides per row in `vt` (`REDUCED_TYPE`), so a predicate, a fold member and a
-        // record field re-read through `select` all read it — a wide `long` carried as TEXT orders as the
-        // number it is (`valuePredicate`).
-        framing: { kind: 'scalar', type: REDUCED_TYPE, result: 'number' },
-        vtype: { kind: 'scalar', plan: vtExpr },
-        // Over no rows the winner is NULL — no value, which is presence (`ChildValue.present`).
-        present: 'value-nullness',
-        yields: 'one',
-      };
-    }
-  }
   // A correlated reduction is a PER-TRAVERSER child: TinkerPop runs the body as its own traversal, one
   // parent traverser at a time (`TraversalUtil.apply`), so the body's step list begins it — the fact a
   // consumer that depends on where the reference bulked needs (`ChainCtx.traversal`).

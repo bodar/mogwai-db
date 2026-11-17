@@ -2579,70 +2579,72 @@ function scalarTail(
         // `typeof = 'text'`, so a raw `MIN()`/`MAX()` picks by storage-class order (INTEGER before
         // TEXT) and answers the wrong element AND hands it back framed as text. The compare key is
         // `storedCompareOn` — the SAME cast authority `order().by()` uses (`modulator.ts`) — so the
-        // two positions cannot drift.
+        // two positions cannot drift (`minMaxKey`).
         //
-        // The winner is the ORIGINAL row, projected whole (an argmin/argmax: rank, take rank 1), not
-        // a `MIN()`/`MAX()` over a cast key: returning the raw storage extremum would round a >2^53
-        // long through a JS number and lose the low bits, where the stored decimal TEXT is exact.
-        // Ranking also makes zero rows emit NOTHING (`ReducingBarrierStep` supplies no seed for
-        // min/max, §92·1) rather than the one NULL row a `MIN()` aggregate emits. The `vt` column
-        // is the winner's own GREMLIN vtype (`int`/`long`/`string`, from the per-row column or the
-        // source's static tag), which the `result:'number'` framer reads through `vtypeToValueType`
-        // so a text-carried long frames as a `long` — the vocabulary `values()` frames on. Only the
-        // UNKNOWN case (a heterogeneous stream, no vtype) falls back to the class the wire infers from
-        // the value (`inferredVtype`).
-        const rank = 'red_rank';
+        // The winner is the ORIGINAL row — an ARGMIN/ARGMAX (`arg_min(value, key)`, Calcite's `ARG_MIN`),
+        // not a `MIN()`/`MAX()` over the cast key: returning the raw storage extremum would round a >2^53
+        // long through a JS number and lose the low bits, where the stored decimal TEXT is exact. SQLite
+        // spells it natively — `MIN(key)` with the winner's columns as BARE columns, one pass, no window,
+        // no fence — and because it is an ordinary scalar `Aggregate` the decorrelator keys a body's
+        // min/max by its scope with the rule it already has (`decorrelate.ts` 'aggregate'), so a per-host
+        // `map(outE().values('w').min())` is ONE `GROUP BY`, at any depth. The `vt` column is the winner's
+        // own GREMLIN vtype (`int`/`long`/`string`, from the per-row column or the source's static tag),
+        // which the `result:'number'` framer reads through `vtypeToValueType` so a text-carried long frames
+        // as a `long` — the vocabulary `values()` frames on. Only the UNKNOWN case (a heterogeneous stream,
+        // no vtype) falls back to the class the wire infers from the value (`inferredVtype`).
+        //
         // NULL is SKIPPED by min/max — `NumberHelper.max/min` return the non-null side — so it never
-        // WINS. It must not be FILTERED, though, and that distinction cost four conformance
-        // scenarios: `Operator.max` over an all-null input reduces to null, and
-        // `ReducingBarrierStep` has seen starts, so the reference emits ONE null traverser
-        // (`gremlin-core/.../step/map/MaxGlobalStep.java:43-46` + `.../util/NumberHelper.java`'s
-        // `max`). Filtering answered EMPTY for exactly that case — reachable the moment a
-        // `ProductiveByStrategy` collection put nulls in a stream. So nulls sort LAST instead, in
-        // both directions: SQLite orders NULLs first ascending and last descending, which is why the
-        // `IS NULL` term is explicit rather than left to the direction.
-        // The single-type-space order + a total raw-value tie-break, shared with the correlated
-        // by()-reducer arm (`minMaxOrder`) so the two positions cannot drift.
+        // WINS, and SQL's `MIN`/`MAX` skip it too. It must not be FILTERED, though: `Operator.max` over an
+        // all-null input reduces to null, and `ReducingBarrierStep` has seen starts, so the reference emits
+        // ONE null traverser (`gremlin-core/.../step/map/MaxGlobalStep.java:43-46` + `.../util/NumberHelper.java`'s
+        // `max`) — which the aggregate answers, its winner a null row. ZERO rows emit NOTHING
+        // (`ReducingBarrierStep` supplies no seed for min/max, §92·1) where a scalar `MIN()` emits one NULL
+        // row: the row count rides beside the winner and a Filter drops the empty group. A Filter, not
+        // `HAVING`: the decorrelator keys a scalar aggregate by LEFT-joining the domain, so an empty scope's
+        // count reads 0 there and the same Filter drops it — the per-host "no rows, no value".
+        //
+        // A stream that may MIX comparability classes (`comparableClass` non-null) refuses rather than let
+        // SQLite's class order pick: the count of distinct classes is an aggregate beside the winner (a
+        // `count`, not a `min`/`max`, so the bare-column law holds — `checkAggregateShape`) and the row count
+        // raises when it is above one.
         const cls = comparableClass(rel, out);
-        // A stream that may MIX comparability classes carries each row's class as a column (materialized,
-        // so the value is spelled once rather than once per window), and windows the least and greatest
-        // class over every row, so the winner can refuse when they differ (`comparableClass`).
-        const present = cls === null ? rel : fenced(make.project({
-          id: fresh('rc'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta('red_cls', 'text', true)),
-          exprs: [...rel.type.cols.map((column) => [column.name, col(rel.id, column.name)] as const), ['red_cls', cls]],
-        }), fresh);
-        const order = minMaxOrder(present, out, step.name === 'min');
-        const ranked = cls === null
-          ? rowNumberWindow(present, rank, present.channels, { partitionBy: [], orderBy: order }, fresh)
-          : make.window({
-            id: fresh('rn'), input: present, channels: present.channels,
-            type: typeOf(...present.type.cols, meta(rank, 'int'), meta('red_lo', 'text', true), meta('red_hi', 'text', true)),
-            specs: [
-              [rank, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: order } }],
-              ['red_lo', { kind: 'window-expr', fn: 'min', args: [col(present.id, 'red_cls')], spec: { partitionBy: [], orderBy: [] } }],
-              ['red_hi', { kind: 'window-expr', fn: 'max', args: [col(present.id, 'red_cls')], spec: { partitionBy: [], orderBy: [] } }],
-            ],
-          });
-        // The rank filter reads a windowed column, so fence it (a window may not sit inside another
-        // SELECT's WHERE without re-inlining — the rule `sample` obeys and §11 records).
-        const frame = make.materialize({ id: fresh('rm'), input: ranked, channels: ranked.channels, type: ranked.type });
-        const first: Expr = { kind: 'binary', op: '=', left: col(frame.id, rank), right: compilerInt(1) };
-        const winner = make.filter({
-          id: fresh('rk'), input: frame, channels: frame.channels, type: frame.type,
-          pred: cls === null ? first : and(first, { kind: 'case', whens: [[
-            { kind: 'binary', op: 'is not', left: col(frame.id, 'red_lo'), right: col(frame.id, 'red_hi') },
-            raiseExpr(MIXED_COMPARABLES, col(frame.id, 'red_lo'))]], else: compilerInt(1) }),
+        const key = minMaxKey(rel, out);
+        const fn = step.name === 'min' ? 'arg_min' : 'arg_max';
+        const rows: Expr = { kind: 'agg', fn: 'count', args: [] };
+        const counted: Expr = cls === null ? rows : {
+          kind: 'case',
+          whens: [[{ kind: 'binary', op: '>', left: { kind: 'agg', fn: 'count', args: [cls], distinct: true }, right: compilerInt(1) },
+            raiseExpr(MIXED_COMPARABLES, rows)]],
+          else: rows,
+        };
+        // The winner's own type TAG column (a stored `vtype`, a per-row tag) rides out of the aggregate off
+        // the same row as its value, so its Gremlin class (`minMaxWinnerVt`) is read once, off the winner.
+        const tag = streamRowTag(rel, out);
+        const tagCol = tag?.kind === 'col' ? rel.type.cols.find((column) => column.name === tag.name) : undefined;
+        const reduced = make.aggregate({
+          id: fresh('red'), input: rel, channels: [],
+          type: typeOf(meta('v', 'any', true), ...(tagCol ? [{ ...tagCol, nullable: true }] : []), meta('red_n', 'int')),
+          groupBy: [],
+          aggs: [
+            ['v', { kind: 'agg', fn, args: [col(rel.id, 'v'), key] }],
+            ...(tagCol ? [[tagCol.name, { kind: 'agg', fn, args: [col(rel.id, tagCol.name), key] }] as const] : []),
+            ['red_n', counted],
+          ],
+        });
+        const seen = make.filter({
+          id: fresh('rk'), input: reduced, channels: [], type: reduced.type,
+          pred: { kind: 'binary', op: '>', left: col(reduced.id, 'red_n'), right: compilerInt(0) },
         });
         // THE WINNER KEEPS ITS OWN CLASS: `inject(5, 2.0d).max()` is the Int 5, not the reference's promoted
-        // Double 5.0, and a tie between two representations of one value (`1.0m`/`1.00m`) takes whichever the
-        // order puts first — a deliberate divergence (`docs/feature-support-matrix.md`).
+        // Double 5.0, and a tie between two representations of one value (`1.0m`/`1.00m`) takes whichever row
+        // SQLite's `MIN`/`MAX` lands on — a deliberate divergence (`docs/feature-support-matrix.md`).
         rel = make.project({
-          id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
-          exprs: [['v', col(winner.id, 'v')], ['vt', minMaxWinnerVt(winner, out)]],
+          id: fresh('red'), input: seen, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+          exprs: [['v', col(seen.id, 'v')], ['vt', minMaxWinnerVt(seen, out)]],
         });
         // A min/max NULL result is ALWAYS productive — unconditionally, not only when the INPUT stream
         // already was (`ProductiveByStrategy`). `ReducingBarrierStep.processAllStarts` emits whenever it
-        // has seen ANY start (`MaxGlobalStep.java:43-46`), and the argmax window above yields exactly one
+        // has seen ANY start (`MaxGlobalStep.java:43-46`), and the argmax aggregate above yields exactly one
         // row for a non-empty input and zero for an empty one — so the single row it produces is always
         // the genuine reduced value, null (all inputs null) or not. Inheriting `out.productiveNull` caught
         // only the `aggregate().by(foo).cap().unfold().max()` path and dropped `g.inject(null,null).max()`
@@ -4175,29 +4177,19 @@ const framed = (chain: Tail, source: GraphSource, detached: boolean, rawListElem
   }
 };
 
-/**
- * THE ARGMIN/ARGMAX ORDER of a scalar `rel` — ONE construction so the GLOBAL barrier (a `row_number`
- * window over the whole stream) and the per-host CORRELATED subquery (a `sort`+`limit(1)`) pick the
- * SAME element. Gremlin orders within a single TYPE SPACE via `storedCompareOn` (the `order().by()`
- * cast authority, so a `long` carried as decimal TEXT past 2^53 orders as a number, not lexically),
- * skips NULL — sorted LAST in both directions so an all-null input still surfaces its one null rather
- * than a real value — and breaks ties on the raw value so the survivor is deterministic under a
- * reversed scan (`test:perturbed`).
- */
-
-export function minMaxOrder(rel: Rel, framing: RelFraming, isMin: boolean): readonly SortTerm[] {
-  // The row's own tag through the ONE reading (`streamRowTag`) — a per-row tag column (a reducer's `vt`)
-  // included, so a BigDecimal carried as decimal TEXT orders as the number it is.
+/** THE MIN/MAX COMPARE KEY of a scalar `rel`'s row — its value in the single type space Gremlin orders
+ *  in, through `storedCompareOn` (the `order().by()` cast authority), read off the row's own tag through
+ *  the ONE reading (`streamRowTag`) — a per-row tag column (a reducer's `vt`) included, so a BigDecimal
+ *  carried as decimal TEXT orders as the number it is. NULL exactly where the value is. The key of the
+ *  global reducer's `arg_min`/`arg_max`, and so of every body's min/max. */
+export function minMaxKey(rel: Rel, framing: RelFraming): Expr {
   const vtypeExpr = streamRowTag(rel, framing);
-  const key = vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
-  const dir: 'asc' | 'desc' = isMin ? 'asc' : 'desc';
-  const nullsLast: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
-  return [{ expr: nullsLast, dir: 'asc' }, { expr: key, dir }, { expr: col(rel.id, 'v'), dir }];
+  return vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
 }
 
 /** A min/max input row's comparability class (`comparabilityClass`), read off the row's own type carrier
  *  — the stored `vtype`, a per-row tag column, else the storage class — or `null` where the stream is
- *  statically ONE type and so cannot mix. The twin of `minMaxOrder`. */
+ *  statically ONE type and so cannot mix. The twin of `minMaxKey`. */
 export function comparableClass(rel: Rel, framing: RelFraming): Expr | null {
   if (framing.kind === 'scalar' && staticTypeOf(framing.type) !== undefined) return null;
   const storage: Expr = { kind: 'call', fn: 'typeof', args: [col(rel.id, 'v')] };
@@ -4242,7 +4234,7 @@ const transformInput = (framing: RelFraming): ScalarType | undefined =>
 
 /** The winner row's own GREMLIN class — `int`/`long`/`string` from the stored `vtype` column, a per-row
  *  tag or the source's static tag, else the class the wire infers from its value (`inferredVtype`). The
- *  twin of `minMaxOrder`: the same authority, read off the SURVIVING row. */
+ *  twin of `minMaxKey`: the same authority, read off the SURVIVING row. */
 export function minMaxWinnerVt(rel: Rel, framing: RelFraming): Expr {
   const inferred = inferredVtype(col(rel.id, 'v'));
   const tag = streamRowTag(rel, framing);

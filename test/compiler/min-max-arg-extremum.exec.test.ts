@@ -1,0 +1,84 @@
+// min()/max() IS ONE ARGMIN AGGREGATE — `arg_min(value, key)` / `arg_max(value, key)` (Calcite's `ARG_MIN`),
+// spelled as SQLite's `MIN(key)`/`MAX(key)` with the winner's columns as BARE columns
+// (`src/compiler/rel/lower.ts` global min/max reducer, `src/rel/emit.ts` `bareWinner`). Because it is an
+// ordinary scalar `Aggregate`, a min/max inside a child body is keyed by its scope with the decorrelator's
+// existing Aggregate rule (`src/rel/decorrelate.ts`) — one `GROUP BY`, not a correlated window per host — so
+// it composes under every host and at depth.
+//
+// The semantics it must keep (`vendor/tinkerpop/gremlin-core/.../step/map/MaxGlobalStep.java` + `NumberHelper`):
+// ZERO rows emit NOTHING (no seed), an all-null input emits ONE null, null never wins, the winner keeps its
+// own class (an Int stays an Int — `typedAll` keeps `3` vs `3.0` apart), and values of different types refuse.
+import { describe, expect, test } from 'bun:test';
+import { exec } from '../support/executor.ts';
+import { typedAll } from '../support/decode.ts';
+import { bagOf, LADDER, seededStore } from '../support/harness.ts';
+import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
+import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
+import { aggregate, values } from '../../src/rel/factory.ts';
+import { col, lit } from '../../src/rel/expr.ts';
+import { relId } from '../../src/rel/types.ts';
+
+const MODES = [['connector', CONNECTOR_ONLY], ['default', undefined], ['ladder', { ...DEFAULT_FAST_PATHS, ...LADDER }]] as const;
+const typed = (q: string, fastPaths?: FastPathConfig): string[] => bagOf(typedAll(exec(seededStore(), undefined, fastPaths).buffers(q, {})));
+
+const ANSWERS: readonly (readonly [string, readonly string[]])[] = [
+  // The witnesses: a per-host min/max under project/map/union/local, the class kept, an empty host dropped.
+  ["g.V().project('n','m').by('name').by(outE().values('weight').min())",
+    ['{"n":"marko","m":0.4d}', '{"n":"vadas"}', '{"n":"lop"}', '{"n":"josh","m":0.4d}', '{"n":"ripple"}', '{"n":"peter","m":0.2d}']],
+  ["g.V().map(outE().values('weight').min()).count()", ['3L']],
+  ["g.V().union(map(outE().values('weight').min()), constant(0))", ['0.4d', '0.4d', '0.2d', '0i', '0i', '0i', '0i', '0i', '0i']],
+  ["g.V().local(outE().values('weight').max())", ['1d', '1d', '0.2d']],
+  ["g.V().map(out().values('age').max())", ['32i']],
+  // The root form: ONE null over all-null input, NOTHING over none.
+  ['g.inject(null,null).max()', ['null']],
+  ["g.V().values('nope').min()", []],
+  ["g.V().values('age').min()", ['27i']],
+  ["g.V().values('name').max()", ['"vadas"']],
+  ['g.inject(9007199254740993L, 1L).max()', ['9007199254740993L']],
+  ['g.inject(5, 2.0d).max()', ['5i']],
+  ['g.inject(null, 3, null).min()', ['3i']],
+  // Deeper: a reducer over a reducer, a branch arm, a predicate body, an order key, a group value, repeat.
+  ["g.V().map(out().map(outE().values('weight').max()).min())", ['1d']],
+  ["g.V().map(union(out().values('age'), in().values('age')).min())", ['27i', '29i', '29i', '29i', '32i']],
+  ["g.V().group().by(label).by(values('age').max())", ['{"person":35i}']],
+  ["g.V().where(map(outE().values('weight').max()).is(gt(0.5))).values('name')", ['"marko"', '"josh"']],
+  ["g.V().not(map(outE().values('weight').min()).is(lt(0.5))).values('name')", ['"vadas"', '"lop"', '"ripple"']],
+  ["g.V().order().by(outE().values('weight').min()).values('name')", ['"peter"', '"marko"', '"josh"']],
+  ["g.V().choose(hasLabel('person'), map(outE().values('weight').min()), constant(-1))", ['0.4d', '0.4d', '0.2d', '-1i', '-1i']],
+  ["g.V().coalesce(map(outE().values('weight').min()), constant(-1))", ['0.4d', '0.4d', '0.2d', '-1i', '-1i', '-1i']],
+  ["g.V().repeat(map(out().values('age').max())).times(1)", ['32i']],
+  ["g.V().local(both().values('age').max().is(gt(30)))", ['32i', '35i', '32i']],
+  ["g.V().as('a').map(outE().values('weight').min()).as('b').select('a','b').by('name').by()",
+    ['{"a":"marko","b":0.4d}', '{"a":"josh","b":0.4d}', '{"a":"peter","b":0.2d}']],
+  ["g.V().project('x').by(both().id().min())", ['{"x":2i}', '{"x":1i}', '{"x":1i}', '{"x":1i}', '{"x":4i}', '{"x":3i}']],
+  ["g.V().map(label().max())", ['"person"', '"person"', '"software"', '"person"', '"software"', '"person"']],
+];
+
+describe('min()/max() answer as one argmin aggregate, at the root and in every body', () => {
+  for (const [q, expected] of ANSWERS)
+    for (const [mode, fastPaths] of MODES)
+      test(`${q} (${mode})`, () => expect(typed(q, fastPaths)).toEqual(bagOf(expected)));
+});
+
+describe('values of different types refuse, wherever the min/max sits', () => {
+  for (const q of ["g.inject(1, 'a').max()", "g.V().local(union(values('age'), constant('x')).max())", "g.V().map(union(values('age'), constant('x')).min()).count()"])
+    for (const [mode, fastPaths] of MODES)
+      test(`${q} (${mode})`, () => expect(() => typed(q, fastPaths)).toThrow('min/max over values of different types is not supported'));
+});
+
+describe('the bare-column law is structural', () => {
+  const input = values({ id: relId('in'), channels: [], rows: [[lit(1, 'int'), lit(2, 'int')]], type: { cols: [{ name: 'a', type: 'int', nullable: false }, { name: 'b', type: 'int', nullable: false }] } });
+  const type = { cols: [{ name: 'x', type: 'any' as const, nullable: true }, { name: 'y', type: 'any' as const, nullable: true }] };
+  const argMin = (value: string, key: string) => ({ kind: 'agg', fn: 'arg_min', args: [col(relId('in'), value), col(relId('in'), key)] } as const);
+  test('several arg-extrema over ONE key are one min()', () => {
+    expect(() => aggregate({ id: relId('ok'), input, channels: [], type, groupBy: [], aggs: [['x', argMin('a', 'b')], ['y', argMin('b', 'b')]] })).not.toThrow();
+  });
+  test('a second key is refused', () => {
+    expect(() => aggregate({ id: relId('two'), input, channels: [], type, groupBy: [], aggs: [['x', argMin('a', 'b')], ['y', argMin('b', 'a')]] }))
+      .toThrow('may hold no other min/max');
+  });
+  test('a plain min() beside an arg-extremum is refused', () => {
+    expect(() => aggregate({ id: relId('mix'), input, channels: [], type, groupBy: [], aggs: [['x', argMin('a', 'b')], ['y', { kind: 'agg', fn: 'max', args: [col(relId('in'), 'a')] }]] }))
+      .toThrow('may hold no other min/max');
+  });
+});

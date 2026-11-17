@@ -1,7 +1,7 @@
 import { empty, identifier, jsonEachValues, keyedValue, list, q, raw, render, runTimeHole, textLiteral, value, type Expression, type RunTimeHole } from '../sql/kernel/q.ts';
 import { NEEDS_SUBQUERY, aliasOf, free, fromTree, grouped, isDirectSource, isUnitValues, maySplice, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
-import { col, compilerInt, type Expr } from './expr.ts';
+import { col, compilerInt, compilerNull, isArgExtremum, type Expr } from './expr.ts';
 import { materialize } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
@@ -877,6 +877,24 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     b.from.table && !b.joins.length ? e
       : rewriteExpr(e, (node) => node.kind === 'agg' && node.fn === 'count' && !node.args.length ? { ...node, args: [compilerInt(1)] } : node);
 
+  /**
+   * An arg-extremum (`ArgExtremumFn`) spelled as SQLite's bare-column argmin: `arg_min(value, key)` is
+   * `value` read as a BARE column beside `MIN(key)`. Each one carries its OWN anchor —
+   * `coalesce(value, CASE WHEN MIN(key) IS NULL THEN NULL END)`, which is `value` whatever the anchor answers
+   * and spells it once — rather than one shared `MIN(key)` column, because
+   * a projection above may keep any subset of the winner's columns (`prune` drops unread aggregates, a fused
+   * projection inlines only what it reads), and a bare column with no `MIN` left beside it is a value off an
+   * ARBITRARY row. Identical aggregate calls are ONE aggregate to SQLite, so N anchors over one key are still
+   * the single `min()` the bare-column rule needs — the law `checkAggregateShape` holds every Aggregate to.
+   */
+  const bareWinner = (e: Expr): Expr => rewriteExpr(e, (node) => {
+    if (node.kind !== 'agg' || !isArgExtremum(node.fn)) return node;
+    const [value, key] = node.args as [Expr, Expr];
+    const anchor: Expr = { kind: 'agg', fn: node.fn === 'arg_min' ? 'min' : 'max', args: [key] };
+    const nothing: Expr = { kind: 'case', whens: [[{ kind: 'binary', op: 'is', left: anchor, right: compilerNull() }, compilerNull()]] };
+    return { kind: 'call', fn: 'coalesce', args: [value, nothing] };
+  });
+
   // ---------- the per-kind arms ----------
 
   /**
@@ -984,10 +1002,11 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         // (`unanchoredAggregate`), so a fold meant per host collapses the whole host stream into one row.
         // Closing the input as a derived table makes every input column a column of THIS block's FROM,
         // which anchors the aggregate here — the one spelling with the algebra's meaning.
+        const aggs = r.aggs.map(([name, e]) => [name, bareWinner(e)] as const);
         let b = inputBlock(r.input, outer, (b) => NEEDS_SUBQUERY.aggregate(b, r), r);
-        if (unanchoredAggregate(r.aggs, b, outer)) {
+        if (unanchoredAggregate(aggs, b, outer)) {
           b = inputBlock(r.input, outer, () => true);
-          if (unanchoredAggregate(r.aggs, b, outer))
+          if (unanchoredAggregate(aggs, b, outer))
             throw new Error(`RelIR emitter: aggregate '${r.id}' reads no column of its own input, so SQL would evaluate it in the enclosing query`);
         }
         const groupBy = r.groupBy.map((e) => computed(e, b.scope));
@@ -995,9 +1014,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
         const counted = countArgument(b);
         const select = [
           ...keys.map((name, i) => [name, groupBy[i]!] as const),
-          ...r.aggs.map(([name, e]) => [name, computed(counted(e), b.scope)] as const),
+          ...aggs.map(([name, e]) => [name, computed(counted(e), b.scope)] as const),
         ];
-        return { ...b, select, groupBy, having: r.having ? expr(counted(r.having), b.scope) : undefined, scope: withRel(b.scope, r.id, new Map(select)) };
+        return { ...b, select, groupBy, having: r.having ? expr(counted(bareWinner(r.having)), b.scope) : undefined, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'sort': {

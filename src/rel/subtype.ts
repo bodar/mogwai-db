@@ -1,4 +1,4 @@
-import type { Expr } from './expr.ts';
+import { isArgExtremum, type Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
 import { forEachRel } from './walk.ts';
 
@@ -32,7 +32,8 @@ export function mayCarryJsonSubtype(e: Expr, outer: (rel: string, name: string) 
         if (x.fn.startsWith('jsonb')) return false;
         if (x.fn.startsWith('json')) return true;
         return x.args.some(expr);
-      case 'agg': return x.fn === 'json_group_array' || x.fn === 'json_group_object' || ((x.fn === 'min' || x.fn === 'max') && x.args.some(expr));
+      case 'agg': return x.fn === 'json_group_array' || x.fn === 'json_group_object' || ((x.fn === 'min' || x.fn === 'max') && x.args.some(expr))
+        || (isArgExtremum(x.fn) && expr(x.args[0]!)); // the winner's own value, a bare column
       case 'window-expr': return x.fn !== 'row_number' && x.fn !== 'rank' && x.fn !== 'dense_rank' && x.fn !== 'count' && x.args.some(expr);
       case 'json-object': case 'json-array': return !x.binary;
       case 'scalar': index(x.plan); return x.plan.type.cols.length > 0 && column(x.plan, x.plan.type.cols[0]!.name);

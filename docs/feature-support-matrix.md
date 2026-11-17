@@ -306,7 +306,7 @@ wrong number class.
 | `barrier()` | a pass-through, as is `barrier(n)`: `inject(1,2,1,3).barrier()` is `[1,2,1,3]` |
 | Seeded fold over repeats | every traverser folds: `inject(1,1,2).fold(0, sum)` is `4` |
 | Seeded fold per parent | a seeded fold in a child starts from a fresh seed per parent (Java aliases one seed) |
-| `min`/`max` class | the winner keeps its own class: `inject(5, 2.0d).max()` is Int `5` |
+| `min`/`max` class | the winner keeps its own class: `inject(5, 2.0d).max()` is Int `5`; a tie between two spellings of one value (`1.0m`/`1.00m`) answers whichever row SQLite's `MIN`/`MAX` lands on |
 | `sum`/`mean` arithmetic | adds in double and frames the common class (`0.1d+0.2d+5n` is `5.3`); `Infinity + -Infinity` is `null` |
 | BigDecimal widening scale | a whole Double widened to BigDecimal has scale 0 (`100.0` → `100`); `1e7m` answers at scale 0 |
 | Sack number class | a simple meet: floating if either side is, else Long if either side is or it exceeds 32 bits, else Integer (`withSack(127b)…sack(sum)` with `1b` is Integer 128) |

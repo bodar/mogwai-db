@@ -140,6 +140,17 @@ const SHAPES: readonly Shape[] = [
   { name: 'unit: union(map(values),map(out.values))', query: "g.V().union(map(values('name')), map(out().values('name')))" },
   { name: 'unit: project.by(map(out.values))', query: "g.V().project('a').by(map(out().values('name')))" },
   { name: 'unit: repeat(out).times(2).map(values)', query: "g.V().repeat(out()).times(2).map(values('name'))" },
+  // N5: a per-key min/max is ONE `GROUP BY` argmin (`arg_min`/`arg_max`, SQLite's MIN/MAX with bare columns),
+  // keyed by the decorrelator's Aggregate rule — no window, no materialize, at the root and in a body alike.
+  { name: 'minmax: project.by(outE.values.min)', query: "g.V().project('n','m').by('name').by(outE().values('weight').min())" },
+  { name: 'minmax: map(outE.values.min)', query: "g.V().map(outE().values('weight').min()).count()" },
+  { name: 'minmax: union(map(min),constant)', query: "g.V().union(map(outE().values('weight').min()), constant(0)).count()" },
+  { name: 'minmax: local(outE.values.max)', query: "g.V().local(outE().values('weight').max()).count()" },
+  { name: 'minmax: map(out.values(age).max)', query: "g.V().map(out().values('age').max()).count()" },
+  { name: 'minmax: values(age).min', query: "g.V().values('age').min()" },
+  { name: 'minmax: group.by(label).by(values.max)', query: "g.V().group().by(label).by(values('age').max())" },
+  { name: 'minmax: where(map(outE.max).is)', query: "g.V().where(map(outE().values('weight').max()).is(gt(0.5))).count()" },
+  { name: 'minmax: order.by(outE.values.min)', query: "g.V().order().by(outE().values('weight').min()).limit(5)" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

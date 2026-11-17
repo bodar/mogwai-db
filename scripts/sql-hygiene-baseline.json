@@ -373,7 +373,7 @@
   },
   "max": {
     "binds": 0,
-    "bytes": 4082,
+    "bytes": 4344,
     "compiler": 116,
     "bound": 0
   },
@@ -403,7 +403,7 @@
   },
   "min": {
     "binds": 0,
-    "bytes": 4081,
+    "bytes": 4344,
     "compiler": 116,
     "bound": 0
   },
@@ -517,7 +517,7 @@
   },
   "select": {
     "binds": 0,
-    "bytes": 13009,
+    "bytes": 17275,
     "compiler": 275,
     "bound": 0
   },

@@ -1,4 +1,5 @@
 import type { RelNode } from './rel.ts';
+import { isArgExtremum, type Expr } from './expr.ts';
 import { sameColumns } from './types.ts';
 
 // The CONSTRUCTION-TIME structural laws — the ones a node must satisfy the moment it is built, from its
@@ -36,13 +37,58 @@ export function checkJoinShape(
 /** An Aggregate emits its group KEYS and then its aggregates; the declared type is the naming authority
  *  (a key that is an expression carries no name of its own), so the declared width and the aggregate
  *  names in their trailing positions must line up. */
-export function checkAggregateShape(a: Pick<RelNode<'aggregate'>, 'groupBy' | 'aggs' | 'type'>): void {
+export function checkAggregateShape(a: Pick<RelNode<'aggregate'>, 'groupBy' | 'aggs' | 'type' | 'having'>): void {
   const declared = a.type.cols.map((column) => column.name);
   if (declared.length !== a.groupBy.length + a.aggs.length)
     throw new Error(`RelIR: Aggregate declares ${declared.length} columns but emits ${a.groupBy.length} group keys and ${a.aggs.length} aggregates`);
   if (a.aggs.some(([name], i) => name !== declared[a.groupBy.length + i]))
     throw new Error('RelIR: Aggregate output must be its group keys followed by its aggregates');
+  checkArgExtremumLaw([...a.aggs.map(([, e]) => e), ...(a.having ? [a.having] : [])]);
 }
+
+/**
+ * THE BARE-COLUMN LAW of an arg-extremum (`ArgExtremumFn`, `expr.ts`). SQLite takes a bare column off the
+ * min/max row only when the SELECT holds exactly ONE `min()`/`max()` — and it shares IDENTICAL aggregate
+ * calls, so N arg-extrema over one key are still one. A second key, a second direction or a plain
+ * `min`/`max` beside them would make the winner arbitrary, a wrong answer with no error, so it is refused
+ * here, structurally, rather than left to convention. The key is compared by structure, which is exactly
+ * what decides whether SQLite sees one aggregate call or two.
+ */
+function checkArgExtremumLaw(exprs: readonly Expr[]): void {
+  const extrema: Extract<Expr, { readonly kind: 'agg' }>[] = [];
+  const visit = (e: Expr): void => {
+    if (e.kind === 'agg' && (e.fn === 'min' || e.fn === 'max' || isArgExtremum(e.fn))) extrema.push(e);
+    if (e.kind === 'scalar' || e.kind === 'exists' || e.kind === 'in-query') return; // its own SELECT
+    for (const child of shallowChildren(e)) visit(child);
+  };
+  exprs.forEach(visit);
+  const args = extrema.filter((e) => isArgExtremum(e.fn));
+  if (!args.length) return;
+  for (const e of args) {
+    if (e.args.length !== 2 || e.distinct || e.orderBy?.length || e.filter)
+      throw new Error(`RelIR: ${e.fn} takes exactly (value, key), with no DISTINCT, ORDER BY or FILTER`);
+  }
+  const [first] = args;
+  const key = JSON.stringify(first!.args[1]);
+  if (extrema.some((e) => e.fn !== first!.fn || JSON.stringify(e.args[1]) !== key))
+    throw new Error(`RelIR: an Aggregate holding ${first!.fn} may hold no other min/max and no second key — SQLite reads a bare column off ONE min/max row`);
+}
+
+/** An expression's direct children, without the walk module (this module is below it). */
+const shallowChildren = (e: Expr): readonly Expr[] => {
+  switch (e.kind) {
+    case 'unary': case 'cast': return [e.arg];
+    case 'binary': return [e.left, e.right];
+    case 'case': return [...e.whens.flat(), ...(e.else ? [e.else] : [])];
+    case 'call': return e.args;
+    case 'agg': return [...e.args, ...(e.orderBy ?? []).map((term) => term.expr), ...(e.filter ? [e.filter] : [])];
+    case 'window-expr': return e.args;
+    case 'json-object': return e.entries.map(([, x]) => x);
+    case 'json-array': return e.items;
+    case 'in-list': return [e.expr, ...e.values];
+    default: return [];
+  }
+};
 
 /** A Values relation needs at least one row and one column, and every row as wide as the declared type
  *  — SQLite has no empty `VALUES` and no empty select list, so neither degenerate shape is constructible. */

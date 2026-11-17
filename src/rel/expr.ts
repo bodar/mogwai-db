@@ -45,7 +45,22 @@ export type Expr =
  * for JSON escaping that SQLite already does correctly.
  */
 export type AggFn = 'count' | 'sum' | 'min' | 'max' | 'avg' | 'total' | 'group_concat'
-  | 'json_group_array' | 'jsonb_group_array' | 'json_group_object' | 'jsonb_group_object';
+  | 'json_group_array' | 'jsonb_group_array' | 'json_group_object' | 'jsonb_group_object'
+  | ArgExtremumFn;
+
+/**
+ * THE ARGMIN/ARGMAX AGGREGATE — Calcite's `ARG_MIN(value, key)` / `ARG_MAX(value, key)`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql/fun/SqlLibraryOperators.java`): `args` is
+ * `[value, key]`, and the result is `value` read off the row whose `key` is least (greatest). NULL keys
+ * never win (SQL `MIN`/`MAX` skip them); a group whose every key is NULL answers a `value` of one of its
+ * rows. It is SQLite's own one-pass argmax — `MIN(key)`/`MAX(key)` with `value` as a BARE column
+ * (https://sqlite.org/lang_select.html#bare_columns_in_an_aggregate_query) — so the emitter spells it that
+ * way, and the bare-column guarantee holds only with ONE min/max per SELECT: an Aggregate holding one is
+ * refused unless every arg-extremum in it shares one direction and one key and no plain `min`/`max` sits
+ * beside them (`checkAggregateShape`). Several columns off one winner are several arg-extrema on one key.
+ */
+export type ArgExtremumFn = 'arg_min' | 'arg_max';
+export const isArgExtremum = (fn: string): fn is ArgExtremumFn => fn === 'arg_min' || fn === 'arg_max';
 export type WindowFn = 'row_number' | 'rank' | 'dense_rank' | 'count' | 'sum' | 'min' | 'max' | 'lag' | 'lead';
 
 export const col = (rel: import('./types.ts').RelId, name: string): Expr => ({ kind: 'col', rel, name });

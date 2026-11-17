@@ -121,7 +121,7 @@ function emptyAgg(e: Extract<Expr, { kind: 'agg' }>): Expr {
     case 'json_group_object': return compilerText('{}');
     case 'jsonb_group_array': return { kind: 'call', fn: 'jsonb', args: [compilerText('[]')] };
     case 'jsonb_group_object': return { kind: 'call', fn: 'jsonb', args: [compilerText('{}')] };
-    case 'sum': case 'min': case 'max': case 'avg': case 'group_concat': return compilerNull();
+    case 'sum': case 'min': case 'max': case 'avg': case 'group_concat': case 'arg_min': case 'arg_max': return compilerNull();
   }
 }
 
