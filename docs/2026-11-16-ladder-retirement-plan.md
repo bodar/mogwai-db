@@ -383,6 +383,9 @@ fires and the count is 0 on the pools, delete the arm and the retry (R7's precon
   `g.V().where(__.addLabel('x').count())` is deleted by `isAlwaysProductiveFilterNoOp` and the write never happens
   (then `hasLabel('x').count()` is 0, not 6). Reuse `dropEffectFreeSideEffect`'s predicate (`MUTATING_STEPS` +
   `collectsSideEffect` + `OPAQUE_OR_RAISING`) as one export from `ir/step.ts`, keeping `sack(op)` and `mayRaise`.
+  ✅ **LANDED (e89bb6f2).** `stepHasEffect` (`src/compiler/ir/step.ts`) is the one effect predicate that both
+  `dropEffectFreeSideEffect` and `isImpure` ask (the private `SIDE_EFFECTING` list is deleted); a write inside a
+  filter is now kept and declines by name (`write-in-filter`) instead of being silently trimmed. Remains: nothing.
 - **P2 — One productivity rule (after P1).** Build `alwaysProduces`/`bodyAlwaysProduces` and coalesce's
   `alwaysFires` on the `existencePrefix` walk (a global seeded terminal cuts to `[]`; `isStreamIdentity` never
   empties; purity a separate gate), and fold `isAlwaysProductiveFilterNoOp` into `trimExistenceSuffix`.
