@@ -303,8 +303,8 @@ read's own labels/path are shed; under an all-rows host the read's label binds r
 (`ownLabels`) and the rest splits only at a real host-state read or a rebind of a prefix label (`sharedEnd`), the fold
 continuing over the cross (`reSource` in `lower/movement.ts` admits a path and a sack via one `splitRefuses`).
 A query-text decline with an advisory reason remains for an all-rows host on a tracked path (`resource-path`); a
-first-row host reading host state (once `resource-reads-host`) now ANSWERS through the fold's cross, kept correlated
-by the host's correlated-first policy (M2). Witnesses in
+first-row host reading host state now ANSWERS through the fold's cross, kept correlated by the host's
+correlated-first policy (M2; `resource-reads-host` remains only where the host cannot stay correlated). Witnesses in
 `test/compiler/resource-general-cross.exec.test.ts`; scaling ~7-8x for 8x input; no baseline moved. Remains: nothing.
 
 `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) returns `null` (hard decline) where it should return
@@ -536,6 +536,18 @@ rejoin's encounter (`src/compiler/rel/lower.ts` `treeTail`), closing a bare inte
 (~7–8.5× at 1k → 8k). No baseline moved. Remains: nothing.
 
 ### M2 — Make the reducing-rest cost policy consistent (after M1)
+
+✅ **LANDED (a6a8f497, 90f1118d, 75e1d1a9).** One decision: a FIRST-row host (`map`, a `by()`, a filter) whose
+re-source rest reads host state ANSWERS through the fold's GraphStep cross (`reSourcedBody` returns `undefined`,
+`reSource` in `lower/movement.ts`), read per host row by the host's own correlated-first policy (`correlatedBody` sets
+`lowerBody`'s `correlated`; `firstInnerOver` / `fencedHost`, `landValues`' `correlatedValue`, the existence probe) and
+stopped at its first row (`LIMIT 1` / `EXISTS`) — TraversalMapStep's one `next()`, TraversalFilterStep's one
+`hasNext()`. Only where the host cannot read it per row (the decorrelated fallback, every host × G ahead of the pick)
+does it still decline, with the explained `resource-reads-host` message — a property of the query text, never a cost
+decline. A barrier rest (`map(V().as('x').out().where(neq('a')).count())`) is N×G by the query's meaning, as under
+the all-rows hosts, and the probe labels those shapes `xNG`. Fix-forward: `positionKeys` (`src/rel/position.ts`) keeps
+a nested join side's key columns in place (`g.V().map(both().both().values('name'))` read the wrong vertex on trunk).
+Linear (5–8.6× at 1k → 8k) for the first-row shapes; no baseline moved. Remains: nothing.
 
 `scoped.ts`'s host-state comment says an all-rows host's fold is "linear in what it returns". That is false when
 the rest ends in a barrier: `g.V().as('a').local(V().as('x').out().where(neq('a')).count()).count()` takes 52 ms at
