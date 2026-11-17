@@ -1,7 +1,7 @@
 # Retiring the correlated-child ladder
 
 _Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; round 2
-landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10. The next round starts at
+landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; N3 landed partially (d229d834). The next round starts at
 "Next round (written 2026-11-17, after round 3)" at the end. No deadline: each step lands on its own when it is ready, and
 any step may stop and be reconsidered._
 
@@ -328,9 +328,19 @@ value CTE's row. Lands naturally with P4 (one first-row builder) below.
 
 ### N3 — Linear pooled re-source for many keys (MAJOR — performance is semantics)
 
-⏸ **NOT BUILT in round 2: waits on owner question 5.** It is traverser-linear (N×G is what the query asks for)
-and its witnesses ignore their key. If it is built, it is one `fuse.ts` AggregateJoinTransposeRule, not a
-`pooledGroup` law.
+✅ **LANDED (d229d834) — partially: the bare re-source shapes.** `fuse` (`src/rel/fuse.ts`) gained Calcite's
+AggregateJoinTransposeRule for a cross join beside Filter-below-Window: a SUM/COUNT over `Project* ∘ Join(cross)`
+is factored into per-side sub-aggregates multiplied by the other side's count (Calcite's CountSplitter /
+SumSplitter), so `group().by('name').by(V().count())` is 11.8 → 69.7 ms at 1k → 8k (5.9×; `E().count()` 7.3×,
+`both()…` 8.9×). Test: `test/compiler/aggregate-join-transpose.exec.test.ts`. **Remains:** Witness 4
+(`g.V().group().by('name').by(V().values('age').sum())`) and the name-keyed forms of witnesses 3 and 5
+(`V().out().count()`, `V().has('age',gt(30)).count()`) are still quadratic, as before this change. In the weighted
+pool (`scoped.ts` `pooledGroup` → `poolWeight` → `continueAs`) the cross happens at `V()` and the hops and filters
+stack above it, so no Aggregate sits directly over the cross join. Missing prerequisite, one of: (a) push filters
+and inner joins down through a cross join in `fuse` (Calcite's FilterJoinRule and join-associate rules, carrying
+columns through the intermediate projections), or (b) make `reSourcedBody` accept a bulk-carrying prefix: cut the
+shared read before the first bulk-observing barrier and carry bulk as the product of the two sides. With either,
+the factoring rule reaches these shapes unchanged.
 
 `g.V().group().by('name').by(V().count())` is 183 ms at 1k and 14,810 ms at 8k (81×): with `poolWeight` the graph
 is still crossed once per KEY. `reSourcedBody`'s own law, rest(prefix×G) = prefix×rest(G), says rest(G) is computed
