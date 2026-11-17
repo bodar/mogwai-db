@@ -1,8 +1,8 @@
 # Retiring the correlated-child ladder
 
 _Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; round 2
-landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; N3 landed partially (d229d834); R6's first item (+R6.0) landed (5452ee0b, 490a66e8, 690de3d8). The next round starts at
-"Next round (written 2026-11-17, after round 3)" at the end. No deadline: each step lands on its own when it is ready, and
+landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; round 4 landed N5, K1+P15, Q2 (both halves), P12, M2, R6's first item (+R6.0) and N3 partially. The next round starts at
+"Next round (written 2026-11-17, after round 4)" at the end. No deadline: each step lands on its own when it is ready, and
 any step may stop and be reconsidered._
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is
@@ -874,3 +874,239 @@ sideEffect() …"), not "no lowering covers".
 ### Needs-human questions (round 3)
 
 None raised.
+
+## Next round (written 2026-11-17, after round 4)
+
+Round 4 landed N5 (f31ec6bb), K1 + P15 (b93bbdbf), Q2 bounded half (5c1edb55), P12 (7f715408), M2 (a6a8f497,
+90f1118d, 75e1d1a9), R6's first item + R6.0 (5452ee0b, 490a66e8, 690de3d8), N3 partially (d229d834) and Q2's unbounded
+half (ccfe92a4, 30568349, 5ca1aef2). Every round-4 branch landed, so no branch is parked as a resume point. Still open
+from earlier rounds: M1b (parked behind H1), M6, N3 (remainder below), N8, N9, K2, K3, K4, P2, P5, P6, P8, P9, P11,
+P13, P14, R4.2, R4.5, R5.2–R5.4, R6 (other hosts), R7. The items below are ordered so that each prerequisite comes
+BEFORE the item it unblocks. Major items come first.
+
+### S1 — One correlated row read per host (SUBSTRATE: shared root cause of four findings; do first)
+
+Several round-4 reviewers found the same root cause from different sides. A correlated per-host pick is emitted as
+one scalar subquery PER COLUMN, plus a presence `EXISTS`, and each one re-spells the same body. That breaks the rule
+that an expression is computed once:
+
+- **M2:** `correlatedValue` → `correlatedFirst` computes value, vtype and the presence probe as three copies of one
+  search (`g.V().as('a').groupCount().by(V().where(neq('a')).values('name'))`: CORRELATED SCALAR SUBQUERY 4/5/6; the
+  leading-key `(SELECT s.id … ORDER BY s.id LIMIT 1)` appears three times in `map(V().where(neq('a')).out().values('name'))`).
+- **M2, identity coupling:** to make those copies agree, `positionKeys` (`src/rel/position.ts`) and `leadingRead`
+  are memoized in module-global WeakMaps keyed on `Rel`, and `semijoin.ts` `narrowed` is keyed by Filter id ("a copy
+  of the same query block"). The cached ids come from whichever `fresh` minter asked first, so a later pass rewrite
+  or a Rel reused across compiles can break this silently.
+- **N5:** a body's min/max is two or three correlated scalars per host (v, vt, and in CONN mode the presence
+  `EXISTS`), each re-running the whole aggregate with its own `count(DISTINCT)` temp B-tree. The old
+  `correlatedReduce` did the same, so this is not a regression.
+
+**Item:** a per-host pick yields ONE relation (a fenced per-host row, or one keyed aggregate the host joins) that the
+value, the vtype and the presence read as columns. Then delete the WeakMap memos and the Filter-id `narrowed` key,
+because nothing needs copies to agree any more. Measure with sql-hygiene's subquery checks: they stay green today only
+because the copies sit in separate select items. Tighten the check so it sees that case. Witnesses: the three queries
+above, plus `g.V().project('n','m').by('name').by(outE().values('weight').min())` and
+`g.V().map(out().values('age').max()).count()`.
+
+### S2 — The leading-scan rewrite moves to `src/rel/passes` and reuses lineage (MAJOR, placement + duplication; after S1)
+
+M2's `leadingFirst`, `leadingRead`/`buildLeadingRead`, `elementSource`, `scanKey`, `holdSource`, `reaches`,
+`traceDown`, `mapColsDeep`, `deepColsRead` and `slicesByKeys` (about 230–400 lines in
+`src/compiler/rel/lower/scoped.ts`) are a physical-plan rewrite. They push Sort+fetch and conjuncts onto the leading
+scan of an uncorrelated scan crossed with the seed row, and they live inside the lowering. `src/compiler/CLAUDE.md`
+puts that kind of rewrite in `src/rel/passes`, next to `propertySeek`, and the comment cites Calcite's
+SortJoinTransposeRule
+(`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/SortJoinTransposeRule.java`). The code also
+duplicates existing authorities:
+- `traceDown`/`scanKey` re-implement `semijoin.ts` `columnPath`/`definingPath` and `copies.ts` `columnIsRowKey`;
+- `conjuncts` now has four definitions (`semijoin.ts` ~384, `scoped.ts` ~877 and ~942);
+- `deepColsRead` sits beside `colsRead`.
+
+The walk's hand-written spine list (project/filter/sort/inner-join left) is also too narrow: a window, an aggregate or
+a nested decorrelated filter on the spine stops it.
+
+**Item:** move it to a pass over the finished algebra, reuse the lineage helpers, and keep one `conjuncts`. Run it
+after S1, which removes the identity memos this code relies on.
+
+### S3 — One "per-host work is bounded" fact for first-row and existence hosts (MAJOR, special-case; after S1)
+
+Two syntactic choices stand in for a cost fact:
+- **M2:** `landValues` picks the correlated route with `reSourcesDeep(body)`, a name test for `V()`/`E()` at any
+  depth. That makes it a (host, body-shape) branch for order/dedup/group/groupCount `by()`. A by() body that reaches
+  the whole graph some other way takes the N×G landed window, and a re-source that does not read the host is routed
+  correlated for no reason.
+- **Q2b:** `correlatedExistence`'s bounded-work guard is a hand-written list of node kinds (aggregate/sort/window over
+  an input with `rowBounds` max = ∞). It misses `distinct`, and it sits on the new route only. The older movement-head
+  `correlatedExists` still runs the shapes this guard declines, at quadratic cost:
+  - `emit(in().order().by('age').limit(1).has('age',gt(30)))`: 54×
+  - `until(in('created').values('age').sum().is(gt(100)))`: 63×
+  - `until(in('created').values('age').dedup().count().is(gt(3)))`: 54×
+  - `emit(in().fold().count(local).is(gt(1)))`: 21×
+
+  So whether a query declines or answers depends on how it is spelled (the condition's first step), not on what it
+  means.
+
+**Item:** one authority on the LOWERED Rel ("can this body's first row / existence be read per host with early stop
+and bounded per-host work"), shared by map/project/where/by() and both walk-condition routes. A route this item
+newly declines must not take away an answer trunk gives (end-state rule 3). Where that conflicts, see the
+needs-human question on walk-until-hub below.
+
+### S4 — `perState` only where the state key merges rows (MAJOR, regression in scoped walks)
+
+Q2b's `perState` (`src/compiler/rel/walk.ts`) makes a query trunk already answered slower when the walk runs under a
+decorrelated host. `g.V().where(repeat(out()).emit(in('created').has('age',gt(45)))).count()` went from 14.3 → 265 ms
+to 30.7 → 640 ms at 130 → 1050 chains, and from 993 ms to 2356 ms at 2100 (about 2.4×).
+`g.V().hasLabel('person').local(repeat(out('knows')).emit(out('created').has('lang')).count())` went from 52 to 76 ms
+at 2100. Under a scoped host the state key carries the scope columns (dk/dc), so the DISTINCT, the spool and the
+semi-join add cost and merge nothing.
+
+**Item:** apply `perState` only at the root (or wherever the key really merges rows). Keep the condition per row under
+a scoped host until scope-free keying (S6) exists. In the same file:
+- compute the walk's exit flag once and filter both arms on that column (the until test is spelled three times when
+  an emit reads adjacency, and `lp0 > 0` is repeated);
+- the unbounded `until()` condition is spelled twice (term stop test and outer emit filter).
+
+Add a scoped-host witness to `test/compiler/walk-condition-hub-scale.exec.test.ts`, plus a selective/failing
+condition over a hub (`emit(union(in('created'),out('knows')).has('age',gt(45)))`). Tighten its 20× bound to the
+project's ≈16×.
+
+### S5 — Index-driven probes for a re-source compare (MAJOR, super-linear; after S2)
+
+- **M2's existence probe** (`existenceProbe` → `leadingRead`, `LIMIT 1` with no ORDER BY) reads `nodes` through the
+  covering index `nodes_gid`. gid is effectively random, so "stop at the first match" lands at a random position.
+  `g.V().as('a').where(V().where(neq('a')).values('name').is('p7')).count()` takes 14.6 → 3135 ms at 1k → 8k (215×),
+  while the `has('name','p7')` spelling is 2×. Drive `values(k).is(c)` after a re-source through `propertySeek`, as
+  `has(k,c)` already is.
+- **The correlated equality `by()` compare** (`where(V().where(eq('a')).by('name').where(neq('a')))`, a duplicate-name
+  finder): 1.16 s → 79 s at 1k → 8k (68×). It was newly reachable with M2; the `coalesce`/`optional` spellings were
+  already on trunk at the same cost. The `vp_key_value` index could answer it in N log N. Whether to build this is an
+  owner question (below).
+
+### N3 remainder — gated on S6a (prerequisite, ordered first)
+
+Witness 4 `g.V().group().by('name').by(V().values('age').sum())` (1.5 s → 89 s) and the name-keyed
+`by(V().out().count())` / `by(V().has('age',gt(30)).count())` are still quadratic, the same as on trunk. In the
+weighted pool the cross is at `V()`, and the hops and filters stack ABOVE it, so no Aggregate sits directly over the
+cross join and `fuse`'s AggregateJoinTransposeRule never fires.
+
+- **S6a (prerequisite) — push a side-local Filter and an inner Join below a cross join in `fuse`**, carrying columns
+  through the intermediate projections. This is Calcite's FilterJoinRule and JoinPushThroughJoinRule
+  (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/FilterJoinRule.java`,
+  `.../JoinPushThroughJoinRule.java`). Prefer it to the alternative of a bulk-carrying prefix in `reSourcedBody`: it
+  is algebra, it lives in the seam the rule already lives in, and it adds no lowering special case. With S6a in place,
+  the N3 factoring reaches these shapes unchanged.
+- Cheap, same file: `groupedOn` should look through a column-renaming Project. Today
+  `g.V().both().group().by('name').by(V().count())` re-groups an already-grouped pool side and adds an unused
+  `count(1)`. Calcite uses a unique side as it is, with count 1. Also give the factored aggregates a mint hint
+  distinct from their column names (`fa0.fa2 * fa2.fa1`).
+
+### S6 — Scope-free subterm: a decorrelator rule (prerequisite for walk conditions under a host)
+
+Q2b's remaining **scope-free-subterm** (`docs/outstanding-work.md` §1b): a filtering condition under
+`where`/`local`/`map` is keyed per scope by the decorrelator, which costs 16–23× at a hub. That holds connector-wide on
+trunk (`where(out().out().where(in().has(..)))`), and Q2b's new non-movement heads reach it at depth. **Item:** one
+rule in `src/rel/decorrelate.ts` that leaves a membership test of a scope-independent fact unkeyed. S4's per-row
+fallback becomes unnecessary once this lands. The R6 rejoin finding is the same family: `scopedSite` re-joins the
+keyed site to a projection of `outer` to get the host encounter, but the domain already carries it. Carry `hostEnc`
+in the domain.
+
+### K5 — The decline signal: a host records its own decline (minor x4, one item; replaces the position watermark)
+
+K1's `Declines.furthest` advances only in `continueAs`, so whether a write hint is certain or hedged depends on
+routing, not on where the decline is:
+- `sideEffect(property(...))`, `sideEffect(drop())` and `repeat(addV(...)).times(2)` became "may not be supported
+  here", which is vaguer than trunk;
+- `g.V().hasLabel('software').union(drop())` lost the hint entirely, because `afterWrite` (`write.ts` ~1346) advanced
+  furthest past the union;
+- `…union(addV('x')).values('name').order()` and `coalesce(out(), addV('x')).order().by('name')` still blame the
+  write, although `union(addV('x')).values('name')` answers.
+
+**Item:** a write host records its own decline, instead of reading a position watermark. Also in this item:
+- R6.0's advisory overrides a write reason. `g.V().sideEffect(out().aggregate('x').property('k',1)).cap('x')` now
+  points at a cap/select the user never wrote. Let the write reason win (skip the `effectInChild` note when
+  `keyedInFork` returned null on `lowered.effects?.length`).
+- The R6.0 hint never fires when `registerGrouping` returns false before a site is pending:
+  `sideEffect(out().group('x').by('name').by(count()))` and `…by(values('age').sum())` say only "no lowering covers".
+  Note the advisory there too.
+
+### Cheap, concrete follow-ups (round 4)
+
+- **R6 — `P.not(within('x'))` → `without('x')`.** Normalize this at the one `memberOf` helper. Corpus
+  `g_VX1X_out_aggregateXxX_out_whereXnotXwithinXaXXX` and `g_V_classic_recommendation` still decline; the
+  `without` spelling answers `[ripple]`.
+- **R6 — compute the membership key once.** `scalarMembership` (`src/compiler/rel/lower/filter.ts`) spells
+  `typedValueKey(v, coalesce(tag, inferredVtype(v)))` about 6 times per member row (2649 → 3941 bytes). Project the
+  member's total tag as one column under `set`, then key over that column.
+- **N5 — root min/max re-inlines the per-row value CASE** (`CASE WHEN vtype IN ('list','map','set') THEN json(value)
+  …`) into the compare key, the bare value and the class. Project it once below the Aggregate.
+- **Q2a — one `loopCountPredicate(test): P | null`** in `src/compiler/ir/strategies.ts`, shared by `emitLevelTest`
+  and `loopCountUntilAsTimes`.
+- **P12 — pin the drop-vs-keep classes.** `coalesce(map(identity()).out('created')).path()` drops the inner position
+  CORRECTLY: `CoalesceStep extends FlatMapStep`
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/CoalesceStep.java:38`),
+  and `SimplePath.feature:80` adds one position. Add tests in `test/compiler/tree-step.exec.test.ts`:
+  map/flatMap/coalesce drop the inner positions (`map(out('knows').map(identity())).tree()` → `{marko:{vadas}}`);
+  `local(map(identity()).out('knows')).tree()` keeps them. Without these, a later item may "fix" it into a wrong
+  answer. Do NOT record it as outstanding work.
+- **P12 (optional)** — typing a kept identity-body host as its input's kind would remove the 3-way `CASE` that
+  `tree().by(id)`/`path()` emit after `map(identity())` (linear today).
+- **M2 scaling witnesses** in `scripts/scaling-probe.ts`: a hop (`map(V().where(neq('a')).out().values('name'))`), a
+  limit, a sparse filter, `project('n').by(V().where(neq('a')).values('name'))`, `hasLabel`, `id()`/`label()`,
+  `not(where(...))`, `E()`, an eq-by-key miss, and `values(k).is(c)`. The current witnesses all hit the first vertex
+  scanned, so they cannot see S5.
+
+### N8 additions (round 4 depth gaps; clean declines today; a body or host row, never a rung)
+
+- **M2:** `map(V().where(neq('a')).out().id())` declines while `…out().values('name')` answers (also
+  `both().both().id()`, `E().where(outV().where(neq('a'))).inV().id()`, `limit(3).out().id()`, under map and
+  `project().by`). Likely `id()`'s computed payload after a hop trips `correlatedFirst`'s two-column/subquery rule.
+  This shares a root with S1. Also still declined: an `order()` in the rest (`map(V().where(lt('a')).by('age').order()…)`),
+  `addE(…).to(V()…where(lt('a')))`, `group().by('name').by(map(V().where(neq('a'))…))`, a `choose(V()…where(neq('a')), …)`
+  predicate (the message says "inside map(), by() or a filter"; name `choose()`), `repeat(V().has('age').where(gt('a')).by('age')).times(1)`
+  and `map(V().where(neq('a')).sample(1))`. The last two say only "no lowering covers"; give them a reason.
+- **R6:** `coalesce(out().aggregate('x'), constant(1)).cap('x')` (a constant arm beside a collecting arm);
+  `sideEffect(out().group('x').by(k).by(<reducing>))`; `sideEffect(out().fold().aggregate('x'))`;
+  `sideEffect(properties('name').aggregate('x'))`; a non-empty seed `withSideEffect('x',[1,2])`; membership over a
+  SEEDED collection (`where(without('a'))` after `withSideEffect('a',['marko'])`); `project('n').by(out().aggregate('x').count()).cap('x')`.
+- **Q2a/Q2b:** a label bound in the repeat body and read by the condition or after it
+  (`repeat(out().as('x')).emit(select('x')…)`); `loops()` inside a coalesce/union condition arm (the `sameChannels`
+  branch-merge limit); a `select('a')` in a walk condition (`walk.ts` does not pass the alias map to
+  `child.predicate`); a `path()` read inside a walk condition answers only when the outer chain also tracks path (the
+  condition's own `path()` should turn tracking on).
+- **K1:** a write after a path-tracked `repeat`/`where(simplePath())` (now explained by `write-on-path`).
+
+### Next round — reuse sweep (round 4's proposals)
+
+- **P16 — `min(local)`/`max(local)` reuse N5's arg-extremum Aggregate.** Pull the global reducer's Aggregate
+  (`lower.ts` ~2620–2645) out into one builder and call it from `src/compiler/rel/list.ts` `listReduce` over `members`,
+  with `memberCompareKey` as the key. That deletes the Sort+Limit/JSON-pair/fence block (~55 lines) and
+  `predicate.ts` `mixedClassesRefused` (its only caller). Measured: `local(out().values('age').fold().max(local))` is
+  17,101 B and 12.2/97.2 ms; the arg-extremum spelling is 7,883 B and 4.4/37.1 ms. A tie between two spellings (1 vs
+  1.0) then goes to SQLite: widen N5's §17 line to cover `local`, and say so in the commit.
+- **P17 — `firstArrival` → `arg_min(value, order)`** (`src/compiler/rel/build.ts`; callers `lower/slice.ts` ~491,
+  `lower/scoped.ts` ~2499, `map.ts` ~142). This removes the per-row `printf('%020d…')` packing and keeps the winner's
+  storage class (the packed form is always TEXT, while the pooled-group KEY is declared `int`). In `slice.ts` the
+  plain `MIN(encounter)` becomes `arg_min(enc, enc)`, or `checkArgExtremumLaw` allows a plain MIN identical to the
+  anchor.
+- **P18 — dedup-first windows → one Aggregate of `arg_min` per carried column.** Targets: `map.ts`
+  `dedupGroupMembers` and the `list.ts` `dedup(local)` arm (~505). Both use ROW_NUMBER only because "an Aggregate
+  cannot give the value of the row with MIN(mo)", which arg_min now does. This also moves them onto decorrelate's
+  Aggregate rule. `slice.ts` `dedupOn`/`dedupOnTyped` are not candidates (multi-key order).
+- **P19 — Hoist the path-tracked write decline.** Use one
+  `if (MUTATING_STEPS.has(step.name) && pathCarried(rel)) return writeOnPath(step, ctx)` at the top of `elementTail`'s
+  loop (`lower.ts` ~5755–5859) and at the scalar-tail site (~2802). It replaces 6 repeated lines, and a new write step
+  is covered automatically. Do it with K5.
+- **P20 — One keyed-collector predicate.** `labels.ts` `KEYED_SIDE_EFFECT_WRITERS` and `step.ts` `KEYED_REDUCERS` are
+  the same set with the same string-arg test. Export one `isKeyedCollector(step)`. Also spell `write.ts` ~881
+  `LABEL_READING_STEPS` as `PATH_READERS` ∪ {select, match, cap, sack}. Membership is unchanged.
+
+### Needs-human questions (round 4)
+
+1. **(Q2b builder, verbatim:)** "walk-until-hub: the movement-head until, e.g. `until(in('created').has(..))`, is
+   22.8x. It already runs this way on trunk, so declining it would take away answers trunk gives; that is your call."
+   (The alternative is a per-distinct-element evaluation inside the recursion, e.g. a reachability pre-pass. S3
+   needs this answer before it may decline anything the movement-head route answers today.)
+2. **(M2 reviewer, verbatim:)** "Flagged for the owner: either accept it under the xNG rule, or treat a correlated
+   equality by() compare as a propertySeek term." (Witness: `g.V().as('a').where(V().where(eq('a')).by('name').where(neq('a'))).values('name')`,
+   1.16 s → 79 s at 1k → 8k. The reference's `TraversalFilterStep` also scans the graph per host when there is no
+   match. An index answers it in N log N. This decides S5's second bullet.)
