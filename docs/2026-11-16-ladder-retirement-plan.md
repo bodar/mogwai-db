@@ -689,6 +689,13 @@ Unblocks N7.
   correlated subquery — `count().is()` already works there). Only what SQLite genuinely cannot hold stays
   `host-owned`, with that limit as its recorded reason. Owner: "the implementation there has to be a limited one" —
   a partial is accepted where SQLite forces it, so users don't have to think about it elsewhere.
+  ✅ **LANDED (5c1edb55) — the bounded half.** `repeat(b).emit(p).times(n)` (every emit/until position) unrolls:
+  each tested level is the arm's phases + `filter(p)` through the connector's existing filter row
+  (`src/compiler/ir/strategies.ts`; level order read off `.../step/branch/RepeatStep.java`, `doUntil` before
+  `doEmit`); `emit(loops().is(P))` is decided per arm at compile time, any other `loops()` read in the test declines
+  by name. Repeat.feature `g_V_emitXhasLabelXpersonXX_repeatXout_order_byXnameXX_timesX2X_valuesXnameX` now passes
+  (L3 2052 → 2053); emit shapes in the scaling probe, ~8.5–9× from 1k to 8k. Remains: nothing for the bounded
+  item. (The "then MEASURE the unbounded condition in correlated form" clause was not part of this landing.)
 - **Q3 — margins.** (a) ACCEPT the `group` margins (`by(label).by(count())` 1.40×, `by('name').by(tail())` 1.30×) as
   named margins; R5 step 4 deletes the route. Default users already run the connector, so the delete slows no one.
   QUEUE (not a gate) a decorrelation rule that closes the remaining join-then-GROUP BY gap. (b) N5 is a FIX, not a
