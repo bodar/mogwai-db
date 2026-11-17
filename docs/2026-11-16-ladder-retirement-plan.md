@@ -501,6 +501,14 @@ path has no shared-read crossing. It either declines (`resource-path`) or goes t
 Item: under `local`/`flatMap`, a body that reads no host state crosses the prefix's path unchanged with ONE shared
 read (`reSourcedBody` / `sharedEnd`). `flatMap` takes `map()`'s path contract. Fix the comments.
 
+✅ **LANDED (ab0c9a36, f195241f).** `reSourcedBody`'s `first` flag became the host's own rejoin contract,
+`'first' | 'split' | 'forward'` (`src/compiler/rel/lower/scoped.ts`), taken at each site from the rejoin policy it
+already passes. Under `'split'` (flatMap, coalesce) a tracked path crosses the shared read unchanged and `rejoin`
+extends it by the result, so `g.V().out().flatMap(V().has('name','marko')).path()` answers. `local` stays `'forward'`
+(`LocalStep` emits the child's own path); its cost policy is M2's. Fix-forward: `tree()` orders its paths by the
+rejoin's encounter (`src/compiler/rel/lower.ts` `treeTail`), closing a bare internal Error that predated M1. Linear
+(~7–8.5× at 1k → 8k). No baseline moved. Remains: nothing.
+
 ### M2 — Make the reducing-rest cost policy consistent (after M1)
 
 `scoped.ts`'s host-state comment says an all-rows host's fold is "linear in what it returns". That is false when
