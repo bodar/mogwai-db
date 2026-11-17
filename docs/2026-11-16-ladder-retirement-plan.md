@@ -471,6 +471,12 @@ free), reusing `emit.ts`'s unit classification, not a special case in `substRelI
 "census byte-identical" holds for the census only. Corpus SQL changed in 4 of 2,395 plans (2 shrank, 2 grew +109/+11
 bytes from this hoist), so the `select.compiler` 175 → 275 re-record is not purely a stale baseline.
 
+✅ **LANDED (fe84f779).** One predicate, `isUnitValues` (`src/rel/block.ts`, beside `isDirectSource`): the emitter's
+`directSource` sets `unit` from it and `name`'s `binds` refuses to hoist it, so each block's `withoutUnit` fold erases
+the inline seed. `map(out().values('name'))` 1423 → 1314 bytes, `map(values('name'))` 928 → 824; both linear (~8× at
+1k → 8k). Pinned in `test/L2-sql/first-row-once.sql.test.ts`; witness shapes in `scripts/scaling-probe.ts`. No
+baseline moved. Remains: nothing.
+
 ### M1 — All-rows host over a tracked path: one shared-read crossing (substrate for M2–M4)
 
 One root cause behind several round-2 findings: when a body reads no host state, `local`/`flatMap` over a tracked
