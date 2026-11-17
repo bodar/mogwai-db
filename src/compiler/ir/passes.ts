@@ -6,7 +6,7 @@ import {
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity, verifyChooseOptionKeys,
     absorbValueMapWith, collapseFoldCountLocal, plainFoldSpelling, dropRedundantOrder, mergeStepLabels,
-    injectSubgraphRec, injectPartitionRec, markProductiveBy, trimExistenceSuffix, isAlwaysProductiveFilterNoOp, dropEffectFreeSideEffect, verify,
+    injectSubgraphRec, injectPartitionRec, markProductiveBy, trimExistenceSuffix, boundConditionCount, isAlwaysProductiveFilterNoOp, dropEffectFreeSideEffect, verify,
     inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
@@ -177,6 +177,14 @@ const SIMPLIFY: Pass[] = group('simplify', [
     name: 'trimExistenceSuffix',
     applies: (steps) => steps.some((s) => FILTER_HOSTS.has(s.name) || s.name === 'choose' || !!s.repeatRegion),
     run: (steps, ctx) => trimExistenceSuffix(steps, ctx.params) as IRStep[],
+  },
+  // A walk condition's `count().is(P)` reads at most as many rows as `P` can tell apart — `CountStrategy`'s
+  // range insertion, result-preserving (so `CountStrategy` stays in NO_OP_STRATEGIES). After the trim, which
+  // may expose the `count().is(P)` end.
+  {
+    name: 'boundConditionCount',
+    applies: (steps) => steps.some((s) => !!s.repeatRegion),
+    run: (steps, ctx) => boundConditionCount(steps, ctx.params) as IRStep[],
   },
   {
     // An existence filter whose body ALWAYS produces a traverser cannot reject anything, so the step

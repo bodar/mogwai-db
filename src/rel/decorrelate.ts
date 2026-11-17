@@ -400,6 +400,13 @@ export function decorrelateAll(
             rel: make.project({ id: r.id, input: k.rel, channels: r.channels, type: k.rel.type, exprs: k.rel.type.cols.map((c) => [c.name, col(k.rel.id, c.name)] as const) }),
           };
         }
+        // A domain of at most ONE row (the outer is a correlated body's one-row seed — `local(in().limit(1))`
+        // inside a correlated `EXISTS`) has ONE key: top-N per key IS the plain top-N, so it stays a `LIMIT`,
+        // which stops at the n-th row. The per-key `ROW_NUMBER` would number the WHOLE input first — a hub's
+        // entire neighbourhood per outer row, super-linear wherever many outer rows reach one hub (measured).
+        if (atMostOneRow(outer)) {
+          return { keyed: true, rel: make.limit({ id: r.id, input: k.rel, channels: r.channels, type: k.rel.type, ...(r.count ? { count: r.count } : {}), ...(r.offset ? { offset: r.offset } : {}) }) };
+        }
         // Ranked over the SORT the limit reads, where there is one (its terms resolve against its own
         // input, so the window replaces the sort rather than sitting above it).
         const sorted = k.rel.kind === 'sort' ? k.rel : null;

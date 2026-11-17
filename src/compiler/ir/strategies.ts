@@ -259,6 +259,57 @@ export function trimExistenceSuffix(steps: Step[], params: ParamEnv): Step[] {
 }
 
 /**
+ * A WALK CONDITION'S `count().is(P)` COUNTS ONLY AS FAR AS `P` CAN TELL — `CountStrategy`'s range insertion
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/CountStrategy.java`:
+ * `outE().count().is(gt(3))` is `outE().limit(4).count().is(gt(3))`). Over the integers `P` is a finite boolean
+ * combination of comparisons against its number operands, so its truth is constant for every count past the
+ * largest operand: with `h` that saturation point, `P(min(c, h)) = P(c)`, and the count need never read past
+ * `h` rows. Only a body ENDING in `count().is(P)` — the count's value is read by `P` and nothing else.
+ *
+ * Only a `repeat()`'s `until`/`emit` (the unbounded walk's: a bounded repeat is unrolled before this runs): a
+ * walk condition is evaluated CORRELATED, once per frontier row inside the recursive term, where a count over
+ * a hub's neighbourhood is the hub's degree per row reaching it — quadratic in the walk (measured). Elsewhere
+ * the connector decorrelates a count into one grouped pass, which a per-key limit would only slow.
+ * A PARAMETER operand is the user's to vary, so the plan does not depend on it; a non-number operand, an
+ * existing slice before the count, or a `P` the integer evaluator does not know leaves the body alone.
+ */
+export function boundConditionCount(steps: Step[], params: ParamEnv): Step[] {
+  const bounded = (a: Arg): Arg => {
+    if (!isNested(a.value)) return a;
+    const body = stepChain(a.value.nested, params);
+    const n = body.length;
+    if (n < 2) return a;
+    const [count, is] = [body[n - 2]!, body[n - 1]!];
+    if (count.name !== 'count' || count.args.length || is.name !== 'is' || is.args.length !== 1) return a;
+    if (n > 2 && SLICE_STEPS.has(body[n - 3]!.name)) return a;
+    const p = is.args[0]!;
+    if (someParameter(p)) return a;
+    const h = countSaturation(p.value);
+    if (h === undefined) return a;
+    return arg(nestedArg([...body.slice(0, n - 2), { name: 'limit', args: [arg(h)], ctx: count.ctx } as Step, count, is]));
+  };
+  return steps.map((s) => {
+    const ir = s as IRStep;
+    if (!ir.repeatRegion) return s;
+    return { ...s, repeatRegion: ir.repeatRegion.map((r) => (r.name === 'until' || r.name === 'emit') && r.args.length === 1 ? { ...r, args: r.args.map(bounded) } : r) } as Step;
+  });
+}
+
+/** Does a predicate argument name a user PARAMETER at any depth (an operand, or a member of one)? */
+const someParameter = (a: Arg): boolean =>
+  a.name != null || (a.members ?? []).some(someParameter) || (isPred(a.value) && a.value.operands.some(someParameter));
+
+/** The least `h ≥ 1` past which `P(k)` is constant over the integers — one past the largest finite operand
+ *  floor — or undefined where an operand is not a number or `P` is not decidable at `h`. */
+function countSaturation(p: unknown): number | undefined {
+  const operands = countOperands(p);
+  if (!operands) return undefined;
+  let h = 1;
+  for (const c of operands) if (Number.isFinite(c)) h = Math.max(h, Math.floor(c) + 1);
+  return Number.isSafeInteger(h) && loopCountHolds(p, h) !== undefined ? h : undefined;
+}
+
+/**
  * Remove a `sideEffect(body)` whose body has NO EFFECT — no write, no keyed collector, no raise.
  *
  * `TraversalSideEffectStep` drains its body for each traverser and passes the traverser on unchanged

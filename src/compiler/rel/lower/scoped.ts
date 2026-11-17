@@ -4,7 +4,7 @@ import * as make from '../../../rel/factory.ts';
 import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
 import { commitScope, forkCollections, isScopedFork, pendingLabels, pendingSites, restoreCollections, type Collections, type Site } from '../collection.ts';
 import { positionKeys } from '../../../rel/position.ts';
-import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
+import { atMostOneRow, exactlyOneRow, rowBounds } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
@@ -674,7 +674,7 @@ function existenceProbe(tail: Tail, fresh: Minter): Rel {
  * self-reference, which a correlated subquery may read (`src/rel/recursive.ts` P2) but a decorrelated join
  * cannot, since a recursive term takes no join to a keyed domain. So this stays correlated, never keyed, and
  * `correlatedBody`'s own refusals (a draw, a nested walk, a host-reading GROUP BY/ORDER/window term) are its
- * refusals — a decline, never a different plan.
+ * refusals — a decline, never a different plan — as is a body whose per-row work is unbounded (below).
  *
  * Only a subject that IS its relation's row (payload `id`, no partial presence): the seed row copies the
  * relation's payload, so a rerooted subject (`select('a')…`) would seed the wrong element.
@@ -689,7 +689,19 @@ export function correlatedExistence(
   const tail = correlatedBody(body, rel, { kind: 'elements', elem: subject.elem }, ctx, fresh, labels, 'free', 'first');
   if (!tail) return null;
   const plan = existenceProbe(tail, fresh);
-  return spellsStored(plan, ['one'], rel) ? { kind: 'exists', plan, negated } : null;
+  if (!spellsStored(plan, ['one'], rel)) return null;
+  // BOUNDED WORK PER SUBJECT ROW. An `EXISTS` stops at its first row, but not inside a barrier: an aggregate,
+  // sort or window reads ALL of its input first. Over an unbounded input (a neighbourhood) that is the
+  // neighbourhood's size per subject row — and a walk revisits a hub once per frontier row reaching it, so it is
+  // quadratic in the walk exactly where the graph has hubs (measured: `local(in().order().by(k).limit(1))`
+  // 52x per 8x). A bounded input (`limit(n)`, the count bound a walk condition's `count().is(P)` takes —
+  // `boundConditionCount`, `ir/strategies.ts`) costs O(n). The linear form needs the condition evaluated
+  // per DISTINCT element, which a recursive term cannot hold (no aggregate, no keyed join: `recursive.ts`).
+  let unbounded = false;
+  forEachRel(plan, (r) => {
+    if ((r.kind === 'aggregate' || r.kind === 'sort' || r.kind === 'window') && rowBounds(r.input).max === Infinity) unbounded = true;
+  });
+  return unbounded ? null : { kind: 'exists', plan, negated };
 }
 
 /**

@@ -81,8 +81,39 @@ Feature: mogwai addendum — an unbounded repeat()'s until/emit condition may le
       | ripple |
       | ripple |
 
-  # A per-row ORDER + LIMIT inside the condition (a window in the nested SELECT, legal there): josh's
-  # out-neighbours by name descending lead with ripple.
+  # A per-row LIMIT inside the condition is a plain LIMIT in the nested SELECT (a one-row scope has one key),
+  # so it stops at the first in-neighbour — O(1) per walk row even where many rows reach one hub. Which
+  # in-neighbour is first is unordered, so the scenario asks only the one the filter makes order-free: every
+  # walk row past depth 0 has a person in-neighbour, so all 8 are emitted.
+  Scenario: g_V_repeatXoutX_emitXlocalXin_limitX1XX_hasLabelXpersonXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).emit(__.local(__.in().limit(1)).hasLabel("person")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[8].l |
+
+  # count().is(P) in a walk condition counts only as far as P can tell (`CountStrategy`'s range insertion):
+  # between(1,3) needs no more than 3 rows. vadas, josh and ripple (twice) have one creator-or-knower; lop three.
+  Scenario: g_V_repeatXoutX_emitXin_count_isXbetweenX1_3XXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).emit(__.in().count().is(P.between(1, 3))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[4].l |
+
+  # A per-row ORDER inside the condition reads the WHOLE neighbourhood per walk row — a hub's degree for every
+  # frontier row reaching it, quadratic in the walk. The linear form evaluates the condition once per DISTINCT
+  # element, which a recursive term cannot hold (no aggregate, no keyed join) — so it declines rather than
+  # landing a quadratic route.
+  @Unsupported
   Scenario: g_V_repeatXoutX_untilXlocalXout_order_byXname_descX_limitX1X_hasXname_rippleXXX_name
     Given the modern graph
     And the traversal of

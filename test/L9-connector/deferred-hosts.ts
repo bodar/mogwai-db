@@ -63,10 +63,12 @@ const RESOURCE: Deferred = {
 const REPEAT: Deferred = {
   reason: 'repeat()\'s body/loop condition — bounded is the IR unroll, unbounded a `Recursive` term (docs/archive/2026-08-09-repeat-two-regimes-plan.md)',
   // An unbounded until/emit condition of ANY head (coalesce/local/union/choose …) is the existence connector's
-  // CORRELATED body over the walk row (`correlatedExistence`, `lower/scoped.ts`) — a nested SELECT, where SQLite
-  // admits aggregates, windows, ORDER and LIMIT (`src/rel/recursive.ts` P2). What stays refused is exactly what
-  // cannot stay correlated: a decorrelated (keyed) body is a join the recursive term cannot take.
-  blocker: "SQLite's recursive-term law: no aggregate/window in the recursive SELECT itself (`BARRIER_IN_TERM`), so no per-iteration scope key and no decorrelated condition body — a condition that DRAWS (`sample`/`coin`), holds its own walk, or orders/groups by a host column (`correlatedBody`'s refusals) declines",
+  // CORRELATED body over the walk row (`correlatedExistence`, `lower/scoped.ts`) — a nested SELECT, which may sit
+  // inside the recursive term (`src/rel/recursive.ts` P2). A `limit(n)` there is a plain LIMIT (a one-row scope
+  // has one key, `src/rel/decorrelate.ts`) and a trailing `count().is(P)` counts only as far as P can tell
+  // (`boundConditionCount`, `ir/strategies.ts`), so the work per walk row is bounded. What stays refused is what
+  // cannot be: the condition is evaluated per FRONTIER row, never once per distinct element.
+  blocker: "SQLite's recursive-term law: no aggregate/window in the recursive SELECT itself (`BARRIER_IN_TERM`) and no join to a keyed domain, so a walk condition is evaluated per frontier row, never once per distinct element — a condition of any head whose per-row work is a whole neighbourhood (an unbounded aggregate/ORDER/window: `local(in().order().by(k).limit(1))`, `local(in().tail(1))`) would be quadratic at a hub and declines, as does one that DRAWS (`sample`/`coin`), holds its own walk, or orders/groups by a host column (`correlatedBody`'s refusals)",
   // The plan's open owner question ("should repeat until/emit's own condition lowering stay as it is?"): yes,
   // provisionally — the regime split IS the host's lowering, and its conditions use the shared correlated
   // predicate builders R1 extracts as substrate, not a ladder route.
