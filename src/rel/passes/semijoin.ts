@@ -1,10 +1,11 @@
-import { type Expr, and, col, compilerText, conjoin, eq, isNot, or } from '../expr.ts';
+import { type Expr, and, col, compilerText, conjoin, conjuncts, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
 import { rowBounds } from '../bounds.ts';
 import type { RelId } from '../types.ts';
-import { exprRels, forEachExpr, forEachRel, relChildren, relExprs, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
+import { exprRels, forEachExpr, forEachRel, relExprs, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
+import { columnPath } from '../lineage.ts';
 
 /**
  * `semijoin` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the
@@ -323,53 +324,6 @@ function ownerColumn(term: Expr): { readonly rel: RelId; readonly name: string; 
   return found.length === 1 ? { rel: found[0]!.rel, name: found[0]!.name, properties: props.table } : null;
 }
 
-/**
- * Where column `rel.name` comes from, seen from `top`: every relation on the way down to the one that
- * DEFINES it — through filters, renaming projections and the join side that carries the name — with its
- * name there. It stops at anything else (that relation computes the column), so the last relation is a
- * scan only when the column is a stored one. `null` when `rel` is not on `top`'s spine — an OUTER row.
- */
-function columnPath(top: Rel, rel: RelId, name: string): { readonly rels: readonly Rel[]; readonly name: string } | null {
-  const above = spinePath(top, rel);
-  if (!above) return null;
-  const below = definingPath(above.at(-1)!, name);
-  return { rels: [...above.slice(0, -1), ...below.rels], name: below.name };
-}
-
-function definingPath(rel: Rel, name: string): { readonly rels: readonly Rel[]; readonly name: string } {
-  const through = (rest: { readonly rels: readonly Rel[]; readonly name: string }, ...hops: readonly Rel[]) =>
-    ({ rels: [rel, ...hops, ...rest.rels], name: rest.name });
-  switch (rel.kind) {
-    case 'filter': return through(definingPath(rel.input, name));
-    case 'project': {
-      const e = rel.exprs.find(([output]) => output === name)?.[1];
-      const hops = e?.kind === 'col' ? spinePath(rel.input, e.rel) : null;
-      return e?.kind === 'col' && hops ? through(definingPath(hops.at(-1)!, e.name), ...hops.slice(0, -1)) : { rels: [rel], name };
-    }
-    case 'join': {
-      const sides = [rel.left, rel.right].filter((child) => child.type.cols.some((c) => c.name === name));
-      return sides.length === 1 ? through(definingPath(sides[0]!, name)) : { rels: [rel], name };
-    }
-    default: return { rels: [rel], name };
-  }
-}
-
-/** The relations from `top` down to the one named `id`, along relational children (not subplans). */
-function spinePath(top: Rel, id: RelId): readonly Rel[] | null {
-  const seen = new Set<Rel>();
-  const go = (r: Rel): readonly Rel[] | null => {
-    if (r.id === id) return [r];
-    if (seen.has(r)) return null;
-    seen.add(r);
-    for (const child of relChildren(r)) {
-      const below = go(child);
-      if (below) return [r, ...below];
-    }
-    return null;
-  };
-  return go(top);
-}
-
 /** Every relation id defined under `rel`, correlated subplans included. */
 function idsWithin(rel: Rel): ReadonlySet<RelId> {
   const ids = new Set<RelId>();
@@ -378,11 +332,6 @@ function idsWithin(rel: Rel): ReadonlySet<RelId> {
 }
 
 // ---------- shared helpers ----------
-
-/** Flatten an `AND` tree. A conjunct is what may be dropped independently of the rest. */
-function conjuncts(e: Expr): readonly Expr[] {
-  return e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e];
-}
 
 const andAll = (parts: readonly Expr[]): Expr => parts.reduce(and);
 

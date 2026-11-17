@@ -155,6 +155,14 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource first: as.map(V.where(neq(a)).id)', query: "g.V().as('a').map(V().where(neq('a')).id()).count()" },
   { name: 'resource first: as.map(V.not(where(eq(a))).values)', query: "g.V().as('a').map(V().not(where(eq('a'))).values('name')).count()" },
   { name: 'resource first: as.map(E.where(outV.where(neq(a))).values)', query: "g.V().as('a').map(E().where(outV().where(neq('a'))).values('weight')).count()" },
+  // The leading-scan pass (`src/rel/passes/leading.ts`) at depth: an existence probe whose candidates the property
+  // seek drives, and first-row picks under a nested map, a union arm, a flatMap and a where(map(...)).
+  { name: 'resource first: as.where(V.where(neq(a)).has(p7))', query: "g.V().as('a').where(V().where(neq('a')).has('name','p7')).count()" },
+  { name: 'resource first: as.not(V.where(neq(a)).has(p7))', query: "g.V().as('a').not(V().where(neq('a')).has('name','p7')).count()" },
+  { name: 'resource first: as.map(V.where(neq(a)).map(V.where(neq(a)).values))', query: "g.V().as('a').map(V().where(neq('a')).map(V().where(neq('a')).values('name'))).count()" },
+  { name: 'resource first: as.flatMap(V.where(neq(a)).out.values.limit)', query: "g.V().as('a').flatMap(V().where(neq('a')).out().values('name').limit(1)).count()" },
+  { name: 'resource first: as.where(map(V.where(neq(a)).out.values).is(p3))', query: "g.V().as('a').where(map(V().where(neq('a')).out().values('name')).is('p3')).count()" },
+  { name: 'resource first: as.project.by(V.where(neq(a)).out.values).by(V.where(neq(a)).values(age))', query: "g.V().as('a').project('x','y').by(V().where(neq('a')).out().values('name')).by(V().where(neq('a')).values('age')).count()" },
   { name: 'as.project.by(both.both.where(neq(a)).values)', query: "g.V().as('a').project('n','fof').by('name').by(both().both().where(neq('a')).values('name')).count()" },
   // A lookup whose MISSES grow with the graph (the max-age persons): the reference reads the whole graph for each,
   // so its own work is ~40× from 1k to 8k on this graph (1 070 950 / 26 720 element visits) — xNG by the data.

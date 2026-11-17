@@ -1,5 +1,5 @@
 import { isNested, isPred } from '../../../gremlin/frontend.ts';
-import { and, col, compilerInt, compilerNull, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, conjuncts, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
 import { commitScope, forkCollections, isScopedFork, pendingLabels, pendingSites, restoreCollections, type Collections, type Site } from '../collection.ts';
@@ -10,9 +10,9 @@ import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
 import { exprMayAbort } from '../../../rel/raise.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
-import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelChildren, mapRelExprs, relExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
+import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
-import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, spelledOuterColumns } from '../../../rel/copies.ts';
+import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, nestsCorrelatedSubplans, spelledOuterColumns } from '../../../rel/copies.ts';
 import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import type { AliasMap } from '../../alias.ts';
 import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpec } from '../alias.ts';
@@ -224,7 +224,7 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * host's correlated-first policy (`firstInnerOver`, `recordLeft`, `landValues`' `correlatedValue`, the existence
  * probe; over a host computed once where its label is a computed column, `fencedHost`) reads per host row and
  * stops at the first row: an `EXISTS`, or a first-row pick that finds its leading element first
- * (`leadingFirst`) and slices by position keys (`slicesByKeys`) — what `TraversalMapStep`'s one `next()` and
+ * (`src/rel/passes/leading.ts`) and slices by position keys (`slicesByKeys`) — what `TraversalMapStep`'s one `next()` and
  * `TraversalFilterStep`'s one `hasNext()` read. A body with no row reads the whole graph for that host, as the
  * reference's exhausted child does. Where the host cannot hold that read per host row (its decorrelated fallback,
  * `correlated` false), the cross would be every host × the graph ahead of the pick: declined, naming the shape.
@@ -260,7 +260,7 @@ function reSourcedBody(
   // prices it by the host's contract: an ALL-rows host pays the cross the query asks for (below, split at
   // `sharedEnd`), and a FIRST-row host pays a correlated read that stops at its first row — the host tries
   // `correlatedBody` first (`firstInnerOver`'s correlated first-row pick, the existence probe's `EXISTS`), so
-  // inside it the cross is ONE host row × the graph up to its first match (`leadingFirst`).
+  // inside it the cross is ONE host row × the graph up to its first match (`src/rel/passes/leading.ts`).
   //
   // A first-row read that is NOT per host row (the decorrelated scope, the host's fallback where SQL cannot hold
   // the dependent join) would cross EVERY host with the graph ahead of its first-row pick: N × G where the
@@ -710,25 +710,18 @@ function spellsStored(plan: Rel, outputs: readonly string[], host: Rel): boolean
 /** A correlated body as an `EXISTS` operand, projecting its FIRST column alone: an `EXISTS` reads no value, so
  *  the body's other columns (labels, path) are not spelled; a column rather than a literal keeps an aggregate
  *  block an aggregate query (the reason `correlatedExists`' probe gives, `exists.ts`). Nor does it read an order,
- *  so a position the body numbered is not computed for it (`positionKeys` drops the window). */
+ *  so a position the body numbered is not computed for it (`positionKeys` drops the window). A body that
+ *  re-sources is tested element by element by the physical tier (`src/rel/passes/leading.ts`), so a miss reads
+ *  an index, not the graph. */
 function existenceProbe(tail: Tail, fresh: Minter): Rel {
   const enc = encounterOf(tail.rel.channels);
   const rows = (enc && positionKeys(tail.rel, enc.col, fresh)?.rel) || tail.rel;
-  return probeOver(rows, tail.rel.type.cols[0]!.name, leadingRead(rows, fresh), fresh);
+  return probeOver(rows, tail.rel.type.cols[0]!.name, fresh);
 }
 
-/** `existenceProbe` over rows already keyed, and their leading read where the caller built one — so a pick's
- *  value and its presence test read ONE relation (`correlatedFirst`), never two copies of it. */
-function probeOver(rows: Rel, lead: string, read: LeadingRead | null, fresh: Minter): Rel {
-  // A body that re-sources is tested element by element (`leadingRead`): its candidates carry the filters the
-  // property seek drives and the host-only tests SQLite asks once, so a miss reads an index, not the graph.
-  if (read) {
-    const first = make.limit({ id: fresh('spl'), input: read.kept, channels: read.kept.channels, type: read.kept.type, count: compilerInt(1) });
-    const any: Expr = read.guarded({ kind: 'scalar', plan: make.project({ id: fresh('spk'), input: first, channels: [], type: typeOf(meta('k', 'int', true)), exprs: [['k', col(first.id, read.key)]] }) }, meta('k', 'int', true));
-    const unit = make.values({ id: fresh('spu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const hit = make.filter({ id: fresh('spf'), input: unit, channels: [], type: unit.type, pred: isNot(any, compilerNull()) });
-    return make.project({ id: fresh('sp'), input: hit, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(hit.id, 'n')]] });
-  }
+/** `existenceProbe` over rows already keyed — so a pick's value and its presence test read ONE relation
+ *  (`correlatedFirst`), never two copies of it. */
+function probeOver(rows: Rel, lead: string, fresh: Minter): Rel {
   return make.project({
     id: fresh('sp'), input: rows, channels: [], type: typeOf(meta('one', 'any', true)),
     exprs: [['one', col(rows.id, lead)]],
@@ -833,20 +826,9 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
     if (probe && !spellsStored(probe, ['one'], host)) return null;
     return scalarPick(payload as ColMeta[], seedValues(inline), probe, total, fresh);
   }
-  // The repetition must not COMPOUND: a first-row read spells its body more than once — a SCALAR pick once per
-  // column, a re-source's leading read (`leadingFirst`) once to find the element and once to read it — so a body
-  // whose own subplans hold subplans (a nested first-row pick) would be `2^depth` spellings. A subplan that is
-  // itself flat — an arm's priority guard, one seek — is repeated once and no further. Nor does an UNCORRELATED
-  // subplan (a `hasLabel()`'s label-id membership): SQLite evaluates it once per statement, and it holds no
-  // correlated pick of its own to compound.
-  let deep = false;
-  forEachRel(tail.rel, (r) => {
-    for (const e of relExprs(r)) forEachExpr(e, (node) => {
-      for (const sub of exprRels(node)) {
-        if (!isSelfContained(sub)) forEachRel(sub, (s) => { if (relExprs(s).some(exprHasSubquery)) deep = true; });
-      }
-    });
-  });
+  // The repetition must not COMPOUND: a SCALAR pick spells its body once per column, so a body whose own
+  // subplans nest subplans would be `2^depth` spellings (`nestsCorrelatedSubplans`).
+  const deep = nestsCorrelatedSubplans(tail.rel);
   // A body of at most one row (a reducer, a record over the one seed row) IS its first row: no sort.
   const single = atMostOneRow(tail.rel);
   // The FIRST row in EMISSION order (`lowerBody`): sorted by the position's own keys where the body numbered
@@ -889,15 +871,14 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
       const last: Expr = { kind: 'scalar', plan: plans[plans.length - 1]! };
       exprs.set(column.name, whens.length ? { kind: 'case', whens, else: last } : last);
     }
-    const probe = presence && !total && lead.nullable ? probeOver(base, lead.name, leadingRead(base, fresh), fresh) : null;
+    const probe = presence && !total && lead.nullable ? probeOver(base, lead.name, fresh) : null;
     if (probe && !spellsStored(probe, ['one'], host)) return null;
     return scalarPick(payload as ColMeta[], exprs, probe, total, fresh);
   }
-  // ONE leading read of a re-source, shared by the pick and its presence test.
-  const read = single || deep ? null : leadingRead(base, fresh);
-  const led = read ? leadingFirst(base, sorted, read, fresh) : base;
+  // A re-source's first row stops at its first hit: the physical tier reads its leading element first
+  // (`src/rel/passes/leading.ts`), for this pick and its presence test alike.
   const first = single ? tail.rel : make.limit({
-    id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: led, channels: base.channels, type: base.type, terms: sorted.map((term) => ({ ...term, expr: substRelId(term.expr, base.id, led.id) })) }),
+    id: fresh('cl'), input: make.sort({ id: fresh('cs'), input: base, channels: base.channels, type: base.type, terms: sorted }),
     channels: base.channels, type: base.type, count: compilerInt(1),
   });
   // The keyed form where the scalar form would search twice — a second column, or a presence `EXISTS` beside the
@@ -911,7 +892,7 @@ function correlatedFirst(tail: Tail, names: readonly string[], host: Rel, fresh:
     make.project({ id: fresh('cv'), input: first, channels: [], type: typeOf({ ...column, nullable: true }), exprs: [[column.name, col(first.id, column.name)]] })] as const);
   if (!plans.every(([name, plan]) => spellsStored(plan, [name], host))) return null;
   const probeRows = single ? (enc && positionKeys(tail.rel, enc.col, fresh)?.rel) || tail.rel : base;
-  const probe = presence && !total && lead.nullable ? probeOver(probeRows, lead.name, single ? leadingRead(probeRows, fresh) : read, fresh) : null;
+  const probe = presence && !total && lead.nullable ? probeOver(probeRows, lead.name, fresh) : null;
   if (probe && !spellsStored(probe, ['one'], host)) return null;
   return scalarPick(payload as ColMeta[], new Map(plans.map(([name, plan]) => [name, { kind: 'scalar', plan } as Expr])), probe, total, fresh);
 }
@@ -1094,203 +1075,9 @@ function keyedPick(key: PickKey, first: Rel, names: readonly string[], payload: 
   };
 }
 
-/**
- * THE FIRST ROW OF A RE-SOURCE STOPS AT ITS FIRST MATCH. A body that re-sources (`V()`/`E()`, GraphStep's cross
- * with the one seed row) has the graph scan as its OUTERMOST loop, and its emission order leads with that scan's
- * rowid. Its first row is the first scanned element the rest of the body keeps, so `TraversalMapStep`'s one
- * `next()` reads the scan only up to that element. A sort over the whole body cannot be relied on to: a pick sorting
- * by more than the rowid (a hop's target, a property row, the payload) is a PARTIAL sort SQLite stops early only if
- * it plans the scan in rowid order, which with no statistics it does not (it scans the narrower covering index
- * `nodes_gid` and sorts the whole cross), and a body whose filter the emitter computes once behind a fence is a
- * subquery SQLite cannot read in order at all. Either way one host row × G, so N × G over the hosts (measured:
- * `map(V().where(neq('a')).out().values('name'))` 1.2 s at 1k, 5.3 s at 2k vertices; the lookup
- * `map(V().where(eq('a')).by('age').values('name'))` 0.9 s → 3.6 s).
- *
- * So the leading element is found FIRST, as the reference finds it: the scan alone, in rowid order, each element
- * asked whether the body restricted to it has a row — `k = (SELECT s.id FROM <scan> s WHERE EXISTS(<body at s.id>)
- * ORDER BY s.id LIMIT 1)`, a one-table rowid-ordered read that stops at the first hit — and the body is then read
- * at that one element (a rowid seek), its full sort ordering only that element's results. Same rows, same pick:
- * the lexicographic first row has the least leading key, and restricting the scan commutes with every operator on
- * the spine (`elementSource`). Calcite pushes a `Sort`+fetch toward the side that owns its leading key the same way
- * (`SortJoinTransposeRule`, `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/SortJoinTransposeRule.java`);
- * here the other side may drop the outer row, so the push is an `EXISTS` rather than a limit on the side alone.
- * `base` unchanged where the leading term is not an uncorrelated scan's rowid (a hop off the seed row is already a
- * seek per host).
- */
-function leadingFirst(base: Rel, sorted: readonly SortTerm[], read: LeadingRead, fresh: Minter): Rel {
-  const lead = sorted[0];
-  if (sorted.length < 2 || lead?.expr.kind !== 'col' || lead.expr.rel !== base.id) return base;
-  if (traceDown(base, lead.expr.name, read.side) !== read.key) return base;
-  const least = make.limit({
-    id: fresh('cll'), input: make.sort({ id: fresh('csl'), input: read.kept, channels: read.kept.channels, type: read.kept.type, terms: [{ ...lead, expr: col(read.kept.id, read.key) }] }),
-    channels: read.kept.channels, type: read.kept.type, count: compilerInt(1),
-  });
-  const plan = make.project({ id: fresh('clv'), input: least, channels: [], type: typeOf(meta('k', 'int', true)), exprs: [['k', col(least.id, read.key)]] });
-  return read.at(read.guarded({ kind: 'scalar', plan }, meta('k', 'int', true))) ?? base;
-}
-
-/**
- * A re-sourcing correlated body read ELEMENT BY ELEMENT (`leadingFirst`'s first-row pick, `existenceProbe`'s
- * test): the re-source's elements as CANDIDATES, each kept where the body held to it has a row (`kept`), and the
- * body held to any one element (`at`). `null` where the body is not a re-source crossed with its seed row.
- *
- * The candidates carry every filter above the cross that reads only the element and the HOST (the seed row's
- * columns are the host's): a `has()` after the re-source, which the property seek then drives, so a lookup that
- * matches nothing reads its index rather than the graph; and a test of the host alone (`where(eq('a')).by('age')`
- * over a host with no age), which SQLite evaluates once per read, ahead of the scan. Each stays in the body too —
- * a candidate only NARROWS, the `EXISTS` decides. Every copy is FRESH (`freshCopy`), so it may stand beside the
- * original: two relations never share an id.
- */
-interface LeadingRead {
-  readonly side: Rel;
-  readonly key: string;
-  readonly kept: Rel;
-  readonly at: (key: Expr) => Rel | null;
-  /** `value` asked only where the host passes the body's host-only tests, NULL elsewhere. */
-  readonly guarded: (value: Expr, type: ColMeta) => Expr;
-}
-
-/** Built ONCE per pick by its caller (`correlatedFirst`), which hands the same read to the pick and to its
- *  presence test: no memo keyed on relation identity is needed for the two to agree. */
-function leadingRead(base: Rel, fresh: Minter): LeadingRead | null {
-  const found = elementSource(base);
-  if (!found) return null;
-  const { side, key, seed, spine } = found;
-  const at = (value: Expr): Rel | null => {
-    const held = holdSource(base, side, (copy) => eq(col(copy.id, key), value), fresh);
-    const copied = freshCopy({ kind: 'scalar', plan: held }, mintOf(fresh));
-    return copied?.kind === 'scalar' ? copied.plan : null;
-  };
-  const source = freshCopy({ kind: 'scalar', plan: side }, mintOf(fresh));
-  if (source?.kind !== 'scalar') return null;
-  // A seed column as the HOST expression it copies (`seedRow` reads the host's columns over one unit row), through
-  // the projections over it (`ensureBulk`); one read off the seed's own rows is not the host's.
-  const inSeed = new Set<RelId>();
-  forEachRel(seed, (r) => inSeed.add(r.id));
-  const seedExpr = (name: string, r: Rel = seed): Expr | null => {
-    if (r.kind !== 'project') return null;
-    const e = r.exprs.find(([column]) => column === name)?.[1];
-    if (!e) return null;
-    if (e.kind === 'col' && e.rel === r.input.id) return seedExpr(e.name, r.input);
-    let own = false;
-    forEachExpr(e, (node) => { if (node.kind === 'col' && inSeed.has(node.rel)) own = true; });
-    return own || exprHasSubquery(e) ? null : e;
-  };
-  const pushed: Expr[] = [];
-  const guards: Expr[] = [];
-  for (const filter of spine) {
-    if (filter.kind !== 'filter') continue;
-    for (const conjunct of conjuncts(filter.pred)) {
-      const mapped = new Map<string, Expr>();
-      const traced = [...deepColsRead(conjunct, filter.input.id)].every((name) => {
-        const onSide = traceDown(filter.input, name, side);
-        const onSeed = onSide === null ? traceDown(filter.input, name, seed) : null;
-        const e = onSide !== null ? col(source.plan.id, onSide) : onSeed !== null ? seedExpr(onSeed) : null;
-        if (e) mapped.set(name, e);
-        return e !== null;
-      });
-      const moved = traced && freshCopy(mapColsDeep(conjunct, filter.input.id, (name) => mapped.get(name)!), mintOf(fresh));
-      if (moved && [...mapped.values()].some((e) => e.kind === 'col' && e.rel === source.plan.id)) pushed.push(moved);
-      else if (moved) guards.push(moved);
-    }
-  }
-  // A test of the HOST alone is asked ONCE per read, over one unit row ahead of the scan: SQLite places a WHERE
-  // term that reads none of the scan's tables inside the scan's loop all the same, so as a candidate filter it
-  // would be asked per element — and a host it rejects (no age to compare) would still scan the graph.
-  const guard = guards.length ? guards.reduce((a, b) => and(a, b)) : undefined;
-  const guarded = (value: Expr, type: ColMeta): Expr => {
-    if (!guard) return value;
-    const unit = make.values({ id: fresh('clu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const held = make.filter({ id: fresh('clg'), input: unit, channels: [], type: unit.type, pred: guard });
-    return { kind: 'scalar', plan: make.project({ id: fresh('clq'), input: held, channels: [], type: typeOf({ ...type, nullable: true }), exprs: [[type.name, value]] }) };
-  };
-  const candidates = pushed.length
-    ? make.filter({ id: fresh('clc'), input: source.plan, channels: source.plan.channels, type: source.plan.type, pred: pushed.reduce((a, b) => and(a, b)) })
-    : source.plan;
-  const one = at(col(candidates.id, key));
-  if (!one) return null;
-  const probe = make.project({ id: fresh('clp'), input: one, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(one.id, one.type.cols[0]!.name)]] });
-  const kept = make.filter({ id: fresh('clf'), input: candidates, channels: candidates.channels, type: candidates.type, pred: { kind: 'exists', plan: probe, negated: false } });
-  return { side, key, kept, at, guarded };
-}
-
-/**
- * The re-source a correlated body reads as its OUTERMOST loop: down the body's spine (copying projections,
- * row-wise filters and sorts, a join's left side — the outer loop of a hop) to a cross join of the one-row SEED
- * with an element read that reads nothing of it (`movement.ts` `reSource`). Its element relation (`side`), the
- * column that is the scanned element's rowid (`key`, through the side's own projections and filters), the seed,
- * and the spine above the cross. Every operator on the spine commutes with restricting the element's rows; a
- * `limit`, a window or an aggregate does not, and stops the walk (`null`).
- */
-function elementSource(base: Rel): { readonly side: Rel; readonly key: string; readonly seed: Rel; readonly spine: readonly Rel[] } | null {
-  const spine: Rel[] = [];
-  for (let r: Rel = base; ;) {
-    if (r.kind === 'project' || r.kind === 'filter' || r.kind === 'sort') { spine.push(r); r = r.input; continue; }
-    if (r.kind !== 'join' || (r.join !== 'cross' && r.join !== 'inner')) return null;
-    if (!r.on && atMostOneRow(r.left)) {
-      const right = r.right;
-      const key = right.type.cols.find((column) => scanKey(right, column.name))?.name;
-      return key ? { side: right, key, seed: r.left, spine } : null;
-    }
-    spine.push(r);
-    r = r.left;
-  }
-}
-
-/** Is column `name` of `r` the rowid of a `nodes`/`edges` scan, through copying projections and row-wise filters? */
-function scanKey(r: Rel, name: string): boolean {
-  switch (r.kind) {
-    case 'scan': return name === 'id' && (r.table === 'nodes' || r.table === 'edges');
-    case 'project': {
-      const e = r.exprs.find(([column]) => column === name)?.[1];
-      return e?.kind === 'col' && e.rel === r.input.id && scanKey(r.input, e.name);
-    }
-    case 'filter': return scanKey(r.input, name);
-    default: return false;
-  }
-}
-
-/** The conjuncts of a predicate. */
-const conjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e]);
-
-/** Column `name` of `r` as the column of `target` (below it, on `elementSource`'s spine) it copies, or `null`. */
-function traceDown(r: Rel, name: string, target: Rel): string | null {
-  if (r === target) return name;
-  switch (r.kind) {
-    case 'project': {
-      const e = r.exprs.find(([column]) => column === name)?.[1];
-      return e?.kind === 'col' && e.rel === r.input.id ? traceDown(r.input, e.name, target) : null;
-    }
-    case 'filter': case 'sort': return traceDown(r.input, name, target);
-    case 'join': {
-      const at = r.type.cols.findIndex((column) => column.name === name);
-      const leftN = r.left.type.cols.length;
-      if (at < 0) return null;
-      return at < leftN ? traceDown(r.left, r.left.type.cols[at]!.name, target) : traceDown(r.right, r.right.type.cols[at - leftN]!.name, target);
-    }
-    default: return null;
-  }
-}
-
 /** A `fresh` minter as `freshCopy`'s pair: one sequence for ids and scan aliases. */
 const mintOf = (fresh: Minter): { readonly id: (hint: string) => RelId; readonly alias: (hint: string) => string } =>
   ({ id: (hint) => fresh(hint), alias: (hint) => fresh(hint) as string });
-
-/** `r` with `source` (on `elementSource`'s spine) filtered by `pred` over a renamed copy of it; the filter takes its id. */
-function holdSource(r: Rel, source: Rel, pred: (copy: Rel) => Expr, fresh: Minter): Rel {
-  if (r === source) {
-    const copy = brandRel({ ...source, id: fresh('clr') } as Rel);
-    return make.filter({ id: source.id, input: copy, channels: source.channels, type: source.type, pred: pred(copy) });
-  }
-  return mapRelChildren(r, (child) => (reaches(child, source) ? holdSource(child, source, pred, fresh) : child));
-}
-
-/** Is `source` on the spine of `r` (not inside an expression's subplan)? */
-function reaches(r: Rel, source: Rel): boolean {
-  if (r === source) return true;
-  return r.kind === 'join' ? reaches(r.left, source) || reaches(r.right, source)
-    : r.kind === 'project' || r.kind === 'filter' || r.kind === 'sort' ? reaches(r.input, source) : false;
-}
 
 /**
  * A correlated body that is a run of `Project`s and `Filter`s over its SEED ROW alone (`seedRow`: one constant
@@ -1305,7 +1092,6 @@ interface SeedExpressions { readonly values: ReadonlyMap<string, Expr>; readonly
 /** `seedExpressions` as each column's value alone — `NULL` where the body's filters drop its row. A filter that
  *  only asks the column itself to be present (`x IS NOT NULL` over a value `x`) is that column already. */
 function seedValues(inline: SeedExpressions): ReadonlyMap<string, Expr> {
-  const conjuncts = (e: Expr): Expr[] => (e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e]);
   const same = (a: Expr, b: Expr): boolean => JSON.stringify(a) === JSON.stringify(b);
   return new Map([...inline.values].map(([name, e]) => {
     const kept = inline.pred ? conjuncts(inline.pred).filter((p) => !(p.kind === 'binary' && p.op === 'is not'

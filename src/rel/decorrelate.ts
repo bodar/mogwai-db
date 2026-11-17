@@ -1,7 +1,7 @@
 import { atMostOneRow, rowBounds, rowBoundsWith } from './bounds.ts';
 import { ownDraws } from './copies.ts';
 import type { Expr } from './expr.ts';
-import { and, col, compilerInt, compilerNull, compilerText, eq } from './expr.ts';
+import { and, col, compilerInt, compilerNull, compilerText, conjuncts, eq } from './expr.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import type { ColMeta, RelId, SortTerm } from './types.ts';
@@ -269,11 +269,8 @@ export function decorrelateAll(
    *  `IS`, another conjunct reading the outer row). */
   const keyProjected = (r: Extract<Rel, { kind: 'filter' }>): Out | null => {
     const projection = eliminating!;
-    const conjuncts: Expr[] = [];
-    const split = (e: Expr): void => { if (e.kind === 'binary' && e.op === 'and') { split(e.left); split(e.right); } else conjuncts.push(e); };
-    split(r.pred);
     const matched = new Set<string>();
-    const rest = conjuncts.filter((e) => {
+    const rest = conjuncts(r.pred).filter((e) => {
       if (e.kind !== 'binary' || e.op !== 'is') return true;
       const [inner, outerSide] = e.left.kind === 'col' && e.left.rel === h ? [e.right, e.left] : [e.left, e.right];
       if (inner.kind !== 'col' || inner.rel !== r.input.id || outerSide.kind !== 'col' || outerSide.rel !== h) return true;

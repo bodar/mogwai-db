@@ -133,7 +133,7 @@ describe('a first-row host whose rest reads the host traverser answers through t
 });
 
 describe('a first-row read over the cross stops at the leading element the body keeps', () => {
-  // `scoped.ts` `leadingFirst`: the first scanned element whose body has a row is found first (one rowid-ordered
+  // `src/rel/passes/leading.ts`: the first scanned element whose body has a row is found first (one rowid-ordered
   // read with an EXISTS per element), then the body is read at that element alone. These pin the ANSWERS of the
   // shapes it rewrites — a hop, a property row, a lookup keyed on a host value, a has() the seek drives.
   test('map(V().where(neq(a)).out().values(name)): the first other vertex WITH an out-edge', () => {
@@ -161,6 +161,23 @@ describe('a first-row read over the cross stops at the leading element the body 
   test('an existence test over a hop', () => {
     expect(bagOf(scalars("g.V().as('a').where(V().where(neq('a')).out().has('name','josh')).values('name')")))
       .toEqual(bagOf(['josh', 'lop', 'peter', 'ripple', 'vadas']));
+  });
+  // The rewrite is a pass over the finished algebra, so it reaches every host that reads a correlated re-source's
+  // first row or existence, at any depth.
+  test('an existence test whose has() the seek drives, and its negation', () => {
+    expect(count("g.V().as('a').where(V().where(neq('a')).has('name','peter')).count()")).toBe(5);
+    expect(scalars("g.V().as('a').not(V().where(neq('a')).has('name','peter')).values('name')")).toEqual(['peter']);
+  });
+  test('a pick nested in a pick', () => {
+    expect(bagOf(scalars("g.V().as('a').map(V().where(neq('a')).map(V().where(neq('a')).values('name')))")))
+      .toEqual(bagOf(['vadas', ...Array(5).fill('marko')]));
+  });
+  test('under flatMap, a where(map(...)) and two project().by() picks', () => {
+    // An unordered limit(1) keeps one member, whichever SQLite reads first (§17): one per host.
+    expect(count("g.V().as('a').flatMap(V().where(neq('a')).out().values('name').limit(1)).count()")).toBe(6);
+    expect(count("g.V().as('a').where(map(V().where(neq('a')).out().values('name')).is('lop')).count()")).toBe(1);
+    expect(bagOf(rows("g.V().as('a').project('x','y').by(V().where(neq('a')).out().values('name')).by(V().where(neq('a')).values('age'))")
+      .map((r) => JSON.parse(r.map).map(([, v]: any) => v.v).join('/')))).toEqual(bagOf(['lop/27', ...Array(5).fill('vadas/29')]));
   });
 });
 

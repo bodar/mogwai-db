@@ -9,6 +9,7 @@ import { renderLowered, type RenderedPlan } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { indexSeek, semijoinAll, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { fuseAll } from '../../rel/passes/fuse.ts';
+import { leadingAll } from '../../rel/passes/leading.ts';
 import { dropUnreadJoins } from '../../rel/passes/prune.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Stmt } from '../../rel/stmt.ts';
@@ -4403,11 +4404,13 @@ const lowered = (
   // are offered, never whether the plan exists. Order is load-bearing: `trigramSeek` before
   // `indexSeek` gives a substring predicate the trigram index rather than a base-table `LIKE`.
   // `fuse` (the SEMANTIC tier) runs first, so a filter it pushes below a renumber reaches `semijoin`'s
-  // access-path strategies over the base relation it now sits on.
+  // access-path strategies over the base relation it now sits on. `leading` (`src/rel/passes/leading.ts`, physical:
+  // a correlated re-source read element by element) runs between them, so the candidate filters it pushes onto
+  // the scan reach the property seek too.
   // A long spine the fold CUT (`boundedSpine`) is part of the same program: its pieces and the result run
   // through every pass as one plan, so a node they share stays one node and is named once.
   const hoisted = liveHoisted(chain.hoisted ?? [], [wire.rel, ...(chain.effects ?? []).map((effect) => effect.node)]);
-  const passed = semijoinAll(dropUnreadJoins(fuseAll([...hoisted.map((piece) => piece.node), wire.rel])), [
+  const passed = semijoinAll(dropUnreadJoins(leadingAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel]))), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
   ]);

@@ -143,6 +143,8 @@ export const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=',
 export const isNot = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'is not', left, right });
 /** `left AND right`. */
 export const and = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'and', left, right });
+/** `and`'s inverse: an `AND` tree flattened to its conjuncts, each of which may be dropped independently of the rest. */
+export const conjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e]);
 /** `left OR right`. */
 export const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
 /** Fold `terms` with AND; `undefined` for no terms (an absent predicate). */

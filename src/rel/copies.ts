@@ -3,7 +3,7 @@ import { shapeOf, spliceable } from './block.ts';
 import { isAbort } from './raise.ts';
 import { atMostOneRow } from './bounds.ts';
 import type { Rel } from './rel.ts';
-import { deepColsRead, exprChildren, exprRels, forEachExpr, isSelfContained, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
+import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath } from './walk.ts';
 import type { RelId } from './types.ts';
 
 /**
@@ -476,4 +476,23 @@ export function spelledOuterColumns(plan: Rel, outer: RelId, outputs: readonly s
   visit(plan);
   outputs.forEach((name) => of(plan.id, name).forEach((c) => reads.add(c)));
   return opaque ? null : reads;
+}
+
+/**
+ * DOES A RELATION NEST ITS CORRELATED SUBPLANS — does a subplan it correlates hold a subplan of its own? A read that
+ * spells a body more than once (a first-row pick's scalar per column, `leading`'s first-hit read once to find the
+ * element and once to read it) would then COMPOUND: `2^depth` spellings. A subplan that is itself flat (an arm's
+ * priority guard, one seek) is repeated once and no further; nor does an UNCORRELATED subplan count (a
+ * `hasLabel()`'s label-id membership) — SQLite evaluates it once per statement.
+ */
+export function nestsCorrelatedSubplans(r: Rel): boolean {
+  let deep = false;
+  forEachRel(r, (node) => {
+    for (const e of relExprs(node)) forEachExpr(e, (x) => {
+      for (const sub of exprRels(x)) {
+        if (!isSelfContained(sub)) forEachRel(sub, (s) => { if (relExprs(s).some(exprHasSubquery)) deep = true; });
+      }
+    });
+  });
+  return deep;
 }

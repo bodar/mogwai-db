@@ -62,9 +62,9 @@ describe('the pick composes at depth', () => {
 });
 
 describe('one search per host row', () => {
-  // The leading-element search of a re-source pick (`leadingFirst`) is spelled once in the statement: the value,
+  // The leading-element search of a re-source pick (`src/rel/passes/leading.ts`) is spelled once in the statement: the value,
   // its type tag and the presence test read one key (it was spelled once per column plus once for presence). It
-  // tests each candidate with ONE `EXISTS` (`leadingRead`), so a second spelling would bring a second.
+  // tests each candidate with ONE `EXISTS` (`leadingRead`, same file), so a second spelling would bring a second.
   const leading = 'EXISTS';
   test('map(V().where(neq(a)).out().values(name)): value, type and presence read one key', () => {
     const sql = read("g.V().as('a').map(V().where(neq('a')).out().values('name'))").sql;
