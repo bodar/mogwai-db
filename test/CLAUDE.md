@@ -125,15 +125,18 @@
 - **L9** (`test/L9-connector/`, `mise run L9` alias `connector`) — the CONNECTOR guards that keep nesting on
   the scoped-relation connector (root CLAUDE.md decision 6). (1) The L5 host-closure sweep (same engine, seed
   42, 200 cases) with the ladder OFF and no fallback (`FastPathConfig.connectorOnly`, set per compile),
-  ratcheted ONE-WAY per host × level in `connector-closure-baseline.json` — a fall names the cell and the
-  queries that newly decline; internal errors and law divergences fail as in L5; re-record with
+  ratcheted ONE-WAY per host × level in `connector-closure-baseline.json` and per QUERY — any newly declined
+  query fails its cell, even when a newly answered one holds the rate level (both named, `closure-ratchet.ts`);
+  internal errors and law divergences fail as in L5; re-record with
   `mise run connector-record` (a downward one needs its reason). (2) Host totality: every child-taking position
   — derived from the grammar, the L1 corpus and L5's `hosts.ts` — is a `CONNECTORS` row or a
   `deferred-hosts.ts` entry with its reason, blocker and retirement `scope` (`ladder` | `host-owned`), so a new
   host cannot quietly get a route of its own. (3) The LADDER-REACH ratchet (same file as (1), sharing its sweep;
   engine `ladder-reach.ts`): the traversals the default answers and the connector alone does not, per pool (L1,
   L6, the sweep's host queries) × family, and the answers only `bothChildOrders`' second order rescues
-  (`FastPathConfig.childOrderRetry: false`), in `ladder-reach-baseline.json` — neither may rise, and where both
+  (`FastPathConfig.childOrderRetry: false`), and the traversals whose first order declines with `CopiedDraw` (the
+  retry arm's FIRES), in `ladder-reach-baseline.json` — none may rise; a family host beneath a `host-owned`
+  position is charged `other`; and where both
   modes answer the multisets must agree. Re-record with `mise run ladder-reach-record`; the wider ~25k sample is
   the instrument `mise run ladder-reach`.
   Its static sibling is `mise run ladder` (in `gates`): the `return null` count in `src/compiler/rel/` never rises.

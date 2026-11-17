@@ -65,4 +65,29 @@ describe('L9 — ladder reach engine', () => {
     expect(familyOf("g.V().project('x').by(__.coalesce(__.out(), __.in()))")).toBe('other');
     expect(familyOf('g.V().out()')).toBe('other');
   });
+
+  // `deferred-hosts.ts` scope `host-owned` is the authority: a family host beneath such a position is the host's
+  // own lowering's, not the ladder's, so it charges `other` — at any depth, and wherever the host-owned site is.
+  test('a family host beneath a HOST-OWNED position charges `other`', () => {
+    // The Grateful Dead match() with a map() pattern (L1): match() is its own lowering (`rel/match.ts`).
+    expect(familyOf('g.V().match(__.as("a").has("song", "name", "HERE COMES SUNSHINE"), __.as("a").map(__.inE("followedBy").values("weight").mean()).as("b"), __.as("a").inE("followedBy").as("c"), __.as("c").filter(__.values("weight").where(P.gte("b"))).outV().as("d")). select("d").by("name")')).toBe('other');
+    expect(familyOf('g.V().where(__.repeat(__.out().map(__.out())).times(2))')).toBe('other');
+    expect(familyOf("g.V().map(__.choose(label()).option('person', __.where(__.out())))")).toBe('other');
+    expect(familyOf("g.V().hasLabel('person').local(__.choose(__.values('age')).option(P.between(26, 30), __.values('name').fold()).option(Pick.none, __.values('name').fold()))")).toBe('other');
+    expect(familyOf("g.V().addV('x').property('n', __.map(__.out().count()))")).toBe('other');
+    // The deepest site still decides: a family host deeper than the host-owned one, elsewhere in the query.
+    expect(familyOf("g.V().local(__.union(__.repeat(__.out()).times(2), __.map(__.group().by(__.out().count()))))")).toBe('group');
+    // A family host BESIDE a host-owned position (not beneath it) is still charged — at its depth, too.
+    expect(familyOf("g.V().where(__.out()).repeat(__.out()).times(2)")).toBe('existence');
+    expect(familyOf('g.V().repeat(__.both("followedBy")).times(2).group("a").by("songType").by(__.count()).cap("a")')).toBe('group');
+    // A `ladder`-scoped deferral is not host-owned: what is beneath it is charged as before.
+    expect(familyOf("g.V().sideEffect(__.map(__.out()))")).toBe('per-traverser');
+  });
+
+  // FIRES (`ladder-reach.ts`): a draw is compiled under its first child order alone, so a `CopiedDraw` there is
+  // counted whatever the default did. After R2b no draw's first order declines with it; N7 reads 0 over the pools.
+  test('a draw is checked for a CopiedDraw retry fire, and does not fire once R2b closed it', () => {
+    const r = reach(["g.V().local(out().sample(1).union(identity(), identity()))", "g.V().project('a','b').by(out().sample(1)).by(out().sample(1))"].map((q) => ({ pool: 'W', q, store })));
+    expect({ fires: r.fires, counted: counts(r).fires, differ: r.differ, random: r.random.length }).toEqual({ fires: [], counted: 0, differ: [], random: 2 });
+  });
 });

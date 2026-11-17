@@ -1,15 +1,15 @@
 {
   "pools": {
-    "L1": 2372,
+    "L1": 2395,
     "L6": 312,
     "H": 3797
   },
   "ladderOnly": {
     "L1": {
       "existence": 0,
-      "per-traverser": 6,
+      "per-traverser": 1,
       "group": 14,
-      "other": 0
+      "other": 4
     },
     "L6": {
       "existence": 0,
@@ -24,7 +24,8 @@
       "other": 0
     }
   },
-  "rescued": 1,
+  "rescued": 0,
+  "fires": 0,
   "queries": [
     "087edf71dbf5",
     "0a5bfd28f164",
@@ -44,7 +45,6 @@
     "ca52f8047492",
     "cbd5e1b42527",
     "d0e288cd2be4",
-    "d4f5df237027",
     "deff90325220",
     "ef9c2a2f38ea",
     "f6be844c87ab",
