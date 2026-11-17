@@ -52,6 +52,29 @@ export const exprDraws: (e: Expr) => boolean = nodeFact((e: Expr): boolean => {
 });
 const isRandom = (e: Expr): boolean => e.kind === 'call' && e.fn.toUpperCase() === 'RANDOM';
 
+/**
+ * MAY TWO EVALUATIONS OF THIS RELATION DIFFER — `draws`, plus every PICK whose rows SQLite is free to choose: a
+ * `LIMIT`/`OFFSET` over an input that is not a `sort` (`V().limit(50)`, a first-row `limit(1)`), or a
+ * `row_number`/`lag`/`lead` window — a first pick — over a partition with no `ORDER BY`. SQL leaves such a pick's
+ * rows to the plan, and a COPY is a second plan: a consumer that re-reads a relation as an independent copy (a magic
+ * domain beside the body it was read from, `src/rel/passes/magic.ts`) may see rows the original did not. A limit over
+ * at most one row picks nothing. Same reach as `draws`: its own expressions, the subplans they correlate, and
+ * everything beneath; a raise arm is skipped for `draws`' reason.
+ *
+ * Memoized per node (`nodeFact`), so it is O(DAG).
+ */
+export const picks: (r: Rel) => boolean = nodeFact((r: Rel): boolean =>
+  draws(r) || picksHere(r) || relExprs(r).some(exprPicks) || relChildren(r).some(picks));
+const exprPicks: (e: Expr) => boolean = nodeFact((e: Expr): boolean =>
+  !isAbort(e) && (exprChildren(e).some(exprPicks) || exprRels(e).some(picks)));
+/** Does this node itself choose rows SQL leaves to the plan (its inputs aside)? */
+const picksHere = (r: Rel): boolean => {
+  if (r.kind === 'limit') return r.input.kind !== 'sort' && !atMostOneRow(r.input);
+  if (r.kind !== 'window') return false;
+  return r.specs.some(([, w]) => !w.spec.orderBy.length
+    && (w.fn === 'row_number' || w.fn === 'lag' || w.fn === 'lead' || w.spec.frame?.mode === 'rows'));
+};
+
 /** `draws` and its expression half, cut at the nodes a caller does not own (`ownDraws`). */
 export interface OwnDraws {
   readonly rel: (r: Rel) => boolean;

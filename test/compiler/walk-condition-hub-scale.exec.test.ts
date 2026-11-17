@@ -139,13 +139,48 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     }, SCALE_TIMEOUT_MS);
   }
 
-  // A SELECTIVE host keeps its own size: the domain is the host's rows, never the whole graph — one vertex's
-  // two-hop neighbourhood at either size.
+  // A BOUNDED host (`rowBounds`) asks its body a constant number of times: nothing to share, so it is left as it
+  // is — one vertex's two-hop neighbourhood at either size, with no domain spooled beside it.
   test("magic: a point query stays a point query — g.V('p0_1').local(out().out().where(in().has('age',gt(45))).count())", () => {
     const q = "g.V('p0_1').local(out().out().where(in().has('age',gt(45))).count())";
     expect(count(small, q)).toBe(1);
-    expect(read(q).sql).toContain('AS MATERIALIZED');
+    expect(read(q).sql).not.toContain('MATERIALIZED');
     expect(timed(() => runWith(large, q)) / Math.max(timed(() => runWith(small, q)), 5)).toBeLessThan(2);
+  }, SCALE_TIMEOUT_MS);
+
+  // A test that stops at its first index seek (`perHostWork(…).exhausts` false) costs per host what the semi-join
+  // probe replacing it would: nothing to share, so no domain — measured 2× slower at 8k with one. Still linear.
+  for (const [q, atSmall] of [
+    ['g.V().local(out().where(out()).count()).sum()', 650],
+    ["g.V().project('n','f').by('name').by(out().where(out('knows')).count()).select('f').sum()", 520],
+  ] as const) {
+    test(`magic: a one-seek test is not rewritten — ${q}`, () => {
+      expect(count(small, q)).toBe(atSmall);
+      expect(read(q).sql).not.toContain('MATERIALIZED');
+      expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));
+    }, SCALE_TIMEOUT_MS);
+  }
+
+  // A SELECTIVE but unbounded host (one label of many) is still rewritten: no static fact tells it from a hub's
+  // hosts without statistics (the R6-1 residue in `docs/2026-11-16-ladder-retirement-plan.md`). Only linear.
+  test("magic: a selective host stays linear — g.V().hasLabel('software').local(__.in().where(out().has('age',gt(30))).count()).sum()", () => {
+    const q = "g.V().hasLabel('software').local(__.in().where(out().has('age',gt(30))).count()).sum()";
+    expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));
+  }, SCALE_TIMEOUT_MS);
+
+  // A host whose rows a COPY could re-pick (`picks`, `src/rel/copies.ts`): an unordered `limit` leaves its rows to
+  // SQLite's plan, so the domain — a second evaluation — may hold other rows than the body reads. Left as it is;
+  // an ordered pick is one answer and is rewritten. Each answers as the same walk at the root does (the per-host
+  // counts sum to the root's count), which the pass never rewrites.
+  test('magic: a host holding an unordered pick is not rewritten', () => {
+    const unordered = "g.V().limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
+    const ordered = "g.V().order().by(id,desc).limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
+    expect(read(unordered).sql).not.toContain('MATERIALIZED');
+    expect(read(ordered).sql).toContain('AS MATERIALIZED');
+    for (const q of [unordered, ordered]) {
+      const atRoot = q.replace(".local(out().where(__.in().has('age',gt(30))).count()).sum()", ".out().where(__.in().has('age',gt(30))).count()");
+      expect(count(large, q)).toBe(count(large, atRoot));
+    }
   }, SCALE_TIMEOUT_MS);
 
   // An EXISTS body stops at its first row, so a domain would be all the work it skips: on a uniform graph of

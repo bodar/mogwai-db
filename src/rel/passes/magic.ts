@@ -3,8 +3,8 @@ import * as make from '../factory.ts';
 import type { Rel } from '../rel.ts';
 import { rowBounds } from '../bounds.ts';
 import { minter, freshCopy, type Minter } from '../mint.ts';
-import { draws, exprDraws } from '../copies.ts';
-import { readInFull } from '../work.ts';
+import { exprDraws, picks } from '../copies.ts';
+import { perHostWork, readInFull } from '../work.ts';
 import { decorrelate, semiJoinPerDistinct } from '../decorrelate.ts';
 import type { RelId } from '../types.ts';
 import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained, mapRelChildren, mapRelExprs, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
@@ -47,14 +47,26 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  * (`docs/archive/2026-08-01-relir-build-plan.md` §1 P4) neither form wins there, so the existence probe keeps its
  * short-circuit (`docs/2026-11-16-ladder-retirement-plan.md` T3(b) carries the measured trade).
  *
+ * ## When — and only where there is something to share
+ *
+ * - ONE call of the test reads an unbounded input to its end (`perHostWork(…).exhausts`, `src/rel/work.ts`): a
+ *   failing probe reads a hub's whole neighbourhood. A test that stops at its first index seek
+ *   (`local(out().where(out()).count())`) costs per host what the semi-join probe replacing it would, so the domain
+ *   is pure overhead (measured 2× slower at 8k). Static, from the algebra: no statistics, no decline.
+ * - The outermost host is UNBOUNDED (`rowBounds`): `V(1)`, or a `limit(k)` at its top, asks its body a constant
+ *   number of times. A nested host is asked across every enclosing host, so only the outermost bound counts.
+ *   A selective but unbounded host (`hasLabel('software').local(…)`) is still rewritten — no static fact tells it
+ *   from a hub's hosts (statistics residue, R6-1 in `docs/2026-11-16-ladder-retirement-plan.md`); it stays linear.
+ *
  * - The host's rows are SELF-CONTAINED (`isSelfContained`): at the outermost host its input reads no outer row and
  *   no walk's self-reference (so never inside a recursive term); a host nested inside a body is reached through
  *   the enclosing host's rows (`overHosts` of its input), so the domain is always one CTE. It is never a whole base
  *   table standing in for a selective host — on SQLite, a nested-loop engine, the domain decides the work
- *   (`decorrelate.ts`, "The domain that IS its input's key projection"), so `g.V(1).local(…)` stays the
- *   neighbourhood of one vertex.
- * - Nothing on the way DRAWS (`draws`, `src/rel/copies.ts`): the domain re-reads `F`'s input, and a re-drawn input
- *   would miss the `x` the body drew. That is also why the pass may tell `decorrelate` it owns nothing.
+ *   (`decorrelate.ts`, "The domain that IS its input's key projection").
+ * - Nothing on the way PICKS (`picks`, `src/rel/copies.ts`): the domain re-reads the host's input and `F`'s as a
+ *   COPY, a second evaluation — a re-drawn input (`draws`) would miss the `x` the body drew, and an unordered
+ *   `limit` or first-row window (`V().limit(50).out().local(…)`) leaves its rows to SQLite's plan, which the copy
+ *   need not repeat. That is also why the pass may tell `decorrelate` it owns nothing.
  * - Each body reads its host through ONE column (the domain's key is that column's distinct values).
  *
  * It recognises the ALGEBRA, so every host and every depth gets it with no list of positions. It runs after
@@ -78,8 +90,13 @@ interface Hosts {
  *  `within` is the enclosing body's hosts, `null` at the outermost host. */
 function atHost(r: Rel, within: Hosts | null, mint: Minter): Rel {
   if (r.kind !== 'filter' && r.kind !== 'project') return r;
+  // A BOUNDED host (`V(1)`, a `limit(k)` at its top) asks its body a constant number of times: nothing to share
+  // across hosts, and the domain would only add a spool to a point query. Only the OUTERMOST host's bound counts: a
+  // nested host's input is bounded per enclosing row (one row, inside `local(local(…))`), but it is asked across
+  // every enclosing host, and an unbounded enclosing host was already let through here.
+  if (!within && rowBounds(r.input).max < Infinity) return r;
   const free = freeRelIds(r.input);
-  if (draws(r.input) || (within ? [...free].some((id) => id !== within.outer) : !isSelfContained(r.input))) return r;
+  if (picks(r.input) || (within ? [...free].some((id) => id !== within.outer) : !isSelfContained(r.input))) return r;
   let reached: Rel | null | undefined;
   const hosts: Hosts = { outer: r.input.id, reached: () => (reached === undefined ? (reached = hostRows(r, within, mint)) : reached) };
   let changed = false;
@@ -141,12 +158,16 @@ function atFilter(f: Extract<Rel, { kind: 'filter' }>, hosts: Hosts, mint: Minte
   const at =all.findIndex((e) => elementTest(e, f.input.id) !== null);
   if (at < 0) return f;
   const test = all[at] as Extract<Expr, { kind: 'exists' }>;
+  // Sharing pays only where ONE call of the test reads an unbounded input to its end (`perHostWork`'s `exhausts`):
+  // a hub's whole neighbourhood behind a failing probe. A test that stops at its first index seek
+  // (`out().where(out())`) costs the same per host as the semi-join probe that would replace it, plus the domain.
+  if (!perHostWork(test.plan).exhausts) return f;
   const x = elementTest(test, f.input.id)!;
   const xMeta = f.input.type.cols.find((c) => c.name === x);
   // A NULL `x` matches no passing row, while the test may hold of it: only a column that is never NULL.
   if (!xMeta || xMeta.nullable) return f;
   const others = all.filter((_, i) => i !== at);
-  if (draws(f.input) || others.some(exprDraws)) return f;
+  if (picks(f.input) || others.some(exprDraws)) return f;
   // THE DOMAIN: `x` over `F`'s input under its subquery-free conjuncts, for every host row — a fresh copy, so it
   // may stand beside the body it was read from.
   const restricting = others.filter((e) => !exprHasSubquery(e));

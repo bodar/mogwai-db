@@ -1670,6 +1670,10 @@ forms join U2's witnesses.
   reviewer's view: keep the short-circuit without statistics; defer until a substrate keeps the first-row stop while
   sharing the test (none known on SQLite). Same owner call as `docs/outstanding-work.md` ("A correlated EXISTS body
   at a hub…"). U0's demand fact does not answer it — it is a statistics question.
+  **Same residue, from U2:** a selective but unbounded host (`g.V().hasLabel('software').local(__.in().where(out().has('age',gt(30))).count()).sum()`)
+  is still rewritten by `magic` — no static fact tells it from a hub's hosts — and measured 9.4/27.7 ms without the
+  rewrite vs 12.5/40.6 ms with it on the hub graph (130 → 1050 chains), linear either way; the hub-scale suite
+  asserts only linearity there.
 - Round 4's question 1 (movement-head `until` at a hub) and question 2 (S5's second bullet) remain open.
 
 All 13 round-6 `wf/*-6-*` branches and their worktrees were removed after their landing shas were confirmed on
