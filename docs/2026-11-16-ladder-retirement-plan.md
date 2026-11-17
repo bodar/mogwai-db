@@ -1290,7 +1290,8 @@ too. Guards: the host rows self-contained (nested hosts reach theirs through the
 (so `owns: () => false` is sound), one host column read. Measured on the hub graph (130 → 1050 chains):
 `local(out().out().where(in().has('age',gt(50))).count()).sum()` 13.1 → 526 ms (40×) before, 8.8 → 25.5 ms (2.9×)
 now; `map(…)`, `local(local(…))`, `local(…not(…)…)`, `local(union(…))`, `dedup()` before the test all 16–20× → 3–5×.
-Uniform out-degree 4 graph, 1k → 8k: every rewritten form as fast or faster (`local(…gt(50)…)` 145 → 75 ms);
+Uniform out-degree 4 graph, 1k → 8k: the hub-shaped witnesses got faster (`local(…gt(50)…)` 145 → 75 ms), but NOT
+every rewritten form — a selective host or a one-seek test got 1.3–2× slower, still linear (review correction; U2 below);
 out-degree 20: 3.3 s → 1.2 s. Point query `g.V(21).local(…)` unchanged (~3 ms at both sizes). Witnesses in
 `test/compiler/walk-condition-hub-scale.exec.test.ts`.
 **Remains: witness 2, the existence body (`where(...)`, `filter(...)`, a first-row `map`; `g.V().where(out().out().where(in().has(…)))`), still about 48× at a hub.**
@@ -1452,3 +1453,211 @@ gives a clean UnsupportedTraversal, both before and after this change.
 None raised this round. Round 4's two questions are still open: question 1 (movement-head `until` at a hub, 22.8×;
 S3 confirmed the two reducer walk-condition witnesses `sum().is`/`dedup().count().is` stay at 56×/49× pending it) and
 question 2 (decides S5's second bullet).
+
+## Next round (written 2026-11-17, after round 6)
+
+Round 6 landed every item it built: T1 (6e6e45ca, 6b6619f6, 1274c293 — with the `edgePair` pass), T3(a) (614a69e4,
+6b1457dd, 4231ed52), P21–P24 (53e8f1b2), T3(b) in part (7971f932), T2 (ec2db3de), P16 + T7's keyed pick (97b6e161,
+c93e6a1c), S6a (fac4c754), T5 (846f4e35) and T6 (d4aebac4). No round-6 branch is parked as a resume point. Nothing was
+deferred for a missing substrate; the one item left open by choice is T3(b) witness 2, parked on an owner decision
+(question R6-1 below). Still open from earlier rounds: T4, T7's other bullets, M1b (behind H1), M6, N8, N9, K2, K3, K4,
+P2, P5, P6, P8, P9, P11, P13, P14, P17, P18, P20, P25–P31, R4.2, R4.5, R5.2–R5.4, R6 (other hosts), R7, S5's second
+bullet. Ordered so each prerequisite comes BEFORE the item it unblocks; major items first.
+
+**Shared root of four round-6 majors: a physical pass fires on a SHAPE, with no fact for what the reader demands or
+what one call of the replaced test costs.** `edgePair` (U1) fires on every both-pinned label-free probe whatever the
+label vocabulary; `magic` (U2) fires on a one-seek test where nothing can be shared; the T2 fence (U3) spools a CTE
+whose reader stops after `limit(k)`; `narrowFilter`'s constant seek (U4) drives whatever its selectivity. `magic`
+already has half of the missing fact privately (`demanded`, "every row of this relation is work the plan does
+anyway"), and `src/rel/work.ts` `perHostWork`/`exhausts` has the other half (a filter straight over a base table IS
+the index seek). So the substrate item comes first:
+
+### U0 — One "reader demand + per-call cost" fact in `src/rel/work.ts` (SUBSTRATE for U2, U3; do first)
+
+Lift `magic.ts`'s private `demanded` into `src/rel/work.ts` beside `perHostWork`, as a node fact: does every
+consumer read this relation IN FULL (aggregate, sort, window, ≤1 row, up to the root), or can it stop early (EXISTS,
+`limit`, first-row pick)? And expose `exhausts`' "the test is one index seek over a base table" as a per-call cost
+question. No behaviour change by itself (magic's answers byte-identical; L1 compilePlan diff). Then U2 and U3 each
+become one extra condition on that fact, not a new private model.
+
+### U1 — `edgePair` costs |label vocabulary| per probe (MAJOR, common reach; regression from T1's 1274c293)
+
+`edgePair` (`src/rel/passes/edge-pair.ts`) reads every both-endpoint-pinned, label-free edge probe through
+`label IN (SELECT id FROM labels)`. `labels` holds the WHOLE vocabulary, vertex labels included (`src/storage.ts` ~70),
+so each probe is |labels| seeks. Measured on the walk-condition hub graph with N extra vertex labels (small/large =
+130/1050 chains): `g.V().as('a').out('knows').where(__.in().as('a')).count()` at 300 labels 2.9/7.5 → 32.2/264.4 ms
+(35×), at 3000 labels 4.2/9.5 → 302/2631 ms (277×); the hub form `…out().where(__.in().as('a'))` breaks even at 30
+labels and is 69× slower at 3000. Linear in traversers, but a per-row term whose cost grows with the SCHEMA. The
+header's "this is the skip-scan SQLite would pick with sqlite_stat1" is wrong: a real skip-scan steps only through the
+labels present under the pinned prefix. **Item:** either give SQLite the statistic it lacks (a `sqlite_stat1` row for
+`e_out`/`e_in`, so its own skip-scan is chosen, bounded by the labels at that vertex), or restrict the membership to
+labels present under the pinned prefix. Add a multi-label (≥300 labels) hub row to
+`test/compiler/walk-condition-hub-scale.exec.test.ts` — the suite uses 3 labels, which is why CI could not see it. Also
+record in the design doc that the pass widened past walks to point lookups (`g.V(1).outE().inV().hasId(3)`,
+`g.E().where(outV().hasId(1)).where(inV().hasId(3))`), while `g.V(1).out().hasId(2)` does not fire — the same question
+with two access paths.
+
+### U2 — `magic` fires where there is nothing to share (MAJOR, common reach; after U0)
+
+T3(b)'s pass rewrites any element test it reaches, including a one-seek test and a selective host. Best of 3, trunk vs
+7971f932, both linear: u4 `g.V().local(out().where(out()).count()).sum()` 4.0/12 → 6.6/23.8 ms (2× at 8k);
+`g.V().project('n','f').by('name').by(out().where(out('knows')).count()).select('f').sum()` 5.3/15 → 8.8/24 ms;
+`g.V().hasLabel('software').local(__.in().where(out().has('age',gt(30))).count()).sum()` 8.2 → 12.8 ms at 8k;
+`g.V('v1').local(out().out().where(…).count())` 2.0 → 3.3 ms (the doc said unchanged). **Item:** fire only when U0's
+per-call cost says one call of the test costs more than the semi-join probe that replaces it, and skip a point or
+low-cardinality host (`rowBounds`). Add controls to the hub-scale suite: a cheap one-seek test
+(`local(out().where(out()).count())`, `project().by(out().where(out('knows')).count())`) and a selective host, each
+asserting no regression. Cheap, same item: `hostRows` re-reads an unordered `limit`/`range`/`dedup().by` host as an
+independent copy, so the domain is valid only if SQLite picks the same rows twice (0 mismatches over 23 hosts measured,
+but structural) — skip hosts with an unordered limit/first pick, or say why it holds in a comment.
+
+### U3 — The T2 fence spools a short-circuiting stream (MAJOR, common reach; after U0)
+
+`copyRerunsBarrier` (`src/rel/copies.ts`) counts the `SELECT DISTINCT node` seed of a range `has()` as a barrier, so
+the shared start CTE of `has(…).both()`, `union(out(),in())`, `coalesce`, `optional`, `repeat(both()).times(n)` renders
+`AS MATERIALIZED`, and under `limit(k)` SQLite computes the whole set first. Best of 7:
+`g.V().has('age',gt(30)).both().values('name').limit(3)` 2.0 → 8.0 ms at 8k, 4.7 → 53 ms at 64k (near-constant became
+linear); `…union(out(),in()).limit(2).count()` 4.6 → 52.7 ms at 64k; `repeat(both()).times(3).limit(5)` 2.4 → 7.5 ms.
+Movers that read every row got faster (`…both().values('name').count()` 21.8 → 13.7 ms). **Item:** fence only where
+U0 says every reader reads in full, or do not count an index-streamed DISTINCT seed as re-run work; keep fencing the
+walk witnesses. Same item (minor, concrete): `barrierBeneath` near-duplicates `copiedWork` and diverges on
+`self-ref`/`explode` and on subplans in expressions — make it ONE parameterised fact (with/without the computed half).
+Note in `test/support/cte-runs.ts` that the gate counts only WITH-defined names: a derived table spelled twice
+(`dag124` in `g.V().hasLabel('person').choose(repeat(out('knows')).emit(in('knows').has('age',gt(20))).count().is(gt(0)),constant('y'),constant('n'))`)
+and a CTE re-run per outer row inside a correlated subquery are invisible to it.
+
+### U4 — The correlated seek drives; constant seeks become uncorrelated INs (MAJOR, super-linear, plausible reach)
+
+`narrowFilter` (`src/rel/passes/semijoin.ts`) still CHOOSES between a correlated and a constant seek: it skips a
+correlated seek whenever `facts.constantSeek` has the element, so an unselective constant `has()` drives, re-run per
+host. `g.V().values('name').as('n').V().has('name',select('n')).has('kind','person').count()` (every vertex
+kind=person): 770 ms → 12.4 s at 1k → 4k (quadratic; 6.7/12.9 ms without the `kind` term);
+`g.V().as('a').values('city').as('c').V().has('city',select('c')).has('kind','person').where(neq('a')).count()` 1.08 →
+17.4 s. Not newly reachable. **Item:** the correlated seek drives and each constant seek is an uncorrelated `IN` set
+built once per statement — `allOwners` with the correlated seek as `first`; delete `constantSeek`. This removes the
+last selectivity choice in the seam. Same seam, after: `stackedAbove` merges only Filters stacked directly; a Project
+between them or a conjunct inside a nested `where()` stays quadratic
+(`…where(V().where(neq('a')).has('kind','person').where(values('name').is('zz'))).count()` 452 ms / 30.7 s at 1k/8k;
+`flatMap(V().where(neq('a')).has('kind','person').has('name','zz'))` 675 ms / 47.3 s) — the nested-`where` half is T4's.
+
+### U5 — `fuse.ts` re-derives the lineage authority (MAJOR x2, one-authority; cheap)
+
+S6a added two hand-rolled rename tracers to `src/rel/passes/fuse.ts` — `overRenames().trace` and the rename loop in
+`groupedOn` — plus `sideIndex`, a third positional side lookup beside `joinSide`, one commit after P21–P24 made
+`src/rel/lineage.ts` the single column-lineage authority. **Item:** add a positional `index: 0|1` to `JoinSide` (so the
+self-join case is identity-free), delete `sideIndex`; `trace(name)` becomes `columnAt(r, name, under.join)`;
+`groupedOn` asks `definingPath`. Same rewrites; check with the L1 compilePlan diff. (Round 6's reuse proposal 6.)
+
+### U6 — A `both()`/`union` body's positional scope key (SUBSTRATE for two super-linear findings)
+
+Over a UNION input a correlated body lowers through a `row_number` scope key (`sk*`/`dk*`) re-inlined per host, and
+an element test then reads the row key, not one element column. Two findings share it:
+`g.V().local(both().both().where(both().has('age',gt(20))).count()).sum()` 1.7 s → 17.9 s at 1k → 8k on u4 (10.5×,
+huge constant; hub form > 120 s), and `magic` cannot reach `g.V().local(both().where(in().has('age',gt(30))).count()).sum()`
+(52 ms → 1.0 s, 19×). **Item:** key a union body's scope by element (or have `decorrelate` leave it unkeyed, as
+`existenceOverOwnRows` does) — in `src/rel/decorrelate.ts`, one rule, never a magic.ts special case. Then the both()
+forms join U2's witnesses.
+
+### U7 — Pre-existing super-linear shapes found this round (each its own item; not newly reachable)
+
+- **Coalesce arm cross join:** `g.V().as('a').coalesce(V().where(neq('a')).values('name').is(startingWith('zz')).is(endingWith('q')),constant('none')).count()`
+  990 ms → 93 s at 1k → 8k (94×). The arm decorrelates to a plain `CROSS JOIN` with no EXISTS or first-row pick, so
+  `leading` never sees it — the leading/seek idea for a whole arm read under coalesce.
+- **A `distinct` on the leading spine:** `g.V().hasLabel('software').as('a').map(V().dedup().where(neq('a')).values('name')).count()`
+  238 ms → 15.4 s (64×); without `dedup()` linear. `leading.ts`'s spine walk accepts only project/filter/sort — let it
+  pass `distinct` (restricting an element commutes with a whole-row distinct), now that `definingPath` does.
+- **fuse `factor` after a dedup / non-count aggregate:** `g.V().group().by('name').by(V().dedup().count()).count(local)`
+  1.46 s at 1k (8k did not finish); `group().by('name').by(V().values('age').is(gt(30)).sum())` 719 ms at 1k (filter over
+  a computing values Project); `group('m').by('name').by(V().out().count()).cap('m')` 3.8 s; `by(V().union(out(),in()).count())`
+  1.7 s; `by(V().optional(out()).count())` 1.0 s; `by(V().values('age').max()/min()/mean())` unfactored (min/max are
+  `arg_max`/`arg_min`; S6a's `SelfSplitter` fires only for sum's clw/clf bookkeeping). Re-measure P21's
+  `group().by('name').by(V().values('age').sum())` (66×) on trunk after S6a first — it may already be factored.
+- **Mid-chain re-source before a keyed aggregate:** `g.V().hasLabel('person').V().out().groupCount().by('name')` does
+  |pool|×|body| work (S6a's normalisation reaches only the pooled by() re-source).
+
+### U8 — Cheap, concrete follow-ups (round 6)
+
+- **T1:** tests for the outer-label-READING walk conditions it newly answers — `g.V().as('a').repeat(both()).until(where(eq('a'))).limit(5).path()`
+  (cycle detection), `emit(where(neq('a')))`, `until(select('a').has('name','marko'))`, `emit(local(select('a').out()))`
+  — and one of them in the hub-scale suite. Re-check after T2 that the per-state walk CTE (referenced by DISTINCT and
+  semi-join) now runs once.
+- **T3(a):** stale `ownerJoined` citations (now `ownerScan`/`ownerProbe`) in `test/leading-owner-seek.test.ts` l.13
+  and this doc; add a regression case with `has()` BEFORE the `values().is()` conjunct to the scaling test.
+- **P21–P24:** one L2 assertion pinning the new narrowing through `dedup()`/`limit` (`g.V().dedup().has(k,v)`); P22
+  widened `definingPath` callers (`edgePair`, `leading` `columnAt`, `reSourceCross`) beyond "byte-identical SQL" — the
+  L1 corpus was identical, 7/38 off-corpus shapes changed, all faster or same rows.
+- **P16/T7:** the keyed pick's type-tag fallback inlines the value-read `CASE` three times (`vt = coalesce(skq.skc24,
+  … typeof(CASE …) … abs(2*CASE …+1))`) — project the value once in the pick's lookup (compute-once rule).
+  `threadingRowKey` (`src/rel/copies.ts`) and `positionKeys` (`src/rel/position.ts`) share a "widen a spine node by one
+  carried column" step — extract it when either is next touched.
+- **T5:** `poolingStep` (`src/compiler/rel/map.ts`) is a second statement of `GroupRows.done` and disagrees:
+  `sideEffect(out().group('x').by('name').by(count(local))).cap('x')` lost its hint; `…by(dedup().count())` now names
+  the wrong reason. Return a `pooled` fact from `groupRows`' own decision and delete the parallel predicate.
+- **T6:** `reSourcingBody`'s `someStepDeep(… V||E …)` repeats `ladderOwns` and mirrors `reSource`'s trigger — one
+  `mayReSource(body, params)` beside `reSource` (`movement.ts`), joins P30. Say in the compile-time ratio test that
+  the <30 margin (measured ~17) is deliberate.
+- **T6 remains (follow-up item, plan-changing):** decide `positioned` before lowering in `lowerBody` instead of
+  retrying (depth 2 is 3.8× depth 1; `landValues` calls 1/3/13 → 1/2/5 without the retry). Needs a census and
+  sql-hygiene review.
+- **S6a:** add one or two of its newly factored routes to `scripts/scaling-probe.ts` (`E().values().sum()`,
+  `in().count()`, a `where()` semi-join body, `withSack().sack().sum()`).
+
+### N8 additions (round 6 depth gaps; clean declines today; a body or host row, never a rung)
+
+- **T1:** an emit/until condition reading a label bound OUTSIDE the walk with a path read
+  (`g.V().as('s').repeat(out()).until(hasLabel('software')).emit(where(neq('s')))`, `emit(local(in().where(eq('s'))))`,
+  `emit(path().count(local).is(gt(2)))`); a `simplePath` walk under a scoping host
+  (`g.V().local(repeat(both().simplePath()).until(hasLabel('software')).emit(local(in().limit(1))).values('name').fold())`,
+  also under `map(..count())`, `not(..)`, `group().by(..).by(..count())`).
+- **T3(a):** `g.V().as('a').where(V().where(neq('a')).values('name').is(regex('^m.*o$'))).values('name')`;
+  `choose(V().where(neq('a')).values('name').is(startingWith('m')).is(endingWith('o')),constant('y'),constant('n'))`.
+- **T2:** `g.V().hasLabel('person').group().by('name').by(repeat(out('knows')).emit(in('knows').has('age',gt(20))).values('name').fold())`
+  (the `count()` body answers); `groupCount().by('age').as('m').union(identity(),identity()).select('m')`.
+- **T5:** under connector-only, a keyed `group('x')` with any child value `by()` declines everywhere, root included
+  (`g.V().group('x').by(label).by(out().count()).cap('x')`), and `union(...)` arms get no hint — R7 must close these.
+- **P21–P24:** `g.V().project('a').by(choose(values('age')).option(between(20,40),constant('young')).option(none,constant('old'))).count()`.
+
+### Next round — reuse sweep (round 6's proposals)
+
+- **P32 — one lowering-trial transaction in `scoped.ts`.** `reSourcingBody` (rolls back collections, siteEffects,
+  `budget.restoreUnroll`, a declines fork), `attempt` (collections + siteEffects), `lowerBody`'s 'read' retry
+  (collections ONLY) and `scopedHost`'s route loop (collections + declines fork + T5's `refusalMark`/`dropRefusals`)
+  become one `trial(ctx, run) → {value, commit, rollback}` capturing every piece of per-compile state. Also closes a
+  probable gap: `lowerBody`'s retry does not truncate siteEffects or restore the unroll note — probe first
+  (order:'read', a body with `aggregate('x')`, positioned retry). Do before T6's `positioned` follow-up.
+- **P33 — identity-preserving `rewrite`/`rewriteRels`** (`src/rel/walk.ts` `mapRelChildren`/`mapRelExprs` return `r`
+  when every child is `===`; Calcite `vendor/calcite/core/src/main/java/org/apache/calcite/rel/RelShuttleImpl.java`
+  `visitChild`). Deletes `magic.ts` `unchanged()` and its `relsBeneath` comparison; no future pass can split a shared
+  node by a no-op rewrite (the bug T3(b) hit). Check with the L1 compilePlan diff.
+- **P34 — `edge-pair.ts` `pathFrom`'s fast path moves into `lineage.ts` `columnPath`** (check top / a direct child
+  first), so `semijoin` `drivenElement`/`rowidScan` get linear compile cost on an unrolled `times(K)` spine too.
+- **P35 — one "fixed for the block / outer-only" lineage question** `outerOnly(top, e, allowLeaves)` on
+  `columnLineage`, plus an exported expression free-id set from `walk.ts` (`exprReach` computes it privately), shared
+  by `edge-pair.ts` `fixed()`, `leading.ts` `seedExpr` and `scoped.ts` `freeIds` (~35 lines). Joins P27.
+- **P36 — `decorrelate.ts` `columnsRead` → `walk.ts` `deepColsRead`** (a superset, more conservative). Part of P27.
+- **P37 — one `labelsScan(mint)`** in `build.ts`/`element.ts` for the ten inline `make.scan({table:'labels',…})`
+  spellings (`edge-pair.ts`, `build.ts` `labelIds`, `element.ts` `labelTable`, `source.ts` ×3, `write.ts` ×3).
+  Do with or after U1, which may change edge-pair's use.
+- **P38 — `collapsesGlobally(step)`** = `selfCollapses(step.name) && !isLocalScope(step)` for the four inline
+  conjunctions (`branch.ts` L117/L1238, `per-traverser.ts` L189) and T5's `reducesPool`; decide whether
+  `per-traverser.ts` L142's REDUCERS||fold-without-count variant is intended. Pairs with U8's T5 `pooled` fact.
+- **P39 — `firstArrival` → P16's `argExtremum` where the arrival is one column** (`build.ts` `firstArrival`; callers
+  `slice.ts` L491, `scoped.ts` ~L2537, `map.ts` `groupKeyed`). Drops four per-row terms per passenger and keeps the
+  value's storage class (check integer passengers for a wrong-class risk). Needs the bare-column law
+  (`structure.ts` `checkArgExtremumLaw`) to admit a plain `min()` identical to the anchor. This IS P17 — build as P17.
+  Measure sql-hygiene bytes and 1k/8k `dedup().by`/group-key timings first.
+- (Round 6's proposal 6, `fuse.ts` `sideIndex`/`overRenames.trace`, is U5 above.)
+
+### Needs-human questions (round 6)
+
+- **R6-1 (T3(b) witness 2), from the builder, verbatim:** "Witness 2, the `where()` existence body, is deliberately
+  not rewritten, because doing so made ordinary `where()` queries up to 48× slower. That trade needs your call." The
+  measured trade: building the magic domain under an EXISTS costs `g.V().where(out().out().where(in().has('age',gt(20)))).count()`
+  10.6 → 505 ms at 8k on a uniform out-degree-20 graph, while leaving it costs 48× per 8× at a hub. The depth
+  reviewer's view: keep the short-circuit without statistics; defer until a substrate keeps the first-row stop while
+  sharing the test (none known on SQLite). Same owner call as `docs/outstanding-work.md` ("A correlated EXISTS body
+  at a hub…"). U0's demand fact does not answer it — it is a statistics question.
+- Round 4's question 1 (movement-head `until` at a hub) and question 2 (S5's second bullet) remain open.
+
+All 13 round-6 `wf/*-6-*` branches and their worktrees were removed after their landing shas were confirmed on
+origin/trunk; none is a resume point.
