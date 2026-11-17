@@ -1371,6 +1371,17 @@ fence was not deleted.
 **One column-lineage authority (SUBSTRATE: the shared root of five review findings and five proposals; do as one
 item, in this order).** S1 added `columnLineage` (`src/rel/copies.ts`) and S2 added `definingPath`/`columnAt`
 (`src/rel/lineage.ts`); private walkers still answer "which column below defines this one":
+
+✅ **P21–P24 LANDED (53e8f1b2).** One positional join-side mapper (`joinSide`, `src/rel/walk.ts`) serves
+`columnLineage`/`constantOver`/`columnIsStored`/`columnIsRowKey`; `definingPath` (`src/rel/lineage.ts`) passes through
+`limit`/`distinct`/`materialize`; `leading.ts` and `priorityArms.constantIn` ask `columnLineage`; semijoin's leaf
+questions go through one `rowidScan` in lineage.ts. Hand-built same-name joins: `test/rel-lineage.test.ts`.
+**Remains:** `g.V().group().by('name').by(V().values('age').sum())` is quadratic at production size (66× from 1k to 8k
+vertices) — its own item, starting by checking whether fuse `factor` fires for a sum over the property-join side.
+Measured with `.count(local)` appended; the scaling probe's own `ajt` entry (no `.count(local)`) was stopped before it
+finished, so that the unmodified entry is also quadratic is unconfirmed. Separately,
+`g.V().project('a').by(choose(values('age')).option(between(20,40),constant('young')).option(none,constant('old'))).count()`
+gives a clean UnsupportedTraversal, both before and after this change.
 - **P21 — one positional join-side mapper** `joinSide(r, name)` in `src/rel/walk.ts` or `copies.ts`, replacing the
   4-line block written 5× (`columnIsStored`, `columnIsRowKey`, `columnLineage`, `constantOver`,
   `priorityArms.constantIn`). Fixes `definingPath`'s by-NAME join case, which gives up when both sides carry the name
