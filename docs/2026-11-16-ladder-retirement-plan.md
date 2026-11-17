@@ -599,6 +599,10 @@ Unblocks N7.
   - `test/L5-properties/attribution.ts` ~l.211
   Export one set and import it everywhere. If they drift, a new filter host declines generically rather than with
   `writeInFilter`.
+  ✅ **LANDED (6db3f4bd).** `FILTER_HOSTS` lives once in `src/compiler/ir/step.ts` (with `SINGLE_BODY_FILTER_HOSTS`
+  and `FAN_OUT_HOSTS` beside it); every `src/` copy derives from it, guarded by `test/compiler/filter-hosts.test.ts`.
+  Remains: nothing in `src/` (the L5 generator's own `FILTER_HOSTS` in `test/L5-properties/attribution.ts` is a
+  test-side copy, left as is).
 - **P11 — `writesOrCollects` in `ir/step.ts`** (= `MUTATING_STEPS` ∪ `collectsSideEffect`). `stepHasEffect` becomes
   `writesOrCollects || OPAQUE_OR_RAISING`, and `strategies.ts` `carriesIterationState` (~l.1505) asks
   `writesOrCollects`. That leaves one place to add a new write or collector step. Also check `reduction.ts` ~l.1579:
