@@ -1,7 +1,7 @@
 # Retiring the correlated-child ladder
 
 _Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; round 2
-landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; N3 landed partially (d229d834). The next round starts at
+landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10; N3 landed partially (d229d834); R6's first item (+R6.0) landed (5452ee0b, 490a66e8, 690de3d8). The next round starts at
 "Next round (written 2026-11-17, after round 3)" at the end. No deadline: each step lands on its own when it is ready, and
 any step may stop and be reconsidered._
 
@@ -230,6 +230,13 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
 ### R6 — Deferred hosts classified as `ladder` in R0
 
 Work them by workload reach, not by list order. `sideEffect` with effects is the likely big one.
+
+✅ **First item (+R6.0) LANDED (5452ee0b, 490a66e8, 690de3d8).** Collector side effects (`aggregate`/`group`/
+`groupCount('x')`) inside a decorrelated child body: `sideEffect()` is a CONNECTORS row, and the body plus its collector
+sites are keyed in ONE decorrelation (`keyedBody`, `src/compiler/rel/lower/scoped.ts`); a body-filled collection is one
+spooled relation read at the cap, membership one uncorrelated IN probe. Composes under local/flatMap/optional/where/map
+(`test/L4-addendum/child-body-collectors.feature`). Remains for this item: nothing; the other R0-`ladder` hosts are
+still open.
 
 ### R7 — Delete the switch, IF the earlier calls left nothing on it
 
@@ -800,6 +807,9 @@ M1's fix makes `treeTail` (`src/compiler/rel/lower.ts`) order folded paths by th
 `src/rel/obligations.ts`), or drop the encounter. Pick one; no answer changes.
 
 ### R6.0 — `sideEffect` with a filter-hosted body feeding a collector (folds into R6's first item, owner answer Q4)
+
+✅ **LANDED with R6's first item (5452ee0b, 490a66e8).** `sideEffect(where(out()).aggregate('x'))` now answers.
+Remains: nothing.
 
 `g.V().sideEffect(where(out()).aggregate('x')).cap('x').unfold().count()` declines with the generic message, the same
 on trunk before P10. It is the `sideEffect`-with-effects host owner answer Q4 makes R6's FIRST item
