@@ -319,6 +319,12 @@ authority. Measure with the scaling probe (≈8× is the bar).
 
 ### N4 — `covering` from `bounds.ts`, not a second copy (MAJOR — one authority)
 
+✅ **LANDED (55fae41b).** `covering` in `src/rel/decorrelate.ts` is now `rowBounds(min ≥ 1)` over the correlated
+input (`src/rel/bounds.ts`), with the eliminated key-projection filter as the one injected fact; the rule-by-rule
+copy is gone. No answer or SQL change (census/sql-hygiene unmoved); L2 tests in `test/L2-sql/group.sql.test.ts` tie
+`keyProjected` to `pooledGroup`'s `member.term IS scoped.term` filter. Landing also fixed a pre-existing L8 witness
+(2b9f2054): `orderIndeterminacy` now credits an `order()` only in the window's own scope. Remains: nothing.
+
 R5.1's `Out.covering` in `src/rel/decorrelate.ts` re-implements `rowBounds().min` rule by rule (limit, filter,
 project/sort/distinct/window, LEFT JOIN, union, recursive, HAVING); the only fact `bounds.ts` lacks is "the
 key-projection filter yields ≥1 row per key under `covers`". Compute covering as `rowBounds` over the correlated plan
