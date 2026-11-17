@@ -2,7 +2,7 @@ import { isNested, isPred } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, conjuncts, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
-import { commitScope, forkCollections, isScopedFork, pendingLabels, pendingSites, restoreCollections, type Collections, type Site } from '../collection.ts';
+import { commitScope, dropRefusals, forkCollections, isScopedFork, pendingLabels, pendingSites, refusalMark, refusedSites, refuseSite, restoreCollections, type Collections, type Site } from '../collection.ts';
 import { positionKeys } from '../../../rel/position.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import { perHostWork } from '../../../rel/work.ts';
@@ -22,7 +22,7 @@ import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, PresentWhen, Subject } from '../child.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
-import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
+import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
@@ -461,9 +461,14 @@ function keyedBody(
   const fork = forkCollections(ctx.collections);
   const out = keyedInFork(lower, outer, key, ctx, fresh, mine, fork, reframe, projection);
   // A body that COLLECTED and still declined says so, naming what it collected (R6.0) — rather than only "no
-  // lowering covers". Advisory: a sibling route that answers is never shadowed by it.
-  const collected = out ? [] : pendingLabels(fork);
-  if (collected.length && ctx.host) ctx.declines.note(effectInChild(ctx.host, collected));
+  // lowering covers". Advisory: a sibling route that answers is never shadowed by it. A collector the fork
+  // REFUSED (`refuseSite` — a keyed `group()` whose value by() pools) is named here too, with the form that
+  // refused it: this is the ONE raiser, whichever route of the collector's own site found the refusal.
+  if (!out && ctx.host) {
+    const refused = refusedSites(fork);
+    const labels = [...new Set([...pendingLabels(fork), ...refused.map((r) => r.label)])];
+    if (labels.length) ctx.declines.note(effectInChild(ctx.host, labels, refused[0]?.example));
+  }
   return out;
 }
 
@@ -2254,7 +2259,8 @@ const byValues: Connector = (site) => {
   // An ARGUMENT changes what the by() runs over: `dedup("a")` projects each scope LABEL's value on a NEW traverser
   // (`freshTraverserRow`), and `group("m")`/`groupCount("m")` is a keyed SIDE EFFECT — neither is a per-traverser
   // by() over this stream, so both stay the host's own.
-  if (step.optionArms || !step.modulators?.length || step.args.length) return null;
+  if (step.optionArms || !step.modulators?.length) return null;
+  if (step.args.length) { refuseKeyedPool(step, ctx); return null; }
   const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
   if (!bys) return null;
   if (step.name === 'group' && bys[1]?.key.kind === 'child') return pooledGroup(site, bys);
@@ -2276,6 +2282,22 @@ const byValues: Connector = (site) => {
   const tail = (inPlace.size < seamless.size ? landedStep(site, inPlace) : null) ?? landedStep(site, seamless);
   return tail && afterLanded(site, tail);
 };
+
+/**
+ * A KEYED `group("a")` IN A CONNECTOR BODY whose value `by()` POOLS (`poolingStep` — `by(count())`,
+ * `by(values('age').sum())`, `by(out().fold())`) has no lowering on any route: the pool reduces once per BODY,
+ * so its finished map cannot key as one grouping per host row (`registerGrouping` refuses it, `collection.ts`),
+ * and this row leaves the keyed form to the host's own lowering. Recorded ON THE FORK (`refuseSite`), so the one
+ * raiser — `keyedBody`, which knows the host the body runs under — names it whichever route reached it.
+ */
+function refuseKeyedPool(step: IRStep, ctx: ChainCtx): void {
+  const label = step.args[0]?.value;
+  const value = step.modulators?.[1]?.[0];
+  if (step.name !== 'group' || typeof label !== 'string' || !isNested(value)) return;
+  const body = bodyOf(value.nested, ctx.params, ctx.sideEffects);
+  const pool = body && poolingStep(body);
+  if (pool) refuseSite(ctx.collections, { label, example: `a group() value by() that reduces or folds, here ${pool.name}()` });
+}
 
 /** THE HOST STEP ALONE over its landed by() values (`landValues`): the host's own lowering of `site.step` over
  *  the joined relation, reading each landed value as a column (`scopedValue`). No body to land (a
@@ -2710,6 +2732,9 @@ export function scopedHost(
   // reasons do (`fork`/`adopt`) — what names a write in its body as the reason (`lowerChain`).
   const hostProgress: HostProgress = { steps, at, continued: false };
   const tried: Declines[] = [];
+  // …and so are the collectors a body's fork REFUSED (`refuseSite`): a route that answered means none of them is
+  // why the body declines.
+  const refusals = refusalMark(ctx.collections);
   for (const route of routes) {
     const sink = ctx.declines.fork();
     const saved = new Map(ctx.collections);
@@ -2717,6 +2742,7 @@ export function scopedHost(
     const tail = route({ ...ctx, declines: sink, siteEffects, hostBulked: bulked, hostProgress });
     if (tail) {
       ctx.declines.adopt(sink);
+      dropRefusals(ctx.collections, refusals);
       return siteEffects.length ? { ...tail, effects: [...siteEffects, ...(tail.effects ?? [])] } : tail;
     }
     restoreCollections(ctx.collections, saved);

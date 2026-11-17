@@ -306,9 +306,12 @@ const named = (modulation: Modulation | undefined): Modulation | undefined =>
  *  (`by(__.out().fold())`) is NOT collapsed: its members are the pooled child rows, which is
  *  `groupCollected`'s pool. */
 const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
-  (modulation && modulation.key.kind === 'child' && modulation.key.body.length === 1
-    && modulation.key.body[0]!.name === 'fold' && !modulation.key.body[0]!.args.length
+  (modulation && modulation.key.kind === 'child' && isBareFold(modulation.key.body)
     && modulation.order === undefined ? undefined : modulation);
+
+/** Is a value body exactly a bare `fold()` — the traverser-collect, not a pool (`bareFold`)? */
+const isBareFold = (body: readonly IRStep[]): boolean =>
+  body.length === 1 && body[0]!.name === 'fold' && !body[0]!.args.length;
 
 /**
  * Is this value-body step a REDUCING barrier — one that turns a group's pooled members into one value?
@@ -320,6 +323,12 @@ const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
 const reducesPool = (step: IRStep): boolean =>
   !isLocalScope(step) && (isReducer(step.name) || step.name === 'count' || step.name === 'fold' || step.name === 'tree'
     || ((step.name === 'group' || step.name === 'groupCount') && !step.args.some((a) => typeof a.value === 'string')));
+
+/** The step a group() value body POOLS its members at — its first reducing barrier (`by(count())`,
+ *  `by(values(k).sum())`, `by(out().fold())`), or `undefined`. The value is then one reduction per KEY
+ *  (`GroupRows.done`), never a member row. A bare `by(fold())` is the traverser-collect (`bareFold`), no pool. */
+export const poolingStep = (body: readonly IRStep[]): IRStep | undefined =>
+  (isBareFold(body) ? undefined : body.find(reducesPool));
 
 /** The non-reducing global barriers a value body can hold: the `FilteringBarrier`s (`dedup`,
  *  `range`/`limit`/`skip`/`tail`), the `CollectingBarrierStep`s (`order`, `sample`) and the supplying

@@ -61,7 +61,7 @@ import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, exactWideTotal, isLongSumClass, is
 import { raiseExpr, raiseInRow } from '../../rel/raise.ts';
 import { afterWrite, elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, mergeEFromMap, mergeVFromMap, programWrites, propertyDrop, propertyWrites, withPreChecks, type Effects, type ProgramWrites } from './write.ts';
 import { Deferral, MapScopeDeferral, mergeMaps, type MergeMaps } from '../ir/write-args.ts';
-import { Declines, effectInChild, writeInChild, writeOnTrackedPath, type ChildWrite } from '../unsupported.ts';
+import { Declines, writeInChild, writeOnTrackedPath, type ChildWrite } from '../unsupported.ts';
 import { CompileBudget } from '../../sql/kernel/budget.ts';
 import { BARE_LIST, collectionMembersOrSelf, collectionRetype, collectionValue, encounteredType, nonMapArgument, operandClass, operandForm, operandIsList, storedCollection, foldElements, foldLists, foldPaths, foldMaps, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listLiteralBlob, listRetype, listSetOp, NODE_COL, nonIterableTraverser, nonIterableTraverserMessage, nonMapArgumentMessage, nullTraverserMessage, oneMemberList, unfoldList } from './list.ts';
 import { ENTRY, constantNode, correlatedMapKey, elementHost, elementValueMap, entryHost, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapLiteralSide, mapPayload, mapPutAll, MAP_COL, mapEntriesLocal, mapRange, mapSelect, mapSide, mapSize, mapsMerged, scalarMapKey, unfoldMap } from './map.ts';
@@ -76,7 +76,7 @@ import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
 import { ADD_ALL, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
 import { keyProductive, ORDER_KEY, ORDER_RANK, orderKeyTuple, rankJoin, type RankedOrders, type RankSink } from './ranked-order.ts';
-import { collectionOf, groupedKeys, readCollection, readUnfolded, isScopedFork, registerCollection, registerGrouping, type Collections } from './collection.ts';
+import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
@@ -1458,15 +1458,9 @@ function collectionArm(
       // node, and a retained binding travels as JSON (`src/program.ts`), which fails closed on exactly
       // that. Projecting `json(gk)` at the binding is the remaining step.
       if (ctx.mutating) return { tail: null };
-      if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) {
-        // A POOLED value (`GroupRows.done` — a value `by()` that reduces or folds its body) in a connector body
-        // reduced its pool once per BODY, so it cannot key as one grouping and `registerGrouping` refuses it:
-        // said in the user's terms, naming the host it fired under. Advisory, like `keyedBody`'s.
-        const label = step.args[0]?.value;
-        if (rows.done && ctx.host && isScopedFork(ctx.collections) && typeof label === 'string')
-          ctx.declines.note(effectInChild(ctx.host, [label], 'a group() value by() that reduces or folds, such as by(count())'));
-        return { tail: null };
-      }
+      // A POOLED value (`GroupRows.done`) in a connector body is refused here, and the CONNECTOR ROW says why
+      // (`refuseKeyedPool`, `lower/scoped.ts`) — on every route, so the explanation does not depend on which ran.
+      if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, ctx.source, fresh)) return { tail: null };
       const drained = drainRaisingSite(step, ctx.collections, fresh);
       if (drained === null) return { tail: null };
       if (!drained) return 'continue';

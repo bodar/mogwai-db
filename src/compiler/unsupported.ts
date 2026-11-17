@@ -160,7 +160,8 @@ export const drawInGroupValue: DeclineReason = {
 
 /** The `effect-in-child` decline: the collection(s) a child body of `host` filled, named as the user wrote them,
  *  and a form known not to key — by default a read of the collection inside the body that fills it (`keyedBody`,
- *  `lower/scoped.ts`); a keyed `group()` the body could not register names its own (`lower.ts`). */
+ *  `lower/scoped.ts`); a keyed `group()` the body's fork refused names its own (`refuseSite`, `collection.ts`).
+ *  Raised in ONE place, `keyedBody`, whichever route found the reason. */
 export const effectInChild = (
   host: string, labels: readonly string[], example = 'read with cap()/select() inside the same child that fills it',
 ): DeclineReason => ({

@@ -234,11 +234,28 @@ describe('a write in a non-filter child body declines, naming the write, the hos
         expect(message, q).not.toContain('a write');
       }
   });
-  test('a keyed group() with a reducing value by() in a child body names the collection and why', () => {
-    const message = declined("g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')");
-    expect(message).toContain("a side effect ('x') collected inside sideEffect() is not supported in this form yet");
-    expect(message).toContain('a group() value by() that reduces or folds');
-    expect(declined("g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')", LADDER_FIRST)).toBe(message);
+  // ONE raiser (`keyedBody`) reading ONE carrier (the body's fork, `refuseSite`): the explanation is the same under
+  // every switch position, the connector alone included — it does not depend on which route reached the group().
+  for (const [q, host, pool] of [
+    ["g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')", 'sideEffect', 'count'],
+    ["g.V().local(out().group('x').by('name').by(count())).cap('x')", 'local', 'count'],
+    ["g.V().sideEffect(out().group('x').by('name').by(values('age').sum())).cap('x')", 'sideEffect', 'sum'],
+    ["g.V().optional(out().group('x').by('name').by(out().fold())).cap('x')", 'optional', 'fold'],
+    // nested: the innermost body's host is the one named
+    ["g.V().sideEffect(local(out().group('x').by('name').by(count()))).cap('x')", 'local', 'count'],
+  ] as const) {
+    test(`a keyed group() with a reducing value by() in a child body names the collection and why: ${q}`, () => {
+      const message = declined(q);
+      expect(message).toContain(`a side effect ('x') collected inside ${host}() is not supported in this form yet`);
+      expect(message).toContain(`a group() value by() that reduces or folds, here ${pool}()`);
+      expect(declined(q, LADDER_FIRST)).toBe(message);
+      expect(declined(q, CONNECTOR_ONLY)).toBe(message);
+    });
+  }
+  test('a keyed group() whose value by() is a bare fold() is not blamed on pooling', () => {
+    // the default answers it (the traverser-collect); the connector alone declines it for another reason
+    expect(declined("g.V().sideEffect(out().group('x').by('name').by(fold())).cap('x')", CONNECTOR_ONLY))
+      .not.toContain('reduces or folds');
   });
   test('a write that lowers inside its host answers, with no hint', () => {
     expect(bare(runWith(seededStore(), "g.V().has('person','name','marko').union(addV('x')).count()"))).toEqual([{ v: 1 }]);

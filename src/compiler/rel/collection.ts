@@ -174,6 +174,40 @@ export function restoreCollections(collections: Collections, saved: ReadonlyMap<
 export const pendingLabels = (fork: Collections): readonly string[] =>
   [...fork].filter(([, collection]) => collection.sites.some((site) => site.pending === fork)).map(([label]) => label);
 
+/** A collector a body could not REGISTER into its fork, and the form that refused it, in the user's terms. */
+export interface RefusedSite {
+  readonly label: string;
+  readonly example: string;
+}
+
+/**
+ * THE COLLECTORS A BODY'S FORK REFUSED — the other half of what a body that declines says it collected
+ * (`pendingLabels` is the half that registered). Identity-keyed beside the fork (`SCOPED_FORKS`), so a refusal
+ * recorded anywhere in the body — a branch arm, a nested host's route — reaches the ONE place a connector body
+ * with effects is refused (`keyedBody`, `lower/scoped.ts`), whichever route found it.
+ */
+const REFUSED = new WeakMap<Collections, RefusedSite[]>();
+
+/** Record that `fork` refused a collector (see `REFUSED`). Not a scoped fork: nothing to say, nowhere to say it. */
+export function refuseSite(fork: Collections, refused: RefusedSite): void {
+  if (!isScopedFork(fork)) return;
+  const held = REFUSED.get(fork) ?? [];
+  if (!held.some((r) => r.label === refused.label && r.example === refused.example)) held.push(refused);
+  REFUSED.set(fork, held);
+}
+
+/** The collectors `fork` refused, in recording order. */
+export const refusedSites = (fork: Collections): readonly RefusedSite[] => REFUSED.get(fork) ?? [];
+
+/** How many refusals `fork` holds — a mark `dropRefusals` returns to. */
+export const refusalMark = (fork: Collections): number => REFUSED.get(fork)?.length ?? 0;
+
+/** Forget the refusals recorded since `mark`: the site they were found under ANSWERED by another route, so they
+ *  are not why its body declined (`scopedHost`'s route transaction). */
+export function dropRefusals(fork: Collections, mark: number): void {
+  REFUSED.get(fork)?.splice(mark);
+}
+
 /** The sites a body registered into ITS fork (not an enclosing body's), each once, in registration order. */
 export function pendingSites(fork: Collections): readonly Site[] {
   const out = new Set<Site>();
