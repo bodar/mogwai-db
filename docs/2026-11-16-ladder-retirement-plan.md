@@ -327,6 +327,10 @@ value CTE's row. Lands naturally with P4 (one first-row builder) below.
 
 ### N3 — Linear pooled re-source for many keys (MAJOR — performance is semantics)
 
+⏸ **NOT BUILT in round 2: waits on owner question 5.** It is traverser-linear (N×G is what the query asks for)
+and its witnesses ignore their key. If it is built, it is one `fuse.ts` AggregateJoinTransposeRule, not a
+`pooledGroup` law.
+
 `g.V().group().by('name').by(V().count())` is 183 ms at 1k and 14,810 ms at 8k (81×): with `poolWeight` the graph
 is still crossed once per KEY. `reSourcedBody`'s own law, rest(prefix×G) = prefix×rest(G), says rest(G) is computed
 once and scaled by each key's weight; `pooledGroup` should reuse that seam instead of being a second re-source
@@ -444,6 +448,163 @@ fires and the count is 0 on the pools, delete the arm and the retry (R7's precon
 R4.2 (waits for the typed carrier), R4.5 (decide whether the "a body that MOVES is left alone" pin is semantic),
 R5.2–R5.4, R6, R7.
 
+## Next round (written 2026-11-17, after round 2)
+
+Round 2 landed N0, N1, N2+P4, N4, N6, P1, P3 (trunk 71fad22a). Nothing is parked on a branch. **N3 was not built:
+it waits on owner question 5** (below), so it is struck from the worklist until answered. Still open from round 1:
+N5, N7, N8, N9, P2, P5, P6, the existence-host list. Ordered: each prerequisite sits BEFORE what it unblocks.
+
+### M0 — Do not hoist a constant one-row `VALUES` unit into a CTE (MAJOR, regression from N2 — do first)
+
+N2's `substRelId` rule (`src/rel/walk.ts`, a2a1715f) now SHARES the scoped connector's seed row (`scoped.ts`
+`seedRow`, `(VALUES (1)) su`) between the value scalar, the vtype scalar and the presence `EXISTS`. `name`
+(`src/rel/passes/name.ts` `binds()`, ~l.89) hoists any node reached twice, so the seed becomes
+`rNN AS (SELECT su.column1 AS n FROM (VALUES (1)) su)`; `emit.ts`'s unit fold (`unit: true`, ~l.636) drops only an
+INLINE `VALUES`, so every correlated per-row subquery gets `FROM rNN su CROSS JOIN …` back — the co-routine the
+emitter comment says costs ~10% of a one-hop body. Answers unchanged, still linear, but every plain
+`map(<path>.values(k))` is slower: `g.V().map(values('name'))` 7.22 → 10.20 ms at 8k (+42%);
+`g.withPath().V().as('a').out().map(select('a').values('name'))` 137.5 → 173.1 ms at 32k (+26%, corpus plan 1143 →
+1252 bytes). Fix on the existing authority: `name` does not bind a compiler-constant one-row `VALUES` (copying it is
+free), reusing `emit.ts`'s unit classification, not a special case in `substRelId`. Pin it in
+`test/L2-sql/first-row-once.sql.test.ts`: no `(VALUES (1))` CTE and a byte bound on `g.V().map(out().values('name'))`
+(the current test checks only for duplicate `MATERIALIZED` bodies, so it cannot see this). Record correction: N2's
+"census byte-identical" holds for the census only. Corpus SQL changed in 4 of 2,395 plans (2 shrank, 2 grew +109/+11
+bytes from this hoist), so the `select.compiler` 175 → 275 re-record is not purely a stale baseline.
+
+### M1 — All-rows host over a tracked path: one shared-read crossing (substrate for M2–M4)
+
+One root cause behind several round-2 findings: when a body reads no host state, `local`/`flatMap` over a tracked
+path has no shared-read crossing. It either declines (`resource-path`) or goes to the per-host fold (N×G).
+- `flatMap` is wrongly grouped with `local`. `FlatMapStep.processNextStart` returns `this.head.split(...)`
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java`),
+  so its output path is host path + end object, the same contract as `map()`'s first-row crossing. Only `LocalStep`
+  (`…/step/branch/LocalStep.java`) emits the child's own traversers. Answers are right today (inner labels already do
+  not ride out of flatMap). But `g.V().out().flatMap(V().has('name','marko')).path()` declines `resource-path` when it
+  could cross like `map()`, and the `scoped.ts` comments cite the wrong contract.
+- `g.V().out().local(V().order().by('name').limit(1).values('name')).path().count()` runs the per-host fold (1.9 s at
+  500 vertices; it declined on trunk before). The shared read could serve it.
+Item: under `local`/`flatMap`, a body that reads no host state crosses the prefix's path unchanged with ONE shared
+read (`reSourcedBody` / `sharedEnd`). `flatMap` takes `map()`'s path contract. Fix the comments.
+
+### M2 — Make the reducing-rest cost policy consistent (after M1)
+
+`scoped.ts`'s host-state comment says an all-rows host's fold is "linear in what it returns". That is false when
+the rest ends in a barrier: `g.V().as('a').local(V().as('x').out().where(neq('a')).count()).count()` takes 52 ms at
+250 vertices and 916 ms at 1k (17.6× for 4×). The query asks for N×G (Java flows N×G too), so it is not a defect in
+itself. But the first-row decline refuses the same cross on the ground that it "would pay that whole cross for one row
+per host", so the two policies disagree. Fix the comment and make one decision; if it is not clear-cut, take it to
+the owner with both timings.
+
+### M3 — Scaling probe shapes that can see a quadratic re-source (cheap)
+
+Every `resource:` shape in `scripts/scaling-probe.ts` ends in a cheap rest (`count()`, `values()`, an indexed
+`has`), so the probe could not see the routes in M1/M2. Add `map(V().values('age').max()).path()`,
+`map(V().limit(1)).path()`, `where(V().out().has(…)).path()` and the M2 query. Note: N1 changed the existing shape
+`local(V.has.values).count` to add `.dedup()` without saying why, so its numbers are not comparable with earlier
+runs. Either revert that or record it in the probe.
+
+### M4 — Decline messages that name the user's shape (cheap, explain-don't-baffle)
+
+- `resource-path` says the path is tracked by "a path(), simplePath() or cyclicPath() around it". For
+  `g.V().local(V().simplePath().count())` and `g.V().local(V().order().by('name').limit(1).path())` the tracking is
+  INSIDE the body.
+- `keyedBody`'s effect refusal (`scoped.ts`) is still a silent `null`, so `g.V().local(addV('x'))` gets the generic
+  "no lowering covers". Give it a reason at that site; the reason's wording follows `writeInFilter`.
+- `g.V().group().by(label).by(out().sample(1))` (and `.count()`) declines generically. Say that the problem is a
+  random draw inside a group value.
+- `CopiedDraw` on a `choose()` predicate (`g.V().choose(out().sample(1).hasLabel('person'), constant(1),
+  constant(2))`) suggests `local(out().sample(1)).union(…)`, which does not fit a predicate.
+- P1's `write-in-filter` replaced the generic message for EVERY graph write in a filter body
+  (`where(property(..))`, `not(drop())`, `where(addE(..))`, `where(mergeV(..))`), not only label writes. Say so in
+  `test/compiler/existence-prefix.exec.test.ts`.
+
+### M5 — Refine N6's FIRES count before N7 (cheap; then N7)
+
+`fires` counts four ordinary `choose()` queries whose first order throws `CopiedDraw` and whose second order ALSO
+declines (`g.V().choose(out().sample(1).hasLabel('person'), constant(1), constant(2))`, the no-else form,
+`…count().is(gt(0))…`, `g.V().hasLabel('person').choose(__.outE().sample(1).inV().hasLabel('software'),
+values('name'))`). N7 cannot change them, but a corpus pin that adds one would turn the ratchet red and block N7 for
+no reason. Count only a fire whose second order ANSWERS (that is the one N7 risks), and add a POSITIVE witness so the
+counter cannot go silently vacuous (`g.V().choose(out().sample(1).values('name'), identity(), out())` fires under
+`NO_RETRY` today). State in N7 that "fires = 0" is measured over the L1/L6/H pools, not proved in general.
+Unblocks N7.
+
+### M6 — Small cleanups from review (cheap, concrete)
+
+- Duplicate `encounterOf`: `src/compiler/rel/build.ts` ~l.980 copies the export in `src/compiler/rel/lower/chain.ts`
+  ~l.104. Keep the one in `build.ts` (lower layer).
+- `decorrelate.ts` doc comment (P3) says the `owns` default "made … pick again for every row — a measured wrong
+  answer". At the parent every production caller already passed `mine.owns`, so it was a trap for new callers, not a
+  live bug. Reword it.
+- N4 changed plans for a PARAMETER `limit`/`skip` in a `by()` body (`group().by(label).by(limit($n).count())`):
+  the domain `LEFT JOIN` is now always kept, because `rowBounds` refuses a parameter. That is an improvement: the old
+  plan shape depended on the parameter's value. Pin it with one L2 test.
+- N4 missed optimisation (predates N4): `by(identity().count())` keeps the domain `LEFT JOIN` because the pooled
+  filter carries a residual `WHERE (1 = 1)`, so `keyProjected`'s `rest` is non-empty. Drop a provably-true conjunct
+  in `keyProjected`. Also check `by(order().by('name').count())` and `by(V().count())`.
+- `test/compiler/resource-general-cross.exec.test.ts`: "two read labels beside a host label" and "a read label
+  beside a host label of another name keeps both" check only row counts. Assert the maps (e.g.
+  `select('x','y').by('name')` → josh/lop, josh/ripple).
+- N0: a draw that both modes answer now goes to `random` and is not checked at all. Keep a weak invariant over
+  `random`: a count bound, or each answer a sub-multiset of the un-sampled query.
+- N6's `familyOf` also lets a host-owned site outrank an ENCLOSING family host. That moved 4 L1 queries
+  (`local`/`map(choose(values('age')).option(…))`, corpus.txt 515/516/2077/2078) from per-traverser to `other`.
+  Connector-only declines them (the same `choose` at the top level answers), so R4's family count no longer shows
+  that dependency. L3 would still catch a lost answer. Note this in R4's done-when. The body itself goes in N8.
+
+### N8 additions (depth gaps, clean declines today; a body or host row, never a rung)
+
+- N1 leftovers: `g.V().local(V().as('x').out().select('x')).path()`, `g.V().project('n','c').by('name').by(V().count()).path()`,
+  `g.V().out().map(V().fold()).path()`, `g.V().repeat(out().V().has('name','lop')).times(2).path()`, corpus
+  `CyclicPath.feature:74`; first-row bodies `g.V().out().map(V().values('name').fold()).path()`,
+  `map(V().has('name','zzz').fold()).path()`, `project('a').by(V().values('age').sum()).path()`,
+  `choose(V().count().is(6),constant('six'),constant('no')).path()`; `local(V().coalesce(out('knows'),constant('none')))`.
+- `g.V().map(__.choose(label()).option('person', __.out().count()).option('software', constant(0)))` and the four
+  `local`/`map(choose(values('age')).option(…))` corpus queries: an option-map `choose` body under a host.
+- Out of plan, for `docs/outstanding-work.md`: `g.V().coin(1.0).count()` / `coin(0.0).count()` decline, while
+  `Coin.feature` expects every vertex and zero vertices.
+
+### Next round — reuse sweep (round 2's proposals)
+
+- **P7 — One col-retargeting authority, `substRelId`** (`src/rel/walk.ts`). Since N2 it keeps untouched subplans
+  shared, so three hand-rolled copies can go. Answers unchanged; plans can only share more. Do this after M0, so the
+  extra sharing does not re-trigger the unit hoist.
+  - `src/rel/passes/semijoin.ts` `retarget` (~l.390): one memo per nested subplan, and it un-shares the DAG (the N2
+    root cause).
+  - `src/compiler/rel/build.ts` `reread` (~l.1310): its pre-scan exists only because `substRelId` used to rebuild
+    every subplan, which no longer holds.
+  - `src/compiler/rel/write.ts` `reScope` (~l.4800): it stops at subplans, so a correlated subquery over `incoming`
+    would keep naming the old scope (a latent unresolved column).
+- **P8 — Route the remaining hand-rolled `sort`+`LIMIT 1` first-row picks through `firstRow`.** The sites:
+  - `scoped.ts` priority-arm `firstOf` (~l.570) and `first` (~l.585)
+  - `reduction.ts` ~l.957 (min/max winner)
+  - `list.ts` ~l.777
+  - `collection.ts` `lastMember` (~l.687)
+  - `build.ts` `firstOf` (~l.895)
+  Each keeps its own order terms. That is about 25 lines, and P4's "one first-row builder" becomes true.
+- **P9 — Route the first-per-partition `ROW_NUMBER … = 1` windows through `perOriginWindow`.** These are exact
+  matches:
+  - `write.ts` `rankedFirst` (~l.1617)
+  - `map.ts` `dedupGroupMembers` (~l.1196)
+  `collection.ts` `firstOccurrences` (keeps the rank column) and `slice.ts` `dedupOnTyped` (rewrites bulk) need a
+  small option, or stay as they are. Have `perOriginWindow` emit `= 1` for a slice of one, or re-record census and
+  sql-hygiene for a text-only change.
+- **P10 — One filter-host set** (absorbs round 1's "one existence-host list"). The same five names are spelled
+  separately in:
+  - `scoped.ts` `EXISTENCE_HOSTS` (~l.2049)
+  - P1's `unsupported.ts` `FILTER_HOSTS` (~l.83, used by `write.ts` ~l.1119)
+  - an inline list in `ir/passes.ts` ~l.188
+  - `ir/strategies.ts` `EXISTENCE_FILTER_HOSTS` (~l.187), a near-twin
+  - `ir/bulk.ts` `COLLAPSE_FILTERS` (~l.192), a superset
+  - `test/L5-properties/attribution.ts` ~l.211
+  Export one set and import it everywhere. If they drift, a new filter host declines generically rather than with
+  `writeInFilter`.
+- **P11 — `writesOrCollects` in `ir/step.ts`** (= `MUTATING_STEPS` ∪ `collectsSideEffect`). `stepHasEffect` becomes
+  `writesOrCollects || OPAQUE_OR_RAISING`, and `strategies.ts` `carriesIterationState` (~l.1505) asks
+  `writesOrCollects`. That leaves one place to add a new write or collector step. Also check `reduction.ts` ~l.1579:
+  its evaluable-once prefix test asks only `collectsSideEffect`. Confirm a write there is refused upstream, or make it
+  ask `writesOrCollects`.
+
 ## Decisions for the owner
 
 1. **Per kept route, at its step:** replace or keep. Settled in principle (considered replacement, not forced);
@@ -457,3 +618,9 @@ R5.2–R5.4, R6, R7.
 4. **(round 1, R0 builder, verbatim:)** "The R6 split of the deferred hosts is my judgement and needs the owner's
    confirmation." (27 `ladder` / 21 `host-owned`; `repeat` until/emit set `host-owned`, `sideEffect` set `ladder`,
    each with a comment in `test/L9-connector/deferred-hosts.ts`.)
+5. **(round 2, N3 — not built, verbatim:)** "N3's 81× is measured per VERTEX, but the queries semantically produce
+   N×G traversers (the reference does the same N×G work, and poolWeight already does less), so by the 'linear in
+   traversers flowing' rule it is linear. Its witnesses are bodies that ignore their key (group().by(k).by(V().count())).
+   Should vertex-quadratic but traverser-linear cost be in the performance rule's scope? If yes, build it as one fuse.ts
+   AggregateJoinTransposeRule (COUNT/SUM over a cross join), not a pooledGroup law; if no, strike N3 from the plan."
+   (M2's reducing-rest policy is the same question in another host. Answer them together.)
