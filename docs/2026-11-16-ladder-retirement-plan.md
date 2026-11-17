@@ -1,6 +1,7 @@
 # Retiring the correlated-child ladder
 
-_Status: PROPOSED, 2026-11-16. Not started. No deadline: each step lands on its own when it is ready, and
+_Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; the
+next round starts at "Next round" below. No deadline: each step lands on its own when it is ready, and
 any step may stop and be reconsidered._
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is
@@ -23,6 +24,9 @@ measurements this plan starts from). Direction: root `CLAUDE.md` locked decision
 - Ladder-only answers over the L1/L6/L9 pools: **66** (from 119 before cc3d) — the wide instrument
   (`mise run ladder-reach`, ~29k traversals). The CI-gated subset (L1, L6, the sweep's host queries) is **30**
   (existence 7, per-traverser 6, group 17), plus 1 `bothChildOrders` rescue. Ladder files: 328 `return null`.
+  _After round 1 (baseline `test/L9-connector/ladder-reach-baseline.json`):_ **23** — existence 0, per-traverser
+  6 (L1), group 17 (L1 14, L6 3); the recorded rescue count still reads 1 and `bothChildOrders`' `CopiedDraw` arm
+  is still in `src/compiler/rel/spine.ts`. `LADDER_FILES` is `lower/per-traverser.ts` alone (12 `return null`).
 
 ## What "retired" means — the end state
 
@@ -260,9 +264,152 @@ acceptable end state, not a failure.
 
 R0 adds the one guard still missing: the count of ladder-only answers may only fall.
 
+## Next round (written 2026-11-17, after round 1)
+
+Ordered: each prerequisite sits BEFORE the item it unblocks. Every round-1 item landed; nothing is parked on a
+branch.
+
+### N0 — Trunk CI is RED on a nondeterministic witness (FIRST — fix before anything else lands)
+
+GitHub CI for 760b3d5f (R2b+R4.4) and c10c57aa (R1, trunk tip) fails in `test/L9-connector/ladder-reach.test.ts`
+("a draw a later step filters, under an existence host: CLOSED (R2b)"): `differ` lists
+`g.V().where(out().sample(1).has('age')).values('name')`. The query DRAWS, so the default and connector-only
+multisets legitimately differ run to run (marko passes with probability 2/3 per run); local `mise run ci` passed by
+chance. Fix the witness, not the engine: assert `ladderOnly: 0` and both modes answer, and make `differ` skip a
+query whose answer is nondeterministic (the same `orderIndeterminacy`/draw fact the L5 oracle uses), or pick a
+witness whose filter makes the draw's outcome deterministic.
+(c0c204bf, R5.1, was also red, on an unrelated browser test — `browser-graph-manager.test.ts` "a graph re-opened right
+after its owner Worker died", `reopened = {vertexCount:0}`; later shas passed it, so it reads as a flake worth a look.)
+
+### N1 — Fix R4.3's coverage regression (MAJOR — breaks end-state rule 3, "no query that answers today declines")
+
+`reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) returns `null` (hard decline) where it should return
+`undefined` (fall through to the fold's GraphStep cross join, `reSource` in `lower/movement.ts`, which handles a
+path) in two cases: (a) the prefix carries a channel outside alias/sack/loops/encounter — a `path` or a
+`simplePath` host; (b) the rooted read binds its own alias. `connectorOwns` also removed the ladder fallback, so
+these now raise "no lowering covers" in DEFAULT mode where the parent answered (parent answer in brackets):
+`g.V().map(V().count()).path()` [6 paths], `g.V().out().map(V().count()).path()`,
+`g.V().repeat(out()).times(1).map(V().count()).path().count()` [6], `g.V().both().simplePath().map(V().count()).count()`
+[12], `g.V().local(V().as('x').out().select('x')).count()` [36], `g.V().local(V().as('x').out().where(neq('x'))).count()`
+[36], `g.V().map(V().has('name','marko').as('m').out().select('m').values('name'))` [marko ×6],
+`g.V().local(V().values('name').as('n').select('n')).count()` [36], `g.V().as('a').local(V().as('b').select('a','b')).count()`
+[36], `g.V().local(V().has('name','lop').as('x')).select('x').count()` [6]. Fix: return `undefined` for those
+shapes (the fold answers them), not a ladder rung. Add each as a witness; CI stayed green only because no corpus
+scenario uses them.
+
+### N2 — One fenced first-row read in `reSourcedBody` (MAJOR — compute-once rule)
+
+The first-row read is referenced twice (value and presence `EXISTS`) and emitted as two byte-identical
+`MATERIALIZED` CTEs, so the graph scan + sort runs twice: `g.V().map(V().values('name'))` 757 → 1430 bytes,
+`map(V().order().by('name').values('name'))` 1367 → 2779. Give both uses one fenced node, or read presence off the
+value CTE's row. Lands naturally with P4 (one first-row builder) below.
+
+### N3 — Linear pooled re-source for many keys (MAJOR — performance is semantics)
+
+`g.V().group().by('name').by(V().count())` is 183 ms at 1k and 14,810 ms at 8k (81×): with `poolWeight` the graph
+is still crossed once per KEY. `reSourcedBody`'s own law, rest(prefix×G) = prefix×rest(G), says rest(G) is computed
+once and scaled by each key's weight; `pooledGroup` should reuse that seam instead of being a second re-source
+authority. Measure with the scaling probe (≈8× is the bar).
+
+### N4 — `covering` from `bounds.ts`, not a second copy (MAJOR — one authority)
+
+R5.1's `Out.covering` in `src/rel/decorrelate.ts` re-implements `rowBounds().min` rule by rule (limit, filter,
+project/sort/distinct/window, LEFT JOIN, union, recursive, HAVING); the only fact `bounds.ts` lacks is "the
+key-projection filter yields ≥1 row per key under `covers`". Compute covering as `rowBounds` over the correlated plan
+with the eliminated filter passed in as a bounds override (the `ref.bounds` style). No answer change expected. Add
+the L2 assertion tying `keyProjected` to the exact `member.term IS domain.term` filter `pooledGroup` builds, so a
+future rewrite of that filter cannot silently lose the elimination.
+
+### N5 — Connector's per-traverser min/max lowering (MAJOR — a named margin until fixed)
+
+R4.1 opened the arm meet, so `g.V().union(map(outE().values('weight').min()), constant(0))` now takes the connector
+in default mode: 5.6/45.0 ms → 24.9/196.2 ms (1k/8k, ~4.3×, still linear). The cost is the connector's existing
+window/materialize argmax for a correlated min/max (`g.V().map(outE().values('weight').min())` is 25.0 vs 5.7 ms on
+the ladder at 1k). `union(local(max), …)` shapes are ~1.3×. Fix it in the body's lowering (a plain per-key
+`MIN`/`MAX` aggregate where only the value is read), not with a ladder rung. Until then it is a margin — see
+owner question 3.
+
+### N6 — R0 ratchet follow-ups (cheap, concrete)
+
+- Fail (or at least print) when `fresh` is non-empty in `test/L9-connector/connector-closure.test.ts`: the ratchet
+  gates COUNTS, so a swap within one pool×family cell (one query closes, another regresses) lands silently.
+- `familyOf` (`test/L9-connector/ladder-reach.ts`): a family host under a `host-owned` `DEFERRED_HOSTS` position
+  (e.g. the `map()` inside the Grateful Dead `match()` scenario) is charged to `other`, using `Deferred.scope`.
+- R2's done-when: count retry FIRES (first order declines), not only rescues, or reword it. Re-record the baseline
+  if the rescue count has fallen since R2b.
+
+### N7 — Delete the `CopiedDraw` retry arm, then `bothChildOrders` (after N6)
+
+After R2a and R2b, `bothChildOrders` (`src/compiler/rel/spine.ts`) retries only on `CopiedDraw`. Once N6 counts
+fires and the count is 0 on the pools, delete the arm and the retry (R7's precondition "R2's retry count is 0").
+
+### N8 — Depth gaps (clean declines today; each is a body or a host row, never a rung)
+
+- `where('a', P('b'))` with TWO by() entries where either is a traversal (`.by(out().count()).by(in().count())`,
+  `.by('age').by(__.values('age'))`): `aliasCompare` answers both bodies; the host's own alias-where lowering
+  declines the two-entry list. Also a landed fold body, `.where('a', eq('b')).by(out().values('name').fold())`.
+- A pooled `group` inside a `choose` arm and a global `group` inside a `union` arm
+  (`g.V().union(__.group().by(T.label).by(__.count()), __.count())`).
+- A draw in a `group()` value-by (`group().by(label).by(sample(2).fold())`, corpus
+  `g_withStrategiesXSeedStrategyX_V_group_byXlabelX_byXbothE_weight_order_sampleX2X_foldXunfold`): `pooledGroup`
+  refuses a nondeterministic body; R2b's per-scope keying is the substrate.
+- Weighted `sample(n).by(k)` anywhere (corpus `g_V_localXoutE_sampleX1X_byXweightXX`), `local(out().coin(p))`,
+  `local(bothE().sample(1).otherV())`.
+- `match(__.as('a').local(out().count()).as('b'))`: `local` passes on the reducer's new traverser without the `a`
+  binding.
+
+### N9 — Pre-existing, outside this plan (move to `docs/outstanding-work.md`)
+
+- Reading a collected side effect in a per-traverser body is super-linear, no draw involved:
+  `g.V().out().aggregate('x').V().limit(5).local(select('x').unfold()).dedup().count()` 1.5 s → 104 s (68×).
+- `g.V().fold().as('x').unfold().local(select('x').unfold().sample(1))` leaks a bare `Error: database or disk is
+  full` at 1k vertices (a data-size failure AND a bare Error reaching the user).
+- `local(repeat(both()).times(k).dedup())` has no per-iteration bulk collapse inside a host (degree^k); R2a made
+  k ≥ 64 reachable. Collapse-authority residue, `outstanding-work.md` §3.
+- R2a docs: `docs/feature-support-matrix.md` row "Long bounded repeat inside a per-traverser host" still says
+  times(63); `emit().times(64)` answers on Bun but declines on a DO (≈120 KB statement) — say so; and
+  `host-unroll-width.exec.test.ts` wants a multiplicity witness (ring with a doubled edge, walks multiply 2^k).
+
+### Reuse sweep (proposals from round 1's reviewers)
+
+- **P1 — One effect vocabulary (fixes a measured WRONG ANSWER; do first).** `productivity.ts` `isImpure`'s private
+  `SIDE_EFFECTING` list misses `addLabel`/`dropLabel`/`dropLabels`, keyed `tree('x')`, `call`/`io`/`fail`, so
+  `g.V().where(__.addLabel('x').count())` is deleted by `isAlwaysProductiveFilterNoOp` and the write never happens
+  (then `hasLabel('x').count()` is 0, not 6). Reuse `dropEffectFreeSideEffect`'s predicate (`MUTATING_STEPS` +
+  `collectsSideEffect` + `OPAQUE_OR_RAISING`) as one export from `ir/step.ts`, keeping `sack(op)` and `mayRaise`.
+- **P2 — One productivity rule (after P1).** Build `alwaysProduces`/`bodyAlwaysProduces` and coalesce's
+  `alwaysFires` on the `existencePrefix` walk (a global seeded terminal cuts to `[]`; `isStreamIdentity` never
+  empties; purity a separate gate), and fold `isAlwaysProductiveFilterNoOp` into `trimExistenceSuffix`.
+- **P3 — Make `decorrelate`'s `owns` mandatory.** One keyed-body helper (`owning` + lower + effects + reframe +
+  `decorrelate(…, mine.owns)`) for `scopedBody`/`rootedBody`/`pooledGroup`; the `() => true` default reintroduces
+  the R2b bug for a fourth caller. Also one `ownDraws`/`draws` walker in `src/rel/copies.ts`.
+- **P4 — One first-row builder** that returns the relation itself when `atMostOneRow` (replacing the hand-rolled
+  sort+LIMIT 1 / `ROW_NUMBER` forms in `reSourcedBody`, the scalar first-row, `rowsKeyedBy`, `build.ts`
+  `firstRootedColumn`); the short-circuit lives in `perOriginWindow`. Carries N2.
+- **P5 — `typeColumnOf(framing)`** in `framing.ts`: the one "which column holds a scalar's per-row type (`vt` vs
+  `vtype`)" authority for the six sites that re-derive it; variant/merge admission becomes
+  `scalarArmType(arm) && !reducedGlobally`.
+- **P6 — Test harness:** one `sameAnswer(q, a, b)` + `totalBulk` + `storeFor(q, shared, mint)` in
+  `test/support/multiset.ts`, replacing four hand-kept §17 unordered-window comparisons (L5 oracle, L5
+  host-closure, L7 census, L9 ladder-reach).
+- Smaller: one existence-host list (`EXISTENCE_HOSTS` in `scoped.ts`, `EXISTENCE_FILTER_HOSTS` in
+  `strategies.ts`, the Pass's `applies` in `passes.ts`); `rootedBody` shares `scopedBody`'s second half.
+
+### Still open from the original steps (unchanged)
+
+R4.2 (waits for the typed carrier), R4.5 (decide whether the "a body that MOVES is left alone" pin is semantic),
+R5.2–R5.4, R6, R7.
+
 ## Decisions for the owner
 
 1. **Per kept route, at its step:** replace or keep. Settled in principle (considered replacement, not forced);
    each call is made with that step's measurements in hand. (`group` at R5 is the first likely "keep".)
 2. **Scope of "ladder" vs "host-owned"** (R0's classification). Should `repeat` until/emit's own condition
    lowering stay as it is?
+3. **(round 1, R5.1 builder, verbatim:)** "It still misses the 1.2× bar on two witnesses: group().by(label).by(count())
+   went from 1.95× to 1.40× and group().by('name').by(tail()) from 1.37× to 1.30×. Those numbers go back to the owner."
+   Accept these as named margins for R5's step-4 delete, or require more speed work first? Same question for N5's
+   per-traverser min/max margin (~4.3× on `union(map(<min/max>), constant(0))` until the connector's argmax is fixed).
+4. **(round 1, R0 builder, verbatim:)** "The R6 split of the deferred hosts is my judgement and needs the owner's
+   confirmation." (27 `ladder` / 21 `host-owned`; `repeat` until/emit set `host-owned`, `sideEffect` set `ladder`,
+   each with a comment in `test/L9-connector/deferred-hosts.ts`.)
