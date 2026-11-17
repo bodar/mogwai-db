@@ -1269,6 +1269,23 @@ synthetic depth-4 nest 7.1 → 26.5 s. Not data-dependent. **Item:** memoise the
 reuse the trial's tail when it says re-source, so the cost fact adds no second lowering per level. Also fork
 `ctx.declines` (and roll back `budget.noteUnroll`) around the trial, so a thrown-away trial cannot leave a reason.
 
+✅ **LANDED (d4aebac4).** `landValues` (`src/compiler/rel/lower/scoped.ts`) runs the `correlatedReSources` trial only
+when the body names a `V()`/`E()` at any depth (`reSource`, `movement.ts`, is the re-source cross's one producer);
+where the trial says yes its tail IS the correlated read, never lowered twice; a "no" restores collections, site
+effects, the unroll note (`CompileBudget.restoreUnroll`) and its decline reasons (forked sink). Depth 1/2/3 witness
+48/283/1921 → 40/152/679 ms; no baseline moved.
+
+**Remains:** the reviewer's target ("depth 2 compile time no more than about 2× depth 1") is not met: it is 3.8×. The
+trial is no longer the cause; other repeated lowerings are, and they are outside this item's seam. Counts of
+`landValues` calls at depths 1/2/3 are 1/3/13; with `lowerBody`'s retry switched off they are 1/2/5.
+- `lowerBody` (`scoped.ts`) lowers an order='read' body once unpositioned, then lowers it again from a positioned seed
+  when the result may have several rows and carries no position. That doubles the work at each 'read' level.
+- The remaining growth comes from host routes that try one lowering and then fall back to another, such as `local`'s
+  correlated route followed by the keyed route.
+
+Follow-up item: decide `positioned` before lowering instead of retrying. That would change some plans, so it needs a
+census and sql-hygiene review.
+
 ### T7 — S1 remainders (after P16–P18; shared root with them)
 
 - **Arg-min/arg-max keyed pick for a min/max body.** S1's witnesses 1–2 keep two scalar reads (value, type tag),
