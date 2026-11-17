@@ -225,12 +225,11 @@ describe('a write in any correlated child value declines — never `RelIR: Ref �
 });
 
 describe('every child re-root hands its host labels in as enclosing', () => {
-  // A choose() condition and a repeat() until()/emit() predicate re-root at the subject row with no alias
-  // channel, exactly as a correlated value does; a scope read of the chain's label declines there too.
+  // A union() arm that re-roots at the chain's label inside a choose() condition or a repeat() until()/emit()
+  // predicate still declines, cleanly — never a wrong count.
   test.each([
     "g.V().as('a').out('knows').choose(union(select('a'), identity()).count().is(2), constant('y'), constant('n'))",
     "g.V().as('a').out('knows').repeat(out()).until(union(select('a'), identity()).count().is(2))",
-    "g.V().as('a').out('knows').repeat(out()).until(local(select('a')).count().is(1))",
     "g.V().as('a').out('knows').until(union(select('a'), identity()).count().is(2)).repeat(out())",
     "g.V().as('a').out('knows').repeat(out()).emit(union(select('a'), identity()).count().is(2))",
   ])('%s', (q) => declines(q));
@@ -241,6 +240,15 @@ describe('every child re-root hands its host labels in as enclosing', () => {
     "g.V().as('a').out('knows').choose(local(select('a')).count().is(1), constant('y'), constant('n'))",
     "g.V().as('a').out('knows').choose(flatMap(select('a')).count().is(1), constant('y'), constant('n'))",
   ])('a scoped condition reads the host label: %s', async (q) => expect(await framed(q)).toEqual(['y', 'y']));
+
+  // A WALK condition is handed the walk's labels (`src/compiler/rel/walk.ts`), and the walk row carries them, so
+  // a label read through a nested local() answers: marko, once — josh's walk stops at its first hop.
+  test.each([
+    ["g.V().as('a').out('knows').repeat(out()).until(local(select('a')).count().is(1)).values('name')", ['lop', 'ripple']],
+    ["g.V().as('a').out('knows').repeat(out()).emit(local(select('a')).has('age',29)).values('name')", ['lop', 'ripple']],
+    ["g.V().as('a').out('knows').repeat(out()).until(local(select('a')).count().is(0)).values('name')", []],
+  ] as const)('a walk condition reads the host label: %s', async (q, expected) =>
+    expect(bagOf(await framed(q))).toEqual(bagOf([...expected])));
 
   test('a condition that reads no label still answers', async () => {
     expect(await framed("g.V().as('a').out('knows').choose(has('age'), constant('y'), constant('n'))")).toEqual(['y', 'y']);

@@ -179,6 +179,11 @@ export function bindAliases(
   for (const label of labels as readonly string[]) {
     const existing = next.get(label);
     const column = existing?.col ?? `a${next.size}`;
+    // A NEW label's column must not already be carried. It can only be where the map handed over does not name
+    // every alias channel the relation carries — a caller that dropped its labels (a condition asked without
+    // them). Minting past the column would bind the label afresh where it may be a REBIND of the one that column
+    // holds (its history lost), so it declines rather than guess, and never reaches `withChannel`'s internal throw.
+    if (!existing && channels.some((channel) => channel.col === column)) return null;
     const binding: AliasEntry = {
       col: column,
       shapes: new Set([shape]),

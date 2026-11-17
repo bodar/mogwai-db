@@ -76,6 +76,10 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     ["g.V().repeat(out()).until(hasLabel('software')).emit(coalesce(in('created').has('age',gt(30)),out('nope'))).count()", 5460],
     ["g.V().until(hasLabel('software')).repeat(out()).emit(coalesce(in('created').has('age',gt(30)),out('nope'))).count()", 10636],
     ["g.V().emit(local(in().limit(1))).repeat(out()).until(hasLabel('software')).count()", 8860],
+    // The condition is handed the walk's labels: an outer label beside one the condition binds, and an outer label
+    // the condition reads (which keys its states by that label's history, still linear).
+    ["g.V().as('a').repeat(out()).until(hasLabel('software')).emit(as('b').in().where(neq('b'))).count()", 7410],
+    ["g.V().as('s').where(repeat(out()).until(hasLabel('software')).emit(as('x').where('s',neq('x')).in('created'))).count()", 780],
   ] as const) {
     test(q, () => {
       expect(count(small, q)).toBe(atSmall);

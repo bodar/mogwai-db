@@ -217,7 +217,7 @@ export function repeatWalk(
       exprs: [['id', col(rows.id, 'id')], ...stateChannels.map((channel) => [channel.col, col(rows.id, channel.col)] as const)],
     });
     const states = make.distinct({ id: fresh('wsd'), input: keys, channels: stateChannels, type: stateType });
-    const tested = child.predicate(body, subject(states), false);
+    const tested = child.predicate(body, subject(states), false, aliases);
     if (!tested) return null;
     // FENCED (`AS MATERIALIZED`): the passing states are ONE relation computed once. Unfenced, SQLite flattens
     // the condition into the semi-join's probe and asks it again per walk row — the quadratic form this replaces.
@@ -230,8 +230,14 @@ export function repeatWalk(
       on: stateType.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name))).reduce((all, one) => and(all, one)),
     });
   };
+  // EVERY CONDITION IS HANDED THE WALK'S LABELS (`aliases`): a condition traverser is a split of the walk's and
+  // carries its path (`B_O_S_SE_SL_Traverser.split`,
+  // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java),
+  // so `where('a', …)` inside it reads the outer `a`, and a label it binds mints past the columns the walk row
+  // already carries. Each subject below carries the walk's channels (or the state's subset, which `liveAliases`
+  // prunes the map to), so the map names exactly the alias columns its row holds.
   /** The `until` predicate asked of `rel`'s row — `null` where it does not lower. */
-  const tests = (rel: Rel): Expr | null => predicate ? child.predicate(predicate, subject(rel), false) ?? null : null;
+  const tests = (rel: Rel): Expr | null => predicate ? child.predicate(predicate, subject(rel), false, aliases) ?? null : null;
   /** The `until` exit condition at a walk row — its `EXIT` column where `landed`, else the test asked of the
    *  row; `null` where the predicate does not lower, `undefined` where there is no `until` at all and the walk
    *  therefore never exits early. */
@@ -296,7 +302,7 @@ export function repeatWalk(
    */
   const asked = (steps: readonly IRStep[], rel: Rel): Expr | null => {
     const view = traverserView(rel);
-    const tested = child.predicate(steps, subject(view), false);
+    const tested = child.predicate(steps, subject(view), false, aliases);
     if (!tested) return null;
     let held = false;
     forEachExpr(tested, (node) => {
