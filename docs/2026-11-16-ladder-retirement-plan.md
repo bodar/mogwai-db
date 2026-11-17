@@ -271,6 +271,12 @@ branch.
 
 ### N0 — Trunk CI is RED on a nondeterministic witness (FIRST — fix before anything else lands)
 
+✅ **LANDED (4c213aa8).** `reach` (`test/L9-connector/ladder-reach.ts`) consults `isNondeterministic` — the
+authority the census and L5 share — so a draw counts in its pool and can still be ladder-only, but is listed in
+`random`, never compared in `differ`; the by-value per-scope-draw witness is now
+`g.V().where(out('knows').sample(1).has('age'))`, whose outcome is deterministic ([marko] in both modes). No
+baseline moved. Remains: nothing (the browser-graph-manager flake noted below is a separate observation).
+
 GitHub CI for 760b3d5f (R2b+R4.4) and c10c57aa (R1, trunk tip) fails in `test/L9-connector/ladder-reach.test.ts`
 ("a draw a later step filters, under an existence host: CLOSED (R2b)"): `differ` lists
 `g.V().where(out().sample(1).has('age')).values('name')`. The query DRAWS, so the default and connector-only
