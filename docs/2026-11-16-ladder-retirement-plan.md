@@ -361,6 +361,13 @@ the ladder at 1k). `union(local(max), …)` shapes are ~1.3×. Fix it in the bod
 `MIN`/`MAX` aggregate where only the value is read), not with a ladder rung. Until then it is a margin — see
 owner question 3.
 
+✅ **LANDED (f31ec6bb).** The one global min/max reducer (`src/compiler/rel/lower.ts`) is now a scalar `Aggregate`
+of `arg_min`/`arg_max` (Calcite's ARG_MIN; `AggFn` in `src/rel/expr.ts`, emitted as SQLite's bare-column MIN/MAX)
+plus a row count and a `count > 0` Filter — no window, no materialize — so a scoped body is keyed by
+`decorrelate.ts`'s existing Aggregate rule; the `correlatedReduce` min/max ladder arm is deleted. Per-host min/max is
+3–5× faster and linear (`union(map(min),constant)` 5.1/39.1 ms at 1k/8k, was 24.4/191.0). sql-hygiene bytes moved
+for max/min/select (spelling only); census unchanged. Remains: nothing.
+
 ### N6 — R0 ratchet follow-ups (cheap, concrete)
 
 ✅ **LANDED (1c2b861f).** The closure ratchet is held per QUERY (`test/L9-connector/closure-ratchet.ts`
