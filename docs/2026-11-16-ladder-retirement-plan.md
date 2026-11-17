@@ -713,6 +713,17 @@ Unblocks N7.
   by name. Repeat.feature `g_V_emitXhasLabelXpersonXX_repeatXout_order_byXnameXX_timesX2X_valuesXnameX` now passes
   (L3 2052 → 2053); emit shapes in the scaling probe, ~8.5–9× from 1k to 8k. Remains: nothing for the bounded
   item. (The "then MEASURE the unbounded condition in correlated form" clause was not part of this landing.)
+  ✅ **LANDED (ccfe92a4, 30568349, 5ca1aef2) — the unbounded half.** An unbounded `repeat`'s `emit`/`until`
+  condition led by a non-movement step (`coalesce`/`local`/`union`/…) lowers as the connector's correlated
+  existence probe inside the recursive term (`src/compiler/rel/lower/scoped.ts` + `src/rel/decorrelate.ts`;
+  `test/L4-addendum/repeat-condition-any-head.feature`); an emit condition is asked once per distinct walk state, and
+  what SQLite genuinely refuses in a recursive term stays declined with that limit as its recorded reason. Remains —
+  both recorded in `docs/outstanding-work.md` §1b: (1) **walk-until-hub** — the movement-head `until` that filters a
+  neighbourhood is 22.8× (already on trunk); fixing it needs a per-distinct-element evaluation inside the recursion
+  (e.g. a reachability pre-pass), or an owner decision to decline it. (2) **scope-free-subterm** — a decorrelator rule
+  leaving a scope-independent membership subterm unkeyed; until then a filtering walk condition under
+  `where`/`local`/`map` is 18–21× at a hub, as are the equivalent nested `where()` bodies on trunk. Caveat: the
+  per-state semi-join relies on SQLite's automatic index (same caveat as setop-autoindex-do); unchecked on DO.
 - **Q3 — margins.** (a) ACCEPT the `group` margins (`by(label).by(count())` 1.40×, `by('name').by(tail())` 1.30×) as
   named margins; R5 step 4 deletes the route. Default users already run the connector, so the delete slows no one.
   QUEUE (not a gate) a decorrelation rule that closes the remaining join-then-GROUP BY gap. (b) N5 is a FIX, not a
