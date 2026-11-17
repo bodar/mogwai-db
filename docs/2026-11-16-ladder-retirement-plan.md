@@ -1,7 +1,8 @@
 # Retiring the correlated-child ladder
 
-_Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; the
-next round starts at "Next round" below. No deadline: each step lands on its own when it is ready, and
+_Status: IN PROGRESS. Round 1 (2026-11-17) landed R0, R1, R2a, R2b, R3, R4.1, R4.3, R4.4 and R5.1; round 2
+landed N0, N1, N2+P4, N4, N6, P1, P3; round 3 landed M0, M1 (+M3), M4, N7 (+M5), P7, P10. The next round starts at
+"Next round (written 2026-11-17, after round 3)" at the end. No deadline: each step lands on its own when it is ready, and
 any step may stop and be reconsidered._
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is
@@ -15,8 +16,8 @@ measurements this plan starts from). Direction: root `CLAUDE.md` locked decision
 ## Where we are
 
 - The scoped-relation connector (`src/compiler/rel/lower/scoped.ts` + `src/rel/decorrelate.ts`) is the
-  DEFAULT at every child site. The ladder is the opt-in `correlatedChild` FastPath, plus the `bothChildOrders`
-  retry (`src/compiler/rel/spine.ts`), which re-lowers a declining compile in the other order.
+  DEFAULT at every child site. The ladder is the opt-in `correlatedChild` FastPath. The `bothChildOrders` retry
+  is deleted (N7, 8a103627): `compileViaRel` (`src/compiler/rel/spine.ts`) lowers once.
 - Already off the ladder (`LADDERLESS`, `scoped.ts`): `project`, `order`/`dedup`/`groupCount` `by()`,
   `coalesce`/`optional`, `choose`, `union`.
 - Still on it, per the audit: existence (`where`/`filter`/`not`/`and`/`or`), per-traverser
@@ -520,6 +521,10 @@ the owner with both timings.
 
 ### M3 — Scaling probe shapes that can see a quadratic re-source (cheap)
 
+✅ **ABSORBED BY M1 (ab0c9a36, f195241f).** `scripts/scaling-probe.ts` now carries the `resource: … .path` shapes
+(`map(V.max).path`, `map(V.limit.values).path`, `where(V.out.has).path`, `local(V.order.limit).path`) and the M2
+`resource xNG` query; the N1 `.dedup()` is recorded in a comment beside `local(V.has.values).count`. Remains: nothing.
+
 Every `resource:` shape in `scripts/scaling-probe.ts` ends in a cheap rest (`count()`, `values()`, an indexed
 `has`), so the probe could not see the routes in M1/M2. Add `map(V().values('age').max()).path()`,
 `map(V().limit(1)).path()`, `where(V().out().has(…)).path()` and the M2 query. Note: N1 changed the existing shape
@@ -692,3 +697,109 @@ Unblocks N7.
   in `fuse.ts` — COUNT/SUM over a cross join factored per side — not a pooledGroup law. First scenario: bulk/
   multiplicity (the count×count arithmetic is where it can go wrong). M2: make the policies consistent by the first-row
   path ANSWERING the cross it declines today — never decline on cost.
+
+## Next round (written 2026-11-17, after round 3)
+
+Round 3 landed M0 (fe84f779), P7 (620df051), P10 (6db3f4bd), M4 (ee8157e8), N7 (8a103627; absorbs M5) and M1
+(ab0c9a36, f195241f; absorbs M3). Every round-3 branch landed; nothing is parked on a branch. Owner answers Q2–Q5
+(above) are DECIDED and feed the items below. Still open from earlier rounds: M2 (now decided by Q5), M6, N3 (decided
+by Q5), N5 (decided by Q3b: a fix), N8, N9, P2, P5, P6, P8, P9, P11, R4.2, R4.5, R5.2–R5.4, R6, R7. Ordered: each
+prerequisite sits BEFORE what it unblocks.
+
+### Parked: M1b — `local()` over a tracked path with a `V()`/`E()` re-source (DEFERRED)
+
+M1 kept `local` on the `'forward'` contract, because `LocalStep` emits the child's own traversers
+(`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java`),
+so its path is host path ++ read path, not host path + end. `g.V().out().local(V().order().by('name').limit(1)).path()`
+therefore still takes the per-host fold rather than one shared read. Not built: no substrate concatenates two paths.
+
+- **Prerequisite, ordered before M1b — H1: a history-concatenation primitive** in `src/compiler/rel/history.ts`
+  (path ++ path over the canonical JSON history, exact, O(path length) per row, no new per-row term beyond the
+  concatenation). Build it only when a NON-contrived query needs it; the measured cost today is the fold, which is
+  linear in what it returns. Then M1b is `local`'s `'forward'` contract crossing the shared read with H1.
+- M2's cost policy (above) owns the question of whether the fold is acceptable meanwhile.
+
+### K1 — Ground the child-write advisory in the host that declined (MAJOR-ish: explain, don't baffle; do first, cheap)
+
+Two reviewers found the same root cause in M4. `lowerChain` (`src/compiler/rel/lower.ts`) appends
+`writes.childWrite` to ANY decline, so a child write that lowers fine is blamed for an unrelated gap:
+`g.V().hasLabel('software').union(addV('x')).local(V().simplePath().count())` and
+`…union(addV('x')).group().by(label).by(out().sample(1).count())` now say "a write (addV()) inside union() is not
+supported yet", but `union(addV('x'))` alone answers. Likewise the real gap behind
+`g.V().union(addV('x'), identity()).count()` is a write in a MULTI-arm union, not a write in a union. Fix: keep
+`programWrites` (`src/compiler/rel/write.ts`) as the place the write is FOUND (sideEffect and a write's own argument
+never reach `scopedHost`), but attach the hint only when that host's own lowering declined (record it on the route that
+refused the body), or soften the wording to "may not be supported here". Same item:
+
+- **Upsert advice by shape, not host.** `UPSERT_HOSTS` (`src/compiler/unsupported.ts`) gives the `mergeV()/mergeE()`
+  hint to every coalesce/optional/choose/union write, including a conditional update
+  (`g.V().has('person','name','marko').choose(has('age', gt(20)), property('adult', true), property('adult', false))`).
+  Give it only when the write is `addV`/`addE`/`mergeV`/`mergeE` (or the body is the `fold().coalesce(unfold(), …)`
+  idiom); `property()`/`drop()` get the "move it out" wording. `UPSERT_HOSTS` is the same set as `BRANCH_KINDS`
+  (`src/compiler/ir/step.ts`) — import it.
+- Cosmetic: `resourcePathMessage` (`src/compiler/rel/lower/scoped.ts`) writes "a optional() body"; choose a/an.
+
+### K2 — Declines that lost their explanation under M1 (minor, one item)
+
+Under `'split'`, `reSourcedBody` no longer notes `resource-path`, and the later decline notes nothing, so these say only
+"no lowering covers …": `g.V().out().coalesce(V().has('name','marko'), constant('x')).path()`,
+`g.V().out().flatMap(V().has('name','marko')).dedup().by(path()).count()`, `….flatMap(V().has(…)).dedup().path()`,
+`….tree().count(local)`, `….path().tree()`, `flatMap(V().fold()).path()` (while `flatMap(V().count()).path()` answers),
+`project('n','p').by('name').by(flatMap(V().has(…)).path())`, `.select('a').path()` after a flatMap re-source. Each
+matches the same shape with a plain `flatMap(out())` body on trunk, so these are older flatMap/coalesce+path gaps
+newly exposed, not new holes. Fix: the LATER decline says in the user's terms what is unsupported (a `constant()` arm
+beside a re-sourced arm; `by(path())`/`dedup()` over a flatMap rejoin), or close the gap in the body's lowering. Also:
+the header comment of `test/compiler/resource-general-cross.exec.test.ts` still groups `local` with `flatMap` as "an
+ALL-rows host on a tracked path declines" — now true only of forward hosts; add a row for a path reader AFTER the split
+host (`flatMap(V()…).simplePath()`, answers 6 on `g.V().both()…`).
+
+### K3 — P7 left one hand-rolled retarget (cheap, concrete)
+
+`negativeOwners` (`src/rel/passes/semijoin.ts` ~l.594) re-points `props.value` to `fts.text` with its own
+`rewriteExpr`; that is `substRelId(matches, props.id, fts.id, () => 'text')` (the `readsOnlyValue` gate guarantees one
+column, no subplan). P7 also rewrote the `readsOnlyValue` comment to cite `substRelId`, which this site does not call —
+route it through `substRelId` or restore the comment. Reach: `g.V().has('name', notContaining('x'))` on an FTS-indexed
+store. Answers unaffected.
+
+### K4 — tree()'s encounter order (minor, judgement)
+
+M1's fix makes `treeTail` (`src/compiler/rel/lower.ts`) order folded paths by the encounter column, repeating the
+`fold()` path arm's law instead of sharing it. `Tree` is a `HashMap` in the reference, so that order is not observable;
+`dropEncounter` before the fold gives the same answer for one sort fewer. Either share one `foldPaths` default with the
+`fold()` arm (so the next collector cannot leak the same bare `Error` from `collectionConsumesEncounter`,
+`src/rel/obligations.ts`), or drop the encounter. Pick one; no answer changes.
+
+### R6.0 — `sideEffect` with a filter-hosted body feeding a collector (folds into R6's first item, owner answer Q4)
+
+`g.V().sideEffect(where(out()).aggregate('x')).cap('x').unfold().count()` declines with the generic message, the same
+on trunk before P10. It is the `sideEffect`-with-effects host owner answer Q4 makes R6's FIRST item
+(`g.V().sideEffect(out().aggregate('x')).cap('x')` declines in every mode); both need effects threaded through a
+scoped body. Until R6 lands, the decline must name what is unsupported ("a side effect (aggregate()) collected inside
+sideEffect() …"), not "no lowering covers".
+
+### Next round — reuse sweep (round 3's proposals)
+
+- **P12 — One `PATH_READERS` set (PATH_FAMILY ∪ {tree}) in `src/compiler/ir/step.ts` — FIXES A WRONG ANSWER; do
+  first.** `src/compiler/ir/strategies.ts` ~l.762 `inlineIdentityHostBody`'s `readsPath` asks only `PATH_FAMILY`, so a
+  `map(identity())` entry is spliced away when only `tree()` reads the path: `g.V(1).map(identity()).out('created').path()`
+  gives `[v1, v1, v3]` but `.tree()` gives `{v1:{v3}}` where the reference gives `{v1:{v1:{v3}}}`
+  (`vendor/tinkerpop/gremlin-core/.../step/map/TreeStep.java` reads the full path). Replace `analyze.ts:43`'s private
+  `PATH_STEPS`, M1's inline `readsPath` in `scoped.ts` ~l.349 and M4's `PATH_STEPS` in `scoped.ts` ~l.338 (a copy of
+  `PATH_FAMILY` that also misses `tree`) with the one set; consider `TRAVERSER_STATE_READS` = {sack, loops} ∪
+  `PATH_READERS`. Pin the tree() answer.
+- **P13 — `rejoin()` takes the `RejoinContract`** (`scoped.ts` ~l.1154) instead of `(policy, firstOnly)`: ('split',
+  true) is `'first'`; `allRows`/`priority` take `Exclude<RejoinContract,'first'>`; the meaningless ('forward', true) can
+  no longer be written. 4 call sites, no SQL change.
+- **P14 — Derive the last literal filter-host copies from P10's sets.** `bulk.ts` `BULK_TRANSPARENT` =
+  `COLLAPSE_FILTERS` ∪ {as, identity, barrier} (else a new filter host misses `bulkVerdict`); `analyze.ts`
+  `CONNECTOR_HOSTS` = `FILTER_HOSTS` ∪ `FAN_OUT_HOSTS` ∪ the branch/by()/reducer names (else the load-time
+  CONNECTORS==CONNECTOR_HOSTS throw, `scoped.ts` ~l.2046, trips); `lower/filter.ts` ~l.157 and `strategies.ts` ~l.250
+  inline tests → `SINGLE_BODY_FILTER_HOSTS`/`FILTER_HOSTS` (the filter.ts site is on the ladder; may wait for its
+  rung's deletion). Identical membership; extend `test/compiler/filter-hosts.test.ts`.
+- **P15 — Classify a child write once.** `programWrites` (`write.ts` `noteWrite`) already splits on `FILTER_HOSTS`;
+  `writeInChild(host, write, filterHosts)` (`unsupported.ts` ~l.107) tests it again. Carry `filter: boolean` on the
+  child write (or two builders) and drop the parameter. Do with K1.
+
+### Needs-human questions (round 3)
+
+None raised.
