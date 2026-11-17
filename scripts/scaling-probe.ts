@@ -238,6 +238,17 @@ const SHAPES: readonly Shape[] = [
   // decorrelation (`keyedBody`), the sites one relation over every scope, read at the cap.
   { name: 'collect: sideEffect(out.aggregate).cap.count', query: "g.V().sideEffect(out().aggregate('x')).cap('x').unfold().count()" },
   { name: 'collect: sideEffect(where(out).aggregate)', query: "g.V().sideEffect(where(out()).aggregate('x')).cap('x').unfold().count()" },
+  // S3: the per-host work fact (`src/rel/work.ts`) — a landed by() whose correlated plan re-sources stays a
+  // first-row read per host, at depth and with a text-bounded `V(1)`; a by() that does not stays decorrelated.
+  // (The walk-condition witnesses are measured on the acyclic hub graph of `walk-condition-hub-scale` — on this
+  // cyclic graph an unsatisfied `until` walks forever, per the spec.)
+  { name: 'work: as.order.by(V.where(neq(a)).values)', query: "g.V().as('a').order().by(V().where(neq('a')).values('name')).count()" },
+  { name: 'work: as.group.by(V.where(neq(a)).values).count(local)', query: "g.V().as('a').group().by(V().where(neq('a')).values('name')).count(local)" },
+  { name: 'work: as.order.by(V(1).where(neq(a)).values)', query: "g.V().as('a').order().by(V(1).where(neq('a')).values('name')).count()" },
+  { name: 'work: as.order.by(map(V.where(neq(a)).values))', query: "g.V().as('a').order().by(map(V().where(neq('a')).values('name'))).count()" },
+  { name: 'work: as.dedup.by(map(V.where(neq(a)).out.values))', query: "g.V().as('a').dedup().by(map(V().where(neq('a')).out().values('name'))).count()" },
+  { name: 'work: as.order.by(V.where(neq(a)).values).by(V.where(neq(a)).values(age))', query: "g.V().as('a').order().by(V().where(neq('a')).values('name')).by(V().where(neq('a')).values('age')).count()" },
+  { name: 'work: as.order.by(out.count)', query: "g.V().as('a').order().by(out().count()).count()" },
   { name: 'collect: both.sideEffect(aggregate)', query: "g.V().both().sideEffect(aggregate('x')).cap('x').unfold().count()" },
   { name: 'collect: sideEffect(out.groupCount.by(name))', query: "g.V().sideEffect(out().groupCount('x').by('name')).cap('x')" },
   { name: 'collect: local(out.aggregate).cap.count', query: "g.V().local(out().aggregate('x')).cap('x').unfold().count()" },

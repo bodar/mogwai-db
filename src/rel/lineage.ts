@@ -83,9 +83,15 @@ export function spinePath(top: Rel, id: RelId): readonly Rel[] | null {
  * `movement.ts` `reSource`), and the one place a per-seed read reads the WHOLE graph rather than a seek off
  * the seed. Its parts: the `seed` (the left, at most one row), the element relation (`side`, the right, which
  * reads nothing outside itself), and `key` — a column of the side that is its scanned `nodes`/`edges` rowid
- * (`columnIsRowKey`, down to the scan along `definingPath`). `null` for any other node. ONE predicate, so every
- * question about a whole-relation read under a seed (`leading`'s first-hit read, a per-host bounded-work
- * classification) recognises the same shape.
+ * (`columnIsRowKey`, down to the scan along `definingPath` — and through a `materialize`, which carries its input's
+ * rows unchanged: the read a re-source computes once and fences, `reSourcedBody`). `null` for any other node. ONE
+ * predicate, so every question about a whole-relation read under a seed (`leading`'s first-hit read, the per-host
+ * work fact `perHostWork`, `src/rel/work.ts`) recognises the same shape.
+ *
+ * `seed: 'any'` drops the one-row bound on the left: the same whole-relation read crossed with whatever rows a
+ * body has reached before it (`out().V()`, GraphStep's cross of EVERY traverser with the graph) — still a whole
+ * read per evaluation, which is what a cost question asks; `leading`, which rewrites the read around its ONE seed
+ * row, keeps the default.
  */
 export interface ReSourceCross {
   readonly seed: Rel;
@@ -93,13 +99,15 @@ export interface ReSourceCross {
   readonly key: string;
 }
 
-export function reSourceCross(r: Rel): ReSourceCross | null {
-  if (r.kind !== 'join' || (r.join !== 'cross' && r.join !== 'inner') || r.on || !atMostOneRow(r.left)) return null;
+export function reSourceCross(r: Rel, seed: 'one-row' | 'any' = 'one-row'): ReSourceCross | null {
+  if (r.kind !== 'join' || (r.join !== 'cross' && r.join !== 'inner') || r.on) return null;
+  if (seed === 'one-row' && !atMostOneRow(r.left)) return null;
   const side = r.right;
   if (freeRelIds(side).size) return null;
   const key = side.type.cols.find((column) => {
     if (!columnIsRowKey(side, column.name)) return false;
-    const path = definingPath(side, column.name);
+    let path = definingPath(side, column.name);
+    for (let at = path.rels.at(-1)!; at.kind === 'materialize'; at = path.rels.at(-1)!) path = definingPath(at.input, path.name);
     const leaf = path.rels.at(-1)!;
     return leaf.kind === 'scan' && path.name === 'id' && (leaf.table === 'nodes' || leaf.table === 'edges');
   })?.name;

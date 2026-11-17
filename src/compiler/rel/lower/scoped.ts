@@ -4,12 +4,13 @@ import * as make from '../../../rel/factory.ts';
 import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
 import { commitScope, forkCollections, isScopedFork, pendingLabels, pendingSites, restoreCollections, type Collections, type Site } from '../collection.ts';
 import { positionKeys } from '../../../rel/position.ts';
-import { atMostOneRow, exactlyOneRow, rowBounds } from '../../../rel/bounds.ts';
+import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
+import { perHostWork } from '../../../rel/work.ts';
 import { brandRel, type Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
 import { exprMayAbort } from '../../../rel/raise.ts';
-import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
+import { relId, type ColMeta, type RelId, type SortTerm } from '../../../rel/types.ts';
 import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
 import { columnIsRowKey, columnIsStored, columnLineage, columnReadsSubquery, exprDraws, nestsCorrelatedSubplans, spelledOuterColumns } from '../../../rel/copies.ts';
@@ -35,7 +36,7 @@ import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, option
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
-import { drawInGroupValue, effectInChild, type Declines } from '../../unsupported.ts';
+import { drawInGroupValue, effectInChild, UnsupportedTraversal, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type HostProgress, type Tail } from './chain.ts';
 import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
@@ -760,26 +761,17 @@ export function correlatedExistence(
   // Over a FINISHED walk a condition is asked once per distinct traverser state instead (`perState`, `walk.ts`),
   // and outside a walk the host's rows are the host's — the connector's ordinary correlated form. A recursive
   // SELECT holds neither a DISTINCT nor a keyed join (`src/rel/recursive.ts` `BARRIER_IN_TERM`), so in the term
-  // the per-row work itself must be bounded, and two things make it a neighbourhood:
-  //  - a BARRIER over an unbounded input — an aggregate, sort or window reads ALL of it before the EXISTS can stop;
-  //  - a REJECTION of an unbounded input — a filter, or a join it drives, may discard every row it reads, so a
-  //    FAILING probe scans the whole neighbourhood. A filter straight over a base table is the index seek itself
-  //    (an edge or property lookup by its key), not a rejection of rows already read.
-  // A bounded input (`limit(n)`, the count bound a walk condition's `count().is(P)` takes — `boundConditionCount`,
-  // `ir/strategies.ts`) costs O(n). The linear form for the rest needs the condition evaluated per distinct
-  // element INSIDE the recursion, a substrate SQLite's recursive term does not offer, so it declines.
+  // the per-row work itself must be bounded: no barrier or rejection may read an unbounded input to its end
+  // before the EXISTS can stop — the plan's per-host work fact (`perHostWork`'s `exhausts`, `src/rel/work.ts`),
+  // read off the algebra rather than a list of node kinds here. A bounded input (`limit(n)`, the count bound a
+  // walk condition's `count().is(P)` takes — `boundConditionCount`, `ir/strategies.ts`) costs O(n). The linear
+  // form for the rest needs the condition evaluated per distinct element INSIDE the recursion, a substrate
+  // SQLite's recursive term does not offer, so it declines.
   // "Inside the term" is an algebra fact: the subject's row stands on the walk's self-reference in its own FROM
   // tree — the frontier itself, or the row the term PRODUCES from it (the `until` answer the walk lands as a
   // column, `walk.ts` `EXIT`).
   if (!fromTree(rel).some((source) => source.kind === 'self-ref')) return { kind: 'exists', plan, negated };
-  const unbounded = (r: Rel): boolean => rowBounds(r).max === Infinity;
-  let perRowBounded = true;
-  forEachRel(plan, (r) => {
-    if ((r.kind === 'aggregate' || r.kind === 'sort' || r.kind === 'window') && unbounded(r.input)) perRowBounded = false;
-    if (r.kind === 'filter' && r.input.kind !== 'scan' && unbounded(r.input)) perRowBounded = false;
-    if (r.kind === 'join' && r.join !== 'left' && r.join !== 'cross' && unbounded(r.left)) perRowBounded = false;
-  });
-  return perRowBounded ? { kind: 'exists', plan, negated } : null;
+  return perHostWork(plan).exhausts ? null : { kind: 'exists', plan, negated };
 }
 
 /**
@@ -2082,12 +2074,14 @@ function landValues(
   const kept = new Map<string, NonNullable<ReturnType<typeof correlatedValue>>>();
   for (const [key, body] of bodies) {
     const root = roots.get(key);
-    // A body that RE-SOURCES (`V()`/`E()`, at any depth) reads the whole graph, so its decorrelated form crosses
-    // every scope row with the graph ahead of the first-row pick — N × G for one row per host. It takes the host's
-    // correlated-first policy, as `map`'s and `project`'s: read per host row where SQL can hold the dependent join,
-    // its first row under `LIMIT 1` (`correlatedValue`). Any other body's decorrelated read is bounded by the host's
-    // own neighbourhood, and the landed window is its measured form (the order family's plans, `sql-hygiene`).
-    const correlated = root || !reSourcesDeep(body, ctx) ? null : correlatedValue(body, rel, sc.scoped, framing, ctx, fresh, labels);
+    // A body whose correlated plan reads a WHOLE element relation per host row (`perHostWork`'s `reSources`,
+    // `src/rel/work.ts` — a re-source, at any depth) would, decorrelated, cross every scope row with the graph
+    // ahead of the first-row pick — N × G for one row per host. It takes the host's correlated-first policy, as
+    // `map`'s and `project`'s: read per host row where SQL can hold the dependent join, its first row under
+    // `LIMIT 1` (`correlatedValue`). Any other body's decorrelated read is bounded by the host's own
+    // neighbourhood, and the landed window is its measured form (the order family's plans, `sql-hygiene`).
+    const correlated = root || !correlatedReSources(body, rel, sc.scoped, framing, ctx, labels) ? null
+      : correlatedValue(body, rel, sc.scoped, framing, ctx, fresh, labels);
     if (correlated) { kept.set(key, correlated); continue; }
     const reframe = (t: Tail) => recordAsMap(t, ctx, fresh, true);
     const keyed = root ? rootedBody(body, root, rel, sc, ctx, fresh, reframe)
@@ -2173,9 +2167,31 @@ function correlatedValue(
   return pick && { pick, framing: tail.framing, cols: names };
 }
 
-/** Does a body read the graph afresh — a `V()`/`E()` at any depth? */
-const reSourcesDeep = (body: readonly IRStep[], ctx: ChainCtx): boolean =>
-  someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E');
+/**
+ * Does a body's CORRELATED plan re-source (`perHostWork`'s `reSources`, `src/rel/work.ts`)? Asked of a TRIAL
+ * lowering the compile then forgets: its relations are discarded, its ids come from a scratch minter whose ids end
+ * in a letter (the compile's own are a hint and a NUMBER, `minter`), so none can name a relation of the plan, and
+ * the named collections and site effects are put back. The compile's ids — hence its SQL — are as if it never ran.
+ * A trial that declines is a "no": the body then takes its decorrelated form, which answers or declines for itself.
+ */
+function correlatedReSources(
+  body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, labels: AliasMap,
+): boolean {
+  let n = 0;
+  const scratch: Minter = (hint) => relId(`${hint}${n++}t`);
+  const saved = new Map(ctx.collections);
+  const taken = ctx.siteEffects?.length ?? 0;
+  try {
+    const tail = correlatedBody(body, rel, framing, ctx, scratch, labels, 'read', 'first', from);
+    return !!tail && perHostWork(tail.rel).reSources;
+  } catch (error) {
+    if (error instanceof UnsupportedTraversal) return false;
+    throw error;
+  } finally {
+    restoreCollections(ctx.collections, saved);
+    ctx.siteEffects?.splice(taken);
+  }
+}
 
 /** A correlated `ChildValue` re-pointed from the host relation to one that carries its columns by name. */
 function substChildValue(value: ChildValue, from: RelId, to: RelId): ChildValue {
