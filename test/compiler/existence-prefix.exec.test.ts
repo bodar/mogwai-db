@@ -195,6 +195,14 @@ describe('a write in a non-filter child body declines, naming the write, the hos
     ["g.V().local(union(addV('x'), identity()).count())", 'addV', 'union', UPSERT, SURE],
     ["g.V().map(union(addV('x'), identity()).fold())", 'addV', 'union', UPSERT, SURE],
     ["g.V().addE('x').to(coalesce(V(1), addV('y')))", 'addV', 'coalesce', UPSERT, MAYBE],
+    // a DISCARD arm: the host declines itself even though a stream (of nothing) was handed past it
+    ["g.V().hasLabel('software').union(drop())", 'drop', 'union', OUTER, SURE],
+    ["g.V().union(drop()).count()", 'drop', 'union', OUTER, SURE],
+    ["g.V().local(union(drop())).count()", 'drop', 'union', OUTER, SURE],
+    // a body that both collects and writes declines for the WRITE, not for the collection
+    ["g.V().sideEffect(out().aggregate('x').property('k',1)).cap('x')", 'property', 'sideEffect', OUTER, SURE],
+    // the host that is not a connector site records nothing, so the hint says the write MAY be why
+    ["g.V().repeat(out().drop()).times(2)", 'drop', 'repeat', OUTER, MAYBE],
   ] as const) {
     test(q, () => {
       for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST]) {
@@ -225,6 +233,12 @@ describe('a write in a non-filter child body declines, naming the write, the hos
         expect(message, q).toContain('no lowering covers');
         expect(message, q).not.toContain('a write');
       }
+  });
+  test('a keyed group() with a reducing value by() in a child body names the collection and why', () => {
+    const message = declined("g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')");
+    expect(message).toContain("a side effect ('x') collected inside sideEffect() is not supported in this form yet");
+    expect(message).toContain('a group() value by() that reduces or folds');
+    expect(declined("g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')", LADDER_FIRST)).toBe(message);
   });
   test('a write that lowers inside its host answers, with no hint', () => {
     expect(bare(runWith(seededStore(), "g.V().has('person','name','marko').union(addV('x')).count()"))).toEqual([{ v: 1 }]);

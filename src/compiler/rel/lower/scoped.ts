@@ -34,7 +34,7 @@ import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, 
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import { drawInGroupValue, effectInChild, type Declines } from '../../unsupported.ts';
-import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
+import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type HostProgress, type Tail } from './chain.ts';
 import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
@@ -2706,12 +2706,16 @@ export function scopedHost(
   // body keys (`keyedBody`), so a route that then declines puts the registry back, and the snapshots a route's
   // bodies took (`siteEffects`) enter the effect sequence HERE, at the host's position, only for the route that
   // answered.
+  // Whether any route got PAST the host (`continueAs` marks the site): where none did, the host declined itself,
+  // and it records that here, into this site's sink, so it reaches the compile exactly as far as this site's own
+  // reasons do (`fork`/`adopt`) — what names a write in its body as the reason (`lowerChain`).
+  const hostProgress: HostProgress = { steps, at, continued: false };
   const tried: Declines[] = [];
   for (const route of routes) {
     const sink = ctx.declines.fork();
     const saved = new Map(ctx.collections);
     const siteEffects: Binding[] = [];
-    const tail = route({ ...ctx, declines: sink, siteEffects, hostBulked: bulked });
+    const tail = route({ ...ctx, declines: sink, siteEffects, hostBulked: bulked, hostProgress });
     if (tail) {
       ctx.declines.adopt(sink);
       return siteEffects.length ? { ...tail, effects: [...siteEffects, ...(tail.effects ?? [])] } : tail;
@@ -2720,6 +2724,7 @@ export function scopedHost(
     tried.push(sink);
   }
   for (const sink of tried) ctx.declines.adopt(sink);
+  if (!hostProgress.continued) ctx.declines.hostDeclined(step!);
   return null;
 }
 

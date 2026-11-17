@@ -106,9 +106,9 @@ export class UnsupportedTraversal extends Error {
  *  - `upsert`: the write has the UPSERT idiom's shape — an `addV`/`addE` in a branch body
  *    (`fold().coalesce(unfold(), addV(…))`), which `mergeV()`/`mergeE()` answer. A `property()`/`drop()`, or a
  *    merge (already an upsert), is told to move out instead;
- *  - `at`: the TOP-LEVEL step whose body holds the write — the position the fold must have declined AT for the
- *    write to be why the traversal declined (`lowerChain`); `null` where the host has no lowering of its own to
- *    decline at (a write as another write's argument).
+ *  - `at`: the TOP-LEVEL step whose body holds the write — the host that must have declined ITSELF for the write to
+ *    be why the traversal declined (`Declines.hostDeclined`, read by `lowerChain`); `null` where the host has no
+ *    lowering of its own to decline at (a write as another write's argument).
  */
 export interface ChildWrite {
   readonly host: string;
@@ -158,13 +158,15 @@ export const drawInGroupValue: DeclineReason = {
   message: 'a random draw (sample()/coin()/order().by(shuffle)) inside a group() value by() is not supported yet',
 };
 
-/** The `effect-in-child` decline (`keyedBody`, `lower/scoped.ts`): the collection(s) a child body of `host`
- *  filled, named as the user wrote them, and the one form that is known not to key — a read of the collection
- *  inside the body that fills it. */
-export const effectInChild = (host: string, labels: readonly string[]): DeclineReason => ({
+/** The `effect-in-child` decline: the collection(s) a child body of `host` filled, named as the user wrote them,
+ *  and a form known not to key — by default a read of the collection inside the body that fills it (`keyedBody`,
+ *  `lower/scoped.ts`); a keyed `group()` the body could not register names its own (`lower.ts`). */
+export const effectInChild = (
+  host: string, labels: readonly string[], example = 'read with cap()/select() inside the same child that fills it',
+): DeclineReason => ({
   kind: 'effect-in-child', terminal: false,
   message: `a side effect (${labels.map((label) => `'${label}'`).join(', ')}) collected inside ${host}() is not supported `
-    + 'in this form yet (for example, read with cap()/select() inside the same child that fills it)',
+    + `in this form yet (for example, ${example})`,
 });
 
 /** One reason the lowering recorded. `terminal` is a decline that holds whatever else the compile
@@ -196,27 +198,26 @@ export class Declines {
   #terminal: DeclineReason | null = null;
   #hint: string | null = null;
   #advisory: DeclineReason | null = null;
-  /** How far the fold got into each step list it continued (`continueAs`'s `from`): every step before that
-   *  position LOWERED on some route. Shared with every `fork` — a speculative route that got past a step proves
-   *  the step lowers, whatever the route's outcome. What a child write's decline asks (`lowerChain`), never a
-   *  routing input. */
-  readonly #furthest: WeakMap<readonly object[], number>;
+  /** The child-taking HOST steps that declined THEMSELVES: every route at the site returned `null` before the
+   *  chain continued past the host (`scopedHost`, `lower/scoped.ts`). Recorded by the host where it declines and
+   *  carried by `fork`/`adopt` like any reason, so a route that declined while its sibling answered leaves no
+   *  record. What a child write's decline asks (`lowerChain`), never a routing input. */
+  readonly #declinedHosts = new Set<object>();
 
-  constructor(furthest: WeakMap<readonly object[], number> = new WeakMap()) { this.#furthest = furthest; }
-
-  /** The fold has reached position `at` of `steps` — every step before it lowered. */
-  reach(steps: readonly object[], at: number): void {
-    if (at > (this.#furthest.get(steps) ?? -1)) this.#furthest.set(steps, at);
-  }
-
-  /** The furthest position of `steps` the fold reached, or `undefined` if it never continued that list. */
-  furthest(steps: readonly object[]): number | undefined { return this.#furthest.get(steps); }
-
-  /** Record a reason. The first terminal one and the first advisory one are kept. */
-  note(reason: DeclineReason): void {
+  /** Record a reason. The first terminal one and the first advisory one are kept, except that an advisory
+   *  replaces an earlier one of the kind it `displaces`: the one place a later, more specific reason outranks
+   *  an earlier one. */
+  note(reason: DeclineReason, displaces?: DeclineReason['kind']): void {
     if (reason.terminal) this.#terminal ??= reason;
+    else if (displaces && this.#advisory?.kind === displaces) this.#advisory = reason;
     else this.#advisory ??= reason;
   }
+
+  /** The host step `step` declined itself: no route at its site got past it. */
+  hostDeclined(step: object): void { this.#declinedHosts.add(step); }
+
+  /** Did the host step `step` decline itself (`hostDeclined`), on a route this sink kept? */
+  declinedAt(step: object): boolean { return this.#declinedHosts.has(step); }
 
   /** The terminal reason, if one was recorded. */
   terminal(): DeclineReason | null { return this.#terminal; }
@@ -228,12 +229,13 @@ export class Declines {
    * answered is not why the compile did anything, so its reasons are dropped — otherwise the order the
    * two routes are tried in (a fast-path switch) would decide whether the traversal compiles at all.
    */
-  fork(): Declines { return new Declines(this.#furthest); }
+  fork(): Declines { return new Declines(); }
 
   /** Take what a `fork` recorded, as if it had been recorded here — first-recorded still wins. */
   adopt(child: Declines): void {
     if (child.#terminal && !this.#terminal) { this.#terminal = child.#terminal; this.#hint ??= child.#hint; }
     if (child.#advisory) this.#advisory ??= child.#advisory;
+    for (const step of child.#declinedHosts) this.#declinedHosts.add(step);
   }
 
   /** Add a host's suggestion to the terminal reason of `kind`, once. A nested host of the same kind has

@@ -154,3 +154,34 @@ describe('an ADVISORY reason is a hint, never the decline', () => {
     expect(() => declines.raiseTerminal()).toThrow('this traversal is ambiguous: first');
   });
 });
+
+// A HOST'S OWN DECLINE (`Declines.hostDeclined`, recorded by the connector dispatch) travels like any reason:
+// recorded into a route's fork, it reaches the compile only through `adopt`. So whichever of a site's two routes is
+// tried first, the record says the same thing — a route that declined while its sibling answered leaves none.
+describe('a host-decline record follows fork/adopt', () => {
+  const host = {};
+  test('a fork that is not adopted leaves no record', () => {
+    const declines = new Declines();
+    declines.fork().hostDeclined(host);
+    expect(declines.declinedAt(host)).toBe(false);
+  });
+  test('an adopted fork carries its record, at any depth', () => {
+    const declines = new Declines();
+    const outer = declines.fork();
+    const inner = outer.fork();
+    inner.hostDeclined(host);
+    outer.adopt(inner);
+    expect(declines.declinedAt(host)).toBe(false);
+    declines.adopt(outer);
+    expect(declines.declinedAt(host)).toBe(true);
+    expect(declines.declinedAt({})).toBe(false);
+  });
+  test('an advisory displaces only the kind it names', () => {
+    const declines = new Declines();
+    declines.note({ kind: 'effect-in-child', message: 'collected', terminal: false });
+    declines.note({ kind: 'write-in-child', message: 'other', terminal: false }, 'merge-map-scope');
+    expect(declines.uncovered('q').message).toEndWith('— collected');
+    declines.note({ kind: 'write-in-child', message: 'wrote', terminal: false }, 'effect-in-child');
+    expect(declines.uncovered('q').message).toEndWith('— wrote');
+  });
+});

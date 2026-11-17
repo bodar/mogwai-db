@@ -151,6 +151,14 @@ export interface ChildStrategy {
   readonly scopedValues?: { readonly over: import('../../../rel/types.ts').RelId; readonly values: ReadonlyMap<string, import('../child.ts').ChildValue> };
 }
 
+/** A connector site under lowering (`ChainCtx.hostProgress`). `continued` is the one mutable fact: set by `continueAs`
+ *  when a route hands the stream on past the host. */
+export interface HostProgress {
+  readonly steps: readonly IRStep[];
+  readonly at: number;
+  continued: boolean;
+}
+
 /** What the ELEMENT loop needs on top of a filter's context: whether this compile asked for the
  *  movement collapse, and the rest of the settled per-compile facts. One record rather than a dozen
  *  positional arguments, because the tails are re-entered from several places and a re-entry that
@@ -262,6 +270,10 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
   /** The connector host (a step name) whose child body is lowering — set by the connector dispatch
    *  (`scopedHost`, `lower/scoped.ts`) so a decline the body's lowering explains names the host it fired under. */
   readonly host?: string;
+  /** The connector SITE a route is lowering (`scopedHost`, `lower/scoped.ts`): the host's step list (compared BY
+   *  IDENTITY, like `ladderAt`) and position, and whether the chain CONTINUED past it (`continueAs`). A route that
+   *  declined before that is the host declining itself (`Declines.hostDeclined`). */
+  readonly hostProgress?: HostProgress;
   /**
    * WHERE A LONG SPINE IS CUT — set only on an effect-free ROOT chain over the base graph, and honoured
    * only while a tail folds that very step list (`steps`, compared BY IDENTITY like `traversal`), so a
