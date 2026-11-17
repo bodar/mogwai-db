@@ -419,6 +419,10 @@ fires and the count is 0 on the pools, delete the arm and the retry (R7's precon
 - **P3 — Make `decorrelate`'s `owns` mandatory.** One keyed-body helper (`owning` + lower + effects + reframe +
   `decorrelate(…, mine.owns)`) for `scopedBody`/`rootedBody`/`pooledGroup`; the `() => true` default reintroduces
   the R2b bug for a fourth caller. Also one `ownDraws`/`draws` walker in `src/rel/copies.ts`.
+  ✅ **LANDED (71fad22a).** `keyedBody` (`src/compiler/rel/lower/scoped.ts`) is the one owning-mint + lower +
+  effect-refusal + reframe + `decorrelate(…, mine.owns)` sequence for `scopedBody`/`rootedBody`/`pooledGroup`;
+  `decorrelate`'s `owns` (`src/rel/decorrelate.ts`) has no default. The `draws`→`ownDraws` merge in `copies.ts` was
+  deliberately not done: it would trade the global memo for a per-call one. Baselines unchanged. Remains: nothing.
 - **P4 — One first-row builder** that returns the relation itself when `atMostOneRow` (replacing the hand-rolled
   sort+LIMIT 1 / `ROW_NUMBER` forms in `reSourcedBody`, the scalar first-row, `rowsKeyedBy`, `build.ts`
   `firstRootedColumn`); the short-circuit lives in `perOriginWindow`. Carries N2.
