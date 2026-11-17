@@ -711,14 +711,17 @@ export type RootedStart = 'source' | 'split';
  * (a string argument that is not really a scope key counts); it never answers wrong. A side-effect key
  * is global, not inherited, so reading one is not host state.
  */
-export function readsHostState(steps: readonly IRStep[], ctx: ChainCtx): boolean {
+export const readsHostState = (steps: readonly IRStep[], ctx: ChainCtx): boolean => hostStateAt(steps, ctx) >= 0;
+
+/** The first top-level step of `steps` that reads host state (`readsHostState`'s rule, per step), or -1. */
+export function hostStateAt(steps: readonly IRStep[], ctx: ChainCtx): number {
   const { params } = ctx;
   // An opening `V(<traversal>)` resolves its ids by running its child over the HOST traverser, so it is a
   // host read through and through (`__.V(__.identity())` is the host itself), never one shared evaluation.
-  if (steps[0] && traversalIdArg(steps[0])) return true;
-  if (someStepDeep(steps, params, (s) => TRAVERSER_STATE_READS.has(s.name))) return true;
+  if (steps[0] && traversalIdArg(steps[0])) return 0;
   const popped = someStepDeep(steps, params, (s) => (s.args ?? []).some((a) => isPopArg(a.value) && a.value.pop !== 'last'));
-  return steps.some((step, i) => {
+  return steps.findIndex((step, i) => {
+    if (someStepDeep([step], params, (s) => TRAVERSER_STATE_READS.has(s.name))) return true;
     const reads = scopeKeyReads([step], params);
     if (reads.all) return true;
     const named = [...reads.labels].filter((label) => ctx.scopeNames.labels.has(label));

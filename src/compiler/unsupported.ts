@@ -15,6 +15,9 @@ export type DeclineKind =
   /** A re-sourcing V()/E() body under a FIRST-row host (`map`/`by()`/a filter) whose steps after the re-source
    *  read the host traverser's state (`reSourcedBody`). Always ADVISORY. */
   | 'resource-reads-host'
+  /** A re-sourcing V()/E() body under an ALL-rows host (`local`/`flatMap`) on a traverser whose path is tracked
+   *  (`reSourcedBody`). Always ADVISORY. */
+  | 'resource-path'
   /** A merge `select(k)` over a stream of Maps that MAY hold `k`, colliding with a side effect `k`
    *  (`mergedFromMap`). */
   | 'merge-map-scope'
@@ -41,6 +44,7 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'shared-draw': 'this traversal is not supported yet',
   'resource-under-absent': 'this traversal is ambiguous',
   'resource-reads-host': 'this traversal is not supported yet',
+  'resource-path': 'this traversal is not supported yet',
   'merge-map-scope': 'this traversal is not supported yet',
   'merge-own-entry': 'this traversal is not supported yet',
   // Advisory only, so the generic prefix is what the user reads; listed because the table is total.

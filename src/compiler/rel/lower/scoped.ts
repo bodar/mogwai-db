@@ -19,6 +19,7 @@ import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
+import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
 import { bulkObservedFrom } from '../../ir/bulk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { firstArrival, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
@@ -31,7 +32,7 @@ import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import { writeInFilter, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type Tail } from './chain.ts';
-import { childSeam, defaultCollation, perOriginWindow, readsHostState, reductionHost, rootedRead } from './reduction.ts';
+import { childSeam, defaultCollation, hostStateAt, perOriginWindow, readsHostState, reductionHost, rootedRead } from './reduction.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
 // §2, S1–S4). Every host here is the same three moves, and only the third differs:
@@ -184,10 +185,16 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * the traverser (`TraversalMapStep` emits whenever the child `hasNext()`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TraversalMapStep.java`).
  *
- * What it refuses, from the query text: a rest that reads the HOST traverser's state (its sack, path, loops or a
- * host label — `rootedRead`'s `readsHostState`: one shared evaluation cannot hold them), and a prefix of label
- * reads that may LOSE its row — the re-source discards the selected value, so the answer would depend only on
- * which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
+ * Under an ALL-rows host (`local`, `flatMap`) the shared read stops where the rest first binds a label or reads
+ * the host's state (`sharedEnd`), and the fold continues over the cross from there — so the cross holds the
+ * traversers the reference's split has reached at that step, never the whole graph per host ahead of a filter,
+ * order or slice the shared part holds.
+ *
+ * What it refuses, from the query text: under a FIRST-row host a rest that reads the HOST traverser's state (its
+ * sack, path, loops or a host label — `readsHostState`: one shared evaluation cannot hold them, and a per-host
+ * cross would pay the graph for one row), under an ALL-rows host a traverser whose path is tracked (the read's
+ * positions would extend the host's), and a prefix of label reads that may LOSE its row — the re-source discards
+ * the selected value, so the answer would depend only on which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
  * lose or multiply its row (`out().V()`, `values('age').V()`) is GraphStep's own cross join, in the fold.
  */
 function reSourcedBody(
@@ -202,30 +209,46 @@ function reSourcedBody(
   // explained admission rule of a discarded label read (`reSourceTail`'s `admitsReSource`).
   if (!exactlyOneRow(prefix.rel)) return undefined;
   const rest = body.slice(at);
+  // A tracked path out of an ALL-rows host is the host's EXTENDED by the read's positions (below): declined.
+  if (!first && pathCarried(prefix.rel)) {
+    ctx.declines.note({ kind: 'resource-path', message: RESOURCE_PATH, terminal: false });
+    return null;
+  }
   // A rest that reads the HOST traverser's state (an outer label, its sack, path or loops) cannot be one
-  // shared read. An ALL-ROWS host (`local`, `flatMap`) emits every one of the prefix × G traversers, so the
-  // fold's per-row cross IS the answer's flow — linear in what it returns. A FIRST-row host (`map`, a `by()`,
-  // a filter) would pay that whole cross for one row per host: declined, from the query text.
-  if (readsHostState(rest, ctx)) {
-    if (!first) return undefined;
+  // shared read. A FIRST-row host (`map`, a `by()`, a filter) would pay a per-host cross of the graph for one
+  // row per host: declined, from the query text.
+  if (first && readsHostState(rest, ctx)) {
     ctx.declines.note({ kind: 'resource-reads-host', message: hostStateMessage(rest, ctx), terminal: false });
     return null;
   }
+  // An ALL-rows host (`local`, `flatMap`) emits the child's own traversers, so a label the rest binds rides out
+  // and a host label the rest reads is the host's. The rest SPLITS where it first does either (`sharedEnd`): the
+  // part before is one shared read crossed with the prefix — `rest(prefix × G) = rest₂(prefix × rest₁(G))`, where
+  // `rest₁` reads nothing of the host — and the fold continues over that cross, which holds exactly the
+  // traversers the reference's GraphStep split has reached by then (never the whole graph per host ahead of a
+  // filter, order or slice that `rest₁` holds).
+  const cut = first ? rest.length : sharedEnd(rest, ctx);
+  if (cut < 1) return undefined;
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
-  // own. A path is extended by the split and an entering vertex is a hop's: neither is a contract this cross
-  // states, so such a prefix is GraphStep's general cross in the fold (`reSource`, `lower/movement.ts`).
-  if (!prefix.rel.channels.every((channel) => CROSSES.has(channel.role) || channel.role === 'encounter')) return undefined;
-  const rooted = rootedRead(rest, ctx, fresh, 'many');
+  // own. A PATH crosses unchanged under a FIRST-row host too: `map`/`by()`/a filter emit a traverser split from
+  // the HOST (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`), so the positions the child's
+  // GraphStep appends never leave it (and the rest reads none of them: `readsHostState`). Out of an ALL-rows host
+  // (`local`/`flatMap` emit the child's own traversers) the path is the host's EXTENDED by the read's positions —
+  // a concatenation this cross does not state — and the fold's per-row GraphStep cross would pay the whole graph
+  // per host where the answer may hold one row per host (`out().local(V().order().limit(1)).path()`): declined,
+  // from the query text. An entering vertex (`fromV`) is a hop's: the fold's.
+  const crosses = (role: ChannelRole): boolean => CROSSES.has(role) || (first && role === 'path');
+  if (!prefix.rel.channels.every((channel) => crosses(channel.role) || channel.role === 'encounter')) return undefined;
+  const rooted = rootedRead(rest.slice(0, cut), ctx, fresh, 'many');
   if (!rooted || rooted.effects?.length) return null;
   // The read's own position and multiplicity ride; the sack and loop counter a FRESH start traverser holds are
-  // superseded by the host's, which the split keeps. A label the read binds of its own is shed under a
-  // FIRST-row host — `map`/`by()`/a filter emit a new traverser split from the HOST, so the child's labels never
-  // leave it (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`) — but rides out of an all-rows
-  // host (`local` emits the child's own traversers), which is not this cross's state: the fold's general cross.
+  // superseded by the host's, which the split keeps. A label or path the read binds of its own is shed under a
+  // FIRST-row host — its traversers never leave the child. An all-rows host's read is cut before any top-level
+  // bind (`sharedEnd`), so a label still on it is bound below the top level: the fold's general cross.
   const own = rooted.rel.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'bulk');
   const kept = (channel: Channel): boolean =>
-    own.includes(channel) || (channel.role === 'alias' ? first : CROSSES.has(channel.role));
+    own.includes(channel) || (channel.role === 'alias' || channel.role === 'path' ? first : CROSSES.has(channel.role));
   if (!rooted.rel.channels.every(kept)) return undefined;
   const read = first && !atMostOneRow(rooted.rel)
     ? make.limit({
@@ -243,7 +266,7 @@ function reSourcedBody(
   const crossed = make.join({
     id: fresh('srj'), left: prefix.rel, right, join: 'cross', channels: [], type: typeOf(...prefix.rel.type.cols, ...right.type.cols),
   });
-  const carried = prefix.rel.channels.filter((channel) => CROSSES.has(channel.role));
+  const carried = prefix.rel.channels.filter((channel) => crosses(channel.role));
   const channels = carried.reduce(withChannel, own);
   const fromPrefix = new Set(carried.map((channel) => channel.col));
   const outCols = [...payloadCols(once), ...channels.map((channel) => (fromPrefix.has(channel.col) ? prefix.rel : once).type.cols.find((column) => column.name === channel.col)!)];
@@ -251,8 +274,23 @@ function reSourcedBody(
     id: fresh('srx'), input: crossed, channels, type: typeOf(...outCols),
     exprs: outCols.map((column) => [column.name, col(crossed.id, fromPrefix.has(column.name) ? column.name : renamed.get(column.name)!)] as const),
   });
-  return { rel, framing: rooted.framing, aliases: prefix.aliases, bulked: !!rooted.bulked };
+  return cut < rest.length
+    ? continueAs(rel, rooted.framing, rest, cut, !!rooted.bulked, ctx, fresh, prefix.aliases)
+    : { rel, framing: rooted.framing, aliases: prefix.aliases, bulked: !!rooted.bulked };
 }
+
+/** Where an all-rows host's re-sourced rest stops being one shared read (`reSourcedBody`): the first top-level
+ *  step that binds a label (`as()`, a `match()`) or reads host state (`hostStateAt`), else its length. */
+function sharedEnd(rest: readonly IRStep[], ctx: ChainCtx): number {
+  const binds = rest.findIndex((step) => asLabelsOf(step).length > 0 || matchLabelsOf(step, ctx.params).length > 0);
+  const reads = hostStateAt(rest, ctx);
+  const ends = [binds, reads].filter((at) => at >= 0);
+  return ends.length ? Math.min(...ends) : rest.length;
+}
+
+/** Why an ALL-rows host's re-sourcing body declines on a traverser whose path is tracked (`reSourcedBody`). */
+const RESOURCE_PATH = 'a V()/E() inside local() or flatMap() on a traverser whose path is tracked (a path(), '
+  + 'simplePath() or cyclicPath() around it) is not supported yet';
 
 /**
  * Why a FIRST-row host's re-sourcing body declines when the steps after its `V()`/`E()` read the incoming

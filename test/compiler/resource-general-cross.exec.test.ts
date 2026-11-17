@@ -1,13 +1,16 @@
-// GRAPHSTEP'S GENERAL CROSS — a mid-traversal `V()`/`E()` the shared-read form (`lower/scoped.ts`
-// `reSourcedBody`) does not state falls through to the fold's cross join (`lower/movement.ts` `reSource`):
-// a prefix carrying a PATH (the split extends it, as a hop does), a read that binds a label of its OWN (it
-// rides out of `local`), a rest that reads the HOST traverser under an all-rows host (`local`/`flatMap` emit
-// all N × G traversers), and a carried SACK (the split keeps it). `head.split(element, this)` keeps the
-// traverser's labels and sack and extends its path:
+// GRAPHSTEP'S CROSS — a mid-traversal `V()`/`E()`. `head.split(element, this)` keeps the traverser's labels and
+// sack and extends its path:
 // vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221.
 //
-// A FIRST-row host (`map`/`by()`/a filter) whose rest reads the host traverser stays a decline, decided from
-// the query text, naming the shape; a rest that is only `select` of an outer label suggests the likely intent.
+// In a child body (`lower/scoped.ts` `reSourcedBody`) the read after the re-source stays ONE shared read: under a
+// FIRST-row host (`map`/`by()`/a filter) a tracked host path crosses unchanged (the child's positions never leave
+// it); under an ALL-rows host (`local`/`flatMap`) the rest splits where it first binds a label or reads the host,
+// and the fold continues over the cross from there. At the ROOT the fold's cross (`lower/movement.ts` `reSource`)
+// extends a carried path and keeps a sack.
+//
+// A FIRST-row host whose rest reads the host traverser, and an ALL-rows host on a traverser whose path is
+// tracked, decline from the query text, naming the shape; a rest that is only `select` of an outer label
+// suggests the likely intent.
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare, bagOf } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
@@ -88,5 +91,51 @@ describe('a first-row host whose rest reads the host traverser declines, naming 
     expect(message).toContain('a V()/E() inside map(), by() or a filter');
     expect(message).not.toContain("select('a').out()");
     expect(message).not.toContain('ambiguous');
+  });
+});
+
+describe('a first-row host keeps ONE shared read under a tracked path: the host path crosses unchanged', () => {
+  // `map`/`where` emit a traverser split from the HOST, so the child's GraphStep positions never leave it
+  // (`TraversalMapStep`): the path is the host's plus map's own result — never a graph cross per host.
+  test('out().map(V().values(age).max()).path() is [v, w, 35]', () => {
+    const got = rows("g.V().out().map(V().values('age').max()).path().by('name').by('name').by()").map(members);
+    expect(got).toHaveLength(6);
+    expect(got.every((p) => p.length === 3 && p[2] === 35)).toBe(true);
+  });
+  test('out().where(V().has(lop)).path() keeps the host path', () => {
+    expect(bagOf(rows("g.V().out().where(V().has('name','lop')).path().by('name')").map((r) => JSON.stringify(members(r)))))
+      .toEqual(bagOf(rows("g.V().out().path().by('name')").map((r) => JSON.stringify(members(r)))));
+  });
+  test('an empty where() read filters every host', () => expect(count("g.V().out().where(V().out().has('name','zzz')).path().count()")).toBe(0));
+  test('after simplePath()', () => expect(count("g.V().both().simplePath().map(V().values('age').max()).count()")).toBe(12));
+  test('a first-row pick of a multi-row read', () => expect(count("g.V().out().map(V().limit(1).values('name')).path().count()")).toBe(6));
+});
+
+describe('an all-rows host splits its rest where it first binds or reads the host', () => {
+  test('a slice before the bind is shared: local(V().order().limit(1).as(x))', () => {
+    expect(scalars("g.V().local(V().order().by('name').limit(1).as('x')).select('x').values('name')")).toEqual(Array(6).fill('josh'));
+  });
+  test('a slice before the host read is shared: as(a).local(V().order().limit(1).select(a))', () => {
+    expect(bagOf(scalars("g.V().as('a').local(V().order().by('name').limit(1).select('a')).values('name')")))
+      .toEqual(bagOf(['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']));
+  });
+  test('a host compare after the split', () => expect(count("g.V().as('a').local(V().as('b').where('a',neq('b'))).count()")).toBe(30));
+  test('flatMap(V().has().select(a)) answers each host', () => {
+    expect(bagOf(scalars("g.V().as('a').flatMap(V().has('name','lop').select('a')).values('name')")))
+      .toEqual(bagOf(['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']));
+  });
+  test('a rebind of a host label inside local()', () => {
+    expect(scalars("g.V().as('a').local(V().as('a')).select(all,'a').count(local).dedup()")).toEqual([2]);
+  });
+});
+
+describe('an all-rows host on a traverser whose path is tracked declines, naming the shape', () => {
+  test('out().local(V().order().limit(1)).path()', () => {
+    try { run(s, "g.V().out().local(V().order().by('name').limit(1)).path().count()"); } catch (error) {
+      expect(error).toBeInstanceOf(UnsupportedTraversal);
+      expect((error as Error).message).toContain('a V()/E() inside local() or flatMap() on a traverser whose path is tracked');
+      return;
+    }
+    throw new Error('expected a decline');
   });
 });

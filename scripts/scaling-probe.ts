@@ -114,6 +114,13 @@ const SHAPES: readonly Shape[] = [
   { name: 'resource xNG: as.local(V.as.select(a,b))', query: "g.V().as('a').local(V().as('b').select('a','b')).count()" },
   { name: 'resource xNG: local(V.has.as).select', query: "g.V().local(V().has('age',gt(30)).as('x')).select('x').count()" },
   { name: 'resource xNG: sack.V.sack', query: 'g.V().sack(assign).by(constant(1)).V().sack().count()' },
+  // The first-row hosts the N1 review measured quadratic when a path-carrying or simplePath prefix fell to the
+  // fold's per-row cross: the shared read must stay ONE read under them.
+  { name: 'resource: out.map(V.max).path', query: "g.V().out().map(V().values('age').max()).path().count()" },
+  { name: 'resource: out.where(V.out.has).path', query: "g.V().out().where(V().out().has('name','zzz')).path().count()" },
+  { name: 'resource: both.simplePath.map(V.max)', query: "g.V().both().simplePath().map(V().values('age').max()).count()" },
+  { name: 'resource: out.map(V.limit.values).path', query: "g.V().out().map(V().limit(1).values('name')).path().count()" },
+  { name: 'resource: out.local(V.order.limit).path', query: "g.V().out().local(V().order().by('name').limit(1)).path().count()" },
   { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
 ];
 
