@@ -1,14 +1,19 @@
-import type { Expr } from '../expr.ts';
+import { compilerInt, type Expr } from '../expr.ts';
 import * as make from '../factory.ts';
+import { minter } from '../mint.ts';
 import type { Rel } from '../rel.ts';
-import type { RelId } from '../types.ts';
-import { exprChildren, exprRels, forEachExpr, forEachRel, relChildren, relExprs, rewriteRels, substRelId } from '../walk.ts';
+import type { ColMeta, RelId } from '../types.ts';
+import {
+  exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, mapExprChildren, relChildren, relExprs,
+  rewriteExpr, rewriteRels, substRelId,
+} from '../walk.ts';
 
 /**
  * `fuse` — the home for SEMANTIC algebraic rewrites on the RelIR tree: adjacent-node transposes that
  * buy something the block assembler and SQLite cannot.
  *
- * ONE rewrite lives here today: **a `Filter` pushed below a `ROW_NUMBER()` renumber `Window`** (through
+ * TWO rewrites live here: an `Aggregate` FACTORED over a cross `Join` (`factor`, below — Calcite's
+ * AggregateJoinTransposeRule), and **a `Filter` pushed below a `ROW_NUMBER()` renumber `Window`** (through
  * a renaming `Project` directly above it), when nothing reads the window's column as a VALUE. Why
  * SQLite cannot do it: a window is an optimisation barrier — a predicate above `ROW_NUMBER()` cannot
  * move below it in general, because the window would then number a DIFFERENT row set. Why the
@@ -55,7 +60,8 @@ export function fuse(plan: Rel): Rel {
  */
 export function fuseAll(plans: readonly Rel[]): readonly Rel[] {
   // Each transpose can expose another (a filter that lands on a second renumber), so to a fixpoint —
-  // bounded, because every round moves at least one filter strictly lower.
+  // bounded, because every round moves at least one filter strictly lower or turns an Aggregate over a
+  // cross join into one over two grouped sides, which `factor` never matches again.
   let current = plans;
   for (let round = 0; round < 64; round++) {
     const next = transposeRound(current);
@@ -245,10 +251,150 @@ function transposeRound(plans: readonly Rel[]): readonly Rel[] {
     const t = recognise(r, c);
     if (t) found.set(r, t);
   });
-  if (!found.size) return plans;
+  if (!found.size) return factorRound(plans, c);
   const memo = new Map<Rel, Rel>();
   return plans.map((plan) => rewriteRels(plan, (mapped, original) => {
     const t = found.get(original);
     return t && mapped.kind === 'filter' ? transpose(mapped, t) : mapped;
   }, memo));
+}
+
+// ---------- the second rule: an Aggregate factored over a cross Join ----------
+
+type Aggregate = Extract<Rel, { readonly kind: 'aggregate' }>;
+type Join = Extract<Rel, { readonly kind: 'join' }>;
+
+/**
+ * `Aggregate → Project* → Join(cross)`, with `inline` re-spelling an expression over the aggregate's input
+ * as one over the join (each projection's outputs substituted by what computes them). `single` guards the
+ * nodes the rewrite drops: a shared one would stay behind for its other reader, the work done twice.
+ */
+function overCross(a: Aggregate, single: (r: Rel) => boolean): { readonly join: Join; readonly inline: (e: Expr) => Expr } | undefined {
+  const chain: Project[] = [];
+  let node = a.input;
+  for (; node.kind === 'project' && single(node) && !node.exprs.some(([, e]) => exprHasSubquery(e)); node = node.input) chain.push(node);
+  if (node.kind !== 'join' || node.join !== 'cross' || !single(node)) return undefined;
+  const inline = (e: Expr): Expr => chain.reduce((x, p) =>
+    rewriteExpr(x, (n) => (n.kind === 'col' && n.rel === p.id ? p.exprs.find(([out]) => out === n.name)![1] : n)), e);
+  return { join: node, inline };
+}
+
+/** Is `r` (through filters) an Aggregate grouped on nothing but `keys` — at most one row per key? */
+const groupedOn = (r: Rel, keys: readonly string[]): boolean => {
+  for (; r.kind === 'filter'; r = r.input);
+  return r.kind === 'aggregate' && r.type.cols.slice(0, r.groupBy.length).every((column) => keys.includes(column.name));
+};
+
+const aggOf = (fn: 'sum' | 'count', ...args: Expr[]): Expr => ({ kind: 'agg', fn, args });
+const times = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '*', left, right });
+
+/**
+ * Calcite's `AggregateJoinTransposeRule`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/AggregateJoinTransposeRule.java`), for a
+ * CROSS join and the two splittable functions (`SqlSplittableAggFunction`'s `CountSplitter`/`SumSplitter`):
+ * `Aggregate(G; aggs) → Join(cross, L, R)` becomes `Aggregate(G; aggs') → Join(cross, Aggregate(L; G_L; c_L,
+ * sums), Aggregate(R; G_R; c_R, sums))`. Why SQLite cannot: it never transposes an aggregate and has no hash
+ * join, so a GROUP BY over a cross join materialises |L|×|R| rows — the pooled re-source
+ * `g.V().group().by('name').by(V().count())` is |keys|×|V|. Factored, each side is read once.
+ *
+ * Over a group pair (g_L, g_R) of row counts c_L, c_R: `COUNT(*) = c_L·c_R`; `SUM(x_L) = SUM_L(x)·c_R`;
+ * `SUM(f_L·g_R) = SUM_L(f)·SUM_R(g)` (a NULL factor drops the pair on both sides, so an all-NULL group stays
+ * NULL). Each side groups by exactly the keys G reads of it, so a pair IS a top group and every sub-total is
+ * over ≥ 1 row. An integer sub-total times an integer count stays INTEGER, a REAL stays REAL. A side with NO
+ * key is a scalar aggregate — one row even over empty input, where the original has no group at all — so it
+ * is guarded `count > 0`. Anything else (DISTINCT, FILTER, ORDER BY, another function, HAVING, a key that is
+ * not a bare column, a scalar top aggregate, a carried channel) is left alone; so is a pair whose sides are
+ * both grouped on their keys already (Calcite's `uniqueCount == 2`), which is also what stops it re-firing.
+ */
+function factor(a: Aggregate, mint: () => (hint: string) => RelId): Rel | undefined {
+  const shape = overCross(a, () => true);
+  if (!shape || a.having || a.channels.length || !a.groupBy.length || a.aggs.some(([, e]) => exprHasSubquery(e))) return undefined;
+  const { join: j, inline } = shape;
+  const sides = [j.left, j.right] as const;
+  const free = freeRelIds(j.right);
+  let lateral = false;
+  if (free.size) forEachRel(j.left, (r) => { lateral ||= free.has(r.id); });
+  if (lateral) return undefined;
+  const width = j.left.type.cols.length;
+  const sideOf = (name: string): 0 | 1 => (j.type.cols.findIndex((column) => column.name === name) < width ? 0 : 1);
+  /** The side an expression over the join reads (-1 neither, 2 both), and its spelling over that side. */
+  const local = (e: Expr): readonly [number, Expr] => {
+    let side = -1;
+    const expr = rewriteExpr(e, (n) => {
+      if (n.kind !== 'col' || n.rel !== j.id) return n;
+      const s = sideOf(n.name);
+      side = side === -1 || side === s ? s : 2;
+      return { ...n, rel: sides[s].id, name: sides[s].type.cols[j.type.cols.findIndex((column) => column.name === n.name) - s * width]!.name };
+    });
+    return [side, expr];
+  };
+  const keys: [string[], string[]] = [[], []];
+  const groupBy = a.groupBy.map(inline);
+  for (const g of groupBy) {
+    if (g.kind !== 'col' || g.rel !== j.id) return undefined;
+    if (!keys[sideOf(g.name)].includes(g.name)) keys[sideOf(g.name)].push(g.name);
+  }
+  if (sides.every((side, s) => groupedOn(side, keys[s].map((name) => (local({ kind: 'col', rel: j.id, name })[1] as { name: string }).name))))
+    return undefined;
+  const taken = new Set(j.type.cols.map((column) => column.name));
+  const pushed: [(readonly [string, Expr])[], (readonly [string, Expr])[]] = [[], []];
+  const push = (s: number, agg: Expr): Expr => {
+    let n = 0;
+    while (taken.has(`fa${n}`)) n++;
+    taken.add(`fa${n}`);
+    pushed[s]!.push([`fa${n}`, agg]);
+    return { kind: 'col', rel: j.id, name: `fa${n}` };
+  };
+  const counts = [push(0, aggOf('count')), push(1, aggOf('count'))] as const;
+  const split = (e: Extract<Expr, { kind: 'agg' }>): Expr | undefined => {
+    if (e.distinct || e.filter || e.orderBy?.length) return undefined;
+    if (e.fn === 'count' && !e.args.length) return aggOf('sum', times(counts[0], counts[1]));
+    if (e.fn !== 'sum' || e.args.length !== 1) return undefined;
+    const [side, x] = local(e.args[0]!);
+    if (side !== 2) return aggOf('sum', times(push(Math.max(side, 0), aggOf('sum', x)), counts[side === 1 ? 0 : 1]));
+    const product = e.args[0]!;
+    if (product.kind !== 'binary' || product.op !== '*') return undefined;
+    const [l, lx] = local(product.left), [r, rx] = local(product.right);
+    if (l === 2 || r === 2 || (l === r)) return undefined;
+    const left = l === -1 ? 1 - r : l;
+    return aggOf('sum', times(push(left, aggOf('sum', lx)), push(1 - left, aggOf('sum', rx))));
+  };
+  let failed = false;
+  const top = (e: Expr): Expr => {
+    if (e.kind === 'agg') return split(e) ?? ((failed = true), e);
+    if (e.kind === 'col' && e.rel === j.id && !keys[sideOf(e.name)].includes(e.name)) failed = true;
+    return mapExprChildren(e, top);
+  };
+  const aggs = a.aggs.map(([name, e]) => [name, top(inline(e))] as const);
+  if (failed) return undefined;
+  const meta = (name: string): ColMeta => j.type.cols.find((column) => column.name === name)!;
+  const id = mint();
+  const built = sides.map((side, s) => {
+    const [count] = pushed[s]![0]!;
+    const agg = make.aggregate({
+      id: id('fa'), input: side, channels: [], groupBy: keys[s]!.map((name) => local({ kind: 'col', rel: j.id, name })[1]), aggs: pushed[s]!,
+      type: { cols: [...keys[s]!.map(meta), ...pushed[s]!.map(([name]): ColMeta => ({ name, type: name === count ? 'int' : 'any', nullable: name !== count }))] },
+    });
+    return keys[s]!.length ? agg : make.filter({
+      id: id('fa'), input: agg, channels: [], type: agg.type,
+      pred: { kind: 'binary', op: '>', left: { kind: 'col', rel: agg.id, name: count }, right: compilerInt(0) },
+    });
+  });
+  const joined = make.join({ id: j.id, left: built[0]!, right: built[1]!, join: 'cross', channels: [],
+    type: { cols: [...built[0]!.type.cols, ...built[1]!.type.cols] } });
+  return make.aggregate({ id: a.id, input: joined, channels: a.channels, type: a.type, groupBy, aggs });
+}
+
+function factorRound(plans: readonly Rel[], c: Census): readonly Rel[] {
+  const single = (r: Rel): boolean => (c.parents.get(r)?.length ?? 0) === 1 && !c.roots.has(r);
+  let mint: ((hint: string) => RelId) | undefined;
+  let changed = false;
+  const memo = new Map<Rel, Rel>();
+  const next = plans.map((plan) => rewriteRels(plan, (mapped, original) => {
+    if (mapped.kind !== 'aggregate' || original.kind !== 'aggregate' || !overCross(original, single)) return mapped;
+    const factored = factor(mapped, () => (mint ??= minter(...plans).id));
+    if (factored) changed = true;
+    return factored ?? mapped;
+  }, memo));
+  return changed ? next : plans;
 }

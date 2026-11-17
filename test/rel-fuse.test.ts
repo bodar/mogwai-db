@@ -12,7 +12,7 @@ import type { Channels } from '../src/channels.ts';
 import { check } from '../src/rel/check.ts';
 import { emitQuery } from '../src/rel/emit.ts';
 import { col, lit, type Expr } from '../src/rel/expr.ts';
-import { filter, project, scan as scanRel, sort, window } from '../src/rel/factory.ts';
+import { aggregate, filter, join, project, scan as scanRel, sort, window } from '../src/rel/factory.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
 import { planOf } from '../src/rel/plan.ts';
 import type { Rel } from '../src/rel/rel.ts';
@@ -92,5 +92,76 @@ describe('fuse: a Filter below a renumber Window', () => {
   test('does NOT move below a PARTITIONED numbering — a filter can reshuffle its cross-partition order', () => {
     const plan = sortedOut(renumbered(named, true));
     expect(fuse(plan)).toBe(plan);
+  });
+});
+
+// `fuse`'s second rule — Calcite's AggregateJoinTransposeRule over a CROSS join (`factor`). The claim is the
+// answer, so every factored plan runs beside the unfactored one; the shape check is that no Aggregate reads the
+// cross join's |L|×|R| rows any more (each side is grouped below it).
+describe('fuse: an Aggregate factored over a cross Join', () => {
+  const side = (id: string, keep?: string): Rel => {
+    const s = scanRel({ id: relId(`${id}s`), table: 'nodes', alias: id, channels, type: { cols } });
+    return keep === undefined ? s : filter({ id: relId(`${id}f`), input: s, channels, type: { cols },
+      pred: { kind: 'binary', op: '!=', left: col(s.id, 'name'), right: lit(keep, 'text') } });
+  };
+  const crossOf = (l: Rel, r: Rel): Rel => join({ id: relId('j'), left: l, right: r, join: 'cross', channels,
+    type: { cols: [...cols, { name: 'rid', type: 'int', nullable: false }, { name: 'rname', type: 'text', nullable: false }] } });
+  const agg = (fn: 'sum' | 'count', ...args: Expr[]): Expr => ({ kind: 'agg', fn, args });
+  const times = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '*', left, right });
+  /** `Aggregate(keys; aggs)` over a renaming Project over the cross join — the shape the pooled re-source lowers to. */
+  const grouped = (l: Rel, r: Rel, keys: readonly string[], aggs: (j: Rel) => readonly (readonly [string, Expr])[]): Rel => {
+    const j = crossOf(l, r);
+    const p = project({ id: relId('p'), input: j, channels, type: j.type, exprs: j.type.cols.map((c) => [c.name, col(j.id, c.name)] as const) });
+    const out = aggs(p);
+    return aggregate({ id: relId('a'), input: p, channels, groupBy: keys.map((k) => col(p.id, k)),
+      aggs: out, type: { cols: [...keys.map((k) => p.type.cols.find((c) => c.name === k)!), ...out.map(([name]): ColMeta => ({ name, type: 'any', nullable: true }))] } });
+  };
+  const factored = (plan: Rel): boolean => {
+    let crossUnderAggregate = false;
+    const go = (r: Rel, aggregated: boolean): void => {
+      if (r.kind === 'join' && r.join === 'cross') {
+        crossUnderAggregate ||= aggregated && ![r.left, r.right].every((s) => s.kind === 'aggregate' || (s.kind === 'filter' && s.input.kind === 'aggregate'));
+        go(r.left, false); go(r.right, false); return;
+      }
+      if ('input' in r && r.input) go(r.input as Rel, r.kind === 'aggregate' || (aggregated && r.kind === 'project'));
+    };
+    go(plan, false);
+    return !crossUnderAggregate;
+  };
+  const sorted = (rows: unknown[]): unknown[] => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const same = (plan: Rel): Rel => {
+    const fused = fuse(plan);
+    expect(() => check(fused)).not.toThrow();
+    expect(sorted(rowsOf(fused))).toEqual(sorted(rowsOf(plan)));
+    return fused;
+  };
+
+  test('COUNT(*), SUM of one side and SUM of a cross-side PRODUCT factor, keyed on both sides', () => {
+    const plan = grouped(side('l', 'x'), side('r'), ['name', 'rname'], (p) => [
+      ['c', agg('count')], ['s', agg('sum', col(p.id, 'rid'))], ['m', agg('sum', times(col(p.id, 'id'), col(p.id, 'rid')))],
+    ]);
+    const fused = same(plan);
+    expect(factored(plan)).toBe(false);
+    expect(factored(fused)).toBe(true);
+  });
+
+  test('a side with NO key is guarded: it keeps the key-side answer and never invents a group over an empty side', () => {
+    const counted = grouped(side('l'), side('r'), ['name'], (p) => [['c', agg('count')], ['s', agg('sum', times(col(p.id, 'id'), col(p.id, 'rid')))]]);
+    expect(factored(same(counted))).toBe(true);
+    expect(sorted(rowsOf(fuse(counted)))).toContainEqual({ name: 'a', c: 6, s: 21 });
+    // An EMPTY key-less side: the cross join is empty, so there is no group at all — not one group with a 0.
+    const empty = filter({ id: relId('rz'), input: side('r'), channels, type: { cols },
+      pred: { kind: 'binary', op: '=', left: col(relId('rs'), 'name'), right: lit('zzz', 'text') } });
+    const none = grouped(side('l'), empty, ['name'], () => [['c', agg('count')]]);
+    expect(rowsOf(same(none))).toEqual([]);
+  });
+
+  test('is left alone: DISTINCT, another function, a key that is not a bare column, and sides already grouped on their keys', () => {
+    const distinct = grouped(side('l'), side('r'), ['name'], (p) => [['c', { kind: 'agg', fn: 'sum', args: [col(p.id, 'rid')], distinct: true }]]);
+    expect(fuse(distinct)).toBe(distinct);
+    const avg = grouped(side('l'), side('r'), ['name'], (p) => [['c', { kind: 'agg', fn: 'avg', args: [col(p.id, 'rid')] }]]);
+    expect(fuse(avg)).toBe(avg);
+    const once = fuse(grouped(side('l'), side('r'), ['name'], () => [['c', agg('count')]]));
+    expect(fuse(once)).toBe(once);
   });
 });

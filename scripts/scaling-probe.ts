@@ -132,6 +132,16 @@ const SHAPES: readonly Shape[] = [
   { name: 'union(out,in).tree', query: "g.V().union(out(),in()).tree().by('name')" },
   { name: 'resource: out.local(V.order.limit).path', query: "g.V().out().local(V().order().by('name').limit(1)).path().count()" },
   { name: 'project.by(V.count)', query: "g.V().project('n','c').by('name').by(V().count())" },
+  // N3: a pooled re-source's value is an Aggregate over pool-weight × graph, factored per side by `fuse`'s
+  // AggregateJoinTransposeRule (`src/rel/passes/fuse.ts` `factor`) — never |keys| × |V| rows.
+  { name: 'ajt: group.by(name).by(V.count)', query: "g.V().group().by('name').by(V().count())" },
+  { name: 'ajt: both.group.by(name).by(V.count)', query: "g.V().both().group().by('name').by(V().count())" },
+  { name: 'ajt: group.by(label).by(V.out.count)', query: 'g.V().group().by(label).by(V().out().count())' },
+  { name: 'ajt: group.by(name).by(V.values.sum)', query: "g.V().group().by('name').by(V().values('age').sum())" },
+  { name: 'ajt: group.by(name).by(V.has.count)', query: "g.V().group().by('name').by(V().has('name','zzz').count())" },
+  { name: 'ajt: group.by(name).by(E.count)', query: "g.V().group().by('name').by(E().count())" },
+  { name: 'ajt: groupCount.by(name).map(V.count)', query: "g.V().local(group().by('name').by(V().count())).count()" },
+  { name: 'ajt: project.by(group.by(name).by(V.count))', query: "g.V().hasLabel('software').project('g').by(V().group().by('name').by(V().count()))" },
   // The unit row is never a CTE (`isUnitValues`, `src/rel/block.ts`): first-row `map(<traversal>)` reads, at depth.
   { name: 'unit: map(values(name))', query: "g.V().map(values('name'))" },
   { name: 'unit: withPath.as.out.map(select.values)', query: "g.withPath().V().as('a').out().map(select('a').values('name'))" },
