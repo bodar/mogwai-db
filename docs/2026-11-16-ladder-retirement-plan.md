@@ -739,6 +739,12 @@ refused the body), or soften the wording to "may not be supported here". Same it
   (`src/compiler/ir/step.ts`) — import it.
 - Cosmetic: `resourcePathMessage` (`src/compiler/rel/lower/scoped.ts`) writes "a optional() body"; choose a/an.
 
+✅ **LANDED (b93bbdbf, with P15).** `Declines` records the furthest step the fold reached per step list, and
+`lowerChain` (`src/compiler/rel/lower.ts`) names the child write only when the fold declined AT the step holding it
+(else "may not be supported here"); a write on a path-tracked traverser now says so at its own lowering
+(`write-on-path`). Upsert advice follows the write's shape (addV/addE in a `BRANCH_KINDS` body); `UPSERT_HOSTS` is
+deleted; "an optional()". Message-only, no baseline moved. Remains: nothing.
+
 ### K2 — Declines that lost their explanation under M1 (minor, one item)
 
 Under `'split'`, `reSourcedBody` no longer notes `resource-path`, and the later decline notes nothing, so these say only
@@ -799,6 +805,8 @@ sideEffect() …"), not "no lowering covers".
 - **P15 — Classify a child write once.** `programWrites` (`write.ts` `noteWrite`) already splits on `FILTER_HOSTS`;
   `writeInChild(host, write, filterHosts)` (`unsupported.ts` ~l.107) tests it again. Carry `filter: boolean` on the
   child write (or two builders) and drop the parameter. Do with K1.
+  ✅ **LANDED with K1 (b93bbdbf).** `programWrites` classifies each child write once (`ChildWrite`: filter, upsert,
+  host step); `writeInChild` lost its `filterHosts` re-test. Remains: nothing.
 
 ### Needs-human questions (round 3)
 
