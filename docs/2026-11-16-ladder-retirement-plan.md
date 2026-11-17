@@ -927,6 +927,15 @@ above, plus `g.V().project('n','m').by('name').by(outE().values('weight').min())
 
 ### S2 — The leading-scan rewrite moves to `src/rel/passes` and reuses lineage (MAJOR, placement + duplication; after S1)
 
+✅ **LANDED (e2b515da, 01f29c3a).** The first-hit read of a correlated re-source is a physical pass over the finished
+algebra, `src/rel/passes/leading.ts` (after fuse, before semijoin), recognising a Limit-1-over-rowid-Sort or a
+one-column EXISTS over `reSourceCross` (`src/rel/lineage.ts`, the one predicate S3/S5 can reuse) whose seed reads an
+outer row. `columnPath`/`definingPath`/`spinePath`/`columnAt` are one lineage authority in `src/rel/lineage.ts`
+(replacing `traceDown`); one `conjuncts` beside `and` in `src/rel/expr.ts` (the semijoin/scoped/decorrelate copies
+are gone); `copies.ts` `nestsCorrelatedSubplans` is the shared compounding guard. Plans unchanged across the L1
+corpus; nested `map(V().where(neq('a')).map(V().where(neq('a'))…))` now answers; all probes ≈7–9× per 8×.
+**Remains:** nothing.
+
 M2's `leadingFirst`, `leadingRead`/`buildLeadingRead`, `elementSource`, `scanKey`, `holdSource`, `reaches`,
 `traceDown`, `mapColsDeep`, `deepColsRead` and `slicesByKeys` (about 230–400 lines in
 `src/compiler/rel/lower/scoped.ts`) are a physical-plan rewrite. They push Sort+fetch and conjuncts onto the leading
