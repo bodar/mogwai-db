@@ -224,6 +224,12 @@ Each sub-item is its own commit. The audit's "measured and NOT landed" list is t
    `by(name).by(tail)` 1.37 → 1.30; every shape ~8× from 1k to 8k. Remains for step 1: nothing. Note the
    label/count shape is still above the 1.2× deletion bar, which the step-4 decision must weigh.
 2. A connector row for keyed `group("a")…cap("a")` (13 sole answers), through the collection substrate.
+   ✅ **LANDED (c1419463).** `pooledGroup` splits into `pooledGroupMap` (R5.1's per-key pool) plus two tails; the
+   keyed side effect hands that map to `keyedGroupTail`, extracted from `collectionArm` in
+   `src/compiler/rel/lower.ts`, so the host's lowering and the connector share ONE authority for registration,
+   drain and re-entry (`src/compiler/rel/lower/scoped.ts`). ladder-reach group L1 14 → 3, L6 3 → 2; L3 2055 → 2056;
+   connector/ladder at 8k 0.77–1.23×, every shape linear. Remains for step 2: nothing (a pooled keyed form INSIDE a
+   connector body, and a second pooled site on one label, still decline cleanly in `registerGrouping`).
 3. A child-traversal key together with a child-traversal value (2).
 4. Nested groups (2 L6 workload queries). Then delete if within 1.2×; if step 1 misses the bar, back to the
    owner with the numbers.
