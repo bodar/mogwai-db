@@ -1708,3 +1708,185 @@ forms join U2's witnesses.
 
 All 13 round-6 `wf/*-6-*` branches and their worktrees were removed after their landing shas were confirmed on
 origin/trunk; none is a resume point.
+
+## Next round (written 2026-11-18, after round 7)
+
+Round 7 landed U0 (cab95bf4), R5.2 (c1419463), U2 (b062cf00, 18cefe76) and U4 (2115a2ff, 28c109dc, c651c7dc). A
+graceful stop (`.git/workflow-stop`) ended the round before **U3** and **R5.3** started: neither has any work, and their
+branches `wf/u3-fence-demand-gate-7-0` (at d05b712d) and `wf/r5-3-barrierless-group-value-7-0` (at 1ca61804) are
+EMPTY — restart each from trunk, not from the branch. **R5.4** was deferred: its prerequisite R5.3 did not land (R5.2
+now has). **U1** is waiting on an owner decision (question R7-1 below); nothing was committed, and the scratch
+measurements live in its builder's report, not on `wf/u1-edgepair-loose-scan-7-0` (identical to its base). Still open
+from earlier rounds: everything listed under round 6 except U0, U2, U4 and R5.2. Ordered so each prerequisite comes
+BEFORE the item it unblocks; major items first.
+
+**Shared root of three round-7 majors: a physical pass decides on a structural fact that does not match what SQLite
+actually renders or how many rows actually flow.** U0's `'once'` mode calls a `cross` join reorderable and an unfenced
+`materialize` a barrier (the emitter renders neither that way); `magic`'s per-filter gate treats a per-enclosing-row
+bound as a per-statement one (the reasoning U2 rejected for `atHost`); U2's `unpicked` drops a `limit(k)` from the
+domain without anything bounding the widened per-host work. Each is fixed in the fact itself (V0, V2, V3), never in a
+consumer.
+
+### V0 — Make U0's `'once'` fact agree with the emitter (MAJOR; prerequisite for U3 — do first)
+
+Two misclassifications in `src/rel/work.ts`, invisible today because nothing reads `'once'` yet, but U3 would fence on
+them and keep the very regression it exists to fix:
+- **A `cross` join is not reorderable.** `leftInside = !existence && r.join !== 'left' && !r.ordered && perRowOf(r.right)`
+  holds for every cross join, so its left side goes to `full`. `src/rel/emit.ts` ~587 renders `kind === 'cross' ||
+  ordered` as `CROSS JOIN`, SQLite's order fence: the left side is the outer loop, scanned once. Witness:
+  `g.V().repeat(both()).times(3).limit(5)` (a U3 witness) — the direction join `u19 CROSS JOIN (VALUES (0),(1))` puts
+  `u19` and the start relations under `LIMIT 5` in `full`. Fix: exclude `r.join === 'cross'`, or reuse the emitter's
+  ordering rule so the fact cannot diverge from it.
+- **Only a FENCED `materialize` reads its input in full.** `readsInputInFull` counts every `materialize`; an unfenced
+  one renders as a plain CTE SQLite flattens or streams (`src/rel/rel.ts` ~39, `emit.ts` `cteDefinition`), the
+  distinction `src/rel/copies.ts` ~199/~229 and `block.ts` `shapeOf`/`spliceable` already make. Witness:
+  `g.V().out().path().limit(2)` — `pm7` emits without MATERIALIZED, yet `'once'` marks it and the scans beneath `full`.
+  Fix: `|| (r.kind === 'materialize' && r.fenced === true)`; keep magic's `'spine'` answer explicitly if it differs
+  (whole-L1 compilePlan diff, as U0 did). The `exhaustsInput` widening (walk-term existence decline, `scoped.ts` ~780)
+  inherits the same fix.
+- Tests: `test/rel-reader-demand.test.ts` pins the wrong answer for an unfenced `materialize`; add fenced/unfenced and
+  cross-join cases, and compiled-plan witnesses for the U3 shapes (`has(…).both().limit(3)`,
+  `repeat(both()).times(3).limit(5)`).
+- U0's other half ("one-seek test as a per-call cost question") was NOT exported; U2 used `perHostWork(…).exhausts`
+  directly. Record nothing further unless a second consumer appears.
+
+### U3 — unchanged (after V0)
+
+As written under round 6. Restart from trunk. Its witnesses must be re-measured after V0.
+
+### V1 — A keyed pooled group computes its pool once (MAJOR, compute-once; regression from R5.2)
+
+R5.2 sends every keyed pooled `group('a')` through the connector, and `keyedGroupTail` → `drainRaisingSite` builds a
+separate Binding statement over the FINISHED pooled map (`GroupRows.done`). So a value that can raise (sum/mean/max
+over values) computes the whole per-key pool twice — once in the drain statement, once in the cap read — and the drain
+statement shares no CTE: members, domain and pool (held once as MATERIALIZED CTEs in the result statement) are spelled
+inline up to 3×. Median of 9 at 8k, trunk-before → after (unkeyed twin): `g.V().group('a').by('city').by(values('age').sum()).cap('a')`
+39.7 → 86.8 ms (28.4); `…by(values('age').max())` 41.0 → 80.6 (24.3);
+`g.V().as('p').out().group('a').by('city').by(select('p').values('age').mean()).cap('a')` 124.9 → 270.1 (70.9);
+`has('age',gt(30)).group('a').by('city').by(outE().values('weight').sum()).cap('a')` 81.3 → 115.0. Linear, so not a
+blocker, but the keyed form costs 2–4× its unkeyed twin. **Item**, in the ONE shared tail (not per shape): bind the
+finished map once and let the drain and the cap read that binding, or skip the drain when a later `cap`/`select` in the
+same chain reads the label (that read raises anyway). Independently, make the Binding/drain emission share subtrees
+through CTEs the way the result statement does — `sql-hygiene` counts only NAMED CTEs evaluated twice, so an inline
+derived table spelled three times is invisible to it; extend the gate when this lands. Same item (minor): R5.2's commit
+said "no new per-row term", but the keyed form keeps `encounter`, so `pooledGroupMap`'s domain uses `firstArrival`
+(`min(printf('%020d', encounter) || …)`, 2× per statement; cap bytes 7320 → 10601). Say so in the baseline note, or
+drop `encounter` where the key representative does not need it (P39/P17 territory).
+
+### V2 — Delete `magic`'s per-filter row-bound gate (MAJOR, super-linear; cheap — one line)
+
+`if (rowBounds(f.input).max <= 1) return f;` (`src/rel/passes/magic.ts` `atFilter`, ~l.184) treats a bound per
+ENCLOSING row as no reason to share, the reasoning U2 rejected for `atHost`: a nested test is asked across every host.
+Any `limit(1)` / `order().by(..).limit(1)` before an exhausting test stays per host and is quadratic:
+`g.V().hasLabel('person').local(out('created').order().by(id).limit(1).where(__.in('created').has('age',gt(45))).count()).sum()`
+165.6 → 2271 ms at 1050 → 4200 chains (13.7× per 4×; unordered `limit(1)` twin 14.5×). With the line deleted in a
+scratch checkout: 3.4× and 3.1×, same answers (20160). `atHost`'s point gate and `exhausts` already cover what it
+guarded. Add both shapes to `test/compiler/walk-condition-hub-scale.exec.test.ts`, plus a scaling witness whose limit is
+AT OR ABOVE the data size (`hasLabel('person').limit(10000).local(out().where(inE('created').has('w',99)).count())`) —
+the suite's `V().limit(50)` keeps k constant as N grows, which is how U2's first attempt hid a regression.
+
+### V3 — A per-host-bounded magic domain for a pick inside a body (MAJOR, super-linear; SUBSTRATE — after V2)
+
+U2's `unpicked` (`src/rel/copies.ts`) widens a body's `limit(k)` out of the domain, so k no longer bounds the work. Two
+measured costs of the same cause:
+- **Pick input fans out through a hub → quadratic domain** (hosts × hub neighbourhood):
+  `g.V().hasLabel('person').local(out('created').in('created').limit(3).where(out('knows').has('age',gt(45))).count()).sum()`
+  29× per 8× (14.5 → 426 ms); `range(0,3)` 27×; `not(…)` 29×; a nested `local(…limit(3).local(…))` 40×; a `limit(5)`
+  body through `in('knows').out('created')` 32×. Trunk before U2 was worse (45×, copied limit); the per-host form (no
+  magic, U2's first attempt afadd133) was linear (2.9–4.5×). Answers correct everywhere (per-host verifier, 28 pairs).
+- **Selective host, large fan-out → pays the whole neighbourhood:** one `alice` following N persons, 10 posts each:
+  `g.V().has('name','alice').local(out('follows').limit(5).where(out('posted').has('topic','x')).values('name').fold())`
+  9.7/26.9/165.7 ms at N = 1k/8k/64k vs 8.4/10.6/31.0 on the pre-U2 trunk — linear in data, but unbounded in fan-out
+  while only k rows flow.
+Neither "leave the body per host" nor "widen" is linear in both shapes. **Prerequisite (this item):** a domain that keeps
+a per-host bound — at most k candidate rows per distinct host key, read from the host's own pick once (as U2 already
+does for an outermost host's pick, via the fenced named CTE) — or a cost gate weighing a widened unbounded per-host
+input against the k-bounded original. Until then, state the trade as MEASURED in `magic.ts`'s header (today it says the
+widened domain is simply "all the semi-join needs"). Add a test where `limit` actually cuts rows on the hub graph (the
+nine "pick or cap" tests never cut a row: a person has ≤2 created, ≤3 out-edges), pinning both the superset argument
+and the cost.
+
+### V4 — `keyedJoin` reuses `indexSeek`'s EXISTS decomposition (MAJOR, one authority)
+
+U4's `keyedJoin` (`src/rel/passes/semijoin.ts`) re-parses the property EXISTS (`exists` → `project` → `filter` → scan,
+inner conjuncts minus `isCorrelation`) that `indexSeek` in the same file already decomposes, and rebuilds the same scan
+→ filter → project → distinct pipeline with one extra `value` column; its local `own` restates `seekable(e, props.id,
+null)`. It skips `indexSeek`'s checks (`term.negated`, `props.table === properties.table`, `constrainsValue`) and is safe
+only because the caller ran `seek(term,…)` first. **Item:** parameterise `indexSeek` to also project `value`, and build
+the (owner, value) relation from it; `stackedAbove`'s `hop.exprs.find(… kind==='col')` should go through `lineage.ts`
+`columnPath` instead of a third rename tracer (joins U5/P35). Same item (minor, concrete):
+- the `keyedJoin` comment ("only joins may stand between…") contradicts `WIDENABLE` = join/project/filter; the
+  `narrowFilter` comment still describes the deleted correlated-first fallback;
+- a `where` body is lowered as a pick plus an authoritative EXISTS copy (`rcp3.id = rcp0.id`), and the keyed join is
+  placed on both, so `kv` is built twice per statement and an element already pinned by a correlated id equality loses
+  its point seek; `rowBounds` does not count a correlated id equality as a bound — make it, then the copy needs no join;
+- inside a correlated scalar subquery the extra keyed EXISTS is rebuilt per outer row (not "once per statement");
+- `docs/outstanding-work.md` r7-fu3: qualify the "no shape is slower than before" sentence (U4 trades the selective-
+  constant / low-cardinality-correlated case); add `optional()` to item 4(d)'s family
+  (`g.V().has('kind','person').values('name').as('n').optional(__.V().has('kind','person').has('name', select('n'))).count()`
+  420 ms → 25.2 s, 60×, pre-existing); add `…has('country', select('c')).dedup().has('kind','office').count()` (64×,
+  pre-existing: the constant after `dedup()` does not narrow below it, while `has(…).has(…, select('c')).dedup()` is
+  linear); and note that the keyed join is linear only when SQLite builds its automatic index on `kd.value`, which it
+  does not under a global `dedup()` (`…has('name', select('n')).dedup().count()` 590 ms → 36.8 s, `SCAN kd0` per outer
+  row; trunk-before was 65×, so 2× better, not a regression).
+
+### V5 — Pre-existing depth/scale residue found this round (each its own item; not newly reachable)
+
+- **Hosts magic does not reach (≈15× per 8×, trunk alike):** `g.V().hasLabel('person').order().by(out('created').where(__.in('created').has('age',gt(45))).count(),desc).limit(1)`,
+  `dedup().by(…same…).count()` (no MATERIALIZED), and `group().by('age').by(…same…)` (materialized, still 15×).
+- **Hosts after `coalesce`/`optional`/`union`/`choose`/`out('knows').dedup()`** scale 14–23× per 8× before and after U2:
+  `g.V().coalesce(out('knows'),identity()).local(out('created').where(__.in('created').has('age',gt(45))).count()).sum()`.
+- **A `limit` over an unbounded walk inside `local()` does not terminate:** `g.V().hasLabel('person').local(repeat(out('knows')).emit().limit(3).count()).sum()`
+  over a cyclic `knows` graph (>30 s, trunk alike) — the limit is not pushed into the recursive term
+  (`src/compiler/rel/walk.ts`). Plausible "first k reachable" query; needs a judgement against the no-depth-cap rule
+  (bounding the walk by the consumer's own `limit` is not a cap).
+- U2's two open siblings (a `where` over a UNION in a body; a draw before the test) stay as recorded under R6-1; U6 is
+  the union one's substrate.
+
+### Cheap, concrete follow-ups (round 7)
+
+- **R5.2 tests:** the decline cases in `test/compiler/keyed-pooled-group.exec.test.ts` run only under CONNECTOR_ONLY;
+  on the default route `g.V().union(group('a').by(label).by(count()), out()).cap('a')` (and choose/optional/coalesce
+  arms) still ANSWER through the ladder. Assert the default-route answer too, or say the ladder owns the arm form (an
+  R7 item). Add one element-valued keyed pool to SAME (`group('a').by('name').by(out().order().by('name')).cap('a')`,
+  `by(limit(1))`, `by(out().dedup())`) with the twin-equality assertion.
+- **U4 tests:** a `where`/`not` body reading a label bound OUTSIDE it (the route that regressed during the build) in
+  `test/correlated-value-seek.test.ts`'s scaling blocks, at the shared 16× bar (P42).
+
+### Next round — reuse sweep (round 7's proposals)
+
+- **P40 — one effect-prepending helper on `Tail`, and one site tail.** Four sites spell `{ ...tail, effects: [...x,
+  ...(tail.effects ?? [])] }` (`src/compiler/rel/lower.ts` `keyedGroupTail` ~l.1402 and the `collectionArm` aggregate
+  branch ~l.1490, `scoped.ts` route loop ~l.2792, `write.ts` ~l.1408); the aggregate arm repeats `keyedGroupTail`'s
+  drain step (drain, decline on null, prepend, `reenter(at+1)`). Add `prependEffects(tail, effects)` beside `Tail` and a
+  `siteTail(effects, at, reenter)` both return through. ~12 lines; L1 compilePlan diff empty. Do with V1 (same tail).
+- **P41 — spell the one-row bound `atMostOneRow`** in `magic.ts` `atFilter` (deleted by V2 anyway) and `work.ts`
+  `readInFull` (`rowBounds(r).max <= 1`, `perRowOf`'s `> 1`); `src/rel/bounds.ts` already exports it. Zero plan change.
+  Do with V0.
+- **P42 — one scaling-probe helper, `test/support/scaling.ts`** (`timed(run)` best-of-k, sync or async;
+  `expectLinear(small, large)` at the brief's ONE 16× bar). Copies today disagree: `walk-condition-hub-scale` <16,
+  `correlated-value-seek` <20, plus hand-rolled timers in `leading-owner-seek`, `per-host-work`, rooted-sample-scale,
+  traversal-ids-scale, id-routing-scale, merge-scale, filter-below-renumber (~80–100 lines). Re-check U4's witnesses at
+  16× (reported growth was under it).
+
+### Needs-human questions (round 7)
+
+- **R7-1 (U1, `edgePair`'s label vocabulary), from the builder, verbatim:** "The planned recursive loose scan fixes the
+  large-schema case (10-19x faster than trunk at 300 labels when probes fail), but at 3 labels it is 1.6-2x slower than
+  trunk on the hub-scale rows, which breaks your 1.3x gate. The two named witnesses were never slow on trunk, because
+  passing probes stop early. Which do you want? (a) Accept the loose scan and its small-schema slowdown, with the gate
+  relaxed to about 2x. (b) Use `label IN (SELECT DISTINCT label FROM edges WHERE src = <fixed>)` instead. It is as fast
+  as trunk at 3 labels and fastest at 300, but each probe reads that endpoint's whole out-neighbourhood, which is bad if
+  the endpoint is an out-hub. (c) Leave trunk as it is and close U1, re-stating the problem as the failing-probe cost
+  with large schemas, witnessed by `g.V().as('a').out().out().where(__.in().as('a'))` (87ms to 759ms at 300 labels).
+  The witnesses should also change: the two passing-probe witnesses show no regression, and
+  `g.V(1).outE().inV().hasId(3)` does not trigger the pass at all."
+  Context: the builder confirmed SQLite accepts a correlated `WITH RECURSIVE` loose scan inside the EXISTS probe (walks
+  already render one in a correlated derived table), so the named prerequisite is not the blocker; the per-probe
+  recursive-CTE setup (~3 µs) is. U1's doc note about `hasId` must also be corrected: `hasId` lowers to `HAVING EXISTS`
+  against `nodes`, so `g.V(1).outE().inV().hasId(3)` and `g.V(1).out().hasId(2)` both do NOT fire the pass.
+- R6-1 and round 4's questions 1–2 remain open.
+
+Round-7 cleanup: the landed items' `wf/*-7-*` branches and worktrees (U0, U2, U4, R5.2) were removed after their
+landing shas were confirmed on origin/trunk. Kept: `wf/u1-edgepair-loose-scan-7-0`, `wf/u3-fence-demand-gate-7-0`,
+`wf/r5-3-barrierless-group-value-7-0` — all three carry no work.
