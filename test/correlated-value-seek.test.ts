@@ -313,3 +313,42 @@ describe('a correlated value beside a selective constant has() is a keyed join, 
     }, SCALE_TIMEOUT_MS);
   }
 });
+
+// The same lookup where the value belongs to an ENCLOSING query's row — the label bound outside a
+// `where`/`not` body, or before a `select()` back to the element: "persons whose country has an hq". The body's
+// Filter has no join beneath it for the keyed join to widen, so it is placed over the Filter's own input; `kv`
+// reads no outer row, so SQLite builds it once even inside the correlated subquery. The first fix fell back to
+// the correlated seek driving here, which read the whole country group per person: 16 ms @1k → 543 ms @8k (34×).
+describe('a correlated value from an enclosing row beside a constant has() is still a keyed join', () => {
+  /** `n` persons over 20 countries, 4 hq (countries 0–3), 20 offices (one per country, size `j mod 5`). */
+  const world = (n: number): GraphStore => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    loadBulk(store, [
+      ...Array.from({ length: n }, (_, i) => ({ labels: ['v'], properties: [{ key: 'kind', value: 'person' }, { key: 'country', value: `c${i % 20}` }] })),
+      ...Array.from({ length: 4 }, (_, j) => ({ labels: ['v'], properties: [{ key: 'kind', value: 'hq' }, { key: 'country', value: `c${j}` }] })),
+      ...Array.from({ length: 20 }, (_, j) => ({ labels: ['v'], properties: [{ key: 'kind', value: 'office' }, { key: 'country', value: `c${j}` }, { key: 'size', value: j % 5 }] })),
+    ], []);
+    return store;
+  };
+  const small = world(1_000);
+  const large = world(8_000);
+  for (const [q, at1k, at8k] of [
+    ["g.V().has('kind', 'person').values('country').as('c').where(__.V().has('kind', 'hq').has('country', select('c'))).count()", 200, 1_600],
+    ["g.V().has('kind', 'person').values('country').as('c').not(__.V().has('kind', 'hq').has('country', select('c'))).count()", 800, 6_400],
+    ["g.V().has('kind', 'person').values('country').as('c').where(__.V().has('country', select('c')).has('kind', 'office')).count()", 1_000, 8_000],
+    ["g.V().has('kind', 'person').as('p').values('country').as('c').select('p').where(__.V().has('kind', 'hq').has('country', select('c'))).count()", 200, 1_600],
+    ["g.V().has('kind', 'person').as('p').values('country').as('c').select('p').where(__.V().has('kind', 'office').has('size', gt(3)).has('country', select('c'))).count()", 200, 1_600],
+    // A constant set as large as the outer stream: neither IN order is linear here, the keyed join is.
+    ["g.V().has('kind', 'person').values('country').as('c').where(__.V().has('kind', 'person').has('country', select('c'))).count()", 1_000, 8_000],
+    ["g.V().has('kind', 'person').values('country').as('c').map(__.V().has('kind', 'office').has('country', select('c')).count()).sum()", 1_000, 8_000],
+  ] as const) {
+    test(`closed form, propertySeek on = off, under 16× from 1k to 8k: ${q}`, async () => {
+      expect(await answer(small, q)).toEqual([at1k]);
+      expect(await answer(large, q)).toEqual([at8k]);
+      expect(await answer(small, q)).toEqual(await answer(small, q, {}, OFF));
+      const t1 = await timed(() => answer(small, q));
+      const t8 = await timed(() => answer(large, q));
+      expect(t8 / Math.max(t1, 5)).toBeLessThan(16);
+    }, SCALE_TIMEOUT_MS);
+  }
+});

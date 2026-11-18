@@ -279,9 +279,14 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, above: 
  * 20 offices among N users by country, 28 ms @1k → 586 ms @8k), the constant driving reads the whole constant
  * set per outer row (outer × |K|: the people among N by name, 606 ms @1k → 2.4 s @2k). So with constants beside
  * it the correlated seek becomes a KEYED JOIN (`keyedJoin`): the equi-join of the outer value with the constant
- * set's `(owner, value)` rows, built once — linear in the rows it produces, with no selectivity guess. Only
- * where that join cannot be placed (the outer row is an enclosing query's) does the correlated seek go FIRST in
- * the intersection, the constants uncorrelated `IN` sets beneath it — the user's own equi-join, per outer row.
+ * set's `(owner, value)` rows, built once — linear in the rows it produces, with no selectivity guess. That
+ * holds where the outer row is an ENCLOSING query's too (`…as('c').where(__.V().has('kind', 'hq')
+ * .has('country', select('c'))))`): the join is placed over the Filter's own input, and SQLite builds `kv` and
+ * its automatic index once even inside the correlated subquery, since `kv` reads no outer row. Where the join
+ * cannot be placed at all (a relation `keyedJoin` cannot widen stands between), the constants drive alone and
+ * the correlated `EXISTS` checks each — never the correlated seek driving with the constants under it, which
+ * reads the whole value group per outer row (measured on `…values('country').as('c').where(__.V()
+ * .has('kind', 'hq').has('country', select('c'))))`, 4 hq among N persons in 20 countries: 16 ms @1k → 543 ms @8k).
  */
 function narrowFilter(
   node: Extract<Rel, { readonly kind: 'filter' }>, terms: readonly Expr[], above: readonly Expr[],
@@ -305,7 +310,8 @@ function narrowFilter(
     constants.push(seeked);
     selfContained.add(term);
   }
-  // CORRELATED: one seek, re-run per outer row, on the element the constants narrow (or any, where none does).
+  // CORRELATED: beside the constants, a keyed join on their element — or, where none can be placed, the constants
+  // drive alone below. With no constant, one seek re-run per outer row, on any element.
   for (const seek of strategies) {
     for (const term of stacked) {
       if (selfContained.has(term)) continue;
@@ -317,7 +323,7 @@ function narrowFilter(
       if (!seeked) continue;
       const keyed = constants.length ? keyedJoin(node, term, target, constants, mint) : null;
       if (keyed) { facts.narrowed.add(element); return keyed; }
-      return narrowed(node, terms, target, element, allOwners([seeked, ...constants], mint), facts);
+      if (!constants.length) return narrowed(node, terms, target, element, allOwners([seeked], mint), facts);
     }
   }
   return driven ? narrowed(node, terms, driven.target, driven.element, allOwners(constants, mint), facts) : null;
@@ -357,9 +363,13 @@ function narrowed(node: Extract<Rel, { readonly kind: 'filter' }>, terms: readon
  * Placement: the element's `side` is replaced by `Join(kv, side)` (pinned, so `kv` is the loop in front of it),
  * every join above it on the way up to the Filter's input re-declared one `kv` column wider, and the Filter
  * re-stated over that input under a Project that restores its columns under its own id — so nothing above it
- * changes. Only joins may stand between the Filter and the side, since a projection would drop `kv.value`
- * before the `WHERE` that reads it; and a side that IS the Filter's input (the outer row is an enclosing
- * query's, which no join here can reach) keeps the `IN` narrowing.
+ * changes. Only `WIDENABLE` relations may stand between the Filter and the side, each re-declared carrying the
+ * two `kv` columns up to the `WHERE` that reads `kv.value`. A side that IS the Filter's input — the element is
+ * the whole `FROM`, the outer row an enclosing query's (a `where`/`not`/`map` body) — is the same placement with
+ * nothing to widen: `Filter(Join(kv, side))`, the outer value read from the enclosing row. `kv` reads no outer
+ * row, so SQLite still builds it and its automatic index ONCE for the statement, not per outer row (measured on
+ * raw SQL with |K| = N: 0.9 ms @1k → 8.0 ms @8k, against 27 ms → 1.66 s for `id IN (SELECT sid FROM kv WHERE
+ * value = <outer>)`, which scans `kv` per row).
  */
 /** The relations `keyedJoin` can widen by the two `kv` columns on the way up to the Filter: each keeps its input's
  *  rows and passes columns through by name. */
@@ -371,7 +381,7 @@ function keyedJoin(
   const { side, path } = target;
   const sideAt = path.rels.indexOf(side);
   const sideId = path.names[sideAt];
-  if (sideAt <= 0 || !sideId || path.rels.slice(0, sideAt).some((r) => !WIDENABLE.has(r.kind))) return null;
+  if (sideAt < 0 || !sideId || path.rels.slice(0, sideAt).some((r) => !WIDENABLE.has(r.kind))) return null;
   const properties = SEEK_PROPERTIES[target.table];
   if (!properties || term.kind !== 'exists' || term.plan.kind !== 'project' || term.plan.input.kind !== 'filter') return null;
   const props = term.plan.input.input;
@@ -461,10 +471,9 @@ function keyedJoin(
  * fact about the DATA, which neither SQLite nor this pass knows (no statistics) — and the narrowing set is read by
  * a body asked PER HOST, so an unselective seek driving hands every host every candidate: `has('kind','person')`
  * beside a selective `values('name').is('zz')` (spelled as a type-dispatching `CASE`, which no spelling rule can
- * rank) went 840 ms @1k → 3.3 s @2k. Every seek after the first is an uncorrelated `IN`, computed once per
- * statement, each one read of its index — linear whichever term the query states first. Only the FIRST may be
- * correlated (`narrowFilter` puts a correlated seek there): it is the one re-run per outer row, and each row it
- * yields is probed against the once-built sets.
+ * rank) went 840 ms @1k → 3.3 s @2k. The intersection is an uncorrelated `IN`, computed once per statement, each
+ * seek one read of its index — linear whichever term the query states first. A correlated seek is never one of
+ * them: beside constants it is a keyed join (`keyedJoin`), alone it is the only owner relation.
  */
 function allOwners(owners: readonly Rel[], mint: Minter): Rel {
   const [first, ...rest] = owners.map((o) => (o.kind === 'distinct' ? o.input : o));

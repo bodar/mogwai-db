@@ -279,7 +279,16 @@ Shared roots, each proposed ONCE as the substrate item to build before what it u
    (b) magic's per-host body in a scalar `map/project().by(…count())` — its test is a semi-join on the magic
    set, not a seek the keyed join consumes (22 ms / 1.2 s; trunk 35 ms / 1.3 s); (c) a constant inside a
    nested `where(__.has(…))` after the correlated seek (36 ms / 2.4 s, unchanged). The LABELLED value join
-   below is the same keyed join with the label set as K — a direct follow-up.
+   below is the same keyed join with the label set as K — a direct follow-up. The keyed join is also placed
+   where the value is an ENCLOSING row's (`…as('c').where/not(__.V().has('kind', 'hq').has('country',
+   select('c'))))`, or after `select('p')`): `Filter(Join(kv, side))` over the body's own input, `kv` still built
+   once (8.7 / 21.8 ms; correlated-first was 16 / 543 ms). Where no keyed join can be placed the constants drive
+   alone, as before U4 — never correlated-first. (d) PRE-EXISTING, a different root: a correlated `V().has(k,
+   select('n'))` body in `local(…)`/`coalesce(…)` is decorrelated into `outer CROSS JOIN <every element the body
+   admits>` with the value check on the cross product, and the seek cannot narrow an element reached through a
+   bound relation — quadratic with or without a constant (`…values('name').as('n').local(__.V().has('name',
+   select('n')).values('city')).count()` 693 ms @1k → 44 s @8k; same on acce94a4). `map`/`where`/`not`/`union`/
+   `flatMap`/`optional`/`project().by` bodies are linear.
 5. **r7-fu3: the correlated value is spelled twice — the narrowing IN and the EXISTS it sits beside (MAJOR,
    common).** `narrowFilter` (and `indexSeek` via `freshCopy`) copies the whole typed-value normaliser
    (`json_extract(jsonb_array(jsonb_object(… printf('%!.17g' …))),'$[#-1].v')`) into the IN and keeps the
