@@ -133,15 +133,19 @@ describe('the access path', () => {
     expect(correlatedSeek(plan("g.V().values('name').as('e').V().has(T.id, lt(4)).has('name', select('e')).count()"))).toBe(false);
   });
 
-  // The correlated equality IS the join predicate, so it drives (one seek per outer row); a constant `has()` is a
-  // local filter — an UNCORRELATED `IN` set SQLite builds once per statement — whichever the query states first.
+  // A correlated value equality beside a constant `has()` on one element is the equi-join of the outer value with
+  // the constant set's `(owner, value)` rows (`keyedJoin`): those rows are built ONCE per statement — the constant
+  // an uncorrelated `IN` set inside them — and each outer row probes them by value, so neither the value group nor
+  // the constant set is re-read per outer row, whichever the query states first.
   for (const q of [
     "g.V().values('name').as('e').V().has('k', 1).has('name', select('e')).count()",
     "g.V().values('name').as('e').V().has('name', select('e')).has('k', 1).count()",
   ]) {
-    test(`a correlated seek drives, a constant is a once-per-statement set: ${q}`, () => {
+    test(`a correlated value and a constant are one keyed join, its rows built once: ${q}`, () => {
       const details = plan(q);
-      expect(correlatedSeek(details)).toBe(true);
+      expect(correlatedSeek(details)).toBe(false);
+      expect(details.some((d) => /^MATERIALIZE kd\d/.test(d))).toBe(true);
+      expect(details.some((d) => /^SEARCH kd\d+ USING AUTOMATIC .*INDEX \(value=\?\)/.test(d))).toBe(true);
       const constant = details.findIndex((d) => d.startsWith('LIST SUBQUERY'));
       expect(constant).toBeGreaterThanOrEqual(0);
       expect(details[constant + 1]).toContain('vp_key_value (key=?');
@@ -256,6 +260,48 @@ describe('a correlated seek drives past a constant has() on the same element', (
     ["g.V().values('name').as('n').union(__.V().has('name', select('n')).has('kind', 'person'), __.V().has('kind', 'thing').has('name', select('n'))).count()", 1_980, 15_840],
     ["g.V().as('a').where(__.values('name').as('n').V().has('name', select('n')).has('kind', 'person').where(neq('a'))).count()", 740, 5_920],
     ["g.V().local(__.values('name').as('n').V().has('name', select('n')).has('kind', 'person')).count()", 1_480, 11_840],
+  ] as const) {
+    test(`closed form, propertySeek on = off, under 16× from 1k to 8k: ${q}`, async () => {
+      expect(await answer(small, q)).toEqual([at1k]);
+      expect(await answer(large, q)).toEqual([at8k]);
+      expect(await answer(small, q)).toEqual(await answer(small, q, {}, OFF));
+      const t1 = await timed(() => answer(small, q));
+      const t8 = await timed(() => answer(large, q));
+      expect(t8 / Math.max(t1, 5)).toBeLessThan(16);
+    }, SCALE_TIMEOUT_MS);
+  }
+});
+
+// A FACT-TO-DIMENSION lookup: take a value, find the vertices sharing it, keep those a constant `has()` admits —
+// "the office in my country", "the CEO of my country". Here the correlated key is LOW-cardinality (20 countries
+// over N users) and the constant SELECTIVE (20 offices, one CEO), the reverse of the block above. Driving from the
+// correlated seek read the whole value group per outer row (outer × N/20: 10.5 ms @1k → 509 ms @8k); driving from
+// the constant read the constant set per outer row (outer × |K|) in the block above. The keyed join
+// (`keyedJoin`, `src/rel/passes/semijoin.ts`) builds the constant set's `(owner, country)` rows once and probes them
+// by value per outer row, so both directions are linear in the rows the join produces.
+describe('a correlated value beside a selective constant has() is a keyed join, not a group scan per row', () => {
+  /** `n` users (`kind = 'user'`, name `n{i}`, country `k{i mod 20}`, user 3 the CEO) + 20 offices, one per country. */
+  const offices = (n: number): GraphStore => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    loadBulk(store, [
+      ...Array.from({ length: n }, (_, i) => ({ labels: ['u'], properties: [
+        { key: 'name', value: `n${i + 1}` }, { key: 'kind', value: 'user' }, { key: 'country', value: `k${(i + 1) % 20}` },
+        ...(i + 1 === 3 ? [{ key: 'role', value: 'ceo' }] : [])] })),
+      ...Array.from({ length: 20 }, (_, j) => ({ labels: ['o'], properties: [{ key: 'kind', value: 'office' }, { key: 'country', value: `k${j}` }] })),
+    ], []);
+    return store;
+  };
+  const small = offices(1_000);
+  const large = offices(8_000);
+  for (const [q, at1k, at8k] of [
+    ["g.V().has('kind', 'user').values('country').as('c').V().has('country', select('c')).has('kind', 'office').count()", 1_000, 8_000],
+    ["g.V().values('country').as('c').V().has('country', select('c')).has('role', 'ceo').count()", 51, 401],
+    ["g.V().where(__.values('country').as('c').V().has('country', select('c')).has('name', 'n20')).count()", 51, 401],
+    ["g.V().values('kind').as('k').V().has('kind', select('k')).has('name', 'n3').count()", 1_000, 8_000],
+    ["g.V().has('kind', 'user').values('country').as('c').V().has('country', select('c')).has('kind', 'office').has('country', neq('zz')).count()", 1_000, 8_000],
+    ["g.V().has('kind', 'user').union(__.values('country').as('c').V().has('country', select('c')).has('kind', 'office'), __.constant(1)).count()", 2_000, 16_000],
+    // Control: the same lookup spelled with a label keeps the query's own access path.
+    ["g.V().has('kind', 'user').values('country').as('c').V().hasLabel('o').has('country', select('c')).count()", 1_000, 8_000],
   ] as const) {
     test(`closed form, propertySeek on = off, under 16× from 1k to 8k: ${q}`, async () => {
       expect(await answer(small, q)).toEqual([at1k]);

@@ -264,13 +264,22 @@ Shared roots, each proposed ONCE as the substrate item to build before what it u
    the frontier's row count rather than inline it downstream. Add the match(), 3- and 4-hop label shapes to
    the scaling witnesses in `test/compiler/both-frontier-once.exec.test.ts`. Cheap: `copiedWork`'s doc says
    "any projected expression…" but a computed FILTER predicate counts as no work — say so.
-4. ✅ **r7-fu3 constant-outranks-correlated — LANDED (U4).** `ElementFacts.constantSeek` is deleted: a
-   correlated seek on the element drives and every constant `has()` (sargable or not) is an uncorrelated `IN`
-   set beneath it (`narrowFilter`), linear in the join's rows. The traded case, recorded: a correlated value
-   on a LOW-cardinality key beside a selective constant
-   (`g.V().values('kind').as('k').V().has('kind', select('k')).has('name', 'zz').count()`, 3 kinds) costs the
-   user's own equi-join — 3 ms → 73 ms @1k, 4.6 s @8k (N²/3 same-kind pairs). Making it cheap again needs a
-   selectivity fact (S1).
+4. ✅ **r7-fu3 constant-outranks-correlated — LANDED (U4).** `ElementFacts.constantSeek` is deleted, and no
+   ORDER between a correlated seek and a constant one is chosen: a correlated value equality beside constant
+   `has()`s on one element is a KEYED JOIN (`keyedJoin`, `src/rel/passes/semijoin.ts`) — the constant set's
+   `(owner, value)` rows built once per statement, probed by value per outer row through SQLite's automatic
+   index — linear in the join's rows whichever is selective. Measured 1k → 8k: `…has('name', select('n'))
+   .has('kind', 'person')` 4 / 31 ms; the fact-to-dimension reverse (`…has('country', select('c')).has('kind',
+   'office')`, 20 offices) 2.6 / 19 ms (correlated-first had it at 586 ms @8k); `…has('kind', select('k'))
+   .has('name', 'n3')` 2.1 / 15.5 ms (7.6 s @8k correlated-first). `stackedAbove` also sees through a
+   `Distinct`/row-wise `Project`, so magic's domain gets the constant too. Still super-linear, all
+   PRE-EXISTING (same or worse on acce94a4): (a) the keyed join under a window `dedup()` whose WHERE also holds
+   an EXISTS-to-join loop — SQLite declines the automatic index on the `(owner, value)` rows and scans them
+   (`…has('name', select('n')).has('kind', 'person').select('a').dedup()`, 436 ms / 28 s; trunk 734 ms / 40 s);
+   (b) magic's per-host body in a scalar `map/project().by(…count())` — its test is a semi-join on the magic
+   set, not a seek the keyed join consumes (22 ms / 1.2 s; trunk 35 ms / 1.3 s); (c) a constant inside a
+   nested `where(__.has(…))` after the correlated seek (36 ms / 2.4 s, unchanged). The LABELLED value join
+   below is the same keyed join with the label set as K — a direct follow-up.
 5. **r7-fu3: the correlated value is spelled twice — the narrowing IN and the EXISTS it sits beside (MAJOR,
    common).** `narrowFilter` (and `indexSeek` via `freshCopy`) copies the whole typed-value normaliser
    (`json_extract(jsonb_array(jsonb_object(… printf('%!.17g' …))),'$[#-1].v')`) into the IN and keeps the
@@ -619,7 +628,7 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   row, so it must be a real join, the RelIR `flatten` §4 decorrelation, not a narrowing conjunct); an
   element reached through a join key (`V().outE().has('w', select('w'))`, 1.07 s → 71 s) — the narrowing
   declines there by design (the edge join drives it), so the fix is a join REORDER, not a seek. (A constant
-  seek outranking a correlated one is gone — U4: the correlated seek drives, constants are `IN` sets.)
+  seek beside a correlated one is gone — U4: the two are one keyed join, see the r7-fu3 item 4 entry.)
 - **`fuse` runs only in the read `lowered()` (rf3-fuse-write, r4-fu0)** — a write fed by
   `order().by(…).V().has(…)`, or a write-body `V()` re-source's label filter, renumbers holders×V first.
 - **K-entry map driver (r7-fu9)** — `inject([k0:0,…]).mergeV()` 55× (`json_extract` re-reads per entry); a

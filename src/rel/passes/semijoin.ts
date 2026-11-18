@@ -4,8 +4,8 @@ import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
 import { rowBounds } from '../bounds.ts';
 import type { RelId } from '../types.ts';
-import { exprRels, forEachExpr, forEachRel, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
-import { columnPath, rowidScan } from '../lineage.ts';
+import { deepColsRead, exprRels, forEachExpr, forEachRel, mapColsDeep, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
+import { type ColumnPath, columnPath, rowidScan } from '../lineage.ts';
 
 /**
  * `semijoin` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the
@@ -155,20 +155,41 @@ interface ElementFacts {
 /** The conjuncts stacked over each Filter (`ElementFacts.above`). */
 function stackedAbove(plans: readonly Rel[]): ReadonlyMap<Rel, readonly Expr[]> {
   const consumers = new Map<Rel, number>(plans.map((plan) => [plan, 1]));
-  const over = new Map<Rel, Extract<Rel, { readonly kind: 'filter' }>>();
+  // Each Filter's nearest Filter above it, and the row-wise relations between them (top first).
+  const over = new Map<Rel, { readonly parent: Extract<Rel, { readonly kind: 'filter' }>; readonly hops: readonly Rel[] }>();
   forEachRel([...plans], (r) => {
     for (const child of relsBeneath(r)) consumers.set(child, (consumers.get(child) ?? 0) + 1);
-    if (r.kind === 'filter' && r.input.kind === 'filter') over.set(r.input, r);
+  });
+  forEachRel([...plans], (r) => {
+    if (r.kind !== 'filter') return;
+    const hops: Rel[] = [];
+    let below = r.input;
+    while (ROW_WISE.has(below.kind) && consumers.get(below) === 1 && 'input' in below && below.input) { hops.push(below); below = below.input; }
+    if (below.kind === 'filter') over.set(below, { parent: r, hops });
   });
   const above = new Map<Rel, readonly Expr[]>();
   const of = (r: Rel): readonly Expr[] => {
     const known = above.get(r);
     if (known) return known;
-    const parent = over.get(r);
+    const stacked = over.get(r);
     // A term over the Filter's OWN columns is re-spelled over its input's, which a Filter passes through unchanged
-    // — so every term resolves where the lowest Filter's own do (`drivenElement` traces from `node.input`).
-    const terms = parent && consumers.get(r) === 1 && r.kind === 'filter'
-      ? [...conjuncts(parent.pred), ...of(parent)].map((e) => substRelId(e, r.id, r.input.id))
+    // — so every term resolves where the lowest Filter's own do (`drivenElement` traces from `node.input`). Between
+    // the two, a `Distinct` passes its input's columns through by name and a row-wise `Project` by its column
+    // expression; a term reading a column a Project COMPUTES is dropped, which only narrows less.
+    const terms = stacked && consumers.get(r) === 1 && r.kind === 'filter'
+      ? [...conjuncts(stacked.parent.pred), ...of(stacked.parent)].flatMap((e) => {
+        let ok = true;
+        for (const hop of [...stacked.hops, r] as const) {
+          if (hop.kind !== 'project') { e = substRelId(e, hop.id, (hop as Rel & { readonly input: Rel }).input.id); continue; }
+          e = mapColsDeep(e, hop.id, (name) => {
+            const defined = hop.exprs.find(([output]) => output === name)?.[1];
+            if (defined?.kind === 'col' && defined.rel === hop.input.id) return defined;
+            ok = false;
+            return col(hop.input.id, name);
+          });
+        }
+        return ok ? [e] : [];
+      })
       : [];
     above.set(r, terms);
     return terms;
@@ -176,6 +197,11 @@ function stackedAbove(plans: readonly Rel[]): ReadonlyMap<Rel, readonly Expr[]> 
   for (const r of over.keys()) of(r);
   return above;
 }
+
+/** What `stackedAbove` sees a Filter's terms THROUGH on their way down to the Filter beneath: relations that keep
+ *  or drop whole input rows and pass the columns a term reads through unchanged. A predicate on an element's id
+ *  commutes with each — a `Distinct` over fewer rows keeps exactly the values the predicate would have kept. */
+const ROW_WISE: ReadonlySet<Rel['kind']> = new Set(['distinct', 'project']);
 
 function elementFacts(plans: readonly Rel[]): ElementFacts {
   const reached = new Set<RelId>();
@@ -246,21 +272,16 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, above: 
  * `g.V().values('name').as('e').V().has('name', select('e')).count()`, and 3.6 ms with the conjunct.
  *
  * It ADDS an access path to an element the query gives none (`ElementFacts.reached`) and never chooses
- * between two on a selectivity guess. Every SELF-CONTAINED seek on the element is intersected (`allOwners`);
- * a CORRELATED one on the same element, where there is one, goes FIRST in that intersection, and the constants
- * become uncorrelated `IN` sets beneath it.
- *
- * The order is not a selectivity guess either, and it is the reason this is linear. The correlated equality
- * IS the join predicate — `has('name', select('n'))` says "the elements whose name is this row's" — so
- * driving from it is the index nested-loop join on the user's own join: one `vp_key_value` seek per outer
- * row, its rows each probed against the constant sets, which SQLite materialises ONCE per statement (an
- * uncorrelated `IN` subquery is an ephemeral index built on first use). A constant `has()` is a LOCAL filter
- * on the join's output. Driving from the constant instead hands every outer row every element the constant
- * admits and checks the correlated `EXISTS` on each — outer × |K|, a cross product: measured 606 ms @1k →
- * 2.4 s @2k on `V().values('name').as('n').V().has('name', select('n')).has('kind', 'person').count()`.
- * The cost of driving from the correlation is the size of the equi-join the query states — for
- * `V().values('kind').as('k').V().has('kind', select('k')).has('name', 'zz')` that is the (large) number of
- * same-kind pairs, each probed against a one-member set: the user's own join, never a cross product.
+ * between two on a selectivity guess. Every SELF-CONTAINED seek on the element is intersected (`allOwners`).
+ * A CORRELATED one on the same element is the join predicate — `has('name', select('n'))` says "the elements
+ * whose name is this row's" — and the constants are LOCAL filters on that join's output. Neither ORDER of the
+ * two as `IN`s is linear: the correlated seek driving reads the whole value group per outer row (outer × |group|:
+ * 20 offices among N users by country, 28 ms @1k → 586 ms @8k), the constant driving reads the whole constant
+ * set per outer row (outer × |K|: the people among N by name, 606 ms @1k → 2.4 s @2k). So with constants beside
+ * it the correlated seek becomes a KEYED JOIN (`keyedJoin`): the equi-join of the outer value with the constant
+ * set's `(owner, value)` rows, built once — linear in the rows it produces, with no selectivity guess. Only
+ * where that join cannot be placed (the outer row is an enclosing query's) does the correlated seek go FIRST in
+ * the intersection, the constants uncorrelated `IN` sets beneath it — the user's own equi-join, per outer row.
  */
 function narrowFilter(
   node: Extract<Rel, { readonly kind: 'filter' }>, terms: readonly Expr[], above: readonly Expr[],
@@ -293,7 +314,10 @@ function narrowFilter(
       if (!target || !element || facts.reached.has(element) || facts.narrowed.has(element)) continue;
       if (driven && element !== driven.element) continue;
       const seeked = seek(term, target, mint);
-      if (seeked) return narrowed(node, terms, target, element, allOwners([seeked, ...constants], mint), facts);
+      if (!seeked) continue;
+      const keyed = constants.length ? keyedJoin(node, term, target, constants, mint) : null;
+      if (keyed) { facts.narrowed.add(element); return keyed; }
+      return narrowed(node, terms, target, element, allOwners([seeked, ...constants], mint), facts);
     }
   }
   return driven ? narrowed(node, terms, driven.target, driven.element, allOwners(constants, mint), facts) : null;
@@ -305,6 +329,127 @@ function narrowed(node: Extract<Rel, { readonly kind: 'filter' }>, terms: readon
   return make.filter({
     id: node.id, input: node.input, channels: node.channels, type: node.type,
     pred: andAll([{ kind: 'in-query', expr: col(target.rel, target.name), plan: ids, negated: false }, ...terms]),
+  });
+}
+
+/**
+ * The KEYED placement: a correlated value equality AND constant seeks on one element, as a JOIN the outer rows
+ * probe by value — or `null` where the shape does not admit one (the caller then narrows by `IN`).
+ *
+ * `has('country', select('c')).has('kind', 'office')` asks, per outer row, for the elements in `K` (the constant
+ * seeks' intersection) whose `country` is the row's. Neither `IN` order is linear: the correlated seek driving reads
+ * the whole value group per outer row (outer × |group| — every user of the country, to find its one office), and
+ * the constant driving reads all of `K` per outer row (outer × |K| — every person, to find the two named `zz`). The
+ * linear plan is the equi-join itself: `kv` — the `(owner, value)` rows of the correlated key over the owners in
+ * `K`, built ONCE per statement (an uncorrelated `DISTINCT` subquery SQLite materialises) — joined in front of the
+ * element's side, with the correlated equality left in the `WHERE`, where SQLite seeks it through an automatic
+ * index on `kv.value` built once. Cost: |K| + |key rows of K| once, then one index probe per outer row plus the
+ * rows it matches — the size of the user's own join, never a cross product, and with no selectivity guess.
+ * Measured on 20 offices beside N users (`…values('country').as('c').V().has('country', select('c'))
+ * .has('kind', 'office')`): correlated-first 10.5 ms @1k → 509 ms @8k; keyed 1.2 → 9.4 ms.
+ *
+ * It must not duplicate a row, so it is offered only where each candidate matches AT MOST ONE `kv` row per outer
+ * row: `kv` is `DISTINCT (owner, value)`, and every conjunct reading the outer row reads the property's `value`
+ * alone, one of them `value = <outer expression>` — so every matching row of one owner has the same value and the
+ * `DISTINCT` left one. The ORIGINAL `EXISTS`es stay on the Filter as the semantic authority: the join only
+ * chooses which candidates SQLite visits.
+ *
+ * Placement: the element's `side` is replaced by `Join(kv, side)` (pinned, so `kv` is the loop in front of it),
+ * every join above it on the way up to the Filter's input re-declared one `kv` column wider, and the Filter
+ * re-stated over that input under a Project that restores its columns under its own id — so nothing above it
+ * changes. Only joins may stand between the Filter and the side, since a projection would drop `kv.value`
+ * before the `WHERE` that reads it; and a side that IS the Filter's input (the outer row is an enclosing
+ * query's, which no join here can reach) keeps the `IN` narrowing.
+ */
+/** The relations `keyedJoin` can widen by the two `kv` columns on the way up to the Filter: each keeps its input's
+ *  rows and passes columns through by name. */
+const WIDENABLE: ReadonlySet<Rel['kind']> = new Set(['join', 'project', 'filter']);
+
+function keyedJoin(
+  node: Extract<Rel, { readonly kind: 'filter' }>, term: Expr, target: DrivenTarget, constants: readonly Rel[], mint: Minter,
+): Rel | null {
+  const { side, path } = target;
+  const sideAt = path.rels.indexOf(side);
+  const sideId = path.names[sideAt];
+  if (sideAt <= 0 || !sideId || path.rels.slice(0, sideAt).some((r) => !WIDENABLE.has(r.kind))) return null;
+  const properties = SEEK_PROPERTIES[target.table];
+  if (!properties || term.kind !== 'exists' || term.plan.kind !== 'project' || term.plan.input.kind !== 'filter') return null;
+  const props = term.plan.input.input;
+  if (props.kind !== 'scan') return null;
+  const valueCol = props.type.cols.find((c) => c.name === 'value');
+  if (!valueCol) return null;
+  // The property row's own conjuncts go into `kv`; the ones reading the outer row (`seekable` already proved they
+  // do not read the element side) stay in the WHERE.
+  const inner = conjuncts(term.plan.input.pred).filter((e) => !isCorrelation(e, props.id, properties.owner, target.rel, target.name));
+  const own = (e: Expr): boolean => {
+    let only = true;
+    forEachExpr(e, (x) => { if ((x.kind === 'col' && x.rel !== props.id) || exprRels(x).length) only = false; });
+    return only;
+  };
+  const local = inner.filter(own);
+  const outer = inner.filter((e) => !own(e));
+  if (!outer.length || outer.some((e) => [...deepColsRead(e, props.id)].some((name) => name !== 'value'))) return null;
+  const isValue = (x: Expr): boolean => x.kind === 'col' && x.rel === props.id && x.name === 'value';
+  if (!outer.some((e) => e.kind === 'binary' && e.op === '=' && ((isValue(e.left) && !deepColsRead(e.right, props.id).size)
+    || (isValue(e.right) && !deepColsRead(e.left, props.id).size)))) return null;
+  const outerPred = freshCopy(andAll(outer), mint);
+  const localPred = local.length ? freshCopy(andAll(local), mint) : null;
+  if (!outerPred || (local.length && !localPred)) return null;
+
+  const scan = make.scan({ id: mint.id('kk'), table: props.table, alias: mint.alias('rkk'), channels: [], type: props.type });
+  const rows = make.filter({
+    id: mint.id('kf'), input: scan, channels: [], type: scan.type,
+    pred: andAll([
+      ...(localPred ? [substRelId(localPred, props.id, scan.id)] : []),
+      ...constants.map((c): Expr => ({ kind: 'in-query', expr: col(scan.id, properties.owner), plan: c.kind === 'distinct' ? c.input : c, negated: false })),
+    ]),
+  });
+  const pairs = make.project({
+    id: mint.id('kp'), input: rows, channels: [],
+    type: { cols: [{ name: 'sid', type: 'int', nullable: false }, { ...valueCol, name: 'value' }] },
+    exprs: [['sid', col(rows.id, properties.owner)], ['value', col(rows.id, 'value')]],
+  });
+  const kv = make.distinct({ id: mint.id('kd'), input: pairs, channels: [], type: pairs.type });
+  // Fresh output names, so the widened joins above cannot declare a name twice.
+  const kvCols = [{ ...pairs.type.cols[0]!, name: mint.id('kvs') }, { ...pairs.type.cols[1]!, name: mint.id('kvv') }];
+  let below: Rel = make.join({
+    id: mint.id('kj'), left: kv, right: side, join: 'inner', ordered: true, channels: side.channels,
+    type: { cols: [...kvCols, ...side.type.cols] },
+    on: eq(col(side.id, sideId), col(kv.id, 'sid')),
+  });
+  // Up to the Filter's input, each relation re-declared over the widened one beneath, carrying the two `kv` columns.
+  let offset = 0;
+  for (let i = sideAt - 1; i >= 0; i--) {
+    const at = path.rels[i]!;
+    const was = path.rels[i + 1]!;
+    const over = (e: Expr): Expr => substRelId(e, was.id, below.id);
+    const id = mint.id('kw');
+    if (at.kind === 'join') {
+      const isLeft = at.left === was;
+      offset += isLeft ? 0 : at.left.type.cols.length;
+      const cols = [...at.type.cols.slice(0, offset), ...kvCols, ...at.type.cols.slice(offset)];
+      below = make.join({ ...at, id, ...(isLeft ? { left: below } : { right: below }), ...(at.on ? { on: over(at.on) } : {}), type: { cols } });
+    } else if (at.kind === 'project') {
+      offset = at.type.cols.length;
+      below = make.project({
+        ...at, id, input: below, type: { cols: [...at.type.cols, ...kvCols] },
+        exprs: [...at.exprs.map(([name, e]) => [name, over(e)] as const), ...kvCols.map((c) => [c.name, col(below.id, c.name)] as const)],
+      });
+    } else if (at.kind === 'filter') {
+      below = make.filter({ ...at, id, input: below, type: below.type, pred: over(at.pred) });
+    } else return null;
+  }
+  const input = below;
+  const filtered = make.filter({
+    id: mint.id('kn'), input, channels: node.channels, type: input.type,
+    pred: andAll([
+      mapColsDeep(substRelId(outerPred, node.input.id, input.id), props.id, () => col(input.id, kvCols[1]!.name)),
+      substRelId(node.pred, node.input.id, input.id),
+    ]),
+  });
+  return make.project({
+    id: node.id, input: filtered, channels: node.channels, type: node.type,
+    exprs: node.type.cols.map((c) => [c.name, col(filtered.id, c.name)] as const),
   });
 }
 
@@ -344,12 +489,13 @@ function allOwners(owners: readonly Rel[], mint: Minter): Rel {
  * And the element's side must be UNBOUNDED by the row-count authority (`rowBounds`, `src/rel/bounds.ts`)
  * — an id membership the query text states, `V(1)` and `V('u0')` alike, is already a bound.
  */
-function drivenElement(node: Extract<Rel, { readonly kind: 'filter' }>, term: Expr, correlated: boolean): SeekTarget | null {
+function drivenElement(node: Extract<Rel, { readonly kind: 'filter' }>, term: Expr, correlated: boolean): DrivenTarget | null {
   const owner = ownerColumn(term);
   if (!owner) return null;
   const path = columnPath(node.input, owner.rel, owner.name);
   const leaf = path?.rels.at(-1);
   if (!path || leaf?.kind !== 'scan' || path.name !== 'id' || SEEK_PROPERTIES[leaf.table]?.table !== owner.properties) return null;
+  const sideOf = (side: Rel) => ({ side, path });
   // The element's SIDE: the relation under the last join on the way down, or the whole input.
   let side: Rel = node.input;
   for (let i = 0; i < path.rels.length - 1; i++) {
@@ -362,7 +508,7 @@ function drivenElement(node: Extract<Rel, { readonly kind: 'filter' }>, term: Ex
     side = next;
   }
   if (rowBounds(side === node.input ? node : side).max !== Infinity) return null;
-  if (!correlated) return { rel: owner.rel, name: owner.name, table: leaf.table, local: null };
+  if (!correlated) return { rel: owner.rel, name: owner.name, table: leaf.table, local: null, ...sideOf(side) };
   const sideIds = idsWithin(side);
   // A column is the element's own when it is read off the side directly, or traces into it through the
   // projections and joins above it. A relation outside the input is an OUTER row — never local.
@@ -371,8 +517,12 @@ function drivenElement(node: Extract<Rel, { readonly kind: 'filter' }>, term: Ex
     const traced = columnPath(node.input, c.rel, c.name);
     return traced !== null && traced.rels.includes(side);
   };
-  return { rel: owner.rel, name: owner.name, table: leaf.table, local };
+  return { rel: owner.rel, name: owner.name, table: leaf.table, local, ...sideOf(side) };
 }
+
+/** A `SeekTarget` with where it was found: the owner column's defining `path` from the Filter's input, and the
+ *  element's `side` on it (the relation under the last join, or the whole input). */
+type DrivenTarget = SeekTarget & { readonly side: Rel; readonly path: ColumnPath };
 
 
 function readsColumn(e: Expr, match: (c: Extract<Expr, { readonly kind: 'col' }>) => boolean): boolean {
