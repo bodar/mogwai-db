@@ -169,19 +169,42 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
   }, SCALE_TIMEOUT_MS);
 
   // A host whose rows a COPY could re-pick (`picks`, `src/rel/copies.ts`): an unordered `limit` leaves its rows to
-  // SQLite's plan, so the domain — a second evaluation — may hold other rows than the body reads. Left as it is;
-  // an ordered pick is one answer and is rewritten. Each answers as the same walk at the root does (the per-host
-  // counts sum to the root's count), which the pass never rewrites.
-  test('magic: a host holding an unordered pick is not rewritten', () => {
+  // SQLite's plan, so a domain built from a second evaluation could hold other rows than the body reads. The
+  // outermost host is read ONCE instead — one fenced CTE the host and the domain both read — so it is still
+  // rewritten. Each answers as the same walk at the root does (the per-host counts sum to the root's count, and the
+  // root's own collapse never uses the pass), with the rewrite and without it.
+  test('magic: a host holding an unordered pick is read once, and answers as the root does', () => {
     const unordered = "g.V().limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
     const ordered = "g.V().order().by(id,desc).limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
-    expect(read(unordered).sql).not.toContain('MATERIALIZED');
+    expect(read(unordered).sql).toMatch(/^WITH (\w+) AS MATERIALIZED \(.*LIMIT 50\).*FROM \1 /);
     expect(read(ordered).sql).toContain('AS MATERIALIZED');
     for (const q of [unordered, ordered]) {
       const atRoot = q.replace(".local(out().where(__.in().has('age',gt(30))).count()).sum()", ".out().where(__.in().has('age',gt(30))).count()");
       expect(count(large, q)).toBe(count(large, atRoot));
     }
   }, SCALE_TIMEOUT_MS);
+
+  // NO BOUND BUT ONE ROW keeps a host per row: a `limit(k)` is a page size or a safety cap the data may stay under,
+  // and a pick in the BODY's input (`out().limit(5)`) or a nested host's is WIDENED out of the domain (`unpicked`), a
+  // superset of the `x` the body tests. Left per host, each measured 14–19× per 8× (quadratic at 4× more data).
+  // Every one answers as its pick-free twin on this graph (a person has at most 2 `created` and 3 out-edges).
+  for (const [q, atSmall] of [
+    ["g.V().hasLabel('person').limit(100000).local(out('created').where(__.in('created').has('age',gt(45))).count()).sum()", 720],
+    ["g.V().hasLabel('person').order().by('age').limit(100000).local(out('created').where(__.in('created').has('age',gt(45))).count()).sum()", 720],
+    ["g.V().hasLabel('person').local(out().limit(5).where(__.in('created').has('age',gt(45))).count()).sum()", 720],
+    ["g.V().hasLabel('person').local(out('created').limit(2).where(__.in('created').has('age',gt(45))).count()).sum()", 720],
+    ["g.V().hasLabel('person').project('c').by(out('created').limit(3).where(__.in('created').has('age',gt(45))).count()).select('c').sum()", 720],
+    ["g.V().hasLabel('person').local(local(out('created').limit(2).where(__.in('created').has('age',gt(45))).count())).sum()", 720],
+    ["g.V().hasLabel('person').local(out('knows').limit(3).local(out('created').where(__.in('created').has('age',gt(45))).count())).sum()", 600],
+    ["g.V().hasLabel('person').limit(100000).out().local(out().where(__.in().has('age',gt(45))).count()).sum()", 664],
+    ["g.V().hasLabel('person').limit(100000).out('knows').local(out('created').where(__.in('created').has('age',gt(45))).count()).sum()", 600],
+  ] as const) {
+    test(`magic: a pick or a cap is no reason to probe per host — ${q}`, () => {
+      expect(count(small, q)).toBe(atSmall);
+      expect(read(q).sql).toContain('AS MATERIALIZED');
+      expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));
+    }, SCALE_TIMEOUT_MS);
+  }
 
   // An EXISTS body stops at its first row, so a domain would be all the work it skips: on a uniform graph of
   // out-degree 20 a passing `where` measured 10.6 ms → 505 ms at 8k with the rewrite. It keeps its short-circuit.

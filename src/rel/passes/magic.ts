@@ -1,9 +1,9 @@
 import { type Expr, and, col, conjuncts } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel } from '../rel.ts';
-import { rowBounds } from '../bounds.ts';
+import { atMostOneRow, rowBounds } from '../bounds.ts';
 import { minter, freshCopy, type Minter } from '../mint.ts';
-import { exprDraws, picks } from '../copies.ts';
+import { exprDraws, picks, unpicked } from '../copies.ts';
 import { perHostWork, readInFull } from '../work.ts';
 import { decorrelate, semiJoinPerDistinct } from '../decorrelate.ts';
 import type { RelId } from '../types.ts';
@@ -53,9 +53,11 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  *   failing probe reads a hub's whole neighbourhood. A test that stops at its first index seek
  *   (`local(out().where(out()).count())`) costs per host what the semi-join probe replacing it would, so the domain
  *   is pure overhead (measured 2× slower at 8k). Static, from the algebra: no statistics, no decline.
- * - The outermost host is UNBOUNDED (`rowBounds`): `V(1)`, or a `limit(k)` at its top, asks its body a constant
- *   number of times. A nested host is asked across every enclosing host, so only the outermost bound counts.
- *   A selective but unbounded host (`hasLabel('software').local(…)`) is still rewritten — no static fact tells it
+ * - The outermost host is not a POINT (`atMostOneRow`): `V(1)` asks its body once. A `limit(k)` is NOT a point —
+ *   `k` is a page size or a safety cap the data may well stay under, and leaving it per host put a hub's
+ *   neighbourhood back per host reaching it (measured 2.4× → 16.5× per 8× on `limit(100000)`). A nested host is
+ *   asked across every enclosing host, so only the outermost bound counts. A selective but unbounded host
+ *   (`hasLabel('software').local(…)`) is still rewritten — no static fact tells it
  *   from a hub's hosts (statistics residue, R6-1 in `docs/2026-11-16-ladder-retirement-plan.md`); it stays linear.
  *
  * - The host's rows are SELF-CONTAINED (`isSelfContained`): at the outermost host its input reads no outer row and
@@ -63,10 +65,13 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  *   the enclosing host's rows (`overHosts` of its input), so the domain is always one CTE. It is never a whole base
  *   table standing in for a selective host — on SQLite, a nested-loop engine, the domain decides the work
  *   (`decorrelate.ts`, "The domain that IS its input's key projection").
- * - Nothing on the way PICKS (`picks`, `src/rel/copies.ts`): the domain re-reads the host's input and `F`'s as a
- *   COPY, a second evaluation — a re-drawn input (`draws`) would miss the `x` the body drew, and an unordered
- *   `limit` or first-row window (`V().limit(50).out().local(…)`) leaves its rows to SQLite's plan, which the copy
- *   need not repeat. That is also why the pass may tell `decorrelate` it owns nothing.
+ * - The domain covers every `x` the body tests although it is a SECOND evaluation of the host's input and `F`'s,
+ *   where a pick (`picks`, `src/rel/copies.ts`: a draw, an unordered `limit`, a first-row window) leaves its rows
+ *   to SQLite's plan, which a copy need not repeat. So an outermost host that picks is read ONCE (`spooled`: one
+ *   fenced CTE the host and the domain both read, `V().limit(50).out().local(…)`), and a pick inside a correlated
+ *   input is WIDENED away (`unpicked`: a superset, `out().limit(5).where(…)`) — the semi-join needs only a domain
+ *   holding every tested `x`. A pick neither can handle (a draw in the body, a pick under an aggregate) leaves the
+ *   body as it is. That is also why the pass may tell `decorrelate` it owns nothing.
  * - Each body reads its host through ONE column (the domain's key is that column's distinct values).
  *
  * It recognises the ALGEBRA, so every host and every depth gets it with no list of positions. It runs after
@@ -90,15 +95,24 @@ interface Hosts {
  *  `within` is the enclosing body's hosts, `null` at the outermost host. */
 function atHost(r: Rel, within: Hosts | null, mint: Minter): Rel {
   if (r.kind !== 'filter' && r.kind !== 'project') return r;
-  // A BOUNDED host (`V(1)`, a `limit(k)` at its top) asks its body a constant number of times: nothing to share
-  // across hosts, and the domain would only add a spool to a point query. Only the OUTERMOST host's bound counts: a
-  // nested host's input is bounded per enclosing row (one row, inside `local(local(…))`), but it is asked across
-  // every enclosing host, and an unbounded enclosing host was already let through here.
-  if (!within && rowBounds(r.input).max < Infinity) return r;
+  // A POINT host (`V(1)`) asks its body once: nothing to share across hosts, and the domain would only add a spool
+  // to a point query. Only ONE row is a fact of the query text; a `limit(k)` is a page size or a safety cap that may
+  // well exceed the data, so it is no reason to leave a hub's neighbourhood read per host. Only the OUTERMOST host's
+  // bound counts: a nested host's input is bounded per enclosing row (one row, inside `local(local(…))`), but it is
+  // asked across every enclosing host, and an unbounded enclosing host was already let through here.
+  if (!within && atMostOneRow(r.input)) return r;
   const free = freeRelIds(r.input);
-  if (picks(r.input) || (within ? [...free].some((id) => id !== within.outer) : !isSelfContained(r.input))) return r;
+  if (within ? [...free].some((id) => id !== within.outer) : !isSelfContained(r.input)) return r;
+  // An outermost host whose rows a second evaluation could re-pick (`picks`: `V().limit(50).out()`) is read ONCE:
+  // its input becomes one fenced CTE the host and the domain both read, so the domain holds exactly the rows the
+  // bodies are asked of. A nested host is correlated and cannot be spooled; its domain widens instead (`hostRows`).
+  // Named only once a body is rewritten (`spool`): a long chain holds a host at every step, and most rewrite nothing.
+  let spool: string | undefined;
+  const read = !within && picks(r.input)
+    ? (): Rel => make.ref({ id: mint.id('mgf'), name: (spool ??= mint.id('mgn')), channels: r.input.channels, type: r.input.type })
+    : undefined;
   let reached: Rel | null | undefined;
-  const hosts: Hosts = { outer: r.input.id, reached: () => (reached === undefined ? (reached = hostRows(r, within, mint)) : reached) };
+  const hosts: Hosts = { outer: r.input.id, reached: () => (reached === undefined ? (reached = hostRows(r, within, mint, read)) : reached) };
   let changed = false;
   const out = mapRelExprs(r, (e) => rewriteExpr(e, (node) => node, (plan) => {
     const reads = freeRelIds(plan);
@@ -107,7 +121,16 @@ function atHost(r: Rel, within: Hosts | null, mint: Minter): Rel {
     if (body !== plan) changed = true;
     return body;
   }));
-  return changed ? out : r;
+  if (!changed) return r;
+  return spool ? spooled(out, r.input, spool, mint) : out;
+}
+
+/** `host` reading `input` through ONE fenced materialization named `name` — the binding its bodies' domains read by
+ *  that name (a `Ref` is a leaf, so it sits inside a body without capturing the body's correlation to the host's
+ *  input). `name` binds it once, before the host that reads it; every read of `input`'s id moves to it. */
+function spooled(host: Rel, input: Rel, name: string, mint: Minter): Rel {
+  const once = make.materialize({ id: mint.id('mgs'), input, channels: input.channels, type: input.type, name, fenced: true });
+  return mapRelChildren(mapRelExprs(host, (e) => substRelId(e, input.id, once.id)), () => once);
 }
 
 /** `body` with every Filter it reads in full that tests one element by a subquery asking it once per element, and
@@ -137,13 +160,18 @@ function unchanged(mapped: Rel, original: Rel): boolean {
  *  domain sits INSIDE the body, which reads the host's input by id as an outer row, and a relation of that id defined
  *  beneath the body would capture the reference (`freeRelIds` would call the body uncorrelated and `name` would
  *  bind it as a CTE). An input a copy cannot hold (a walk, a named materialization) leaves the body as it is. */
-function hostRows(r: Extract<Rel, { kind: 'filter' | 'project' }>, within: Hosts | null, mint: Minter): Rel | null {
+function hostRows(r: Extract<Rel, { kind: 'filter' | 'project' }>, within: Hosts | null, mint: Minter, spool?: () => Rel): Rel | null {
   const input = r.input;
   const rest = r.kind === 'filter' ? conjuncts(r.pred).filter((e) => !exprHasSubquery(e)) : [];
   const restricted = (base: Rel): Rel => (rest.length
     ? make.filter({ id: mint.id('mgh'), input: base, channels: input.channels, type: input.type, pred: rest.map((e) => substRelId(e, input.id, base.id)).reduce(and) })
     : base);
-  const copy = freshCopy({ kind: 'scalar', plan: restricted(input) }, mint);
+  if (spool) return restricted(spool());
+  // A pick in a nested host's input (`out().limit(5)` per enclosing row) is WIDENED away (`unpicked`): the domain
+  // need only hold every row the host could have asked of, and a copy of the pick might hold others.
+  const widened = unpicked(input);
+  if (!widened) return null;
+  const copy = freshCopy({ kind: 'scalar', plan: restricted(widened) }, mint);
   if (copy?.kind !== 'scalar') return null;
   if (!within) return copy.plan;
   const outer = within.reached();
@@ -167,13 +195,17 @@ function atFilter(f: Extract<Rel, { kind: 'filter' }>, hosts: Hosts, mint: Minte
   // A NULL `x` matches no passing row, while the test may hold of it: only a column that is never NULL.
   if (!xMeta || xMeta.nullable) return f;
   const others = all.filter((_, i) => i !== at);
-  if (picks(f.input) || others.some(exprDraws)) return f;
+  if (others.some(exprDraws)) return f;
   // THE DOMAIN: `x` over `F`'s input under its subquery-free conjuncts, for every host row — a fresh copy, so it
-  // may stand beside the body it was read from.
+  // may stand beside the body it was read from. A pick in that input (`out().limit(5).where(…)`) is WIDENED away
+  // (`unpicked`): the domain is a superset of the `x` the body tests, which is all the semi-join needs, where a copy
+  // of the pick might hold other rows than the body read. Ids are kept, so `restricting` still names `F`'s input.
+  const widened = unpicked(f.input);
+  if (!widened) return f;
   const restricting = others.filter((e) => !exprHasSubquery(e));
   const rows = withoutDistinct(restricting.length
-    ? make.filter({ id: mint.id('mgr'), input: f.input, channels: f.input.channels, type: f.input.type, pred: restricting.reduce(and) })
-    : f.input);
+    ? make.filter({ id: mint.id('mgr'), input: widened, channels: f.input.channels, type: f.input.type, pred: restricting.reduce(and) })
+    : widened);
   const free = freeRelIds(rows);
   // Rows that read no host row are one relation for every host: nothing to share.
   if (free.size !== 1 || !free.has(hosts.outer)) return f;

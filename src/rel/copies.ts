@@ -1,10 +1,10 @@
-import { isArgExtremum, type Expr } from './expr.ts';
+import { col, isArgExtremum, type Expr } from './expr.ts';
 import { shapeOf, spliceable } from './block.ts';
 import { isAbort } from './raise.ts';
 import { atMostOneRow } from './bounds.ts';
 import type { Rel } from './rel.ts';
 import * as make from './factory.ts';
-import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, joinSide, mapColsDeep, nodeFact, relChildren, relExprs, relsBeneath, substRelId } from './walk.ts';
+import { deepColsRead, exprChildren, exprHasSubquery, exprRels, forEachExpr, forEachRel, isSelfContained, joinSide, mapColsDeep, mapRelChildren, nodeFact, relChildren, relExprs, relsBeneath, substRelId } from './walk.ts';
 import type { RelId } from './types.ts';
 
 /**
@@ -57,7 +57,9 @@ const isRandom = (e: Expr): boolean => e.kind === 'call' && e.fn.toUpperCase() =
  * `LIMIT`/`OFFSET` over an input that is not a `sort` (`V().limit(50)`, a first-row `limit(1)`), or a
  * `row_number`/`lag`/`lead` window — a first pick — over a partition with no `ORDER BY`. SQL leaves such a pick's
  * rows to the plan, and a COPY is a second plan: a consumer that re-reads a relation as an independent copy (a magic
- * domain beside the body it was read from, `src/rel/passes/magic.ts`) may see rows the original did not. A limit over
+ * domain beside the body it was read from, `src/rel/passes/magic.ts`) may see rows the original did not — so it
+ * reads ONE evaluation (a fenced CTE both readers share) or a superset of every evaluation (`unpicked`), never a
+ * reason to give the consumer up. A limit over
  * at most one row picks nothing. Same reach as `draws`: its own expressions, the subplans they correlate, and
  * everything beneath; a raise arm is skipped for `draws`' reason.
  *
@@ -74,6 +76,48 @@ const picksHere = (r: Rel): boolean => {
   return r.specs.some(([, w]) => !w.spec.orderBy.length
     && (w.fn === 'row_number' || w.fn === 'lag' || w.fn === 'lead' || w.spec.frame?.mode === 'rows'));
 };
+
+/**
+ * A relation holding EVERY row any evaluation of `r` may hold — `r` with each unordered pick (`picksHere`'s `limit`)
+ * replaced by its input — or `null` where a pick sits where a larger input could REMOVE a row: beneath an aggregate,
+ * a window, an ordered `limit`, the probed side of a semi/anti/left join, or in an expression; and wherever `r`
+ * draws. Only row-wise nodes, an inner or cross join, a union, a sort and a distinct pass the widening through, so
+ * the result is a SUPERSET of the original's rows under any plan SQLite chooses. A consumer that needs only to
+ * cover what one evaluation could have read (a magic domain, `src/rel/passes/magic.ts`) reads this instead of a copy
+ * that might pick other rows. Every id is kept — a stripped `limit` becomes a projection under its own id — so a
+ * reader of any node beneath reads the same columns. Memoized per call: O(DAG).
+ */
+export function unpicked(root: Rel): Rel | null {
+  const memo = new Map<Rel, Rel | null>();
+  const go = (r: Rel): Rel | null => {
+    if (!picks(r)) return r;
+    if (!memo.has(r)) memo.set(r, widen(r));
+    return memo.get(r)!;
+  };
+  const over = (r: Rel, children: readonly Rel[]): Rel | null => {
+    const widened = new Map(children.map((child) => [child, go(child)] as const));
+    if ([...widened.values()].some((child) => !child)) return null;
+    return mapRelChildren(r, (child) => widened.get(child) ?? child);
+  };
+  const widen = (r: Rel): Rel | null => {
+    if (draws(r) || relExprs(r).some(exprPicks)) return null;
+    switch (r.kind) {
+      case 'limit': {
+        // A deterministic limit (over a sort, or of at most one row) over a widened input is no superset.
+        if (!picksHere(r)) return null;
+        const input = go(r.input);
+        return input && make.project({ id: r.id, input, channels: r.channels, type: r.type, exprs: r.type.cols.map((c) => [c.name, col(input.id, c.name)] as const) });
+      }
+      case 'project': case 'filter': case 'distinct': case 'sort': return over(r, [r.input]);
+      case 'explode': return r.input ? over(r, [r.input]) : null;
+      case 'union': return over(r, r.inputs);
+      case 'join': return r.join === 'inner' || r.join === 'cross' ? over(r, [r.left, r.right])
+        : picks(r.right) ? null : over(r, [r.left]);
+      default: return null;
+    }
+  };
+  return go(root);
+}
 
 /** `draws` and its expression half, cut at the nodes a caller does not own (`ownDraws`). */
 export interface OwnDraws {

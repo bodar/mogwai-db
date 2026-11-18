@@ -1674,6 +1674,11 @@ forms join U2's witnesses.
   is still rewritten by `magic` — no static fact tells it from a hub's hosts — and measured 9.4/27.7 ms without the
   rewrite vs 12.5/40.6 ms with it on the hub graph (130 → 1050 chains), linear either way; the hub-scale suite
   asserts only linearity there.
+  **Sibling found by U2's probes, not magic-shaped (trunk and U2 alike):** a `where` over a UNION in a body,
+  `g.V().hasLabel('person').local(union(out('created'),out('knows')).where(__.in('created').has('age',gt(45))).count()).sum()`,
+  measured 20.5/229 ms (≈11× per 8×). Its test is keyed by the union's `row_number` scope key (`dk`/`sk`), so it
+  reads two columns of `F`'s input and is no one-element test; `sample(n)` before the test (a draw) stays per host
+  too. Both need the union's per-row key gone from the test, or a draw-safe domain — open.
 - Round 4's question 1 (movement-head `until` at a hub) and question 2 (S5's second bullet) remain open.
 
 All 13 round-6 `wf/*-6-*` branches and their worktrees were removed after their landing shas were confirmed on
