@@ -1564,6 +1564,20 @@ between them or a conjunct inside a nested `where()` stays quadratic
 (`…where(V().where(neq('a')).has('kind','person').where(values('name').is('zz'))).count()` 452 ms / 30.7 s at 1k/8k;
 `flatMap(V().where(neq('a')).has('kind','person').has('name','zz'))` 675 ms / 47.3 s) — the nested-`where` half is T4's.
 
+✅ **LANDED (2115a2ff, 28c109dc, c651c7dc).** `narrowFilter` (`src/rel/passes/semijoin.ts`) no longer chooses by
+selectivity: `ElementFacts.constantSeek` is deleted. A correlated value equality with constant `has()`s beside it on
+one element places a KEYED JOIN (`keyedJoin`): an uncorrelated `DISTINCT (owner, value)` relation over the owners every
+constant admits, built once per statement and probed by value through SQLite's automatic index — over the Filter's own
+input when the outer row is an enclosing query's (`where`/`not` bodies, `select('p')`), widened through joins and
+row-wise projects otherwise. Where no keyed join can be placed the constants drive alone, as before; there is no
+correlated-first fallback. `stackedAbove` also sees through a Distinct and a row-wise Project. Witnesses and the five
+reviewer shapes are 2.5–8× per 8× in `test/correlated-value-seek.test.ts`; no baseline moved. Remains: **Item 4(d)**
+(`docs/outstanding-work.md` r7-fu3), which predates U4 — a correlated `V()` body in `local()` or `coalesce()` becomes a
+cross join that the seek cannot narrow, so it is quadratic (693 ms → 44 s, with or without a constant). Fixing it needs
+`decorrelate.ts` or the semijoin pass to see through a bound relation; a separate item. Also still super-linear and
+not regressed (r7-fu3 item 4): `select('a').dedup()` over the join, magic's per-host body in `map`/`project().by(count)`,
+and a nested `where(__.has(…))` after the seek.
+
 ### U5 — `fuse.ts` re-derives the lineage authority (MAJOR x2, one-authority; cheap)
 
 S6a added two hand-rolled rename tracers to `src/rel/passes/fuse.ts` — `overRenames().trace` and the rename loop in
