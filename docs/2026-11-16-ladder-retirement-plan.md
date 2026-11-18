@@ -1524,6 +1524,17 @@ asserting no regression. Cheap, same item: `hostRows` re-reads an unordered `lim
 independent copy, so the domain is valid only if SQLite picks the same rows twice (0 mismatches over 23 hosts measured,
 but structural) — skip hosts with an unordered limit/first pick, or say why it holds in a comment.
 
+✅ **LANDED (b062cf00, 18cefe76).** `magic` (`src/rel/passes/magic.ts`) rewrites a test only where ONE call of it
+exhausts a neighbourhood (`perHostWork(test.plan).exhausts`, `src/rel/work.ts`), and leaves only a POINT outermost
+host alone (`atMostOneRow`, `V(id)`; a `limit(k)` is a page size, not a bound). A host whose input picks
+(`V().limit(50).out()`) is read ONCE as a fenced named CTE the domain reads by Ref; a pick inside a correlated input
+is widened out of the domain by `unpicked` (`src/rel/copies.ts`, beside `picks`), null under any draw. Controls and
+9 blocker shapes asserted linear in `test/compiler/walk-condition-hub-scale.exec.test.ts`; no baseline moved.
+Remains: two quadratic shapes, neither from this change nor through `magic` — a `where` over a union inside a body
+(≈11× per 8×; needs the union's per-row key removed from the test), and a draw such as `sample(n)` before the hub
+test (≈14× per 8×; needs a domain that is safe to build when a draw sits before the test). Plus the selective-host
+statistics residue recorded under R6-1.
+
 ### U3 — The T2 fence spools a short-circuiting stream (MAJOR, common reach; after U0)
 
 `copyRerunsBarrier` (`src/rel/copies.ts`) counts the `SELECT DISTINCT node` seed of a range `has()` as a barrier, so
