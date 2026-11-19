@@ -161,6 +161,10 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    schema) and candidate 5 (the TextP full-text probe fix in `src/rel/passes/semijoin.ts`)? Optionally also fix the
    alias blindness in `scripts/sql-plan.ts`. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are
    not recommended now.
+   **(5) LANDED (73616a6b).** The positive TextP probe and `tinker.search` now seek `property_fts`'s trigram
+   index (`INDEX 0:L4`) through a 2-argument `LIKE` built from the raw term, decoded by one helper
+   (`src/rel/like.ts`, beside `likePattern`); the exact residual EXISTS still decides. `negativeOwners` kept its
+   rowid seek by measurement (the 2-argument form made it `0:=L1`, super-linear). Remaining for (5): nothing.
    **Before building (5), from review:**
    - (a) A TextP argument can be a user parameter, so the probe pattern must be the expression `'%' || ? || '%'`,
      not a literal built at compile time.
@@ -250,8 +254,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 ## Next round
 
 - Order: 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
-  run is R4.6's sweep), then G1. Item 10's decided builds — (3) the `edges(label)` index, (5) the TextP trigram probe, and the
-  `sql-plan.ts` alias fix — are independent of the ladder work and can be built at any point.
+  run is R4.6's sweep), then G1. Item 10's decided builds — (3) the `edges(label)` index and the `sql-plan.ts` alias fix ((5), the TextP
+  trigram probe, landed 73616a6b) — are independent of the ladder work and can be built at any point.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
   - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
   - one shared test helper for "adjacency seek" plan assertions (`e_out` ↦ {`e_out`, `e_pair`}).
