@@ -631,10 +631,9 @@ export const memberNodeOf = (produced: ChildValue, source: GraphSource, fresh: M
 
 /**
  * A CHILD BODY'S RESULT AS A SELF-DESCRIBING `{t,v}` MEMBER NODE — the encoding a value `by()` puts in a
- * map, and (via `groupCollected`) the one a `by(__.…​.fold())` collects into a list, or `null` for a
- * shape a node cannot carry.
+ * map, or `null` for a shape a node cannot carry.
  *
- * Factored out of `byNode` because the pooled fold-collect asks exactly this question of an
+ * Factored out of `byNode` because a caller holding a lowered row (`lower.ts`) asks exactly this question of an
  * already-lowered ROW rather than a re-lowered child expression: given a value and what it IS, wrap it
  * as the member node the typed tree frames at any depth. An ELEMENT rowid becomes `{t:'vertex', v:{…}}`,
  * a MAP its pairs array, a scalar its `{t,v}` node tagged by its per-row `vtype` where the producer

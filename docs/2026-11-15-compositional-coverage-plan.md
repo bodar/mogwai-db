@@ -672,9 +672,10 @@ no longer a deferred host in practice.
 - **DELETED (2026-11-19).** R5.2/R5.3/R5.4 and the pooled keyed group took its ladder-only answers to 0 (wide
   ladder-reach sample: L1/L6/H1/H2 group 0, `differ` empty); `group` joined `LADDERLESS` over element and scalar
   hosts, every form. Owner Q3a margins accepted: 8k ladder/connector `by(label).by(count)` 6.0/8.7 ms (1.46×),
-  `by('name').by(tail)` 72.0/96.1 (1.33×). Nothing above became dead: the pooled arm of `groupRows` and
-  `groupReduced`/`groupCollected` still serve the PROPERTY host (`g.V().properties().group().by(key).by(count())`),
-  whose framing is outside `LADDERLESS`.
+  `by('name').by(tail)` 72.0/96.1 (1.33×). The pooled arm of `groupRows`, `groupReduced`'s pooling arm,
+  `groupCollected` and `dedupGroupMembers` were then dead (0 hits over the corpus and the full suite) and are
+  deleted (R5.5); `groupRows` keeps ONE rule — a barrier value body declines unless it is exactly `count()`, which
+  re-enters the barrier as `groupCount` (the PROPERTY host's route, `g.V().properties().group().by(key).by(count())`).
 
 ### Phase 4 — Structured values across scope. IDs `cc4-*`.
 

@@ -1295,7 +1295,7 @@ export const reducedVtype = (vt: Expr): Expr => STORAGE_CLASSES.reduce<Expr>(
  * untagged `1.0` and framed it an Int (`{1:1, 1:1}` where `GroupCountStep` keys `Integer(1)` and
  * `Double(1.0)` apart). It lives here, not in `child.ts`, because `firstRootedValue` reads it too.
  */
-export const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undefined => {
+const relHostTag = (rel: Rel, type: ScalarType | undefined): Expr | undefined => {
   const carries = (name: string): boolean => rel.type.cols.some((column) => column.name === name);
   if (carries('vtype')) return col(rel.id, 'vtype');
   const column = perRowColumnOf(type);

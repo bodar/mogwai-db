@@ -3,25 +3,22 @@ import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { staticTypeOf, TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
-import { framingCols } from './framing.ts';
+import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { countOf, isLocalScope, sliceOf, type IRStep } from '../ir/step.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { mapSlot, valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, fencedWhereSelfContained, firstArrival, firstOf, rowNumberWindow, jsonExtract, jsonField, jsonOf, listNode, mapNode, seedPerOrigin, meta, presenceFenced, relHostTag, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, fencedWhereSelfContained, firstArrival, firstOf, rowNumberWindow, jsonExtract, jsonField, jsonOf, listNode, mapNode, seedPerOrigin, meta, presenceFenced, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
-import { byExpr, byNode, isProductiveBy, memberNodeOf, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
+import { byExpr, byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type Modulation } from './modulator.ts';
 import type { GraphSource } from './source.ts';
-import { recordToMap } from './record.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
 import type { PoolRecipe } from './collection.ts';
-import { someStepDeep } from '../ir/walk.ts';
-import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
+import { isReducer } from './reducer.ts';
 import { inferredVtype, nodeIsNull } from './tag.ts';
 import { storedCompareOn } from './predicate.ts';
 
@@ -98,8 +95,6 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
  *  member rows without folding them into a map first. */
 export const KEY_COL = 'gk';
 const VAL_COL = 'gv';
-/** A grouped reduction's per-row Gremlin type tag (`groupReduced`). */
-const TAG_COL = 'gy';
 /** The MEMBER a collecting group puts in its list — the traverser's rowid where the members are the
  *  elements, the projected value where a value `by()` names one. Named once because the aggregate reads
  *  it either way and the difference is what the column HOLDS, never how it is collected.
@@ -206,9 +201,9 @@ export interface GroupedMap { readonly rel: Rel; readonly keyOf: MapOf; readonly
 export interface GroupRows {
   readonly rel: Rel;
   readonly recipe: GroupRecipe;
-  /** The `groupReduced` arm's finished answer. Its value side is a JOIN whose child rows POOL per group,
-   *  so there is no `(key, contribution)` row to union and no recipe that could describe one — it is
-   *  already a map, and a keyed caller must decline it rather than pretend it is a member relation. */
+  /** A POOLED value's finished answer (the host's `by(count())` re-entry, or the connector's raising
+   *  `pooledGroup` reduction) — already a map, with no `(key, contribution)` row to union and no recipe
+   *  that could describe one, so a keyed caller must decline it rather than pretend it is a member relation. */
   readonly done?: GroupedMap;
   /** A POOLED value's MEMBERS: `rel` is then the members relation (each traverser beside its key), `order` the
    *  columns that order it, and `recipe` the one reduction the collection's reader runs over every site's
@@ -308,8 +303,8 @@ const named = (modulation: Modulation | undefined): Modulation | undefined =>
 
 /** A bare `by(__.fold())` folds the TRAVERSERS themselves into a list — identical to the by()-less
  *  collecting arm — so it collapses to no value `by()` at all. A `fold()` with a pre-body
- *  (`by(__.out().fold())`) is NOT collapsed: its members are the pooled child rows, which is
- *  `groupCollected`'s pool. */
+ *  (`by(__.out().fold())`) is NOT collapsed: its members are the pooled child rows, which is the
+ *  connector's pool (`pooledGroup`, `lower/scoped.ts`). */
 const bareFold = (modulation: Modulation | undefined): Modulation | undefined =>
   (modulation && modulation.key.kind === 'child' && isBareFold(modulation.key.body)
     && modulation.order === undefined ? undefined : modulation);
@@ -340,14 +335,6 @@ export const poolingStep = (body: readonly IRStep[]): IRStep | undefined =>
  *  `cap`. `barrier()` (`NoOpBarrierStep`), `aggregate()` and a labelled side-effect group are
  *  `LocalBarrier`s, which `determineBarrierStep` skips, and a `Scope.local` form is a `MapStep`. */
 const NON_REDUCING_BARRIERS = new Set(['dedup', 'range', 'limit', 'skip', 'tail', 'order', 'sample', 'cap']);
-
-/** A pre-fold body whose one `dedup()` is followed only by global `order()`s — the form `groupCollected`
- *  can restore PER KEY after the pool (`dedupGroupMembers`). A dedup and a stable sort commute as a set
- *  and the survivors keep the sorted encounter, so moving the dedup past the sort changes nothing. */
-const dedupBeforeFold = (pre: readonly IRStep[]): boolean => {
-  const at = pre.findIndex((bodyStep) => bodyStep.name === 'dedup');
-  return at >= 0 && pre.slice(at + 1).every((bodyStep) => bodyStep.name === 'order' && !isLocalScope(bodyStep));
-};
 
 /** Is this value-body step a non-local `Barrier` — what `Grouping.determineBarrierStep` stops at? */
 export const isValueBarrier = (step: IRStep): boolean =>
@@ -399,7 +386,7 @@ export function groupRows(
   // A bare `by(__.fold())` names the TRAVERSERS folded into a list, which is exactly the by()-less
   // collecting arm — `convertValueTraversal` wraps the identity value as `map(identity).fold()`
   // (`gremlin-core/.../step/Grouping.java`). So it collapses to that arm rather than reaching
-  // `groupCollected`, whose pool exists for a NON-empty pre-fold body.
+  // the barrier decline below, which a NON-empty pre-fold body (a pool) meets.
   const valueBy = bareFold(named(bys[1]));
   /**
    * `by(__.tail())` — the group's value is the FIRST TRAVERSER routed to the key, which is the collecting
@@ -421,100 +408,35 @@ export function groupRows(
   const lastOnly = valueBy?.key.kind === 'child' && valueBy.key.body.length === 1
     && valueBy.key.body[0]!.name === 'tail' && !isLocalScope(valueBy.key.body[0]!)
     && countOf(valueBy.key.body[0]!) === 1;
-  // A REDUCING traversal value is one scalar for the WHOLE GROUP, not one member per incoming
-  // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
-  // (`Grouping.determineBarrierStep`). So it is its own arm, and the generic per-parent child
-  // expression would be a plausible-looking wrong value rather than a decline.
-  // An entry host is the one exception to group-scoped pooling: its value `by()` is a normal
-  // per-entry child (the mapValues idiom), so a terminal count/fold belongs INSIDE that child rather
-  // than reducing every row that shares the new group key.
+  /**
+   * A VALUE BODY WITH ANY BARRIER POOLS PER KEY — which this host lowering does not build — so it
+   * DECLINES here, and the decline is load-bearing: it is what stops a barrier body reaching the
+   * per-member `single` (`Operator.assign`) arm below, the reference's answer only for a body with NO
+   * barrier. `Grouping.determineBarrierStep` returns the value traversal's FIRST non-local `Barrier`
+   * (`isValueBarrier`); every traverser of a key runs up to it into ONE pool and `doFinalReduction` runs
+   * the rest over the pool
+   * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125`).
+   * Per member, `by(values('name').fold())` would be one one-member list per traverser where the
+   * reference folds the whole key. The ONE pooled lowering is the connector's (`byValues`/`pooledGroup`,
+   * `lower/scoped.ts`), which owns every pooling body on a host it serves.
+   *
+   * The exception is a bare `by(count())`: it pools nothing but the group's own traversers, which is
+   * `groupCount()`'s value exactly, so it re-enters the barrier as `groupCount` — the property host's
+   * live route (`g.V().properties().group().by(key).by(count())`). A `Scope.local` reducer
+   * (`by(values('name').count(local))`) is a `MapStep` over one value, not a barrier, so it is assigned
+   * per traverser below.
+   *
+   * Two hosts never pool and so precede this rule: a `by(tail())` (`lastOnly`, the collecting arm's
+   * first arrival) and an ENTRY host, whose value `by()` is a normal per-entry child (the mapValues idiom).
+   */
   if (valueBy?.key.kind === 'child' && !lastOnly && !(host.kind === 'scalar' && host.entry)) {
     const body = valueBy.key.body;
-    const terminal = body.at(-1)?.name;
-    /**
-     * A VALUE BODY WITH ANY BARRIER IS POOLED PER KEY, OR IT DECLINES — never the per-member `single`
-     * (`Operator.assign`) arm below, which is the reference's answer only for a body with NO barrier.
-     *
-     * `Grouping.determineBarrierStep` returns the FIRST non-local `Barrier` — a reducing one (`fold`,
-     * `count`, `sum`…), a FILTERING one (`dedup`, `range`/`limit`/`skip`/`tail` — `DedupGlobalStep`,
-     * `RangeGlobalStepContract`, `TailGlobalStepContract` are `FilteringBarrier`s), a collecting one
-     * (`order`, `sample`), a supplying one (`cap`); every traverser of a key runs up to it into ONE pool,
-     * and `doFinalReduction` runs the rest over the pool
-     * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125`).
-     * So the barrier's scope is the KEY. The two pooled arms below pool with `child.rows`, whose origin is
-     * the member ELEMENT (`childRows`, `perRow: false`): a barrier inside their pre-body therefore runs
-     * per element, which IS per key only where the key is the element itself (a `by()`-less key). Any
-     * other key would `limit`/`dedup`/`order` each member alone — `group().by(T.label).by(__.constant(1)
-     * .dedup().count())` answered `person:2` where the reference dedups across the key to `1`. The one
-     * per-key restoration that exists (`groupCollected`'s bare `dedup()` straight before the `fold()`) is
-     * admitted by that arm itself; anything else declines.
-     */
-    const firstBarrier = body.findIndex(isValueBarrier);
-    if (firstBarrier >= 0) {
-      // A global `order()` is the one pre-barrier whose pool scope does not matter: the pool sorts the
-      // WHOLE child stream (it does not consult the origin), and a stable sort of the union restricted
-      // to one key is that key's own stable sort. Every other barrier here is origin-scoped.
-      const preBarriers = body.slice(0, -1).filter((bodyStep) => isValueBarrier(bodyStep) && bodyStep.name !== 'order');
-      const perKeyDedup = terminal === 'fold' && preBarriers.length === 1 && dedupBeforeFold(body.slice(0, -1));
-      // A barrier NESTED in a branch's arm before the pool's barrier (`by(union(dedup(), identity()).count())`)
-      // cuts PER TRAVERSER in the reference — `GroupStep` feeds each one through the pre-barrier part alone — so
-      // pooling the arm's child rows per element dedups/limits ACROSS a vertex's repeat arrivals instead
-      // (measured: `g.V().hasLabel('person').both().group().by(label).by(union(dedup(), identity()).count())`
-      // answered person 7, software 6 where each member counts twice: 8, 8). The connector's grouped pool runs
-      // that part per member (`pooledGroup`'s `perMember`), so this arm declines and the site takes it.
-      const armCuts = body.slice(0, firstBarrier).some((s) => ['union', 'choose', 'branch'].includes(s.name)
-        && someStepDeep([s], child.params, (inner) => inner !== s && inner.name !== 'order' && isValueBarrier(inner), true));
-      if ((preBarriers.length && keyBy && !perKeyDedup) || armCuts) return null;
-      // A barrier that does not REDUCE ends the body (`by(__.values(k).order())`, `.dedup()`, `.limit(1)`):
-      // the value is the first of the pool's remaining traversers, which no arm here builds.
-      if (!reducesPool(body.at(-1)!)) return null;
+    if (body.some(isValueBarrier)) {
+      if (body.length !== 1 || body[0]!.name !== 'count') return null;
+      const counted = groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, source, fresh);
+      // The count is already a map — see `GroupRows.done`; `rel`/`recipe` are stated only so the shape stays total.
+      return counted && { rel: counted.rel, recipe: POOLED_RECIPE(step), done: counted };
     }
-    // THE POOL IS CUT AT THE FIRST REDUCING BARRIER, not at the last step. `Grouping.determineBarrierStep`
-    // returns the value traversal's FIRST non-local `Barrier`; every member's traverser runs up to it into
-    // ONE pool per key, and `doFinalReduction` then runs the REST of the traversal over the reduced value
-    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125`).
-    // Both pooled arms below build only a reduction that ENDS the body; a reducing barrier with steps
-    // after it (`by(__.values(k).sum().fold())`, `by(__.values(k).fold(0, Operator.sum).fold())`) would
-    // otherwise fall through to the per-member child, which reduces each member ALONE and then collects
-    // — a plausible-looking wrong value (`{person:[35]}` where the reference pools to `{person:[123]}`).
-    // So it declines here, the one place that knows the body is a group value.
-    const pooledAt = body.findIndex(reducesPool);
-    if (pooledAt >= 0 && pooledAt !== body.length - 1) return null;
-    // A SEEDED `fold(seed, Operator.x)` pools exactly as the list fold does — it is the same
-    // `ReducingBarrierStep` — but it reduces the pool to ONE VALUE per key, which neither pooled arm
-    // below builds (`groupCollected` collects a list, `groupReduced` spells the four reducers). It
-    // declines for the same reason as above.
-    if (terminal === 'fold' && body.at(-1)!.args.length) return null;
-    // A `by(<pre>.fold())` COLLECTS the pooled child rows into a LIST per key — the same pool
-    // `groupReduced` builds, folded rather than reduced. `fold()` is a reducing barrier that SEEDS `[]`,
-    // so an empty pool keeps its key with `l[]` (not a dropped key), which is why it is `groupCollected`
-    // and not the per-input collecting arm. A bare `by(__.fold())` is the traverser-collect the by()-less
-    // arm already builds, so it is left to fall through (`pre` empty → `groupCollected` declines).
-    if (terminal === 'fold') {
-      const pooled = groupCollected(input, host, step, keyBy, valueBy.key.body, child, source, fresh);
-      // A NON-BARE `by(<pre>.fold())` the pool could not build must never fall through to `scalar`: that
-      // folds each member's body ALONE (a one-member list per traverser) where the reference pools every
-      // member of the key into ONE list (`Grouping.java:74-125` above) — measured
-      // `group().by(select('a').values('name')).by(values('name').fold())` answering `{marko:[josh]}` for
-      // `{marko:[vadas,lop,josh]}`. A value-body `dedup()` was the first instance found (its whole-child
-      // DISTINCT has no outer key in scope); every `<pre>` is the same fall-through. Only the bare
-      // `by(__.fold())` never reaches here (`bareFold` collapsed it), so a pool miss DECLINES.
-      return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
-    }
-    // Gated on the barrier AUTHORITY, not the step name: a `Scope.local` reducer ending the body
-    // (`by(values('name').count(local))`, `by(values('age').sum(local))`) is a `MapStep` over ONE
-    // traverser's value, not a `ReducingBarrierStep`, so the body has no barrier and its value is assigned
-    // per traverser by the `single` arm below — pooling it answered the key's TOTAL (`person:4`) where the
-    // reference keeps one member's own value (`person:1`).
-    if (reducesPool(body.at(-1)!)) {
-      const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, source, fresh);
-      // A POOLED value is already a map, and there is no `(key, contribution)` row behind it — see
-      // `GroupRows.done`. The `rel`/`recipe` are unreachable and stated only so the shape stays total.
-      return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
-    }
-    // Any other barrier-ending body (`tree()`, a nested `group()`) has no pooled arm: decline rather
-    // than reach the per-member `single` arm.
-    if (firstBarrier >= 0) return null;
   }
   // A CHILD value `by()` (`by(__.project(…))`, `by(__.valueMap())`) is lowered here rather than through
   // `byNode` so its FRAMING is captured, not discarded: a MAP-shaped child makes the value a `Map<K,Map>`,
@@ -900,334 +822,6 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, source: GraphSource, fre
   return groupedValue;
 }
 
-/**
- * A GROUP whose VALUE is a REDUCER over the group's pooled child traversers, or `null` to decline.
- *
- * **The pool is the whole point.** `GroupStep` applies the value traversal's PRE-BARRIER part per
- * traverser and lets the BARRIER reduce what every member of a key contributed
- * (`Grouping.determineBarrierStep`) — so `group().by(T.label).by(__.bothE().values('weight').sum())` is
- * one sum per LABEL, not the sum of per-vertex sums re-summed. The two agree for `sum` and disagree for
- * `mean`, which is precisely why this may not be a decomposition table: `mean` needs the complete
- * child-row domain, and a rule that is right for three reducers and wrong for the fourth is the shape
- * of defect the decline contract exists to prevent.
- *
- * So the value side is a JOIN and the grouping aggregates over it — the seam's `rows` answer (§6·6's
- * fourth), with the `origin` channel naming each child row's host. The KEY is re-projected FROM THE
- * ORIGIN rather than carried, because a join keeps channels and drops payload: one `int` names the
- * parent, and the same `by()` that would have read the parent reads it again off that rowid.
- *
- * THREE DECLINES, each for its own reason and none of them taste:
- *
- * - a host with no ROWID (a scalar, a record) — `origin` is a rowid and a value stream has none (a
- *   channels-core change). It bites only the POOLING arm: the empty-body `count()` below pools
- *   nothing, so it is answered for every host `groupBarrier` itself admits;
- * - `count()` with a NON-EMPTY body — `CountGlobalStep` seeds 0, so a member whose body produced
- *   nothing must still count 0 and keep its key, which needs an OUTER join where every other reducer
- *   wants an inner one (`SumGlobalStep` leaves `NON_EMITTING_SEED` and the key goes with the traverser);
- * - a body that does not reduce to a per-row VALUE — there is nothing for an aggregate to read.
- *
- * `count()` with an EMPTY body is not the same question and is answered here: `by(__.count())` counts
- * the group's own traversers, which is `groupCount`'s value exactly, with no join and no pool.
- */
-function groupReduced(
-  input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
-  bulked: boolean, child: ChildSeam, source: GraphSource, fresh: Minter,
-): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
-  const reducer = body.at(-1)!.name;
-  const pre = body.slice(0, -1);
-  if (!pre.length) {
-    // `by(__.count())` — the group's own traverser count. `groupBarrier` already builds exactly that
-    // for `groupCount()`, so this re-enters it rather than growing a second spelling of one answer.
-    //
-    // BEFORE the host test below, and that ordering is the §6·6 rule rather than a tidy-up: this arm
-    // pools nothing, so it needs no `origin` and no rowid, and testing the host first declined every
-    // host the POOLING arm cannot serve for a question that never reaches it. Measured on
-    // `g.V().properties().group().by(__.element()).by(__.count())`, which the algebra could express
-    // the whole time.
-    if (reducer !== 'count') return null;
-    return groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, source, fresh);
-  }
-  // THE POOLING ARM needs a rowid to name each child row's parent by, so only an ELEMENT host reaches
-  // it — `origin` is typed `int` and a value stream has none (a channels-core change).
-  if (host.kind !== 'element') return null;
-  if (reducer !== 'count' && !isReducer(reducer)) return null;
-  // `mean` used to DECLINE for the §12 blob-precision reason: SQLite's JSON writer serializes a REAL at
-  // 15 significant digits, so `map/Mean.feature:70`'s `d[0.3333333333333333].d` came back a digit short.
-  // The map VALUE is a `typedNode` (below), and `typedNode` now makes every numeric member lossless for
-  // the JSON channel (`jsonSafeScalar`, `build.ts`) — a binary64 rides as a 17-digit JSON number — so the
-  // mean survives and the decline is gone. It was never a mean-specific bug; every reducer whose result
-  // needs 16-17 digits goes through the same repair now.
-  const counting = reducer === 'count';
-  const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
-  // A COUNT counts TRAVERSERS, so it needs no value at all and admits any body shape; every other
-  // reducer reads one, so a body that does not end in a per-row value has nothing to reduce.
-  if (!rows || (!counting && rows.framing.kind !== 'scalar')) return null;
-
-  const elementKey = !keyBy;
-  /** The key, from whichever ROWID names the parent — the child rows' `origin`, or the parent's own
-   *  `id` in the seed arm below. One function, because the two arms must group by the same thing. */
-  const keyOf = (rowid: Expr): Expr | null =>
-    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, source, fresh, child));
-  const key = keyOf(col(rows.rel.id, rows.origin));
-  if (!key) return null;
-  // THE ROWS' OWN GREMLIN TYPE, where they carry one (a stored value's per-row tag, or the stream's static
-  // one): a `sum`/`min`/`max` result's class is the rows' COMMON number class (`reducer.ts` `commonNumberClass`),
-  // which the result's storage class alone gets wrong — a Double stored integral (the modern graph's
-  // ripple `weight` 1.0) reduced to an INTEGER and framed as the Int 1, where `Sum.feature`
-  // `g_V_hasLabelXsoftwareX_group_byXnameX_byXbothE_weight_sumX` answers `d[1.0].d`. A `mean` is a Double
-  // whatever it reduces (`MeanGlobalStep`), so it needs none.
-  const tagCol = framingCols(rows.framing)?.find((column) => column.name !== 'v')?.name;
-  const staticTag = rows.framing.kind === 'scalar' ? staticTypeOf(rows.framing.type) : undefined;
-  // Every reducer reads the tag as its ROW TAG (`reducerAggregate`) — a Boolean or Date value refuses, a
-  // `mean` included; only the result's class (`commonNumberClass`) is a `mean`'s to skip.
-  const rowTag = counting ? null
-    : tagCol && rows.rel.type.cols.some((column) => column.name === tagCol) ? col(rows.rel.id, tagCol)
-    : staticTag ? compilerText(staticTag) : null;
-  const tag = reducer === 'mean' ? null : rowTag;
-  const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), ...(rowTag ? [meta(TAG_COL, 'text', true)] : []));
-  // THE KEY IS A COLUMN FIRST, for the reason the barrier's own key is: a `by()` key is a correlated
-  // subquery and SQL needs it in the SELECT list AND the GROUP BY, so naming it once is what stops the
-  // whole subquery being inlined at every position it appears.
-  //
-  // A COUNT's value column is the traverser WEIGHT rather than a value — `SUM(bulk)` where the stream
-  // carries a multiplicity, which is `countExpr`'s rule, and the seed arm below contributes 0.
-  const bulk = rows.rel.channels.find((channel) => channel.role === 'bulk');
-  // Each pooled row is SCREENED by its tag here, once (`screenedByTag`) — the aggregate below is spelled
-  // again at every read of the reduced value, and the screen would be spelled with it.
-  const screened = counting ? col(rows.rel.id, 'v') : screenedByTag(col(rows.rel.id, 'v'), reducer, rowTag);
-  if (!screened) return null;
-  const projected = make.project({
-    id: fresh('rk'), input: rows.rel, channels: [], type: keyCols,
-    exprs: [[KEY_COL, key], [VAL_COL, counting ? (bulk ? col(rows.rel.id, bulk.col) : compilerInt(1)) : screened], ...(rowTag ? [[TAG_COL, rowTag] as const] : [])],
-  });
-  /**
-   * A COUNT KEEPS ITS KEY WHERE EVERY OTHER REDUCER LOSES IT, and that is a SEED ROW rather than an
-   * outer join.
-   *
-   * `CountGlobalStep` seeds 0 and `ReducingBarrierStep` therefore emits for an empty pool, so a group
-   * member whose body produced NOTHING must still contribute a 0 and keep its key; `SumGlobalStep`
-   * leaves `NON_EMITTING_SEED` in place and emits nothing, so there the key goes with the traverser.
-   * An inner join gives the second, which is why only this arm needs the other.
-   *
-   * A LEFT JOIN is not available — the child rows are built by the ordinary fold, whose movements are
-   * inner joins by construction — but it is also not needed: one row per PARENT contributing WEIGHT
-   * ZERO is the same answer, because a parent with children then sums their weights and a parent with
-   * none sums its single zero. The union stays inside the same `GROUP BY`, so nothing downstream has
-   * to know which arm a row came from.
-   */
-  const seedKey = counting ? keyOf(col(input.id, 'id')) : null;
-  if (counting && !seedKey) return null;
-  const arms = counting
-    ? make.union({
-      id: fresh('ru'), all: true, channels: [], type: keyCols,
-      inputs: [make.project({ id: fresh('rz'), input, channels: [], type: keyCols, exprs: [[KEY_COL, seedKey!], [VAL_COL, compilerInt(0)]] }), projected],
-    })
-    : projected;
-  const keyed = make.materialize({ id: fresh('rm'), input: arms, channels: [], type: arms.type });
-  const drop = productivityFilter(step, 'value-nullness', col(keyed.id, KEY_COL))?.keep;
-  const rowsIn = drop
-    ? make.filter({ id: fresh('rf'), input: keyed, channels: [], type: keyed.type, pred: drop })
-    : keyed;
-  // A REDUCER reads the pooled VALUES with no bulk weighting — the child rows are the pool, one
-  // traverser each, and re-applying a collapsed parent's multiplicity would count every walk twice. A
-  // COUNT sums the weight column the projection above built, `COALESCE`d for the reason `countExpr`
-  // carries one: a group whose every row is a zero seed must answer 0, not NULL.
-  const reduced = counting
-    ? { value: coalesce({ kind: 'agg' as const, fn: 'sum' as const, args: [col(rowsIn.id, VAL_COL)] }, compilerInt(0)), type: compilerText('long') }
-    : reducerAggregate(col(rowsIn.id, VAL_COL), reducer, SCREENED);
-  if (!reduced) return null;
-  const keyedBy = groupKeyed(rowsIn, elementKey ? meta(KEY_COL, 'int', true) : undefined, []);
-  const productive = make.aggregate({
-    id: fresh('rb'), input: rowsIn, channels: [],
-    type: typeOf(...keyedBy.cols, ...(keyedBy.key.length ? [meta(KEY_COL, 'json', true)] : []), meta(VAL_COL, 'any', true),
-      ...(tag ? [meta(CLASS_WIDTH_COL, 'int', true), meta(CLASS_FLOATING_COL, 'int', true)] : [])),
-    groupBy: keyedBy.groupBy,
-    aggs: [...keyedBy.key, [VAL_COL, reduced.value], ...(tag ? numberClassAggs(col(rowsIn.id, VAL_COL), col(rowsIn.id, TAG_COL), reducer === 'sum' ? 'not-a-number' : 'number') : [])],
-  });
-  // The class is NAMED ONCE, as a column FENCED on both sides: `typedNode` reads its tag at every arm of
-  // its value encoding, and the assembler fuses an unfenced projection into its neighbour — into the
-  // aggregate (re-spelling `numberClassAggs` per class test) or into the map fold (`commonNumberClass` per arm).
-  const reducedRows = tag ? fenced(productive, fresh) : productive;
-  const groups = tag
-    ? fenced(make.project({
-      id: fresh('rt'), input: reducedRows, channels: [],
-      type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true), meta(TAG_COL, 'text', true)),
-      exprs: [[KEY_COL, col(reducedRows.id, KEY_COL)], [VAL_COL, col(reducedRows.id, VAL_COL)],
-        [TAG_COL, reducedNumberClass(reducedRows.id, col(reducedRows.id, VAL_COL), inferredVtype(col(reducedRows.id, VAL_COL)))]],
-    }), fresh)
-    : productive;
-  const value = col(groups.id, VAL_COL);
-  const entry: Entry = {
-    key: elementKey ? source.elementNode(host.elem, col(groups.id, KEY_COL), fresh) : col(groups.id, KEY_COL),
-    // THE TAG IS A CANONICAL TYPE, NOT A STORAGE CLASS. `reducerAggregate` reports `typeof(<the
-    // aggregate>)` — `'integer'`/`'real'` — which is what `scalarPayload`'s `result: 'number'` arm
-    // reads, and the typed tree speaks the OTHER vocabulary (`'long'`/`'double'`). Handing it a storage
-    // class made a mean frame as an unmapped tag and come back a digit short; `inferredVtype` is the
-    // shared translation, and using it here is the same answer the framer would reach for an untagged
-    // value with the big-long case still covered.
-    // A COUNT is a Gremlin `long` by declaration, which is what makes the wire emit an explicit Int64
-    // rather than letting magnitude inference pick Int for a small count. Every other
-    // reducer's result class is DYNAMIC, so its tag is inferred from the value's storage class.
-    val: typedNode(value, counting ? compilerText('long')
-      : tag ? col(groups.id, TAG_COL)
-      : inferredVtype(value)),
-    keyOf: elementKey ? { kind: 'elem', elem: host.elem } : { kind: 'scalar' },
-    valOf: { kind: 'scalar' },
-  };
-  return {
-    rel: mapOfGroups(groups, entry, col(groups.id, KEY_COL), fresh),
-    keyOf: entry.keyOf,
-    valOf: entry.valOf,
-  };
-}
-
-/**
- * A GROUP whose VALUE is a `by(<pre>.fold())` — the pooled child rows COLLECTED into a list per key, or
- * `null` to decline.
- *
- * The sibling of `groupReduced`, and the front half is the same: `child.rows` pools the pre-fold body's
- * rows and flattens a many-per-traverser body (`by(__.out().fold())`) exactly as it does for
- * `by(__.out().count())`, each row naming its parent by `origin`. The KEY is re-projected FROM THE ORIGIN
- * so N members of one parent share one key. The two diverge at the barrier — a `fold()` COLLECTS where a
- * reducer REDUCES — which is why they are two functions and not one flag.
- *
- * **The SEED is what a `fold()` needs and a `sum()` does not.** `FoldStep` is a reducing barrier that
- * seeds `[]` and emits over an empty pool, so `g.V()...group().by().by(__.out().fold())` maps a childless
- * vertex to `l[]` and KEEPS its key — `sideEffect/Group.feature`'s `g_V_..._group_by_byXout_foldX`:
- * `{"v[vadas]":"l[]", "v[peter]":"l[v[lop]]"}`. `child.rows` is an inner join, so a childless parent
- * contributes no row; a SEED row per parent (its key, a NULL member) creates the group, and the
- * collecting aggregate's own `FILTER (WHERE member IS NOT NULL)` drops the seed so the fold is `[]` rather
- * than `[null]`. This is the same seed `groupReduced`'s COUNT arm unions in, and for the same reason.
- *
- * The pooled rows are then handed to `groupMap` unchanged — member encoding, member order, the empty-list
- * `FILTER`, and the `{t:'list', v}` framing are the collecting arm's, so a `by(<pre>.fold())` frames
- * identically to the by()-less collect one container along.
- */
-function groupCollected(
-  input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
-  child: ChildSeam, source: GraphSource, fresh: Minter,
-): GroupedMap | null {
-  const pre = body.slice(0, -1);
-  // A bare `by(__.fold())` is the by()-less collecting arm (`bareFold` already collapsed it); this pool
-  // exists for a pre-fold body. THE POOLING needs a rowid to name each child row's parent, so only an
-  // ELEMENT host reaches it — `origin` is typed `int` and a value stream has none.
-  if (!pre.length || host.kind !== 'element') return null;
-  // The pool collects rows in their arrival order, one traverser each — never Java's per-member
-  // `TraverserSet` regroup (`docs/feature-support-matrix.md`, deliberate divergences).
-  // A `dedup()` in the value traversal belongs to the OUTER group key, not to the whole child stream.
-  // `GroupStep.projectTraverser` resets its dedup state per value traversal and the barrier accumulates
-  // per key (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:113,127-128,205-216`;
-  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:216-265,276-278`).
-  // Remove the one bare barrier before lowering the child, then restore it below once KEY_COL is a real
-  // partition column.  A by()-keyed or repeated dedup needs its own key projection and declines here.
-  // Only a dedup followed by nothing but global `order()`s moves (`dedupBeforeFold`): restored after the
-  // remaining pre-body, one earlier (`out().dedup().values('name').fold()`) would dedup the NAMES where
-  // the reference dedups the vertices.
-  const dedups = pre.filter((bodyStep) => bodyStep.name === 'dedup');
-  if (dedups.length > 1 || dedups.some((bodyStep) => bodyStep.args.length || bodyStep.modulators?.length)) return null;
-  if (dedups.length && !dedupBeforeFold(pre)) return null;
-  const pooledPre = dedups.length ? pre.filter((bodyStep) => bodyStep.name !== 'dedup') : pre;
-  const pooledRows = child.rows(pooledPre, input, host.elem, host.row?.aliases ?? NO_LABELS);
-  // A body that lost the origin (a barrier BEFORE the fold — `by(__.out().order().fold())`) is a
-  // different first barrier and declines here rather than folding the wrong pool.
-  if (!pooledRows) return null;
-  // A RECORD row (`by(__.project('a').by(…).fold())`) becomes a member at the one boundary that needs a
-  // value — its MAP (`recordToMap`, the same collapse a chain-level `project().fold()` crosses), channels
-  // and origin intact. Without it the pool declined and the body fell to the per-member arm, which kept
-  // ONE member per key where `doFinalReduction` folds them all.
-  const rows = pooledRows.framing.kind === 'record'
-    ? (() => {
-      const mapped = recordToMap(pooledRows.rel, pooledRows.framing.fields, source, fresh);
-      return mapped && { ...pooledRows, rel: mapped.rel, framing: { kind: 'map' as const, keyOf: { kind: 'scalar' as const }, valOf: mapped.valOf } };
-    })()
-    : pooledRows;
-  if (!rows) return null;
-  // The MEMBER, encoded exactly as a value `by()` member is: an element row's rowid → `{t:'vertex',…}`,
-  // a scalar row's value → its `{t,v}` node. A shape a node cannot carry (a map/list member) declines.
-  // The payload column is the framing's own (`framingCols`) — a LIST row carries `list`, not `v`, and
-  // naming `v` for it was an internal error (`by(__.constant([0,1]).fold())`) rather than an answer.
-  const rowCols = framingCols(rows.framing);
-  const payload = rowCols?.[0];
-  if (!payload) return null;
-  const valueCol = col(rows.rel.id, payload.name);
-  // A MAP column is the relational JSONB form; `json()` turns it back into JSON TEXT carrying the JSON
-  // subtype, so the member node embeds the pairs rather than a blob or a quoted string.
-  //
-  // A MAP member (a `project()` record, a `valueMap()`) is collected at the ROOT encoding instead — its raw
-  // pairs, described by `memberOf: {kind:'map', of: valOf}` — the encoding the entry re-group above uses
-  // and the one a `{kind:'map'}` list member means. Wrapped as a `{t:'map'}` node under the default
-  // `TYPED_MEMBERS` descriptor it framed correctly but re-entered as a per-row SCALAR, so
-  // `select('software').unfold().select('a')` read no key at all and answered `[]`.
-  const mapMember = rows.framing.kind === 'map' ? { kind: 'map', of: rows.framing.valOf } as const : undefined;
-  const member = rows.framing.kind === 'elements' || mapMember
-    ? valueCol
-    : producedMemberNode(valueCol, rows.framing, source, fresh, 'always',
-      rows.framing.kind === 'scalar' ? relHostTag(rows.rel, rows.framing.type) : undefined);
-  if (!member) return null;
-
-  const elementKey = !keyBy;
-  /** The key, from whichever ROWID names the parent — the child rows' `origin`, or the parent's own `id`
-   *  in the seed arm. One function so both arms group by the same thing (`groupReduced`'s rule). */
-  const keyOf = (rowid: Expr): Expr | null =>
-    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, source, fresh, child));
-  const key = keyOf(col(rows.rel.id, rows.origin));
-  const seedKey = keyOf(col(input.id, 'id'));
-  if (!key || !seedKey) return null;
-
-  // MEMBER ORDER is the child rows' own encounter, the same total order `mise run test:perturbed` pins for
-  // the collecting arm; the seed rows sort with a `0` they never keep (the `FILTER` drops them).
-  const enc = rows.rel.channels.find((channel) => channel.role === 'encounter');
-  const cols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int'));
-  const real = make.project({
-    id: fresh('ck'), input: rows.rel, channels: [], type: cols,
-    exprs: [[KEY_COL, key], [MEMBER_COL, member], [ORD_COL, enc ? col(rows.rel.id, enc.col) : col(rows.rel.id, rows.origin)]],
-  });
-  // DISTINCT ON (group key, child value), retaining the first row in the child encounter order.  This
-  // is deliberately after the key projection: using the child's `origin` would dedup per parent
-  // traverser, while the GroupStep barrier's map scopes the set per GROUP KEY.
-  const members = dedups.length
-    ? dedupGroupMembers(real, cols, { key: !elementKey, member: rows.framing.kind !== 'elements' && !mapMember }, fresh)
-    : real;
-  const seed = make.project({
-    id: fresh('cz'), input, channels: [], type: cols,
-    exprs: [[KEY_COL, seedKey], [MEMBER_COL, compilerNull()], [ORD_COL, compilerInt(0)]],
-  });
-  const arms = make.union({ id: fresh('cu'), all: true, channels: [], type: cols, inputs: [seed, members] });
-  const keyed = make.materialize({ id: fresh('cm'), input: arms, channels: [], type: cols });
-  // TinkerPop drops an unproductive KEY rather than grouping under null, the same rule (and the same
-  // `ProductiveByStrategy` exception) the barrier's own key obeys — asked here because the seed can
-  // introduce a null key a real member never would.
-  const drop = productivityFilter(step, 'value-nullness', col(keyed.id, KEY_COL))?.keep;
-  const rowsIn = drop ? make.filter({ id: fresh('cf'), input: keyed, channels: [], type: cols, pred: drop }) : keyed;
-  // The COLLECTING arm frames the list, drops the seed (`memberDrop`), orders by encounter and wraps the
-  // members in a `{t:'list', v}` node — a `by(<pre>.fold())` is that arm over a pooled row set.
-  const recipe: GroupRecipe = {
-    counting: false, keyElem: elementKey ? host.elem : undefined,
-    member: rows.framing.kind === 'elements' ? { kind: 'rowid', host: { kind: 'element', id: valueCol, elem: rows.framing.elem } } : { kind: 'node' },
-    single: false, memberDrop: true, bulkCol: undefined, step, ...(mapMember ? { memberOf: mapMember } : {}),
-  };
-  return groupMap(rowsIn, recipe, source, fresh);
-}
-
-/** The pooled `dedup().fold()` barrier: one first member per `(KEY_COL, MEMBER_COL)`, each a node keyed
- * by `nodeEquality` (a rowid as itself).  It is a window rather than an aggregate because the fold needs
- * the surviving member's encounter position intact. */
-function dedupGroupMembers(input: Rel, cols: ReturnType<typeof typeOf>, nodes: { readonly key: boolean; readonly member: boolean }, fresh: Minter): Rel {
-  const keyed = (name: string, node: boolean): Expr[] => node ? nodeEquality(col(input.id, name)) : [col(input.id, name)];
-  const ranked = rowNumberWindow(input, 'gr', [], {
-    partitionBy: [...keyed(KEY_COL, nodes.key), ...keyed(MEMBER_COL, nodes.member)],
-    orderBy: [{ expr: col(input.id, ORD_COL), dir: 'asc' }],
-  }, fresh);
-  const first = make.filter({
-    id: fresh('gf'), input: ranked, channels: [], type: ranked.type,
-    pred: eq(col(ranked.id, 'gr'), compilerInt(1)),
-  });
-  return make.project({
-    id: fresh('gp'), input: first, channels: [], type: cols,
-    exprs: cols.cols.map((column) => [column.name, col(first.id, column.name)] as const),
-  });
-}
-
 /** The hosts whose traverser is addressed by a ROWID, so a collecting group can carry it as an integer
  *  and expand it once per SURVIVING member rather than once per row. Named because three sites read it
  *  (the `tail()` admission, the member projection, the member expansion) and a fourth spelling of the
@@ -1364,11 +958,6 @@ const tokenKey = (name: 'id' | 'label'): Expr =>
  * two-field record modelling a subset would be an arm with no producer. It arrives with its pass.
  */
 export type MapTokens = boolean;
-
-/** No labels in scope — a host built without a row (see `elementHost`). Shared so the two readers
- *  cannot describe "none" differently. */
-const NO_LABELS: AliasMap = new Map();
-
 /**
  * `valueMap()` and `elementMap()` — an ELEMENT's properties as one map per traverser.
  *

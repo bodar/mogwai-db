@@ -3,9 +3,9 @@ Feature: mogwai addendum — a group VALUE body's barrier observes the whole par
   # `Grouping.determineBarrierStep` (vendor/tinkerpop/gremlin-core/.../step/Grouping.java:74) makes
   # the FIRST non-local Barrier in a group's value traversal the group's REDUCER, so it accumulates
   # across every traverser that landed on the key. A `by(<pre>.fold())` is a FoldStep reducer over
-  # exactly that partition, and `groupCollected` (src/compiler/rel/map.ts) builds it by POOLING the
-  # pre-fold body's rows through `child.rows` — the same pool `groupReduced` sums — then collecting
-  # them into a list per key. So the value barrier sees the whole partition, not one origin's rows.
+  # exactly that partition, and the connector's per-key pool (`poolMembers`/`pooledGroup`,
+  # src/compiler/rel/lower/scoped.ts) builds it by lowering the body once over each key's members —
+  # the same pool a `sum()` reduces — then collecting them into a list per key. So the value barrier sees the whole partition, not one origin's rows.
   #
   # The official corpus cannot see the ORDER inside a value list. Its group scenarios assert `the
   # result should be unordered`, which compares the MAP's entries — so a child-scoped

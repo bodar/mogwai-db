@@ -104,39 +104,12 @@ export function towerOperand(value: Expr, inputClass: 'long' | 'bigint'): Expr {
  * is a site that forgot: a Boolean (INTEGER 0/1) or a Date (epoch millis) is a Number to SQLite, so a
  * reducer that does not read the tag adds or orders it as one.
  */
-export type ReducerRowTag = Expr | null | typeof SCREENED;
-
-/**
- * The row tag of a value ALREADY SCREENED by `screenedByTag` — a caller that projects its rows before
- * the aggregate (a group value's pooled rows) screens each row ONCE there, rather than have the screen
- * spelled inside an aggregate expression the statement repeats.
- */
-export const SCREENED = 'screened' as const;
-
-/**
- * The per-row half of `reducerAggregate`'s row-tag reading, for a caller that projects its rows: the
- * value, with a row whose TAG makes it unreducible raising in-statement — a Boolean, Date or Duration
- * (`nonNumberTag`), and for an ORDERING reducer a Number held as decimal TEXT (`exactTail`). `null` where
- * a STATIC tag already decides that every row is unreducible (decline). The aggregate over it then takes
- * `SCREENED` as its tag.
- */
-export function screenedByTag(value: Expr, reducer: Reducer, tag: Expr | null): Expr | null {
-  const nonNumber = nonNumberTag(tag);
-  if (nonNumber === true) return null;
-  const ordering = reducer === 'min' || reducer === 'max';
-  const whens: Arm[] = [
-    ...armWhen(nonNumber === null || nonNumber === false ? nonNumber : bin('and', bin('is not', value, compilerNull()), nonNumber),
-      raiseInRow(ordering ? NON_NUMBER_ORDER : TEXT_OPERAND)),
-    ...armWhen(scaledDecimal(value, tag, reducer), raiseInRow(DECIMAL_SCALE)),
-    ...(ordering ? armWhen(exactTail(value, tag), raiseInRow(EXACT_TAIL)) : []),
-  ];
-  return whens.length ? { kind: 'case', whens, else: value } : value;
-}
+export type ReducerRowTag = Expr | null;
 
 /** `tag` names a type SQLite stores as a number that is not one (`NUMBER_STORED_NON_NUMBERS`). A STATIC
  *  tag is decided here (`true`/`false`), a per-row one is the SQL test; `null` for no tag at all. */
 function nonNumberTag(tag: ReducerRowTag): Expr | boolean | null {
-  if (tag === null || tag === SCREENED) return null;
+  if (tag === null) return null;
   if (tag.kind === 'lit' && tag.source === 'compiler-text') return NUMBER_STORED_NON_NUMBERS.includes(String(tag.value));
   return { kind: 'in-list', expr: tag, values: NUMBER_STORED_NON_NUMBERS.map(compilerText) };
 }
@@ -144,7 +117,7 @@ function nonNumberTag(tag: ReducerRowTag): Expr | boolean | null {
 /** `tag` names a NUMBER class — the reading under which a TEXT value is an exact-tail number (a Long past
  *  2^53, a BigInteger, a BigDecimal) rather than a String. Static where it can be. */
 function numberTag(tag: ReducerRowTag): Expr | boolean {
-  if (tag === null || tag === SCREENED) return false;
+  if (tag === null) return false;
   if (tag.kind === 'lit' && tag.source === 'compiler-text') return NUMERIC_VTYPES.includes(String(tag.value));
   return { kind: 'in-list', expr: tag, values: NUMERIC_VTYPES.map(compilerText) };
 }
@@ -191,7 +164,7 @@ const eligible = (value: Expr, tag: ReducerRowTag): Expr => ({
  * ordering only the TEXT. A STATIC tag is decided here; a per-row one is the SQL test.
  */
 function scaledDecimal(value: Expr, tag: ReducerRowTag, reducer: Reducer): Expr | boolean {
-  if (tag === null || tag === SCREENED) return false;
+  if (tag === null) return false;
   // A MEAN over a BigDecimal or a BigInteger is a BigDecimal DIVISION whatever the carrier
   // (`MeanNumber.getFinal` is `div(sum, count, true)`, and a 128-bit floating common class is a BigDecimal:
   // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MeanGlobalStep.java:175-177`,

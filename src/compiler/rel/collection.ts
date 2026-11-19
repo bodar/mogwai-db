@@ -280,7 +280,7 @@ export type Members =
   | { readonly kind: 'grouped'; readonly recipe: GroupRecipe }
   /**
    * A POOLED grouping, ALREADY REDUCED — `group("a").by(k).by(<reducing traversal>)`, whose value side is
-   * a JOIN over the group's members' child rows (`groupReduced`, `map.ts`).
+   * a JOIN over the group's members' child rows (`GroupRows.done`, `map.ts`).
    *
    * The one arm with no member rows behind it, and therefore the one that is SINGLE-SITE by construction:
    * the child rows POOL per group and the barrier reduces the pool once, so there is no
@@ -713,7 +713,7 @@ export function registerGrouping(
   //
   // A POOLED value registers its MEMBERS and the recipe that reduces them (`GroupRows.pool`): a second site
   // unions its members onto the first, and a site in a connector body is keyed per host row like any other —
-  // the pool is reduced once, at the reader. A FINISHED map (`GroupRows.done` — the host's own pooled arms, or
+  // the pool is reduced once, at the reader. A FINISHED map (`GroupRows.done` — the host's own `by(count())` re-entry, or
   // a pool whose reduction can raise) has no member row a union could take: see the `reduced` arm.
   let added: Collection = rows.pool
     ? {

@@ -1,16 +1,15 @@
 Feature: mogwai addendum — a group VALUE of `by(<pre>.fold())` is a LIST per partition
 
   # `by(<pre>.fold())` makes the group's value the pre-fold body FOLDED over the whole partition — a
-  # list, not the single last value a barrier-less child produces. `groupCollected`
-  # (src/compiler/rel/map.ts) pools the pre-fold rows through `child.rows` exactly as `groupReduced`
-  # does for `by(<pre>.count())`, then COLLECTS rather than reduces. Two things the reference pins that
-  # a scalar reducer does not exercise, and both are here:
+  # list, not the single last value a barrier-less child produces. The connector's per-key pool
+  # (`poolMembers`/`pooledGroup`, src/compiler/rel/lower/scoped.ts) lowers the body once over one key's
+  # members, exactly as it does for `by(<pre>.count())`, then COLLECTS rather than reduces. Two things
+  # the reference pins that a scalar reducer does not exercise, and both are here:
   #
   #  - A `fold()` is a reducing barrier that SEEDS `[]` and emits over an empty pool, so a partition
-  #    whose members contribute nothing keeps its key with `l[]` — NOT a dropped key. `child.rows` is
-  #    an inner join, so `groupCollected` unions a SEED row per parent (the count arm's own trick) to
-  #    keep the group alive, and the collecting aggregate's `FILTER (WHERE member IS NOT NULL)` drops
-  #    the seed so the fold is `[]` and not `[null]`.
+  #    whose members contribute nothing keeps its key with `l[]` — NOT a dropped key. The pool is
+  #    decorrelated against the domain of distinct keys, so a seeded barrier keeps its seed for a key
+  #    whose pool reduced to nothing (`[]`, not `[null]` and not a missing key).
   #  - The members are ELEMENTS, framed through the same `producedMemberNode` a value `by()` uses, so a
   #    folded vertex list rides as `{t:'vertex', v:{…}}` nodes the typed tree reads at any depth.
   #

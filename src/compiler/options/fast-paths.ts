@@ -192,7 +192,7 @@ export const GATE_ONLY_FAST_PATHS: Readonly<Record<string, string>> = Object.fre
     + 'emission-order changes that driving from a different relation legitimately causes.',
   correlatedChild:
     'test/L5-properties/differential.test.ts — the per-switch sweep, over every corpus and generated '
-    + 'traversal with a child at a CONNECTORS host that still has a ladder route (where/filter/and/or/not/map/flatMap/local/group — not the LADDERLESS ones, src/compiler/rel/lower/scoped.ts). The switch only ORDERS two lowerings '
+    + 'traversal with a child at a CONNECTORS host that still has a ladder route (map/flatMap/local, and a filter host over a body the connector leaves to the ladder — not the LADDERLESS ones, src/compiler/rel/lower/scoped.ts). The switch only ORDERS two lowerings '
     + 'that are each the other\'s fallback (src/compiler/rel/lower/scoped.ts `scopedHost`), so support is '
     + 'equal by construction and every traversal both answer compares the ladder of correlated routes '
     + 'against the scoped-relation connector (a general decorrelation, src/rel/decorrelate.ts).',

@@ -83,3 +83,33 @@ describe('group() — a local reducer in the value by() is per traverser, not po
     expect(one("g.V().group().by('name').by(values('l').max(local))")).toEqual({ a: 3 });
   });
 });
+
+// A PROPERTY host is outside the connector's group row, so its group is the host's own lowering (`groupRows`,
+// src/compiler/rel/map.ts), which builds NO pool: a value body with a barrier declines there — never the per-member
+// assign arm, which would answer one member's value for the key's pool — except a bare `by(count())`, which pools
+// nothing but the key's own traversers and is `groupCount()`'s value exactly. Not a `CONNECTORS` row, so the
+// connector-only mode (L9) has no route for it; the default and ladder-first positions answer alike.
+describe('group() over a property host — the host lowering pools nothing', () => {
+  const declines = (q: string) => expect(() => runWith(store, q)).toThrow(/not supported/);
+  const hostAnswer = (q: string) => {
+    const ours = answer(q);
+    expect(answer(q, LADDER_FIRST)).toEqual(ours);
+    return ours;
+  };
+  test('by(count()) answers as groupCount', () => {
+    expect(entries(hostAnswer('g.V().properties().group().by(key).by(count())')[0]!)).toEqual({ age: 4, lang: 2, name: 6 });
+    expect(entries(hostAnswer('g.V().properties().groupCount().by(key)')[0]!)).toEqual({ age: 4, lang: 2, name: 6 });
+  });
+  test('a pooling body is a clean decline, not a per-member answer', () => {
+    declines('g.V().properties().group().by(key).by(value().fold())');
+    declines('g.V().properties().group().by(key).by(value().sum())');
+    declines('g.V().properties().group().by(key).by(value().count())');
+    declines('g.V().properties().group().by(key).by(value().dedup().fold())');
+    declines('g.V().properties().group().by(key).by(value().order().fold())');
+  });
+  test('a barrier-free body is assigned per traverser, at depth too', () => {
+    expect(entries(hostAnswer('g.V().properties().group().by(key).by(value().count(local))')[0]!)).toEqual({ age: 1, lang: 1, name: 1 });
+    expect(hostAnswer('g.V().local(properties().group().by(key).by(count()))').map(entries).map((m) => JSON.stringify(m)))
+      .toEqual(bagOf([...Array(4).fill('{"age":1,"name":1}'), ...Array(2).fill('{"lang":1,"name":1}')]));
+  });
+});
