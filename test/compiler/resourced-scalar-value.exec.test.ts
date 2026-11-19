@@ -195,8 +195,12 @@ describe('a choose whose arm is a re-sourced value', () => {
   test('over a possibly-absent label host it declines with an explanation', () =>
     expect(() => run(s, `g.V().optional(__.out().as('a')).map(__.choose(${PERSON}, __.select('a').V().values('name').order().limit(1), __.constant('x')))`))
       .toThrow(/V\(\)\/E\(\) inside this body discards the value before it/));
-  test('an unproductive choice over an element host still declines (its pass-through is the vertex)', () =>
-    expect(() => run(s, `g.V().map(__.choose(__.values('name')).option('marko', ${FIRST_NAME}).option(Pick.none, __.constant('x')))`)).toThrow(UnsupportedTraversal));
+  // The unproductive pass-through is the VERTEX, so the choice is a VARIANT (a value arm beside an element arm);
+  // the per-traverser rejoin carries a variant payload (`rowResident`, `src/compiler/rel/framing.ts`), so it answers.
+  // Every vertex has a name, so no row takes the pass-through here.
+  test('an unproductive choice over an element host answers as a variant (its pass-through is the vertex)', () =>
+    expect(vals(`${O}.map(__.choose(__.values('name')).option('marko', ${FIRST_NAME}).option(Pick.none, __.constant('x')))`))
+      .toEqual(['x', 'x', 'josh', 'x', 'x', 'x']));
 });
 
 // Over a possibly-absent host the re-source declines (`reSourcedUnder`) rather than choosing per row

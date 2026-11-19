@@ -113,10 +113,9 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # Option-map choose() inside map(): an UNPRODUCTIVE choice (lop/ripple have no age) takes the IDENTITY
   # pass-through `ChooseStep` installs for `Pick.unproductive` (ChooseStep.java:71-79), never the written
   # `Pick.none` — the scenario below this one states the rule. This scenario once asserted 'unknown' for
-  # both, which the scalar CASE answered; the pass-through is the ELEMENT, which a map() child's one value
-  # cannot carry, so it declines (local() answers it: parked-branch-salvage.feature).
+  # both, which the scalar CASE answered; the pass-through is the ELEMENT, so the choice is a per-row VARIANT,
+  # which the per-traverser rejoin carries (`rowResident`, src/compiler/rel/framing.ts).
   @gap:nested-branch
-  @Unsupported
   Scenario: g_V_mapXchooseXvaluesXageX_optionXbetweenX26_30X_valuesXnameXX_optionXnone_constantXunknownXX
     Given the modern graph
     And the traversal of

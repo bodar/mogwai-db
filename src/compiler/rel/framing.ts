@@ -275,6 +275,31 @@ export function perTraverserFraming(framing: RelFraming): RelFraming {
   return perTraverser;
 }
 
+/**
+ * IS THE PAYLOAD COLUMNS OF THE RELATION ITSELF — so a consumer that only CARRIES the payload (renames it,
+ * joins it back by a key, never reads it by name) may take it as `payloadCols(rel)`, every non-channel column.
+ *
+ * The question the per-traverser REJOIN (`scoped.ts` `rejoin`) asks, and a different one from `framingCols`:
+ * that asks for a FIXED-WIDTH payload a record field can name in advance, which a variant (width varies with its
+ * declared arms) and a property (a multi-column payload built in `plan.ts`) are not — yet both are ordinary
+ * columns of each row, so carrying them through an inner join on the scope key is exact. Total, so a new framing
+ * kind is a compile error here until someone says whether its payload rides in the row.
+ */
+export function rowResident(framing: RelFraming): boolean {
+  switch (framing.kind) {
+    case 'elements': case 'scalar': case 'list': case 'path': case 'map': case 'mapEntry': case 'record':
+    case 'variant': case 'property':
+      return true;
+    // A barrier's landed rows exist only after the segment boundary — nothing inside one plan can name them.
+    case 'detached': return false;
+    // No payload at all.
+    case 'discard': return false;
+    // Its `{t,v}` envelope IS relation-resident; held back only because the owner scoped this to
+    // variant/property — a depth gap (`docs/outstanding-work.md` §4), not a design limit.
+    case 'typedNode': return false;
+  }
+}
+
 export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
   switch (framing.kind) {
     case 'elements': return [{ name: 'id', type: 'int', nullable: true }];

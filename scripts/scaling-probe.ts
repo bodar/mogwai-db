@@ -59,6 +59,15 @@ const SHAPES: readonly Shape[] = [
   // The ladder audit (Phase 3 (d)): one shape per remaining host family, so every route deleted or kept has
   // its margin measured here.
   { name: 'local(choose.option.fold)', query: "g.V().local(choose(values('age')).option(between(26, 30), values('name').fold()).option(none, values('name').fold()))" },
+  // R4.2: a VARIANT / PROPERTY body through the per-traverser rejoin (`rowResident`, `src/compiler/rel/framing.ts`).
+  { name: 'rejoin: map(choose.option.fold)', query: "g.V().map(choose(values('age')).option(between(26, 30), values('name').fold()).option(none, values('name').fold()))" },
+  { name: 'rejoin: union.barrier.local(choose.option.fold)', query: "g.union(V(), V()).barrier().local(choose(values('age')).option(between(26, 30), values('name').fold()).option(none, values('name').fold()))" },
+  { name: 'rejoin: union.barrier.map(choose.option.fold)', query: "g.union(V(), V()).barrier().map(choose(values('age')).option(between(26, 30), values('name').fold()).option(none, values('name').fold()))" },
+  { name: 'rejoin: map(choose.option mixed)', query: "g.V().map(choose(values('age')).option(between(26, 30), values('name')).option(none, values('age').fold()))" },
+  { name: 'rejoin: local(properties.order.range).value', query: 'g.V().local(properties().order().by(T.value).range(0, 2)).value()' },
+  { name: 'rejoin: local(properties(name).order.limit)', query: "g.V().local(properties('name').order().by(T.value).limit(1))" },
+  { name: 'rejoin: out.local(local(properties.limit)).value', query: "g.V().out().local(local(properties('name').limit(1))).value()" },
+  { name: 'rejoin: out.out.local(choose.option.fold).count', query: "g.V().out().out().local(choose(values('age')).option(between(26, 30), values('name').fold()).option(none, values('name').fold())).count()" },
   { name: 'flatMap(out.out)', query: "g.V().flatMap(out().out()).count()" },
   { name: 'local(out.limit)', query: "g.V().local(out().order().by('name').limit(1))" },
   { name: 'coalesce(values,constant)', query: "g.V().coalesce(values('age'), constant(0))" },

@@ -892,6 +892,17 @@ Beside the RelIR substrate:
 
 ## 4. Sensible queries we decline
 
+- **A per-row TYPED NODE through the per-traverser rejoin (typednode-rejoin, depth gap)** — a body ending on
+  `unfold()` over a MIXED-member collection (`typedNode` framing) under `local`/`map`/`flatMap` declines at
+  `rowResident` (`src/compiler/rel/framing.ts`). Its `{t,v}` envelope is a column of the row exactly as a
+  variant's and a property's payload are (R4.2 admitted those two), so the rejoin would carry it unchanged; it was
+  held back only because R4.2 was scoped to variant/property. Flip the arm, add depth witnesses. Reach: rare.
+- **`map()` over a variant body pays a per-scope first-row window (map-variant-window, perf, ~1.25×)** — the
+  connector's `map(choose(…).option(…fold())…)` rejoin numbers each scope's rows to keep the first, because
+  `rowBounds` sums a `Union`'s arms and cannot see that `choose`'s option arms are EXCLUSIVE per traverser. Linear
+  (1k→8k ≈ 7.5×) but ~1.25× the ladder route's constant (which R7 deletes). PREREQUISITE: an exclusive-arm bound on the
+  choose merge (`src/rel/bounds.ts`), so `firstRow` drops the window.
+
 - **`count(local)` over an ELEMENT (element-count-local)** — `g.V().out().count(local)` declines at top level, so
   `group().by(label).by(out().count(local))` declines too (ref `{person:1, software:1}` by `Operator.assign`: an
   element's `count(local)` is 1). Fix in the step's own lowering; the group value `by()` then follows.

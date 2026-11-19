@@ -29,7 +29,7 @@ import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
 import { bulkObservedFrom } from '../../ir/bulk.ts';
 import { CONNECTOR_HOSTS } from '../../ir/analyze.ts';
 import { defaultCollation, firstArrival, firstRow, listNode, mapNode, meta, payloadCols, rowNumberWindow, typeOf, type Minter } from '../build.ts';
-import { framingCols, perTraverserFraming, type RecordField, type RelFraming } from '../framing.ts';
+import { framingCols, perTraverserFraming, rowResident, type RecordField, type RelFraming } from '../framing.ts';
 import { branchOrderOwed, continueAs, edgeFeedsOtherV, dropEncounter, dropPath, freezeParent, keyedGroupTail, mintBranchOrder, positioned, withBranchEffects } from '../lower.ts';
 import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, optionalArms, reconcileCollapsed, unionArms, type RoutedCondition } from './branch.ts';
 
@@ -1613,7 +1613,7 @@ function rejoin(
 ): ChainReadOut | null {
   // Each result is one host traverser's: a global reducer in the body is no longer global (`perTraverserFraming`).
   const outFraming = perTraverserFraming(keyed.tail.framing);
-  if (!framingCols(outFraming)) return null;
+  if (!rowResident(outFraming)) return null;
   // A body row that stands for several traversers (a BULKED body, its own `bulk` column) is that many results
   // for EACH of the host row's traversers: the two multiplicities MULTIPLY. An unbulked body's `bulk` is one
   // per row, and the first of a scope is one traverser whatever it stood for.

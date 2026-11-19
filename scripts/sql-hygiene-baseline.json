@@ -86,7 +86,7 @@
   "cap": {
     "binds": 1,
     "bytes": 7320,
-    "compiler": 179,
+    "compiler": 163,
     "bound": 0
   },
   "choose": {
@@ -343,8 +343,8 @@
   },
   "local": {
     "binds": 0,
-    "bytes": 7513,
-    "compiler": 152,
+    "bytes": 11720,
+    "compiler": 307,
     "bound": 0
   },
   "lTrim": {
@@ -355,8 +355,8 @@
   },
   "map": {
     "binds": 0,
-    "bytes": 7513,
-    "compiler": 152,
+    "bytes": 12600,
+    "compiler": 313,
     "bound": 0
   },
   "match": {
@@ -392,7 +392,7 @@
   "mergeE": {
     "binds": 2,
     "bytes": 1605,
-    "compiler": 19,
+    "compiler": 18,
     "bound": 0
   },
   "mergeV": {
@@ -422,7 +422,7 @@
   "option": {
     "binds": 4,
     "bytes": 2173,
-    "compiler": 60,
+    "compiler": 59,
     "bound": 0
   },
   "or": {
@@ -548,7 +548,7 @@
   "to": {
     "binds": 3,
     "bytes": 1834,
-    "compiler": 253,
+    "compiler": 244,
     "bound": 0
   },
   "toLower": {
@@ -595,7 +595,7 @@
   },
   "value": {
     "binds": 0,
-    "bytes": 1937,
+    "bytes": 2299,
     "compiler": 26,
     "bound": 0
   },

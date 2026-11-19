@@ -7,9 +7,9 @@
   "ladderOnly": {
     "L1": {
       "existence": 0,
-      "per-traverser": 1,
+      "per-traverser": 0,
       "group": 0,
-      "other": 4
+      "other": 0
     },
     "L6": {
       "existence": 0,
@@ -24,11 +24,5 @@
       "other": 0
     }
   },
-  "queries": [
-    "087edf71dbf5",
-    "687c561137bb",
-    "7563378b7437",
-    "c068d1eaa2b6",
-    "f6be844c87ab"
-  ]
+  "queries": []
 }

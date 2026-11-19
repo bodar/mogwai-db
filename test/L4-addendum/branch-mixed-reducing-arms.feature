@@ -231,11 +231,10 @@ Feature: mogwai addendum — a REDUCING branch arm beside a STREAMING one, in ei
       | v[marko] |
       | v[vadas] |
 
-  # A per-start count() inside a local() rejoin keeps no per-start key yet, so beside the pass-through it
-  # cannot merge; it DECLINES rather than count across every start. All-reducing options under local()
-  # answer through the per-row CASE (`scalarChooseOptions`) and are unaffected.
-  @Unsupported
-  Scenario: under local() a keyed count() option beside the pass-through still declines
+  # A per-start count() option beside the ELEMENT pass-through is a per-row VARIANT; the local() rejoin
+  # carries it keyed per start (`rowResident`, src/compiler/rel/framing.ts), so each start counts only its
+  # own out-edges — never a count across every start.
+  Scenario: under local() a keyed count() option beside the pass-through counts per start
     Given the modern graph
     And the traversal of
       """
