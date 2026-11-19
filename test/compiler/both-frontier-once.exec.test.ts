@@ -188,7 +188,7 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
   for (const q of ["g.V(1).both().values('name')", "g.V(1).out().both().values('name')", "g.V(1).out().bothE('knows').otherV()", 'g.V(1).repeat(__.both()).emit()']) {
     test(q, () => {
       const detail = plan(q);
-      expect(detail.some((d) => /SEARCH rme\d+ USING COVERING INDEX e_out \(src=\?/.test(d))).toBe(true);
+      expect(detail.some((d) => /SEARCH rme\d+ USING COVERING INDEX e_(out|pair) \(src=\?/.test(d))).toBe(true);
       expect(detail.some((d) => /SEARCH rme\d+ USING COVERING INDEX e_in \(tgt=\?/.test(d))).toBe(true);
       expect(detail.filter((d) => /SCAN rme\d+/.test(d))).toEqual([]);
       expect(detail.filter((d) => /AUTOMATIC/.test(d))).toEqual([]);
@@ -202,7 +202,7 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
   for (const q of ["g.V().out('created').both('knows').path().count()", "g.V().out('created').bothE('knows').path().count()",
     "g.V(1).out('knows').both('knows','created')", "g.V().repeat(__.both('knows')).times(2).path()"]) {
     test(`labelled: ${q}`, () => {
-      const seeks = plan(q).filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_(out|in) /.test(d));
+      const seeks = plan(q).filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_(out|in|pair) /.test(d));
       expect(seeks.some((d) => /e_out \(src=\? AND label=\?\)/.test(d))).toBe(true);
       expect(seeks.some((d) => /e_in \(tgt=\? AND label=\?\)/.test(d))).toBe(true);
       expect(seeks.filter((d) => !/label=\?/.test(d))).toEqual([]);
@@ -221,7 +221,7 @@ describe('access paths — every both() hop seeks e_out/e_in', () => {
     test(`two plain seeks, no MULTI-INDEX OR: ${q}`, () => {
       const detail = plan(q);
       expect(detail.filter((d) => /MULTI-INDEX OR/.test(d))).toEqual([]);
-      expect(detail.filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_out \(src=\?/.test(d)).length).toBeGreaterThanOrEqual(1);
+      expect(detail.filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_(out|pair) \(src=\?/.test(d)).length).toBeGreaterThanOrEqual(1);
       expect(detail.filter((d) => /SEARCH rme\d+ USING COVERING INDEX e_in \(tgt=\?/.test(d)).length).toBeGreaterThanOrEqual(1);
       expect(sqlOf(q)).not.toContain('VALUES (0), (1)');
     });
@@ -260,7 +260,9 @@ describe('a frontier whose copy repeats work is evaluated once', () => {
    *  through that index (the copies of a frontier each seek it again). */
   const plainSeeks = (index: 'e_out' | 'e_in', rows: readonly PlanRow[]): number => {
     const orIndex = new Set(rows.filter((r) => /^INDEX \d+$/.test(r.detail)).map((r) => r.id));
-    return rows.filter((r) => r.detail.startsWith('SEARCH rme') && r.detail.includes(`INDEX ${index} (`) && !orIndex.has(r.parent)).length;
+    // A src-only seek may take `e_pair(src, tgt)` (`src/storage.ts`), the narrower covering index with the same prefix.
+    const names = index === 'e_out' ? ['e_out', 'e_pair'] : [index];
+    return rows.filter((r) => r.detail.startsWith('SEARCH rme') && names.some((n) => r.detail.includes(`INDEX ${n} (`)) && !orIndex.has(r.parent)).length;
   };
   const nodeScans = (rows: readonly PlanRow[]): number => rows.filter((r) => /^SCAN rn\b/.test(r.detail)).length;
 

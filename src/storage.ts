@@ -221,6 +221,13 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,
   `CREATE INDEX IF NOT EXISTS e_out ON edges(src, label, tgt)`,
   `CREATE INDEX IF NOT EXISTS e_in  ON edges(tgt, label, src)`,
+  // An edge test between two KNOWN vertices with no label — the cycle-closing `where(in().as('a'))`, the
+  // triangle's `where(out().as('a'))`, a walk condition testing adjacency to its start — pins `src` and `tgt` and
+  // leaves `label` free, so neither adjacency index has both pinned columns as a prefix: SQLite seeks one endpoint
+  // and filters the other, reading that endpoint's whole neighbourhood per probe (traversers × hub degree, 24–46×
+  // per 8× on `test/compiler/walk-condition-hub-scale.exec.test.ts`'s hub graph). An index whose prefix IS the
+  // probe makes it one seek, chosen by SQLite's own planner, at any label vocabulary.
+  `CREATE INDEX IF NOT EXISTS e_pair ON edges(src, tgt)`,
   // Static covering indexes replace the old self-tuning per-key expression index on
   // nodes.props: (key,value) serves a leading has(key,val); (node,key) serves the
   // given-a-node prop lookups (values()/has()/order/group + leaf materialization). The

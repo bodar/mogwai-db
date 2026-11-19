@@ -20,8 +20,10 @@ import { read, runWith } from '../support/harness.ts';
 //    (`existenceOverOwnRows`, `src/rel/decorrelate.ts`): one DISTINCT across scopes, a hub's condition asked once.
 //    Measured `where(…emit(in('created').has(…)))` ≈17× → ≈6× per 8×.
 
-/** `chains` chains of 6 persons (knows), each person `created` one of 20 shared software HUBS and a private leaf. */
-function hubGraph(chains: number): GraphStore {
+/** `chains` chains of 6 persons (knows), each person `created` one of 20 shared software HUBS and a private leaf;
+ *  `vocabulary` widens the label vocabulary by that many vertex labels and as many edge labels, each on a
+ *  disconnected pair of its own. */
+function hubGraph(chains: number, vocabulary = 0): GraphStore {
   const store = new GraphStore(new BunSqlite(':memory:'));
   const vs: { id: string; labels: string[]; properties: { key: string; value: unknown }[] }[] = [];
   const es: { label: string; src: string; tgt: string }[] = [];
@@ -34,6 +36,10 @@ function hubGraph(chains: number): GraphStore {
       es.push({ label: 'created', src: `p${c}_${i}`, tgt: `l${c}_${i}` });
       if (i) es.push({ label: 'knows', src: `p${c}_${i - 1}`, tgt: `p${c}_${i}` });
     }
+  }
+  for (let k = 0; k < vocabulary; k++) {
+    vs.push({ id: `xa${k}`, labels: [`vl${k}`], properties: [] }, { id: `xb${k}`, labels: [`vl${k}`], properties: [] });
+    es.push({ label: `el${k}`, src: `xa${k}`, tgt: `xb${k}` });
   }
   loadBulk(store, vs, es);
   return store;
@@ -81,8 +87,8 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     ["g.V().as('a').repeat(out()).until(hasLabel('software')).emit(as('b').in().where(neq('b'))).count()", 7410],
     ["g.V().as('s').where(repeat(out()).until(hasLabel('software')).emit(as('x').where('s',neq('x')).in('created'))).count()", 780],
     // A condition testing ADJACENCY to an outer label pins both endpoints of one edge read, with no label: a point
-    // lookup only once the scan is read through the label vocabulary (`edgePair`, `src/rel/passes/edge-pair.ts`) —
-    // before, each probe read a hub's whole in-neighbourhood (24–45× per 8×). The same rule serves it outside a walk.
+    // lookup on `e_pair(src, tgt)` (`src/storage.ts`) — without it each probe read a hub's whole in-neighbourhood
+    // (24–45× per 8×). The same index serves it outside a walk, and at any label vocabulary (below).
     ["g.V().as('a').repeat(out()).emit(where(__.in().as('a'))).count()", 2210],
     ["g.V().as('a').repeat(out()).until(where(__.in().as('a'))).count()", 2210],
     ["g.V().as('a').repeat(out()).emit(as('c').select('a').out().where(eq('c'))).count()", 2210],
@@ -98,6 +104,25 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
       expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));
     }, SCALE_TIMEOUT_MS);
   }
+
+  // The adjacency probe is one seek whatever the graph's label VOCABULARY: 300 vertex and 300 edge labels beside the
+  // hub graph's three. (Read through the vocabulary as `label IN (SELECT id FROM labels)`, each probe was |labels|
+  // seeks — measured 26 → 787 ms for the first row at 1050 chains; 16 ms on `e_pair`.)
+  test('an adjacency probe does not scale with the label vocabulary', () => {
+    const wideSmall = hubGraph(130, 300);
+    const wideLarge = hubGraph(1050, 300);
+    // Each extra edge closes back to its own start once, so a one-hop closure gains exactly 300 rows.
+    for (const [q, gained] of [
+      ["g.V().as('a').out().out().where(__.in().as('a')).count()", 0],
+      ["g.V().as('a').repeat(out()).emit(where(__.in().as('a'))).count()", 300],
+      ["g.V().as('a').out().where(__.in().as('a')).count()", 300],
+    ] as const) {
+      expect(count(wideLarge, q)).toBe(count(large, q) + gained);
+      const wide = timed(() => runWith(wideLarge, q));
+      expect(wide / Math.max(timed(() => runWith(large, q)), 5)).toBeLessThan(2);
+      expectLinear(timed(() => runWith(wideSmall, q)), wide);
+    }
+  }, SCALE_TIMEOUT_MS);
 
   // A SCOPED walk asks its emit condition once per distinct state ACROSS scopes: the DISTINCT is over the state
   // alone, never the scope key (which would merge nothing and cost ≈2.4× the per-row form).

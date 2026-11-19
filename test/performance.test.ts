@@ -39,8 +39,9 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
   // key on the vp_ index name instead.
   const usesVpIndex = (d: string[]) => d.some((s) => /USING (COVERING )?INDEX vp_/.test(s));
   const scansVp = (d: string[]) => d.some((s) => /\bSCAN (vertex_properties|vp)\b/.test(s) && !/USING/.test(s));
+  // A src-only seek may take `e_pair(src, tgt)` (`src/storage.ts`): the narrower covering index with e_out's prefix.
   const usesEdgeIndex = (d: string[], name: 'e_out' | 'e_in') =>
-    d.some((s) => s.includes(`USING COVERING INDEX ${name}`));
+    d.some((s) => s.includes(`USING COVERING INDEX ${name}`) || (name === 'e_out' && s.includes('USING COVERING INDEX e_pair (src=?)')));
 
   test('the static vp indexes exist at schema time (no self-tuning build)', () => {
     const idx = store.query<{ name: string }>("SELECT name FROM sqlite_master WHERE type='index'").map((r) => r.name);

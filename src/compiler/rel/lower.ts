@@ -12,7 +12,6 @@ import { fuseAll } from '../../rel/passes/fuse.ts';
 import { leadingAll } from '../../rel/passes/leading.ts';
 import { magicAll } from '../../rel/passes/magic.ts';
 import { dropUnreadJoins } from '../../rel/passes/prune.ts';
-import { edgePairAll } from '../../rel/passes/edge-pair.ts';
 import { plan as program, retained, type Binding, type Plan } from '../../rel/plan.ts';
 import { isStmt, type Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
@@ -4382,12 +4381,10 @@ const lowered = (
   const hoisted = liveHoisted(chain.hoisted ?? [], [wire.rel, ...(chain.effects ?? []).map((effect) => effect.node)]);
   // `magic` (`src/rel/passes/magic.ts`, physical: a correlated body's one-element test asked once per distinct
   // element across hosts) runs after `leading` and before `semijoin`, so the seek still drives the shared test.
-  // `edgePair` (`src/rel/passes/edge-pair.ts`, physical, always on: an edge read pinned at BOTH endpoints is given
-  // an index prefix it can seek) runs last, over the access paths the others settled.
-  const passed = edgePairAll(semijoinAll(dropUnreadJoins(magicAll(leadingAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel])))), [
+  const passed = semijoinAll(dropUnreadJoins(magicAll(leadingAll(fuseAll([...hoisted.map((piece) => piece.node), wire.rel])))), [
     ...(ftsSubstringPredicate ? [trigramSeek] : []),
     ...(propertySeek ? [indexSeek] : []),
-  ]));
+  ]);
   const named = nameBindings(passed[hoisted.length]!, () => fresh('r'),
     hoisted.map((piece, i) => ({ name: piece.name, node: passed[i]! })));
   // A stateful SOURCE (a `decorateGraph` stack) declares its landed `(id → value)` CTEs HERE — the one
