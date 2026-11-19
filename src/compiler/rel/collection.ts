@@ -438,34 +438,46 @@ function snapshotSite(site: Site, of: Members, fresh: Minter): { readonly site: 
  * raise, the site must be EVALUATED whether or not a `cap` reads it (`drainRaisingSite`, `lower.ts`); a separate
  * guard binding did that, and the `cap` then evaluated the whole map a second time — measured 2.6–3.4× the
  * unkeyed barrier at 1k/8k. Here the drain IS the binding: a `snapshot` step that evaluates the map (so any
- * raise fires there) and RETAINS it, and the site becomes a `Ref` to those rows, so a `cap` reads the one
+ * raise fires there) and RETAINS it, and the site becomes a reader of those rows, so a `cap` re-folds the one
  * evaluation instead of re-deriving it.
  *
- * The map crosses the executor seam as JSON (`src/program.ts`), which fails closed on a BLOB, so the binding
- * projects `json(map)` — TEXT, the column string-typed in transport — and the reader re-wraps it `jsonb`. Every
- * value in the map rides inside its `{t,v}` envelope as JSON text, so a REAL keeps its class (`2.0` stays
- * `2.0`; a bare transported number would not — `JSON.stringify(2.0)` is `'2'`). Retained rows are ONE row.
- * `null` — not a single finished-map site, so the caller keeps the plain drain.
+ * RETAINED AS ITS ENTRIES, ONE ROW PER KEY — never as the one map cell. Retained rows cross the executor seam as
+ * JSON (`src/program.ts`), packed at MEMBER (row) boundaries under a DO's 2 MB value cap (`jsonChunks`). One map
+ * cell is ONE member, and its JSON text re-escaped inside the transport array is ~1.2–1.3× the map, so a map the
+ * plain barrier answers (up to 2 MB) failed past ~1.6 MB on data size alone. As entries it splits like any
+ * retained set, and the reader re-folds O(keys) rows. Each entry is a `[key, value]` pair as JSON TEXT (`json()`
+ * — a JSONB blob fails closed in transport) with its position in the map, so the reader keeps the map's order
+ * from a declared column; every value rides inside its `{t,v}` envelope, so a REAL keeps its class (`2.0` stays
+ * `2.0`; a bare transported number would not — `JSON.stringify(2.0)` is `'2'`).
+ * `null` — not a single, never-null finished-map site, so the caller keeps the plain drain.
  */
 export function takeFinishedMap(label: string, collections: Collections, fresh: Minter): Binding | null {
   const collection = collections.get(label);
   const site = collection?.sites.length === 1 ? collection.sites[0]! : undefined;
   if (!collection || collection.of.kind !== 'reduced' || !site || site.pending || site.rel.channels.length) return null;
   const [column, ...rest] = site.rel.type.cols;
-  if (!column || rest.length || column.name !== MAP_COL) return null;
+  // A NULL map would re-fold to `[]`: only a map that is always a value (the `COALESCE`d fold) is taken.
+  if (!column || rest.length || column.name !== MAP_COL || column.nullable) return null;
   const name = fresh('gm');
+  const entries = make.explode({
+    id: fresh('gme'), input: site.rel, channels: [], expr: col(site.rel.id, MAP_COL), as: { value: ENTRY_COL, ord: ORD_COL },
+    type: typeOf(column, meta(ENTRY_COL, 'any', true), meta(ORD_COL, 'int')),
+  });
   const taken = make.project({
-    id: fresh('gmt'), input: site.rel, channels: [], type: typeOf(meta(MAP_COL, 'text', column.nullable)),
-    exprs: [[MAP_COL, jsonOf(col(site.rel.id, MAP_COL))]],
+    id: fresh('gmt'), input: entries, channels: [], type: typeOf(meta(ENTRY_COL, 'text', true), meta(ORD_COL, 'int')),
+    exprs: [[ENTRY_COL, jsonOf(col(entries.id, ENTRY_COL))], [ORD_COL, col(entries.id, ORD_COL)]],
   });
   const ref = make.ref({ id: fresh('r'), name, channels: [], type: taken.type });
-  const read = make.project({
-    id: fresh('gmr'), input: ref, channels: [], type: site.rel.type,
-    exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [col(ref.id, MAP_COL)] }]],
+  const read = make.aggregate({
+    id: fresh('gmr'), input: ref, channels: [], type: site.rel.type, groupBy: [],
+    aggs: [[MAP_COL, collectedArray(jsonOf(col(ref.id, ENTRY_COL)), [{ expr: col(ref.id, ORD_COL), dir: 'asc' }])]],
   });
   collections.set(label, { ...collection, sites: [{ ...site, rel: read }] });
   return { name, node: taken, snapshot: true };
 }
+
+/** A taken map's ENTRY column — one `[key, value]` pair as JSON text (`takeFinishedMap`). */
+const ENTRY_COL = 'ge';
 
 /** A site's relation NARROWED to the member columns, the site's own order and its barrier unit — all a reader of
  *  the collection addresses, and all a taken copy of it needs to hold. */

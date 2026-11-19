@@ -12,7 +12,11 @@ import { describe, expect, test } from 'bun:test';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { exec } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
-import { bagOf, seededStore } from '../support/harness.ts';
+import { bagOf, runWith, seededStore } from '../support/harness.ts';
+import { GraphStore } from '../../src/storage.ts';
+import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import { CfLimitedSql } from '../../src/cf-limits.ts';
+import { loadBulk } from '../../src/bulk.ts';
 import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
 import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 
@@ -63,7 +67,8 @@ describe('a keyed pooled group() is the connector\'s, through the host\'s own ke
 
 // A pooled keyed group whose map CAN RAISE is evaluated whether or not a `cap` reads it (`CollectingBarrierStep`
 // drains every traverser). The drain IS the finished map's binding (`takeFinishedMap`, `collection.ts`): one step
-// evaluates it, retained as `json(map)`, and the `cap` reads those rows instead of evaluating the map again.
+// evaluates it, retained as its ENTRIES (one row per key, so the transport splits it like any retained set), and the
+// `cap` re-folds those rows instead of evaluating the map again.
 describe('a raising pooled keyed group is evaluated ONCE, and the drain and the cap read that evaluation', () => {
   const steps = (q: string) => {
     const plan = compile(q, {}, undefined);
@@ -75,8 +80,28 @@ describe('a raising pooled keyed group is evaluated ONCE, and the drain and the 
     const [drain, cap, ...rest] = steps("g.V().group('a').by(label).by(values('age').sum()).cap('a')");
     expect(rest).toEqual([]);
     expect(drain).toContain('json_group_array');
-    expect(cap).not.toContain('json_group_array');
-    expect(cap).toContain('json_each');
+    // The cap reads the graph not at all: only the retained entries, exploded from their transport bind.
+    expect(cap).not.toMatch(/\b(nodes|vertex_properties|edges)\b/);
+    expect(cap).toContain('json_each(?)');
+  });
+
+  // RETAINED AS ITS ENTRIES, one row per key: retained rows are packed at ROW boundaries under a DO's 2 MB value cap,
+  // so a map retained as ONE cell would be refused on data size where the plain barrier answers.
+  test('the drain retains one row per key, and an empty map stays an empty map', () => {
+    const q = "g.V().group('a').by('name').by(values('age').sum()).cap('a')";
+    const [drain] = steps(q);
+    expect(seededStore().query(drain!, [])).toHaveLength(4);
+    expect(typed("g.V().hasLabel('none').group('a').by('name').by(values('age').sum()).cap('a')"))
+      .toEqual(typed("g.V().hasLabel('none').group().by('name').by(values('age').sum())"));
+  });
+
+  test('a map past one Durable Object value still answers, as the plain barrier does', () => {
+    const store = new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')));
+    loadBulk(store, Array.from({ length: 36_000 }, (_, i) => ({
+      labels: ['person'], properties: [{ key: 'name', value: `person-number-${i}` }, { key: 'age', value: i % 90, vtype: 'int' as const }],
+    })));
+    const keyed = runWith(store, "g.V().group('a').by('name').by(values('age').sum()).cap('a')");
+    expect(keyed).toEqual(runWith(store, "g.V().group().by('name').by(values('age').sum())"));
   });
 
   // The map rides as JSON TEXT, each value inside its `{t,v}` envelope, so a Double keeps its class across the
