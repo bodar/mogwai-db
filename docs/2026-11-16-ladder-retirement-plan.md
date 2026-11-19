@@ -46,16 +46,16 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
   Both must be closed, or kept as a named non-ladder route, first.
 - Landed: R0–R3, R4.1/R4.3/R4.4, R5.1–R5.5, R6 side effects, pooled keyed `group('a')` in arms/bodies (95334eb3);
   regressions/wrong answers V0+U3 (911eef32), V1 (77eb86cb, b09dee81), V2 (33356b80), V3 (75ad576d),
-  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); R4.2 (ae0fadb7).
+  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); F2 exact depth bag (34674e92); R4.2 (ae0fadb7).
 
 ## Remaining work, in order
 
 1. ✅ **F1 — LANDED (f5d2a6bc), tests only.** Pins V4's per-traverser `count(local)` group values
-   (`test/compiler/group-ladderless.exec.test.ts`, GroupStep.java:123-126). Remains: F2.
-2. **F2 — tighten F1's `project().by()` depth pin (tests only, cheap; both reviewers raised it).** The
-   `project('g').by(out().group().by(label).by(values('age').is(gt(30)).count(local)))` case checks only 6 rows and
-   one row containing `person`, so `{person:2}` or a bogus `software` key would pass. Assert the bag exactly,
-   `{g:{person:1}}` ×1 and `{g:{}}` ×5, as the `local()` case beside it does.
+   (`test/compiler/group-ladderless.exec.test.ts`, GroupStep.java:123-126). Remains: nothing (F2 landed).
+2. ✅ **F2 — LANDED (34674e92), tests only.** F1's `project('g').by(out().group().by(label).by(…count(local)))`
+   depth case now asserts the exact bag of each traverser's `g` map — `{person:1}` ×1, `{}` ×5
+   (`test/compiler/group-ladderless.exec.test.ts`, GroupStep.java:123-126), on the plain run, not `agreed()`.
+   Remains: nothing.
 3. **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293). DECIDED (owner,
    2026-11-19): fix it in the SCHEMA — see S1.** Step 1's measurement (full text at 87400956) ruled out (b)
    (quadratic at an out-hub, 264 → 3744 ms at 2k → 8k out-edges) and (a) (air-routes 7.3 → 10.8 s). The owner's
