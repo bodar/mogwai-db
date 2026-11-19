@@ -156,7 +156,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
      ~16 ms queries, which can flake on CI. Drop the ratio: the answer check and `expectLinear` already pin the
      behaviour.
 10. ✅ **S2 — LANDED (39a8f01a), report only; nothing built.** Survey (below) of every `src/storage.ts` table/index
-   against the emitted shapes. Remains — **owner decision:** build candidate 3 (the `edges(label)` index, one line of
+   against the emitted shapes. **DECIDED (owner, 2026-11-19): build (3), build (5), and fix the `sql-plan.ts` alias blindness;
+   NOT (1) or (2).** The question was: build candidate 3 (the `edges(label)` index, one line of
    schema) and candidate 5 (the TextP full-text probe fix in `src/rel/passes/semijoin.ts`)? Optionally also fix the
    alias blindness in `scripts/sql-plan.ts`. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are
    not recommended now.
@@ -249,7 +250,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 ## Next round
 
 - Order: 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
-  run is R4.6's sweep), then G1. Item 10's owner decision can be built at any point.
+  run is R4.6's sweep), then G1. Item 10's decided builds — (3) the `edges(label)` index, (5) the TextP trigram probe, and the
+  `sql-plan.ts` alias fix — are independent of the ladder work and can be built at any point.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
   - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
   - one shared test helper for "adjacency seek" plan assertions (`e_out` ↦ {`e_out`, `e_pair`}).
@@ -271,10 +273,5 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Owner questions (open)
 
-- **S2 (item 10), verbatim:** "Owner decision: build candidate 3 (the edges(label) index, one line of schema) and
-  candidate 5 (the TextP full-text probe fix in src/rel/passes/semijoin.ts)? Optionally also fix the alias
-  blindness in scripts/sql-plan.ts. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are not
-  recommended now."
-
-R4.5-Q (A; sweep yes; regressions inside 2× accepted) and U1-Q (schema split S1, plus survey S2) were answered
-2026-11-19 and are written into their items.
+None. S2 answered 2026-11-19 (build 3 and 5, fix the scan check; not 1 or 2), written into item 10. R4.5-Q and
+U1-Q were answered earlier the same day and are written into their items.
