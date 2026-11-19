@@ -37,13 +37,11 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 - The connector is the DEFAULT at every child site. The ladder is the opt-in `correlatedChild` FastPath; its code is
   `src/compiler/rel/lower/per-traverser.ts` alone. `group` is `LADDERLESS` and its dead ladder arms are deleted.
-- **Ladder-only answers: 5** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`): per-traverser 1,
-  other 4 (option-map `choose` bodies under `local`/`map`, corpus.txt 515/516/2077/2078). All 5 decline at ONE line,
-  `rejoin`'s `framingCols()` gate in `src/compiler/rel/lower/scoped.ts`, so they are one item, R4.2 — the last thing
-  R7 waits on.
+- **Ladder-only answers: 0** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`). R4.2 (ae0fadb7)
+  closed the last 5; R7 is unblocked.
 - Landed: R0–R3, R4.1/R4.3/R4.4, R5.1–R5.5, R6 side effects, pooled keyed `group('a')` in arms/bodies (95334eb3);
   regressions/wrong answers V0+U3 (911eef32), V1 (77eb86cb, b09dee81), V2 (33356b80), V3 (75ad576d),
-  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc).
+  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); R4.2 (ae0fadb7).
 
 ## Remaining work, in order
 
@@ -63,12 +61,12 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
      checking for the pass's output). Report absolute ms, not only ratios.
    - **Step 2:** take (b) if it stays near trunk at the out-hub; otherwise (a). Add a 300-label row and (for the
      chosen form) an out-hub row to `test/compiler/walk-condition-hub-scale.exec.test.ts`.
-3. **R4.2 — variant and property payloads through the per-traverser rejoin. Closes ALL 5 ladder-only answers.**
-   **DECIDED (owner, 2026-11-19): option (c).** Relax `rejoin`'s `framingCols()` gate (`scoped.ts` ~1616) for
-   variant/property only — record fields and every fixed-width consumer still decline. Before it lands, compare the 5
-   ladder-only queries' answers VALUE BY VALUE against the ladder (the ladder is the reference while it exists): a
-   pinned test, not only the L9 multiset check. Any difference stops and returns to the owner. The typed carrier
-   later refactors working code; it is not a prerequisite.
+3. ✅ **R4.2 — LANDED (ae0fadb7).** `rejoin` (`src/compiler/rel/lower/scoped.ts`) now reads a total switch,
+   `rowResident` (`src/compiler/rel/framing.ts`), instead of `framingCols()`: variant and property payloads ride the
+   per-traverser rejoin; record fields and fixed-width consumers still decline. Ladder-only answers 5 → 0 (L9
+   baseline); all 5 compared value by value against the ladder in all three modes
+   (`test/compiler/rejoin-row-resident.exec.test.ts`), no difference. Linear at 1k/8k. Remains: nothing (the typedNode
+   depth gap and the map-variant window cost are filed in outstanding-work §4).
 4. **R7 — delete the switch**, once the ladder-only count is 0: `correlatedChild` and its readers, L5's per-switch
    entry, `FastPathConfig.connectorOnly` (becomes the only mode); L9's connector-only ratchet becomes the ordinary
    coverage ratchet; update root `CLAUDE.md` decision 6 and `src/compiler/CLAUDE.md`.
