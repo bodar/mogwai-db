@@ -419,7 +419,7 @@ export function groupRows(
    * yet, so it declines rather than silently answering the one-member case.
    */
   const lastOnly = valueBy?.key.kind === 'child' && valueBy.key.body.length === 1
-    && valueBy.key.body[0]!.name === 'tail'
+    && valueBy.key.body[0]!.name === 'tail' && !isLocalScope(valueBy.key.body[0]!)
     && countOf(valueBy.key.body[0]!) === 1;
   // A REDUCING traversal value is one scalar for the WHOLE GROUP, not one member per incoming
   // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
@@ -501,7 +501,12 @@ export function groupRows(
       // `by(__.fold())` never reaches here (`bareFold` collapsed it), so a pool miss DECLINES.
       return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
     }
-    if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) {
+    // Gated on the barrier AUTHORITY, not the step name: a `Scope.local` reducer ending the body
+    // (`by(values('name').count(local))`, `by(values('age').sum(local))`) is a `MapStep` over ONE
+    // traverser's value, not a `ReducingBarrierStep`, so the body has no barrier and its value is assigned
+    // per traverser by the `single` arm below — pooling it answered the key's TOTAL (`person:4`) where the
+    // reference keeps one member's own value (`person:1`).
+    if (reducesPool(body.at(-1)!)) {
       const pooled = groupReduced(input, host, step, keyBy, valueBy.key.body, bulked, child, source, fresh);
       // A POOLED value is already a map, and there is no `(key, contribution)` row behind it — see
       // `GroupRows.done`. The `rel`/`recipe` are unreachable and stated only so the shape stays total.

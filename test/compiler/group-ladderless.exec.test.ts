@@ -4,7 +4,7 @@
 // `by()` is ASSIGNED per traverser when its body has no barrier (`Operator.assign`) and POOLED per key at its first
 // barrier otherwise (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125).
 import { test, expect, describe } from 'bun:test';
-import { bagOf, bare, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, bare, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
 
 const store = seededStore();
 const CONNECTOR_ONLY = { fastPaths: { connectorOnly: true } } as const;
@@ -44,5 +44,42 @@ describe('group() — the connector is the one lowering', () => {
     expect(agreed("g.V().map(both().group().by('name').by(out().count()))").length).toBe(6);
     expect(agreed("g.V().where(out().group().by(label).by(count()).select('software').is(gt(0))).values('name')"))
       .toEqual(bagOf(['"marko"', '"josh"', '"peter"']));
+  });
+});
+
+// A `Scope.local` reducer ending the value body is a `MapStep` over ONE traverser's value, not a
+// `ReducingBarrierStep`, so the body has no barrier and the value is ASSIGNED per traverser (`Operator.assign`,
+// Grouping.java:74-125 — `determineBarrierStep` finds none). It used to reach the pooled arm by step NAME and
+// answer the key's total (`person:4`, `person:123`).
+describe('group() — a local reducer in the value by() is per traverser, not pooled', () => {
+  test('count(local) of a member value is 1, not the key total', () => {
+    expect(entries(agreed("g.V().group().by(label).by(values('name').count(local))")[0]!)).toEqual({ person: 1, software: 1 });
+  });
+  test('sum(local) keeps one member\'s own age, not the total 123', () => {
+    const { person } = entries(agreed("g.V().group().by(label).by(values('age').sum(local))")[0]!);
+    expect([29, 27, 32, 35]).toContain(person as number);
+    expect(entries(agreed("g.V().hasLabel('person').group().by('name').by(values('age').sum(local))")[0]!))
+      .toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  });
+  test('the keyed group(\'a\')…cap(\'a\') form and a local() variant', () => {
+    expect(entries(agreed("g.V().group('a').by(label).by(values('name').count(local)).cap('a')")[0]!)).toEqual({ person: 1, software: 1 });
+    const perVertex = agreed("g.V().local(group().by(label).by(values('name').count(local)))").map(entries);
+    expect(bagOf(perVertex.map((m) => JSON.stringify(m))))
+      .toEqual(bagOf([...Array(4).fill('{"person":1}'), ...Array(2).fill('{"software":1}')]));
+  });
+  test('a GLOBAL barrier before the local reducer still pools per key', () => {
+    expect(entries(agreed("g.V().group().by(label).by(out().fold().count(local))")[0]!)).toEqual({ person: 6, software: 0 });
+    expect(entries(agreed("g.V().group().by(label).by(values('age').fold().sum(local))")[0]!)).toEqual({ person: 123 });
+    expect(entries(agreed("g.V().group().by(label).by(values('age').sum())")[0]!)).toEqual({ person: 123 });
+  });
+  test('a body after a local fold reducer answers per member', () => {
+    expect(entries(agreed("g.V().group().by(id).by(local(out().fold()).count(local))")[0]!))
+      .toEqual({ 1: 3, 2: 0, 3: 0, 4: 2, 5: 0, 6: 1 });
+  });
+  test('a local reader over a list-valued property splits the member\'s own list', () => {
+    const listStore = storeSeededWith(["g.addV('x').property('name','a').property('l',[3,1,3])"]);
+    const one = (q: string) => entries(JSON.stringify((bare(runWith(listStore, q)) as any[])[0].map));
+    expect(one("g.V().group().by('name').by(values('l').count(local))")).toEqual({ a: 3 });
+    expect(one("g.V().group().by('name').by(values('l').max(local))")).toEqual({ a: 3 });
   });
 });

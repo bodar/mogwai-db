@@ -92,13 +92,13 @@ owner stopped it. From now on:
   a body reads them. The two-site arm cases must keep answering (why the pool exists). While there:
   `keyedPooledGroup` builds the whole reduction only to test `mayRaise`, and the reader builds it again — decide "can
   raise" from the value body.
-- **V4 — a LOST answer (regression from 2a94fda9).** `g.V().group().by(label).by(out().count(local))` answered
-  `{person:6, software:0}` before `group` went `LADDERLESS` (measured at b8b2c776) and now raises "no lowering covers"
-  in every mode; connector-only declined it before too, so the ladder was its only route. The wide ladder-reach sample
-  missed it because no corpus traversal has the shape. The body has no barrier, so it is an assigned (per-traverser)
-  value: fix it in that body's lowering (a top-level `count(local)` in an assign body), not with a route. Check the
-  expected value against `vendor/tinkerpop/gremlin-core/.../Grouping.java` first — under `Operator.assign` the last
-  traverser per key wins, so 6/0 may itself have been the ladder's wrong answer.
+- ✅ **V4 — LANDED: it was a WRONG answer, not a lost one.** A `Scope.local` reducer ending a group value `by()`
+  (`by(values('name').count(local))`, `by(values('age').sum(local))`) reached `groupRows`' pooled arm by step NAME
+  and answered the key's total (`person:4`, `person:123`); a local reducer is a `MapStep`, so the body has no barrier
+  and the reference assigns per traverser (`person:1`, one member's age). The arm is now gated on `reducesPool`
+  (`src/compiler/rel/map.ts`), which also fixed the §1 group-local-count-local and group-value-local-reader entries.
+  The old ladder's `by(out().count(local))` → `{person:6, software:0}` was itself wrong (ref `{person:1, software:1}`);
+  it declines cleanly because element `count(local)` is a top-level gap (`outstanding-work.md` §4 element-count-local).
 - **V5 — a bare internal Error reaches the user (pre-existing, in the keyed-group family this plan owns).**
   `g.V().group('a').by(label).by(count()).where(select('a').count(local).is(1)).count()` and
   `g.V().group('a').by('name').by(count()).where(select('a').unfold().count().is(2)).count()` throw `Error: RelIR: no
@@ -117,7 +117,7 @@ owner stopped it. From now on:
   witness `union(group('a').by(label).by(count()), out()).cap('a')` is refused for a reason outside this item — a
   `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
   ladder reach at 0, `group` joined `LADDERLESS` — ✅ LANDED (2a94fda9; owner Q3a margins accepted; `LADDERLESS`
-  in `scoped.ts`, the witness answers in every mode). Remains: R5.5 (the code was not deleted) and V4 (a lost answer).
+  in `scoped.ts`, the witness answers in every mode). Remains: R5.5 (the code was not deleted); V4 landed (a wrong answer, not a lost one).
 - **R5.5 — actually delete the group ladder code (follow-up to 2a94fda9, major).** The commit and
   `docs/2026-11-15-compositional-coverage-plan.md` §3 say `groupReduced`/`groupCollected` are "still served by the
   PROPERTY host, e.g. `g.V().properties().group().by(key).by(count())`". False: hit counters at their entries read 0

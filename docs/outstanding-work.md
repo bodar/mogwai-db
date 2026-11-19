@@ -542,15 +542,6 @@ refusal comes first: it is a production outage.
   The order(local) value-transform barrier (`src/compiler/rel/order-dedup-local.ts`) re-roots the stream and
   drops the alias channel — the same root as §3 "Value barriers carry the traverser's channels"; a clear
   decline would already beat the lost row.
-- **`count(local)` after a `local(…fold())` in a `group()` value answers 1 per key (group-local-count-local)** —
-  `g.V().group().by(id).by(__.local(__.out().fold()).count(Scope.local))` gives 1 for every key (probed on
-  trunk), ref `{1:3,2:0,3:0,4:2,5:0,6:1}` (value traversal with no barrier reduces by `Operator.assign`,
-  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-101`).
-- **A Scope.local reader in a `group()` VALUE `by()` over a list-valued property skips the per-row split
-  (group-value-local-reader)** — with `l=[3,1,3]`, `group().by('name').by(values('l').max(local))` gives the raw
-  list JSON as a String, ref `{a:3}`; `by(values('l').count(local))` gives 1, ref 3. Route the group value-by
-  child seam through `perRowCollectionStep` (`src/compiler/rel/lower.ts`) as the chain and other child hosts
-  now do (`Grouping.java:92`).
 - **`project().by(out().count().fold())` frames the count as Int (project-count-fold-class)** — reported `[3i]`,
   ref `[3L]` (`CountGlobalStep` yields a Long); the top-level `g.V().out().count().fold()` is right. Re-check
   under a FRAMED run before building.
@@ -877,6 +868,10 @@ Beside the RelIR substrate:
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
 
 ## 4. Sensible queries we decline
+
+- **`count(local)` over an ELEMENT (element-count-local)** — `g.V().out().count(local)` declines at top level, so
+  `group().by(label).by(out().count(local))` declines too (ref `{person:1, software:1}` by `Operator.assign`: an
+  element's `count(local)` is 1). Fix in the step's own lowering; the group value `by()` then follows.
 
 - **Two branches over a random draw inside a per-traverser body (copied-draw)** —
   `g.V().local(out().order().by(shuffle).limit(1).union(out(), __.in()))`, and the same with `optional()`,
