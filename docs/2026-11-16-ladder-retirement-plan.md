@@ -74,6 +74,10 @@ owner stopped it. From now on:
   `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
   ladder reach at 0, a later step could put `group` in `LADDERLESS` and delete the route (owner Q3a margins accepted);
   left out of scope.
+- ✅ **Pooled keyed `group('a')` in a branch arm / connector body — LANDED (95334eb3).** Remains: nothing. Each
+  site registers the pool's MEMBERS as a `pooled` collection carrying its `PoolRecipe`; the reader reduces once over
+  every site's members (`poolMembers` / `reduceFrom`, `collection.ts`). A raising reduction keeps V1's finished-map
+  registration. L3 2057 → 2058; scaling linear (1.6–6.7× at 1k → 8k).
 - **R6 — the remaining deferred hosts as CONNECTORS rows** (owner Q4, widest scope), by workload reach:
   option maps (`choose(k).option(…)`, `branch`, closes the 4 "other" ladder-only answers — first), `V`/`E` re-source
   (stale entry: already answers connector-only), value arguments, predicate operands, projection `by()`s
