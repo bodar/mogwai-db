@@ -271,10 +271,12 @@ const elementMembers = (recipe: GroupRecipe): Elem | undefined =>
   !recipe.single && recipe.member?.kind === 'rowid' && recipe.member.host.kind === 'element'
     ? recipe.member.host.elem : undefined;
 
-/** May two sites' rows be grouped together? Structural over everything the aggregation reads, and it
- *  deliberately does NOT compare `step` — that is the strategy carrier, and one traversal has one. */
+/** May two sites' rows be grouped together? Structural over everything the aggregation reads. Of `step` (the
+ *  strategy carrier — one traversal has one) only its NAME: a `group("a").by(k).by(count())` site holds the same
+ *  counting rows as a `groupCount("a").by(k)` one, but two steps naming one label are two side-effect operators
+ *  (`GroupBiOperator` vs `GroupCountStep`'s sum), which stays a decline rather than a silent merge. */
 export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
-  a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single && !!a.firstOnly === !!b.firstOnly
+  a.step.name === b.step.name && a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single && !!a.firstOnly === !!b.firstOnly
   && !!a.mayYieldNull === !!b.mayYieldNull
   && a.memberDrop === b.memberDrop && a.bulkCol === b.bulkCol
   && JSON.stringify(a.singleOf) === JSON.stringify(b.singleOf)
@@ -329,6 +331,17 @@ const reducesPool = (step: IRStep): boolean =>
  *  (`GroupRows.done`), never a member row. A bare `by(fold())` is the traverser-collect (`bareFold`), no pool. */
 export const poolingStep = (body: readonly IRStep[]): IRStep | undefined =>
   (isBareFold(body) ? undefined : body.find(reducesPool));
+
+/**
+ * Is a group() value body exactly `count()` — the key's own TRAVERSER count? That is `groupCount`'s value
+ * (`CountGlobalStep` over the key's members), and it is SPLITTABLE: a site's per-key count is a contribution the
+ * key's total sums. So it needs no pool — every site, keyed or not, contributes the counting recipe's
+ * `(key, contribution)` rows (`groupRows`), and a label filled at several sites is one `sum(contribution)` per key
+ * at the reader. Only `count()` itself: a pre-body count (`by(out().count())`) or a `sum()`/`min()`/`max()` is
+ * splittable in principle, but the counting recipe has no contribution column for it.
+ */
+export const countsTraversers = (body: readonly IRStep[]): boolean =>
+  body.length === 1 && body[0]!.name === 'count' && reducesPool(body[0]!);
 
 /** The non-reducing global barriers a value body can hold: the `FilteringBarrier`s (`dedup`,
  *  `range`/`limit`/`skip`/`tail`), the `CollectingBarrierStep`s (`order`, `sample`) and the supplying
@@ -420,9 +433,9 @@ export function groupRows(
    * reference folds the whole key. The ONE pooled lowering is the connector's (`byValues`/`pooledGroup`,
    * `lower/scoped.ts`), which owns every pooling body on a host it serves.
    *
-   * The exception is a bare `by(count())`: it pools nothing but the group's own traversers, which is
-   * `groupCount()`'s value exactly, so it re-enters the barrier as `groupCount` — the property host's
-   * live route (`g.V().properties().group().by(key).by(count())`). A `Scope.local` reducer
+   * The exception is a bare `by(count())` (`countsTraversers`): it pools nothing but the group's own
+   * traversers, which is `groupCount()`'s value exactly, so it answers as `groupCount`'s counting rows — the
+   * property host's live route (`g.V().properties().group().by(key).by(count())`). A `Scope.local` reducer
    * (`by(values('name').count(local))`) is a `MapStep` over one value, not a barrier, so it is assigned
    * per traverser below.
    *
@@ -432,10 +445,12 @@ export function groupRows(
   if (valueBy?.key.kind === 'child' && !lastOnly && !(host.kind === 'scalar' && host.entry)) {
     const body = valueBy.key.body;
     if (body.some(isValueBarrier)) {
-      if (body.length !== 1 || body[0]!.name !== 'count') return null;
-      const counted = groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, source, fresh);
-      // The count is already a map — see `GroupRows.done`; `rel`/`recipe` are stated only so the shape stays total.
-      return counted && { rel: counted.rel, recipe: POOLED_RECIPE(step), done: counted };
+      if (!countsTraversers(body)) return null;
+      // `by(__.count())` counts the key's own traversers, which is `groupCount`'s value exactly: its rows are the
+      // counting recipe's `(key, contribution)` rows, summed per key, with no pool and no join — at every host,
+      // so a keyed `group("a")` site registers them like `groupCount("a")` does (`keyedCount`, `lower/scoped.ts`).
+      const counted = groupRows(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, source, fresh);
+      return counted && { ...counted, recipe: { ...counted.recipe, step } };
     }
   }
   // A CHILD value `by()` (`by(__.project(…))`, `by(__.valueMap())`) is lowered here rather than through

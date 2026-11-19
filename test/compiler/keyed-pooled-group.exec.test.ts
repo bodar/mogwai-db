@@ -182,3 +182,45 @@ describe('a raising pooled keyed group is evaluated ONCE, and the drain and the 
     expect(typed(q, CONNECTOR_ONLY)).toEqual(typed('g.inject(6L)'));
   });
 });
+
+// A keyed value that is exactly `count()` is SPLITTABLE (`countsTraversers`, `map.ts`): every site registers
+// `groupCount("a")`'s own counting rows — `(key, contribution)`, summed per key at the reader — rather than a member
+// pool, whatever the site's position and however many sites the label has. A count has no per-member state, so the
+// plan carries no member spool and no first-arrival domain. Answers by hand over the modern graph.
+describe('a keyed group() whose value is count() registers the counting rows at every site', () => {
+  for (const [q, expected] of [
+    ["g.V().union(group('a').by(label).by(count()), group('a').by(label).by(count())).cap('a')", '{"person":8L,"software":4L}'],
+    ["g.V().choose(hasLabel('person'), group('a').by('name').by(count()), identity()).cap('a')",
+      '{"josh":1L,"marko":1L,"peter":1L,"vadas":1L}'],
+    ["g.V().both().group('a').by('name').by(count()).cap('a')",
+      '{"josh":3L,"lop":3L,"marko":3L,"peter":1L,"ripple":1L,"vadas":1L}'],
+    ["g.V().repeat(out().group('a').by(label).by(count())).times(2).cap('a')", '{"person":2L,"software":6L}'],
+    ["g.V().sideEffect(group('a').by(label).by(count())).cap('a')", '{"person":4L,"software":2L}'],
+  ] as const) test(q, () => {
+    expect(typed(q, CONNECTOR_ONLY)).toEqual([expected]);
+    expect(typed(q)).toEqual([expected]);
+  });
+
+  test('the keyed count is groupCount\'s map, with no member spool', () => {
+    for (const q of [
+      "g.V().union(group('a').by(label).by(count()), out()).cap('a')",
+      "g.V().group('a').by('name').by(count()).cap('a')",
+    ]) {
+      const plan = compile(q, {}, undefined);
+      if (plan.kind !== 'read') throw new Error(`expected a read for ${q}`);
+      expect(plan.sql).not.toContain('%020d');
+    }
+    expect(typed("g.V().union(group('a').by(label).by(count()), out()).cap('a')"))
+      .toEqual(typed("g.V().union(groupCount('a').by(label), out()).cap('a')"));
+  });
+
+  // Two steps naming one label are two side-effect operators even where their rows agree, and a count site beside a
+  // pooled one shares no reduction: both stay a clean decline.
+  for (const q of [
+    "g.V().union(group('a').by(label).by(count()), groupCount('a').by(label)).cap('a')",
+    "g.V().union(group('a').by(label).by(count()), group('a').by(label).by(out().count())).cap('a')",
+  ]) test(`declines: ${q}`, () => {
+    expect(() => typed(q, CONNECTOR_ONLY)).toThrow(UnsupportedTraversal);
+    expect(() => typed(q)).toThrow(UnsupportedTraversal);
+  });
+});

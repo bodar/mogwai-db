@@ -22,7 +22,7 @@ import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, PresentWhen, Subject } from '../child.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
-import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap, type GroupRows } from '../map.ts';
+import { countsTraversers, groupKeyTerms, groupRows, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap, type GroupRows } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
@@ -2759,22 +2759,43 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
  *
  * A reduction that can RAISE must be evaluated whether or not a `cap` reads it (`drainRaisingSite`), and its drain
  * is the finished map itself (`takeFinishedMap`): such a site registers that map, one site, at the root.
+ * A value that is exactly `count()` needs no pool at all (`keyedCount`): it registers groupCount's counting rows.
  */
 function keyedPooledGroup(site: HostSite): Tail | null {
   const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
   if (step.name !== 'group' || step.args.length !== 1 || typeof step.args[0]!.value !== 'string') return null;
   const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
   if (!bys || bys[1]?.key.kind !== 'child') return null;
+  const rows = keyedCount(site, bys[1].key.body) ?? keyedPool(site, bys);
+  if (!rows) return null;
+  const onward = (from: number): Tail | null => continueAs(rel, framing, steps, from, bulked, ctx, fresh, labels);
+  const out = keyedGroupTail(step, rel, rows, at, ctx, fresh, onward);
+  return out === 'continue' ? onward(at + 1) : out.tail;
+}
+
+/**
+ * A keyed value that is exactly `count()` (`countsTraversers`) is SPLITTABLE: each site contributes the counting
+ * recipe's `(key, contribution)` rows — `groupCount("a")`'s own — and the reader sums them per key. Decided by the
+ * value body, not by how many sites the label has, so a lone site and the Nth agree and nothing looks ahead.
+ * No member spool, no first-arrival domain and no regroup: a count has no per-member state to keep.
+ */
+function keyedCount(site: HostSite, body: readonly IRStep[]): GroupRows | null {
+  const { step, rel, framing, bulked, ctx, fresh, labels } = site;
+  if (!countsTraversers(body) || (framing.kind !== 'elements' && framing.kind !== 'scalar')) return null;
+  return groupRows(rel, reductionHost(rel, framing, labels), step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
+}
+
+/** Any other pooled keyed value registers its MEMBERS and the recipe that reduces them (`poolMembers`) — or, for a
+ *  reduction that can RAISE, the finished map (see `keyedPooledGroup`). */
+function keyedPool(site: HostSite, bys: readonly (Modulation | undefined)[]): GroupRows | null {
+  const { step, fresh } = site;
   const pool = poolMembers(site, bys);
   if (!pool) return null;
   const done = pool.recipe.reduce(pool.members, pool.order, fresh);
   if (!done) return null;
-  const rows: GroupRows = mayRaise(done.rel)
+  return mayRaise(done.rel)
     ? { rel: done.rel, recipe: POOLED_RECIPE(step), done }
     : { rel: pool.members, recipe: POOLED_RECIPE(step), pool: { recipe: pool.recipe, order: pool.order } };
-  const onward = (from: number): Tail | null => continueAs(rel, framing, steps, from, bulked, ctx, fresh, labels);
-  const out = keyedGroupTail(step, rel, rows, at, ctx, fresh, onward);
-  return out === 'continue' ? onward(at + 1) : out.tail;
 }
 
 /**

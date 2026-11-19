@@ -717,9 +717,11 @@ witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100
   `!body.some(isValueBarrier)` that `perTraverserSlot` already decided; `namedEffect` (`lower.ts`) now names every
   retained effect's shared subtrees — say it is generic in its comment; a drain with no reader of its label still
   takes the finished map (O(keys) isolate memory, `g.V().group('a').by('name').by(values('age').sum()).count()`);
-  `by(constant(null))` lands as a self-join of the scope CTE on its row key (seedOnly could write in place); the
-  property host's `group().by(k).by(count())` returns a finished map (`reduced`) where groupCount-style member rows
-  would let it union across sites and retire `POOLED_RECIPE`. Depth gaps (clean declines) — `group().by(label)
+  `by(constant(null))` lands as a self-join of the scope CTE on its row key (seedOnly could write in place); a
+  property host's `group().by(k).by(<pre>.sum())` still returns a finished map (`reduced`) — `by(count())` now takes
+  groupCount's counting rows at every host (`countsTraversers`, `map.ts`), and the same split for `sum`/`min`/`max`
+  and a pre-body `by(out().count())` (splittable, but the counting recipe has no contribution column for them) would
+  let those union across sites too and retire `POOLED_RECIPE`. Depth gaps (clean declines) — `group().by(label)
   .by(optional(values('age')))`, `.by(properties('name'))`; a `group()` as a `choose()` arm; two keyed
   `group('m')`/`group('n')` sites; a `union` whose arms produce maps (`union(group().by(label), constant(1))`);
   `properties().group().by(key).by(value().fold())` (extend `reductionHost` to the property framing); grouping over a
@@ -1236,6 +1238,8 @@ Beside the RelIR substrate:
 - **Six PROPERTY_TABLE insert builders in `rel/write.ts` (propertyRowsInsert)** — one builder,
   byte-identical SQL (absorbs nr-fu-mapentry-props' `json_extract` helper).
 - **Four copied blocks in `write.ts`** (carrier reproject, merged-create spread, alias-carry, nested-spec decline).
+- **`keyedPool` builds the pooled reduction only to ask `mayRaise`** (`lower/scoped.ts`) — decide it from the value
+  body and build the reduction once, at the reader (compute-once tidy-up; not a regression).
 - **One `deferred(ctx, () => …)`** for the four narrowed catches in `rel/lower.ts`/`rel/write.ts`.
 - **`idQueryOf` re-derives `idMembership` (rf3-idquery-dup)** — `routable`/`listAmongSeveral`
   (`lower/filter.ts`) already drift; classify the predicate only. Fix the refuted "`V(1,[2,3]) ≡ V(1,2,3)`"
