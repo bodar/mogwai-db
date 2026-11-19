@@ -600,7 +600,7 @@ no longer a deferred host in practice.
 |---|---|---|---|
 | existence (`where`/`filter`/`not`/`and`/`or`) | 20.8 / 23.8 (1.14×) | 28 | make the connector total, then delete |
 | per-traverser (`map`/`flatMap`/`local`) | 8.3 / 10.6 (**1.29×**) | 9 + every re-source/draw body | make the connector total + fast, then delete |
-| `group` (child value `by()`) | 5.9 / 12.6 (**2.14×**) | 17 | keep; make the pool fast |
+| `group` (child value `by()`) | 5.9 / 12.6 (**2.14×**) | 17 | **DELETED 2026-11-19** (see §3) |
 
 **1. Existence — `where`/`filter`/`not`/`and`/`or`.**
 - *Where:* the tails' filter dispatch at a connector site — `lower.ts` `hostFilter` (1252) from `elementTail`/
@@ -669,6 +669,12 @@ no longer a deferred host in practice.
   `project('name','skills').by('name').by(outE('uses').group().by(inV().values('name')).by(values('skill')))`).
 - *Recommendation:* **keep**; to delete it, make `pooledGroup`'s count/tail plans a plain GROUP BY (they pool through
   a scope today) and give the keyed side-effect form a connector row.
+- **DELETED (2026-11-19).** R5.2/R5.3/R5.4 and the pooled keyed group took its ladder-only answers to 0 (wide
+  ladder-reach sample: L1/L6/H1/H2 group 0, `differ` empty); `group` joined `LADDERLESS` over element and scalar
+  hosts, every form. Owner Q3a margins accepted: 8k ladder/connector `by(label).by(count)` 6.0/8.7 ms (1.46×),
+  `by('name').by(tail)` 72.0/96.1 (1.33×). Nothing above became dead: the pooled arm of `groupRows` and
+  `groupReduced`/`groupCollected` still serve the PROPERTY host (`g.V().properties().group().by(key).by(count())`),
+  whose framing is outside `LADDERLESS`.
 
 ### Phase 4 — Structured values across scope. IDs `cc4-*`.
 

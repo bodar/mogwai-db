@@ -728,7 +728,8 @@ describe('a long unrolled chain cut into CTEs', () => {
   });
 
   test('a guard across a cut still raises the reference error', () => {
-    const q = "g.V().has('i', 0).repeat(__.out('next').limit(1)).times(100).group('a').by('i').by(__.label().sum()).cap('a')";
+    // A per-row TEXT summand (`asString()`), so the guard is the in-statement raise, not a compile-time refusal.
+    const q = "g.V().has('i', 0).repeat(__.out('next').limit(1)).times(100).group('a').by('i').by(__.values('i').asString().sum()).cap('a')";
     expect(() => run(ring, q)).toThrow(/sum\/mean over a text or non-number value/);
   });
 

@@ -72,8 +72,8 @@ owner stopped it. From now on:
   and keyed `group("m")` alike; nested groups close with it. Group ladder reach 5 → 0; L3 +1. Remains: the `union`
   witness `union(group('a').by(label).by(count()), out()).cap('a')` is refused for a reason outside this item — a
   `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
-  ladder reach at 0, a later step could put `group` in `LADDERLESS` and delete the route (owner Q3a margins accepted);
-  left out of scope.
+  ladder reach at 0, `group` is now in `LADDERLESS` — its route is deleted (owner Q3a margins accepted; the
+  witness answers in every mode).
 - ✅ **Pooled keyed `group('a')` in a branch arm / connector body — LANDED (95334eb3).** Remains: nothing. Each
   site registers the pool's MEMBERS as a `pooled` collection carrying its `PoolRecipe`; the reader reduces once over
   every site's members (`poolMembers` / `reduceFrom`, `collection.ts`). A raising reduction keeps V1's finished-map

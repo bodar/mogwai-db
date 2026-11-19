@@ -2837,16 +2837,17 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
 /**
  * The hosts whose ladder route is DELETED (Phase 3 (d); the kept ones are catalogued in
  * `docs/2026-11-15-compositional-coverage-plan.md`, "Kept routes"): the connector row is their one lowering, so the
- * dispatch offers no ladder to fall back to. (`order`/`dedup`/`groupCount` keep their tail lowering — `byValues`
- * hands it the landed `by()` values, the connector's own use of it — but the tail no longer answers the site
- * ALONE, correlating its `by()` bodies itself.) A host leaves the ladder by joining
+ * dispatch offers no ladder to fall back to. (`order`/`dedup`/`groupCount`/`group` keep their tail lowering —
+ * `byValues` hands it the landed `by()` values, the connector's own use of it — but the tail no longer answers the
+ * site ALONE, correlating its `by()` bodies itself. `group` joins in every form: its keyed `group("m")` is the
+ * row's too, assigned or pooled — `keyedPooledGroup`.) A host leaves the ladder by joining
  * this set in the commit that deletes its route. Keyed by the FRAMINGS the deleted route served: over any other
  * framing the tail that lowers the step is the host's own lowering, not a ladder (`project` over a property row is
  * `propertyTail`'s record — `recordLeft` reads a `by()` through an element or scalar host only), and so is a step
  * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
  * `groupCount("m")` — `byValues` leaves both to the host).
  */
-const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'coalesce', 'optional', 'choose', 'union', ...FILTER_HOSTS]);
+const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'group', 'coalesce', 'optional', 'choose', 'union', ...FILTER_HOSTS]);
 /** The hosts whose connector row (`byValues`) claims only the argument-free form. */
 const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
 /** The EXISTENCE hosts (`FILTER_HOSTS`) are LADDERLESS except over a body the connector leaves to the ladder by design (`ladderOwns`:

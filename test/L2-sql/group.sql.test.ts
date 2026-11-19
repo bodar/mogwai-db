@@ -253,11 +253,13 @@ describe('group / properties SQL', () => {
     // which is `groupCount()`'s value exactly, and it re-enters that arm rather than growing a second
     // spelling of one answer.
     expect(await dec("g.V().has('lang').group().by('lang').by(__.count())")).toEqual([new Map([['java', 2]])]);
-    // The ORIGIN CHANNEL is the mechanism, and the SQL says so: the seed names it, the movement's arms
-    // carry it, and the KEY is re-read off it rather than carried through the join.
-    const sql = bare_read("g.V().group().by('name').by(__.bothE().values('weight').sum())", { fastPaths: LADDER }).sql;
-    expect(sql).toContain('AS origin');
-    expect(sql).toMatch(/rp\d+\.node = \w+\.origin/);
+    // The pool is the connector's grouped pool (`pooledGroup`, `lower/scoped.ts` — `group` is LADDERLESS): the
+    // members' child rows are grouped by the KEY, never a per-member sum re-summed — and every switch position
+    // runs that one lowering, so they answer alike.
+    const pooledSum = "g.V().group().by('name').by(__.bothE().values('weight').sum())";
+    expect(bare_read(pooledSum).sql).toContain('GROUP BY');
+    expect(await decodeAll(exec(store, undefined, { ...DEFAULT_FAST_PATHS, ...LADDER }).buffers(pooledSum, {}, {})))
+      .toEqual(await dec(pooledSum));
     // A body reading a LABEL resolves, because the host's labels ride into the sub-fold — handing over
     // an empty map would have made an unresolvable `select()` (now the EMPTY RESULT) pool zero rows.
     expect(await dec("g.V().hasLabel('person').as('p').out('created').group().by('name').by(__.select('p').values('age').sum())"))
@@ -306,10 +308,13 @@ describe('group / properties SQL', () => {
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java:220-238`).
   // It is the collecting arm plus one `$[0]`, which is why it declares `mapValue` like every other map and
   // needs no shape of its own.
-  test('group().by(key).by(__.tail()) is the FIRST member, through the collecting arm', () => {
-    const p = read('g.V().group().by("name").by(__.tail())', { fastPaths: LADDER });
+  test('group().by(key).by(__.tail()) is the FIRST member, one per key', () => {
+    const p = read('g.V().group().by("name").by(__.tail())');
     expect(p.shape).toEqual({ kind: 'mapValue' });
-    expect(p.sql).toContain("'$[0]'");
+    // Each key holds ONE member: the pool's single extraction, never a list.
+    const pairs = JSON.parse(run(seededStore(), 'g.V().group().by("name").by(__.tail())')[0]!.map) as [any, any][];
+    expect(pairs).toHaveLength(6);
+    for (const [key, value] of pairs) { expect(value.t).toBe('vertex'); expect(value.v.props.name[0].v).toBe(key.v); }
   });
 
 
@@ -325,9 +330,11 @@ describe('group / properties SQL', () => {
   });
 
   test('group().by(tail()) reads the FIRST arrival and carries no null sort key', () => {
-    const p = read('g.V().both().group().by(T.label).by(__.tail())', { fastPaths: LADDER });
-    expect(p.sql).toContain("'$[0]'");
-    expect(p.sql).not.toContain("'$.t'), 'null') = 'null') DESC");
+    const q = 'g.V().both().group().by(T.label).by(__.tail())';
+    expect(read(q).sql).not.toContain("'$.t'), 'null') = 'null') DESC");
+    // `RangeBiOperator(1)` keeps the key's first arrival: `person: v[2]` (reading the LAST answered `v[4]`).
+    const pairs = JSON.parse(run(seededStore(), q)[0]!.map) as [any, any][];
+    expect(pairs.find(([key]) => key.v === 'person')![1].v.id).toBe(2);
   });
 
   // The null sort key is spent only where a member CAN be a productive null. A `'value-nullness'` body
@@ -397,7 +404,7 @@ describe('group / properties SQL', () => {
   // ordinary `mapValue`.
   test('group().by(__.project) — a RECORD-keyed group over an edge stream (upstream getEdges)', () => {
     const gremlin = 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())';
-    const p = read(gremlin, { fastPaths: LADDER });
+    const p = read(gremlin);
     expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'mapValue' });
     // The key IS the record's map node, named once as a column and grouped by that column — the
@@ -405,9 +412,10 @@ describe('group / properties SQL', () => {
     // is what naming it prevents).
     expect(p.sql).toContain("json_object('t', 'map', 'v'");
     expect(p.sql).toContain('GROUP BY');
-    // Each field lowers through the ORDINARY child seam: `outV()`/`inV()` re-root the host to the
-    // endpoint (exactly one by the schema), `label()` is the token projection every by() shares.
-    expect(p.sql).toContain('SELECT ree');   // the endpoint re-root reads the edge row
+    // Each field lowers through the ORDINARY root fold under the connector: `outV()`/`inV()` are the edge's
+    // own endpoints, `label()` is the token projection every by() shares.
+    expect(p.sql).toMatch(/\.src\b/);
+    expect(p.sql).toMatch(/\.tgt\b/);
     expect(p.sql).toContain('FROM labels');  // label() → the labels dictionary, not a second spelling
 
     // THE ANSWER — what the harness actually consumes: a Map keyed by a Map. The key rides as the
