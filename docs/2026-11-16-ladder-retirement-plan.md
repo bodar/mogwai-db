@@ -89,7 +89,12 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    probe — one seek SQLite's own planner picks; `edgePair` (`src/rel/passes/edge-pair.ts`) is deleted. Re-timed (ms
    at 8×): 300 labels 779 → 16.0, `repeat(both()).times(2).where(…)` 54769 → 1267, air-routes 2986 → 684,
    grateful-dead 1338 → 869; bulk load +7–11%. Remains: nothing.
-10. **S2 — survey for other simple structural splits (owner, 2026-11-19). REPORT ONLY; the owner decides.** Is there
+10. ✅ **S2 — LANDED (39a8f01a), report only; nothing built.** Survey (below) of every `src/storage.ts` table/index
+   against the emitted shapes. Remains — **owner decision:** build candidate 3 (the `edges(label)` index, one line of
+   schema) and candidate 5 (the TextP full-text probe fix in `src/rel/passes/semijoin.ts`)? Optionally also fix the
+   alias blindness in `scripts/sql-plan.ts`. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are
+   not recommended now.
+   _Original brief:_ survey for other simple structural splits (owner, 2026-11-19). Is there
    another cheap schema split that halves (or better) what an index seek or scan reads — more schema in exchange for
    leaning harder on SQLite? Check every table and index in `src/storage.ts` against the shapes the lowering
    actually emits. Known candidate to assess first: property keys are `key TEXT` on every
