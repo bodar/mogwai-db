@@ -43,17 +43,14 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
   R7 waits on.
 - Landed: R0–R3, R4.1/R4.3/R4.4, R5.1–R5.5, R6 side effects, pooled keyed `group('a')` in arms/bodies (95334eb3);
   regressions/wrong answers V0+U3 (911eef32), V1 (77eb86cb, b09dee81), V2 (33356b80), V3 (75ad576d),
-  V4 (1ef9b707), V5 (b600fc15).
+  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc).
 
 ## Remaining work, in order
 
-1. **F1 — pin V4's newly correct answers (tests only, cheap).** In `test/compiler/group-ladderless.exec.test.ts`'s
-   V4 block, add: `g.V().as('a').out().group().by(select('a').values('name')).by(values('name').count(local))` →
-   `{josh:1, marko:1, peter:1}` (trunk declined it before V4); and the key-dropped case
-   `g.V().group().by(label).by(values('age').is(gt(30)).count(local))` → `{person:1}` with no `software` key
-   (was `{person:2, software:0}`; a key whose value traversal yields nothing is omitted,
-   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java`
-   :123-126). Both verified on trunk 11378285.
+1. ✅ **F1 — LANDED (f5d2a6bc), tests only.** `test/compiler/group-ladderless.exec.test.ts` V4 block pins
+   `group().by(select('a').values('name')).by(values('name').count(local))` → `{josh:1, marko:1, peter:1}` and the
+   key-dropped `by(label).by(values('age').is(gt(30)).count(local))` → `{person:1}` (GroupStep.java:123-126), on the
+   plain run and `agreed`, plus at depth (local, project().by(), where(), group('x')…cap). Remains: nothing.
 2. **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293).** Large schemas only
    (`out().out().where(__.in().as('a'))` 22 → 759 ms at 300 labels; `repeat(out()).emit(where(__.in().as('a')))`
    136 → 2337 ms). **DECIDED (owner, 2026-11-19): measure, then (b) if it holds, else (a).** Ratios are not the bar
