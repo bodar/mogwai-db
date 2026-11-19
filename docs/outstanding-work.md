@@ -693,6 +693,31 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   copying the whole list N times (`src/compiler/rel/list.ts`). Drop the history entry through the explode
   when nothing downstream reads it, or reference the folded row by key instead of copying the blob.
 
+### Moved out of the ladder-retirement plan (2026-11-19, owner scope rule)
+
+Performance findings from ladder-retirement rounds 4–7 that are NOT regressions the plan introduced. Full text,
+witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100715c` (search the item id).
+
+- **Owner calls (hub/statistics trade-offs):** movement-head `until` at a hub, 22.8× (round 4 Q1); a correlated
+  equality `by()` compare, `where(V().where(eq('a')).by('name')…)` 1.16 s → 79 s at 1k → 8k — accept or make it a
+  `propertySeek` term (round 4 Q2, S5); magic-set sharing under `where()` EXISTS costs ordinary queries up to 48×
+  (R6-1, with U2's selective-host residue).
+- **Super-linear, pre-existing:** V2 (`magic`'s per-filter row-bound gate keeps `limit(1)`-before-test quadratic —
+  likely a one-line delete); V3 (per-host-bounded magic domain for a pick inside a body); V5 (hosts magic does not reach;
+  hosts after coalesce/optional/union/choose; `local(repeat(out('knows')).emit().limit(3))` does not terminate on a
+  cyclic graph); U6/U7 (a `both()`/`union` body's positional scope key; pre-existing super-linear shapes); T4
+  (`where(is(c))` over a value is cubic); N9 (reading a collected side effect per traverser 68×; a bare `database or
+  disk is full` Error from `local(select('x').unfold().sample(1))` at 1k; `local(repeat(both()).times(k).dedup())` has
+  no per-iteration collapse); R4.5 (`flatMap(out().out())` 1.29× — is "a body that MOVES is left alone" semantic?).
+- **Queued speed rule (owner Q3a):** a decorrelation rule closing the pooled `group` join-then-GROUP BY gap
+  (`group().by(label).by(count())` 1.40×, `by('name').by(tail())` 1.30× vs the old ladder).
+- **Debt / one-authority / reuse:** U5 (`fuse.ts` re-derives lineage), V4 (`keyedJoin` reuses `indexSeek`'s EXISTS
+  decomposition), U8 and round-7 cheap follow-ups, M6, K2 (declines that lost their explanation under M1), K3, K4,
+  M1b/H1 (path concatenation for `local()` over a re-source), reuse proposals P2–P42 not landed.
+- **Depth gaps (clean declines, not ladder-only):** every "N8 additions" list from rounds 1–6;
+  `g.V().as('a').mergeV(project('name').by(select('a').values('name')))` declines in every mode;
+  `g.V().coin(1.0).count()` / `coin(0.0).count()` decline.
+
 ## 2. Needs a human call
 
 - **Numeric STRING ids (string-id-coercion).** 🔴 Verbatim: "Should a numeric string id like '1' address
