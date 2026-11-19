@@ -2043,9 +2043,14 @@ const rootOfHost = (host: ChildHost, at: RelId | undefined): string | undefined 
   host.kind === 'element' && host.row?.fresh ? rootTag(host.id, at) : undefined;
 
 /** The slots of a by()-modulated host whose child value is PER TRAVERSER — each traverser's first result
- *  (`TraversalUtil.produce`). `group()`'s VALUE `by()` is not one: `Grouping` pools a key's traversers into
- *  its first barrier, so its scope is the KEY. */
-const perTraverserSlot = (step: IRStep, slot: number): boolean => step.name !== 'group' || slot === 0;
+ *  (`TraversalUtil.produce`). `group()`'s VALUE `by()` is one exactly where its body has NO barrier
+ *  (`isValueBarrier`, the step `Grouping.determineBarrierStep` stops at): with one, `Grouping` pools a key's
+ *  traversers into it, so its scope is the KEY (`pooledGroupMap`); without one, each traverser's first value is
+ *  ASSIGNED to its key (`Operator.assign`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125`)
+ *  — a per-traverser value, landed like the key and read by the host's own group lowering. */
+const perTraverserSlot = (step: IRStep, slot: number, body: readonly IRStep[]): boolean =>
+  step.name !== 'group' || slot === 0 || !body.some(isValueBarrier);
 
 /**
  * `order().by(b)` / `dedup().by(b)` / `groupCount().by(b)` / `group().by(b)` — the by() VALUE as JOIN COLUMNS
@@ -2253,7 +2258,7 @@ function recordAsMap(tail: Tail, ctx: ChainCtx, fresh: Minter, always = false): 
 function perTraverserBodies(step: IRStep, bys: readonly (Modulation | undefined)[]): Map<string, readonly IRStep[]> {
   const bodies = new Map<string, readonly IRStep[]>();
   bys.forEach((by, slot) => {
-    if (by?.key.kind === 'child' && perTraverserSlot(step, slot)) bodies.set(bodyKey(by.key.body), by.key.body);
+    if (by?.key.kind === 'child' && perTraverserSlot(step, slot, by.key.body)) bodies.set(bodyKey(by.key.body), by.key.body);
   });
   return bodies;
 }
@@ -2269,22 +2274,26 @@ const byArity = (step: IRStep): number =>
  * unproductive key drops the traverser unless `ProductiveByStrategy` keeps it (`OrderGlobalStep`,
  * `DedupGlobalStep.java:77-78`, `GroupCountStep`'s `TraversalUtil.produce`), the comparator, the survivor, the
  * map — stay the host's; only where the value comes from changes. The joined columns are shed after the step.
- * A `group()` whose VALUE `by()` is a child is `pooledGroup`'s.
+ * A `group()` whose VALUE `by()` POOLS (a barrier in its body, `perTraverserSlot`) is `pooledGroup`'s; one with no
+ * barrier is ASSIGNED per traverser (`Operator.assign`), so its value body lands beside the key, keyed or not.
  */
 const byValues: Connector = (site) => {
   const { step, rel, framing, ctx, fresh, labels } = site;
   // An ARGUMENT changes what the by() runs over: `dedup("a")` projects each scope LABEL's value on a NEW traverser
-  // (`freshTraverserRow`), and `group("m")`/`groupCount("m")` is a keyed SIDE EFFECT — neither is a per-traverser
-  // by() over this stream, so both stay the host's own, except a keyed group whose value POOLS (`keyedPooledGroup`).
+  // (`freshTraverserRow`), and a keyed `groupCount("m")` stays the host's own. A keyed `group("m")` is the barrier
+  // form's per-traverser by() over this stream (`GroupSideEffectStep` differs only in where the map goes): its
+  // value POOLS through `keyedPooledGroup`, and is otherwise ASSIGNED, landed below like the barrier form's.
   if (step.optionArms || !step.modulators?.length) return null;
-  if (step.args.length) {
+  const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
+  // A group whose VALUE pools (a barrier in its body, `perTraverserSlot`) is `pooledGroup`'s, keyed or not.
+  const pools = step.name === 'group' && bys?.[1]?.key.kind === 'child' && !perTraverserSlot(step, 1, bys[1].key.body);
+  if (step.args.length && !(step.name === 'group' && bys && !pools)) {
     const keyed = keyedPooledGroup(site);
     if (!keyed) refuseKeyedPool(step, ctx);
     return keyed;
   }
-  const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
   if (!bys) return null;
-  if (step.name === 'group' && bys[1]?.key.kind === 'child') return pooledGroup(site, bys);
+  if (pools) return pooledGroup(site, bys);
   const all = perTraverserBodies(step, bys);
   // A body the host's own seam answers as a CORRELATED value (`scalarChild` — one index seek per row) keeps the
   // dependent join, as cc3b's `map`/`project` rows do: only the bodies it cannot hold are landed as join columns.
@@ -2441,7 +2450,8 @@ function poolWeight(pool: Rel, fresh: Minter): Rel {
  * decorrelated against the domain. Its barrier is then grouped by the key by construction (S2), and a seeded one
  * keeps its seed for a key whose pool reduced to nothing (S3: `fold()` → `[]`, `count()` → 0); an unseeded one
  * (`sum()`) emits nothing and the key is absent, `GroupStep`'s `hasNextBarrier` false. A body with NO barrier
- * takes each traverser's first value and keeps the last (`Operator.assign`), which is not a pool: the ladder's.
+ * takes each traverser's first value and keeps the last (`Operator.assign`), which is not a pool: it is landed per
+ * traverser (`perTraverserSlot`, `byValues`) and the host's own group lowering assigns it.
  * The key `by()` is the host's own (a child key is landed as a join column first, `landValues`).
  */
 function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]): GroupedMap | null {
@@ -2451,7 +2461,7 @@ function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]
   if (valueBy.key.kind !== 'child' || valueBy.order !== undefined) return null;
   let body = valueBy.key.body;
   // The POOL exists only where the value traversal has a `Barrier` (`isValueBarrier`, the step `determineBarrierStep`
-  // stops at); without one each traverser's first value is assigned, last wins — the host's own arm.
+  // stops at); without one each traverser's first value is assigned, last wins — landed per traverser by `byValues`.
   if (!body.some(isValueBarrier)) return null;
   // A DRAW in the value body (`sample()`, `coin()`, `order().by(shuffle)`) is a pick per traverser the pool —
   // one evaluation per key — cannot reproduce. Declined, and named in the user's terms.

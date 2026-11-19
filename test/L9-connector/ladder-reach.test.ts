@@ -53,6 +53,23 @@ describe('L9 — ladder reach engine', () => {
     expect({ ladderOnly: r.ladderOnly.length, differ: r.differ }).toEqual({ ladderOnly: 0, differ: [] });
   });
 
+  // R5.3/R5.4: a group() value by() with NO barrier is assigned per traverser (`Operator.assign`), so the connector
+  // lands it like the key (`perTraverserSlot`) — unkeyed, keyed and nested. Its last-member pick over an unordered
+  // stream is §17's; both modes take the connector's one plan here, so they agree on it.
+  test('a group() value by() with no barrier is answered by the connector alone, keyed and nested', () => {
+    const qs = [
+      "g.V().group().by(values('name').substring(0,1)).by(constant(1))",
+      "g.V().group('a').by(values('name').substring(0,1)).by(constant(1)).cap('a')",
+      "g.V().group().by(label).by(constant(null))",
+      "g.V().hasLabel('software').group().by('name').by(in('created').group().by('name').by(values('age')))",
+      "g.V().group().by(label).by(values('name'))",
+      "g.V().group('x').by(label).by(values('name')).cap('x')",
+    ];
+    const r = reach(qs.map((q) => ({ pool: 'W', q, store })));
+    expect(r.ladderOnly).toEqual([]);
+    expect(r.differ).toEqual([]);
+  });
+
   test('a traversal both modes answer is not ladder-only, and agrees', () => {
     const r = run("g.V().where(out('created')).values('name')");
     expect({ ladderOnly: r.ladderOnly.length, differ: r.differ, pools: r.pools.W }).toEqual({ ladderOnly: 0, differ: [], pools: { queries: 1, byDefault: 1, connectorOnly: 1 } });

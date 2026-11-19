@@ -314,7 +314,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_V_classic_recommendation_ranked',
     'g_V_coworker',
     'g_V_coworker_with_midV',
-    'g_V_groupXmX_byXnameX_byXinXknowsX_nameX_capXmX',
     'g_V_group_byXlabelX_byXbothE_groupXaX_byXlabelX_byXweight_sumX_weight_sumX',
     'g_V_hasLabelXpersonX_asXpX_mapXbothE_label_groupCountX_asXrX_selectXp_rX',
     'g_V_hasLabelXpersonX_chooseXageX__optionX27L__constantXyoungXX_optionXnone__constantXoldXX_groupCount',

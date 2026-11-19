@@ -8,13 +8,13 @@
     "L1": {
       "existence": 0,
       "per-traverser": 1,
-      "group": 3,
+      "group": 0,
       "other": 4
     },
     "L6": {
       "existence": 0,
       "per-traverser": 0,
-      "group": 2,
+      "group": 0,
       "other": 0
     },
     "H": {
@@ -26,14 +26,9 @@
   },
   "queries": [
     "087edf71dbf5",
-    "0a5bfd28f164",
-    "0c5314a1ad95",
-    "61063cb6084b",
     "687c561137bb",
     "7563378b7437",
     "c068d1eaa2b6",
-    "ca52f8047492",
-    "ef9c2a2f38ea",
     "f6be844c87ab"
   ]
 }
