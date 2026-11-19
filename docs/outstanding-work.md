@@ -720,6 +720,22 @@ witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100
 - **Depth gaps (clean declines, not ladder-only):** every "N8 additions" list from rounds 1–6;
   `g.V().as('a').mergeV(project('name').by(select('a').values('name')))` declines in every mode;
   `g.V().coin(1.0).count()` / `coin(0.0).count()` decline.
+- **Round 8 (2026-11-19), out of the plan's scope:** debt — `poolIdentity` copies `bodyKey`'s structural
+  `JSON.stringify` replacer (`scoped.ts`; give `bodyKey` the `ctx`-drop/`getText()` options); `takeFinishedMap` is a
+  near-copy of `snapshotSite` (`collection.ts`, one "site crosses the executor seam" take); `pooledGroupMap` re-checks
+  `!body.some(isValueBarrier)` that `perTraverserSlot` already decided; `namedEffect` (`lower.ts`) now names every
+  retained effect's shared subtrees — say it is generic in its comment; a drain with no reader of its label still
+  takes the finished map (O(keys) isolate memory, `g.V().group('a').by('name').by(values('age').sum()).count()`);
+  `by(constant(null))` lands as a self-join of the scope CTE on its row key (seedOnly could write in place); the
+  property host's `group().by(k).by(count())` returns a finished map (`reduced`) where groupCount-style member rows
+  would let it union across sites and retire `POOLED_RECIPE`. Depth gaps (clean declines) — `group().by(label)
+  .by(optional(values('age')))`, `.by(properties('name'))`; a `group()` as a `choose()` arm; two keyed
+  `group('m')`/`group('n')` sites; a `union` whose arms produce maps (`union(group().by(label), constant(1))`);
+  `properties().group().by(key).by(value().fold())` (extend `reductionHost` to the property framing); grouping over a
+  map/path row (`project(…).group().by(select('l'))`, `valueMap().group()…`); keyed pooled group in a `coalesce`/
+  `repeat`/after `outV()`, or with a raising `max()`/`mean()`/`sum()` value in an arm/body/second site; mixed member
+  layouts (`where(out().group('a')…)` + a root site); two sites with different recipes decline with only "no
+  lowering covers" (should say two sites must be one grouping).
 
 ## 2. Needs a human call
 

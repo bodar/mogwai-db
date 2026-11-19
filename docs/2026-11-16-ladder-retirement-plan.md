@@ -1,6 +1,7 @@
 # Retiring the correlated-child ladder
 
-_Status: IN PROGRESS. Trimmed 2026-11-19 after round 7. The full round-by-round record (rounds 1–7, every
+_Status: IN PROGRESS. Trimmed 2026-11-19 after round 7; round 8 (V0+U3, R5.3+R5.4, V1, pooled keyed bodies, group
+route) updated in place. The full round-by-round record (rounds 1–7, every
 measurement, reviewer finding and proposal) is this file at `4100715c`, in git history; nothing below depends on it._
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is replaced
@@ -33,9 +34,11 @@ owner stopped it. From now on:
 
 - The connector is the DEFAULT at every child site; `bothChildOrders` is deleted (N7). The ladder is the opt-in
   `correlatedChild` FastPath; its code is `src/compiler/rel/lower/per-traverser.ts` alone (12 `return null`).
+  `group` is `LADDERLESS` (2a94fda9).
 - **Ladder-only answers: 5** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`):
-  group 0 (R5.3+R5.4, ec4ea890), per-traverser 1, other 4 (option-map `choose` bodies under `local`/`map`, corpus.txt
-  515/516/2077/2078), existence 0.
+  group 0, per-traverser 1, other 4 (option-map `choose` bodies under `local`/`map`, corpus.txt
+  515/516/2077/2078), existence 0. All 5 decline at ONE line — `rejoin`'s `framingCols()` gate (`scoped.ts` ~1616) —
+  so they are one item, R4.2, and it is the last thing R7 waits on.
 - Done (detail at `4100715c`): R0 ratchet; R1 shared substrate; R2 join width + per-scope draws; R3 existence family;
   R4.1/R4.3/R4.4; R5.1 domain elimination; R5.2 keyed `group("a")`; R6 `sideEffect` with effects; owner answers
   Q2 (bounded and unbounded `repeat` conditions through the connector), Q3b (N5 min/max), Q5 (N3 cross-join
@@ -56,11 +59,52 @@ owner stopped it. From now on:
   outside; `name`'s fence for re-run work applies only to a shared relation in `readInFull(roots,'once').full`.
   `has('age',gt(30)).both().values('name').limit(3)` is back to 2.9 ms at 64k (45 ms fenced). `repeat(both()).times(3)
   .limit(5)` and `union(out(),in()).limit(2)` were never moved by the fence (measured equal before ec2db3de); the
-  latter's linear cost is pre-existing, filed in `outstanding-work.md` §1b.
+  latter's linear cost is pre-existing, filed in `outstanding-work.md` §1b. **Its own regression is V2.**
+- **V2 — a shared relation read BOTH in full and partially went unfenced (regression from 911eef32; both review
+  lenses, major).** `name.ts` fences only `demand.full`, but `work.ts`'s `ReaderDemand` contract says anything not in
+  `stopsEarly` takes the CONSERVATIVE answer. A mixed relation is in neither set, so the partial reader re-runs the
+  barrier the full reader already pays for. Witnesses (before 911eef32 → now, 1k / 8k): `g.V().out().dedup()
+  .values('name').union(limit(2), count())` 1.01/8.41 → 2.89/26.26 ms (dedup co-routine run 5×);
+  `g.V().has('age',gt(30)).both().union(limit(2), count())` 1.33/9.14 → 2.44/18.26 ms; the emit walk
+  `g.V().repeat(out('knows')).emit(in('knows').has('age',gt(40)))` + `.limit(5)` / `.range(10,20)` /
+  `.dedup().limit(5)` / `.limit(1000000).count()` evaluates `wk_w3` twice (`reevaluatedCtes` non-empty; 374 → 556 ms
+  at 32k). Answers unchanged, growth linear. **Fix (measured in a scratch tree):** `!demand.stopsEarly.has(original)
+  && copyRerunsBarrier(mapped)` in place of `demand.full.has(original) && …`; flip the comment "A relation read both
+  ways is not in `full` and stays lazy too". The U3 witness stays unfenced (0.13/0.36 ms). Pin it: add the limited
+  emit-walk shapes to `WALKS` and the mixed `union(limit(2), count())` case to
+  `test/compiler/shared-cte-fence.exec.test.ts`. Record U3's accepted trade-off in the `name.ts` comment: a selective
+  filter under a `limit` that never stops early (`has('name','nomatch').limit(1)`) reads the seed twice — the
+  pre-ec2db3de cost, not to be re-fenced as a "fix".
 - ✅ **V1 — LANDED (77eb86cb, b09dee81).** Remains: nothing. A raising pooled keyed group's drain IS the finished
   map's binding (`takeFinishedMap`, `collection.ts`): the map is evaluated once, retained as one `[key, value]` pair row
   per key (so it splits under the DO 2 MB value cap like any retained set), and cap/select/unfold re-fold it with
-  `collectedArray`. Keyed/unkeyed 1.1–1.3× at 1k/8k (was 2.6–3.4×); scaling linear.
+  `collectedArray`. Keyed/unkeyed 1.1–1.3× at 1k/8k (was 2.6–3.4×); scaling linear. Add a regression test for the
+  shape V1 made answer: `g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1))
+  .count()` → [6] (it threw a bare Error before V1; the non-raising twin still does — V5).
+- **V3 — a ONE-site keyed pooled group pays for the multi-site pool (regression from 95334eb3, major).**
+  `g.V().group('a').by('name').by(count()).cap('a')` used to take the host's counting recipe (one CTE, `count(1)` per
+  key, 1714 SQL chars); it now goes through `poolMembers`/`reduceFrom`: two MATERIALIZED CTEs, a
+  `min(printf('%020d',…)||key)` first-arrival domain, a domain→pool join and a regroup (2945 chars, +72%; compile
+  4.8 → 7.5 ms). 1k / 8k: 5.2/23.8 → 9.8/48.9 ms; `by(out().count())` at 8k 48.6 → 74.4 ms;
+  `union(group('a')…by(count()), out()).cap('a')` at 8k 23.4 → 46.4 ms; single-site choose/optional/coalesce arms
+  ≈1.5×. Linear, but every one-site keyed `by(count())`/`by(values().fold())` pays per-row terms nothing reads.
+  **Fix:** with ONE site on the label, reduce with the host recipe; register pool members only where a second site or
+  a body reads them. The two-site arm cases must keep answering (why the pool exists). While there:
+  `keyedPooledGroup` builds the whole reduction only to test `mayRaise`, and the reader builds it again — decide "can
+  raise" from the value body.
+- **V4 — a LOST answer (regression from 2a94fda9).** `g.V().group().by(label).by(out().count(local))` answered
+  `{person:6, software:0}` before `group` went `LADDERLESS` (measured at b8b2c776) and now raises "no lowering covers"
+  in every mode; connector-only declined it before too, so the ladder was its only route. The wide ladder-reach sample
+  missed it because no corpus traversal has the shape. The body has no barrier, so it is an assigned (per-traverser)
+  value: fix it in that body's lowering (a top-level `count(local)` in an assign body), not with a route. Check the
+  expected value against `vendor/tinkerpop/gremlin-core/.../Grouping.java` first — under `Operator.assign` the last
+  traverser per key wins, so 6/0 may itself have been the ladder's wrong answer.
+- **V5 — a bare internal Error reaches the user (pre-existing, in the keyed-group family this plan owns).**
+  `g.V().group('a').by(label).by(count()).where(select('a').count(local).is(1)).count()` and
+  `g.V().group('a').by('name').by(count()).where(select('a').unfold().count().is(2)).count()` throw `Error: RelIR: no
+  relation 'c1' is in scope for column 'id'` on trunk (d374f001) and before. The raising `sum()` twin answers since V1
+  (its finished map is taken once), so the missing case is reading a non-raising pooled-members collection from a
+  `where()` body. Answer, or decline cleanly; never a bare Error.
 - **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293).** Large schemas only
   (`g.V().as('a').out('knows').where(__.in().as('a')).count()` 35× at 300 labels). **Blocked on owner question 1.**
 
@@ -72,19 +116,33 @@ owner stopped it. From now on:
   and keyed `group("m")` alike; nested groups close with it. Group ladder reach 5 → 0; L3 +1. Remains: the `union`
   witness `union(group('a').by(label).by(count()), out()).cap('a')` is refused for a reason outside this item — a
   `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
-  ladder reach at 0, `group` joined `LADDERLESS` — ✅ its route is deleted, LANDED (2a94fda9; owner Q3a margins
-  accepted; `LADDERLESS` in `scoped.ts`, the witness answers in every mode). Remains: nothing.
+  ladder reach at 0, `group` joined `LADDERLESS` — ✅ LANDED (2a94fda9; owner Q3a margins accepted; `LADDERLESS`
+  in `scoped.ts`, the witness answers in every mode). Remains: R5.5 (the code was not deleted) and V4 (a lost answer).
+- **R5.5 — actually delete the group ladder code (follow-up to 2a94fda9, major).** The commit and
+  `docs/2026-11-15-compositional-coverage-plan.md` §3 say `groupReduced`/`groupCollected` are "still served by the
+  PROPERTY host, e.g. `g.V().properties().group().by(key).by(count())`". False: hit counters at their entries read 0
+  over the 34-query group probe set (default and LADDER), the whole corpus (`rel-blockers.ts`) and the full
+  `mise run test`; they read 9/3 before 2a94fda9. Delete in `src/compiler/rel/map.ts`: `groupReduced`'s pooling arm
+  (~945–1077, after the `!pre.length` → `groupBarrier` arm), `groupCollected` (~1101–1205), `dedupGroupMembers`,
+  `dedupBeforeFold`, and `groupRows`' pooled-routing block (~428–512, incl. its second copy of `GLOBAL_ARMS`); then
+  whatever orphans (`bun scripts/refs.ts`, `mise run orphans`). Keep the `!pre.length` + `count()` → `groupBarrier`
+  arm: it is the property host's live route. Fix the stale `group` in `GATE_ONLY_FAST_PATHS.correlatedChild`'s comment
+  (`src/compiler/options/fast-paths.ts` ~193) and the false sentence in the coverage plan. Expect `mise run ladder`
+  below 1277; `test/L2-sql/group.sql.test.ts` may pin SQL from these arms. No answer changes.
 - ✅ **Pooled keyed `group('a')` in a branch arm / connector body — LANDED (95334eb3).** Remains: nothing. Each
   site registers the pool's MEMBERS as a `pooled` collection carrying its `PoolRecipe`; the reader reduces once over
   every site's members (`poolMembers` / `reduceFrom`, `collection.ts`). A raising reduction keeps V1's finished-map
   registration. L3 2057 → 2058; scaling linear (1.6–6.7× at 1k → 8k).
-- **R6 — the remaining deferred hosts as CONNECTORS rows** (owner Q4, widest scope), by workload reach:
-  option maps (`choose(k).option(…)`, `branch`, closes the 4 "other" ladder-only answers — first), `V`/`E` re-source
-  (stale entry: already answers connector-only), value arguments, predicate operands, projection `by()`s
-  (`path`/`select`/`valueMap`/`sack`/`math`/`format`/`aggregate`), writes (`WRITE_ARG`). Each landed host deletes its
-  `test/L9-connector/deferred-hosts.ts` entry.
-- **The 1 per-traverser ladder-only answer** — identify it from the ratchet and give it a body or host fix.
-- **R4.2** — variant and property payloads through the rejoin; waits for the typed carrier (parent Phase 4).
+- **R4.2 — variant and property payloads through the per-traverser rejoin. Closes ALL 5 remaining ladder-only
+  answers** (the 4 option-map bodies and the 1 per-traverser one: round 8 found one root cause, so R6's "option maps
+  first" and "the 1 per-traverser answer" merged here). **BLOCKED on owner question 2.** All 5 decline at `rejoin`'s
+  `framingCols()` gate (`scoped.ts` ~1616); `rejoin` never uses that column list — it carries the body's own payload
+  columns — and `framingCols`' null for variant/property exists for RECORD FIELDS. (a) Relax the gate for
+  variant/property (record fields still decline) — makes R7 reachable this cycle; (b) wait for typed-carrier T1
+  (parent Phase 4, not started). PREREQUISITE: the owner's answer.
+- R6's other hosts (`V`/`E` re-source — already answers connector-only, value arguments, predicate operands,
+  projection `by()`s, writes `WRITE_ARG`) carry no ladder-only answer, so they left this plan for
+  `outstanding-work.md` §4; they stay listed in `test/L9-connector/deferred-hosts.ts`.
 - **R7 — delete the switch**, when the ladder-only count is 0 and the scaling probe holds: `correlatedChild` and its
   readers, L5's per-switch entry, `FastPathConfig.connectorOnly` (becomes the only mode); L9's connector-only ratchet
   becomes the ordinary coverage ratchet; update root `CLAUDE.md` decision 6 and `src/compiler/CLAUDE.md`.
@@ -96,12 +154,17 @@ owner stopped it. From now on:
   deferral.
 - `mise run scaling`: the 1k/8k margins a deletion cites.
 
-## Owner questions (open)
+## Owner questions (open, verbatim from round 8)
 
-1. **U1's fix (R7-1):** (a) recursive loose scan — 10–19× faster at 300 labels, 1.6–2× slower at 3 labels;
-   (b) `label IN (SELECT DISTINCT label FROM edges WHERE src = …)` — trunk speed at 3 labels, fastest at 300, but reads
-   an out-hub's whole neighbourhood per probe; (c) leave trunk and close U1, moving the large-schema cost to
-   `outstanding-work.md`.
+1. **U1:** "U1 (plan owner question 1): to fix edgePair's per-probe label-vocabulary cost, pick (a) recursive loose
+   scan (10–19× faster at 300 labels, 1.6–2× slower at 3), (b) label IN (SELECT DISTINCT label FROM edges WHERE src=…)
+   (trunk speed at 3 labels, fastest at 300, reads a hub's whole neighbourhood), or (c) close U1 and move the cost to
+   outstanding-work."
+2. **R4.2:** "All 5 remaining non-group ladder-only answers decline at one line, scoped.ts:1616 rejoin's framingCols()
+   gate. rejoin never uses that column list; it carries the body's own payload columns, and framingCols' null for
+   variant/property exists for RECORD FIELDS. Should the per-traverser rejoin carry variant/property payloads now
+   (record fields still decline), which makes R7 reachable this cycle? Or keep the 2026-11-16 decision to wait for
+   typed-carrier T1, which has not started?"
 
 Every other open question from rounds 4–7 was a performance trade-off, so it moved to `docs/outstanding-work.md`
 under the scope rule.
