@@ -108,7 +108,11 @@ owner stopped it. From now on:
   `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
   ladder reach at 0, `group` joined `LADDERLESS` — ✅ LANDED (2a94fda9; owner Q3a margins accepted; `LADDERLESS`
   in `scoped.ts`, the witness answers in every mode). Remains: R5.5 (the code was not deleted); V4 landed (1ef9b707; a wrong answer, not a lost one). V4 remains: nothing.
-- **R5.5 — actually delete the group ladder code (follow-up to 2a94fda9, major).** The commit and
+- ✅ **R5.5 — LANDED (f2b0fc72).** `groupReduced`'s pooling arm, `groupCollected`, `dedupGroupMembers` and
+  `dedupBeforeFold` deleted from `src/compiler/rel/map.ts`; `groupRows`' pooled routing is one `isValueBarrier` rule
+  (a barrier value body declines unless exactly `count()` → `groupBarrier`, the property host's live route). Ladder
+  decline sites 1277 → 1256; no answer changes. Remains: nothing.
+  Original item: **actually delete the group ladder code (follow-up to 2a94fda9, major).** The commit and
   `docs/2026-11-15-compositional-coverage-plan.md` §3 say `groupReduced`/`groupCollected` are "still served by the
   PROPERTY host, e.g. `g.V().properties().group().by(key).by(count())`". False: hit counters at their entries read 0
   over the 34-query group probe set (default and LADDER), the whole corpus (`rel-blockers.ts`) and the full
