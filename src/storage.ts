@@ -228,6 +228,11 @@ const SCHEMA = [
   // per 8× on `test/compiler/walk-condition-hub-scale.exec.test.ts`'s hub graph). An index whose prefix IS the
   // probe makes it one seek, chosen by SQLite's own planner, at any label vocabulary.
   `CREATE INDEX IF NOT EXISTS e_pair ON edges(src, tgt)`,
+  // The edge half of the vertex split above (`vl_label`): a ROOT `E().hasLabel(x)` pins only `label`, which is no
+  // prefix of e_out/e_in/e_pair, so without this SQLite scans a whole adjacency index and filters (O(|E|) per query
+  // whatever |x|). `(label)` alone, not wider: count/existence is covered through the implicit rowid, and any read
+  // of a further column already pays a row lookup. SQLite's planner chooses it; no lowering names it.
+  `CREATE INDEX IF NOT EXISTS e_label ON edges(label)`,
   // Static covering indexes replace the old self-tuning per-key expression index on
   // nodes.props: (key,value) serves a leading has(key,val); (node,key) serves the
   // given-a-node prop lookups (values()/has()/order/group + leaf materialization). The

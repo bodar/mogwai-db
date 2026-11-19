@@ -16,7 +16,9 @@ export const edgeProperties = relation('edge_properties', ['id', 'edge', 'key', 
 export const labels = relation('labels', ['id', 'name']);
 // A vertex carries a SET of labels (TinkerPop 4 multi-label); an EDGE label is fixed at
 // exactly one by spec (`EdgeFeatures.getLabelCardinality()` is "always ONE"), so it stays
-// inline on `edges` — inside the e_out/e_in covering indexes every movement rides. This is
+// inline on `edges` — inside the e_out/e_in covering indexes every labelled movement rides, and
+// alone in e_label, the root `E().hasLabel(x)` seek (e_pair(src,tgt) serves a label-free
+// endpoint probe; the index list is src/storage.ts SCHEMA). This is
 // the same rule that gave edge_properties no `meta` column: normalize where cardinality is
 // 0..N, keep inline where it is exactly 1.
 export const vertexLabels = relation('vertex_labels', ['node', 'label']);
