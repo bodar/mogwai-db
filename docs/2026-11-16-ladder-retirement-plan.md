@@ -89,12 +89,12 @@ owner stopped it. From now on:
   (`src/compiler/rel/map.ts`), which also fixed the §1 group-local-count-local and group-value-local-reader entries.
   The old ladder's `by(out().count(local))` → `{person:6, software:0}` was itself wrong (ref `{person:1, software:1}`);
   it declines cleanly because element `count(local)` is a top-level gap (`outstanding-work.md` §4 element-count-local).
-- **V5 — a bare internal Error reaches the user (pre-existing, in the keyed-group family this plan owns).**
-  `g.V().group('a').by(label).by(count()).where(select('a').count(local).is(1)).count()` and
-  `g.V().group('a').by('name').by(count()).where(select('a').unfold().count().is(2)).count()` throw `Error: RelIR: no
-  relation 'c1' is in scope for column 'id'` on trunk (d374f001) and before. The raising `sum()` twin answers since V1
-  (its finished map is taken once), so the missing case is reading a non-raising pooled-members collection from a
-  `where()` body. Answer, or decline cleanly; never a bare Error.
+- ✅ **V5 — LANDED (b600fc15).** Remains: nothing. A named collection (aggregate / keyed group / groupCount) read
+  inside a connector body now answers instead of throwing a bare RelIR Error. The plan broke in lowering, not in a
+  pass: two walker rules in `src/rel/walk.ts` fix it generically — `rewriteRels` keeps an untouched node the same node
+  (Calcite `RelShuttleImpl.visitChild`), and in `freeRelIds` a correlated id is bound only by a node's own expressions,
+  not by a definition buried under a sibling spine input. The collection stays one relation evaluated once; pinned in
+  `test/compiler/collection-read-in-body.exec.test.ts`.
 - **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293).** Large schemas only
   (`g.V().as('a').out('knows').where(__.in().as('a')).count()` 35× at 300 labels). **Blocked on owner question 1.**
 
