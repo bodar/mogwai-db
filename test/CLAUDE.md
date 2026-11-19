@@ -25,7 +25,7 @@
   function in `scripts/brackets.ts`). `mise run L1`..`L5` run one level each (`mise run L8` re-runs the whole fan-out perturbed); `mise run ci` is the
   full gate. Re-runs are incremental (`sources` in `mise.toml`) — an unchanged tree skips.
 - **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
-  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `ladder`, `sql-hygiene`, `rel-sweep`, `test`, `L8` and
+  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `ladder`, `sql-hygiene`, `sql-plan`, `rel-sweep`, `test`, `L8` and
   `build`, and `test` fans one `bun test` per bracket over ALL discovered files (`scripts/test-all.ts`),
   so **L1–L5, `test/L7-census` and L8 are inside it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
   what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks

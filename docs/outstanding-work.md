@@ -762,14 +762,6 @@ witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100
 
 ## 2. Needs a human call
 
-- **S2 schema-split survey: build (3) and (5)?** Report in
-  [ladder-retirement plan item 10](./2026-11-16-ladder-retirement-plan.md). Two small changes measured ≥9×: an
-  `edges(label)` index for `E().hasLabel(x)` (9–13×, one DDL line), and the TextP→FTS probe, which emits the
-  3-arg `like(…, '\')` that SQLite never hands to FTS5, so every TextP reads the whole `property_fts` (32–230× on
-  air-routes; ~10 lines in `src/rel/passes/semijoin.ts`). Interned property keys (16–24% smaller, no seek win)
-  and a per-kind FTS split (~2× only after the FTS fix) are not recommended. Also: `scripts/sql-plan.ts`'s
-  base-scan gate matches aliases, not tables, so it cannot fire.
-
 - **Numeric STRING ids (string-id-coercion).** 🔴 Verbatim: "Should a numeric string id like '1' address
   the element whose rowid is 1, as TinkerGraph's LONG id manager does? Or are ids typed, so that '1' names
   only a uid '1'? In the typed case these 8 scenarios are recorded as an expected outcome with a §17 line."
@@ -1274,10 +1266,6 @@ Beside the RelIR substrate:
 
 ## 6. Internal debt
 
-- **`scripts/sql-plan.ts`'s base-scan gate cannot fire** (2026-11-19, S2). It matches the word after `SCAN`
-  against table names, but the RelIR emitter writes aliases there (`SCAN re USING COVERING INDEX e_in`,
-  `SCAN rfs0`). So a plan that regresses to a full scan passes silently. Map each alias to its table; the S2
-  survey's map is the fix.
 - **A far-endpoint `hasId` is not pushed into the edge seek's `tgt`** (2026-11-19, S1 review).
   `g.V(2).outE().where(inV().hasId(4)).count()` and `g.V(2).out().hasId(4).count()` plan `e_pair (src=?)` rather
   than the `(src=? AND tgt=?)` prefix, so a hub source reads its whole out-neighbourhood. Trunk before S1 did the
