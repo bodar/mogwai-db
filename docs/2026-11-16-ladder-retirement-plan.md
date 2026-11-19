@@ -57,10 +57,10 @@ owner stopped it. From now on:
   `has('age',gt(30)).both().values('name').limit(3)` is back to 2.9 ms at 64k (45 ms fenced). `repeat(both()).times(3)
   .limit(5)` and `union(out(),in()).limit(2)` were never moved by the fence (measured equal before ec2db3de); the
   latter's linear cost is pre-existing, filed in `outstanding-work.md` §1b.
-- **V1 — a keyed pooled group computes its pool once (regression from R5.2).** `keyedGroupTail` → `drainRaisingSite`
-  rebuilds the finished map in a separate statement, so `g.V().group('a').by('city').by(values('age').sum()).cap('a')`
-  is 2–4× its unkeyed twin (39.7 → 86.8 ms at 8k). Bind the finished map once and let the drain and the cap read it, in
-  the ONE shared tail.
+- ✅ **V1 — LANDED (77eb86cb, b09dee81).** Remains: nothing. A raising pooled keyed group's drain IS the finished
+  map's binding (`takeFinishedMap`, `collection.ts`): the map is evaluated once, retained as one `[key, value]` pair row
+  per key (so it splits under the DO 2 MB value cap like any retained set), and cap/select/unfold re-fold it with
+  `collectedArray`. Keyed/unkeyed 1.1–1.3× at 1k/8k (was 2.6–3.4×); scaling linear.
 - **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293).** Large schemas only
   (`g.V().as('a').out('knows').where(__.in().as('a')).count()` 35× at 300 labels). **Blocked on owner question 1.**
 
