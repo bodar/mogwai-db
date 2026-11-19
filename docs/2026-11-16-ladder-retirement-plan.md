@@ -96,6 +96,63 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    `vertex_properties`/`edge_properties` row and lead `vp_key_value`/`ep_key_value` — not interned the way labels
    are. Report each candidate with what it splits, measured index size and seek cost before/after on the sample
    graphs, and the code it touches. Do not build.
+
+   **Surveyed 2026-11-19 (report only; nothing built).** Method: EXPLAIN QUERY PLAN over every L6 (304) and L1
+   (1,446) read plan, mapping each `SCAN <alias>` back to its base table; then size (page-count growth of a
+   copy) and timed seeks on modern, crew, grateful-dead (808 v / 8k e), air-routes (3.7k v / 58k e) and a
+   synthetic 20k v / 40k e graph carrying 180k properties.
+
+   *Already split, so the answer to "are we missing one?" is explicit:* vertices/edges are separate tables;
+   vertex/edge properties are separate tables, each with its own `(key, value)` index; vertex labels are
+   interned and normalized (`vl_label(label, node)`); edge labels are interned and sit inside
+   `e_out(src,label,tgt)`/`e_in(tgt,label,src)`; S1 added `e_pair(src,tgt)`; FTS rowids are signed by kind.
+
+   One line per candidate (ms per query; "→" is before → after):
+   - **(1) Interned property keys** (`key INTEGER` + a key vocabulary, like `labels`). Size only, as
+     predicted: property tables + indexes 580→440 KB grateful (76%), 5.7→4.8 MB air-routes (84%), 14.0→11.7 MB
+     synthetic (84%). Seek time unchanged (name = v 0.005→0.004; `age > 30` 4.66→4.53; edge `weight > 0.5`
+     5.25→4.95 synthetic). Touches every property reader and writer, the catalog, `write.ts`, `bulk.ts`,
+     `refresh.ts`, `replicate.ts`, the formats and the FTS `pk`. **Not worth it**: a 16–24% size win, no seek win.
+   - **(2) `property_fts` split by owner kind.** Real but modest: with the trigram index in use, a V probe
+     8.7→4.6 and an E probe 9.4→3.7 on the synthetic graph (a 10%-selective substring); total FTS size about the
+     same (16.2 MB → 8.0 + 6.7). Small code (DDL, `positiveOwners`/`negativeOwners`, the write path and
+     loaders). **BUT it is dwarfed by (5): today the trigram index is not used at all**, so fix (5) first and
+     re-ask this one only if kind-restricted TextP on a mixed graph is still a hotspot.
+   - **(3) Edge label lead index `edges(label)`.** `g.E().hasLabel(x)` scans a whole adjacency index because
+     neither `e_out` nor `e_in` leads with `label`: grateful `sungBy` (501/8049) 0.241→0.020, air-routes
+     `contains` (7k/58k) 1.81→0.134, synthetic `created` (5k/40k) 1.23→0.107 — **9–13×**, SQLite picks it
+     unaided. Cost: one more index per edge (540 KB on air-routes; S1's similar `e_pair` cost +7–11% bulk load).
+     Reach: 4/304 L6 queries, 3 L1 reads. Code: one DDL line. **Recommended** — the vertex side already has
+     `vl_label`, so this is the missing half of an existing split rather than a new one.
+   - **(4) Other base-table SCANs.** None that a split would fix: 751 L1 / 18 L6 plans scan `nodes` (via
+     `nodes_gid`) and 31 / 3 scan `edges` via `e_pair` — all root `V()`/`E()` scans (or a key-existence
+     `has(k)`, which reads every element and probes) that read every element by meaning; 128 L1 `nodes`
+     table scans are the modern graph's planner choosing a 6-row scan. `has(k)` could start from
+     `vp_key_value(key)` instead — a lowering choice, not a schema one; not measured.
+   - **(5) NOT a split, but the biggest finding: the TextP→FTS probe never uses the trigram index.**
+     `positiveOwners` (`src/rel/passes/semijoin.ts`) emits `like(pattern, text, '\')` — the 3-argument
+     (ESCAPE) form, which SQLite does not offer to a virtual table's `xBestIndex` (only the 2-arg
+     `text LIKE p` is), so the plan is `SCAN property_fts VIRTUAL TABLE INDEX 0:` — every FTS row, every query
+     (the 2-arg form plans `INDEX 0:L4`). The comment there says the opposite. Air-routes end to end:
+     `has('airport','desc',TextP.containing('Intercontinental')).count()` 12.9→0.40, `has('desc',
+     containing('Heathrow')).values('code')` 12.5→0.054 (same answers) — **32–230×**. Fix: build the FTS
+     probe's pattern from the RAW literal as a 2-arg `LIKE '%' || lit || '%'` — unescaped `%`/`_` only widen
+     it, so it is a SUPERSET, and the exact residual EXISTS still decides. (Do NOT just drop the ESCAPE
+     argument from the escaped pattern: `a\%b` would then require a backslash and lose rows.) ~10 lines; the
+     negative probe (`negativeOwners`) re-asks the atom's body and wants the same check.
+   - Dropped per review: `tombstones.kind` (changes feed, contrived reach).
+
+   *Instrument defect found on the way:* `scripts/sql-plan.ts`'s "0 base-table scans" gate matches the
+   ALIAS after `SCAN` (`rn`, `re`, `rfs0`) against table names, so it can never fire — the RelIR emitter
+   aliases every table. It is vacuous today; the alias→table map in this survey is the fix.
+
+   Scaling probe (synthetic 1k → 8k vertices, ms): `has('name','alpha-500')` 0.080→0.071 (×0.9),
+   `has('age',gt(30)).count()` 0.75→7.8 (×10.5), `E().has('weight',gt(0.5)).count()` 1.08→10.5 (×9.7),
+   V `TextP.containing('harl')` 1.62→14.3 (×8.8), E same 1.83→15.1 (×8.2), `E().hasLabel('created').count()`
+   0.072→0.50 (×6.9), `where(out().has('age',gt(30)))` 0.58→5.9 (×10.3), `local(outE().has('weight',
+   gt(0.5)))` 1.53→13.6 (×8.8), `has('person','city','golf').out('knows').has('name',containing('elta'))`
+   0.33→2.7 (×8.1) — all linear. **Owner decides**: (3) and (5) are each small and ≥9×; (1) and (2) are not
+   worth building now.
 11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19).** NOT a blanket "remove what only
    got us under 1.3×". For each change this plan made for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2
    33356b80, V3 75ad576d, V5 b600fc15, T1 1274c293), weigh the measured win against the code complexity it added:
