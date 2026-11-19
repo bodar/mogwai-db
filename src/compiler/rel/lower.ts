@@ -13,8 +13,8 @@ import { leadingAll } from '../../rel/passes/leading.ts';
 import { magicAll } from '../../rel/passes/magic.ts';
 import { dropUnreadJoins } from '../../rel/passes/prune.ts';
 import { edgePairAll } from '../../rel/passes/edge-pair.ts';
-import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
-import type { Stmt } from '../../rel/stmt.ts';
+import { plan as program, retained, type Binding, type Plan } from '../../rel/plan.ts';
+import { isStmt, type Stmt } from '../../rel/stmt.ts';
 import { mayRaise } from '../../rel/raise.ts';
 import { atMostOneRow, rowBounds } from '../../rel/bounds.ts';
 import { forEachExpr, isSelfContained, largestExpression, refNames, relDepth } from '../../rel/walk.ts';
@@ -78,7 +78,7 @@ import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantPayload } from './variant.ts';
 import { ADD_ALL, foldDeclared, PLAIN_FOLD, seededLeftFold } from './operator.ts';
 import { keyProductive, ORDER_KEY, ORDER_RANK, orderKeyTuple, rankJoin, type RankedOrders, type RankSink } from './ranked-order.ts';
-import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
+import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, takeFinishedMap, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { shortestPathReconstruct, type ReconstructConfig } from './shortestpath.ts';
 import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
@@ -1369,6 +1369,10 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
   // A connector body's PENDING site is not a relation of its own until the connector keys it, so its drain has
   // nothing to read yet: decline rather than skip the raise.
   if (site.pending || !rel.type.cols.length) return null;
+  // A pooled keyed group's FINISHED MAP: the drain is the binding the `cap` reads, so the map is evaluated
+  // once rather than once to drain and again to read (`takeFinishedMap`).
+  const taken = takeFinishedMap(label as string, collections, fresh);
+  if (taken) return taken;
   const never: Expr = rel.type.cols
     .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') }))
     .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));
@@ -4389,7 +4393,16 @@ const lowered = (
   // collection point — so every entry that reads through it (a resume's final SQL, a downstream
   // barrier's head) gets them without threading a binding by hand. `BaseGraph`/`BoundGraph` carry none.
   const sourceBindings = source.bindings?.(fresh) ?? [];
-  const effects = chain.effects ? [...sourceBindings, ...chain.effects] : sourceBindings;
+  // A RETAINED effect relation is its own statement, so it names its OWN shared subtrees as the result does:
+  // unnamed, a node it reads twice (a pooled group's domain and its pool) is spelled — and computed — twice.
+  // Only a SELF-CONTAINED one (it reads no binding): the emitter spools a retained read per statement from the
+  // statement's own refs (`spools`, `src/rel/emit.ts`), and a CTE hoisted around that read would hide it there.
+  const namedEffect = (binding: Binding): readonly Binding[] => {
+    if (isStmt(binding.node) || !retained(binding) || refNames(binding.node).size) return [binding];
+    const own = nameBindings(binding.node, () => fresh('r'));
+    return own.bindings.length ? [...own.bindings, { ...binding, node: own.result }] : [binding];
+  };
+  const effects = (chain.effects ? [...sourceBindings, ...chain.effects] : sourceBindings).flatMap(namedEffect);
   // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
   // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
   // on the result alone because a write step has already named its own target's shared nodes; the

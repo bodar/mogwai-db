@@ -16,7 +16,7 @@ import { foldElements, foldScalars, LIST_COL, NODE_COL } from './list.ts';
 import { inferredVtype } from './tag.ts';
 import { carriedCols, collectedArray, eq, jsonOf, meta, rowNumberWindow, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
-import { groupMap, groupRowCols, KEY_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
+import { groupMap, groupRowCols, KEY_COL, MAP_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, COLLECTION_OPS, seededLeftFold } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
@@ -429,6 +429,42 @@ function snapshotSite(site: Site, of: Members, fresh: Minter): { readonly site: 
     binding: { name, node: narrowed, snapshot: true },
     site: { ...site, rel: make.ref({ id: fresh('r'), name, channels: [], type: narrowed.type }) },
   };
+}
+
+/**
+ * A POOLED KEYED GROUP'S FINISHED MAP, TAKEN — ONE evaluation that both the drain and the `cap` read.
+ *
+ * A `reduced` collection's single site IS the finished map (`registerGrouping`), one row. Where that map can
+ * raise, the site must be EVALUATED whether or not a `cap` reads it (`drainRaisingSite`, `lower.ts`); a separate
+ * guard binding did that, and the `cap` then evaluated the whole map a second time — measured 2.6–3.4× the
+ * unkeyed barrier at 1k/8k. Here the drain IS the binding: a `snapshot` step that evaluates the map (so any
+ * raise fires there) and RETAINS it, and the site becomes a `Ref` to those rows, so a `cap` reads the one
+ * evaluation instead of re-deriving it.
+ *
+ * The map crosses the executor seam as JSON (`src/program.ts`), which fails closed on a BLOB, so the binding
+ * projects `json(map)` — TEXT, the column string-typed in transport — and the reader re-wraps it `jsonb`. Every
+ * value in the map rides inside its `{t,v}` envelope as JSON text, so a REAL keeps its class (`2.0` stays
+ * `2.0`; a bare transported number would not — `JSON.stringify(2.0)` is `'2'`). Retained rows are ONE row.
+ * `null` — not a single finished-map site, so the caller keeps the plain drain.
+ */
+export function takeFinishedMap(label: string, collections: Collections, fresh: Minter): Binding | null {
+  const collection = collections.get(label);
+  const site = collection?.sites.length === 1 ? collection.sites[0]! : undefined;
+  if (!collection || collection.of.kind !== 'reduced' || !site || site.pending || site.rel.channels.length) return null;
+  const [column, ...rest] = site.rel.type.cols;
+  if (!column || rest.length || column.name !== MAP_COL) return null;
+  const name = fresh('gm');
+  const taken = make.project({
+    id: fresh('gmt'), input: site.rel, channels: [], type: typeOf(meta(MAP_COL, 'text', column.nullable)),
+    exprs: [[MAP_COL, jsonOf(col(site.rel.id, MAP_COL))]],
+  });
+  const ref = make.ref({ id: fresh('r'), name, channels: [], type: taken.type });
+  const read = make.project({
+    id: fresh('gmr'), input: ref, channels: [], type: site.rel.type,
+    exprs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [col(ref.id, MAP_COL)] }]],
+  });
+  collections.set(label, { ...collection, sites: [{ ...site, rel: read }] });
+  return { name, node: taken, snapshot: true };
 }
 
 /** A site's relation NARROWED to the member columns, the site's own order and its barrier unit — all a reader of

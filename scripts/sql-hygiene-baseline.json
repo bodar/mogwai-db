@@ -84,9 +84,9 @@
     "bound": 0
   },
   "cap": {
-    "binds": 0,
-    "bytes": 10601,
-    "compiler": 327,
+    "binds": 1,
+    "bytes": 7320,
+    "compiler": 179,
     "bound": 0
   },
   "choose": {
