@@ -46,18 +46,24 @@ const unbounded = (r: Rel): boolean => rowBounds(r).max === Infinity;
 /**
  * A BARRIER: does this node read its WHOLE input before it yields its first row, however few of its own rows its
  * reader asks for? An aggregate, a sort and a window must see every input row to compute any output row, and a
- * materialization is a CTE SQLite computes in full on first read. The ONE list of blocking kinds: `exhaustsInput`
- * (what a failing probe reads per host row) and `readInFull` (how far a reader's demand reaches) both ask it. A
- * `distinct` is not one — SQLite streams it through an ephemeral index.
+ * FENCED materialization is an `AS MATERIALIZED` CTE SQLite computes in full on first read. An UNFENCED one is an
+ * ordinary CTE, which SQLite flattens into its reader (`copyRepeatsWork`, `src/rel/copies.ts`), so a `LIMIT` above
+ * it still stops early: it passes its reader's demand through like a projection. The ONE list of blocking kinds:
+ * `exhaustsInput` (what a failing probe reads per host row) and `readInFull` (how far a reader's demand reaches) both
+ * ask it. A `distinct` is not one — SQLite streams it through an ephemeral index.
  */
-export const readsInputInFull = (r: Rel): r is Extract<Rel, { kind: 'aggregate' | 'sort' | 'window' | 'materialize' }> =>
-  r.kind === 'aggregate' || r.kind === 'sort' || r.kind === 'window' || r.kind === 'materialize';
+export const readsInputInFull = (r: Rel): boolean => blockedInput(r) !== undefined;
+/** The input a barrier (`readsInputInFull`) reads in full, or `undefined` for any other node. */
+const blockedInput = (r: Rel): Rel | undefined =>
+  r.kind === 'aggregate' || r.kind === 'sort' || r.kind === 'window' || (r.kind === 'materialize' && r.fenced) ? r.input : undefined;
 
 /** Does this one node read ALL of an unbounded input before its first row (its inputs aside)? */
-const exhaustsInput = (r: Rel): boolean =>
-  (readsInputInFull(r) && unbounded(r.input))
+const exhaustsInput = (r: Rel): boolean => {
+  const blocked = blockedInput(r);
+  return (blocked !== undefined && unbounded(blocked))
   || (r.kind === 'filter' && r.input.kind !== 'scan' && unbounded(r.input))
   || (r.kind === 'join' && r.join !== 'left' && r.join !== 'cross' && unbounded(r.left));
+};
 
 /** The per-host work of a correlated plan — `PerHostWork`. */
 export const perHostWork: (plan: Rel) => PerHostWork = nodeFact((plan: Rel): PerHostWork => {
@@ -97,8 +103,8 @@ export const perHostWork: (plan: Rel) => PerHostWork = nodeFact((plan: Rel): Per
  *   - a recursive TERM is re-run per iteration: read in full (its seed takes the walk's own demand);
  *   - a join side re-read per row of the other side counts as read in full, unless that other side is at most one
  *     row: a semi/anti join's right side is an `EXISTS` correlated to each left row (`src/rel/emit.ts`), any other
- *     join's inner loop is re-scanned per outer row, and an unordered inner/cross join lets SQLite put either side
- *     inside.
+ *     join's inner loop is re-scanned per outer row, and an unordered INNER join lets SQLite put either side
+ *     inside (a `cross` join renders `CROSS JOIN`, SQLite's order fence, so its left stays the outer loop).
  *
  * `full` holds the relations read in full on EVERY path; `stopsEarly` (`'once'` only) the relations demanded
  * partially on every path, each evaluated once. A relation read both ways is in neither, and so is one no walk
@@ -121,13 +127,16 @@ export function readInFull(roots: readonly Rel[], mode: 'spine' | 'once', rootsI
     seen.add(r);
     if (again) full.add(r);
     if (once) subqueries(r).forEach((e) => visit(e.plan, e.kind === 'in-query', again || freeRelIds(e.plan).size > 0));
-    if (readsInputInFull(r)) { visit(r.input, true, again); return; }
+    const blocked = blockedInput(r);
+    if (blocked) { visit(blocked, true, again); return; }
     switch (r.kind) {
       case 'limit': visit(r.input, false, again); return;
       case 'join': {
         const perRowOf = (other: Rel): boolean => once && rowBounds(other).max > 1;
         const existence = r.join === 'semi' || r.join === 'anti';
-        const leftInside = !existence && r.join !== 'left' && !r.ordered && perRowOf(r.right);
+        // Only an unordered INNER join lets SQLite put the left side inside: a `cross` join renders `CROSS JOIN`
+        // (`src/rel/emit.ts`), SQLite's join-order fence, exactly as an `ordered` one does.
+        const leftInside = r.join === 'inner' && !r.ordered && perRowOf(r.right);
         visit(r.left, whole, again || leftInside);
         visit(r.right, whole && !existence, again || perRowOf(r.left));
         return;

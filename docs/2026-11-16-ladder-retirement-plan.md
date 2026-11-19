@@ -52,13 +52,11 @@ owner stopped it. From now on:
 
 ### A. Regressions this plan introduced (do first)
 
-- **V0 — make `src/rel/work.ts`'s `'once'` fact agree with the emitter.** A `cross` join is not reorderable (the emitter
-  renders it as `CROSS JOIN`, SQLite's order fence), and only a FENCED `materialize` reads its input in full. Fix the
-  fact, not a consumer; `test/rel-reader-demand.test.ts` currently pins the unfenced case wrong. Prerequisite for U3.
-- **U3 — the T2 fence spools a short-circuiting stream.** `copyRerunsBarrier` (`src/rel/copies.ts`) counts a range
-  `has()`'s `SELECT DISTINCT` seed as a barrier, so `g.V().has('age',gt(30)).both().values('name').limit(3)` went
-  near-constant → linear (4.7 → 53 ms at 64k; also `union(out(),in()).limit(2)`, `repeat(both()).times(3).limit(5)`).
-  Fence only where every reader reads in full (V0's fact). Re-measure after V0.
+- ✅ **V0 + U3 — LANDED.** `readsInputInFull` counts only a fenced `materialize` and a `cross` join keeps its left
+  outside; `name`'s fence for re-run work applies only to a shared relation in `readInFull(roots,'once').full`.
+  `has('age',gt(30)).both().values('name').limit(3)` is back to 2.9 ms at 64k (45 ms fenced). `repeat(both()).times(3)
+  .limit(5)` and `union(out(),in()).limit(2)` were never moved by the fence (measured equal before ec2db3de); the
+  latter's linear cost is pre-existing, filed in `outstanding-work.md` §1b.
 - **V1 — a keyed pooled group computes its pool once (regression from R5.2).** `keyedGroupTail` → `drainRaisingSite`
   rebuilds the finished map in a separate statement, so `g.V().group('a').by('city').by(values('age').sum()).cap('a')`
   is 2–4× its unkeyed twin (39.7 → 86.8 ms at 8k). Bind the finished map once and let the drain and the cap read it, in

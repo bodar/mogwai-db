@@ -692,6 +692,9 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   `a0 = jsonb_array(jsonb_object('k',3,'v',json(fd8.list)))` is projected onto every exploded member row,
   copying the whole list N times (`src/compiler/rel/list.ts`). Drop the history entry through the explode
   when nothing downstream reads it, or reference the folded row by key instead of copying the blob.
+- **`g.V().union(out(), in()).limit(2)` is linear, not constant (pre-existing).** 4.9 → 37 → 339 ms at
+  1k/8k/64k vertices, identical before ec2db3de and after U3, so not the shared-CTE fence; the cause (likely the
+  per-start arm order ahead of the `LIMIT`) is undiagnosed.
 
 ### Moved out of the ladder-retirement plan (2026-11-19, owner scope rule)
 

@@ -77,3 +77,36 @@ describe('the sql-hygiene rule sees a CTE evaluated twice', () => {
       .toEqual(['CTE r1 is evaluated 2 times — fence it']);
   });
 });
+
+// THE FENCE IS ONLY FOR A RELATION EVERY READER READS IN FULL (`readInFull(…, 'once')`, `src/rel/work.ts`). A range
+// `has()` seeds `both()` through a `SELECT DISTINCT` both directions share; under a `limit(n)` each direction stops at
+// its first rows, so an `AS MATERIALIZED` spool of the whole seed turned a near-constant paged read linear in the
+// graph (2.8 → 45 ms at 64k vertices). Read in full (`count()`), the same seed keeps its fence: re-running it per
+// reader would cost the whole relation twice.
+describe('a shared CTE its readers stop early in stays lazy', () => {
+  const store = treeGraph(200);
+  const materialized = (q: string): boolean => /AS MATERIALIZED/.test(planOf(store, q).sql);
+  const PAGED: readonly [string, number][] = [
+    ["g.V().has('age',gt(30)).both().values('age').limit(3)", 3],
+    ["g.V().has('age',gt(30)).both().both().values('age').limit(3)", 3],
+    ["g.V().has('age',gt(30)).both().limit(1)", 1],
+  ];
+  for (const [q, n] of PAGED) test(q, () => {
+    expect(materialized(q)).toBe(false);
+    expect(runWith(store, q).length).toBe(n);
+  });
+
+  test('read in full, the same shared seed stays fenced and evaluated once', () => {
+    const q = "g.V().has('age',gt(30)).both().count()";
+    const { sql, plan } = planOf(store, q);
+    expect(materialized(q)).toBe(true);
+    expect(reevaluatedCtes(sql, plan)).toEqual([]);
+  });
+
+  test('answers on the modern graph', () => {
+    const modern = seededStore();
+    // josh (32): marko, ripple, lop; peter (35): lop.
+    expect(Number(runWith(modern, "g.V().has('age',gt(30)).both().count()")[0].v)).toBe(4);
+    expect(runWith(modern, "g.V().has('age',gt(30)).both().values('name').limit(3)").length).toBe(3);
+  });
+});

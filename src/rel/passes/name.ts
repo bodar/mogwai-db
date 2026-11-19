@@ -6,6 +6,7 @@ import { relId } from '../types.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
 import { exprRels, forEachExpr, isSelfContained, relChildren, relExprs, rewriteRels } from '../walk.ts';
+import { readInFull } from '../work.ts';
 
 /**
  * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
@@ -129,13 +130,23 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
    *   twice per statement (two `CO-ROUTINE wk_…` sites in one plan). Fenced, it is one `MATERIALIZE` and
    *   each reader scans the temp table (or an automatic index on it).
    *
+   * The second reason holds only where EVERY reader reads the relation in full (`readInFull(roots, 'once').full`,
+   * `src/rel/work.ts`, the reader-demand fact). A fence spools the WHOLE relation before the first row; a reader
+   * that stops early — a `LIMIT`, an uncorrelated `EXISTS` — reads a flattened copy only as far as it needs, so two
+   * such copies cost two short reads, not two relations. `g.V().has('age', gt(30)).both().values('name').limit(3)`
+   * shares the range seek's `SELECT DISTINCT` between both directions: fenced it spooled every match and went
+   * near-constant → linear (2.8 → 45 ms at 64k vertices). A relation read both ways is not in `full` and stays
+   * lazy too. A draw fences whatever its demand: that is an answer, not a cost.
+   *
    * A walk bound under its own name is already one CTE in the `WITH RECURSIVE` list — SQLite cannot flatten
    * a recursive CTE — so it is never wrapped (the emitter renders a bound `Recursive` itself, not a
    * `Materialize` over one). `sql-hygiene` checks the outcome independently, from SQLite's own plan: no
    * named CTE evaluated twice in one statement.
    */
+  const demand = readInFull(roots, 'once');
   const fenced = (original: Rel, mapped: Rel): Rel =>
-    (counts.get(original) ?? 0) > 1 && original.kind !== 'recursive' && (draws(original) || copyRerunsBarrier(mapped))
+    (counts.get(original) ?? 0) > 1 && original.kind !== 'recursive'
+      && (draws(original) || (demand.full.has(original) && copyRerunsBarrier(mapped)))
       && !(mapped.kind === 'materialize' && mapped.fenced)
       ? materialize({ id: relId(`${original.id}_fence`), input: mapped, channels: mapped.channels, type: mapped.type, fenced: true })
       : mapped;

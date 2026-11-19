@@ -31,15 +31,27 @@ const spine = (root: Rel, inFull = true) => readInFull([root], 'spine', inFull);
 const once = (root: Rel, inFull = true) => readInFull([root], 'once', inFull);
 
 describe('the blocking kinds', () => {
-  test('an aggregate, sort, window and materialization read their input in full; a limit and a distinct do not', () => {
+  test('an aggregate, sort and FENCED materialization read their input in full; a limit does not', () => {
     const s = nodes();
     const kinds = [
       aggregate({ id: id('a'), input: s, channels, type: { cols: [int('id')] }, groupBy: [col(s.id, 'id')], aggs: [] }),
       sort({ id: id('s'), input: s, channels, type: s.type, terms: [{ expr: col(s.id, 'id'), dir: 'asc' }] }),
-      materialize({ id: id('m'), input: s, channels, type: s.type }),
+      materialize({ id: id('m'), input: s, channels, type: s.type, fenced: true }),
     ];
     for (const r of kinds) expect(readsInputInFull(r)).toBe(true);
     expect(readsInputInFull(first(s))).toBe(false);
+  });
+
+  test('an UNFENCED materialization is an ordinary CTE SQLite flattens: a LIMIT above it still stops early', () => {
+    const input = someNodes();
+    const cte = materialize({ id: id('m'), input, channels, type: input.type });
+    expect(readsInputInFull(cte)).toBe(false);
+    const root = firstOf(cte);
+    expect(once(root).stopsEarly.has(input)).toBe(true);
+    expect(spine(root).full.has(input)).toBe(false);
+    const fencedRoot = firstOf(materialize({ id: id('m'), input, channels, type: input.type, fenced: true }));
+    expect(once(fencedRoot).full.has(input)).toBe(true);
+    expect(spine(fencedRoot).full.has(input)).toBe(true);
   });
 });
 
@@ -142,6 +154,14 @@ describe('readInFull', () => {
     const ordered = join({ ...joined, id: id('j'), ordered: true } as Parameters<typeof join>[0]);
     expect(once(firstOf(ordered)).stopsEarly.has(left)).toBe(true);
     expect(once(firstOf(ordered)).full.has(right)).toBe(true);
+  });
+
+  test('a CROSS join keeps its left side outside (`CROSS JOIN` is SQLite\'s order fence): only the right is re-scanned', () => {
+    const left = someNodes(), right = someNodes();
+    const crossed = join({ id: id('j'), left, right, join: 'cross', channels, type: { cols: [int('id'), int('id2')] } } as Parameters<typeof join>[0]);
+    const demand = once(firstOf(crossed));
+    expect(demand.stopsEarly.has(left)).toBe(true);
+    expect(demand.full.has(right)).toBe(true);
   });
 
   test('a recursive SEED takes the walk\'s demand; its TERM is re-run per iteration, read in full', () => {
