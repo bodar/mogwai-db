@@ -174,6 +174,10 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
      path. Measure it on its own (`g.V().has('name',TextP.notContaining('harl')).count()` on air-routes) rather
      than copying the positive fix, which could pull the planner off the rowid seek.
 
+   **(3) LANDED (22b79ae5).** One schema line, `e_label ON edges(label)` (`src/storage.ts`, beside `vl_label`): a
+   root `E().hasLabel(x)` now `SEARCH`es `e_label` instead of scanning `e_in`, at the root and inside any body; no
+   lowering or emitted-SQL change. Reads 9–13× faster (air-routes `contains` count 1.64→0.117 ms); bulk load +3% at
+   8k edges. Pinned by `test/compiler/edge-label-seek.exec.test.ts`. Remaining for (3): nothing.
    **Before building (3):** measure its own cost to `addE` and to bulk load. It would be a fourth index on
    `edges`, and the doc gives its cost only by analogy to `e_pair`.
    _Original brief:_ survey for other simple structural splits (owner, 2026-11-19). Is there
@@ -254,8 +258,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 ## Next round
 
 - Order: 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
-  run is R4.6's sweep), then G1. Item 10's decided builds — (3) the `edges(label)` index and the `sql-plan.ts` alias fix ((5), the TextP
-  trigram probe, landed 73616a6b) — are independent of the ladder work and can be built at any point.
+  run is R4.6's sweep), then G1. Item 10's remaining decided build — the `sql-plan.ts` alias fix ((3), the `edges(label)` index, landed
+  22b79ae5; (5), the TextP trigram probe, landed 73616a6b) — is independent of the ladder work and can be built at any point.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
   - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
   - one shared test helper for "adjacency seek" plan assertions (`e_out` ↦ {`e_out`, `e_pair`}).
