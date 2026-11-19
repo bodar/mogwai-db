@@ -689,6 +689,15 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
 
 ### Moved out of the ladder-retirement plan (2026-11-19, owner scope rule)
 
+- **Round 11 (pre-existing, measured on trunk 6793d40a).**
+  - A value join after a re-source is quadratic:
+    `g.V().hasLabel('holder').values('age').as('a').V().hasLabel('person').has('age', __.select('a')).count()`
+    takes 439 ms at 1k and 29.5 s at 8k, with holders and persons scaled together (×67). The correlated seek in
+    `src/rel/passes/semijoin.ts` does not fire for this shape.
+  - A crossed run's filters are evaluated once per (host, vertex) pair:
+    `g.V().hasLabel('holder').V().hasLabel('person').has('age',1500).count()` takes 152 ms at 1k and 10.8 s at 8k
+    (×71). The SQL is `nodes CROSS JOIN (…) WHERE … EXISTS(…)`.
+
 Performance findings from ladder-retirement rounds 4–7 that are NOT regressions the plan introduced. Full text,
 witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100715c` (search the item id).
 
@@ -899,6 +908,11 @@ Beside the RelIR substrate:
   per-origin scope — thread the arm-minted origin through `mintTraverserMajor` (`lower/branch.ts`).
 
 ## 4. Sensible queries we decline
+
+- **A project body inside a union arm (union-project-group, depth gap, 2026-11-19 F2 review).**
+  `g.V().union(project('g').by(out().group().by(label).by(values('age').is(gt(30)).count(local))), constant(1))
+  .count()` declines with 'no lowering covers'. The same project answers when it sits under project, local, map,
+  flatMap, optional, coalesce or where, and inside a group value `by()`. This is pre-existing and a clean decline.
 
 - **A per-row TYPED NODE through the per-traverser rejoin (typednode-rejoin, depth gap)** — a body ending on
   `unfold()` over a MIXED-member collection (`typedNode` framing) under `local`/`map`/`flatMap` declines at
@@ -1260,6 +1274,19 @@ Beside the RelIR substrate:
 
 ## 6. Internal debt
 
+- **`scripts/sql-plan.ts`'s base-scan gate cannot fire** (2026-11-19, S2). It matches the word after `SCAN`
+  against table names, but the RelIR emitter writes aliases there (`SCAN re USING COVERING INDEX e_in`,
+  `SCAN rfs0`). So a plan that regresses to a full scan passes silently. Map each alias to its table; the S2
+  survey's map is the fix.
+- **A far-endpoint `hasId` is not pushed into the edge seek's `tgt`** (2026-11-19, S1 review).
+  `g.V(2).outE().where(inV().hasId(4)).count()` and `g.V(2).out().hasId(4).count()` plan `e_pair (src=?)` rather
+  than the `(src=? AND tgt=?)` prefix, so a hub source reads its whole out-neighbourhood. Trunk before S1 did the
+  same through `e_out`.
+- **A drawing body whose prefix does not depend on the origin still pays scope × candidates** (R4.5 review; linear,
+  not super-linear). `map(__.V().hasLabel('software').order().by('age').sample(1))` takes 1.8 s at 1k hosts and
+  13.0 s at 8k. `limit(5)`, `dedup()` and `order().by(shuffle)` prefixes behave the same. Such a prefix could be
+  lowered once and then drawn with the counting pick.
+
 - **Identity-reprojection idiom ~43×** in `src/compiler/rel/**`, `src/rel/**` — add an override-aware
   `carriedExprs(channels, sourceId, overrides?)` and a `from` on `withPayload`; migrate.
 - **`OwnerSeek` DISTINCT tail ×3** in `src/rel/passes/semijoin.ts` — extract `distinctOwners`.
@@ -1407,6 +1434,17 @@ Beside the RelIR substrate:
 
 Proposals from the 2026-11-03 reuse sweep, each answer-neutral unless it says otherwise. Order matters only
 where stated.
+
+- **mergeE: fold the labelled both-endpoint seek arm into the unlabelled one (2026-11-19, after S1).** In
+  `src/compiler/rel/write.ts`, `endpointSeek` loses its `label` parameter and its correlated `labelId()` subquery,
+  and `mergeEFromMap` loses one of its four `seekedSearch` arms. `e_pair(src,tgt)` now makes the unlabelled pair one
+  seek, and `allMatch`'s `labelOk` already checks the label for each candidate, so answers cannot change. About 10
+  lines. Measure first: N labelled re-upserts out of one hub at 1k and 8k should stay about linear (use the
+  walk-condition-hub-scale pattern).
+- **One "adjacency seek" plan-assertion helper (2026-11-19, after S1).** `usesEdgeIndex` in
+  `test/performance.test.ts` and `plainSeeks` in `test/compiler/both-frontier-once.exec.test.ts` each accept
+  `e_out`-or-`e_pair` by hand. Put the fact that maps an index to its accepted set into `test/support` once, so the
+  next index change is a single edit.
 
 - **Landed: a per-traverser child body INSIDE a child body (§3.8).** `valueRun`/`scalarChild` take a
   `local`/`map`/`flatMap` step (`nestedHostChild`), and `flatMapRejoin` composes under an enclosing origin

@@ -1,7 +1,9 @@
 # Retiring the correlated-child ladder
 
-_Status: IN PROGRESS. Round 10 (2026-11-19) landed F1 and R4.2. Owner then answered U1 (→ S1/S2) and R4.5 (A),
-raised the regression bar to 2×, and added G1.
+_Status: IN PROGRESS. Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
+R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers (see 6a–6c). So R7 and G1 were
+deferred. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
+added G1.
 Trimmed hard 2026-11-19 after round 9 (owner request). The full record — every round,
 measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, round 8–9 at `11378285`.
 Nothing below depends on it._
@@ -42,11 +44,12 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
   `src/compiler/rel/lower/per-traverser.ts` alone. `group` is `LADDERLESS` and its dead ladder arms are deleted.
 - **Ladder-only answers in the corpus: 0** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`).
   R4.2 (ae0fadb7) closed the last 5. **R7 is NOT yet unblocked**: L9 counts corpus traversals only, so it cannot see
-  (i) bodies that draw over a re-source (`ladderOwns`, R4.5) or (ii) ladder-only answers outside the corpus (R4.6).
-  Both must be closed, or kept as a named non-ladder route, first.
+  bodies that draw over a re-source (`ladderOwns`). **The one blocker left is R4.5, and it now waits on 6a and
+  6b.** R4.6 (the sweep outside the corpus) is merged into R7: the deletion's own suite run is the sweep.
 - Landed: R0–R3, R4.1/R4.3/R4.4, R5.1–R5.5, R6 side effects, pooled keyed `group('a')` in arms/bodies (95334eb3);
   regressions/wrong answers V0+U3 (911eef32), V1 (77eb86cb, b09dee81), V2 (33356b80), V3 (75ad576d),
-  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); F2 exact depth bag (34674e92); R4.2 (ae0fadb7).
+  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); F2 exact depth bag (34674e92); R4.2 (ae0fadb7);
+  S1 `e_pair` index, `edgePair` pass deleted (6793d40a); S2 survey, report only (39a8f01a).
 
 ## Remaining work, in order
 
@@ -64,10 +67,66 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    Corpus ladder-only answers went 5 → 0. Remains: P1.
 5. ~~P1~~ **DROPPED (owner, 2026-11-19).** R4.2's 1.31× / 1.37× slowdowns are linear and inside the new 2× bar.
    P1a (an exclusive-arm bound in `bounds.ts`) is not built for it; one §1b line if not already filed.
-6. **R4.5 — a body that draws over a re-source (`ladderOwns`). DECIDED (owner, 2026-11-19): (A).** The connector
-   owns it (decorrelated per scope row, like every other drawing body) and `ladderOwns` is deleted. Witness:
-   `g.V().hasLabel('person').local(__.V().hasLabel('software').sample(1))` — one independent pick per person.
-7. **R4.6 — find ladder-only answers OUTSIDE the corpus.** This is a shared prerequisite for R7 and has the same
+6. **6a–6c share ONE root cause.** On the parked branch, the connector's drawing pick (`reSourcedOnce`,
+   `drawnPerOrigin` and `pickAt` in `src/compiler/rel/lower/reduction.ts`) has two limits. It recognises a draw
+   only in a narrow literal spelling, and it refuses an input that carries a path or sack channel. Every miss
+   falls to the scope × read fold. Trunk declined these shapes through `ladderOwns`. With `ladderOwns` deleted
+   they become reachable and run quadratic, or they lose answers the ladder gave. So the substrate comes first
+   (6a, 6b), then R4.5 lands again (6c).
+
+   6a. **R4.5a — carry the origin's PATH and SACK channels across the re-source cross and the pick** (before 6c).
+   Do it the way the plain re-source cross already carries them, instead of refusing them in `drawsOver`. This
+   fixes blocker 1 and restores the lost answers below.
+   - Blocker 1 (79×, newly reachable): `g.V().hasLabel('holder').as('h').map(__.V().hasLabel('person').order()
+     .by(shuffle).limit(1)).path().count()` takes 1,658 ms at N=1k and 131,226 ms at N=8k (26 / 32 ms without
+     `path()`). Same class: `g.withSack(1).V().hasLabel('holder').map(__.V().hasLabel('person').order()
+     .by(shuffle).limit(1)).sack().sum()`. Trunk 03920cc8 declined both at once with the shared-draw message.
+   - Lost answers. Trunk answered these through the ladder; the parked commit declines them with 'a V()/E()
+     inside local() on a traverser whose path is tracked': `g.V().local(__.V().sample(1)).path().count()`,
+     `g.V().as('a').local(__.V().sample(1)).path().count()`, `g.V().local(__.V().hasLabel('software').sample(2))
+     .path().count()`, `g.V().out().local(__.V().sample(1)).path().count()`, `g.V().local(__.V().sample(1))
+     .path().by('name')`, `g.V().local(__.V().sample(1)).simplePath().count()`,
+     `g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).path().count()`. They were quadratic on
+     trunk too (454 ms → 31.7 s), so once the channels are carried the bar is linear. A non-drawing
+     `local(__.V()…).path()` declines on trunk for the same reason, and this item should fix it too.
+
+   6b. **R4.5b — the pick is a FACT, not a list of spellings** (before 6c). `pickAt` is a lookahead peephole: it
+   matches `order().by(shuffle)` followed by a literal `limit(1)`, `range(0,1)` or `tail(1)`. Replace it with a
+   rule: a RANDOM-collation sort that feeds a slice of cardinality 1. That can be a `Sort(RANDOM)` + `Limit 1` rel
+   shape, or a canonicalizing pass gated on the unit-bulk fact (shuffle is unweighted, `sample` weights by bulk).
+   Read the slice bound from a bound GValue at plan time, the last responsible moment. When n ≠ 1, keep rankPairs.
+   - Blocker 2 (69×, newly reachable): `g.V().hasLabel('holder').map(__.V().hasLabel('person').order()
+     .by(shuffle).limit(x)).count()` with `{x:1}` takes 1,107 ms at N=1k and 75,939 ms at N=8k. The literal
+     `limit(1)` takes 26 / 32 ms. Sending a limit as a parameter is the normal TinkerPop 4 idiom, so this shape
+     has to work.
+
+   6c. **R4.5 — a body that draws over a re-source (`ladderOwns`). DECIDED (owner, 2026-11-19): (A). PARKED in
+   round 11.** The connector owns it (decorrelated per scope row, like every other drawing body) and `ladderOwns`
+   is deleted. Witness: `g.V().hasLabel('person').local(__.V().hasLabel('software').sample(1))`, one independent
+   pick per person. **Resume point:** branch `wf/r4-5-connector-draw-over-resource-1-4` (4a5a40aa; earlier
+   attempts `-1-0` d06e2a6d, `-1-2` 1cf7a9f1, `-1-3` 9702c97d). Rebase it onto 6a and 6b. When it lands again it
+   must also do the following.
+   - **Keep the specific decline reason.** With `ladderOwns` gone, a draw the connector cannot lower gets only
+     'no lowering covers <query>'. Trunk said 'a random draw (sample/coin/shuffle) inside a V()/E() body is not
+     supported where the body may run for more than one traverser…'. Witnesses: `g.V().map(__.V().coin(0.5)
+     .count())`, `g.V().local(__.V().coin(0.5).count())`, `g.V().where(__.V().coin(0.5))`,
+     `g.V().hasLabel('person').local(__.V().hasLabel('software').coin(1.0)).count()`,
+     `g.V().local(__.V().sample(1).by('age'))`, `g.V().hasLabel('holder').map(__.V().hasLabel('person').fold()
+     .sample(local,1)).count()`. Restore the `decline-reasons.exec.test.ts` assertions the branch deleted. Either
+     the fold records the reason, or coin goes through the same per-scope keyed draw that sample uses.
+   - **Keep one filter-fusion authority.** The branch's new loop in `reSource` (`src/compiler/rel/lower/movement.ts`)
+     copies `lowerChainOf`'s PHASE-1 loop (`src/compiler/rel/lower.ts`). Make one helper,
+     `fuseSourceFilters(steps, from, seeded, ctx, stop)`. The copy fuses only under `encounterOf(input.channels)`,
+     so that a `has(k, select(…))` pair stays visible to `src/rel/passes/semijoin.ts`. That guard becomes a
+     parameter of the helper, not a second authority.
+   - **Add scale tests for the fall-through**, at 1k and 8k: `local(__.V().hasLabel('person').order().by('age')
+     .limit(5).sample(1))` and `map(__.V()…sample(1)).path()`. Today only the counting-pick shape is timed.
+   - **Do not land the branch's claim** (in `src/compiler/CLAUDE.md` and the `crossedRun` comment) that, with no
+     position window, a run's filters "stay in the product, where SQLite pushes them". Measured false:
+     `g.V().hasLabel('holder').V().hasLabel('person').has('age',1500).count()` takes 152 ms at 1k and 10,801 ms at
+     8k (71×). This is pre-existing; it is filed in outstanding-work §1b.
+7. **R4.6 — find ladder-only answers OUTSIDE the corpus. MERGED INTO R7 (round 11):** the deletion's suite run is
+   this sweep, so it is not built on its own. The text below is what that run must check. This is a shared prerequisite for R7 and has the same
    root cause as R4.5: L9's pool is only the corpus. Run a one-off `MOGWAI_CONNECTOR_ONLY=1 mise run test` sweep and
    compare each extra decline against default mode. A real lost answer becomes its own item before R7; anything
    else gets a §4 line. Known witness, from the R4.2 review, on CREW:
@@ -79,7 +138,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    **Owner (2026-11-19): run the sweep. A WRONG answer is fixed (or, if the fix is not small, turned into a clean
    decline). A LOST answer is fixed if small, else accepted as a decline with a §4 line — it does not block R7.
    A slowdown inside 2× does not block R7.**
-8. **R7 — delete the switch.** After R4.5 (A) lands and R4.6's sweep shows no wrong answers (owner: get rid of the
+8. **R7 — delete the switch. DEFERRED in round 11; it now waits only on 6c (F2 landed).** R4.6 is merged into R7.
+   After R4.5 (A) lands and R4.6's sweep shows no wrong answers (owner: get rid of the
    ladder; a small regression or a deferred lost answer is acceptable). Then delete `correlatedChild` and its readers, L5's per-switch entry, and
    `FastPathConfig.connectorOnly` (connector-only becomes the only mode). L9's connector-only ratchet becomes the
    ordinary coverage ratchet, and F1's `agreed()` ladder half goes. Update root `CLAUDE.md` decision 6 and
@@ -88,12 +148,29 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    keep the pass, so the winner is an `e_pair(src, tgt)` index (`src/storage.ts`) whose prefix IS the label-free
    probe — one seek SQLite's own planner picks; `edgePair` (`src/rel/passes/edge-pair.ts`) is deleted. Re-timed (ms
    at 8×): 300 labels 779 → 16.0, `repeat(both()).times(2).where(…)` 54769 → 1267, air-routes 2986 → 684,
-   grateful-dead 1338 → 869; bulk load +7–11%. Remains: nothing.
+   grateful-dead 1338 → 869; bulk load +7–11%. Writes stay inside 2× (bulk addE 65 → 101 ms; 300 labelled mergeE
+   3842 → 5403 ms at 8k). Remains: two cheap follow-ups.
+   - (a) Stale prose still names only `e_out`/`e_in`, but SQLite now also picks `e_pair (src=?)` for an unlabelled
+     `out()` seek. Fix `scripts/sql-plan.ts:12`, `src/sql/schema.ts:19` and `src/compiler/rel/lower/movement.ts:319`.
+   - (b) The new 300-label test in `walk-condition-hub-scale.exec.test.ts` asserts a wall-clock ratio below 2× on
+     ~16 ms queries, which can flake on CI. Drop the ratio: the answer check and `expectLinear` already pin the
+     behaviour.
 10. ✅ **S2 — LANDED (39a8f01a), report only; nothing built.** Survey (below) of every `src/storage.ts` table/index
    against the emitted shapes. Remains — **owner decision:** build candidate 3 (the `edges(label)` index, one line of
    schema) and candidate 5 (the TextP full-text probe fix in `src/rel/passes/semijoin.ts`)? Optionally also fix the
    alias blindness in `scripts/sql-plan.ts`. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are
    not recommended now.
+   **Before building (5), from review:**
+   - (a) A TextP argument can be a user parameter, so the probe pattern must be the expression `'%' || ? || '%'`,
+     not a literal built at compile time.
+   - (b) The trigram index seeks only for a literal of 3 or more characters, so `containing('ab')` still scans.
+     The 32–230× win applies only to literals of 3+ characters.
+   - (c) `negativeOwners` ties `property_fts` to each candidate by rowid, which is a per-row seek, not the trigram
+     path. Measure it on its own (`g.V().has('name',TextP.notContaining('harl')).count()` on air-routes) rather
+     than copying the positive fix, which could pull the planner off the rowid seek.
+
+   **Before building (3):** measure its own cost to `addE` and to bulk load. It would be a fourth index on
+   `edges`, and the doc gives its cost only by analogy to `e_pair`.
    _Original brief:_ survey for other simple structural splits (owner, 2026-11-19). Is there
    another cheap schema split that halves (or better) what an index seek or scan reads — more schema in exchange for
    leaning harder on SQLite? Check every table and index in `src/storage.ts` against the shapes the lowering
@@ -158,7 +235,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    gt(0.5)))` 1.53→13.6 (×8.8), `has('person','city','golf').out('knows').has('name',containing('elta'))`
    0.33→2.7 (×8.1) — all linear. **Owner decides**: (3) and (5) are each small and ≥9×; (1) and (2) are not
    worth building now.
-11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19).** NOT a blanket "remove what only
+11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19). DEFERRED in round 11; it waits on 6c
+   and R7** (S1 landed), so it weighs the code as it stands once the ladder is gone. NOT a blanket "remove what only
    got us under 1.3×". For each change this plan made for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2
    33356b80, V3 75ad576d, V5 b600fc15, T1 1274c293), weigh the measured win against the code complexity it added:
    - It made the code simpler or no more complex, or bought a large win (e.g. well below the pre-change cost, or a
@@ -170,6 +248,16 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Next round
 
+- Order: 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
+  run is R4.6's sweep), then G1. Item 10's owner decision can be built at any point.
+- Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
+  - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
+  - one shared test helper for "adjacency seek" plan assertions (`e_out` ↦ {`e_out`, `e_pair`}).
+- Round 11 follow-ups outside this plan's scope went to outstanding-work:
+  - §4: `union(project().by(…group…count(local)), constant(1))` declines;
+  - §1b: a value join after a re-source is ×67, and a crossed run's filters are not pushed (×71);
+  - §6: `sql-plan.ts` cannot see a full scan; a far-endpoint `hasId` is not pushed into `e_pair`'s `tgt`; a
+    drawing body whose prefix does not depend on the origin still pays scope × candidates.
 - The reuse-sweep proposal (gate `map()`'s two correlated first-row forms in `firstInnerOver` on `rowResident`, not
   `framingCols`) is filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4.
 - This round's depth gaps were already present and are not ladder-only, so they went to outstanding-work §4.
@@ -183,5 +271,10 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Owner questions (open)
 
-None. R4.5-Q (A; sweep yes; regressions inside 2× accepted) and U1-Q (schema split S1, plus survey S2) were answered
+- **S2 (item 10), verbatim:** "Owner decision: build candidate 3 (the edges(label) index, one line of schema) and
+  candidate 5 (the TextP full-text probe fix in src/rel/passes/semijoin.ts)? Optionally also fix the alias
+  blindness in scripts/sql-plan.ts. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are not
+  recommended now."
+
+R4.5-Q (A; sweep yes; regressions inside 2× accepted) and U1-Q (schema split S1, plus survey S2) were answered
 2026-11-19 and are written into their items.
