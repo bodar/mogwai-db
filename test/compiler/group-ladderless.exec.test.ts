@@ -76,6 +76,30 @@ describe('group() — a local reducer in the value by() is per traverser, not po
     expect(entries(agreed("g.V().group().by(id).by(local(out().fold()).count(local))")[0]!))
       .toEqual({ 1: 3, 2: 0, 3: 0, 4: 2, 5: 0, 6: 1 });
   });
+  // `values('name').count(local)` is not a ValueTraversal, so `convertValueTraversal` appends NO fold (Grouping.java:92)
+  // and, with no barrier, GroupStep ASSIGNS the value traversal's first answer per traverser
+  // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:123-126):
+  // a traverser whose body is empty puts nothing, so a key none of whose members is productive never appears.
+  // Asserted on the plain `run` too, independent of the switch comparison in `agreed`.
+  test('a per-traverser count(local) answers 1 per productive key, and an unproductive key is absent', () => {
+    const keyedBySelect = "g.V().as('a').out().group().by(select('a').values('name')).by(values('name').count(local))";
+    expect(entries(answer(keyedBySelect)[0]!)).toEqual({ josh: 1, marko: 1, peter: 1 });
+    expect(entries(agreed(keyedBySelect)[0]!)).toEqual({ josh: 1, marko: 1, peter: 1 });
+    const filtered = "g.V().group().by(label).by(values('age').is(gt(30)).count(local))";
+    expect(entries(answer(filtered)[0]!)).toEqual({ person: 1 });
+    expect(entries(agreed(filtered)[0]!)).toEqual({ person: 1 });
+  });
+  test('the same per-traverser value at depth — local, project().by(), where(), group(\'x\')…cap', () => {
+    const perVertex = answer("g.V().local(as('a').out().group().by(select('a').values('name')).by(values('name').count(local)))");
+    expect(bagOf(perVertex.map((r) => JSON.stringify(entries(r)))))
+      .toEqual(bagOf(['{}', '{}', '{}', '{"marko":1}', '{"josh":1}', '{"peter":1}']));
+    const projected = answer("g.V().project('g').by(out().group().by(label).by(values('age').is(gt(30)).count(local)))");
+    expect(projected).toHaveLength(6);
+    expect(projected.filter((r) => r.includes('person'))).toHaveLength(1);
+    expect(agreed("g.V().where(group().by(label).by(values('age').is(gt(30)).count(local)).select('person').is(1)).values('name')"))
+      .toEqual(bagOf(['"josh"', '"peter"']));
+    expect(entries(agreed("g.V().group('x').by(label).by(values('age').is(gt(30)).count(local)).cap('x')")[0]!)).toEqual({ person: 1 });
+  });
   test('a local reader over a list-valued property splits the member\'s own list', () => {
     const listStore = storeSeededWith(["g.addV('x').property('name','a').property('l',[3,1,3])"]);
     const one = (q: string) => entries(JSON.stringify((bare(runWith(listStore, q)) as any[])[0].map));
