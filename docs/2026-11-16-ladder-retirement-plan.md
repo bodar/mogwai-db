@@ -92,7 +92,7 @@ owner stopped it. From now on:
   a body reads them. The two-site arm cases must keep answering (why the pool exists). While there:
   `keyedPooledGroup` builds the whole reduction only to test `mayRaise`, and the reader builds it again — decide "can
   raise" from the value body.
-- ✅ **V4 — LANDED: it was a WRONG answer, not a lost one.** A `Scope.local` reducer ending a group value `by()`
+- ✅ **V4 — LANDED (1ef9b707): it was a WRONG answer, not a lost one.** A `Scope.local` reducer ending a group value `by()`
   (`by(values('name').count(local))`, `by(values('age').sum(local))`) reached `groupRows`' pooled arm by step NAME
   and answered the key's total (`person:4`, `person:123`); a local reducer is a `MapStep`, so the body has no barrier
   and the reference assigns per traverser (`person:1`, one member's age). The arm is now gated on `reducesPool`
@@ -117,7 +117,7 @@ owner stopped it. From now on:
   witness `union(group('a').by(label).by(count()), out()).cap('a')` is refused for a reason outside this item — a
   `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
   ladder reach at 0, `group` joined `LADDERLESS` — ✅ LANDED (2a94fda9; owner Q3a margins accepted; `LADDERLESS`
-  in `scoped.ts`, the witness answers in every mode). Remains: R5.5 (the code was not deleted); V4 landed (a wrong answer, not a lost one).
+  in `scoped.ts`, the witness answers in every mode). Remains: R5.5 (the code was not deleted); V4 landed (1ef9b707; a wrong answer, not a lost one). V4 remains: nothing.
 - **R5.5 — actually delete the group ladder code (follow-up to 2a94fda9, major).** The commit and
   `docs/2026-11-15-compositional-coverage-plan.md` §3 say `groupReduced`/`groupCollected` are "still served by the
   PROPERTY host, e.g. `g.V().properties().group().by(key).by(count())`". False: hit counters at their entries read 0
