@@ -52,7 +52,7 @@ owner stopped it. From now on:
 
 ### A. Regressions this plan introduced (do first)
 
-- ✅ **V0 + U3 — LANDED.** `readsInputInFull` counts only a fenced `materialize` and a `cross` join keeps its left
+- ✅ **V0 + U3 — LANDED (911eef32).** Remains: nothing. `readsInputInFull` counts only a fenced `materialize` and a `cross` join keeps its left
   outside; `name`'s fence for re-run work applies only to a shared relation in `readInFull(roots,'once').full`.
   `has('age',gt(30)).both().values('name').limit(3)` is back to 2.9 ms at 64k (45 ms fenced). `repeat(both()).times(3)
   .limit(5)` and `union(out(),in()).limit(2)` were never moved by the fence (measured equal before ec2db3de); the
