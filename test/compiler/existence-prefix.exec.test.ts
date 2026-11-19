@@ -9,7 +9,7 @@ import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { isNested, parseGremlin, stepChain, type Step } from '../../src/gremlin/frontend.ts';
 import { runPasses, EMPTY_STRATEGY_USE } from '../../src/compiler/ir/passes.ts';
 import { existencePrefix } from '../../src/compiler/ir/productivity.ts';
-import { bagOf, bare, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, bare, grouped, runWith, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
 const CONNECTOR_ONLY = { fastPaths: { connectorOnly: true } } as const;
@@ -234,28 +234,39 @@ describe('a write in a non-filter child body declines, naming the write, the hos
         expect(message, q).not.toContain('a write');
       }
   });
-  // ONE raiser (`keyedBody`) reading ONE carrier (the body's fork, `refuseSite`): the explanation is the same under
-  // every switch position, the connector alone included — it does not depend on which route reached the group().
-  for (const [q, host, pool] of [
-    ["g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')", 'sideEffect', 'count'],
-    ["g.V().local(out().group('x').by('name').by(count())).cap('x')", 'local', 'count'],
-    ["g.V().sideEffect(out().group('x').by('name').by(values('age').sum())).cap('x')", 'sideEffect', 'sum'],
-    ["g.V().optional(out().group('x').by('name').by(out().fold())).cap('x')", 'optional', 'fold'],
-    // nested: the innermost body's host is the one named
-    ["g.V().sideEffect(local(out().group('x').by('name').by(count()))).cap('x')", 'local', 'count'],
+  // A keyed group() whose value by() POOLS registers the pool's MEMBERS, so a child body's site is keyed per host
+  // row like any collector's and the one reduction runs at the cap (`PoolRecipe`, src/compiler/rel/collection.ts).
+  // Every switch position answers the same, nested hosts included.
+  for (const [q, expected] of [
+    ["g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')", { josh: 1, lop: 3, ripple: 1, vadas: 1 }],
+    ["g.V().local(out().group('x').by('name').by(count())).cap('x')", { josh: 1, lop: 3, ripple: 1, vadas: 1 }],
+    ["g.V().sideEffect(local(out().group('x').by('name').by(count()))).cap('x')", { josh: 1, lop: 3, ripple: 1, vadas: 1 }],
+    // the seed per key: lop's three members reach nothing, and fold() over an empty pool is []
+    ["g.V().optional(out().group('x').by('name').by(out().values('name').fold())).cap('x')",
+      { josh: ['lop', 'ripple'], lop: [], ripple: [], vadas: [] }],
+    // a bare fold() is the traverser-collect, not a pool
+    ["g.V().sideEffect(out().group('x').by('name').by(values('name').fold())).cap('x')",
+      { josh: ['josh'], lop: ['lop', 'lop', 'lop'], ripple: ['ripple'], vadas: ['vadas'] }],
   ] as const) {
-    test(`a keyed group() with a reducing value by() in a child body names the collection and why: ${q}`, () => {
-      const message = declined(q);
-      expect(message).toContain(`a side effect ('x') collected inside ${host}() is not supported in this form yet`);
-      expect(message).toContain(`a group() value by() that reduces or folds, here ${pool}()`);
-      expect(declined(q, LADDER_FIRST)).toBe(message);
-      expect(declined(q, CONNECTOR_ONLY)).toBe(message);
+    test(`a keyed group() with a reducing value by() in a child body answers: ${q}`, () => {
+      const sorted = (map: Record<string, unknown>) =>
+        Object.fromEntries(Object.entries(map).map(([k, v]) => [k, Array.isArray(v) ? [...v].sort() : v]));
+      const ours = sorted(grouped(runWith(seededStore(), q)));
+      expect(ours).toEqual(expected as Record<string, unknown>);
+      expect(sorted(grouped(runWith(seededStore(), q, LADDER_FIRST as never)))).toEqual(ours);
+      expect(sorted(grouped(runWith(seededStore(), q, CONNECTOR_ONLY as never)))).toEqual(ours);
     });
   }
-  test('a keyed group() whose value by() is a bare fold() is not blamed on pooling', () => {
-    // the default answers it (the traverser-collect); the connector alone declines it for another reason
-    expect(declined("g.V().sideEffect(out().group('x').by('name').by(fold())).cap('x')", CONNECTOR_ONLY))
-      .not.toContain('reduces or folds');
+  // A pool whose reduction can RAISE (a `sum()`'s narrowing overflow) is evaluated where it is collected, so its
+  // drain is the finished map (`takeFinishedMap`) — one map per body, which cannot key per host row. ONE raiser
+  // (`keyedBody`) reading ONE carrier (the body's fork, `refuseSite`): the same explanation under every switch.
+  test("a keyed group() whose pooled value can raise names the collection and why, in a child body", () => {
+    const q = "g.V().sideEffect(out().group('x').by('name').by(values('age').sum())).cap('x')";
+    const message = declined(q);
+    expect(message).toContain("a side effect ('x') collected inside sideEffect() is not supported in this form yet");
+    expect(message).toContain('a group() value by() that reduces or folds, here sum()');
+    expect(declined(q, LADDER_FIRST)).toBe(message);
+    expect(declined(q, CONNECTOR_ONLY)).toBe(message);
   });
   test('a write that lowers inside its host answers, with no hint', () => {
     expect(bare(runWith(seededStore(), "g.V().has('person','name','marko').union(addV('x')).count()"))).toEqual([{ v: 1 }]);

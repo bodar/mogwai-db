@@ -16,7 +16,7 @@ import { foldElements, foldScalars, LIST_COL, NODE_COL } from './list.ts';
 import { inferredVtype } from './tag.ts';
 import { carriedCols, collectedArray, eq, jsonOf, meta, rowNumberWindow, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
-import { groupMap, groupRowCols, KEY_COL, MAP_COL, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
+import { groupMap, groupRowCols, KEY_COL, MAP_COL, ORD_COL, sameGroupRecipe, type GroupedMap, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, COLLECTION_OPS, seededLeftFold } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
@@ -290,6 +290,15 @@ export type Members =
    */
   | { readonly kind: 'reduced'; readonly framing: RelFraming }
   /**
+   * A POOLED keyed grouping's MEMBERS — `group("a").by(k).by(<value with a barrier>)`, whose value pools every
+   * member of a key up to the barrier and reduces the pool once (`Grouping.java:74-125`). The sites hold the
+   * MEMBERS (each traverser beside its key and the key's equality terms), so N sites — two branch arms, a body's
+   * site keyed per host row — are a `UNION ALL` of members like any other collection, and the reader runs the
+   * ONE reduction over all of them (`PoolRecipe`). `reduced` remains only for a pool whose reduction can RAISE
+   * (its drain must evaluate the finished map, `takeFinishedMap`) and for the host's own pooled arms (`map.ts`).
+   */
+  | { readonly kind: 'pooled'; readonly pool: PoolRecipe }
+  /**
    * MIXED MEMBER SHAPES — sites contributing different KINDS into one label (a vertex site beside an
    * edge site, an element beside a value). The member-level tagged union one level BELOW the
    * stream-level variant (`variant.ts`): where that discriminates a per-ROW shape, this discriminates a
@@ -302,6 +311,23 @@ export type Members =
    * member vocabulary, carried so `cap("a").unfold()` can declare the right VARIANT arms.
    */
   | { readonly kind: 'mixed'; readonly arms: readonly MixedArm[] };
+
+/**
+ * HOW A POOL BECOMES A MAP — the reduction a `pooled` collection's reader runs over its members.
+ *
+ * The reduction is the VALUE TRAVERSAL itself, lowered over one key's pool (`pooledGroupMap`, `lower/scoped.ts`),
+ * so unlike `GroupRecipe` it is not data a reader here could interpret: `reduce` is the site's own lowering,
+ * handed the members relation (one site's, or the `UNION ALL` of several) and the columns that order it. What
+ * makes two sites ONE grouping is still decided on DATA — `identity` spells the step's key and value `by()`s and
+ * the member layout, and sites whose identities differ decline rather than being reduced by the first site's
+ * recipe (`accumulate`).
+ */
+export interface PoolRecipe {
+  readonly identity: string;
+  /** The member relation's columns — the traverser's own, its key node, its key's equality terms. */
+  readonly cols: readonly string[];
+  readonly reduce: (members: Rel, order: readonly string[], fresh: Minter) => GroupedMap | null;
+}
 
 /** The registry a chain carries — MUTABLE, because a side effect is chain-global state written at one
  *  step and read at another, which is the one thing a fold's return value cannot carry backwards. */
@@ -545,6 +571,10 @@ function accumulate(held: Collection, added: Collection, source: GraphSource, fr
   // (`sameGroupRecipe`, `map.ts`), or a plausibly-wrong map results; a pooled `reduced` has no member
   // rows for a second site to union onto. Both decline rather than going mixed.
   if (held.of.kind === 'reduced' || added.of.kind === 'reduced') return null;
+  // Two POOLED sites are one grouping only where they are the same grouping over the same member layout.
+  if (held.of.kind === 'pooled' || added.of.kind === 'pooled')
+    return held.of.kind === 'pooled' && added.of.kind === 'pooled' && held.of.pool.identity === added.of.pool.identity
+      ? { sites, of: held.of, merge } : null;
   if (held.of.kind === 'grouped' || added.of.kind === 'grouped')
     return held.of.kind === 'grouped' && added.of.kind === 'grouped'
       && sameGroupRecipe(held.of.recipe, added.of.recipe) ? { sites, of: held.of, merge } : null;
@@ -681,10 +711,17 @@ export function registerGrouping(
   // no `go` column at all (`groupRowCols`), and a count is order-free by construction. Naming a column
   // the site does not have is what `accumulated` would then project, and the checker catches it.
   //
-  // A POOLED value registers its FINISHED map instead, and `accumulate` then refuses a second site: the
-  // group's members' child rows pool and the barrier reduces the pool once, so there is no
-  // `(key, contribution)` row a union could take. See the `reduced` arm.
-  let added: Collection = rows.done
+  // A POOLED value registers its MEMBERS and the recipe that reduces them (`GroupRows.pool`): a second site
+  // unions its members onto the first, and a site in a connector body is keyed per host row like any other —
+  // the pool is reduced once, at the reader. A FINISHED map (`GroupRows.done` — the host's own pooled arms, or
+  // a pool whose reduction can raise) has no member row a union could take: see the `reduced` arm.
+  let added: Collection = rows.pool
+    ? {
+      sites: [{ rel: rows.rel, order: rows.pool.order, perTraverser: true }],
+      of: { kind: 'pooled', pool: rows.pool.recipe },
+      merge: undefined,
+    }
+    : rows.done
     ? {
       sites: [{ rel: rows.done.rel, order: [], perTraverser: true }],
       of: { kind: 'reduced', framing: { kind: 'map', keyOf: rows.done.keyOf, valOf: rows.done.valOf } },
@@ -695,7 +732,7 @@ export function registerGrouping(
       of: { kind: 'grouped', recipe: rows.recipe },
       merge: undefined,
     };
-  // Inside a connector body the site is PENDING (see `registerCollection`) — but a POOLED map reduced its pool
+  // Inside a connector body the site is PENDING (see `registerCollection`) — but a FINISHED map reduced its pool
   // once per BODY, so keying it would be one finished map per host row, not one grouping: it declines.
   const scoped = isScopedFork(collections);
   if (scoped && rows.done) return false;
@@ -815,6 +852,13 @@ export function reduce(collection: Collection, source: GraphSource, fresh: Minte
   // What it shares with the other two arms is everything that matters: N sites are a `UNION ALL` of
   // member relations, ordered by (site ordinal, that site's own), reduced ONCE at the read.
   if (collection.of.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: collection.of.framing };
+  // A POOL is reduced ONCE, over every site's members: one site as it is, several as their `UNION ALL`.
+  if (collection.of.kind === 'pooled') {
+    const { pool } = collection.of;
+    const site = collection.sites.length === 1 ? collection.sites[0]! : accumulated(collection.sites, pool.cols, fresh);
+    const map = pool.reduce(site.rel, site.order, fresh);
+    return map && { rel: map.rel, framing: { kind: 'map', keyOf: map.keyOf, valOf: map.valOf } };
+  }
   if (collection.of.kind === 'grouped') {
     const { recipe } = collection.of;
     // One site's order is its own where it states more than the grouping's `go` (a body site ordered by its
@@ -845,7 +889,7 @@ export function reduce(collection: Collection, source: GraphSource, fresh: Minte
   const { sites, of, merge } = seeded;
   // `grouped`/`reduced` are maps — the seeded list fold below serves only the two list arms. `mixed` was
   // dispatched just above.
-  if (of.kind === 'grouped' || of.kind === 'reduced') return null;
+  if (of.kind === 'grouped' || of.kind === 'reduced' || of.kind === 'pooled') return null;
   // `assign` REPLACES, so only the LAST merge survives and every site before it is dead — which makes
   // it the one policy that narrows the site list rather than reading all of it.
   const surviving = merge?.operator === ASSIGN ? [sites[sites.length - 1]!] : sites;
@@ -1045,7 +1089,8 @@ const memberCols = (of: Members): readonly string[] =>
   of.kind === 'elements' ? ['id']
     : of.kind === 'scalars' ? ['v', ...perRowCols(of.type)]
       : of.kind === 'grouped' ? groupRowCols(of.recipe)
-        : of.kind === 'mixed' ? [MEMBER_ENVELOPE] : [];
+        : of.kind === 'pooled' ? of.pool.cols
+          : of.kind === 'mixed' ? [MEMBER_ENVELOPE] : [];
 
 /** The ORDINAL of the site a member came from, and that site's own emission position — see
  *  `Collection.sites`. Ordering by the pair is what reproduces `Operator.addAll` appending one whole
@@ -1157,7 +1202,7 @@ export function readUnfolded(
   readonly elem?: Elem; readonly type?: ScalarType; readonly productiveNull?: boolean } | null {
   if (collection.merge || !settled(collection)) return null;
   const of = collection.of;
-  if (of.kind === 'grouped' || of.kind === 'reduced') return null;
+  if (of.kind === 'grouped' || of.kind === 'reduced' || of.kind === 'pooled') return null;
   const site = collection.sites.length === 1 ? collection.sites[0]! : accumulated(collection.sites, memberCols(of), fresh);
   const order = site.order;
   const orderMeta = order.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'));

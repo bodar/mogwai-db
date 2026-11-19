@@ -1388,8 +1388,9 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
 type ArmOutcome = { readonly tail: Tail | null } | 'continue' | 'pass';
 
 /**
- * THE KEYED `group("a")`/`groupCount("a")` TAIL — the ONE authority for registering a grouping's rows (or a
- * pooled value's finished map, `GroupRows.done`) under its label, draining a raising site, and re-entering the
+ * THE KEYED `group("a")`/`groupCount("a")` TAIL — the ONE authority for registering a grouping's rows (a pooled
+ * value's MEMBERS, `GroupRows.pool`, or its finished map, `GroupRows.done`) under its label, draining a raising
+ * site, and re-entering the
  * chain with the traversers the side effect passes on. Both the host's own lowering (`collectionArm`) and the
  * connector's pooled group (`byValues`, `lower/scoped.ts`) call it, so the guards are stated once:
  * - a carried PATH declines — the member rows would have to carry it, which is not built;
@@ -1398,8 +1399,8 @@ type ArmOutcome = { readonly tail: Tail | null } | 'continue' | 'pass';
  *   `(key, contribution)` MEMBER rows, but the KEY column holds a JSONB node, and a retained binding travels as
  *   JSON (`src/program.ts`), which fails closed on exactly that. Projecting `json(gk)` at the binding is the
  *   remaining step;
- * - `registerGrouping` refuses a POOLED value inside a connector body (the connector row names why,
- *   `refuseKeyedPool`), a second pooled site on one label, and a declared merge policy.
+ * - `registerGrouping` refuses a FINISHED pooled map inside a connector body (the connector row names why,
+ *   `refuseKeyedPool`), a second site that is not the same grouping, and a declared merge policy.
  * `'continue'` — the caller's own fold continues with its relation unchanged; `reenter` is that fold from a
  * position, for the one case (a drained raising site) that must prepend an effect.
  */

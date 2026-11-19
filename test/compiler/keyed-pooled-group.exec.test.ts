@@ -53,15 +53,58 @@ describe('a keyed pooled group() is the connector\'s, through the host\'s own ke
       .toEqual(typed("g.V().group().by(label).by(out().count())", CONNECTOR_ONLY));
   });
 
-  // The keyed tail's guards hold on the connector route as on the host's own: a pooled keyed form INSIDE a
-  // connector body reduces once per body (`registerGrouping`), a second pooled site on one label has no
-  // `(key, contribution)` row to union (`accumulate`), and a program with effects declines.
+  // The keyed tail's guards hold on the connector route as on the host's own: a program with effects declines, and
+  // two sites that are not ONE grouping (different value by()s) have no reduction to share (`accumulate`).
   for (const q of [
-    "g.V().union(group('a').by(label).by(count()), out()).cap('a')",
-    "g.V().group('a').by(label).by(count()).out().group('a').by(label).by(count()).cap('a')",
     "g.V().group('a').by(label).by(count()).addV('x').cap('a')",
+    "g.V().union(group('a').by(label).by(count()), group('a').by(label).by(values('name').fold())).cap('a')",
   ]) test(`declines: ${q}`, () => {
     expect(() => typed(q, CONNECTOR_ONLY)).toThrow(UnsupportedTraversal);
+  });
+});
+
+// THE POOL IS ITS MEMBERS (`PoolRecipe`, `collection.ts`): each site registers its traversers beside their keys, and
+// the reader reduces every site's members ONCE — so a second site (another branch arm, a later position, an unrolled
+// repeat) unions its members onto the first, and a site inside a connector body (`where`/`local`/`optional`) is keyed
+// per host row like any collector's. Each answer is the reference's, by hand over the modern graph.
+describe('a keyed pooled group() pools its members across sites and bodies, reduced once at the reader', () => {
+  for (const [q, expected] of [
+    // a branch arm, beside a sibling that collects nothing
+    ["g.V().union(group('a').by(label).by(count()), out()).cap('a')", '{"person":4L,"software":2L}'],
+    ["g.V().choose(has('age'), group('a').by(label).by(count()), out()).cap('a')", '{"person":4L}'],
+    ["g.V().optional(group('a').by(label).by(count())).cap('a')", '{"person":4L,"software":2L}'],
+    ["g.V().coalesce(group('a').by(label).by(count()), out()).cap('a')", '{"person":4L,"software":2L}'],
+    // TWO sites, one grouping: the members of both, pooled per key (V: 4 persons, 2 software; out(): 2 and 4)
+    ["g.V().group('a').by(label).by(count()).out().group('a').by(label).by(count()).cap('a')", '{"person":6L,"software":6L}'],
+    ["g.V().union(group('a').by(label).by(count()), out().group('a').by(label).by(count())).cap('a')", '{"person":6L,"software":6L}'],
+    // the pool is the KEY's, across sites: one dedup over every person member's out()
+    ["g.V().union(group('a').by(label).by(out().dedup().count()), out().group('a').by(label).by(out().dedup().count())).cap('a')",
+      '{"person":4L,"software":0L}'],
+    // a connector body's site, keyed per host row
+    ["g.V().where(group('a').by(label).by(count())).cap('a')", '{"person":4L,"software":2L}'],
+    ["g.V().local(out().group('a').by(label).by(count())).cap('a')", '{"person":2L,"software":4L}'],
+    ["g.V().union(local(out().group('a').by(label).by(count())), optional(in().group('a').by(label).by(count()))).cap('a')",
+      '{"person":8L,"software":4L}'],
+    // a seeded reducer keeps its seed for a key whose pool reduced to nothing
+    ["g.V().where(out().group('a').by(label).by(out().count())).cap('a')", '{"person":2L,"software":0L}'],
+    ["g.V().group('a').by(label).by(out('nothing').count()).cap('a')", '{"person":0L,"software":0L}'],
+  ] as const) test(q, () => {
+    expect(typed(q, CONNECTOR_ONLY)).toEqual([expected]);
+    expect(typed(q)).toEqual([expected]);
+  });
+
+  test('a list value pools both sites\' members', () => {
+    const q = "g.V().union(group('a').by(label).by(values('age').fold()), group('a').by(label).by(values('age').fold())).cap('a')";
+    const [map] = typed(q);
+    expect(map).toContain('"software":[]');
+    expect(map!.match(/\d+i/g)!.sort()).toEqual(['27i', '27i', '29i', '29i', '32i', '32i', '35i', '35i']);
+  });
+
+  test('a draw in the value body keeps its named decline, wherever the site is', () => {
+    for (const q of [
+      "g.V().union(group('a').by(label).by(values('name').sample(1).fold()), out()).cap('a')",
+      "g.V().where(group('a').by(label).by(values('name').sample(1).fold())).cap('a')",
+    ]) expect(() => typed(q)).toThrow(/a random draw .* inside a group\(\) value by\(\)/);
   });
 });
 

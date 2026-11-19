@@ -28,8 +28,10 @@ import { compile } from '../../src/compiler/compiler.ts';
  * 1819 → 1820: a keyed pooled `group("a").by().by(out().order()).cap("a")` now compiles on the connector (R5.2).
  * 1820 → 1821: a keyed `group("m")` whose value by() has no barrier (`by(in('knows').values('name'))`) is assigned per
  * traverser and now compiles on the connector (R5.3).
+ * 1821 → 1822: a keyed pooled `group("a")` registers its pool's MEMBERS, so the two sites an unrolled
+ * `repeat(out().group('a').by('name').by(count())).times(2)` fills are one pool and the traversal now compiles.
  */
-const CEILING = { lowerings: 2016, emissions: 1821, perQuery: 12 } as const;
+const CEILING = { lowerings: 2016, emissions: 1822, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 

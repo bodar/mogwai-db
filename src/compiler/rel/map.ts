@@ -19,6 +19,7 @@ import type { GraphSource } from './source.ts';
 import { recordToMap } from './record.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../alias.ts';
+import type { PoolRecipe } from './collection.ts';
 import { someStepDeep } from '../ir/walk.ts';
 import { CLASS_FLOATING_COL, CLASS_WIDTH_COL, isReducer, numberClassAggs, reducedNumberClass, reducerAggregate, SCREENED, screenedByTag } from './reducer.ts';
 import { inferredVtype, nodeIsNull } from './tag.ts';
@@ -209,6 +210,10 @@ export interface GroupRows {
    *  so there is no `(key, contribution)` row to union and no recipe that could describe one — it is
    *  already a map, and a keyed caller must decline it rather than pretend it is a member relation. */
   readonly done?: GroupedMap;
+  /** A POOLED value's MEMBERS: `rel` is then the members relation (each traverser beside its key), `order` the
+   *  columns that order it, and `recipe` the one reduction the collection's reader runs over every site's
+   *  members (`PoolRecipe`, `collection.ts`). */
+  readonly pool?: { readonly recipe: PoolRecipe; readonly order: readonly string[] };
 }
 
 /**

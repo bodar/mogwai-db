@@ -288,7 +288,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_V_repeatXaddV_propertyXgenerated_trueXX_timesX2X',
     'g_V_repeatXdedup_bothX_timesX2X',
     'g_V_repeatXoutXknowsXX_untilXrepeatXoutXcreatedXX_emitXhasXname_lopXXX_path_byXnameX',
-    'g_V_repeatXout_groupXaX_byXnameX_byXcountX_timesX2X_capXaX',
     'g_V_repeatXrepeatXout_createdXX_untilXhasXname_rippleXXXemit_lang',
     'g_V_repeatXunionXconstantXyX_limitX1X_identityXX_timesX3X',
     'g_V_repeatXunionXoutXknowsX_order_byXnameX_inXcreatedX_order_byXnameXXX_timesX1X',

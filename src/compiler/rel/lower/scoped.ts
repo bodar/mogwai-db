@@ -2,14 +2,14 @@ import { isNested, isPred } from '../../../gremlin/frontend.ts';
 import { and, col, compilerInt, compilerNull, conjuncts, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
-import { commitScope, dropRefusals, forkCollections, isScopedFork, pendingLabels, pendingSites, refusalMark, refusedSites, refuseSite, restoreCollections, type Collections, type Site } from '../collection.ts';
+import { commitScope, dropRefusals, forkCollections, isScopedFork, pendingLabels, pendingSites, refusalMark, refusedSites, refuseSite, restoreCollections, type Collections, type PoolRecipe, type Site } from '../collection.ts';
 import { positionKeys } from '../../../rel/position.ts';
 import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import { perHostWork } from '../../../rel/work.ts';
 import { brandRel, type Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
 import { freshCopy } from '../../../rel/mint.ts';
-import { exprMayAbort } from '../../../rel/raise.ts';
+import { exprMayAbort, mayRaise } from '../../../rel/raise.ts';
 import type { ColMeta, RelId, SortTerm } from '../../../rel/types.ts';
 import { deepColsRead, exprHasSubquery, exprRels, forEachExpr, forEachRel, freeRelIds, isSelfContained, joinSide, mapColsDeep, mapExprChildren, mapRelExprs, rewriteExpr, rewriteRels, substRelId } from '../../../rel/walk.ts';
 import { fromTree } from '../../../rel/block.ts';
@@ -22,7 +22,7 @@ import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, PresentWhen, Subject } from '../child.ts';
 import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
-import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap } from '../map.ts';
+import { groupKeyTerms, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap, type GroupRows } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
@@ -2315,9 +2315,10 @@ const byValues: Connector = (site) => {
 
 /**
  * A KEYED `group("a")` IN A CONNECTOR BODY whose value `by()` POOLS (`poolingStep` — `by(count())`,
- * `by(values('age').sum())`, `by(out().fold())`) has no lowering on any route: the pool reduces once per BODY,
- * so its finished map cannot key as one grouping per host row (`registerGrouping` refuses it, `collection.ts`),
- * whether `keyedPooledGroup` or the host's own lowering reached it. Recorded ON THE FORK (`refuseSite`), so the one
+ * `by(values('age').sum())`, `by(out().fold())`) and that `keyedPooledGroup` could not register as pool MEMBERS —
+ * in practice a reduction that can RAISE (`by(values('age').sum())`), whose drain is the finished map and so reduces
+ * once per BODY: one map per body cannot key as one grouping per host row (`registerGrouping` refuses it,
+ * `collection.ts`), whichever route reached it. Recorded ON THE FORK (`refuseSite`), so the one
  * raiser — `keyedBody`, which knows the host the body runs under — names it whichever route reached it.
  */
 function refuseKeyedPool(step: IRStep, ctx: ChainCtx): void {
@@ -2453,9 +2454,18 @@ function poolWeight(pool: Rel, fresh: Minter): Rel {
  * takes each traverser's first value and keeps the last (`Operator.assign`), which is not a pool: it is landed per
  * traverser (`perTraverserSlot`, `byValues`) and the host's own group lowering assigns it.
  * The key `by()` is the host's own (a child key is landed as a join column first, `landValues`).
+ *
+ * Split at the MEMBERS: what is built here is each traverser beside its key (the site's), and the reduction
+ * (`reduceFrom`) is a recipe over members alone, so a keyed `group("a")` registers the members and its reader
+ * reduces every site's members once (`PoolRecipe`, `collection.ts`).
  */
-function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]): GroupedMap | null {
-  const { step, rel, framing, ctx, fresh, labels } = site;
+function poolMembers(site: HostSite, bys: readonly (Modulation | undefined)[]): PoolMembers | null {
+  const { step, framing, ctx, fresh, labels } = site;
+  // A KEYED group's map is the ROOT's (a side effect resolves through the root traversal, `AggregateStep.java:57`),
+  // so a branch merge's ordering key (`branchKey` — an arm's frozen input position, which a body must never
+  // partition by) says nothing about which pool a member joins: its members shed it.
+  const branchKeys = step.args.length ? site.rel.channels.filter((channel) => channel.role === 'branchKey') : [];
+  const rel = branchKeys.length ? shedChannels(site.rel, branchKeys, fresh) : site.rel;
   if (framing.kind !== 'elements' && framing.kind !== 'scalar') return null;
   const valueBy = bys[1]!;
   if (valueBy.key.kind !== 'child' || valueBy.order !== undefined) return null;
@@ -2513,7 +2523,8 @@ function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]
   if (!keyExpr) return null;
   // Every member beside its key, the key computed ONCE (fenced): the domain and the pools both read it.
   const own = rel.type.cols;
-  const KEY = fresh('pgk') as string;
+  // A KEYED form's member layout is named, not minted: a second site's members union onto the first by name.
+  const KEY = (step.args.length ? 'pool_key' : fresh('pgk')) as string;
   const withKey = make.materialize({
     id: fresh('pgm'), channels: rel.channels, type: typeOf(...own, meta(KEY, keyElem ? 'int' : 'json', true)),
     input: make.project({
@@ -2532,7 +2543,7 @@ function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]
   // expression compared across every (key, member) pair — which was quadratic in the member count (measured:
   // `group().by('name').by(both().count())` ran for minutes at 8k vertices).
   const terms = groupKeyTerms(col(kept.id, KEY), !!keyElem);
-  const memberCols = terms.map(() => meta(fresh('pgu') as string, 'any', true));
+  const memberCols = terms.map((_, i) => meta((step.args.length ? `pool_term${i}` : fresh('pgu')) as string, 'any', true));
   const termedType = typeOf(...kept.type.cols, ...memberCols);
   const members = make.materialize({
     id: fresh('pgw'), channels: kept.channels, type: termedType, fenced: true,
@@ -2542,109 +2553,193 @@ function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]
         ...memberCols.map((column, i) => [column.name, terms[i]!] as const)],
     }),
   });
-  // THE DOMAIN: one row per key under the grouping's own equality, the first arrival's key node naming it.
-  const termCols = terms.map(() => meta(fresh('pgt') as string, 'any', true));
-  const enc = encounterOf(members.channels);
-  const domain = make.aggregate({
-    id: fresh('pgd'), input: members, channels: [], type: typeOf(...termCols, meta(KEY, keyElem ? 'int' : 'json', true)),
-    groupBy: memberCols.map((column) => col(members.id, column.name)),
-    aggs: [[KEY, firstArrival(col(members.id, KEY), enc ? [col(members.id, enc.col)] : [])]],
-  });
-  const sc = scope(domain, fresh);
-  // THE POOL'S TRAVERSERS: the members themselves — or, where the pre-barrier part must run per member
-  // (`perMember`), each member's own results of it: that part lowered as a `local()` body over the members (the
-  // connector's `forward` rejoin, host-major then the body's order), each result keeping its member's key terms
-  // as host-only channels, and the pool continuing from the barrier.
-  let source: Rel = members;
-  let sourceFraming: RelFraming = framing;
-  let rest: readonly IRStep[] = body;
-  let restBulked = site.bulked;
-  if (perMember) {
-    const prefix = body.slice(0, cut);
-    const keyChannels = memberCols.map((column): Channel => ({ col: column.name, role: 'branchKey' }));
-    // The member as the traverser it is (its own columns — the key node is not its payload) plus its key terms.
-    const hostCols = [...own, ...memberCols];
-    const asHost = make.project({
-      id: fresh('pgh'), input: members, channels: keyChannels.reduce(withChannel, rel.channels), type: typeOf(...hostCols),
-      exprs: hostCols.map((column) => [column.name, col(members.id, column.name)] as const),
+  // THE REDUCTION — everything from here runs over the pool's MEMBERS, which the collection's reader may hand back
+  // as several sites' members (`PoolRecipe`, `collection.ts`): it reads nothing of this site but their layout.
+  const reduceFrom = (members: Rel, fresh: Minter): GroupedMap | null => {
+    // THE DOMAIN: one row per key under the grouping's own equality, the first arrival's key node naming it.
+    const termCols = memberCols.map(() => meta(fresh('pgt') as string, 'any', true));
+    const enc = encounterOf(members.channels);
+    const domain = make.aggregate({
+      id: fresh('pgd'), input: members, channels: [], type: typeOf(...termCols, meta(KEY, keyElem ? 'int' : 'json', true)),
+      groupBy: memberCols.map((column) => col(members.id, column.name)),
+      aggs: [[KEY, firstArrival(col(members.id, KEY), enc ? [col(members.id, enc.col)] : [])]],
     });
-    const frozen = freezeParent(positioned(asHost, fresh), fresh);
-    const msc = scope(frozen.rel, fresh);
-    const keyedPrefix = scopedBody(prefix, frozen.rel, framing, msc, ctx, fresh, labels, 'read', !isReductionArm(prefix));
-    const out = keyedPrefix && rejoin(msc, msc.scoped, keyedPrefix, frozen.rel, 'forward', false, ctx, fresh, labels, true);
-    const merged = out && mintBranchOrder([{ ...out, bulked: site.bulked || out.bulked }], frozen.parent, labels, ctx.source, fresh);
-    if (!out || !merged || !memberCols.every((column) => merged.rel.type.cols.some((c) => c.name === column.name))) return null;
-    source = merged.rel;
-    sourceFraming = merged.framing;
-    rest = body.slice(cut);
-    restBulked = site.bulked || out.bulked;
-  }
-  // ONE KEY'S POOL: the members whose key is the domain row's, as the traverser stream the body starts from.
-  const pooled = make.filter({
-    id: fresh('pgs'), input: source, channels: source.channels, type: source.type,
-    // NULL-safe (`IS`): a term may be NULL for every member of a key (a string key has no family tag).
-    pred: memberCols.map((column, i): Expr => ({ kind: 'binary', op: 'is', left: col(source.id, column.name), right: col(sc.scoped.id, termCols[i]!.name) }))
-      .reduce((a, b) => and(a, b)),
-  });
-  const termNames = new Set(memberCols.map((column) => column.name));
-  const seedChannels = source === members ? rel.channels : source.channels.filter((channel) => !termNames.has(channel.col));
-  const seedCols = source === members ? own : source.type.cols.filter((column) => !termNames.has(column.name));
-  const seed = make.project({
-    id: fresh('pgn'), input: pooled, channels: seedChannels, type: typeOf(...seedCols),
-    exprs: seedCols.map((column) => [column.name, col(pooled.id, column.name)] as const),
-  });
-  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: rest, rooted: false }, originDomain: undefined, bodyOrder: 'read' };
-  // A pool that RE-SOURCES first (`group().by(label).by(__.V().count())`) discards every member's value: each
-  // member splits into the whole graph (`GraphStep`), so where the rest reads none of a member's own state
-  // (`readsHostState`) the pool is ONE traverser of bulk |pool| — the multiset is the same, and the graph is
-  // crossed once per KEY rather than once per member. Only where everything after the re-source READS that
-  // multiplicity (`bulkObservedFrom`, the one positional authority — a `count()`/`sum()` does, a `fold()` reads
-  // rows); otherwise every member crosses the graph, as the reference does.
-  const weighed = reSourceAt(rest) === 0 && !readsHostState(rest, bodyCtx) && bulkObservedFrom(rest, 1) ? poolWeight(seed, fresh) : null;
-  // THE KEY PROJECTION: the domain is the members' DISTINCT key terms, so the body keys the pool by those terms
-  // read off the pool's traversers themselves — no domain cross join. The members COVER the domain (every key
-  // has one), so no LEFT JOIN either; a per-member prefix's results need not (a key whose members all produced
-  // nothing), and keep it. `src/rel/decorrelate.ts` "The domain that IS its input's key projection".
-  const projection: KeyProjection = {
-    input: source.id, cols: new Map(termCols.map((column, i) => [column.name, memberCols[i]!.name])), covers: source === members,
+    const sc = scope(domain, fresh);
+    // THE POOL'S TRAVERSERS: the members themselves — or, where the pre-barrier part must run per member
+    // (`perMember`), each member's own results of it: that part lowered as a `local()` body over the members (the
+    // connector's `forward` rejoin, host-major then the body's order), each result keeping its member's key terms
+    // as host-only channels, and the pool continuing from the barrier.
+    let source: Rel = members;
+    let sourceFraming: RelFraming = framing;
+    let rest: readonly IRStep[] = body;
+    let restBulked = site.bulked;
+    if (perMember) {
+      const prefix = body.slice(0, cut);
+      const keyChannels = memberCols.map((column): Channel => ({ col: column.name, role: 'branchKey' }));
+      // The member as the traverser it is (its own columns — the key node is not its payload) plus its key terms.
+      const hostCols = [...own, ...memberCols];
+      const asHost = make.project({
+        id: fresh('pgh'), input: members, channels: keyChannels.reduce(withChannel, rel.channels), type: typeOf(...hostCols),
+        exprs: hostCols.map((column) => [column.name, col(members.id, column.name)] as const),
+      });
+      const frozen = freezeParent(positioned(asHost, fresh), fresh);
+      const msc = scope(frozen.rel, fresh);
+      const keyedPrefix = scopedBody(prefix, frozen.rel, framing, msc, ctx, fresh, labels, 'read', !isReductionArm(prefix));
+      const out = keyedPrefix && rejoin(msc, msc.scoped, keyedPrefix, frozen.rel, 'forward', false, ctx, fresh, labels, true);
+      const merged = out && mintBranchOrder([{ ...out, bulked: site.bulked || out.bulked }], frozen.parent, labels, ctx.source, fresh);
+      if (!out || !merged || !memberCols.every((column) => merged.rel.type.cols.some((c) => c.name === column.name))) return null;
+      source = merged.rel;
+      sourceFraming = merged.framing;
+      rest = body.slice(cut);
+      restBulked = site.bulked || out.bulked;
+    }
+    // ONE KEY'S POOL: the members whose key is the domain row's, as the traverser stream the body starts from.
+    const pooled = make.filter({
+      id: fresh('pgs'), input: source, channels: source.channels, type: source.type,
+      // NULL-safe (`IS`): a term may be NULL for every member of a key (a string key has no family tag).
+      pred: memberCols.map((column, i): Expr => ({ kind: 'binary', op: 'is', left: col(source.id, column.name), right: col(sc.scoped.id, termCols[i]!.name) }))
+        .reduce((a, b) => and(a, b)),
+    });
+    const termNames = new Set(memberCols.map((column) => column.name));
+    const seedChannels = source === members ? rel.channels : source.channels.filter((channel) => !termNames.has(channel.col));
+    const seedCols = source === members ? own : source.type.cols.filter((column) => !termNames.has(column.name));
+    const seed = make.project({
+      id: fresh('pgn'), input: pooled, channels: seedChannels, type: typeOf(...seedCols),
+      exprs: seedCols.map((column) => [column.name, col(pooled.id, column.name)] as const),
+    });
+    const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: rest, rooted: false }, originDomain: undefined, bodyOrder: 'read' };
+    // A pool that RE-SOURCES first (`group().by(label).by(__.V().count())`) discards every member's value: each
+    // member splits into the whole graph (`GraphStep`), so where the rest reads none of a member's own state
+    // (`readsHostState`) the pool is ONE traverser of bulk |pool| — the multiset is the same, and the graph is
+    // crossed once per KEY rather than once per member. Only where everything after the re-source READS that
+    // multiplicity (`bulkObservedFrom`, the one positional authority — a `count()`/`sum()` does, a `fold()` reads
+    // rows); otherwise every member crosses the graph, as the reference does.
+    const weighed = reSourceAt(rest) === 0 && !readsHostState(rest, bodyCtx) && bulkObservedFrom(rest, 1) ? poolWeight(seed, fresh) : null;
+    // THE KEY PROJECTION: the domain is the members' DISTINCT key terms, so the body keys the pool by those terms
+    // read off the pool's traversers themselves — no domain cross join. The members COVER the domain (every key
+    // has one), so no LEFT JOIN either; a per-member prefix's results need not (a key whose members all produced
+    // nothing), and keep it. `src/rel/decorrelate.ts` "The domain that IS its input's key projection".
+    const projection: KeyProjection = {
+      input: source.id, cols: new Map(termCols.map((column, i) => [column.name, memberCols[i]!.name])), covers: source === members,
+    };
+    // The pool and its seed are the HOST's (minted outside `keyedBody`); only what `rest` builds is the body's own.
+    const pool = keyedBody(
+      (mf, collections) => weighed
+        ? continueAs(weighed, sourceFraming, rest, 0, true, { ...bodyCtx, collections }, mf, labels)
+        : continueAs(seed, sourceFraming, rest, 0, restBulked, { ...bodyCtx, collections }, mf, labels),
+      sc.scoped, sc.key, ctx, fresh, undefined, projection,
+    );
+    if (!pool) return null;
+    const { keyed, tail } = pool;
+    // THE VALUE NODE: the reduced value of the key's pool, one row per key (a FIRST, for a body whose last
+    // barrier is not its last step and could still fan out — `doFinalReduction` reads `next()`).
+    const valueCols = framingCols(tail.framing);
+    if (!valueCols || valueCols.length > (tail.framing.kind === 'scalar' ? 2 : 1)) return null;
+    const first = rowsKeyedBy(keyed.rel, tail.rel, keyed.key.map((k) => k.col), valueCols.map((column) => column.name), fresh, true);
+    const joined = make.join({
+      id: fresh('pgj'), left: sc.scoped, right: first.rel, join: 'inner', channels: [],
+      type: typeOf(...sc.scoped.type.cols, ...first.rel.type.cols),
+      on: keyMatch(keyed.key, (k) => col(sc.scoped.id, k.outer), (k) => col(first.rel.id, first.keys[keyed.key.indexOf(k)]!)),
+    });
+    const valueExpr = col(joined.id, first.renamed.get(valueCols[0]!.name)!);
+    const produced: ChildValue = {
+      expr: valueExpr, framing: tail.framing, yields: 'one', present: 'always',
+      ...(valueCols[1] ? { vtype: col(joined.id, first.renamed.get(valueCols[1].name)!) } : {}),
+    };
+    const valueFraming = tail.framing;
+    // A list value is NESTED in the map, so its members must describe themselves (`selfDescribingList`) — and
+    // be members the tree framer can walk (`listNodeExpr`): a path member has no `{t:'path'}` node yet.
+    if (valueFraming.kind === 'list' && !treeFramed(valueFraming.of)) return null;
+    // …and a MAP value keeps its element rowids for the root framer, which expands them through `singleOf`
+    // (`mapNodePayload`, recursive over a nested map); any other value shape is not one this node builder states.
+    if (valueFraming.kind !== 'list' && valueFraming.kind !== 'map' && valueFraming.kind !== 'scalar' && valueFraming.kind !== 'elements') return null;
+    const listed = valueFraming.kind === 'list' ? selfDescribingList(valueExpr, valueFraming.of, fresh) : null;
+    const node = listed ? listNode(listed.list) : memberNodeOf(produced, ctx.source, fresh);
+    if (!node) return null;
+    const singleOf: MapOf = valueFraming.kind === 'list' ? { kind: 'list', of: listed!.of, ...(valueFraming.set ? { set: true } : {}) }
+      : valueFraming.kind === 'map' ? { kind: 'map', of: valueFraming.valOf } : { kind: 'scalar' };
+    return keyedValuesMap(joined, col(joined.id, KEY), keyElem, node, singleOf, step, ctx.source, fresh);
   };
-  // The pool and its seed are the HOST's (minted outside `keyedBody`); only what `rest` builds is the body's own.
-  const pool = keyedBody(
-    (mf, collections) => weighed
-      ? continueAs(weighed, sourceFraming, rest, 0, true, { ...bodyCtx, collections }, mf, labels)
-      : continueAs(seed, sourceFraming, rest, 0, restBulked, { ...bodyCtx, collections }, mf, labels),
-    sc.scoped, sc.key, ctx, fresh, undefined, projection,
-  );
-  if (!pool) return null;
-  const { keyed, tail } = pool;
-  // THE VALUE NODE: the reduced value of the key's pool, one row per key (a FIRST, for a body whose last
-  // barrier is not its last step and could still fan out — `doFinalReduction` reads `next()`).
-  const valueCols = framingCols(tail.framing);
-  if (!valueCols || valueCols.length > (tail.framing.kind === 'scalar' ? 2 : 1)) return null;
-  const first = rowsKeyedBy(keyed.rel, tail.rel, keyed.key.map((k) => k.col), valueCols.map((column) => column.name), fresh, true);
-  const joined = make.join({
-    id: fresh('pgj'), left: sc.scoped, right: first.rel, join: 'inner', channels: [],
-    type: typeOf(...sc.scoped.type.cols, ...first.rel.type.cols),
-    on: keyMatch(keyed.key, (k) => col(sc.scoped.id, k.outer), (k) => col(first.rel.id, first.keys[keyed.key.indexOf(k)]!)),
-  });
-  const valueExpr = col(joined.id, first.renamed.get(valueCols[0]!.name)!);
-  const produced: ChildValue = {
-    expr: valueExpr, framing: tail.framing, yields: 'one', present: 'always',
-    ...(valueCols[1] ? { vtype: col(joined.id, first.renamed.get(valueCols[1].name)!) } : {}),
+  // THE RECIPE'S MEMBERS, as the reader hands them back: one site's own relation is the pool as it is; anything
+  // else (several sites' `UNION ALL`, a body's site keyed per host row) is re-expressed in the members' layout —
+  // their channels, their columns — with the ENCOUNTER re-minted from the order the reader states (site, then that
+  // site's own position), which is what the first arrival naming a key and a collecting value read. Fenced once:
+  // the domain and every pool read it.
+  const encounter = encounterOf(members.channels);
+  const restored = (input: Rel, order: readonly string[], fresh: Minter): Rel => {
+    if (input === members) return members;
+    const renumber = encounter && order.length ? `${encounter.col}_n` : undefined;
+    const ordered = renumber
+      ? rowNumberWindow(input, renumber, [], { partitionBy: [], orderBy: order.map((name) => ({ expr: col(input.id, name), dir: 'asc' as const })) }, fresh)
+      : input;
+    const read = (name: string): Expr => col(ordered.id, renumber && name === encounter!.col ? renumber : name);
+    return make.materialize({
+      id: fresh('pgr'), channels: members.channels, type: members.type, fenced: true,
+      input: make.project({
+        id: fresh('pgq'), input: ordered, channels: members.channels, type: members.type,
+        exprs: members.type.cols.map((column) => [column.name, read(column.name)] as const),
+      }),
+    });
   };
-  const valueFraming = tail.framing;
-  // A list value is NESTED in the map, so its members must describe themselves (`selfDescribingList`) — and
-  // be members the tree framer can walk (`listNodeExpr`): a path member has no `{t:'path'}` node yet.
-  if (valueFraming.kind === 'list' && !treeFramed(valueFraming.of)) return null;
-  // …and a MAP value keeps its element rowids for the root framer, which expands them through `singleOf`
-  // (`mapNodePayload`, recursive over a nested map); any other value shape is not one this node builder states.
-  if (valueFraming.kind !== 'list' && valueFraming.kind !== 'map' && valueFraming.kind !== 'scalar' && valueFraming.kind !== 'elements') return null;
-  const listed = valueFraming.kind === 'list' ? selfDescribingList(valueExpr, valueFraming.of, fresh) : null;
-  const node = listed ? listNode(listed.list) : memberNodeOf(produced, ctx.source, fresh);
-  if (!node) return null;
-  const singleOf: MapOf = valueFraming.kind === 'list' ? { kind: 'list', of: listed!.of, ...(valueFraming.set ? { set: true } : {}) }
-    : valueFraming.kind === 'map' ? { kind: 'map', of: valueFraming.valOf } : { kind: 'scalar' };
-  return keyedValuesMap(joined, col(joined.id, KEY), keyElem, node, singleOf, step, ctx.source, fresh);
+  // What makes two sites one grouping, as data: the step's key and value by()s (`bodyKey`, the structural spelling
+  // a landed body is matched by, without its parse context), the member layout, the bulk.
+  const identity = poolIdentity(step, bys, members, framing, site.bulked);
+  return {
+    members,
+    order: encounter ? [encounter.col] : [],
+    recipe: {
+      identity, cols: members.type.cols.map((column) => column.name),
+      reduce: (input, order, fresh) => reduceFrom(restored(input, order, fresh), fresh),
+    },
+  };
+}
+
+/**
+ * A pool's IDENTITY (`PoolRecipe.identity`) — two sites are one grouping only where this agrees: the step, its
+ * resolved key and value `by()`s, the member layout and the bulk. Spelled as `bodyKey` spells a body, except that a
+ * step's own parse context is not structure (it is where the step was written, so two arms writing the same
+ * grouping would never agree) and a nested parse tree spells as its text.
+ */
+function poolIdentity(
+  step: IRStep, bys: readonly (Modulation | undefined)[], members: Rel, framing: RelFraming, bulked: boolean,
+): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify([step.name, step.args.map((arg) => arg.value), bys, members.type.cols, members.channels, framing, bulked],
+    (key, value: unknown) => {
+      if (key === 'ctx') return undefined;
+      if (typeof value === 'bigint') return `${value}n`;
+      if (value && typeof value === 'object') {
+        const text = (value as { getText?: unknown }).getText;
+        if (typeof text === 'function') return `«${String(text.call(value))}»`;
+        if (seen.has(value)) return '[seen]';
+        seen.add(value);
+      }
+      return value;
+    });
+}
+
+/** `rel` without the carried `channels` — their columns and roles forgotten, every other column and the rows
+ *  untouched (`dropEncounter`'s shape, for any channel). */
+function shedChannels(rel: Rel, channels: readonly Channel[], fresh: Minter): Rel {
+  const shed = new Set(channels.map((channel) => channel.col));
+  const cols = rel.type.cols.filter((column) => !shed.has(column.name));
+  return make.project({
+    id: fresh('pgx'), input: rel, channels: rel.channels.filter((channel) => !shed.has(channel.col)),
+    type: typeOf(...cols), exprs: cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+  });
+}
+
+/** A pooled group's MEMBERS and the recipe that reduces them (`poolMembers`). */
+interface PoolMembers {
+  readonly members: Rel;
+  readonly order: readonly string[];
+  readonly recipe: PoolRecipe;
+}
+
+/** `group().by(k).by(b)`'s map over ONE site's pool — the members reduced where they are. */
+function pooledGroupMap(site: HostSite, bys: readonly (Modulation | undefined)[]): GroupedMap | null {
+  const pool = poolMembers(site, bys);
+  return pool && pool.recipe.reduce(pool.members, pool.order, site.fresh);
 }
 
 /** The UNKEYED pooled `group().by(k).by(b)` — a reducing barrier: the map IS the traverser. */
@@ -2658,18 +2753,27 @@ function pooledGroup(site: HostSite, bys: readonly (Modulation | undefined)[]): 
  * The KEYED pooled `group("a").by(k).by(b)` — a SIDE EFFECT: the same map `pooledGroupMap` builds for the
  * barrier form, registered under its label through the host's own keyed tail (`keyedGroupTail`, `lower.ts` —
  * one authority for registration, drain and re-entry, with its guards), and the stream continues as the
- * INCOMING traversers (`GroupSideEffectStep` passes them on). A pooled keyed form inside a connector body still
- * declines in `registerGrouping` (its pool reduces once per body), and so does a second pooled site on one label.
+ * INCOMING traversers (`GroupSideEffectStep` passes them on). What is registered is the pool's MEMBERS
+ * (`poolMembers`), so a second site on the label — another branch arm — unions its members onto them, and a site
+ * in a connector body is keyed per host row like any collector's; the ONE reduction runs at the reader.
+ *
+ * A reduction that can RAISE must be evaluated whether or not a `cap` reads it (`drainRaisingSite`), and its drain
+ * is the finished map itself (`takeFinishedMap`): such a site registers that map, one site, at the root.
  */
 function keyedPooledGroup(site: HostSite): Tail | null {
   const { step, rel, framing, steps, at, bulked, ctx, fresh, labels } = site;
   if (step.name !== 'group' || step.args.length !== 1 || typeof step.args[0]!.value !== 'string') return null;
   const bys = modulations(step, byArity(step), childSeam(ctx, fresh));
   if (!bys || bys[1]?.key.kind !== 'child') return null;
-  const done = pooledGroupMap(site, bys);
+  const pool = poolMembers(site, bys);
+  if (!pool) return null;
+  const done = pool.recipe.reduce(pool.members, pool.order, fresh);
   if (!done) return null;
+  const rows: GroupRows = mayRaise(done.rel)
+    ? { rel: done.rel, recipe: POOLED_RECIPE(step), done }
+    : { rel: pool.members, recipe: POOLED_RECIPE(step), pool: { recipe: pool.recipe, order: pool.order } };
   const onward = (from: number): Tail | null => continueAs(rel, framing, steps, from, bulked, ctx, fresh, labels);
-  const out = keyedGroupTail(step, rel, { rel: done.rel, recipe: POOLED_RECIPE(step), done }, at, ctx, fresh, onward);
+  const out = keyedGroupTail(step, rel, rows, at, ctx, fresh, onward);
   return out === 'continue' ? onward(at + 1) : out.tail;
 }
 
