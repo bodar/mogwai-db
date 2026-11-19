@@ -339,7 +339,22 @@ export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel, m
   const go = (r: Rel): Rel => {
     const seen = memo.get(r);
     if (seen) return seen;
-    const out = f(mapRelExprs(mapRelChildren(r, go), (e) => rewriteExpr(e, (node) => node, go)), r);
+    // AN UNTOUCHED NODE IS THE SAME NODE — Calcite's rule (`RelShuttleImpl.visitChild`,
+    // vendor/calcite/core/src/main/java/org/apache/calcite/rel/RelShuttleImpl.java: a child that comes back
+    // `==` leaves its parent unrebuilt), as `substRelId` already keeps it. The memo preserves sharing only
+    // WITHIN the rewritten DAG; a caller that rewrites a SUB-DAG (a connector body, `slicesByKeys`) reaches
+    // nodes the rest of the plan also holds — the root's stream under a named collection the body reads — and
+    // a rebuilt copy of one is a second relation under the first's id: "relation id 'c1' names two different
+    // relations in one scope", or, worse, a correlated read that looks self-contained (`freeRelIds` sees the
+    // copy DEFINE the id the seed row correlates to) and is fenced out of the scope it reads.
+    let changed = false;
+    const child = (x: Rel): Rel => {
+      const y = go(x);
+      if (y !== x) changed = true;
+      return y;
+    };
+    const rebuilt = mapRelExprs(mapRelChildren(r, child), (e) => rewriteExpr(e, (node) => node, child));
+    const out = f(changed ? rebuilt : r, r);
     memo.set(r, out);
     return out;
   };
@@ -379,9 +394,20 @@ export const freeRelIds: (plan: Rel) => ReadonlySet<string> = nodeFact((r: Rel):
   if (!candidates.size) return candidates;
   // EVERY direct child's id first, and only then a subtree search: searching the left child for the right
   // one's id made each link of a long chain search the whole chain beneath it (see `definesId`).
+  //
+  // AN ID FREE IN A SPINE INPUT IS NOT BOUND BY A DEEPER DEFINITION ELSEWHERE BENEATH. A relation's spine inputs
+  // are separate FROM terms with no LATERAL between them, so what one input correlates to cannot be a relation
+  // buried in another (or deep in itself — it is free there already). Only an EXPRESSION reaches through: this
+  // node's own terms and the subplans they hang may read a relation below the input they sit over (a fused
+  // expression). The distinction matters when ONE relation sits at two scopes — the root's stream that a
+  // connector body correlates to, and the same stream beneath a named collection that body reads
+  // (`g.V().aggregate('a').where(select('a').count(local).is(6))`): searched as before, the collection's copy
+  // "defined" the body's correlation, the correlated body looked self-contained, and `name` hoisted it to a CTE
+  // that cannot see the outer row.
+  const spineFree = unionOf(relChildren(r).map(freeRelIds));
   const free = [...candidates].filter((id) => id !== r.id
     && !beneath.some((child) => child.id === id)
-    && !beneath.some((child, i) => !freeBeneath[i]!.has(id) && definesId(child, id)));
+    && (spineFree.has(id) || !beneath.some((child, i) => !freeBeneath[i]!.has(id) && definesId(child, id))));
   return free.length === candidates.size ? candidates : free.length ? new Set(free) : NO_NAMES;
 });
 

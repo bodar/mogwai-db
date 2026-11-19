@@ -299,6 +299,17 @@ const SHAPES: readonly Shape[] = [
   { name: 'membership: local(where(not(within)))', query: "g.V().out().aggregate('x').out().local(where(P.not(within('x')))).count()" },
   { name: 'membership: project.by(out.where(not(within)).count)', query: "g.V().out().aggregate('x').fold().V().project('c').by(out().where(P.not(within('x'))).count()).count()" },
   { name: 'membership: values.aggregate.fold.V.values.where(not(within))', query: "g.V().values('age').aggregate('x').fold().V().values('age').where(P.not(within('x'))).count()" },
+  // A named collection read inside a connector body: one uncorrelated reduction crossed with each host row,
+  // never re-scanned per host row.
+  { name: 'collection-in-body: aggregate.where(select.count(local))', query: "g.V().aggregate('a').where(select('a').count(local).is(gt(0))).count()" },
+  { name: 'collection-in-body: aggregate.map(select.count(local))', query: "g.V().aggregate('a').map(select('a').count(local)).count()" },
+  { name: 'collection-in-body: aggregate.where(select.unfold.hasLabel)', query: "g.V().aggregate('a').where(select('a').unfold().hasLabel('person')).count()" },
+  { name: 'collection-in-body: groupCount.where(select.count(local))', query: "g.V().groupCount('a').by(label).where(select('a').count(local).is(2)).count()" },
+  { name: 'collection-in-body: group.by(count).where(select.count(local))', query: "g.V().group('a').by(label).by(count()).where(select('a').count(local).is(2)).count()" },
+  { name: 'collection-in-body: group.by(name).where(select.unfold.count)', query: "g.V().group('a').by('name').by(count()).where(select('a').unfold().count().is(gt(0))).count()" },
+  { name: 'collection-in-body: group.by(sum).where(select.count(local))', query: "g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1)).count()" },
+  { name: 'collection-in-body: aggregate.where(where(select))', query: "g.V().aggregate('a').where(where(select('a').count(local).is(gt(0)))).count()" },
+  { name: 'collection-in-body: aggregate.out.aggregate.where(select)', query: "g.V().aggregate('a').out().aggregate('a').where(select('a').count(local).is(gt(0))).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

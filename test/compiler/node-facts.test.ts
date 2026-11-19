@@ -70,6 +70,9 @@ const walkedFreeSelfRef = (plan: Rel): boolean => {
   });
   return [...referenced].some((name) => !bound.has(name));
 };
+// Coarser than `freeRelIds` in one case no corpus plan holds: ONE relation at two scopes (a connector body
+// correlated to the root stream, beside a collection over that same stream). There a definition buried in one
+// spine input does not bind another input's correlation (`test/compiler/collection-read-in-body.exec.test.ts`).
 const walkedFreeRelIds = (plan: Rel): ReadonlySet<string> => {
   const defined = new Set<string>(), referenced = new Set<string>();
   walk.forEachRel(plan, (r) => {
@@ -103,15 +106,28 @@ describe('a synthesized fact answers what the whole-subtree walk answers, at eve
   }, 120_000);
 });
 
-/** Enumerations of child relations and sub-expressions made while `fn` runs, per DISTINCT node. */
-const enumerations = (fn: () => void): { readonly rels: number; readonly exprs: number; readonly distinct: number } => {
+/**
+ * Enumerations of child relations and sub-expressions a compile of `q` makes, per node of its FINISHED plan.
+ *
+ * The denominator is the plan's own node count, not the distinct nodes the walks happened to touch: a rewrite
+ * that rebuilds a node it left unchanged mints a copy, and counting copies as nodes made a wasteful compile
+ * read CHEAPER per node. Since `rewriteRels` keeps an untouched node the same node (`src/rel/walk.ts`) the
+ * copies are gone and the total fell (`times(100)`: 56k → 52k `relChildren` calls, 119k → 92k
+ * `exprChildren`), while the per-touched-node figure rose 7.8 → 34 because its denominator fell 4.8×. The
+ * plan's node count does not move with that.
+ */
+const enumerations = (q: string): { readonly rels: number; readonly exprs: number; readonly distinct: number } => {
+  const plan = lowered(q);
+  if (!plan) throw new Error(`${q}: did not lower`);
+  const { rels: nodes, stmts } = nodesOf(plan);
+  const exprNodes = new Set<unknown>();
+  [...nodes.flatMap((r) => walk.relExprs(r)), ...stmts.flatMap((s) => walk.stmtExprs(s))]
+    .forEach((e) => walk.forEachExpr(e, (x) => { exprNodes.add(x); }));
   const rc = spyOn(walk, 'relChildren');
   const ec = spyOn(walk, 'exprChildren');
   try {
-    fn();
-    const distinct = new Set(rc.mock.calls.map(([r]) => r)).size;
-    const distinctExprs = new Set(ec.mock.calls.map(([e]) => e)).size;
-    return { rels: rc.mock.calls.length / Math.max(1, distinct), exprs: ec.mock.calls.length / Math.max(1, distinctExprs), distinct };
+    compile(q, {});
+    return { rels: rc.mock.calls.length / Math.max(1, nodes.length), exprs: ec.mock.calls.length / Math.max(1, exprNodes.size), distinct: nodes.length };
   } finally { rc.mockRestore(); ec.mockRestore(); }
 };
 
@@ -119,8 +135,8 @@ describe('a compile enumerates each node a small constant number of times', () =
   /**
    * The bound is the compile's walk COUNT — lowering, the passes, `check`, the emitter each walk the plan
    * a few times, and each fact enumerates a node once when it is synthesized — not a per-fact count.
-   * Measured when the facts became per-node: 4.7–9.7 per relation and 7.0–9.2 per expression over these
-   * plans. The relation figure includes `freeRelIds` proving a correlated id absent from a subtree
+   * Measured per node of the FINISHED plan (`enumerations`): 8.6–44 per relation and 9.1–18 per expression over these
+   * plans (up to 48.5 per relation before `rewriteRels` stopped copying untouched nodes). The relation figure includes `freeRelIds` proving a correlated id absent from a subtree
    * (`definesId`), which is bounded by the spine cut (`boundedSpine`) and is the same search the
    * walk-per-ask did.
    */
@@ -133,9 +149,9 @@ describe('a compile enumerates each node a small constant number of times', () =
   ];
   for (const [label, q] of FIXED) {
     test(label, () => {
-      const { rels, exprs } = enumerations(() => compile(q, {}));
-      expect(rels).toBeLessThan(12);
-      expect(exprs).toBeLessThan(12);
+      const { rels, exprs } = enumerations(q);
+      expect(rels).toBeLessThan(60);
+      expect(exprs).toBeLessThan(30);
     });
   }
 
@@ -144,7 +160,7 @@ describe('a compile enumerates each node a small constant number of times', () =
     // its visited-set, or a fact that lost its memo, grows with the hop count rather than the node count.
     // Both lengths are past the spine cut (`SPINE_DEPTH_BOUND`), which bounds every per-step search, so
     // what is left to grow is a re-walk that the memo or a visited-set should have stopped.
-    const at = (hops: number) => enumerations(() => compile(`g.V()${'.both()'.repeat(hops)}.count()`, {}));
+    const at = (hops: number) => enumerations(`g.V()${'.both()'.repeat(hops)}.count()`);
     const small = at(40), large = at(160);
     expect(large.distinct).toBeGreaterThan(3 * small.distinct);
     expect(large.rels).toBeLessThan(small.rels * 1.2);

@@ -170,8 +170,15 @@ describe('a raising pooled keyed group is evaluated ONCE, and the drain and the 
     "g.V().group('a').by(label).by(values('age').sum()).cap('a').select(Column.keys)",
     "g.V().group('a').by(label).by(values('age').sum()).select('a')",
     "g.V().group('a').by(label).by(values('age').sum()).repeat(out()).times(1).cap('a')",
-    "g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1)).count()",
   ]) test(`reads the taken map wherever the collection is read: ${q}`, () => {
     expect(typed(q).length).toBeGreaterThan(0);
+  });
+
+  // Inside a connector body: `software` has no age, so its key drops and the map holds one entry — every
+  // vertex passes (`test/compiler/collection-read-in-body.exec.test.ts` holds the family).
+  test('reads the taken map inside a where() body', () => {
+    const q = "g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1)).count()";
+    expect(typed(q)).toEqual(typed('g.inject(6L)'));
+    expect(typed(q, CONNECTOR_ONLY)).toEqual(typed('g.inject(6L)'));
   });
 });
