@@ -94,8 +94,13 @@ describe('group() — a local reducer in the value by() is per traverser, not po
     expect(bagOf(perVertex.map((r) => JSON.stringify(entries(r)))))
       .toEqual(bagOf(['{}', '{}', '{}', '{"marko":1}', '{"josh":1}', '{"peter":1}']));
     const projected = answer("g.V().project('g').by(out().group().by(label).by(values('age').is(gt(30)).count(local)))");
-    expect(projected).toHaveLength(6);
-    expect(projected.filter((r) => r.includes('person'))).toHaveLength(1);
+    // Each traverser's `g` map exactly, as in the test above (GroupStep.java:123-126): marko's productive person (josh,
+    // 32) counts a LONG 1; vadas (27) and lop (no age) are unproductive, so their keys are absent, not 0.
+    const gOf = (row: string) => {
+      const [[, g]] = JSON.parse(JSON.parse(row)) as [[unknown, { v: [{ v: unknown }, { t: string; v: unknown }][] }]];
+      return JSON.stringify(Object.fromEntries(g.v.map(([k, v]) => [String(k.v), v.t === 'long' ? v.v : v])));
+    };
+    expect(bagOf(projected.map(gOf))).toEqual(bagOf(['{"person":1}', '{}', '{}', '{}', '{}', '{}']));
     expect(agreed("g.V().where(group().by(label).by(values('age').is(gt(30)).count(local)).select('person').is(1)).values('name')"))
       .toEqual(bagOf(['"josh"', '"peter"']));
     expect(entries(agreed("g.V().group('x').by(label).by(values('age').is(gt(30)).count(local)).cap('x')")[0]!)).toEqual({ person: 1 });
