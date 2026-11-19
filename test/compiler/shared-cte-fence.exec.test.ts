@@ -34,6 +34,12 @@ const WALKS = [
   "g.V().union(repeat(out('knows')).emit(in('knows').has('age',gt(40))), identity()).count()",
   "g.V().not(repeat(out('knows')).emit(in('knows').has('age',gt(40)))).count()",
   "g.V().project('n').by(repeat(out('knows')).emit(in('knows').has('age',gt(40))).count()).count()",
+  // Under a `limit`/`range` the emitted rows stop early, but the state semi-join still reads the walk in full: a
+  // MIXED relation, fenced (`fenced`, `src/rel/passes/name.ts`).
+  "g.V().repeat(out('knows')).emit(in('knows').has('age',gt(40))).limit(5)",
+  "g.V().repeat(out('knows')).emit(in('knows').has('age',gt(40))).dedup().limit(5)",
+  "g.V().repeat(out('knows')).emit(in('knows').has('age',gt(40))).range(10,20)",
+  "g.V().hasLabel('person').where(repeat(out('knows')).emit(in('knows').has('age',gt(40))).limit(2)).count()",
   // The control: `until` before `emit` — the `twice` route already shares the walk as one CTE.
   "g.V().until(hasLabel('software')).repeat(out()).emit(has('age',gt(30))).count()",
 ];
@@ -58,7 +64,7 @@ describe('a shared CTE over a walk is evaluated once per statement', () => {
     expect(count(WALKS[0]!)).toBe(0);
     expect(count("g.V().repeat(out('knows')).emit(in('knows').has('age',gt(20))).count()")).toBe(2);
     expect(count("g.V().hasLabel('person').where(repeat(out('knows')).emit(in('knows').has('age',gt(20)))).count()")).toBe(1);
-    expect(count(WALKS[6]!)).toBe(9);
+    expect(count(WALKS.at(-1)!)).toBe(9);
   });
 
   test('answers on the tree agree with a per-row reading', () => {
@@ -103,8 +109,27 @@ describe('a shared CTE its readers stop early in stays lazy', () => {
     expect(reevaluatedCtes(sql, plan)).toEqual([]);
   });
 
+  // A MIXED relation — one reader stops early, another reads it in full — is fenced: the full reader already pays
+  // for the whole relation, so the spool costs nothing and saves the second evaluation (page plus total).
+  const MIXED = [
+    "g.V().out().dedup().values('age').union(limit(2), count())",
+    "g.V().has('age',gt(30)).both().union(limit(2), count())",
+  ];
+  for (const q of MIXED) test(`read both partially and in full, fenced: ${q}`, () => {
+    const { sql, plan } = planOf(store, q);
+    expect(materialized(q)).toBe(true);
+    expect(reevaluatedCtes(sql, plan)).toEqual([]);
+    expect(runWith(store, q).length).toBe(3);
+  });
+
+  test('a selective seed under a limit that never stops early stays unfenced (an accepted second read)', () => {
+    expect(materialized("g.V().has('age',gt(30)).both().values('name').limit(3)")).toBe(false);
+  });
+
   test('answers on the modern graph', () => {
     const modern = seededStore();
+    // page plus total over josh's and peter's neighbours: two rows, then the count 4.
+    expect(Number(runWith(modern, "g.V().has('age',gt(30)).both().union(limit(2), count())").at(-1)!.v)).toBe(4);
     // josh (32): marko, ripple, lop; peter (35): lop.
     expect(Number(runWith(modern, "g.V().has('age',gt(30)).both().count()")[0].v)).toBe(4);
     expect(runWith(modern, "g.V().has('age',gt(30)).both().values('name').limit(3)").length).toBe(3);

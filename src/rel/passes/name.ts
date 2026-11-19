@@ -130,13 +130,17 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
    *   twice per statement (two `CO-ROUTINE wk_…` sites in one plan). Fenced, it is one `MATERIALIZE` and
    *   each reader scans the temp table (or an automatic index on it).
    *
-   * The second reason holds only where EVERY reader reads the relation in full (`readInFull(roots, 'once').full`,
+   * The second reason is waived only where EVERY reader stops early (`readInFull(roots, 'once').stopsEarly`,
    * `src/rel/work.ts`, the reader-demand fact). A fence spools the WHOLE relation before the first row; a reader
    * that stops early — a `LIMIT`, an uncorrelated `EXISTS` — reads a flattened copy only as far as it needs, so two
    * such copies cost two short reads, not two relations. `g.V().has('age', gt(30)).both().values('name').limit(3)`
    * shares the range seek's `SELECT DISTINCT` between both directions: fenced it spooled every match and went
-   * near-constant → linear (2.8 → 45 ms at 64k vertices). A relation read both ways is not in `full` and stays
-   * lazy too. A draw fences whatever its demand: that is an answer, not a cost.
+   * near-constant → linear (2.8 → 45 ms at 64k vertices). A MIXED relation — read in full by one reader and
+   * partially by another (`union(limit(2), count())`, or an emit walk under `limit(n)` whose state semi-join reads
+   * it in full) — IS fenced: one reader already pays for the whole relation, so the spool costs nothing extra and
+   * saves the second evaluation. Accepted trade-off: a selective filter under a `limit` that never stops early
+   * reads its seed twice — the pre-ec2db3de cost; do not re-fence it. A draw fences whatever its demand: that is
+   * an answer, not a cost.
    *
    * A walk bound under its own name is already one CTE in the `WITH RECURSIVE` list — SQLite cannot flatten
    * a recursive CTE — so it is never wrapped (the emitter renders a bound `Recursive` itself, not a
@@ -146,7 +150,7 @@ export function name(root: Rel, mint: () => string, hoisted: readonly { readonly
   const demand = readInFull(roots, 'once');
   const fenced = (original: Rel, mapped: Rel): Rel =>
     (counts.get(original) ?? 0) > 1 && original.kind !== 'recursive'
-      && (draws(original) || (demand.full.has(original) && copyRerunsBarrier(mapped)))
+      && (draws(original) || (!demand.stopsEarly.has(original) && copyRerunsBarrier(mapped)))
       && !(mapped.kind === 'materialize' && mapped.fenced)
       ? materialize({ id: relId(`${original.id}_fence`), input: mapped, channels: mapped.channels, type: mapped.type, fenced: true })
       : mapped;
