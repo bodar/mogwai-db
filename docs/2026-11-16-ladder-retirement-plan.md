@@ -71,7 +71,12 @@ owner stopped it. From now on:
   `collectedArray`. Keyed/unkeyed 1.1–1.3× at 1k/8k (was 2.6–3.4×); scaling linear. Add a regression test for the
   shape V1 made answer: `g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1))
   .count()` → [6] (it threw a bare Error before V1; the non-raising twin still does — V5).
-- **V3 — a ONE-site keyed pooled group pays for the multi-site pool (regression from 95334eb3, major).**
+- ✅ **V3 — LANDED (75ad576d).** Remains: nothing. A value body that is exactly `count()` is splittable, so it takes
+  groupCount's `(key, contribution)` counting rows at EVERY site (`countsTraversers` in `groupRows`, `src/compiler/rel/map.ts`)
+  and a keyed `group('a')` registers them like `groupCount('a')` (`keyedCount`, `lower/scoped.ts`); decided by the value
+  body, not the site count, so no lookahead. All witnesses ~2× faster and linear (7.7–8.2× at 1k→8k). sum/min/max and a
+  pre-body count stay pooled, and the `mayRaise` compute-once tidy-up is filed in `outstanding-work.md`.
+  Original item: **a ONE-site keyed pooled group pays for the multi-site pool (regression from 95334eb3, major).**
   `g.V().group('a').by('name').by(count()).cap('a')` used to take the host's counting recipe (one CTE, `count(1)` per
   key, 1714 SQL chars); it now goes through `poolMembers`/`reduceFrom`: two MATERIALIZED CTEs, a
   `min(printf('%020d',…)||key)` first-arrival domain, a domain→pool join and a regroup (2945 chars, +72%; compile
