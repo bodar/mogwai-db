@@ -55,12 +55,23 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java`
    :123-126). Both verified on trunk 11378285.
 2. **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293).** Large schemas only
-   (`g.V().as('a').out('knows').where(__.in().as('a')).count()` 35× at 300 labels). **Blocked on owner question 1.**
+   (`out().out().where(__.in().as('a'))` 22 → 759 ms at 300 labels; `repeat(out()).emit(where(__.in().as('a')))`
+   136 → 2337 ms). **DECIDED (owner, 2026-11-19): measure, then (b) if it holds, else (a).** Ratios are not the bar
+   here — absolute cost is: (a)'s ~3 µs per probe adds milliseconds on small schemas and is accepted.
+   - **Step 1, a one-off measurement (not a CI gate):** compare trunk, (a) the correlated recursive loose scan and
+     (b) `label IN (SELECT DISTINCT label FROM edges WHERE src = <fixed>)` on (i) the round-7 hub rows at 3 and 300
+     labels, (ii) a pinned start vertex that is an OUT-HUB (10k–100k out-edges) — (b)'s unmeasured risk, it reads the
+     whole out-neighbourhood per probe — and (iii) REAL queries over the conformance/workload sample graphs (L1
+     corpus scenarios and L6 workload queries whose plans fire `edgePair` — find them by compiling the pools and
+     checking for the pass's output). Report absolute ms, not only ratios.
+   - **Step 2:** take (b) if it stays near trunk at the out-hub; otherwise (a). Add a 300-label row and (for the
+     chosen form) an out-hub row to `test/compiler/walk-condition-hub-scale.exec.test.ts`.
 3. **R4.2 — variant and property payloads through the per-traverser rejoin. Closes ALL 5 ladder-only answers.**
-   **Blocked on owner question 2.** `rejoin` never uses `framingCols()`' column list — it carries the body's own
-   payload columns — and `framingCols`' null for variant/property exists for RECORD FIELDS. (a) relax the gate for
-   variant/property (record fields still decline), making R7 reachable this cycle; or (b) wait for typed-carrier T1
-   (parent Phase 4, not started).
+   **DECIDED (owner, 2026-11-19): option (c).** Relax `rejoin`'s `framingCols()` gate (`scoped.ts` ~1616) for
+   variant/property only — record fields and every fixed-width consumer still decline. Before it lands, compare the 5
+   ladder-only queries' answers VALUE BY VALUE against the ladder (the ladder is the reference while it exists): a
+   pinned test, not only the L9 multiset check. Any difference stops and returns to the owner. The typed carrier
+   later refactors working code; it is not a prerequisite.
 4. **R7 — delete the switch**, once the ladder-only count is 0: `correlatedChild` and its readers, L5's per-switch
    entry, `FastPathConfig.connectorOnly` (becomes the only mode); L9's connector-only ratchet becomes the ordinary
    coverage ratchet; update root `CLAUDE.md` decision 6 and `src/compiler/CLAUDE.md`.
@@ -71,14 +82,6 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 - L9: connector-only closure may not fall; ladder-only answers may only fall; every host is a row or a classified
   deferral.
 
-## Owner questions (open, verbatim from round 8)
+## Owner questions (open)
 
-1. **U1:** "U1 (plan owner question 1): to fix edgePair's per-probe label-vocabulary cost, pick (a) recursive loose
-   scan (10–19× faster at 300 labels, 1.6–2× slower at 3), (b) label IN (SELECT DISTINCT label FROM edges WHERE src=…)
-   (trunk speed at 3 labels, fastest at 300, reads a hub's whole neighbourhood), or (c) close U1 and move the cost to
-   outstanding-work."
-2. **R4.2:** "All 5 remaining non-group ladder-only answers decline at one line, scoped.ts:1616 rejoin's framingCols()
-   gate. rejoin never uses that column list; it carries the body's own payload columns, and framingCols' null for
-   variant/property exists for RECORD FIELDS. Should the per-traverser rejoin carry variant/property payloads now
-   (record fields still decline), which makes R7 reachable this cycle? Or keep the 2026-11-16 decision to wait for
-   typed-carrier T1, which has not started?"
+None. Q1 (U1) and Q2 (R4.2) were answered 2026-11-19 and are written into their items.
