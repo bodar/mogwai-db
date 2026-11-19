@@ -901,7 +901,16 @@ Beside the RelIR substrate:
   connector's `map(choose(…).option(…fold())…)` rejoin numbers each scope's rows to keep the first, because
   `rowBounds` sums a `Union`'s arms and cannot see that `choose`'s option arms are EXCLUSIVE per traverser. Linear
   (1k→8k ≈ 7.5×) but ~1.25× the ladder route's constant (which R7 deletes). PREREQUISITE: an exclusive-arm bound on the
-  choose merge (`src/rel/bounds.ts`), so `firstRow` drops the window.
+  choose merge (`src/rel/bounds.ts`), so `firstRow` drops the window. Re-measured by the R4.2 review as 1.31× at
+  8k, which is past the bar, so it is now ladder-retirement plan item P1 and owned there. That item also covers
+  `g.V().local(union(values('name'), out())).dedup().count()` (1.37×, 2 → 3 joins).
+- **Variant/property-producing child bodies at depth (pre-existing, unchanged by R4.2)** — clean "no lowering
+  covers" declines: a variant `map()` body under a `union` arm, `order().by()`, `group().by(…fold())` or before
+  `path()`; a property body under a `union` arm, followed by `path()`/`valueMap()`/`properties()`, or inside
+  `optional(properties(…))`. Reach: plausible.
+- **`group()` over a collection-valued traverser (pre-existing)** — `g.inject([1,2],[3]).group().by(count(local))`,
+  `g.V().out().fold().group().by(count(local))` decline although `inject([1,2],[3]).count(local)` answers `[2,1]`.
+  The reference answer is a `{2:1, 1:1}`-style map. Reach: plausible.
 
 - **`count(local)` over an ELEMENT (element-count-local)** — `g.V().out().count(local)` declines at top level, so
   `group().by(label).by(out().count(local))` declines too (ref `{person:1, software:1}` by `Operator.assign`: an
@@ -1565,6 +1574,12 @@ Proposals from the compile-cost round 3 reuse sweep (answer-neutral unless state
   args:[]})` — the only `fn:'random'` constructions outside raise.ts, and exactly the arms `draws`
   (`src/rel/copies.ts`) must skip via `isAbort` or a valid query declines `CopiedDraw`. One constructor next
   to its recogniser keeps them from drifting. No SQL change.
+- **Gate `map()`'s two correlated first-row forms on `rowResident`, not `framingCols`** (from the 2026-11-19 ladder
+  round). `src/compiler/rel/lower/scoped.ts` `firstInnerOver` (`inline` and `pick`) asks `framingCols` and then
+  discards the column list in favour of `payloadCols(tail.rel)`. That is exactly the `rowResident` question
+  (`src/compiler/rel/framing.ts`), so all three `map()` routes would admit framings by one total switch. Expected
+  to change neither answers nor SQL: R4.2 widened these sites as an experiment, measured no change, and reverted.
+  Re-check with `rejoin-row-resident.exec.test.ts` and sql-hygiene. Low value, zero risk.
 
 ## 7. Low priority
 
