@@ -56,13 +56,9 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    depth case now asserts the exact bag of each traverser's `g` map — `{person:1}` ×1, `{}` ×5
    (`test/compiler/group-ladderless.exec.test.ts`, GroupStep.java:123-126), on the plain run, not `agreed()`.
    Remains: nothing.
-3. **U1 — `edgePair` costs |label vocabulary| per probe (regression from T1, 1274c293). DECIDED (owner,
-   2026-11-19): fix it in the SCHEMA — see S1.** Step 1's measurement (full text at 87400956) ruled out (b)
-   (quadratic at an out-hub, 264 → 3744 ms at 2k → 8k out-edges) and (a) (air-routes 7.3 → 10.8 s). The owner's
-   call: we are pre-v1 with no users, so a schema split is cheap and is the mechanically sympathetic fix. Once S1
-   lands, whatever cost remains (e.g. 300 EDGE labels) is accepted: one §1b line, U1 closed. Keep the real-graph
-   witnesses as a one-off comparison script; add the 300-label row to
-   `test/compiler/walk-condition-hub-scale.exec.test.ts`.
+3. ✅ **U1 — CLOSED by S1 (6793d40a).** The `edgePair` pass is gone; a label-free edge probe is one `e_pair` seek
+   at any vocabulary (300 edge labels: 787 → 16.2 ms), so no residual cost needs a §1b line. The 300-label row is in
+   `test/compiler/walk-condition-hub-scale.exec.test.ts`. Remains: nothing.
 4. ✅ **R4.2 — LANDED (ae0fadb7).** `rejoin` (`src/compiler/rel/lower/scoped.ts`) reads the total switch
    `rowResident` (`src/compiler/rel/framing.ts`), so variant and property payloads ride the per-traverser rejoin.
    Corpus ladder-only answers went 5 → 0. Remains: P1.
@@ -88,11 +84,11 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    `FastPathConfig.connectorOnly` (connector-only becomes the only mode). L9's connector-only ratchet becomes the
    ordinary coverage ratchet, and F1's `agreed()` ladder half goes. Update root `CLAUDE.md` decision 6 and
    `src/compiler/CLAUDE.md`.
-9. **S1 — split the label vocabulary by element kind (fixes U1; owner, 2026-11-19).** `labels` (`src/storage.ts`)
-   holds vertex AND edge labels in one table, so `edgePair`'s `label IN (SELECT id FROM labels)` probes vertex
-   labels it can never match. Split it (two vocabularies, or a kind column with an index that leads on it — the
-   builder measures and picks the simpler). Pre-v1, no users: change the schema directly, no migration. Re-time U1's
-   rows (3/300 labels, out-hub, air-routes, grateful-dead) and record absolute ms.
+9. ✅ **S1 — LANDED (6793d40a).** Measured both: a `labels` kind flag would still cost |edge labels| per probe and
+   keep the pass, so the winner is an `e_pair(src, tgt)` index (`src/storage.ts`) whose prefix IS the label-free
+   probe — one seek SQLite's own planner picks; `edgePair` (`src/rel/passes/edge-pair.ts`) is deleted. Re-timed (ms
+   at 8×): 300 labels 779 → 16.0, `repeat(both()).times(2).where(…)` 54769 → 1267, air-routes 2986 → 684,
+   grateful-dead 1338 → 869; bulk load +7–11%. Remains: nothing.
 10. **S2 — survey for other simple structural splits (owner, 2026-11-19). REPORT ONLY; the owner decides.** Is there
    another cheap schema split that halves (or better) what an index seek or scan reads — more schema in exchange for
    leaning harder on SQLite? Check every table and index in `src/storage.ts` against the shapes the lowering
