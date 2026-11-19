@@ -718,7 +718,7 @@ witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100
   retained effect's shared subtrees — say it is generic in its comment; a drain with no reader of its label still
   takes the finished map (O(keys) isolate memory, `g.V().group('a').by('name').by(values('age').sum()).count()`);
   `by(constant(null))` lands as a self-join of the scope CTE on its row key (seedOnly could write in place); a
-  property host's `group().by(k).by(<pre>.sum())` still returns a finished map (`reduced`) — `by(count())` now takes
+  property host's `group().by(k).by(<pre>.sum())` declines since R5.5 (f2b0fc72) — `by(count())` now takes
   groupCount's counting rows at every host (`countsTraversers`, `map.ts`), and the same split for `sum`/`min`/`max`
   and a pre-body `by(out().count())` (splittable, but the counting recipe has no contribution column for them) would
   let those union across sites too and retire `POOLED_RECIPE`. Depth gaps (clean declines) — `group().by(label)
@@ -729,6 +729,27 @@ witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100
   `repeat`/after `outV()`, or with a raising `max()`/`mean()`/`sum()` value in an arm/body/second site; mixed member
   layouts (`where(out().group('a')…)` + a root site); two sites with different recipes decline with only "no
   lowering covers" (should say two sites must be one grouping).
+- **Round 9 (2026-11-19), out of the plan's scope:** super-linear, pre-existing (same before and after V5) — a
+  collection read that does not depend on the outer row is paid per host row in `coalesce`/`choose`/`order().by`/
+  `dedup().by` (`g.V().aggregate('a').coalesce(select('a').unfold().has('age',gt(1000)), constant('x')).count()`
+  0.75 s → 62 s at 1k → 8k) and `local(select('a').unfold().limit(2))`/`map(select('a').unfold())` are quadratic.
+  Debt / reuse — send an unkeyed `group().by(k).by(count())` to `groupRows`' `countsTraversers` arm instead of the
+  member pool (2226 vs 1223 SQL chars; fold `keyedCount` into the one route; check key spelling); one exported
+  `collapsesStep(step)` (`selfCollapses && !isLocalScope`, `lower/reduction.ts`) replacing the hand copies in
+  `branch.ts` `isReductionArm`/`slicesAcrossStarts`, `per-traverser.ts` and `map.ts` `reducesPool`; delete the
+  unreferenced spine-only `rewrite` in `src/rel/walk.ts` (it lacks V5's identity rule) and fix the prune.ts /
+  `rewriteRels` comments citing it; `countsTraversers` (`map.ts`) and `reducingGroupCollapseTerminal`
+  (`ir/bulk.ts`) both ask "is the value exactly count()", and bulk.ts excludes the now-splittable keyed form;
+  `countsTraversers`/`sameGroupRecipe` comments lack `vendor/tinkerpop/...` paths; `name.ts`'s "costs nothing extra"
+  comment is about rows, not computed columns; `node-facts.test.ts` bounds (60/30) were reset with the new
+  denominator — ~50 would hold (measured 8.6–44). Depth gaps (clean declines) — the property host has no CONNECTORS
+  row (`properties().group().by(key).by(value().fold())`, `group('a')…cap('a')` over it); keyed
+  `group('a').by(k).by(count())` at a branch-arm site on a non-vertex host (`g.E().union(group('a').by(label)
+  .by(count()), inV()).cap('a')`, `coalesce(out().group('a')…, constant('x'))`); `union(limit(k).fold(), count())`
+  after `values`/`project`/`valueMap`; `aggregate('a').local(union(select('a').count(local), constant(0L)).sum())`;
+  a reducer inside a `coalesce` arm (`coalesce(out().map(out().count()), constant(0L)).sum()`). Probe:
+  `g.V().values('name').group().by(length())` emits keys tagged `{t:null,v:3}` — check the wire type before filing
+  as §1.
 
 ## 2. Needs a human call
 
