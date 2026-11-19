@@ -239,7 +239,10 @@ const SCHEMA = [
   // A single FTS5 trigram index over property TEXT, maintained in the write path (see
   // services/fts-index.ts) — the shared substrate for tinker.search and the TextP substring
   // predicates. `text` is the ONLY tokenized column; the rest are UNINDEXED (stored, not tokenized).
-  // trigram + case_sensitive 0 (the default) makes `text LIKE '%sub%'` index-served AND matches
+  // trigram + case_sensitive 0 (the default) makes `text LIKE '%sub%'` index-served — the infix or
+  // TWO-argument form only: the three-argument `like(p, text, '\')` an ESCAPED pattern needs is never
+  // offered to FTS5's xBestIndex and scans the table, so every seek probes by the unescaped
+  // `trigramProbe` (`src/rel/like.ts`) and keeps the escaped LIKE as its check — AND matches
   // TinkerPop's single-case reference graphs; the tokenizer options live INSIDE the tokenize
   // string (a separate `case_sensitive 0` column option errors — see fts5-trigram-runtime).
   // One row per property, and its ROWID is the property id SIGNED by owner kind (+vertex, -edge —

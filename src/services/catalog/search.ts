@@ -1,5 +1,6 @@
 import * as make from '../../rel/factory.ts';
-import { col, compilerInt, compilerText } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { likeEscaped, trigramProbe } from '../../rel/like.ts';
 import { and, eq, meta, typeOf } from '../../compiler/rel/build.ts';
 import { propertyJoin } from '../../compiler/rel/property.ts';
 import { sqlElem, type Elem } from '../../compiler/elem.ts';
@@ -55,9 +56,6 @@ function searchTerm(params: CallParams): string {
   return term;
 }
 
-/** The LIKE-escaped `%term%`: %/_/\ in the user term escaped, then wrapped for a substring match. */
-const likeContaining = (term: string): string => `%${term.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
-
 /**
  * The matched properties as a RelIR relation — an FTS scan joined back to the property table for the
  * payload, which is `propertyJoin`'s caller-supplied ON in its second form: this producer has no
@@ -72,7 +70,8 @@ const likeContaining = (term: string): string => `%${term.replace(/[\\%_]/g, (c)
  * parameters. A bind serves a user PARAMETER; this is a constant the compiler already holds.
  */
 function searchProperties(site: RelCallSite, ownerElem: Elem, term: string, empty = false): RelContribution {
-  const pattern = likeContaining(term);
+  const raw = compilerText(term);
+  const wrap = (x: Expr): Expr => ({ kind: 'binary', op: '||', left: { kind: 'binary', op: '||', left: compilerText('%'), right: x }, right: compilerText('%') });
   const fts = make.scan({
     id: site.fresh('fts'), table: 'property_fts', alias: site.fresh('rf'), channels: [],
     type: typeOf(meta('owner_elem', 'text'), meta('pid', 'int'), meta('text', 'text', true)),
@@ -81,9 +80,11 @@ function searchProperties(site: RelCallSite, ownerElem: Elem, term: string, empt
     id: site.fresh('ffl'), input: fts, channels: [], type: fts.type,
     pred: and(
       eq(col(fts.id, 'owner_elem'), compilerText(sqlElem(ownerElem))),
-      // SQLite's `like(pattern, subject, escape)` FUNCTION, not the infix operator — the algebra has
-      // no node for an ESCAPE clause and §7 keeps the node set closed, so the function says it
-      // instead. The same form `predicate.ts` emits for every TextP substring op.
+      // Two LIKEs over one term. The SEEK is the two-argument `trigramProbe` over the raw `%term%` — the only
+      // form FTS5's `xBestIndex` serves from the trigram index (`src/rel/like.ts`); its unescaped `%`/`_`
+      // only widen it. The CONTRACT is SQLite's `like(pattern, subject, escape)` FUNCTION over the escaped
+      // term — the algebra has no node for an ESCAPE clause and §7 keeps the node set closed — the same
+      // escape encoding `predicate.ts` emits for every TextP substring op (`likeEscaped`).
       empty
         // THE EMPTY RELATION, spelled as the algebra spells one: a `Filter(false)` over something
         // (§3.3). `Values([])` is unrepresentable — it rendered as invalid SQL that only failed at the
@@ -91,7 +92,10 @@ function searchProperties(site: RelCallSite, ownerElem: Elem, term: string, empt
         // rather than declining. Declining would be wrong: a decline raises `UnsupportedTraversal`,
         // leaving NOTHING answering a shape that should return empty.
         ? eq(compilerInt(0), compilerInt(1))
-        : { kind: 'call', fn: 'like', args: [compilerText(pattern), col(fts.id, 'text'), compilerText('\\')] },
+        : and(
+          trigramProbe(wrap(raw), col(fts.id, 'text')),
+          { kind: 'call', fn: 'like', args: [wrap(likeEscaped(raw)), col(fts.id, 'text'), compilerText('\\')] },
+        ),
     ),
   });
   const rel = propertyJoin(scoped, ownerElem, (props) => eq(col(props, 'id'), col(scoped.id, 'pid')), site.fresh);

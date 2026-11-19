@@ -6,6 +6,7 @@ import { rowBounds } from '../bounds.ts';
 import type { RelId } from '../types.ts';
 import { deepColsRead, exprRels, forEachExpr, forEachRel, mapColsDeep, relExprs, relsBeneath, rewriteExpr, rewriteRels, substRelId } from '../walk.ts';
 import { type ColumnPath, columnPath, rowidScan } from '../lineage.ts';
+import { likeProbePattern, trigramProbe } from '../like.ts';
 
 /**
  * `semijoin` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the
@@ -18,7 +19,8 @@ import { type ColumnPath, columnPath, rowidScan } from '../lineage.ts';
  * relation of owner ids and INNER JOIN the element scan to it — a semi-join — leaving the ORIGINAL
  * predicate on the `Filter` untouched as the semantic authority. What VARIES is only the physical
  * relation the owner ids are seeked from: a `has(k, v)` reads `vp_key_value` (`indexSeek`); a
- * `has(k, containing(t))` reads the `property_fts` trigram index (`trigramSeek`). That is a single
+ * `has(k, containing(t))` reads the `property_fts` trigram index (`trigramSeek`, by the two-argument LIKE
+ * probe FTS5 can serve — `src/rel/like.ts`). That is a single
  * DECORRELATION over the finished algebra with the ACCESS PATH as a pluggable sub-decision, which is
  * the split Calcite draws too (`vendor/calcite`, at the pin — a logical rewrite changes what a plan
  * MEANS, a physical rule chooses how it RUNS; a driving semi-join is `SubQueryRemoveRule` +
@@ -693,9 +695,10 @@ export const trigramSeek: OwnerSeek = (term, target, mint) => {
   const key = literalEq(free, props.id, 'key');
   if (key == null) return null;
   const atom = necessaryTextAtom(free, props.id);
-  if (atom == null || literalTerm(atom.pattern).length < 3) return null;
+  const probe = atom && likeProbePattern(atom.pattern);
+  if (!atom || !probe || literalTerm(probe.term).length < 3) return null;
   if (atom.kind === 'negative') return negativeOwners(props, properties, key, atom.matches, mint);
-  return positiveOwners(properties, key, atom.pattern, mint);
+  return positiveOwners(properties, key, probe.pattern, mint);
 };
 
 /**
@@ -741,12 +744,19 @@ function readsOnlyValue(e: Expr, rel: RelId): boolean {
   return only;
 }
 
-/** Positive TextP can start directly from matching FTS rows. */
-function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, pattern: Expr, mint: Minter): Rel {
+/**
+ * Positive TextP starts directly from matching FTS rows, SEEKED through the trigram index: `probe` is the atom's
+ * pattern with its escape chain collapsed to the raw term (`likeProbePattern`), read by the two-argument LIKE FTS5
+ * serves (`trigramProbe`). Unescaped, the user's `%`/`_` only WIDEN it, and it folds case — a superset, never the
+ * answer: the generic correlated `EXISTS` (the escaped LIKE AND the exact `instr`/`substr` test) stays above the
+ * join and decides. The escaped three-argument LIKE here read the whole index (`INDEX 0:`) and re-checked every
+ * row — slower than no seek at all.
+ */
+function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, probe: Expr, mint: Minter): Rel {
   const scan = make.scan({ id: mint.id('fs'), table: 'property_fts', alias: mint.alias('rfs'), channels: [], type: FTS_TYPE });
   const pred = andAll([
     eq(col(scan.id, 'owner_elem'), compilerText(properties.ownerElem)), eq(col(scan.id, 'pk'), compilerText(key)),
-    { kind: 'call', fn: 'like', args: [pattern, col(scan.id, 'text'), compilerText('\\')] },
+    trigramProbe(probe, col(scan.id, 'text')),
   ]);
   const filtered = make.filter({ id: mint.id('ff'), input: scan, channels: [], type: scan.type, pred });
   const owners = make.project({ id: mint.id('fp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(filtered.id, 'owner')]] });
@@ -776,8 +786,11 @@ function negativeOwners(
   const fts = make.scan({ id: mint.id('nfs'), table: 'property_fts', alias: mint.alias('rnfs'), channels: [], type: FTS_TYPE });
   const matchingFts = make.filter({ id: mint.id('nff'), input: fts, channels: [], type: fts.type, pred: andAll([
     eq(col(fts.id, 'rowid'), properties.ownerElem === 'edge' ? { kind: 'unary', op: 'neg', arg: col(rows.id, 'id') } : col(rows.id, 'id')),
-    // The atom's OWN match body re-asked of the FTS text — LIKE (which keeps the trigram index) AND its
-    // exact case test — so the probe drops exactly the rows the negative TextP rejects.
+    // The atom's OWN match body re-asked of the FTS text — its escaped LIKE AND its exact case test — so the
+    // probe drops exactly the rows the negative TextP rejects. That LIKE stays the THREE-argument form, which
+    // FTS5's `xBestIndex` never sees, DELIBERATELY: this probe is served by the rowid equality above
+    // (`INDEX 0:=`, one rowid seek per keyed property row). Offered the two-argument `trigramProbe`, SQLite plans
+    // the trigram match with it instead (`INDEX 0:=L1`), measured super-linear: 18x over 8k -> 64k rows.
     rewriteExpr(matches, (n) => (n.kind === 'col' && n.rel === props.id && n.name === 'value' ? col(fts.id, 'text') : n)),
   ]) });
   const probe = make.project({ id: mint.id('nfp'), input: matchingFts, channels: [], type: { cols: [{ name: 'one', type: 'int', nullable: false }] }, exprs: [['one', compilerText('1')] ] });
@@ -799,11 +812,11 @@ function literalEq(parts: readonly Expr[], rel: RelId, name: string): string | n
   }
   return null;
 }
-/** Literal-only: parameters deliberately use the generic plan, preserving the old fast-path scope. */
-function literalTerm(pattern: Expr): string {
-  let raw: string | null = null;
-  forEachExpr(pattern, (e) => {
-    if (e.kind === 'call' && e.fn.toLowerCase() === 'replace' && e.args[0]?.kind === 'lit' && e.args[0].source === 'compiler-text' && raw == null) raw = e.args[0].value;
-  });
-  return raw ?? '';
+/**
+ * The term a seek probes by when it is a compiler-text LITERAL (`likeProbePattern`'s `term`), else `''`.
+ * Literal-only: a wire parameter keeps the generic plan, because one under the trigram floor (3 characters) makes
+ * FTS5 read the whole index — slower than no seek — and its length is not known when the plan is built.
+ */
+function literalTerm(term: Expr): string {
+  return term.kind === 'lit' && term.source === 'compiler-text' ? term.value : '';
 }

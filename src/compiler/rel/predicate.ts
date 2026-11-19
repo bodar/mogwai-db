@@ -7,6 +7,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
 import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, isBinaryCarrier, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
+import { likeEscaped } from '../../rel/like.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -790,7 +791,7 @@ export const typedValueKey = (value: Expr, vtype: Expr): readonly [Expr, Expr] =
   ];
 };
 
-/** `TextP` -> a LIKE pattern with the user's metacharacters escaped. A wire parameter stays a
+/** `TextP` -> a LIKE pattern with the user's metacharacters escaped (`likeEscaped`). A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
  * compiler constant. */
 function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolean; nullOperand: boolean; cased: (subject: Expr) => Expr } | null {
@@ -803,13 +804,7 @@ function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolea
   if (operand.value !== null && typeof operand.value !== 'string') return null;
   if (operand.value === null) return { pattern: compilerText(''), negated, nullOperand: true, cased: () => CONSTANT.false };
   const raw = operand.name == null ? compilerText(operand.value) : param(operand.value, operand.name);
-  const escaped: Expr = { kind: 'call', fn: 'replace', args: [
-    { kind: 'call', fn: 'replace', args: [
-      { kind: 'call', fn: 'replace', args: [raw, compilerText('\\'), compilerText('\\\\')] },
-      compilerText('%'), compilerText('\\%'),
-    ] },
-    compilerText('_'), compilerText('\\_'),
-  ] };
+  const escaped = likeEscaped(raw);
   const join = (...parts: readonly Expr[]): Expr => parts.reduce((left, right) => binary('||', left, right));
   // SQLite's LIKE folds ASCII case (`'MARKO' LIKE '%ark%'` is true), where Java's `startsWith`/`endsWith`/
   // `contains` are exact (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Text.java:44,126`

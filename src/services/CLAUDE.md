@@ -34,10 +34,15 @@ through the ordinary fold — no new orchestrator, and nothing here builds SQL b
 One FTS5 **trigram** virtual table backs both `tinker.search` and the TextP substring predicates,
 maintained in the write path (the stored typed tree needs app awareness, so no triggers).
 The index's `LIKE` is **case-insensitive** (ASCII), so it is only ever a SUPERSET access path: the
-TextP predicates are Java's exact `startsWith`/`endsWith`/`contains` (`Text.java`), spelled as the
-`LIKE` (which the seek reads) CONJOINED with an exact `instr`/`substr` test (`likePattern`,
+TextP predicates are Java's exact `startsWith`/`endsWith`/`contains` (`Text.java`), spelled as an
+escaped `LIKE` CONJOINED with an exact `instr`/`substr` test (`likePattern`,
 `src/compiler/rel/predicate.ts`). `tinker.search` keeps its own documented case-insensitive literal
-contract (`describeParams`). `regex` is a barrier segment prefiltered by the trigram index
+contract (`describeParams`). **FTS5 serves only the TWO-argument `LIKE`** — the three-argument
+`like(p, text, '\')` an escaped pattern needs reads the whole index (`VIRTUAL TABLE INDEX 0:` in the
+plan, against `INDEX 0:L…` for a seek). So every positive probe is `trigramProbe` over the UNESCAPED term
+(`likeProbePattern`, `src/rel/like.ts` — the one inverse of the one escape encoding), a wildcard-widened
+superset, with the escaped `LIKE` kept beside it as the check. The negative anti-probe is the exception,
+by measurement: it is a rowid seek, and offering it the two-argument form makes it super-linear. `regex` is a barrier segment prefiltered by the trigram index
 (`docs/archive/2026-08-12-regex-as-a-barrier-research.md`).
 
 - **One row per property, keyed by the SIGNED property id** (`rowid` = +vertex_properties.id,

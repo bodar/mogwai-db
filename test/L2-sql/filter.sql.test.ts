@@ -10,6 +10,9 @@ import { test, expect, describe } from 'bun:test';
 import { PER_ROW, STATIC } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { read, run, seededStore } from '../support/harness.ts';
+import { exec } from '../support/executor.ts';
+import { decode } from '../support/decode.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -62,6 +65,85 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(negIndexed.sql).toContain('property_fts');
     expect(negIndexed.sql).toContain('IS NOT');
     expect(negGeneric.sql).not.toContain('property_fts');
+  });
+
+  // FTS5's trigram tokenizer serves `text LIKE p` from its index ONLY for the two-argument LIKE its
+  // xBestIndex is offered (`L` in the plan's idxStr); the escaped three-argument `like(p, text, '\')` is a
+  // whole-index read (a bare `INDEX 0:`) that was slower than no seek at all. So a positive seek must show an
+  // `L` constraint, and the anti-probe must stay a rowid seek (`INDEX 0:=` — the two-argument form there is
+  // measured super-linear, `src/rel/passes/semijoin.ts` `negativeOwners`).
+  describe('the property_fts probe is index-served (src/rel/like.ts)', () => {
+    /** The `property_fts` accesses of every statement `drive` runs against `store`. */
+    const ftsAccesses = async (store: ReturnType<typeof seededStore>, drive: () => unknown): Promise<string[]> => {
+      const sqls: [string, readonly unknown[]][] = [];
+      const query = store.query.bind(store);
+      store.query = ((sql: string, binds: readonly unknown[] = []) => {
+        if (sql.includes('property_fts')) sqls.push([sql, binds]);
+        return query(sql, binds as unknown[]);
+      }) as typeof store.query;
+      try { await drive(); } finally { store.query = query; }
+      return sqls.flatMap(([sql, binds]) => (query('EXPLAIN QUERY PLAN ' + sql, binds as unknown[]) as { detail: string }[])
+        .map((r) => r.detail).filter((d) => d.includes('VIRTUAL TABLE')));
+    };
+    const seeks = (details: readonly string[]): void => {
+      expect(details.length).toBeGreaterThan(0);
+      for (const d of details) expect(d).toMatch(/INDEX 0:\S*L/);
+    };
+
+    for (const q of [
+      "g.V().has('name',TextP.containing('ark')).values('name')",
+      "g.V().has('name',TextP.startingWith('mar')).values('name')",
+      "g.V().has('name',TextP.endingWith('ter')).values('name')",
+      "g.E().has('weight',TextP.containing('abc')).count()",
+      "g.V().has('name',TextP.containing('ark').and(TextP.endingWith('rko'))).values('name')",
+    ]) test(`positive TextP seeks: ${q}`, async () => {
+      const store = seededStore();
+      seeks(await ftsAccesses(store, () => run(store, q)));
+    });
+
+    test('the regex prefilter rides the same seek', async () => {
+      const store = seededStore();
+      let names: unknown;
+      seeks(await ftsAccesses(store, async () => {
+        names = await Promise.all((await exec(store).framedAsync("g.V().has('name', TextP.regex('mar.*')).values('name')", {})).map((f) => decode(f.buf)));
+      }));
+      expect(names).toEqual(['marko']);
+    });
+
+    test('tinker.search seeks, and keeps its escaped contract LIKE', async () => {
+      const store = seededStore();
+      const p = compile("g.call('tinker.search', ['search':'mar'])", {}, { registry: standardRegistry });
+      if (p.kind !== 'read') throw new Error('expected read');
+      expect(p.sql).toMatch(/\.text, '\\'\)/);
+      seeks(await ftsAccesses(store, () => store.query(p.sql, p.binds)));
+    });
+
+    test('negative TextP keeps its rowid anti-probe', async () => {
+      const store = seededStore();
+      const details = await ftsAccesses(store, () => run(store, "g.V().has('name',TextP.notContaining('harl')).count()"));
+      expect(details.length).toBeGreaterThan(0);
+      for (const d of details) expect(d).toMatch(/INDEX 0:=$/);
+    });
+
+    // The probe is UNESCAPED and case-blind, so it admits a superset; the generic predicate above the join decides.
+    test('the probe is a superset: wildcards, case and non-ASCII stay exact', () => {
+      const store = seededStore();
+      for (const name of ['a_c', 'abc', '50%', '500', 'MÄRK', 'märk', 'back\\slash'])
+        run(store, `g.addV('thing').property('name', '${name.replace(/\\/g, '\\\\')}')`);
+      const names = (q: string): unknown[] => run(store, q).map((r) => r.v).sort();
+      expect(names("g.V().has('name',TextP.containing('a_c')).values('name')")).toEqual(['a_c']);
+      expect(names("g.V().has('name',TextP.containing('50%')).values('name')")).toEqual(['50%']);
+      expect(names("g.V().has('name',TextP.containing('ÄRK')).values('name')")).toEqual(['MÄRK']);
+      expect(names("g.V().has('name',TextP.containing('ARK')).values('name')")).toEqual([]);
+      expect(names("g.V().has('name',TextP.endingWith('k\\\\slash')).values('name')")).toEqual(['back\\slash']);
+      expect(names("g.V().has('name',TextP.containing('ar').or(TextP.containing('os'))).values('name')")).toEqual(['josh', 'marko']);
+      expect(names("g.V().has('name',TextP.notContaining('a_c')).values('name')"))
+        .toEqual(['50%', '500', 'MÄRK', 'abc', 'back\\slash', 'josh', 'lop', 'marko', 'märk', 'peter', 'ripple', 'vadas']);
+      // tinker.search's documented contract: case-insensitive (ASCII), wildcards literal.
+      const p = compile("g.call('tinker.search', ['search':'a_c'])", {}, { registry: standardRegistry });
+      if (p.kind !== 'read') throw new Error('expected read');
+      expect(store.query(p.sql, p.binds).map((r) => r.pv)).toEqual(['a_c']);
+    });
   });
 
   // `P.typeOf` on both `is` and `has` asserts the CONTRACT — three resolution modes, and the point of
