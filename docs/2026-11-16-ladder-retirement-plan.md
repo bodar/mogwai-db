@@ -60,21 +60,11 @@ owner stopped it. From now on:
   `has('age',gt(30)).both().values('name').limit(3)` is back to 2.9 ms at 64k (45 ms fenced). `repeat(both()).times(3)
   .limit(5)` and `union(out(),in()).limit(2)` were never moved by the fence (measured equal before ec2db3de); the
   latter's linear cost is pre-existing, filed in `outstanding-work.md` §1b. **Its own regression is V2.**
-- **V2 — a shared relation read BOTH in full and partially went unfenced (regression from 911eef32; both review
-  lenses, major).** `name.ts` fences only `demand.full`, but `work.ts`'s `ReaderDemand` contract says anything not in
-  `stopsEarly` takes the CONSERVATIVE answer. A mixed relation is in neither set, so the partial reader re-runs the
-  barrier the full reader already pays for. Witnesses (before 911eef32 → now, 1k / 8k): `g.V().out().dedup()
-  .values('name').union(limit(2), count())` 1.01/8.41 → 2.89/26.26 ms (dedup co-routine run 5×);
-  `g.V().has('age',gt(30)).both().union(limit(2), count())` 1.33/9.14 → 2.44/18.26 ms; the emit walk
-  `g.V().repeat(out('knows')).emit(in('knows').has('age',gt(40)))` + `.limit(5)` / `.range(10,20)` /
-  `.dedup().limit(5)` / `.limit(1000000).count()` evaluates `wk_w3` twice (`reevaluatedCtes` non-empty; 374 → 556 ms
-  at 32k). Answers unchanged, growth linear. **Fix (measured in a scratch tree):** `!demand.stopsEarly.has(original)
-  && copyRerunsBarrier(mapped)` in place of `demand.full.has(original) && …`; flip the comment "A relation read both
-  ways is not in `full` and stays lazy too". The U3 witness stays unfenced (0.13/0.36 ms). Pin it: add the limited
-  emit-walk shapes to `WALKS` and the mixed `union(limit(2), count())` case to
-  `test/compiler/shared-cte-fence.exec.test.ts`. Record U3's accepted trade-off in the `name.ts` comment: a selective
-  filter under a `limit` that never stops early (`has('name','nomatch').limit(1)`) reads the seed twice — the
-  pre-ec2db3de cost, not to be re-fenced as a "fix".
+- ✅ **V2 — LANDED (33356b80).** Remains: nothing. `name.ts` now waives the fence only where EVERY reader stops
+  early (`readInFull(roots,'once').stopsEarly`, `src/rel/work.ts` `ReaderDemand`); a MIXED relation is fenced, so the
+  emit walk under `limit`/`range` evaluates its walk once and `union(limit(2), count())` its barrier input once
+  (8k: 22.1 → 10.4 ms, 24.6 → 14.9 ms). U3 stays unfenced and its accepted re-read trade-off is recorded in the
+  `name.ts` comment; pinned in `test/compiler/shared-cte-fence.exec.test.ts`.
 - ✅ **V1 — LANDED (77eb86cb, b09dee81).** Remains: nothing. A raising pooled keyed group's drain IS the finished
   map's binding (`takeFinishedMap`, `collection.ts`): the map is evaluated once, retained as one `[key, value]` pair row
   per key (so it splits under the DO 2 MB value cap like any retained set), and cap/select/unfold re-fold it with
