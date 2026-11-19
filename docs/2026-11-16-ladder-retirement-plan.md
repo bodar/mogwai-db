@@ -33,8 +33,8 @@ owner stopped it. From now on:
 
 - The connector is the DEFAULT at every child site; `bothChildOrders` is deleted (N7). The ladder is the opt-in
   `correlatedChild` FastPath; its code is `src/compiler/rel/lower/per-traverser.ts` alone (12 `return null`).
-- **Ladder-only answers: 10** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`):
-  group 5 (L1 3, L6 2), per-traverser 1, other 4 (option-map `choose` bodies under `local`/`map`, corpus.txt
+- **Ladder-only answers: 5** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`):
+  group 0 (R5.3+R5.4, ec4ea890), per-traverser 1, other 4 (option-map `choose` bodies under `local`/`map`, corpus.txt
   515/516/2077/2078), existence 0.
 - Done (detail at `4100715c`): R0 ratchet; R1 shared substrate; R2 join width + per-scope draws; R3 existence family;
   R4.1/R4.3/R4.4; R5.1 domain elimination; R5.2 keyed `group("a")`; R6 `sideEffect` with effects; owner answers
@@ -66,11 +66,14 @@ owner stopped it. From now on:
 
 ### B. Ladder retirement
 
-- **R5.3** — `group` with a child-traversal key AND a child-traversal value (2 ladder-only answers). Restart from trunk.
-- **R5.4** — nested groups (2 L6 workload queries); then delete the `group` route (owner Q3a: the 1.40×/1.30× margins
-  are ACCEPTED). Also: `union(group('a').by(label).by(count()), out()).cap('a')` and choose/optional/coalesce arms
-  answer only through the ladder today, and under connector-only a keyed `group('x')` with a child value `by()` declines
-  — close these before the delete.
+- ✅ **R5.3 + R5.4 — LANDED (ec4ea890).** A `group()` value `by()` with no barrier is assigned per traverser
+  (`Operator.assign`, `vendor/tinkerpop/gremlin-core/.../Grouping.java`): `perTraverserSlot` (`scoped.ts`) marks the
+  value slot per traverser when the body has no `isValueBarrier` step, so `byValues` lands it beside the key, unkeyed
+  and keyed `group("m")` alike; nested groups close with it. Group ladder reach 5 → 0; L3 +1. Remains: the `union`
+  witness `union(group('a').by(label).by(count()), out()).cap('a')` is refused for a reason outside this item — a
+  `union` whose arms produce maps is refused even with no value `by()` (a separate union-host gap). With group's
+  ladder reach at 0, a later step could put `group` in `LADDERLESS` and delete the route (owner Q3a margins accepted);
+  left out of scope.
 - **R6 — the remaining deferred hosts as CONNECTORS rows** (owner Q4, widest scope), by workload reach:
   option maps (`choose(k).option(…)`, `branch`, closes the 4 "other" ladder-only answers — first), `V`/`E` re-source
   (stale entry: already answers connector-only), value arguments, predicate operands, projection `by()`s
