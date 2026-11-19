@@ -100,11 +100,15 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    `vertex_properties`/`edge_properties` row and lead `vp_key_value`/`ep_key_value` — not interned the way labels
    are. Report each candidate with what it splits, measured index size and seek cost before/after on the sample
    graphs, and the code it touches. Do not build.
-11. **G1 — garbage-collect speed-for-complexity trades (owner, 2026-11-19).** With the bar now 2×, review the code
-   this plan added for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2 33356b80, V3 75ad576d, V5 b600fc15,
-   T1 1274c293) and remove any whose only justification was getting under 1.3×, where removal keeps every answer and
-   stays within 2× of the trunk before that commit. Each removal reports before/after ms on its witnesses and lines
-   removed. Wrong-answer fixes are never removed.
+11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19).** NOT a blanket "remove what only
+   got us under 1.3×". For each change this plan made for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2
+   33356b80, V3 75ad576d, V5 b600fc15, T1 1274c293), weigh the measured win against the code complexity it added:
+   - It made the code simpler or no more complex, or bought a large win (e.g. well below the pre-change cost, or a
+     super-linear shape made linear): it earns its keep. Keep it.
+   - It added substantial code for a marginal win (removing it keeps every answer and stays within 2× of the trunk
+     before that commit): it does not earn its keep. Simplify or remove it.
+   - Report each with its witnesses before/after in ms, the lines it added, and the verdict with a one-line reason.
+     Wrong-answer fixes are never removed.
 
 ## Next round
 
