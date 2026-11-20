@@ -199,6 +199,24 @@ every depth gap now goes to §3._
    answer correctly where trunk declined. If U4 turns out not to be small, raise an owner question (accept the loss
    for now, or keep the splice out of bounded repeat bodies) rather than shoehorn.
 
+8d. **RC — repeat()-condition gaps (owner, 2026-11-20; added by the owner despite scope rule 5).** Measured on
+   trunk 0d10cb47, modern graph. Bounded `emit` conditions all answer now; these UNBOUNDED conditions decline with the
+   generic "no lowering covers …" though `test/L9-connector/deferred-hosts.ts` (REPEAT) says they should answer
+   (emit: any head, asked once per distinct state over the finished walk; until: any head whose per-row work is
+   bounded):
+   - `g.V().repeat(__.out()).until(__.project(a).by(__.out().count()).select(a).is(0)).count()` (bounded
+     `emit(project…)` answers; `until(map(out().count()).is(0))` answers 7).
+   - `g.V().repeat(__.out()).until(__.group().by(label).select(keys).count(local).is(1)).count()`.
+   - `g.V().repeat(__.out()).emit(__.order().by(name).limit(1).has(name,marko)).count()` — an emit condition,
+     which the deferral says takes any head.
+   - `until` combined with `times(n)` (`g.V().repeat(__.out()).until(__.out().count().is(0)).times(2).count()`, in
+     every order) fails with "VerificationException: The repeat()-traversal was not defined" — a misleading message.
+     Read `vendor/tinkerpop/gremlin-core/…/RepeatStep.java` and `GraphTraversal.java` (`times`/`until`) for what
+     the combination MEANS; answer it if the reference defines it, else decline in the user's terms.
+   Fix each in the condition's lowering or the decorrelator (one rule, every head), never a per-shape branch. Keep the
+   deliberate refusals (a per-frontier-row condition that is quadratic at a hub, a draw) and make their messages say
+   so. Pin the answers in a test; correct the REPEAT deferral text to what is true after the fix.
+
 9. ✅ **S1 — LANDED (6793d40a; follow-ups 666ebf3e).** `e_pair(src, tgt)` (`src/storage.ts`) is the label-free
    probe; `edgePair` is deleted. Remains: nothing (test-brittleness note folded into outstanding-work §6
    `adjacency-seek-assert`).
