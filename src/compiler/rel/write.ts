@@ -33,7 +33,7 @@ import type { AliasMap } from '../alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 import { constLit } from './const.ts';
 import { fieldCol, framingCols, type MapKeyFacts, type RelFraming } from './framing.ts';
-import { collectsSideEffect, EDGE_MOVES, EDGE_SOURCE, ENDPOINT_MOVES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, traversalIdArg, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
+import { collectsSideEffect, EDGE_MOVES, ENDPOINT_MOVES, GRAPH_SOURCES, isLocalScope, OTHER_V, ranPerTraverser, REDUCERS, sliceOf, SLICE_STEPS, traversalIdArg, unionOf, VERTEX_MOVES, VERTEX_SOURCE } from '../ir/step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { BRANCH_KINDS, FILTER_HOSTS, nondeterministic } from '../ir/step.ts';
 import type { ChildWrite } from '../unsupported.ts';
@@ -875,7 +875,6 @@ interface BodyReach {
 }
 
 const KEY_READING_STEPS: ReadonlySet<string> = new Set(['values', 'properties', 'valueMap', 'elementMap', 'propertyMap', 'has', 'hasNot', 'hasKey', 'hasValue']);
-const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE);
 const ELEMENT_MOVES: ReadonlySet<string> = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, new Set(['toE', 'toV']));
 /** Steps whose answer can be an element bound EARLIER on the traverser's path, not the current one. */
 const LABEL_READING_STEPS: ReadonlySet<string> = new Set(['select', 'path', 'simplePath', 'cyclicPath', 'tree', 'match', 'cap', 'sack']);

@@ -131,6 +131,8 @@ export const OTHER_V: ReadonlySet<string> = new Set(['otherV']);
 /** The graph sources. */
 export const VERTEX_SOURCE: ReadonlySet<string> = new Set(['V']);
 export const EDGE_SOURCE: ReadonlySet<string> = new Set(['E']);
+/** Either graph source — a mid-traversal `V()`/`E()` RE-SOURCES the stream. */
+export const GRAPH_SOURCES: ReadonlySet<string> = unionOf(VERTEX_SOURCE, EDGE_SOURCE);
 
 /** The path-family steps: they thread a path AND host from()/to() scoping modulators. */
 export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);

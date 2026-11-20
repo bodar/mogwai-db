@@ -7,7 +7,7 @@ import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
 import { addsUnlabelledTraversers, collectsSideEffect, FAN_OUT_HOSTS, SINGLE_BODY_FILTER_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { ONE_TO_ONE, PATH_FAMILY, PATH_READERS, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
+import { ONE_TO_ONE, PATH_FAMILY, PATH_READERS, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, GRAPH_SOURCES, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 import { COMPILE_BUDGET_BYTES, CompileBudgetExceeded, UNROLLED_STEP_BYTES } from '../../sql/kernel/budget.ts';
@@ -341,8 +341,6 @@ export function dropEffectFreeSideEffect(steps: Step[], params: ParamEnv): Step[
 const VERTEX_PRODUCERS = unionOf(VERTEX_SOURCE, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V);
 /** Steps whose output traverser is an edge (a partition edge filter injects after). */
 const EDGE_PRODUCERS = unionOf(EDGE_SOURCE, EDGE_MOVES);
-/** The graph sources — a mid-traversal `V()`/`E()` RE-SOURCES the stream. */
-const GRAPH_SOURCES = unionOf(VERTEX_SOURCE, EDGE_SOURCE);
 /** Movement explosion (SubgraphStrategy edge criterion only). To filter the traversed
  *  EDGE, a vertex→vertex hop must first land on the edge: out→outE.inV, in→inE.outV,
  *  both→bothE.otherV — the same rewrite TinkerPop performs when an edgeCriterion is set.
@@ -807,8 +805,8 @@ function identityHostBody(s: Step, params: ParamEnv): Step[] | null {
  *  - no write (`MUTATING_STEPS`) and no `call` at any depth — each is a statement the connector owns;
  *  - no step that adds unlabelled traversers (`addsUnlabelledTraversers`) at any depth: an `inject(x)` inside
  *    `local` adds `x` once PER START, inline it would add it once;
- *  - no top-level re-source (`V()`/`E()`): inline-equivalent (GraphStep splits per start), but the connector
- *    owns that shape (`reSourcedBody`) and lowers it as one shared read.
+ *  - no re-source (`V()`/`E()`, `GRAPH_SOURCES`) at any depth: inline-equivalent (GraphStep splits per start),
+ *    but the connector owns that shape (`reSourcedBody`) and lowers it as one shared read.
  *
  * A side effect that is not a barrier (`sideEffect`, a mutating `sack`) rides along with the splice's
  * `perTraverser` mark, as an identity body's does. Over-approximation (a `count` inside a `where()` inside the
@@ -825,12 +823,13 @@ function spliceableLocalBody(s: Step, params: ParamEnv): Step[] | null {
   const read = rawBodies(params);
   const body = read(args[0].value.nested);
   if (!body?.length || body[0].name === 'by') return null;
-  // A body that RE-SOURCES is the connector's (`reSourcedBody`, `lower/scoped.ts`): its read after `V()`/`E()`
-  // is ONE shared relation crossed with the host, and a draw there keeps its per-host pick. Spliced, the same
-  // read is a mid-chain GraphStep the fold lowers less well (inside a `repeat` it does not lower at all).
-  if (body.some((inner) => GRAPH_SOURCES.has(inner.name))) return null;
   if (fanOutHoldsBarrier(s, read)) return null;
-  const owned = (inner: Step): boolean => MUTATING_STEPS.has(inner.name) || inner.name === 'call' || addsUnlabelledTraversers(inner, 1);
+  // A body that RE-SOURCES — at ANY depth, an arm's `V()` included (`local(union(V()…, out()))`) — is the
+  // connector's (`reSourcedBody`, `lower/scoped.ts`): its read after `V()`/`E()` is ONE shared relation crossed
+  // with the host, and a draw there keeps its per-host pick. Spliced, the same read is a mid-chain GraphStep the
+  // fold lowers less well (inside a `repeat` it does not lower at all). One deep walk answers every gate.
+  const owned = (inner: Step): boolean => GRAPH_SOURCES.has(inner.name) || MUTATING_STEPS.has(inner.name)
+    || inner.name === 'call' || addsUnlabelledTraversers(inner, 1);
   return someStepDeep(body, read, owned, true) ? null : [...body];
 }
 

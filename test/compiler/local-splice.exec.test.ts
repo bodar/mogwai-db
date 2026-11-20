@@ -53,3 +53,33 @@ describe('arm productivity is the BODY’s, not identity’s', () => {
     expect(bagOf(names)).toEqual(bagOf(['vadas', 'lop', 'josh', 'lop', 'ripple', 'lop', 'none', 'none', 'none']));
   });
 });
+
+// R7b — a `local()` inside a BOUNDED `repeat()`. A barrier-free body splices and the unroll admits its steps as
+// ordinary per-traverser phases (U4's `unrollableBodyStep`); a body that RE-SOURCES at any depth — an arm's `V()`
+// included — stays a `local` the connector owns (`reSourcedBody`), and the unroll admits it as a per-traverser
+// reset host. Both keep the answers R7a's splice briefly lost.
+describe('local() inside a bounded repeat() answers', () => {
+  test('a sack body: sack(sum) accumulates across the unrolled iterations', () => {
+    expect(answer("g.withSack(0.0).V().repeat(__.local(__.outE().sack(Operator.sum).by('weight').inV())).times(2).sack()"))
+      .toEqual(bagOf([{ v: 1.4, vtype: 'double' }, { v: 2, vtype: 'double' }].map((r) => JSON.stringify(r))));
+  });
+  test('a label body: a label bound inside the local survives the repeat', () => {
+    expect(answer("g.V().repeat(__.local(__.out().as('x'))).times(2).select('x').values('name')"))
+      .toEqual(bagOf([{ v: 'lop', vtype: 'string' }, { v: 'ripple', vtype: 'string' }].map((r) => JSON.stringify(r))));
+  });
+  test('a value body: select() of a label bound before the repeat', () => {
+    expect(answer("g.V().as('s').repeat(__.local(__.out().select('s'))).times(2).count()")).toEqual(answer('g.inject(14L)'));
+  });
+  test('a union arm that re-sources stays the connector’s', () => {
+    expect(answer("g.V().repeat(__.local(__.union(__.V().has('name','marko'), __.out()))).times(2).count()")).toEqual(answer('g.inject(32L)'));
+    expect(answer("g.V().repeat(__.local(__.local(__.union(__.V().has('name','marko'), __.out())))).times(2).count()")).toEqual(answer('g.inject(32L)'));
+  });
+  test('a coalesce arm that re-sources stays the connector’s', () => {
+    expect(answer("g.V().repeat(__.local(__.coalesce(__.out('knows'), __.V().has('name','peter')))).times(2).count()")).toEqual(answer('g.inject(7L)'));
+  });
+  test('R7a’s gains stay', () => {
+    expect(run(store, "g.withSack(1.0).V().repeat(__.local(__.outE().sack(Operator.mult).by('weight').inV())).emit().sack()")).toHaveLength(8);
+    expect(run(store, "g.withSack(1.0).V().repeat(__.local(__.outE().sack(Operator.mult).by('weight').inV())).until(__.outE().count().is(0)).sack()")).toHaveLength(7);
+    expect(run(store, "g.V().until(__.has('name','ripple')).repeat(__.local(__.out())).path()")).toHaveLength(3);
+  });
+});
