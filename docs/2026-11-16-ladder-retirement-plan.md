@@ -158,7 +158,9 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    probe — one seek SQLite's own planner picks; `edgePair` (`src/rel/passes/edge-pair.ts`) is deleted. Re-timed (ms
    at 8×): 300 labels 779 → 16.0, `repeat(both()).times(2).where(…)` 54769 → 1267, air-routes 2986 → 684,
    grateful-dead 1338 → 869; bulk load +7–11%. Writes stay inside 2× (bulk addE 65 → 101 ms; 300 labelled mergeE
-   3842 → 5403 ms at 8k). Remains: two cheap follow-ups.
+   3842 → 5403 ms at 8k). Both follow-ups ✅ LANDED (666ebf3e): `movement.ts` prose names `e_pair`; the 300-label
+   test replaces the wall-clock ratio with a structural plan check on the wide graph (`e_pair (src=? AND tgt=?)`
+   seek, no label index read, `classify` from `scripts/sql-plan.ts` flags only the root `V()`). Remains: nothing.
    - (a) Stale prose still names only `e_out`/`e_in`, but SQLite now also picks `e_pair (src=?)` for an unlabelled
      `out()` seek. `scripts/sql-plan.ts` and `src/sql/schema.ts` were fixed in round 12 (d64a6d3a, 22b79ae5);
      `src/compiler/rel/lower/movement.ts:319` remains.
