@@ -5,7 +5,9 @@ _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
 R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; G1 audited every performance change and removed
 nothing (each earns its keep). **Round 14's review reopened the plan:** R7a lost answers (a `local()` with a label,
-sack or value body inside a bounded `repeat()`); U4 (b84e2cf1) then R7b (35feb250) restored them. Round 12 landed item
+sack or value body inside a bounded `repeat()`); U4 (b84e2cf1) then R7b (35feb250) restored them. **Round 15** landed U4,
+R7b and RC's `until` and `times+until` bullets (bf776b35, 115e58ee); RC(emit) is PARKED behind 8d0; review found R7b
+regressed top-level re-sourcing `local()`s past 2× (8e, do first). Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -57,9 +59,12 @@ every depth gap now goes to §3._
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
   `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d, U4 (b84e2cf1), R7b (35feb250).
-- **R7b (item 8c) landed (35feb250)**, restoring R7a's (46e0a19b) lost answers; two deeper sack/repeat forms remain (8c).
+- **R7b (item 8c) landed (35feb250)**, restoring R7a's (46e0a19b) lost answers; two deeper sack/repeat forms remain
+  (filed outstanding-work §3 `sack-optional-local-repeat`). **But R7b regressed top-level locals** — item 8e.
   Apart from that, 6d ((b) 64bae352, (a) d5ce03e2), R7a and G1 (0d10cb47, audit only) landed in full.
-- **No parked branch.** Every round-14 item landed; nothing is waiting on a resume point.
+- **RC (8d):** `until` bullets landed (bf776b35), `times+until` landed (115e58ee); the `emit` bullet is PARKED.
+- **Parked branch:** `wf/rc-emit-any-head-1-0` (fbe1855a, WIP, do not land as is; worktree
+  `.claude/worktrees/wf_c2beac97-e66-6`) — the resume point for RC(emit) once 8d0 lands.
 
 ## Remaining work, in order
 
@@ -212,6 +217,23 @@ every depth gap now goes to §3._
    answer correctly where trunk declined. If U4 turns out not to be small, raise an owner question (accept the loss
    for now, or keep the splice out of bounded repeat bodies) rather than shoehorn.
 
+8d0. **RC0 — the unbounded walk stops multiplying traversers that reach the same state. PREREQUISITE of RC(emit)
+   (8d, emit bullet); do before it.** Found by round 15's RC(emit) build: letting an emit condition with no correlated
+   form lower per distinct state (`semiJoinPassing`, `src/rel/decorrelate.ts`) is correct on every witness, but it
+   turns L3 `g_VX3X_repeatXbothX_createdXX_untilXloops_is_40XXemit_repeatXin_knowsXX_emit_loopsXisX1Xdedup_values`
+   (`g.V(3).repeat(both('created')).until(loops().is(40)).emit(<nested walk>).dedup()`) from a clean decline into
+   the exponential walk (L3 80 s → 1083 s, then SQLite "database or disk is full" on a 32 GB /tmp). The walk keeps
+   every traverser as a row with no bulk collapse; trunk already blows up on the same query with a bare `emit()`
+   or `emit(in('knows'))` (probe timed out at 100 s), so the hazard is pre-existing — RC(emit) only exposes it to CI.
+   `loopCountUntilAsTimes` keeps a barrier-free body in the walk on purpose (O(k²) unrolled text). Two directions,
+   pick one in the build: (a) send `until(loops().is(n))` over a barrier-free body through the bounded regime,
+   which first needs the unroll to compute each level once (outstanding-work §2 `emit-unroll-frontier`, so (a) is
+   two items in that order); or (b) let the walk keep only distinct states where nothing downstream counts
+   traversers (a `dedup()` and pure conditions). **One root cause, said once:** no collapse of equal traverser
+   states — the same root as outstanding-work §2 `unroll-sack-collapse` and `local-repeat-bulk` (filed there as
+   performance per scope rule 2; RC0 is in this plan only because it blocks 8d). Witness: the L3 scenario above
+   answers (josh, lop, ripple with `loops().is(12)`) in bounded time and L3 stays ≈80 s.
+
 8d. **RC — repeat()-condition gaps (owner, 2026-11-20; added by the owner despite scope rule 5).** Measured on
    trunk 0d10cb47, modern graph. Bounded `emit` conditions all answer now; these UNBOUNDED conditions decline with the
    generic "no lowering covers …" though `test/L9-connector/deferred-hosts.ts` (REPEAT) says they should answer
@@ -232,6 +254,14 @@ every depth gap now goes to §3._
      spelling's pre-existing hub cost is outstanding-work §2 `until-map-count`).
    - `g.V().repeat(__.out()).emit(__.order().by(name).limit(1).has(name,marko)).count()` — an emit condition,
      which the deferral says takes any head.
+     ⏸ **PARKED (round 15) — after 8d0.** Built on `wf/rc-emit-any-head-1-0` (fbe1855a): `perState` is the emit
+     condition's fallback whenever the correlated form is null (`repeatWalk`, `src/compiler/rel/walk.ts`);
+     `semiJoinPerDistinct` split so the caller builds the passing set (`semiJoinPassing`); a per-state predicate
+     that does not lower runs as a `filter()` over the distinct-state stream through the connector; a drawing or
+     side-effecting emit condition declines by name (`impure-emit-condition`, which also stops an adjacency-reading
+     draw silently collapsing multiplicity). Witnesses answered (`emit(repeat(out()).until(has('name','lop')))` →
+     josh; `emit(has('name','lop')).count()` 4; order-head pins 0 / 4). Not landable: it exposes the walk blowup
+     (8d0). On resume, drop the branch's `l3-walk-multiset-blowup` ledger entry — it bought green CI at 18 min / 32 GB.
    - `until` combined with `times(n)` (`g.V().repeat(__.out()).until(__.out().count().is(0)).times(2).count()`, in
      every order) fails with "VerificationException: The repeat()-traversal was not defined" — a misleading message.
      Read `vendor/tinkerpop/gremlin-core/…/RepeatStep.java` and `GraphTraversal.java` (`times`/`until`) for what
@@ -244,6 +274,27 @@ every depth gap now goes to §3._
    Fix each in the condition's lowering or the decorrelator (one rule, every head), never a per-shape branch. Keep the
    deliberate refusals (a per-frontier-row condition that is quadratic at a hub, a draw) and make their messages say
    so. Pin the answers in a test; correct the REPEAT deferral text to what is true after the fix.
+
+8e. **R7c — R7b's re-route of top-level re-sourcing `local()`s is past the 2× bar (scope rule 1, 35feb250). DO
+   FIRST.** R7b made `spliceableLocalBody`'s V()/E() check deep for EVERY `local()`, not only one in a repeat body,
+   so a top-level local re-sourcing inside an arm or child traversal, spliced before, now goes through the
+   connector's `reSourcedBody`: same answers (18 shapes compared on modern), ≈30–45% more SQL, a new per-row
+   correlated scalar (`g.V().local(__.where(__.V().has('name','marko')))` projects
+   `(SELECT rn.id FROM (VALUES (1)) WHERE EXISTS (…)) AS smv24`), and the commit's "no SQL change" claim is wrong.
+   Review timings, R7b's build parent (738c7401~1) → R7b, ms at 1k / 8k, all linear:
+   `g.V().local(__.union(__.V().has('name','marko'), __.out())).count()` 1.9/4.4 → 5.4/16.7 (**3.8×**);
+   `g.V().as('a').local(__.union(__.V()…, __.out()).select('a'))` 1.9/4.1 → 5.6/16.3 (**4.0×**); choose arm
+   2.4/5.8 → 5.4/16.2 (**2.8×**); `local(optional(out().V().has(…)))` 3.6/8.4 → 6.1/14.8 (1.8×);
+   `local(coalesce(out('knows'), V().has('name','peter')))` 4.1/7.1 → 7.2/15.7 (2.2×). In a repeat,
+   `repeat(local(local(union(V().has(marko), out())))).times(2)` 33.3 → 59.1 at 8k (1.8×, 1614 → 2387 SQL bytes).
+   Fix, in preference order: (1) make the connector's re-source lowering as cheap as the splice for these shapes (a
+   general `reSourcedBody` fix — a body re-source with no host read is one shared read, not a per-row scalar);
+   (2) fix the mid-chain GraphStep lowering inside a repeat body so the gate need not widen, then restore the
+   top-level-only test. NOT a "(local not in repeat)" branch — review called that context-dependent. Add the
+   missing test: `test/compiler/local-splice.exec.test.ts` pins top-level `local(union(V()…, out()))` and siblings
+   (cite `vendor/tinkerpop/gremlin-core/…/step/map/LocalStep.java` for per-start semantics). Re-measure against
+   35feb250~1. If neither fix is small, it becomes an owner question (accept the constant-factor cost), not a
+   shoehorn. Correct the `spliceableLocalBody` comment ("the fold lowers less well") either way.
 
 9. ✅ **S1 — LANDED (6793d40a; follow-ups 666ebf3e).** `e_pair(src, tgt)` (`src/storage.ts`) is the label-free
    probe; `edgePair` is deleted. Remains: nothing (test-brittleness note folded into outstanding-work §6
@@ -341,8 +392,26 @@ every depth gap now goes to §3._
 
 ## Next round
 
-- **Next: R7b (item 8c).** Its prerequisite U4 (item 8b) landed as b84e2cf1 and fixed six corpus declines on its own. Round 14
-  landed 6d(b) 64bae352, 6d(a) d5ce03e2, R7a 46e0a19b and G1 0d10cb47 (audit only, no code).
+- **Next, in order: R7c (8e), then RC0 (8d0), then RC(emit) resumed from `wf/rc-emit-any-head-1-0`.** Round 15
+  landed U4 b84e2cf1, R7b 35feb250, RC(until) bf776b35, RC(times+until) 115e58ee.
+- Round 15's follow-ups outside this plan's scope were filed in `docs/outstanding-work.md` (scope rules 2, 4, 5):
+  - §2 performance (pre-existing or constant-factor): `unroll-sack-collapse` (U4: a sack phase never groups;
+    (id, sack) collapse is sound), `unroll-edge-step-collapse` (`repeat(bothE().otherV())` ≈75× `both()`, same as
+    the written-out chain), `elementmap-select-direct` (≈10× `has()`), `resource-edge-limit-arm` (super-linear,
+    pre-existing, byte-identical across R7b).
+  - §3 depth gaps: `sack-optional-local-repeat` (R7b's two remaining forms), `resource-local-unbounded` (generic
+    message for a re-sourcing local in an unbounded repeat / with a side effect).
+  - §6 debt: `hub-in-walk-term-advice` (bf776b35's advisory misfires on a path-length `until` and always suggests
+    `out().count().is(0)`), `round15-comment-fixes` (U4's wrong sack-collapse comment; `verifyRepeatDefined`
+    citation; `unrollRegion`'s top-level-only `select` gate).
+- **Reuse sweep (round 15), filed as outstanding-work §6 items per scope rule 4:**
+  - `graph-sources-vocabulary` (updated) — R7b exported `GRAPH_SOURCES`; use it in `reSourcingBody` and
+    `reSourceAt` (`scoped.ts`) so the splice gate and the connector's trial ask the deep re-source question in one
+    vocabulary; then lift `isReSource(step)` (V/E, not `idOfValue`, no traversal id arg) beside `IRStep.idOfValue`.
+    Take it with R7c if R7c touches `reSourcedBody`.
+  - `unroll-moves-set` — `unrollableBodyStep`'s three move-set lookups are `COLLAPSE_MOVES`; share only under a
+    neutral name in `ir/step.ts`, else skip.
+- Round 14 landed 6d(b) 64bae352, 6d(a) d5ce03e2, R7a 46e0a19b and G1 0d10cb47 (audit only, no code).
 - Round 14's follow-ups outside this plan's scope were filed in `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (within the 2× bar or pre-existing): `simplepath-reinline` (R7a made
     `repeat(local(both().simplePath())).times(3)` take the inline SQL, ≈15%), `inline-label-compare-cast` (≈1.36×).
@@ -385,4 +454,5 @@ every depth gap now goes to §3._
 
 ## Owner questions (open)
 
-None. Rounds 13 and 14 raised no needs-human question. R7b may raise one if U4 turns out not to be small (item 8c).
+None. Rounds 13–15 raised no needs-human question. R7c (8e) may raise one: accept R7b's constant-factor cost on
+top-level re-sourcing locals if neither connector fix is small.

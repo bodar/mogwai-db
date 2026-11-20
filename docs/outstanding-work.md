@@ -53,11 +53,11 @@ An item marked "verify" may have landed already. Check it against the code befor
 ## Contents
 
 1. [Wrong answers](#1-wrong-answers) — 33 items
-2. [Performance](#2-performance) — 52 items
-3. [Queries we decline](#3-queries-we-decline) — 87 items
+2. [Performance](#2-performance) — 57 items
+3. [Queries we decline](#3-queries-we-decline) — 89 items
 4. [Shared substrate](#4-shared-substrate) — 17 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
-6. [Internal debt](#6-internal-debt) — 88 items
+6. [Internal debt](#6-internal-debt) — 91 items
 7. [Needs an owner decision](#7-needs-an-owner-decision) — 8 items
 8. [Low priority](#8-low-priority) — 13 items
 9. [Won't do](#wont-do)
@@ -386,6 +386,27 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Fix:** Have the count bound see through a `map()`/`project().by()` wrapper of a count, or route both through `perHostWork`'s `exhausts && readsNeighbourhood` refusal. The second retires a trunk answer, so it needs an owner call.
 - **Where:** `boundConditionCount` (`src/compiler/ir/strategies.ts`); `correlatedExistence` (`src/compiler/rel/lower/scoped.ts`)
 
+#### A sack-carrying unroll phase never collapses (`unroll-sack-collapse`)
+- **Area:** `repeat()`, sack
+- **Reach:** plausible
+- **Problem:** U4 (b84e2cf1) admits `sack` in a bounded unroll body, but `CHANNEL_GROUP_POLICY.sack = 'undefined'` (`src/channels.ts`) forbids grouping a sack phase, so each path stays its own row (deg^n in `times(n)`). Faithful (`B_O_S_SE_SL_Traverser.carriesUnmergeableSack`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java`) and linear in N (`withSack(0).V().repeat(both().sack(sum).by(constant(1))).times(4).sack().sum()` 2454/18779 ms at 1k/8k, 7.7×), but `repeat(both()).times(4).count()` is 6/51 ms. Not a regression: trunk declined these, and the written-out chain costs the same.
+- **Fix:** Collapse a sack phase on `(id, sack value)` with `SUM(bulk)` — two traversers with equal sacks are interchangeable. Same root as `local-repeat-bulk` and the RC(emit) walk blowup (ladder plan 8d0): no collapse of equal traverser states.
+- **Where:** `CHANNEL_GROUP_POLICY` (`src/channels.ts`); `src/compiler/ir/bulk.ts`
+
+#### An edge-step unroll body never collapses (`unroll-edge-step-collapse`)
+- **Area:** `repeat()`
+- **Reach:** plausible
+- **Problem:** `repeat(bothE().otherV()).times(4).count()` takes 454 ms at 1k against 6 ms for `repeat(both())`; each phase's rows are edges, so the RLE collapse never fires. Linear (8.6× per 8×). The written-out chain costs the same on trunk (452 ms), so the cost is the edge-step lowering's, not U4's.
+- **Fix:** Collapse after `otherV()` (the phase ends on a vertex), or fuse `bothE().otherV()` into `both()` when nothing reads the edge.
+- **Where:** `src/compiler/ir/bulk.ts`; `edgeFeedsOtherV` (`src/compiler/rel/lower.ts`)
+
+#### `elementMap().select(k)` builds the whole map per row (`elementmap-select-direct`)
+- **Area:** values, `repeat()` conditions
+- **Reach:** plausible
+- **Problem:** `g.V().repeat(out()).until(elementMap().select('lang').is('java')).count()` (answering since bf776b35) is ≈10–12× its `has('lang','java')` form (121/910 ms vs 10/49 ms at ≈1k/8k); `valueMap().select(k).unfold()` likewise. Linear; constant factor only.
+- **Fix:** Canonicalize `elementMap().select(k)` / `valueMap().select(k).unfold()` to `values(k)` (respecting the T.id/T.label keys).
+- **Where:** `src/compiler/ir/strategies.ts`
+
 ### Performance: branches and nesting
 
 #### Presence gate inlines its value twice (`produced-only-where`)
@@ -430,6 +451,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Problem:** `g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').sample(1)).path().count()` goes from 1,006 ms at 1k to 71.2 s at 8k (70×); `limit(5).sample(1)` 450 ms → 30.1 s. Trunk before 6a had the same cost. A barrier (`order()`/`limit()`) ahead of the draw takes GraphStep's origins × candidates product instead of `splitInto`'s shared read.
 - **Fix:** Lower the barrier inside the once-read shared relation, then split the path after it, as `splitInto` already does for a still prefix.
 - **Where:** `splitInto`, `splitRefuses` (`src/compiler/rel/lower/movement.ts`); `reSourcedOnce`
+
+#### A re-sourced arm's `E().has(…).limit(1)` read runs per host (`resource-edge-limit-arm`)
+- **Area:** nesting, re-source
+- **Reach:** rare
+- **Problem:** `g.V().local(__.union(__.E().has('weight',0.5).limit(1).inV(), __.out())).count()` is ≈4× per doubling (590/2405 ms at 1k/2k); inside `repeat(…).times(2)` 1778/120298 ms at 1k/8k (67.7×). The `V().has(name).limit(1)` form is linear. Pre-existing (byte-identical SQL before and after R7b 35feb250).
+- **Fix:** Lower the re-sourced, sliced edge read once per query, not per host row.
+- **Where:** `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`)
 
 ### Performance: paths, labels, side effects and match
 
@@ -851,6 +879,19 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Problem:** `g.V(1).repeat(bothE().sample(1).otherV()).times(3)` and `g.V(1).repeat(bothE().limit(1).otherV()).times(3)` decline with the generic "no lowering covers …", which names nothing. The `local(bothE().sample(1).otherV())` recipe answers. The unbounded `repeat(local(out().sample(1))).until(…)` also declines. Not a regression (6d(a), d5ce03e2, did not change them).
 - **Fix:** Carry the edge's `fromV` through a phase-level barrier in an unrolled body; at minimum, a decline that names the barrier-then-`otherV()` shape.
 - **Where:** `tryUnroll` (`src/compiler/ir/strategies.ts`); `edgeFeedsOtherV`, `FROM_V_TRANSPARENT` (`src/compiler/rel/lower.ts`)
+
+#### Sack in an optional arm of an unroll; a sack repeat inside `local()` (`sack-optional-local-repeat`)
+- **Area:** `repeat()`, sack
+- **Reach:** rare
+- **Problem:** `g.withSack(0.0).V().repeat(__.optional(__.outE().sack(sum).by('weight').inV())).times(2).sack()` and `g.V().local(__.repeat(…sack…).times(2))` decline with "no lowering covers". Same with or without a wrapping `local()` on trunk before R7b, so not a lost answer.
+- **Where:** `unrollableBodyStep` / `carriesIterationState` (`src/compiler/ir/strategies.ts`)
+
+#### A re-sourcing `local()` in an unbounded repeat, or with a side effect, declines generically (`resource-local-unbounded`)
+- **Area:** `repeat()`, re-source
+- **Reach:** rare
+- **Problem:** `g.V().repeat(__.local(__.coalesce(__.out('knows'), __.V().has('name','peter')))).until(__.has('name','peter')).values('name')`, and `local(coalesce(…V()…).aggregate('x'))` / `local(union(V().has(…).sideEffect(property(…)), out()))` in `times(n)`, decline with the bare "no lowering covers …" that does not name the unsupported part. Identical on the parent of R7b.
+- **Fix:** Answer the walk form through the connector, or at least decline naming the re-source in an unbounded repeat body.
+- **Where:** `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`); `src/compiler/rel/walk.ts`
 
 ### Queries we decline: branches and nesting
 
@@ -1580,6 +1621,22 @@ Code-health work. These items change no answer unless they say so.
 - **Fix:** Export one `repeatSlot(name)` (times → until) and the shared REPEAT_CLUSTER walk. Build `verifyRepeatDefined` on `gatherRepeatRegion`'s grouping. About 10 lines; answers do not change.
 - **Where:** `gatherRepeatRegion`, `verifyRepeatDefined`
 
+#### `hub-in-walk-term` advice misfires and is fixed text (`hub-in-walk-term-advice`)
+- **Area:** `repeat()`, decline messages
+- **Reach:** plausible
+- **Problem:** The advisory (bf776b35, `hubInWalkTerm` in `src/compiler/unsupported.ts`) fires whenever the condition plan scans `edges`, so `g.V().repeat(out().simplePath()).until(path().count(local).is(3)).count()` (a path-length stop; simplePath brings in an edges scan) is told it reads each vertex's neighbourhood and to use `until(out().count().is(0))` — wrong and baffling. And the suggestion is always `out().count().is(0)` whatever the condition (`until(project('a').by(in('created').count())…is(gt(2)))` gets the wrong direction and predicate).
+- **Fix:** Gate on the exhausting node's own input reading `edges`, and word the hint generically ("count the neighbourhood directly in `until(…count().is(…))`, or bound it with `limit(n)`").
+- **Where:** `hubInWalkTerm` (`src/compiler/unsupported.ts`); `perHostWork` (`src/rel/work.ts`)
+
+#### Round-15 comment and citation fixes (`round15-comment-fixes`)
+- **Area:** `repeat()`, `local()`
+- **Reach:** rare
+- **Problem:**
+  - (a) `PER_TRAVERSER_BODY_STEPS` (family 3, `src/compiler/ir/strategies.ts`) says `CHANNEL_GROUP_POLICY` keeps the sack a distinct group key through each phase's collapse; in fact `sack = 'undefined'` means a sack phase never collapses (`unroll-sack-collapse`).
+  - (b) `verifyRepeatDefined`'s new comment should cite `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/RepeatStep.java` (`addUntilToTraversal`, the emit slot).
+  - (c) `unrollRegion` keeps a body side effect and a body reader apart by top-level name (`PER_TRAVERSER_RESET_HOSTS.has(s.name) || s.name === 'select'`); a `select` nested in a `by()` passes. No wrong answer today (it declines downstream). Decide it with a deep `someStepDeep` fact instead.
+- **Where:** `src/compiler/ir/strategies.ts`
+
 ### Internal debt: branches and nesting
 
 #### R7 (ladder deletion) follow-ups (`r7-followups`)
@@ -2177,10 +2234,16 @@ Each item is measured from N≈1k to N≈8k (linear is about 8×), or it exceeds
 #### One V/E re-source vocabulary (`graph-sources-vocabulary`)
 - **Area:** compiler internals
 - **Reach:** common
-- **Problem:** `GRAPH_SOURCES` in `src/compiler/ir/strategies.ts` (R7a) is a copy of `src/compiler/rel/write.ts`'s, and about 14 sites hand-spell `name === 'V' || name === 'E'` (`reSourceAt` in `scoped.ts`, `reduction.ts`, `lower.ts`, `segment.ts`, `write.ts`, `ir/bulk.ts`). `reSourceAt`'s doc comment in `scoped.ts` sits orphaned above `BOUNDING_SLICES`.
-- **Fix:** Export one `GRAPH_SOURCES = unionOf(VERTEX_SOURCE, EDGE_SOURCE)` from `src/compiler/ir/step.ts` and use it everywhere. Pure refactor. Do NOT swap `spliceableLocalBody`'s any-top-level test for `reSourceAt`'s narrower one — that widens the splice and needs its own witnesses.
-- **Where:** `src/compiler/ir/step.ts`; `src/compiler/ir/strategies.ts` (`spliceableLocalBody`); `src/compiler/rel/write.ts`; `src/compiler/rel/lower/scoped.ts` (`reSourceAt`)
+- **Problem:** R7b (35feb250) made `GRAPH_SOURCES` one export in `src/compiler/ir/step.ts`, but the inline `name === 'V' || name === 'E'` checks remain: `reSourceAt` and `reSourcingBody` in `scoped.ts`, `reduction.ts` (three), `segment.ts`, `ir/bulk.ts`, and five in `lower.ts`. The deep "does this body re-source" question is asked through `GRAPH_SOURCES` in `spliceableLocalBody` but by hand in `reSourcingBody`, so the splice gate and the connector's trial can drift. Separately, `(V||E) && !idOfValue && !traversalIdArg(s)` (a re-source, not an id lookup) is spelled three times (`reSourceAt`; `lower.ts`; `reduction.ts`) — name it `isReSource(step)` beside `IRStep.idOfValue`.
+- **Fix:** Use `GRAPH_SOURCES.has` in `reSourcingBody` and `reSourceAt` first (≈2 lines, no SQL change); the other sites only where they mean "re-source" rather than "which element kind". Then `isReSource` if those sites are touched anyway.
+- **Where:** `src/compiler/ir/step.ts`; `src/compiler/rel/lower/scoped.ts` (`reSourceAt`, `reSourcingBody`); `src/compiler/rel/lower.ts`; `src/compiler/rel/lower/reduction.ts`
 
+#### The unroll gate's movement family as one named set (`unroll-moves-set`)
+- **Area:** compiler internals
+- **Reach:** rare
+- **Problem:** `unrollableBodyStep` tests `VERTEX_MOVES || EDGE_MOVES || ENDPOINT_MOVES`, exactly `COLLAPSE_MOVES` in `src/compiler/ir/bulk.ts`; but that name means "can bulk-collapse".
+- **Fix:** Only with a neutral name: export the union from `ir/step.ts` (e.g. `ELEMENT_MOVES_NO_OTHERV`) and import it at both sites; `otherV` stays admitted only via `ONE_TO_ONE`. Skip otherwise.
+- **Where:** `unrollableBodyStep` (`src/compiler/ir/strategies.ts`); `src/compiler/ir/bulk.ts`
 #### Build `FROM_V_TRANSPARENT` from the step vocabularies (`from-v-transparent-vocabulary`)
 - **Area:** compiler internals
 - **Reach:** plausible
