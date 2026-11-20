@@ -76,7 +76,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    they become reachable and run quadratic, or they lose answers the ladder gave. So the substrate comes first
    (6a, 6b), then R4.5 lands again (6c).
 
-   6a. **R4.5a — carry the origin's PATH and SACK channels across the re-source cross and the pick** (before 6c).
+   6a. ✅ **LANDED (d19d6f6e, d4406e18, e4c03ba8).** The per-origin draw and a forward re-source under a tracked path carry the origin's path and sack as GraphStep's split does: one shared read crossed with the hosts, the path extended by one position after the cross (`splitInto`/`splitPosition`, `src/compiler/rel/lower/movement.ts`), gated by the one `splitRefuses(input, keepsPosition(prefix))` authority; a stream barrier after a move, or a bounding slice after a host-reading step, declines with the resource-path reason. All witnesses below linear (≈7× per 8×). Remains: nothing.
+   ~~R4.5a — carry the origin's PATH and SACK channels across the re-source cross and the pick~~ (before 6c).
    Do it the way the plain re-source cross already carries them, instead of refusing them in `drawsOver`. This
    fixes blocker 1 and restores the lost answers below.
    - Blocker 1 (79×, newly reachable): `g.V().hasLabel('holder').as('h').map(__.V().hasLabel('person').order()
