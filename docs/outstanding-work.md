@@ -607,6 +607,13 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   `reSourcedOnce` refuses a moving prefix under a path, so GraphStep's product (`reSource`) answers. The same
   shape with a slice/reducer in place of the draw (`local(V().out().limit(1)).path()`) DECLINES in `reSourcedBody`
   for this reason. Both need M1b/H1 — the read's own path concatenated onto the origin's after the join.
+- **A per-origin barrier or draw after a HOST-READING filter in a re-source is quadratic** — `g.V().hasLabel('holder')
+  .as('h').local(__.V().hasLabel('person').where(neq('h')).limit(1)).count()` 665 ms @1k → 45 s @8k;
+  `…where(neq('h')).sample(1))…` (with or without `path()`) 806 ms → 55 s. Pre-existing: `sharedEnd` cuts the
+  shared read at the host-reading step and the fold runs the slice/draw per host over hosts × graph. Under a
+  tracked path the slice/reducer form declines in `reSourcedBody` (named reason); the path-free form and the draw
+  still answer quadratically. Needs the host-reading filter pushed past the slice as an anti/semi-join on the
+  shared read (`neq('h')` excludes at most one row per host: `limit(k+1)` shared, then filtered per host).
 - **A shared collection is re-read per traverser** — `g.V().group('a').by(constant('a')).by('age')
   .select('a').select('a').count()` 57 ms → 3.4 s. Read the key once as one MATERIALIZED relation and
   cross-join it.

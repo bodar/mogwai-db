@@ -189,6 +189,10 @@ const CROSSES: ReadonlySet<ChannelRole> = new Set<ChannelRole>(['alias', 'sack',
 
 /** Where a body RE-SOURCES at its top level — the first plain `V()`/`E()` (literal ids, not `V(<traversal>)`,
  *  whose ids come from the host) — or -1. */
+/** The slices that BOUND how many rows reach them per stream — `limit`/`range`, where the reference's
+ *  `RangeGlobalStep` stops pulling at its high bound (`skip` and `tail` read every row). */
+const BOUNDING_SLICES: ReadonlySet<string> = new Set(['limit', 'range']);
+
 const reSourceAt = (body: readonly IRStep[]): number =>
   body.findIndex((s) => (s.name === 'V' || s.name === 'E') && !s.idOfValue && !traversalIdArg(s));
 
@@ -237,7 +241,7 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * cross; the shared read stops where the read first moves, and the fold extends the rest.
  *
  * What it refuses, from the query text: under `forward` with a tracked path, a stream barrier after the read
- * moves (it would cut hosts × graph per host), under `split` a tracked path the rest READS (the
+ * moves, or a bounding slice after it first reads the host (either would cut hosts × graph per host), under `split` a tracked path the rest READS (the
  * child's path inside the body is likewise extended), and a prefix of label reads that may LOSE its row — the re-source discards
  * the selected value, so the answer would depend only on which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
  * lose or multiply its row (`out().V()`, `values('age').V()`) is GraphStep's own cross join, in the fold.
@@ -300,6 +304,11 @@ function reSourcedBody(
   const moves = extended ? rest.findIndex((step, i) => i > 0 && i < hostCut && !keepsPosition([step])) : -1;
   if (moves > 0 && rest.slice(moves, hostCut).some(isStreamBarrier)) return null;
   const cut = moves > 0 ? moves : hostCut;
+  // Past the HOST cut (a step that reads the host, `where(neq('h'))`) the rest is per host by meaning, so a reducer
+  // or sort there reads the hosts × read rows the query streams. A bounding slice does not: the reference's child
+  // stops pulling at its bound (`RangeGlobalStep`), so its cost is per host ROW, while the fold would cut a
+  // hosts × graph product per host — declined, naming the shape (`where(neq('h')).limit(1)`, `…order().limit(1)`).
+  if (extended && rest.slice(hostCut).some((step) => isStreamBarrier(step) && BOUNDING_SLICES.has(step.name))) return null;
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
   // own. A PATH crosses unchanged under `first` and `split` too: `map`/`by()`/a filter and `flatMap` emit a

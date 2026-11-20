@@ -385,6 +385,8 @@ describe('a re-source in local() on a path-tracked traverser', () => {
       ["g.V().hasLabel('holder').union(__.local(__.V().hasLabel('person').limit(1)), __.identity()).path().count()", 2],
       ["g.V().hasLabel('holder').repeat(__.local(__.V().hasLabel('person').order().by('age').limit(1))).times(2).path().count(local).sum()", 3],
       ["g.V().hasLabel('holder').optional(__.V().hasLabel('person').limit(1)).path().count(local).sum()", 2],
+      // A host-reading filter with no barrier after it is the cross the query asks for, extended in the fold.
+      ["g.V().hasLabel('holder').as('h').flatMap(__.V().hasLabel('person').where(neq('h')).limit(1)).path().count()", 1],
     ] as const)('%s is exact and linear', (q, perHolder) => {
       expect(count(small, q)).toBe(1000 * perHolder);
       expect(count(large, q)).toBe(8000 * perHolder);
@@ -402,15 +404,28 @@ describe('a re-source in local() on a path-tracked traverser', () => {
   });
 
   // A barrier AFTER the read moves would cut hosts × graph per host: declined (the shared read would need a path
-  // tracked from its own start, concatenated onto the host's after the cross — not built).
+  // tracked from its own start, concatenated onto the host's after the cross — not built). So would a bounding
+  // slice after a step that reads the HOST (`where(neq('h'))` cuts the shared read per host): the reference stops
+  // at the bound, the product route measured 991 ms @1k → 15.7 s @4k.
   test.each([
     "g.V().local(__.V().out().limit(1)).path()",
     "g.V().local(__.V().hasLabel('person').out().order().by('name').limit(1)).path()",
+    "g.V().hasLabel('person').as('h').local(__.V().hasLabel('person').where(neq('h')).limit(1)).path().count()",
+    "g.V().hasLabel('person').as('h').local(__.V().hasLabel('person').where(neq('h')).order().by('age').limit(1)).path()",
+    "g.V().hasLabel('person').as('h').local(__.V().hasLabel('person').where(neq('h')).range(0, 2)).simplePath().count()",
   ])('%s declines naming the shape', (q) => {
     expect(() => compile(q, {})).toThrow(/a V\(\)\/E\(\) inside local\(\) on a traverser whose path is tracked/);
   });
 
+  // Without a bounding slice, a host-reading filter is the hosts × read rows the query streams: it answers.
+  test('a host-reading filter with no slice after it answers host × read', () => {
+    expect(count(seededStore(), "g.V().hasLabel('person').as('h').local(__.V().hasLabel('person').where(neq('h'))).path().count()")).toBe(12);
+    expect(pathsOf("g.V().has('name','vadas').as('h').local(__.V().hasLabel('person').where(neq('h'))).path().by('name')").sort())
+      .toEqual([['vadas', 'josh'], ['vadas', 'marko'], ['vadas', 'peter']]);
+  });
+
   test.each([
+    "g.V().hasLabel('person').as('h').local(__.V().hasLabel('person').where(neq('h')).count()).path()",
     "g.V().local(__.V().hasLabel('software').count()).path()",
     "g.V().local(__.V().hasLabel('software').fold()).path()",
   ])('%s declines naming the shape, never a wrong path', (q) => {
