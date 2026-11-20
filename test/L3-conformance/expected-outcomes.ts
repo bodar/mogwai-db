@@ -8,7 +8,7 @@
 //
 // ── The four kinds, and the one rule that keeps them honest ───────────────────────────────────────
 //
-//   divergence — a deliberate difference with its line in `docs/feature-support-matrix.md` §17.
+//   divergence — a deliberate difference with its line in `docs/limitations.md` §4.
 //   wall       — a declared capability we do not have (a format, a provider default, an inert strategy).
 //   decline    — a clear `UnsupportedTraversal` for a capability `docs/outstanding-work.md` names.
 //   defect     — a KNOWN WRONG ANSWER, carrying its `docs/outstanding-work.md` ID.
@@ -43,16 +43,16 @@ export interface Reason {
 
 export const REASONS = {
   // ── wall ──
-  'nan-literal': { kind: 'wall', why: 'a NaN literal in a value position (`inject(NaN)`) declines: SQLite stores NaN as NULL', cite: ['docs/feature-support-matrix.md', '| `NaN` values |'] },
-  'io-gryo-graphml': { kind: 'wall', why: '`io()` reads typed GraphSON only; Gryo is JVM serialization and GraphML cannot carry our value types', cite: ['docs/feature-support-matrix.md', '🚫 GraphML, Gryo'] },
-  'connective-strategy': { kind: 'wall', why: 'ConnectiveStrategy\'s infix `and()`/`or()` folding is always applied, so `withoutStrategies(ConnectiveStrategy)` is refused', cite: ['docs/feature-support-matrix.md', 'always on, so disabling it is rejected'] },
+  'nan-literal': { kind: 'wall', why: 'a NaN literal in a value position (`inject(NaN)`) declines: SQLite stores NaN as NULL', cite: ['docs/limitations.md', '| `NaN` |'] },
+  'io-gryo-graphml': { kind: 'wall', why: '`io()` reads typed GraphSON only; Gryo is JVM serialization and GraphML cannot carry our value types', cite: ['docs/feature-support-matrix.md', '| GraphML, Gryo | 🚫 |'] },
+  'connective-strategy': { kind: 'wall', why: 'ConnectiveStrategy\'s infix `and()`/`or()` folding is always applied, so `withoutStrategies(ConnectiveStrategy)` is refused', cite: ['docs/feature-support-matrix.md', 'disabling `ConnectiveStrategy` is rejected'] },
   'graph-computer-inert': { kind: 'wall', why: 'every traversal runs compiled; `VertexProgramStrategy` and `VertexProgramRestrictionStrategy` are inert, so there is no vertex program to refuse', cite: ['docs/feature-support-matrix.md', '`VertexProgramRestrictionStrategy`, `HaltedTraverserStrategy`, `VertexProgramStrategy`'] },
-  'vertex-property-ids': { kind: 'wall', why: 'vertex-property ids are assigned by the graph, so a loaded file\'s ids (`@UserSuppliedVertexPropertyIds`) are not kept', cite: ['docs/feature-support-matrix.md', 'Vertex-property ids are assigned by the graph'] },
+  'vertex-property-ids': { kind: 'wall', why: 'vertex-property ids are assigned by the graph, so a loaded file\'s ids (`@UserSuppliedVertexPropertyIds`) are not kept', cite: ['docs/feature-support-matrix.md', 'Vertex-property ids are made by the graph'] },
   'list-default-cardinality': { kind: 'wall', why: 'an undeclared `property(k, v)` APPENDS (the default cardinality is list); this scenario assumes a `single` default', cite: ['src/api.ts', 'export const DEFAULT_VERTEX_CARDINALITY: VertexCardinality = \'list\';'] },
   // ── divergence ──
-  'string-id-distinct': { kind: 'divergence', why: 'a String id is not the integer id it spells (`V(\'1\')` is not `V(1)`)', cite: ['docs/feature-support-matrix.md', '| String vs integer element id |'] },
-  'merge-type-error-text': { kind: 'divergence', why: '`merge()` raises the same type error in our own words', cite: ['docs/feature-support-matrix.md', '| `merge()` type-error text |'] },
-  'oncreate-override': { kind: 'divergence', why: 'an onCreate map that changes a merge key is refused when the query compiles (eager error timing), though here the edge exists and onCreate never runs', cite: ['docs/feature-support-matrix.md', '| Error timing |'] },
+  'string-id-distinct': { kind: 'divergence', why: 'a String id is not the integer id it spells (`V(\'1\')` is not `V(1)`)', cite: ['docs/limitations.md', '| String vs integer id |'] },
+  'merge-type-error-text': { kind: 'divergence', why: '`merge()` raises the same type error in our own words', cite: ['docs/limitations.md', 'messages differ in wording from Java (`merge()`'] },
+  'oncreate-override': { kind: 'divergence', why: 'an onCreate map that changes a merge key is refused when the query compiles (eager error timing), though here the edge exists and onCreate never runs', cite: ['docs/limitations.md', '| When errors happen |'] },
   // ── defect ──
   'multilabel-edge-label': { kind: 'defect', why: '`with(\'multilabel\')` frames an edge\'s own label as a String, not a Set', cite: ['docs/outstanding-work.md', '(l3-multilabel-edge-label)'] },
   // ── decline ──
