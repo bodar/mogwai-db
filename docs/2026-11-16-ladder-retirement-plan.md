@@ -207,6 +207,16 @@ every depth gap now goes to §3._
    - `g.V().repeat(__.out()).until(__.project(a).by(__.out().count()).select(a).is(0)).count()` (bounded
      `emit(project…)` answers; `until(map(out().count()).is(0))` answers 7).
    - `g.V().repeat(__.out()).until(__.group().by(label).select(keys).count(local).is(1)).count()`.
+     ✅ **LANDED (bf776b35) — both `until` bullets above.** A condition reading only the frontier element's own
+     rows (properties, labels, a value's members) is bounded by the element, so it now answers in the walk term
+     (`group().by(label)…` = 6; also `elementMap()`/`properties()`/`project().by(values)`/`valueMap()` heads).
+     Mechanism: `PerHostWork.readsNeighbourhood` + `exprReadsNeighbourhood` (`src/rel/work.ts`, the one authority;
+     walk.ts's private `readsAdjacency` moved there); the term refuses only `exhausts && (readsNeighbourhood ||
+     reSources)`. `until(project('a').by(out().count())…)` stays a DELIBERATE refusal (it reads the neighbourhood
+     — quadratic at a hub) and now says so, naming `until(out().count().is(0))` (`hub-in-walk-term`,
+     `src/compiler/unsupported.ts`). Pinned in `test/L4-addendum/repeat-condition-any-head.feature` and
+     `test/compiler/per-host-work.exec.test.ts`. Remains for these bullets: nothing (the `map(out().count())`
+     spelling's pre-existing hub cost is outstanding-work §2 `until-map-count`).
    - `g.V().repeat(__.out()).emit(__.order().by(name).limit(1).has(name,marko)).count()` — an emit condition,
      which the deferral says takes any head.
    - `until` combined with `times(n)` (`g.V().repeat(__.out()).until(__.out().count().is(0)).times(2).count()`, in
