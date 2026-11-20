@@ -92,7 +92,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
      trunk too (454 ms → 31.7 s), so once the channels are carried the bar is linear. A non-drawing
      `local(__.V()…).path()` declines on trunk for the same reason, and this item should fix it too.
 
-   6b. **R4.5b — the pick is a FACT, not a list of spellings** (before 6c). `pickAt` is a lookahead peephole: it
+   6b. ✅ **LANDED (157d7ad0).** A global `order().by(shuffle)` cut to exactly one member (read through `sliceOf`/`countOf`, a bound `$x` reduced at plan time) is canonicalized to `sample(1)` by one Pass, `src/compiler/ir/shuffle-cut.ts` (`shuffleCutToSample`), at every depth; `reSourcedOnce`'s draw then serves it. Remains: nothing.
+   ~~R4.5b — the pick is a FACT, not a list of spellings~~ (before 6c). `pickAt` is a lookahead peephole: it
    matches `order().by(shuffle)` followed by a literal `limit(1)`, `range(0,1)` or `tail(1)`. Replace it with a
    rule: a RANDOM-collation sort that feeds a slice of cardinality 1. That can be a `Sort(RANDOM)` + `Limit 1` rel
    shape, or a canonicalizing pass gated on the unit-bulk fact (shuffle is unweighted, `sample` weights by bulk).
@@ -299,7 +300,7 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Next round
 
-- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
+- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (6b landed 157d7ad0), then 6c (rebase the parked branch onto them), then R7 (its suite
   run is R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
   scan-check fix d64a6d3a.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
