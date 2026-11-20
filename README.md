@@ -71,12 +71,20 @@ contract test runs against every edition over the real wire.
 Because the API describes itself, an agent can use it with no custom code. For example, an MCP
 server can wrap the OpenAPI description.
 
-## How it works
+## Why it is different: compiled, not interpreted
 
-Most Gremlin engines are interpreters. They move traversers through the steps one at a time.
-mogwai-db is a compiler. It turns the whole traversal into SQL, and SQLite runs it in the same
-process as the data. SQLite does the planning, the index lookups and the execution. There is no
-row-at-a-time interpreter.
+TinkerPop's reference engine is an interpreter: each step pulls traversers from the step before it.
+Several graph databases (for example
+[Neptune](https://docs.aws.amazon.com/neptune/latest/userguide/gremlin-step-support.html),
+JanusGraph and Sqlg) run some steps natively, such as an index lookup for `has()`, and hand the rest
+to that interpreter. Nesting can change this: Neptune, for example, does not convert `order()` or
+`aggregate()` inside a child traversal.
+
+mogwai-db has no interpreter to fall back to. It compiles the whole traversal, at any depth, to SQL,
+and SQLite runs it in the same process as the data. SQLite does the planning, the index lookups and
+the execution. A query that mogwai-db cannot compile fails with a clear error.
+
+The rest of this section shows how.
 
 ### The engine
 
