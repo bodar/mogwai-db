@@ -1,7 +1,7 @@
 # Retiring the correlated-child ladder
 
 _Status: IN PROGRESS. Round 12 (2026-11-20) landed item 10's three decided builds: (5) 73616a6b, (3) 22b79ae5 and
-the `sql-plan.ts` scan check d64a6d3a; review left tooling follow-ups on the scan check (10a). Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
+the `sql-plan.ts` scan check d64a6d3a; review's tooling follow-ups on the scan check (10a) landed 4a1e42a8. Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
 R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers (see 6a–6c). So R7 and G1 were
 deferred. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
 added G1.
@@ -186,9 +186,14 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    **Scan-check fix LANDED (d64a6d3a).** `scripts/sql-plan.ts` resolves each `SCAN <alias>` to its base table
    through the emitted SQL's FROM items (index cross-checked against `sqlite_schema`), classifies it by EQP-tree
    position (ROOT reported, NESTED ratcheted against `scripts/sql-plan-baseline.json`, an unconstrained
-   `property_fts` scan gated at zero), and plans `call()` reads too. No compiled-SQL change. Remaining: 10a.
+   `property_fts` scan gated at zero), and plans `call()` reads too. No compiled-SQL change. Remaining: nothing (10a landed).
 
-   10a. **Scan-check follow-ups from round-12 review (tooling only; no compiled SQL, no answer changes).** The
+   10a. **LANDED (4a1e42a8).** `scripts/sql-plan.ts` `classify()` now exempts a ROOT scan only for `nodes`/`edges`
+   (any other root base-table scan is gated at zero), and gates at zero a base-table `AUTOMATIC` index and a nested
+   `SEARCH` constrained only by a label/key prefix; `[tasks.sql-plan]` sources gained `parser/**/*` + `bunfig.toml`;
+   the header's baseline prose names the 27th entry. Pinned by `test/sql-plan.test.ts`; baseline unchanged.
+   Remaining for 10a: nothing.
+   _Original brief:_ **Scan-check follow-ups from round-12 review (tooling only; no compiled SQL, no answer changes).** The
    gate the owner asked for still has holes. Each new gate costs nothing today (measured over all 1458 planned
    corpus reads on trunk d64a6d3a):
    - **(major) The ROOT exemption is too wide.** `classify()` exempts the first loop under its parent for EVERY base
