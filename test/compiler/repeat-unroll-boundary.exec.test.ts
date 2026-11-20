@@ -155,6 +155,76 @@ describe('the repeat() unroll boundary', () => {
     expect(vals('g.V().repeat(__.dedup().skip(1).sample(2)).times(2).count()')).toEqual([0]);
   });
 
+  test('the PER-TRAVERSER body steps — maps, as/select, sack — unroll to EXACTLY the hand-written phases', () => {
+    // `PER_TRAVERSER_BODY_STEPS` (ir/strategies.ts): each reads and writes only the traverser it is
+    // handed, so phase k computes iteration k. Asserted as a SQL identity against the written-out chain,
+    // plus the run (so the identity is not between two plans that both fail).
+    const sqlOf = (q: string): string => {
+      const plan = compile(q, {});
+      if (!('sql' in plan)) throw new Error(`expected a read plan: ${q}`);
+      return plan.sql;
+    };
+    const rows = (q: string) => JSON.stringify(run(store, q));
+    const pairs: readonly [string, string][] = [
+      ["g.withSack(0.0).V().repeat(__.outE().sack(Operator.sum).by('weight').inV()).times(2).sack()",
+        "g.withSack(0.0).V().outE().sack(Operator.sum).by('weight').inV().outE().sack(Operator.sum).by('weight').inV().sack()"],
+      ["g.withSack(1.0).V().repeat(__.outE().sack(Operator.mult).by('weight').inV()).times(2).sack()",
+        "g.withSack(1.0).V().outE().sack(Operator.mult).by('weight').inV().outE().sack(Operator.mult).by('weight').inV().sack()"],
+      ["g.withSack(0.0).V().repeat(__.outE().sack(Operator.sum).by(__.values('weight')).inV()).times(2).sack()",
+        "g.withSack(0.0).V().outE().sack(Operator.sum).by(__.values('weight')).inV().outE().sack(Operator.sum).by(__.values('weight')).inV().sack()"],
+      ["g.V(1).as('a').repeat(__.out().as('a')).times(2).select(Pop.first,'a').values('name')",
+        "g.V(1).as('a').out().as('a').out().as('a').select(Pop.first,'a').values('name')"],
+      ["g.V(1).as('a').repeat(__.out().as('a')).times(2).select(Pop.last,'a').values('name')",
+        "g.V(1).as('a').out().as('a').out().as('a').select(Pop.last,'a').values('name')"],
+      ["g.V(1).as('a').repeat(__.out().as('a')).times(2).select(Pop.all,'a')",
+        "g.V(1).as('a').out().as('a').out().as('a').select(Pop.all,'a')"],
+      ["g.V().repeat(__.out().as('x')).times(2).select('x').values('name')",
+        "g.V().out().as('x').out().as('x').select('x').values('name')"],
+      ["g.V().repeat(__.out().as('x').in()).times(2).count()", "g.V().out().as('x').in().out().as('x').in().count()"],
+      ["g.V().as('s').repeat(__.out().select('s')).times(2).count()", "g.V().as('s').out().select('s').out().select('s').count()"],
+      ["g.V().repeat(__.out().as('a').in().select('a')).times(2).values('name')",
+        "g.V().out().as('a').in().select('a').out().as('a').in().select('a').values('name')"],
+      ["g.V().repeat(__.out().as('x')).times(2).path()", "g.V().out().as('x').out().as('x').path()"],
+      ["g.V().repeat(__.out().values('name')).times(1)", "g.V().out().values('name')"],
+      ["g.V().repeat(__.outE().inV().as('a').math('_ + 1').by(__.values('age').is(gt(0))).select('a')).times(1).values('name')",
+        "g.V().outE().inV().as('a').math('_ + 1').by(__.values('age').is(gt(0))).select('a').values('name')"],
+      // At DEPTH: the repeat inside a local, a where, a project().by().
+      ["g.V().local(__.repeat(__.out().as('x')).times(2).select('x').values('name'))",
+        "g.V().local(__.out().as('x').out().as('x').select('x').values('name'))"],
+      ["g.V().where(__.repeat(__.out().as('x')).times(2).select('x').has('name','lop'))",
+        "g.V().where(__.out().as('x').out().as('x').select('x').has('name','lop'))"],
+      ["g.V().project('a').by(__.repeat(__.out().as('x')).times(2).select('x').values('name').fold())",
+        "g.V().project('a').by(__.out().as('x').out().as('x').select('x').values('name').fold())"],
+      ["g.withSack(0.0).V().local(__.repeat(__.outE().sack(Operator.sum).by('weight').inV()).times(2)).sack()",
+        "g.withSack(0.0).V().local(__.outE().sack(Operator.sum).by('weight').inV().outE().sack(Operator.sum).by('weight').inV()).sack()"],
+      // The EMIT regime: each level an independent arm.
+      ["g.V().repeat(__.out().as('x')).emit().times(2).select('x').values('name')",
+        "g.V().union(__.out().as('x'), __.out().as('x').out().as('x')).select('x').values('name')"],
+      ["g.withSack(0.0).V().repeat(__.outE().sack(Operator.sum).by('weight').inV()).emit().times(2).sack()",
+        "g.withSack(0.0).V().union(__.outE().sack(Operator.sum).by('weight').inV(), __.outE().sack(Operator.sum).by('weight').inV().outE().sack(Operator.sum).by('weight').inV()).sack()"],
+    ];
+    for (const [rolled, written] of pairs) {
+      expect(sqlOf(rolled), rolled).toBe(sqlOf(written));
+      expect(rows(rolled), rolled).toBe(rows(written));
+    }
+    // The corpus values (Sack.feature g_withSackX0X_V_repeatXoutE_sackXsumX_byXweightX_inVX_timesX2X_sack,
+    // Select.feature g_VX1X_asXaX_repeatXout_asXaXX_timesX2X_selectXfirst|last, aX).
+    expect(bagOf(vals("g.withSack(0.0).V().repeat(__.outE().sack(Operator.sum).by('weight').inV()).times(2).sack()"))).toEqual([1.4, 2]);
+    expect(bagOf(vals("g.V(1).as('a').repeat(__.out().as('a')).times(2).select(Pop.first,'a').values('name')"))).toEqual(['marko', 'marko']);
+    expect(bagOf(vals("g.V(1).as('a').repeat(__.out().as('a')).times(2).select(Pop.last,'a').values('name')"))).toEqual(['lop', 'ripple']);
+    // `as()` is value-preserving, so the dedup empty-levels argument still holds through a label.
+    expect(vals("g.V().repeat(__.dedup().as('y')).times(2).count()")).toEqual([0]);
+    // ⚠️ The UNBOUNDED sack walk stays the walk's: sack is NOT an unrollable barrier (`needsPhases`).
+    expect(vals("g.withSack(0.0).V().repeat(__.outE().sack(Operator.sum).by('weight').inV()).until(__.out().count().is(0)).sack()")).toHaveLength(7);
+    // What outlives an iteration stays out: a loop counter in a by(), and a select beside a body side effect
+    // (with no path label it would read the side-effect key — root state no per-phase read can argue).
+    for (const q of [
+      "g.V().repeat(__.out().select('x').by(__.loops())).times(2).count()",
+      "g.V().repeat(__.out().sack(Operator.sum).by(__.loops())).times(2).count()",
+      "g.V().repeat(__.out().aggregate('x').select('x')).times(2).count()",
+    ]) expect(() => compile(q, {}), q).toThrow(/not supported yet/);
+  });
+
   test('an emit over a RANDOM body declines — independent arms would draw independently', () => {
     // Every emit is a split of the ONE traverser that keeps looping (RepeatStep.java:334-353), so an
     // emitted level-k path always extends an emitted level-(k-1) path. The emit unroll's arms re-run the

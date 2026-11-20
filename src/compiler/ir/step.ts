@@ -677,8 +677,10 @@ export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
  *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/util/StepOutputArityPredictor.java`):
  *  `IdentityStep`, `IdStep`, `LabelStep`, `ConstantStep`, `PropertyKeyStep`, `PropertyValueStep`, `PathStep`,
  *  `ElementMapStep`, `PropertyMapStep`, `MathStep`, and `EdgeVertexStep` one-sided (`inV`/`outV`) or
- *  `EdgeOtherVertexStep` — plus `as()`, which is a label on the step before, not a step. One reader asks it:
- *  `EarlyLimitStrategy`'s port (`early-limit.ts`, which slice may cross). */
+ *  `EdgeOtherVertexStep` — plus `as()`, which is a label on the step before, not a step. Two readers ask it:
+ *  `EarlyLimitStrategy`'s port (`early-limit.ts`, which slice may cross), and the bounded-repeat unroll's
+ *  per-traverser map family (`PER_TRAVERSER_BODY_STEPS`, `ir/strategies.ts` — one in, one out, so phase k
+ *  maps exactly what iteration k maps). */
 export const ONE_TO_ONE: ReadonlySet<string> = new Set([
   'as', 'identity', 'id', 'label', 'constant', 'key', 'value', 'path', 'elementMap', 'valueMap', 'propertyMap', 'math', 'inV', 'outV', 'otherV',
 ]);

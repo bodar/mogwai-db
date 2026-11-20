@@ -7,7 +7,7 @@ import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
 import { addsUnlabelledTraversers, collectsSideEffect, FAN_OUT_HOSTS, SINGLE_BODY_FILTER_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
-import { PATH_FAMILY, PATH_READERS, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
+import { ONE_TO_ONE, PATH_FAMILY, PATH_READERS, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
 import { ValueParseError, VerificationException } from '../../gremlin/coerce.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 import { COMPILE_BUDGET_BYTES, CompileBudgetExceeded, UNROLLED_STEP_BYTES } from '../../sql/kernel/budget.ts';
@@ -1526,9 +1526,13 @@ const SIDE_EFFECT_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
    * the rolled form receives the frontier — a shape change no phase can reproduce. `aggregate` has no
    * such form (its label is required), so it needs no gate.
    *
-   * ⚠️ **`sack(Operator.x)` is deliberately absent** even though it also passes traversers through: its
-   * state is a per-traverser CHANNEL rather than a root collection, so the argument above says nothing
-   * about it and it would need its own (see `repeatWalk`, which admits it through the other regime).
+   * ⚠️ **`sack(Operator.x)` is deliberately absent, and must STAY absent from this table** even though it
+   * also passes traversers through: its state is a per-traverser CHANNEL rather than a root collection,
+   * so the argument above says nothing about it. It has its own argument and is admitted by
+   * `unrollableBodyStep` directly (`PER_TRAVERSER_BODY_STEPS`). Listing it HERE would be a lost answer:
+   * `needsPhases` reads this table to send an UNBOUNDED body to phases, which refuse unbounded+barrier, so
+   * `withSack(0.0).V().repeat(outE().sack(sum).by('weight').inV()).until(out().count().is(0)).sack()` — which
+   * the recursive walk answers — would start declining.
    */
   aggregate: () => true,
   group: labelled,
@@ -1583,7 +1587,8 @@ const ROW_FILTERS: ReadonlySet<string> = new Set(['has', 'hasLabel', 'hasId', 'i
  *  local-scope transform, a side effect (`aggregate` would register a traverser before the dedup drops
  *  it) or a `call` is outside it, so such a body at n ≥ 2 declines instead. */
 const valuePreservingBodyStep = (s: Step): boolean =>
-  ROW_FILTERS.has(s.name) || (s.name in SIDE_EFFECT_FREE_BARRIERS && !isLocalScope(s as IRStep));
+  // `as()` labels the traverser and leaves its value alone (the dedup keys on the value, not the path).
+  ROW_FILTERS.has(s.name) || s.name === 'as' || (s.name in SIDE_EFFECT_FREE_BARRIERS && !isLocalScope(s as IRStep));
 
 /** `withoutStrategies(EarlyLimitStrategy)` — mark every slice at EVERY depth so `earlyLimit`
  *  (`ir/early-limit.ts`) leaves it where the user wrote it. The mark rides on the STEP rather than being
@@ -1635,6 +1640,29 @@ const carriesIterationState = (s: Step): boolean =>
   s.name === 'loops' || (s.name === 'repeat' && !!(s as IRStep).loopName)
   || MUTATING_STEPS.has(s.name) || collectsSideEffect(s as IRStep);
 
+/** THE PER-TRAVERSER BODY STEPS — three families, each a step that reads and writes only the ONE traverser
+ *  it is handed, so phase k computes exactly what iteration k computes and nothing crosses a phase
+ *  boundary. A member holding a child traversal (a `by()` of `select`/`sack`/`math`/`path`, a
+ *  `select(traversal)`) is admitted only under the per-traverser host's deep gate (`carriesIterationState`),
+ *  which keeps a `loops()`, a write or a keyed side effect in a `by()` out.
+ *
+ *  1. **Per-traverser MAPS** — `ONE_TO_ONE` (`ir/step.ts`, the `StepOutputArityPredictor` authority) plus
+ *     `values`/`properties`. One traverser in, its own outputs out; nothing is shared across traversers or
+ *     iterations, so splicing the map n times asks the n questions the loop asks. `as()` is a member: a
+ *     label on the traverser, which the spliced path at phase k carries exactly as the written-out
+ *     `out().as('x').out().as('x')` does.
+ *  2. **`select`** reads the traverser's OWN path, and the spliced path at phase k IS iteration k's path,
+ *     so `Pop.first`/`last`/`all` see the 1..k bindings the reference's path holds (`Select.feature`
+ *     g_VX1X_asXaX_repeatXout_asXaXX_timesX2X_selectXfirst|last, aX). With no matching label it reads a
+ *     side-effect key — root state, which is why `unrollRegion` keeps it out of a body that writes one.
+ *  3. **`sack()` and `sack(Operator).by(…)`** — the sack is a per-traverser CHANNEL updated once per pass
+ *     (`SackValueStep` merges into the traverser it is handed, vendor/tinkerpop/gremlin-core/src/main/java/
+ *     org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/SackValueStep.java), and
+ *     `CHANNEL_GROUP_POLICY` keeps it a distinct group key through each phase's collapse, so phase k's sack
+ *     is iteration k's (`Sack.feature` g_withSackX0X_V_repeatXoutE_sackXsumX_byXweightX_inVX_timesX2X_sack).
+ *     ⚠️ Admitted HERE ONLY, never in `UNROLLABLE_BARRIERS` (see the note in `SIDE_EFFECT_BARRIERS`). */
+const PER_TRAVERSER_BODY_STEPS: ReadonlySet<string> = new Set([...ONE_TO_ONE, 'values', 'properties', 'select', 'sack']);
+
 /** A body step an unrolled phase may contain: one of the barriers above, a per-traverser host, a row-local movement/filter
  *  the main chain already lowers, or a barrier `call()` — a service boundary.
  *
@@ -1652,7 +1680,8 @@ const carriesIterationState = (s: Step): boolean =>
  *  is a UNION arm, and a barrier inside a union arm is the tree-Plan promotion target (§6), not this. */
 const unrollableBodyStep = (s: Step, read: BodyReader): boolean =>
   UNROLLABLE_BARRIERS[s.name]?.(s)
-  || (PER_TRAVERSER_RESET_HOSTS.has(s.name) && !someStepDeep([s], read, carriesIterationState, true))
+  || ((PER_TRAVERSER_RESET_HOSTS.has(s.name) || PER_TRAVERSER_BODY_STEPS.has(s.name))
+      && !someStepDeep([s], read, carriesIterationState, true))
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
   || ROW_FILTERS.has(s.name)
   // `simplePath()`/`cyclicPath()` are PURE PATH FILTERS: a spliced phase checks the whole-path-so-far
@@ -1953,7 +1982,8 @@ function unrollRegion(region: Step[], params: ParamEnv, childBody: ChildBody, ne
   // A body SIDE EFFECT is root state that outlives every iteration, and a per-traverser host's child
   // could READ it (`aggregate('x').where(within('x'))`) — which the host argument says nothing about.
   // So the two never meet in one body: decline rather than argue what phase k's read sees.
-  if (body.some((s) => s.name in SIDE_EFFECT_BARRIERS) && body.some((s) => PER_TRAVERSER_RESET_HOSTS.has(s.name))) return null;
+  // `select('k')` is such a reader too: with no path label `k` it reads the side-effect key `k`.
+  if (body.some((s) => s.name in SIDE_EFFECT_BARRIERS) && body.some((s) => PER_TRAVERSER_RESET_HOSTS.has(s.name) || s.name === 'select')) return null;
   // A barrier `call()` unrolls only in the NON-emit regime. `emit` makes each level a UNION-ALL arm
   // (below), and a barrier inside a union arm is the tree-Plan promotion target (§6), not the sequential
   // chaining this slice reuses — so decline it here, fail closed, rather than splice a `call` into an arm

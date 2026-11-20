@@ -16,7 +16,7 @@ need a special driver. mogwai-db compiles each query to SQL, and SQLite runs it.
 >
 > - **Parses the whole language.** All 2,395 / 2,395 standard Gremlin traversals parse. The parser
 >   is generated from TinkerPop's own `Gremlin.g4` grammar.
-> - **Gives correct answers.** **<!-- L3:passing -->2,059<!-- /L3:passing --> / <!-- L3:ceiling -->2,246<!-- /L3:ceiling -->**
+> - **Gives correct answers.** **<!-- L3:passing -->2,065<!-- /L3:passing --> / <!-- L3:ceiling -->2,246<!-- /L3:ceiling -->**
 >   official TinkerPop test scenarios pass. They run through the unmodified `gremlin` JavaScript
 >   client over the real GraphBinary protocol. The pass count can only go up.
 >   The second number is the ceiling: the <!-- L3:in-scope -->2,270<!-- /L3:in-scope --> in-scope

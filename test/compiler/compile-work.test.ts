@@ -32,8 +32,10 @@ import { compile } from '../../src/compiler/compiler.ts';
  * `repeat(out().group('a').by('name').by(count())).times(2)` fills are one pool and the traversal now compiles.
  * 1822 → 1823: a sampled edge feeds `otherV()` (`sample` is `FROM_V_TRANSPARENT`), so the random-walk corpus
  * traversal `local(aggregate(a)).bothE().sample(1).otherV()…` newly compiles.
+ * 1823 → 1827: the bounded unroll admits per-traverser body steps (`PER_TRAVERSER_BODY_STEPS` — maps,
+ * `as`/`select`, `sack`), so four corpus `repeat(…).times(n)` traversals newly compile (each one emission).
  */
-const CEILING = { lowerings: 2016, emissions: 1823, perQuery: 12 } as const;
+const CEILING = { lowerings: 2016, emissions: 1827, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 

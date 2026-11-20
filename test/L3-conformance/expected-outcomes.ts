@@ -273,8 +273,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_injectXsetX_isXtypeOfXGType_SETXX_groupCount',
   ],
   'repeat-shape': [
-    'g_VX1X_asXaX_repeatXout_asXaXX_timesX2X_selectXfirst_aX',
-    'g_VX1X_asXaX_repeatXout_asXaXX_timesX2X_selectXlast_aX',
     'g_VX1X_repeatXbothEXcreatedX_whereXwithoutXeXX_aggregateXeX_otherVX_emit_path',
     'g_VX1X_repeatXgroupCountXmX_byXloopsX_outX_timesX3X_capXmX',
     'g_VX1X_repeatXrepeatXunionXout_uses_out_traversesXX_whereXloops_isX0X_timesX1X_timeX2X_name',
@@ -298,11 +296,7 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_V_untilXout_outX_repeatXin_asXaX_in_asXbXX_selectXa_bX_byXnameX',
     'g_V_valuesXstrX_repeatXsplitXabcX_conjoinX_timesX2X',
     'g_addV_asXfirstX_repeatXaddEXnextX_toXaddVX_inVX_timesX5X_addEXnextX_toXselectXfirstXX',
-    'g_withSackX0X_V_repeatXoutE_sackXsumX_byXweightX_inVX_timesX2X_sack',
-    'g_withSackX0X_V_repeatXsackXsumX_byXageX_whereXsack_isXltX59XXXX_timesX2X',
     'g_withSackX1X_injectX1X_repeatXsackXsumX_byXconstantX1XXX_timesX5X_emit_mathXsin__X_byXsackX',
-    'g_withStrategiesXRepeatUnrollStrategyX_V_repeatXbothE_otherV_hasXage_ltX30XXX_timesX2X',
-    'g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXbothE_otherV_hasXage_ltX30XXX_timesX2X',
   ],
   'group-side-effect': [
     'g_V_aggregateXxX_byXout_order_byXnameXX_capXxX',
