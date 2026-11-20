@@ -1,6 +1,7 @@
 # Retiring the correlated-child ladder
 
-_Status: IN PROGRESS. Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
+_Status: IN PROGRESS. Round 12 (2026-11-20) landed item 10's three decided builds: (5) 73616a6b, (3) 22b79ae5 and
+the `sql-plan.ts` scan check d64a6d3a; review left tooling follow-ups on the scan check (10a). Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
 R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers (see 6a–6c). So R7 and G1 were
 deferred. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
 added G1.
@@ -49,7 +50,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 - Landed: R0–R3, R4.1/R4.3/R4.4, R5.1–R5.5, R6 side effects, pooled keyed `group('a')` in arms/bodies (95334eb3);
   regressions/wrong answers V0+U3 (911eef32), V1 (77eb86cb, b09dee81), V2 (33356b80), V3 (75ad576d),
   V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); F2 exact depth bag (34674e92); R4.2 (ae0fadb7);
-  S1 `e_pair` index, `edgePair` pass deleted (6793d40a); S2 survey, report only (39a8f01a).
+  S1 `e_pair` index, `edgePair` pass deleted (6793d40a); S2 survey, report only (39a8f01a); S2 builds: TextP
+  trigram probe (73616a6b), `e_label` index (22b79ae5), `sql-plan.ts` scan check (d64a6d3a).
 
 ## Remaining work, in order
 
@@ -151,7 +153,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    grateful-dead 1338 → 869; bulk load +7–11%. Writes stay inside 2× (bulk addE 65 → 101 ms; 300 labelled mergeE
    3842 → 5403 ms at 8k). Remains: two cheap follow-ups.
    - (a) Stale prose still names only `e_out`/`e_in`, but SQLite now also picks `e_pair (src=?)` for an unlabelled
-     `out()` seek. Fix `scripts/sql-plan.ts:12`, `src/sql/schema.ts:19` and `src/compiler/rel/lower/movement.ts:319`.
+     `out()` seek. `scripts/sql-plan.ts` and `src/sql/schema.ts` were fixed in round 12 (d64a6d3a, 22b79ae5);
+     `src/compiler/rel/lower/movement.ts:319` remains.
    - (b) The new 300-label test in `walk-condition-hub-scale.exec.test.ts` asserts a wall-clock ratio below 2× on
      ~16 ms queries, which can flake on CI. Drop the ratio: the answer check and `expectLinear` already pin the
      behaviour.
@@ -183,7 +186,31 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    **Scan-check fix LANDED (d64a6d3a).** `scripts/sql-plan.ts` resolves each `SCAN <alias>` to its base table
    through the emitted SQL's FROM items (index cross-checked against `sqlite_schema`), classifies it by EQP-tree
    position (ROOT reported, NESTED ratcheted against `scripts/sql-plan-baseline.json`, an unconstrained
-   `property_fts` scan gated at zero), and plans `call()` reads too. No compiled-SQL change. Remaining: nothing.
+   `property_fts` scan gated at zero), and plans `call()` reads too. No compiled-SQL change. Remaining: 10a.
+
+   10a. **Scan-check follow-ups from round-12 review (tooling only; no compiled SQL, no answer changes).** The
+   gate the owner asked for still has holes. Each new gate costs nothing today (measured over all 1458 planned
+   corpus reads on trunk d64a6d3a):
+   - **(major) The ROOT exemption is too wide.** `classify()` exempts the first loop under its parent for EVERY base
+     table, but the reason (a root `g.V()`/`g.E()` reads every element by meaning) holds only for `nodes`/`edges`.
+     Witness: drop `vp_key_value` and `g.V().has('name','marko')` / `g.V().has('person','name','marko').out()` plan
+     a full `SCAN vertex_properties`, classed `root:vertex_properties`, reported only, so `sql-plan` exits 0 — the
+     most common index regression (a `has()` lookup) is invisible. Today the corpus has 988 root scans of `nodes`,
+     30 of `edges`, 0 of anything else: gate a root scan of any other base table at zero.
+   - **SEARCH is always treated as index-served.** Two disguised nested scans pass: an inner or CORRELATED
+     `SEARCH` whose only constraint is a low-selectivity prefix (`e_label (label=?)`, `vp_key_value (key=?)`), and
+     a base-table `SEARCH … USING AUTOMATIC [PARTIAL] COVERING INDEX` (SQLite builds it by scanning the table on
+     every run). Witness: drop `e_out` and `e_pair`; `g.V(1).out('knows').values('name')` plans
+     `SEARCH … e_label (label=?)` and `classify()` returns []; 278 corpus reads switch to an automatic index on
+     `edges` unflagged. `e_label` (22b79ae5) is what makes this fallback available. Both occur 0 times on trunk:
+     hard gate at zero.
+   - **`[tasks.sql-plan]` sources omit `parser/**/*` and `bunfig.toml`** (`mise.toml`), which `sql-hygiene`'s
+     identical compile-and-plan task lists, so `mise run generate` alone leaves the gate skipped locally. CI runs
+     fresh. One line.
+   - **The baseline's description is wrong.** d64a6d3a says all 27 entries are "a V() mid-traversal or inside a
+     correlated set-operation argument"; one is neither (the `groupCount('a')…where(select('a')…)` query, filed in
+     `outstanding-work.md` §1b as pre-existing super-linear). Correct the prose in `scripts/sql-plan.ts`'s header
+     when the baseline is next re-recorded.
    _Original brief:_ survey for other simple structural splits (owner, 2026-11-19). Is there
    another cheap schema split that halves (or better) what an index seek or scan reads — more schema in exchange for
    leaning harder on SQLite? Check every table and index in `src/storage.ts` against the shapes the lowering
@@ -261,7 +288,7 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Next round
 
-- Order: 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
+- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
   run is R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
   scan-check fix d64a6d3a.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
@@ -275,6 +302,18 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 - The reuse-sweep proposal (gate `map()`'s two correlated first-row forms in `firstInnerOver` on `rowResident`, not
   `framingCols`) is filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4.
 - This round's depth gaps were already present and are not ladder-only, so they went to outstanding-work §4.
+- Round 12's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
+  - one EXPLAIN-tree reader (`PlanRow`, alias resolution, loop-position walk) shared by `scripts/sql-plan.ts`,
+    `test/support/snapshot-scans.ts`, `cte-runs.ts` and `sql-hygiene.ts`; adopting snapshot-scans' MATERIALIZE
+    stop drops 5 of the 27 `sql-plan-baseline.json` entries (re-record in the same commit; take after 10a);
+  - `tinker.search` builds one escaped `%term%` pattern and derives its probe via `likeProbePattern`, with an
+    `escapedLike` beside `trigramProbe` in `src/rel/like.ts`;
+  - one `property_fts` row type + `trigramCandidates` builder for `semijoin.ts` and `search.ts`;
+  - plan-shape tests assert through the gate's classifier and one `explain()` helper.
+- Round 12 follow-ups outside this plan's scope went to outstanding-work: §1b a side effect read in `where`
+  re-derived per traverser (68×, pre-existing); §6 the FTS probe decoder (carry the raw term on the atom), the
+  trigram seek's root-only reach, stale `storage.ts`/`src/services/CLAUDE.md` prose, and `e_label`'s one-time
+  build on an existing DO's next `initSchema`. `hasLabel(P)` declining was already filed in §4.
 
 ## Guards
 
@@ -285,5 +324,6 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Owner questions (open)
 
-None. S2 answered 2026-11-19 (build 3 and 5, fix the scan check; not 1 or 2), written into item 10. R4.5-Q and
+None. Owner's round-12 request, verbatim — "#3 and #5: I'd build both. The broken scan check: I'd fix that
+too." — is done (73616a6b, 22b79ae5, d64a6d3a). S2 answered 2026-11-19 (build 3 and 5, fix the scan check; not 1 or 2), written into item 10. R4.5-Q and
 U1-Q were answered earlier the same day and are written into their items.

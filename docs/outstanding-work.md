@@ -697,6 +697,11 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   - A crossed run's filters are evaluated once per (host, vertex) pair:
     `g.V().hasLabel('holder').V().hasLabel('person').has('age',1500).count()` takes 152 ms at 1k and 10.8 s at 8k
     (×71). The SQL is `nodes CROSS JOIN (…) WHERE … EXISTS(…)`.
+- **Round 12 (pre-existing, found by the sql-plan review of d64a6d3a).** A side effect read inside `where` is
+  re-derived per traverser: `g.V().both().groupCount('a').by(T.label).as('b').barrier().where(__.select('a')
+  .select('software').is(P.gt(2))).select('b').values('name')` re-runs `V().both()` in a CORRELATED SCALAR
+  SUBQUERY per row — wrapped in `count()`, 3.6 s at N=1k vs 246.8 s at N=8k (68×; output ~2N). It sits accepted in
+  `scripts/sql-plan-baseline.json`; compute the side effect once and join it.
 
 Performance findings from ladder-retirement rounds 4–7 that are NOT regressions the plan introduced. Full text,
 witnesses and measurements: `docs/2026-11-16-ladder-retirement-plan.md` at `4100715c` (search the item id).
@@ -1266,6 +1271,19 @@ Beside the RelIR substrate:
 
 ## 6. Internal debt
 
+- **Round 12 (S2 builds) review debt** (2026-11-20).
+  - `likeProbePattern` (`src/rel/like.ts`) recovers the raw TextP term by matching the shape of `likeEscaped`'s
+    `replace()` chain, though `likePattern` (`src/compiler/rel/predicate.ts`) already knows the term: let the atom
+    carry it and drop the decoder. If the escape spelling changes, the decoder returns null and the seek silently
+    falls back to a full FTS read (no wrong answer; sql-plan's unconstrained-virtual gate would catch it).
+  - The trigram seek fires only on a root `V()`/`E()` scan: `where(has('name',containing('ark')))`,
+    `out().has(…containing)`, `local(has(…))`, `union(has(…), …)` plan with no `property_fts` access. Correct and
+    linear (`out().has` 3.0 → 5.7 ms, 1k → 8k); recorded so the seek's reach is not over-stated.
+  - Prose: in `src/storage.ts`'s SCHEMA comment the "AND matches TinkerPop's single-case reference graphs" clause
+    now hangs off the wrong subject; `src/services/CLAUDE.md` has one over-long joined line at the new paragraph.
+  - `e_label` (22b79ae5), like `e_pair`, is built by `CREATE INDEX IF NOT EXISTS` on an existing DO's next
+    `initSchema` (DO constructor, `src/cloudflare/graph-store-do.ts:56`): a one-time O(|E| log |E|) cost inside the
+    first request after deploy. Note it with the schema-migration facts for multi-GB graphs.
 - **A far-endpoint `hasId` is not pushed into the edge seek's `tgt`** (2026-11-19, S1 review).
   `g.V(2).outE().where(inV().hasId(4)).count()` and `g.V(2).out().hasId(4).count()` plan `e_pair (src=?)` rather
   than the `(src=? AND tgt=?)` prefix, so a hub source reads its whole out-neighbourhood. Trunk before S1 did the
@@ -1614,6 +1632,30 @@ Proposals from the compile-cost round 3 reuse sweep (answer-neutral unless state
   (`src/compiler/rel/framing.ts`), so all three `map()` routes would admit framings by one total switch. Expected
   to change neither answers nor SQL: R4.2 widened these sites as an experiment, measured no change, and reverted.
   Re-check with `rejoin-row-resident.exec.test.ts` and sql-hygiene. Low value, zero risk.
+
+Proposals from the 2026-11-20 ladder round 12 (S2 builds) reuse sweep (answer-neutral; no compiled-SQL change):
+- **One EXPLAIN-tree reader.** `test/support/snapshot-scans.ts:nestedSnapshotScans` (own `PlanRow`, LOOP regex,
+  `correlated` walk, a `(?:FROM|JOIN) x y` alias regex that neither blanks string literals nor handles quoted
+  names, a hand `BASE_TABLES` list missing `tombstones`/`barrier_state`), `test/support/cte-runs.ts:reevaluatedCtes`
+  and `scripts/sql-hygiene.ts:planOf` should use `scripts/sql-plan.ts`'s `aliasTables`/`schemaFacts`/`classify`
+  (move the shared module into `test/support/` to keep the scripts → test/support direction). The two walks
+  disagree on MATERIALIZE: snapshot-scans stops there (a CTE fill runs once), `classify` does not. Taking the stop
+  drops 5 of the 27 `sql-plan-baseline.json` entries (`g.inject(['marko']).{combine,difference,intersect,merge,
+  product}(__.V().values('name')…fold())`) to 22 — re-record in the same commit.
+- **`tinker.search` builds its pattern the way TextP does.** `src/services/catalog/search.ts:searchProperties`'s
+  `wrap` spells `'%'||x||'%'` twice (raw for the probe, escaped for the check) and hand-spells the 3-argument
+  `like(…, '\')`, as does `src/compiler/rel/predicate.ts` (~1225). Build one escaped containing pattern, derive the
+  probe with `likeProbePattern(pattern).pattern` (as `semijoin.ts:positiveOwners` does), and add
+  `escapedLike(pattern, subject)` beside `trigramProbe` in `src/rel/like.ts` for both builders and for
+  `semijoin.ts:necessaryTextAtom`'s recogniser. ~8–10 lines; SQL byte-identical.
+- **One `property_fts` row type and trigram-candidate scan.** `semijoin.ts:FTS_TYPE` and `search.ts`'s inline
+  `typeOf(...)` already differ (search marks `text` nullable). Export one `FTS_TYPE` from `src/rel/` plus
+  `trigramCandidates(ownerElem, probe, mint, extra?)`; `negativeOwners` reuses only the type. Plans unchanged.
+- **Plan-shape tests assert through the gate's classifier.** ~20 test files hand-roll
+  `store.query('EXPLAIN QUERY PLAN '+sql, binds).map(r=>r.detail)`; `test/L2-sql/filter.sql.test.ts`'s `seeks`
+  regex restates sql-plan's unconstrained-virtual class. One `explain(store, sql, binds): PlanRow[]` (the shared
+  module above) and `classify(...)` assertions keep test and gate from drifting; keep the specific `0:L…`/`0:=`
+  pins where they are the point. Test-only.
 
 ## 7. Low priority
 
