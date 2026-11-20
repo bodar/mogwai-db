@@ -5,7 +5,7 @@ _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
 R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; G1 audited every performance change and removed
 nothing (each earns its keep). **Round 14's review reopened the plan:** R7a lost answers (a `local()` with a label,
-sack or value body inside a bounded `repeat()`); U4 (the prerequisite) landed (b84e2cf1), so R7b is open. Round 12 landed item
+sack or value body inside a bounded `repeat()`); U4 (b84e2cf1) then R7b (35feb250) restored them. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -56,8 +56,8 @@ every depth gap now goes to §3._
   draw, `drawnPerOrigin` draws a uniform pick per scope row, a shuffle cut to one IS `sample(1)` (6b,
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
-  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d, U4 (b84e2cf1).
-- **Open: R7b (item 8c); its prerequisite U4 (8b) landed.** R7a (46e0a19b) lost answers that trunk gave before it (scope rule 1).
+  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d, U4 (b84e2cf1), R7b (35feb250).
+- **R7b (item 8c) landed (35feb250)**, restoring R7a's (46e0a19b) lost answers; two deeper sack/repeat forms remain (8c).
   Apart from that, 6d ((b) 64bae352, (a) d5ce03e2), R7a and G1 (0d10cb47, audit only) landed in full.
 - **No parked branch.** Every round-14 item landed; nothing is waiting on a resume point.
 
@@ -179,7 +179,15 @@ every depth gap now goes to §3._
    label. Do NOT narrow `spliceableLocalBody` instead: review and scope rule both call that a per-shape exclusion.
    It gains the corpus scenarios above; move the L3/census baselines only for them, and say so in the commit.
 
-8c. **R7b — restore R7a's lost answers (scope rule 1: answered before 46e0a19b, decline now). After U4.**
+8c. ✅ **R7b — LANDED (35feb250).** After U4 the spliced-`local()` witnesses answer unchanged (sack(sum) [1.4, 2.0],
+   body label [lop, ripple], outer `select('s')` 14); the arm re-source pair now answers (union → 32, coalesce → 7):
+   `spliceableLocalBody` (`src/compiler/ir/strategies.ts`) reads V()/E() at any depth in its one `owned` walk, so such a
+   `local()` stays a connector-owned reset host; `GRAPH_SOURCES` is one export in `ir/step.ts`. Pinned in
+   `test/compiler/local-splice.exec.test.ts`. **Remains:** two deeper forms still decline, and the same queries without
+   `local` decline the same way on the base: `repeat(optional(outE().sack(sum).by('weight').inV()))` and
+   `local(repeat(…sack…).times(2))`. These are gaps for a sack inside an optional arm in the unroll, and for a repeat
+   inside a local body; they are outside R7b's splice-gate seam. Original item:
+   **R7b — restore R7a's lost answers (scope rule 1: answered before 46e0a19b, decline now). After U4.**
    Witnesses, trunk 29c83d03 (before R7a) → 46e0a19b, modern graph:
    - `g.withSack(0.0).V().repeat(__.local(__.outE().sack(sum).by('weight').inV())).times(2).sack()`: [1.4, 2.0] → decline
      (the `local()` wrapper of Sack.feature:280).
