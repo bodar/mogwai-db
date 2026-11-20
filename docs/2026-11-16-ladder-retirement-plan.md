@@ -3,7 +3,8 @@
 _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4a1e42a8), S1's follow-ups
 (666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
-R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; what is left is G1. Round 12 landed item
+R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; G1 audited every performance change and removed
+nothing (each earns its keep), so no item is open. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -55,7 +56,8 @@ every depth gap now goes to §3._
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
   `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d.
-- **Open:** G1. R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed in full.
+- **Open:** nothing. R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed in full; G1 (item 11) kept every
+  performance change.
 - **No parked branch.** Every round-13 item landed; nothing is waiting on a resume point.
 
 ## Remaining work, in order
@@ -220,21 +222,36 @@ every depth gap now goes to §3._
    0.33→2.7 (×8.1) — all linear. **Owner decides**: (3) and (5) are each small and ≥9×; (1) and (2) are not
    worth building now.
 
-11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19). UNBLOCKED (6c and R7 landed); after
-   6d and R7a** so it weighs the code as it will stand. NOT a blanket "remove what only got us under 1.3×". For each
-   change this plan made for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2 33356b80, V3 75ad576d, V5
-   b600fc15, T1 1274c293), weigh the measured win against the code complexity it added:
-   - It made the code simpler or no more complex, or bought a large win (e.g. well below the pre-change cost, or a
-     super-linear shape made linear): it earns its keep. Keep it.
-   - It added substantial code for a marginal win (removing it keeps every answer and stays within 2× of the trunk
-     before that commit): it does not earn its keep. Simplify or remove it.
-   - Report each with its witnesses before/after in ms, the lines it added, and the verdict with a one-line reason.
-     Wrong-answer fixes are never removed. Some of those commits touched code R7 deleted; say so per item rather
-     than re-measuring a route that no longer exists.
+11. ✅ **G1 — DONE (2026-11-20): every performance change earns its keep; nothing removed.** Measured on trunk
+   2f133ee4 (after 6d and R7a): each change's witnesses at 1k / 8k vertices (median of 9, ms), with the change and
+   with a scratch revert of only its hunk. Answers were identical both ways. The rule (owner, 2026-11-19): keep a
+   change that is no more complex, or that bought a large or super-linear→linear win; remove only substantial code
+   bought for a marginal win.
+   - **V0+U3 911eef32 + V2 33356b80: KEEP.** 2 code lines in `name.ts` (`demand` and the `stopsEarly` waiver; V2
+     changed one word) plus `work.ts`'s `blockedInput`, a fact fix (an unfenced materialize and a `cross` join now
+     agree with the emitter). The revert fences every shared barrier copy: `has(age,gt(30)).both().values(name)
+     .limit(3)` goes 2.8/2.2 → 3.2/7.2, from near-constant to linear in N (45 ms at 64k). The mixed witnesses (an
+     emit walk under limit/range, `union(limit(2),count())`, and those under where/local) are equal either way
+     (39–58 ms at 8k), because both versions fence them.
+   - **V1 77eb86cb/b09dee81: KEEP.** ~30 lines (`takeFinishedMap`, `ENTRY_COL` and a 2-line call) plus 6 lines
+     (`namedEffect`, `lower.ts`). Reverting `takeFinishedMap` evaluates the map twice: `group('a').by(name)
+     .by(values(age).sum()).cap('a')` goes 16.8/88.0 → 29.4/143.9 and `by(label)` 7.5/24.4 → 15.0/48.4 (1.6–2.0×,
+     at the bar). The unkeyed barrier takes 14.4/70.4. Reverting only `namedEffect` makes the drain spell its domain
+     twice: 88.0 → 108.2 and 24.4 → 37.6. It is small code enforcing the project's compute-once rule. b09dee81's
+     entry split stays with it, because of the 2 MB value cap.
+   - **V3 75ad576d: KEEP.** `keyedCount` (5 code lines) plus `countsTraversers` (2). It also SIMPLIFIED `groupRows`:
+     one counting authority replaced the `groupBarrier` re-entry. The revert sends a keyed count through the member
+     pool. At 8k: root `group('a').by(name).by(count()).cap('a')` 33.0 → 57.9, two union sites 36.7 → 76.1,
+     `repeat(out().group('a')…).times(2)` 98.2 → 198.5, `choose` 26.8 → 47.5, `where(out().group('a')…)`
+     27.7 → 41.5 (1.5–2.1×).
+   - **V5 b600fc15: KEEP, untimed.** It fixed a bare RelIR error (`walk.ts`), so it is a correctness change.
+   - **T1 1274c293: gone.** S1 6793d40a deleted the `edgePair` pass (replaced by the `e_pair` index).
+   - Every witness is linear with its change in place: 1k→8k ratios are 0.8× (paged) and 2.5–5.9× otherwise.
 
 ## Next round
 
-- **Order: G1** (R7a landed 46e0a19b; 6d landed in full: 64bae352, d5ce03e2).
+- **Order: none.** G1 is done and kept every change (item 11); R7a landed 46e0a19b; 6d landed in full (64bae352,
+  d5ce03e2).
 - Round 13's follow-ups outside this plan's scope went to `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (pre-existing): `resource-union-prefix-slice`, `resource-barrier-prefix-path`; `cr-fu5` gained the
     shuffle `limit(n>1)` witness.
