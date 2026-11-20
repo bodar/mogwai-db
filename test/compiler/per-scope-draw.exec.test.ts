@@ -82,6 +82,31 @@ describe('a draw in local()/flatMap()/map() answers per scope row', () => {
   }
 });
 
+// A shuffle cut to ONE is a uniform pick — `sample(1)` (`ir/shuffle-cut.ts`) — so a re-sourced body draws it
+// per origin over one evaluation of its prefix (`reSourcedOnce`), in every spelling: `limit`, `range(0,1)`,
+// `tail`, and a bound `limit($x)` with `$x = 1`, which declined before the rewrite. Default mode only: the
+// re-sourced per-origin draw is not the connector's alone yet (`sample(1)` itself declines there).
+describe('a re-sourced shuffle cut to one picks once per origin', () => {
+  const answer = (q: string, params: Record<string, unknown>) => {
+    const plan = compile(q, params);
+    if (plan.kind !== 'read') throw new Error('expected read plan');
+    return bare(store.query(plan.sql, plan.binds));
+  };
+  const BODY = "g.V().hasLabel('software').local(__.V().hasLabel('person').order().by(shuffle)";
+  test('every spelling answers one person per software vertex', () => {
+    for (const [cut, params] of [['limit(1)', {}], ['range(0,1)', {}], ['tail(1)', {}], ['limit(x)', { x: 1 }], ['tail(x)', { x: 1 }]] as const)
+      expect(answer(`${BODY}.${cut}).count()`, params)).toEqual([{ v: 2 }]);
+  });
+  test('a label on either step names the one pick', () => {
+    for (let i = 0; i < 20; i++) {
+      expect(answer(`${BODY}.as('p').limit(1).as('q')).where('p', eq('q')).count()`, {})).toEqual([{ v: 2 }]);
+      const picks = answer(`${BODY}.as('p').limit(1).as('q')).select('q').values('name')`, {});
+      expect(picks.length).toBe(2);
+      for (const p of picks) expect(['marko', 'vadas', 'josh', 'peter']).toContain(p.v ?? p);
+    }
+  });
+});
+
 describe('a drawn relation the body only READS stays one shared pick', () => {
   // Drawn ONCE, upstream of the host, into a side effect: every scope reads that one value. Only the body's OWN
   // draws are per scope (`ownDraws`, src/rel/copies.ts) — keying the upstream draw redrew it per scope, a

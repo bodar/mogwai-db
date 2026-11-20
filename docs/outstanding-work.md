@@ -906,6 +906,14 @@ Beside the RelIR substrate:
 
 ## 4. Sensible queries we decline
 
+- **A drawn per-origin slice with a PARAMETER bound in a re-sourced body (param-draw-slice, depth gap)** —
+  `g.V().hasLabel('software').local(__.V().hasLabel('person').order().by(shuffle).limit(x))` with `{x: 2}` declines
+  with the shared-draw message, although the literal `limit(2)` answers (and so does a plain `local(out().limit(x))`,
+  measured). Only `$x = 1` answers, via `shuffleCutToSample` (`src/compiler/ir/shuffle-cut.ts`). The per-origin
+  window's bound path refuses a named count (`src/compiler/rel/lower/slice.ts`,
+  `sliceParamNames(step).some(…) → null`); fix there (bind the count, or reduce it at plan time as
+  `unrollFixedRepeat` does). Reach: plausible — a parameterised limit is the normal TP4 idiom.
+
 - **A project body inside a union arm (union-project-group, depth gap, 2026-11-19 F2 review).**
   `g.V().union(project('g').by(out().group().by(label).by(values('age').is(gt(30)).count(local))), constant(1))
   .count()` declines with 'no lowering covers'. The same project answers when it sits under project, local, map,

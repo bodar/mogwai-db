@@ -312,7 +312,7 @@ describe('a draw in a body evaluated once for several hosts declines', () => {
     "g.V().flatMap(__.project('x').by(__.V().sample(1).values('name')))",
     // Sufficient, not necessary: a stream barrier before the draw is outside the per-origin gate, so no
     // suggestion, though GraphStep's product happens to answer the local(…) form.
-    "g.V().map(__.V().order().by(shuffle).limit(1).values('name'))",
+    "g.V().map(__.V().order().by(shuffle).limit(2).sample(1).values('name'))",
   ])('%s', (q) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).not.toThrow(LOCAL_HINT);
@@ -324,6 +324,8 @@ describe('a draw in a body evaluated once for several hosts declines', () => {
     ["g.V().out().map(__.V().hasLabel('person').sample(1).values('name'))", "g.V().out().local(__.V().hasLabel('person').sample(1).values('name')).count()", 6],
     ["g.V().as('a').map(__.V().sample(1)).select('a')", "g.V().as('a').local(__.V().sample(1)).select('a').count()", 6],
     ["g.V().map(__.V().sample(1).values('name').fold())", "g.V().local(__.V().sample(1).values('name').fold()).count()", 6],
+    // A shuffle cut to one IS `sample(1)` (`ir/shuffle-cut.ts`), so it takes the same per-origin draw.
+    ["g.V().map(__.V().order().by(shuffle).limit(1).values('name'))", "g.V().local(__.V().order().by(shuffle).limit(1).values('name')).count()", 6],
   ] as const)('%s names the per-row local() form, and that form answers', (q, local, n) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).toThrow(LOCAL_HINT);

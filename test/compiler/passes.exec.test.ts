@@ -2,7 +2,7 @@
 // only in prose comments + the inside-out normalize() nesting. Encoding them as a test turns a
 // silent mis-compile (a future reorder) into a loud failure. Asserted DIRECTLY against the PASSES
 // array — no compile() needed.
-import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
+import { NO_PARAMS, paramEnv } from '../../src/gremlin/param-env.ts';
 import { test, expect, describe } from 'bun:test';
 import { PASSES } from '../../src/compiler/ir/passes.ts';
 import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
@@ -451,5 +451,47 @@ describe('until(loops().is(P)) canonicalizes to times(k*)', () => {
       expect(chain(q)).not.toContain('repeat');
       expect(chain(q)).toBe(chain(q.replace(/until\(loops\(\)\.is\(\d\)\)/, `times(${n})`)));
     }
+  });
+});
+
+// shuffleCutToSample (ir/shuffle-cut.ts): a uniform shuffle cut to ONE is a uniform pick, so the chain
+// says so with `sample(1)` and every per-origin draw lowering serves it. A cut of several keeps its
+// shuffled ORDER (sample keeps input order), so it is not the same question and stays.
+describe('shuffleCutToSample — order().by(shuffle) cut to one is sample(1)', () => {
+  const spell = (s: any): string => s.name === 'as' ? `as(${s.args.map((a: any) => a.value).join(',')})`
+    : s.name === 'sample' ? `sample(${s.args[0].value}${s.args[0].name ? '$' : ''})` : s.name;
+  const chain = (g: string, params: Record<string, unknown> = {}) => {
+    const env = paramEnv(params);
+    return runPasses(stepChain(parseGremlin(g), env), EMPTY_STRATEGY_USE, env).steps.map(spell).join('.');
+  };
+
+  test('limit(1), range(0,1) and tail(1) all become sample(1)', () => {
+    for (const cut of ['limit(1)', 'range(0,1)', 'tail(1)', 'tail()'])
+      expect(chain(`g.V().order().by(shuffle).${cut}.values("name")`)).toBe('V.sample(1).values');
+  });
+
+  test('a bound count is reduced to the constant 1 — and only when it IS 1', () => {
+    expect(chain('g.V().order().by(shuffle).limit(x)', { x: 1 })).toBe('V.sample(1)');
+    expect(chain('g.V().order().by(shuffle).tail(x)', { x: 1 })).toBe('V.sample(1)');
+    expect(chain('g.V().order().by(shuffle).limit(x)', { x: 2 })).toBe('V.order.limit');
+  });
+
+  test("both steps' labels ride after the pick, in written order", () => {
+    expect(chain('g.V().order().by(shuffle).as("a").limit(1).as("b").select("a","b")')).toBe('V.sample(1).as(a).as(b).select');
+  });
+
+  test('a cut of several, an offset, local scope or a keyed order is left alone', () => {
+    for (const q of [
+      'g.V().order().by(shuffle).limit(2)', 'g.V().order().by(shuffle).range(1,2)', 'g.V().order().by(shuffle).tail(2)',
+      'g.V().order().by(shuffle).skip(1)', 'g.V().order().by("name").limit(1)', 'g.V().order().by("name").by(shuffle).limit(1)',
+      'g.V().order().by(shuffle).out().limit(1)', 'g.V().order().by(shuffle).limit(local, 1)',
+      'g.V().fold().order(local).by(shuffle).limit(local, 1)',
+    ]) expect(chain(q)).toContain('order');
+  });
+
+  test('a nested body is rewritten by the same pipeline', () => {
+    const env = paramEnv({ x: 1 });
+    const [, local] = stepChain(parseGremlin('g.V().local(__.V().order().by(shuffle).limit(x))'), env) as any[];
+    expect(childSteps(local.args[0].value.nested, env).map(spell)).toEqual(['V', 'sample(1)']);
   });
 });

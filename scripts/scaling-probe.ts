@@ -319,6 +319,10 @@ const SHAPES: readonly Shape[] = [
   { name: 'collection-in-body: group.by(sum).where(select.count(local))', query: "g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1)).count()" },
   { name: 'collection-in-body: aggregate.where(where(select))', query: "g.V().aggregate('a').where(where(select('a').count(local).is(gt(0)))).count()" },
   { name: 'collection-in-body: aggregate.out.aggregate.where(select)', query: "g.V().aggregate('a').out().aggregate('a').where(select('a').count(local).is(gt(0))).count()" },
+  // A shuffle cut to one is `sample(1)` (`ir/shuffle-cut.ts`): a re-sourced pick per origin, drawn over one
+  // evaluation of the candidates (`reSourcedOnce`). Before the rewrite it ranked the origins × candidates cross.
+  { name: 'draw: local(V.shuffle.limit(1))', query: "g.V().hasLabel('software').local(V().hasLabel('person').order().by(shuffle).limit(1)).count()" },
+  { name: 'draw: local(V.shuffle.tail(1))', query: "g.V().hasLabel('software').local(V().hasLabel('person').order().by(shuffle).tail(1)).count()" },
 ];
 
 const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;

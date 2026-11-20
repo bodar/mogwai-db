@@ -14,6 +14,7 @@ import {
 import { verifyLabelMutationTarget, verifyWriteArgs } from './write-args.ts';
 import { FILTER_HOSTS, LABEL_MUTATIONS, SLICE_STEPS } from './step.ts';
 import { earlyLimit } from './early-limit.ts';
+import { shuffleCutToSample } from './shuffle-cut.ts';
 import { UnsupportedTraversal } from '../unsupported.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
@@ -151,6 +152,10 @@ const FOLD: Pass[] = group('canonicalize', [
   { name: 'absorbOptionArms', run: (steps) => absorbOptionArms(steps) },
   // AFTER absorbModulators, so a `by()` is no longer a step between two binds of one path entry.
   { name: 'mergeStepLabels', applies: (steps) => steps.some((s) => s.name === 'as'), run: (steps, ctx) => mergeStepLabels(steps, ctx.params) },
+  // A uniform shuffle cut to one IS `sample(1)` (`ir/shuffle-cut.ts`): AFTER absorbModulators, so the
+  // order's `by(shuffle)` is its `.modulators`; BEFORE EarlyLimitStrategy, which would otherwise read
+  // the cut as a slice it may move.
+  { name: 'shuffleCutToSample', applies: (steps) => steps.some((s) => s.name === 'order'), run: (steps) => shuffleCutToSample(steps) },
   // BEFORE absorbCallWith: desugarIo re-emits io()'s with() steps after the call it mints, for
   // absorbCallWith to fold exactly as it folds a hand-written call()'s.
   { name: 'desugarIo', run: (steps) => desugarIo(steps) },
