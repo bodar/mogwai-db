@@ -77,6 +77,12 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     ["g.V().repeat(out()).emit(local(in().order().by('age').limit(1))).count()", 7410],
     ["g.V().repeat(out()).until(has('age',gt(40))).emit(in('created').has('age',gt(45))).count()", 1980],
     ["g.V().repeat(out()).until(optional(in('created').has('age',gt(45)))).count()", 2210],
+    // A barrier over the frontier element's OWN rows is bounded by the element, so a hub does not multiply it: it
+    // stays in the term (`perHostWork`'s `readsNeighbourhood`, `src/rel/work.ts`), as until(has('age',gt(40))).
+    ["g.V().repeat(out()).until(elementMap().select('age').is(gt(40))).count()", 220],
+    ["g.V().repeat(out()).until(properties('age').value().is(gt(40))).count()", 220],
+    ["g.V().repeat(out()).until(project('a').by(values('age')).select('a').is(gt(40))).count()", 220],
+    ["g.V().repeat(out()).until(group().by(label).select(keys).count(local).is(1)).count()", 2210],
     // Beside a landed `until`, an emit condition is asked of the TRAVERSER, not of the walk row with its `EXIT`
     // column (`asked`, `walk.ts`) — so it still takes the per-state route.
     ["g.V().repeat(out()).until(hasLabel('software')).emit(local(in().limit(1))).count()", 7410],
@@ -257,6 +263,7 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
     "g.V().repeat(out()).until(local(in().order().by('age').limit(1))).count()",
     "g.V().repeat(out()).until(union(in('created'),out('knows')).has('age',gt(45))).count()",
     "g.V().repeat(out()).until(coalesce(in('created').has('age',gt(45)),out('nope'))).count()",
+    "g.V().repeat(out()).until(project('a').by(out().count()).select('a').is(0)).count()",
   ]) {
     test(`an until whose per-row work is a whole neighbourhood declines: ${q}`, () => {
       expect(() => runWith(small, q)).toThrow(/not supported/);

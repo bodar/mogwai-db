@@ -2,6 +2,7 @@ import { CHANNEL_GROUP_POLICY, sameChannels, withChannel, type Channel, type Cha
 import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import { exprRels, forEachExpr, forEachRel, substRelId } from '../../rel/walk.ts';
 import * as make from '../../rel/factory.ts';
+import { exprReadsNeighbourhood } from '../../rel/work.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { RelType } from '../../rel/types.ts';
@@ -17,19 +18,6 @@ import { and, carriedCols, elementCols, meta, notProduced, or, typeOf, type Mint
 import type { ChildSeam, Subject } from './child.ts';
 import { CONSTANT } from './predicate.ts';
 import type { RelFraming } from './framing.ts';
-
-/**
- * Does a condition read a NEIGHBOURHOOD — a subquery over `edges`? That is the work a hub multiplies: a per-row
- * read of the element's own labels or properties is one index seek whatever the graph's shape, so a condition
- * that reads only those stays per row (no spool, no semi-join); one that moves is asked per distinct state.
- */
-function readsAdjacency(e: Expr): boolean {
-  let moves = false;
-  forEachExpr(e, (node) => {
-    for (const plan of exprRels(node)) forEachRel(plan, (r) => { if (r.kind === 'scan' && r.table === 'edges') moves = true; });
-  });
-  return moves;
-}
 
 /** "Every row the walk holds" — an output condition that needs no filter, distinct from the absence
  *  of a condition. */
@@ -184,9 +172,10 @@ export function repeatWalk(
    * reached in — a DISTINCT pushed below a semi-join, Calcite's `SemiJoinRule` family
    * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/SemiJoinRule.java`).
    *
-   * Only the `emit` condition, and only one that reads adjacency (`readsAdjacency`: a condition over the row's
-   * own columns, labels or properties — `loops()`, `has(k,v)` — costs one seek per row as it is). Inside the term (`self`) the frontier row is all there
-   * is — a recursive SELECT may not DISTINCT or aggregate (`src/rel/recursive.ts` `BARRIER_IN_TERM`) — so the
+   * Only the `emit` condition, and only one that reads a NEIGHBOURHOOD (`exprReadsNeighbourhood`, the one
+   * authority, `src/rel/work.ts`: a condition over the row's own columns, labels or properties — `loops()`,
+   * `has(k,v)` — costs one seek per row as it is, whatever the graph's shape). Inside the term (`self`) the
+   * frontier row is all there is — a recursive SELECT may not DISTINCT or aggregate (`src/rel/recursive.ts` `BARRIER_IN_TERM`) — so the
    * `until` test stays per row there, and the output side READS its answer (`EXIT`) rather than asking again.
    * What keeps the term's per-row work bounded is `correlatedExistence`'s rule (`lower/scoped.ts`).
    *
@@ -425,7 +414,7 @@ export function repeatWalk(
 
   let surviving: Rel;
   const emitting = emits(walk);
-  if (emitted && emitting !== null && emitting !== ALL && readsAdjacency(emitting)) {
+  if (emitted && emitting !== null && emitting !== ALL && exprReadsNeighbourhood(emitting)) {
     // An `emit` condition that reads ADJACENCY is asked once per distinct STATE
     // (`perState`): the rows past the depth test, semi-joined to the states that pass. With an `until` it is the
     // rows that do NOT exit — `exit ∪ (¬exit ∧ emit)` is the disjunction `leaves` spells, as two disjoint arms —

@@ -144,6 +144,15 @@ describe('a walk condition: the decline set is pinned', () => {
     "local(in().order().by('age').limit(1))",
     "V().hasLabel('software')",
     "V().where(neq('x')).count().is(gt(3))",
+    // A barrier over the frontier element's OWN rows is bounded by the element (`readsNeighbourhood` false).
+    "elementMap().select('name').is('lop')",
+    "properties('name').value().is('lop')",
+    "project('a').by(values('name')).select('a').is('lop')",
+    "group().by(label).select(keys).count(local).is(1)",
+    "valueMap().select('name').unfold().is('lop')",
+    // …one over its NEIGHBOURHOOD is not.
+    "project('a').by(out().count()).select('a').is(0)",
+    "map(out().count()).is(0)",
   ];
   // What trunk declined before the fact existed — `distinct` is deliberately NOT a barrier (SQLite streams it), so
   // the `dedup()` conditions keep answering; the movement-head `correlatedExists` answers the reducer heads.
@@ -153,7 +162,32 @@ describe('a walk condition: the decline set is pinned', () => {
     "local(in().order().by('age').limit(1))",
     "V().hasLabel('software')",
     "V().where(neq('x')).count().is(gt(3))",
+    "project('a').by(out().count()).select('a').is(0)",
   ]);
+
+  // Each answers as the root-level filter over the same walk does (`emit`'s per-state form is asked over the
+  // finished walk, outside the term), so being bounded per element changed no rows.
+  for (const [c, equivalent] of [
+    ["elementMap().select('name').is('lop')", "has('name','lop')"],
+    ["properties('name').value().is('lop')", "has('name','lop')"],
+    ["project('a').by(values('name')).select('a').is('lop')", "has('name','lop')"],
+    ["valueMap().select('name').unfold().is('lop')", "has('name','lop')"],
+    ["group().by(label).select(keys).count(local).is(1)", 'identity()'],
+  ] as const) {
+    test(`until(${c}) answers as until(${equivalent})`, () => {
+      for (const tail of ['.count()', ".values('name')", '.path().count()']) {
+        expect(bagOf(names(run(store, `g.V().repeat(out()).until(${c})${tail}`))))
+          .toEqual(bagOf(names(run(store, `g.V().repeat(out()).until(${equivalent})${tail}`))));
+        expect(bagOf(names(run(store, `g.V().where(repeat(out()).until(${c}))${tail}`))))
+          .toEqual(bagOf(names(run(store, `g.V().where(repeat(out()).until(${equivalent}))${tail}`))));
+      }
+    });
+  }
+
+  test('a neighbourhood barrier in the term declines naming the bounded spelling', () => {
+    expect(() => run(store, "g.V().repeat(out()).until(project('a').by(out().count()).select('a').is(0)).count()"))
+      .toThrow(/neighbourhood in full on every path that reaches it.*until\(out\(\)\.count\(\)\.is\(0\)\)/);
+  });
 
   test('exactly the recorded conditions decline, each as a clean UnsupportedTraversal', () => {
     const got = new Set<string>();

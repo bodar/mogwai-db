@@ -44,7 +44,11 @@ export type DeclineKind =
   | 'draw-in-group-value'
   /** A side effect collected inside a child body (`aggregate`/`group`/`groupCount` with a label) that the
    *  connector could not key per traverser (`keyedBody`, `lower/scoped.ts`). Always ADVISORY. */
-  | 'effect-in-child';
+  | 'effect-in-child'
+  /** A `repeat()` exit condition whose per-row work reads ALL of a frontier element's neighbourhood (or the whole
+   *  graph) before it can answer, inside the recursive term — quadratic in the walk at a hub
+   *  (`correlatedExistence`, `lower/scoped.ts`). Always ADVISORY. */
+  | 'hub-in-walk-term';
 
 /**
  * THE PREFIX IS A PROPERTY OF THE KIND, kept in this one table. Most declines say the traversal is
@@ -68,6 +72,7 @@ const PREFIX: Readonly<Record<DeclineKind, string>> = {
   'write-on-path': 'this traversal is not supported yet',
   'draw-in-group-value': 'this traversal is not supported yet',
   'effect-in-child': 'this traversal is not supported yet',
+  'hub-in-walk-term': 'this traversal is not supported yet',
 };
 
 /**
@@ -157,6 +162,19 @@ export const drawInGroupValue: DeclineReason = {
   kind: 'draw-in-group-value', terminal: false,
   message: 'a random draw (sample()/coin()/order().by(shuffle)) inside a group() value by() is not supported yet',
 };
+
+/** The `hub-in-walk-term` decline (`correlatedExistence`, `lower/scoped.ts`): the exit condition reads a frontier
+ *  element's whole neighbourhood — or, `reSources`, the whole graph — on every path that reaches it. */
+export const hubInWalkTerm = (reSources: boolean): DeclineReason => ({
+  kind: 'hub-in-walk-term', terminal: false,
+  message: reSources
+    ? 'the repeat() until()/emit() condition reads the whole graph (V()/E()) in full for every path the walk takes, which grows '
+      + 'with the square of the walk; test it after the walk instead (repeat(…).emit().where(…)), or bound it with '
+      + 'count().is(…) or limit(n)'
+    : 'the repeat() until() condition reads each frontier vertex\'s whole neighbourhood in full on every path that '
+      + 'reaches it, which grows with the square of the walk at a hub; a direct count bounds it '
+      + '(until(out().count().is(0))), as does limit(n)',
+});
 
 /** The `effect-in-child` decline: the collection(s) a child body of `host` filled, named as the user wrote them,
  *  and a form known not to key — by default a read of the collection inside the body that fills it (`keyedBody`,

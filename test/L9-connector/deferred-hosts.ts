@@ -68,8 +68,11 @@ const REPEAT: Deferred = {
   // has one key, `src/rel/decorrelate.ts`) and a trailing `count().is(P)` counts only as far as P can tell
   // (`boundConditionCount`, `ir/strategies.ts`), so the work per walk row is bounded. An EMIT condition is asked
   // over the FINISHED walk, once per distinct traverser state (`perState`, `walk.ts`), so any head answers
-  // linearly there. What stays refused is the in-term until: evaluated per FRONTIER row, never per distinct element.
-  blocker: "SQLite's recursive-term law: no DISTINCT/aggregate/window in the recursive SELECT itself (`BARRIER_IN_TERM`) and no join to a keyed domain, so an until() condition is evaluated per frontier row, never once per distinct element — one of any head whose per-row work is a whole neighbourhood (a barrier or a FILTER over an unbounded input: `until(local(in().order().by(k).limit(1)))`, `until(union(in(),out()).has(k,v))`) would be quadratic at a hub and declines, as does one that DRAWS (`sample`/`coin`), holds its own walk, or orders/groups by a host column (`correlatedBody`'s refusals)",
+  // linearly there. An in-term until whose exhausting work reads only the frontier element's OWN rows
+  // (`elementMap()`, `properties()`, a `project()` of its values) is bounded by the element and answers
+  // (`perHostWork`'s `readsNeighbourhood`, `src/rel/work.ts`). What stays refused is the in-term until whose
+  // exhausting work reads a NEIGHBOURHOOD: evaluated per FRONTIER row, never per distinct element.
+  blocker: "SQLite's recursive-term law: no DISTINCT/aggregate/window in the recursive SELECT itself (`BARRIER_IN_TERM`) and no join to a keyed domain, so an until() condition is evaluated per frontier row, never once per distinct element — one of any head whose per-row work reads a whole NEIGHBOURHOOD (a barrier or a FILTER over an unbounded input that scans edges: `until(local(in().order().by(k).limit(1)))`, `until(union(in(),out()).has(k,v))`, `until(project('a').by(out().count()).select('a').is(0))`) would be quadratic at a hub and declines with that reason (`hubInWalkTerm`), as does one that DRAWS (`sample`/`coin`), holds its own walk, or orders/groups by a host column (`correlatedBody`'s refusals); a barrier over the element's own properties/labels is bounded by the element and answers",
   // The plan's open owner question ("should repeat until/emit's own condition lowering stay as it is?"): yes,
   // provisionally — the regime split IS the host's lowering, and its conditions use the shared correlated
   // predicate builders R1 extracts as substrate, not a ladder route.

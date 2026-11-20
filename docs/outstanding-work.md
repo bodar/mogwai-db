@@ -379,6 +379,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Fix:** Project each level's path once (a MATERIALIZED level or a projected column) and reference it in the next level's check.
 - **Where:** `tryUnroll` (`src/compiler/ir/strategies.ts`); the path-family lowering in `src/compiler/rel/lower.ts`
 
+#### `until(map(in().count()).is(P))` counts a hub's whole neighbourhood per frontier row (`until-map-count`)
+- **Area:** `repeat()`
+- **Reach:** plausible
+- **Problem:** The direct spelling `until(in().count().is(P))` takes the count bound (`boundConditionCount`) and stays linear (5.2/10.7 ms at 1k/8k sources → one hub). The `map(…count())` spelling escapes the bound and is answered outside `correlatedExistence`'s refusal, so each frontier row counts the hub's whole in-neighbourhood: 20.9/1110.6 ms, 53× per 8×. Pre-existing. The `project('a').by(out().count()).select('a').is(P)` spelling of the same thing declines with a reason that names the direct spelling (`hubInWalkTerm`), on purpose, so it does not reach this cost.
+- **Fix:** Have the count bound see through a `map()`/`project().by()` wrapper of a count, or route both through `perHostWork`'s `exhausts && readsNeighbourhood` refusal. The second retires a trunk answer, so it needs an owner call.
+- **Where:** `boundConditionCount` (`src/compiler/ir/strategies.ts`); `correlatedExistence` (`src/compiler/rel/lower/scoped.ts`)
+
 ### Performance: branches and nesting
 
 #### Presence gate inlines its value twice (`produced-only-where`)

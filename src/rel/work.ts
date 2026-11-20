@@ -2,7 +2,7 @@ import { rowBounds } from './bounds.ts';
 import { reSourceCross } from './lineage.ts';
 import type { Rel } from './rel.ts';
 import type { Expr } from './expr.ts';
-import { forEachExpr, forEachRel, freeRelIds, nodeFact, recursiveStep, relChildren, relExprs } from './walk.ts';
+import { exprRels, forEachExpr, forEachRel, freeRelIds, nodeFact, recursiveStep, relChildren, relExprs } from './walk.ts';
 
 /**
  * WHAT ONE EVALUATION OF A CORRELATED PLAN READS — the per-host-row work of a child body left correlated, as
@@ -34,11 +34,20 @@ import { forEachExpr, forEachRel, freeRelIds, nodeFact, recursiveStep, relChildr
  *   at once, so it does not stop an `EXISTS` from stopping early. A bounded input (`limit(n)`, `V(1)`, the count
  *   bound a walk condition's `count().is(P)` takes, `boundConditionCount`) costs O(n) and exhausts nothing.
  *
+ * - `readsNeighbourhood` — some node scans `edges`: the plan reads the host element's ADJACENCY, the work a hub
+ *   multiplies. A read of the element's own labels or properties is an index seek bounded by the ELEMENT whatever
+ *   the graph's shape, so a plan that reads only those costs the same per row at a hub as at a leaf. The ONE
+ *   authority for "per element or per neighbourhood": a walk's `emit` routing asks it of its condition
+ *   (`exprReadsNeighbourhood`, `src/compiler/rel/walk.ts`), and a walk TERM's refusal of an exhausting body asks it
+ *   too (`correlatedExistence`, `src/compiler/rel/lower/scoped.ts`) — a barrier over the element's own rows
+ *   (`elementMap()`, `properties()`, a `project()`/`group()` of its values) is bounded by the element.
+ *
  * MEMOISED per node: a node is immutable, so its work is too.
  */
 export interface PerHostWork {
   readonly reSources: boolean;
   readonly exhausts: boolean;
+  readonly readsNeighbourhood: boolean;
 }
 
 const unbounded = (r: Rel): boolean => rowBounds(r).max === Infinity;
@@ -67,13 +76,22 @@ const exhaustsInput = (r: Rel): boolean => {
 
 /** The per-host work of a correlated plan — `PerHostWork`. */
 export const perHostWork: (plan: Rel) => PerHostWork = nodeFact((plan: Rel): PerHostWork => {
-  let reSources = false, exhausts = false;
+  let reSources = false, exhausts = false, readsNeighbourhood = false;
   forEachRel(plan, (r) => {
     reSources ||= !!reSourceCross(r, 'any');
     exhausts ||= exhaustsInput(r);
+    readsNeighbourhood ||= r.kind === 'scan' && r.table === 'edges';
   });
-  return { reSources, exhausts };
+  return { reSources, exhausts, readsNeighbourhood };
 });
+
+/** Does an expression read a NEIGHBOURHOOD — does a subquery it holds scan `edges` (`PerHostWork`'s
+ *  `readsNeighbourhood`)? */
+export function exprReadsNeighbourhood(e: Expr): boolean {
+  let reads = false;
+  forEachExpr(e, (node) => { reads ||= exprRels(node).some((plan) => perHostWork(plan).readsNeighbourhood); });
+  return reads;
+}
 
 /**
  * HOW MUCH OF EACH RELATION ITS READERS DEMAND — the reader-demand fact, compile-time metadata over the closed node

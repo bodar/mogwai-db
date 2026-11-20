@@ -37,7 +37,7 @@ import { chooseArms, coalesceArms, ensureBulk, isReductionArm, mergeArms, option
 import { byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type ByField, type Modulation } from '../modulator.ts';
 import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
-import { drawInGroupValue, effectInChild, UnsupportedTraversal, type Declines } from '../../unsupported.ts';
+import { drawInGroupValue, effectInChild, hubInWalkTerm, UnsupportedTraversal, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type HostProgress, type Tail } from './chain.ts';
 import { childSeam, drawnPerOrigin, isUniformPick, hostStateAt, readsHostState, reductionHost, rootedRead, SHARED_DRAW } from './reduction.ts';
 import { prune } from '../../../rel/passes/prune.ts';
@@ -834,14 +834,24 @@ export function correlatedExistence(
   // the per-row work itself must be bounded: no barrier or rejection may read an unbounded input to its end
   // before the EXISTS can stop — the plan's per-host work fact (`perHostWork`'s `exhausts`, `src/rel/work.ts`),
   // read off the algebra rather than a list of node kinds here. A bounded input (`limit(n)`, the count bound a
-  // walk condition's `count().is(P)` takes — `boundConditionCount`, `ir/strategies.ts`) costs O(n). The linear
-  // form for the rest needs the condition evaluated per distinct element INSIDE the recursion, a substrate
-  // SQLite's recursive term does not offer, so it declines.
+  // walk condition's `count().is(P)` takes — `boundConditionCount`, `ir/strategies.ts`) costs O(n). So does an
+  // exhausting read of the element's OWN rows (`elementMap()`, `properties()`, a `project()`/`group()` of its
+  // values): it is bounded by the element, whatever the graph's shape, so a hub does not multiply it. The question
+  // is therefore whether the exhausting work also reads a NEIGHBOURHOOD (some node scans `edges`) or RE-SOURCES
+  // (the whole graph per row) — `perHostWork`'s `readsNeighbourhood`/`reSources`, the same per-element-vs-
+  // neighbourhood authority `walk.ts` routes `emit` by. The linear form for that rest needs the condition
+  // evaluated per distinct element INSIDE the recursion, a substrate SQLite's recursive term does not offer, so it
+  // declines, saying why in the user's terms (`hubInWalkTerm`).
   // "Inside the term" is an algebra fact: the subject's row stands on the walk's self-reference in its own FROM
   // tree — the frontier itself, or the row the term PRODUCES from it (the `until` answer the walk lands as a
   // column, `walk.ts` `EXIT`).
   if (!fromTree(rel).some((source) => source.kind === 'self-ref')) return { kind: 'exists', plan, negated };
-  return perHostWork(plan).exhausts ? null : { kind: 'exists', plan, negated };
+  const work = perHostWork(plan);
+  if (work.exhausts && (work.readsNeighbourhood || work.reSources)) {
+    ctx.declines.note(hubInWalkTerm(work.reSources));
+    return null;
+  }
+  return { kind: 'exists', plan, negated };
 }
 
 /**

@@ -231,3 +231,74 @@ Feature: mogwai addendum — an unbounded repeat()'s until/emit condition may le
     Then the result should be unordered
       | result |
       | d[6].l |
+
+  # An until() whose barrier reads only the frontier element's OWN rows (its properties, its label) is bounded by
+  # the element, not its neighbourhood, so it answers inside the recursive term (`perHostWork`'s
+  # `readsNeighbourhood`, `src/rel/work.ts`) — the same rows as until(values("name").is("lop")).
+  Scenario: g_V_repeatXoutX_untilXelementMap_selectXnameX_isXlopXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).until(__.elementMap().select("name").is("lop")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+
+  Scenario: g_V_repeatXoutX_untilXpropertiesXnameX_value_isXlopXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).until(__.properties("name").value().is("lop")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+
+  Scenario: g_V_repeatXoutX_untilXprojectXaX_byXnameX_selectXaX_isXlopXX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).until(__.project("a").by(__.values("name")).select("a").is("lop")).values("name")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | lop |
+      | lop |
+      | lop |
+      | lop |
+
+  # A group() of the one frontier element by its label always has one key: every first step exits.
+  Scenario: g_V_repeatXoutX_untilXgroup_byXlabelX_selectXkeysX_countXlocalX_isX1XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).until(__.group().by(T.label).select(Column.keys).count(Scope.local).is(1)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  # A barrier over the frontier's NEIGHBOURHOOD (a projected out().count()) would be quadratic at a hub inside the
+  # recursive term: a clean refusal naming the bounded spelling, until(out().count().is(0)).
+  @Unsupported
+  Scenario: g_V_repeatXoutX_untilXprojectXaX_byXout_countX_selectXaX_isX0XX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().repeat(__.out()).until(__.project("a").by(__.out().count()).select("a").is(0)).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[7].l |
