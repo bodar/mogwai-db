@@ -260,7 +260,8 @@ const BOTH_COPY_BOUND = 2;
  * `local(repeat(both()).times(16))` spent 4.7 s in prepare before refusing. So the frontier is crossed
  * with a constant `VALUES (0),(1)` direction relation and joined to `edges` on
  * `(dir = 0 AND e.<from₀> = in) OR (dir = 1 AND e.<from₁> = in)` — SQLite plans that as a MULTI-INDEX OR
- * (one seek of `e_out`, one of `e_in`, measured) — and `to`/`from` are `CASE dir` reads. A self-loop
+ * (one adjacency-index seek per direction — `e_out`/`e_in`, or `e_pair` for a label-free out-arm —
+ * measured) — and `to`/`from` are `CASE dir` reads. A self-loop
  * matches under BOTH directions, so it is two rows: the multiset rule carried by the direction row, with
  * no dedup. Where every direction matches the same end (`bothV`: both from `id`) the ON collapses to the
  * one equality and only the reads differ per direction.
@@ -315,10 +316,13 @@ function directionsJoin(
   const left = frontierRel(from);
   const leftCols = left ? [meta('pid', 'int'), ...carriedCols(left.channels)] : [];
   // **THE INCOMING FRONTIER IS THE LEFT SIDE, AND THE EDGE JOIN IS `ordered`** — a hop is "for each
-  // traverser I have, find its edges", so the stream drives and `edges` is probed through
-  // `e_out(src,label,tgt)` / `e_in(tgt,label,src)`. With the order free SQLite chose `e_in` and scanned
-  // the whole edge table for a hop off ONE vertex, taking a 4 000-vertex `has(name).out(knows).values(name)`
-  // to 1 492 ms; pinned, it seeks `e_out` and takes 0.3 ms. The direction row is crossed onto the frontier
+  // traverser I have, find its edges", so the stream drives and `edges` is probed through an adjacency
+  // index on the incoming end: `e_out(src,label,tgt)` / `e_in(tgt,label,src)` for a labelled hop, and for
+  // a label-free one whichever of them or `e_pair(src,tgt)` SQLite's planner picks (it takes `e_pair` for
+  // an `out()` and for an edge test pinning both ends — `src/storage.ts`). No lowering names an index.
+  // With the order free SQLite chose `e_in` and scanned the whole edge table for a hop off ONE vertex,
+  // taking a 4 000-vertex `has(name).out(knows).values(name)` to 1 492 ms; pinned, it seeks `e_out` and
+  // takes 0.3 ms. The direction row is crossed onto the frontier
   // BEFORE the edges, so each (traverser, direction) pair is one indexed probe.
   //
   // `driver` is what the ON reads the incoming id and the direction off: the frontier crossed with the

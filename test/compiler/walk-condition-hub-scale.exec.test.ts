@@ -3,6 +3,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadBulk } from '../../src/bulk.ts';
 import { read, runWith } from '../support/harness.ts';
+import { classify, planOf, schemaFacts } from '../../scripts/sql-plan.ts';
 
 // AN UNBOUNDED WALK'S CONDITION MUST NOT COST A HUB'S NEIGHBOURHOOD PER WALK ROW — many walk rows reach one hub.
 //  - `emit(c)` is asked over the FINISHED walk once per DISTINCT traverser state (`perState`,
@@ -107,10 +108,15 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
 
   // The adjacency probe is one seek whatever the graph's label VOCABULARY: 300 vertex and 300 edge labels beside the
   // hub graph's three. (Read through the vocabulary as `label IN (SELECT id FROM labels)`, each probe was |labels|
-  // seeks — measured 26 → 787 ms for the first row at 1050 chains; 16 ms on `e_pair`.)
+  // seeks — measured 26 → 787 ms for the first row at 1050 chains; 16 ms on `e_pair`.) Both sizes below carry the
+  // same vocabulary, so a per-label probe cost still scales linearly between them: the guard is the PLAN SQLite
+  // chose on the wide graph — the label-free probe pins `src` and `tgt` of `e_pair`, reads no label index, and the
+  // plan gate's own classifier (`classify`, `scripts/sql-plan.ts`) finds nothing but the root `V()` — never a
+  // wall-clock ratio between two stores, which CI noise can flip.
   test('an adjacency probe does not scale with the label vocabulary', () => {
     const wideSmall = hubGraph(130, 300);
     const wideLarge = hubGraph(1050, 300);
+    const facts = schemaFacts(wideLarge);
     // Each extra edge closes back to its own start once, so a one-hop closure gains exactly 300 rows.
     for (const [q, gained] of [
       ["g.V().as('a').out().out().where(__.in().as('a')).count()", 0],
@@ -118,9 +124,12 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
       ["g.V().as('a').out().where(__.in().as('a')).count()", 300],
     ] as const) {
       expect(count(wideLarge, q)).toBe(count(large, q) + gained);
-      const wide = timed(() => runWith(wideLarge, q));
-      expect(wide / Math.max(timed(() => runWith(large, q)), 5)).toBeLessThan(2);
-      expectLinear(timed(() => runWith(wideSmall, q)), wide);
+      const got = planOf(wideLarge, q)!;
+      const details = got.plan.map((r) => r.detail);
+      expect(details).toContainEqual(expect.stringMatching(/^SEARCH \w+ (EXISTS )?USING COVERING INDEX e_pair \(src=\? AND tgt=\?\)$/));
+      expect(details.filter((d) => /\b(e_label|labels)\b|label=\?/.test(d))).toEqual([]);
+      expect(classify(got.plan, got.sql, facts).map((f) => `${f.cls}:${f.table}`)).toEqual(['root:nodes']);
+      expectLinear(timed(() => runWith(wideSmall, q)), timed(() => runWith(wideLarge, q)));
     }
   }, SCALE_TIMEOUT_MS);
 
