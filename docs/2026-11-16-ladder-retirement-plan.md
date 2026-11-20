@@ -3,7 +3,7 @@
 _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4a1e42a8), S1's follow-ups
 (666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
-What is left is two in-scope regression fixes found by round 13's review (6d(a) — 6d(b) landed 64bae352 — and R7a), then G1. Round 12 landed item
+What is left is one in-scope regression fix found by round 13's review (R7a; 6d landed — (b) 64bae352, (a) d5ce03e2), then G1. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -54,8 +54,8 @@ every depth gap now goes to §3._
   draw, `drawnPerOrigin` draws a uniform pick per scope row, a shuffle cut to one IS `sample(1)` (6b,
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
-  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c.
-- **Open:** 6d(a) (6d(b) landed 64bae352) and R7a (regressions a round-13 commit introduced; scope rule 1), then G1.
+  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d.
+- **Open:** R7a (a regression a round-13 commit introduced; scope rule 1), then G1. 6d landed in full ((b) 64bae352, (a) d5ce03e2).
 - **No parked branch.** Every round-13 item landed; nothing is waiting on a resume point.
 
 ## Remaining work, in order
@@ -116,7 +116,13 @@ every depth gap now goes to §3._
      **(b) ✅ LANDED (64bae352):** `rowBounds` (`src/rel/bounds.ts`) bounds a Filter of `row_number <= n` over an
      unpartitioned window at max n, so `perOriginWindow`'s single pick satisfies `atMostOneRow` and hosts a rooted
      draw again (shuffle and `sample(1)` forms write one edge; `sample(2)` as host still declines). Compile-time
-     metadata only, no new SQL term. Remains of (b): nothing. **(a) is still open.**
+     metadata only, no new SQL term. Remains of (b): nothing.
+     **(a) ✅ LANDED (d5ce03e2):** `'sample'` joins `FROM_V_TRANSPARENT` (`src/compiler/rel/lower.ts`, read by
+     `edgeFeedsOtherV`), so a sampled or shuffle-cut edge mints `fromV` and `otherV()` answers again in every host
+     (global, `local`, `local(…).otherV()` via `allRows('forward')`, `flatMap`, `map`, `project().by`, `where`,
+     `optional`, union arms, repeat bodies), plus TinkerPop's random-walk recipe; `perOriginWindow` already carried
+     every channel, so no new SQL term. Witness `test/compiler/sample-other-v.exec.test.ts`. Weighted
+     `sample(1).by(…)` still declines (pre-existing, separate gap). Remains of (a): nothing. **6d is done.**
 
 7. ✅ **R4.6 — LANDED with R7 (82da81ae; witness be26dfa7, c8c7d7f4).** The sweep found no wrong answer; its lost
    answers were fixed in R7. The witness: `reductionHost` answers the property framing and `propertyTail` hands
@@ -223,8 +229,7 @@ every depth gap now goes to §3._
 
 ## Next round
 
-- **Order: 6d, then R7a, then G1.** 6d is two small, independent fixes (one set member; one `rowBounds` rule) and
-  may build in parallel with R7a. G1 waits for both.
+- **Order: R7a, then G1** (6d landed in full: 64bae352, d5ce03e2). G1 waits for R7a.
 - Round 13's follow-ups outside this plan's scope went to `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (pre-existing): `resource-union-prefix-slice`, `resource-barrier-prefix-path`; `cr-fu5` gained the
     shuffle `limit(n>1)` witness.
