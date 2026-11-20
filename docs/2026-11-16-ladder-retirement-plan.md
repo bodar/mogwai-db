@@ -180,6 +180,10 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    8k edges. Pinned by `test/compiler/edge-label-seek.exec.test.ts`. Remaining for (3): nothing.
    **Before building (3):** measure its own cost to `addE` and to bulk load. It would be a fourth index on
    `edges`, and the doc gives its cost only by analogy to `e_pair`.
+   **Scan-check fix LANDED (d64a6d3a).** `scripts/sql-plan.ts` resolves each `SCAN <alias>` to its base table
+   through the emitted SQL's FROM items (index cross-checked against `sqlite_schema`), classifies it by EQP-tree
+   position (ROOT reported, NESTED ratcheted against `scripts/sql-plan-baseline.json`, an unconstrained
+   `property_fts` scan gated at zero), and plans `call()` reads too. No compiled-SQL change. Remaining: nothing.
    _Original brief:_ survey for other simple structural splits (owner, 2026-11-19). Is there
    another cheap schema split that halves (or better) what an index seek or scan reads — more schema in exchange for
    leaning harder on SQLite? Check every table and index in `src/storage.ts` against the shapes the lowering
@@ -258,15 +262,15 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 ## Next round
 
 - Order: 6a and 6b (independent of each other), then 6c (rebase the parked branch onto them), then R7 (its suite
-  run is R4.6's sweep), then G1. Item 10's remaining decided build — the `sql-plan.ts` alias fix ((3), the `edges(label)` index, landed
-  22b79ae5; (5), the TextP trigram probe, landed 73616a6b) — is independent of the ladder work and can be built at any point.
+  run is R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
+  scan-check fix d64a6d3a.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
   - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
   - one shared test helper for "adjacency seek" plan assertions (`e_out` ↦ {`e_out`, `e_pair`}).
 - Round 11 follow-ups outside this plan's scope went to outstanding-work:
   - §4: `union(project().by(…group…count(local)), constant(1))` declines;
   - §1b: a value join after a re-source is ×67, and a crossed run's filters are not pushed (×71);
-  - §6: `sql-plan.ts` cannot see a full scan; a far-endpoint `hasId` is not pushed into `e_pair`'s `tgt`; a
+  - §6: `sql-plan.ts` cannot see a full scan (fixed, d64a6d3a); a far-endpoint `hasId` is not pushed into `e_pair`'s `tgt`; a
     drawing body whose prefix does not depend on the origin still pays scope × candidates.
 - The reuse-sweep proposal (gate `map()`'s two correlated first-row forms in `firstInnerOver` on `rowResident`, not
   `framingCols`) is filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4.
