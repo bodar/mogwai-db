@@ -271,6 +271,110 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
   });
 });
 
+// THE PER-ORIGIN DRAW CARRIES THE ORIGIN'S PATH AND SACK, as GraphStep's split does (`head.split(element, this)`,
+// `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221`):
+// the sack crosses unchanged and the path gains the element drawn — `splitInto`, the one rule `reSource` keeps too.
+// The gate is GraphStep's own refusal (`splitRefuses`): a path rides only where the prefix does not MOVE (the
+// re-source and filters), so the draw adds exactly one position. Before, a tracked path or a sack sent the draw to
+// the origins × graph product: 417 ms at 1k holders, 6.9 s at 4k.
+describe('the per-origin draw carries the origin path and sack', () => {
+  /** Best of three after one warm-up. */
+  const best = (f: () => unknown): number => {
+    f();
+    let ms = Infinity;
+    for (let i = 0; i < 3; i++) { const t0 = performance.now(); f(); ms = Math.min(ms, performance.now() - t0); }
+    return ms;
+  };
+  /** 1k → 8k traversers: linear is ≈8×, N log N ≈10×; the product route measured ≫16×. */
+  const expectLinear = (small: number, large: number) => expect(large / Math.max(small, 5)).toBeLessThan(16);
+  const small = graph(1000, 1000);
+  const large = graph(8000, 8000);
+  const scalar = (store: GraphStore, q: string): number => Number(bare(run(store, q))[0].v);
+
+  test.each([
+    ["g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).path().count(local).sum()", 2],
+    ["g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).path().count()", 1],
+    ["g.withSack(1).V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).sack().sum()", 1],
+    ["g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).simplePath().count()", 1],
+    ["g.withSack(1).V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).sack(sum).by(constant(1)).sack().sum()", 2],
+    ["g.V().hasLabel('holder').flatMap(__.V().hasLabel('person').sample(1)).path().count(local).sum()", 2],
+    ["g.V().hasLabel('holder').union(__.local(__.V().hasLabel('person').where(__.has('name')).sample(1))).path().count(local).sum()", 2],
+    ["g.V().hasLabel('holder').repeat(__.local(__.V().hasLabel('person').sample(1))).times(1).path().count(local).sum()", 2],
+  ] as const)('%s is exact and linear', (q, perHolder) => {
+    expect(scalar(small, q)).toBe(1000 * perHolder);
+    expect(scalar(large, q)).toBe(8000 * perHolder);
+    expectLinear(best(() => run(small, q)), best(() => run(large, q)));
+  }, 60_000);
+
+  test('each path is [holder, a person], drawn independently per holder', () => {
+    const store = graph(300, 300);
+    const paths = bare(run(store, "g.V().hasLabel('holder').as('h').local(__.V().hasLabel('person').sample(1)).path().by(label)"));
+    expect(paths).toHaveLength(300);
+    for (const row of paths) expect(JSON.parse(row.list).map((e: { v: string }) => e.v)).toEqual(['holder', 'person']);
+    const drawn = bare(run(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).path().by(id)"))
+      .map((row: { list: string }) => JSON.parse(row.list));
+    // The origin is each holder once; the draws spread over the 150 persons rather than one shared pick.
+    expect(new Set(drawn.map((p: { v: number }[]) => p[0]!.v)).size).toBe(300);
+    expect(new Set(drawn.map((p: { v: number }[]) => p[1]!.v)).size).toBeGreaterThan(50);
+  });
+
+  test('on modern every path is [origin, drawn]; a sack keeps its origin value', () => {
+    const modern = seededStore();
+    const NAMES = ['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter'];
+    const paths = bare(run(modern, "g.V().order().by('name').local(__.V().sample(1)).path().by('name')"))
+      .map((row: { list: string }) => JSON.parse(row.list).map((e: { v: string }) => e.v));
+    expect(paths.map((p: string[]) => p[0])).toEqual([...NAMES].sort());
+    for (const p of paths) { expect(p).toHaveLength(2); expect(NAMES).toContain(p[1]); }
+    expect(count(modern, "g.withSack(2).V().local(__.V().sample(1)).sack().sum()")).toBe(12);
+    // After a hop the path is three long: the hop's position, then the draw's.
+    expect(bare(run(modern, "g.V().out().local(__.V().sample(1)).path().count(local).dedup()"))).toEqual([{ v: 3 }]);
+    // An edge re-source is the same split: [edge, edge].
+    expect(bare(run(modern, "g.E().local(__.E().sample(1)).path().count(local).dedup()"))).toEqual([{ v: 2 }]);
+  });
+
+  // A MOVING prefix adds positions the draw does not hold, so the per-origin route refuses it and GraphStep's
+  // product answers (every position extended there): [origin, V, out].
+  test('a moving prefix under a path falls through to the product, never a short path', () => {
+    expect(bare(run(seededStore(), "g.V().local(__.V().out().sample(1)).path().count(local).dedup()"))).toEqual([{ v: 3 }]);
+  });
+});
+
+// A RE-SOURCE INSIDE local() ON A PATH-TRACKED TRAVERSER is GraphStep's own cross in the fold, which extends the
+// path as the split does — hosts × graph rows by meaning. The connector's shared read cannot hold that path, so it
+// only NOTES its reason (`reSourcedBody`), which still names the shape where the fold cannot answer either.
+describe('a re-source in local() on a path-tracked traverser', () => {
+  const pathsOf = (q: string): string[][] => bare(run(seededStore(), q)).map((row: { list: string }) => JSON.parse(row.list).map((e: { v: string }) => e.v));
+
+  test('answers host × read, each path the host extended by the read', () => {
+    const modern = seededStore();
+    expect(count(modern, "g.V().local(__.V().hasLabel('person')).path().count()")).toBe(24);
+    expect(pathsOf("g.V().has('name','marko').local(__.V().hasLabel('software')).path().by('name')").sort())
+      .toEqual([['marko', 'lop'], ['marko', 'ripple']]);
+    expect(pathsOf("g.V().has('name','marko').local(__.V().hasLabel('software').in().simplePath()).path().by('name')").sort())
+      .toEqual([['marko', 'lop', 'josh'], ['marko', 'lop', 'peter'], ['marko', 'ripple', 'josh']]);
+    expect(pathsOf("g.V().has('name','vadas').local(__.V().hasLabel('software').order().by('name').limit(1)).path().by('name')"))
+      .toEqual([['vadas', 'lop']]);
+    expect(count(modern, "g.V().union(__.local(__.V().hasLabel('software'))).path().count()")).toBe(12);
+  });
+
+  test('scales with host × read', () => {
+    const best = (f: () => unknown): number => { f(); let ms = Infinity; for (let i = 0; i < 3; i++) { const t0 = performance.now(); f(); ms = Math.min(ms, performance.now() - t0); } return ms; };
+    // 20 persons per host: 20k then 160k paths.
+    const q = "g.V().hasLabel('holder').local(__.V().hasLabel('person')).path().count(local).sum()";
+    const small = graph(1000, 40), large = graph(8000, 40);
+    expect(count(small, q)).toBe(40_000);
+    expect(count(large, q)).toBe(320_000);
+    expect(best(() => run(large, q)) / Math.max(best(() => run(small, q)), 5)).toBeLessThan(16);
+  }, 60_000);
+
+  test.each([
+    "g.V().local(__.V().hasLabel('software').count()).path()",
+    "g.V().local(__.V().hasLabel('software').fold()).path()",
+  ])('%s declines naming the shape, never a wrong path', (q) => {
+    expect(() => compile(q, {})).toThrow(/a V\(\)\/E\(\) inside local\(\) on a traverser whose path is tracked/);
+  });
+});
+
 // A DRAW IN A ONCE-EVALUATED SPLIT READ. A `by()`/`map()` value, a `P` operand, a list operand or a write
 // endpoint that re-sources (`__.V()…`) is lowered ONCE for every host (`rootedRead`'s 'split' gate), so a
 // `sample`/`coin`/`shuffle` in it would be ONE random choice shared by every row, where the reference draws
@@ -305,9 +409,10 @@ describe('a draw in a body evaluated once for several hosts declines', () => {
     // A SCALAR host has no per-row rejoin.
     "g.inject(1,2).map(__.V().sample(1).values('name'))",
     "g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))",
-    // `coin` is not the per-origin draw, and a sack rides into the body.
+    // `coin` is not the per-origin draw.
     "g.V().map(__.V().coin(0.5).count())",
-    "g.withSack(1).V().map(__.V().sample(1))",
+    // A path rides into the body and the prefix MOVES: the draw would add two positions, not one.
+    "g.V().map(__.V().out().sample(1)).path()",
     // The draw sits under a by(), not at the body's re-source.
     "g.V().flatMap(__.project('x').by(__.V().sample(1).values('name')))",
     // Sufficient, not necessary: a stream barrier before the draw is outside the per-origin gate, so no
@@ -326,6 +431,8 @@ describe('a draw in a body evaluated once for several hosts declines', () => {
     ["g.V().map(__.V().sample(1).values('name').fold())", "g.V().local(__.V().sample(1).values('name').fold()).count()", 6],
     // A shuffle cut to one IS `sample(1)` (`ir/shuffle-cut.ts`), so it takes the same per-origin draw.
     ["g.V().map(__.V().order().by(shuffle).limit(1).values('name'))", "g.V().local(__.V().order().by(shuffle).limit(1).values('name')).count()", 6],
+    // A sack crosses the split as any carried channel does (`splitInto`), so the per-row form draws per origin.
+    ["g.withSack(1).V().map(__.V().sample(1))", "g.withSack(1).V().local(__.V().sample(1)).count()", 6],
   ] as const)('%s names the per-row local() form, and that form answers', (q, local, n) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).toThrow(LOCAL_HINT);

@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
-import { withChannel, type Channel } from '../../../channels.ts';
+import { withChannel, type Channel, type ChannelRole } from '../../../channels.ts';
 import { isColumnArg, isNested, isPopArg, isPred, stepChain, type Arg, type SideEffectConstants } from '../../../gremlin/frontend.ts';
 import { col, compilerInt, compilerNull, compilerText, eq, isNot, type BinaryOp, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
@@ -16,6 +16,7 @@ import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
 import { collectsSideEffect, countOf, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
+import { COLLAPSE_FILTERS } from '../../ir/bulk.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, perOriginWindow, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
@@ -44,7 +45,7 @@ import { RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { scopedValue } from './scoped.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './exists.ts';
-import { crossCarried, movement } from './movement.ts';
+import { movement, splitInto, splitRefuses } from './movement.ts';
 import { nondeterministic } from '../../ir/step.ts';
 import { pastBudget } from '../../../sql/kernel/budget.ts';
 
@@ -1380,11 +1381,16 @@ export function reSourcedOnce(
   const drawAt = drawIndex(steps, at);
   const prefix = steps.slice(at, drawAt);
   const draw = steps[drawAt]!;
+  // The rooted read is a fresh root chain, so it tracks no path of its own: the one position the split adds to
+  // the origin's path — the element drawn — is appended after the join (`splitInto`).
   const rooted = rootedRead(prefix, ctx, fresh, 'many');
   if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return undefined;
+  const elem = rooted.framing.kind === 'elements' ? rooted.framing.elem : undefined;
+  if (!elem && pathCarried(input)) return undefined;
   // Only the payload crosses: a rooted channel other than its position and its (provably unit) bulk —
-  // an alias, a path — is a fact about the candidate that the origins' channels have no slot for.
-  if (rooted.rel.channels.some((channel) => channel.role !== 'encounter' && channel.role !== 'bulk')) return undefined;
+  // an alias — is a fact about the candidate that the origins' channels have no slot for. The sack and loop
+  // counter a FRESH start traverser holds are superseded by the origin's, which the split keeps (`splitInto`).
+  if (rooted.rel.channels.some((channel) => !SUPERSEDED.has(channel.role))) return undefined;
 
   const int = (name: string): ColMeta => meta(name, 'int');
   const bin = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
@@ -1457,12 +1463,16 @@ export function reSourcedOnce(
     type: typeOf(...row.type.cols, ...candidates.type.cols), on: eq(col(candidates.id, K), col(row.id, KI)),
   });
 
-  // GraphStep's crossing (`crossCarried`): the origins' carried channels cross, their payload is replaced by
-  // the candidate's, and the candidate's number K is the ordinal. ONE pick per origin keeps its row's
-  // position; several re-mint it origin-major, then candidate order.
-  const rel = crossCarried(parent, met, K, payload.map((column) => [column, column.name] as const), n > 1, ctx, fresh);
+  // GraphStep's split (`splitInto`): the origins' carried channels cross — a sack among them — their payload is
+  // replaced by the candidate's, the candidate's number K is the ordinal, and a tracked path gains the drawn
+  // element. ONE pick per origin keeps its row's position; several re-mint it origin-major, then candidate order.
+  const rel = splitInto(parent, met, K, payload.map((column) => [column, column.name] as const), n > 1, elem, ctx, fresh);
   return continueAs(rel, rooted.framing, steps, drawAt + 1, bulked, ctx, fresh, labels) ?? undefined;
 }
+
+/** A rooted read's channels the per-origin draw drops: its own position and unit bulk, and the start state the
+ *  origin's split supersedes (`reSourcedOnce`). */
+const SUPERSEDED: ReadonlySet<ChannelRole> = new Set<ChannelRole>(['encounter', 'bulk', 'sack', 'loops']);
 
 /** The top-level global `sample` after the re-source at `at`: the draw `reSourcedOnce` makes per origin. */
 const drawIndex = (steps: readonly IRStep[], at: number): number =>
@@ -1483,13 +1493,18 @@ export function reSourcesOncePerOrigin(steps: readonly IRStep[], at: number, inp
   const prefix = steps.slice(at, drawAt);
   const { params } = ctx;
   const draw = steps[drawAt]!;
-  if (bulked || draw.modulators?.length || draw.optionArms
-    || input.channels.some((channel) => channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return false;
+  // The state the split cannot keep is GraphStep's own refusal (`splitRefuses`). A path gains ONE position here —
+  // the element drawn — so it rides only where the prefix does not MOVE: the re-source and filters, by name.
+  if (bulked || draw.modulators?.length || draw.optionArms || splitRefuses(input, prefix.slice(1).every((step) => STILL.has(step.name)))) return false;
   const read = rawBodies(params);
   const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
   if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return false;
   return !nondeterministic(prefix, params) && !someStepDeep(prefix, read, collectsSideEffect, true);
 }
+
+/** The steps that leave their traverser where it stands: a filter never extends the path, so a prefix of the
+ *  re-source and these adds exactly one position to it, the element drawn (`reSourcesOncePerOrigin`). */
+const STILL: ReadonlySet<string> = new Set([...COLLAPSE_FILTERS, 'is']);
 
 /** The filter steps whose child runs PER TRAVERSER (`TraversalUtil.test` on one traverser at a time), so a
  *  prefix holding one is still R copies of one evaluation. A new filter host belongs here for that reason:

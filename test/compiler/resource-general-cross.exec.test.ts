@@ -15,7 +15,6 @@
 // the query text, naming the shape.
 import { test, expect, describe } from 'bun:test';
 import { seededStore, run, bare, bagOf } from '../support/harness.ts';
-import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 
 const s = seededStore();
 const rows = (g: string): any[] => bare(run(s, g));
@@ -394,22 +393,28 @@ describe('tree() folds the paths a split or forward rejoin emits, in traverser o
   }
 });
 
-describe('a forward (local()) host on a traverser whose path is tracked declines, naming the shape', () => {
-  // `LocalStep` emits the CHILD's own traverser, whose path the read's GraphStep extends.
-  test('out().local(V().has(marko)).path()', () => {
-    expect(() => run(s, "g.V().out().local(V().has('name','marko')).path().count()"))
+describe('a forward (local()) host on a traverser whose path is tracked', () => {
+  // `LocalStep` emits the CHILD's own traverser, whose path the read's GraphStep extends: GraphStep's own cross in
+  // the fold (`reSource`) extends it, so these answer — the connector's shared read only notes its reason.
+  const names = (q: string): string[][] => bare(run(s, q)).map((row: { list: string }) => JSON.parse(row.list).map((e: { v: string }) => e.v));
+  test('out().local(V().has(marko)).path() is each out() path extended by marko', () => {
+    expect(names("g.V().out().local(V().has('name','marko')).path().by('name')").map((p) => p[2])).toEqual(Array(6).fill('marko'));
+    expect(names("g.V().out().local(V().has('name','marko')).path().by('name')").every((p) => p.length === 3)).toBe(true);
+  });
+  test('out().local(V().order().limit(1)).path() slices per local() start', () => {
+    expect(names("g.V().out().local(V().order().by('name').limit(1)).path().by('name')").map((p) => p[2])).toEqual(Array(6).fill('josh'));
+  });
+  test('a path read INSIDE the local() body sees the host path extended by the read', () => {
+    // [origin, v]: simple unless v is the origin, cyclic only then.
+    expect(bare(run(s, 'g.V().local(V().simplePath().count())')).map((row: { v: number }) => row.v)).toEqual(Array(6).fill(5));
+    expect(bare(run(s, 'g.V().local(V().cyclicPath().count())')).map((row: { v: number }) => row.v)).toEqual(Array(6).fill(1));
+  });
+  test('a reducer after the re-source still declines, naming the shape', () => {
+    expect(() => run(s, "g.V().local(V().hasLabel('software').count()).path()"))
       .toThrow('a V()/E() inside local() on a traverser whose path is tracked');
   });
-  test('out().local(V().order().limit(1)).path()', () => {
-    try { run(s, "g.V().out().local(V().order().by('name').limit(1)).path().count()"); } catch (error) {
-      expect(error).toBeInstanceOf(UnsupportedTraversal);
-      expect((error as Error).message).toContain('a V()/E() inside local() on a traverser whose path is tracked');
-      return;
-    }
-    throw new Error('expected a decline');
-  });
-  // Where the path is asked for INSIDE the re-sourced body, the message says so, and names the host it fired under.
-  for (const [q, host] of [['g.V().local(V().simplePath().count())', 'local'], ['g.V().flatMap(V().path())', 'flatMap']] as const) {
+  // Where the path is asked for INSIDE a flatMap() body, the message says so, and names the host it fired under.
+  for (const [q, host] of [['g.V().flatMap(V().path())', 'flatMap']] as const) {
     test(q, () => {
       expect(() => run(s, q)).toThrow(`a path(), simplePath() or cyclicPath() inside a ${host}() body that starts with V()/E()`);
     });

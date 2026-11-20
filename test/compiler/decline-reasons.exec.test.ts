@@ -117,7 +117,7 @@ describe('a terminal reason is the message, and its prefix is a property of its 
   });
 
   test('a traversal no lowering covers still says so', () => {
-    const q = "g.V().out().local(__.V().has('name','lop')).path()";
+    const q = "g.V().out().local(__.V().has('name','lop').count()).path()";
     const e = declineOf(q);
     expect(e.kind).toBe('uncovered');
     // The re-source's advisory reason (`reSourcedBody`) is a hint after the decline, never in its place.

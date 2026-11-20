@@ -232,7 +232,8 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * `correlated` false), the cross would be every host × the graph ahead of the pick: declined, naming the shape.
  *
  * What it refuses, from the query text: under `forward` a traverser whose path is tracked (the child's own
- * path, emitted, is the host's EXTENDED by the read's positions), under `split` a tracked path the rest READS (the
+ * path, emitted, is the host's EXTENDED by the read's positions — left to GraphStep's cross in the fold, which
+ * extends it, with the reason only noted), under `split` a tracked path the rest READS (the
  * child's path inside the body is likewise extended), and a prefix of label reads that may LOSE its row — the re-source discards
  * the selected value, so the answer would depend only on which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
  * lose or multiply its row (`out().V()`, `values('age').V()`) is GraphStep's own cross join, in the fold.
@@ -252,10 +253,13 @@ function reSourcedBody(
   if (!exactlyOneRow(prefix.rel)) return undefined;
   const rest = body.slice(at);
   // A tracked path the CHILD's traverser carries out (`forward`), or that a `split` body reads inside itself, is
-  // the host's EXTENDED by the read's positions, which the shared read does not hold: declined.
+  // the host's EXTENDED by the read's positions, which the shared read does not hold. Under `forward` that is
+  // GraphStep's own cross in the fold (`reSource`, or the per-origin draw `reSourcedOnce`), which extends the
+  // path as the split does — the hosts × graph rows the query asks for — so the reason is only NOTED, and still
+  // names the shape where the fold cannot answer either. A `split` body reading its own path declines here.
   if (pathCarried(prefix.rel) && (contract === 'forward' || (contract === 'split' && readsPath(rest, ctx)))) {
     ctx.declines.note({ kind: 'resource-path', message: resourcePathMessage(rest, ctx), terminal: false });
-    return null;
+    return contract === 'forward' ? undefined : null;
   }
   // A rest that reads the HOST traverser's state (an outer label, its sack, path or loops) cannot be one
   // shared read: it is GraphStep's own cross with the host, in the fold (`movement.ts` `reSource`). One policy

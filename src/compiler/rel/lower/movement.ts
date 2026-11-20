@@ -58,9 +58,24 @@ export function reSource(
     id: fresh('j'), left: parent, right: ids, join: 'cross', channels: parent.channels,
     type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
-  const met = crossCarried(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, ctx, fresh);
-  // The split's path gains the element it meets — a hop's own extension (`movement`, `otherVertex`).
-  return { elem, rel: pathCarried(met) ? extendPath(met, { kind: 'element', elem, id: col(met.id, 'id') }, fresh, ctx.demandsPathLabels) : met };
+  return { elem, rel: splitInto(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, elem, ctx, fresh) };
+}
+
+/**
+ * GRAPHSTEP'S SPLIT, WHOLE — the one rule every re-source keeps (`reSource`'s cross join, `reSourcedOnce`'s
+ * per-origin draw): the origin's carried channels cross onto the element it meets (`crossCarried`), and a
+ * tracked PATH gains that element, as `head.split(element, this)` extends it
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221`)
+ * — a hop's own extension (`movement`, `otherVertex`). `elem` is the kind met; a split that meets a VALUE
+ * (`undefined`) is never handed a path — its caller refused one before building (`splitRefuses`).
+ */
+export function splitInto(
+  parent: Rel, met: Rel, ordinal: string, payload: readonly (readonly [ColMeta, string])[], several: boolean,
+  elem: Elem | undefined, ctx: ChainCtx, fresh: Minter,
+): Rel {
+  const crossed = crossCarried(parent, met, ordinal, payload, several, ctx, fresh);
+  return elem && pathCarried(crossed)
+    ? extendPath(crossed, { kind: 'element', elem, id: col(crossed.id, 'id') }, fresh, ctx.demandsPathLabels) : crossed;
 }
 
 /**
