@@ -33,6 +33,15 @@ const ANSWERS: readonly (readonly [string, readonly string[]])[] = [
     ['v=aachen,s=2009', 'v=baltimore,s=2007', 'v=brussels,s=2004', 'v=centreville,s=1990']],
   // A CHILD by() over the property host — the slot the deleted `propertyTail` record could not lower.
   [`g.V().properties('location').project('v','n').by(T.value).by(__.values('startTime').count())`, LOCATIONS.map(([v]) => `v=${v},n=1`)],
+  // A SHAPE-KEEPING step BEFORE `project()` — a meta-property `has`, an order + slice. `propertyTail` hands each on
+  // through `continueAs`, so the `project` after it still reaches the connector (a direct recursion skipped it).
+  [`g.V().properties('location').has('startTime',P.gt(2008)).project('v','s').by(T.value).by('startTime')`,
+    ['v=aachen,s=2009', 'v=oakland,s=2011', 'v=seattle,s=2014']],
+  [`g.V().properties('location').order().by(T.value).limit(3).project('v','s').by(T.value).by('startTime')`,
+    ['v=aachen,s=2009', 'v=baltimore,s=2007', 'v=bremen,s=2004']],
+  [`g.V().properties().hasKey('location').hasValue('seattle').project('k','v').by(T.key).by(T.value)`, ['k=location,v=seattle']],
+  [`g.V().properties('location').hasNot('endTime').dedup().project('v').by(T.value)`, ['v=aachen', 'v=purcellville', 'v=santa fe', 'v=seattle']],
+  [`g.V().local(__.properties('location').has('startTime',P.gt(2008)).project('v').by(T.value))`, ['v=aachen', 'v=oakland', 'v=seattle']],
   // The owner through `element()`, after a meta-property filter.
   [`g.V().properties('location').where(__.has('startTime',P.gt(2008))).project('v','e').by(T.value).by(__.element().values('name'))`,
     ['v=aachen,e=daniel', 'v=oakland,e=matthias', 'v=seattle,e=matthias']],

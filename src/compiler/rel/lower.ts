@@ -6239,7 +6239,8 @@ function treeTail(rel: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx,
  * like any other, so `order()`, `dedup()` and the slices route through `rowOp` with a property
  * `RowShape` rather than through property-specific arms. Both of that shape's answers split on the OWNER
  * KIND, which is upstream's own line — a `VertexProperty` IS an `Element` and an edge `Property` is not
- * — and both citations live in `property.ts`. They keep the shape, so they recurse rather than retyping.
+ * — and both citations live in `property.ts`. They keep the shape, so they hand it back to `continueAs`
+ * unchanged rather than retyping — never a direct recursion, which would skip the dispatcher's connector sites.
  *
  * Anything else DECLINES.
  */
@@ -6257,7 +6258,7 @@ function propertyTail(
     const clause = propertyHasClause(rel, step.name === 'hasKey' ? 'key' : 'value', step.args ?? [], fresh);
     if (!clause) return null;
     const kept = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
-    return propertyTail(kept, elem, steps, from + 1, bulked, ctx, fresh, labels);
+    return continueAs(kept, { kind: 'property', ownerElem: elem }, steps, from + 1, bulked, ctx, fresh, labels);
   }
 
   if (ROW_OPS.has(step.name)) {
@@ -6265,7 +6266,7 @@ function propertyTail(
     // A `dedup()` that lowered RESET the multiplicity — `dedupOn` projects `bulk` as the literal 1 — so
     // the fold learns it, for `elementTail`'s reason: a stale `bulked` sends a following slice to
     // `bulkSlice`, which declines without an emission order.
-    return row && propertyTail(row, elem, steps, from + 1, step.name === 'dedup' ? false : bulked, ctx, fresh, labels);
+    return row && continueAs(row, { kind: 'property', ownerElem: elem }, steps, from + 1, step.name === 'dedup' ? false : bulked, ctx, fresh, labels);
   }
 
   // THE GROUP BARRIER, over a property stream. It needs nothing property-specific: `groupBarrier` asks
@@ -6281,7 +6282,10 @@ function propertyTail(
   }
 
   // `project(…)` over a property stream is not here: it is the connector's record (`recordLeft`, `lower/scoped.ts`)
-  // over the same property host, reached through `continueAs` before this tail.
+  // over the same property host, reached through `continueAs` before this tail. That is why every shape-keeping
+  // step here (`hasKey`/`hasValue`, a row op, a filter) hands its stream on through `continueAs` rather than
+  // recursing into this tail: a direct recursion skipped the ONE dispatcher, so a connector site after it
+  // (`…has('x').project(…)`), a re-source or a mid-chain `inject()` never reached its lowering.
 
   // A CORRELATED FILTER over a property traverser — `where`/`filter`/`not`/`and`/`or`, the SAME
   // `sourceFilter` vocabulary the element and scalar hosts use, reachable now that a property is a
@@ -6294,7 +6298,7 @@ function propertyTail(
   if (SCALAR_FILTER_HOSTS.has(step.name) || step.name === 'is' || step.name === 'has' || step.name === 'hasNot') {
     const subject: Subject = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, rel };
     const filtered = hostFilter(rel, step, subject, ctx, fresh, labels);
-    return filtered ? propertyTail(filtered, elem, steps, from + 1, bulked, ctx, fresh, labels) : null;
+    return filtered ? continueAs(filtered, { kind: 'property', ownerElem: elem }, steps, from + 1, bulked, ctx, fresh, labels) : null;
   }
 
   // THE BRANCH FAMILY over a PROPERTY stream — the same `branchArms` the element and value tails call,
