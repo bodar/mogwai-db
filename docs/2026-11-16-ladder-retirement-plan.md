@@ -3,7 +3,7 @@
 _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4a1e42a8), S1's follow-ups
 (666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
-What is left is two in-scope regression fixes found by round 13's review (6d, R7a), then G1. Round 12 landed item
+What is left is two in-scope regression fixes found by round 13's review (6d(a) — 6d(b) landed 64bae352 — and R7a), then G1. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -55,7 +55,7 @@ every depth gap now goes to §3._
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
   `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c.
-- **Open:** 6d and R7a (regressions a round-13 commit introduced; scope rule 1), then G1.
+- **Open:** 6d(a) (6d(b) landed 64bae352) and R7a (regressions a round-13 commit introduced; scope rule 1), then G1.
 - **No parked branch.** Every round-13 item landed; nothing is waiting on a resume point.
 
 ## Remaining work, in order
@@ -113,6 +113,10 @@ every depth gap now goes to §3._
      (`src/rel/bounds.ts`) treats `perOriginWindow`'s `Filter(prn<=1)` over a materialized window as unbounded. Fix
      generically in `rowBounds`: a Filter of `row_number <= n` over an unpartitioned window has max n. Do not
      special-case the Pass.
+     **(b) ✅ LANDED (64bae352):** `rowBounds` (`src/rel/bounds.ts`) bounds a Filter of `row_number <= n` over an
+     unpartitioned window at max n, so `perOriginWindow`'s single pick satisfies `atMostOneRow` and hosts a rooted
+     draw again (shuffle and `sample(1)` forms write one edge; `sample(2)` as host still declines). Compile-time
+     metadata only, no new SQL term. Remains of (b): nothing. **(a) is still open.**
 
 7. ✅ **R4.6 — LANDED with R7 (82da81ae; witness be26dfa7, c8c7d7f4).** The sweep found no wrong answer; its lost
    answers were fixed in R7. The witness: `reductionHost` answers the property framing and `propertyTail` hands
