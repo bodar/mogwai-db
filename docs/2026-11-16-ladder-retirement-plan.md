@@ -1,13 +1,13 @@
 # Retiring the correlated-child ladder
 
-_Status: IN PROGRESS. Round 12 (2026-11-20) landed item 10's three decided builds: (5) 73616a6b, (3) 22b79ae5 and
-the `sql-plan.ts` scan check d64a6d3a; review's tooling follow-ups on the scan check (10a) landed 4a1e42a8. Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
-R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers. 6a, 6b and then 6c (1d1f3fc8,
-2026-11-20) and R7 (82da81ae, 2026-11-20) have landed, so G1 is next. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
-added G1.
-Trimmed hard 2026-11-19 after round 9 (owner request). The full record — every round,
-measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, round 8–9 at `11378285`.
-Nothing below depends on it._
+_Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4a1e42a8), S1's follow-ups
+(666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
+`correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
+What is left is two in-scope regression fixes found by round 13's review (6d, R7a), then G1. Round 12 landed item
+10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
+Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
+round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
+`11378285`, rounds 10–13 at `326456e9`. Nothing below depends on it._
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is replaced
 where the connector genuinely does the job as well or better, and left where it does not. Code genuinely shared by
@@ -39,19 +39,24 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 6. **No per-round sections, no landed-item narratives.** A round flips an item to "landed (sha)" in one line,
    updates "Where we are", and stops.
 
-## Where we are (2026-11-19)
+_Section numbers above are pre-2026-11-20. `docs/outstanding-work.md` is now a uniform reference: §1b → §2
+Performance, §4 → §3 Queries we decline, §6 Internal debt unchanged. L9 ladder-reach is deleted with the ladder, so
+every depth gap now goes to §3._
 
-- The connector is the DEFAULT at every child site. The ladder is the opt-in `correlatedChild` FastPath; its code is
-  `src/compiler/rel/lower/per-traverser.ts` alone. `group` is `LADDERLESS` and its dead ladder arms are deleted.
-- **Ladder-only answers in the corpus: 0** (from 66; CI ratchet `test/L9-connector/ladder-reach-baseline.json`).
-  R4.2 (ae0fadb7) closed the last 5. **R7 is NOT yet unblocked**: L9 counts corpus traversals only, so it cannot see
-  bodies that draw over a re-source (`ladderOwns`). **The one blocker left is R4.5, and it now waits on 6a and
-  6b.** R4.6 (the sweep outside the corpus) is merged into R7: the deletion's own suite run is the sweep.
-- Landed: R0–R3, R4.1/R4.3/R4.4, R5.1–R5.5, R6 side effects, pooled keyed `group('a')` in arms/bodies (95334eb3);
-  regressions/wrong answers V0+U3 (911eef32), V1 (77eb86cb, b09dee81), V2 (33356b80), V3 (75ad576d),
-  V4 (1ef9b707), V5 (b600fc15); F1 pins V4's answers (f5d2a6bc); F2 exact depth bag (34674e92); R4.2 (ae0fadb7);
-  S1 `e_pair` index, `edgePair` pass deleted (6793d40a); S2 survey, report only (39a8f01a); S2 builds: TextP
-  trigram probe (73616a6b), `e_label` index (22b79ae5), `sql-plan.ts` scan check (d64a6d3a).
+## Where we are (2026-11-20)
+
+- **The ladder is deleted (R7, 82da81ae).** The connector (`src/compiler/rel/lower/scoped.ts` `CONNECTORS` +
+  `src/rel/decorrelate.ts`) is the only child lowering. A host with its own tail lowering (`group()` over
+  properties, `order(local).by`, `dedup('a','b').by`, …) falls back to that tail through `scopedHost`'s
+  `hostTailAt`/`TAILED_HOSTS`, never to a per-traverser route. L9's ladder-reach engine is gone; its closure
+  ratchet (`test/L9-connector/connector-closure-baseline.json`) is now the ordinary coverage ratchet.
+- A body that draws over a re-source is the connector's (6c): `reSourcedBody` ends the shared read at the first
+  draw, `drawnPerOrigin` draws a uniform pick per scope row, a shuffle cut to one IS `sample(1)` (6b,
+  `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
+- Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
+  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c.
+- **Open:** 6d and R7a (regressions a round-13 commit introduced; scope rule 1), then G1.
+- **No parked branch.** Every round-13 item landed; nothing is waiting on a resume point.
 
 ## Remaining work, in order
 
@@ -69,158 +74,79 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    Corpus ladder-only answers went 5 → 0. Remains: P1.
 5. ~~P1~~ **DROPPED (owner, 2026-11-19).** R4.2's 1.31× / 1.37× slowdowns are linear and inside the new 2× bar.
    P1a (an exclusive-arm bound in `bounds.ts`) is not built for it; one §1b line if not already filed.
-6. **6a–6c share ONE root cause.** On the parked branch, the connector's drawing pick (`reSourcedOnce`,
-   `drawnPerOrigin` and `pickAt` in `src/compiler/rel/lower/reduction.ts`) has two limits. It recognises a draw
-   only in a narrow literal spelling, and it refuses an input that carries a path or sack channel. Every miss
-   falls to the scope × read fold. Trunk declined these shapes through `ladderOwns`. With `ladderOwns` deleted
-   they become reachable and run quadratic, or they lose answers the ladder gave. So the substrate comes first
-   (6a, 6b), then R4.5 lands again (6c).
+6. ✅ **6a / 6b / 6c — LANDED.** They shared ONE root cause (the connector's drawing pick knew a draw only by a
+   literal spelling and refused a path/sack input), so the substrate came first.
+   - 6a ✅ (d19d6f6e, d4406e18, e4c03ba8): the per-origin draw and a forward re-source under a tracked path carry
+     the origin's path and sack as GraphStep's split does (`splitInto`/`splitPosition`,
+     `src/compiler/rel/lower/movement.ts`), gated by `splitRefuses(input, keepsPosition(prefix))`; a stream
+     barrier after a move, or a bounding slice after a host-reading step, declines. Linear (≈7× per 8×).
+   - 6b ✅ (157d7ad0): a global `order().by(shuffle)` cut to exactly one member (via `sliceOf`/`countOf`, a bound
+     `$x` reduced at plan time) is canonicalized to `sample(1)` by `shuffleCutToSample`
+     (`src/compiler/ir/shuffle-cut.ts`), at every depth. **Two lost answers — see 6d.**
+   - 6c ✅ (1d1f3fc8): R4.5 (A). `reSourcedBody` ends the shared read at the first drawing step; `drawnPerOrigin`
+     (`src/compiler/rel/lower/reduction.ts`) draws a uniform pick keyed per scope row, O(scope + read); a coin or a
+     weighted/local sample keeps the shared-draw decline; `ladderOwns` is deleted.
+   - Residue, all pre-existing cost or depth (scope rules 2 and 5), filed in `docs/outstanding-work.md`:
+     `resource-union-prefix-slice`, `resource-barrier-prefix-path`, `cr-fu5` (shuffle `limit(n>1)`),
+     `param-draw-slice`, `reresource-host-filter`, `reresource-path-draw`, `map-draw-host-read`,
+     `resource-path-still-steps`.
 
-   6a. ✅ **LANDED (d19d6f6e, d4406e18, e4c03ba8).** The per-origin draw and a forward re-source under a tracked path carry the origin's path and sack as GraphStep's split does: one shared read crossed with the hosts, the path extended by one position after the cross (`splitInto`/`splitPosition`, `src/compiler/rel/lower/movement.ts`), gated by the one `splitRefuses(input, keepsPosition(prefix))` authority; a stream barrier after a move, or a bounding slice after a host-reading step, declines with the resource-path reason. All witnesses below linear (≈7× per 8×). Remains: nothing.
-   ~~R4.5a — carry the origin's PATH and SACK channels across the re-source cross and the pick~~ (before 6c).
-   Do it the way the plain re-source cross already carries them, instead of refusing them in `drawsOver`. This
-   fixes blocker 1 and restores the lost answers below.
-   - Blocker 1 (79×, newly reachable): `g.V().hasLabel('holder').as('h').map(__.V().hasLabel('person').order()
-     .by(shuffle).limit(1)).path().count()` takes 1,658 ms at N=1k and 131,226 ms at N=8k (26 / 32 ms without
-     `path()`). Same class: `g.withSack(1).V().hasLabel('holder').map(__.V().hasLabel('person').order()
-     .by(shuffle).limit(1)).sack().sum()`. Trunk 03920cc8 declined both at once with the shared-draw message.
-   - Lost answers. Trunk answered these through the ladder; the parked commit declines them with 'a V()/E()
-     inside local() on a traverser whose path is tracked': `g.V().local(__.V().sample(1)).path().count()`,
-     `g.V().as('a').local(__.V().sample(1)).path().count()`, `g.V().local(__.V().hasLabel('software').sample(2))
-     .path().count()`, `g.V().out().local(__.V().sample(1)).path().count()`, `g.V().local(__.V().sample(1))
-     .path().by('name')`, `g.V().local(__.V().sample(1)).simplePath().count()`,
-     `g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).path().count()`. They were quadratic on
-     trunk too (454 ms → 31.7 s), so once the channels are carried the bar is linear. A non-drawing
-     `local(__.V()…).path()` declines on trunk for the same reason, and this item should fix it too.
+6d. **Restore 6b's two lost answers (scope rule 1: answered before 157d7ad0, decline now). DO FIRST.**
+   Re-verified 2026-11-20 on trunk 2c360906 (after R7):
+   - (a) **A shuffle or sample pick followed by `otherV()` declines** with "no lowering covers":
+     `g.V().bothE().order().by(shuffle).limit(1).otherV().count()`,
+     `g.V().local(__.bothE().order().by(shuffle).limit(1).otherV()).count()`,
+     `g.V().local(__.bothE().order().by(shuffle).limit(1)).otherV().count()`, the `inE`/`outE`, `flatMap` and `map`
+     forms, and the random-walk recipe
+     `g.V().hasLabel('person').repeat(__.local(__.bothE().order().by(shuffle).limit(1).otherV())).times(2).count()`.
+     Trunk before 157d7ad0 answered all of them. Cause: the rewritten `sample(1)` is not in `FROM_V_TRANSPARENT`
+     (`src/compiler/rel/lower.ts`, read by `edgeFeedsOtherV`), so the edge hop never mints `fromV`. Fix (verified by
+     review in a scratch checkout of 157d7ad0): add `'sample'` to the set — `perOriginWindow` already carries every
+     channel through `carriedCols`. It also makes TinkerPop's own recipe
+     `g.V(1).repeat(local(bothE().sample(1).otherV())).times(4).path()` answer (pre-existing gap). Pick must stay
+     uniform (`g.V(4).local(bothE().sample(1).otherV())` ≈ 1/3 each of ripple/lop/marko). Test both the shuffle
+     and the `sample` forms, including the `local(…).otherV()` form R7 routes through `allRows('forward')`.
+   - (b) **A single shuffle pick as the HOST of a rooted draw declines with SHARED_DRAW**:
+     `g.V().hasLabel('person').order().by(shuffle).limit(1).addE('likes').to(__.V().hasLabel('software').order().by(shuffle).limit(1))`
+     (trunk before 157d7ad0: 1 edge). The `project().by(V()…limit(1))` form review also named answers again since
+     6c. Cause: `rootedHosts` (`src/compiler/rel/lower/reduction.ts`) asks `atMostOneRow`; `rowBounds`
+     (`src/rel/bounds.ts`) treats `perOriginWindow`'s `Filter(prn<=1)` over a materialized window as unbounded. Fix
+     generically in `rowBounds`: a Filter of `row_number <= n` over an unpartitioned window has max n. Do not
+     special-case the Pass.
 
-   6b. ✅ **LANDED (157d7ad0).** A global `order().by(shuffle)` cut to exactly one member (read through `sliceOf`/`countOf`, a bound `$x` reduced at plan time) is canonicalized to `sample(1)` by one Pass, `src/compiler/ir/shuffle-cut.ts` (`shuffleCutToSample`), at every depth; `reSourcedOnce`'s draw then serves it. Remains: nothing.
-   ~~R4.5b — the pick is a FACT, not a list of spellings~~ (before 6c). `pickAt` is a lookahead peephole: it
-   matches `order().by(shuffle)` followed by a literal `limit(1)`, `range(0,1)` or `tail(1)`. Replace it with a
-   rule: a RANDOM-collation sort that feeds a slice of cardinality 1. That can be a `Sort(RANDOM)` + `Limit 1` rel
-   shape, or a canonicalizing pass gated on the unit-bulk fact (shuffle is unweighted, `sample` weights by bulk).
-   Read the slice bound from a bound GValue at plan time, the last responsible moment. When n ≠ 1, keep rankPairs.
-   - Blocker 2 (69×, newly reachable): `g.V().hasLabel('holder').map(__.V().hasLabel('person').order()
-     .by(shuffle).limit(x)).count()` with `{x:1}` takes 1,107 ms at N=1k and 75,939 ms at N=8k. The literal
-     `limit(1)` takes 26 / 32 ms. Sending a limit as a parameter is the normal TinkerPop 4 idiom, so this shape
-     has to work.
+7. ✅ **R4.6 — LANDED with R7 (82da81ae; witness be26dfa7, c8c7d7f4).** The sweep found no wrong answer; its lost
+   answers were fixed in R7. The witness: `reductionHost` answers the property framing and `propertyTail` hands
+   shape-keeping steps on through `continueAs`. Remains: nothing (follow-ups `property-ladderless-pair`,
+   `tail-loop-head` in outstanding-work §6).
 
-   6c. ✅ **LANDED (1d1f3fc8).** R4.5 (A): a body that draws over a re-source is the connector's, decorrelated per
-   scope row, and `ladderOwns` is deleted. `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) ends the shared read
-   at the first drawing step; a uniform pick is drawn over it by `drawnPerOrigin` (split out of `reSourcedOnce`,
-   `src/compiler/rel/lower/reduction.ts`), keyed per scope row by the decorrelator, O(scope + read); a coin or a
-   weighted/local sample keeps the shared-draw decline reason. Witness:
-   `g.V().hasLabel('person').local(__.V().hasLabel('software').sample(1))`, one independent pick per person.
-   Remains: (1) a limit after a re-source over a multi-row prefix still builds the whole holders × candidates
-   product (`map(union(identity(),identity()).V().has('age').limit(3).sample(1))`: 1.9 s at 1k, 15.9 s at 8k).
-   The `has('age')` map form is newly answered, and trunk already paid this for the `hasLabel` local form. The fix
-   needs a bounded-slice-per-origin substrate, which does not exist yet (outstanding-work §1b). (2) outstanding-work
-   §4 "param-draw-slice" (`order().by(shuffle).limit(x)` with x≠1) is unchanged.
-7. ✅ **R4.6 — LANDED with R7 (82da81ae).** The sweep found no wrong answer; its lost answers were fixed in R7 (see item 8). Remains: nothing.
-   **Was: find ladder-only answers OUTSIDE the corpus. MERGED INTO R7 (round 11):** the deletion's suite run is
-   this sweep, so it is not built on its own. The text below is what that run must check. This is a shared prerequisite for R7 and has the same
-   root cause as R4.5: L9's pool is only the corpus. Run a one-off `MOGWAI_CONNECTOR_ONLY=1 mise run test` sweep and
-   compare each extra decline against default mode. A real lost answer becomes its own item before R7; anything
-   else gets a §4 line. Known witness, from the R4.2 review, on CREW:
-   `g.V().hasLabel('person').map(__.properties('location').order().by(T.value)).project('v','s').by(T.value)
-   .by('startTime')`. It declined on trunk. It now answers correctly in default and ladder mode
-   (`{v:brussels,s:2004}`, `{centreville,1990}`, …) but still declines in connector-only mode. The likely reason is
-   that the connector feeds a property traverser to `project().by(T.value).by('startTime')` and the ladder answers
-   that part. Fix the connector's `project().by` over a property host before R7.
-   ✅ **Known witness LANDED (be26dfa7, c8c7d7f4).** `reductionHost` answers the property framing and
-   `recordLeft` passes it through, so the connector alone answers `project().by(…)` over a property row; the
-   hand-built property `ChildHost` literals and `propertyTail`'s duplicate `project` record are gone, and
-   `propertyTail` hands shape-keeping steps on through `continueAs` (`src/compiler/rel/lower/reduction.ts`,
-   `scoped.ts`, `lower.ts`). Connector-only, 1k → 8k: 3.2×–5.8×, linear. Remains for this witness: nothing (the
-   sweep itself still runs as part of R7).
-   **Owner (2026-11-19): run the sweep. A WRONG answer is fixed (or, if the fix is not small, turned into a clean
-   decline). A LOST answer is fixed if small, else accepted as a decline with a §4 line — it does not block R7.
-   A slowdown inside 2× does not block R7.**
-8. ✅ **R7 — LANDED (82da81ae).** `correlatedChild`, `connectorOnly`, `lower/per-traverser.ts` and L9's ladder-reach are deleted; the connector is the one child lowering, and a host with its own tail lowering falls back to it through `scopedHost`'s `hostTailAt`/`TAILED_HOSTS` (`src/compiler/rel/lower/scoped.ts`); `local(<edge body>).otherV()` is answered by the connector's `allRows('forward')` lowering its body with `fromV`. Scaling unchanged (6.8–9.6× per 8×). Follow-ups filed as outstanding-work §6 `r7-followups`. Remains: nothing.
-   **Was:** delete the switch. DEFERRED in round 11; unblocked now that 6c landed (1d1f3fc8; F2 landed). R4.6 is merged into R7.
-   After R4.5 (A) lands and R4.6's sweep shows no wrong answers (owner: get rid of the
-   ladder; a small regression or a deferred lost answer is acceptable). Then delete `correlatedChild` and its readers, L5's per-switch entry, and
-   `FastPathConfig.connectorOnly` (connector-only becomes the only mode). L9's connector-only ratchet becomes the
-   ordinary coverage ratchet, and F1's `agreed()` ladder half goes. Update root `CLAUDE.md` decision 6 and
-   `src/compiler/CLAUDE.md`.
-9. ✅ **S1 — LANDED (6793d40a).** Measured both: a `labels` kind flag would still cost |edge labels| per probe and
-   keep the pass, so the winner is an `e_pair(src, tgt)` index (`src/storage.ts`) whose prefix IS the label-free
-   probe — one seek SQLite's own planner picks; `edgePair` (`src/rel/passes/edge-pair.ts`) is deleted. Re-timed (ms
-   at 8×): 300 labels 779 → 16.0, `repeat(both()).times(2).where(…)` 54769 → 1267, air-routes 2986 → 684,
-   grateful-dead 1338 → 869; bulk load +7–11%. Writes stay inside 2× (bulk addE 65 → 101 ms; 300 labelled mergeE
-   3842 → 5403 ms at 8k). Both follow-ups ✅ LANDED (666ebf3e): `movement.ts` prose names `e_pair`; the 300-label
-   test replaces the wall-clock ratio with a structural plan check on the wide graph (`e_pair (src=? AND tgt=?)`
-   seek, no label index read, `classify` from `scripts/sql-plan.ts` flags only the root `V()`). Remains: nothing.
-   - (a) Stale prose still names only `e_out`/`e_in`, but SQLite now also picks `e_pair (src=?)` for an unlabelled
-     `out()` seek. `scripts/sql-plan.ts` and `src/sql/schema.ts` were fixed in round 12 (d64a6d3a, 22b79ae5);
-     `src/compiler/rel/lower/movement.ts:319` remains.
-   - (b) The new 300-label test in `walk-condition-hub-scale.exec.test.ts` asserts a wall-clock ratio below 2× on
-     ~16 ms queries, which can flake on CI. Drop the ratio: the answer check and `expectLinear` already pin the
-     behaviour.
-10. ✅ **S2 — LANDED (39a8f01a), report only; nothing built.** Survey (below) of every `src/storage.ts` table/index
-   against the emitted shapes. **DECIDED (owner, 2026-11-19): build (3), build (5), and fix the `sql-plan.ts` alias blindness;
-   NOT (1) or (2).** The question was: build candidate 3 (the `edges(label)` index, one line of
-   schema) and candidate 5 (the TextP full-text probe fix in `src/rel/passes/semijoin.ts`)? Optionally also fix the
-   alias blindness in `scripts/sql-plan.ts`. Candidates 1 (interned keys) and 2 (full-text split by vertex/edge) are
-   not recommended now.
-   **(5) LANDED (73616a6b).** The positive TextP probe and `tinker.search` now seek `property_fts`'s trigram
-   index (`INDEX 0:L4`) through a 2-argument `LIKE` built from the raw term, decoded by one helper
-   (`src/rel/like.ts`, beside `likePattern`); the exact residual EXISTS still decides. `negativeOwners` kept its
-   rowid seek by measurement (the 2-argument form made it `0:=L1`, super-linear). Remaining for (5): nothing.
-   **Before building (5), from review:**
-   - (a) A TextP argument can be a user parameter, so the probe pattern must be the expression `'%' || ? || '%'`,
-     not a literal built at compile time.
-   - (b) The trigram index seeks only for a literal of 3 or more characters, so `containing('ab')` still scans.
-     The 32–230× win applies only to literals of 3+ characters.
-   - (c) `negativeOwners` ties `property_fts` to each candidate by rowid, which is a per-row seek, not the trigram
-     path. Measure it on its own (`g.V().has('name',TextP.notContaining('harl')).count()` on air-routes) rather
-     than copying the positive fix, which could pull the planner off the rowid seek.
+8. ✅ **R7 — LANDED (82da81ae).** `correlatedChild`, `connectorOnly`, `lower/per-traverser.ts` and L9's
+   ladder-reach are deleted; `local(<edge body>).otherV()` is answered by `allRows('forward')` lowering its body
+   with `fromV`. Follow-ups in outstanding-work §6 `r7-followups` and §3 `local-edge-otherv-depth`.
+   **One regression past the 2× bar — see R7a.**
 
-   **(3) LANDED (22b79ae5).** One schema line, `e_label ON edges(label)` (`src/storage.ts`, beside `vl_label`): a
-   root `E().hasLabel(x)` now `SEARCH`es `e_label` instead of scanning `e_in`, at the root and inside any body; no
-   lowering or emitted-SQL change. Reads 9–13× faster (air-routes `contains` count 1.64→0.117 ms); bulk load +3% at
-   8k edges. Pinned by `test/compiler/edge-label-seek.exec.test.ts`. Remaining for (3): nothing.
-   **Before building (3):** measure its own cost to `addE` and to bulk load. It would be a fourth index on
-   `edges`, and the doc gives its cost only by analogy to `e_pair`.
-   **Scan-check fix LANDED (d64a6d3a).** `scripts/sql-plan.ts` resolves each `SCAN <alias>` to its base table
-   through the emitted SQL's FROM items (index cross-checked against `sqlite_schema`), classifies it by EQP-tree
-   position (ROOT reported, NESTED ratcheted against `scripts/sql-plan-baseline.json`, an unconstrained
-   `property_fts` scan gated at zero), and plans `call()` reads too. No compiled-SQL change. Remaining: nothing (10a landed).
+8a. **R7a — R7's forwarding rejoin is past 2× on the unsliced `local(<edge body>).otherV()` family (scope rule 1).**
+   Measured by review, best of 5, trunk 517e695a~1 → R7, ms at 1k / 8k vertices:
+   `g.V().map(local(outE()).otherV().values('name').fold())` 4.1 / 35.9 → 12.4 / 101.1 (**2.8×**);
+   `g.V().local(bothE().where(otherV().has('age',gt(30)))).otherV().count()` 4.1 / 40.2 → 9.8 / 88.6 (**2.2×**);
+   `g.V().local(union(outE(),inE())).otherV().count()` 1.3 / 12.6 → 3.0 / 26.1 (2.1×);
+   `g.V().local(bothE()).otherV().count()` 1.3 / 12.4 → 3.0 / 24.1 (1.9×). All linear (≈8–9× per 8×). The common
+   sliced idiom `local(bothE().limit(1)).otherV()` is unchanged (34.7 vs 33.4). Cause: the connector's
+   `allRows('forward')` materializes the scope and joins it back on `sk = dk` (plan 3 → 4 joins) where the
+   deleted route emitted one flat UNION/JOIN. Fix direction: when the body holds no barrier (nothing needs a
+   per-scope partition), lower it inline over the host as a plain flatMap rejoin, without the materialized scope
+   — a general rule in the connector, not a `(local, otherV)` branch. Re-measure the four witnesses against
+   517e695a~1. If the fix is not small, this becomes an owner question (accept, as the R7 owner note allowed "a
+   small regression"), not a shoehorn.
 
-   10a. **LANDED (4a1e42a8).** `scripts/sql-plan.ts` `classify()` now exempts a ROOT scan only for `nodes`/`edges`
-   (any other root base-table scan is gated at zero), and gates at zero a base-table `AUTOMATIC` index and a nested
-   `SEARCH` constrained only by a label/key prefix; `[tasks.sql-plan]` sources gained `parser/**/*` + `bunfig.toml`;
-   the header's baseline prose names the 27th entry. Pinned by `test/sql-plan.test.ts`; baseline unchanged.
-   Remaining for 10a: nothing.
-   _Original brief:_ **Scan-check follow-ups from round-12 review (tooling only; no compiled SQL, no answer changes).** The
-   gate the owner asked for still has holes. Each new gate costs nothing today (measured over all 1458 planned
-   corpus reads on trunk d64a6d3a):
-   - **(major) The ROOT exemption is too wide.** `classify()` exempts the first loop under its parent for EVERY base
-     table, but the reason (a root `g.V()`/`g.E()` reads every element by meaning) holds only for `nodes`/`edges`.
-     Witness: drop `vp_key_value` and `g.V().has('name','marko')` / `g.V().has('person','name','marko').out()` plan
-     a full `SCAN vertex_properties`, classed `root:vertex_properties`, reported only, so `sql-plan` exits 0 — the
-     most common index regression (a `has()` lookup) is invisible. Today the corpus has 988 root scans of `nodes`,
-     30 of `edges`, 0 of anything else: gate a root scan of any other base table at zero.
-   - **SEARCH is always treated as index-served.** Two disguised nested scans pass: an inner or CORRELATED
-     `SEARCH` whose only constraint is a low-selectivity prefix (`e_label (label=?)`, `vp_key_value (key=?)`), and
-     a base-table `SEARCH … USING AUTOMATIC [PARTIAL] COVERING INDEX` (SQLite builds it by scanning the table on
-     every run). Witness: drop `e_out` and `e_pair`; `g.V(1).out('knows').values('name')` plans
-     `SEARCH … e_label (label=?)` and `classify()` returns []; 278 corpus reads switch to an automatic index on
-     `edges` unflagged. `e_label` (22b79ae5) is what makes this fallback available. Both occur 0 times on trunk:
-     hard gate at zero.
-   - **`[tasks.sql-plan]` sources omit `parser/**/*` and `bunfig.toml`** (`mise.toml`), which `sql-hygiene`'s
-     identical compile-and-plan task lists, so `mise run generate` alone leaves the gate skipped locally. CI runs
-     fresh. One line.
-   - **The baseline's description is wrong.** d64a6d3a says all 27 entries are "a V() mid-traversal or inside a
-     correlated set-operation argument"; one is neither (the `groupCount('a')…where(select('a')…)` query, filed in
-     `outstanding-work.md` §1b as pre-existing super-linear). Correct the prose in `scripts/sql-plan.ts`'s header
-     when the baseline is next re-recorded.
-   _Original brief:_ survey for other simple structural splits (owner, 2026-11-19). Is there
-   another cheap schema split that halves (or better) what an index seek or scan reads — more schema in exchange for
-   leaning harder on SQLite? Check every table and index in `src/storage.ts` against the shapes the lowering
-   actually emits. Known candidate to assess first: property keys are `key TEXT` on every
-   `vertex_properties`/`edge_properties` row and lead `vp_key_value`/`ep_key_value` — not interned the way labels
-   are. Report each candidate with what it splits, measured index size and seek cost before/after on the sample
-   graphs, and the code it touches. Do not build.
+9. ✅ **S1 — LANDED (6793d40a; follow-ups 666ebf3e).** `e_pair(src, tgt)` (`src/storage.ts`) is the label-free
+   probe; `edgePair` is deleted. Remains: nothing (test-brittleness note folded into outstanding-work §6
+   `adjacency-seek-assert`).
+
+10. ✅ **S2 — LANDED.** Survey 39a8f01a (owner decided: build (3) and (5), fix the scan check; not (1) or (2)).
+   (5) TextP trigram probe 73616a6b; (3) `e_label` 22b79ae5; scan check d64a6d3a; 10a gate holes 4a1e42a8
+   (`classify()` exempts a root scan only for `nodes`/`edges`, gates base-table `AUTOMATIC` indexes and
+   label/key-prefix-only nested SEARCH at zero). Remains: nothing (`sql-plan-weak-prefix-ratchet` in
+   outstanding-work §6). The survey is kept below as the measured record for (1) and (2).
 
    **Surveyed 2026-11-19 (report only; nothing built).** Method: EXPLAIN QUERY PLAN over every L6 (304) and L1
    (1,446) read plan, mapping each `SCAN <alias>` back to its base table; then size (page-count growth of a
@@ -278,55 +204,48 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    gt(0.5)))` 1.53→13.6 (×8.8), `has('person','city','golf').out('knows').has('name',containing('elta'))`
    0.33→2.7 (×8.1) — all linear. **Owner decides**: (3) and (5) are each small and ≥9×; (1) and (2) are not
    worth building now.
-11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19). DEFERRED in round 11; it waits on 6c
-   and R7** (S1 landed), so it weighs the code as it stands once the ladder is gone. NOT a blanket "remove what only
-   got us under 1.3×". For each change this plan made for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2
-   33356b80, V3 75ad576d, V5 b600fc15, T1 1274c293), weigh the measured win against the code complexity it added:
+
+11. **G1 — does each performance change EARN ITS KEEP? (owner, 2026-11-19). UNBLOCKED (6c and R7 landed); after
+   6d and R7a** so it weighs the code as it will stand. NOT a blanket "remove what only got us under 1.3×". For each
+   change this plan made for performance (V0+U3 911eef32, V1 77eb86cb/b09dee81, V2 33356b80, V3 75ad576d, V5
+   b600fc15, T1 1274c293), weigh the measured win against the code complexity it added:
    - It made the code simpler or no more complex, or bought a large win (e.g. well below the pre-change cost, or a
      super-linear shape made linear): it earns its keep. Keep it.
    - It added substantial code for a marginal win (removing it keeps every answer and stays within 2× of the trunk
      before that commit): it does not earn its keep. Simplify or remove it.
    - Report each with its witnesses before/after in ms, the lines it added, and the verdict with a one-line reason.
-     Wrong-answer fixes are never removed.
+     Wrong-answer fixes are never removed. Some of those commits touched code R7 deleted; say so per item rather
+     than re-measuring a route that no longer exists.
 
 ## Next round
 
-- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (6b landed 157d7ad0), then 6c (landed 1d1f3fc8), then R7 (landed 82da81ae; its suite
-  run was R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
-  scan-check fix d64a6d3a.
-- Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
-  - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
-  - one shared test helper for "adjacency seek" plan assertions (`e_out` ↦ {`e_out`, `e_pair`}).
-- Round 11 follow-ups outside this plan's scope went to outstanding-work:
-  - §4: `union(project().by(…group…count(local)), constant(1))` declines;
-  - §1b: a value join after a re-source is ×67, and a crossed run's filters are not pushed (×71);
-  - §6: `sql-plan.ts` cannot see a full scan (fixed, d64a6d3a); a far-endpoint `hasId` is not pushed into `e_pair`'s `tgt`; a
-    drawing body whose prefix does not depend on the origin still pays scope × candidates.
-- The reuse-sweep proposal (gate `map()`'s two correlated first-row forms in `firstInnerOver` on `rowResident`, not
-  `framingCols`) is filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4.
-- This round's depth gaps were already present and are not ladder-only, so they went to outstanding-work §4.
-- Round 12's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
-  - one EXPLAIN-tree reader (`PlanRow`, alias resolution, loop-position walk) shared by `scripts/sql-plan.ts`,
-    `test/support/snapshot-scans.ts`, `cte-runs.ts` and `sql-hygiene.ts`; adopting snapshot-scans' MATERIALIZE
-    stop drops 5 of the 27 `sql-plan-baseline.json` entries (re-record in the same commit; take after 10a);
-  - `tinker.search` builds one escaped `%term%` pattern and derives its probe via `likeProbePattern`, with an
-    `escapedLike` beside `trigramProbe` in `src/rel/like.ts`;
-  - one `property_fts` row type + `trigramCandidates` builder for `semijoin.ts` and `search.ts`;
-  - plan-shape tests assert through the gate's classifier and one `explain()` helper.
-- Round 12 follow-ups outside this plan's scope went to outstanding-work: §1b a side effect read in `where`
-  re-derived per traverser (68×, pre-existing); §6 the FTS probe decoder (carry the raw term on the atom), the
-  trigram seek's root-only reach, stale `storage.ts`/`src/services/CLAUDE.md` prose, and `e_label`'s one-time
-  build on an existing DO's next `initSchema`. `hasLabel(P)` declining was already filed in §4.
+- **Order: 6d, then R7a, then G1.** 6d is two small, independent fixes (one set member; one `rowBounds` rule) and
+  may build in parallel with R7a. G1 waits for both.
+- Round 13's follow-ups outside this plan's scope went to `docs/outstanding-work.md` (scope rules 2, 4, 5):
+  - §2 performance (pre-existing): `resource-union-prefix-slice`, `resource-barrier-prefix-path`; `cr-fu5` gained the
+    shuffle `limit(n>1)` witness.
+  - §3 depth gaps (not regressions): `map-draw-host-read`, `local-edge-otherv-depth`, `resource-path-still-steps`.
+  - §6 debt: `keeps-position-authority` (6a's `KEEPS_POSITION` duplicates `KEEPS_PATH_ENTRY`; take before
+    `resource-path-still-steps`), `bounding-slices-truncates`, `resource-decline-messages`,
+    `property-ladderless-pair`, `sql-plan-weak-prefix-ratchet`; `adjacency-seek-assert` widened.
+  - Already filed, unchanged: writes inside `sideEffect` (§3 writes), `reresource-host-filter`.
+- **Reuse sweep (round 13), filed as outstanding-work §6 items per scope rule 4:**
+  - `tail-loop-head` — one loop-head re-dispatch (`handsBack` → `continueAs`) for the seven tails in
+    `src/compiler/rel/lower.ts`; `pathTail`/`mapEntryTail`/`recordTail` have drifted
+    (`g.V().valueMap().unfold().V().count()` declines while `g.V().valueMap().V().count()` answers 36).
+  - `slice-window-of` — a total `windowOf(step)` in `src/compiler/ir/step.ts`; deletes five catches of `sliceOf`'s
+    internal plain `Error`.
+  - `bounding-slices-truncates` — `BOUNDING_SLICES` → `write.ts`'s `truncates`, moved to `ir/step.ts`.
+  - `adjacency-seek-assert` — plan-pinning tests read the seek rule from `scripts/sql-plan.ts`'s `schemaFacts` /
+    `constrainedColumns` instead of hand-listing `e_out`/`e_pair`.
+- Earlier rounds' reuse proposals are already in `docs/outstanding-work.md` §6.
 
 ## Guards
 
-- `mise run ladder`: ladder files may not grow.
-- L9: connector-only closure may not fall; ladder-only answers may only fall; every host is a row or a classified
-  deferral.
-
+- `mise run ladder` (`scripts/ladder-check.ts`): the `return null` decline sites in `src/compiler/rel/` may not grow.
+- L9: the connector-closure ratchet may not fall; every host is a `CONNECTORS` row or a classified deferral
+  (`test/L9-connector/deferred-hosts.ts`, `host-totality.test.ts`).
 
 ## Owner questions (open)
 
-None. Owner's round-12 request, verbatim — "#3 and #5: I'd build both. The broken scan check: I'd fix that
-too." — is done (73616a6b, 22b79ae5, d64a6d3a). S2 answered 2026-11-19 (build 3 and 5, fix the scan check; not 1 or 2), written into item 10. R4.5-Q and
-U1-Q were answered earlier the same day and are written into their items.
+None. Round 13 raised no needs-human question. R7a may become one only if its fix is not small (see the item).

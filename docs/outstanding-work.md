@@ -53,11 +53,11 @@ An item marked "verify" may have landed already. Check it against the code befor
 ## Contents
 
 1. [Wrong answers](#1-wrong-answers) — 33 items
-2. [Performance](#2-performance) — 48 items
-3. [Queries we decline](#3-queries-we-decline) — 80 items
+2. [Performance](#2-performance) — 50 items
+3. [Queries we decline](#3-queries-we-decline) — 83 items
 4. [Shared substrate](#4-shared-substrate) — 17 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
-6. [Internal debt](#6-internal-debt) — 76 items
+6. [Internal debt](#6-internal-debt) — 84 items
 7. [Needs an owner decision](#7-needs-an-owner-decision) — 8 items
 8. [Low priority](#8-low-priority) — 13 items
 9. [Won't do](#wont-do)
@@ -403,6 +403,20 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Fix:** Skip `ensureBulk` when no arm is bulked.
 - **Where:** `src/compiler/rel/lower/branch.ts` (`reconcileCollapsed`, `ensureBulk`)
 
+#### A slice after a re-source over a multi-row prefix builds holders × candidates (`resource-union-prefix-slice`)
+- **Area:** compile
+- **Reach:** rare
+- **Problem:** `g.V().hasLabel('holder').map(__.union(__.identity(), __.identity()).V().has('age').limit(3).sample(1))` takes 1.9 s at 1k holders and 15.9 s at 8k (1k candidates). The `has('age')` map form is newly answered since 6c (1d1f3fc8); trunk already paid this cost for the `hasLabel` local form.
+- **Fix:** A bounded-slice-per-origin substrate: read the prefix once, slice per origin without crossing the whole candidate set.
+- **Where:** `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`), `drawnPerOrigin` (`src/compiler/rel/lower/reduction.ts`)
+
+#### A per-origin draw behind a stream barrier under a tracked path is quadratic (`resource-barrier-prefix-path`)
+- **Area:** compile
+- **Reach:** plausible
+- **Problem:** `g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').sample(1)).path().count()` goes from 1,006 ms at 1k to 71.2 s at 8k (70×); `limit(5).sample(1)` 450 ms → 30.1 s. Trunk before 6a had the same cost. A barrier (`order()`/`limit()`) ahead of the draw takes GraphStep's origins × candidates product instead of `splitInto`'s shared read.
+- **Fix:** Lower the barrier inside the once-read shared relation, then split the path after it, as `splitInto` already does for a still prefix.
+- **Where:** `splitInto`, `splitRefuses` (`src/compiler/rel/lower/movement.ts`); `reSourcedOnce`
+
 ### Performance: paths, labels, side effects and match
 
 #### `fold().as('x').select('x').unfold()` is quadratic in the list (`fold-label-history-copy`)
@@ -582,7 +596,7 @@ Queries that answer correctly but grow faster than linear with data or query siz
 #### A re-source over an origin-independent candidate set is quadratic (`cr-fu5`)
 - **Area:** compile
 - **Reach:** plausible
-- **Problem:** `local(__.V().hasLabel('person').limit(2)).count()` goes from 355 ms to 24.6 s. `sample(2)` is the same. `rankPairs` crosses origins × candidates.
+- **Problem:** `local(__.V().hasLabel('person').limit(2)).count()` goes from 355 ms to 24.6 s. `sample(2)` is the same. `rankPairs` crosses origins × candidates. `g.V().hasLabel('software').local(V().hasLabel('person').order().by(shuffle).limit(2)).count()` too: 191 ms at 1k, 14.0 s at 8k (73×); `shuffleCutToSample` serves only a cut to one.
 - **Fix:** Read the prefix once with `rootedRead`, then cross with its small result. Fix the `rankPairs` doc: the CTE is not `MATERIALIZED`, so "FENCED" is wrong.
 - **Where:** `rankPairs`, `rootedRead`
 
@@ -898,6 +912,28 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Reach:** plausible
 - **Problem:** `g.V().choose(hasLabel('person'), out().fold(), values('name').fold())` declines.
 - **Fix:** Merge an element-list arm with a scalar-list arm.
+
+#### A drawn re-source after a host-reading filter declines under `map()` (`map-draw-host-read`)
+- **Area:** nesting
+- **Reach:** plausible
+- **Problem:** The "random OTHER person" idiom answers under `local()` but declines under `map()`: `g.V().hasLabel('person').as('p').local(__.V().hasLabel('person').where(neq('p')).sample(1)).count()` returns 4; the `map(…)` form (and `order().by(shuffle).limit(1)` in place of `sample(1)`) declines with "this V()/E() inside map(), by() or a filter, whose later steps read the incoming traverser … is not supported yet". The message is misleading, since `local()` answers the same body.
+- **Fix:** Give `map`'s first-row contract the fold route `local`'s forward contract takes when the draw follows the host cut.
+- **Where:** `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`)
+
+#### `local(<edge body>).otherV()` depth residue (`local-edge-otherv-depth`)
+- **Area:** nesting
+- **Reach:** plausible
+- **Problem:** `g.V().repeat(local(outE().limit(1)).otherV()).times(2).values('name')` (and the `bothE` form) and `g.V().local(bothE().dedup()).otherV().values('name')` decline. A repeat body does not get R7's `fromV` route because `inBody` clears `needsFromV`. Not a regression: trunk before R7 declined them too.
+- **Fix:** Carry `needsFromV` into a repeat body; let `dedup()` pass the edge's `fromV` channel.
+- **Where:** `lowerBody`'s `fromV` and `allRows('forward')` (`src/compiler/rel/lower/scoped.ts`); `FROM_V_TRANSPARENT` (`src/compiler/rel/lower.ts`)
+
+#### A re-source under a tracked path declines on a still step that is not on the list (`resource-path-still-steps`)
+- **Area:** paths
+- **Reach:** plausible
+- **Problem:** Under a tracked path, `g.V().hasLabel('holder').local(__.V().hasLabel('person').hasNot('x').limit(2)).path().count()`, `g.V(1).local(__.V().hasLabel('software').hasKey('lang').limit(1)).path()` and `g.V().local(__.V().hasLabel('person').as('b').limit(1)).path()` decline with the resource-path message, while the `has('age',gt(5))` and `limit(1).as('b')` forms answer linearly. `KEEPS_POSITION` omits `hasNot`/`hasKey`/`hasValue`/`as`. Also `local(__.V().out().order().by('name')).path()` and `local(__.V().out().dedup()).path()` decline although their cost is bounded by their output. Trunk before 6a declined all of these.
+- **Fix:** Take `keeps-position-authority` first; then a barrier after a move under a path declines only when it bounds (see `bounding-slices-truncates`).
+- **Depends on:** `keeps-position-authority`
+- **Where:** `keepsPosition` (`src/compiler/rel/lower/movement.ts`); `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`)
 
 ### Queries we decline: paths, labels, side effects and match
 
@@ -1507,6 +1543,34 @@ Code-health work. These items change no answer unless they say so.
 - **Fix:** (a) compute the presence term once, or drop it where the host is always present. (b) fold the rate ratchet into L9's per-query one, or have one share the other's sweep. (c) rename the scope to what it now means (a connector row owed vs a host's own lowering).
 - **Where:** `src/compiler/rel/lower/scoped.ts` `firstInner`; `test/L5-properties/host-closure.test.ts`; `test/L9-connector/connector-closure.test.ts`, `test/L9-connector/deferred-hosts.ts`
 
+#### One "keeps the traverser where it stands" authority (`keeps-position-authority`)
+- **Area:** paths
+- **Reach:** plausible
+- **Problem:** 6a added `KEEPS_POSITION` (`src/compiler/rel/lower/movement.ts`), a hand-written step-name list, beside `KEEPS_PATH_ENTRY` (`src/compiler/ir/strategies.ts`), which already encodes the same fact (steps that hand on the very traverser they were given; AbstractStep/ImmutablePath) and applies a scope rule. The copy is incomplete (no `hasNot`/`hasKey`/`hasValue`/`as`) and ignores `isLocalScope`, so the answer depends on which filter the user spells (`resource-path-still-steps`). A new filter step must be added by hand or silently loses the linear route.
+- **Fix:** Derive `keepsPosition` from `KEEPS_PATH_ENTRY` and its scope rule (or from the lowered prefix's path-extension fact); delete `KEEPS_POSITION`.
+- **Where:** `keepsPosition`, `KEEPS_POSITION` (`src/compiler/rel/lower/movement.ts`); `KEEPS_PATH_ENTRY` (`src/compiler/ir/strategies.ts`)
+
+#### `BOUNDING_SLICES` is a name list; `truncates` is the fact (`bounding-slices-truncates`)
+- **Area:** slices
+- **Reach:** plausible
+- **Problem:** 6a's guard (`BOUNDING_SLICES = {limit, range}` in `src/compiler/rel/lower/scoped.ts`, e4c03ba8) checks names on top-level steps after the host cut only. `write.ts` `truncates` already decodes RangeGlobalStep's stop-pulling rule (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/RangeGlobalStep.java`). A slice inside a child arm bypasses the guard: `…as('h').local(__.V().hasLabel('person').where(neq('h')).union(__.limit(1))).path().count()` answers at 1.2 s (1k) → 76 s (8k), where trunk declined. The set's declaration also sits between `reSourceAt`'s JSDoc and `reSourceAt`, orphaning that comment.
+- **Fix:** Move `truncates` to `src/compiler/ir/step.ts` and use it for both; look through child arms. `range(n,-1)` would then answer as `skip(n)` does. The real fix for the guarded shapes is `reresource-host-filter`'s semi-join; replace the guard with it, do not grow it.
+- **Where:** `BOUNDING_SLICES`, `reSourceAt` (`src/compiler/rel/lower/scoped.ts`); `truncates` (`src/compiler/rel/write.ts`)
+
+#### Re-source decline messages name the wrong cause (`resource-decline-messages`)
+- **Area:** messages
+- **Reach:** plausible
+- **Problem:** `local(__.V().hasLabel('person').where(neq('h')).limit(1)).path()` declines with `resourcePathMessage` ("a V()/E() inside local() on a traverser whose path is tracked … is not supported yet") although `local(__.V().hasLabel('person').limit(1)).path()` answers; likewise the move-then-barrier decline and `as()`-before-slice. `local(__.V().hasLabel('person').fold().sample(local,1))` reaches `declinedDraw`, whose message says the draw "would be drawn once and shared by every row", but a local sample over a folded list is a per-row function; the `sharedDraw` comment's cost reason is inconsistent with the labelled-`sample` fold 6c accepts. The coin/weighted decline is terminal (6c departed from a non-terminal note to keep six witnesses verbatim), so no later route can answer behind it.
+- **Fix:** Name the shape (a limit/range after a step that reads the outer label, under `path()`); give `sample(local)` its own reason; state the coin decline's real basis (owner call).
+- **Where:** `resourcePathMessage`, `declinedDraw`, `sharedDraw` (`src/compiler/rel/lower/scoped.ts`)
+
+#### Property framing in `ladderless` is a per-(framing, step) literal (`property-ladderless-pair`)
+- **Area:** nesting
+- **Reach:** plausible
+- **Problem:** `ladderless` carries `(framing.kind === 'property' && step.name === 'project')`; each host that leaves `propertyTail` would add another clause. Its doc also claims every property tail is reached through `continueAs`. R4.6's fix (c8c7d7f4) opened untested routes: `g.V().properties('name').hasValue('marko').V().count()` now returns 6; `…has('startTime',gt(2008)).V().count()` 18 on CREW.
+- **Fix:** A framing-keyed table beside `LADDERLESS` (or derive it from which framings a tail still answers); add one re-source-after-property-filter test.
+- **Where:** `ladderless`, `LADDERLESS` (`src/compiler/rel/lower/scoped.ts`); `test/compiler/project-property-host.exec.test.ts`
+
 #### Route the remaining host lists through the host-set authorities (`host-lists`)
 - **Area:** IR host sets
 - **Reach:** common
@@ -1657,6 +1721,13 @@ Code-health work. These items change no answer unless they say so.
   - Optional: add a `mergeV(...).option(Merge.onMatch, $m)` case with a 150 KB member to `test/compiler/parameter-size.exec.test.ts`, marked expected-failure, to pin nr-param-map-members (§4).
 - **Fix:** Make each change listed above.
 
+#### `sql-plan` gates a weak-prefix SEARCH harder than a full SCAN (`sql-plan-weak-prefix-ratchet`)
+- **Area:** tooling
+- **Reach:** rare
+- **Problem:** `g.V().fold().difference(__.V().hasLabel('person').fold())` classifies `weak-prefix:vertex_labels` (gated at zero), while the same query without `hasLabel` is a nested SCAN that is merely ratcheted. Under `fold()` the outer loop is one row. No corpus read hits it today (0/1458), but a pin bump that adds the shape turns CI red and `--record` cannot accept it.
+- **Fix:** Make a weak-prefix under a CORRELATED ancestor part of the per-query ratchet, or say in the header why it is gated harder.
+- **Where:** `classify` (`scripts/sql-plan.ts`)
+
 #### Fixed test ports (`rf3-ci-port`)
 - **Area:** tests
 - **Reach:** common
@@ -1707,8 +1778,8 @@ Code-health work. These items change no answer unless they say so.
 - **Area:** tests
 - **Reach:** common
 - **Problem:** `usesEdgeIndex` and `plainSeeks` each accept `e_out` or `e_pair` by hand. The next index change must edit both.
-- **Fix:** Put the map from an index to its accepted index set in `test/support` once.
-- **Where:** `test/performance.test.ts` `usesEdgeIndex`; `test/compiler/both-frontier-once.exec.test.ts` `plainSeeks`
+- **Fix:** Read the rule from the gate rather than listing index names: a SEARCH whose `constrainedColumns` are `[src]` on an index whose leading column is `src`, using `schemaFacts`/`constrainedColumns`/`PlanRow` exported by `scripts/sql-plan.ts` (10a, 4a1e42a8). Drops `both-frontier-once`'s private `PlanRow`/`planRows`. Also loosen `walk-condition-hub-scale.exec.test.ts`'s exact `e_pair (src=? AND tgt=?)` text to "a covering adjacency-index SEARCH with no label term" (S1 follow-up, 666ebf3e); its other two assertions already catch the regression.
+- **Where:** `test/performance.test.ts` `usesEdgeIndex`; `test/compiler/both-frontier-once.exec.test.ts` `plainSeeks`; `test/compiler/walk-condition-hub-scale.exec.test.ts`
 
 #### `mise run binds` flags a hand-written `json_each(?)` (`binds-json-each`)
 - **Area:** gates
@@ -1734,6 +1805,20 @@ Code-health work. These items change no answer unless they say so.
 - **Where:** `test/L2-sql/filter.sql.test.ts`; the shared plan module
 
 ### Internal debt: compiler internals
+
+#### One loop-head re-dispatch for every tail (`tail-loop-head`)
+- **Area:** compile
+- **Reach:** plausible
+- **Problem:** Seven tails hand-roll the hand-back to `continueAs` (connector site, re-source, inject) and have drifted — the same bug class R4.6 fixed in `propertyTail`. `pathTail`, `mapEntryTail` and `recordTail` check only `connectorSite`, so `g.V().valueMap().unfold().V().count()` and `g.V().project('a').by('name').inject(1).count()` decline with "no lowering covers", while `g.V().valueMap().V().count()` and `g.V().project('a').by('name').V().count()` answer 36.
+- **Fix:** One `handsBack(step, ctx, steps, at)` test at each tail's loop head returning `continueAs(rel, <framing>, …)`; `framingDispatch` already serves V/E/inject. About 12 lines go; no answer changes, a few declines answer.
+- **Where:** `src/compiler/rel/lower.ts` `scalarTail`, `listTail`, `pathTail`, `mapTail`, `mapEntryTail`, `elementTail`, `recordTail`, `framingDispatch`
+
+#### A total `windowOf(step)` beside `sliceOf`/`countOf` (`slice-window-of`)
+- **Area:** slices
+- **Reach:** plausible
+- **Problem:** Five callers catch `sliceOf`'s internal "not a slice step" plain `Error` (`try { sliceOf } catch (e) { if (e instanceof ValueParseError) throw e; return null }`), and three repeat the `tail → {offset:0, limit:countOf(step)}` branch. Two are catch-alls that also swallow a `ValueParseError`/`UnsupportedTraversal` (`cutsToOne`, `truncates`).
+- **Fix:** `windowOf(step): {offset, limit, fromEnd} | null` in `src/compiler/ir/step.ts`; delete the internal throw. About 20 lines go; values do not change, except an out-of-range count surfaces its specific "not an exact 64-bit long" decline.
+- **Where:** `sliceOf` (`src/compiler/ir/step.ts`); `src/compiler/rel/lower/slice.ts`; `src/compiler/rel/list.ts`; `mapWindow` (`src/compiler/rel/map.ts`); `cutsToOne` (`src/compiler/ir/shuffle-cut.ts`); `truncates` (`src/compiler/rel/write.ts`)
 
 #### `recordPairs` raise gate is untested (`cc1-raise-gate`)
 - **Area:** compile
