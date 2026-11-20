@@ -186,11 +186,18 @@ export type ScalarReducer = 'count' | NumericReducer;
  *  §1 there is the reason only `union`/`choose` are affected (`coalesce`/`optional` do not extend
  *  `BranchStep`, so their arms genuinely are per-traverser and our lowering of them is right).
  *
+ *  `tree` and `cap` are members for `fold`'s reason: `tree()` is a `ReducingBarrierStep` that replaces the
+ *  stream with ONE tree (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/TreeStep.java`),
+ *  and `cap()` a `SupplyingBarrierStep` that drains every start before it emits the side effect
+ *  (`.../step/sideEffect/SideEffectCapStep.java`). Every consumer reads "is a barrier" as the CONSERVATIVE
+ *  answer, so a keyed `tree('k')` (a side effect that passes its traverser) counted here only narrows them
+ *  toward safety.
+ *
  *  It lives HERE, in the IR's step vocabulary, and not beside its first consumer, because the
  *  branch-arm gate belongs in an `ir/` verify Pass, which runs before lowering. */
 export const GLOBAL_BARRIER_STEPS: ReadonlySet<string> = new Set([
   'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
-  'group', 'groupCount', 'aggregate', 'local', 'fold', ...REDUCERS,
+  'group', 'groupCount', 'aggregate', 'local', 'fold', 'tree', 'cap', ...REDUCERS,
 ]);
 export const isGlobalBarrier = (s: { readonly name: string }): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
 

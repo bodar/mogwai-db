@@ -100,7 +100,8 @@ describe('an unroll inside a host answers past SQLite\'s join width', () => {
     const ring = new GraphStore(new BunSqlite(':memory:'));
     loadBulk(ring, Array.from({ length: 10 }, (_, i) => ({ id: i + 1, labels: ['v'], properties: [] })),
       Array.from({ length: 10 }, (_, i) => ({ label: 'next', src: i + 1, tgt: (i + 1) % 10 + 1, properties: [] })));
-    for (const q of ['g.V().local(repeat(out()).times(130)).count()', 'g.V().where(repeat(out()).times(130)).count()']) {
+    // (`flatMap`, not `local`: a `local()` over this barrier-free body is spliced into its chain before lowering.)
+    for (const q of ['g.V().flatMap(repeat(out()).times(130)).count()', 'g.V().where(repeat(out()).times(130)).count()']) {
       const plan = read(q);
       expect(plan.sql).toContain('OFFSET 0');
       expect(bare(ring.query(plan.sql, plan.binds))).toEqual([{ v: 10 }]);

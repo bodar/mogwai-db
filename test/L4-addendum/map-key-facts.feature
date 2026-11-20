@@ -239,7 +239,22 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   # The same fact decides the label read inside a child body (an enclosing label) and behind math().
+  # (A flatMap body: a local() over a body with no stream barrier is its inline chain, spliced before lowering.)
   @Unsupported
+  Scenario: g_V_asXbX_flatMapXconstantXa1_b2X_limitXlocal_1X_selectXbXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("b").flatMap(__.constant(["a": 1, "b": 2]).limit(Scope.local, 1).select("b")).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
+
+  # The local() spelling is the inline chain `as("b").constant(…).limit(local, 1).select("b").count()`, whose
+  # count reads no selected VALUE, so the row-dependent choice is not observable and it answers as inline does.
   Scenario: g_V_asXbX_localXconstantXa1_b2X_limitXlocal_1X_selectXbXX_count
     Given the modern graph
     And the traversal of
@@ -250,7 +265,6 @@ Feature: mogwai addendum — a map's static key fact: the keys a row MAY hold
     Then the result should be unordered
       | result |
       | d[6].l |
-    And the decline should say "is ambiguous here: each Map may hold a key 'b' and a path label 'b' is also bound"
 
   @Unsupported
   Scenario: g_V_valuesXageX_asXbX_constantXa1_b2X_limitXlocal_1X_mathXbX

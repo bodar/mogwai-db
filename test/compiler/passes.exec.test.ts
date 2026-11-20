@@ -205,14 +205,51 @@ describe('inlineIdentityHostBody: a per-traverser host over a stream-identity bo
 
   test('a MUTATING sack is stream-identity; a BARE sack() is a retype and is not', () => {
     expect(chain('g.withSack(0).V().local(__.sack(sum).by("age")).sack()')).toBe('V.sack.sack');
-    // `local(__.sack())` REPLACES the traverser with the accumulator's value, so the host decides
-    // something and must survive.
-    expect(chain('g.withSack(0).V().local(__.sack())')).toBe('V.local');
+    // `local(__.sack())` REPLACES the traverser with the accumulator's value, so it is not IDENTITY
+    // — `map(__.sack())` keeps its host. `local` still splices it, as its inline chain (`sack()` holds
+    // no barrier, and `LocalStep` emits the child's own traverser).
+    expect(chain('g.withSack(0).V().map(__.sack())')).toBe('V.map');
+    expect(chain('g.withSack(0).V().local(__.sack())')).toBe('V.sack');
   });
 
-  test('a body that MOVES, PROJECTS or FILTERS is left alone — that is what the hosts are FOR', () => {
-    for (const body of ['__.out()', '__.out().count()', '__.values("name")', '__.has("name","marko")', '__.count()'])
-      expect(chain('g.V().local(' + body + ')')).toBe('V.local');
+  test('a map/flatMap body that MOVES, PROJECTS or FILTERS is left alone — that is what the hosts are FOR', () => {
+    // `map`/`flatMap` emit `head.split(result)`, dropping labels/sack/path made inside the body
+    // (FlatMapStep.java:42-52), so only an identity body is theirs to lose.
+    for (const host of ['map', 'flatMap'])
+      for (const body of ['__.out()', '__.values("name")', '__.has("name","marko")', '__.out().as("a")'])
+        expect(chain('g.V().' + host + '(' + body + ')')).toBe('V.' + host);
+  });
+
+  // ---- spliceableLocalBody: a local() whose body holds no stream barrier IS its inline chain ----
+  // `LocalStep` emits its child's own traversers (LocalStep.java:60-75), so only a STREAM BARRIER in the
+  // body sees the per-start reset; without one the body answers what its steps answer inline.
+  test('local() over a barrier-free body splices — one flat chain, no rejoin', () => {
+    expect(chain('g.V().local(__.out())')).toBe('V.out');
+    expect(chain('g.V().local(__.values("name"))')).toBe('V.values');
+    expect(chain('g.V().local(__.has("name","marko"))')).toBe('V.has');
+    expect(chain('g.V().local(__.bothE()).otherV()')).toBe('V.bothE.otherV');
+    expect(chain('g.V().local(__.union(__.outE(),__.inE())).otherV()')).toBe('V.union.otherV');
+    expect(chain('g.V().local(__.bothE().where(__.otherV().has("age",gt(30)))).otherV()')).toBe('V.bothE.where.otherV');
+    expect(chain('g.V().local(__.out().as("a")).select("a")')).toBe('V.out.as.select');
+    expect(chain('g.V().local(__.local(__.out().out()))')).toBe('V.local');
+  });
+
+  test('local() over a body holding a STREAM BARRIER at any depth stays — one per start', () => {
+    for (const body of ['__.out().count()', '__.count()', '__.bothE().limit(1)', '__.out().tree()', '__.out().cap("x")',
+      '__.out().fold()', '__.out().order()', '__.out().dedup()', '__.out().aggregate("x")', '__.union(__.out().limit(1))',
+      '__.out().where(__.out().count().is(1))', '__.barrier()'])
+      expect([body, chain('g.V().local(' + body + ')')]).toEqual([body, 'V.local']);
+  });
+
+  test('local() over a body that writes, adds unlabelled traversers or re-sources stays — the connector owns those', () => {
+    for (const body of ['__.addE("x").to(__.V(1))', '__.out().property("k",1)', '__.out().inject(1)', '__.inject(1)', '__.union(__.inject(1))',
+      '__.V().has("name","lop")', '__.out().E()'])
+      expect([body, chain('g.V().local(' + body + ')')]).toEqual([body, 'V.local']);
+  });
+
+  test('the spliced steps carry the per-traverser mark', () => {
+    const steps = runPasses(stepChain(parseGremlin('g.V().local(__.bothE()).otherV()'), NO_PARAMS), EMPTY_STRATEGY_USE, NO_PARAMS).steps as any[];
+    expect(steps.map((s) => [s.name, s.perTraverser === true])).toEqual([['V', false], ['bothE', true], ['otherV', false]]);
   });
 
   test('a barrier() body is NOT its body — the equivalence is with identity, not with barrier()', () => {

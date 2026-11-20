@@ -317,6 +317,19 @@ const SHAPES: readonly Shape[] = [
   // evaluation of the candidates (`reSourcedOnce`). Before the rewrite it ranked the origins × candidates cross.
   { name: 'draw: local(V.shuffle.limit(1))', query: "g.V().hasLabel('software').local(V().hasLabel('person').order().by(shuffle).limit(1)).count()" },
   { name: 'draw: local(V.shuffle.tail(1))', query: "g.V().hasLabel('software').local(V().hasLabel('person').order().by(shuffle).tail(1)).count()" },
+  // R7a: a `local()` whose body holds no stream barrier is spliced into its chain (`spliceableLocalBody`,
+  // `src/compiler/ir/strategies.ts`) — one flat seek chain, not a materialized scope rejoined by the host row.
+  { name: 'splice: map(local(outE).otherV.fold)', query: "g.V().map(local(outE()).otherV().values('name').fold())" },
+  { name: 'splice: local(bothE.where(otherV.has)).otherV', query: "g.V().local(bothE().where(otherV().has('age',gt(30)))).otherV().count()" },
+  { name: 'splice: local(union(outE,inE)).otherV', query: 'g.V().local(union(outE(),inE())).otherV().count()' },
+  { name: 'splice: local(bothE).otherV', query: 'g.V().local(bothE()).otherV().count()' },
+  { name: 'splice: local(bothE).otherV.path', query: 'g.V().local(bothE()).otherV().path()' },
+  { name: 'splice: local(out.as).select', query: "g.V().local(out().as('a')).select('a').path()" },
+  { name: 'splice: optional(local(out))', query: 'g.V().optional(local(out())).count()' },
+  { name: 'splice: where(local(out.has))', query: "g.V().where(local(out().has('age',gt(60)))).count()" },
+  { name: 'splice: union(local(out.out),local(in))', query: "g.V().union(local(out().out()), local(in())).count()" },
+  { name: 'no splice: local(bothE.limit(1)).otherV', query: 'g.V().local(bothE().limit(1)).otherV().count()' },
+  { name: 'no splice: local(out.tree)', query: 'g.V().local(out().tree()).count()' },
 ];
 
 /** Deterministic xorshift, so every child and every run sees one graph. */

@@ -4,7 +4,7 @@ import { bodyAlwaysProduces, existencePrefix } from './productivity.ts';
 import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf, whereHasScopeKey } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { flatType, mapEntryType, type TypeNode } from '../../gremlin/types.ts';
-import { collectsSideEffect, FAN_OUT_HOSTS, SINGLE_BODY_FILTER_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
+import { addsUnlabelledTraversers, collectsSideEffect, FAN_OUT_HOSTS, SINGLE_BODY_FILTER_HOSTS, isStreamBarrier, MUTATING_STEPS, nondeterministic, PER_TRAVERSER_RESET_HOSTS, stepHasEffect, type IRStep } from './step.ts';
 import { eachChildChain, rawBodies, someStepDeep, valueNodes, type BodyReader } from './walk.ts';
 import { IO_SERVICE_NAME, PAGERANK_SERVICE_NAME, WCC_SERVICE_NAME, PEER_PRESSURE_SERVICE_NAME, SHORTEST_PATH_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, PATH_READERS, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope, SLICE_STEPS } from './step.ts';
@@ -341,6 +341,8 @@ export function dropEffectFreeSideEffect(steps: Step[], params: ParamEnv): Step[
 const VERTEX_PRODUCERS = unionOf(VERTEX_SOURCE, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V);
 /** Steps whose output traverser is an edge (a partition edge filter injects after). */
 const EDGE_PRODUCERS = unionOf(EDGE_SOURCE, EDGE_MOVES);
+/** The graph sources — a mid-traversal `V()`/`E()` RE-SOURCES the stream. */
+const GRAPH_SOURCES = unionOf(VERTEX_SOURCE, EDGE_SOURCE);
 /** Movement explosion (SubgraphStrategy edge criterion only). To filter the traversed
  *  EDGE, a vertex→vertex hop must first land on the edge: out→outE.inV, in→inE.outV,
  *  both→bothE.otherV — the same rewrite TinkerPop performs when an edgeCriterion is set.
@@ -790,6 +792,49 @@ function identityHostBody(s: Step, params: ParamEnv): Step[] | null {
 }
 
 /**
+ * The body of a `local()` that is its INLINE CHAIN, or `null` — a wider source for the SPLICE only.
+ *
+ * `LocalStep` hands each start to its child and emits the child's own traversers
+ * (`localTraversal.nextTraverser()`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:60-75`),
+ * so labels, sack, loops and path made inside the body survive it — unlike `map`/`flatMap`, which emit
+ * `head.split(result)` and DROP them (`.../step/map/FlatMapStep.java:42-52`; `flatMap(out().as('a')).select('a')`
+ * has no rows). What the per-start RESET changes is only what a STREAM BARRIER in the body sees: one start's
+ * traversers rather than the stream's. A body holding none at any depth therefore answers exactly what its steps
+ * answer in the host's chain. Every gate is an existing vocabulary, not a per-shape list:
+ *
+ *  - no stream barrier at any depth (`fanOutHoldsBarrier`, the `isStreamBarrier` authority — `tree`/`cap`
+ *    included, so `local(out().tree())` keeps one tree per start); an unreadable body counts as one;
+ *  - no write (`MUTATING_STEPS`) and no `call` at any depth — each is a statement the connector owns;
+ *  - no step that adds unlabelled traversers (`addsUnlabelledTraversers`) at any depth: an `inject(x)` inside
+ *    `local` adds `x` once PER START, inline it would add it once;
+ *  - no top-level re-source (`V()`/`E()`): inline-equivalent (GraphStep splits per start), but the connector
+ *    owns that shape (`reSourcedBody`) and lowers it as one shared read.
+ *
+ * A side effect that is not a barrier (`sideEffect`, a mutating `sack`) rides along with the splice's
+ * `perTraverser` mark, as an identity body's does. Over-approximation (a `count` inside a `where()` inside the
+ * local) only keeps the body on the connector: slower, never wrong.
+ *
+ * ⚠️ DELIBERATELY a separate predicate and NOT a widening of `identityHostBody`/`isStreamIdentity`: those answer
+ * "emits exactly its input, once", which the branch arms read as ALWAYS PRODUCTIVE (`branch.ts` `alwaysFires`).
+ * A body like `out()` is inline-equivalent but may produce nothing, so it must never reach that question.
+ */
+function spliceableLocalBody(s: Step, params: ParamEnv): Step[] | null {
+  if (s.name !== 'local') return null;
+  const args = s.args ?? [];
+  if (args.length !== 1 || !isNested(args[0].value)) return null;
+  const read = rawBodies(params);
+  const body = read(args[0].value.nested);
+  if (!body?.length || body[0].name === 'by') return null;
+  // A body that RE-SOURCES is the connector's (`reSourcedBody`, `lower/scoped.ts`): its read after `V()`/`E()`
+  // is ONE shared relation crossed with the host, and a draw there keeps its per-host pick. Spliced, the same
+  // read is a mid-chain GraphStep the fold lowers less well (inside a `repeat` it does not lower at all).
+  if (body.some((inner) => GRAPH_SOURCES.has(inner.name))) return null;
+  if (fanOutHoldsBarrier(s, read)) return null;
+  const owned = (inner: Step): boolean => MUTATING_STEPS.has(inner.name) || inner.name === 'call' || addsUnlabelledTraversers(inner, 1);
+  return someStepDeep(body, read, owned, true) ? null : [...body];
+}
+
+/**
  * Splice a per-traverser host whose body leaves the stream alone into the chain that hosts it.
  *
  * ⚠️ **THE SPLICE RECORDS THE GRANULARITY IT ERASES, and that is not bookkeeping.** A
@@ -829,7 +874,10 @@ export function inlineIdentityHostBody(steps: Step[], params: ParamEnv, nested: 
 function spliceIdentityHosts(steps: Step[], params: ParamEnv, readsPath: boolean): Step[] {
   const out: Step[] = [];
   for (const s of steps) {
-    const body = identityHostBody(s, params);
+    // The identity body, or a `local()` whose body is its own inline chain (`spliceableLocalBody` — never the
+    // identity question, which branch arms read as always productive). `local` opens no path entry, so `keep`
+    // and the root's path marking are untouched by the second source.
+    const body = identityHostBody(s, params) ?? spliceableLocalBody(s, params);
     const keep = OPENS_ENTRY_HOSTS.has(s.name) && (readsPath || (s as IRStep).keepsPathEntry === true);
     // A kept `map` host over an identity body is its `flatMap`: the body emits exactly its one input.
     if (keep) out.push(body && s.name === 'map' ? { ...s, name: 'flatMap' } : s);

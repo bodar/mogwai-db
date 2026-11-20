@@ -165,7 +165,7 @@ describe('a compiler-minted bind name is one no user parameter can spell', () =>
 
 describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never an internal error', () => {
   test.each([
-    ["g.V().has('name', regex('m')).local(out().has('name', regex('l'))).values('name')"],
+    ["g.V().has('name', regex('m')).flatMap(out().has('name', regex('l'))).values('name')"],
     ["g.V().has('name', regex('m')).repeat(out()).until(has('name', regex('l'))).values('name')"],
     ["g.V().has('name', regex('m')).sideEffect(out().has('name', regex('l')).aggregate('x')).values('name')"],
   ])('%s', (gremlin) => {
@@ -182,6 +182,11 @@ describe('an uncoverable barrier RESUME declines as UnsupportedTraversal, never 
     ["g.V().has('name', regex('m')).sideEffect(out().groupCount('x')).values('name')"],
   ])('a sideEffect() after a regex barrier passes its stream through: %s', (gremlin) => {
     expect(typedAll(executeQuery(seededStore(), gremlin))).toEqual(['"marko"']);
+  });
+  test('a local() over a barrier-free body is its inline chain, so a regex inside it resumes as inline', () => {
+    // `spliceableLocalBody` (src/compiler/ir/strategies.ts): the body is spliced before lowering.
+    expect(typedAll(executeQuery(seededStore(), "g.V().has('name', regex('m')).local(out().has('name', regex('l'))).values('name')")))
+      .toEqual(['"lop"']);
   });
   test('a resumed local(values(k)) answers every value', () => {
     expect(typedAll(executeQuery(seededStore(), "g.V().has('name', regex('m')).out().has('name', regex('l')).local(values('name'))")))
