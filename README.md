@@ -25,6 +25,12 @@ need a special driver. mogwai-db compiles each query to SQL, and SQLite runs it.
 > - **Reads, writes and strategies** are supported across most steps. See the
 >   **[feature support matrix](docs/feature-support-matrix.md)**.
 
+## Try it now
+
+Open **[bodar.github.io/mogwai-db](https://bodar.github.io/mogwai-db/)**. The whole database runs
+in your browser tab, with no server and no install. The page is the interactive API reference: pick
+a request, edit the Gremlin, and send it.
+
 ## Quick start
 
 1. Start a server with Docker:
