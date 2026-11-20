@@ -15,6 +15,8 @@ import type { GraphSource } from '../source.ts';
 import { CONSTANT } from '../predicate.ts';
 import { extendPath, pathCarried } from '../path.ts';
 import { BULK, ENCOUNTER, encounterOf, FROM_V, fromVOf, type ChainCtx } from './chain.ts';
+import { COLLAPSE_FILTERS } from '../../ir/bulk.ts';
+import { ROW_OPS } from './slice.ts';
 import { remintOrder } from '../lower.ts';
 import { ensureBulk } from './branch.ts';
 import { evidenceOf } from '../tag.ts';
@@ -33,6 +35,18 @@ import { copyRepeatsWork, doubledReads } from '../../../rel/copies.ts';
  */
 export const splitRefuses = (input: Rel, extendsPath: boolean): boolean =>
   input.channels.some((channel) => channel.role === 'fromV' || (!extendsPath && channel.role === 'path'));
+
+/**
+ * The steps that leave a traverser WHERE IT STANDS — a filter, a reorder, a slice: none makes a new traverser
+ * object, so none owes the path a position (`path.ts`'s rule: filters, `order()` and the slices carry it). After a
+ * re-source, a run of them adds exactly ONE position to a tracked path — the element the split met — which is the
+ * one extension a read shared by every origin can make after its join (`splitInto`). An `as()` is absent: it
+ * labels a position. Asked by step NAME, so the gate is mint-free (`reSourcesOncePerOrigin`, `reSourcedBody`).
+ */
+const KEEPS_POSITION: ReadonlySet<string> = new Set([...COLLAPSE_FILTERS, 'is', ...ROW_OPS]);
+
+/** Does every step of `steps` keep its traverser's position (`KEEPS_POSITION`)? */
+export const keepsPosition = (steps: readonly IRStep[]): boolean => steps.every((step) => KEEPS_POSITION.has(step.name));
 
 export function reSource(
   step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
@@ -74,9 +88,14 @@ export function splitInto(
   elem: Elem | undefined, ctx: ChainCtx, fresh: Minter,
 ): Rel {
   const crossed = crossCarried(parent, met, ordinal, payload, several, ctx, fresh);
-  return elem && pathCarried(crossed)
-    ? extendPath(crossed, { kind: 'element', elem, id: col(crossed.id, 'id') }, fresh, ctx.demandsPathLabels) : crossed;
+  return elem ? splitPosition(crossed, elem, ctx, fresh) : crossed;
 }
+
+/** The ONE position a split adds to a tracked path — the element it met, at the row's `id` — or `rel` unchanged
+ *  where no path is tracked. Every re-source makes it after its join: `splitInto`, and the connector's shared read
+ *  (`reSourcedBody`), whose read up to its cut keeps its position (`keepsPosition`). */
+export const splitPosition = (rel: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter): Rel =>
+  pathCarried(rel) ? extendPath(rel, { kind: 'element', elem, id: col(rel.id, 'id') }, fresh, ctx.demandsPathLabels) : rel;
 
 /**
  * GRAPHSTEP'S ID LOOKUP — the elements a `V(<traversal>)`/`E(<traversal>)` names, once the traversal's

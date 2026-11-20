@@ -16,7 +16,6 @@ import { producesWithoutInput } from '../../ir/productivity.ts';
 import { normalize } from '../../ir/passes.ts';
 import { collectsSideEffect, countOf, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, isStreamBarrier, splitTraversalIds, traversalIdArg, TRAVERSER_STATE_READS } from '../../ir/step.ts';
 import { writesAnywhere, type IRStep } from '../../ir/strategies.ts';
-import { COLLAPSE_FILTERS } from '../../ir/bulk.ts';
 import { eachChildChain, rawBodies, someStepDeep, type BodyReader } from '../../ir/walk.ts';
 import { aliasProjection, liveAliases, rerootPresence, selectSpec } from '../alias.ts';
 import { and, carriedCols, DOMAIN_ENCOUNTER, elementCols, firstRootedColumn, firstRootedValue, perOriginWindow, jsonField, jsonOf, meta, onceTyped, payloadCols, presenceFenced, propertyKeyArgs, rowNumberWindow, storedValueOn, typeOf, type Minter } from '../build.ts';
@@ -45,7 +44,7 @@ import { RANDOM_ORDER } from './slice.ts';
 import { bodyOf, CARRIED_READ, encounterOf, inBody, inOrderFreeBody, NO_ALIASES, ORIGIN, originOf, settledOf, withEnclosing, type ChainCtx, type ElementSubject, type Tail } from './chain.ts';
 import { scopedValue } from './scoped.ts';
 import { anchoredSeed, bodyPredicate, childPredicate } from './exists.ts';
-import { movement, splitInto, splitRefuses } from './movement.ts';
+import { keepsPosition, movement, splitInto, splitRefuses } from './movement.ts';
 import { nondeterministic } from '../../ir/step.ts';
 import { pastBudget } from '../../../sql/kernel/budget.ts';
 
@@ -1494,17 +1493,13 @@ export function reSourcesOncePerOrigin(steps: readonly IRStep[], at: number, inp
   const { params } = ctx;
   const draw = steps[drawAt]!;
   // The state the split cannot keep is GraphStep's own refusal (`splitRefuses`). A path gains ONE position here —
-  // the element drawn — so it rides only where the prefix does not MOVE: the re-source and filters, by name.
-  if (bulked || draw.modulators?.length || draw.optionArms || splitRefuses(input, prefix.slice(1).every((step) => STILL.has(step.name)))) return false;
+  // the element drawn — so it rides only where the prefix does not MOVE (`keepsPosition`, by name).
+  if (bulked || draw.modulators?.length || draw.optionArms || splitRefuses(input, keepsPosition(prefix.slice(1)))) return false;
   const read = rawBodies(params);
   const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
   if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return false;
   return !nondeterministic(prefix, params) && !someStepDeep(prefix, read, collectsSideEffect, true);
 }
-
-/** The steps that leave their traverser where it stands: a filter never extends the path, so a prefix of the
- *  re-source and these adds exactly one position to it, the element drawn (`reSourcesOncePerOrigin`). */
-const STILL: ReadonlySet<string> = new Set([...COLLAPSE_FILTERS, 'is']);
 
 /** The filter steps whose child runs PER TRAVERSER (`TraversalUtil.test` on one traverser at a time), so a
  *  prefix holding one is still R copies of one evaluation. A new filter host belongs here for that reason:

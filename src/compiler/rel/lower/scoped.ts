@@ -20,7 +20,8 @@ import { aliasElementHost, aliasIdAt, aliasProjection, isElementAlias, selectSpe
 import { freshTraverserRow, type RootedRead } from '../child.ts';
 import type { Elem } from '../../elem.ts';
 import type { ChildHost, ChildValue, PresentWhen, Subject } from '../child.ts';
-import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, isStreamBarrier, nondeterministic, PATH_READERS, traversalIdArg, type IRStep } from '../../ir/step.ts';
+import { keepsPosition, splitPosition } from './movement.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { countsTraversers, groupKeyTerms, groupRows, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap, type GroupRows } from '../map.ts';
 import { selfDescribingList } from '../list.ts';
@@ -231,9 +232,12 @@ const reSourceAt = (body: readonly IRStep[]): number =>
  * reference's exhausted child does. Where the host cannot hold that read per host row (its decorrelated fallback,
  * `correlated` false), the cross would be every host × the graph ahead of the pick: declined, naming the shape.
  *
- * What it refuses, from the query text: under `forward` a traverser whose path is tracked (the child's own
- * path, emitted, is the host's EXTENDED by the read's positions — left to GraphStep's cross in the fold, which
- * extends it, with the reason only noted), under `split` a tracked path the rest READS (the
+ * Under `forward` a tracked path (the child's own path, emitted, is the host's EXTENDED by the read's positions)
+ * gains the ONE position the split met while the read keeps its position (`keepsPosition`), appended after the
+ * cross; the shared read stops where the read first moves, and the fold extends the rest.
+ *
+ * What it refuses, from the query text: under `forward` with a tracked path, a stream barrier after the read
+ * moves (it would cut hosts × graph per host), under `split` a tracked path the rest READS (the
  * child's path inside the body is likewise extended), and a prefix of label reads that may LOSE its row — the re-source discards
  * the selected value, so the answer would depend only on which rows matched: `admitsReSource`, the one explained rule the scalar seam asks too. Any other prefix that may
  * lose or multiply its row (`out().V()`, `values('age').V()`) is GraphStep's own cross join, in the fold.
@@ -252,14 +256,11 @@ function reSourcedBody(
   // explained admission rule of a discarded label read (`reSourceTail`'s `admitsReSource`).
   if (!exactlyOneRow(prefix.rel)) return undefined;
   const rest = body.slice(at);
-  // A tracked path the CHILD's traverser carries out (`forward`), or that a `split` body reads inside itself, is
-  // the host's EXTENDED by the read's positions, which the shared read does not hold. Under `forward` that is
-  // GraphStep's own cross in the fold (`reSource`, or the per-origin draw `reSourcedOnce`), which extends the
-  // path as the split does — the hosts × graph rows the query asks for — so the reason is only NOTED, and still
-  // names the shape where the fold cannot answer either. A `split` body reading its own path declines here.
-  if (pathCarried(prefix.rel) && (contract === 'forward' || (contract === 'split' && readsPath(rest, ctx)))) {
+  // A tracked path that a `split` body reads inside itself is the host's EXTENDED by the read's positions, which
+  // the shared read does not hold: declined.
+  if (pathCarried(prefix.rel) && contract === 'split' && readsPath(rest, ctx)) {
     ctx.declines.note({ kind: 'resource-path', message: resourcePathMessage(rest, ctx), terminal: false });
-    return contract === 'forward' ? undefined : null;
+    return null;
   }
   // A rest that reads the HOST traverser's state (an outer label, its sack, path or loops) cannot be one
   // shared read: it is GraphStep's own cross with the host, in the fold (`movement.ts` `reSource`). One policy
@@ -282,17 +283,32 @@ function reSourcedBody(
   // host — and the fold continues over that cross. A label the read BINDS reads nothing of the host either, so it
   // stays inside `rest₁` and rides out of the cross as an alias channel beside the host's (`ownLabels`) — never a
   // cut, which would put the whole graph per host ahead of a reducer, filter or slice the shared read holds.
-  const cut = first ? rest.length : sharedEnd(rest, prefix.aliases, ctx);
-  if (cut < 1) return undefined;
+  const hostCut = first ? rest.length : sharedEnd(rest, prefix.aliases, ctx);
+  if (hostCut < 1) return undefined;
+  // A tracked path the CHILD's traverser carries out (`forward`: `local` emits the child's own traverser) is the
+  // host's EXTENDED by the read's positions. While the read keeps its position — the re-source, then filters,
+  // reorders and slices (`keepsPosition`) — that is ONE position, the element the split met, appended after the
+  // cross (`splitPosition`) exactly as GraphStep's split appends it. So the shared read stops where the rest first
+  // MOVES as well, and the fold extends the path through each later step over the cross — the hosts × read rows
+  // the query asks for. A stream barrier there, ahead of the host cut, would cut a hosts × graph product down per
+  // host where the shared form cuts once (`V().out().limit(1)`, `V().values('x').count()`): declined, naming the
+  // shape, rather than an answer quadratic in the hosts. (The shared read cannot carry the moved positions — that
+  // needs a path the read tracks from its own start, concatenated onto the host's after the cross.)
+  const extended = contract === 'forward' && pathCarried(prefix.rel);
+  // The reason is NOTED wherever the path is extended: it names the shape if neither this read nor the fold answers.
+  if (extended) ctx.declines.note({ kind: 'resource-path', message: resourcePathMessage(rest, ctx), terminal: false });
+  const moves = extended ? rest.findIndex((step, i) => i > 0 && i < hostCut && !keepsPosition([step])) : -1;
+  if (moves > 0 && rest.slice(moves, hostCut).some(isStreamBarrier)) return null;
+  const cut = moves > 0 ? moves : hostCut;
   // The prefix's carried state crosses unchanged — `head.split(element)` keeps the traverser's labels, sack and
   // loop counter (the rest reads none of them: `readsHostState`), and a seed position is replaced by the read's
   // own. A PATH crosses unchanged under `first` and `split` too: `map`/`by()`/a filter and `flatMap` emit a
   // traverser split from the HOST (`TraversalMapStep`: `traverser.split(mapTraversal.next(), this)`, `FlatMapStep`
   // `head.split(r)`), so the positions the child's GraphStep appends never leave it (and the rest reads none of
-  // them: `readsHostState`, `readsPath`). Under `forward` a tracked path is declined above. An entering vertex
-  // (`fromV`) is a hop's: the fold's.
+  // them: `readsHostState`, `readsPath`). Under `forward` a tracked path crosses to be extended by the one
+  // position the read met (above). An entering vertex (`fromV`) is a hop's: the fold's.
   const splits = contract !== 'forward';
-  const crosses = (role: ChannelRole): boolean => CROSSES.has(role) || (splits && role === 'path');
+  const crosses = (role: ChannelRole): boolean => CROSSES.has(role) || ((splits || extended) && role === 'path');
   if (!prefix.rel.channels.every((channel) => crosses(channel.role) || channel.role === 'encounter')) return undefined;
   const rooted = rootedRead(rest.slice(0, cut), ctx, fresh, 'many');
   if (!rooted || rooted.effects?.length) return null;
@@ -306,9 +322,11 @@ function reSourcedBody(
   if (labelled === null) return undefined;
   const own = rooted.rel.channels.filter((channel) =>
     channel.role === 'encounter' || channel.role === 'bulk' || (labelled !== undefined && channel.role === 'alias'));
-  const kept = (channel: Channel): boolean =>
-    own.includes(channel) || (channel.role === 'alias' || channel.role === 'path' ? splits : CROSSES.has(channel.role));
+  // A path the read tracks of its own is shed: under `forward` its one position is re-added after the cross.
+  const kept = (channel: Channel): boolean => own.includes(channel)
+    || (channel.role === 'alias' ? splits : channel.role === 'path' ? splits || extended : CROSSES.has(channel.role));
   if (!rooted.rel.channels.every(kept)) return undefined;
+  if (extended && rooted.framing.kind !== 'elements') return undefined;
   // ONE fenced relation is the read's value AND its presence: a first-row host reads both off `once`.
   const read = first ? firstRow(rooted.rel, defaultCollation(rooted.rel), fresh) : rooted.rel;
   const once = isSelfContained(read) ? make.materialize({ id: fresh('srm'), input: read, channels: read.channels, type: read.type, fenced: true }) : read;
@@ -337,10 +355,11 @@ function reSourcedBody(
     ...payloadCols(once).map((column) => (source.set(column.name, renamed.get(column.name)!), column)),
     ...channels.map((channel) => (fromPrefix.has(channel.col) ? prefix.rel.type.cols.find((column) => column.name === channel.col)! : readCol(channel.col))),
   ];
-  const rel = make.project({
+  const projected = make.project({
     id: fresh('srx'), input: crossed, channels, type: typeOf(...outCols),
     exprs: outCols.map((column) => [column.name, col(crossed.id, fromPrefix.has(column.name) ? column.name : source.get(column.name)!)] as const),
   });
+  const rel = extended && rooted.framing.kind === 'elements' ? splitPosition(projected, rooted.framing.elem, ctx, fresh) : projected;
   const aliases = labelled ? labelled.aliases : prefix.aliases;
   return cut < rest.length
     ? continueAs(rel, rooted.framing, rest, cut, !!rooted.bulked, ctx, fresh, aliases)

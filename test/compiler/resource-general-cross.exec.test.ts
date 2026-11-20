@@ -394,8 +394,9 @@ describe('tree() folds the paths a split or forward rejoin emits, in traverser o
 });
 
 describe('a forward (local()) host on a traverser whose path is tracked', () => {
-  // `LocalStep` emits the CHILD's own traverser, whose path the read's GraphStep extends: GraphStep's own cross in
-  // the fold (`reSource`) extends it, so these answer — the connector's shared read only notes its reason.
+  // `LocalStep` emits the CHILD's own traverser, whose path the read's GraphStep extends by the element it met: the
+  // connector's shared read appends that one position after its cross (`splitPosition`), so these answer, and the
+  // fold extends any position a later step adds.
   const names = (q: string): string[][] => bare(run(s, q)).map((row: { list: string }) => JSON.parse(row.list).map((e: { v: string }) => e.v));
   test('out().local(V().has(marko)).path() is each out() path extended by marko', () => {
     expect(names("g.V().out().local(V().has('name','marko')).path().by('name')").map((p) => p[2])).toEqual(Array(6).fill('marko'));

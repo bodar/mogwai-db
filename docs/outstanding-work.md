@@ -602,6 +602,11 @@ Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test g
   `local(__.V().hasLabel('person').limit(2)).count()` 355 ms → 24.6 s (`sample(2)` the same; `rankPairs`
   crosses origins × candidates). `rootedRead` the prefix once, cross with its small result; fix the
   `rankPairs` doc ("FENCED" overclaims — the CTE is not `MATERIALIZED`).
+- **A per-origin draw over a MOVING re-source under a tracked path is quadratic** — `g.V().hasLabel('holder')
+  .local(__.V().hasLabel('person').out().sample(1)).path().count()` 585 ms @1k → 39.7 s @8k (68×). Pre-existing:
+  `reSourcedOnce` refuses a moving prefix under a path, so GraphStep's product (`reSource`) answers. The same
+  shape with a slice/reducer in place of the draw (`local(V().out().limit(1)).path()`) DECLINES in `reSourcedBody`
+  for this reason. Both need M1b/H1 — the read's own path concatenated onto the origin's after the join.
 - **A shared collection is re-read per traverser** — `g.V().group('a').by(constant('a')).by('age')
   .select('a').select('a').count()` 57 ms → 3.4 s. Read the key once as one MATERIALIZED relation and
   cross-join it.

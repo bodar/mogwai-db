@@ -333,15 +333,20 @@ describe('the per-origin draw carries the origin path and sack', () => {
   });
 
   // A MOVING prefix adds positions the draw does not hold, so the per-origin route refuses it and GraphStep's
-  // product answers (every position extended there): [origin, V, out].
+  // product answers (every position extended there): [origin, V, out]. That product is origins × graph ahead of the
+  // per-origin draw (as it was before the draw carried a path); a linear form needs the read's own path concatenated
+  // onto the origin's after the join — residue in docs/outstanding-work.md.
   test('a moving prefix under a path falls through to the product, never a short path', () => {
     expect(bare(run(seededStore(), "g.V().local(__.V().out().sample(1)).path().count(local).dedup()"))).toEqual([{ v: 3 }]);
   });
 });
 
-// A RE-SOURCE INSIDE local() ON A PATH-TRACKED TRAVERSER is GraphStep's own cross in the fold, which extends the
-// path as the split does — hosts × graph rows by meaning. The connector's shared read cannot hold that path, so it
-// only NOTES its reason (`reSourcedBody`), which still names the shape where the fold cannot answer either.
+// A RE-SOURCE INSIDE local() ON A PATH-TRACKED TRAVERSER: the child's path is the host's extended by the read's
+// positions. While the read keeps its position (filters, reorders, slices) that is ONE position, so the connector's
+// shared read answers — computed once, crossed with the hosts, the path extended after the join (`reSourcedBody`,
+// `splitPosition`) — and a slice or reducer in it costs one evaluation, never hosts × graph. Where the read MOVES,
+// the fold extends each later position over the cross; a stream barrier there would cut a hosts × graph product down
+// per host, so it declines naming the shape.
 describe('a re-source in local() on a path-tracked traverser', () => {
   const pathsOf = (q: string): string[][] => bare(run(seededStore(), q)).map((row: { list: string }) => JSON.parse(row.list).map((e: { v: string }) => e.v));
 
@@ -366,6 +371,44 @@ describe('a re-source in local() on a path-tracked traverser', () => {
     expect(count(large, q)).toBe(320_000);
     expect(best(() => run(large, q)) / Math.max(best(() => run(small, q)), 5)).toBeLessThan(16);
   }, 60_000);
+
+  describe('a slice in the shared read is cut once, never per host over hosts × graph', () => {
+    const best = (f: () => unknown): number => { f(); let ms = Infinity; for (let i = 0; i < 3; i++) { const t0 = performance.now(); f(); ms = Math.min(ms, performance.now() - t0); } return ms; };
+    const small = graph(1000, 1000), large = graph(8000, 8000);
+    // The product route measured 432 ms → 29 s (limit) and 2.5 s @1k (order().limit), ≈4× per doubling.
+    test.each([
+      ["g.V().hasLabel('holder').local(__.V().hasLabel('person').limit(1)).path().count()", 1],
+      ["g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').limit(1)).path().count()", 1],
+      ["g.V().hasLabel('holder').local(__.V().hasLabel('person').range(0,1)).path().count(local).sum()", 2],
+      ["g.V().hasLabel('holder').local(__.V().hasLabel('person').where(__.has('name')).dedup().limit(1)).path().count(local).sum()", 2],
+      ["g.V().hasLabel('holder').local(__.V().hasLabel('person').limit(1).simplePath()).path().count()", 1],
+      ["g.V().hasLabel('holder').union(__.local(__.V().hasLabel('person').limit(1)), __.identity()).path().count()", 2],
+      ["g.V().hasLabel('holder').repeat(__.local(__.V().hasLabel('person').order().by('age').limit(1))).times(2).path().count(local).sum()", 3],
+      ["g.V().hasLabel('holder').optional(__.V().hasLabel('person').limit(1)).path().count(local).sum()", 2],
+    ] as const)('%s is exact and linear', (q, perHolder) => {
+      expect(count(small, q)).toBe(1000 * perHolder);
+      expect(count(large, q)).toBe(8000 * perHolder);
+      expect(best(() => run(large, q)) / Math.max(best(() => run(small, q)), 5)).toBeLessThan(16);
+    }, 60_000);
+
+    test('each path is the host extended by the ONE element the read met', () => {
+      const store = graph(50, 50);
+      const paths = bare(run(store, "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age', desc).limit(1)).path().by(id)"))
+        .map((row: { list: string }) => JSON.parse(row.list).map((e: { v: number }) => e.v));
+      // The oldest person is the last odd-indexed candidate: id 100.
+      expect(paths).toHaveLength(50);
+      for (const [i, p] of paths.entries()) expect(p).toEqual([i + 1, 100]);
+    });
+  });
+
+  // A barrier AFTER the read moves would cut hosts × graph per host: declined (the shared read would need a path
+  // tracked from its own start, concatenated onto the host's after the cross — not built).
+  test.each([
+    "g.V().local(__.V().out().limit(1)).path()",
+    "g.V().local(__.V().hasLabel('person').out().order().by('name').limit(1)).path()",
+  ])('%s declines naming the shape', (q) => {
+    expect(() => compile(q, {})).toThrow(/a V\(\)\/E\(\) inside local\(\) on a traverser whose path is tracked/);
+  });
 
   test.each([
     "g.V().local(__.V().hasLabel('software').count()).path()",
