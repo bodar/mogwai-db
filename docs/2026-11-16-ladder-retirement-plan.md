@@ -137,6 +137,12 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    (`{v:brussels,s:2004}`, `{centreville,1990}`, …) but still declines in connector-only mode. The likely reason is
    that the connector feeds a property traverser to `project().by(T.value).by('startTime')` and the ladder answers
    that part. Fix the connector's `project().by` over a property host before R7.
+   ✅ **Known witness LANDED (be26dfa7, c8c7d7f4).** `reductionHost` answers the property framing and
+   `recordLeft` passes it through, so the connector alone answers `project().by(…)` over a property row; the
+   hand-built property `ChildHost` literals and `propertyTail`'s duplicate `project` record are gone, and
+   `propertyTail` hands shape-keeping steps on through `continueAs` (`src/compiler/rel/lower/reduction.ts`,
+   `scoped.ts`, `lower.ts`). Connector-only, 1k → 8k: 3.2×–5.8×, linear. Remains for this witness: nothing (the
+   sweep itself still runs as part of R7).
    **Owner (2026-11-19): run the sweep. A WRONG answer is fixed (or, if the fix is not small, turned into a clean
    decline). A LOST answer is fixed if small, else accepted as a decline with a §4 line — it does not block R7.
    A slowdown inside 2× does not block R7.**
