@@ -4,7 +4,8 @@ _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4
 (666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
 R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; G1 audited every performance change and removed
-nothing (each earns its keep), so no item is open. Round 12 landed item
+nothing (each earns its keep). **Round 14's review reopened the plan:** R7a lost answers (a `local()` with a label,
+sack or value body inside a bounded `repeat()`), so U4 (the prerequisite) and then R7b are open. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -56,9 +57,9 @@ every depth gap now goes to §3._
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
   `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d.
-- **Open:** nothing. R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed in full; G1 (item 11) kept every
-  performance change.
-- **No parked branch.** Every round-13 item landed; nothing is waiting on a resume point.
+- **Open: U4, then R7b (items 8b, 8c).** R7a (46e0a19b) lost answers that trunk gave before it (scope rule 1).
+  Apart from that, 6d ((b) 64bae352, (a) d5ce03e2), R7a and G1 (0d10cb47, audit only) landed in full.
+- **No parked branch.** Every round-14 item landed; nothing is waiting on a resume point.
 
 ## Remaining work, in order
 
@@ -140,7 +141,7 @@ every depth gap now goes to §3._
    traverser source or top-level re-source) is spliced into its host chain — `spliceableLocalBody`, consulted by
    `spliceIdentityHosts` (`src/compiler/ir/strategies.ts`); `tree`/`cap` joined `GLOBAL_BARRIER_STEPS`. All four
    witnesses are now below the pre-R7 baseline (e.g. `map(local(outE()).otherV()…fold())` 2.8 / 22.6 ms, 2 joins)
-   and linear. Remains: nothing. The original finding, kept for the record:
+   and linear. Remains: its lost answers in bounded repeat bodies, handled by U4 then R7b (8b, 8c). The original finding, kept for the record:
    R7's forwarding rejoin was past 2× on the unsliced `local(<edge body>).otherV()` family (scope rule 1).
    Measured by review, best of 5, trunk 517e695a~1 → R7, ms at 1k / 8k vertices:
    `g.V().map(local(outE()).otherV().values('name').fold())` 4.1 / 35.9 → 12.4 / 101.1 (**2.8×**);
@@ -154,6 +155,49 @@ every depth gap now goes to §3._
    — a general rule in the connector, not a `(local, otherV)` branch. Re-measure the four witnesses against
    517e695a~1. If the fix is not small, this becomes an owner question (accept, as the R7 owner note allowed "a
    small regression"), not a shoehorn.
+
+8b. **U4 — the bounded unroll admits label, sack, value and select body steps. PREREQUISITE of R7b; do first.**
+   This is the one root cause behind every R7a lost answer. `tryUnroll` (`src/compiler/ir/strategies.ts`) splices
+   `times(n)` only when every body step passes `unrollableBodyStep`, and `as()`, `sack()` (with its `by()`),
+   `values()` and `select()` are not in that set. Before R7a a `local()` host hid them: it was admitted as a
+   `PER_TRAVERSER_RESET_HOSTS` step with no iteration state and lowered per phase by the connector. R7a now splices
+   that body into the repeat body first, so the unroll sees the bare steps and refuses, and the recursive walk
+   cannot hold them either. The inline forms already decline on trunk, corpus scenarios included:
+   `vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/sideEffect/Sack.feature:280`
+   (`repeat(__.outE().sack(Operator.sum).by("weight").inV()).times(2).sack()`) and `…/features/map/Select.feature:462`
+   and `:488` (`as("a").repeat(__.out().as("a")).times(2).select(Pop.first|last, "a")`). Re-verified 2026-11-20 on
+   046254bc: the inline and `local()` forms all decline with the generic "no lowering covers …".
+   Fix: admit these steps as phase steps, each with its reason. A spliced phase is an ordinary chain step, so a
+   label binds and a sack updates once per level, exactly as if written out (prior art:
+   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/RepeatUnrollStrategy.java`).
+   Witness `select()` of a label the body itself binds, and `select(first|last|all, …)` over n bindings of one
+   label. Do NOT narrow `spliceableLocalBody` instead: review and scope rule both call that a per-shape exclusion.
+   It gains the corpus scenarios above; move the L3/census baselines only for them, and say so in the commit.
+
+8c. **R7b — restore R7a's lost answers (scope rule 1: answered before 46e0a19b, decline now). After U4.**
+   Witnesses, trunk 29c83d03 (before R7a) → 46e0a19b, modern graph:
+   - `g.withSack(0.0).V().repeat(__.local(__.outE().sack(sum).by('weight').inV())).times(2).sack()`: [1.4, 2.0] → decline
+     (the `local()` wrapper of Sack.feature:280).
+   - `g.withSack(1.0).V().repeat(__.local(__.outE().sack(mult).by('weight').inV())).times(2).sack()`: [0.4, 1.0] → decline.
+   - `g.V().repeat(__.local(__.outE().as('e').inV())).times(2).select(all,'e').count()`: 2 → decline.
+   - `g.V().repeat(__.local(__.out().as('x').in())).times(2).count()`: 50 → decline.
+   - `g.V().repeat(__.local(__.out().as('x'))).times(2).select('x').values('name')`: [lop, ripple] → decline; also
+     `select(last,'x')` and `select(all,'x').count(local)` ([2, 2]).
+   - `g.V().as('s').repeat(__.local(__.out().select('s'))).times(2).count()`: 14 → decline.
+   - `g.V().repeat(__.local(__.out().values('name'))).times(1)` (6 rows) → decline; also
+     `repeat(local(out().as('a')).simplePath()).times(2)` and `repeat(local(out().as('x'))).times(2).simplePath()`.
+   - Lower reach, different cause: a re-source inside an ARM of a spliced `local()` in a repeat.
+     `g.V().repeat(__.local(__.union(__.V().has('name','marko'), __.out()))).times(2).count()` 32 → decline, and
+     `…local(__.coalesce(__.out('knows'), __.V().has('name','peter')))…` 7 → decline. `spliceableLocalBody`'s V()/E()
+     exclusion reads only top-level body steps. Fix it by reading the body at any depth (one `someStepDeep` walk over
+     the shared `graph-sources-vocabulary` set, outstanding-work §6), not with a per-arm branch.
+   After U4, re-run every witness. Whatever still declines is fixed in the unroll or the splice gate, never with a
+   `(repeat, local)` branch. Add the test review asked for: `test/compiler/local-splice.exec.test.ts` pins a
+   repeat-hosted `local()` over a sack, label and value body (e.g. the `sack(sum)` witness = [1.4, 2.0]).
+   R7a's gains stay: `repeat(local(outE().sack(mult).by('weight').inV())).emit().sack()` (8 rows),
+   `.until(outE().count().is(0)).sack()` (7) and `until(has('name','ripple')).repeat(local(out())).path()` (3) now
+   answer correctly where trunk declined. If U4 turns out not to be small, raise an owner question (accept the loss
+   for now, or keep the splice out of bounded repeat bodies) rather than shoehorn.
 
 9. ✅ **S1 — LANDED (6793d40a; follow-ups 666ebf3e).** `e_pair(src, tgt)` (`src/storage.ts`) is the label-free
    probe; `edgePair` is deleted. Remains: nothing (test-brittleness note folded into outstanding-work §6
@@ -251,8 +295,23 @@ every depth gap now goes to §3._
 
 ## Next round
 
-- **Order: none.** G1 is done (0d10cb47, audit only — no code) and kept every change (item 11); R7a landed 46e0a19b; 6d landed in full (64bae352,
-  d5ce03e2).
+- **Order: U4 (item 8b) → R7b (item 8c).** U4 is R7b's prerequisite and fixes corpus declines on its own. Round 14
+  landed 6d(b) 64bae352, 6d(a) d5ce03e2, R7a 46e0a19b and G1 0d10cb47 (audit only, no code).
+- Round 14's follow-ups outside this plan's scope were filed in `docs/outstanding-work.md` (scope rules 2, 4, 5):
+  - §2 performance (within the 2× bar or pre-existing): `simplepath-reinline` (R7a made
+    `repeat(local(both().simplePath())).times(3)` take the inline SQL, ≈15%), `inline-label-compare-cast` (≈1.36×).
+  - §3 depth gaps (not regressions): `repeat-barrier-otherv`, `weighted-sample-otherv` (both also want a decline that
+    names the shape), `single-row-host-bounds` (6d(b)'s `boundsOf` join and fold/unfold arms), `keyed-group-arm-hosts`
+    (G1 review: a keyed `group('a')` in `coalesce`/`union` arms).
+  - §6 debt: `sample-otherv-selfloop-test`, `row-number-cap-authority`.
+- **Reuse sweep (round 14), filed as outstanding-work §6 items per scope rule 4:**
+  - `graph-sources-vocabulary` — one exported `GRAPH_SOURCES` in `src/compiler/ir/step.ts` replaces R7a's copy in
+    `strategies.ts`, `write.ts`'s original and about 14 hand-spelled `name === 'V' || name === 'E'` tests. R7b's
+    arm-depth splice gate should read it.
+  - `row-number-cap-authority` — one `predicateBound(pred, leaf)` for `uniqueKeyMatches` and `rowNumberCap`
+    (`src/rel/bounds.ts`), the and/or law written once.
+  - `from-v-transparent-vocabulary` — build `FROM_V_TRANSPARENT` from `FILTER_HOSTS` and slice.ts's set renamed
+    `ROW_SLICE_STEPS`, which removes a `SLICE_STEPS` homonym and the drift that 6d(a) had to repair.
 - Round 13's follow-ups outside this plan's scope went to `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (pre-existing): `resource-union-prefix-slice`, `resource-barrier-prefix-path`; `cr-fu5` gained the
     shuffle `limit(n>1)` witness.
@@ -280,4 +339,4 @@ every depth gap now goes to §3._
 
 ## Owner questions (open)
 
-None. Round 13 raised no needs-human question. R7a landed as a small fix (46e0a19b).
+None. Rounds 13 and 14 raised no needs-human question. R7b may raise one if U4 turns out not to be small (item 8c).

@@ -53,11 +53,11 @@ An item marked "verify" may have landed already. Check it against the code befor
 ## Contents
 
 1. [Wrong answers](#1-wrong-answers) — 33 items
-2. [Performance](#2-performance) — 50 items
-3. [Queries we decline](#3-queries-we-decline) — 83 items
+2. [Performance](#2-performance) — 52 items
+3. [Queries we decline](#3-queries-we-decline) — 87 items
 4. [Shared substrate](#4-shared-substrate) — 17 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
-6. [Internal debt](#6-internal-debt) — 84 items
+6. [Internal debt](#6-internal-debt) — 88 items
 7. [Needs an owner decision](#7-needs-an-owner-decision) — 8 items
 8. [Low priority](#8-low-priority) — 13 items
 9. [Won't do](#wont-do)
@@ -372,6 +372,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Fix:** Compute a per-level frontier relation once: a MATERIALIZED CTE per level that level k+1 extends, or the RelIR tree-Plan promotion. Build this before more emit-unroll admissions. It also lets every emitted level share one random draw, which retires the emit-over-`sample()`/`shuffle` decline in `tryUnroll` (`RepeatStep.java:334-353`).
 - **Where:** `src/compiler/ir/strategies.ts` (`tryUnroll`); `src/storage.ts` (`STATEMENT_SHAPE_LIMIT`); `src/sql/kernel/budget.ts`
 
+#### `repeat(both().simplePath()).times(n)` re-inlines the path per level (`simplepath-reinline`)
+- **Area:** `repeat()`
+- **Reach:** common
+- **Problem:** The inline unroll's per-level `simplePath()` check re-inlines the full nested path expression of every earlier level (`jsonb_insert(jsonb_insert(…))`) instead of projecting it once per level. Linear, but against the compute-once rule. R7a (46e0a19b) made `repeat(local(both().simplePath())).times(3)` take this SQL too: 508/3840 → 584/4440 ms at 1k/8k (≈15%, inside the 2× bar).
+- **Fix:** Project each level's path once (a MATERIALIZED level or a projected column) and reference it in the next level's check.
+- **Where:** `tryUnroll` (`src/compiler/ir/strategies.ts`); the path-family lowering in `src/compiler/rel/lower.ts`
+
 ### Performance: branches and nesting
 
 #### Presence gate inlines its value twice (`produced-only-where`)
@@ -425,6 +432,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Problem:** `g.V().values('name').fold().as('x').select('x').unfold().count()` goes from 30.7 ms to 1595.8 ms (52×). A map-valued `values('m')` is 67×. The label-history column `a0 = jsonb_array(jsonb_object('k',3,'v',json(fd8.list)))` copies the whole list onto every exploded row.
 - **Fix:** Drop the history entry through the explode when nothing downstream reads it. Or reference the folded row by key instead of copying it.
 - **Where:** `src/compiler/rel/list.ts`
+
+#### Inline label compare builds a JSON history per row (`inline-label-compare-cast`)
+- **Area:** labels
+- **Reach:** plausible
+- **Problem:** `g.V().as('a').out().in().where(neq('a')).count()` compares through `CAST(json_extract(jsonb_array(jsonb_object('k',0,'v',rn.id)),'$[#-1].v') AS INT)` instead of `rn.id`. Linear; ≈1.36× slower than the old `local()` route at 1k/8k (3.5/28.1 vs 2.6/20.6 ms), which R7a (46e0a19b) now routes through the inline form.
+- **Fix:** When a label's history holds one known entry, compare the bound column directly.
+- **Where:** the label-history `where(neq)` lowering in `src/compiler/rel/lower.ts`
 
 ### Performance: values, lists and maps
 
@@ -824,6 +838,13 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Depends on:** `repeat-slot`
 - **Where:** `gatherRepeatRegion`
 
+#### `otherV()` after a global barrier inside a repeat body (`repeat-barrier-otherv`)
+- **Area:** `repeat()`
+- **Reach:** plausible
+- **Problem:** `g.V(1).repeat(bothE().sample(1).otherV()).times(3)` and `g.V(1).repeat(bothE().limit(1).otherV()).times(3)` decline with the generic "no lowering covers …", which names nothing. The `local(bothE().sample(1).otherV())` recipe answers. The unbounded `repeat(local(out().sample(1))).until(…)` also declines. Not a regression (6d(a), d5ce03e2, did not change them).
+- **Fix:** Carry the edge's `fromV` through a phase-level barrier in an unrolled body; at minimum, a decline that names the barrier-then-`otherV()` shape.
+- **Where:** `tryUnroll` (`src/compiler/ir/strategies.ts`); `edgeFeedsOtherV`, `FROM_V_TRANSPARENT` (`src/compiler/rel/lower.ts`)
+
 ### Queries we decline: branches and nesting
 
 #### Chained `union()` names its input once per arm (`union-chain-references`)
@@ -1016,6 +1037,13 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Fix:** Add a per-key `GroupBiOperator` merge.
 - **Where:** `src/compiler/rel/collection.ts` (`registerGrouping`)
 
+#### A keyed `group('a')` in a `coalesce` or `union` arm (`keyed-group-arm-hosts`)
+- **Area:** side-effects
+- **Reach:** plausible
+- **Problem:** `g.V().coalesce(out('created').group('a').by('name').by(count()), constant(0)).cap('a')` and `g.V().union(group('a').by(label).by(values('age').sum()), out()).cap('a')` decline with "no lowering covers …". The same keyed site answers under `union` (with `by(count())`), `choose`, `optional`, `where`, `local` and `repeat`. Found by G1's review; pre-existing.
+- **Fix:** Admit a keyed group side effect in a `coalesce` arm, and a `by(sum)` reducer in a `union` arm, through the connector's arm hosts.
+- **Where:** `src/compiler/rel/lower/scoped.ts` (`CONNECTORS`); `src/compiler/rel/collection.ts`
+
 ### Queries we decline: values, lists and maps
 
 #### Property-host `group().by(k).by(<pre>.sum())` declines (`pooled-recipe-split`)
@@ -1204,6 +1232,20 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Problem:** `inject` past an element or collection stream declines: `g.V(1).out().inject(7).path()`, `g.V().as('a').inject(1).select('a')`, `g.V(1).as('a').out().inject(1).select('a')`, `g.withSack(1).V().inject(5).sack()`, `g.V().values('age').fold().inject([1])`, `project('a').by('age').inject([a:1])`, `valueMap().inject([…])`, `out().path().inject(1)`. In `mergeArms`, list arms whose `of` differs and computed-map arms do not merge.
 - **Fix:** Merge these arm shapes in `mergeArms`. Make `injectTail`'s alias reset read `addsUnlabelledTraversers`, so the two cannot drift.
 - **Where:** `src/compiler/rel/lower.ts` (`injectTail`, `mergeArms`); `src/compiler/ir/labels.ts` (`addsUnlabelledTraversers`)
+
+#### A weighted `sample()` followed by `otherV()` (`weighted-sample-otherv`)
+- **Area:** movement
+- **Reach:** plausible
+- **Problem:** `g.V(1).bothE().sample(1).by('weight').otherV().count()` (a weighted random walk) declines with the generic "no lowering covers …", which does not say that the weighted sample before `otherV()` is the unsupported part. The unweighted form answers since 6d(a) (d5ce03e2).
+- **Fix:** Let the weighted per-origin draw carry the edge's `fromV` as `perOriginWindow` does; until then, name the shape in the decline.
+- **Where:** `FROM_V_TRANSPARENT`, `edgeFeedsOtherV` (`src/compiler/rel/lower.ts`); the weighted draw in `src/compiler/rel/lower/reduction.ts`
+
+#### A one-row host hidden by a join or a list round-trip (`single-row-host-bounds`)
+- **Area:** writes
+- **Reach:** plausible
+- **Problem:** `g.E().sample(1).outV().addE('likes').to(__.V().hasLabel('software').sample(1))` and `g.V().sample(1).fold().unfold().addE('x').to(__.V().sample(1))` decline with the shared-draw message although the host is one row. `rowBounds` does not see through an edge→vertex lookup join or the unfold of a one-row fold.
+- **Fix:** In `boundsOf`: a lookup join to a unique key keeps the other side's bound; an unfold of a one-row fold of a one-row input is bounded by the list. Not in `rowNumberCap`.
+- **Where:** `src/rel/bounds.ts` (`boundsOf`); `rootedHosts` (`src/compiler/rel/lower/reduction.ts`)
 
 ### Queries we decline: federation, services and io
 
@@ -1804,6 +1846,13 @@ Code-health work. These items change no answer unless they say so.
 - **Depends on:** `explain-reader`
 - **Where:** `test/L2-sql/filter.sql.test.ts`; the shared plan module
 
+#### Pin `sample(…).otherV()` on self-loops and repeated vertices (`sample-otherv-selfloop-test`)
+- **Area:** tests
+- **Reach:** plausible
+- **Problem:** `test/compiler/sample-other-v.exec.test.ts` runs only on the modern graph (no self-loops, no repeated traversers). A self-loop's `bothE()` yields the loop twice and `otherV()` returns the vertex itself; `g.V(1).both().both().local(bothE().sample(1).otherV())` gives one row per traverser (7). Both probed correct at N=1k, neither pinned.
+- **Fix:** Add a small self-loop graph case and a repeated-traverser case. Test-only.
+- **Where:** `test/compiler/sample-other-v.exec.test.ts`
+
 ### Internal debt: compiler internals
 
 #### One loop-head re-dispatch for every tail (`tail-loop-head`)
@@ -2110,6 +2159,27 @@ Each item is measured from N≈1k to N≈8k (linear is about 8×), or it exceeds
 - **Problem:** Several sites hand-roll a one-row unit relation.
 - **Fix:** Export `oneRow` from `build.ts` beside `once()`. Replace `lower.ts` `oneRow`, `u`/`eu`/`pu` in `reduction.ts` (`mapEntryChild`, `perRowCollectionChild`) and `pv` in `write.ts`. `mapEntryChild` and `perRowCollectionChild` become a one-row `make.values({ rows: [[…]] })`, with one Rel node and one nesting level fewer. About 10 lines.
 - **Where:** `src/compiler/rel/lower.ts` `oneRow`; `src/compiler/rel/lower/reduction.ts` `mapEntryChild`, `perRowCollectionChild`; `src/compiler/rel/write.ts`
+
+#### One bound law for `uniqueKeyMatches` and `rowNumberCap` (`row-number-cap-authority`)
+- **Area:** RelIR metadata
+- **Reach:** common
+- **Problem:** `rowNumberCap` (6d(b), 64bae352) copies `uniqueKeyMatches`' AND-takes-min / OR-needs-both walk line for line; only the leaf differs. Its "unpartitioned `row_number`" test also restates `columnIsRowKey`'s window arm (`src/rel/copies.ts`) and the renumber check in `src/rel/position.ts`.
+- **Fix:** One `predicateBound(pred, leaf)` holding the and/or law (≈8 lines fewer); one `isWholeRelationRowNumber(spec)` read by all three sites (the cap also needs 1..N density). Compile-time metadata only.
+- **Where:** `src/rel/bounds.ts` (`uniqueKeyMatches`, `rowNumberCap`); `src/rel/copies.ts` (`columnIsRowKey`); `src/rel/position.ts`
+
+#### One V/E re-source vocabulary (`graph-sources-vocabulary`)
+- **Area:** compiler internals
+- **Reach:** common
+- **Problem:** `GRAPH_SOURCES` in `src/compiler/ir/strategies.ts` (R7a) is a copy of `src/compiler/rel/write.ts`'s, and about 14 sites hand-spell `name === 'V' || name === 'E'` (`reSourceAt` in `scoped.ts`, `reduction.ts`, `lower.ts`, `segment.ts`, `write.ts`, `ir/bulk.ts`). `reSourceAt`'s doc comment in `scoped.ts` sits orphaned above `BOUNDING_SLICES`.
+- **Fix:** Export one `GRAPH_SOURCES = unionOf(VERTEX_SOURCE, EDGE_SOURCE)` from `src/compiler/ir/step.ts` and use it everywhere. Pure refactor. Do NOT swap `spliceableLocalBody`'s any-top-level test for `reSourceAt`'s narrower one — that widens the splice and needs its own witnesses.
+- **Where:** `src/compiler/ir/step.ts`; `src/compiler/ir/strategies.ts` (`spliceableLocalBody`); `src/compiler/rel/write.ts`; `src/compiler/rel/lower/scoped.ts` (`reSourceAt`)
+
+#### Build `FROM_V_TRANSPARENT` from the step vocabularies (`from-v-transparent-vocabulary`)
+- **Area:** compiler internals
+- **Reach:** plausible
+- **Problem:** `FROM_V_TRANSPARENT` (`src/compiler/rel/lower.ts`) hand-lists `FILTER_HOSTS` plus the slice ops; 6d(a)'s whole fix was adding the `sample` it had missed. The slice fold's private `SLICE_STEPS` (`src/compiler/rel/lower/slice.ts`) shares its name with `ir/step.ts`'s exported `SLICE_STEPS` but has different members.
+- **Fix:** Rename and export slice.ts's set (e.g. `ROW_SLICE_STEPS`); build `FROM_V_TRANSPARENT` as `unionOf(FILTER_HOSTS, ROW_SLICE_STEPS, {…the has/path/identity/as/order names})` with the same members. Keep `dedup` out explicitly (its comment says why); `ROW_OPS` is not reusable whole.
+- **Where:** `src/compiler/rel/lower.ts` (`FROM_V_TRANSPARENT`); `src/compiler/rel/lower/slice.ts`; `src/compiler/ir/step.ts`
 
 ### Internal debt: other
 
