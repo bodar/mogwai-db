@@ -8,7 +8,7 @@
 //
 // ── The four kinds, and the one rule that keeps them honest ───────────────────────────────────────
 //
-//   divergence — a deliberate difference with its line in `docs/limitations.md` §4.
+//   divergence — a deliberate difference with its line in `docs/limitations.md` §3.
 //   wall       — a declared capability we do not have (a format, a provider default, an inert strategy).
 //   decline    — a clear `UnsupportedTraversal` for a capability `docs/outstanding-work.md` names.
 //   defect     — a KNOWN WRONG ANSWER, carrying its `docs/outstanding-work.md` ID.
@@ -62,25 +62,25 @@ export const REASONS = {
   'tree-step': { kind: 'decline', why: '`tree()`', cite: ['docs/outstanding-work.md', '**Step vocabulary (matrix-fill).** `tree`'] },
   'subgraph-step': { kind: 'decline', why: '`subgraph(\'sg\')`', cite: ['docs/outstanding-work.md', '`subgraph(\'sg\')`'] },
   'to-direction-step': { kind: 'decline', why: '`to(Direction, …)` / `toE(Direction, …)`', cite: ['docs/outstanding-work.md', '**Step vocabulary (matrix-fill).**'] },
-  'inject-residue': { kind: 'decline', why: '`inject()` with a set literal, or a keyed `select(traversal)` over injected values', cite: ['docs/outstanding-work.md', 'inject list/set residue'] },
-  'set-op-operand': { kind: 'decline', why: '`combine`/`merge`/`disjunct`/`product` between a scalar-membered list and an element-list operand (`values(\'name\').combine(V().fold())`): no mixed member encoding, so the scalar rows\' raise is never reached', cite: ['docs/outstanding-work.md', '(o-setop-mixed)'] },
-  'split-residue': { kind: 'decline', why: '`split()` over a list or inside a body', cite: ['docs/outstanding-work.md', '(o-split)'] },
-  'sack-residue': { kind: 'decline', why: '`withBulk(false)`, `normSack` and sack bodies', cite: ['docs/outstanding-work.md', '(o-sack)'] },
-  'property-stream': { kind: 'decline', why: 'meta-property and property-stream reads', cite: ['docs/outstanding-work.md', '(o-propstream)'] },
-  'path-value': { kind: 'decline', why: '`path()` read as a value (ordered, deduped, keyed, null members)', cite: ['docs/outstanding-work.md', '**Path as a value.**'] },
-  'merge-residue': { kind: 'decline', why: '`mergeV`/`mergeE` shapes beyond the covered driver forms', cite: ['docs/outstanding-work.md', '**Merge residue.**'] },
-  'match-residue': { kind: 'decline', why: '`match()` residue', cite: ['docs/outstanding-work.md', '**`match()` residue.**'] },
-  'union-residue': { kind: 'decline', why: '`union()` as a source, a local reducer arm, or a re-sourced operand', cite: ['docs/outstanding-work.md', '**Source union**'] },
-  'where-predicate': { kind: 'decline', why: '`where()`/`is()` predicates over labels, traversals and side effects', cite: ['docs/outstanding-work.md', '**Labels and scope**'] },
-  'branch-choose-option': { kind: 'decline', why: 'body-keyed `branch()`/`choose()` with `option()`s', cite: ['docs/outstanding-work.md', 'body-keyed `choose`'] },
-  'select-residue': { kind: 'decline', why: '`select()` over Pop/Column/traversal keys and map streams', cite: ['docs/outstanding-work.md', '`Pop.all/mixed`'] },
-  'typeof-collection': { kind: 'decline', why: '`is(typeOf(LIST|SET))` over a LIST framing, which names no List/Set/BulkSet GType yet (`cap()` frames a BulkSet as a list), and a `where`/`project().by()` child over a typeOf-retyped collection', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
-  'repeat-shape': { kind: 'decline', why: '`repeat()` body/modulator compositions', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
-  'group-side-effect': { kind: 'decline', why: '`group`/`groupCount`/`aggregate`/`sideEffect`/`cap` compositions', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
-  'index-step': { kind: 'decline', why: '`index()`', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
-  'add-element-residue': { kind: 'decline', why: '`addV`/`addE` with `with()` options or traversal arguments', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
-  'discard-residue': { kind: 'decline', why: '`discard()` followed by a barrier or a second step', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
-  'uncovered-composition': { kind: 'decline', why: 'another composition no lowering covers; the decline message names it', cite: ['docs/outstanding-work.md', '**Families** (rank by `rel-blockers`)'] },
+  'inject-residue': { kind: 'decline', why: '`inject()` with a set literal, or a keyed `select(traversal)` over injected values', cite: ['docs/outstanding-work.md', '(`inject-set-literal`)'] },
+  'set-op-operand': { kind: 'decline', why: '`combine`/`merge`/`disjunct`/`product` between a scalar-membered list and an element-list operand (`values(\'name\').combine(V().fold())`): no mixed member encoding, so the scalar rows\' raise is never reached', cite: ['docs/outstanding-work.md', '(`o-setop-mixed`)'] },
+  'split-residue': { kind: 'decline', why: '`split()` over a list or inside a body', cite: ['docs/outstanding-work.md', '(`o-split`)'] },
+  'sack-residue': { kind: 'decline', why: '`withBulk(false)`, `normSack` and sack bodies', cite: ['docs/outstanding-work.md', '(`o-sack`)'] },
+  'property-stream': { kind: 'decline', why: 'meta-property and property-stream reads', cite: ['docs/outstanding-work.md', '(`o-propstream`)'] },
+  'path-value': { kind: 'decline', why: '`path()` read as a value (ordered, deduped, keyed, null members)', cite: ['docs/outstanding-work.md', '(`path-as-value`)'] },
+  'merge-residue': { kind: 'decline', why: '`mergeV`/`mergeE` shapes beyond the covered driver forms', cite: ['docs/outstanding-work.md', '(`merge-residue`)'] },
+  'match-residue': { kind: 'decline', why: '`match()` residue', cite: ['docs/outstanding-work.md', '(`match-residue`)'] },
+  'union-residue': { kind: 'decline', why: '`union()` as a source, a local reducer arm, or a re-sourced operand', cite: ['docs/outstanding-work.md', '(`source-union`)'] },
+  'where-predicate': { kind: 'decline', why: '`where()`/`is()` predicates over labels, traversals and side effects', cite: ['docs/outstanding-work.md', '(`labels-scope`)'] },
+  'branch-choose-option': { kind: 'decline', why: 'body-keyed `branch()`/`choose()` with `option()`s', cite: ['docs/outstanding-work.md', '(`body-keyed-choose`)'] },
+  'select-residue': { kind: 'decline', why: '`select()` over Pop/Column/traversal keys and map streams', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
+  'typeof-collection': { kind: 'decline', why: '`is(typeOf(LIST|SET))` over a LIST framing, which names no List/Set/BulkSet GType yet (`cap()` frames a BulkSet as a list), and a `where`/`project().by()` child over a typeOf-retyped collection', cite: ['docs/outstanding-work.md', '(`typeof-list-framing`)'] },
+  'repeat-shape': { kind: 'decline', why: '`repeat()` body/modulator compositions', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
+  'group-side-effect': { kind: 'decline', why: '`group`/`groupCount`/`aggregate`/`sideEffect`/`cap` compositions', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
+  'index-step': { kind: 'decline', why: '`index()`', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
+  'add-element-residue': { kind: 'decline', why: '`addV`/`addE` with `with()` options or traversal arguments', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
+  'discard-residue': { kind: 'decline', why: '`discard()` followed by a barrier or a second step', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
+  'uncovered-composition': { kind: 'decline', why: 'another composition no lowering covers; the decline message names it', cite: ['docs/outstanding-work.md', '(`rel-blocker-families`)'] },
 } as const satisfies Record<string, Reason>;
 
 export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] } = {

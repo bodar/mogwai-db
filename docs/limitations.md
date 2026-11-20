@@ -1,13 +1,12 @@
 # mogwai-db — limitations
 
-This page lists what mogwai-db does not do, and where its answers differ from Java TinkerPop. For what
-it does do, see [feature-support-matrix.md](feature-support-matrix.md).
+This page lists what mogwai-db will not do, and where its answers differ from Java TinkerPop on
+purpose. We do not plan to change these. For what works, and for gaps we plan to close, see
+[feature-support-matrix.md](feature-support-matrix.md).
 
 There are three kinds of limitation:
 
-1. **Not supported yet.** The query fails with an `UnsupportedTraversal` error that names the problem.
-   It never runs with a wrong answer. The decision depends only on the query text, never on the size
-   or content of the graph.
+1. **Out of scope.** Features we will not build.
 2. **Number limits.** SQLite stores numbers in a fixed way. Some values cannot be stored or computed.
 3. **Differences from Java.** mogwai-db is a faithful port, not a copy of Java's execution. It gives
    the answer a user would call correct, under JavaScript and SQLite rules. The rows and the counts
@@ -15,134 +14,21 @@ There are three kinds of limitation:
 
 ---
 
-## 1. Not supported yet
+## 1. Out of scope
 
-Most of these are rare combinations of steps that work on their own.
+| | Why |
+|---|---|
+| `store(k)` | Removed from the Gremlin language. Use `aggregate(k)`. |
+| Single-label graphs | A vertex always has a set of labels, so `elementMap()` and `valueMap(true)` show `T.label` as a set. A one-label-only mode is not offered. |
+| `dedup()` or another barrier inside `repeat(…).until(…)`/`.emit(…)` | A recursive SQL query cannot hold `DISTINCT` or an aggregate. Use `times(n)`, where it works. |
+| `tail()` or `sample()` over a stream with no order to keep | The query has no defined answer to compile. |
+| A map literal with traversal values (`[k: __.…]`) as a `mergeV`/`mergeE` argument | Not planned. |
+| Branch arms with different row shapes, or a per-row slice of a `coalesce`/`optional` arm | Not planned. These fail with a clear error. |
+| Writes after a slice where TinkerPop would stop early | Beyond what `EarlyLimitStrategy` moves, these fail with a clear error. |
+| Row-at-a-time interpretation | Every query compiles to SQL. This is the purpose of the project. |
+| GraphML, Gryo | `io()` reads and writes typed GraphSON and CSV only. |
 
-**Start and move**
-
-- `V()` mid-traversal after `path()`.
-- `V()`/`E()` in a child traversal, after a value that some rows do not have
-  (`optional(…as('a')).map(__.select('a').V()…)`). The answer would depend on which rows had the value.
-- `otherV()` with no entry vertex (`E().otherV()`), or after a mix of vertices and edges
-  (`union(outE(), out()).otherV()`).
-- `to(Direction, …)` and `toE(Direction, …)`.
-- `inject()` with a set literal.
-
-**Filter**
-
-- `where(P)` and `where('a', P)`:
-  - a comparison between value labels (`values('age').as('a') … where('a', P.lt('b'))`);
-  - `by(key)` that reads an edge label;
-  - a side effect as the key, except `P.within`/`P.without` over an `aggregate` collection.
-- `is(P)` after `path()`, or with an operand that reads a label of the same row
-  (`is(P.gt(__.select('x').values('age')))`).
-- `is(typeOf(GType))` over a list.
-- `regex` and `notRegex` in `is()`, `where()` or `match()`. They work in `has()`.
-- `coin(p)`.
-
-**Read element data**
-
-- `valueMap().with(WithOptions.tokens, …)`.
-- Reading meta-properties: `properties().properties()`.
-- `propertyMap()`.
-- `select(k)` of an element out of a `project()` map after `fold().unfold()`.
-
-**Count, aggregate and order**
-
-- `fold(seed, Operator.assign)`.
-- `fold(seed, Operator)` with a list seed other than `[]`, or with a `byte`, `short`, `float`,
-  `bigint` or `bigdecimal` seed or value.
-- `fold(seed, Operator)` with a result of Infinity or NaN. It raises an error.
-- `order()` by a list, map or path inside a child traversal, in a query that writes, or over a
-  federated list. (`order().by(keys)` over list-valued keys compares the JSON text.)
-
-**Write**
-
-- `addE()` directly after `addE()`.
-- `addV(<traversal>)` or `addLabel(<traversal>)` whose label is a list.
-- `dropLabel(<traversal>)`.
-- `property(k, <traversal>)` where the traversal could read a value that another row writes.
-- `mergeV`/`mergeE` with maps that come from `unfold()`.
-- `mergeV`/`mergeE` that write a meta-property with no declared cardinality.
-
-**Branch and nest**
-
-- `union()` with one arm that reduces (`union(count())`).
-- `union()` that mixes maps and plain values.
-- `choose(identity()).option(P.gt(1), …)` — an ordering or text predicate key over an element.
-- `branch()` with only one arm left, when the order of results must be kept.
-- After `coalesce()` or `union()` with mixed result types: `unfold()`, a member transform, or
-  `dedup()` with a key. (`count()`, slices and plain `dedup()` work.)
-- `sideEffect()` whose only effect is a write or an error (`sideEffect(addV(…))`).
-
-**Repeat**
-
-- `repeat(…).until(…)` or `repeat(…).emit(…)` with `dedup()`, an aggregate or a side effect
-  (`aggregate`, `groupCount('k')`) in the body. A recursive SQL query cannot hold these. With
-  `times(n)` they work.
-
-**Paths and labels**
-
-- `unfold()` over a path that mixes vertices and edges (`outE().inV().path().unfold()`).
-- `path().group()`.
-- `tree('k')` (the side-effect form), and a step after `tree()` (`tree().count(local)`).
-- `subgraph('k')`.
-
-**Lists and maps**
-
-- `order(local).by(<traversal>)` over a map.
-- `dedup(local)` with labels or with `by(…)`.
-- A list of properties as a local collection.
-- `merge()` of a non-empty map literal into `valueMap()`.
-- `combine`/`merge`/`disjunct`/`product` between a list of values and a list of elements.
-- `index()`.
-
-**Strings**
-
-- `split(Scope.local, …)`, `split()` over a list, `split()` inside a child traversal, and reading a
-  label bound before `split()`.
-- `reverse()` of a string inside a child traversal.
-
-**Side effects and sacks**
-
-- `aggregate`, `group` or `groupCount` inside a child traversal, when the same child also reads the
-  collection (`local(aggregate('a').cap('a'))`).
-- In a child traversal: a `group(k)` whose `by()` can raise an error, or whose value `by()` reduces;
-  a keyed `group(k)` in a query that writes.
-- `withSack(seed, Operator)`.
-- A `bigint` or `bigdecimal` operand to `sack(Operator)`.
-
-**Pattern matching** — see the ❌ rows in the
-[support matrix](feature-support-matrix.md#12-pattern-matching-match).
-
-**Services and federation**
-
-- `tinker.search`: terms shorter than 3 characters, and `regex`.
-- `federate`: a parameter or `null` as an edge label, `order()` over the bound stream, `path()` or
-  `as()` across the call, and movement over a result that is not a subgraph.
-
-**Strategies**
-
-- `SubgraphStrategy` with `vertexProperties`, or on a query that writes.
-- `PartitionStrategy` with `mergeV`/`mergeE`, or with `includeMetaProperties`.
-- `ProductiveByStrategy` on a `by()` whose host step is not supported.
-- `EarlyLimitStrategy` disabled: a slice after a side effect is not supported.
-
-**Import and export**
-
-- CSV export cannot write list, set or map values, or meta-properties. It writes `bigint`,
-  `bigdecimal`, `uuid`, `char` and `duration` as strings.
-
-## 2. Known issues
-
-These give a wrong answer today. They are bugs, not design choices.
-
-- `barrier(Barrier.normSack)` acts as a plain `barrier()`. It does not normalize the sacks.
-- `tinker.search` with `type: 'VertexProperty'` always returns nothing, also when a meta-property
-  matches.
-
-## 3. Number limits
+## 2. Number limits
 
 | Limit | What happens |
 |---|---|
@@ -154,7 +40,7 @@ These give a wrong answer today. They are bugs, not design choices.
 | Bounded `repeat` inside a child traversal | `repeat(…).times(n)` inside `local`, `map`, `flatMap`, `where` or `by()` works up to `times(63)`. From 64 it would pass SQLite's 64-table join limit, so it is not supported. A top-level `times(n)` has no limit. |
 | Very large or small doubles | Outside about 1e-80 to 1e116, a value can change in its last digit (`1.5e-300` → `1.4999999999999998e-300`). |
 
-## 4. Differences from Java TinkerPop
+## 3. Differences from Java TinkerPop
 
 ### Text
 

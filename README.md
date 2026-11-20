@@ -4,135 +4,138 @@
 
 # mogwai-db
 
-**A TinkerPop 4 graph database with SQLite as its engine — natively targeting the browser, edge, bare metal and Docker.**
+**A TinkerPop 4 graph database that uses SQLite as its engine. It runs in the browser, at the edge,
+as a single binary and in Docker.**
 
-Point any TinkerPop 4 client at it and it speaks Gremlin over the standard HTTP
-wire — no bespoke driver. Underneath there's no graph query engine to run and
-scale — just SQLite.
+Connect any TinkerPop 4 client. The client sends Gremlin over the standard HTTP protocol. You do not
+need a special driver. mogwai-db compiles each query to SQL, and SQLite runs it.
 
-> ### Status: pre-alpha — design in the open, not for production
+> ### Status: pre-alpha — not for production
 >
-> Actively developed on `trunk`; no auth yet, expect churn. Shared so the design and
-> progress are visible, not because it's production-ready.
+> We develop on `trunk` in the open. There is no authentication yet, and the API can change.
 >
-> - **Understands the whole language** — 2,395 / 2,395 canonical Gremlin traversals
->   parse and chain (100%), through a parser generated from TinkerPop's own `Gremlin.g4`.
-> - **Executes correctly** — **<!-- L3:passing -->2,058<!-- /L3:passing --> / <!-- L3:ceiling -->2,246<!-- /L3:ceiling -->** official TinkerPop Gherkin scenarios pass
->   through the *unmodified* `gremlin` JS client (tinkerpop `origin/master`) over the real GraphBinary wire,
->   run as a **ratchet** (the number only goes up). The second number is the ceiling: the
->   <!-- L3:in-scope -->2,270<!-- /L3:in-scope --> in-scope scenarios, less the ones we will not pass by design
->   (a [deliberate difference or a declared limit](docs/limitations.md)).
-> - **Reads + writes + strategies** land across a wide step surface. For the exact
->   per-step edges see the **[feature support matrix](docs/feature-support-matrix.md)**.
+> - **Parses the whole language.** All 2,395 / 2,395 standard Gremlin traversals parse. The parser
+>   is generated from TinkerPop's own `Gremlin.g4` grammar.
+> - **Gives correct answers.** **<!-- L3:passing -->2,058<!-- /L3:passing --> / <!-- L3:ceiling -->2,246<!-- /L3:ceiling -->**
+>   official TinkerPop test scenarios pass. They run through the unmodified `gremlin` JavaScript
+>   client over the real GraphBinary protocol. The pass count can only go up.
+>   The second number is the ceiling: the <!-- L3:in-scope -->2,270<!-- /L3:in-scope --> in-scope
+>   scenarios, less the ones we will not pass by design
+>   ([limitations](docs/limitations.md)).
+> - **Reads, writes and strategies** are supported across most steps. See the
+>   **[feature support matrix](docs/feature-support-matrix.md)**.
 
-## SQLite is the engine
+## Quick start
 
-A Gremlin traversal is normally run by walking its step chain one traverser at a
-time. mogwai-db doesn't — it **lowers each whole traversal to a single parameterised
-SQL statement** for SQLite to run. The traversal executes *in the same process as
-storage* — no query-engine-to-storage hop — and k-hop movement becomes index-only
-covering scans. The planner, indexes, and execution are SQLite's; mogwai-db's job is
-the compile.
+1. Start a server with Docker:
+
+   ```sh
+   docker run -p 8182:8182 -v data:/data ghcr.io/bodar/mogwai-db:latest
+   ```
+
+2. Send a query. A graph is created the first time you use its name:
+
+   ```sh
+   curl -X POST localhost:8182/gremlin/demo -d '{"gremlin":"g.addV(\"person\").property(\"name\",\"ada\")"}'
+   curl -X POST localhost:8182/gremlin/demo -d '{"gremlin":"g.V().values(\"name\")"}'
+   ```
+
+3. Or point a TinkerPop 4 client (any language) at `http://localhost:8182/gremlin/demo`.
+
+## Install
+
+Every edition is self-contained. Each release publishes all of them
+([Releases](../../releases)).
+
+| Edition | How to run |
+|---|---|
+| **Docker** | `docker run -p 8182:8182 -v data:/data ghcr.io/bodar/mogwai-db:latest` (multi-arch). |
+| **Binary** | Download `mogwai-db-<version>-<os>-<arch>` (Linux, macOS, Windows; arm64 and amd64). Run `./mogwai-db --data-dir ./graphs`. It serves on port 8182. Use `--help` for options. |
+| **Cloudflare Durable Objects** | Unzip `mogwai-db-<version>-cloudflare.zip`. Set `CLOUDFLARE_API_TOKEN`. Run `./deploy.sh`. One Durable Object holds one graph. |
+| **Browser** | Unzip `mogwai-db-<version>-browser.zip` into a static folder. Add `<script type="module" src="mogwai-db.js">`. SQLite runs as WebAssembly behind a Service Worker, so the database lives in the browser tab with no server. A TinkerPop client or a plain `fetch` works. |
+
+All editions share the same parser, compiler and wire code. Only the SQLite layer changes. One
+contract test runs against every edition over the real wire.
+
+## Use the API
+
+| Request | Effect |
+|---|---|
+| `POST /gremlin/{graph}` with `{"gremlin": "…", "bindings": {…}}` | Runs a query. |
+| `PUT /gremlin/{graph}` | Creates a graph. |
+| `GET /gremlin/{graph}` | Describes a graph. |
+| `DELETE /gremlin/{graph}` | Deletes a graph. |
+| `GET /openapi.json` | The OpenAPI 3.1 description of the API. |
+| `GET /docs` | Interactive API reference. |
+
+Because the API describes itself, an agent can use it with no custom code. For example, an MCP
+server can wrap the OpenAPI description.
+
+## How it works
+
+Most Gremlin engines run a query one step and one traverser at a time. mogwai-db does not. It
+compiles the whole traversal to SQL, and SQLite runs it in the same process as the data. A read is
+one SQL statement. Movement between vertices uses covering indexes. SQLite does the planning and
+the execution; mogwai-db does the compiling.
 
 ```mermaid
 flowchart LR
-  G["Gremlin string<br/>+ params"] --> P["parse<br/><i>generated ANTLR</i>"]
-  P --> IR["step chain<br/><i>own IR</i>"]
-  IR --> N["normalize<br/><i>strategies</i>"]
-  N --> L["lower<br/><i>typed Stream pipeline</i>"]
-  L --> Q["one SQL query<br/><i>CTE chain</i>"]
-  Q --> DB[("SQLite engine<br/><i>in-process</i>")]
+  G["Gremlin string<br/>+ parameters"] --> P["parse<br/><i>generated ANTLR</i>"]
+  P --> IR["step chain"]
+  IR --> N["rewrite<br/><i>strategies</i>"]
+  N --> L["lower<br/><i>relational algebra</i>"]
+  L --> Q["SQL<br/><i>CTE chain</i>"]
+  Q --> DB[("SQLite<br/><i>in-process</i>")]
 ```
 
-The lowering pipeline is a typed **Stream** model: each read step transforms an
-immutable stream (elements → scalars → lists → groups → …), accumulating CTEs, and
-the whole plan materialises to GraphBinary only at the root. Movement, filters,
-projections, branching, recursion, paths, aggregation, side-effects and the
-collection/string/date families all lower through this one engine — no row-at-a-time
-interpreter anywhere.
+Every step family compiles through this one path: movement, filters, projections, branches,
+recursion, paths, aggregation, side effects, collections, strings and dates. There is no
+row-at-a-time interpreter.
 
-## Runs everywhere
+## When to use it
 
-Because the engine is SQLite, mogwai-db runs wherever SQLite does. The parser,
-compiler, and GraphBinary wire are platform-agnostic; only the synchronous **SQLite
-leaf** changes per target — and one shared contract test runs against every backend
-over the real wire, so they're proven identical, not tested twice. Every edition is
-self-contained and published on each release ([Releases](../../releases)):
+mogwai-db is for **many small or medium graphs**, each kept close to the code that uses it. Examples:
+a knowledge graph per user, a graph per SaaS tenant, agent memory, a graph inside an app. Each graph
+is one SQLite database, so graphs are isolated from each other. On Cloudflare, a graph that is not
+in use costs almost nothing.
 
-- **Browser** — SQLite compiled to WebAssembly (`opfs-sahpool`) behind a Service
-  Worker; the whole database lives in the tab, no server. Unzip
-  `mogwai-db-<version>-browser.zip` into a static folder and add
-  `<script type="module" src="mogwai-db.js">` — an unmodified TinkerPop client or a
-  plain `fetch` just works.
-- **Edge — Cloudflare Durable Objects** — one DO = one isolated graph. Unzip
-  `mogwai-db-<version>-cloudflare.zip`, set `CLOUDFLARE_API_TOKEN`, run `./deploy.sh`.
-- **Bare metal** — a single self-contained binary (Linux, macOS, Windows; arm64 and
-  amd64). Download `mogwai-db-<version>-<os>-<arch>` and run `./mogwai-db --data-dir ./graphs`
-  (serves on `:8182`; `--help` for flags).
-- **Docker** — a multi-arch image:
-  `docker run -p 8182:8182 -v data:/data ghcr.io/bodar/mogwai-db:latest`.
+**Do not use it** for one very large graph or for analytics at large scale. One graph is one SQLite
+file or one Durable Object (about 10 GB on Cloudflare), and each graph runs on one thread. The graph
+algorithms are included — PageRank, ArticleRank, HITS, degree, betweenness and closeness centrality,
+weakly and strongly connected components, peer-pressure clustering, k-core, node similarity,
+triangle count and shortest path — but they run on one graph at a time, not across a cluster.
 
-Then talk to it: `POST /gremlin/{graph}` with `{"gremlin":"g.V().count()"}`, or point a
-TinkerPop 4 GLV at the same URL. Management (`PUT`/`GET`/`DELETE`) is on the same path.
-
-## Where it fits (and where it doesn't)
-
-mogwai-db is **not** trying to be Neptune or TigerGraph. It targets a different,
-underserved corner: **many small-to-medium isolated graphs** that live close to the
-code that uses them — per-user knowledge graphs, per-tenant SaaS graphs, agent
-memory, in-app graphs, personal projects. One graph is one SQLite database, so
-isolation is free, and on Cloudflare an idle graph costs essentially nothing.
-
-**Poor fit:** one enormous graph, or analytics *at scale*. A single graph is one
-SQLite file / one Durable Object (~10 GB ceiling on Cloudflare) and execution is
-single-threaded per graph, so shard-one-logical-graph or PageRank-over-a-billion-edges
-is Neptune/TigerGraph's job, not this. The OLAP algorithms themselves are here and
-growing — PageRank/ArticleRank/HITS, degree and betweenness centrality, connected
-components (weak + strong), peer-pressure clustering, k-core, node similarity, triangle
-count, and shortest path, all as compiled set-based passes — they just run one graph at
-a time, not across a cluster.
-
-The tick column is an honest **self-rating**: ✅✅ = a real edge · ✅ = on par ·
-❌ = a weak spot for now. Other columns show where each database sits.
+The mogwai-db column is a self-rating: ✅✅ = a strength, ✅ = on par, ❌ = a weakness for now.
 
 | Property | mogwai-db | Neptune | Cosmos (Gremlin) | Neo4j | TigerGraph |
 |---|---|---|---|---|---|
 | Gremlin / TinkerPop | ✅✅ **v4** | v3 | v3 | Cypher | GSQL |
-| Runs | ✅✅ browser · edge · binary · docker | managed only | managed only | self-host · managed | self-host · managed |
-| Scale-to-zero | ✅✅ ~$0 idle | no | no | no | no |
-| Cheap per-tenant fleets | ✅✅ free | costly | costly | costly | costly |
-| Single-graph scale | ❌ ~10 GB | ~unbounded | ~unbounded | large | large |
-| OLAP | ✅ growing library | strong | weak | strong | strong |
+| Runs | ✅✅ browser · edge · binary · Docker | managed only | managed only | self-host · managed | self-host · managed |
+| Scale to zero | ✅✅ ~$0 when idle | no | no | no | no |
+| Many small tenant graphs | ✅✅ free | costly | costly | costly | costly |
+| Size of one graph | ❌ ~10 GB | ~unbounded | ~unbounded | large | large |
+| Graph algorithms | ✅ growing library | strong | weak | strong | strong |
 | Maturity | ❌ **pre-alpha** | GA | GA | GA | GA |
 
-The two ❌ are honest: the scale ceiling is **structural** — one SQLite database, one
-thread per graph — and maturity is **pre-alpha**.
+The size limit is part of the design: one SQLite database, one thread per graph.
 
-## Agent-driven by design
+## Documentation
 
-Graph lifecycle is a thin **REST layer on the same `/gremlin/{graph}` path** —
-`PUT`/`GET`/`DELETE` create, inspect, and destroy a graph; data-plane queries `POST`
-to it. The server is **self-describing**: `GET /openapi.json` serves an OpenAPI 3.1
-spec and `/docs` an interactive reference. TinkerPop has no data-plane
-database-provisioning API — here a graph springs into being on first access, and
-management is in-band on the one path.
-
-The direction of travel: that REST + OpenAPI surface makes mogwai-db a natural home
-for **agent tooling** — an MCP server over the OpenAPI contract, say — where an agent
-creates graphs, writes, and traverses with no bespoke integration, just the described
-HTTP.
+| Document | Use it to |
+|---|---|
+| [Feature support matrix](docs/feature-support-matrix.md) | Look up a Gremlin step and see if it is supported. |
+| [Limitations](docs/limitations.md) | See what we will not build, the number limits, and where answers differ from Java TinkerPop. |
+| [Outstanding work](docs/outstanding-work.md) | See known bugs and planned work. |
+| `GET /docs` on a running server | Look up the HTTP API. |
 
 ## Develop
 
-The toolchain is pinned via [mise](https://mise.jdx.dev): `mise install`, then
-`mise run ci` (the full gate) or `mise run test`. The first run auto-provisions the
-pinned TinkerPop submodule (grammar + Gherkin corpus + JS cucumber runner) and boots
-the Cloudflare half under `wrangler dev`, so it may pause while it clones and starts.
-Everything lands on `trunk` — contributions welcome.
+The toolchain is pinned with [mise](https://mise.jdx.dev). Run `mise install`, then `mise run test`
+or `mise run ci` (the full gate). The first run downloads the pinned TinkerPop submodule (grammar,
+test scenarios and the JavaScript test runner) and starts the Cloudflare edition under
+`wrangler dev`, so it can take some time. All work lands on `trunk`. Contributions are welcome.
 
-## Learn more
+## The name
 
-- **[Feature support matrix](docs/feature-support-matrix.md)** — the scannable,
-  code-grounded map of what compiles and where each partial step stops.
-- The name: *mogwai* (魔怪) is Cantonese for a mischievous little devil — fitting for a
-  pocket-sized graph that speaks **Gremlin**, the TinkerPop query language.
+*Mogwai* (魔怪) is Cantonese for a small, mischievous devil — a good name for a small graph database
+that speaks **Gremlin**, the TinkerPop query language.

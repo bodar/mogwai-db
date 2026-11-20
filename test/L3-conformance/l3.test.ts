@@ -78,7 +78,7 @@ function syncCountFiles(counts: Readonly<Record<string, number>>): string[] {
 }
 
 // THE CEILING: the in-scope scenarios we expect to pass one day. A ledgered `wall` (a capability we
-// declare we do not have) or `divergence` (a deliberate difference, limitations.md §4) will never pass;
+// declare we do not have) or `divergence` (a deliberate difference, limitations.md §3) will never pass;
 // a `decline` or `defect` is work we mean to do, so it stays under the ceiling.
 const neverPasses = (): number => (Object.entries(EXPECTED_OUTCOMES) as [ReasonKey, readonly string[]][])
   .filter(([key]) => REASONS[key].kind === 'wall' || REASONS[key].kind === 'divergence')

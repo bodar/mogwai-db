@@ -5,10 +5,10 @@ its status.
 
 - A supported step works **anywhere in a traversal**, at any depth of nesting.
 - A few rare combinations are not supported yet. They fail with a clear `UnsupportedTraversal` error.
-  They never give a wrong answer. [limitations.md](limitations.md) lists them by area.
-- Some answers follow JavaScript and SQLite rules, not Java rules. The result is the same; the detail
-  can differ (for example number formatting). [limitations.md](limitations.md) lists these
-  differences too.
+  [§17](#17-not-supported-yet-rare-combinations) lists them by area.
+- Some answers follow JavaScript and SQLite rules, not Java rules. The rows are the same; details can
+  differ (for example number formatting). [limitations.md](limitations.md) lists these differences,
+  the number limits, and what is out of scope.
 
 **Conformance:** <!-- L3:passing -->2,058<!-- /L3:passing --> of <!-- L3:ceiling -->2,246<!-- /L3:ceiling --> reachable TinkerPop scenarios pass
 (<!-- L3:in-scope -->2,270<!-- /L3:in-scope --> are in scope; the rest of the reachable gap is listed below as ❌ and 🟡).
@@ -19,7 +19,7 @@ All 2,395 corpus traversals parse.
 | ✅ | Supported. |
 | 🟡 | Partly supported. The note says what is missing. |
 | ❌ | Not supported yet. The query fails with a clear error. |
-| 🚫 | Out of scope. We will not build it. |
+| 🚫 | Out of scope. We will not build it. See [limitations.md](limitations.md#1-out-of-scope). |
 
 **Contents**
 
@@ -39,7 +39,8 @@ All 2,395 corpus traversals parse.
 14. [Import and export (`io`)](#14-import-and-export-io)
 15. [Traversal strategies](#15-traversal-strategies)
 16. [Data model](#16-data-model)
-17. [Out of scope](#17-out-of-scope)
+17. [Not supported yet: rare combinations](#17-not-supported-yet-rare-combinations)
+18. [Out of scope](#18-out-of-scope)
 
 ---
 
@@ -104,7 +105,8 @@ full-text index.
 | `fold(seed, Operator)` | 🟡 | `Operator.assign` and some seed types are missing. |
 | `group().by().by()`, `groupCount()` | ✅ | |
 | `order().by(…)` | ✅ | |
-| `barrier()` | ✅ | `barrier(Barrier.normSack)` — see [limitations](limitations.md). |
+| `barrier()` | ✅ | |
+| `barrier(Barrier.normSack)` | ❌ | Runs, but does not normalize the sacks (a known bug). |
 
 ## 5. Write
 
@@ -140,7 +142,8 @@ A child traversal (the `__.…` argument) can use every supported step, at any d
 | `repeat(…).times(n)` | ✅ | |
 | `repeat(…).until(…)`, `.emit()`, `.emit(…)` | ✅ | All modulator positions. |
 | `repeat(…)` with no modulator | ✅ | |
-| `repeat(…).until(…)` with `dedup()`, an aggregate or a side effect in the body | ❌ | Works with `times(n)`. |
+| `repeat(…).until(…)` with `dedup()` or another barrier in the body | 🚫 | A recursive SQL query cannot hold it. Works with `times(n)`. |
+| `repeat(…).until(…)` with a side effect (`aggregate`, `groupCount('k')`) in the body | ❌ | Works with `times(n)`. |
 
 There is **no depth limit**. A loop over a cycle without `simplePath()` runs until the request limit
 stops it. This is the Gremlin specification.
@@ -285,10 +288,126 @@ disabling `StandardVerificationStrategy` or disabling `ConnectiveStrategy` is re
 - An element id is an integer, or the id you supplied. Vertex-property ids are made by the graph, so
   an import does not keep them.
 
-## 17. Out of scope
+## 17. Not supported yet: rare combinations
 
-| | Why |
-|---|---|
-| `store(k)` | Removed from the Gremlin language. Use `aggregate(k)`. |
-| Row-at-a-time interpretation | Every query compiles to SQL. This is the purpose of the project. |
-| GraphML, Gryo | See §14. |
+The steps above work on their own. These combinations of them do not work yet. Each one fails with a
+clear `UnsupportedTraversal` error that names the problem. The decision depends only on the query
+text, never on the size or content of the graph.
+
+
+### Start and move
+
+- `V()` mid-traversal after `path()`.
+- `V()`/`E()` in a child traversal, after a value that some rows do not have
+  (`optional(…as('a')).map(__.select('a').V()…)`). The answer would depend on which rows had the value.
+- `otherV()` with no entry vertex (`E().otherV()`), or after a mix of vertices and edges
+  (`union(outE(), out()).otherV()`).
+- `to(Direction, …)` and `toE(Direction, …)`.
+- `inject()` with a set literal.
+
+### Filter
+
+- `where(P)` and `where('a', P)`:
+  - a comparison between value labels (`values('age').as('a') … where('a', P.lt('b'))`);
+  - `by(key)` that reads an edge label;
+  - a side effect as the key, except `P.within`/`P.without` over an `aggregate` collection.
+- `is(P)` after `path()`, or with an operand that reads a label of the same row
+  (`is(P.gt(__.select('x').values('age')))`).
+- `is(typeOf(GType))` over a list.
+- `regex` and `notRegex` in `is()`, `where()` or `match()`. They work in `has()`.
+- `coin(p)`.
+
+### Read element data
+
+- `valueMap().with(WithOptions.tokens, …)`.
+- Reading meta-properties: `properties().properties()`.
+- `propertyMap()`.
+- `select(k)` of an element out of a `project()` map after `fold().unfold()`.
+
+### Count, aggregate and order
+
+- `fold(seed, Operator.assign)`.
+- `fold(seed, Operator)` with a list seed other than `[]`, or with a `byte`, `short`, `float`,
+  `bigint` or `bigdecimal` seed or value.
+- `fold(seed, Operator)` with a result of Infinity or NaN. It raises an error.
+- `order()` by a list, map or path inside a child traversal, in a query that writes, or over a
+  federated list. (`order().by(keys)` over list-valued keys compares the JSON text.)
+
+### Write
+
+- `addE()` directly after `addE()`.
+- `addV(<traversal>)` or `addLabel(<traversal>)` whose label is a list.
+- `dropLabel(<traversal>)`.
+- `property(k, <traversal>)` where the traversal could read a value that another row writes.
+- `mergeV`/`mergeE` with maps that come from `unfold()`.
+- `mergeV`/`mergeE` that write a meta-property with no declared cardinality.
+
+### Branch and nest
+
+- `union()` with one arm that reduces (`union(count())`).
+- `union()` that mixes maps and plain values.
+- `choose(identity()).option(P.gt(1), …)` — an ordering or text predicate key over an element.
+- `branch()` with only one arm left, when the order of results must be kept.
+- After `coalesce()` or `union()` with mixed result types: `unfold()`, a member transform, or
+  `dedup()` with a key. (`count()`, slices and plain `dedup()` work.)
+- `sideEffect()` whose only effect is a write or an error (`sideEffect(addV(…))`).
+
+### Repeat
+
+- `repeat(…).until(…)` or `repeat(…).emit(…)` with a side effect (`aggregate`, `groupCount('k')`)
+  in the body. With `times(n)` it works.
+
+### Paths and labels
+
+- `unfold()` over a path that mixes vertices and edges (`outE().inV().path().unfold()`).
+- `path().group()`.
+- `tree('k')` (the side-effect form), and a step after `tree()` (`tree().count(local)`).
+- `subgraph('k')`.
+
+### Lists and maps
+
+- `order(local).by(<traversal>)` over a map.
+- `dedup(local)` with labels or with `by(…)`.
+- A list of properties as a local collection.
+- `merge()` of a non-empty map literal into `valueMap()`.
+- `combine`/`merge`/`disjunct`/`product` between a list of values and a list of elements.
+- `index()`.
+
+### Strings
+
+- `split(Scope.local, …)`, `split()` over a list, `split()` inside a child traversal, and reading a
+  label bound before `split()`.
+- `reverse()` of a string inside a child traversal.
+
+### Side effects and sacks
+
+- `aggregate`, `group` or `groupCount` inside a child traversal, when the same child also reads the
+  collection (`local(aggregate('a').cap('a'))`).
+- In a child traversal: a `group(k)` whose `by()` can raise an error, or whose value `by()` reduces;
+  a keyed `group(k)` in a query that writes.
+- `withSack(seed, Operator)`.
+- A `bigint` or `bigdecimal` operand to `sack(Operator)`.
+
+**Pattern matching** — see the ❌ rows in [§12](#12-pattern-matching-match).
+
+### Services and federation
+
+- `tinker.search`: terms shorter than 3 characters, and `regex`.
+- `federate`: a parameter or `null` as an edge label, `order()` over the bound stream, `path()` or
+  `as()` across the call, and movement over a result that is not a subgraph.
+
+### Strategies
+
+- `SubgraphStrategy` with `vertexProperties`, or on a query that writes.
+- `PartitionStrategy` with `mergeV`/`mergeE`, or with `includeMetaProperties`.
+- `ProductiveByStrategy` on a `by()` whose host step is not supported.
+- `EarlyLimitStrategy` disabled: a slice after a side effect is not supported.
+
+### Import and export
+
+- CSV export cannot write list, set or map values, or meta-properties. It writes `bigint`,
+  `bigdecimal`, `uuid`, `char` and `duration` as strings.
+
+## 18. Out of scope
+
+Features we will not build are listed in [limitations.md](limitations.md#1-out-of-scope).

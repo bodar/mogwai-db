@@ -80,14 +80,14 @@ test('every reason is used, and cites a document that says it', () => {
     const end = rest.search(/^## /m);
     return start < 0 ? '' : rest.slice(0, end < 0 ? undefined : end);
   };
-  const divergences = section(read('docs/limitations.md'), /^## 4\. /m);
+  const divergences = section(read('docs/limitations.md'), /^## 3\. /m);
   const wrongAnswers = section(read('docs/outstanding-work.md'), /^## 1\. /m);
   for (const [key, reason] of Object.entries(REASONS) as [ReasonKey, (typeof REASONS)[ReasonKey]][]) {
     expect({ key, names: EXPECTED_OUTCOMES[key].length > 0 }).toEqual({ key, names: true });
     const [path, text] = reason.cite;
     expect({ key, cited: read(path).includes(text) }).toEqual({ key, cited: true });
-    // The anti-laundering half: a DIVERGENCE must be a limitations.md §4 row, a DEFECT must be a §1 wrong answer with
-    // its ID. A wrong answer cannot be filed as a divergence, because limitations.md §4 would have to say it.
+    // The anti-laundering half: a DIVERGENCE must be a limitations.md §3 row, a DEFECT must be a §1 wrong answer with
+    // its ID. A wrong answer cannot be filed as a divergence, because limitations.md §3 would have to say it.
     if (reason.kind === 'divergence') expect({ key, in17: path === 'docs/limitations.md' && divergences.includes(text) }).toEqual({ key, in17: true });
     if (reason.kind === 'defect') expect({ key, in1: path === 'docs/outstanding-work.md' && /^\([\w-]+\)$/.test(text) && wrongAnswers.includes(text) }).toEqual({ key, in1: true });
   }
