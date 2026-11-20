@@ -81,24 +81,10 @@ row-at-a-time interpreter.
 ### The engine
 
 ```mermaid
-flowchart TB
-  subgraph FE["1 · Front end"]
-    direction LR
-    G["Gremlin text<br/>+ parameters"] --> P["Parse<br/><i>generated from Gremlin.g4</i>"] --> C["Step chain"] --> R["Rewrite rules<br/><i>TinkerPop strategies</i>"]
-  end
-  subgraph ALG["2 · Relational algebra"]
-    L["Lower each step to<br/>relational operators<br/><i>scan · filter · join · aggregate<br/>window · recursive union</i>"]
-    L --> Q{"A child<br/>traversal?"}
-    Q -- "an index can answer it" --> COR["Keep it as a<br/>correlated subquery<br/><i>EXISTS · first-row lookup</i>"]
-    Q -- "otherwise" --> DEC["Decorrelate it<br/>into a join keyed<br/>by the parent row"]
-    COR -- "lower its body<br/>the same way" --> L
-    DEC -- "lower its body<br/>the same way" --> L
-  end
-  subgraph OUT["3 · SQL"]
-    E["One SQL statement<br/><i>nested SELECTs · CTEs · WITH RECURSIVE</i>"]
-  end
-  R --> L
-  L --> E --> DB[("SQLite<br/><i>in-process</i>")]
+flowchart LR
+  G[Gremlin] --> P[Parse] --> R[Rewrite] --> L[Algebra] --> S[SQL] --> DB[(SQLite)]
+  L -- child traversal --> COR[Correlate or decorrelate]
+  COR -- same lowering --> L
 ```
 
 1. **Front end.** A parser generated from TinkerPop's grammar reads the query into a chain of
