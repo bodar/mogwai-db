@@ -320,7 +320,6 @@ export const EXPECTED_OUTCOMES: { readonly [K in ReasonKey]: readonly string[] }
     'g_V_hasLabelXsongX_groupXaX_byXnameX_byXproperties_groupCount_byXlabelXX_out_capXaX',
     'g_V_hasLabelXsongX_group_byXnameX_byXproperties_groupCount_byXlabelXX',
     'g_V_label_groupCount_asXxX_selectXxX',
-    'g_V_localXaggregateXaXX_bothE_sampleX1X_otherV_localXaggregateXaXX_capXaX_unfold_groupCount_byXlabelX',
     'g_V_localXaggregateXaXX_outE_hasXweight_lgtX0_5XX_inV_localXaggregateXaXX_capXaX_unfold_path',
     'g_V_localXgroupCountXaX_selectXaX_countXlocalXX',
     'g_V_localXgroupXaX_byXnameX_by_selectXaX_countXlocalXX',

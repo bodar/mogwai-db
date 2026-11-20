@@ -5506,14 +5506,17 @@ function detachedTail(
 
 /** The steps between an edge hop and an `otherV()` that leave the EDGE and its `fromV` channel intact —
  *  the filter family, `as`, `identity`, and the order/slice family (a sort or window carries every
- *  channel through). A `fromV` channel is minted at the edge hop only if scanning forward through these
+ *  channel through). `sample` belongs to that family: it keeps rows WHOLE and its fenced RANDOM() window
+ *  (`perOriginWindow`) carries every channel, so a random walk's `bothE().sample(1).otherV()` — and the
+ *  `order().by(shuffle).limit(1)` spelling rewritten into it — still knows the vertex each edge was
+ *  entered from. A `fromV` channel is minted at the edge hop only if scanning forward through these
  *  reaches an `otherV`, so a non-transparent step in between stops the scan and the edge stays plain.
  *  `dedup` is DELIBERATELY absent: it GROUPS by id (group policy `undefined` for `fromV`), so a live
  *  `fromV` would either mis-collapse or decline — `bothE().dedup().otherV()` fails closed instead, its
  *  entering vertex genuinely ambiguous once convergent edges merge. */
 const FROM_V_TRANSPARENT: ReadonlySet<string> = new Set([
   'hasLabel', 'has', 'hasId', 'hasKey', 'hasValue', 'where', 'not', 'filter', 'and', 'or',
-  'simplePath', 'cyclicPath', 'identity', 'as', 'order', 'limit', 'range', 'skip', 'tail',
+  'simplePath', 'cyclicPath', 'identity', 'as', 'order', 'limit', 'range', 'skip', 'tail', 'sample',
 ]);
 
 /** Does the edge stream produced at `at` flow into an `otherV()` — through `FROM_V_TRANSPARENT` steps

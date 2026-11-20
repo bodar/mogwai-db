@@ -30,8 +30,10 @@ import { compile } from '../../src/compiler/compiler.ts';
  * traverser and now compiles on the connector (R5.3).
  * 1821 → 1822: a keyed pooled `group("a")` registers its pool's MEMBERS, so the two sites an unrolled
  * `repeat(out().group('a').by('name').by(count())).times(2)` fills are one pool and the traversal now compiles.
+ * 1822 → 1823: a sampled edge feeds `otherV()` (`sample` is `FROM_V_TRANSPARENT`), so the random-walk corpus
+ * traversal `local(aggregate(a)).bothE().sample(1).otherV()…` newly compiles.
  */
-const CEILING = { lowerings: 2016, emissions: 1822, perQuery: 12 } as const;
+const CEILING = { lowerings: 2016, emissions: 1823, perQuery: 12 } as const;
 
 const corpus = (await Bun.file(new URL('../L1-corpus/corpus.txt', import.meta.url)).text()).split('\n').filter(Boolean);
 
