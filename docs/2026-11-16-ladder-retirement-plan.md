@@ -3,7 +3,7 @@
 _Status: IN PROGRESS. Round 12 (2026-11-20) landed item 10's three decided builds: (5) 73616a6b, (3) 22b79ae5 and
 the `sql-plan.ts` scan check d64a6d3a; review's tooling follow-ups on the scan check (10a) landed 4a1e42a8. Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
 R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers. 6a, 6b and then 6c (1d1f3fc8,
-2026-11-20) have landed, so R7 and then G1 are next. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
+2026-11-20) and R7 (82da81ae, 2026-11-20) have landed, so G1 is next. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
 added G1.
 Trimmed hard 2026-11-19 after round 9 (owner request). The full record — every round,
 measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, round 8–9 at `11378285`.
@@ -115,7 +115,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    The `has('age')` map form is newly answered, and trunk already paid this for the `hasLabel` local form. The fix
    needs a bounded-slice-per-origin substrate, which does not exist yet (outstanding-work §1b). (2) outstanding-work
    §4 "param-draw-slice" (`order().by(shuffle).limit(x)` with x≠1) is unchanged.
-7. **R4.6 — find ladder-only answers OUTSIDE the corpus. MERGED INTO R7 (round 11):** the deletion's suite run is
+7. ✅ **R4.6 — LANDED with R7 (82da81ae).** The sweep found no wrong answer; its lost answers were fixed in R7 (see item 8). Remains: nothing.
+   **Was: find ladder-only answers OUTSIDE the corpus. MERGED INTO R7 (round 11):** the deletion's suite run is
    this sweep, so it is not built on its own. The text below is what that run must check. This is a shared prerequisite for R7 and has the same
    root cause as R4.5: L9's pool is only the corpus. Run a one-off `MOGWAI_CONNECTOR_ONLY=1 mise run test` sweep and
    compare each extra decline against default mode. A real lost answer becomes its own item before R7; anything
@@ -134,7 +135,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    **Owner (2026-11-19): run the sweep. A WRONG answer is fixed (or, if the fix is not small, turned into a clean
    decline). A LOST answer is fixed if small, else accepted as a decline with a §4 line — it does not block R7.
    A slowdown inside 2× does not block R7.**
-8. **R7 — delete the switch. DEFERRED in round 11; unblocked now that 6c landed (1d1f3fc8; F2 landed).** R4.6 is merged into R7.
+8. ✅ **R7 — LANDED (82da81ae).** `correlatedChild`, `connectorOnly`, `lower/per-traverser.ts` and L9's ladder-reach are deleted; the connector is the one child lowering, and a host with its own tail lowering falls back to it through `scopedHost`'s `hostTailAt`/`TAILED_HOSTS` (`src/compiler/rel/lower/scoped.ts`); `local(<edge body>).otherV()` is answered by the connector's `allRows('forward')` lowering its body with `fromV`. Scaling unchanged (6.8–9.6× per 8×). Follow-ups filed as outstanding-work §6 `r7-followups`. Remains: nothing.
+   **Was:** delete the switch. DEFERRED in round 11; unblocked now that 6c landed (1d1f3fc8; F2 landed). R4.6 is merged into R7.
    After R4.5 (A) lands and R4.6's sweep shows no wrong answers (owner: get rid of the
    ladder; a small regression or a deferred lost answer is acceptable). Then delete `correlatedChild` and its readers, L5's per-switch entry, and
    `FastPathConfig.connectorOnly` (connector-only becomes the only mode). L9's connector-only ratchet becomes the
@@ -289,8 +291,8 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Next round
 
-- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (6b landed 157d7ad0), then 6c (landed 1d1f3fc8), then R7 (its suite
-  run is R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
+- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (6b landed 157d7ad0), then 6c (landed 1d1f3fc8), then R7 (landed 82da81ae; its suite
+  run was R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
   scan-check fix d64a6d3a.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:
   - fold mergeE's labelled both-endpoint seek arm into the unlabelled one, now that `e_pair` makes the pair one seek;
