@@ -2,8 +2,8 @@
 
 _Status: IN PROGRESS. Round 12 (2026-11-20) landed item 10's three decided builds: (5) 73616a6b, (3) 22b79ae5 and
 the `sql-plan.ts` scan check d64a6d3a; review's tooling follow-ups on the scan check (10a) landed 4a1e42a8. Round 11 (2026-11-19) landed S1 (6793d40a), F2 (34674e92) and the S2 survey (39a8f01a).
-R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers (see 6a–6c). So R7 and G1 were
-deferred. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
+R4.5 was PARKED: it made two quadratic shapes reachable and lost some path answers. 6a, 6b and then 6c (1d1f3fc8,
+2026-11-20) have landed, so R7 and then G1 are next. Round 10 landed F1 and R4.2; the owner answered U1 (→ S1/S2) and R4.5 (A), raised the bar to 2×, and
 added G1.
 Trimmed hard 2026-11-19 after round 9 (owner request). The full record — every round,
 measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, round 8–9 at `11378285`.
@@ -104,31 +104,17 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
      `limit(1)` takes 26 / 32 ms. Sending a limit as a parameter is the normal TinkerPop 4 idiom, so this shape
      has to work.
 
-   6c. **R4.5 — a body that draws over a re-source (`ladderOwns`). DECIDED (owner, 2026-11-19): (A). PARKED in
-   round 11.** The connector owns it (decorrelated per scope row, like every other drawing body) and `ladderOwns`
-   is deleted. Witness: `g.V().hasLabel('person').local(__.V().hasLabel('software').sample(1))`, one independent
-   pick per person. **Resume point:** branch `wf/r4-5-connector-draw-over-resource-1-4` (4a5a40aa; earlier
-   attempts `-1-0` d06e2a6d, `-1-2` 1cf7a9f1, `-1-3` 9702c97d). Rebase it onto 6a and 6b. When it lands again it
-   must also do the following.
-   - **Keep the specific decline reason.** With `ladderOwns` gone, a draw the connector cannot lower gets only
-     'no lowering covers <query>'. Trunk said 'a random draw (sample/coin/shuffle) inside a V()/E() body is not
-     supported where the body may run for more than one traverser…'. Witnesses: `g.V().map(__.V().coin(0.5)
-     .count())`, `g.V().local(__.V().coin(0.5).count())`, `g.V().where(__.V().coin(0.5))`,
-     `g.V().hasLabel('person').local(__.V().hasLabel('software').coin(1.0)).count()`,
-     `g.V().local(__.V().sample(1).by('age'))`, `g.V().hasLabel('holder').map(__.V().hasLabel('person').fold()
-     .sample(local,1)).count()`. Restore the `decline-reasons.exec.test.ts` assertions the branch deleted. Either
-     the fold records the reason, or coin goes through the same per-scope keyed draw that sample uses.
-   - **Keep one filter-fusion authority.** The branch's new loop in `reSource` (`src/compiler/rel/lower/movement.ts`)
-     copies `lowerChainOf`'s PHASE-1 loop (`src/compiler/rel/lower.ts`). Make one helper,
-     `fuseSourceFilters(steps, from, seeded, ctx, stop)`. The copy fuses only under `encounterOf(input.channels)`,
-     so that a `has(k, select(…))` pair stays visible to `src/rel/passes/semijoin.ts`. That guard becomes a
-     parameter of the helper, not a second authority.
-   - **Add scale tests for the fall-through**, at 1k and 8k: `local(__.V().hasLabel('person').order().by('age')
-     .limit(5).sample(1))` and `map(__.V()…sample(1)).path()`. Today only the counting-pick shape is timed.
-   - **Do not land the branch's claim** (in `src/compiler/CLAUDE.md` and the `crossedRun` comment) that, with no
-     position window, a run's filters "stay in the product, where SQLite pushes them". Measured false:
-     `g.V().hasLabel('holder').V().hasLabel('person').has('age',1500).count()` takes 152 ms at 1k and 10,801 ms at
-     8k (71×). This is pre-existing; it is filed in outstanding-work §1b.
+   6c. ✅ **LANDED (1d1f3fc8).** R4.5 (A): a body that draws over a re-source is the connector's, decorrelated per
+   scope row, and `ladderOwns` is deleted. `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`) ends the shared read
+   at the first drawing step; a uniform pick is drawn over it by `drawnPerOrigin` (split out of `reSourcedOnce`,
+   `src/compiler/rel/lower/reduction.ts`), keyed per scope row by the decorrelator, O(scope + read); a coin or a
+   weighted/local sample keeps the shared-draw decline reason. Witness:
+   `g.V().hasLabel('person').local(__.V().hasLabel('software').sample(1))`, one independent pick per person.
+   Remains: (1) a limit after a re-source over a multi-row prefix still builds the whole holders × candidates
+   product (`map(union(identity(),identity()).V().has('age').limit(3).sample(1))`: 1.9 s at 1k, 15.9 s at 8k).
+   The `has('age')` map form is newly answered, and trunk already paid this for the `hasLabel` local form. The fix
+   needs a bounded-slice-per-origin substrate, which does not exist yet (outstanding-work §1b). (2) outstanding-work
+   §4 "param-draw-slice" (`order().by(shuffle).limit(x)` with x≠1) is unchanged.
 7. **R4.6 — find ladder-only answers OUTSIDE the corpus. MERGED INTO R7 (round 11):** the deletion's suite run is
    this sweep, so it is not built on its own. The text below is what that run must check. This is a shared prerequisite for R7 and has the same
    root cause as R4.5: L9's pool is only the corpus. Run a one-off `MOGWAI_CONNECTOR_ONLY=1 mise run test` sweep and
@@ -148,7 +134,7 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
    **Owner (2026-11-19): run the sweep. A WRONG answer is fixed (or, if the fix is not small, turned into a clean
    decline). A LOST answer is fixed if small, else accepted as a decline with a §4 line — it does not block R7.
    A slowdown inside 2× does not block R7.**
-8. **R7 — delete the switch. DEFERRED in round 11; it now waits only on 6c (F2 landed).** R4.6 is merged into R7.
+8. **R7 — delete the switch. DEFERRED in round 11; unblocked now that 6c landed (1d1f3fc8; F2 landed).** R4.6 is merged into R7.
    After R4.5 (A) lands and R4.6's sweep shows no wrong answers (owner: get rid of the
    ladder; a small regression or a deferred lost answer is acceptable). Then delete `correlatedChild` and its readers, L5's per-switch entry, and
    `FastPathConfig.connectorOnly` (connector-only becomes the only mode). L9's connector-only ratchet becomes the
@@ -303,7 +289,7 @@ ran a scaling probe and every probe found something. The owner stopped it twice.
 
 ## Next round
 
-- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (6b landed 157d7ad0), then 6c (rebase the parked branch onto them), then R7 (its suite
+- Order: 10a (tooling, cheap, independent) alongside 6a and 6b (6b landed 157d7ad0), then 6c (landed 1d1f3fc8), then R7 (its suite
   run is R4.6's sweep), then G1. Item 10's decided builds have all landed: (3) 22b79ae5, (5) 73616a6b, and the `sql-plan.ts`
   scan-check fix d64a6d3a.
 - Round 11's reuse proposals are filed in `docs/outstanding-work.md` "Next round — reuse sweep", per scope rule 4:

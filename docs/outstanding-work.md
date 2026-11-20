@@ -559,6 +559,12 @@ refusal comes first: it is a production outage.
 
 Measured N≈1k → 8k (linear ≈8×), or over a DO cap — passes every test graph, fails in production.
 
+- **A limit after a re-source over a multi-row prefix builds the whole holders × candidates product
+  (bounded-slice-per-origin; seen landing ladder-retirement 6c, 1d1f3fc8).**
+  `g.V().map(__.union(__.identity(),__.identity()).V().has('age').limit(3).sample(1))`: 1.9 s at 1k, 15.9 s at 8k.
+  The `has('age')` map form is newly answered by 6c; trunk already paid this for the `hasLabel` `local()` form.
+  Prerequisite: a bounded-slice-per-origin substrate (stop each origin's run after its first n candidates), which
+  does not exist yet.
 - **branch-step-options re-routed answered scalar runs to a slower correlated plan (scalar-tail-fence) —
   MAJOR (review of df99c592).** `scalarTail` now fences the clause reader only where `isSelfContained(rel)`
   holds (`src/compiler/rel/lower.ts`), so `g.V().local(__.values('age').is(P.gt(30)).dedup().fold())` (and
