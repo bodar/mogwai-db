@@ -1028,21 +1028,53 @@ function firstMutatingStep(chain: readonly Step[], read: BodyReader): Step | und
  * is replayed here over the authored chain; an `as()` labels the end step rather than adding one, so
  * it does not end a group. Said as invalid rather than "not supported yet", because no lowering ever
  * will accept it.
+ *
+ * The reference's sentence stays the message, but when the bodiless group was opened because a
+ * modulator found its slot already FILLED — `repeat(out()).until(p).times(2)`, a doubled `emit()` —
+ * the bare sentence baffles: the user did write a `repeat()`. So the collision is remembered and the
+ * reason appended in the user's terms, with the single modulator that says what they most likely
+ * meant (`until(or(loops().is(n), p))` — `loops()` is the counter `times(n)` itself reads).
  */
 function verifyRepeatDefined(chain: readonly Step[]): void {
-  let open: Set<string> | null = null; // the filled slots of the RepeatStep at the chain's end, if any
+  // the filled slots of the RepeatStep at the chain's end, if any, each with the step that filled it
+  let open: Map<string, Step> | null = null;
+  // the [earlier, later] modulators whose collision opened `open`, when that is why it was opened
+  let collided: readonly [Step, Step] | null = null;
   const close = () => {
-    if (open && !open.has('repeat')) throw new VerificationException('The repeat()-traversal was not defined');
+    if (open && !open.has('repeat'))
+      throw new VerificationException('The repeat()-traversal was not defined' + (collided ? `: ${collisionReason(collided[0], collided[1])}` : ''));
     open = null;
+    collided = null;
   };
   for (const s of chain) {
     if (s.name === 'as') continue;
     if (!REPEAT_CLUSTER.has(s.name)) { close(); continue; }
     const slot = s.name === 'times' ? 'until' : s.name;
-    if (open?.has(slot) !== false) { close(); open = new Set(); }
-    open!.add(slot);
+    const filler: Step | undefined = open?.get(slot);
+    if (open === null || filler) {
+      close();
+      open = new Map();
+      collided = filler && slot !== 'repeat' ? [filler, s] : null;
+    }
+    open.set(slot, s);
   }
   close();
+}
+
+/** Why a second exit condition (or emit) on one `repeat()` started a bodiless one, in the user's
+ *  terms, and the single modulator that expresses what they most likely meant. */
+function collisionReason(first: Step, second: Step): string {
+  const tail = 'and one repeat() takes only one, so the second starts a new repeat() with no body';
+  const a = first.name, b = second.name;
+  if (a === 'emit')
+    return `two emit() modulators on one repeat() — emit() sets which iterations repeat() emits ${tail}; combine them in one emit(), e.g. emit(or(<condition>, <condition>))`;
+  if (a === 'times' && b === 'times')
+    return `two times() modulators on one repeat() — times() sets repeat()'s exit condition ${tail}; keep one times()`;
+  if (a === 'until' && b === 'until')
+    return `two until() modulators on one repeat() — until() sets repeat()'s exit condition ${tail}; combine them in one until(), e.g. until(or(<condition>, <condition>))`;
+  const n = (a === 'times' ? first : second).args?.[0]?.value;
+  const count = typeof n === 'number' || typeof n === 'bigint' ? String(n) : 'n';
+  return `times() and until() both set repeat()'s exit condition ${tail}; combine them in one until(), e.g. until(or(loops().is(${count}), <condition>))`;
 }
 
 /**

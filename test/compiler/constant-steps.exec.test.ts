@@ -44,6 +44,43 @@ describe('a repeat modulator without repeat() is invalid Gremlin', () => {
     expect(() => run(store, q)).toThrow('The repeat()-traversal was not defined');
   });
 
+  // A modulator that collides with a FILLED slot is why its new repeat() has no body; the message
+  // keeps the reference's sentence and says so in the user's terms, naming the one-modulator form.
+  // `until(…).times(n)` — "until X but at most n hops" — is the natural intent this explains.
+  const timesUntil = [
+    'g.V().repeat(__.out()).until(__.out().count().is(0)).times(2).count()',
+    'g.V().repeat(__.out()).times(2).until(__.out().count().is(0)).count()',
+    'g.V().times(2).repeat(__.out()).until(__.out().count().is(0)).count()',
+    'g.V().until(__.out().count().is(0)).repeat(__.out()).times(2).count()',
+    // at depth: a per-traverser body and a filter body
+    'g.V().local(__.repeat(__.out()).until(__.out().count().is(0)).times(2)).count()',
+    'g.V().where(__.repeat(__.out()).times(2).until(__.hasLabel("software"))).count()',
+  ];
+  test.each(timesUntil)('times() with until() explains the collision and suggests loops(): %s', (q) => {
+    expect(() => run(store, q)).toThrow(VerificationException);
+    expect(() => run(store, q)).toThrow('The repeat()-traversal was not defined: times() and until() both set');
+    expect(() => run(store, q)).toThrow('until(or(loops().is(2), <condition>))');
+  });
+
+  test('the suggested loops() form answers what the collision meant', () => {
+    expect(count('g.V().repeat(__.out()).until(__.or(__.loops().is(2), __.out().count().is(0))).count()')).toBe(7);
+  });
+
+  test.each([
+    ['g.V().repeat(__.out()).emit().emit(__.hasLabel("software")).count()', 'two emit() modulators', 'emit(or('],
+    ['g.V().repeat(__.out()).until(__.hasLabel("x")).until(__.hasLabel("y")).count()', 'two until() modulators', 'until(or('],
+    ['g.V().repeat(__.out()).times(2).times(3).count()', 'two times() modulators', 'keep one times()'],
+  ])('a doubled modulator explains the collision: %s', (q, names, hint) => {
+    expect(() => run(store, q)).toThrow(names);
+    expect(() => run(store, q)).toThrow(hint);
+  });
+
+  test('with no collision the message is the reference sentence alone', () => {
+    let msg = '';
+    try { run(store, 'g.V().emit()'); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toBe('The repeat()-traversal was not defined');
+  });
+
   test.each([
     'g.V().emit().repeat(__.out()).times(1).count()',
     'g.V().times(1).repeat(__.out()).count()',
