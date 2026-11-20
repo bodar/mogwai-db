@@ -27,7 +27,7 @@ import { pathCarried } from '../path.ts';
 import { BULK, encounterOf, graphOf, originOf, type ChainCtx } from './chain.ts';
 import { withChannel } from '../../../channels.ts';
 import { dropPath, mapKeyCollidedOwn, orderRows } from '../lower.ts';
-import { childSeam } from './reduction.ts';
+import { childSeam, reductionHost } from './reduction.ts';
 
 export function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
@@ -319,7 +319,7 @@ export const elementRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowS
  *  in `property.ts` — a `VertexProperty` IS an `Element` (compared and hashed by id) while an edge
  *  `Property` is compared and hashed by KEY and VALUE. */
 export const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowShape => ({
-  host: { kind: 'property', id: propertyRowId(input), ownerElem: elem, row: { rel: input, aliases } },
+  host: reductionHost(input, { kind: 'property', ownerElem: elem }, aliases),
   // The property row's own rowid: deterministic for both owner kinds, even where it is not the identity.
   tie: (rel) => [propertyRowId(rel)],
   identity: (rel) => propertyIdentityKey(rel, elem),

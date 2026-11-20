@@ -31,7 +31,7 @@ import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { appendValuePosition, PATH_CHANNEL, pathCarried, subPathMembers } from '../path.ts';
 import { perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
-import { metaPropertyRead, propertyMetaBag, propertyReadOf } from '../property.ts';
+import { metaPropertyRead, propertyMetaBag, propertyReadOf, propertyRowId } from '../property.ts';
 import { raisingWhen, transformOffences } from '../receiver.ts';
 import { evidenceOf } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
@@ -159,13 +159,17 @@ const oneRowPresence = (rel: Rel, nullable = false): Presence =>
  * productivity the seam cannot state (`ChildValue.present` `'unknown'` — a numeric reducer over an empty
  * child, which `correlatedExists` fails closed on for the same reason) declines here too.
  */
-/** The child HOST for a per-traverser body over an element or scalar stream — the subject `scalarChild`
- *  reads. Extracted so the `map`/`local`/`flatMap` dispatch and a `coalesce`/`optional` reduction arm
- *  name ONE host shape rather than two copies of it. */
+/** The child HOST for a body over an element, scalar or PROPERTY stream — the subject `scalarChild` and the
+ *  record builder read. The ONE builder of a `ChildHost` from a stream's framing: the `map`/`local`/`flatMap`
+ *  dispatch, a `coalesce`/`optional` reduction arm, `project().by()` (`recordLeft`), the property group
+ *  barrier and the property `RowShape` all name this host rather than each spelling a copy of it. A
+ *  PROPERTY traverser is addressed by its stored row's own rowid (`propertyRowId`) — the address
+ *  `branchSubject` uses and every `by()` token/key read (`propertyReadOf`) seeks on. */
 export function reductionHost(
-  rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, labels: AliasMap,
+  rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' | 'scalar' | 'property' }>, labels: AliasMap,
 ): ChildHost {
   if (framing.kind === 'elements') return elementHost(rel, framing.elem, labels);
+  if (framing.kind === 'property') return { kind: 'property', id: propertyRowId(rel), ownerElem: framing.ownerElem, row: { rel, aliases: labels } };
   // The host's tag is the ONE reading of the row's own type (`streamRowTag`): the stored `vtype`, a per-row tag
   // column (a reducer's `vt`), else the static tag. Reading `vtype` alone re-framed a min/max winner by
   // inference inside `local()` — `max()` of [5, 2.5d] came back the Int 5 — and judged its predicates by

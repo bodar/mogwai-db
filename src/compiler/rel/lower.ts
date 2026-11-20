@@ -25,7 +25,7 @@ import { orderReadAfter, bulkObservedFrom } from '../ir/bulk.ts';
 import { memberTypeOf, MERGED_VTYPE, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, literalKeyFacts, mapKeyFacts, mayHoldKey, meetMapKeyFacts, recordKeyFacts, type FramedRel, type MapKeyFacts, type RecordField, type RelFraming } from './framing.ts';
-import { recordField, recordOf, recordPayload, recordToMap, selectKeys } from './record.ts';
+import { recordField, recordPayload, recordToMap, selectKeys } from './record.ts';
 import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyAsString, propertyElement, propertyHasClause, propertyId, propertyKey, metaPropertyValues, propertyPayload, propertyRowId, propertyValue } from './property.ts';
 import { edgeEndpoint } from './element.ts';
@@ -85,7 +85,7 @@ import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, noteUnrolled, 
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
 import { childHostOf, namesACollection, sourceFilter } from './lower/filter.ts';
-import { admitsReSource, childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
+import { admitsReSource, childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, reductionHost, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
 import { perTraverserChild } from './lower/per-traverser.ts';
 import { atLadder, connectorSite, scopedHost } from './lower/scoped.ts';
 import { BRANCH_HOSTS, branchArms, meetFraming, mergeArms, sameFraming, sourceUnion, variantTail, type BranchRel } from './lower/branch.ts';
@@ -6275,21 +6275,13 @@ function propertyTail(
   // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:176-190`), which is why it
   // is here before the retypes below rather than after the modulator guard they share.
   if (step.name === 'group' || step.name === 'groupCount') {
-    const host: ChildHost = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, row: { rel, aliases: labels } };
+    const host = reductionHost(rel, { kind: 'property', ownerElem: elem }, labels);
     const grouped = groupBarrier(rel, host, step, bulked, childSeam(ctx, fresh), ctx.source, fresh);
     return grouped && continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
 
-  // `project(…)` over a property stream — the SAME record builder the element and scalar tails share
-  // (`collectionArm`), handed a property host: each `by()` asks the child seam about the VertexProperty
-  // (`by(T.value)`, `by(__.value())`, `by('metaKey')`, `by(__.values('metaKey'))`), so nothing here is
-  // property-specific but the host. A carried path declines, as `collectionArm`'s does.
-  if (step.name === 'project') {
-    if (pathCarried(rel)) return null;
-    const host: ChildHost = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, row: { rel, aliases: labels } };
-    const record = recordOf(rel, host, { kind: 'property', ownerElem: elem }, step, childSeam(ctx, fresh), ctx.source, fresh);
-    return record && continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, from + 1, bulked, ctx, fresh, labels);
-  }
+  // `project(…)` over a property stream is not here: it is the connector's record (`recordLeft`, `lower/scoped.ts`)
+  // over the same property host, reached through `continueAs` before this tail.
 
   // A CORRELATED FILTER over a property traverser — `where`/`filter`/`not`/`and`/`or`, the SAME
   // `sourceFilter` vocabulary the element and scalar hosts use, reachable now that a property is a

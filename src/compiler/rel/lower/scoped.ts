@@ -1901,7 +1901,7 @@ const recordLeft: Connector = (site) => {
   const keys = step.args.length;
   const bys = modulations(step, keys, child);
   if (!bys) return null;
-  const host = (from: Rel) => (framing.kind === 'elements' || framing.kind === 'scalar' ? reductionHost(from, framing, labels) : null);
+  const host = (from: Rel) => (framing.kind === 'elements' || framing.kind === 'scalar' || framing.kind === 'property' ? reductionHost(from, framing, labels) : null);
   // The scope is minted only once a slot needs it.
   let sc: Scope | undefined;
   // Which `by()` slots this connector answers: every CHILD body it can lower, correlated or keyed. Decided per
@@ -2862,9 +2862,9 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
  * `byValues` hands it the landed `by()` values, the connector's own use of it — but the tail no longer answers the
  * site ALONE, correlating its `by()` bodies itself. `group` joins in every form: its keyed `group("m")` is the
  * row's too, assigned or pooled — `keyedPooledGroup`.) A host leaves the ladder by joining
- * this set in the commit that deletes its route. Keyed by the FRAMINGS the deleted route served: over any other
- * framing the tail that lowers the step is the host's own lowering, not a ladder (`project` over a property row is
- * `propertyTail`'s record — `recordLeft` reads a `by()` through an element or scalar host only), and so is a step
+ * this set in the commit that deletes its route. Keyed by the FRAMINGS the deleted route served (and `project` over a
+ * PROPERTY row, whose `propertyTail` record was deleted once `recordLeft` read a property host through
+ * `reductionHost`): over any other framing the tail that lowers the step is the host's own lowering, not a ladder, and so is a step
  * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
  * `groupCount("m")` — `byValues` leaves both to the host).
  */
@@ -2875,7 +2875,7 @@ const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCou
  *  a draw over a re-source, `docs/2026-11-16-ladder-retirement-plan.md` R2b/R4.3/R4.4) — the one form of their
  *  route still standing. */
 const ladderless = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =>
-  LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar')
+  LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar' || (framing.kind === 'property' && step.name === 'project'))
   && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length)
   && (!FILTER_HOSTS.has(step.name) || ![...step.args.map((arg) => arg.value), ...(step.modulators ?? []).flat()].some((value) => {
     if (!isNested(value)) return false;
