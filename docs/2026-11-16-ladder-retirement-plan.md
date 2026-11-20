@@ -3,7 +3,7 @@
 _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4a1e42a8), S1's follow-ups
 (666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
-What is left is one in-scope regression fix found by round 13's review (R7a; 6d landed — (b) 64bae352, (a) d5ce03e2), then G1. Round 12 landed item
+R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; what is left is G1. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -55,7 +55,7 @@ every depth gap now goes to §3._
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
   `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d.
-- **Open:** R7a (a regression a round-13 commit introduced; scope rule 1), then G1. 6d landed in full ((b) 64bae352, (a) d5ce03e2).
+- **Open:** G1. R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed in full.
 - **No parked branch.** Every round-13 item landed; nothing is waiting on a resume point.
 
 ## Remaining work, in order
@@ -132,9 +132,14 @@ every depth gap now goes to §3._
 8. ✅ **R7 — LANDED (82da81ae).** `correlatedChild`, `connectorOnly`, `lower/per-traverser.ts` and L9's
    ladder-reach are deleted; `local(<edge body>).otherV()` is answered by `allRows('forward')` lowering its body
    with `fromV`. Follow-ups in outstanding-work §6 `r7-followups` and §3 `local-edge-otherv-depth`.
-   **One regression past the 2× bar — see R7a.**
+   Its one regression past the 2× bar is fixed by R7a.
 
-8a. **R7a — R7's forwarding rejoin is past 2× on the unsliced `local(<edge body>).otherV()` family (scope rule 1).**
+8a. ✅ **R7a — LANDED (46e0a19b).** A `local()` whose body holds no stream barrier (and no write, call, unlabelled
+   traverser source or top-level re-source) is spliced into its host chain — `spliceableLocalBody`, consulted by
+   `spliceIdentityHosts` (`src/compiler/ir/strategies.ts`); `tree`/`cap` joined `GLOBAL_BARRIER_STEPS`. All four
+   witnesses are now below the pre-R7 baseline (e.g. `map(local(outE()).otherV()…fold())` 2.8 / 22.6 ms, 2 joins)
+   and linear. Remains: nothing. The original finding, kept for the record:
+   R7's forwarding rejoin was past 2× on the unsliced `local(<edge body>).otherV()` family (scope rule 1).
    Measured by review, best of 5, trunk 517e695a~1 → R7, ms at 1k / 8k vertices:
    `g.V().map(local(outE()).otherV().values('name').fold())` 4.1 / 35.9 → 12.4 / 101.1 (**2.8×**);
    `g.V().local(bothE().where(otherV().has('age',gt(30)))).otherV().count()` 4.1 / 40.2 → 9.8 / 88.6 (**2.2×**);
@@ -229,7 +234,7 @@ every depth gap now goes to §3._
 
 ## Next round
 
-- **Order: R7a, then G1** (6d landed in full: 64bae352, d5ce03e2). G1 waits for R7a.
+- **Order: G1** (R7a landed 46e0a19b; 6d landed in full: 64bae352, d5ce03e2).
 - Round 13's follow-ups outside this plan's scope went to `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (pre-existing): `resource-union-prefix-slice`, `resource-barrier-prefix-path`; `cr-fu5` gained the
     shuffle `limit(n>1)` witness.
@@ -257,4 +262,4 @@ every depth gap now goes to §3._
 
 ## Owner questions (open)
 
-None. Round 13 raised no needs-human question. R7a may become one only if its fix is not small (see the item).
+None. Round 13 raised no needs-human question. R7a landed as a small fix (46e0a19b).
