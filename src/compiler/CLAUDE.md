@@ -38,10 +38,9 @@ while what they operate on keeps TinkerPop's.
 - **The lowering is a fold over `Step[]`, not an object graph.** The `src/compiler/rel/lower/` module
   is the fold — `lower.ts` holds the fold core (the shape tails, `continueAs`, assembly and the
   `lower*` entry points), and the cohesive clusters live beside it as `lower/{chain,movement,slice,
-  filter,exists,reduction,branch,scoped,per-traverser}.ts` (shared vocabulary; physical movement;
+  filter,exists,reduction,branch,scoped}.ts` (shared vocabulary; physical movement;
   slice/row algebra; the filter steps; a child body as a boolean — the correlated `EXISTS`; the child
-  seam and the correlated first-row read; branch/merge; the connector; the ladder's per-traverser
-  ROUTE — the only ladder-only code, the one file `mise run ladder` ratchets per file). The shape-aware payload builders
+  seam and the correlated first-row read; branch/merge; the connector). The shape-aware payload builders
   a level up (`element.ts`, `list.ts`, `map.ts`, `record.ts`, `path.ts`, `foreign.ts`, …) are pure
   functions it calls. The `lower/` family is mutually recursive (a tail calls `continueAs` which
   re-dispatches into a cluster which calls back), so it uses function-level import cycles WITHIN the
@@ -83,13 +82,14 @@ while what they operate on keeps TinkerPop's.
     that produced ~890 decline sites and a 98% decline rate at depth 5.
   - **A body that does not lower is fixed in the body's lowering or in `decorrelate.ts`** (one rule per
     node kind), so the fix composes at every depth and under every host at once.
-  - **The old ladder is the `correlatedChild` FastPath and it is SHRINKING.** A route survives only with
-    a MEASURED win (`mise run scaling`, 1k/8k) weighed against its complexity; a complex route the
-    connector replaces is deleted. Never extend it. Deleting a rung is scope worth taking. A deleted route's host
-    joins `LADDERLESS` (`lower/scoped.ts`, so the dispatch offers no ladder there); every route still standing is
-    in the plan's "Kept routes" catalogue with its margin, its sole-answer queries and the owner's call to make.
-  - The two orders are each other's fallback at a site; there is no whole-compile retry in the other order
-    (`bothChildOrders` was deleted once the wide ladder-reach sample measured it rescuing nothing). A body that re-sources
+  - **The old ladder is DELETED** (`docs/2026-11-16-ladder-retirement-plan.md` R7): the `correlatedChild`
+    FastPath, its per-traverser route and the connector-only measurement mode are gone, so there is no second
+    child lowering to fall back to or to compare against. At a site the connector's row does not CLAIM — a
+    `group()` over a property stream, an `order(local).by(…)` over a list, `dedup('a').by(…)` — the dispatch falls
+    back to the HOST'S OWN tail lowering of the step (`scopedHost`, `TAILED_HOSTS`), which reads its `by()` bodies
+    through the child seam; that is the host's lowering, not a route, and `map`/`flatMap`/`local`/`sideEffect`
+    have none. There is no whole-compile retry (`bothChildOrders` was deleted once a wide sample measured it
+    rescuing nothing). A body that re-sources
     (`V()`/`E()`) is the connector's alone (`reSourcedBody`, `connectorOwns`) — its read after the re-source is
     one uncorrelated relation crossed with the host, so a productive null is a row. A body that DRAWS is the
     connector's too and always DECORRELATED (never `correlatedBody`): the body's OWN draw counts as touching the
@@ -101,10 +101,9 @@ while what they operate on keeps TinkerPop's.
     A relation drawn UPSTREAM that the body only reads (a side effect, a binding) is not the body's
     (`owning` in `scoped.ts`, `ownDraws` in `rel/copies.ts`) and stays one shared, unkeyed pick — keying
     it redraws per scope: a wrong count and an N×N cross.
-  - **Three CI guards hold this direction:** `mise run ladder` (the `return null` count in `rel/` never rises —
-    the total, and per file for the ladder files; the connector's own `scoped.ts` is outside the total because
-    L9 guards its reach by coverage, not by site count), and L9 (`test/L9-connector/`): the host-closure ratchet with the
-    connector ALONE (`FastPathConfig.connectorOnly` — no ladder at any site, no retry) and host totality (a
+  - **Two CI guards hold this direction:** `mise run ladder` (the total `return null` count in `rel/` never
+    rises; the connector's own `scoped.ts` is outside the total because L9 guards its reach by coverage, not by
+    site count), and L9 (`test/L9-connector/`): the host-closure ratchet, held per query, and host totality (a
     child-taking position is a `CONNECTORS` row or a `deferred-hosts.ts` entry with its reason and blocker).
 - **Shape is CONSULTED, never CONSTRUCTED — the bright line.** Shape may be an annotation a Pass reads
   and may DECLINE on; it must never be a representation a Pass CONSTRUCTS or a lowering CONSUMES, and

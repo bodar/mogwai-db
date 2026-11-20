@@ -9,10 +9,10 @@
 // (`test/fixtures/seed-crew.ts`) is the fixture with multi-valued `location` and `startTime` meta-properties.
 import { describe, expect, test } from 'bun:test';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
 import { bagOf, bare, runWith, storeSeededWith } from '../support/harness.ts';
 
-const MODES = [['connector', { fastPaths: CONNECTOR_ONLY }], ['default', undefined]] as const;
+// One lowering since the ladder was deleted; the loop keeps the mode label in a failure.
+const MODES = [['default', undefined]] as const;
 const crew = storeSeededWith(CREW_SEED);
 
 /** A record row as `key=value,…`, in field order. */

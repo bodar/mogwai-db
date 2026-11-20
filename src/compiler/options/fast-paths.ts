@@ -66,41 +66,7 @@ export interface FastPathConfig {
    * relation legitimately changes the emission order of a traversal that never called `order()`.
    */
   readonly propertySeek: boolean;
-  /**
-   * PREFER the LADDER of specialised correlated child routes (the per-shape readers still standing in the host
-   * tails) over the scoped-relation connector at a connector host (every row of `CONNECTORS`,
-   * `src/compiler/rel/lower/scoped.ts`). **OFF by default** — the one switch whose default position is its
-   * generic side.
-   *
-   * **The NINTH switch, and the first whose generic side is a general DECORRELATION** (`src/rel/decorrelate.ts`,
-   * Neumann/Calcite): the connector scopes the host stream by a row number, lowers the body as the root lowers
-   * a chain, keys it by the scope and joins it back by the host's policy — keeping the dependent join correlated
-   * (an `EXISTS`, a correlated first-row scalar) wherever SQL can hold it, which is what made it as fast as the
-   * ladder on the cost-discipline shapes. Since the Phase 3 inversion (`docs/2026-11-15-compositional-coverage-plan.md`
-   * §3, cc3c) the connector is the default and the semantic authority; ON puts the ladder first again, and
-   * exists only so the routes still standing keep a differential while they are audited and deleted (cc3d,
-   * the plan's "Kept routes" table).
-   *
-   * Each side is the other's fallback, so the SUPPORTED set is identical in both positions — only the plan
-   * changes, which is exactly the claim L5's per-switch sweep checks (it FLIPS each switch from its default,
-   * so this one is swept ON): every traversal both lowerings answer is compared ladder against connector.
-   */
-  readonly correlatedChild: boolean;
-  /**
-   * NOT a fast path — a MEASUREMENT mode, and deliberately optional and absent from `DEFAULT_FAST_PATHS` so L5's
-   * per-switch sweep never flips it. On, the scoped-relation connector answers every connector site ALONE: the
-   * ladder is neither tried first nor a fallback at any site (`scopedHost`), and `correlatedChild` is forced off.
-   * It CHANGES COVERAGE, which no product setting
-   * may, so it exists only for the instruments that read what the general path answers by itself:
-   * `test/L9-connector` (in-process, per compile), `mise run scaling` and `mise run coverage` (through
-   * `MOGWAI_CONNECTOR_ONLY=1`, the default when this field is absent — `CONNECTOR_ONLY_ENV`).
-   */
-  readonly connectorOnly?: boolean;
 }
-
-/** `MOGWAI_CONNECTOR_ONLY=1`: the process-wide default for `FastPathConfig.connectorOnly`, for the scripts that
- *  measure a configuration per child process. Read once; absent outside Bun/Node. */
-export const CONNECTOR_ONLY_ENV: boolean = typeof process !== 'undefined' && process.env?.MOGWAI_CONNECTOR_ONLY === '1';
 
 export interface CompileOptions {
   readonly fastPaths?: Partial<FastPathConfig>;
@@ -141,9 +107,6 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   movementCollapse: true,
   repeatBodyExpansion: true,
   propertySeek: true,
-  // OFF by default since the Phase 3 inversion: the scoped-relation connector is the authority and is tried
-  // first; the ladder is the opt-in side (see the field's comment).
-  correlatedChild: false,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
@@ -190,12 +153,6 @@ export const GATE_ONLY_FAST_PATHS: Readonly<Record<string, string>> = Object.fre
     + 'actually watching for is the DISTINCT — a Cardinality.list key holding one value twice would '
     + 'multiply a traverser through the seek and not through the filter — and, as telemetry, the '
     + 'emission-order changes that driving from a different relation legitimately causes.',
-  correlatedChild:
-    'test/L5-properties/differential.test.ts — the per-switch sweep, over every corpus and generated '
-    + 'traversal with a child at a CONNECTORS host that still has a ladder route (map/flatMap/local — not the LADDERLESS ones, src/compiler/rel/lower/scoped.ts). The switch only ORDERS two lowerings '
-    + 'that are each the other\'s fallback (src/compiler/rel/lower/scoped.ts `scopedHost`), so support is '
-    + 'equal by construction and every traversal both answer compares the ladder of correlated routes '
-    + 'against the scoped-relation connector (a general decorrelation, src/rel/decorrelate.ts).',
 });
 
 // ---------- the FastPath contract ----------

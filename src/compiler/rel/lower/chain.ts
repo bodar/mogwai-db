@@ -132,21 +132,16 @@ export const graphOf = (channels: Channels): Channel | undefined =>
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
 export interface FilterCtx { readonly params: ParamEnv; readonly correlatedChildren: boolean; }
 
-/** The `correlatedChild` switch (`options/fast-paths.ts`): which of the two child lowerings a connector site
- *  (`lower/scoped.ts`) tries FIRST — the ladder of correlated routes (on), or the scoped-relation connector
- *  (off). Each is the other's fallback, so the switch changes the PLAN, never whether there is one. */
+/** How a connector site (`lower/scoped.ts`) reaches the host's OWN lowering of its step. */
 export interface ChildStrategy {
-  readonly correlatedChild: boolean;
-  /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): a connector site never falls back to
-   *  the ladder. Off in every product compile. */
-  readonly connectorOnly?: boolean;
-  /** The connector site the LADDER is lowering right now — set by `continueAs` when it hands a connector host
-   *  to the ladder, so the tail that lowers it does not hand it straight back (`atLadder`, `lower/scoped.ts`).
+  /** The connector site the HOST'S OWN TAIL is lowering right now — set by the connector dispatch (`scopedHost`)
+   *  when the connector row leaves the step to the host (`byValues`' landed values, a host the row does not
+   *  claim), so the tail that lowers it does not hand it straight back (`atHostTail`, `lower/scoped.ts`).
    *  Compared by step-list IDENTITY and index, so a body or a later step never matches it. */
-  readonly ladderAt?: { readonly steps: readonly import('../../ir/step.ts').IRStep[]; readonly at: number };
+  readonly hostTailAt?: { readonly steps: readonly import('../../ir/step.ts').IRStep[]; readonly at: number };
   /** CHILD VALUES A CONNECTOR PRE-JOINED (`lower/scoped.ts` `byValues`, §2 S5): a `by()` body's first result per
    *  scope landed as JOIN COLUMNS of the relation `over`, keyed by the body's fingerprint, so the one step the
-   *  ladder lowers over that relation reads a column where it would build a correlated subquery
+   *  host's own tail lowers over that relation reads a column where it would build a correlated subquery
    *  (`childSeam`'s `scalar`). A host over any other relation never matches. */
   readonly scopedValues?: { readonly over: import('../../../rel/types.ts').RelId; readonly values: ReadonlyMap<string, import('../child.ts').ChildValue> };
 }
@@ -225,12 +220,13 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
   /** A map-entry child reads `select(Column.values)` from this correlated value cell. */
   readonly entryValue?: import('../../../rel/expr.ts').Expr;
   /**
-   * Will the stream THIS scope produces be consumed by an `otherV()` in the enclosing chain? Set by
-   * `elementTail` on a VALUE-producing child host (`local`/`flatMap`) when an `otherV()` follows it, so
-   * the body's tail edge hop mints its entering vertex (`fromV`) even though the `otherV` is not in the
-   * body's own step slice. No body inherits it by default (`inBody` clears it) — an existence gate
-   * consumes its child as a boolean, and a branch arm cannot carry a uniformly-minted rigid channel — so
-   * the one host that honours it (`flatMapRejoin`) re-injects it through `childRows`'s explicit parameter.
+   * Will the stream THIS scope produces be consumed by an `otherV()` in the enclosing chain? Set for a
+   * child body whose result an `otherV()` after its host reads, so the body's tail edge hop mints its
+   * entering vertex (`fromV`) even though the `otherV` is not in the body's own step slice. No body inherits
+   * it by default (`inBody` clears it) — an existence gate consumes its child as a boolean — so the hosts that
+   * honour it re-inject it: a branch's arms (`inArmBody`, every arm minting it alike for the peer merge) and
+   * `local`, the connector's forwarding rejoin (`lowerBody`'s `fromV`, `lower/scoped.ts`). `flatMap` needs
+   * none: it splits the head, so its `otherV()` reads the host element (`rejoin`).
    */
   readonly needsFromV?: boolean;
   /**
@@ -271,7 +267,7 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
    *  (`scopedHost`, `lower/scoped.ts`) so a decline the body's lowering explains names the host it fired under. */
   readonly host?: string;
   /** The connector SITE a route is lowering (`scopedHost`, `lower/scoped.ts`): the host's step list (compared BY
-   *  IDENTITY, like `ladderAt`) and position, and whether the chain CONTINUED past it (`continueAs`). A route that
+   *  IDENTITY, like `hostTailAt`) and position, and whether the chain CONTINUED past it (`continueAs`). A route that
    *  declined before that is the host declining itself (`Declines.hostDeclined`). */
   readonly hostProgress?: HostProgress;
   /**
@@ -312,7 +308,7 @@ export interface ChainCtx extends FilterCtx, ChildStrategy {
  * graph), `rankedOrders` (keyed by the outer chain's step identity), and the head/resume-only flags.
  */
 export const settledOf = (ctx: ChainCtx) => ({
-  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren, correlatedChild: ctx.correlatedChild, connectorOnly: ctx.connectorOnly,
+  params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
   labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects, sideEffectPolicies: ctx.sideEffectPolicies,
   services: ctx.services, sack: ctx.sack, collections: ctx.collections,
   writes: ctx.writes, scopeNames: ctx.scopeNames, declines: ctx.declines, budget: ctx.budget,
@@ -330,8 +326,8 @@ export const settledOf = (ctx: ChainCtx) => ({
 // A body does NOT inherit the enclosing chain's otherV() demand by default: an existence gate consumes
 // its child as a boolean, a branch arm cannot carry a uniformly-minted rigid channel through the peer
 // merge, and a recursive term cannot mint one either. So `inBody` CLEARS `needsFromV`, and the ONE value
-// host that CAN honour it — `flatMapRejoin`, no peer merge — re-injects it through `childRows`'s explicit
-// parameter instead of through here.
+// host that CAN honour it — `local`, the connector's forwarding rejoin, no peer merge — re-injects it into its
+// body (`lowerBody`'s `fromV`, `lower/scoped.ts`) instead of through here.
 /**
  * `ctx` for a child body of a host whose chain has bound `labels` — those labels join
  * `enclosingLabels`, so a body that re-roots WITHOUT their alias channels declines a scope read of one
@@ -352,8 +348,8 @@ export const inOrderFreeBody = (ctx: ChainCtx): ChainCtx => ({ ...inBody(ctx), b
 /** A BRANCH ARM whose merged result an outer `otherV()` reads — `inBody` but RE-INJECTING `needsFromV`,
  *  so each arm's tail edge hop mints its entering vertex. Every arm mints it UNIFORMLY (same column), so
  *  the peer merge carries it as a shared rigid channel (`mergeArms`); an arm that does not (a non-edge
- *  shape) makes the arms disagree and the merge declines. The value host `flatMapRejoin` uses `childRows`'s
- *  explicit parameter for the same purpose; a branch has many arm sites, so it takes a helper. */
+ *  shape) makes the arms disagree and the merge declines. The connector's `local` rejoin uses `lowerBody`'s
+ *  `fromV` for the same purpose; a branch has many arm sites, so it takes a helper. */
 export const inArmBody = (ctx: ChainCtx): ChainCtx =>
   ({ ...inBody(ctx), ...(ctx.needsFromV ? { needsFromV: true } : {}) });
 

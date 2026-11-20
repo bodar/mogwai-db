@@ -30,8 +30,7 @@ export const ALL_GENERIC: FastPathConfig = Object.freeze(
 export const FAST_PATH_NAMES = Object.keys(DEFAULT_FAST_PATHS) as (keyof FastPathConfig)[];
 
 /** Default config with exactly one switch FLIPPED from its default — isolates which switch a diff belongs to.
- *  Flipped rather than disabled: `correlatedChild` defaults OFF (the connector is the authority since the
- *  Phase 3 inversion), so disabling it would compare the default against itself. */
+ *  Flipped rather than disabled, so a switch whose default is its generic side would still be swept. */
 export const onlyFlipped = (name: keyof FastPathConfig): FastPathConfig =>
   Object.freeze({ ...DEFAULT_FAST_PATHS, [name]: !DEFAULT_FAST_PATHS[name] });
 

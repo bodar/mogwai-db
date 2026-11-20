@@ -28,7 +28,7 @@ import { collectionReaderOf, continueAs, dropPath, lowerChain, mapKeyCollided, m
 import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
-import { appendValuePosition, PATH_CHANNEL, pathCarried, subPathMembers } from '../path.ts';
+import { PATH_CHANNEL, pathCarried, subPathMembers } from '../path.ts';
 import { perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { metaPropertyRead, propertyMetaBag, propertyReadOf, propertyRowId } from '../property.ts';
@@ -52,10 +52,9 @@ import { pastBudget } from '../../../sql/kernel/budget.ts';
 // first-row read (scalarChild, the index-seeking correlated scalar), the per-origin primitives
 // (childRows/mintRowOrigin — the window and first-row builders they share, `perOriginWindow`/`firstRow`, live in
 // `../build.ts`), the correlated reducers (correlatedReduce/reductionTail) and their rooting helpers
-// (rootedRead/hostSelf/rerootedHost). SHARED substrate, owned by neither the ladder nor the
-// scoped-relation connector (`docs/2026-11-16-ladder-retirement-plan.md` R1): the connector's rows read it
-// through `childSeam`/`reductionHost`, and the ladder's per-traverser ROUTE that chooses between its forms is
-// `lower/per-traverser.ts`. The densest slice of the fold; it calls the fold core back.
+// (rootedRead/hostSelf/rerootedHost). The scoped-relation connector's rows read it through
+// `childSeam`/`reductionHost` (the ladder's per-traverser route that once chose between its forms is deleted,
+// `docs/2026-11-16-ladder-retirement-plan.md` R7). The densest slice of the fold; it calls the fold core back.
 
 /**
  * THE CHILD SEAM, IMPLEMENTED — `child.ts` declares the three answers, this builds them (§6·6).
@@ -78,7 +77,7 @@ export const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   predicate: (body, subject, negated, aliases) => childPredicate(body, subject, fresh, ctx, negated, aliases),
   rooted: (steps, host) => rootedRead(steps, ctx, fresh, rootedHosts(host)),
   anchored: (elem, id) => ({ rel: anchoredSeed(ctx.source, elem, id, fresh), framing: { kind: 'elements', elem } }),
-  rows: (body, input, elem, aliases, originFrom) => childRows(body, input, elem, aliases, ctx, fresh, false, false, originFrom),
+  rows: (body, input, elem, aliases, originFrom) => childRows(body, input, elem, aliases, ctx, fresh, false, originFrom),
   // `bulked: false` is a fold RESET, and it is safe for a reason worth naming rather than trusting:
   // every step whose lowering READS `bulked` — the slice family and a grouping barrier — mints a
   // `limit`/`window`/`sort`/`aggregate` node, and each of those is refused outright inside a
@@ -180,15 +179,16 @@ export function reductionHost(
 
 /**
  * A per-traverser reduction's one-value-per-host expression FRAMED as this stream's payload columns — the
- * projection `perTraverserChild` (map/local/flatMap) and a `coalesce`/`optional` reduction arm share.
+ * projection a `coalesce`/`optional` reduction arm reads.
  *
  * The body's ONE result becomes the payload: an element re-roots to its rowid, a fold's value lands in the
  * canonical `list` column, a scalar to `v` (plus a `vtype` column where the seam read a stored type). Every
  * carried channel PASSES THROUGH unchanged (it is one row per host, so a frozen fan-out position survives),
  * and an arm that can be UNPRODUCTIVE is filtered on its projected payload's non-nullness (presence is value
- * nullness, `ChildValue.present`). The assembler fuses the two nodes into one SELECT. See `perTraverserChild`'s §3.3 note on why the filter is a sibling projection, not nested.
+ * nullness, `ChildValue.present`). The assembler fuses the two nodes into one SELECT; the filter is a sibling
+ * projection, not nested, so the presence test reads the projected payload once.
  */
-export function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, labels: AliasMap, bulked: boolean): Tail | null {
+function reductionTail(rel: Rel, produced: ChildValue, fresh: Minter, labels: AliasMap, bulked: boolean): Tail | null {
   if (produced.present === 'unknown') return null;
   const payload = ((): { readonly cols: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming } | null => {
     if (produced.framing.kind === 'elements')
@@ -285,26 +285,19 @@ export function reductionArm(
   const tail = reductionTail(domain, produced, fresh, labels, bulked);
   // Shared by `coalesce` (a `FlatMapStep`) and `optional` (which forwards the child's traverser), so the
   // arm cannot say which entry its result opens — drop the path rather than guess (`childResultPath`).
-  return tail && childResultPath(tail, false, fresh);
+  return tail && childResultPath(tail, fresh);
 }
 
 /**
- * THE PATH ENTRY a per-traverser child's ONE result leaves on the traverser — the one authority every
- * correlated-scalar host consults, so a carried path never rides past such a host unextended.
- *
- * `map`/`flatMap` (and `coalesce`, a `FlatMapStep`) emit `head.split(result)`: the PRE-child path extended
- * by exactly the emitted value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`,
- * `…/step/map/MapStep.java`, `…/traverser/B_LP_O_S_SE_SL_Traverser.java:66-71`), so a scalar result is
- * APPENDED as a value position — `V(1).map(values('age')).path()` is `[v[1], 29]`, which answered `[v[1]]`.
- * `local`/`optional` forward the CHILD's own traverser (`…/step/branch/LocalStep.java:80-88`), whose path
- * depends on the body (a reducing barrier mints a fresh one, `ReducingBarrierStep`), and a non-scalar
- * result has no value position this can append — both DROP the path, so a later path read declines.
+ * THE PATH a correlated reduction arm's ONE result leaves on the traverser when the arm cannot say which entry
+ * it opens. `map`/`flatMap` (and `coalesce`, a `FlatMapStep`) emit `head.split(result)`: the PRE-child path
+ * extended by exactly the emitted value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/FlatMapStep.java:42-52`)
+ * — the connector's `splitPath` (`lower/scoped.ts`) appends it. `local`/`optional` forward the CHILD's own
+ * traverser (`…/step/branch/LocalStep.java:80-88`), whose path depends on the body (a reducing barrier mints a
+ * fresh one, `ReducingBarrierStep`). An arm shared by both DROPS the path, so a later path read declines.
  */
-export function childResultPath(tail: Tail, opensEntry: boolean, fresh: Minter): Tail {
-  if (!pathCarried(tail.rel)) return tail;
-  if (opensEntry && tail.framing.kind === 'scalar' && tail.rel.type.cols.some((column) => column.name === 'v'))
-    return { ...tail, rel: appendValuePosition(tail.rel, tail.framing.type, fresh) };
-  return { ...tail, rel: dropPath(tail.rel, fresh) };
+function childResultPath(tail: Tail, fresh: Minter): Tail {
+  return pathCarried(tail.rel) ? { ...tail, rel: dropPath(tail.rel, fresh) } : tail;
 }
 
 /**
@@ -324,24 +317,9 @@ export function mintRowOrigin(rel: Rel, fresh: Minter): Rel {
   return originOf(rel.channels) ? rel : numberedOrigin(rel, ORIGIN, fresh);
 }
 
-/**
- * NEST a per-ROW origin INSIDE the one the stream already carries — the origin of a per-traverser host
- * sitting in another one's body (`local(__.out().local(__.out().limit(1)))`), whose own barriers scope
- * per INNER row while the enclosing host still needs its origin back afterwards. A second `origin`-role
- * channel under a fresh column: `withChannel` keeps peers in arrival order, so the nested one is last and
- * `originOf` (the INNERMOST) is what the body's barriers partition by. Partitioning by it alone is exact —
- * an inner row descends from one outer row, so the inner origin determines the outer, which rides through
- * every window as a carried passenger. `dropOrigin` sheds the innermost, restoring the enclosing scope.
- * A separate entry point because `mintRowOrigin`'s idempotence is what its callers rely on.
- */
-export function nestRowOrigin(rel: Rel, fresh: Minter): Rel {
-  return numberedOrigin(rel, { col: fresh('origin'), role: 'origin' }, fresh);
-}
-
 function numberedOrigin(rel: Rel, origin: Channel, fresh: Minter): Rel {
   const channels = withChannel(rel.channels, origin);
   // Numbered in ARRIVAL order where the stream carries one, so the origin is also the entering
-  // traverser's position — what `originMajor` re-reads after a per-traverser body.
   const enc = encounterOf(rel.channels);
   const numbered = rowNumberWindow(rel, origin.col, rel.channels, {
     partitionBy: [], orderBy: enc ? [{ expr: col(rel.id, enc.col), dir: 'asc' }] : [],
@@ -353,15 +331,14 @@ function numberedOrigin(rel: Rel, origin: Channel, fresh: Minter): Rel {
   });
 }
 
-/** Is `window` the numbering `mintRowOrigin`/`nestRowOrigin` mints the per-ROW origin `origin` from? */
+/** Is `window` the numbering `mintRowOrigin` mints the per-ROW origin `origin` from? */
 export const isMintedRowOrigin = (window: Rel, origin: Channel): boolean =>
   window.kind === 'window' && window.specs.some(([name]) => name === origin.col);
 
 /** DROP the `origin` channel and its column — the counterpart of `mintRowOrigin`/`childRows`' mint,
  *  run once a per-origin body is done so the host a row descended from does not ride into a downstream
- *  whole-row `dedup`/merge (`flatMapRejoin` and `match`'s per-origin body both shed it here). A no-op
- *  when no origin is carried. */
-export function dropOrigin(rel: Rel, fresh: Minter): Rel {
+ *  whole-row `dedup`/merge (a GROUP reducer's rows, `unscopeRows`). A no-op when no origin is carried. */
+function dropOrigin(rel: Rel, fresh: Minter): Rel {
   const origin = originOf(rel.channels);
   if (!origin) return rel;
   const channels = rel.channels.filter((channel) => channel.col !== origin.col);
@@ -431,11 +408,10 @@ export function originDomainOf(seeded: Rel, fresh: Minter): Rel {
 
 export function childRows(
   body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
-  perRow = false, needsFromV = false, originFrom = 'id',
+  perRow = false, originFrom = 'id',
 ): ChildRows | null {
   // A per-ROW body REUSES an origin already on the input (`mintRowOrigin` is idempotent), so a caller
-  // that pre-numbered to capture a channel keyed by origin — `flatMapRejoin`'s path-hide numbers the
-  // input to recover the entering path — is served rather than refused. A GROUP reducer (`!perRow`) seeds
+  // that pre-numbered to capture a channel keyed by origin is served rather than refused. A GROUP reducer (`!perRow`) seeds
   // origin from the HOST rowid, a different identity, so a pre-existing origin there is still a decline.
   if (!body.length || (!perRow && originOf(input.channels))) return null;
   const seeded = perRow ? mintRowOrigin(input, fresh) : (() => {
@@ -455,18 +431,14 @@ export function childRows(
   // and since an unresolvable `select()` is now the EMPTY RESULT it would pool ZERO rows and answer an
   // empty map. §6·6's rule with the sharpest witness yet — check what a seam HANDS OVER, because the
   // combination of two correct rules made one of them silently produce the other's answer.
-  // `needsFromV` rides IN only for a `flatMap`/`local` fan-out whose result an outer `otherV()` reads:
-  // `inBody` cleared the demand (a body does not inherit it), so re-inject it here — the body's tail
-  // edge hop then mints its entering vertex, which the rejoin carries out to the outer `otherV`.
   // THE ORIGIN DOMAIN rides in on the ctx so a SEEDED barrier in the body (`fold`→[], `group`→{}) can emit
   // its seed for an origin whose sub-stream is EMPTY — a `GROUP BY origin` over the post-fan-out stream
   // cannot, because a movement that fans out to zero drops that origin before the barrier sees it.
   // A body seeded from a traverser POSITION (`originFrom` — a write's value traversal) runs once per
   // traverser at bulk 1 (`AddPropertyStep.handleTraversalValue` → `TraversalUtil.applyAll`), so it BEGINS a
-  // traversal (`ChainCtx.traversal`); a per-row `local`/`flatMap` body says so through its own `ctx`.
+  // traversal (`ChainCtx.traversal`).
   const scoped: ChainCtx = originFrom !== 'id' && ctx.traversal?.steps !== body ? { ...ctx, traversal: { steps: body, rooted: false } } : ctx;
-  const baseCtx = needsFromV ? { ...inBody(scoped), needsFromV: true } : inBody(scoped);
-  const bodyCtx = { ...baseCtx, originDomain: originDomainOf(seeded, fresh) };
+  const bodyCtx = { ...inBody(scoped), originDomain: originDomainOf(seeded, fresh) };
   const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, bodyCtx, fresh, aliases);
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.
@@ -1564,7 +1536,7 @@ export function scalarChild(body: readonly IRStep[], host: ChildHost, outer: Cha
  * child body. Its body runs over ONE entering traverser (`LocalStep.java:80-88`, `FlatMapStep.java:42-52`,
  * `MapStep`, under `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/`),
  * and in a correlated child that traverser IS the host, so the host step's value is `b`'s value over the
- * SAME host. The three differ only in cardinality, as at the chain (`perTraverserChild`'s policy): `map`
+ * SAME host. The three differ only in cardinality, as at the chain (the connector's `firstInner`/`allRows`): `map`
  * takes the first result, so it yields ONE; `local`/`flatMap` emit every result, so they yield what `b`
  * does, and a consumer that sees every result refuses a `'first'`.
  *
@@ -1687,7 +1659,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
 
   // A GraphStep inside a per-traverser child RE-SOURCES the graph: its answer is independent of WHICH
   // host triggered it, and a host that may be absent declines (`reSourcedUnder`). This is the `map(__.V().count())`
-  // half of re-sourcing; fan-out `flatMap(__.V()…)` is the general child rejoin's (`flatMapRejoin`),
+  // half of re-sourcing; fan-out `flatMap(__.V()…)` is the connector's rejoin (`allRows`, `lower/scoped.ts`),
   // rather than abusing a scalar subquery's arbitrary-first-row behaviour.
   // `V(<traversal>)` is not that: its ids come from its child run over THIS host, so it is the
   // per-traverser results then their lookup (`splitTraversalIds`), lowered like any other body.

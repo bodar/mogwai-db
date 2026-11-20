@@ -62,10 +62,9 @@ import { prune } from '../../../rel/passes/prune.ts';
 //      columns for the host's own lowering to read (`landValues`, S5), and a POOL whose scope is a group key
 //      rather than a traverser (`pooledGroup`).
 //
-// THIS IS THE DEFAULT AND THE AUTHORITY (the Phase 3 inversion). What is left of the ladder of specialised
-// correlated routes is the opt-in `correlatedChild` switch: off (the default) the connector is tried first and
-// the ladder is its fallback where it declines; on, the ladder is tried first. Either way the SUPPORTED set is
-// the union of the two, so L5's per-switch differential compares the two lowerings wherever both answer.
+// THIS IS THE ONE MECHANISM FOR NESTING. The ladder of specialised correlated routes it replaced, and the
+// `correlatedChild` switch that ordered the two, are deleted (`docs/2026-11-16-ladder-retirement-plan.md` R7); where
+// a row does not claim its site, the host's OWN lowering of the step is the fallback (`scopedHost`).
 
 /** The channels a child body does NOT inherit from its host row. A child is handed ONE traverser at bulk 1
  *  (`TraversalUtil.apply`, `LocalStep.java:80-88`), so the host's multiplicity, its position in the host
@@ -150,13 +149,15 @@ interface ScopedBody {
  * POSITIONED seed: its hops then number their rows in storage order (the same `encounter` a root chain's
  * `fold` reads), and the pick is by that position, never by value. A body of at most one row (a reducer, a
  * record) has nothing to pick and keeps the unpositioned plan — whose collects order their members as the
- * correlated ladder does. `positionedSeed` asks for the position outright (a merge that numbers its arms).
+ * correlated first-row read does. `positionedSeed` asks for the position outright (a merge that numbers its arms).
  */
 function lowerBody(
   body: readonly IRStep[], rel: Rel, from: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-  order?: 'free' | 'read', positionedSeed = false, contract: RejoinContract = 'forward', correlated = false,
+  order?: 'free' | 'read', positionedSeed = false, contract: RejoinContract = 'forward', correlated = false, fromV = false,
 ): Tail | null {
-  const bodyCtx: ChainCtx = { ...inBody(ctx), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
+  // `fromV`: an `otherV()` after a FORWARDING host reads the child traverser's own previous object — the vertex
+  // the body's tail edge hop entered from — so that hop mints it (`needsFromV`, which `inBody` otherwise clears).
+  const bodyCtx: ChainCtx = { ...inBody(ctx), ...(fromV ? { needsFromV: true } : {}), traversal: { steps: body, rooted: false }, originDomain: undefined, ...(order ? { bodyOrder: order } : {}) };
   const positioned = positionedSeed || someStepDeep(body, ctx.params, (s) => s.name === 'tail');
   const run = (at: boolean): Tail | null => {
     const seed = seedRow(rel, from, fresh, at);
@@ -483,8 +484,8 @@ const sharedDraw = (ctx: ChainCtx): null => {
   return null;
 };
 
-/** A host whose child body RE-SOURCES at its top level is the connector's alone (`reSourcedBody`): the ladder's
- *  re-source is a scalar first-row read that cannot tell a productive null from no row, so offering it as a route
+/** A host whose child body RE-SOURCES at its top level is the connector's alone (`reSourcedBody`): the host's own
+ *  tail's re-source is a scalar first-row read that cannot tell a productive null from no row, so offering it as a route
  *  would answer the same query two ways. A body that also DRAWS is the connector's too: the shared read ends at
  *  the draw, which is made per scope row (`reSourcedBody`, `drawnPerOrigin`). */
 export const connectorOwns = (step: IRStep, ctx: ChainCtx): boolean => step.args.some((arg) => {
@@ -634,6 +635,7 @@ function attempt<T>(ctx: ChainCtx, run: () => T | null): T | null {
 function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
   order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null, contract: RejoinContract = 'forward',
+  fromV = false,
 ): ScopedBody | null {
   // A RE-SOURCE is the connector's own (`reSourcedBody`), drawing or not.
   //
@@ -646,7 +648,7 @@ function scopedBody(
   // draws (`owning`): a relation drawn upstream that the body only reads stays one shared pick.
   // `reframe` is the host's own re-expression of the body's value (`landValues`' record).
   const out = keyedBody(
-    (mf, collections) => lowerBody(body, rel, sc.scoped, framing, { ...ctx, collections }, mf, labels, order, positionedSeed, contract),
+    (mf, collections) => lowerBody(body, rel, sc.scoped, framing, { ...ctx, collections }, mf, labels, order, positionedSeed, contract, false, fromV),
     sc.scoped, sc.key, ctx, fresh, reframe,
   );
   return out && { rel: out.keyed.rel, keyCol: out.keyed.key[0].col, tail: out.tail, collected: out.collected };
@@ -1847,9 +1849,13 @@ const allRows = (policy: 'split' | 'forward'): Connector => (site) => {
   const frozen = owed ? freezeParent(positioned(rel, fresh), fresh) : null;
   const input = frozen ? frozen.rel : rel;
   const sc = scope(input, fresh);
-  const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body), undefined, policy);
+  const feedsOtherV = edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false);
+  // `local` forwards the child's traverser, so an `otherV()` after it reads the body's own entering vertex (the
+  // body mints it); `flatMap` splits the head, so it reads the host element (`rejoin`).
+  const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body), undefined, policy,
+    policy === 'forward' && feedsOtherV);
   if (!keyed) return null;
-  const out = rejoin(sc, sc.scoped, keyed, input, policy, false, ctx, fresh, labels, owed, edgeFeedsOtherV(steps, at, ctx.needsFromV ?? false));
+  const out = rejoin(sc, sc.scoped, keyed, input, policy, false, ctx, fresh, labels, owed, feedsOtherV);
   if (!out) return null;
   const arm: Tail = { ...out, bulked: bulked || out.bulked };
   const merged = frozen ? mintBranchOrder([arm], frozen.parent, labels, ctx.source, fresh) : { ...out, rel: dropEncounter(out.rel, fresh) };
@@ -1912,7 +1918,7 @@ const priority: Connector = (site) => {
   for (const body of bodies as (readonly IRStep[])[]) {
     // Where the merge's order is read, a STREAMING arm runs from a positioned seed, so its results are numbered
     // in its own emission order; a REDUCING arm (`isReductionArm`) has one result per scope and no position to
-    // keep — the ladder's own split between its positioned arms and its per-traverser reduction arm.
+    // keep.
     const keyed = scopedBody(body, input, framing, sc, ctx, fresh, labels, owed ? 'read' : 'free', owed && !isReductionArm(body), undefined, policy);
     if (!keyed) return null;
     const out = rejoin(sc, remaining, keyed, input, policy, false, ctx, fresh, labels, owed,
@@ -2002,8 +2008,8 @@ const recordLeft: Connector = (site) => {
     });
     owned.set(slot, { first, framing: keyed.tail.framing });
   }
-  // No slot a child this connector owns: the record is the builder's own over the host row, as the ladder's
-  // is — only the path rule below differs.
+  // No slot a child this connector owns: the record is the builder's own over the host row, as the host's
+  // own tail is — only the path rule below differs.
   // Each correlated slot's pick lands its columns on the joined input — it reads the host row, which every
   // relation the joins built still carries by name.
   const landed = new Map<number, Attached>();
@@ -2118,7 +2124,7 @@ const perTraverserSlot = (step: IRStep, slot: number, body: readonly IRStep[]): 
 /**
  * `order().by(b)` / `dedup().by(b)` / `groupCount().by(b)` / `group().by(b)` — the by() VALUE as JOIN COLUMNS
  * (§2 S5). Each child `by()` is the first result per scope (`firstPerScope`), LEFT-joined onto the scoped
- * input; the host step is then the ladder's own lowering over that relation, reading each value as a column
+ * input; the host step is then the host's own lowering over that relation, reading each value as a column
  * where it would have built a correlated subquery (`scopedValue`). The by() semantics — an unproductive key
  * drops the traverser unless `ProductiveByStrategy` keeps it (`OrderGlobalStep`, `DedupGlobalStep.java:77-78`,
  * `GroupCountStep`'s `TraversalUtil.produce`), the comparator, the survivor, the map — stay the host's; only
@@ -2302,7 +2308,7 @@ const treeFramed = (of: ListOf): boolean =>
  * maps, an empty one included: one `map` column (`recordToMap`), so the value is ONE column, present wherever the
  * body produced and equal by its entries. Read as a record, its presence was its FIRST SUB-field's, so an inner
  * map with that field absent read as no value at all (`project('x').by(project('a','b').by(has('lang'))…)`
- * dropped `x`). The ladder's seam already hands a project body back collapsed the same way.
+ * dropped `x`). The child seam already hands a project body back collapsed the same way.
  */
 function recordAsMap(tail: Tail, ctx: ChainCtx, fresh: Minter, always = false): Tail | null {
   // Only where the record's presence CANNOT be read off its first column: a first field that is itself always
@@ -2332,7 +2338,7 @@ const byArity = (step: IRStep): number =>
 
 /**
  * `order().by(b)` / `dedup().by(b)` / `groupCount().by(b)` / `group().by(b)` — the by() VALUE as JOIN COLUMNS
- * (`landValues`). The host step is then the ladder's own lowering over the joined relation, reading each value
+ * (`landValues`). The host step is then the host's own lowering over the joined relation, reading each value
  * as a column where it would have built a correlated subquery (`scopedValue`). The by() semantics — an
  * unproductive key drops the traverser unless `ProductiveByStrategy` keeps it (`OrderGlobalStep`,
  * `DedupGlobalStep.java:77-78`, `GroupCountStep`'s `TraversalUtil.produce`), the comparator, the survivor, the
@@ -2405,7 +2411,7 @@ function landedStep(site: HostSite, bodies: ReadonlyMap<string, readonly IRStep[
   const { over, values } = landed;
   const only = [step];
   return continueAs(over, framing, only, 0, bulked,
-    { ...ctx, scopedValues: { over: over.id, values }, ladderAt: { steps: only, at: 0 } }, fresh, labels);
+    { ...ctx, scopedValues: { over: over.id, values }, hostTailAt: { steps: only, at: 0 } }, fresh, labels);
 }
 
 /** The chain after a `landedStep`, the joined columns shed: a framing-preserving step (order, dedup, a filter)
@@ -2571,7 +2577,7 @@ function poolMembers(site: HostSite, bys: readonly (Modulation | undefined)[]): 
   const GLOBAL_ARMS = new Set(['union', 'choose', 'branch']);
   const perMember = body.slice(0, cut).some((s) => GLOBAL_ARMS.has(s.name)
     && someStepDeep([s], ctx.params, (inner) => inner !== s && inner.name !== 'order' && isValueBarrier(inner), true));
-  // An enclosing per-traverser scope's key would have to ride every pool as one more group key; the ladder's.
+  // An enclosing per-traverser scope's key would have to ride every pool as one more group key; it declines.
   if (rel.channels.some((channel) => channel.role === 'origin' || channel.role === 'branchKey')) return null;
   // THE KEY: the host's own by() vocabulary over the (possibly value-landed) relation.
   const keyBy = bys[0] && !(bys[0].key.kind === 'identity' && bys[0].order === undefined) ? bys[0] : undefined;
@@ -2908,10 +2914,10 @@ const CONNECTORS: ReadonlyMap<string, Connector> = new Map<string, Connector>([
 if (CONNECTORS.size !== CONNECTOR_HOSTS.size || [...CONNECTORS.keys()].some((name) => !CONNECTOR_HOSTS.has(name)))
   throw new Error('RelIR lowering: CONNECTORS and CONNECTOR_HOSTS (ir/analyze.ts) name different hosts');
 
-/** Is the ladder lowering THIS connector site right now (`ChildStrategy.ladderAt`)? Then a tail must not hand
- *  it back to `continueAs`. */
-export const atLadder = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
-  ctx.ladderAt?.steps === steps && ctx.ladderAt.at === at;
+/** Is the HOST'S OWN TAIL lowering this connector site right now (`ChildStrategy.hostTailAt`)? Then a tail must
+ *  not hand it back to `continueAs`. */
+export const atHostTail = (ctx: ChainCtx, steps: readonly IRStep[], at: number): boolean =>
+  ctx.hostTailAt?.steps === steps && ctx.hostTailAt.at === at;
 
 /** Is `step` a site a connector may own? The cheap gate a tail loop asks before yielding to `continueAs`. */
 export const connectorSite = (step: IRStep | undefined): boolean =>
@@ -2919,32 +2925,36 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
     || (step.modulators ?? []).some((by) => by.some(isNested)));
 
 /**
- * The hosts whose ladder route is DELETED (Phase 3 (d); the kept ones are catalogued in
- * `docs/2026-11-15-compositional-coverage-plan.md`, "Kept routes"): the connector row is their one lowering, so the
- * dispatch offers no ladder to fall back to. (`order`/`dedup`/`groupCount`/`group` keep their tail lowering —
- * `byValues` hands it the landed `by()` values, the connector's own use of it — but the tail no longer answers the
- * site ALONE, correlating its `by()` bodies itself. `group` joins in every form: its keyed `group("m")` is the
- * row's too, assigned or pooled — `keyedPooledGroup`.) A host leaves the ladder by joining
- * this set in the commit that deletes its route. Keyed by the FRAMINGS the deleted route served (and `project` over a
- * PROPERTY row, whose `propertyTail` record was deleted once `recordLeft` read a property host through
- * `reductionHost`): over any other framing the tail that lowers the step is the host's own lowering, not a ladder, and so is a step
- * FORM the connector row does not claim: an ARGUMENT changes what a `by()` runs over (`dedup("a")`, a keyed
- * `groupCount("m")` — `byValues` leaves both to the host).
+ * The hosts with a TAIL LOWERING OF THEIR OWN — the one a connector site falls back to where its row does not
+ * claim the site. The row CLAIMS it over an element or scalar stream (and `project` over a PROPERTY row, which
+ * `recordLeft` reads through `reductionHost`): there the row is the step's one lowering. (`order`/`dedup`/
+ * `groupCount`/`group` still reach their tail there — `byValues` hands it the landed `by()` values, the
+ * connector's own use of it — but the tail never answers the site ALONE, correlating its `by()` bodies itself.)
+ * Over any other framing the host's own lowering is the fallback (a `group()` over a property stream, an
+ * `order(local).by(…)` over a list), and so it is for a step FORM the row does not claim: an ARGUMENT changes
+ * what a `by()` runs over (`dedup("a")`, a keyed `groupCount("m")` — `byValues` leaves both to the host).
+ * `map`/`flatMap`/`local`/`sideEffect` have no tail of their own: the connector is their one lowering.
  */
-const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'group', 'coalesce', 'optional', 'choose', 'union', ...FILTER_HOSTS]);
+const TAILED_HOSTS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'group', 'coalesce', 'optional', 'choose', 'union', ...FILTER_HOSTS]);
 /** The hosts whose connector row (`byValues`) claims only the argument-free form. */
 const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
-const ladderless = (step: IRStep, framing: RelFraming): boolean =>
-  LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar' || (framing.kind === 'property' && step.name === 'project'))
+const claimed = (step: IRStep, framing: RelFraming): boolean =>
+  (framing.kind === 'elements' || framing.kind === 'scalar' || (framing.kind === 'property' && step.name === 'project'))
   && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length);
+/** Does this site fall back to its host's own tail? Not where the row claims it, and not for a body that
+ *  re-sources (`connectorOwns`). */
+const hostTailed = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =>
+  TAILED_HOSTS.has(step.name) && !claimed(step, framing) && !connectorOwns(step, ctx);
 
 /**
- * The dispatch at a connector site: the ladder (the `correlatedChild` fast path) and the connector, in the order
- * the switch names, each the other's fallback. `undefined` where `steps[at]` is not a connector site.
+ * The dispatch at a connector site: the connector, then — where the row does not claim the site — the host's own
+ * tail lowering of the step (`hostTail`), which reads its `by()`/argument bodies through the child seam.
+ * `undefined` where `steps[at]` is not a connector site. There is no ladder: the per-traverser route the old
+ * `correlatedChild` switch ordered against the connector is deleted (`docs/2026-11-16-ladder-retirement-plan.md` R7).
  */
 export function scopedHost(
   rel: Rel, framing: RelFraming, steps: readonly IRStep[], at: number, bulked: boolean,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap, ladder: (ctx: ChainCtx) => Tail | null,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap, hostTail: (ctx: ChainCtx) => Tail | null,
 ): Tail | null | undefined {
   const step = steps[at];
   if (!connectorSite(step)) return undefined;
@@ -2955,11 +2965,9 @@ export function scopedHost(
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, FAN_OUT_HOSTS.has(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: { ...under, host: step!.name }, fresh, labels });
-  const routes = ctx.connectorOnly || ladderless(step!, framing) || connectorOwns(step!, ctx) ? [scoped]
-    : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
+  const routes = hostTailed(step!, framing, ctx) ? [scoped, hostTail] : [scoped];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
-  // answered are kept, and a route that declined while the other answered leaves none — so which route is
-  // tried first (the switch) changes the plan, never whether the traversal compiles.
+  // answered are kept, and a route that declined while the other answered leaves none.
   // Each route is also a TRANSACTION over the named collections: a body's side-effect sites are committed as its
   // body keys (`keyedBody`), so a route that then declines puts the registry back, and the snapshots a route's
   // bodies took (`siteEffects`) enter the effect sequence HERE, at the host's position, only for the route that

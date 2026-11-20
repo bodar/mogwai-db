@@ -259,8 +259,9 @@ property.
    `src/compiler/CLAUDE.md`). Every child traversal — `where`/`map`/`project().by`/`group().by`/
    `coalesce`/`union`/… at any depth — lowers its body with the root's own fold and reconnects through a
    `CONNECTORS` row. A new host is a row; a body that won't lower is fixed in the body's lowering or the
-   decorrelator. Never add a correlated route or a `(host, body-shape)` special case — the old ladder
-   is a shrinking fast path that must earn its keep by measurement. Owner decision, 2026-11-16.
+   decorrelator. Never add a correlated route or a `(host, body-shape)` special case. The old ladder of
+   correlated routes and its `correlatedChild` switch are DELETED (2026-11-20); where a row does not claim its
+   site, the host's own tail lowering of the step is the fallback, never a route. Owner decision, 2026-11-16.
 
 ## Semantics traps — encode as tests before touching related steps
 

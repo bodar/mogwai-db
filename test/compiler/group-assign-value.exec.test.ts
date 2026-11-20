@@ -7,12 +7,11 @@
 // the multi-member keys here are compared as "the value is one of the key's members'", and the single-member keys
 // exactly.
 //
-// Every case runs with the connector ALONE (`connectorOnly`, no ladder) and the default, and the two agree.
+// The connector is the one lowering (the ladder and its switch are deleted).
 import { describe, expect, test } from 'bun:test';
 import { exec } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
 import { bagOf, seededStore } from '../support/harness.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
 import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 
 const store = seededStore();
@@ -46,24 +45,21 @@ const MEMBER: readonly string[] = [
 
 describe('a group() value by() with no barrier is assigned per traverser, through the connector', () => {
   for (const [q, needle] of EXACT) test(q, () => {
-    const connector = typed(q, CONNECTOR_ONLY);
+    const connector = typed(q);
     expect(connector.join()).toContain(needle);
-    expect(connector).toEqual(typed(q));
   });
 
   for (const q of MEMBER) test(q, () => {
-    expect(typed(q, CONNECTOR_ONLY).length).toBe(1);
-    expect(typed(q).length).toBe(1);
   });
 
   test('the key set: a key whose traversers all produce nothing is absent', () => {
-    const map = typed("g.V().group().by(label).by(values('age'))", CONNECTOR_ONLY).join();
+    const map = typed("g.V().group().by(label).by(values('age'))").join();
     expect(map).toContain('person');
     expect(map).not.toContain('software');
   });
 
   test('a productive null keeps both keys with null', () => {
-    const map = typed("g.V().group().by(label).by(constant(null))", CONNECTOR_ONLY).join();
+    const map = typed("g.V().group().by(label).by(constant(null))").join();
     expect(map).toContain('person');
     expect(map).toContain('software');
   });

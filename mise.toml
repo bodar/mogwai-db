@@ -151,12 +151,12 @@ run = "bun scripts/binds-check.ts"
 sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
 
 # The ladder-size ratchet (scripts/ladder-check.ts): the `return null` decline sites in src/compiler/rel/ may
-# not grow — the TOTAL, and file by file for the correlated-route (ladder) files. Root CLAUDE.md decision 6:
+# not grow — the TOTAL. Root CLAUDE.md decision 6:
 # nesting composes through the scoped-relation connector, so a new decline site is a new route by another name.
 # A RISE fails; a FALL passes and asks for `ladder-record` (tightening). Source text only — no graph, no
 # traversal, well under a second — so it lives in `gates`. Re-record with the reason in the commit message.
 [tasks.ladder]
-description = "Ladder-size ratchet: return-null decline sites in src/compiler/rel/ never rise (total + ladder files)"
+description = "Ladder-size ratchet: return-null decline sites in src/compiler/rel/ never rise"
 depends = ["install"]
 run = "bun scripts/ladder-check.ts"
 sources = ["src/compiler/rel/**/*", "scripts/ladder-check.ts", "scripts/ladder-baseline.json"]
@@ -363,32 +363,22 @@ depends = ["install", "check", "submodule"]
 run = "L5_HOST_RECORD=1 bun test test/L5-properties/host-closure.test.ts"
 
 # L9 — the CONNECTOR guards (test/L9-connector/), keeping nesting on the scoped-relation connector (root
-# CLAUDE.md decision 6): the host-closure sweep with the ladder OFF and no ladder fallback
-# (`FastPathConfig.connectorOnly`), ratcheted per host × level, plus host totality (every child-taking
-# position is a CONNECTORS row or a written-down deferral). A `test/L9-…` dir, so CI gives it its own
+# CLAUDE.md decision 6): the host-closure sweep, ratcheted per host × level and per query, plus host totality
+# (every child-taking position is a CONNECTORS row or a written-down deferral). A `test/L9-…` dir, so CI gives it its own
 # `test (L9)` and `L8 (L9)` runners with no ci.yml edit, and `test`/`L8` already run it inside `ci`.
 [tasks.L9]
 alias = "connector"
-description = "L9 — connector guards: connector-only host-closure ratchet + host totality"
+description = "L9 — connector guards: host-closure ratchet + host totality"
 depends = ["install", "check", "submodule"]
 run = "bun test test/L9-connector"
 sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
 
-# Re-record the connector-only closure ratchet — a command for L5-host-record's reason (an auto-record would
+# Re-record the connector closure ratchet — a command for L5-host-record's reason (an auto-record would
 # launder a fall). Run it when a rate ROSE or the generator changed; a downward re-record needs its reason.
 [tasks.connector-record]
-description = "Re-record the L9 connector-only closure baseline (commit test/L9-connector/connector-closure-baseline.json)"
+description = "Re-record the L9 connector closure baseline (commit test/L9-connector/connector-closure-baseline.json)"
 depends = ["install", "check", "submodule"]
 run = "L9_CONNECTOR_RECORD=1 bun test test/L9-connector/connector-closure.test.ts"
-
-# Re-record L9's ladder-reach ratchet (test/L9-connector/ladder-reach-baseline.json) — the ladder-only answer count
-# per pool × family (docs/2026-11-16-ladder-retirement-plan.md R0). A command
-# for connector-record's reason: run it when a count FELL (the test prints the hint) or a pool changed size; an
-# upward re-record needs its reason in the commit message.
-[tasks.ladder-reach-record]
-description = "Re-record the L9 ladder-reach baseline (commit test/L9-connector/ladder-reach-baseline.json)"
-depends = ["install", "check", "submodule"]
-run = "L9_REACH_RECORD=1 bun test test/L9-connector/connector-closure.test.ts -t 'ladder reach'"
 
 # The refactor guard, NOT a ladder level: it asserts nothing about correctness, only that behaviour
 # has not CHANGED. `submodule` because it executes traversals (same reason as L5). It lives in
@@ -426,21 +416,12 @@ depends = ["install", "check", "submodule"]
 run = "bun scripts/coverage-attribution.ts"
 
 # The scaling probe (Phase 3 (b), docs/2026-11-15-compositional-coverage-plan.md §5): each cost-discipline
-# and nested shape at 1k/8k, `correlatedChild` ON vs OFF vs the connector ALONE — ms, SQL bytes, JOINs. An
-# INSTRUMENT (wall-clock, needs judgement), deliberately not in `ci`. `-- --sql <shape>` prints the plans.
+# and nested shape at 1k/8k — ms, SQL bytes, JOINs and the growth ratio. An INSTRUMENT (wall-clock, needs
+# judgement), deliberately not in `ci`. `-- --sql <shape>` prints the plan.
 [tasks.scaling]
-description = "Scaling probe: probe shapes at 1k/8k, ladder vs connector vs connector-only (ms, SQL bytes, joins)"
+description = "Scaling probe: probe shapes at 1k/8k (ms, SQL bytes, joins, growth ratio)"
 depends = ["install"]
 run = "bun scripts/scaling-probe.ts"
-
-# The ladder-reach instrument (docs/2026-11-16-ladder-retirement-plan.md R0): what the default answers and the
-# connector ALONE does not, per pool × family — over L1, L6 and the generator's
-# hosts at level 1 and every level-2 pair (~25k traversals). The GATE is L9's ratchet over L9's pools; this wider
-# sample is an INSTRUMENT (minutes), deliberately not in `ci`. `-- --list` prints every ladder-only traversal.
-[tasks.ladder-reach]
-description = "Ladder reach: traversals the default answers and the connector alone does not, per pool × family"
-depends = ["install", "submodule"]
-run = "bun scripts/ladder-reach.ts"
 
 [tasks.census-record]
 description = "Re-record the census baseline (prints the delta first; commit the two .tsv files)"

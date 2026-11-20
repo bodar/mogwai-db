@@ -65,8 +65,8 @@ export interface SweepResult {
   readonly knownHits: Map<string, number>;
   /** Per law: evaluated / skipped-indeterminate. */
   readonly laws: Map<string, { evaluated: number; indeterminate: number }>;
-  /** Every host query (levels 1–3) with its outcome under the sweep's configuration — so a caller comparing
-   *  configurations (L9's ladder-reach ratchet) compiles each in this one only once. */
+  /** Every host query (levels 1–3) with its outcome under the sweep's configuration — the query set L9's
+   *  per-query closure ratchet reads (`compareClosure`). */
   readonly outcomes: ReadonlyMap<string, Outcome>;
 }
 

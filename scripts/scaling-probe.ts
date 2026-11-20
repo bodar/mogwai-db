@@ -3,22 +3,16 @@
  * SCALING PROBE — the plan-cost instrument for the scoped-relation connector
  * (`docs/2026-11-15-compositional-coverage-plan.md` §5 cost discipline, Phase 3 item (b)).
  *
- * Runs each probe shape over a synthetic graph at N vertices (~2.5 out-edges each) under the three
- * `correlatedChild` configurations and reports, per shape and N: the median execute time, the SQL bytes and
- * the JOIN count of the plan.
- *
- *   LADDER  — `correlatedChild` on (opt-in): the ladder of correlated routes first, the connector its fallback;
- *   DEFAULT — the shipping default since the Phase 3 inversion: the connector first, the ladder its fallback;
- *   CONN    — the connector ALONE (`MOGWAI_CONNECTOR_ONLY=1`): what the general path costs with no ladder.
- *
- * `MOGWAI_CONNECTOR_ONLY` is read once at module load, so each configuration is a CHILD process
- * (`--child <mode> <n>`) and this parent only tabulates. An INSTRUMENT, deliberately not in `ci`: its numbers
- * are wall-clock and need judgement.
+ * Runs each probe shape over a synthetic graph at N vertices (~2.5 out-edges each) and reports, per shape and
+ * N: the best-of-7 execute time, the SQL bytes and the JOIN count of the plan, and the time ratio between the
+ * largest and smallest N (linear is the size ratio, ≈8× for 1k → 8k). Each size runs in a CHILD process
+ * (`--child <n>`) and this parent only tabulates. An INSTRUMENT, deliberately not in `ci`: its numbers are
+ * wall-clock and need judgement.
  *
  *   bun scripts/scaling-probe.ts                  # 1k and 8k, every shape
  *   bun scripts/scaling-probe.ts --sizes 1000     # one size
  *   bun scripts/scaling-probe.ts --only nested    # shapes whose name contains the text
- *   bun scripts/scaling-probe.ts --sql <name>     # print the plan's SQL + EXPLAIN QUERY PLAN per mode (1k)
+ *   bun scripts/scaling-probe.ts --sql <name>     # print the plan's SQL + EXPLAIN QUERY PLAN (1k)
  */
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
@@ -325,9 +319,6 @@ const SHAPES: readonly Shape[] = [
   { name: 'draw: local(V.shuffle.tail(1))', query: "g.V().hasLabel('software').local(V().hasLabel('person').order().by(shuffle).tail(1)).count()" },
 ];
 
-const MODES = { LADDER: {}, DEFAULT: {}, CONN: { MOGWAI_CONNECTOR_ONLY: '1' } } as const;
-type Mode = keyof typeof MODES;
-
 /** Deterministic xorshift, so every child and every run sees one graph. */
 function rng(seed: number): () => number {
   let s = seed >>> 0 || 1;
@@ -358,18 +349,17 @@ function graph(n: number): GraphStore {
 
 interface Row { readonly name: string; readonly ms: number | null; readonly bytes: number; readonly joins: number; readonly rows: number; readonly error?: string }
 
-function child(mode: Mode, n: number, only: string | undefined, sqlOf: string | undefined): void {
+function child(n: number, only: string | undefined, sqlOf: string | undefined): void {
   const store = graph(n);
-  const fastPaths = { correlatedChild: mode === 'LADDER' };
   const out: Row[] = [];
   for (const shape of SHAPES) {
     if (only && !shape.name.includes(only)) continue;
     if (sqlOf && shape.name !== sqlOf) continue;
     try {
-      const plan = compile(shape.query, {}, { fastPaths });
+      const plan = compile(shape.query, {});
       if (plan.kind !== 'read' || !plan.sql) { out.push({ name: shape.name, ms: null, bytes: 0, joins: 0, rows: 0, error: plan.kind }); continue; }
       if (sqlOf) {
-        console.log(`---- ${mode} ----\n${plan.sql}\n`);
+        console.log(`${plan.sql}\n`);
         for (const row of store.query('EXPLAIN QUERY PLAN ' + plan.sql, plan.binds)) console.log(`  ${row.id}/${row.parent} ${row.detail}`);
         continue;
       }
@@ -393,35 +383,34 @@ const argv = Bun.argv.slice(2);
 const flag = (name: string): string | undefined => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] : undefined; };
 
 if (argv[0] === '--child') {
-  child(argv[1] as Mode, Number(argv[2]), flag('--only'), flag('--sql'));
+  child(Number(argv[1]), flag('--only'), flag('--sql'));
 } else {
   const sizes = (flag('--sizes') ?? '1000,8000').split(',').map(Number);
   const only = flag('--only'), sqlOf = flag('--sql');
-  const run = (mode: Mode, n: number): string => {
+  const run = (n: number): string => {
     const extra = [...(only ? ['--only', only] : []), ...(sqlOf ? ['--sql', sqlOf] : [])];
-    const proc = Bun.spawnSync(['bun', import.meta.path, '--child', mode, String(n), ...extra], { env: { ...process.env, ...MODES[mode] }, stderr: 'inherit' });
+    const proc = Bun.spawnSync(['bun', import.meta.path, '--child', String(n), ...extra], { stderr: 'inherit' });
     return proc.stdout.toString();
   };
   if (sqlOf) {
-    for (const mode of Object.keys(MODES) as Mode[]) console.log(run(mode, sizes[0]!));
+    console.log(run(sizes[0]!));
   } else {
-    const results = new Map<string, Map<string, Row>>(); // `${mode}@${n}` → shape → row
-    for (const n of sizes) for (const mode of Object.keys(MODES) as Mode[]) {
-      const rows = JSON.parse(run(mode, n).trim().split('\n').pop()!) as Row[];
-      results.set(`${mode}@${n}`, new Map(rows.map((r) => [r.name, r])));
+    const results = new Map<number, Map<string, Row>>(); // n → shape → row
+    for (const n of sizes) {
+      const rows = JSON.parse(run(n).trim().split('\n').pop()!) as Row[];
+      results.set(n, new Map(rows.map((r) => [r.name, r])));
     }
     const cell = (r: Row | undefined): string => (!r ? '-' : r.ms === null ? `✗${r.error ?? ''}` : r.ms.toFixed(1));
-    const header = ['shape', ...sizes.flatMap((n) => (Object.keys(MODES) as Mode[]).map((m) => `${m}@${n / 1000}k`)), 'CONN/LADDER', 'bytes LADDER/CONN', 'joins LADDER/CONN'];
+    const [first, last] = [sizes[0]!, sizes[sizes.length - 1]!];
+    const header = ['shape', ...sizes.map((n) => `ms@${n / 1000}k`), `×(${last / first}× N)`, 'bytes', 'joins'];
     console.log(`| ${header.join(' | ')} |`);
     console.log(`|${header.map(() => '---').join('|')}|`);
-    const last = sizes[sizes.length - 1]!;
     for (const shape of SHAPES) {
       if (only && !shape.name.includes(only)) continue;
-      const at = (m: Mode, n: number) => results.get(`${m}@${n}`)?.get(shape.name);
-      const on = at('LADDER', last), conn = at('CONN', last);
-      const ratio = on?.ms && conn?.ms ? (conn.ms / on.ms).toFixed(2) : '-';
-      console.log(`| ${[shape.name, ...sizes.flatMap((n) => (Object.keys(MODES) as Mode[]).map((m) => cell(at(m, n)))), ratio,
-        `${on?.bytes ?? '-'}/${conn?.bytes ?? '-'}`, `${on?.joins ?? '-'}/${conn?.joins ?? '-'}`].join(' | ')} |`);
+      const at = (n: number) => results.get(n)?.get(shape.name);
+      const [a, b] = [at(first), at(last)];
+      const ratio = a?.ms && b?.ms ? (b.ms / a.ms).toFixed(1) : '-';
+      console.log(`| ${[shape.name, ...sizes.map((n) => cell(at(n))), ratio, `${b?.bytes ?? '-'}`, `${b?.joins ?? '-'}`].join(' | ')} |`);
     }
   }
 }

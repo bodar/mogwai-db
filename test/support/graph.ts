@@ -122,8 +122,7 @@ const POSITIONAL_WINDOW = /\b(?:range|limit|tail|skip)\s*\(/g;
  * Does an `order()` earlier in the window's OWN scope supply its channel? Only one at the window's
  * nesting level counts: in `V().order().by('name').local(__.out().limit(1))` the order sorts the outer
  * stream, while `limit(1)` slices each vertex's unordered `out()` — WHICH neighbour it takes is still
- * the plan's scan order (measured: L5's correlatedChild differential picks different ones under L8's
- * reversed scans). An `order()` inside a sibling argument (`where(__.order()…)`) does not count either.
+ * the plan's scan order (measured: L5's differential picked different ones under L8's reversed scans). An `order()` inside a sibling argument (`where(__.order()…)`) does not count either.
  * Conservative in the same direction as the walk below: missing an order costs coverage, never
  * soundness.
  */

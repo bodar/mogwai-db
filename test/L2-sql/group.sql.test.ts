@@ -10,9 +10,8 @@ import { test, expect, describe } from 'bun:test';
 import { PER_ROW, STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { exec, executeQuery } from '../support/executor.ts';
-import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { decodeAll } from '../support/decode.ts';
-import { LADDER, bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
 import { t } from '../../src/io.ts';
 import { decorrelate } from '../../src/rel/decorrelate.ts';
 import { col as relCol } from '../../src/rel/expr.ts';
@@ -253,13 +252,10 @@ describe('group / properties SQL', () => {
     // which is `groupCount()`'s value exactly, and it re-enters that arm rather than growing a second
     // spelling of one answer.
     expect(await dec("g.V().has('lang').group().by('lang').by(__.count())")).toEqual([new Map([['java', 2]])]);
-    // The pool is the connector's grouped pool (`pooledGroup`, `lower/scoped.ts` — `group` is LADDERLESS): the
-    // members' child rows are grouped by the KEY, never a per-member sum re-summed — and every switch position
-    // runs that one lowering, so they answer alike.
+    // The pool is the connector's grouped pool (`pooledGroup`, `lower/scoped.ts`): the members' child rows are
+    // grouped by the KEY, never a per-member sum re-summed.
     const pooledSum = "g.V().group().by('name').by(__.bothE().values('weight').sum())";
     expect(bare_read(pooledSum).sql).toContain('GROUP BY');
-    expect(await decodeAll(exec(store, undefined, { ...DEFAULT_FAST_PATHS, ...LADDER }).buffers(pooledSum, {}, {})))
-      .toEqual(await dec(pooledSum));
     // A body reading a LABEL resolves, because the host's labels ride into the sub-fold — handing over
     // an empty map would have made an unresolvable `select()` (now the EMPTY RESULT) pool zero rows.
     expect(await dec("g.V().hasLabel('person').as('p').out('created').group().by('name').by(__.select('p').values('age').sum())"))
@@ -547,11 +543,10 @@ describe('by(__.select(label)) — the alias arm', () => {
 // terms of those members — so the body keys the pool by the members' own columns. No domain cross join, no
 // count-bug LEFT JOIN where every key has a member, no first-row window over a one-row-per-key value.
 describe('pooled group — the domain is the members\' key projection', () => {
-  // The answer the ladder's correlated routes give, decoded off the wire (the two frame a list member differently).
+  // The plan answers off the wire: one group map, or one per vertex under a per-traverser host.
   const store = seededStore();
-  const ladderAgrees = async (q: string) => {
-    const [own, ladder] = [exec(store).buffers(q, {}, {}), exec(store, undefined, { ...DEFAULT_FAST_PATHS, ...LADDER }).buffers(q, {}, {})];
-    expect(await decodeAll(own), q).toEqual(await decodeAll(ladder));
+  const answers = async (q: string) => {
+    expect(await decodeAll(exec(store).buffers(q, {}, {})), q).toHaveLength(q.includes('.local(') || q.includes('.map(') ? 6 : 1);
   };
 
   test('group().by(label).by(count()) is ONE grouping of the members — no domain join, no LEFT JOIN, no window', async () => {
@@ -560,7 +555,7 @@ describe('pooled group — the domain is the members\' key projection', () => {
     expect(sql).not.toContain('PARTITION BY');
     // The domain is read once more — the reconnect naming each key — and never crossed with the pool.
     expect(sql.match(/CROSS JOIN/g) ?? []).toHaveLength(0);
-    await ladderAgrees('g.V().group().by(T.label).by(__.count())');
+    await answers('g.V().group().by(T.label).by(__.count())');
   });
 
   test('a NULL key keeps its bucket — the key is matched null-safely', async () => {
@@ -570,7 +565,7 @@ describe('pooled group — the domain is the members\' key projection', () => {
       'g.withStrategies(ProductiveByStrategy).V().group().by("age").by(__.count())',
     ]) {
       expect(read(q).sql).toContain(' IS ');
-      await ladderAgrees(q);
+      await answers(q);
     }
   });
 
@@ -584,7 +579,7 @@ describe('pooled group — the domain is the members\' key projection', () => {
       'g.V().group().by(T.label).by(__.union(__.out().order().by("name",Order.desc).limit(2)).values("name").fold())',
     ]) {
       expect(read(q).sql).toContain('LEFT JOIN');
-      await ladderAgrees(q);
+      await answers(q);
     }
   });
 
@@ -597,7 +592,7 @@ describe('pooled group — the domain is the members\' key projection', () => {
       'g.V().group().by(T.label).by(__.group().by("age").by(__.count()))',
       'g.V().local(__.group().by(T.label).by(__.count()))',
       'g.V().map(__.out().group().by(T.label).by(__.count()))',
-    ]) await ladderAgrees(q);
+    ]) await answers(q);
   });
 
   test('a SELECTIVE correlated body keeps its domain-driven seek — no key projection is stated there', async () => {

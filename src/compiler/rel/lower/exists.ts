@@ -22,12 +22,10 @@ import { foldedListSet, nestedFirstValue, readsScopeValue, scalarChild } from '.
 // A CHILD BODY AS A BOOLEAN — the correlated existence and its predicate forms: correlatedExists (a body as a
 // correlated `[NOT] EXISTS`, the index-seeking form), anchoredSeed/matchPredicate (a body rooted AT the subject),
 // and bodyPredicate/childPredicate/valuePredicate (the shapes a where()/and()/or()/not() body, a choose()
-// condition, a coalesce arm's emptiness and a repeat() until/emit take). SHARED substrate, owned by neither the
-// ladder nor the scoped-relation connector (`docs/2026-11-16-ladder-retirement-plan.md` R1): it is the child
-// seam's `predicate` answer (`childSeam`, `lower/reduction.ts` — read by match legs, repeat conditions,
-// shortestPath targets) and the step filters' (`sourceFilter`, `lower/filter.ts`), and both run it with the
-// ladder off (measured: line coverage of the L1+L6 pools, connector alone vs ladder first). Calls back into the
-// fold core.
+// condition, a coalesce arm's emptiness and a repeat() until/emit take). The child seam's `predicate` answer
+// (`childSeam`, `lower/reduction.ts` — read by match legs, repeat conditions, shortestPath targets) and the step
+// filters' (`sourceFilter`, `lower/filter.ts`); the connector's existence rows keep its correlated `EXISTS` where
+// SQLite's index-seeking nested loop is the fast plan. Calls back into the fold core.
 
 /**
  * A SUB-TRAVERSAL AS A BOOLEAN — `EXISTS (<the body, rooted at the current row>)`.

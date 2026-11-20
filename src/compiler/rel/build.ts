@@ -1110,8 +1110,8 @@ export function renumber(
   });
 }
 
-/** The PER-ORIGIN partition key a body scopes by — the INNERMOST origin where per-traverser bodies nest
- *  (`nestRowOrigin`: peers keep arrival order, so the nested one is last). */
+/** The PER-ORIGIN partition key a body scopes by — the INNERMOST origin where
+ *  several are carried (peers keep arrival order, so the nested one is last). */
 export const originOf = (channels: Channels): Channel | undefined =>
   channels.findLast((channel) => channel.role === 'origin');
 

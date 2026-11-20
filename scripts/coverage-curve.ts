@@ -3,8 +3,7 @@
 //   bun scripts/coverage-curve.ts            print both profiles' curves at the CI sample size
 //   bun scripts/coverage-curve.ts --record   rewrite test/L5-properties/coverage-baseline.json
 //   COVERAGE_PER_SEED=n                      a bigger exploration sample (report only — never recorded)
-//   COVERAGE_OFF=name[,name]                 the curve with those fast paths OFF (report only — never recorded);
-//                                            with `MOGWAI_CONNECTOR_ONLY=1` and `correlatedChild`, the general path alone
+//   COVERAGE_OFF=name[,name]                 the curve with those fast paths OFF (report only — never recorded)
 //
 // Recording is a command, not something the test does on its own. A new baseline needs a commit message
 // that names WHY the curve moved.

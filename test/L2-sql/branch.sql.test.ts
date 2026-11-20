@@ -8,7 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { LADDER, read, run, seededStore } from '../support/harness.ts';
+import { read, run, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -84,10 +84,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
 
   test('local(<body>.dedup()) is a per-origin DISTINCT, not a global one', () => {
     // `dedup()` inside a per-parent body is DISTINCT within each parent: `local(both("created").dedup())`
-    // keeps each vertex's distinct created-neighbours. It lowers to a ranked window PARTITIONed by the
-    // origin (parent) plus the identity key — never a global Distinct that would collapse across parents.
-    const p = read('g.V().local(__.both("created").dedup())', { fastPaths: LADDER });
-    expect(p.sql).toMatch(/row_number\(\) OVER \(PARTITION BY/i);
+    // keeps each vertex's distinct created-neighbours. The connector keys the body by its scope row, so the
+    // DISTINCT carries that key (`dk…`) beside the identity — never a global Distinct across parents.
+    const p = read('g.V().local(__.both("created").dedup())');
+    expect(p.sql).toMatch(/SELECT DISTINCT \w+\.id AS id, 1 AS bulk, \w+\.dk\d+ AS dk\d+/i);
     // Per-vertex distinct both-created counts: marko 1, josh 2 (lop,ripple), peter 1, lop 3, ripple 1 = 8.
     const n = run(seededStore(), 'g.V().local(__.both("created").dedup()).count()') as any[];
     expect(Number(n[0].v)).toBe(8);

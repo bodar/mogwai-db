@@ -11,14 +11,14 @@
 import { describe, expect, test } from 'bun:test';
 import { exec } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
-import { bagOf, LADDER, read, seededStore } from '../support/harness.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
-import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
+import { bagOf, read, seededStore } from '../support/harness.ts';
+import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import { aggregate, values } from '../../src/rel/factory.ts';
 import { col, lit } from '../../src/rel/expr.ts';
 import { relId } from '../../src/rel/types.ts';
 
-const MODES = [['connector', CONNECTOR_ONLY], ['default', undefined], ['ladder', { ...DEFAULT_FAST_PATHS, ...LADDER }]] as const;
+// One lowering since the ladder was deleted; the loop keeps the mode label in a failure.
+const MODES = [['default', undefined]] as const;
 const typed = (q: string, fastPaths?: FastPathConfig): string[] => bagOf(typedAll(exec(seededStore(), undefined, fastPaths).buffers(q, {})));
 
 const ANSWERS: readonly (readonly [string, readonly string[]])[] = [

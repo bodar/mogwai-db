@@ -6,8 +6,8 @@
 // `GroupSideEffectStep` passes its traversers on, so the stream after the step is the INCOMING one
 // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/sideEffect/GroupSideEffectStep.java`).
 //
-// Every case runs with the connector ALONE (`connectorOnly`, no ladder) and the default, and the two give the
-// same typed multiset — `typedAll` keeps the number class.
+// The connector is the one lowering (the ladder and its switch are deleted); answers compare as typed multisets
+// — `typedAll` keeps the number class.
 import { describe, expect, test } from 'bun:test';
 import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { exec } from '../support/executor.ts';
@@ -17,7 +17,6 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../../src/cf-limits.ts';
 import { loadBulk } from '../../src/bulk.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
 import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 
 const typed = (q: string, fastPaths?: FastPathConfig): string[] => bagOf(typedAll(exec(seededStore(), undefined, fastPaths).buffers(q, {})));
@@ -43,14 +42,13 @@ const SAME: readonly string[] = [
 
 describe('a keyed pooled group() is the connector\'s, through the host\'s own keyed tail', () => {
   for (const q of SAME) test(q, () => {
-    const connector = typed(q, CONNECTOR_ONLY);
+    const connector = typed(q);
     expect(connector.length).toBeGreaterThan(0);
-    expect(connector).toEqual(typed(q));
   });
 
   test('the pooled map is the one the barrier form builds', () => {
-    expect(typed("g.V().group('a').by(label).by(out().count()).cap('a')", CONNECTOR_ONLY))
-      .toEqual(typed("g.V().group().by(label).by(out().count())", CONNECTOR_ONLY));
+    expect(typed("g.V().group('a').by(label).by(out().count()).cap('a')"))
+      .toEqual(typed("g.V().group().by(label).by(out().count())"));
   });
 
   // The keyed tail's guards hold on the connector route as on the host's own: a program with effects declines, and
@@ -59,7 +57,7 @@ describe('a keyed pooled group() is the connector\'s, through the host\'s own ke
     "g.V().group('a').by(label).by(count()).addV('x').cap('a')",
     "g.V().union(group('a').by(label).by(count()), group('a').by(label).by(values('name').fold())).cap('a')",
   ]) test(`declines: ${q}`, () => {
-    expect(() => typed(q, CONNECTOR_ONLY)).toThrow(UnsupportedTraversal);
+    expect(() => typed(q)).toThrow(UnsupportedTraversal);
   });
 });
 
@@ -89,7 +87,6 @@ describe('a keyed pooled group() pools its members across sites and bodies, redu
     ["g.V().where(out().group('a').by(label).by(out().count())).cap('a')", '{"person":2L,"software":0L}'],
     ["g.V().group('a').by(label).by(out('nothing').count()).cap('a')", '{"person":0L,"software":0L}'],
   ] as const) test(q, () => {
-    expect(typed(q, CONNECTOR_ONLY)).toEqual([expected]);
     expect(typed(q)).toEqual([expected]);
   });
 
@@ -179,7 +176,7 @@ describe('a raising pooled keyed group is evaluated ONCE, and the drain and the 
   test('reads the taken map inside a where() body', () => {
     const q = "g.V().group('a').by(label).by(values('age').sum()).where(select('a').count(local).is(1)).count()";
     expect(typed(q)).toEqual(typed('g.inject(6L)'));
-    expect(typed(q, CONNECTOR_ONLY)).toEqual(typed('g.inject(6L)'));
+    expect(typed(q)).toEqual(typed('g.inject(6L)'));
   });
 });
 
@@ -197,7 +194,7 @@ describe('a keyed group() whose value is count() registers the counting rows at 
     ["g.V().repeat(out().group('a').by(label).by(count())).times(2).cap('a')", '{"person":2L,"software":6L}'],
     ["g.V().sideEffect(group('a').by(label).by(count())).cap('a')", '{"person":4L,"software":2L}'],
   ] as const) test(q, () => {
-    expect(typed(q, CONNECTOR_ONLY)).toEqual([expected]);
+    expect(typed(q)).toEqual([expected]);
     expect(typed(q)).toEqual([expected]);
   });
 
@@ -220,7 +217,7 @@ describe('a keyed group() whose value is count() registers the counting rows at 
     "g.V().union(group('a').by(label).by(count()), groupCount('a').by(label)).cap('a')",
     "g.V().union(group('a').by(label).by(count()), group('a').by(label).by(out().count())).cap('a')",
   ]) test(`declines: ${q}`, () => {
-    expect(() => typed(q, CONNECTOR_ONLY)).toThrow(UnsupportedTraversal);
+    expect(() => typed(q)).toThrow(UnsupportedTraversal);
     expect(() => typed(q)).toThrow(UnsupportedTraversal);
   });
 });

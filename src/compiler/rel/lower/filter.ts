@@ -96,8 +96,8 @@ export function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
  * THE SOURCE'S FILTER FUSION — the ONE authority for which filters after a `V()`/`E()` conjoin into the scan's own
  * WHERE: the leading run from `steps[from]` of filters `sourceFilter` lowers over the physical row (an edge's
  * `label` is a column there, not a membership test), so a run of filters is ONE `WHERE` over one scan instead of a
- * CTE-per-filter with its re-join. A child filter at a connector site is the connector's (`lower/scoped.ts`, its
- * hosts LADDERLESS) and ends the run; so does any step `stop` names — the caller's own reason a filter must stay
+ * CTE-per-filter with its re-join. A child filter at a connector site is the connector's (`lower/scoped.ts`) and
+ * ends the run; so does any step `stop` names — the caller's own reason a filter must stay
  * above the scan. Returns the conjoined predicate and the index of the first step not fused.
  */
 export function fuseSourceFilters(

@@ -31,11 +31,6 @@ export interface RelRequest {
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
   readonly ftsSubstringPredicate: boolean;
-  /** The `correlatedChild` fast path: the ladder of correlated child routes tried before the scoped-relation
-   *  connector (on) or after it (off) — `lower/scoped.ts`. */
-  readonly correlatedChild: boolean;
-  /** The connector-ALONE measurement mode (`FastPathConfig.connectorOnly`): no ladder at any site. */
-  readonly connectorOnly?: boolean;
   /** DETACHED-transfer compile mode (set only by `runForeign()`): the leaf emits a fuller property node
    *  `{t, v, vpid, meta?}` so a landed snapshot carries per-property identity + meta. Off for ordinary
    *  wire framing, so the base plan is unchanged. */
@@ -134,11 +129,11 @@ export function compileViaRel(
   // position — so an unordered stream owes no emission order (`Lowering.wireTerminal`). The only place
   // it is set; every split/barrier head and federate push lowers through `loweringOptions` without it.
   //
-  // ONE lowering, in the child order the switch names. Each connector site (`lower/scoped.ts`) tries the ladder
-  // and the connector in that order, each the other's fallback; there is no whole-compile retry in the other
-  // order. It used to exist (`bothChildOrders`) for a NESTED site whose choice an enclosing route refused, and
-  // for a plan decline (`CopiedDraw`) the other order's plan avoided — measured over L1, L6 and the ~25k host
-  // sample (`mise run ladder-reach`), it rescued nothing, so a decline is now the first order's own reason.
+  // ONE lowering. Each connector site (`lower/scoped.ts`) tries the connector, then the host's own tail where the
+  // row does not claim the site; there is no whole-compile retry. One used to exist (`bothChildOrders`) for a
+  // NESTED site whose choice an enclosing route refused, and for a plan decline (`CopiedDraw`) the other child
+  // order's plan avoided — measured over L1, L6 and the ~25k host sample, it rescued nothing, so a decline is
+  // the lowering's own reason.
   const lowered = lowerToRel(steps, { ...loweringOptions(request, params, sideEffects), wireTerminal: true });
   if (!lowered) return null;
   return finishLowering(lowered);
@@ -157,8 +152,6 @@ export function loweringOptions(
     params,
     collapse: request.collapse,
     correlatedChildren: true,
-    correlatedChild: request.correlatedChild,
-    connectorOnly: request.connectorOnly ?? false,
     // NOT a strategy switch — the graph's declared label cardinality is a CAPABILITY, and a creation
     // with no label of its own is a compile-time question only because this value is settled before a
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the

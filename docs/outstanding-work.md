@@ -1253,9 +1253,9 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 #### Two arity vocabularies (`arity-one-authority`)
 - **Area:** compiler
 - **Reach:** plausible
-- **Problem:** `atMostOnePerTraverser` is a hand recursion over named hosts. It sits beside `rowBounds`/`atMostOneRow`. It is sound but conservative: it does not include filters or modulated local operations. So `g.V().map(__.coalesce(__.out('knows').count().is(P.gt(0)), __.constant(-1L)))` declines. Its doc says why `rowBounds` cannot see a `choose`'s disjoint gates.
+- **Problem:** `atMostOnePerTraverser` (a hand recursion over named hosts beside `rowBounds`/`atMostOneRow`) was deleted with the ladder (R7, 2026-11-20), so `rowBounds` is the one arity authority. `g.V().map(__.coalesce(__.out('knows').count().is(P.gt(0)), __.constant(-1L)))` still declines (re-probed after R7): `rowBounds` cannot see a `choose`'s/`coalesce`'s disjoint gates.
 - **Fix:** Keep it in step with `ONE_TO_ONE`. See the KEEPS_ONE proposal under "Next round".
-- **Where:** `src/compiler/rel/lower/per-traverser.ts` `atMostOnePerTraverser`; `src/rel/bounds.ts`
+- **Where:** `src/rel/bounds.ts`
 
 ### Queries we decline: other
 
@@ -1497,6 +1497,16 @@ Code-health work. These items change no answer unless they say so.
 
 ### Internal debt: branches and nesting
 
+#### R7 (ladder deletion) follow-ups (`r7-followups`)
+- **Area:** branches and nesting
+- **Reach:** rare
+- **Problem:**
+  - (a) `map(choose(hasLabel('person'), select('k'), constant(0)))` over an always-present host: the connector's `firstInner` keeps a per-row `IS NOT NULL` presence term plus an EXISTS fallback that re-inlines the label `EXISTS` four times. The deleted ladder's choose-arm route spent none (was pinned by `test/compiler/scalar-map-select.test.ts`). The default plan did not change with R7 — the connector was already first — so this is plan hygiene, not a regression.
+  - (b) L5's `host-closure.test.ts` and L9's `connector-closure.test.ts` now run the IDENTICAL sweep (seed 42, 200 cases, default config).
+  - (c) `deferred-hosts.ts`' retirement `scope` (`ladder` | `host-owned`) still names the deleted ladder.
+- **Fix:** (a) compute the presence term once, or drop it where the host is always present. (b) fold the rate ratchet into L9's per-query one, or have one share the other's sweep. (c) rename the scope to what it now means (a connector row owed vs a host's own lowering).
+- **Where:** `src/compiler/rel/lower/scoped.ts` `firstInner`; `test/L5-properties/host-closure.test.ts`; `test/L9-connector/connector-closure.test.ts`, `test/L9-connector/deferred-hosts.ts`
+
 #### Route the remaining host lists through the host-set authorities (`host-lists`)
 - **Area:** IR host sets
 - **Reach:** common
@@ -1531,7 +1541,7 @@ Code-health work. These items change no answer unless they say so.
 - **Reach:** rare
 - **Problem:**
   - Send an unkeyed `group().by(k).by(count())` to the `countsTraversers` arm of `groupRows`, not the member pool (2226 vs 1223 SQL chars). Fold `keyedCount` into that route. Check the key spelling.
-  - Export one `collapsesStep(step)` (`selfCollapses && !isLocalScope`, `lower/reduction.ts`). Replace the hand copies in `branch.ts` (`isReductionArm`, `slicesAcrossStarts`), `per-traverser.ts` and `map.ts` (`reducesPool`).
+  - Export one `collapsesStep(step)` (`selfCollapses && !isLocalScope`, `lower/reduction.ts`). Replace the hand copies in `branch.ts` (`isReductionArm`, `slicesAcrossStarts`) and `map.ts` (`reducesPool`).
   - Delete the unreferenced spine-only `rewrite` in `src/rel/walk.ts` (it lacks V5's identity rule). Fix the `prune.ts` and `rewriteRels` comments that cite it.
   - `countsTraversers` (`map.ts`) and `reducingGroupCollapseTerminal` (`ir/bulk.ts`) both ask "is the value exactly count()". `bulk.ts` excludes the keyed form, which is now splittable.
   - The comments of `countsTraversers` and `sameGroupRecipe` lack `vendor/tinkerpop/...` paths.
@@ -1544,7 +1554,7 @@ Code-health work. These items change no answer unless they say so.
 - **Reach:** plausible
 - **Problem:** Some callers of `selfCollapses` add `!isLocalScope(step)` by hand and some do not. `map.ts` `reducesPool` restates the test. `project('x').by(values('age').fold().sum(Scope.local))` declines, but `…count(Scope.local)` answers. It is not measured whether the missing check causes this.
 - **Fix:** Move the `!isLocalScope` check into `selfCollapses(step)`. Measure the probe as part of the item.
-- **Where:** `src/compiler/rel/lower/branch.ts` `isReductionArm` and the slice test near `SUBSET_SLICES`; `src/compiler/rel/lower/per-traverser.ts`; `src/compiler/rel/lower/reduction.ts` `reductionArm`, `selfCollapsed`; `src/compiler/rel/map.ts` `reducesPool`
+- **Where:** `src/compiler/rel/lower/branch.ts` `isReductionArm` and the slice test near `SUBSET_SLICES`; `src/compiler/rel/lower/reduction.ts` `reductionArm`, `selfCollapsed`; `src/compiler/rel/map.ts` `reducesPool`
 
 #### `collectionMembersOrSelf` reads `storedCollection` (`cm-stored-collection`)
 - **Area:** collection tags
@@ -1941,9 +1951,9 @@ Each item is measured from N≈1k to N≈8k (linear is about 8×), or it exceeds
 #### "Terminal global reducer" tested by name (`terminal-reducer-fact`)
 - **Area:** compiler
 - **Reach:** rare
-- **Problem:** Five places test for a terminal global reducer by step name. One is `isStreamBarrier(last) && (REDUCERS.has(last.name) || last.name === 'fold')`. `nestedHostChild` restates `perTraverserChild`'s policy (map → one; local, flatMap → all). All sites fail closed today.
+- **Problem:** Five places test for a terminal global reducer by step name. One is `isStreamBarrier(last) && (REDUCERS.has(last.name) || last.name === 'fold')`. `nestedHostChild` states the per-host policy (map → one; local, flatMap → all) by hand. All sites fail closed today.
 - **Fix:** Make it one fact. See the `selfCollapses` proposal under "Next round".
-- **Where:** `src/compiler/rel/lower/per-traverser.ts`; `src/compiler/ir/analyze.ts`; `src/compiler/rel/write.ts`
+- **Where:** `src/compiler/rel/lower/reduction.ts` `nestedHostChild`; `src/compiler/ir/analyze.ts`; `src/compiler/rel/write.ts`
 
 #### Ordering pins (`ordering-pins`)
 - **Area:** compiler

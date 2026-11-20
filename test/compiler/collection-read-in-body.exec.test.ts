@@ -18,13 +18,12 @@ import { col, eq } from '../../src/rel/expr.ts';
 import { filter, join, project, scan } from '../../src/rel/factory.ts';
 import { relId } from '../../src/rel/types.ts';
 import { forEachRel, freeRelIds, rewriteRels } from '../../src/rel/walk.ts';
-import { bare, run, runWith, seededStore } from '../support/harness.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
+import { bare, run, seededStore } from '../support/harness.ts';
 import { reevaluatedCtes } from '../support/cte-runs.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 
-const values = (q: string, connectorOnly = false): unknown[] =>
-  (bare(connectorOnly ? runWith(seededStore(), q, { fastPaths: CONNECTOR_ONLY }) : run(seededStore(), q)) as { v: unknown }[])
+const values = (q: string): unknown[] =>
+  (bare(run(seededStore(), q)) as { v: unknown }[])
     .map((row) => row.v);
 
 // Hand-checked on the modern graph: 6 vertices (4 person, 2 software), 6 distinct names.
@@ -62,7 +61,6 @@ describe('a named collection read inside a connector body', () => {
   for (const [q, expected] of CASES) {
     test(q, () => {
       expect(values(q)).toEqual([...expected]);
-      expect(values(q, true)).toEqual([...expected]);
     });
   }
 });

@@ -24,7 +24,7 @@ import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { loadBulk } from '../../src/bulk.ts';
-import { bare, LADDER, read, runWith, seededStore } from '../support/harness.ts';
+import { bare, read, runWith, seededStore } from '../support/harness.ts';
 
 /** Child-relation enumerations one compile makes — answered or declined. */
 const enumerations = (q: string, fastPaths?: Partial<FastPathConfig>): number => {
@@ -43,18 +43,16 @@ const HOSTS: readonly (readonly [string, (k: number) => string])[] = [
   ['filter', (k) => `g.V().filter(repeat(out()).times(${k})).count()`],
 ];
 
-// Measured in EACH child order alone, across the width: closing a side at 64 is one more derived table, a step
-// in the SQL and never growth in the compile.
+// Measured across the width: closing a side at 64 is one more derived table, a step in the SQL and never growth
+// in the compile.
 describe('an unroll inside a host compiles in work linear in its count', () => {
   for (const [host, q] of HOSTS) {
-    for (const [order, fastPaths] of [['connector', { connectorOnly: true }], ['ladder', LADDER]] as const) {
-      test(`${host} (${order})`, () => {
-        const [k16, k32, k63, k130] = [16, 32, 63, 130].map((k) => enumerations(q(k), fastPaths));
-        expect(k32! / k16!).toBeLessThanOrEqual(2.5);
-        expect(k63! / k32!).toBeLessThanOrEqual(2.5);
-        expect(k130! / k63!).toBeLessThanOrEqual(2.5 * 130 / 63 / 2);
-      });
-    }
+    test(host, () => {
+      const [k16, k32, k63, k130] = [16, 32, 63, 130].map((k) => enumerations(q(k)));
+      expect(k32! / k16!).toBeLessThanOrEqual(2.5);
+      expect(k63! / k32!).toBeLessThanOrEqual(2.5);
+      expect(k130! / k63!).toBeLessThanOrEqual(2.5 * 130 / 63 / 2);
+    });
   }
   // Linear: ~31× the iterations may cost at most ~1.5× that per iteration. The quadratic ordering cost ~650×
   // the work at times(2000) that it did at times(63).
@@ -86,18 +84,14 @@ describe('an unroll inside a host answers past SQLite\'s join width', () => {
     // A top-level emit() unroll joins every iteration's phase into one SELECT too.
     ['g.V().repeat(__.out()).emit().times(64).count()', [8]],
   ] as const)('%s', (q, expected) => {
-    for (const fastPaths of [{ connectorOnly: true }, LADDER]) {
-      expect(bare(runWith(store, q, { fastPaths })).map((row: { v: number }) => row.v)).toEqual([...expected]);
-    }
+    expect(bare(runWith(store, q)).map((row: { v: number }) => row.v)).toEqual([...expected]);
   });
 
   // A `both()` hop reads a UNION ALL CTE the flattener merges arm by arm, so the width counts its widest arm
-  // (`derivedTables`): counted as one table, it closed at 64 and SQLite still refused the flattened 65. The
-  // default order only: the opt-in ladder's per-traverser `limit` enumerates every walk before it keeps one
-  // (~2.4× per hop on this graph, a cost of the ladder route at any width, not of the close).
+  // (`derivedTables`): counted as one table, it closed at 64 and SQLite still refused the flattened 65.
   test('a both() unroll past the width answers', () => {
     const q = 'g.V().local(repeat(both()).times(70).limit(1)).count()';
-    for (const fastPaths of [{ connectorOnly: true }, {}]) expect(bare(runWith(store, q, { fastPaths }))).toEqual([{ v: 6 }]);
+    expect(bare(runWith(store, q))).toEqual([{ v: 6 }]);
   });
 
   // On a ring every vertex walks to exactly one vertex k hops on, so the answer is the vertex count — and a

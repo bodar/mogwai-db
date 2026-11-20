@@ -757,7 +757,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, source: GraphSource, fr
  * ORIGIN (`GROUP BY origin`), then LEFT JOINs the origin DOMAIN so an origin whose sub-stream was empty
  * still emits a map, `COALESCE`d to the empty `{}` (an empty pairs array) a `group()` owes for zero
  * traversers — the seed a bare `GROUP BY` drops. The origin is re-declared as the channel on the output
- * (the one node that may), so the rejoin carries it and `flatMapRejoin` sheds it once the body is done.
+ * (the one node that may), so the rejoin carries it and the body's host sheds it once the body is done.
  */
 function mapOfGroupsPerOrigin(grouped: Rel, entry: Entry, order: Expr, originCol: string, domain: Rel, fresh: Minter): Rel {
   const perOrigin = make.aggregate({

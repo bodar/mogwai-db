@@ -8,16 +8,15 @@
 // did: an option-map `choose` with differently shaped arms under `local`/`map`, and a per-vertex property window
 // under `local` (`vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/map/Local.feature:20-37`).
 //
-// Every case runs on the connector ALONE, the default, and the opt-in ladder, and all three must give the same
-// multiset — the connector's answer value by value against the route it replaces.
+// Every case compares the multiset, value by value, against the answer the deleted ladder route gave.
 import { describe, expect, test } from 'bun:test';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
-import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
+import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
-import { bagOf, bare, LADDER, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
+import { bagOf, bare, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
 
-const MODES = [['connector', CONNECTOR_ONLY], ['default', undefined], ['ladder', { ...DEFAULT_FAST_PATHS, ...LADDER }]] as const;
+// One lowering since the ladder was deleted; the loop keeps the mode label in a failure.
+const MODES = [['default', undefined]] as const;
 const modern = seededStore();
 const crew = storeSeededWith(CREW_SEED);
 type Store = typeof modern;

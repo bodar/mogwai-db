@@ -13,18 +13,17 @@
 // `src/compiler/rel/framing.ts`); the arm meet re-projects (a) onto the merged `vtype` (`scalarArmType`,
 // `src/compiler/rel/lower/branch.ts`), and `match` binds the value with its `vt` tag.
 //
-// Every case runs in BOTH child orders, the connector alone (`connectorOnly`, no ladder, no retry) and the
-// default, and the two must give the same typed multiset — `typedAll` keeps the number class, so `3` vs `3.0`
+// Every case compares the typed multiset — `typedAll` keeps the number class, so `3` vs `3.0`
 // is a different answer here.
 import { describe, expect, test } from 'bun:test';
 import { UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { exec } from '../support/executor.ts';
 import { typedAll } from '../support/decode.ts';
 import { bagOf, seededStore } from '../support/harness.ts';
-import { CONNECTOR_ONLY } from '../L9-connector/ladder-reach.ts';
 import type { FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 
-const MODES = [['connector', CONNECTOR_ONLY], ['default', undefined]] as const;
+// One lowering since the ladder was deleted; the loop keeps the mode label in a failure.
+const MODES = [['default', undefined]] as const;
 const typed = (q: string, fastPaths?: FastPathConfig): string[] => bagOf(typedAll(exec(seededStore(), undefined, fastPaths).buffers(q, {})));
 
 const ANSWERS: readonly (readonly [string, readonly string[]])[] = [

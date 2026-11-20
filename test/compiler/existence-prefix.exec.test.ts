@@ -3,7 +3,7 @@
 // authority with two consumers: the `trimExistenceSuffix` Pass (a TRUE existence position is rewritten) and
 // `childPredicate` (a `coalesce` arm's emptiness, whose value is still used). And the alias compare
 // `where(k, P).by(<traversal>)` is a connector row (`aliasCompare`, src/compiler/rel/lower/scoped.ts), so the
-// existence family is LADDERLESS.
+// existence family is the connector's alone.
 import { test, expect, describe } from 'bun:test';
 import { NO_PARAMS } from '../../src/gremlin/param-env.ts';
 import { isNested, parseGremlin, stepChain, type Step } from '../../src/gremlin/frontend.ts';
@@ -12,17 +12,10 @@ import { existencePrefix } from '../../src/compiler/ir/productivity.ts';
 import { bagOf, bare, grouped, runWith, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
-const CONNECTOR_ONLY = { fastPaths: { connectorOnly: true } } as const;
-const LADDER_FIRST = { fastPaths: { correlatedChild: true } } as const;
 /** The answer as a multiset of plain values (an id for an element row). */
 const answer = (q: string, options?: object): string[] => bagOf(bare(runWith(store, q, options as never)).map((r: any) => JSON.stringify(r.v ?? r.id ?? r.map ?? r)));
-/** Every switch position answers the same. */
-const agreed = (q: string) => {
-  const ours = answer(q);
-  expect(answer(q, CONNECTOR_ONLY)).toEqual(ours);
-  expect(answer(q, LADDER_FIRST)).toEqual(ours);
-  return ours;
-};
+/** The answer of the one lowering (the ladder and its switch are deleted). */
+const agreed = (q: string) => answer(q);
 
 /** The step names of a chain's normalized first nested argument at `host`. */
 const bodyAfterPasses = (g: string, host: string): string[] => {
@@ -145,8 +138,7 @@ describe('an effect in an existence body is never trimmed away', () => {
       ["g.V().union(__.where(__.map(__.addLabel('x')).count()))", 'addLabel', 'where'],
       ["g.V().where(__.where(__.out().drop()).count())", 'drop', 'where'],
     ] as const) {
-      for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST])
-        expect(declined(q, options), q).toContain(`a write (${write}()) inside ${host}()`);
+      expect(declined(q), q).toContain(`a write (${write}()) inside ${host}()`);
     }
   });
   test('nothing is written by a declined filter', () => {
@@ -205,38 +197,33 @@ describe('a write in a non-filter child body declines, naming the write, the hos
     ["g.V().repeat(out().drop()).times(2)", 'drop', 'repeat', OUTER, MAYBE],
   ] as const) {
     test(q, () => {
-      for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST]) {
-        const message = declined(q, options);
-        expect(message, q).toContain('no lowering covers');
-        expect(message, q).toContain(`a write (${write}()) inside ${host}() ${certainty}; ${advice}`);
-      }
+      const message = declined(q);
+      expect(message, q).toContain('no lowering covers');
+      expect(message, q).toContain(`a write (${write}()) inside ${host}() ${certainty}; ${advice}`);
     });
   }
   // A child write that lowers fine is not blamed for a decline elsewhere: the hint is only where the fold declined
   // AT the write's host. Here the write's own lowering declines on a framing fact — the traverser's path is tracked
   // (the simplePath() in the later local()) — and that is what the user reads, from the write itself.
   test('a write is blamed for the fact that declined it, not for its host', () => {
-    for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST]) {
-      const message = declined("g.V().hasLabel('software').union(addV('x')).local(V().simplePath().count())", options);
-      expect(message).not.toContain('inside union()');
-      expect(message).toContain('a write (addV()) on a traverser whose path is tracked');
-      expect(declined("g.V().addV('x').path()", options)).toContain('a write (addV()) on a traverser whose path is tracked');
-    }
+    const message = declined("g.V().hasLabel('software').union(addV('x')).local(V().simplePath().count())");
+    expect(message).not.toContain('inside union()');
+    expect(message).toContain('a write (addV()) on a traverser whose path is tracked');
+    expect(declined("g.V().addV('x').path()")).toContain('a write (addV()) on a traverser whose path is tracked');
   });
   test('a write whose host lowered is not blamed for a decline after it, or before it', () => {
-    for (const options of [undefined, CONNECTOR_ONLY, LADDER_FIRST])
-      for (const q of [
-        "g.V().has('person','name','marko').union(addV('x')).valueMap().unfold().unfold()",
-        "g.V().valueMap().unfold().unfold().union(addV('x'))",
-      ]) {
-        const message = declined(q, options);
-        expect(message, q).toContain('no lowering covers');
-        expect(message, q).not.toContain('a write');
-      }
+    for (const q of [
+      "g.V().has('person','name','marko').union(addV('x')).valueMap().unfold().unfold()",
+      "g.V().valueMap().unfold().unfold().union(addV('x'))",
+    ]) {
+      const message = declined(q);
+      expect(message, q).toContain('no lowering covers');
+      expect(message, q).not.toContain('a write');
+    }
   });
   // A keyed group() whose value by() POOLS registers the pool's MEMBERS, so a child body's site is keyed per host
   // row like any collector's and the one reduction runs at the cap (`PoolRecipe`, src/compiler/rel/collection.ts).
-  // Every switch position answers the same, nested hosts included.
+  // Nested hosts included.
   for (const [q, expected] of [
     ["g.V().sideEffect(out().group('x').by('name').by(count())).cap('x')", { josh: 1, lop: 3, ripple: 1, vadas: 1 }],
     ["g.V().local(out().group('x').by('name').by(count())).cap('x')", { josh: 1, lop: 3, ripple: 1, vadas: 1 }],
@@ -253,20 +240,16 @@ describe('a write in a non-filter child body declines, naming the write, the hos
         Object.fromEntries(Object.entries(map).map(([k, v]) => [k, Array.isArray(v) ? [...v].sort() : v]));
       const ours = sorted(grouped(runWith(seededStore(), q)));
       expect(ours).toEqual(expected as Record<string, unknown>);
-      expect(sorted(grouped(runWith(seededStore(), q, LADDER_FIRST as never)))).toEqual(ours);
-      expect(sorted(grouped(runWith(seededStore(), q, CONNECTOR_ONLY as never)))).toEqual(ours);
     });
   }
   // A pool whose reduction can RAISE (a `sum()`'s narrowing overflow) is evaluated where it is collected, so its
   // drain is the finished map (`takeFinishedMap`) — one map per body, which cannot key per host row. ONE raiser
-  // (`keyedBody`) reading ONE carrier (the body's fork, `refuseSite`): the same explanation under every switch.
+  // (`keyedBody`) reading ONE carrier (the body's fork, `refuseSite`): the same explanation whichever host reached it.
   test("a keyed group() whose pooled value can raise names the collection and why, in a child body", () => {
     const q = "g.V().sideEffect(out().group('x').by('name').by(values('age').sum())).cap('x')";
     const message = declined(q);
     expect(message).toContain("a side effect ('x') collected inside sideEffect() is not supported in this form yet");
     expect(message).toContain('a group() value by() that reduces or folds, here sum()');
-    expect(declined(q, LADDER_FIRST)).toBe(message);
-    expect(declined(q, CONNECTOR_ONLY)).toBe(message);
   });
   test('a write that lowers inside its host answers, with no hint', () => {
     expect(bare(runWith(seededStore(), "g.V().has('person','name','marko').union(addV('x')).count()"))).toEqual([{ v: 1 }]);

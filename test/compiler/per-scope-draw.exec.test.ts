@@ -16,19 +16,21 @@
 // readers of one pick agree, picks are independent across scopes — never on Java's sampling order.
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
+import type { CompileOptions } from '../../src/compiler/options/fast-paths.ts';
 import { decorrelate } from '../../src/rel/decorrelate.ts';
 import { col, compilerInt, type Expr } from '../../src/rel/expr.ts';
 import { limit, scan, sort } from '../../src/rel/factory.ts';
 import type { Rel } from '../../src/rel/rel.ts';
 import { relId } from '../../src/rel/types.ts';
 import { forEachRel } from '../../src/rel/walk.ts';
+import { CopiedDraw } from '../../src/sql/kernel/budget.ts';
 import { bare, runWith, seededStore } from '../support/harness.ts';
 
-const CONNECTOR = { fastPaths: { connectorOnly: true } } as const;
-const MODES = [['default', undefined], ['connector alone', CONNECTOR]] as const;
+// One lowering since the ladder was deleted; the loop keeps the mode label in a failure.
+const MODES = [['default', undefined]] as const;
 const store = seededStore();
-const rows = (q: string, options?: typeof CONNECTOR) => bare(runWith(store, q, options));
-const ids = (q: string, options?: typeof CONNECTOR): number[] => rows(q, options).map((r: any) => Number(r.v ?? r));
+const rows = (q: string, options?: CompileOptions) => bare(runWith(store, q, options));
+const ids = (q: string, options?: CompileOptions): number[] => rows(q, options).map((r: any) => Number(r.v ?? r));
 /** Out-neighbours in the modern graph — v2, v3 and v5 have none. */
 const OUT: Record<number, number[]> = { 1: [2, 3, 4], 4: [3, 5], 6: [3] };
 
@@ -139,13 +141,13 @@ describe('a drawn relation the body only READS stays one shared pick', () => {
 
 describe('the plan', () => {
   test('the draw is partitioned by the scope key, never a correlated subquery', () => {
-    const plan = compile('g.V().local(out().sample(1)).count()', {}, CONNECTOR);
+    const plan = compile('g.V().local(out().sample(1)).count()', {});
     if (plan.kind !== 'read') throw new Error('expected a read');
     expect(plan.sql).toMatch(/PARTITION BY [^)]*ORDER BY RANDOM\(\)/);
   });
 
   test('a drawing relation two readers share is a fenced CTE', () => {
-    const plan = compile("g.V().local(out().order().by(shuffle).limit(1).union(out(), __.in()).count())", {}, CONNECTOR);
+    const plan = compile("g.V().local(out().order().by(shuffle).limit(1).union(out(), __.in()).count())", {});
     if (plan.kind !== 'read') throw new Error('expected a read');
     expect(plan.sql).toMatch(/AS MATERIALIZED \(SELECT [^;]*RANDOM\(\)/);
   });
@@ -195,5 +197,27 @@ describe('a draw we cannot keep per scope declines, naming the shape', () => {
   test('a draw a choose() predicate and its arms read', () => {
     expect(() => rows("g.V().choose(out().sample(1).hasLabel('person'), constant(1), constant(2))"))
       .toThrow('Draw once in the outer traversal, e.g. with local(…), and branch on that');
+  });
+  // `CopiedDraw` (the `name` pass) declines the one lowering's plan with the specific reason — a property of the
+  // query text — under a choose() predicate and at depth (inside map()/local()). Moved from L9's ladder-reach engine
+  // test when the ladder was deleted (R7).
+  test('a draw a choose() predicate and its arm both read declines with the CopiedDraw reason, at any depth', () => {
+    for (const q of [
+      "g.V().choose(out().sample(1).values('name'), identity(), out())",
+      "g.V().map(choose(out().sample(1).values('name'), identity(), out()).fold())",
+      "g.V().local(choose(out().sample(1).values('name'), identity(), out()))",
+    ]) expect(() => rows(q), q).toThrow(CopiedDraw);
+  });
+});
+
+// A per-scope draw checked BY VALUE: of the modern vertices only marko has a `knows` edge, and both vertices he
+// knows (vadas, josh) have an age, so whichever is drawn the answer is [marko] — every run, at any host.
+describe('a draw whose outcome is deterministic', () => {
+  test('under an existence host and at depth: [marko]', () => {
+    for (const q of [
+      "g.V().where(out('knows').sample(1).has('age')).values('name')",
+      "g.V().where(local(out('knows').sample(1)).has('age')).values('name')",
+      "g.V().filter(map(out('knows').sample(1).has('age'))).values('name')",
+    ]) for (let i = 0; i < 5; i++) expect(rows(q).map((r: any) => r.v), q).toEqual(['marko']);
   });
 });

@@ -48,9 +48,9 @@ describe('a collector in a child body', () => {
     expect(one("g.V().sideEffect(out().aggregate('x').local(out().aggregate('x'))).cap('x').unfold().count()")).toBe(8);
   });
 
-  test('the same under every connector host, connector alone', () => {
+  test('the same under every connector host', () => {
     for (const host of ['sideEffect', 'local', 'flatMap', 'where', 'optional'])
-      expect((bare(runWith(store, `g.V().${host}(out().aggregate('x')).cap('x').unfold().count()`, { fastPaths: { connectorOnly: true } })) as { v: unknown }[])[0]!.v).toBe(6);
+      expect((bare(runWith(store, `g.V().${host}(out().aggregate('x')).cap('x').unfold().count()`)) as { v: unknown }[])[0]!.v).toBe(6);
   });
 
   test('members come host-major: a host traverser\'s body rows stay together', () => {

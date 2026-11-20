@@ -210,7 +210,7 @@ export const addsUnlabelledTraversers = (s: { readonly name: string; readonly ar
 
 /** THE FAN-OUT HOSTS — the three steps that apply a CHILD BODY once per traverser and emit what it
  *  yields. One set rather than three names at each dispatch, because what separates them is a policy
- *  inside the lowering (`perTraverserChild`), not which loop owns them. Their child's barrier is LOCAL
+ *  inside the lowering (the connector's `firstInner`/`allRows` rows, `rel/lower/scoped.ts`), not which loop owns them. Their child's barrier is LOCAL
  *  to one traverser — `LocalStep` resets it per start (vendor/tinkerpop/gremlin-core/src/main/java/org/
  *  apache/tinkerpop/gremlin/process/traversal/step/branch/LocalStep.java:60-75) — but it is still a
  *  window/aggregate in the relation the host lowers to, which a recursive term cannot hold. */
@@ -533,22 +533,6 @@ export function sliceParamNames(step: IRStep): (string | null)[] {
 export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
 
 /**
- * The branch kinds whose arms can see the branch's WHOLE input, and it is a class-hierarchy fact,
- * not a judgement: `UnionStep` and `ChooseStep` extend `BranchStep` (which `branch()` IS), whose `standardAlgorithm`
- * injects every start at once when `hasBarrier` is set. `CoalesceStep extends FlatMapStep` and
- * `OptionalStep extends AbstractStep` take ONE traverser at a time unconditionally, so a barrier in
- * one of their arms genuinely reduces over that traverser's sub-stream and our per-origin lowering
- * of those two is CORRECT — for a REDUCING arm (`reductionArm`). A subset-selecting SLICE in such an
- * arm (`limit`/`dedup`/`sample`/…) has no per-traverser lowering and declines (`slicesAcrossStarts`,
- * `src/compiler/rel/lower/branch.ts`).
- *
- * Named separately from `BRANCH_KINDS` for exactly that reason — "fix all four branch kinds" would
- * break a dozen tests that are already right
- * (docs/2026-08-01-branch-arm-barrier-scope-plan.md §1, §6).
- */
-export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose', 'branch']);
-
-/**
  * The barriers that PRESERVE cardinality but choose or reorder a subset of the whole stream. Every
  * one is a `Barrier` in the reference — `RangeGlobalStepContract`/`TailGlobalStepContract extends
  * FilteringBarrier`, `OrderGlobalStep`/`SampleGlobalStep extends CollectingBarrierStep`,
@@ -686,9 +670,8 @@ export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
  *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/util/StepOutputArityPredictor.java`):
  *  `IdentityStep`, `IdStep`, `LabelStep`, `ConstantStep`, `PropertyKeyStep`, `PropertyValueStep`, `PathStep`,
  *  `ElementMapStep`, `PropertyMapStep`, `MathStep`, and `EdgeVertexStep` one-sided (`inV`/`outV`) or
- *  `EdgeOtherVertexStep` — plus `as()`, which is a label on the step before, not a step. Two readers ask it:
- *  `EarlyLimitStrategy`'s port (`early-limit.ts`, which slice may cross) and the per-traverser arity a
- *  `map()` body is admitted to the rejoin on (`atMostOnePerTraverser`, `rel/lower/per-traverser.ts`). */
+ *  `EdgeOtherVertexStep` — plus `as()`, which is a label on the step before, not a step. One reader asks it:
+ *  `EarlyLimitStrategy`'s port (`early-limit.ts`, which slice may cross). */
 export const ONE_TO_ONE: ReadonlySet<string> = new Set([
   'as', 'identity', 'id', 'label', 'constant', 'key', 'value', 'path', 'elementMap', 'valueMap', 'propertyMap', 'math', 'inV', 'outV', 'otherV',
 ]);

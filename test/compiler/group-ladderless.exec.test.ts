@@ -1,23 +1,16 @@
-// `group` is LADDERLESS (docs/2026-11-16-ladder-retirement-plan.md, R5.3+R5.4 then the route delete): its connector
+// `group` has no ladder (docs/2026-11-16-ladder-retirement-plan.md, R5.3+R5.4, then R7 deleted the ladder): its connector
 // row (`byValues`, src/compiler/rel/lower/scoped.ts) is its one lowering over an element or scalar host, so the
-// dispatch offers no ladder there — every switch position runs the SAME lowering and answers alike. The value
+// dispatch offers no other route there. The value
 // `by()` is ASSIGNED per traverser when its body has no barrier (`Operator.assign`) and POOLED per key at its first
 // barrier otherwise (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:74-125).
 import { test, expect, describe } from 'bun:test';
 import { bagOf, bare, runWith, seededStore, storeSeededWith } from '../support/harness.ts';
 
 const store = seededStore();
-const CONNECTOR_ONLY = { fastPaths: { connectorOnly: true } } as const;
-const LADDER_FIRST = { fastPaths: { correlatedChild: true } } as const;
 /** The answer as a multiset of plain values (the map's entry list for a map row). */
 const answer = (q: string, options?: object): string[] => bagOf(bare(runWith(store, q, options as never)).map((r: any) => JSON.stringify(r.map ?? r.v ?? r.id ?? r)));
-/** Every switch position answers the same — one lowering. */
-const agreed = (q: string) => {
-  const ours = answer(q);
-  expect(answer(q, CONNECTOR_ONLY)).toEqual(ours);
-  expect(answer(q, LADDER_FIRST)).toEqual(ours);
-  return ours;
-};
+/** The answer of the one lowering (the ladder and its switch are deleted). */
+const agreed = (q: string) => answer(q);
 /** A map row's entries as `key → value`. */
 const entries = (row: string): Record<string, unknown> =>
   Object.fromEntries((JSON.parse(JSON.parse(row)) as [{ v: unknown }, { v: unknown }][]).map(([k, v]) => [String(k.v), v.v]));
@@ -80,7 +73,7 @@ describe('group() — a local reducer in the value by() is per traverser, not po
   // and, with no barrier, GroupStep ASSIGNS the value traversal's first answer per traverser
   // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:123-126):
   // a traverser whose body is empty puts nothing, so a key none of whose members is productive never appears.
-  // Asserted on the plain `run` too, independent of the switch comparison in `agreed`.
+  // Asserted on the plain `run` too.
   test('a per-traverser count(local) answers 1 per productive key, and an unproductive key is absent', () => {
     const keyedBySelect = "g.V().as('a').out().group().by(select('a').values('name')).by(values('name').count(local))";
     expect(entries(answer(keyedBySelect)[0]!)).toEqual({ josh: 1, marko: 1, peter: 1 });
@@ -116,15 +109,11 @@ describe('group() — a local reducer in the value by() is per traverser, not po
 // A PROPERTY host is outside the connector's group row, so its group is the host's own lowering (`groupRows`,
 // src/compiler/rel/map.ts), which builds NO pool: a value body with a barrier declines there — never the per-member
 // assign arm, which would answer one member's value for the key's pool — except a bare `by(count())`, which pools
-// nothing but the key's own traversers and is `groupCount()`'s value exactly. Not a `CONNECTORS` row, so the
-// connector-only mode (L9) has no route for it; the default and ladder-first positions answer alike.
+// nothing but the key's own traversers and is `groupCount()`'s value exactly. The connector's group row does not
+// claim a property stream, so the dispatch falls back to this host lowering (`scopedHost`).
 describe('group() over a property host — the host lowering pools nothing', () => {
   const declines = (q: string) => expect(() => runWith(store, q)).toThrow(/not supported/);
-  const hostAnswer = (q: string) => {
-    const ours = answer(q);
-    expect(answer(q, LADDER_FIRST)).toEqual(ours);
-    return ours;
-  };
+  const hostAnswer = (q: string) => answer(q);
   test('by(count()) answers as groupCount', () => {
     expect(entries(hostAnswer('g.V().properties().group().by(key).by(count())')[0]!)).toEqual({ age: 4, lang: 2, name: 6 });
     expect(entries(hostAnswer('g.V().properties().groupCount().by(key)')[0]!)).toEqual({ age: 4, lang: 2, name: 6 });

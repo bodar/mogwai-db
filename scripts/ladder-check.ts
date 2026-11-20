@@ -14,7 +14,7 @@
  * route is a function that answers or returns null, so a new rung is visible here as new `return null`s
  * before anything else can see it.
  *
- * WHAT IS RATCHETED, AND WHY BOTH:
+ * WHAT IS RATCHETED:
  *   • the TOTAL over `src/compiler/rel/**`, EXCEPT the connector's own file(s) (`CONNECTOR_FILES`), may not
  *     rise. The connector's declines are not ladder growth: they mark where the ONE mechanism does not reach
  *     yet, and their real guard is L9's connector-only closure ratchet (`test/L9-connector/`), which fails
@@ -22,12 +22,14 @@
  *     baseline (the inversion added 23, all in scoped.ts) — and a limit raised routinely stops meaning
  *     anything. Body lowering legitimately adds a few declines too (a body is fixed IN the body's lowering
  *     — a new step form often refuses its own sub-cases), so the counted files may trade sites with each
- *     other freely as long as their whole does not grow. The ladder deletion (Phase 3 (d)) is what pays for that headroom.
- *   • PER FILE for the LADDER files below — the correlated-route homes. A total alone would let a new rung
- *     hide behind deletions elsewhere (the ladder deletion is precisely a stream of deletions to hide
- *     behind), and a new rung is exactly what decision 6 forbids. Per file for EVERY file was rejected:
- *     it charges the sanctioned direction (fix the body's lowering, extend the connector) the same toll
- *     as the forbidden one, and a file move would fail it for nothing.
+ *     other freely as long as their whole does not grow. The ladder deletion (Phase 3 (d), then R7 of
+ *     `docs/2026-11-16-ladder-retirement-plan.md`) is what paid for that headroom.
+ *   • There is no longer a per-file ratchet: it held the LADDER files (the correlated-route homes, last of all
+ *     `lower/per-traverser.ts`) while the ladder was being deleted, so a new rung could not hide behind the
+ *     stream of deletions. R7 deleted the last of them and the `correlatedChild` switch with it; a new
+ *     correlated route would now have to be a new file of `return null`s, which the total sees. Per file for
+ *     EVERY file stays rejected: it charges the sanctioned direction (fix the body's lowering, extend the
+ *     connector) the same toll as the forbidden one, and a file move would fail it for nothing.
  *
  * A RISE fails, naming the file(s). The fix is almost always not to add the site: route the case through the
  * connector (a `CONNECTORS` row, or the body's own lowering, or one rule in `decorrelate.ts`). If a decline
@@ -45,17 +47,6 @@ import { ROOT } from './lsp.ts';
 
 const BASELINE = new URL('./ladder-baseline.json', import.meta.url);
 const SCOPE = 'src/compiler/rel';
-/** The correlated-route homes — the `correlatedChild` ladder's ROUTING, ratcheted file by file. Paths relative to
- *  the repo root. Only routing: `docs/2026-11-16-ladder-retirement-plan.md` R1 measured line coverage of the L1+L6
- *  pools with the ladder first and with the connector alone, and the code BOTH run is shared substrate, not ladder
- *  — the correlated existence and its predicates (`lower/exists.ts`), the correlated first-row read and the child
- *  seam (`lower/reduction.ts`), the arm merges (`lower/branch.ts`, every host of which is `LADDERLESS`), the by()
- *  readers (`modulator.ts` `byField`, read by `record.ts`/`collection.ts`) and the presence vocabulary
- *  (`child.ts`). Those are counted in the total like any lowering. What only the ladder runs is the per-traverser
- *  route (`perTraverserChild`/`flatMapRejoin` and their admission gates), which R1 moved into its own file. */
-const LADDER_FILES = [
-  `${SCOPE}/lower/per-traverser.ts`,
-] as const;
 /** The connector's own files: counted and printed, but outside the total (see WHY) — L9 guards them. */
 const CONNECTOR_FILES: readonly string[] = [`${SCOPE}/lower/scoped.ts`];
 const counted = (f: string) => !CONNECTOR_FILES.includes(f);
@@ -86,15 +77,14 @@ for (const rel of files) {
   if (n) counts[rel] = n;
 }
 const total = Object.entries(counts).filter(([f]) => counted(f)).reduce((a, [, b]) => a + b, 0);
-const ladderNow = LADDER_FILES.reduce((a, f) => a + (counts[f] ?? 0), 0);
 
 if (verbose)
   for (const [f, n] of Object.entries(counts).sort(([, a], [, b]) => b - a))
-    console.log(`  ${String(n).padStart(4)}  ${f}${(LADDER_FILES as readonly string[]).includes(f) ? '  (ladder)' : counted(f) ? '' : '  (connector — outside the total)'}`);
+    console.log(`  ${String(n).padStart(4)}  ${f}${counted(f) ? '' : '  (connector — outside the total)'}`);
 
 if (record) {
   await Bun.write(BASELINE, `${JSON.stringify({ total, files: counts } satisfies Baseline, null, 2)}\n`);
-  console.log(`ladder: recorded ${total} decline sites (${ladderNow} in the ladder files) → scripts/ladder-baseline.json — commit it with the reason`);
+  console.log(`ladder: recorded ${total} decline sites → scripts/ladder-baseline.json — commit it with the reason`);
   process.exit(0);
 }
 
@@ -103,9 +93,6 @@ const was = (f: string) => base.files[f] ?? 0;
 const rose = (fs: readonly string[]) => fs.filter((f) => (counts[f] ?? 0) > was(f)).map((f) => `${f}: ${was(f)} → ${counts[f] ?? 0}`);
 
 const failures: string[] = [];
-const ladderRose = rose(LADDER_FILES);
-if (ladderRose.length)
-  failures.push(`a LADDER file gained decline sites (per-file ratchet — a deletion elsewhere does not pay for a new rung):\n    ${ladderRose.join('\n    ')}`);
 if (total > base.total)
   failures.push(`the total rose ${base.total} → ${total}; files above their recorded count:\n    ${rose(Object.keys(counts).filter(counted)).join('\n    ')}`);
 
@@ -122,7 +109,6 @@ if (failures.length) {
   process.exit(1);
 }
 
-const ladderWas = LADDER_FILES.reduce((a, f) => a + was(f), 0);
-console.log(`ladder: ${total} decline sites in ${SCOPE} (baseline ${base.total}); ladder files ${ladderNow} (baseline ${ladderWas})`);
-if (total < base.total || ladderNow < ladderWas)
+console.log(`ladder: ${total} decline sites in ${SCOPE} (baseline ${base.total})`);
+if (total < base.total)
   console.log('ladder: the count FELL — tighten the floor with `mise run ladder-record` and commit scripts/ladder-baseline.json');

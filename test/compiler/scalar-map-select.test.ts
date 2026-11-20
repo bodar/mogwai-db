@@ -4,7 +4,7 @@
 // Map probe is spent (only where no scope beyond the Map names the key) — and the declines the query text
 // decides.
 import { test, expect, describe } from 'bun:test';
-import { LADDER, bare, read, run, seededStore } from '../support/harness.ts';
+import { bare, read, run, seededStore } from '../support/harness.ts';
 import { UnsupportedTraversal } from '../../src/compiler/unsupported.ts';
 
 const values = (rows: readonly any[]): unknown[] => rows.map((row) => row.v);
@@ -117,18 +117,16 @@ describe('select(k) over a per-row scalar stream — Map first only where nothin
 });
 
 // A `choose` arm `select(k)` of a side-effect constant: the constant's presence is its HOST's (`hostPresence`,
-// `constantSelectChild`), so over a host that is always there the arm is `'always'` — the choice's meet
-// answers and no per-row `IS NOT NULL` is spent on a literal. The end-to-end answers, at depth, are
-// test/L4-addendum/side-effect-choose-arm.feature.
+// `constantSelectChild`), so over a host that is always there the arm is `'always'` and the choice's meet
+// answers. The end-to-end answers, at depth, are test/L4-addendum/side-effect-choose-arm.feature.
 describe('a side-effect constant read in a choose arm', () => {
-  test('over an always-present host: no presence term, and the choice answers', () => {
+  test('over an always-present host: the choice answers', () => {
     const q = "g.withSideEffect('k',5).V().map(__.choose(__.hasLabel('person'), __.select('k'), __.constant(0)))";
-    expect(read(q, { fastPaths: LADDER }).sql).not.toMatch(/IS NOT NULL/i); // the ladder's choose-arm route
     expect(values(run(seededStore(), q)).sort()).toEqual([0, 0, 5, 5, 5, 5]);
   });
 
-  // The ladder's choice declines over a may-be-absent host; the scoped-relation connector (`lower/scoped.ts`)
-  // answers it — the body runs per traverser, so a row whose `b` is unbound is dropped by `select('b')`
+  // Over a may-be-absent host the scoped-relation connector (`lower/scoped.ts`) answers the choice — the body
+  // runs per traverser, so a row whose `b` is unbound is dropped by `select('b')`
   // before the choice and `map()` drops it (`TraversalMapStep.java:49-53`): vadas and josh, both persons.
   test('over a may-be-absent host the connector answers: the unbound rows drop, the bound ones choose', () => {
     expect(values(run(seededStore(),

@@ -28,12 +28,6 @@ export const read = (q: string, options?: CompileOptions) => {
   return p;
 };
 
-/** The opt-in LADDER (`correlatedChild` on): for an L2 test that pins the plan of a ladder route still
- *  standing. Since the Phase 3 inversion the connector is the default, so such a test names the route it
- *  pins — and goes with the route when the route is deleted (`docs/2026-11-15-compositional-coverage-plan.md`
- *  cc3d). */
-export const LADDER = { correlatedChild: true } as const;
-
 /** An in-memory store seeded by RUNNING the modern-graph write traversals. */
 export function seededStore() {
   return storeSeededWith(MODERN_SEED);

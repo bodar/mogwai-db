@@ -124,19 +124,15 @@
   every order an answer relies on is pinned by the SQL. See "L8 — the perturbation rung" below.
 - **L9** (`test/L9-connector/`, `mise run L9` alias `connector`) — the CONNECTOR guards that keep nesting on
   the scoped-relation connector (root CLAUDE.md decision 6). (1) The L5 host-closure sweep (same engine, seed
-  42, 200 cases) with the ladder OFF and no fallback (`FastPathConfig.connectorOnly`, set per compile),
+  42, 200 cases; the ladder and its switch are deleted, so it reads the shipping configuration),
   ratcheted ONE-WAY per host × level in `connector-closure-baseline.json` and per QUERY — any newly declined
   query fails its cell, even when a newly answered one holds the rate level (both named, `closure-ratchet.ts`);
   internal errors and law divergences fail as in L5; re-record with
   `mise run connector-record` (a downward one needs its reason). (2) Host totality: every child-taking position
   — derived from the grammar, the L1 corpus and L5's `hosts.ts` — is a `CONNECTORS` row or a
   `deferred-hosts.ts` entry with its reason, blocker and retirement `scope` (`ladder` | `host-owned`), so a new
-  host cannot quietly get a route of its own. (3) The LADDER-REACH ratchet (same file as (1), sharing its sweep;
-  engine `ladder-reach.ts`): the traversals the default answers and the connector alone does not, per pool (L1,
-  L6, the sweep's host queries) × family, in `ladder-reach-baseline.json` — none may rise; a family host beneath a `host-owned`
-  position is charged `other`; and where both
-  modes answer the multisets must agree. Re-record with `mise run ladder-reach-record`; the wider ~25k sample is
-  the instrument `mise run ladder-reach`.
+  host cannot quietly get a route of its own. (The ladder-reach ratchet that counted what only the ladder answered
+  went with the ladder, R7 of `docs/2026-11-16-ladder-retirement-plan.md`.)
   Its static sibling is `mise run ladder` (in `gates`): the `return null` count in `src/compiler/rel/` never rises.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
   (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they
