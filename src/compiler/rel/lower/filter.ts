@@ -18,6 +18,8 @@ import { readUnfolded } from '../collection.ts';
 import { NO_ALIASES, bodyOf, elementSubject, noteUnrolled, type ChainCtx, type ElementSubject } from './chain.ts';
 import { foldedListSet, nestedFirstValue } from './reduction.ts';
 import { childPredicate } from './exists.ts';
+import { connectorSite } from './scoped.ts';
+import type { Elem } from '../../elem.ts';
 
 // FILTER FAMILY — a filter STEP lowered to a boolean `Expr` over the current row: sourceFilter +
 // hasLabel/has/hasToken clauses, and the child-subject helpers (childHostOf/branchSubject). A sub-traversal
@@ -90,6 +92,28 @@ export function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
   };
 }
 
+/**
+ * THE SOURCE'S FILTER FUSION — the ONE authority for which filters after a `V()`/`E()` conjoin into the scan's own
+ * WHERE: the leading run from `steps[from]` of filters `sourceFilter` lowers over the physical row (an edge's
+ * `label` is a column there, not a membership test), so a run of filters is ONE `WHERE` over one scan instead of a
+ * CTE-per-filter with its re-join. A child filter at a connector site is the connector's (`lower/scoped.ts`, its
+ * hosts LADDERLESS) and ends the run; so does any step `stop` names — the caller's own reason a filter must stay
+ * above the scan. Returns the conjoined predicate and the index of the first step not fused.
+ */
+export function fuseSourceFilters(
+  steps: readonly IRStep[], from: number, seeded: { readonly scan: Rel; readonly pred?: Expr }, elem: Elem, ctx: ChainCtx, fresh: Minter,
+  stop: (step: IRStep) => boolean = () => false,
+): { readonly pred: Expr | undefined; readonly at: number } {
+  let pred = seeded.pred;
+  let at = from;
+  for (; at < steps.length; at++) {
+    if (connectorSite(steps[at]) || stop(steps[at]!)) break;
+    const clause = sourceFilter(steps[at]!, { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
+    if (!clause) break;
+    pred = and(pred, clause);
+  }
+  return { pred, at };
+}
 
 export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx, aliases: AliasMap = NO_ALIASES): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which

@@ -30,11 +30,11 @@ const chainOf = (q: string): IRStep[] => {
 const AMBIGUOUS = /^this traversal is ambiguous: V\(\)\/E\(\) inside this body discards the value before it/;
 const SHARED = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body may run '
   + 'for more than one traverser — it would be drawn once and shared by every row';
-const LOCAL_HINT = (host: string): string => `local(…) draws per row, so use local(__.V()…sample(1)) in place of ${host}(…)`;
 
 describe('the lowering RECORDS a framing-decided decline and returns null — it never throws', () => {
   for (const [q, kind] of [
-    ["g.inject(1,2).map(__.V().sample(1).values('name'))", 'shared-draw'],
+    ["g.V().has('age', __.V().sample(1).values('age'))", 'shared-draw'],
+    ["g.V().map(__.V().coin(0.5).count())", 'shared-draw'],
     ["g.V().optional(__.out().as('a')).map(__.select('a').V().count())", 'resource-under-absent'],
     ["g.V().optional(__.out().as('a')).flatMap(__.select('a').V())", 'resource-under-absent'],
     ["g.V(1).valueMap().mergeV(__.select('name'))", 'merge-own-entry'],
@@ -48,21 +48,11 @@ describe('the lowering RECORDS a framing-decided decline and returns null — it
 });
 
 describe('a terminal reason is the message, and its prefix is a property of its kind', () => {
-  test('a shared draw keeps its reason and a map()/flatMap() host adds the per-row form', () => {
-    const e = declineOf("g.V().map(__.V().sample(1).values('name'))");
-    expect(e.kind).toBe('shared-draw');
-    expect(e.message).toBe(`this traversal is not supported yet: ${SHARED}; ${LOCAL_HINT('map')}`);
-    expect(declineOf("g.V().out().map(__.V().hasLabel('person').sample(1).values('name').fold())").message)
-      .toBe(`this traversal is not supported yet: ${SHARED}; ${LOCAL_HINT('map')}`);
-  });
-
-  test('the per-row form is named only where its own route admits the body (`reSourcesOncePerOrigin`)', () => {
-    // A scalar host has no per-row rejoin, a `coin` is not the per-origin draw, and a draw under a by()
-    // is not at the body's re-source: local(…) declines on each of these too, so suggesting it misleads.
+  // A ONCE-evaluated read (a predicate operand) shares one draw by every host: declined, naming no per-row form.
+  test('a shared draw keeps its reason and a predicate operand names no per-row form', () => {
     for (const q of [
-      "g.inject(1,2).map(__.V().sample(1).values('name'))",
-      "g.V().map(__.V().coin(0.5).count())",
-      "g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))",
+      "g.V().has('age', __.V().sample(1).values('age'))",
+      "g.V().values('age').is(gt(__.V().sample(1).values('age')))",
     ]) {
       const e = declineOf(q);
       expect(e.kind).toBe('shared-draw');
@@ -70,9 +60,32 @@ describe('a terminal reason is the message, and its prefix is a property of its 
     }
   });
 
-  test('a non-map host names no per-row form', () => {
-    expect(declineOf("g.inject(1,2).project('x').by(__.V().sample(1).values('name'))").message)
-      .toBe(`this traversal is not supported yet: ${SHARED}`);
+  // A connector body that draws over a re-source draws per scope row (`reSourcedBody`/`drawnPerOrigin`,
+  // `src/compiler/rel/lower/scoped.ts`) where the draw is a uniform pick; a `coin` or a `sample` that is not one
+  // (weighted, local) keeps the shared-draw decline (`declinedDraw`) — the owner's call, R4.5 (A).
+  test('a connector body whose draw over a re-source is not a uniform pick keeps the shared-draw reason', () => {
+    for (const q of [
+      "g.V().map(__.V().coin(0.5).count())",
+      "g.V().local(__.V().coin(0.5).count())",
+      "g.V().where(__.V().coin(0.5))",
+      "g.V().hasLabel('person').local(__.V().hasLabel('software').coin(1.0)).count()",
+      "g.V().local(__.V().sample(1).by('age'))",
+      "g.V().hasLabel('holder').map(__.V().hasLabel('person').fold().sample(local,1)).count()",
+    ]) {
+      const e = declineOf(q);
+      expect(e.kind).toBe('shared-draw');
+      expect(e.message).toBe(`this traversal is not supported yet: ${SHARED}`);
+    }
+  });
+
+  test('a connector body that draws a uniform pick over a re-source answers', () => {
+    for (const q of [
+      "g.V().map(__.V().sample(1).values('name'))",
+      "g.inject(1,2).map(__.V().sample(1).values('name'))",
+      "g.inject(1,2).project('x').by(__.V().sample(1).values('name'))",
+      "g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))",
+      "g.V().out().map(__.V().hasLabel('person').sample(1).values('name').fold())",
+    ]) expect(() => compilePlan(q, {})).not.toThrow();
   });
 
   test('a re-source under a maybe-absent label reads as ambiguous and keeps the advice', () => {
@@ -112,8 +125,8 @@ describe('a terminal reason is the message, and its prefix is a property of its 
   });
 
   test('a terminal reason recorded while planning a barrier RESUME is that resume\'s decline', () => {
-    expect(() => executeFramed(seededStore(), "g.V().has('name', regex('m.*')).map(__.V().sample(1).values('name'))"))
-      .toThrow(`this traversal is not supported yet: ${SHARED}; ${LOCAL_HINT('map')}`);
+    expect(() => executeFramed(seededStore(), "g.V().has('name', regex('m.*')).has('age', __.V().sample(1).values('age'))"))
+      .toThrow(`this traversal is not supported yet: ${SHARED}`);
   });
 
   test('a traversal no lowering covers still says so', () => {

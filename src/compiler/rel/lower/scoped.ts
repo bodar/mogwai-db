@@ -39,7 +39,7 @@ import { appendValuePosition, extendPath, pathCarried } from '../path.ts';
 import { recordOf, recordToMap } from '../record.ts';
 import { drawInGroupValue, effectInChild, UnsupportedTraversal, type Declines } from '../../unsupported.ts';
 import { BULK, bodyOf, ENCOUNTER, encounterOf, FROM_V, inBody, NO_ALIASES, noteUnrolled, type ChainCtx, type HostProgress, type Tail } from './chain.ts';
-import { childSeam, hostStateAt, readsHostState, reductionHost, rootedRead } from './reduction.ts';
+import { childSeam, drawnPerOrigin, isUniformPick, hostStateAt, readsHostState, reductionHost, rootedRead, SHARED_DRAW } from './reduction.ts';
 import { prune } from '../../../rel/passes/prune.ts';
 
 // SCOPED RELATIONS — a child-taking host as a CONNECTOR, not a route (`docs/2026-11-15-compositional-coverage-plan.md`
@@ -302,8 +302,27 @@ function reSourcedBody(
   // The reason is NOTED wherever the path is extended: it names the shape if neither this read nor the fold answers.
   if (extended) ctx.declines.note({ kind: 'resource-path', message: resourcePathMessage(rest, ctx), terminal: false });
   const moves = extended ? rest.findIndex((step, i) => i > 0 && i < hostCut && !keepsPosition([step])) : -1;
-  if (moves > 0 && rest.slice(moves, hostCut).some(isStreamBarrier)) return null;
-  const cut = moves > 0 ? moves : hostCut;
+  // A body that DRAWS there cannot share the cut anyway — its draw is per host — so it is the fold's: GraphStep's
+  // product extends each later position (`reSource`), the hosts × read traversers the reference streams.
+  if (moves > 0 && rest.slice(moves, hostCut).some(isStreamBarrier)) return nondeterministic(rest.slice(moves), ctx.params) ? undefined : null;
+  const shareable = moves > 0 ? moves : hostCut;
+  // A DRAW (`sample`/`coin`/`shuffle`, at any depth) in the shared part would be ONE pick for every scope row — the
+  // reference draws per incoming traverser (`TraversalUtil.apply` hands the child one at a time). So the shared read
+  // ENDS at the first step that draws, and a uniform pick there (`sample(n)`; a shuffle cut to one is one,
+  // `ir/shuffle-cut.ts`) is drawn over the shared read itself per scope row (`drawnPerOrigin`: the seed row is one
+  // partition, which the decorrelator keys per scope row, `src/rel/decorrelate.ts`) — O(scope + read), where the
+  // fold over the cross would rank scope × read. A global sample or shuffle that pick cannot make (a label the read
+  // binds, a shuffle cut to several), and a draw inside a child whose own host draws per row, are the fold's over
+  // that cross, keyed per scope row — the reference's own scope × read traversers. A `coin` or a `sample` that is
+  // not a uniform pick (`sample().by()`, `sample(local, n)`) there is declined from the query text, naming it
+  // (`declinedDraw`, `SHARED_DRAW`; the owner's call, R4.5 (A)).
+  const drawAt = rest.slice(0, shareable).findIndex((step) => nondeterministic([step], ctx.params));
+  if (drawAt >= 0 && (drawAt < 1 || declinedDraw(rest, drawAt))) return sharedDraw(ctx);
+  const cut = drawAt >= 0 ? drawAt : shareable;
+  if (cut < 1) return undefined;
+  // A first-row host reads only the read's first row where the shared read is the whole rest; cut ahead of a draw,
+  // the rest continues over every row of it.
+  const firstOnly = first && cut === rest.length;
   // Past the HOST cut (a step that reads the host, `where(neq('h'))`) the rest is per host by meaning, so a reducer
   // or sort there reads the hosts × read rows the query streams. A bounding slice does not: the reference's child
   // stops pulling at its bound (`RangeGlobalStep`), so its cost is per host ROW, while the fold would cut a
@@ -321,13 +340,19 @@ function reSourcedBody(
   if (!prefix.rel.channels.every((channel) => crosses(channel.role) || channel.role === 'encounter')) return undefined;
   const rooted = rootedRead(rest.slice(0, cut), ctx, fresh, 'many');
   if (!rooted || rooted.effects?.length) return null;
+  if (cut === drawAt) {
+    const drawn = drawnPerOrigin(rooted, rest, cut, prefix.rel, false, ctx, fresh, prefix.aliases);
+    if (drawn) return drawn;
+    // The reason names the draw if the fold over the cross declines too.
+    ctx.declines.note({ kind: 'shared-draw', message: SHARED_DRAW, terminal: false });
+  }
   // The read's own position and multiplicity ride; the sack and loop counter a FRESH start traverser holds are
   // superseded by the host's, which the split keeps. A label or path the read binds of its own is shed under
   // `first` and `split` — those traversers never leave the child (`rejoin`'s `split` keeps the host's channels).
   // Under `forward` the read's labels ride out (`local` emits the child's own traversers), each under a column the
   // prefix does not carry; under `split` they ride only as far as a rest the fold continues past the cut, which
   // may still select them inside the body.
-  const labelled = first || (contract === 'split' && cut === rest.length) ? undefined : ownLabels(rooted, prefix);
+  const labelled = firstOnly || (contract === 'split' && cut === rest.length) ? undefined : ownLabels(rooted, prefix);
   if (labelled === null) return undefined;
   const own = rooted.rel.channels.filter((channel) =>
     channel.role === 'encounter' || channel.role === 'bulk' || (labelled !== undefined && channel.role === 'alias'));
@@ -337,7 +362,7 @@ function reSourcedBody(
   if (!rooted.rel.channels.every(kept)) return undefined;
   if (extended && rooted.framing.kind !== 'elements') return undefined;
   // ONE fenced relation is the read's value AND its presence: a first-row host reads both off `once`.
-  const read = first ? firstRow(rooted.rel, defaultCollation(rooted.rel), fresh) : rooted.rel;
+  const read = firstOnly ? firstRow(rooted.rel, defaultCollation(rooted.rel), fresh) : rooted.rel;
   const once = isSelfContained(read) ? make.materialize({ id: fresh('srm'), input: read, channels: read.channels, type: read.type, fenced: true }) : read;
   // The read's columns under fresh names beside the prefix's, then back under their own (a label under the column
   // `ownLabels` gave it).
@@ -443,23 +468,30 @@ function hostStateMessage(rest: readonly IRStep[], ctx: ChainCtx): string {
     : `${shape} — here the V() is discarded by select('${label}'); did you mean select('${label}').out(), or V().has(…, select('${label}'))?`;
 }
 
-/** A host whose child body RE-SOURCES at its top level (and does not draw: `ladderOwns`) is the connector's alone
- *  (`reSourcedBody`): the ladder's re-source is a scalar first-row read that cannot tell a productive null from
- *  no row, so offering it as a route would answer the same query two ways. */
+/** Is `steps[at]`, the first step after a re-source that draws, a draw the connector DECLINES rather than make over
+ *  every scope row × the graph: a `coin`, or a `sample` that is not a uniform pick (a local one, a weighted one).
+ *  A global `sample`/shuffle the counting pick cannot make, and a draw inside a child (whose own host draws per
+ *  row), are the fold's over the shared read's cross, keyed per scope row. */
+const declinedDraw = (steps: readonly IRStep[], at: number): boolean =>
+  steps[at]!.name === 'coin' || (steps[at]!.name === 'sample' && !isUniformPick(steps, at));
+
+/** A draw over a re-source the connector cannot make per scope row (`reSourcedBody`): declined from the query
+ *  text, naming the draw. TERMINAL, as the rooted read's own shared-draw decline is: no other route lowers this
+ *  body (`connectorOwns`), and the fold's GraphStep product would cross every scope row with the graph. */
+const sharedDraw = (ctx: ChainCtx): null => {
+  ctx.declines.note({ kind: 'shared-draw', message: SHARED_DRAW, terminal: true });
+  return null;
+};
+
+/** A host whose child body RE-SOURCES at its top level is the connector's alone (`reSourcedBody`): the ladder's
+ *  re-source is a scalar first-row read that cannot tell a productive null from no row, so offering it as a route
+ *  would answer the same query two ways. A body that also DRAWS is the connector's too: the shared read ends at
+ *  the draw, which is made per scope row (`reSourcedBody`, `drawnPerOrigin`). */
 export const connectorOwns = (step: IRStep, ctx: ChainCtx): boolean => step.args.some((arg) => {
   if (!isNested(arg.value)) return false;
   const body = bodyOf(arg.value.nested, ctx.params, ctx.sideEffects);
-  return !!body && reSourceAt(body) >= 0 && !ladderOwns(body, ctx);
+  return !!body && reSourceAt(body) >= 0;
 });
-
-/**
- * A body that both DRAWS and RE-SOURCES (`V()`/`E()`, at any depth) stays the ladder's, for a reason about the
- * QUERY TEXT: the read after a re-source is one relation shared by every host (`reSourcedBody`), so a draw over
- * it is one pick for all of them, and keying it per scope instead crosses every host with the whole graph — a
- * draw the ladder's `shared-draw` decline names. Any other drawing body is the connector's (`scopedBody`).
- */
-const ladderOwns = (body: readonly IRStep[], ctx: ChainCtx): boolean =>
-  nondeterministic(body, ctx.params) && someStepDeep(body, ctx.params, (s) => s.name === 'V' || s.name === 'E', true);
 
 /**
  * WHICH RELATIONS A BODY BUILT — a minter that records what it mints, and the `owns` test the decorrelator reads
@@ -603,7 +635,7 @@ function scopedBody(
   body: readonly IRStep[], rel: Rel, framing: RelFraming, sc: Scope, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
   order?: 'free' | 'read', positionedSeed = false, reframe?: (tail: Tail) => Tail | null, contract: RejoinContract = 'forward',
 ): ScopedBody | null {
-  // A RE-SOURCE is the connector's own (`reSourcedBody`) — unless the body also draws (`ladderOwns`).
+  // A RE-SOURCE is the connector's own (`reSourcedBody`), drawing or not.
   //
   // A random DRAW (`sample`/`coin`/`shuffle`, at any depth) is the connector's, and this is the form that
   // answers it: the reference hands the body ONE traverser at a time (`TraversalUtil.apply`,
@@ -612,7 +644,6 @@ function scopedBody(
   // the domain is pushed beneath it and every `ORDER BY RANDOM()`/`ROW_NUMBER` it feeds is partitioned by the
   // scope key — one sort, linear in the rows drawn from, and no pick shared by two scopes. Only the body's OWN
   // draws (`owning`): a relation drawn upstream that the body only reads stays one shared pick.
-  if (ladderOwns(body, ctx)) return null;
   // `reframe` is the host's own re-expression of the body's value (`landValues`' record).
   const out = keyedBody(
     (mf, collections) => lowerBody(body, rel, sc.scoped, framing, { ...ctx, collections }, mf, labels, order, positionedSeed, contract),
@@ -630,7 +661,6 @@ function scopedBody(
 function rootedBody(
   body: readonly IRStep[], root: LandedRoot, rel: Rel, sc: Scope, ctx: ChainCtx, fresh: Minter, reframe: (tail: Tail) => Tail | null,
 ): ScopedBody | null {
-  if (ladderOwns(body, ctx)) return null;
   const type = typeOf(meta('id', 'int'), meta(sc.key, 'int'));
   const located = make.project({
     id: fresh('sbr'), input: sc.scoped, channels: [], type,
@@ -1860,8 +1890,9 @@ const priority: Connector = (site) => {
   // correlated form cc3b keeps for `map`/`where`). SQLite's join IS a nested loop, so an arm it can seek per row
   // is already the scoped plan's best physical form — measured 2.2× (`coalesce(values,constant)`) and 2.9×
   // (`optional(out('knows'))`) faster at 8k than scoping the stream. Only where that form declines is the stream
-  // scoped and decorrelated below.
-  {
+  // scoped and decorrelated below. A body that DRAWS never takes it, for `correlatedBody`'s reason: its existence
+  // test and its value would be two draws (or one shared by every host), so it is decorrelated below.
+  if (!bodies.some((body) => nondeterministic(body!, ctx.params))) {
     const direct = attempt(ctx, () => {
       const branch = optional ? optionalArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at })
         : coalesceArms(step, rel, framing, bulked, armsCtx(site), fresh, labels, { steps, at });
@@ -2903,17 +2934,9 @@ export const connectorSite = (step: IRStep | undefined): boolean =>
 const LADDERLESS: ReadonlySet<string> = new Set(['project', 'order', 'dedup', 'groupCount', 'group', 'coalesce', 'optional', 'choose', 'union', ...FILTER_HOSTS]);
 /** The hosts whose connector row (`byValues`) claims only the argument-free form. */
 const BY_VALUE_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup', 'groupCount']);
-/** The EXISTENCE hosts (`FILTER_HOSTS`) are LADDERLESS except over a body the connector leaves to the ladder by design (`ladderOwns`:
- *  a draw over a re-source, `docs/2026-11-16-ladder-retirement-plan.md` R2b/R4.3/R4.4) — the one form of their
- *  route still standing. */
-const ladderless = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =>
+const ladderless = (step: IRStep, framing: RelFraming): boolean =>
   LADDERLESS.has(step.name) && (framing.kind === 'elements' || framing.kind === 'scalar' || (framing.kind === 'property' && step.name === 'project'))
-  && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length)
-  && (!FILTER_HOSTS.has(step.name) || ![...step.args.map((arg) => arg.value), ...(step.modulators ?? []).flat()].some((value) => {
-    if (!isNested(value)) return false;
-    const body = bodyOf(value.nested, ctx.params, ctx.sideEffects);
-    return !body || ladderOwns(body, ctx);
-  }));
+  && (!BY_VALUE_HOSTS.has(step.name) || !step.args.length);
 
 /**
  * The dispatch at a connector site: the ladder (the `correlatedChild` fast path) and the connector, in the order
@@ -2932,7 +2955,7 @@ export function scopedHost(
     noteUnrolled(bodyOf(arg.value.nested, ctx.params, ctx.sideEffects), ctx, FAN_OUT_HOSTS.has(step!.name) ? step!.name : null);
   }
   const scoped = (under: ChainCtx): Tail | null => connector({ step: step!, rel, framing, steps, at, bulked, ctx: { ...under, host: step!.name }, fresh, labels });
-  const routes = ctx.connectorOnly || ladderless(step!, framing, ctx) || connectorOwns(step!, ctx) ? [scoped]
+  const routes = ctx.connectorOnly || ladderless(step!, framing) || connectorOwns(step!, ctx) ? [scoped]
     : ctx.correlatedChild ? [ladder, scoped] : [scoped, ladder];
   // Each route records its decline reasons into its OWN sink (`Declines.fork`): the reasons of the route that
   // answered are kept, and a route that declined while the other answered leaves none — so which route is

@@ -22,7 +22,7 @@ import { runSteps } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bare, run, seededStore } from '../support/harness.ts';
+import { bagOf, bare, run, seededStore } from '../support/harness.ts';
 
 const N = 6000;
 /** Quadratic was ≥ 60 s at this size on trunk; linear is ~0.1 s. */
@@ -72,6 +72,59 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     if (compiled.kind !== 'program') throw new Error('expected a write program');
     // The old plan's tell: `… CROSS JOIN nodes rn) ro27` — a product with the graph, no ON to seek by.
     for (const step of compiled.steps) expect(step.emitted.sql).not.toMatch(/CROSS JOIN nodes \w+\)/);
+  });
+
+  // A barrier before the draw (a slice, an order, a dedup) is not evaluable per origin, but in a connector body over
+  // ONE seed row it is still the graph's alone: the body's shared read ends AT the draw (`reSourcedBody`,
+  // `src/compiler/rel/lower/scoped.ts`) and the draw is made per scope row over that read (`drawnPerOrigin`). Where
+  // the prefix may hold several rows (`union(identity(), identity()).V()…`), GraphStep's product fuses the leading
+  // element filters into its scan beneath the cross, read once (`reSource`'s `fuseSourceFilters`,
+  // `src/compiler/rel/lower/movement.ts`). Either way no filter sits
+  // above the cross's position window: there, every holder met the WHOLE graph — 59 s at 8k holders × 1k
+  // candidates, 36.6× from 1k; an existence filter (`has('age')`, `hasNot('name')`) or a label before the filter
+  // (`V().as('p').hasLabel(…)`) made it a correlated EXISTS per (holder, vertex) pair, 23–50× from 1k to 8k.
+  test.each([
+    "g.V().hasLabel('holder').map(__.V().hasLabel('software').limit(5).sample(1)).count()",
+    "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').limit(5).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().hasLabel('software').dedup().sample(1)).count()",
+    "g.withSack(1).V().hasLabel('holder').map(__.V().hasLabel('software').limit(5).sample(1)).sack().count()",
+    "g.V().hasLabel('holder').as('h').map(__.V().hasLabel('software').limit(5).sample(1)).path().count()",
+    "g.V().hasLabel('holder').map(__.V().has('age').limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().has('age').order().by('age').limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().hasNot('name').limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').local(__.V().has('age').limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().as('p').hasLabel('person').limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().as('p').has('age', gt(0)).limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').local(__.V().as('p').has('age').limit(3).sample(1).select('p')).count()",
+    "g.V().hasLabel('holder').map(__.union(__.identity(), __.identity()).V().has('age').limit(3).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.union(__.identity(), __.identity()).V().as('p').hasLabel('person').limit(3)).count()",
+    "g.V().hasLabel('holder').local(__.union(__.identity(), __.identity()).V().has('age').limit(3).sample(1)).count()",
+  ])('no filter of the body sits above the cross with the graph: %s', (q) => {
+    const compiled = compile(q, {});
+    const sql = compiled.kind === 'program' ? compiled.steps.map((step) => step.emitted.sql).join('\n') : compiled.sql;
+    expect(sql).not.toMatch(/CROSS JOIN nodes \w+\)/);
+    const store = graph(4000, 100);
+    const { rows, ms } = timed(store, q);
+    expect(rows).toEqual([{ v: 4000 }]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+  });
+
+  // A coalesce/optional arm that draws is never the correlated dependent join (its existence test and its value
+  // would be two draws, or one shared by every row): it is scoped and decorrelated, one pick per host row.
+  test.each([
+    "g.V().hasLabel('holder').optional(__.local(__.V().hasLabel('person').sample(1))).values('name')",
+    "g.V().hasLabel('holder').coalesce(__.local(__.V().hasLabel('person').sample(1)), __.identity()).values('name')",
+    "g.V().hasLabel('holder').optional(__.V().hasLabel('person').sample(1)).values('name')",
+    "g.V().hasLabel('holder').union(__.local(__.V().hasLabel('person').sample(1))).values('name')",
+    "g.V().hasLabel('holder').repeat(__.local(__.V().hasLabel('person').sample(1))).times(1).values('name')",
+  ])('a draw in a priority/branch arm or a repeat body is one independent pick per row: %s', (q) => {
+    const store = graph(400, 400);
+    const names = bare(run(store, q)).map((row: any) => row.v ?? row);
+    expect(names.length).toBe(400);
+    // Persons are ids 402, 404, …: every pick is one of theirs, and 400 independent draws over 200 names leave
+    // ~173 distinct — one shared pick would leave 1.
+    expect(names.every((name: string) => Number(name.slice(1)) % 2 === 0 && Number(name.slice(1)) > 400)).toBe(true);
+    expect(new Set(names).size).toBeGreaterThan(100);
   });
 
   test('every holder gets exactly one person name, drawn independently per holder', () => {
@@ -248,20 +301,32 @@ describe('a rooted body sampled per traverser is lowered once and drawn per orig
     expect(seen).toBeLessThanOrEqual(high);
   });
 
-  // What the product route ITSELF does not lower yet stays a clear refusal — a side-effect collector, a coin
-  // (at any depth of the prefix), a reducer in a union arm. Depth gaps of the
-  // general route, not of this fast path.
+  // What the product route ITSELF does not lower yet stays a clear refusal — a coin (at any depth of the
+  // prefix), a collector under a write's value. Depth gaps of the general route, not of this fast path.
   test.each([
-    "g.V().local(__.V().groupCount('x').sample(1)).cap('x')",
-    "g.V().local(__.V().group('x').by(label).sample(2)).cap('x')",
     "g.V().property('c', __.V().groupCount('x').sample(1).id()).cap('x').select(values).unfold().sum()",
-    "g.V().local(__.V().aggregate('a').sample(1)).cap('a')",
     "g.V().local(__.V().coin(0.5).sample(1)).count()",
     "g.V().local(__.V().where(__.coin(0.5)).sample(100)).count()",
-    "g.V().local(__.out().V().union(__.count(), __.constant(0)).sample(100)).count()",
   ])('declines %s', (q) => {
     expect(() => compile(q, {})).toThrow(/not supported/);
   });
+
+  // A drawing re-source body is the CONNECTOR's (`connectorOwns`, `src/compiler/rel/lower/scoped.ts`): lowered over
+  // the scope's seed row and decorrelated, so a collector before the draw is keyed with its body (`keyedBody`) and
+  // sees every origin's copy of the graph — six origins × six vertices — and a reducer in a union arm is per
+  // origin. A union arm with no starts emits nothing, even a reducer (`BranchStep.standardAlgorithm`'s
+  // `hasStarts()` check, vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/branch/BranchStep.java):
+  // out() gives R = 3/0/0/2/0/1, so 1 + 6R rows for marko/josh/peter and none for the rest — 19 + 13 + 7.
+  test('a collector or a reducer before the draw answers per origin through the connector', () => {
+    const modern = seededStore();
+    expect(bare(run(modern, "g.V().local(__.V().groupCount('x').sample(1)).cap('x').select(values).unfold()")).map((row: any) => row.v))
+      .toEqual([6, 6, 6, 6, 6, 6]);
+    expect(count(modern, "g.V().local(__.V().aggregate('a').sample(1)).cap('a').count(local)")).toBe(36);
+    expect(bagOf(bare(run(modern, "g.V().local(__.V().group('x').by(label).sample(2)).cap('x').unfold().select(values).count(local)")).map((row: any) => row.v)))
+      .toEqual([12, 24]);
+    expect(count(modern, "g.V().local(__.out().V().union(__.count(), __.constant(0)).sample(100)).count()")).toBe(39);
+  });
+
 
   // A collector in a CHILD body of the rooted read (a `sideEffect`/`where` body) is the connector's: keyed per
   // scope with its body (`keyedBody`), so every origin's re-sourced V() reaches it — six origins × six vertices.
@@ -433,68 +498,142 @@ describe('a re-source in local() on a path-tracked traverser', () => {
   });
 });
 
-// A DRAW IN A ONCE-EVALUATED SPLIT READ. A `by()`/`map()` value, a `P` operand, a list operand or a write
-// endpoint that re-sources (`__.V()…`) is lowered ONCE for every host (`rootedRead`'s 'split' gate), so a
-// `sample`/`coin`/`shuffle` in it would be ONE random choice shared by every row, where the reference draws
-// per traverser. Where the host may be MORE than one row it declines from the query text naming the
-// problem — and, from a `map()`/`flatMap()` body, the per-row `local(…)` form, but ONLY where that form's
-// per-origin draw admits the same body over the same input (`reSourcesOncePerOrigin`, the route's own gate,
-// `src/compiler/rel/lower/reduction.ts`), so the advice never names a form that declines too. Where the host
-// is provably ONE row (`rowBounds`, `src/rel/bounds.ts`: a source `addE`, `g.V(1)`, `g.inject(x)`) one draw
-// IS the per-traverser draw, so it answers.
+// A DRAW IN A ONCE-EVALUATED SPLIT READ. A `P` operand, a list operand, a non-connector `by()` (order, group) or
+// a write endpoint that re-sources (`__.V()…`) is lowered ONCE for every host (`rootedRead`'s 'split' gate), so
+// a `sample`/`coin`/`shuffle` in it would be ONE random choice shared by every row, where the reference draws
+// per traverser. Where the host may be MORE than one row it declines from the query text naming the problem.
+// Where the host is provably ONE row (`rowBounds`, `src/rel/bounds.ts`: a source `addE`, `g.V(1)`,
+// `g.inject(x)`) one draw IS the per-traverser draw, so it answers. A CONNECTOR host's body (`map`, `flatMap`,
+// `local`, `project().by`, a filter, a branch arm) is not this read: it draws per scope row (below).
 const SHARED = /a random draw \(sample\/coin\/shuffle\) inside a V\(\)\/E\(\) body is not supported where the body may run for more than one traverser — it would be drawn once and shared by every row/;
 const LOCAL_HINT = /; local\(…\) draws per row, so use local\(__\.V\(\)…sample\(1\)\) in place of (map|flatMap)\(…\)$/;
 describe('a draw in a body evaluated once for several hosts declines', () => {
   test.each([
-    "g.V().project('x').by(__.V().sample(1).values('name'))",
     "g.V().order().by(__.V().order().by(shuffle).values('name'))",
     "g.V().values('age').is(gt(__.V().sample(1).values('age')))",
     "g.V().has('age', __.V().sample(1).values('age'))",
     "g.V().values('name').is(within(__.V().sample(1).values('name').fold()))",
-    "g.V().where(__.V().sample(1).values('age').is(29))",
     "g.V().group().by(__.V().sample(1).values('name'))",
     "g.V().addE('x').to(__.V().sample(1))",
     // Two literal ids are two hosts, whatever the graph holds.
     "g.V(1,1).addE('x').to(__.V().sample(1))",
-    "g.V(1,2).project('x').by(__.V().sample(1).values('name'))",
-    // A one-row host INSIDE a per-row body is still evaluated once per statement.
-    "g.V().local(__.V(1).project('x').by(__.V().sample(1).values('name')))",
-    "g.V().V(1).project('x').by(__.V().sample(1).values('name'))",
-    "g.V(1).out().project('x').by(__.V().sample(1).values('name'))",
     // A predicate operand is not row-bounded by its host, so even `V(1)`'s MAY run for several.
     "g.V(1).has('age', __.V().sample(1).values('age'))",
-    // map()/flatMap() hosts whose local(…) form declines too: the advice would be a dead end.
-    // A SCALAR host has no per-row rejoin.
-    "g.inject(1,2).map(__.V().sample(1).values('name'))",
-    "g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name')))",
-    // `coin` is not the per-origin draw.
-    "g.V().map(__.V().coin(0.5).count())",
-    // A path rides into the body and the prefix MOVES: the draw would add two positions, not one.
-    "g.V().map(__.V().out().sample(1)).path()",
-    // The draw sits under a by(), not at the body's re-source.
-    "g.V().flatMap(__.project('x').by(__.V().sample(1).values('name')))",
-    // Sufficient, not necessary: a stream barrier before the draw is outside the per-origin gate, so no
-    // suggestion, though GraphStep's product happens to answer the local(…) form.
-    "g.V().map(__.V().order().by(shuffle).limit(2).sample(1).values('name'))",
   ])('%s', (q) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).not.toThrow(LOCAL_HINT);
   });
+});
 
+// A CONNECTOR HOST's drawing re-source body draws PER SCOPE ROW (`connectorOwns`, `src/compiler/rel/lower/scoped.ts`):
+// the read shared by every host ENDS at the draw (`reSourcedBody`), and the draw is made over the scope's seed row,
+// which the decorrelator keys by the scope (`src/rel/decorrelate.ts`) — the counting pick (`drawnPerOrigin`) over
+// the shared read for a global `sample`, the fold over the cross otherwise. The reference hands the child one
+// traverser at a time (`TraversalUtil.apply`), so this is its answer.
+describe('a draw in a connector body answers per scope row', () => {
   // One drawn row per host traverser: modern has 6 vertices and 6 out() traversers.
   test.each([
-    ["g.V().map(__.V().sample(1).values('name'))", "g.V().local(__.V().sample(1).values('name')).count()", 6],
-    ["g.V().out().map(__.V().hasLabel('person').sample(1).values('name'))", "g.V().out().local(__.V().hasLabel('person').sample(1).values('name')).count()", 6],
-    ["g.V().as('a').map(__.V().sample(1)).select('a')", "g.V().as('a').local(__.V().sample(1)).select('a').count()", 6],
-    ["g.V().map(__.V().sample(1).values('name').fold())", "g.V().local(__.V().sample(1).values('name').fold()).count()", 6],
-    // A shuffle cut to one IS `sample(1)` (`ir/shuffle-cut.ts`), so it takes the same per-origin draw.
-    ["g.V().map(__.V().order().by(shuffle).limit(1).values('name'))", "g.V().local(__.V().order().by(shuffle).limit(1).values('name')).count()", 6],
-    // A sack crosses the split as any carried channel does (`splitInto`), so the per-row form draws per origin.
-    ["g.withSack(1).V().map(__.V().sample(1))", "g.withSack(1).V().local(__.V().sample(1)).count()", 6],
-  ] as const)('%s names the per-row local() form, and that form answers', (q, local, n) => {
-    expect(() => compile(q, {})).toThrow(SHARED);
-    expect(() => compile(q, {})).toThrow(LOCAL_HINT);
-    expect(count(seededStore(), local)).toBe(n);
+    ["g.V().map(__.V().sample(1).values('name')).count()", 6],
+    ["g.V().out().map(__.V().hasLabel('person').sample(1).values('name')).count()", 6],
+    ["g.V().as('a').map(__.V().sample(1)).select('a').count()", 6],
+    ["g.V().map(__.V().sample(1).values('name').fold()).count()", 6],
+    ["g.V().project('x').by(__.V().sample(1).values('name')).count()", 6],
+    ["g.V(1,2).project('x').by(__.V().sample(1).values('name')).count()", 2],
+    ["g.V().local(__.V(1).project('x').by(__.V().sample(1).values('name'))).count()", 6],
+    ["g.V().V(1).project('x').by(__.V().sample(1).values('name')).count()", 6],
+    ["g.V(1).out().project('x').by(__.V().sample(1).values('name')).count()", 3],
+    ["g.inject(1,2).map(__.V().sample(1).values('name')).count()", 2],
+    ["g.inject(1,2).flatMap(__.project('x').by(__.V().sample(1).values('name'))).count()", 2],
+    ["g.withSack(1).V().map(__.V().sample(1)).count()", 6],
+    ["g.V().flatMap(__.project('x').by(__.V().sample(1).values('name'))).count()", 6],
+    ["g.V().map(__.V().order().by(shuffle).limit(1).values('name')).count()", 6],
+    ["g.V().where(__.V().sample(1).values('name').is(neq('x'))).count()", 6],
+    ["g.V().hasLabel('person').local(__.V().hasLabel('software').sample(2)).count()", 8],
+  ] as const)('%s', (q, n) => {
+    expect(count(seededStore(), q)).toBe(n);
+  });
+
+  // ONE pick shared by every scope would leave one distinct pick (map) and keep all hosts or none (where).
+  test('each scope row draws independently — at the top level, in an arm, at depth', () => {
+    const store = graph(400, 400);
+    for (const q of [
+      "g.V().hasLabel('holder').map(__.V().hasLabel('person').sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').flatMap(__.V().hasLabel('person').sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').local(__.V().hasLabel('person').sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').project('p').by(__.V().hasLabel('person').sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').union(__.local(__.V().hasLabel('person').sample(1))).dedup().count()",
+      "g.V().hasLabel('holder').coalesce(__.V().hasLabel('person').sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').repeat(__.local(__.V().hasLabel('person').sample(1))).times(1).dedup().count()",
+      "g.V().hasLabel('holder').local(__.local(__.V().hasLabel('person').sample(1))).dedup().count()",
+      // A barrier before the draw: the shared read ends at the draw, which is still one per scope row.
+      "g.V().hasLabel('holder').map(__.V().hasLabel('person').order().by('age').limit(300).sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').map(__.V().as('p').hasLabel('person').dedup().sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').local(__.V().hasLabel('person').limit(300).sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').project('p').by(__.V().hasLabel('person').limit(300).sample(1)).dedup().count()",
+      "g.V().hasLabel('holder').local(__.union(__.identity(), __.identity()).V().hasLabel('person').limit(300).sample(1)).dedup().count()",
+    ]) expect(count(store, q)).toBeGreaterThan(150);
+    // Persons are ids 402, 404, …, 800 (age = id): about half are under 600.
+    const kept = count(store, "g.V().hasLabel('holder').where(__.V().hasLabel('person').sample(1).values('age').is(lt(600))).count()");
+    expect(kept).toBeGreaterThan(100);
+    expect(kept).toBeLessThan(300);
+  });
+
+  // The counting pick: one RANDOM() index per scope row into a once-numbered candidate set — no scope × candidates
+  // product for sample(1). Measured 8k holders × 1k candidates: ~20 ms, as the per-origin ladder route it replaces.
+  test('map(__.V()…sample(1)) over 6k holders × 6k candidates runs inside the budget', () => {
+    const store = graph(N, N);
+    const { rows, ms } = timed(store, "g.V().hasLabel('holder').map(__.V().hasLabel('person').sample(1)).count()");
+    expect(rows).toEqual([{ v: N }]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+  });
+
+  // THE FALL-THROUGHS the per-origin fast path leaves, at 1k and 8k holders × 1k candidates: a barrier before the
+  // draw (the shared read ends at the draw, `reSourcedBody`) and a path the draw extends (`splitInto`). Measured
+  // 3 → 22 ms and 4 → 30 ms (≈7× per 8×); the per-origin product on trunk took 680 → 5,681 ms for the first and
+  // declined the second.
+  test.each([
+    "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by('age').limit(5).sample(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().hasLabel('person').sample(1)).path().count()",
+  ])('%s at 1k and 8k holders runs inside the budget', (q) => {
+    for (const holders of [1000, 8000]) {
+      const { rows, ms } = timed(graph(holders, 1000), q);
+      expect(rows).toEqual([{ v: holders }]);
+      expect(ms).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  // `order().by(shuffle)` cut to ONE is the same uniform pick as `sample(1)` (`shuffleCutToSample`,
+  // src/compiler/ir/shuffle-cut.ts), so it takes the counting pick too. Ranked over scope × read instead it
+  // was ~4× per doubling — 1.1 s at 1k holders × 2k candidates, 4.7 s at 2k — under every connector host.
+  test.each([
+    "g.V().hasLabel('holder').map(__.V().hasLabel('person').order().by(shuffle).limit(1)).count()",
+    "g.V().hasLabel('holder').map(__.V().hasLabel('person').order().by(shuffle).range(0, 1)).count()",
+    "g.V().hasLabel('holder').map(__.V().hasLabel('person').order().by(shuffle).tail(1)).count()",
+    "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by(shuffle).limit(1)).count()",
+    "g.V().hasLabel('holder').project('n', 'p').by(id).by(__.V().hasLabel('person').order().by(shuffle).limit(1).values('name')).count()",
+    "g.V().hasLabel('holder').coalesce(__.V().hasLabel('person').order().by(shuffle).limit(1), __.identity()).count()",
+    "g.V().hasLabel('holder').where(__.V().hasLabel('person').order().by(shuffle).limit(1).has('age', gt(0))).count()",
+    "g.V().hasLabel('holder').map(__.V().hasLabel('person').limit(300).order().by(shuffle).limit(1)).count()",
+  ])('a shuffle cut to one is the counting pick over 6k holders × 6k candidates: %s', (q) => {
+    const store = graph(N, N);
+    const { rows, ms } = timed(store, q);
+    expect(rows).toEqual([{ v: N }]);
+    expect(ms).toBeLessThan(BUDGET_MS);
+  });
+
+  test('a shuffle cut to one draws independently per scope row', () => {
+    const store = graph(400, 400);
+    for (const q of [
+      "g.V().hasLabel('holder').map(__.V().hasLabel('person').order().by(shuffle).limit(1)).dedup().count()",
+      "g.V().hasLabel('holder').local(__.V().hasLabel('person').order().by(shuffle).tail(1)).dedup().count()",
+      "g.V().hasLabel('holder').project('p').by(__.V().hasLabel('person').order().by(shuffle).range(0, 1)).dedup().count()",
+      "g.V().hasLabel('holder').union(__.local(__.V().hasLabel('person').order().by(shuffle).limit(1))).dedup().count()",
+      "g.V().hasLabel('holder').repeat(__.map(__.V().hasLabel('person').order().by(shuffle).limit(1))).times(1).dedup().count()",
+    ]) expect(count(store, q)).toBeGreaterThan(150);
+    // Persons are ids 402 … 800 with age = id: about half the picks are under 600.
+    const kept = count(store, "g.V().hasLabel('holder').where(__.V().hasLabel('person').order().by(shuffle).limit(1).values('age').is(lt(600))).count()");
+    expect(kept).toBeGreaterThan(100);
+    expect(kept).toBeLessThan(300);
   });
 });
 

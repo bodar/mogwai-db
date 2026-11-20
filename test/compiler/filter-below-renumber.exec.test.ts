@@ -1,4 +1,5 @@
-// A FILTER AFTER A RE-SOURCING FAN-OUT RUNS BEFORE THE RENUMBER — `fuse`'s transpose (`src/rel/passes/fuse.ts`).
+// A FILTER AFTER A RE-SOURCING FAN-OUT RUNS BEFORE THE RENUMBER — fused into the re-source's own scan (`reSource`,
+// `src/compiler/rel/lower/movement.ts`), and `fuse`'s transpose (`src/rel/passes/fuse.ts`) moves any other filter below it.
 //
 // `g.V().hasLabel('holder').order().by('name').V().hasLabel('person')` re-sources the graph per holder, and
 // the fan-out RENUMBERS the emission order (a `ROW_NUMBER()` over holders × V). The label membership sat
@@ -61,11 +62,12 @@ describe('a filter after a re-sourcing fan-out runs below the renumber', () => {
       .toEqual([{ list: JSON.stringify(['n4', 'n5', 'n4']) }]);
   });
 
-  test('the plan seeks the persons inside the renumbering SELECT, not above it', () => {
+  test('the plan seeks the persons once, beneath the renumber, never above it', () => {
     const compiled = compile("g.V().hasLabel('holder').order().by('name').V().hasLabel('person').values('name').count()", {});
     if (compiled.kind !== 'read') throw new Error('expected a read plan');
-    // The fan-out's renumber and the person membership share one SELECT: the membership precedes the
-    // window's FROM closing, i.e. it is the window block's own WHERE.
-    expect(compiled.sql).toMatch(/row_number\(\) OVER \(ORDER BY \w+\.encounter ASC, rn\.id ASC\) AS encounter FROM [^]*CROSS JOIN nodes rn WHERE rn\.id IN/);
+    // The re-source fuses the person membership into its own scan (`fuseSourceFilters`, `reSource` in
+    // `src/compiler/rel/lower/movement.ts`): one materialized relation whose WHERE is the membership, which the
+    // fan-out's renumber crosses with the holders and orders by (holder position, person id).
+    expect(compiled.sql).toMatch(/^WITH (\w+) AS MATERIALIZED \(SELECT rn\.id AS sid FROM nodes rn WHERE rn\.id IN \(SELECT [^]*'person'[^]*row_number\(\) OVER \(ORDER BY \w+\.encounter ASC, (\w+)\.sid ASC\) AS encounter FROM [^]*CROSS JOIN \1 \2\)/);
   });
 });

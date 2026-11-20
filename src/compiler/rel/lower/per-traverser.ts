@@ -14,8 +14,8 @@ import type { RelFraming } from '../framing.ts';
 import { continueAs, dropPath } from '../lower.ts';
 import { extendPath, PATH_CHANNEL, PATH_COL, pathCarried } from '../path.ts';
 import { BRANCH_HOSTS } from './branch.ts';
-import { bodyOf, encounterOf, inBody, noteUnrolled, originOf, type ChainCtx, type Tail } from './chain.ts';
-import { childResultPath, childRows, dropOrigin, mintRowOrigin, nestRowOrigin, reductionHost, reductionTail, reSourcesOncePerOrigin, scalarChild, selfCollapses, shedBodyAliases } from './reduction.ts';
+import { bodyOf, encounterOf, noteUnrolled, originOf, type ChainCtx, type Tail } from './chain.ts';
+import { childResultPath, childRows, dropOrigin, mintRowOrigin, nestRowOrigin, reductionHost, reductionTail, scalarChild, selfCollapses, shedBodyAliases } from './reduction.ts';
 
 // THE PER-TRAVERSER ROUTE — the ladder's `map`/`flatMap`/`local` lowering (the `correlatedChild` fast path's
 // remaining per-traverser family, `docs/2026-11-16-ladder-retirement-plan.md` R4): `perTraverserChild` picks
@@ -53,13 +53,7 @@ export function perTraverserChild(
     const perRow = flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
     if (perRow) return perRow;
   }
-  const declinedBefore = ctx.declines.terminal();
   const produced = scalarChild(body, reductionHost(rel, framing, labels), bodyCtx, fresh);
-  // A `map()`/`flatMap()` body's `SHARED_DRAW` names the per-row form ONLY where that form's route admits
-  // the same body over the same input (`localDrawsPerRow`). Advice must not send the user to a `local(…)`
-  // that declines too (`inject(1,2)`'s scalar host, a `coin` draw). Every other host's does not.
-  if (!declinedBefore && (step.name === 'map' || step.name === 'flatMap') && localDrawsPerRow(body, rel, framing, bodyCtx))
-    ctx.declines.hint('shared-draw', `local(…) draws per row, so use local(__.V()…sample(1)) in place of ${step.name}(…)`);
   if (!produced) return flatMapRejoin(step, rel, framing, body, steps, at, bulked, ctx, fresh, labels, bodyCtx);
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
@@ -103,8 +97,7 @@ export const PER_ORIGIN_GROUPING_BARRIER: ReadonlySet<string> = new Set(['fold',
 
 /**
  * Does every stream barrier of a per-traverser body SELF-SCOPE by the body's ONE origin? The admission
- * gate of the per-row rejoin (`flatMapRejoin`, both its forms) and of the per-row draw advice
- * (`localDrawsPerRow`) — one predicate, so the route and the advice cannot disagree about a body.
+ * gate of the per-row rejoin (`flatMapRejoin`, both its forms).
  *
  * A barrier self-scopes when it is a per-origin window or grouping (the two sets above), or when it is a
  * NESTED per-traverser host that scopes within the enclosing row (`nestedHostScopes`).
@@ -320,20 +313,6 @@ export function flatMapRejoin(
   const out = step.name === 'local' ? rows.aliases : labels;
   const rejoined = step.name === 'local' ? shed : shedBodyAliases(shed, labels, fresh);
   return continueAs(rejoined, rows.framing, steps, at + 1, bulked, ctx, fresh, out);
-}
-
-/**
- * Would `local(body)` over this host draw per row? The rejoin's own entry conditions (an ELEMENT host, only
- * per-origin-safe barriers, `flatMapRejoin`) and the per-origin draw's admission gate
- * (`reSourcesOncePerOrigin`) at the body's first top-level re-source, asked under the body context the
- * rejoin lowers it with (`childRows`: `inBody`, unbulked). Sufficient, not necessary: GraphStep's product
- * may still answer a body this refuses, so it only ever withholds a suggestion, never a route.
- */
-function localDrawsPerRow(body: readonly IRStep[], rel: Rel, framing: RelFraming, bodyCtx: ChainCtx): boolean {
-  if (framing.kind !== 'elements') return false;
-  if (!bodyScopesPerOrigin(body, bodyCtx.params)) return false;
-  const at = body.findIndex((s) => s.name === 'V' || s.name === 'E');
-  return at >= 0 && reSourcesOncePerOrigin(body, at, rel, false, inBody(bodyCtx));
 }
 
 /**

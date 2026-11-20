@@ -687,7 +687,7 @@ export type RootedHosts = 'one' | 'many';
 export const rootedHosts = (host: Rel | undefined): RootedHosts =>
   host && atMostOneRow(host) && isSelfContained(host) ? 'one' : 'many';
 
-const SHARED_DRAW = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body may run '
+export const SHARED_DRAW = 'a random draw (sample/coin/shuffle) inside a V()/E() body is not supported where the body may run '
   + 'for more than one traverser — it would be drawn once and shared by every row';
 
 /**
@@ -1360,30 +1360,48 @@ function reSourcedValue(body: readonly IRStep[], ctx: ChainCtx, fresh: Minter, h
 }
 
 /**
- * A SAMPLED RE-SOURCE IN A PER-TRAVERSER BODY — `property('c', __.V().hasLabel('person').sample(1)…)`,
- * `local(__.V().sample(2))` — with the prefix before the draw evaluated ONCE and the draw made per origin.
+ * A SAMPLED RE-SOURCE — `property('c', __.V().hasLabel('person').sample(1)…)`, `local(__.V().sample(2))`,
+ * `g.V()…V().sample(1)` — with the prefix before the draw evaluated ONCE and the draw made per origin.
  * GraphStep emits the graph per incoming traverser
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java`),
  * so origin `o`'s stream is R_o copies of the M candidates — R copies of ONE evaluation only for a top-level
  * WHITELIST (`evaluableOnce`: no stream barrier, each step childless or a filter host) holding no draw,
- * collector or host-state read at any depth. `sample(1)` is one fenced index in 1..P (P = R_o·M) per origin,
- * equi-joined back, O(origins + M log M); `sample(n > 1)` ranks the P pairs by RANDOM() (`perOriginWindow`),
- * linear in the traversers the reference streams. A FAST PATH: `undefined` falls through to GraphStep's
- * product (`reSource`), which answers whatever this leaves; it never declines. Only the picks'
- * distribution is the reservoir's, not their order — §17 "Unordered slices".
+ * collector or host-state read at any depth (`reSourcesOncePerOrigin`); the draw itself is `drawnPerOrigin`.
+ * A FAST PATH: `undefined` falls through to GraphStep's product (`reSource`), which answers whatever this
+ * leaves; it never declines.
  */
 export function reSourcedOnce(
   steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | undefined {
-  const origin = originOf(input.channels);
-  if (!origin || !reSourcesOncePerOrigin(steps, at, input, bulked, ctx)) return undefined;
+  if (!reSourcesOncePerOrigin(steps, at, input, bulked, ctx)) return undefined;
   const drawAt = drawIndex(steps, at);
-  const prefix = steps.slice(at, drawAt);
-  const draw = steps[drawAt]!;
   // The rooted read is a fresh root chain, so it tracks no path of its own: the one position the split adds to
   // the origin's path — the element drawn — is appended after the join (`splitInto`).
-  const rooted = rootedRead(prefix, ctx, fresh, 'many');
-  if (!rooted || rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return undefined;
+  const rooted = rootedRead(steps.slice(at, drawAt), ctx, fresh, 'many');
+  return rooted ? drawnPerOrigin(rooted, steps, drawAt, input, bulked, ctx, fresh, labels) : undefined;
+}
+
+/**
+ * THE DRAW PER ORIGIN over a read computed ONCE: the global `sample(n)` at `steps[drawAt]` made per origin of
+ * `input` over `rooted`, the candidates every origin row meets alike, and the fold continued after it.
+ * `reSourcedOnce` hands it an evaluable-once prefix; a connector body whose input is EXACTLY ONE row hands it the
+ * shared read up to its draw, whatever barriers that read holds (`reSourcedBody` in `lower/scoped.ts`:
+ * `rest(prefix × G) = prefix × rest(G)` for a one-row prefix). An input with NO origin is ONE partition: the top
+ * level (`g.V()…V().sample(1)`, one draw over R·M), or a connector body's seed row, which the decorrelator keys
+ * per scope row (`src/rel/decorrelate.ts` adds the scope key to every grouping and window) — one draw per SCOPE
+ * row, with no second keying authority. `sample(1)` is one fenced index in 1..P (P = R_o·M) per origin,
+ * equi-joined back, O(origins + M log M); `sample(n > 1)` ranks the P pairs by RANDOM() (`perOriginWindow`),
+ * linear in the traversers the reference streams. Only the picks' distribution is the reservoir's, not their
+ * order — §17 "Unordered slices". `undefined` where the read, the draw or the input is not this shape.
+ */
+export function drawnPerOrigin(
+  rooted: RootedRead, steps: readonly IRStep[], drawAt: number, input: Rel, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | undefined {
+  // The state the split cannot keep is GraphStep's own refusal (`splitRefuses`); a tracked path gains the ONE
+  // position drawn (`splitInto`), which every caller's read keeps (`reSourcesOncePerOrigin`, `reSourcedBody`).
+  if (!isUniformPick(steps, drawAt) || bulked || splitRefuses(input, true)) return undefined;
+  const origin = originOf(input.channels);
+  if (rooted.effects || rooted.bulked !== false || (rooted.framing.kind !== 'elements' && rooted.framing.kind !== 'scalar')) return undefined;
   const elem = rooted.framing.kind === 'elements' ? rooted.framing.elem : undefined;
   if (!elem && pathCarried(input)) return undefined;
   // Only the payload crosses: a rooted channel other than its position and its (provably unit) bulk —
@@ -1414,10 +1432,13 @@ export function reSourcedOnce(
   const carried = carriedCols(parent.channels);
   const arriving = encounterOf(parent.channels);
   const ranked = rowNumberWindow(parent, R, parent.channels, {
-    partitionBy: [col(parent.id, origin.col)], orderBy: arriving ? [{ expr: col(parent.id, arriving.col), dir: 'asc' }] : [],
+    partitionBy: origin ? [col(parent.id, origin.col)] : [], orderBy: arriving ? [{ expr: col(parent.id, arriving.col), dir: 'asc' }] : [],
   }, fresh);
   const rows = fence(project(ranked, [...carried, int(R)]));
   const O = 'sample_o', RI = 'sample_ri', KI = 'sample_ki';
+  // The origin's column where there is one; with none, every relation below omits it.
+  const originCol = origin ? [int(origin.col)] : [];
+  const originOut = origin ? [int(O)] : [];
 
   /** `sample(1)`: ONE uniform index D in 1..P = R·M per origin that has rows to draw from, located as its
    *  (origin row, candidate) coordinates. Both the span and the draw are fenced: the draw reads P three
@@ -1426,19 +1447,19 @@ export function reSourcedOnce(
     const P = 'sample_p', D = 'sample_d';
     const size = make.aggregate({ id: fresh('sn'), input: candidates, channels: [], type: typeOf(int(M)), groupBy: [], aggs: [[M, count]] });
     const perOrigin = make.aggregate({
-      id: fresh('sa'), input: rows, channels: [], type: typeOf(int(origin.col), int(RN)),
-      groupBy: [col(rows.id, origin.col)], aggs: [[RN, count]],
+      id: fresh('sa'), input: rows, channels: [], type: typeOf(...originCol, int(RN)),
+      groupBy: origin ? [col(rows.id, origin.col)] : [], aggs: [[RN, count]],
     });
-    const sized = make.join({ id: fresh('sj'), left: perOrigin, right: size, join: 'cross', channels: [], type: typeOf(int(origin.col), int(RN), int(M)) });
-    const spanned = project(sized, [int(O), int(M), int(P)], (name) => name === O ? col(sized.id, origin.col)
+    const sized = make.join({ id: fresh('sj'), left: perOrigin, right: size, join: 'cross', channels: [], type: typeOf(...originCol, int(RN), int(M)) });
+    const spanned = project(sized, [...originOut, int(M), int(P)], (name) => name === O ? col(sized.id, origin!.col)
       : name === P ? bin('*', col(sized.id, RN), col(sized.id, M)) : col(sized.id, name));
     const drawing = fence(make.filter({ id: fresh('sq'), input: spanned, channels: [], type: spanned.type, pred: bin('>', col(spanned.id, P), compilerInt(0)) }));
     const random: Expr = { kind: 'call', fn: 'RANDOM', args: [] };
     const span = col(drawing.id, P);
-    const picks = fence(project(drawing, [int(O), int(M), int(D)], (name) => name === D
+    const picks = fence(project(drawing, [...originOut, int(M), int(D)], (name) => name === D
       ? bin('+', bin('%', bin('+', bin('%', random, span), span), span), compilerInt(1)) : col(drawing.id, name)));
     const offset = bin('-', col(picks.id, D), compilerInt(1));
-    return project(picks, [int(O), int(RI), int(KI)], (name) => name === RI ? bin('+', bin('/', offset, col(picks.id, M)), compilerInt(1))
+    return project(picks, [...originOut, int(RI), int(KI)], (name) => name === RI ? bin('+', bin('/', offset, col(picks.id, M)), compilerInt(1))
       : name === KI ? bin('+', bin('%', offset, col(picks.id, M)), compilerInt(1)) : col(picks.id, name));
   };
   /** `sample(n > 1)`: each origin's R·M (row, candidate) pairs ranked by RANDOM(), keeping rn <= n — the FENCED
@@ -1447,15 +1468,15 @@ export function reSourcedOnce(
     const pairs = make.join({
       id: fresh('sj'), left: rows, right: candidates, join: 'cross', channels: [], type: typeOf(...rows.type.cols, ...candidates.type.cols),
     });
-    const keyed = project(pairs, [int(O), int(RI), int(KI)], (name) => col(pairs.id, name === O ? origin.col : name === RI ? R : K));
-    return perOriginWindow(keyed, col(keyed.id, O), [RANDOM_ORDER], { offset: 0, limit: n }, fresh, true);
+    const keyed = project(pairs, [...originOut, int(RI), int(KI)], (name) => col(pairs.id, name === O ? origin!.col : name === RI ? R : K));
+    return perOriginWindow(keyed, origin ? col(keyed.id, O) : null, [RANDOM_ORDER], { offset: 0, limit: n }, fresh, true);
   };
-  const n = countOf(draw);
+  const n = countOf(steps[drawAt]!);
   const chosen = n === 1 ? drawOne() : rankPairs();
   const row = make.join({
     id: fresh('sx'), left: chosen, right: rows, join: 'inner', ordered: true, channels: [],
     type: typeOf(...chosen.type.cols, ...rows.type.cols),
-    on: and(eq(col(rows.id, origin.col), col(chosen.id, O)), eq(col(rows.id, R), col(chosen.id, RI))),
+    on: origin ? and(eq(col(rows.id, origin.col), col(chosen.id, O)), eq(col(rows.id, R), col(chosen.id, RI))) : eq(col(rows.id, R), col(chosen.id, RI)),
   });
   const met = make.join({
     id: fresh('sx'), left: row, right: candidates, join: 'inner', ordered: true, channels: [],
@@ -1473,28 +1494,32 @@ export function reSourcedOnce(
  *  origin's split supersedes (`reSourcedOnce`). */
 const SUPERSEDED: ReadonlySet<ChannelRole> = new Set<ChannelRole>(['encounter', 'bulk', 'sack', 'loops']);
 
+/** Is `steps[at]` a uniform pick of `n` traversers (`SampleGlobalStep` with every weight 1): a global `sample(n)`
+ *  with no `by()` weight — folded, or the free `by` step after it (`sample` is no `BY_HOSTS` member)? A uniform
+ *  shuffle cut to one is canonicalized to it upstream (`src/compiler/ir/shuffle-cut.ts`). */
+export const isUniformPick = (steps: readonly IRStep[], at: number): boolean => {
+  const step = steps[at];
+  return step?.name === 'sample' && !isLocalScope(step) && !step.modulators?.length && !step.optionArms && steps[at + 1]?.name !== 'by';
+};
+
 /** The top-level global `sample` after the re-source at `at`: the draw `reSourcedOnce` makes per origin. */
 const drawIndex = (steps: readonly IRStep[], at: number): number =>
   steps.findIndex((step, i) => i > at && step.name === 'sample' && !isLocalScope(step));
 
 /**
  * `reSourcedOnce`'s ADMISSION GATE, mint-free and side-effect-free: may the re-source at `steps[at]` over
- * `input` draw per origin over ONE evaluation of its prefix? The ONE spelling of that rule. The route asks
- * it before it builds anything, and a `map()`/`flatMap()` host's `SHARED_DRAW` decline asks it before
- * suggesting `local(…)` (`localDrawsPerRow`), so the advice cannot name a form the route refuses.
- * It checks no origin (the per-row rejoin mints one) and lowers nothing (`rootedRead` and the rooted
- * shape checks stay in `reSourcedOnce`): holding it is necessary for the fast path, and it is the most a
- * hint can ask without building.
+ * `input` draw per origin over ONE evaluation of its prefix? The ONE spelling of that rule, asked before
+ * anything is built. It lowers nothing (`rootedRead` and the rooted shape checks stay in `drawnPerOrigin`): holding it is
+ * necessary for the fast path, and it is the most a hint can ask without building.
  */
-export function reSourcesOncePerOrigin(steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx): boolean {
+function reSourcesOncePerOrigin(steps: readonly IRStep[], at: number, input: Rel, bulked: boolean, ctx: ChainCtx): boolean {
   const drawAt = drawIndex(steps, at);
   if (drawAt < 0) return false;
   const prefix = steps.slice(at, drawAt);
   const { params } = ctx;
-  const draw = steps[drawAt]!;
   // The state the split cannot keep is GraphStep's own refusal (`splitRefuses`). A path gains ONE position here —
   // the element drawn — so it rides only where the prefix does not MOVE (`keepsPosition`, by name).
-  if (bulked || draw.modulators?.length || draw.optionArms || splitRefuses(input, keepsPosition(prefix.slice(1)))) return false;
+  if (bulked || !isUniformPick(steps, drawAt) || splitRefuses(input, keepsPosition(prefix.slice(1)))) return false;
   const read = rawBodies(params);
   const evaluableOnce = (step: IRStep): boolean => !isStreamBarrier(step) && (ONCE_FILTER_HOSTS.has(step.name) || !hasChild(step, read));
   if (!prefix.every(evaluableOnce) || readsHostState(prefix, ctx)) return false;

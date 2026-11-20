@@ -84,7 +84,7 @@ import { MUTATING_STEPS, writesAnywhere } from '../ir/strategies.ts';
 import { BULK, ENCOUNTER, GRAPH, NO_ALIASES, bodyOf, encounterOf, noteUnrolled, withEnclosing, type ChainCtx, type HoistedSpine, type SpineHoist, type Tail } from './lower/chain.ts';
 import { HOPS, idLookup, movement, otherVertex, reSource } from './lower/movement.ts';
 import { dedupByLabels, type MapScope, elementRowShape, propertyRowShape, payloadRowShape, rowOp, scalarRowShape, sliceOp, ROW_OPS } from './lower/slice.ts';
-import { childHostOf, namesACollection, sourceFilter } from './lower/filter.ts';
+import { childHostOf, fuseSourceFilters, namesACollection, sourceFilter } from './lower/filter.ts';
 import { admitsReSource, childRows, childSeam, isMintedRowOrigin, mintRowOrigin, foldedListSet, nestedFirstValue, pathSimplePredicate, reductionHost, reSourcedOnce, scalarChild, shedBodyAliases } from './lower/reduction.ts';
 import { perTraverserChild } from './lower/per-traverser.ts';
 import { atLadder, connectorSite, scopedHost } from './lower/scoped.ts';
@@ -196,8 +196,8 @@ function reSourceTail(
   if (steps[at]!.idOfValue || traversalIdArg(steps[at]!)) return traversalIdsTail(steps, at, rel, framing, bulked, ctx, fresh, labels);
   const once = reSourcedOnce(steps, at, rel, bulked, ctx, fresh, labels);
   if (once) return once;
-  const reSourced = admitsReSource(selectsMaybeUnbound(steps, at, rel, ctx, labels), ctx) ? reSource(steps[at]!, rel, framing, ctx, fresh) : null;
-  return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+  const reSourced = admitsReSource(selectsMaybeUnbound(steps, at, rel, ctx, labels), ctx) ? reSource(steps[at]!, rel, framing, ctx, fresh, steps.slice(at + 1)) : null;
+  return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1 + reSourced.absorbed, bulked, ctx, fresh, labels);
 }
 
 /**
@@ -5305,18 +5305,9 @@ function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter,
   // PHASE 1 — the source scan and the filters that fuse into its own WHERE. Kept separate from the
   // general fold below because only here is the physical row in scope: an edge's `label` is a
   // column to read rather than a membership test, and a run of filters conjoins into ONE `WHERE`
-  // over one scan instead of a CTE-per-filter with its re-join.
-  let pred = seeded.pred;
-  let at = 1;
-  let elem = elem0;
-  for (; at < steps.length; at++) {
-    // A child filter at a connector site is the connector's (`lower/scoped.ts`, its hosts LADDERLESS): it never
-    // fuses into the scan's WHERE as a correlated clause.
-    if (connectorSite(steps[at])) break;
-    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, readCtx);
-    if (!clause) break;
-    pred = and(pred, clause);
-  }
+  // over one scan instead of a CTE-per-filter with its re-join (`fuseSourceFilters`, shared with `reSource`).
+  const elem = elem0;
+  const { pred, at } = fuseSourceFilters(steps, 1, seeded, elem, readCtx, fresh);
 
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
   // The `Filter` this builds over a bare element scan is what `src/rel/passes/semijoin.ts` reads: a

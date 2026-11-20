@@ -94,6 +94,10 @@ while what they operate on keeps TinkerPop's.
     one uncorrelated relation crossed with the host, so a productive null is a row. A body that DRAWS is the
     connector's too and always DECORRELATED (never `correlatedBody`): the body's OWN draw counts as touching the
     scope in `decorrelate.ts`, so it is one draw per scope row, and `name.ts` fences a shared drawing CTE.
+    A body that draws over a re-source is the connector's as well: its shared read ENDS at the draw
+    (`reSourcedBody`), and a uniform pick there is one index per scope row into the once-numbered read
+    (`drawnPerOrigin`: "no origin" is one partition, which the decorrelator keys per scope row); a `coin` or a
+    weighted/local `sample` there declines with the shared-draw reason (`declinedDraw`).
     A relation drawn UPSTREAM that the body only reads (a side effect, a binding) is not the body's
     (`owning` in `scoped.ts`, `ownDraws` in `rel/copies.ts`) and stays one shared, unkeyed pick — keying
     it redraws per scope: a wrong count and an N×N cross.

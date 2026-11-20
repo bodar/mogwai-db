@@ -23,6 +23,10 @@ import { evidenceOf } from '../tag.ts';
 import { externalIdKeys } from '../source.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import { copyRepeatsWork, doubledReads } from '../../../rel/copies.ts';
+import { isSelfContained } from '../../../rel/walk.ts';
+import { nondeterministic } from '../../ir/step.ts';
+import { fuseSourceFilters } from './filter.ts';
+import { readsHostState } from './reduction.ts';
 
 /**
  * The carried state a GraphStep split cannot keep — the ONE refusal `reSource` and `idLookup` share.
@@ -49,22 +53,39 @@ const KEEPS_POSITION: ReadonlySet<string> = new Set([...COLLAPSE_FILTERS, 'is', 
 export const keepsPosition = (steps: readonly IRStep[]): boolean => steps.every((step) => KEEPS_POSITION.has(step.name));
 
 export function reSource(
-  step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
-): { rel: Rel; elem: Elem } | null {
+  step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter, following: readonly IRStep[] = [],
+): { rel: Rel; elem: Elem; absorbed: number } | null {
   if ((step.name !== 'V' && step.name !== 'E') || step.modulators?.length || step.optionArms) return null;
   if (framing.kind === 'path' || splitRefuses(input, true)) return null;
   const elem: Elem = step.name === 'E' ? 'edge' : 'vertex';
   const seeded = ctx.source.elementScan(elem, step.args, fresh);
   if (!seeded) return null;
-  const source = seeded.pred
-    ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred })
+  // The leading run of element filters after the re-source fuses into the scan's own WHERE BENEATH the cross — the
+  // start's fusion (`fuseSourceFilters`). A filter over one element is the same filter for every origin, so applying
+  // it beneath the cross changes no row. Left above, it sits over the position window `splitInto` mints on the
+  // cross (`crossCarried`'s `several` re-mint), which no filter is pushed through, so every origin meets the WHOLE
+  // graph: origins × |V| where the reference streams origins × candidates. So it fuses only where that window is
+  // minted (an ARRIVING position); without it the filters above the cross are the algebra
+  // `src/rel/passes/semijoin.ts` reads to pair a constant filter with a correlated `has(k, select(…))` into one
+  // keyed seek. A DRAW (`coin`: one coin per element would be shared by every origin) and a read of the traverser's
+  // own state end the run.
+  const window = !!encounterOf(input.channels);
+  const fused = fuseSourceFilters(following, 0, seeded, elem, ctx, fresh,
+    (next) => !window || nondeterministic([next], ctx.params) || readsHostState([next], ctx));
+  const source = fused.pred
+    ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: fused.pred })
     : seeded.scan;
   // Only the new id crosses the join. Keeping the source row's physical columns would collide with
   // an element input's `id`/`uid` columns before the payload replacement (`crossCarried`).
-  const ids = make.project({
+  const projected = make.project({
     id: fresh('rs'), input: source, channels: [], type: typeOf(meta('sid', 'int')),
     exprs: [['sid', col(source.id, 'id')]],
   });
+  // The fused run is evaluated ONCE: left inline, SQLite flattens the scan into the cross and tests each fused
+  // filter per (origin, element) PAIR (measured: an existence `has('age')` at 8k holders, 144M EXISTS probes).
+  const ids = fused.at > 0 && isSelfContained(projected)
+    ? make.materialize({ id: fresh('rsm'), input: projected, channels: [], type: projected.type, fenced: true })
+    : projected;
   // GraphStep's iterator visits the scanned elements in rowid order, so the source id is the ordinal;
   // every origin meets every element, so an arriving position is always re-minted (`several`).
   const parent = ensureBulk(input, fresh);
@@ -72,7 +93,7 @@ export function reSource(
     id: fresh('j'), left: parent, right: ids, join: 'cross', channels: parent.channels,
     type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
-  return { elem, rel: splitInto(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, elem, ctx, fresh) };
+  return { elem, absorbed: fused.at, rel: splitInto(parent, crossed, 'sid', [[meta('id', 'int'), 'sid']], true, elem, ctx, fresh) };
 }
 
 /**
