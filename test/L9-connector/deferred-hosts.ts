@@ -18,7 +18,7 @@ export interface Deferred {
   /** What has to exist before it can — the work that would turn this into a CONNECTORS row. */
   readonly blocker: string;
   /**
-   * Is this position in the ladder retirement's scope (`docs/2026-11-16-ladder-retirement-plan.md` R0/R6)?
+   * Is this position in the ladder retirement's scope (`docs/archive/2026-11-16-ladder-retirement-plan.md` R0/R6)?
    *  • `ladder` — a per-traverser child the host reads in the ladder's style: a correlated per-shape read of
    *    the body (the child seam's scalar or predicate answer, a body the ladder alone may hold), where the
    *    connector's scoped body is the general replacement. R6 moves these onto CONNECTORS rows, by workload reach.
@@ -67,8 +67,8 @@ const REPEAT: Deferred = {
   // inside the recursive term (`src/rel/recursive.ts` P2). A `limit(n)` there is a plain LIMIT (a one-row scope
   // has one key, `src/rel/decorrelate.ts`) and a trailing `count().is(P)` counts only as far as P can tell
   // (`boundConditionCount`, `ir/strategies.ts`), so the work per walk row is bounded. An EMIT condition is asked
-  // over the FINISHED walk, once per distinct traverser state (`perState`, `walk.ts`), so any head answers
-  // linearly there. An in-term until whose exhausting work reads only the frontier element's OWN rows
+  // over the FINISHED walk, once per distinct traverser state (`perState`, `walk.ts`), so a head with a correlated form answers
+  // linearly there; one with none (`emit(order().by(k).limit(1)…)`) still declines (outstanding-work `emit-any-head`). An in-term until whose exhausting work reads only the frontier element's OWN rows
   // (`elementMap()`, `properties()`, a `project()` of its values) is bounded by the element and answers
   // (`perHostWork`'s `readsNeighbourhood`, `src/rel/work.ts`). What stays refused is the in-term until whose
   // exhausting work reads a NEIGHBOURHOOD: evaluated per FRONTIER row, never per distinct element.

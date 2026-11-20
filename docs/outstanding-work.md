@@ -358,6 +358,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 
 ### Performance: repeat
 
+#### An unbounded walk never merges traversers in the same state (`walk-state-collapse`)
+- **Area:** `repeat()`
+- **Reach:** plausible
+- **Problem:** The recursive walk keeps every traverser as its own row, with no bulk collapse of equal states, so a cyclic body grows exponentially in loops. `g.V(3).repeat(both('created')).until(loops().is(40)).emit().dedup()` (and `emit(in('knows'))`) does not finish in 100 s on trunk. It also blocks `emit-any-head`: that fix lets L3 `g_VX3X_repeatXbothX_createdXX_untilXloops_is_40XXemit_repeatXin_knowsXX_emit_loopsXisX1Xdedup_values` reach this walk (L3 80 s → 1083 s, then "database or disk is full"). Pre-existing.
+- **Fix:** Either (a) send `until(loops().is(n))` over a barrier-free body through the bounded regime, after the unroll computes each level once (`emit-unroll-frontier`); or (b) keep only distinct states where nothing downstream counts traversers (a `dedup()`, pure conditions). Same root as `unroll-sack-collapse` and `local-repeat-bulk`.
+- **Where:** `repeatWalk` (`src/compiler/rel/walk.ts`); `loopCountUntilAsTimes` (`src/compiler/ir/strategies.ts`); `src/rel/recursive.ts`
+
 #### `local(repeat(both()).times(k))` does not bulk-collapse (`local-repeat-bulk`)
 - **Area:** repeat
 - **Reach:** rare
@@ -390,7 +397,7 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Area:** `repeat()`, sack
 - **Reach:** plausible
 - **Problem:** U4 (b84e2cf1) admits `sack` in a bounded unroll body, but `CHANNEL_GROUP_POLICY.sack = 'undefined'` (`src/channels.ts`) forbids grouping a sack phase, so each path stays its own row (deg^n in `times(n)`). Faithful (`B_O_S_SE_SL_Traverser.carriesUnmergeableSack`, `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_S_SE_SL_Traverser.java`) and linear in N (`withSack(0).V().repeat(both().sack(sum).by(constant(1))).times(4).sack().sum()` 2454/18779 ms at 1k/8k, 7.7×), but `repeat(both()).times(4).count()` is 6/51 ms. Not a regression: trunk declined these, and the written-out chain costs the same.
-- **Fix:** Collapse a sack phase on `(id, sack value)` with `SUM(bulk)` — two traversers with equal sacks are interchangeable. Same root as `local-repeat-bulk` and the RC(emit) walk blowup (ladder plan 8d0): no collapse of equal traverser states.
+- **Fix:** Collapse a sack phase on `(id, sack value)` with `SUM(bulk)` — two traversers with equal sacks are interchangeable. Same root as `local-repeat-bulk` and `walk-state-collapse`: no collapse of equal traverser states.
 - **Where:** `CHANNEL_GROUP_POLICY` (`src/channels.ts`); `src/compiler/ir/bulk.ts`
 
 #### An edge-step unroll body never collapses (`unroll-edge-step-collapse`)
@@ -408,6 +415,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Where:** `src/compiler/ir/strategies.ts`
 
 ### Performance: branches and nesting
+
+#### A top-level `local()` that re-sources in an arm pays a per-row scalar (`local-resource-arm-cost`)
+- **Area:** nesting, `local()`
+- **Reach:** plausible
+- **Problem:** Since R7b (35feb250) `spliceableLocalBody` reads V()/E() at any depth, so a top-level `local()` whose arm re-sources goes through the connector's `reSourcedBody` instead of being spliced: same answers, linear, ≈30–45% more SQL and a per-row correlated scalar. ms at 8k, before → after: `g.V().local(__.union(__.V().has('name','marko'), __.out())).count()` 4.4 → 16.7; the `as('a')…select('a')` form 4.1 → 16.3; a choose arm 5.8 → 16.2; `local(coalesce(out('knows'), V().has('name','peter')))` 7.1 → 15.7. Accepted by the owner (2026-11-20) as a small absolute cost.
+- **Fix:** A body re-source with no host read is one shared read, not a per-row scalar (a general `reSourcedBody` fix). Not a "(local not in repeat)" branch.
+- **Where:** `reSourcedBody` (`src/compiler/rel/lower/scoped.ts`); `spliceableLocalBody` (`src/compiler/ir/strategies.ts`)
 
 #### Presence gate inlines its value twice (`produced-only-where`)
 - **Area:** nesting
@@ -830,6 +844,14 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Where:** `src/compiler/rel/write.ts` `KEEPS_ONE`; `src/compiler/ir/step.ts` `ONE_TO_ONE`
 
 ### Queries we decline: repeat
+
+#### An unbounded emit() condition with no correlated form declines (`emit-any-head`)
+- **Area:** `repeat()` conditions
+- **Reach:** plausible
+- **Problem:** `g.V().repeat(__.out()).emit(__.order().by('name').limit(1).has('name','marko')).count()` declines with the generic "no lowering covers …", though the REPEAT deferral (`test/L9-connector/deferred-hosts.ts`) says an emit condition takes any head. Built and parked on branch `wf/rc-emit-any-head-1-0` (fbe1855a): `perState` becomes the emit condition's fallback when the correlated form is null (`semiJoinPassing`, `src/rel/decorrelate.ts`), and a drawing or side-effecting emit condition declines by name (`impure-emit-condition`). Correct on every witness, but not landable before `walk-state-collapse`.
+- **Fix:** Land the branch after `walk-state-collapse`. Drop its `l3-walk-multiset-blowup` ledger entry: it bought green CI at 18 min / 32 GB.
+- **Depends on:** walk-state-collapse
+- **Where:** `repeatWalk` (`src/compiler/rel/walk.ts`); `semiJoinPerDistinct` (`src/rel/decorrelate.ts`)
 
 #### Spine cut does not reach correlated hosts or write programs (`spine-cut-hosts`)
 - **Area:** repeat
@@ -1420,7 +1442,7 @@ Building blocks that unblock many other items. Do these before the items that de
 - **Reach:** common
 - **Problem:** Declines rise with nesting depth (measured 6% → 28% → 71% → 88%). The correlated-scalar ladder still owns some nested shapes.
 - **Fix:** Committed direction (owner, 2026-11-16). Finish general decorrelation through the scoped-relation connector and make the ladder a measured fast path. `alias-channels-child-seam`, `list-members`, `fan-out-residue`, `branch-slice` and `path-as-value` are expected to fall out of it.
-- **Where:** `docs/2026-11-15-compositional-coverage-plan.md`; `docs/2026-11-16-ladder-retirement-plan.md`
+- **Where:** `docs/2026-11-15-compositional-coverage-plan.md`; `docs/archive/2026-11-16-ladder-retirement-plan.md`
 
 #### Branch and slice (`branch-slice`)
 - **Area:** branch

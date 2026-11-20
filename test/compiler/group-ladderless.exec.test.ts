@@ -1,4 +1,4 @@
-// `group` has no ladder (docs/2026-11-16-ladder-retirement-plan.md, R5.3+R5.4, then R7 deleted the ladder): its connector
+// `group` has no ladder (docs/archive/2026-11-16-ladder-retirement-plan.md, R5.3+R5.4, then R7 deleted the ladder): its connector
 // row (`byValues`, src/compiler/rel/lower/scoped.ts) is its one lowering over an element or scalar host, so the
 // dispatch offers no other route there. The value
 // `by()` is ASSIGNED per traverser when its body has no barrier (`Operator.assign`) and POOLED per key at its first

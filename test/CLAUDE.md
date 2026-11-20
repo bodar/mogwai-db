@@ -132,7 +132,7 @@
   — derived from the grammar, the L1 corpus and L5's `hosts.ts` — is a `CONNECTORS` row or a
   `deferred-hosts.ts` entry with its reason, blocker and retirement `scope` (`ladder` | `host-owned`), so a new
   host cannot quietly get a route of its own. (The ladder-reach ratchet that counted what only the ladder answered
-  went with the ladder, R7 of `docs/2026-11-16-ladder-retirement-plan.md`.)
+  went with the ladder, R7 of `docs/archive/2026-11-16-ladder-retirement-plan.md`.)
   Its static sibling is `mise run ladder` (in `gates`): the `return null` count in `src/compiler/rel/` never rises.
 - Shared reference-graph seeds live in `test/fixtures/`; shared graph-minting helpers
   (`seeded`/`isWrite`) live in `test/support/graph.ts` — used by both L5 and the census, so they

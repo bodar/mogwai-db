@@ -82,7 +82,7 @@ while what they operate on keeps TinkerPop's.
     that produced ~890 decline sites and a 98% decline rate at depth 5.
   - **A body that does not lower is fixed in the body's lowering or in `decorrelate.ts`** (one rule per
     node kind), so the fix composes at every depth and under every host at once.
-  - **The old ladder is DELETED** (`docs/2026-11-16-ladder-retirement-plan.md` R7): the `correlatedChild`
+  - **The old ladder is DELETED** (`docs/archive/2026-11-16-ladder-retirement-plan.md` R7): the `correlatedChild`
     FastPath, its per-traverser route and the connector-only measurement mode are gone, so there is no second
     child lowering to fall back to or to compare against. At a site the connector's row does not CLAIM — a
     `group()` over a property stream, an `order(local).by(…)` over a list, `dedup('a').by(…)` — the dispatch falls

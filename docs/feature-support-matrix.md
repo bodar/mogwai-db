@@ -51,7 +51,7 @@ All 2,395 corpus traversals parse.
 | `V()`, `V(id…)`, `E()`, `E(id…)` | ✅ | Also mid-traversal. |
 | `out`, `in`, `both` | ✅ | |
 | `outE`, `inE`, `bothE` | ✅ | |
-| `outV`, `inV`, `bothV`, `otherV` | ✅ | |
+| `outV`, `inV`, `bothV`, `otherV` | ✅ | `otherV()` also works after a random edge pick (`bothE().sample(1).otherV()`). Not after a weighted pick (`sample(1).by('weight')`). |
 | `inject(…)` | ✅ | |
 | `to(Direction, …)`, `toE(Direction, …)` | ❌ | |
 
@@ -76,7 +76,7 @@ All 2,395 corpus traversals parse.
 `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `within`, `without`, `between`, `inside`, `outside`.
 
 **Text predicates (`TextP`)** — case-sensitive. A literal of 3 or more characters uses the trigram
-full-text index.
+full-text index when the filter comes right after `g.V()`/`g.E()`. Elsewhere it scans.
 
 | Predicate | | Notes |
 |---|:--:|---|
@@ -139,8 +139,12 @@ A child traversal (the `__.…` argument) can use every supported step, at any d
 
 | Form | | Notes |
 |---|:--:|---|
-| `repeat(…).times(n)` | ✅ | |
-| `repeat(…).until(…)`, `.emit()`, `.emit(…)` | ✅ | All modulator positions. |
+| `repeat(…).times(n)` | ✅ | The body may hold `as()`, `select()`, `sack()` and value steps. |
+| `repeat(local(bothE().sample(1).otherV())).times(n)` (random walk) | ✅ | `order().by(shuffle).limit(1)` works the same way. |
+| `repeat(…).until(…)`, `.emit()`, `.emit(…)` | ✅ | All modulator positions. A condition on the element's own properties or labels works (`until(group().by(label)…)`). |
+| `until(…)` that counts or scans neighbours on every loop (`until(project('a').by(out().count())…)`) | 🚫 | Slow at a high-degree vertex. Use `until(out().count().is(0))`. |
+| `emit(…)` with a condition like `emit(order().by(k).limit(1)…)` | ❌ | Known gap. |
+| `until(…)` together with `times(n)` | 🚫 | Not valid Gremlin. Use `until(or(loops().is(n), …))`. |
 | `repeat(…)` with no modulator | ✅ | |
 | `repeat(…).until(…)` with `dedup()` or another barrier in the body | 🚫 | A recursive SQL query cannot hold it. Works with `times(n)`. |
 | `repeat(…).until(…)` with a side effect (`aggregate`, `groupCount('k')`) in the body | ❌ | Works with `times(n)`. |
@@ -356,6 +360,8 @@ text, never on the size or content of the graph.
 
 - `repeat(…).until(…)` or `repeat(…).emit(…)` with a side effect (`aggregate`, `groupCount('k')`)
   in the body. With `times(n)` it works.
+- `until(…)` that counts or scans neighbours on every loop. Use `until(out().count().is(0))`.
+- `emit(…)` whose condition sorts and slices (`emit(order().by(k).limit(1)…)`).
 
 ### Paths and labels
 

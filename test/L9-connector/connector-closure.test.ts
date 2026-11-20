@@ -3,7 +3,7 @@
 // The same sweep as L5's host-closure ratchet (`test/L5-properties/host-closure.test.ts`; same engine,
 // `host-closure.ts`; same seed and size), held PER QUERY rather than per rate. The connector is the one mechanism
 // for nesting (root CLAUDE.md decision 6): the ladder of correlated routes and the `correlatedChild` switch that
-// ordered it against the connector are deleted (`docs/2026-11-16-ladder-retirement-plan.md` R7), so what this
+// ordered it against the connector are deleted (`docs/archive/2026-11-16-ladder-retirement-plan.md` R7), so what this
 // sweep reads is what the shipping configuration answers — the connector, and a host's own tail where the
 // connector's row does not claim the site (`scopedHost`, `src/compiler/rel/lower/scoped.ts`).
 //

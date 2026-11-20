@@ -4,7 +4,7 @@
 // so an `otherV()` after it reads the child path's previous object — the vertex the body's edge hop entered from
 // (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/EdgeOtherVertexStep.java:44-55)
 // — and the body's tail edge hop must mint it. The deleted ladder route did this through `childRows`; R7
-// (docs/2026-11-16-ladder-retirement-plan.md) moved it onto the connector, at any depth. The L3 witness is
+// (docs/archive/2026-11-16-ladder-retirement-plan.md) moved it onto the connector, at any depth. The L3 witness is
 // `g_VX4X_localXbothE_limitX2XX_otherV_name`.
 import { describe, expect, test } from 'bun:test';
 import { bagOf, bare, run, seededStore } from '../support/harness.ts';

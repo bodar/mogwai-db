@@ -1,4 +1,4 @@
-// R3 (docs/2026-11-16-ladder-retirement-plan.md): an existence check asks only its body's EXISTENCE PREFIX — the
+// R3 (docs/archive/2026-11-16-ladder-retirement-plan.md): an existence check asks only its body's EXISTENCE PREFIX — the
 // body up to its last step that can drop a row (`existencePrefix`, src/compiler/ir/productivity.ts) — through ONE
 // authority with two consumers: the `trimExistenceSuffix` Pass (a TRUE existence position is rewritten) and
 // `childPredicate` (a `coalesce` arm's emptiness, whose value is still used). And the alias compare

@@ -54,7 +54,7 @@ import { pastBudget } from '../../../sql/kernel/budget.ts';
 // `../build.ts`), the correlated reducers (correlatedReduce/reductionTail) and their rooting helpers
 // (rootedRead/hostSelf/rerootedHost). The scoped-relation connector's rows read it through
 // `childSeam`/`reductionHost` (the ladder's per-traverser route that once chose between its forms is deleted,
-// `docs/2026-11-16-ladder-retirement-plan.md` R7). The densest slice of the fold; it calls the fold core back.
+// `docs/archive/2026-11-16-ladder-retirement-plan.md` R7). The densest slice of the fold; it calls the fold core back.
 
 /**
  * THE CHILD SEAM, IMPLEMENTED — `child.ts` declares the three answers, this builds them (§6·6).

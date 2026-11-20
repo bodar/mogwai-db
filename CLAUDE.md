@@ -58,6 +58,10 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   algebra (`Step[] → RelIR → SQL`): one spine, the legacy compiler deleted, the node set closed. Read it
   for §1–§9's LAW and measured facts (the platform envelope, the node set, the disciplines) and §12's
   traps; its open worklist moved to `docs/outstanding-work.md`.
+- `docs/archive/2026-11-16-ladder-retirement-plan.md` — ✅ **LANDED AND ARCHIVED (2026-11-20).** The old
+  correlated-child ladder is deleted; the scoped-relation connector (locked decision 6) is the one child lowering.
+  Read it for the measured route-by-route replacement and its scope rule (performance enters a plan only as a
+  regression past 2× against the commit before); residue is in `docs/outstanding-work.md`.
 - `docs/property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the bright line in `src/compiler/CLAUDE.md` — the
   boundary is the anchor rule, not "shape belongs downstream". The shape vocabularies themselves landed

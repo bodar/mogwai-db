@@ -45,7 +45,7 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  * of out-degree 20, `g.V().where(out().out().where(in().has('age',gt(20)))).count()` went 10.6 ms → 505 ms at 8k
  * vertices with the rewrite, because every host passes on its first two-hop row. Without statistics
  * (`docs/archive/2026-08-01-relir-build-plan.md` §1 P4) neither form wins there, so the existence probe keeps its
- * short-circuit (`docs/2026-11-16-ladder-retirement-plan.md` T3(b) carries the measured trade).
+ * short-circuit (`docs/archive/2026-11-16-ladder-retirement-plan.md` T3(b) carries the measured trade).
  *
  * ## When — and only where there is something to share
  *
@@ -58,7 +58,7 @@ import { deepColsRead, exprHasSubquery, forEachRel, freeRelIds, isSelfContained,
  *   neighbourhood back per host reaching it (measured 2.4× → 16.5× per 8× on `limit(100000)`). A nested host is
  *   asked across every enclosing host, so only the outermost bound counts. A selective but unbounded host
  *   (`hasLabel('software').local(…)`) is still rewritten — no static fact tells it
- *   from a hub's hosts (statistics residue, R6-1 in `docs/2026-11-16-ladder-retirement-plan.md`); it stays linear.
+ *   from a hub's hosts (statistics residue, R6-1 in `docs/archive/2026-11-16-ladder-retirement-plan.md`); it stays linear.
  *
  * - The host's rows are SELF-CONTAINED (`isSelfContained`): at the outermost host its input reads no outer row and
  *   no walk's self-reference (so never inside a recursive term); a host nested inside a body is reached through

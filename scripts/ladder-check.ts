@@ -23,7 +23,7 @@
  *     anything. Body lowering legitimately adds a few declines too (a body is fixed IN the body's lowering
  *     — a new step form often refuses its own sub-cases), so the counted files may trade sites with each
  *     other freely as long as their whole does not grow. The ladder deletion (Phase 3 (d), then R7 of
- *     `docs/2026-11-16-ladder-retirement-plan.md`) is what paid for that headroom.
+ *     `docs/archive/2026-11-16-ladder-retirement-plan.md`) is what paid for that headroom.
  *   • There is no longer a per-file ratchet: it held the LADDER files (the correlated-route homes, last of all
  *     `lower/per-traverser.ts`) while the ladder was being deleted, so a new rung could not hide behind the
  *     stream of deletions. R7 deleted the last of them and the `correlatedChild` switch with it; a new

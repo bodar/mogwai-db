@@ -63,7 +63,7 @@ import { prune } from '../../../rel/passes/prune.ts';
 //      rather than a traverser (`pooledGroup`).
 //
 // THIS IS THE ONE MECHANISM FOR NESTING. The ladder of specialised correlated routes it replaced, and the
-// `correlatedChild` switch that ordered the two, are deleted (`docs/2026-11-16-ladder-retirement-plan.md` R7); where
+// `correlatedChild` switch that ordered the two, are deleted (`docs/archive/2026-11-16-ladder-retirement-plan.md` R7); where
 // a row does not claim its site, the host's OWN lowering of the step is the fallback (`scopedHost`).
 
 /** The channels a child body does NOT inherit from its host row. A child is handed ONE traverser at bulk 1
@@ -2960,7 +2960,7 @@ const hostTailed = (step: IRStep, framing: RelFraming, ctx: ChainCtx): boolean =
  * The dispatch at a connector site: the connector, then — where the row does not claim the site — the host's own
  * tail lowering of the step (`hostTail`), which reads its `by()`/argument bodies through the child seam.
  * `undefined` where `steps[at]` is not a connector site. There is no ladder: the per-traverser route the old
- * `correlatedChild` switch ordered against the connector is deleted (`docs/2026-11-16-ladder-retirement-plan.md` R7).
+ * `correlatedChild` switch ordered against the connector is deleted (`docs/archive/2026-11-16-ladder-retirement-plan.md` R7).
  */
 export function scopedHost(
   rel: Rel, framing: RelFraming, steps: readonly IRStep[], at: number, bulked: boolean,

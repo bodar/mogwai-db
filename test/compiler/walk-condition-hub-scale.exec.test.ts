@@ -202,7 +202,7 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
   }
 
   // A SELECTIVE but unbounded host (one label of many) is still rewritten: no static fact tells it from a hub's
-  // hosts without statistics (the R6-1 residue in `docs/2026-11-16-ladder-retirement-plan.md`). Only linear.
+  // hosts without statistics (the R6-1 residue in `docs/archive/2026-11-16-ladder-retirement-plan.md`). Only linear.
   test("magic: a selective host stays linear — g.V().hasLabel('software').local(__.in().where(out().has('age',gt(30))).count()).sum()", () => {
     const q = "g.V().hasLabel('software').local(__.in().where(out().has('age',gt(30))).count()).sum()";
     expectLinear(timed(() => runWith(small, q)), timed(() => runWith(large, q)));

@@ -1,17 +1,12 @@
 # Retiring the correlated-child ladder
 
-_Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4a1e42a8), S1's follow-ups
-(666ebf3e), 6b (157d7ad0), 6a (e4c03ba8), the R4.6 witness (c8c7d7f4), 6c (1d1f3fc8) and R7 (82da81ae): the
-`correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
-R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; G1 audited every performance change and removed
-nothing (each earns its keep). **Round 14's review reopened the plan:** R7a lost answers (a `local()` with a label,
-sack or value body inside a bounded `repeat()`); U4 (b84e2cf1) then R7b (35feb250) restored them. **Round 15** landed U4,
-R7b and RC's `until` and `times+until` bullets (bf776b35, 115e58ee); RC(emit) is PARKED behind 8d0; review found R7b
-regressed top-level re-sourcing `local()`s past 2× (8e, do first). Round 12 landed item
-10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
-Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
-round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
-`11378285`, rounds 10–13 at `326456e9`. Nothing below depends on it._
+_Status: ✅ **LANDED AND ARCHIVED (2026-11-20).** The ladder is deleted (R7, 82da81ae): the scoped-relation connector
+is the one child lowering. Rounds 10–15 also landed F1/F2, R4.2, S1/S2 (`e_pair`, `e_label`, the TextP trigram probe,
+the `sql-plan` scan gate), 6a–6d, R7a/R7b, U4, G1 (every performance change earns its keep) and the repeat-condition
+fixes. Owner calls at close: R7c ACCEPTED (a few ms at 8k, linear) → `outstanding-work.md` `local-resource-arm-cost`;
+RC0 and RC(emit) MOVED → `walk-state-collapse` and `emit-any-head` (branch `wf/rc-emit-any-head-1-0`). The full
+record of every round is in git history (rounds 1–7 at `4100715c`, 8–9 at `11378285`, 10–13 at `326456e9`)._
+
 
 **The principle (owner, 2026-11-16): smart, considered replacement — not a forced migration.** A route is replaced
 where the connector genuinely does the job as well or better, and left where it does not. Code genuinely shared by
@@ -217,7 +212,7 @@ every depth gap now goes to §3._
    answer correctly where trunk declined. If U4 turns out not to be small, raise an owner question (accept the loss
    for now, or keep the splice out of bounded repeat bodies) rather than shoehorn.
 
-8d0. **RC0 — the unbounded walk stops multiplying traversers that reach the same state. PREREQUISITE of RC(emit)
+8d0. ➡️ **MOVED to outstanding-work `walk-state-collapse` (owner, 2026-11-20).** RC0 — the unbounded walk stops multiplying traversers that reach the same state. PREREQUISITE of RC(emit)
    (8d, emit bullet); do before it.** Found by round 15's RC(emit) build: letting an emit condition with no correlated
    form lower per distinct state (`semiJoinPassing`, `src/rel/decorrelate.ts`) is correct on every witness, but it
    turns L3 `g_VX3X_repeatXbothX_createdXX_untilXloops_is_40XXemit_repeatXin_knowsXX_emit_loopsXisX1Xdedup_values`
@@ -254,7 +249,7 @@ every depth gap now goes to §3._
      spelling's pre-existing hub cost is outstanding-work §2 `until-map-count`).
    - `g.V().repeat(__.out()).emit(__.order().by(name).limit(1).has(name,marko)).count()` — an emit condition,
      which the deferral says takes any head.
-     ⏸ **PARKED (round 15) — after 8d0.** Built on `wf/rc-emit-any-head-1-0` (fbe1855a): `perState` is the emit
+     ➡️ **MOVED to outstanding-work `emit-any-head` (owner, 2026-11-20).** ⏸ PARKED (round 15) — after 8d0. Built on `wf/rc-emit-any-head-1-0` (fbe1855a): `perState` is the emit
      condition's fallback whenever the correlated form is null (`repeatWalk`, `src/compiler/rel/walk.ts`);
      `semiJoinPerDistinct` split so the caller builds the passing set (`semiJoinPassing`); a per-state predicate
      that does not lower runs as a `filter()` over the distinct-state stream through the connector; a drawing or
@@ -275,7 +270,7 @@ every depth gap now goes to §3._
    deliberate refusals (a per-frontier-row condition that is quadratic at a hub, a draw) and make their messages say
    so. Pin the answers in a test; correct the REPEAT deferral text to what is true after the fix.
 
-8e. **R7c — R7b's re-route of top-level re-sourcing `local()`s is past the 2× bar (scope rule 1, 35feb250). DO
+8e. ✅ **ACCEPTED (owner, 2026-11-20): small absolute cost, linear; `outstanding-work.md` `local-resource-arm-cost`.** R7c — R7b's re-route of top-level re-sourcing `local()`s is past the 2× bar (scope rule 1, 35feb250). DO
    FIRST.** R7b made `spliceableLocalBody`'s V()/E() check deep for EVERY `local()`, not only one in a repeat body,
    so a top-level local re-sourcing inside an arm or child traversal, spliced before, now goes through the
    connector's `reSourcedBody`: same answers (18 shapes compared on modern), ≈30–45% more SQL, a new per-row
@@ -452,7 +447,6 @@ every depth gap now goes to §3._
 - L9: the connector-closure ratchet may not fall; every host is a `CONNECTORS` row or a classified deferral
   (`test/L9-connector/deferred-hosts.ts`, `host-totality.test.ts`).
 
-## Owner questions (open)
+## Owner questions
 
-None. Rounds 13–15 raised no needs-human question. R7c (8e) may raise one: accept R7b's constant-factor cost on
-top-level re-sourcing locals if neither connector fix is small.
+None open. Closed 2026-11-20.
