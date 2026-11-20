@@ -73,24 +73,112 @@ server can wrap the OpenAPI description.
 
 ## How it works
 
-Most Gremlin engines run a query one step and one traverser at a time. mogwai-db does not. It
-compiles the whole traversal to SQL, and SQLite runs it in the same process as the data. A read is
-one SQL statement. Movement between vertices uses covering indexes. SQLite does the planning and
-the execution; mogwai-db does the compiling.
+Most Gremlin engines are interpreters. They move traversers through the steps one at a time.
+mogwai-db is a compiler. It turns the whole traversal into SQL, and SQLite runs it in the same
+process as the data. SQLite does the planning, the index lookups and the execution. There is no
+row-at-a-time interpreter.
+
+### The engine
+
+```mermaid
+flowchart TB
+  subgraph FE["1 · Front end"]
+    direction LR
+    G["Gremlin text<br/>+ parameters"] --> P["Parse<br/><i>generated from Gremlin.g4</i>"] --> C["Step chain"] --> R["Rewrite rules<br/><i>TinkerPop strategies</i>"]
+  end
+  subgraph ALG["2 · Relational algebra"]
+    L["Lower each step to<br/>relational operators<br/><i>scan · filter · join · aggregate<br/>window · recursive union</i>"]
+    L --> Q{"A child<br/>traversal?"}
+    Q -- "an index can answer it" --> COR["Keep it as a<br/>correlated subquery<br/><i>EXISTS · first-row lookup</i>"]
+    Q -- "otherwise" --> DEC["Decorrelate it<br/>into a join keyed<br/>by the parent row"]
+    COR -- "lower its body<br/>the same way" --> L
+    DEC -- "lower its body<br/>the same way" --> L
+  end
+  subgraph OUT["3 · SQL"]
+    E["One SQL statement<br/><i>nested SELECTs · CTEs · WITH RECURSIVE</i>"]
+  end
+  R --> L
+  L --> E --> DB[("SQLite<br/><i>in-process</i>")]
+```
+
+1. **Front end.** A parser generated from TinkerPop's grammar reads the query into a chain of
+   steps. Rewrite rules then apply TinkerPop's strategies (for example `PartitionStrategy`) and
+   simplify the chain.
+2. **Relational algebra.** Each step becomes relational operators. A movement step is a join on the
+   edge table. `repeat()` is a recursive union. `group()` is an aggregate. `order().limit()` for each parent row
+   is a window.
+3. **Nesting at any depth.** Many steps take a child traversal: `where`, `map`, `local`,
+   `project().by()`, `union`, `choose`, `coalesce` and more. The engine lowers the child's body with
+   the same code that lowers the main traversal, so every supported step also works inside any
+   child, at any depth. It then connects the child to its parent row in one of two ways:
+   - If an index can answer the child for each parent row, it stays a correlated subquery
+     (`EXISTS`, or a lookup of the first row). SQLite has no hash join, so an index lookup is the
+     fast form.
+   - Otherwise the engine **decorrelates** it. The child becomes an ordinary join, grouped by the
+     parent row. This is the general unnesting method of Neumann and Kemper (*Unnesting Arbitrary
+     Queries*, 2015), which Apache Calcite also uses. It is one rule per operator, not one special
+     case per query shape.
+4. **SQL.** The algebra prints as one SQL statement for a read. A write runs as a short, fixed
+   sequence of statements. The number of statements depends on the query, never on the number of
+   rows.
+
+### An example
+
+`g.V().has('name','marko').repeat(out()).until(outE().count().is(0)).values('name')` returns the
+names at the end of every path from `marko`. Each step maps to one part of a single SQL statement:
 
 ```mermaid
 flowchart LR
-  G["Gremlin string<br/>+ parameters"] --> P["parse<br/><i>generated ANTLR</i>"]
-  P --> IR["step chain"]
-  IR --> N["rewrite<br/><i>strategies</i>"]
-  N --> L["lower<br/><i>relational algebra</i>"]
-  L --> Q["SQL<br/><i>CTE chain</i>"]
-  Q --> DB[("SQLite<br/><i>in-process</i>")]
+  subgraph Gremlin
+    direction TB
+    s1["V().has('name','marko')"]
+    s2["repeat(out())"]
+    s3["until(outE().count().is(0))"]
+    s4["values('name')"]
+  end
+  subgraph SQL["One SQL statement"]
+    direction TB
+    q1["seed: index lookup<br/>on vertex_properties"]
+    q2["WITH RECURSIVE …<br/>seed UNION ALL join on edges"]
+    q3["per-row EXISTS on edges,<br/>a column of the recursion"]
+    q4["join vertex_properties"]
+  end
+  s1 --> q1
+  s2 --> q2
+  s3 --> q3
+  s4 --> q4
 ```
 
-Every step family compiles through this one path: movement, filters, projections, branches,
-recursion, paths, aggregation, side effects, collections, strings and dates. There is no
-row-at-a-time interpreter.
+The `until()` condition is a child traversal. It runs once per row inside the recursion, as an index
+lookup.
+
+### When SQL is not enough: JavaScript and other graphs
+
+Some steps have no SQL form, for example `split()`, `reverse()` or a JavaScript `regex`. Some work
+happens outside the database: a `call()` service, `io()` import and export, or a query on another
+graph. For these, the engine cuts the plan into **segments** at a **barrier**:
+
+```mermaid
+flowchart LR
+  A["SQL segment<br/><i>steps before the barrier</i>"] -- "values" --> B["JavaScript barrier<br/><i>split · reverse · regex<br/>services · io()</i>"]
+  B -- "one JSON value<br/>json_each(?)" --> C["SQL segment<br/><i>steps after the barrier</i>"]
+  A -. "part of the traversal" .-> F[("Another graph<br/><i>federate</i>")]
+  F -. "results as one JSON value" .-> C
+```
+
+- The SQL segment before the barrier reads all the values in one batch.
+- JavaScript transforms the whole batch at once, not one row at a time.
+- The result goes back to SQLite as **one** JSON value, which `json_each` opens as a table. The next
+  SQL segment joins it like any other table, so the rest of the traversal stays compiled.
+- **Federation** sends part of a traversal to another graph. The other graph runs it as its own
+  compiled query. The results come back as one JSON value in the same way.
+
+This is also the extension point. A new service or a new value transform plugs in as a barrier,
+and the steps around it stay SQL.
+
+Each graph-algorithm service (PageRank, connected components, and the others) runs as set-based SQL
+too. A query that the engine cannot compile fails with a clear `UnsupportedTraversal` error. It never
+falls back to a slow path or gives a partial answer.
 
 ## When to use it
 
