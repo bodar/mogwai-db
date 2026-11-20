@@ -213,6 +213,11 @@ every depth gap now goes to §3._
      every order) fails with "VerificationException: The repeat()-traversal was not defined" — a misleading message.
      Read `vendor/tinkerpop/gremlin-core/…/RepeatStep.java` and `GraphTraversal.java` (`times`/`until`) for what
      the combination MEANS; answer it if the reference defines it, else decline in the user's terms.
+     ✅ **LANDED (115e58ee).** Invalid per the reference (`times(n)` fills the `until` slot, so the second
+     modulator opens a bodiless `RepeatStep`); `verifyRepeatDefined` (`src/compiler/ir/strategies.ts`) keeps the
+     reference sentence and appends the collision in the user's terms plus the one-modulator form
+     `until(or(loops().is(n), <condition>))` (doubled `emit`/`until`/`times` likewise); pinned in
+     `test/compiler/constant-steps.exec.test.ts`. Remains for this bullet: nothing.
    Fix each in the condition's lowering or the decorrelator (one rule, every head), never a per-shape branch. Keep the
    deliberate refusals (a per-frontier-row condition that is quadratic at a hub, a draw) and make their messages say
    so. Pin the answers in a test; correct the REPEAT deferral text to what is true after the fix.
