@@ -10,7 +10,8 @@ its status.
   can differ (for example number formatting). [limitations.md](limitations.md) lists these
   differences too.
 
-**Conformance:** <!-- L3:passing -->2,058<!-- /L3:passing -->/2,260 TinkerPop scenarios pass.
+**Conformance:** <!-- L3:passing -->2,058<!-- /L3:passing --> of <!-- L3:ceiling -->2,246<!-- /L3:ceiling --> reachable TinkerPop scenarios pass
+(<!-- L3:in-scope -->2,270<!-- /L3:in-scope --> are in scope; the rest of the reachable gap is listed below as ❌ and 🟡).
 All 2,395 corpus traversals parse.
 
 | Mark | Meaning |

@@ -32,7 +32,7 @@ import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
 import { L3_TAGS, isOutOfScope } from './tags.ts';
-import { auditLedger, declinesThatAnswered, reasonOf } from './expected-outcomes.ts';
+import { auditLedger, declinesThatAnswered, reasonOf, EXPECTED_OUTCOMES, REASONS, type ReasonKey } from './expected-outcomes.ts';
 import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
@@ -56,24 +56,33 @@ const STATE = new URL('./l3-state.json', import.meta.url).pathname;
 // with the ratchet so the prose can never drift from l3-state.json.
 const SYNC_FILES = [join(ROOT, 'README.md'), join(ROOT, 'docs/feature-support-matrix.md')];
 
-// Rewrite the count between the <!-- L3:passing --> … <!-- /L3:passing -->
-// markers in each synced file. Markdown has no native placeholder, so we use the
-// universal HTML-comment-anchor convention and rewrite only what's between the
-// markers (idempotent, re-runnable). Grouped with commas by hand — no ICU/locale
-// dependency. Returns the basenames actually changed (for the commit hint).
-function syncCountFiles(passing: number): string[] {
-  const grouped = String(passing).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  const marker = /(<!-- L3:passing -->).*?(<!-- \/L3:passing -->)/s;
+// Rewrite each count between its <!-- L3:<name> --> … <!-- /L3:<name> --> markers in each synced
+// file. Markdown has no native placeholder, so we use the universal HTML-comment-anchor convention and
+// rewrite only what's between the markers (idempotent, re-runnable). Grouped with commas by hand — no
+// ICU/locale dependency. A file without a given marker is left alone. Returns the basenames actually
+// changed (for the commit hint).
+function syncCountFiles(counts: Readonly<Record<string, number>>): string[] {
   const changed: string[] = [];
   for (const file of SYNC_FILES) {
     const text = readFileSync(file, 'utf8');
-    const next = text.replace(marker, `$1${grouped}$2`);
+    let next = text;
+    for (const [name, n] of Object.entries(counts)) {
+      const grouped = String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      next = next.replace(new RegExp(`(<!-- L3:${name} -->).*?(<!-- /L3:${name} -->)`, 's'), `$1${grouped}$2`);
+    }
     if (next === text) continue;
     writeFileSync(file, next);
     changed.push(file.slice(ROOT.length).replace(/^\/+/, ''));
   }
   return changed;
 }
+
+// THE CEILING: the in-scope scenarios we expect to pass one day. A ledgered `wall` (a capability we
+// declare we do not have) or `divergence` (a deliberate difference, limitations.md §4) will never pass;
+// a `decline` or `defect` is work we mean to do, so it stays under the ceiling.
+const neverPasses = (): number => (Object.entries(EXPECTED_OUTCOMES) as [ReasonKey, readonly string[]][])
+  .filter(([key]) => REASONS[key].kind === 'wall' || REASONS[key].kind === 'divergence')
+  .reduce((n, [, names]) => n + names.length, 0);
 
 // Provisioning (git clone + workspace install) and the cucumber run can each
 // take minutes; the default 5s hook/test timeout would abort them.
@@ -214,8 +223,8 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
       writeState(STATE, rows);
       console.log(`L3 stored count repaired ${stored} → ${passing} (a merge had left it behind).`);
     }
-    const synced = syncCountFiles(passing);
-    if (synced.length) console.log(`L3 prose count synced to ${passing} — commit ${synced.join(' + ')}.`);
+    const synced = syncCountFiles({ passing, ceiling: rows.length - neverPasses(), 'in-scope': rows.length });
+    if (synced.length) console.log(`L3 prose counts synced (${passing} passing) — commit ${synced.join(' + ')}.`);
   }
 
   // ── THE EXPECTED-OUTCOME LEDGER — every failure named, every decline proven ──────────────────────
