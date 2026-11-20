@@ -5,7 +5,7 @@ _Status: IN PROGRESS — the ladder is GONE. Round 13 (2026-11-20) landed 10a (4
 `correlatedChild` switch and `lower/per-traverser.ts` are deleted and the connector is the one child lowering.
 R7a (46e0a19b) and 6d ((b) 64bae352, (a) d5ce03e2) landed; G1 audited every performance change and removed
 nothing (each earns its keep). **Round 14's review reopened the plan:** R7a lost answers (a `local()` with a label,
-sack or value body inside a bounded `repeat()`), so U4 (the prerequisite) and then R7b are open. Round 12 landed item
+sack or value body inside a bounded `repeat()`); U4 (the prerequisite) landed (b84e2cf1), so R7b is open. Round 12 landed item
 10's three decided builds; rounds 10–11 landed F1, F2, R4.2, S1 and the S2 survey.
 Trimmed hard 2026-11-19 after round 9 and again 2026-11-20 after round 13 (owner rule 6). The full record — every
 round, measurement, reviewer finding and proposal — is in git history: rounds 1–7 at `4100715c`, rounds 8–9 at
@@ -56,8 +56,8 @@ every depth gap now goes to §3._
   draw, `drawnPerOrigin` draws a uniform pick per scope row, a shuffle cut to one IS `sample(1)` (6b,
   `shuffleCutToSample`), and the draw carries path and sack through `splitInto` (6a).
 - Landed in full: R0–R7, R4.1–R4.6, R5.1–R5.5, R6, V0–V5 + U3, F1, F2, S1 (+ follow-ups), S2 builds (3)/(5) and the
-  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d.
-- **Open: U4, then R7b (items 8b, 8c).** R7a (46e0a19b) lost answers that trunk gave before it (scope rule 1).
+  `sql-plan.ts` scan check (+ 10a), 6a, 6b, 6c, 6d, U4 (b84e2cf1).
+- **Open: R7b (item 8c); its prerequisite U4 (8b) landed.** R7a (46e0a19b) lost answers that trunk gave before it (scope rule 1).
   Apart from that, 6d ((b) 64bae352, (a) d5ce03e2), R7a and G1 (0d10cb47, audit only) landed in full.
 - **No parked branch.** Every round-14 item landed; nothing is waiting on a resume point.
 
@@ -156,7 +156,12 @@ every depth gap now goes to §3._
    517e695a~1. If the fix is not small, this becomes an owner question (accept, as the R7 owner note allowed "a
    small regression"), not a shoehorn.
 
-8b. **U4 — the bounded unroll admits label, sack, value and select body steps. PREREQUISITE of R7b; do first.**
+8b. ✅ **U4 — LANDED (b84e2cf1). Remains: nothing.** `unrollableBodyStep` (`src/compiler/ir/strategies.ts`) admits
+   the named `PER_TRAVERSER_BODY_STEPS` family (ONE_TO_ONE maps + `values`/`properties`, `as`/`select`,
+   `sack`/`sack(op).by`), child-holding members only under the `carriesIterationState` gate; a spliced phase is pinned
+   as SQL identity against the written-out chain (`test/compiler/repeat-unroll-boundary.exec.test.ts`). L3 2059→2065
+   (Sack.feature:280, Select first|last, two RepeatUnroll otherV scenarios). R7b (8c) is unblocked. Original item:
+   **U4 — the bounded unroll admits label, sack, value and select body steps. PREREQUISITE of R7b; do first.**
    This is the one root cause behind every R7a lost answer. `tryUnroll` (`src/compiler/ir/strategies.ts`) splices
    `times(n)` only when every body step passes `unrollableBodyStep`, and `as()`, `sack()` (with its `by()`),
    `values()` and `select()` are not in that set. Before R7a a `local()` host hid them: it was admitted as a
@@ -328,7 +333,7 @@ every depth gap now goes to §3._
 
 ## Next round
 
-- **Order: U4 (item 8b) → R7b (item 8c).** U4 is R7b's prerequisite and fixes corpus declines on its own. Round 14
+- **Next: R7b (item 8c).** Its prerequisite U4 (item 8b) landed as b84e2cf1 and fixed six corpus declines on its own. Round 14
   landed 6d(b) 64bae352, 6d(a) d5ce03e2, R7a 46e0a19b and G1 0d10cb47 (audit only, no code).
 - Round 14's follow-ups outside this plan's scope were filed in `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (within the 2× bar or pre-existing): `simplepath-reinline` (R7a made
