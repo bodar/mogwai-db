@@ -14,22 +14,41 @@
  * cross-checked against `sqlite_schema.tbl_name`. An alias that resolves to no base table is a derived
  * relation (a CTE, a co-routine, `json_each`) and is not a finding.
  *
- * Only a `SCAN` of a base table is a finding — a `SEARCH` is index-served by definition. Each base SCAN is
- * classified by its POSITION in the EQP tree (`id`/`parent`), and the three classes are not alike:
+ * Each base-table loop is classified by its POSITION in the EQP tree (`id`/`parent`) — ROOT is the first
+ * loop under its parent in an uncorrelated block; NESTED is an inner loop (after a sibling loop under the
+ * same parent) or any loop under a `CORRELATED … SUBQUERY` node, which re-runs per outer row — and by how
+ * it is served. The classes are not alike:
  *
- *   ROOT — the outermost loop of an uncorrelated block: the first loop under its parent. A root `g.V()` /
- *     `g.E()` reads every element BY MEANING, so this is reported, never gated: gating it would force a
- *     decline or an index that serves nothing.
- *   NESTED — an inner loop (a base SCAN after a sibling loop under the same parent), or any base SCAN under
- *     a `CORRELATED … SUBQUERY` node, which re-runs per outer row. This is the N² signature — but not
- *     proof of it (`g.V(1).V()`'s outer loop is one row), so it is a RATCHET needing judgement: each query's
- *     nested count is held to `scripts/sql-plan-baseline.json`, and a query that GAINS one fails. A query
- *     that loses one fails too, so the baseline is re-recorded and stays tight (`--record`; say why in the
- *     commit — a corpus pin bump that adds queries re-records and says so).
+ *   ROOT (element) — a root SCAN of `nodes`/`edges`. A root `g.V()` / `g.E()` reads every element BY
+ *     MEANING, so this is reported, never gated: gating it would force a decline or an index that serves
+ *     nothing.
+ *   ROOT (non-element) — a root SCAN of ANY other base table. No query means "every property row" or
+ *     "every label row"; this is the signature of a lost index (drop `vp_key_value` and
+ *     `g.V().has('name','marko')` scans `vertex_properties`). Gate at zero.
+ *   NESTED — a nested base SCAN. This is the N² signature — but not proof of it (`g.V(1).V()`'s outer loop
+ *     is one row), so it is a RATCHET needing judgement: each query's nested count is held to
+ *     `scripts/sql-plan-baseline.json`, and a query that GAINS one fails. A query that loses one fails too,
+ *     so the baseline is re-recorded and stays tight (`--record`; say why in the commit — a corpus pin bump
+ *     that adds queries re-records and says so). Of its 27 entries, 26 are a `V()`/`E()` mid-traversal
+ *     (`V().out().V()`, `V().E(null)`, `inject(1).as(…).V()`) or inside a correlated set-operation argument
+ *     (`fold().difference(__.V()…fold())`); the 27th is neither — `groupCount('a')…where(__.select('a')…)`
+ *     re-derives the side effect per traverser, a known super-linear defect (`docs/outstanding-work.md`).
  *   UNCONSTRAINED VIRTUAL — a scan of the `property_fts` virtual table whose idxStr carries NO constraint
- *     (a bare `INDEX 0:`): the whole full-text index read per query. The one STRUCTURAL class (nothing a
- *     query means needs it — the probe always has a pattern to hand FTS5), so it is a hard gate at zero.
- *     A `0:=` rowid seek or a `0:L…`/`0:M…` constraint is index-served and not flagged.
+ *     (a bare `INDEX 0:`): the whole full-text index read per query. Nothing a query means needs it — the
+ *     probe always has a pattern to hand FTS5 — so it is a hard gate at zero. A `0:=` rowid seek or a
+ *     `0:L…`/`0:M…` constraint is index-served and not flagged.
+ *
+ * A `SEARCH` is index-served — except in two disguises, both gated at zero:
+ *
+ *   AUTOMATIC INDEX — a base-table `SEARCH … USING AUTOMATIC [PARTIAL] [COVERING] INDEX`: SQLite builds it
+ *     by scanning the whole table, on every run. (On a derived relation — a CTE — it is the planner's
+ *     ordinary hash-join substitute, and not a finding.)
+ *   WEAK PREFIX — a NESTED `SEARCH` whose constrained columns (parsed from the EQP line's `(col=? AND …)`)
+ *     are ALL vocabulary columns (`VOCABULARY_COLUMNS`: `label`, `key`): a slice proportional to the graph,
+ *     re-read per outer row (drop `e_out`/`e_pair` and `g.V(1).out('knows')` probes `e_label (label=?)`).
+ *     Each index's columns and uniqueness come from SQLite's own `pragma_index_list`/`pragma_index_info`,
+ *     so no index name is listed here; a unique index fully constrained is a point lookup and not flagged.
+ *     A ROOT vocabulary probe — `g.E().hasLabel('x')` seeking `e_label` once — is the query's meaning.
  *
  * TEMP B-TREE (a sort/group without an index) is reported, never gated: a GROUP BY over a computed value
  * has no index to use.
@@ -38,7 +57,7 @@
  * plan and is skipped. `call()` reads compile against the standard service registry, so `tinker.search`
  * — the second user of `property_fts` — is planned and covered by the hard gate.
  *
- *   bun scripts/sql-plan.ts            # summary; exit 1 on an unconstrained virtual scan or a nested-baseline move
+ *   bun scripts/sql-plan.ts            # summary; exit 1 on any gated class or a nested-baseline move
  *   bun scripts/sql-plan.ts --verbose  # also list every offender per class + the temp-b-tree offenders
  *   bun scripts/sql-plan.ts --record   # bank the NESTED baseline (the hard gate still applies)
  */
@@ -52,22 +71,41 @@ import { MODERN_SEED } from '../test/fixtures/seed-modern.ts';
 /** One EXPLAIN QUERY PLAN row. */
 export interface PlanRow { readonly id: number; readonly parent: number; readonly detail: string }
 
-/** What the classifier needs from the schema: which names are base tables (and which of those are
- *  virtual), and which table each named index belongs to. */
-export interface SchemaFacts { readonly tables: ReadonlySet<string>; readonly virtual: ReadonlySet<string>; readonly indexTable: ReadonlyMap<string, string> }
+/** One index, read from SQLite's own metadata (`pragma_index_list` / `pragma_index_info`), never restated. */
+export interface IndexFacts { readonly table: string; readonly columns: readonly string[]; readonly unique: boolean }
 
-export type ScanClass = 'root' | 'nested' | 'unconstrained-virtual';
-export interface BaseScan { readonly cls: ScanClass; readonly table: string; readonly alias: string; readonly detail: string }
+/** What the classifier needs from the schema: which names are base tables (and which of those are
+ *  virtual), and each named index's table, columns and uniqueness. */
+export interface SchemaFacts { readonly tables: ReadonlySet<string>; readonly virtual: ReadonlySet<string>; readonly indexes: ReadonlyMap<string, IndexFacts> }
+
+/** The VOCABULARY columns: an interned label id, a property key name. Each has a handful of distinct values
+ *  over a whole graph, so an index probe constrained by these ALONE reads a slice proportional to the
+ *  graph, not to the outer row — and at a nested position, once per outer row. The one judgement this gate
+ *  makes, and it is a SCHEMA fact (src/storage.ts), not a per-query or per-index list: a new index whose
+ *  leading column is one of these is covered without an edit. */
+export const VOCABULARY_COLUMNS: ReadonlySet<string> = new Set(['label', 'key']);
+
+/** The tables a root loop may read whole BY MEANING: a root `g.V()` / `g.E()` is every element. */
+export const ELEMENT_TABLES: ReadonlySet<string> = new Set(['nodes', 'edges']);
+
+export type LoopClass = 'root' | 'root-non-element' | 'nested' | 'unconstrained-virtual' | 'automatic-index' | 'weak-prefix';
+/** A loop worth naming: a base-table SCAN, or a SEARCH that is a scan in disguise. */
+export interface LoopFinding { readonly cls: LoopClass; readonly table: string; readonly alias: string; readonly detail: string }
 
 export function schemaFacts(store: GraphStore): SchemaFacts {
-  const rows = store.query(`SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE type IN ('table', 'index')`, []) as { type: string; name: string; tbl_name: string; sql: string | null }[];
-  const tables = new Set<string>(), virtual = new Set<string>(), indexTable = new Map<string, string>();
+  const rows = store.query(`SELECT name, sql FROM sqlite_schema WHERE type = 'table'`, []) as { name: string; sql: string | null }[];
+  const tables = new Set<string>(), virtual = new Set<string>();
   for (const r of rows) {
-    if (r.type === 'index') { indexTable.set(r.name, r.tbl_name); continue; }
     tables.add(r.name);
     if (/^CREATE VIRTUAL TABLE/i.test(r.sql ?? '')) virtual.add(r.name);
   }
-  return { tables, virtual, indexTable };
+  const indexRows = store.query(
+    `SELECT m.name AS tbl, il.name AS idx, il."unique" AS uniq,
+            (SELECT json_group_array(ii.name) FROM (SELECT name FROM pragma_index_info(il.name) ORDER BY seqno) ii) AS cols
+       FROM sqlite_schema m, pragma_index_list(m.name) il WHERE m.type = 'table'`, []) as { tbl: string; idx: string; uniq: number; cols: string }[];
+  const indexes = new Map<string, IndexFacts>();
+  for (const r of indexRows) indexes.set(r.idx, { table: r.tbl, columns: JSON.parse(r.cols) as string[], unique: r.uniq === 1 });
+  return { tables, virtual, indexes };
 }
 
 /** Blank every string literal (keeping its length irrelevant) so a literal spelling `from nodes x` is not
@@ -94,30 +132,56 @@ export function aliasTables(sql: string, facts: SchemaFacts): Map<string, string
 
 const LOOP = /^(SCAN|SEARCH) (\S+)/;
 
-/** Classify every base-table SCAN in one plan by its EQP-tree position. */
-export function classify(plan: readonly PlanRow[], sql: string, facts: SchemaFacts): BaseScan[] {
+/** The columns an index probe constrains, from the EQP line's trailing `(col=? AND col>? …)`. */
+export function constrainedColumns(detail: string): string[] {
+  const list = detail.match(/\(([^()]*)\)$/)?.[1];
+  if (list === undefined) return [];
+  return list.split(' AND ').map((term) => term.match(/^(\w+)/)?.[1]).filter((c): c is string => c !== undefined);
+}
+
+/** Classify every base-table loop in one plan by its EQP-tree position and how it is served. */
+export function classify(plan: readonly PlanRow[], sql: string, facts: SchemaFacts): LoopFinding[] {
   const aliases = aliasTables(sql, facts);
   const byId = new Map(plan.map((row) => [row.id, row]));
   const correlatedAncestor = (row: PlanRow): boolean => {
     for (let p = byId.get(row.parent); p; p = byId.get(p.parent)) if (/^CORRELATED /.test(p.detail)) return true;
     return false;
   };
-  const out: BaseScan[] = [];
+  // An inner loop (after a sibling loop under the same parent), or any loop under a correlated subquery,
+  // runs once per outer row.
+  const nestedAt = (row: PlanRow): boolean =>
+    plan.some((s) => s.parent === row.parent && s.id < row.id && LOOP.test(s.detail)) || correlatedAncestor(row);
+  const out: LoopFinding[] = [];
   for (const row of plan) {
     const m = row.detail.match(LOOP);
     if (!m) continue;
-    const table = aliases.get(m[2]!) ?? (facts.tables.has(m[2]!) ? m[2]! : undefined);
+    const alias = m[2]!;
+    const table = aliases.get(alias) ?? (facts.tables.has(alias) ? alias : undefined);
     const index = row.detail.match(/USING (?:COVERING )?INDEX (\S+)/)?.[1];
-    const owner = index === undefined ? undefined : facts.indexTable.get(index);
-    if (table !== undefined && owner !== undefined && owner !== table)
-      throw new Error(`sql-plan: ${m[2]} resolved to ${table} but loops over index ${index} of ${owner}`);
-    if (m[1] !== 'SCAN' || table === undefined) continue;     // a SEARCH is index-served; a derived relation is not a base read
+    const idx = index === undefined ? undefined : facts.indexes.get(index);
+    if (table !== undefined && idx !== undefined && idx.table !== table)
+      throw new Error(`sql-plan: ${alias} resolved to ${table} but loops over index ${index} of ${idx.table}`);
+    if (table === undefined) continue;                        // a derived relation (CTE, co-routine, json_each) is not a base read
+    const finding = (cls: LoopClass): void => { out.push({ cls, table, alias, detail: row.detail }); };
+    if (m[1] === 'SEARCH') {
+      // An AUTOMATIC index is built by scanning the whole table at run time, every statement: a disguised scan.
+      if (/USING AUTOMATIC (?:PARTIAL )?(?:COVERING )?INDEX/.test(row.detail)) { finding('automatic-index'); continue; }
+      if (!nestedAt(row)) continue;                           // a root probe reads its slice once (`g.E().hasLabel(x)`)
+      const cols = constrainedColumns(row.detail);
+      if (idx !== undefined) {
+        const stray = cols.filter((c) => !idx.columns.includes(c));
+        if (stray.length) throw new Error(`sql-plan: ${alias} constrains ${stray.join(', ')}, not columns of index ${index} (${idx.columns.join(', ')})`);
+        if (idx.unique && idx.columns.every((c) => cols.includes(c))) continue; // a unique point lookup reads one row
+      }
+      if (cols.length && cols.every((c) => VOCABULARY_COLUMNS.has(c))) finding('weak-prefix');
+      continue;
+    }
     if (facts.virtual.has(table)) {
-      if (/VIRTUAL TABLE INDEX \d+:$/.test(row.detail)) out.push({ cls: 'unconstrained-virtual', table, alias: m[2]!, detail: row.detail });
+      if (/VIRTUAL TABLE INDEX \d+:$/.test(row.detail)) finding('unconstrained-virtual');
       continue;                                               // a constrained virtual scan (`0:=`, `0:L4`) is index-served
     }
-    const innerLoop = plan.some((s) => s.parent === row.parent && s.id < row.id && LOOP.test(s.detail));
-    out.push({ cls: innerLoop || correlatedAncestor(row) ? 'nested' : 'root', table, alias: m[2]!, detail: row.detail });
+    if (nestedAt(row)) finding('nested');
+    else finding(ELEMENT_TABLES.has(table) ? 'root' : 'root-non-element');
   }
   return out;
 }
@@ -151,7 +215,7 @@ async function main(): Promise<void> {
   const store = seededPlanStore();
   const facts = schemaFacts(store);
   let planned = 0, withTempBtree = 0;
-  const offenders: Record<ScanClass, string[]> = { root: [], nested: [], 'unconstrained-virtual': [] };
+  const offenders: Record<LoopClass, string[]> = { root: [], 'root-non-element': [], nested: [], 'unconstrained-virtual': [], 'automatic-index': [], 'weak-prefix': [] };
   const tempOffenders: string[] = [];
   const nested: Record<string, number> = {};
 
@@ -159,9 +223,9 @@ async function main(): Promise<void> {
     const got = planOf(store, q);
     if (!got) continue;
     planned++;
-    const scans = classify(got.plan, got.sql, facts);
-    for (const cls of ['root', 'nested', 'unconstrained-virtual'] as const) {
-      const n = scans.filter((s) => s.cls === cls).length;
+    const loops = classify(got.plan, got.sql, facts);
+    for (const cls of Object.keys(offenders) as LoopClass[]) {
+      const n = loops.filter((s) => s.cls === cls).length;
       if (n) offenders[cls].push(q);
       if (cls === 'nested' && n) nested[q] = n;
     }
@@ -169,12 +233,19 @@ async function main(): Promise<void> {
   }
 
   console.log(`sql-plan: ${planned} corpus reads planned via EXPLAIN QUERY PLAN`);
-  console.log(`  root base scans (a read of every element by meaning) : ${offenders.root.length}  (reported, not gated)`);
+  console.log(`  root element scans (every vertex/edge, by meaning)   : ${offenders.root.length}  (reported, not gated)`);
+  console.log(`  root scans of any other base table                   : ${offenders['root-non-element'].length}  (gate at zero)`);
   console.log(`  nested base scans (inner loop / under CORRELATED)    : ${offenders.nested.length}  (ratcheted against sql-plan-baseline.json)`);
   console.log(`  unconstrained virtual scans (property_fts, no probe) : ${offenders['unconstrained-virtual'].length}  (gate at zero)`);
+  console.log(`  automatic indexes on a base table (a disguised scan) : ${offenders['automatic-index'].length}  (gate at zero)`);
+  console.log(`  nested probes on vocabulary columns only (label/key) : ${offenders['weak-prefix'].length}  (gate at zero)`);
   console.log(`  temp b-tree (sort/group without index)               : ${withTempBtree}  (reported, not gated)`);
   if (verbose) {
-    for (const cls of ['unconstrained-virtual', 'nested', 'root'] as const) {
+    for (const cls of GATED) {
+      console.log(`\n${cls} offenders (${offenders[cls].length}):`);
+      for (const q of offenders[cls]) console.log(`  ${q}`);
+    }
+    for (const cls of ['nested', 'root'] as const) {
       console.log(`\n${cls} offenders (${offenders[cls].length}):`);
       for (const q of offenders[cls]) console.log(`  ${q}`);
     }
@@ -183,7 +254,7 @@ async function main(): Promise<void> {
   }
 
   const failures: string[] = [];
-  for (const q of offenders['unconstrained-virtual']) failures.push(`unconstrained property_fts scan (the whole full-text index per query): ${q}`);
+  for (const cls of GATED) for (const q of offenders[cls]) failures.push(`${GATE_REASON[cls]}: ${q}`);
   const sorted = Object.fromEntries(Object.entries(nested).sort(([a], [b]) => a.localeCompare(b)));
   if (record) {
     await Bun.write(baselinePath, `${JSON.stringify(sorted, null, 2)}\n`);
@@ -203,7 +274,16 @@ async function main(): Promise<void> {
     for (const f of failures) console.error(`  ${f}`);
     process.exit(1);
   }
-  console.log('\nOK: no unconstrained virtual scan; nested base scans match the baseline.');
+  console.log('\nOK: every gated class is empty; nested base scans match the baseline.');
 }
+
+/** The classes gated at zero: nothing a query MEANS needs any of them. */
+const GATED = ['unconstrained-virtual', 'root-non-element', 'automatic-index', 'weak-prefix'] as const;
+const GATE_REASON: Record<(typeof GATED)[number], string> = {
+  'unconstrained-virtual': 'unconstrained property_fts scan (the whole full-text index per query)',
+  'root-non-element': 'root scan of a non-element table (only a root V()/E() reads a whole table by meaning — a missing index?)',
+  'automatic-index': 'automatic index on a base table (SQLite scans the whole table to build it, every run — a missing index?)',
+  'weak-prefix': 'nested probe constrained by vocabulary columns only (label/key: a graph-sized slice re-read per outer row — a missing index?)',
+};
 
 if (import.meta.main) await main();

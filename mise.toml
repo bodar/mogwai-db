@@ -532,17 +532,18 @@ run = "bun scripts/sql-hygiene.ts"
 sources = ["src/**/*", "test/**/*", "scripts/**/*", "parser/**/*", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock", "!test/**/l3-telemetry.*", "!test/**/.wrangler/**"]
 
 # EXPLAIN QUERY PLAN over every compiled corpus read (call() reads included, via the standard registry),
-# each loop's alias resolved to its table through the emitted SQL's FROM items. A root V()/E() is a full
-# scan BY MEANING and is only reported; the one STRUCTURAL class — an unconstrained property_fts scan — is
-# a gate at zero; a NESTED base scan (an inner loop, or under a correlated subquery) is ratcheted per query
-# against scripts/sql-plan-baseline.json (re-record with `sql-plan-record`, the reason in the commit; a
-# corpus pin bump that adds queries re-records and says so). Source + fixture data only, same `depends`
-# as sql-hygiene: it compiles and runs SQL, it never frames a result.
+# each loop's alias resolved to its table through the emitted SQL's FROM items. A root V()/E() (a scan of
+# nodes/edges) is a full scan BY MEANING and is only reported; the classes nothing a query means needs — a
+# root scan of any other table, an unconstrained property_fts scan, an automatic index on a base table, a
+# nested probe constrained only by label/key — are gated at zero; a NESTED base scan (an inner loop, or
+# under a correlated subquery) is ratcheted per query against scripts/sql-plan-baseline.json (re-record
+# with `sql-plan-record`, the reason in the commit; a corpus pin bump that adds queries re-records and says
+# so). Same `depends` and compile inputs as sql-hygiene: it compiles and runs SQL, it never frames a result.
 [tasks.sql-plan]
-description = "Gate: EXPLAIN QUERY PLAN over corpus reads — no unconstrained full-text scan, nested base scans ratcheted; root scans + temp-b-trees reported"
+description = "Gate: EXPLAIN QUERY PLAN over corpus reads — no non-element root scan, unconstrained full-text scan, automatic index or nested label/key-only probe; nested base scans ratcheted; element root scans + temp-b-trees reported"
 depends = ["install"]
 run = "bun scripts/sql-plan.ts"
-sources = ["src/**/*", "scripts/sql-plan.ts", "scripts/sql-plan-baseline.json", "test/L1-corpus/corpus.txt", "test/fixtures/seed-modern.ts", "tsconfig.json", "package.json", "bun.lock"]
+sources = ["src/**/*", "parser/**/*", "scripts/sql-plan.ts", "scripts/sql-plan-baseline.json", "test/L1-corpus/corpus.txt", "test/fixtures/seed-modern.ts", "tsconfig.json", "bunfig.toml", "package.json", "bun.lock"]
 
 [tasks.sql-plan-record]
 description = "Bank the sql-plan nested base-scan baseline (commit scripts/sql-plan-baseline.json)"

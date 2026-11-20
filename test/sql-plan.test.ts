@@ -12,6 +12,14 @@ const classes = (q: string) => {
   if (!got) throw new Error(`no plan for ${q}`);
   return classify(got.plan, got.sql, facts).map((s) => `${s.cls}:${s.table}`).sort();
 };
+/** Classes on a fresh store with `drop` indexes removed — the regression each gated class exists to catch. */
+const classesWithout = (drop: readonly string[], q: string) => {
+  const s = seededPlanStore();
+  for (const i of drop) s.query(`DROP INDEX ${i}`, []);
+  const got = planOf(s, q);
+  if (!got) throw new Error(`no plan for ${q}`);
+  return classify(got.plan, got.sql, schemaFacts(s)).map((f) => `${f.cls}:${f.table}`).sort();
+};
 
 describe('sql-plan scan classification', () => {
   test('a root V() is a ROOT scan of nodes — a read of every element by meaning', () => {
@@ -58,6 +66,50 @@ describe('sql-plan scan classification', () => {
   test('a string literal spelling a FROM item is not a FROM item; one alias naming two tables fails loudly', () => {
     expect([...aliasTables(`SELECT 'from edges rn' FROM nodes rn`, facts)]).toEqual([['rn', 'nodes']]);
     expect(() => aliasTables(`SELECT 1 FROM nodes rx CROSS JOIN edges rx`, facts)).toThrow(/names both/);
+  });
+
+  test('a root scan of a NON-element table is gated: a lost has() index cannot hide as a root read', () => {
+    const lost = classesWithout(['vp_key_value'], `g.V().has('name','marko')`);
+    expect(lost).toContain('root-non-element:vertex_properties');
+    expect(lost.some((c) => c.startsWith('root:'))).toBe(false);
+    expect(classesWithout(['vp_key_value'], `g.V().has('person','name','marko').out()`)).toContain('root-non-element:vertex_properties');
+  });
+
+  test('a NESTED probe constrained only by a vocabulary column is gated: e_label per outer row', () => {
+    expect(classesWithout(['e_out', 'e_pair'], `g.V(1).out('knows').values('name')`)).toContain('weak-prefix:edges');
+    // deeper: the same lost hop inside a child traversal and a repeat body
+    expect(classesWithout(['e_out', 'e_pair'], `g.V().where(__.out('knows')).values('name')`).some((c) => /^(weak-prefix|automatic-index):edges$/.test(c))).toBe(true);
+    expect(classesWithout(['e_out', 'e_pair'], `g.V(1).repeat(__.out('knows')).times(2).values('name')`).some((c) => /^(weak-prefix|automatic-index):edges$/.test(c))).toBe(true);
+  });
+
+  test('a ROOT vocabulary probe is the query meaning: E().hasLabel seeking e_label stays unflagged', () => {
+    const got = planOf(store, `g.E().hasLabel('knows')`)!;
+    expect(got.plan.some((r) => /SEARCH \S+ USING COVERING INDEX e_label \(label=\?\)/.test(r.detail))).toBe(true);
+    expect(classify(got.plan, got.sql, facts)).toEqual([]);
+  });
+
+  test('a base-table AUTOMATIC index is a disguised scan; on a derived relation it is not a finding', () => {
+    expect(classesWithout(['e_out', 'e_pair'], `g.V().local(__.out('knows')).values('name')`)).toContain('automatic-index:edges');
+    const sql = `SELECT 1 FROM nodes rn CROSS JOIN edges rme3 CROSS JOIN (SELECT 1 sk) scm`;
+    const rows = (detail: string): PlanRow[] => [
+      { id: 2, parent: 0, detail: 'SCAN rn' },
+      { id: 4, parent: 0, detail },
+    ];
+    expect(classify(rows('SEARCH rme3 USING AUTOMATIC PARTIAL COVERING INDEX (src=?)'), sql, facts).map((s) => s.cls)).toEqual(['root', 'automatic-index']);
+    expect(classify(rows('SEARCH scm USING AUTOMATIC COVERING INDEX (sk=?)'), sql, facts).map((s) => s.cls)).toEqual(['root']);
+  });
+
+  test('weak prefix reads index columns from SQLite: a nested vocabulary-only probe on ANY index flags; a fuller probe or a unique lookup does not', () => {
+    expect(facts.indexes.get('e_label')).toEqual({ table: 'edges', columns: ['label'], unique: false });
+    const sql = `SELECT 1 FROM nodes rn CROSS JOIN vertex_properties rp CROSS JOIN labels rl`;
+    const nested = (detail: string): string[] =>
+      classify([{ id: 2, parent: 0, detail: 'SCAN rn' }, { id: 4, parent: 0, detail }], sql, facts).filter((s) => s.cls !== 'root').map((s) => s.cls);
+    expect(nested('SEARCH rp USING INDEX vp_key_value (key=?)')).toEqual(['weak-prefix']);
+    expect(nested('SEARCH rp USING INDEX vp_key_value (key=? AND value>?)')).toEqual([]);
+    expect(nested('SEARCH rp USING INDEX vp_node_key (node=? AND key=?)')).toEqual([]);
+    expect(nested('SEARCH rl USING COVERING INDEX sqlite_autoindex_labels_1 (name=?)')).toEqual([]);
+    // a column the EQP line names that the index does not have means the parse is lying: fail loudly
+    expect(() => nested('SEARCH rp USING INDEX vp_key_value (node=?)')).toThrow(/not columns of index/);
   });
 
   test('a derived relation is not a base table', () => {
