@@ -519,9 +519,41 @@ describe('a draw in a body evaluated once for several hosts declines', () => {
     "g.V(1,1).addE('x').to(__.V().sample(1))",
     // A predicate operand is not row-bounded by its host, so even `V(1)`'s MAY run for several.
     "g.V(1).has('age', __.V().sample(1).values('age'))",
+    // A top-level `sample(2)` is two hosts: at most two rows is not at most one.
+    "g.V().hasLabel('person').sample(2).addE('likes').to(__.V().hasLabel('software').sample(1))",
+    "g.V().hasLabel('person').order().by(shuffle).limit(2).addE('likes').to(__.V().hasLabel('software').sample(1))",
   ])('%s', (q) => {
     expect(() => compile(q, {})).toThrow(SHARED);
     expect(() => compile(q, {})).not.toThrow(LOCAL_HINT);
+  });
+});
+
+// A top-level single pick — `sample(1)`, `order().by(shuffle).limit(1)` — is ONE host: the filter capping its
+// unpartitioned `row_number` at 1 bounds it (`rowNumberCap`, `src/rel/bounds.ts`), so one draw under it IS the
+// per-traverser draw. The data-generation idiom "connect a random person to a random software".
+describe('a draw under a single top-level pick answers', () => {
+  const likes = (store: GraphStore) => [
+    bare(run(store, "g.E().hasLabel('likes').outV().label()")).map((r: { v: unknown }) => r.v),
+    bare(run(store, "g.E().hasLabel('likes').inV().label()")).map((r: { v: unknown }) => r.v),
+  ];
+  test.each([
+    "g.V().hasLabel('person').order().by(shuffle).limit(1).addE('likes').to(__.V().hasLabel('software').order().by(shuffle).limit(1))",
+    "g.V().hasLabel('person').sample(1).addE('likes').to(__.V().hasLabel('software').sample(1))",
+    "g.V().hasLabel('person').order().by(shuffle).range(0, 1).addE('likes').to(__.V().hasLabel('software').sample(1))",
+  ])('%s writes exactly one person → software edge', (q) => {
+    for (let i = 0; i < 5; i++) {
+      const store = seededStore();
+      expect(bare(run(store, q))).toHaveLength(1);
+      expect(likes(store)).toEqual([['person'], ['software']]);
+    }
+  });
+
+  test.each([
+    "g.V().hasLabel('person').order().by(shuffle).limit(1).project('x').by(__.V().hasLabel('software').order().by(shuffle).limit(1).values('lang'))",
+    "g.V().hasLabel('person').sample(1).map(__.V().hasLabel('software').sample(1).values('lang'))",
+  ])('%s still answers one row', (q) => {
+    const rows = bare(run(seededStore(), q));
+    expect(rows).toHaveLength(1);
   });
 });
 

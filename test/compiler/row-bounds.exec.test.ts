@@ -7,7 +7,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Channels } from '../../src/channels.ts';
 import { atMostOneRow, exactlyOneRow, rowBounds } from '../../src/rel/bounds.ts';
 import { col, compilerInt, lit, param } from '../../src/rel/expr.ts';
-import { aggregate, distinct, filter, join, limit, scan as scanRel, union, values } from '../../src/rel/factory.ts';
+import { aggregate, distinct, filter, join, limit, materialize, scan as scanRel, union, values, window } from '../../src/rel/factory.ts';
 import type { Rel } from '../../src/rel/rel.ts';
 import { relId } from '../../src/rel/types.ts';
 import { leafTag } from '../../src/gremlin/types.ts';
@@ -64,6 +64,32 @@ describe('rowBounds', () => {
     // A disjunct that pins nothing, or a non-key column, bounds nothing.
     expect(over({ kind: 'binary', op: 'or', left: ids(1), right: truthy })).toEqual({ min: 0, max: Infinity });
     expect(over({ kind: 'in-list', expr: key('label'), values: [compilerInt(1)] })).toEqual({ min: 0, max: Infinity });
+  });
+
+  test('a filter capping a whole-relation row_number holds at most its rank; a partitioned one is per partition', () => {
+    // `perOriginWindow`'s two forms (`src/compiler/rel/build.ts`): the filter over the window, or over its
+    // FENCED materialization (`sample`'s RANDOM() order).
+    const ranked = (partitioned: boolean) => window({
+      id: relId(partitioned ? 'wp' : 'w'), input: scan, channels,
+      type: { cols: [...scan.type.cols, { name: 'prn', type: 'int', nullable: false }] },
+      specs: [['prn', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: partitioned ? [col(scan.id, 'id')] : [], orderBy: [] } }]],
+    });
+    const fence = (w: Rel) => materialize({ id: relId(`${w.id}m`), input: w, channels, type: w.type, fenced: true });
+    const rn = (r: Rel) => col(r.id, 'prn');
+    const over = (input: Rel, pred: any) => rowBounds(filter({ id: relId('f'), input, channels, type: input.type, pred }));
+    const le = (r: Rel, n: any) => ({ kind: 'binary', op: '<=', left: rn(r), right: n }) as const;
+    const w = ranked(false), fw = fence(w), pw = ranked(true);
+    expect(over(w, le(w, compilerInt(1)))).toEqual({ min: 0, max: 1 });
+    expect(over(fw, le(fw, compilerInt(3)))).toEqual({ min: 0, max: 3 });
+    expect(over(fw, { kind: 'binary', op: '<', left: rn(fw), right: compilerInt(3) })).toEqual({ min: 0, max: 2 });
+    // `range(k, k+n)`'s `prn > k AND prn <= k+n` — the upper rank bounds it (a SUFFICIENT bound).
+    expect(over(w, { kind: 'binary', op: 'and', left: { kind: 'binary', op: '>', left: rn(w), right: compilerInt(2) }, right: le(w, compilerInt(5)) }))
+      .toEqual({ min: 0, max: 5 });
+    // n PER partition, a user parameter, or a disjunct that caps nothing: unbounded.
+    expect(over(pw, le(pw, compilerInt(1)))).toEqual({ min: 0, max: Infinity });
+    expect(over(w, le(w, param(1, 'n', 'int')))).toEqual({ min: 0, max: Infinity });
+    expect(over(w, { kind: 'binary', op: 'or', left: le(w, compilerInt(1)), right: { kind: 'binary', op: '>', left: rn(w), right: compilerInt(4) } }))
+      .toEqual({ min: 0, max: Infinity });
   });
 
   test('a join multiplies; only an ON that always holds keeps a floor; union all sums', () => {

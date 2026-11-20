@@ -46,6 +46,43 @@ function uniqueKeyMatches(pred: Expr, scan: Extract<Rel, { readonly kind: 'scan'
 }
 
 /**
+ * At most how many rows of `input` satisfy `pred` because it caps an UNPARTITIONED `row_number` at a
+ * literal, or `null` where it does not. `row_number() OVER (ORDER BY …)` numbers the whole relation
+ * 1, 2, 3, … with no repeats, so `rn <= n` holds for at most n rows WHATEVER the order — this is the
+ * global top-n `perOriginWindow` (`src/compiler/rel/build.ts`) builds with no partition: a top-level
+ * `sample(n)`, an `order().by(shuffle).limit(n)`. It is Calcite's `Filter(ROW_NUMBER() <= n)` reading
+ * of a `Window` (`RelMdMaxRowCount` has no window handler; the bound is the window function's own law).
+ *
+ * The window is reached only in the two forms `perOriginWindow` builds: the filter directly over it, or
+ * over a `Materialize` of it (the FENCED `RANDOM()` form). A PARTITIONED `row_number` keeps n rows PER
+ * partition — a per-origin slice, and a decorrelated body's (the scope key is in its partition) — so it
+ * stays unbounded. A user-PARAMETER count stays unbounded too, as `limit`'s does (`literalCount`).
+ */
+function rowNumberCap(pred: Expr, input: Rel): number | null {
+  const window = input.kind === 'materialize' && input.input.kind === 'window' ? input.input
+    : input.kind === 'window' ? input : null;
+  if (!window) return null;
+  const isRank = (e: Expr): boolean => {
+    if (e.kind !== 'col' || e.rel !== input.id) return false;
+    const spec = window.specs.find(([name]) => name === e.name)?.[1];
+    return spec?.fn === 'row_number' && spec.spec.partitionBy.length === 0;
+  };
+  const walk = (e: Expr): number | null => {
+    if (e.kind !== 'binary') return null;
+    if (e.op === '<=' || e.op === '<') {
+      const n = isRank(e.left) ? literalCount(e.right) : null;
+      return n === null ? null : e.op === '<' ? Math.max(0, n - 1) : n;
+    }
+    if (e.op !== 'and' && e.op !== 'or') return null;
+    const left = walk(e.left), right = walk(e.right);
+    // `uniqueKeyMatches`' discipline: a conjunction is bounded by either side, a disjunction only by both.
+    if (e.op === 'and') return left === null ? right : right === null ? left : Math.min(left, right);
+    return left === null || right === null ? null : left + right;
+  };
+  return walk(pred);
+}
+
+/**
  * THE ROW-COUNT AUTHORITY — the bounds on how many rows `rel` yields, as compile-time metadata over the
  * closed node set. Calcite's `RelMdMinRowCount`/`RelMdMaxRowCount` (`vendor/calcite/core/src/main/java/org/
  * apache/calcite/rel/metadata/RelMdMaxRowCount.java`) are the prior art, one handler per node kind.
@@ -112,10 +149,11 @@ function boundsOf(rel: Rel, of: (r: Rel) => RowBounds): RowBounds {
       return { min: Math.min(count, Math.max(0, input.min - offset)), max: Math.min(count, Math.max(0, input.max - offset)) };
     }
     // A filter keeps at most its input's rows — and, directly over an element scan, at most as many as
-    // a unique-key membership it states (`uniqueKeyMatches`), which is how `V(1)` is known to be one row.
+    // a unique-key membership it states (`uniqueKeyMatches`), which is how `V(1)` is known to be one row;
+    // over a whole-relation `row_number`, at most the rank it caps (`rowNumberCap`) — a top-level `sample(1)`.
     case 'filter': {
       const input = of(rel.input).max;
-      const keyed = rel.input.kind === 'scan' ? uniqueKeyMatches(rel.pred, rel.input) : null;
+      const keyed = rel.input.kind === 'scan' ? uniqueKeyMatches(rel.pred, rel.input) : rowNumberCap(rel.pred, rel.input);
       return { min: 0, max: keyed === null ? input : Math.min(keyed, input) };
     }
     case 'project': case 'sort': case 'window': case 'materialize': return of(rel.input);
