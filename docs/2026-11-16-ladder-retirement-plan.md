@@ -222,7 +222,8 @@ every depth gap now goes to §3._
    0.33→2.7 (×8.1) — all linear. **Owner decides**: (3) and (5) are each small and ≥9×; (1) and (2) are not
    worth building now.
 
-11. ✅ **G1 — DONE (2026-11-20): every performance change earns its keep; nothing removed.** Measured on trunk
+11. ✅ **G1 — DONE (2026-11-20, landed 0d10cb47): every performance change earns its keep; nothing removed;
+   remains: nothing.** Measured on trunk
    2f133ee4 (after 6d and R7a): each change's witnesses at 1k / 8k vertices (median of 9, ms), with the change and
    with a scratch revert of only its hunk. Answers were identical both ways. The rule (owner, 2026-11-19): keep a
    change that is no more complex, or that bought a large or super-linear→linear win; remove only substantial code
@@ -250,7 +251,7 @@ every depth gap now goes to §3._
 
 ## Next round
 
-- **Order: none.** G1 is done and kept every change (item 11); R7a landed 46e0a19b; 6d landed in full (64bae352,
+- **Order: none.** G1 is done (0d10cb47, audit only — no code) and kept every change (item 11); R7a landed 46e0a19b; 6d landed in full (64bae352,
   d5ce03e2).
 - Round 13's follow-ups outside this plan's scope went to `docs/outstanding-work.md` (scope rules 2, 4, 5):
   - §2 performance (pre-existing): `resource-union-prefix-slice`, `resource-barrier-prefix-path`; `cr-fu5` gained the
