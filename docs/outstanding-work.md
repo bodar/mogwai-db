@@ -2352,7 +2352,7 @@ Items that wait for a decision. Do not start them without one.
 - **Area:** ids
 - **Reach:** plausible
 - **Problem:** Should a numeric string id like `'1'` address the element whose rowid is 1, as TinkerGraph's LONG id manager does? Or are ids typed, so that `'1'` names only a uid `'1'`? Today ids are typed: `V(5)` and `V('5')` can both exist (limitations "String vs integer element id" row). 8 L3 scenarios assume the LONG id manager.
-- **Fix:** Either answer is one change. Coerce at `routedExternalId`/`externalIdIs`, or ledger the 8 scenarios as `divergence` with a §17 line. Fix `rf3-reuse1` (§1) under either answer.
+- **Fix:** Either answer is one change. Coerce at `routedExternalId`/`externalIdIs`, or ledger the 8 scenarios as `divergence` with a `docs/limitations.md` §3 row. Fix `rf3-reuse1` (§1) under either answer.
 - **Where:** `src/compiler/rel/source.ts` (`routedExternalId`, `externalIdIs`)
 
 #### Map-key order authority (`map-key-order-authority`)

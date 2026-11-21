@@ -62,7 +62,7 @@
     the ceiling and the floor follows for free. So read a rising L3 count as a *side effect* of the
     right work, never as the target — and don't chase a scenario with a special-case (see the
     seam directive in `src/compiler/CLAUDE.md`).
-  - **Every in-scope failure is LEDGERED** in `expected-outcomes.ts` with a kind — `divergence` (a §17
+  - **Every in-scope failure is LEDGERED** in `expected-outcomes.ts` with a kind — `divergence` (a `docs/limitations.md` §3
     row), `wall` (a declared capability we lack), `decline` (a clean `UnsupportedTraversal`), `defect` (a
     known wrong answer, with its `outstanding-work.md` §1 ID) — and the ledger must EQUAL the failing set
     by multiplicity. So **a commit that fixes a scenario deletes its name there** (L3 and
@@ -199,7 +199,7 @@ merge and a per-traverser body, until the next fan-out), a `tail()`, fold/aggreg
 (`test/compiler/meaningful-order.exec.test.ts` is that keep-list, asserted exactly). It does NOT expect an
 UNORDERED stream to hold its order: an unordered stream reaching the wire, and an unordered
 `limit`/`range`/`skip`, come back in SQLite's planner order (`computeDemandsEncounter`'s `wireTerminal`,
-a deliberate divergence in `docs/feature-support-matrix.md` §17). A test over such a stream compares a
+a deliberate divergence in `docs/limitations.md` §3). A test over such a stream compares a
 MULTISET (`bagOf`, `test/support/harness.ts`), or a COUNT/sub-multiset for an unordered slice; the census
 digests an unordered window's COUNT, and L5's differential tolerates the members it picks
 (`orderIndeterminacy`, `test/support/graph.ts`). The same goes for an order that comes from ANOTHER

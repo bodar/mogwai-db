@@ -15,9 +15,8 @@ The compiler builds all SQL through a template-first `q` kernel + typed `Relatio
   exist because the failure they replace is invisible: a `derived()`/`cte()` relation is
   `Relation<string>`, so `rel.c[name]` type-checks for every string, and an absent one used to splice
   an EMPTY expression — shipping malformed SQL for SQLite to reject rather than raising at the site
-  that built it. Two separate defects reached production that way. The compiler-side twin, which
-  names the carried CHANNEL rather than a CTE alias, is `layoutProjection`
-  (`compiler/steps/context/context.ts`).
+  that built it. Two separate defects reached production that way. (Its compiler-side twin,
+  `layoutProjection`, went with the deleted legacy compiler.)
 - **Prefer `q.derived` (non-CTE subquery) over a named CTE.** Reach for a named CTE only when the
   relation is shared/reused or the planner needs a deliberate materialization boundary.
 - **The kernel owns BOTH rendering modes, and there are exactly two.** `Query` NAMES relations
@@ -25,9 +24,9 @@ The compiler builds all SQL through a template-first `q` kernel + typed `Relatio
   `recursiveCte`/`render`, which have no meaning without a shared `WITH`. Whether a relation is
   named or nested is a property of the Query, so a subclass here — never a per-site choice, and
   never a `Query` subclass in a step module (that was `InlineQuery`).
-  `DerivedQuery` is **not** inherently correlated: correlation is what the caller seeds it with. The
-  correlated inline child (`compiler/steps/tail/correlated.ts`) is the two composed, and it draws
-  its seed alias from `DerivedQuery.alias()` so the whole `x*` namespace has one owner.
+  `DerivedQuery` is **not** inherently correlated: correlation is what the caller seeds it with. A
+  correlated use draws its seed alias from `DerivedQuery.alias()` so the whole `x*` namespace has one
+  owner (the old correlated inline child was deleted with the ladder, 2026-11-20).
 - **A third mode ("flat accumulation") was measured unnecessary — don't add one.** SQLite's lateral
   rule is positional, not absent: a table-valued function and a correlated scalar subquery both see
   the outer row; only a FROM-clause derived table doesn't. So the only shape needing flat

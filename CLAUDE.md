@@ -5,8 +5,9 @@ the CROSS-CUTTING rules; subsystem detail lives next to the code (below) and loa
 a subsystem fact changes, edit it in its own file — don't pull it back here. Prefer high-level
 direction over mechanism: if a detail is re-derivable from the code, cite the code instead.
 
-- **Step support / edges** → `docs/feature-support-matrix.md` (keep in sync per step); its §17
-  *Deliberate divergences* lists every accepted JS/SQLite-vs-Java difference (one line each).
+- **Step support / edges** → `docs/feature-support-matrix.md` (keep in sync per step).
+- **Deliberate divergences** → `docs/limitations.md` §3 *Differences from Java TinkerPop* lists every
+  accepted JS/SQLite-vs-Java difference (one table row each).
 - **Future work** → `docs/outstanding-work.md`. Dated `docs/` are design
   rationale — consult, but this file must not depend on an in-flight plan.
 
@@ -280,7 +281,7 @@ property.
   An answer that is sensible under documented JavaScript/SQLite semantics — number spelling, string
   order, regex dialect, the order of a stream the query does not order, error timing, signed zero — is
   NOT a different question: prefer that natural answer to a decline AND to emulating Java. Each
-  accepted divergence is one line in `docs/feature-support-matrix.md` §17 *Deliberate divergences*;
+  accepted divergence is one row in `docs/limitations.md` §3 *Differences from Java TinkerPop*;
   the rationale and the work order that removes the old emulation are in
   `docs/archive/2026-10-18-simplification-plan.md`.
 - **Correct by design, fail closed — on what is GENUINELY wrong.** Never reject a valid input to keep
