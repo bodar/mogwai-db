@@ -15,6 +15,12 @@ import { declaredParamTypes, mapSlot, storedScalar, type MapEntryType, type Type
 export interface ParamEnv {
   readonly values: Readonly<Record<string, any>>;
   readonly types: Readonly<Record<string, TypeNode>>;
+  /** THE REQUEST'S DYNAMIC LITERALS — the value each no-argument `UUID()`/`datetime()` took in THIS
+   *  request, keyed by its parse-tree node (`dynamicLiteralValue`, `src/gremlin/frontend.ts`). A nested
+   *  body is extracted again from the shared tree at every site that reads it, so without one memo per
+   *  request one `UUID()` could give two values in one answer. It lives on the env, not on the tree,
+   *  because the parse cache shares the tree across requests. Absent (`NO_PARAMS`), each read draws. */
+  readonly dynamicLiterals?: Map<object, unknown>;
 }
 
 /** The environment of a compile with no user parameters — a param-free analysis, a synthesized body. */
@@ -55,7 +61,8 @@ function land(v: any, t: TypeNode | null | undefined): [any, TypeNode | null | u
 export function paramEnv(wireParams: Record<string, any>, wireTypes: Record<string, TypeNode> = {}): ParamEnv {
   const declared = declaredParamTypes(wireParams, wireTypes);
   const typed = Object.keys(declared).filter((k) => k in wireParams);
-  if (typed.length === 0) return { values: wireParams, types: declared };
+  const dynamicLiterals = new Map<object, unknown>();
+  if (typed.length === 0) return { values: wireParams, types: declared, dynamicLiterals };
   const values = { ...wireParams };
   const types = { ...declared };
   for (const k of typed) {
@@ -63,5 +70,5 @@ export function paramEnv(wireParams: Record<string, any>, wireTypes: Record<stri
     values[k] = v;
     if (t != null) types[k] = t;
   }
-  return { values, types };
+  return { values, types, dynamicLiterals };
 }

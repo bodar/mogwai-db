@@ -85,14 +85,15 @@ export function isWrite(q: string): boolean {
  * differs between any two runs whatever the fast paths do.
  *
  * The sources, each probe-confirmed to give four different answers in four runs: `sample()`/`coin()`
- * and `Order.shuffle` lower to SQL `RANDOM()`, and an ARGUMENT-LESS `datetime()` reads the clock —
- * hence the `\(\s*\)`, since `datetime('2020-01-01')` is perfectly deterministic.
+ * and `Order.shuffle` lower to SQL `RANDOM()`, an ARGUMENT-LESS `datetime()` reads the clock, and an
+ * argument-less `UUID()` draws a random uuid — hence the `\(\s*\)`, since `datetime('2020-01-01')`
+ * and `UUID('…')` are perfectly deterministic.
  *
  * A regex and not the compiler, unlike `isWrite`: nondeterminism is a property of the SQL a step
  * emits, and no compiled artifact reports it. TinkerPop's own answer
  * (`withStrategies(SeedStrategy(seed: …))`) is unimplemented here, so we cannot lean on it.
  */
-const NONDETERMINISTIC = /\b(?:sample|coin)\s*\(|Order\.shuffle|\bshuffle\b|\b(?:datetime|DateTime)\s*\(\s*\)/;
+const NONDETERMINISTIC = /\b(?:sample|coin)\s*\(|Order\.shuffle|\bshuffle\b|\b(?:datetime|DateTime|UUID)\s*\(\s*\)/;
 export const isNondeterministic = (q: string): boolean => NONDETERMINISTIC.test(q);
 
 /**

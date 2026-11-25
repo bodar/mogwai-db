@@ -4,7 +4,7 @@ import {
   BailErrorStrategy, ParseCancellationException, PredictionMode,
 } from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
-import { GremlinParser, DateLiteralContext } from '../../parser/GremlinParser.ts';
+import { GremlinParser, DateLiteralContext, UuidLiteralContext } from '../../parser/GremlinParser.ts';
 import { binaryOfBase64, fitsSafeInteger, BigDecimal, Duration, mapSlot, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 import { floatCanonical } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
@@ -120,21 +120,42 @@ export function parseGremlin(query: string): ParsedQuery {
 /** The parse cache's hit, miss, entry and weight (code units of held text) counts. */
 export function parseCacheStats(): BoundedLruStats { return parseCache.stats(); }
 
-// A query is VOLATILE when its TEXT reads the clock: a no-argument `datetime()` is "now", captured as a
-// literal when the step chain is built (`emitArg`, `DateLiteralContext`). Its compiled plan holds that
-// instant, so it must not be reused (`PlanCache`). A fact of the text, so it is computed once per parse
-// tree and memoised beside the tree, which the parse cache keeps alive for as long as the text is hot.
+// A DYNAMIC LITERAL is one whose value is drawn when the query runs, not written in its text: a
+// no-argument `datetime()` ("now") or `UUID()` (a random v4 uuid). The reference draws each when the
+// literal is visited (`GenericLiteralVisitor.visitDateLiteral`/`visitUuidLiteral`,
+// `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/language/grammar/GenericLiteralVisitor.java`).
+// ONE predicate, read by the literal visitor (`walkArgs`, which draws the value) and by `isVolatileQuery`
+// (which keeps the plan out of the cache), so a new dynamic literal cannot be drawn and then cached.
+function dynamicLiteral(node: ParseTree): node is DateLiteralContext | UuidLiteralContext {
+  return (node instanceof DateLiteralContext || node instanceof UuidLiteralContext) && node.stringLiteral() === null;
+}
+
+/** A dynamic literal's value in THIS request: drawn once, then read back from the request's
+ *  memo (`ParamEnv.dynamicLiterals`) at every re-extraction of the body that holds it. The value is a
+ *  constant of the compile, inlined as a typed literal like any other — never a per-row SQL `random()`. */
+function dynamicLiteralValue(node: DateLiteralContext | UuidLiteralContext, params: ParamEnv): unknown {
+  const memo = params.dynamicLiterals;
+  if (memo?.has(node)) return memo.get(node);
+  const value = node instanceof UuidLiteralContext ? crypto.randomUUID() : Date.now();
+  memo?.set(node, value);
+  return value;
+}
+
+// A query is VOLATILE when its TEXT holds a dynamic literal (`dynamicLiteral`): its compiled plan holds
+// the value drawn at compile time, so it must not be reused (`PlanCache`). A fact of the text, so it is
+// computed once per parse tree and memoised beside the tree, which the parse cache keeps alive for as
+// long as the text is hot.
 const volatileTrees = new WeakMap<object, boolean>();
 
 export function isVolatileQuery(tree: ParsedQuery): boolean {
   let known = volatileTrees.get(tree);
-  if (known === undefined) { known = readsClock(tree); volatileTrees.set(tree, known); }
+  if (known === undefined) { known = holdsDynamicLiteral(tree); volatileTrees.set(tree, known); }
   return known;
 }
 
-function readsClock(node: ParseTree): boolean {
-  if (node instanceof DateLiteralContext && node.stringLiteral() === null) return true;
-  for (let i = 0; i < node.getChildCount(); i++) if (readsClock(node.getChild(i)!)) return true;
+function holdsDynamicLiteral(node: ParseTree): boolean {
+  if (dynamicLiteral(node)) return true;
+  for (let i = 0; i < node.getChildCount(); i++) if (holdsDynamicLiteral(node.getChild(i)!)) return true;
   return false;
 }
 
@@ -716,11 +737,10 @@ function walkArgs(node: any, out: Arg[], params: ParamEnv): void {
     emit(Duration.fromTotalNanos(node.booleanLiteral()?.getText() === 'true' ? -total : total), 'duration'); return;
   }
   // UUID('…') → the string form tagged `uuid` so a property write records it as a
-  // UUID (indistinguishable from a plain string by JS value alone). Bare UUID() (a
-  // random uuid) has no string child — it falls through (uncommon as a stored value).
+  // UUID (indistinguishable from a plain string by JS value alone). Bare UUID() is a random v4 uuid,
+  // drawn once per request (`dynamicLiteralValue`).
   if (cls === 'UuidLiteralContext') {
-    const s = node.stringLiteral();
-    if (s) { emit(unquote(s.getText()), 'uuid'); return; }
+    emit(dynamicLiteral(node) ? dynamicLiteralValue(node, params) : unquote(node.stringLiteral().getText()), 'uuid'); return;
   }
   // Binary('…base64…') → its carrier (`binaryCarrier`: the bytes as hex TEXT) tagged `binary`. Without
   // this case the generic recursion surfaced the inner string literal, and the bytes answered as a String.
@@ -831,8 +851,7 @@ function walkArgs(node: any, out: Arg[], params: ParamEnv): void {
   // epoch-millis (the internal datetime representation; the 'date' shape tag frames it
   // back to a JS Date). An offset-bearing ISO string folds into the correct instant.
   if (cls === 'DateLiteralContext') {
-    const s = node.stringLiteral();
-    emit(s ? parseIsoMs(unquote(s.getText())) : Date.now(), 'datetime'); return;
+    emit(dynamicLiteral(node) ? dynamicLiteralValue(node, params) : parseIsoMs(unquote(node.stringLiteral().getText())), 'datetime'); return;
   }
   // DT.second/minute/hour/day (or the bare unit) — dateAdd()'s unit selector.
   if (cls === 'TraversalDTContext') { emit({ dt: enumSuffix(node) }); return; }

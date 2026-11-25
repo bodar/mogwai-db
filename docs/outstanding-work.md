@@ -301,14 +301,6 @@ Queries that run and return a wrong result today. Fix these first.
 - **Fix:** Carry `sack` and `path` through writes.
 - **Where:** `src/compiler/rel/write.ts` `writeInputChannels`
 
-### Wrong answers: other
-
-#### `UUID()` literal returns nothing (`uuid-literal`)
-- **Area:** literals
-- **Reach:** plausible
-- **Problem:** `g.inject(UUID())` returns `[]`, and `g.inject(UUID()).count()` returns `[0]` (measured 2026-11-20). The reference returns one random UUID. It used to decline. L3 never sees this form: `g_injectXUUIDXXX` is GLV-lossy, because gremlin.js sends a concrete `uuid.v4()`.
-- **Fix:** Lower `UUID()` to a random v4 value tagged `uuid`. Read the grammar visitor in `vendor/tinkerpop/gremlin-language` to see when it is evaluated. Or decline it and add a limitations line. Never return an empty stream.
-
 ## 2. Performance
 
 Queries that answer correctly but grow faster than linear with data or query size, or compile slowly.

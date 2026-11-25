@@ -101,6 +101,20 @@ describe('nothing the cache serves is stale', () => {
     expect(app.planCache.stats().size).toBe(1);
   });
 
+  test('UUID() is a fresh random uuid at each request — never served from the cache', async () => {
+    const app = scope();
+    const store = seededStore();
+    const a = await answer(store, app, 'g.inject(UUID())');
+    const b = await answer(store, app, 'g.inject(UUID())');
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+    expect(a[0]).not.toEqual(b[0]);
+    expect(app.planCache.stats().size).toBe(0);
+    // A UUID with a string is a constant of the text, so it IS cached.
+    await answer(store, app, "g.inject(UUID('6c1f4a2e-0000-4000-8000-000000000000'))");
+    expect(app.planCache.stats().size).toBe(1);
+  });
+
   test('a nested datetime() is found at any depth', () => {
     const app = scope();
     compilePlan("g.V().project('a').by(constant(datetime()))", {}, { app });

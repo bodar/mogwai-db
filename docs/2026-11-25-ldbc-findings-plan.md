@@ -146,10 +146,8 @@ All findings were minor. They are ordered: wrong answers first, then cheap fixes
   (`src/execute.ts`, around line 333) decodes a `boolean` tag with `Boolean(v)`. Use
   `booleanOfStored` there, so the comment "the one decode every external form uses" is true. No
   answer changes for stored 1/0/true/false.
-- **Volatility has two authorities (from L2).** `readsClock` (`src/gremlin/frontend.ts`) finds a
-  no-argument `datetime()` again. The clock is read at `emitArg` (`Date.now()`). Make the emit site
-  record "volatile" in a per-compile sink, and make `compilePlan` read that sink. Then a new volatile
-  literal (for example a random `UUID()`) cannot be cached by mistake.
+- **Volatility has two authorities (from L2).** ✅ Done by round-3 items 8–9: one predicate,
+  `dynamicLiteral` (`src/gremlin/frontend.ts`), drives the value draw and `isVolatileQuery`.
 - **Per-entry size limit for the plan cache (from L2).** ✅ Done by round-2 item 2 (`ed9ff04e`).
 - **One-off write plans evict hot reads (from L2).** Distinct-parameter `addV` writes all miss and
   fill the LRU. No wrong answer, miss cost is in the noise. Do this with L2 v2 (pin-on-read): an

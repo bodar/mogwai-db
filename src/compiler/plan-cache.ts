@@ -20,7 +20,7 @@ import { BoundedLru } from '../bounded-lru.ts';
 //  - a params value this module cannot spell canonically, or whose spelling is large (a bulk-upsert
 //    list parameter) — simply not cached, never a decline;
 //  - a plan whose held text passes `PLAN_CACHE_MAX_ENTRY_TEXT_UNITS` (a large batch write) — the same;
-//  - a VOLATILE query: one whose text reads the clock (`datetime()`, `isVolatileQuery`).
+//  - a VOLATILE query: one whose text holds a dynamic literal (`datetime()`, `UUID()`, `isVolatileQuery`).
 //
 // SCOPE OF v1: the key holds every parameter VALUE, so it serves a repeated IDENTICAL request (a
 // latency lane, polling, a dashboard). One text sent with varying parameters gets no hit; that is the

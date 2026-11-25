@@ -65,7 +65,7 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   try { tree = parseGremlin(gremlin); plan = compileUnguarded(gremlin, tree, params, options, budget); }
   catch (error) { throw tooDeep(error) ?? expansionNamed(error, budget) ?? error; }
   // Only a single-statement plan is reusable: a segment plan's resume compiles against landed rows, and
-  // a plan whose TEXT reads the clock holds the instant it was compiled at (`isVolatileQuery`).
+  // a plan whose TEXT holds a dynamic literal holds the value drawn when it compiled (`isVolatileQuery`).
   if (cache && plan.kind === 'sql' && plan.compiled.cleanup === undefined && !isVolatileQuery(tree))
     cache.plans.set(cache.key, plan);
   return plan;
