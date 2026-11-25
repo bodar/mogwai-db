@@ -640,10 +640,11 @@ const FILTER_PROBE_LIMIT = 1;
  *  the precise "must yield a vertex stream"; remotely a 400 from the source's own `_changes`), which the
  *  router surfaces as a 400 save rejection. Fail-closed at save so a broken filter never becomes a
  *  silently-wrong replication. An empty CURRENT match set is valid (the selector is well-formed, it just
- *  matches nothing now — dynamic/never-prune). */
+ *  matches nothing now — dynamic/never-prune). The probe PAGES the feed too (`limit`), so on a graph
+ *  that never exposed identity it backfills one element, not the whole graph (`exposeIdentity`). */
 export async function validateReplicationFilter(source: Peer, filter: string): Promise<void> {
   try {
-    await source.changes(0, undefined, `${filter}.limit(${FILTER_PROBE_LIMIT})`);
+    await source.changes(0, FILTER_PROBE_LIMIT, `${filter}.limit(${FILTER_PROBE_LIMIT})`);
   } catch (e: any) {
     throw new Error(`replication filter rejected: ${e?.message ?? String(e)}`);
   }
@@ -684,7 +685,10 @@ export async function runReplicationPass(
   source: Peer, target: Peer, cp: Checkpoint, batchSize = DEFAULT_REPLICATION_BATCH, filter?: string,
 ): Promise<ReplicationRunStats> {
   const since = await cp.read();
-  const limit = batchSize > 0 ? batchSize : undefined;
+  // A FILTERED pass pages even when `batchSize <= 0`: its feed reads only the matched subgraph, but an
+  // unpaged feed backfills the WHOLE graph's metadata in one call (`exposeIdentity`), a span that grows
+  // with the graph rather than with the match.
+  const limit = batchSize > 0 ? batchSize : filter ? DEFAULT_REPLICATION_BATCH : undefined;
   // A `filter` (filtered-replication-plan F1) restricts the SOURCE feed to the matched subgraph + its
   // 1-hop closure; re-evaluated every pass (dynamic/never-prune, §2). It rides the same `changes` call
   // the pass already makes, so pacing/paging are unchanged.

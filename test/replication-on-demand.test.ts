@@ -5,7 +5,8 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { makeRouter } from '../src/router.ts';
 import { changesFeed, revsDiff } from '../src/manager.ts';
-import { localPeer, runReplication, applyWire, bulkGet, type Checkpoint } from '../src/replicate.ts';
+import { localPeer, runReplication, applyWire, bulkGet, validateReplicationFilter, type Checkpoint } from '../src/replicate.ts';
+import { loadBulk } from '../src/bulk.ts';
 import { writeGraphson, loadGraphson } from '../src/formats/graphson.ts';
 import { writeCsv } from '../src/formats/csv.ts';
 import { ReplicatorStore, storeRegistry } from '../src/replicator-registry.ts';
@@ -164,5 +165,30 @@ describe('replication metadata on demand', () => {
     }
     expect(ticks).toBeGreaterThan(1);
     expect(await m.info('local')).toEqual({ vertexCount: 10, edgeCount: 6 });
+  });
+});
+
+// A first filtered call on a graph that never exposed identity must do bounded work: the backfill goes a
+// page at a time, never the whole graph in one request (storage density plan, F1).
+describe('filtered replication backfills a bounded page', () => {
+  /** `n` vertices with no metadata, loaded while replication is off. */
+  const seeded = (n: number) => {
+    const m = mgr();
+    loadBulk(m.storeOf('g'), Array.from({ length: n }, (_, i) => ({ id: i + 1, labels: ['p'], properties: [] })));
+    return m;
+  };
+  const unsequenced = (s: GraphStore) => count(s, 'SELECT count(*) AS n FROM nodes WHERE seq IS NULL');
+
+  test('the first save-time filter validation backfills one element, not the graph', async () => {
+    const m = seeded(50);
+    await validateReplicationFilter(localPeer(m, 'g'), "g.V().hasLabel('p')");
+    expect(unsequenced(m.storeOf('g'))).toBe(49);
+  });
+
+  test('a filtered run with batchSize <= 0 pages its backfill and still lands the whole match', async () => {
+    const m = seeded(1200);
+    const r = await runReplication(localPeer(m, 'g'), localPeer(m, 't'), memCp(), { batchSize: 0 }, "g.V().hasLabel('p')");
+    expect(r.batches).toBeGreaterThan(2);
+    expect(await m.info('t')).toEqual({ vertexCount: 1200, edgeCount: 0 });
   });
 });
