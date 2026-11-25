@@ -255,6 +255,10 @@ byte-stable reuse.
    through the one map/record lowering, not per host.
 2. **Run-time equality sets, part A: unwrap folded-set members** (`decimal-arm-runtime-bounds` A). A
    folded set of doubles or dates compares wrongly. Land before part B.
+   ✅ **Landed 2026-11-25 (`27d0e19e`).** `foldedListSet` reads each member through `list.ts`
+   `payloadOf`, the one payload authority; the `select(Column.values)` arm uses the same helper. Every
+   caller gets it: `has`/`is`/`where`, `exists`, connector bodies. Linear at N=1k/8k. Test:
+   `test/compiler/folded-set-payload.exec.test.ts`. Remains: nothing (part B is item 3).
 3. **Store a comparable REAL for a `bigdecimal` / out-of-range `bigint`; keep the exact text only for
    output.** Today such a value is TEXT in `value`, so every compare site needs a decimal arm
    (`decimalTextArm` in `predicate.ts`, `decimalTextSeeks` in `write.ts`, the `seekArms` OR expansion in
