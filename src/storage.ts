@@ -245,7 +245,8 @@ const SCHEMA = [
   // (`decimalTextArm`, src/compiler/rel/predicate.ts), so `has(k, 1)` is `value = 1 OR (vtype =
   // 'bigdecimal' AND CAST(value AS REAL) = 1)`. The owner seek reads each disjunct as its own arm
   // (`seekArms`, src/rel/passes/semijoin.ts): the raw compare seeks (key, value) above, the decimal arm
-  // seeks here. Without it that arm read every row of the key. SQLite's planner chooses it; no lowering
+  // seeks here, and so does a merge search's BigDecimal arm (`decimalTextSeeks`, src/compiler/rel/write.ts).
+  // Without it that arm read every row of the key. SQLite's planner chooses it; no lowering
   // names it. PARTIAL, so it holds zero rows on a graph that never writes a BigDecimal.
   `CREATE INDEX IF NOT EXISTS vp_decimal ON vertex_properties(key, CAST(value AS REAL)) WHERE vtype = 'bigdecimal'`,
   `CREATE INDEX IF NOT EXISTS ep_decimal ON edge_properties(key, CAST(value AS REAL)) WHERE vtype = 'bigdecimal'`,

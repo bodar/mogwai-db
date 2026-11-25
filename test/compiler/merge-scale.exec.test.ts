@@ -109,7 +109,7 @@ describe(`a merge over ${N} traversers is linear`, () => {
 // was quadratic on trunk (8k traversers: 34 s, 65 s, 360 s, 149 s, 86 s, 8.7 s), each through a seek that
 // was correct and read a whole key range per driver:
 //  - a NUMERIC search over a string-valued key read every TEXT value of the key (`value >= ''`), now only
-//    the decimal texts the number's cast could land on (`decimalTextSeeks`);
+//    the decimal texts the number's cast could land on (`decimalTextSeeks`: a BigDecimal through `vp_decimal`);
 //  - a search whose FIRST criterion every element shares (`kind`, `tenant`) seeked by it, now by the key
 //    with the fewest capped matches per driver (`cappedCount`);
 //  - a long past 2^53 is stored as decimal TEXT, so every such search read the whole TEXT range;
@@ -148,6 +148,8 @@ describe(`a merge search over ${N} traversers seeks its most selective criterion
     // Longs past 2^53 — TEXT-stored — re-upserted by map and by computed search.
     [`g.inject(${maps((i) => `[sid:${BIG + BigInt(2 * i)}L]`)}).mergeV().count()`, () => shaped(N, (i) => [['sid', (BIG + BigInt(2 * i)).toString(), 'long']]), N, "g.V().count()", N],
     ["g.V().mergeV(__.project('sid').by('sid')).count()", () => shaped(N, (i) => [['sid', (BIG + BigInt(2 * i)).toString(), 'long']]), N, "g.V().count()", N],
+    // BigDecimals re-upserted by a double criterion — one `vp_decimal` probe per driver.
+    [`g.inject(${maps((i) => `[d:${i}.5]`)}).mergeV().count()`, () => shaped(N, (i) => [['d', `${i}.5`, 'bigdecimal']]), N, "g.V().count()", N],
     // N maps of N different keys, every one creating — the guard's N shapes.
     [`g.inject(${maps((i) => `[k${i}:1]`)}).mergeV().count()`, () => graph(N), N, "g.V().has('k4242',1).count()", 1],
     // A composite key whose every ENTRY hundreds of maps share; a batch of two key sets, one containing the other.

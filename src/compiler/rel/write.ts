@@ -3958,23 +3958,22 @@ function propertySeeks(
 const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x', SEEK_ORD = 'sk_o';
 
 /**
- * THE DECIMAL-TEXT tail of a NUMERIC criterion — the stored TEXT rows (`storedScalar`'s exact tail, always a
- * PLAIN decimal: `BigDecimal.toString` writes no exponent, a long its digits) whose `storedCompareOn` cast
- * could equal the driver's compared number `c`, as index RANGES on `(key, value)` rather than the whole TEXT
- * range of the key (which made a numeric search over a string-valued key read every string, per driver).
- *
- * A stored text `x` meets `c` only where its cast lands on `c` — exactly (a long's INT cast) or by rounding
- * (a BigDecimal's REAL cast, within an ulp of `c`, plus slack for the text-to-real conversion). So, by the
- * magnitude of `c` (two arms that partition the numeric drivers):
- *  - `|c| < 2^52` — `x` lies within 2 of `c`, so its integer part is one of trunc(c)−2 … trunc(c)+2 (and
- *    `-0` near zero): one PREFIX seek per integer part `p`, `value >= p AND value < p || '/'` — exactly `p`,
- *    `p.…` and nothing longer (`'/'` sorts right after `'.'` and before every digit);
- *  - `2^52 ≤ |c| < 9·10^18` — `|x|`'s integer part lies within `U = |c|/2^50 + 1` (several ulps) of trunc|c|;
- *    where both ends spell the same number of digits a decimal's text order IS its numeric order, so it is
- *    one RANGE between the two ends (sign-prefixed); otherwise (the ends' lengths differ, a magnitude past
- *    an INTEGER) the same arm reads the key's numeric-looking TEXT, `value >= '-' AND value < ':'` — the
- *    bound that still keeps every other string out.
- * A seek only NARROWS: the search's residual decides, so a range that admits more than the cast does costs a
+ * THE DECIMAL-TEXT tail of a NUMERIC criterion — the stored TEXT rows (`storedScalar`'s exact tail: a
+ * BigDecimal always, a long/bigint at or past ±2^53) whose `storedCompareOn` cast could equal the driver's
+ * compared number `c`, as index seeks rather than the whole TEXT range of the key (which made a numeric
+ * search over a string-valued key read every string, per driver). Two arms, one per stored tail:
+ *  - a BIGDECIMAL row is compared by its REAL cast, which is the expression the partial `vp_decimal` /
+ *    `ep_decimal` index holds (`src/storage.ts`): one SEARCH on `(key, CAST(value AS REAL)) = (k, c)` under
+ *    `vtype = 'bigdecimal'`, for every magnitude of `c`;
+ *  - a LONG/BIGINT TEXT row is compared by its exact INT cast, so it meets only `|c| ≥ 2^53` (a long below
+ *    is stored as an INTEGER and found by the `(key, value)` arm; 2^53 itself is not a safe integer, so the
+ *    bound is inclusive). The cast is exact, but `c` may not be: an INTEGER past 2^53 reaches the arm through
+ *    a spooled snapshot as its nearest double. So the stored integer part lies within `U = |c|/2^50 + 1`
+ *    (several ulps) of trunc|c|; where both ends spell the same number of digits a decimal's text order IS
+ *    its numeric order, so it is one RANGE between the two ends (sign-prefixed); otherwise (the ends' lengths
+ *    differ, a magnitude past an INTEGER) the arm reads the key's numeric-looking TEXT,
+ *    `value >= '-' AND value < ':'` — the bound that still keeps every other string out.
+ * A seek only NARROWS: the search's residual decides, so an arm that admits more than the cast does costs a
  * probe, never an answer.
  */
 function decimalTextSeeks(
@@ -3987,7 +3986,7 @@ function decimalTextSeeks(
   const text = (e: Expr): Expr => ({ kind: 'cast', arg: e, to: 'text' });
   const int = (e: Expr): Expr => ({ kind: 'cast', arg: e, to: 'int' });
   const cat = (a: Expr, b: Expr): Expr => cmp('||', a, b);
-  const SMALL = 2 ** 52, INTEGRAL = 9e18;
+  const SAFE = 2 ** 53, INTEGRAL = 9e18;
   // A magnitude test spelled as two comparisons — `abs()` of the least INTEGER raises in SQLite.
   const within = (c: Expr, bound: number): Expr => and(cmp('>', c, compilerReal(-bound)), cmp('<', c, compilerReal(bound)));
   const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
@@ -4000,44 +3999,33 @@ function decimalTextSeeks(
     });
     return make.filter({ id: fresh('f'), input: withC, channels: [], type: withC.type, pred: narrow(col(withC.id, C)) });
   };
-  // `driving` carries `[lo, hi)` columns; the arm is the TEXT values of the key in that range.
-  const ranged = (driving: Rel, lo: (rel: RelId) => Expr, hi: (rel: RelId) => Expr): Rel => {
-    const bounded = make.project({
-      id: fresh('p'), input: driving, channels: [], type: typeOf(...drivingCols(driving), meta(LO, 'text', true), meta(HI, 'text', true)),
-      exprs: [...drivingCols(driving).map((column) => [column.name, col(driving.id, column.name)] as const), [LO, lo(driving.id)], [HI, hi(driving.id)]],
-    });
-    const scan = props();
-    return seekOwners(bounded, scan, and(and(eq(col(scan.id, 'key'), key(bounded.id)),
-      cmp('>=', col(scan.id, 'value'), col(bounded.id, LO))), cmp('<', col(scan.id, 'value'), col(bounded.id, HI))), owner, fresh);
-  };
-  const drivingCols = (rel: Rel): readonly ColMeta[] => rel.type.cols.filter((column) => column.name !== C);
-  // |c| < 2^52: the integer parts trunc(c)−2 … trunc(c)+2, and `-0` where trunc(c) is within 2 of zero.
-  const small = keyed((c) => within(c, SMALL));
-  const parts = make.explode({
-    id: fresh('ex'), input: small, channels: [], as: { value: 'sk_p', ord: 'sk_o' },
-    expr: { kind: 'json-array', binary: false, items: [
-      ...[-2, -1, 0, 1, 2].map((d): Expr => text(cmp('+', int(col(small.id, C)), compilerInt(d)))),
-      { kind: 'case', whens: [[cmp('<=', call('abs', int(col(small.id, C))), compilerInt(2)), compilerText('-0')]], else: compilerNull('text') },
-    ] },
-    type: typeOf(...small.type.cols, meta('sk_p', 'text', true), meta('sk_o', 'int')),
-  });
-  const prefixes = make.project({
-    id: fresh('p'), input: parts, channels: [], type: typeOf(...drivingCols(small), meta('sk_p', 'text', true)),
-    exprs: [...drivingCols(small).map((column) => [column.name, col(parts.id, column.name)] as const), ['sk_p', col(parts.id, 'sk_p')]],
-  });
-  const prefixed = ranged(prefixes, (rel) => col(rel, 'sk_p'), (rel) => cat(col(rel, 'sk_p'), compilerText('/')));
-  // |c| ≥ 2^52: below 9·10^18 with ends of one length, one range on the integer part's digits; otherwise the
-  // key's numeric-looking TEXT. A CASE, so the ends are only computed for a magnitude they are defined on.
+  // BigDecimal: the partial decimal index, keyed by the very cast the residual compares. The `vtype` term is
+  // the index's own WHERE, so SQLite may use it.
+  const every = keyed(() => eq(compilerInt(1), compilerInt(1))), decimals = props();
+  const decimal = seekOwners(every, decimals, and(and(eq(col(decimals.id, 'key'), key(every.id)), eq(col(decimals.id, 'vtype'), compilerText('bigdecimal'))),
+    eq({ kind: 'cast', arg: col(decimals.id, 'value'), to: 'real' }, col(every.id, C))), owner, fresh);
+  // |c| ≥ 2^53, a long/bigint TEXT: below 9·10^18 with ends of one length, one range on the integer part's
+  // digits; otherwise the key's numeric-looking TEXT. A CASE, so the ends are only computed for a magnitude
+  // they are defined on.
   const sign = (c: Expr): Expr => ({ kind: 'case', whens: [[cmp('<', c, compilerInt(0)), compilerText('-')]], else: compilerText('') });
   const reach = (c: Expr): Expr => cmp('+', cmp('/', call('abs', int(c)), compilerInt(2 ** 50)), compilerInt(1));
   const end = (c: Expr, side: '-' | '+'): Expr => text(cmp(side, call('abs', int(c)), reach(c)));
   const spans = (c: Expr): Expr => ({ kind: 'case', whens: [[within(c, INTEGRAL), eq(call('length', end(c, '-')), call('length', end(c, '+')))]],
     else: eq(compilerInt(1), compilerInt(0)) });
   const bound = (c: Expr, ranged: Expr, otherwise: string): Expr => ({ kind: 'case', whens: [[spans(c), ranged]], else: compilerText(otherwise) });
-  const large = keyed((c) => not(within(c, SMALL)));
-  const spanned = ranged(large, (rel) => bound(col(rel, C), cat(sign(col(rel, C)), end(col(rel, C), '-')), '-'),
-    (rel) => bound(col(rel, C), cat(cat(sign(col(rel, C)), end(col(rel, C), '+')), compilerText('/')), ':'));
-  return [prefixed, spanned];
+  const large = keyed((c) => not(within(c, SAFE)));
+  const c = col(large.id, C);
+  const drivingCols = large.type.cols.filter((column) => column.name !== C);
+  const bounded = make.project({
+    id: fresh('p'), input: large, channels: [], type: typeOf(...drivingCols, meta(LO, 'text', true), meta(HI, 'text', true)),
+    exprs: [...drivingCols.map((column) => [column.name, col(large.id, column.name)] as const),
+      [LO, bound(c, cat(sign(c), end(c, '-')), '-')], [HI, bound(c, cat(cat(sign(c), end(c, '+')), compilerText('/')), ':')]],
+  });
+  const longs = props();
+  const textLong: Expr = { kind: 'in-list', expr: col(longs.id, 'vtype'), values: ['long', 'bigint'].map(compilerText) };
+  const spanned = seekOwners(bounded, longs, and(and(and(eq(col(longs.id, 'key'), key(bounded.id)), textLong),
+    cmp('>=', col(longs.id, 'value'), col(bounded.id, LO))), cmp('<', col(longs.id, 'value'), col(bounded.id, HI))), owner, fresh);
+  return [decimal, spanned];
 }
 
 /**
