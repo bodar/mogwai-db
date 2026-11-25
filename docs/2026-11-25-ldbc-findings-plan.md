@@ -63,6 +63,18 @@ changes a data-dependent compile decision does not serve a stale plan.
 
 ### L3. The JSON output must render a Boolean as a Boolean
 
+**✅ LANDED (2026-11-25, `318a9dd9`).** The untyped renderer reads the value's `boolean` tag in
+`untypedLeaf` (every scalar leaf) and `scalarKey` (every scalar map key) in `src/untyped.ts`. One
+decode, `booleanOfStored` in `src/gremlin/types.ts`, now serves GraphSON, CSV and the JSON response.
+Test: `test/untyped-boolean.test.ts`.
+
+**What remains.** Not in the JSON renderer, so not fixed here:
+- A list that `project().by(...fold())` collects loses its Boolean or datetime type, on GraphBinary
+  too. `g.inject(true).project('b').by(fold())` gives `{"b":[1]}`. A datetime comes back as a plain
+  number. `group().by().by(fold())` and `map(fold())` keep the type. Tracked in
+  `docs/outstanding-work.md` as `project-fold-type-loss`.
+- Already true before this change: an error response is GraphBinary even when the request asks for JSON.
+
 **Fact.** On the `application/json` path (`Executor.jsonAsync` / the untyped renderer),
 `g.inject(true)` returns `[1]` and `false` returns `[0]`. GraphBinary is correct (`0x27 01`). Every
 query that ends in a Boolean (`constant(true)`, `choose(…, constant(true), constant(false))`, `is()`
