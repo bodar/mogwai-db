@@ -264,6 +264,9 @@ byte-stable reuse.
    precision" (`docs/limitations.md`). So store the double in `value`, which SQLite compares and
    indexes natively, and keep the exact digits in a nullable column used only to frame the output.
    Then delete the decimal arms, the two partial indexes and the OR expansion where only they used it.
+   This includes round 2's merge-side BigDecimal arm (`7d6b0bc9`). Keep `722b7da8` (a JS double past
+   2^53 crosses JSON as its own exact digits): that is JS-to-SQLite value fidelity, not Java emulation,
+   and it stops a duplicate upsert of a plain double.
    No migration (pre-alpha). Done when: the witnesses above return the right rows, a BigDecimal still
    round-trips exactly, and LDBC q3/q7/q21/q26 keep their plain seek.
 4. *(Cut by owner review — subsumed by item 3.)*
