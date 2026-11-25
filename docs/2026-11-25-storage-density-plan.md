@@ -41,6 +41,11 @@ Cite the vendored reference for what `TextP` does on a non-string (`vendor/tinke
 Expected: about 90 MB at sf0.1, about 20 lines.
 
 ### S2. `uid` uniqueness as a partial index
+
+✅ **LANDED (2026-11-25, `3a9623b9`).** `nodes.uid` and `edges.uid` lose the column `UNIQUE`. Two partial
+unique indexes, `nodes_uid` and `edges_uid` (`WHERE uid IS NOT NULL`), replace it — see `SCHEMA` in
+`src/storage.ts`. Measured: LDBC sf0.1 shrinks by 18.4 MB. Every `uid` lookup still seeks
+(`test/performance.test.ts` pins this). Remaining: nothing.
 `nodes.uid` and `edges.uid` are `TEXT UNIQUE`. The implicit index holds a row for every element, but
 most elements have no `uid` (LDBC: none). Replace the column constraint with
 `CREATE UNIQUE INDEX … WHERE uid IS NOT NULL`, and check that every `uid` lookup still seeks it.
