@@ -188,7 +188,7 @@ any of them. Their questions are under "Needs a human". The round-3 list below o
 
 Major first. Minor items are kept only when they are cheap and concrete.
 
-- **MAJOR — the merge selectivity count ignores the BigDecimal arm (super-linear).** `cappedCount`
+- **(Subsumed by round-3 item 3.) MAJOR — the merge selectivity count ignores the BigDecimal arm (super-linear).** `cappedCount`
   (`src/compiler/rel/write.ts`, about line 4039) counts only the exact `(key, value)` arm. For a
   BigDecimal-stored key it always gives 0. The computed-search picker and the `mapDrivers` ranking
   then choose that key as the most selective. The `vp_decimal` arm returns every vertex with that
@@ -197,7 +197,7 @@ Major first. Minor items are kept only when they are cheap and concrete.
   8k (110×). The `inject` map form: 3,020 ms / 153,097 ms (50×). Price as a double: linear. Answers are
   correct. Trunk before round 2 was also quadratic. Fix: make `cappedCount` also count a capped probe
   through `vp_decimal` (`vtype = 'bigdecimal' AND CAST(value AS REAL) = c`).
-- **MAJOR — the long/bigint TEXT arm's `vtype` gate does not narrow the index (super-linear).**
+- **(Subsumed by round-3 item 3.) MAJOR — the long/bigint TEXT arm's `vtype` gate does not narrow the index (super-linear).**
   `vp_key_value` is `(key, value)` and does not hold `vtype`. When |c| >= 9e18, or the two range ends
   have different digit counts, the bounds fall back to `value >= '-' AND value < ':'`. Each driver
   then reads every numeric-looking TEXT row of the key. Witness: N `p` vertices with
@@ -233,8 +233,19 @@ Major first. Minor items are kept only when they are cheap and concrete.
 
 ## Next round
 
-This is the proposed round-3 order. The owner decides the scope (see "Needs a human"). Wrong answers
-come first, then super-linear costs, then cheap fixes, then byte-stable reuse.
+**Owner review (2026-11-25): mechanical sympathy, not Java emulation.** The rule
+(CLAUDE.md, "A faithful port"): fix a wrong answer in the way SQLite and JS do it naturally; if that is
+not possible, decline it. Do not build machinery to give Java's exact number behaviour.
+`docs/limitations.md` already accepts that a `bigdecimal` compares at double precision. The review
+made these changes:
+- **Cut item 4** (merge seek on BigDecimal keys, the two MAJOR follow-ups, the [2^53, 2^63) witnesses,
+  the `stringifyExact` doc fix). It is the cost of the TEXT-stored decimal arms, and item 3 removes them.
+- **Cut the correlated form of item 3.** It is contrived.
+- **Replace item 3** with a storage change that removes the decimal arms rather than adding more.
+- Items 1, 2, 5–14 stay. None of them copies Java. Items 1, 2 and 8 are wrong answers.
+
+This is the round-3 order. Wrong answers come first, then super-linear costs, then cheap fixes, then
+byte-stable reuse.
 
 1. **A list nested in a map/record value keeps its static member type** (`project-fold-member-tag`;
    `docs/outstanding-work.md` `project-fold-type-loss` and `project-count-fold-class`).
@@ -244,14 +255,18 @@ come first, then super-linear costs, then cheap fixes, then byte-stable reuse.
    through the one map/record lowering, not per host.
 2. **Run-time equality sets, part A: unwrap folded-set members** (`decimal-arm-runtime-bounds` A). A
    folded set of doubles or dates compares wrongly. Land before part B.
-3. **Run-time equality sets, part B: the decimal arm for `within(listParam)`.** Stored `age=29m`:
-   `has('age', within(xs))` with `xs=[29,30]` misses the BigDecimal row. The `json_each` path gets no
-   `decimalTextArm` (`src/compiler/rel/predicate.ts`). Fix it through the one decimal-arm rule. Do the
-   read-path large-BigDecimal miss (follow-up above) in the same item. The correlated operand form
-   (`has('age', select('a').values('age'))`) looks contrived; the owner decides.
-4. **Merge seek stays linear on BigDecimal keys.** The two MAJOR follow-ups above: `cappedCount`
-   counts the decimal arm, and the long/bigint TEXT arm gets an index its gate can narrow. Add the
-   [2^53, 2^63) witnesses and the `stringifyExact` doc fix here.
+3. **Store a comparable REAL for a `bigdecimal` / out-of-range `bigint`; keep the exact text only for
+   output.** Today such a value is TEXT in `value`, so every compare site needs a decimal arm
+   (`decimalTextArm` in `predicate.ts`, `decimalTextSeeks` in `write.ts`, the `seekArms` OR expansion in
+   `semijoin.ts`, `vp_decimal`/`ep_decimal` in `storage.ts`). Each site that lacks an arm is a missed row:
+   `within(listParam)` misses a stored `29m`, and `has('n', 123456789012345678m)` returns 0. The arms
+   also cause the two quadratic merge costs. The documented semantics is already "compare at double
+   precision" (`docs/limitations.md`). So store the double in `value`, which SQLite compares and
+   indexes natively, and keep the exact digits in a nullable column used only to frame the output.
+   Then delete the decimal arms, the two partial indexes and the OR expansion where only they used it.
+   No migration (pre-alpha). Done when: the witnesses above return the right rows, a BigDecimal still
+   round-trips exactly, and LDBC q3/q7/q21/q26 keep their plain seek.
+4. *(Cut by owner review — subsumed by item 3.)*
 5. **Parse-cache bounds for memory** (follow-up above). Small.
 6. **GraphBinary frames a boolean tag through `booleanOfStored`; name `vp_decimal`/`ep_decimal` in the
    index-build-on-deploy note** (round-1 follow-ups, about 5 lines).
@@ -277,10 +292,7 @@ come first, then super-linear costs, then cheap fixes, then byte-stable reuse.
     `bun scripts/refs.ts conjoin`/`disjoin` and a grep for hand-written `op: 'and'|'or', left`.
 11. **Delete `receiver.ts`'s private `and`/`or`** (`src/compiler/rel/receiver.ts:79-80`). Import them
     from `src/rel/expr.ts`. `scoped.ts:1544` becomes `(step.name === 'or' ? disjoin : conjoin)(preds)!`.
-12. **One builder for the BigDecimal compare form that `vp_decimal`/`ep_decimal` index.**
-    `predicate.ts:258` `decimalTextArm` (read) and `write.ts:3981` `decimalTextSeeks` (write) both
-    spell the index expression of `src/storage.ts:251`. One `decimalCompare(value, vtype, c)` in
-    `build.ts` keeps them in step. Do it with item 3 or item 4.
+12. *(Cut by owner review — item 3 deletes both spellings.)*
 13. **Share the all-null `concat` guard** between `lower.ts:2320-2327` and `transform.ts:294-300`
     (`allNullGuard(parts, body)` beside `VALUE_TX`, built on `conjoin`).
 14. **Name the tautology once** (`always` in `src/rel/expr.ts`; 17 spellings of
@@ -291,7 +303,11 @@ come first, then super-linear costs, then cheap fixes, then byte-stable reuse.
 
 ## Needs a human
 
-Round-2 questions, verbatim:
+**Answered by the owner review (2026-11-25):** take items 1–3 and 5–11, 13 and 14 in round 3, in the
+order above. Item 4, item 12 and the correlated form are cut. Items 8 and 9 land together, because a
+random `UUID()` literal must never be served from the plan cache.
+
+Round-2 questions, verbatim (now answered):
 
 - **`boolean-frame-and-index-note` (round-3 item 6):** "You asked for items 1, 2, 3. These two round-1
   follow-ups are about 5 lines in total. Do you want them in this round, or in a later one?"
