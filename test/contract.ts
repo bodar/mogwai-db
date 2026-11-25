@@ -48,9 +48,54 @@ export function graphContract(
     federationContract(() => origin);
     olapContract(() => origin);
     replicatorContract(() => origin);
+    revContract(() => origin);
     // A per-runtime hook for assertions that only ONE runtime can make (e.g. io() from a URL over the real
     // workerd DO boundary, which needs an allowlist + a fetchable doc server the shared contract can't set up).
     opts.extra?.(() => origin);
+  });
+}
+
+/**
+ * The packed rev (src/rev.ts: one BLOB, a 4-byte gen then 16-byte ancestry hashes) on the REAL runtime.
+ * The same writes give the same rev on every backend, read back through the wire forms: the `_changes`
+ * leaf, the `_bulk_get` body with its ancestry, and a tombstone's `_changes` entry with the full
+ * ancestry. On Cloudflare this crosses DO SQLite and the RPC boundary, where a raw BLOB would diverge.
+ * The expected values come from an in-process Bun manager running the same writes.
+ */
+function revContract(getOrigin: () => string) {
+  describe('rev — packed storage, same bytes on every runtime', () => {
+    test('a vertex mutated twice, then dropped, reports the same rev chain as an in-process Bun graph', async () => {
+      const origin = getOrigin();
+      const g = `rev-${Date.now()}`;
+      const writes = ["g.addV('p').property('n',1)", "g.V().property('n',2)", "g.V().property('n',3)"];
+      const post = (path: string, body: unknown) => fetch(`${origin}/gremlin/${g}${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+      const changes = async () => (await (await fetch(`${origin}/gremlin/${g}/_changes`)).json()) as
+        { results: { id: string; rev: { gen: number; hash: string; ids?: readonly string[] }; deleted?: boolean }[] };
+
+      const { BunGraphManager } = await import('../src/bun/BunGraphManager.ts');
+      const { standardRegistry } = await import('../src/services/standard.ts');
+      const local = new BunGraphManager(undefined, standardRegistry);
+      await local.changes('g', 0); // replication on, as the remote's first _changes does
+      for (const w of writes) await local.executor('g').framedAsync(w, {});
+      const want = (await local.changes('g', 0)).results[0]!;
+      const wantBody = (await local.bulkGet('g', [{ gid: want.id, kind: 'vertex' }])).vertices![0]!;
+
+      await changes(); // turn replication metadata on for the remote graph
+      for (const w of writes) await post('', { gremlin: w });
+      const live = (await changes()).results;
+      expect(live).toHaveLength(1);
+      expect(live[0]!.rev).toEqual(want.rev!); // the leaf {gen: 3, hash}
+      expect(live[0]!.rev.gen).toBe(3);
+      const body = ((await (await post('/_bulk_get', [{ gid: live[0]!.id, kind: 'vertex' }])).json()) as
+        { vertices: { rev: string }[] }).vertices[0]!;
+      expect(JSON.parse(body.rev)).toEqual(JSON.parse(wantBody.rev)); // the ancestry, leaf first
+      expect((JSON.parse(body.rev) as { ids: string[] }).ids).toHaveLength(3);
+
+      await post('', { gremlin: 'g.V().drop()' });
+      const del = (await changes()).results.find((r) => r.deleted)!;
+      expect(del.rev).toEqual(JSON.parse(wantBody.rev)); // a tombstone carries the full ancestry
+    });
   });
 }
 

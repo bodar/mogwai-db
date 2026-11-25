@@ -39,13 +39,14 @@
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
 import { refreshElements } from './refresh.ts';
+import { storedRev } from './rev.ts';
 import { deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
 import { stringifyExact } from './json-exact.ts';
 import { execute, identifier, q, value } from './sql/kernel/q.ts';
 
 /** Landing a PRESERVED rev on a matched vertex during `'replace'` (replication apply): the rev crosses
- *  as its `{gen, hash}` JSON text wrapped in `jsonb()`, and dirty=3 tells the refresh to keep it. */
-const BULK_REV: SetColumn = { name: 'rev', type: 'blob', jsonb: true };
+ *  as its packed hex (`storedRev`, rev.ts) `unhex()`ed, and dirty=3 tells the refresh to keep it. */
+const BULK_REV: SetColumn = { name: 'rev', type: 'blob', blob: true };
 const BULK_DIRTY: SetColumn = { name: 'dirty', type: 'any' };
 /** A streaming load's undo journal row — `[load, kind, id]` (the `bulk_journal` schema note, storage.ts). */
 const BULK_JOURNAL: readonly SetColumn[] = [
@@ -77,7 +78,8 @@ export interface BulkVertex {
   /** Global identity (§6·1), a 32-char hex uuid_v7. Present → PRESERVED verbatim (a replicated element
    *  keeps its gid across peers); absent → the refresh mints one once replication is on (`refresh.ts`). */
   readonly gid?: string | null;
-  /** The rev (§5·1) as JSON TEXT (`{"gen":N,"hash":"…"}`). Present → PRESERVED verbatim so an `io()`
+  /** The rev (§5·1) as JSON TEXT (`{"gen":N,"hash":"…","ids":[…]}`), packed into the stored BLOB on
+   *  landing (`storedRev`, rev.ts; a malformed one is refused). Present → PRESERVED so an `io()`
    *  round-trip (and replication replay) is idempotent — the element keeps its generation and lineage;
    *  absent → the post-write refresh COMPUTES a fresh `{gen:1, hash}` from the element's content, the
    *  SAME authority the compiled path uses, so identical content converges. Preserve-or-COMPUTE (a
@@ -281,7 +283,7 @@ export class BulkLoader {
     // the compiled path uses, so identical content converges (§5·1). A CARRIED rev lands verbatim born
     // dirty=3 (PRESERVE): the refresh keeps the rev but still assigns a fresh LOCAL seq (§5·2 — a load is
     // a local write event, so the element must enter this graph's `_changes` feed).
-    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? null, v.rev ?? null, v.rev == null ? 1 : 3]);
+    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? null, storedRev(v.rev), v.rev == null ? 1 : 3]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
@@ -308,7 +310,7 @@ export class BulkLoader {
     // a local seq). The refresh reads the endpoints' minted gids, so it runs AFTER the vertices' (§6·5).
     const gid = e.gid ?? null;
     const dirty = e.rev == null ? 1 : 3;
-    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, e.rev ?? null, dirty]);
+    if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, storedRev(e.rev), dirty]);
     else this.pendingEdges.push({ edge: e, id: rowid, uid, gid });
     for (const p of e.properties ?? [])
       this.property(this.edgeProps, 'edge', rowid, p, () => p.id ?? this.nextEdgeProp++, 'edge');
@@ -374,7 +376,7 @@ export class BulkLoader {
     for (const { edge, id, uid, gid } of this.pendingEdges) {
       const src = this.resolveEndpoint(edge.src, edge);
       const tgt = this.resolveEndpoint(edge.tgt, edge);
-      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, edge.rev ?? null, edge.rev == null ? 1 : 3]);
+      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt, gid, storedRev(edge.rev), edge.rev == null ? 1 : 3]);
     }
     this.pendingEdges = [];
     this.land('edges', ['id', 'uid', 'src', 'label', 'tgt', 'gid', 'rev', 'dirty'], this.edgeRows);
@@ -455,7 +457,7 @@ export class BulkLoader {
     // version lands, so replication apply is idempotent. An ABSENT rev CHAINS (dirty=2): a local
     // re-import is a mutation, so the refresh reads the old rev and computes gen+1. Both take a fresh
     // local seq. A matched EDGE is deleted and reinserted, so it is born fresh through `bufferEdge`.
-    const preserve = matchedVertices.filter((id) => matchedRev.get(id) != null).map((id) => [id, matchedRev.get(id), 3]);
+    const preserve = matchedVertices.filter((id) => matchedRev.get(id) != null).map((id) => [id, storedRev(matchedRev.get(id)), 3]);
     if (preserve.length) updateSet(this.store, 'nodes', 'id', [BULK_REV, BULK_DIRTY], preserve);
     markMembersDirty(this.store, 'nodes', 'id', matchedVertices.filter((id) => matchedRev.get(id) == null));
 
@@ -593,8 +595,9 @@ export class BulkLoader {
   private land(table: string, columns: readonly string[], rows: unknown[][], jsonbValue = false): void {
     // A JSONB column carries its JSON TEXT wrapped in `jsonb(<text>)`. `meta` always rides that shape —
     // `jsonb(NULL)` is NULL (verified), so a nullable JSONB column needs no second batch.
-    const isJsonb = (c: string) => c === 'meta' || c === 'rev' || (jsonbValue && c === 'value');
-    const isBlob = (c: string) => c === 'gid'; // a raw BLOB, crossed as hex + unhex()'d (setwrite.ts)
+    const isJsonb = (c: string) => c === 'meta' || (jsonbValue && c === 'value');
+    // A raw BLOB, crossed as hex + unhex()'d (setwrite.ts): the gid, and the packed rev (rev.ts).
+    const isBlob = (c: string) => c === 'gid' || c === 'rev';
     const spec: SetColumn[] = columns.map((c) => ({
       name: c, type: isJsonb(c) || isBlob(c) ? 'blob' : 'any', jsonb: isJsonb(c), blob: isBlob(c),
     }));

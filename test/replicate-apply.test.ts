@@ -2,6 +2,7 @@ import { test, expect, describe } from 'bun:test';
 import { replicatingStore } from './support/replicating.ts';
 import { GraphStore } from '../src/storage.ts';
 import { applyChanges, type ReplVertex, type ReplEdge } from '../src/replicate.ts';
+import { decodeRev } from '../src/rev.ts';
 
 // Phase 3 step 3a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §4·5, §6·1/§6·2): applyChanges
 // lands a peer's changes by GID, idempotently, at their stated rev. A fresh gid → a fresh local rowid; a
@@ -9,7 +10,9 @@ import { applyChanges, type ReplVertex, type ReplEdge } from '../src/replicate.t
 // element and tombstones it. This is the write half the peer protocol (3b) and the replicator (3c) drive.
 
 const store = replicatingStore;
-const rev = (gen: number, hash: string) => JSON.stringify({ gen, hash });
+// A stored rev hash is 128-bit hex, so a test name ('aa', 'del') stands for a hash spelled from its bytes.
+const H = (name: string) => [...name].map((c) => c.charCodeAt(0).toString(16)).join('').padEnd(32, '0');
+const rev = (gen: number, hash: string) => JSON.stringify({ gen, hash: H(hash), ids: [H(hash)] });
 const A = 'A'.repeat(32), B = 'B'.repeat(32), C = 'C'.repeat(32);
 const v = (gid: string, r: string, labels: string[], props: Record<string, unknown> = {}): ReplVertex =>
   ({ gid, rev: r, labels, properties: Object.entries(props).map(([key, value]) => ({ key, value })) });
@@ -18,10 +21,8 @@ const e = (gid: string, r: string, label: string, srcGid: string, tgtGid: string
 // The stored rev's LEAF (gen/hash) as a normalized string — the rev now also carries the tree `ids`
 // (Phase 4a), which these assertions don't pin.
 const storedRev = (s: GraphStore, table: 'nodes' | 'edges', gid: string) => {
-  const raw = s.query<{ rev: string }>(`SELECT json(rev) AS rev FROM ${table} WHERE hex(gid) = ?`, [gid])[0]?.rev;
-  if (!raw) return undefined;
-  const { gen, hash } = JSON.parse(raw) as { gen: number; hash: string };
-  return JSON.stringify({ gen, hash });
+  const r = decodeRev(s.query<{ rev: string }>(`SELECT hex(rev) AS rev FROM ${table} WHERE hex(gid) = ?`, [gid])[0]?.rev);
+  return r ? JSON.stringify({ gen: r.gen, hash: r.hash, ids: [r.hash] }) : undefined;
 };
 const counts = (s: GraphStore) => ({
   v: s.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0]!.n,
@@ -75,13 +76,14 @@ describe('applyChanges — landing a peer\'s changes by gid', () => {
     const s = store();
     applyChanges(s, { vertices: [v(A, rev(1, 'aa'), ['person'])] });
     // A realistic delete DESCENDS the element's rev (a delete-after-edit) — its ancestry includes 'aa'.
-    const del = JSON.stringify({ gen: 2, hash: 'del', ids: ['del', 'aa'] });
+    const del = JSON.stringify({ gen: 2, hash: H('del'), ids: [H('del'), H('aa')] });
     applyChanges(s, { deletes: [{ gid: A, rev: del, kind: 'vertex' }] });
     expect(counts(s)).toEqual({ v: 0, e: 0 }); // gone
     const t = s.query<{ gid: string; rev: string; seq: number | null; kind: string }>(
-      'SELECT hex(gid) AS gid, json(rev) AS rev, seq, kind FROM tombstones');
+      'SELECT hex(gid) AS gid, hex(rev) AS rev, seq, kind FROM tombstones');
     expect(t).toHaveLength(1);
-    expect(t[0]!).toMatchObject({ gid: A, rev: del, kind: 'vertex' });
+    expect(t[0]!).toMatchObject({ gid: A, kind: 'vertex' });
+    expect(JSON.stringify(decodeRev(t[0]!.rev))).toBe(del); // the carried rev, ancestry included
     expect(t[0]!.seq!).toBeGreaterThan(0); // a fresh LOCAL seq — the delete enters the feed
     applyChanges(s, { deletes: [{ gid: A, rev: del, kind: 'vertex' }] });
     expect(s.query<{ n: number }>('SELECT count(*) AS n FROM tombstones')[0]!.n).toBe(1); // deduped
@@ -90,7 +92,7 @@ describe('applyChanges — landing a peer\'s changes by gid', () => {
   test('a change set refused part-way applies none of it — its deletes stay unapplied', () => {
     const s = store();
     applyChanges(s, { vertices: [v(A, rev(1, 'aa'), ['person'])] });
-    const del = JSON.stringify({ gen: 2, hash: 'del', ids: ['del', 'aa'] });
+    const del = JSON.stringify({ gen: 2, hash: H('del'), ids: [H('del'), H('aa')] });
     // The upsert's meta-property holds a raw bigint, which no JSON text SQLite reads can spell — refused AFTER
     // the delete ran, inside the same unit.
     const refused: ReplVertex = { gid: B, rev: rev(1, 'bb'), labels: ['person'], properties: [{ key: 'k', value: 1, meta: { m: 5n } }] };

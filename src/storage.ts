@@ -77,8 +77,9 @@ const SCHEMA = [
   // `gid` (global identity, §6·1) and `rev` (generation + content hash, §5·1) are the replication
   // deltas (docs/archive/2026-09-02-replication-and-http-interop-plan.md). `gid` is a 16-byte uuid_v7 BLOB,
   // minted once at creation and IMMUTABLE — cross-peer identity, separate from the local rowid, which
-  // stays the fast join key. `rev` is a JSONB `{gen, hash}` recomputed on every mutation (the
-  // touch-rev-on-write barrier). Both are dedicated columns, not properties: a property row would
+  // stays the fast join key. `rev` is ONE packed BLOB — a 4-byte gen then each 16-byte ancestry
+  // hash, leaf first (`encodeRev`, src/rev.ts) — recomputed on every mutation (the touch-rev-on-write
+  // barrier). Both are dedicated columns, not properties: a property row would
   // store the key string on EVERY element plus a second index (double-digit GB at 10^8), and it is
   // more CouchDB-faithful. Nullable: all three (gid, rev, seq) are computed only once the graph first
   // exposes identity (a replication call or a GraphSON export, `src/refresh.ts`), so a graph that never

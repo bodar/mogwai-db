@@ -1,4 +1,5 @@
 import { test, expect, describe } from 'bun:test';
+import { decodeRev } from '../src/rev.ts';
 import { replicatingManager } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
@@ -16,7 +17,7 @@ const n = (s: GraphStore, sql: string, ...binds: unknown[]) => s.query<{ n: numb
 const gidOf = (s: GraphStore, name: string) =>
   s.query<{ gid: string }>("SELECT hex(n.gid) AS gid FROM nodes n JOIN vertex_properties p ON p.node = n.id WHERE p.key = 'name' AND p.value = ?", [name])[0]!.gid;
 const revOf = (s: GraphStore, gid: string) =>
-  s.query<{ rev: string }>('SELECT json(rev) AS rev FROM nodes WHERE hex(gid) = ?', [gid])[0]!.rev;
+  JSON.stringify(decodeRev(s.query<{ rev: string }>('SELECT hex(rev) AS rev FROM nodes WHERE hex(gid) = ?', [gid])[0]!.rev));
 
 describe('replication — the referential rule + resurrect (§6·3)', () => {
   test('deleting a vertex a live edge references RESURRECTS it and surfaces the delete', async () => {

@@ -10,7 +10,7 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 interface Tomb { gid: string; rev: string | null; seq: number | null; kind: string }
 const mgr = replicatingManager;
 const tombs = (m: BunGraphManager, id: string): Tomb[] =>
-  m.storeOf(id).query<Tomb>('SELECT hex(gid) AS gid, json(rev) AS rev, seq, kind FROM tombstones ORDER BY seq');
+  m.storeOf(id).query<Tomb>('SELECT hex(gid) AS gid, hex(rev) AS rev, seq, kind FROM tombstones ORDER BY seq');
 const nodeGid = (m: BunGraphManager, id: string): string =>
   m.storeOf(id).query<{ gid: string }>('SELECT hex(gid) AS gid FROM nodes ORDER BY id')[0]!.gid;
 
@@ -19,7 +19,7 @@ describe('tombstones — drop() records a delete', () => {
     const m = mgr();
     await m.executor('g').framedAsync('g.addV("person").property("name","marko")', {});
     const gid = nodeGid(m, 'g');
-    const rev = m.storeOf('g').query<{ rev: string }>('SELECT json(rev) AS rev FROM nodes')[0]!.rev;
+    const rev = m.storeOf('g').query<{ rev: string }>('SELECT hex(rev) AS rev FROM nodes')[0]!.rev;
     await m.executor('g').framedAsync('g.V().drop()', {});
 
     const t = tombs(m, 'g');

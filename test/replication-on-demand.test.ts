@@ -1,4 +1,5 @@
 import { test, expect, describe } from 'bun:test';
+import { decodeRev } from '../src/rev.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { standardRegistry } from '../src/services/standard.ts';
@@ -20,7 +21,7 @@ const mgr = (http?: Http) => new BunGraphManager(undefined, standardRegistry, un
 const run = (m: BunGraphManager, g: string, q: string) => m.executor(g).framedAsync(q, {});
 const meta = (s: GraphStore, table: 'nodes' | 'edges') =>
   s.query<{ id: number; gid: string; rev: string | null; seq: number | null }>(
-    `SELECT id, hex(gid) AS gid, json(rev) AS rev, seq FROM ${table} ORDER BY id`);
+    `SELECT id, hex(gid) AS gid, nullif(hex(rev), '') AS rev, seq FROM ${table} ORDER BY id`);
 const memCp = (): Checkpoint => { let s = 0; return { read: async () => s, write: async (v) => { s = v; } }; };
 const count = (s: GraphStore, sql: string) => s.query<{ n: number }>(sql)[0]!.n;
 
@@ -101,10 +102,10 @@ describe('replication metadata on demand', () => {
     loadGraphson(b, dump); // b: replication off, but carrying a lineage
     await run(m, 'b', "g.V().property('x', 1)");
     const row = meta(b, 'nodes')[0]!;
-    expect(JSON.parse(row.rev!).gen).toBe(2);
+    expect(decodeRev(row.rev)!.gen).toBe(2);
     expect(row.seq).toBeNull();
     await runReplication(localPeer(m, 'b'), localPeer(m, 'peer'), memCp());
-    expect(JSON.parse(meta(peer, 'nodes')[0]!.rev!).gen).toBe(2);
+    expect(decodeRev(meta(peer, 'nodes')[0]!.rev)!.gen).toBe(2);
     expect(peer.query<{ n: number }>("SELECT count(*) AS n FROM vertex_properties WHERE key = 'x'")[0]!.n).toBe(1);
   });
 

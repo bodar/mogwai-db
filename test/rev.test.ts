@@ -4,7 +4,7 @@ import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { GraphStore } from '../src/storage.ts';
 import { loadGraphson, writeGraphson } from '../src/formats/graphson.ts';
 import { loadBulk } from '../src/bulk.ts';
-import { computeRev, descendsFrom, revWins } from '../src/rev.ts';
+import { computeRev, decodeRev, descendsFrom, encodeRev, revWins, storedRev, type Rev } from '../src/rev.ts';
 
 // Phase 4 step 4a: the rev-TREE. A rev carries its stemmed ancestry (newest-first), so apply can tell a
 // fast-forward from a divergent conflict; `descendsFrom`/`revWins` are the primitives conflict handling
@@ -37,11 +37,10 @@ describe('rev — the rev-tree (Phase 4a)', () => {
 // replay), different content diverges, and an edge's rev references its endpoint gids. rev is not
 // user-visible yet, so we read it off the store.
 
-interface Rev { gen: number; hash: string }
 const mgr = replicatingManager;
 const revs = (m: BunGraphManager, id: string, table: 'nodes' | 'edges'): Rev[] =>
-  m.storeOf(id).query<{ rev: string | null }>(`SELECT json(rev) AS rev FROM ${table} ORDER BY id`)
-    .map((r) => JSON.parse(r.rev!) as Rev);
+  m.storeOf(id).query<{ rev: string }>(`SELECT hex(rev) AS rev FROM ${table} ORDER BY id`)
+    .map((r) => decodeRev(r.rev)!);
 const gids = (m: BunGraphManager, id: string, table: 'nodes' | 'edges'): string[] =>
   m.storeOf(id).query<{ gid: string }>(`SELECT hex(gid) AS gid FROM ${table} ORDER BY id`).map((r) => r.gid);
 
@@ -166,7 +165,7 @@ describe('rev — the post-write refresh (compiled path)', () => {
 describe('rev — the bulk/format path', () => {
   const store = replicatingStore;
   const storeRevs = (s: GraphStore, table: 'nodes' | 'edges'): Rev[] =>
-    s.query<{ rev: string | null }>(`SELECT json(rev) AS rev FROM ${table} ORDER BY id`).map((r) => JSON.parse(r.rev!) as Rev);
+    s.query<{ rev: string }>(`SELECT hex(rev) AS rev FROM ${table} ORDER BY id`).map((r) => decodeRev(r.rev)!);
 
   test('a GraphSON round-trip PRESERVES rev verbatim, including a chained generation', async () => {
     const m = mgr();
@@ -200,5 +199,58 @@ describe('rev — the bulk/format path', () => {
     loadBulk(bulk, [{ id: 1, labels: ['person'], properties: [{ key: 'name', value: 'a' }] }]);
     expect(storeRevs(bulk, 'nodes')[0]!.gen).toBe(1);
     expect(bulk.query<{ n: number }>('SELECT count(*) AS n FROM nodes WHERE dirty')[0]!.n).toBe(0);
+  });
+});
+
+// Storage density S4 (docs/2026-11-25-storage-density-plan.md): a stored rev is ONE packed BLOB — a 4-byte
+// big-endian gen, then each ancestry hash as 16 raw bytes, leaf first — crossing SQLite as hex (the gid
+// idiom). The wire forms render from the decoded `Rev` and do not change.
+describe('rev — the packed storage form', () => {
+  test('encodeRev/decodeRev round-trip gen, hash and ancestry; 4 + 16 bytes per id', () => {
+    const r1 = computeRev(null, 'a'), r2 = computeRev(r1, 'b'), r3 = computeRev(r2, 'c');
+    const hex = encodeRev(r3);
+    expect(hex.length / 2).toBe(4 + 16 * 3);
+    expect(hex.slice(0, 8)).toBe('00000003');
+    expect(decodeRev(hex)).toEqual(r3);
+    expect(decodeRev(hex.toUpperCase())).toEqual(r3); // SQLite's hex() is upper case
+    expect(decodeRev('')).toBeNull(); // hex(NULL) is ''
+  });
+
+  test('a rev the packed form cannot hold is refused with a clear message, never truncated', () => {
+    const r = computeRev(null, 'a');
+    expect(() => encodeRev({ ...r, gen: 0 })).toThrow(/generation 0/);
+    expect(() => encodeRev({ ...r, gen: 2 ** 32 })).toThrow(/generation/);
+    expect(() => encodeRev({ gen: 1, hash: 'abc', ids: ['abc'] })).toThrow(/128-bit hex/);
+    expect(() => storedRev(`{"gen":1,"hash":"${r.hash}"}`)).toThrow(/not a \{gen, hash, ids\} rev/);
+  });
+
+  test('gen, hash and ids round-trip through storage after a chain of writes', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync('g.addV("p").property("n",1)', {});
+    const chain = [revs(m, 'g', 'nodes')[0]!];
+    for (const n of [2, 3, 4]) {
+      await m.executor('g').framedAsync(`g.V().property("n",${n})`, {});
+      chain.push(revs(m, 'g', 'nodes')[0]!);
+    }
+    const last = chain.at(-1)!;
+    expect(last.gen).toBe(4);
+    expect(last.ids).toEqual(chain.map((r) => r.hash).reverse()); // leaf first, every ancestor kept
+    expect(m.storeOf('g').query<{ n: number }>('SELECT length(rev) AS n FROM nodes')[0]!.n).toBe(4 + 16 * 4);
+    expect(m.storeOf('g').query<{ t: string }>('SELECT typeof(rev) AS t FROM nodes')[0]!.t).toBe('blob');
+  });
+
+  test('a GraphSON write/read round-trips gid and rev for a replicated graph', async () => {
+    const m = mgr();
+    await m.executor('g').framedAsync(
+      'g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b")', {});
+    await m.executor('g').framedAsync('g.V().property("age",1)', {}); // chain every vertex to gen 2
+    const reloaded = replicatingStore();
+    loadGraphson(reloaded, writeGraphson(m.storeOf('g')));
+    const ident = (s: GraphStore, table: 'nodes' | 'edges') =>
+      s.query<{ gid: string; rev: string }>(`SELECT hex(gid) AS gid, hex(rev) AS rev FROM ${table} ORDER BY gid`);
+    for (const table of ['nodes', 'edges'] as const) {
+      expect(ident(reloaded, table).length).toBeGreaterThan(0);
+      expect(ident(reloaded, table)).toEqual(ident(m.storeOf('g'), table)); // the same bytes, gid and rev
+    }
   });
 });

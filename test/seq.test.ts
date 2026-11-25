@@ -1,4 +1,5 @@
 import { test, expect, describe } from 'bun:test';
+import { decodeRev } from '../src/rev.ts';
 import { replicatingManager, replicatingStore } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { GraphStore } from '../src/storage.ts';
@@ -88,8 +89,8 @@ describe('seq — the bulk/format path', () => {
   test('a PRESERVED-rev bulk load keeps rev but still takes a fresh LOCAL seq (§5·2)', () => {
     const s = store();
     // A carried rev (as a replicated/dumped element ships) — preserved, but seq is this graph's own.
-    loadBulk(s, [{ id: 1, labels: ['person'], gid: 'a'.repeat(32), rev: JSON.stringify({ gen: 5, hash: 'deadbeef' }), properties: [] }]);
-    expect(JSON.parse(s.query<{ rev: string }>('SELECT json(rev) AS rev FROM nodes')[0]!.rev)).toMatchObject({ gen: 5, hash: 'deadbeef' }); // rev preserved (leaf)
+    loadBulk(s, [{ id: 1, labels: ['person'], gid: 'a'.repeat(32), rev: JSON.stringify({ gen: 5, hash: 'deadbeef'.repeat(4), ids: ['deadbeef'.repeat(4)] }), properties: [] }]);
+    expect(decodeRev(s.query<{ rev: string }>('SELECT hex(rev) AS rev FROM nodes')[0]!.rev)).toMatchObject({ gen: 5, hash: 'deadbeef'.repeat(4) }); // rev preserved (leaf)
     expect(storeSeqs(s, 'nodes')[0]!).toBeGreaterThan(0); // but a local seq was assigned
     expect(s.query<{ n: number }>('SELECT count(*) AS n FROM nodes WHERE dirty')[0]!.n).toBe(0); // dirty cleared
   });

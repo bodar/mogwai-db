@@ -12,6 +12,7 @@
 // PUT is create-if-absent, DELETE is a no-op when there's nothing to remove.
 import type { GraphStore } from './storage.ts';
 import { exposeIdentity } from './refresh.ts';
+import { decodeRev, parseRev, type Rev } from './rev.ts';
 import type { ChangesFeed, ChangeRow, GraphInfo, RevsDiffRequest, RevsDiffResponse, WireRev } from './api.ts';
 // The GraphManager / GraphInfo / Executor seams now live in the API surface (src/api.ts).
 // Re-exported here so existing `import { GraphManager } from './manager.ts'` sites keep working.
@@ -68,19 +69,19 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
            UNION ALL SELECT id, src FROM edges WHERE tgt IN (SELECT id FROM matched)),
          vclosure(id) AS (SELECT id FROM matched UNION SELECT other FROM incident),
          eclosure(id) AS (SELECT eid FROM incident)
-         SELECT seq, hex(gid) AS id, 'vertex' AS kind, json(rev) AS rev, 0 AS deleted FROM nodes
+         SELECT seq, hex(gid) AS id, 'vertex' AS kind, hex(rev) AS rev, 0 AS deleted FROM nodes
            WHERE seq > ? AND gid IS NOT NULL AND id IN (SELECT id FROM vclosure)
          UNION ALL
-         SELECT seq, hex(gid) AS id, 'edge' AS kind, json(rev) AS rev, 0 AS deleted FROM edges
+         SELECT seq, hex(gid) AS id, 'edge' AS kind, hex(rev) AS rev, 0 AS deleted FROM edges
            WHERE seq > ? AND gid IS NOT NULL AND id IN (SELECT id FROM eclosure)
          UNION ALL
-         SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
+         SELECT seq, hex(gid) AS id, kind, hex(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
          ORDER BY seq${paged ? ' LIMIT ?' : ''}`
-      : `SELECT seq, hex(gid) AS id, 'vertex' AS kind, json(rev) AS rev, 0 AS deleted FROM nodes WHERE seq > ? AND gid IS NOT NULL
+      : `SELECT seq, hex(gid) AS id, 'vertex' AS kind, hex(rev) AS rev, 0 AS deleted FROM nodes WHERE seq > ? AND gid IS NOT NULL
          UNION ALL
-         SELECT seq, hex(gid) AS id, 'edge' AS kind, json(rev) AS rev, 0 AS deleted FROM edges WHERE seq > ? AND gid IS NOT NULL
+         SELECT seq, hex(gid) AS id, 'edge' AS kind, hex(rev) AS rev, 0 AS deleted FROM edges WHERE seq > ? AND gid IS NOT NULL
          UNION ALL
-         SELECT seq, hex(gid) AS id, kind, json(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
+         SELECT seq, hex(gid) AS id, kind, hex(rev) AS rev, 1 AS deleted FROM tombstones WHERE seq > ?
          ORDER BY seq${paged ? ' LIMIT ?' : ''}`,
     filtered
       ? (paged ? [JSON.stringify(match), since, since, since, limit] : [JSON.stringify(match), since, since, since])
@@ -90,7 +91,7 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',
     // A live row carries the LEAF only (its ancestry stays in the store, revs_diff reads it); a DELETE
     // carries the FULL ancestry, since a tombstone has no body and the feed is its only lineage carrier.
-    rev: r.deleted ? fullRev(r.rev) : leafRev(r.rev),
+    rev: r.deleted ? fullRev(decodeRev(r.rev)) : leafRev(decodeRev(r.rev)),
     ...(r.deleted ? { deleted: true as const } : {}),
     ...(conflicts.get(r.id)?.length ? { conflicts: conflicts.get(r.id) } : {}),
   }));
@@ -114,27 +115,19 @@ function conflictLeaves(store: GraphStore, gids: readonly string[]): Map<string,
   for (const r of rows) {
     const doc = JSON.parse(r.doc) as { deleted?: boolean; uidConflict?: string; rev?: string };
     if (doc.deleted || doc.uidConflict) continue; // not a content leaf
-    const rev = leafRev(doc.rev ?? null);
+    const rev = leafRev(parseRev(doc.rev));
     if (rev) (out.get(r.gid) ?? out.set(r.gid, []).get(r.gid)!).push(rev);
   }
   return out;
 }
 
-/** The stored rev's LEAF `{gen, hash}` — the feed's shape, dropping the rev-tree `ids` (a `_changes`
- *  entry is a leaf pointer; ancestry is the store's business). */
-const leafRev = (raw: string | null): { gen: number; hash: string } | null => {
-  if (!raw) return null;
-  const r = JSON.parse(raw) as { gen: number; hash: string };
-  return { gen: r.gen, hash: r.hash };
-};
+/** A rev's LEAF `{gen, hash}` — the feed's shape, dropping the rev-tree `ids` (a `_changes` entry is a
+ *  leaf pointer; ancestry is the store's business). */
+const leafRev = (r: Rev | null): WireRev | null => r && { gen: r.gen, hash: r.hash };
 
-/** The stored rev WITH its ancestry (`ids`) — a delete's feed shape, so apply can classify it against a
- *  peer's live edit (§6·3). Seeds `[hash]` for a pre-tree rev. */
-const fullRev = (raw: string | null): WireRev | null => {
-  if (!raw) return null;
-  const r = JSON.parse(raw) as { gen: number; hash: string; ids?: string[] };
-  return { gen: r.gen, hash: r.hash, ids: r.ids ?? [r.hash] };
-};
+/** A rev WITH its ancestry (`ids`) — a delete's feed shape, so apply can classify it against a peer's
+ *  live edit (§6·3). */
+const fullRev = (r: Rev | null): WireRev | null => r && { gen: r.gen, hash: r.hash, ids: [...r.ids] };
 
 /**
  * The `_revs_diff` lookup (§4 primitive 2), shared like `changesFeed`: given the revs a peer holds per
@@ -154,20 +147,20 @@ export function revsDiff(store: GraphStore, request: RevsDiffRequest): RevsDiffR
   if (!gids.length) return {};
   const gidsJson = JSON.stringify(gids);
   const rows = store.query<{ gid: string; rev: string | null }>(
-    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))
+    `SELECT hex(gid) AS gid, hex(rev) AS rev FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))
      UNION ALL
-     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IN (SELECT unhex(value) FROM json_each(?))
+     SELECT hex(gid) AS gid, hex(rev) AS rev FROM edges WHERE gid IN (SELECT unhex(value) FROM json_each(?))
      UNION ALL
-     SELECT hex(gid) AS gid, json(rev) AS rev FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))`,
+     SELECT hex(gid) AS gid, hex(rev) AS rev FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))`,
     [gidsJson, gidsJson, gidsJson]);
   // gid (upper hex) → every hash on this graph's rev-tree(s) for it (leaf + ancestry), so an offered
   // ancestor is recognised as already held.
   const held = new Map<string, Set<string>>();
   for (const r of rows) {
-    if (!r.rev) continue;
-    const rev = JSON.parse(r.rev) as { hash: string; ids?: string[] };
+    const rev = decodeRev(r.rev);
+    if (!rev) continue;
     const set = held.get(r.gid) ?? held.set(r.gid, new Set()).get(r.gid)!;
-    for (const h of rev.ids ?? [rev.hash]) set.add(h);
+    for (const h of rev.ids) set.add(h);
   }
   const out: Record<string, { missing: WireRev[] }> = {};
   for (const [gid, revs] of Object.entries(request)) {

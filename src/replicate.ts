@@ -26,14 +26,14 @@ import { exposeIdentity, refreshElements } from './refresh.ts';
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
 import { vertexPropsJson, edgePropsJson, vertexProperties, edgeProperties } from './formats/graphson.ts';
 import { changesFeed, revsDiff } from './manager.ts';
-import { parseRev, descendsFrom, revWins, type Rev } from './rev.ts';
+import { decodeRev, parseRev, descendsFrom, revWins, storedRev, wireRevText, type Rev } from './rev.ts';
 import type {
   BulkGetRef, WireChangeSet, WireVertex, WireEdge, WireDelete, WireRev, ChangesFeed, RevsDiffRequest,
   RevsDiffResponse, Http, GraphManager, ReplicateOptions, ReplicationStats, ConflictEntry, Executor,
 } from './api.ts';
 
 /** A replicated vertex document (what `_bulk_get` returns / `_bulk_docs` applies): identity + version +
- *  content, keyed by GID. `rev` is the `{gen, hash}` JSON text, preserved verbatim on apply. */
+ *  content, keyed by GID. `rev` is the `{gen, hash, ids}` JSON text, packed and preserved on apply. */
 export interface ReplVertex {
   readonly gid: string;
   readonly rev: string;
@@ -187,9 +187,9 @@ function resurrect(store: GraphStore, gids: readonly string[]): void {
   if (!gids.length) return;
   const j = JSON.stringify(gids.map(upper));
   const toms = store.query<{ gid: string; rev: string | null; kind: string }>(
-    'SELECT hex(gid) AS gid, json(rev) AS rev, kind FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))', [j]);
+    'SELECT hex(gid) AS gid, hex(rev) AS rev, kind FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))', [j]);
   if (!toms.length) return;
-  for (const t of toms) shadowDelete(store, t.gid, t.rev, t.kind as 'vertex' | 'edge');
+  for (const t of toms) shadowDelete(store, t.gid, wireRevText(t.rev), t.kind as 'vertex' | 'edge');
   store.query('DELETE FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))', [j]);
 }
 
@@ -260,7 +260,7 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   // never needs to know the edge was weak (the marker is LOCAL and need not travel). These edges are never
   // in `deletes` — the source that dropped the vertex knows nothing of a placement edge only THIS graph made.
   const weakCascade = removeV.length ? store.query<{ id: number; gid: string | null; rev: string | null }>(
-    `SELECT id, hex(gid) AS gid, json(rev) AS rev FROM edges
+    `SELECT id, hex(gid) AS gid, hex(rev) AS rev FROM edges
      WHERE weak = 1 AND (src IN (SELECT value FROM json_each(?)) OR tgt IN (SELECT value FROM json_each(?)))`,
     [JSON.stringify(removeV), JSON.stringify(removeV)]) : [];
   for (const w of weakCascade) removeE.push(w.id);
@@ -280,19 +280,20 @@ function applyDeletes(store: GraphStore, deletes: readonly ReplDelete[]): void {
   }
 
   // A tombstone per APPLIED delete (a refused one is surfaced, not tombstoned) PLUS each locally-cascaded
-  // weak edge (at its own gid/rev), skipping a gid already tombstoned. gid crosses as hex→unhex, rev as
-  // jsonb text, seq NULL (the refresh assigns it).
+  // weak edge (at its own gid/rev), skipping a gid already tombstoned. gid and the packed rev both cross
+  // as hex→unhex (a carried wire rev is packed by `storedRev`, the weak edge's is already stored hex —
+  // '' when it had none), seq NULL (the refresh assigns it).
   const applied = deletes.filter((d) => !refused.has(upper(d.gid)));
   const toTombstone: { gid: string; rev: string | null; kind: string }[] = [
-    ...applied.map((d) => ({ gid: upper(d.gid), rev: d.rev, kind: d.kind })),
-    ...weakCascade.filter((w) => w.gid).map((w) => ({ gid: upper(w.gid!), rev: w.rev, kind: 'edge' })),
+    ...applied.map((d) => ({ gid: upper(d.gid), rev: storedRev(d.rev), kind: d.kind })),
+    ...weakCascade.filter((w) => w.gid).map((w) => ({ gid: upper(w.gid!), rev: w.rev || null, kind: 'edge' })),
   ];
   const already = new Set(store.query<{ gid: string }>(
     'SELECT hex(gid) AS gid FROM tombstones WHERE gid IN (SELECT unhex(value) FROM json_each(?))',
     [JSON.stringify(toTombstone.map((t) => t.gid))]).map((r) => r.gid));
   const record = toTombstone.filter((t) => !already.has(t.gid));
   if (record.length) insertSet(store, 'tombstones',
-    [{ name: 'gid', type: 'blob', blob: true }, { name: 'rev', type: 'blob', jsonb: true }, { name: 'kind', type: 'any' }],
+    [{ name: 'gid', type: 'blob', blob: true }, { name: 'rev', type: 'blob', blob: true }, { name: 'kind', type: 'any' }],
     record.map((t) => [t.gid, t.rev, t.kind]));
 }
 
@@ -329,24 +330,24 @@ function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices:
   const eGids = refs.filter((r) => r.kind === 'edge').map((r) => upper(r.gid));
 
   const vRows = vGids.length ? store.query<{ id: number; gid: string; rev: string; uid: string | null }>(
-    'SELECT id, hex(gid) AS gid, json(rev) AS rev, uid FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))',
+    'SELECT id, hex(gid) AS gid, hex(rev) AS rev, uid FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))',
     [JSON.stringify(vGids)]) : [];
   const vIds = vRows.map((r) => r.id);
   const labels = labelsForOwners(store, vIds);
   const vprops = vertexPropsForOwners(store, vIds, true); // collection values as json() text
   const vertices: WireVertex[] = vRows.map((r) => ({
-    gid: r.gid, rev: r.rev, uid: r.uid,
+    gid: r.gid, rev: wireRevText(r.rev)!, uid: r.uid,
     labels: (labels.get(r.id) ?? []).map((l) => l.name),
     properties: vertexPropsJson(vprops.get(r.id) ?? []),
   }));
 
   const eRows = eGids.length ? store.query<{ id: number; gid: string; rev: string; uid: string | null; label: string; src: string; tgt: string }>(
-    `SELECT e.id AS id, hex(e.gid) AS gid, json(e.rev) AS rev, e.uid AS uid, l.name AS label, hex(sv.gid) AS src, hex(tv.gid) AS tgt
+    `SELECT e.id AS id, hex(e.gid) AS gid, hex(e.rev) AS rev, e.uid AS uid, l.name AS label, hex(sv.gid) AS src, hex(tv.gid) AS tgt
      FROM edges e JOIN labels l ON l.id = e.label JOIN nodes sv ON sv.id = e.src JOIN nodes tv ON tv.id = e.tgt
      WHERE e.gid IN (SELECT unhex(value) FROM json_each(?))`, [JSON.stringify(eGids)]) : [];
   const eprops = edgePropsForOwners(store, eRows.map((r) => r.id), true);
   const edges: WireEdge[] = eRows.map((r) => ({
-    gid: r.gid, rev: r.rev, uid: r.uid, label: r.label, srcGid: r.src, tgtGid: r.tgt,
+    gid: r.gid, rev: wireRevText(r.rev)!, uid: r.uid, label: r.label, srcGid: r.src, tgtGid: r.tgt,
     properties: edgePropsJson(eprops.get(r.id) ?? []),
   }));
 
@@ -357,9 +358,9 @@ function liveBodies(store: GraphStore, refs: readonly BulkGetRef[]): { vertices:
 function localRevs(store: GraphStore, table: 'nodes' | 'edges', gids: readonly string[]): Map<string, Rev> {
   if (!gids.length) return new Map();
   const rows = execute<{ gid: string; rev: string | null }>(store,
-    q`SELECT hex(gid) AS gid, json(rev) AS rev FROM ${identifier(table)} WHERE gid IN (SELECT unhex(value) FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
+    q`SELECT hex(gid) AS gid, hex(rev) AS rev FROM ${identifier(table)} WHERE gid IN (SELECT unhex(value) FROM json_each(${value(JSON.stringify(gids.map(upper)))}))`);
   const out = new Map<string, Rev>();
-  for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, rev); }
+  for (const r of rows) { const rev = decodeRev(r.rev); if (rev) out.set(r.gid, rev); }
   return out;
 }
 
@@ -390,7 +391,7 @@ function classifyWire<W extends { gid: string; rev: string }, R>(
   for (const w of incoming) {
     const loc = local.get(upper(w.gid));
     const inc = parseRev(w.rev);
-    if (!loc || !inc) { accept.push(toRepl(w)); continue; }        // new (or unparseable rev — apply, fail-safe)
+    if (!loc || !inc) { accept.push(toRepl(w)); continue; }        // new (an unparseable rev is refused when the load packs it)
     if (inc.hash === loc.hash) continue;                            // identical → already have it
     if (descendsFrom(inc, loc)) { accept.push(toRepl(w)); continue; } // fast-forward → advance
     if (descendsFrom(loc, inc)) continue;                          // incoming is an ancestor → already have
@@ -446,11 +447,11 @@ function liveRevs(store: GraphStore, gids: readonly string[]): Map<string, WireR
   if (!gids.length) return out;
   const j = JSON.stringify(gids);
   const rows = store.query<{ gid: string; rev: string | null }>(
-    `SELECT hex(gid) AS gid, json(rev) AS rev FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))
+    `SELECT hex(gid) AS gid, hex(rev) AS rev FROM nodes WHERE gid IN (SELECT unhex(value) FROM json_each(?))
      UNION ALL
-     SELECT hex(gid) AS gid, json(rev) AS rev FROM edges WHERE gid IN (SELECT unhex(value) FROM json_each(?))`,
+     SELECT hex(gid) AS gid, hex(rev) AS rev FROM edges WHERE gid IN (SELECT unhex(value) FROM json_each(?))`,
     [j, j]);
-  for (const r of rows) { const rev = parseRev(r.rev); if (rev) out.set(r.gid, { gen: rev.gen, hash: rev.hash }); }
+  for (const r of rows) { const rev = decodeRev(r.rev); if (rev) out.set(r.gid, { gen: rev.gen, hash: rev.hash }); }
   return out;
 }
 

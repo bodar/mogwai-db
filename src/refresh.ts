@@ -30,35 +30,35 @@
 
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
-import { computeRev, edgeContent, parseRev, vertexContent, type Rev } from './rev.ts';
+import { computeRev, decodeRev, edgeContent, encodeRev, vertexContent } from './rev.ts';
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners, type PropRow } from './formats/drain.ts';
 import { insertSet, updateSet, type SetColumn } from './setwrite.ts';
 import { valueNodeFromStored } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, ftsRowid, propertyFtsTextOfNode, type OwnerElem } from './services/fts-index.ts';
 
 const GID: SetColumn = { name: 'gid', type: 'blob', blob: true };
-const REV: SetColumn = { name: 'rev', type: 'blob', jsonb: true };
+const REV: SetColumn = { name: 'rev', type: 'blob', blob: true }; // the packed rev, as hex (rev.ts encodeRev)
 const SEQ: SetColumn = { name: 'seq', type: 'any' };
 const DIRTY: SetColumn = { name: 'dirty', type: 'any' };
 // [id, gid, rev, seq, dirty=0] per refreshed row — `hex(NULL)` is '' not NULL in SQLite, so a gid-less
 // row (empty string) routes to a mint via `||`; a real gid hex is 32 chars and never empty.
 
-/** The next rev for a dirty row: a PRESERVE (dirty 3) keeps its existing rev verbatim; a CREATE (rev
- *  null) computes `{gen:1, …}`; a MUTATION (rev present) chains gen+1 — the last two are exactly
- *  `computeRev(parent, content)`, so only PRESERVE is special-cased. */
-const nextRev = (dirty: number, rev: string | null, content: string): Rev =>
-  dirty === PRESERVE ? parseRev(rev)! : computeRev(parseRev(rev), content);
+/** The next stored rev (hex) for a dirty row: a PRESERVE (dirty 3) keeps its existing rev's bytes
+ *  verbatim; a CREATE (rev '') computes `{gen:1, …}`; a MUTATION (rev present) chains gen+1 — the last
+ *  two are exactly `computeRev(parent, content)`, so only PRESERVE is special-cased. */
+const nextRev = (dirty: number, rev: string, content: string): string =>
+  dirty === PRESERVE ? rev : encodeRev(computeRev(decodeRev(rev), content));
 const PRESERVE = 3;
 
 type Elem = 'node' | 'edge';
-interface ElemRow { id: number; gid: string; rev: string | null; dirty: number; label?: string; srcgid?: string; tgtgid?: string }
+interface ElemRow { id: number; gid: string; rev: string; dirty: number; label?: string; srcgid?: string; tgtgid?: string }
 
 /** The rows to recompute, as `x` (a vertex, or an edge joined to its label and endpoint gids). `dirty` is
  *  the enum expression: the stored flag for a refresh, derived from `rev` for a backfill page. */
 function selectRows(store: GraphStore, elem: Elem, where: string, dirty: string, tail = '', binds: unknown[] = []): ElemRow[] {
   return store.query<ElemRow>(elem === 'node'
-    ? `SELECT x.id AS id, hex(x.gid) AS gid, json(x.rev) AS rev, ${dirty} AS dirty FROM nodes x WHERE ${where} ORDER BY x.id ${tail}`
-    : `SELECT x.id AS id, hex(x.gid) AS gid, json(x.rev) AS rev, ${dirty} AS dirty, l.name AS label,
+    ? `SELECT x.id AS id, hex(x.gid) AS gid, hex(x.rev) AS rev, ${dirty} AS dirty FROM nodes x WHERE ${where} ORDER BY x.id ${tail}`
+    : `SELECT x.id AS id, hex(x.gid) AS gid, hex(x.rev) AS rev, ${dirty} AS dirty, l.name AS label,
               hex(sv.gid) AS srcgid, hex(tv.gid) AS tgtgid
        FROM edges x JOIN labels l ON l.id = x.label JOIN nodes sv ON sv.id = x.src JOIN nodes tv ON tv.id = x.tgt
        WHERE ${where} ORDER BY x.id ${tail}`, binds);
@@ -74,7 +74,7 @@ function recompute(store: GraphStore, elem: Elem, rows: readonly ElemRow[], full
   // collection values as json() TEXT, so JSON.stringify is stable
   const props = elem === 'node' ? vertexPropsForOwners(store, contentIds, true) : edgePropsForOwners(store, contentIds, true);
   const labels = elem === 'node' ? labelsForOwners(store, contentIds) : undefined;
-  const rev = (r: ElemRow): Rev => nextRev(r.dirty, r.rev, r.dirty === PRESERVE ? ''
+  const rev = (r: ElemRow): string => nextRev(r.dirty, r.rev, r.dirty === PRESERVE ? ''
     : labels ? vertexContent((labels.get(r.id) ?? []).map((l) => l.name), props.get(r.id) ?? [])
     : edgeContent(r.label!, r.srcgid!, r.tgtgid!, props.get(r.id) ?? []));
   const table = elem === 'node' ? 'nodes' : 'edges';

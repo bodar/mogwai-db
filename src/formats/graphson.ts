@@ -31,6 +31,7 @@
 import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import { exposeIdentity } from '../refresh.ts';
+import { decodeRev } from '../rev.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
@@ -264,8 +265,8 @@ const flatVtype = (t: TypeNode | null): CanonicalType | null =>
  *  `JSON.parse` + guards and builds only the half each pass needs. */
 interface RawAdjacency { id: number | string; label: unknown; properties: unknown; outE: Record<string, unknown[]>; gid?: string; rev?: string }
 
-/** A carried rev arrives as a nested `{gen, hash}` OBJECT; re-serialize it to the JSON TEXT the bulk
- *  loader lands as JSONB (preserved verbatim). Absent/malformed → undefined, so the loader recomputes. */
+/** A carried rev arrives as a nested `{gen, hash, ids}` OBJECT; re-serialize it to the JSON TEXT the bulk
+ *  loader packs into the stored rev BLOB (`storedRev`). Absent → undefined, so the loader recomputes. */
 const revText = (rev: unknown): string | undefined =>
   rev !== null && typeof rev === 'object' ? JSON.stringify(rev) : undefined;
 
@@ -487,7 +488,7 @@ function incidenceJson(
       id: idJson(e.uid ?? e.id),
       [endpoint]: idJson(extId(other)),
       ...(e.gid ? { gid: e.gid } : {}),
-      ...(e.rev ? { rev: JSON.parse(e.rev) as unknown } : {}),
+      ...(e.rev ? { rev: decodeRev(e.rev) } : {}),
       ...(p.length ? { properties: edgePropsJson(p) } : {}),
     };
     const list = out[e.label];
@@ -510,8 +511,8 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
   // replication. O(N), as the export already is.
   exposeIdentity(store);
   // `hex(gid)` so the 16-byte BLOB rides as a hex string on both runtimes (a raw BLOB read diverges);
-  // `json(rev)` so the JSONB rev blob rides as its `{gen, hash}` TEXT, nested as an object on the wire.
-  for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null; rev: string | null }>(store, 'nodes', ['id', 'uid', q`hex(gid) AS gid`, q`json(rev) AS rev`], pageSize)) {
+  // `hex(rev)` likewise for the packed rev BLOB, decoded (rev.ts) to its `{gen, hash, ids}` object on the wire.
+  for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null; rev: string | null }>(store, 'nodes', ['id', 'uid', q`hex(gid) AS gid`, q`hex(rev) AS rev`], pageSize)) {
     const ids = page.map((v) => v.id);
     const extId = new Map<number, number | string>(page.map((v) => [v.id, v.uid ?? v.id]));
 
@@ -521,7 +522,7 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
     // Both incidence directions, per the header. `owner` is the vertex this side hangs off.
     const e = edges.as('e');
     const edgeSql = (endpointCol: 'src' | 'tgt') => (members: Expression) =>
-      q`SELECT e.id AS id, e.uid AS uid, e.src AS src, e.tgt AS tgt, l.name AS label, ${e.c[endpointCol]} AS owner, hex(e.gid) AS gid, json(e.rev) AS rev
+      q`SELECT e.id AS id, e.uid AS uid, e.src AS src, e.tgt AS tgt, l.name AS label, ${e.c[endpointCol]} AS owner, hex(e.gid) AS gid, hex(e.rev) AS rev
        FROM ${e} JOIN labels l ON l.id = e.label WHERE ${e.c[endpointCol]} IN (${members}) ORDER BY ${e.c[endpointCol]}, e.id`;
     const outE = rowsForOwners<EdgeRow>(store, edgeSql('src'), ids);
     const inE = rowsForOwners<EdgeRow>(store, edgeSql('tgt'), ids);
@@ -553,7 +554,7 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
         ...(v.gid ? { gid: v.gid } : {}),
         // `rev` rides as its `{gen, hash}` OBJECT under a private key; a reader that lacks it recomputes
         // one from content (bulk.ts, preserve-or-compute), which converges for identical content.
-        ...(v.rev ? { rev: JSON.parse(v.rev) as unknown } : {}),
+        ...(v.rev ? { rev: decodeRev(v.rev) } : {}),
         ...(vp.length ? { properties: vertexPropsJson(vp) } : {}),
         ...(out.length ? { outE: incidenceJson(out, edgeProps, 'inV', resolveExt) } : {}),
         ...(incoming.length ? { inE: incidenceJson(incoming, edgeProps, 'outV', resolveExt) } : {}),
