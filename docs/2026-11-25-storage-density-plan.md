@@ -74,6 +74,12 @@ content hash), and their indexes hold nothing.
 - Expected: up to ~260 MB, and faster writes.
 
 ### S4. Compact `rev` storage
+
+✅ **LANDED (2026-11-25, `0e21709b`).** A stored `rev` is one packed BLOB: a 4-byte generation, then
+each ancestry hash as 16 raw bytes, leaf first. It crosses SQLite as hex, the same idiom as `gid`.
+Mechanism: `encodeRev`/`decodeRev`, `storedRev` and `wireRevText` in `src/rev.ts`. The wire form does
+not change. Measured on LDBC sf0.1 after replication: rev bytes 157 MB → 36 MB, db file −133 MB.
+Remaining: nothing.
 Store `rev` as an integer generation plus a binary hash (8–16 bytes), not 87 B of JSONB. The WIRE form
 (`_changes`, `_revs_diff`, `_bulk_docs`) does not change: render it at the edge. After S3 this matters
 only for a graph that replicates. Expected: about 120 MB on such a graph.
