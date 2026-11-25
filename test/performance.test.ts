@@ -3,6 +3,8 @@ import { compile, type Compiled } from '../src/compiler/compiler.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { rawVertex } from './support/graph.ts';
+import { runSteps } from '../src/program.ts';
+import { idAlreadyExists } from './support/harness.ts';
 
 // Performance regression guard for property access (W4).
 //
@@ -83,6 +85,58 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
   });
 
 
+});
+
+// User-id uniqueness is a PARTIAL unique index (`nodes_uid`/`edges_uid`, `WHERE uid IS NOT NULL`), not a
+// column UNIQUE: an element with no uid has no index entry. These pin that every uid lookup still seeks it.
+describe('uid indexes: partial, unique, and every uid lookup seeks them', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  const run = (q: string) => {
+    const p = compile(q, {});
+    if (p.kind === 'program') return [...runSteps(store, p)];
+    return store.query(p.sql, p.binds);
+  };
+  const explain = (q: string) => {
+    const p = compile(q, {});
+    if (p.kind !== 'read') throw new Error('expected read plan');
+    return store.query<{ detail: string }>(`EXPLAIN QUERY PLAN ${p.sql}`, p.binds).map((r) => r.detail);
+  };
+  beforeAll(() => {
+    run("g.addV('p').property(T.id,'a')");
+    run("g.addV('p').property(T.id,'b')");
+    run("g.addV('p').addV('p')");
+    run("g.addE('x').from(__.V('a')).to(__.V('b')).property(T.id,'e1')");
+  });
+
+  test('no column autoindex on uid; the partial indexes exist and hold only uid rows', () => {
+    const idx = store.query<{ name: string; sql: string | null }>("SELECT name, sql FROM sqlite_master WHERE type='index'");
+    const names = idx.map((r) => r.name);
+    expect(names).not.toContain('sqlite_autoindex_nodes_1');
+    expect(names).not.toContain('sqlite_autoindex_edges_1');
+    for (const name of ['nodes_uid', 'edges_uid'])
+      expect(idx.find((r) => r.name === name)?.sql).toContain('WHERE uid IS NOT NULL');
+    // 4 vertices, 2 with a uid: the partial index holds 2 entries.
+    expect(store.query('SELECT COUNT(*) AS n FROM nodes INDEXED BY nodes_uid WHERE uid IS NOT NULL')).toEqual([{ n: 2 }]);
+  });
+
+  test.each([
+    ["g.V('a')", 'nodes_uid'],
+    ["g.V('a','b').out()", 'nodes_uid'],
+    ["g.V().hasId(within('a','b'))", 'nodes_uid'],
+    ["g.V(__.constant('b')).id()", 'nodes_uid'],
+    ["g.V('a').where(__.out().hasId('b'))", 'nodes_uid'],
+    ["g.E('e1')", 'edges_uid'],
+    ["g.E(__.constant('e1')).id()", 'edges_uid'],
+  ])('%s seeks %s', (q, index) => {
+    expect(explain(q).some((d) => d.startsWith('SEARCH') && d.includes(`INDEX ${index} (uid=?`))).toBe(true);
+  });
+
+  test('a second element with a taken uid is still refused; many uid-less elements are not', () => {
+    expect(() => run("g.addV().property(T.id,'a')")).toThrow(idAlreadyExists('Vertex', 'a'));
+    expect(() => run("g.addE('x').from(__.V('a')).to(__.V('b')).property(T.id,'e1')")).toThrow(idAlreadyExists('Edge', 'e1'));
+    run("g.addV().addV().addV()");
+    expect(store.query('SELECT COUNT(*) AS n FROM nodes WHERE uid IS NULL')).toEqual([{ n: 5 }]);
+  });
 });
 
 /**

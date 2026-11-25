@@ -71,8 +71,9 @@ const SCHEMA = [
      id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)`,
   // `id` stays the SQLite rowid (integer PK) — the whole covering-index /
   // index-only-scan perf story rides on integer src/tgt joins. `uid` is the
-  // optional TinkerPop user-supplied id (string/custom); UNIQUE auto-indexes it
-  // for the V(uid) lookup. Elements report COALESCE(uid, id) as their id.
+  // optional TinkerPop user-supplied id (string/custom). Its uniqueness is a PARTIAL unique index
+  // (`nodes_uid`/`edges_uid` below), not a column UNIQUE: most elements carry no uid, and a column
+  // UNIQUE builds a full autoindex with one entry per NULL row. Elements report COALESCE(uid, id) as their id.
   // `gid` (global identity, §6·1) and `rev` (generation + content hash, §5·1) are the replication
   // deltas (docs/archive/2026-09-02-replication-and-http-interop-plan.md). `gid` is a 16-byte uuid_v7 BLOB,
   // minted once at creation and IMMUTABLE — cross-peer identity, separate from the local rowid, which
@@ -94,7 +95,7 @@ const SCHEMA = [
   // element, MOVED (not appended) on each write, so the feed is current-state-sized. NOT preserved across
   // peers (unlike gid/rev): it is this graph's own clock, so a replicated element takes a fresh LOCAL seq.
   `CREATE TABLE IF NOT EXISTS nodes(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1)`,
+     id INTEGER PRIMARY KEY, uid TEXT, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1)`,
   // A vertex's labels are a SET (TinkerPop 4 multi-label), so they normalize out of `nodes`
   // exactly as properties did — the rule being "normalize where cardinality is 0..N, keep
   // inline where it is exactly 1", which is also why an EDGE label stays on `edges` (upstream
@@ -134,7 +135,7 @@ const SCHEMA = [
   // to the synthesizing graph and does NOT travel on the wire (bulkGet selects explicit columns, omitting
   // it), so a replicated edge is born strong (DEFAULT 0). A normal `addE`/mergeE/bulk-load never sets it.
   `CREATE TABLE IF NOT EXISTS edges(
-     id INTEGER PRIMARY KEY, uid TEXT UNIQUE, src INTEGER NOT NULL, label INTEGER NOT NULL,
+     id INTEGER PRIMARY KEY, uid TEXT, src INTEGER NOT NULL, label INTEGER NOT NULL,
      tgt INTEGER NOT NULL, gid BLOB, rev BLOB, seq INTEGER, dirty INTEGER NOT NULL DEFAULT 1,
      weak INTEGER NOT NULL DEFAULT 0)`,
   // Edge properties are ALSO normalized rows (the typed-property-values rework retired
@@ -180,6 +181,10 @@ const SCHEMA = [
      PRIMARY KEY (node, key))`,
   // Replaces n_label: (label, node) is the seek order hasLabel wants — find the label id,
   // read the node ids off the index without touching `nodes` at all.
+  // User-id uniqueness and the V(uid)/E(uid) seek. PARTIAL, so an element with no uid costs no index
+  // entry. The planner uses it for `uid = ?` and `uid IN (…)`, which imply `uid IS NOT NULL`.
+  `CREATE UNIQUE INDEX IF NOT EXISTS nodes_uid ON nodes(uid) WHERE uid IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS edges_uid ON edges(uid) WHERE uid IS NOT NULL`,
   // Global identity is UNIQUE per graph and indexed for the gid→rowid resolution replication/merge
   // does (§6·1). A UNIQUE index over a NULLABLE column admits many NULLs in SQLite, so elements not
   // yet carrying a gid (a pre-column graph, an untouched element) coexist until minted.

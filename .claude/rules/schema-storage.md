@@ -11,7 +11,8 @@ Integer rowid PKs, interned labels, covering edge indexes `(src,label,tgt)`/`(tg
 out()/in() are index-only, plus `e_pair(src,tgt)` so a label-free edge test between two known vertices
 (a cycle/triangle/adjacency `where`) is one seek at any label vocabulary, and `e_label(label)` — the edge half of
 the vertex `vl_label` split — so a root `E().hasLabel(x)` seeks rather than scanning an adjacency index.
-SQLite's planner picks each; no pass names one. `nodes`/`edges` carry a nullable `uid TEXT UNIQUE` (user ids); rowid is
+SQLite's planner picks each; no pass names one. `nodes`/`edges` carry a nullable `uid TEXT` (user ids). A partial unique index
+(`nodes_uid`/`edges_uid`, `WHERE uid IS NOT NULL`) enforces uniqueness, so an element with no uid has no index entry. Rowid is
 the internal PK. Properties are **normalized** into `vertex_properties`/`edge_properties` (the old
 flat `edges.props` JSONB blob is retired).
 

@@ -101,13 +101,13 @@ describe('query-plan stability', () => {
 
 // ID ROUTING — every id question (`V(ids)`, `E(ids)`, `hasId`, `has(T.id, …)`) is ONE authority
 // (`idMembership`, `src/compiler/rel/source.ts`), and its point is that each becomes a rowid or
-// `uid`-UNIQUE SEEK. The `COALESCE(uid, id)` comparison it replaced could only be checked per row, so
+// `uid` partial-unique-index SEEK. The `COALESCE(uid, id)` comparison it replaced could only be checked per row, so
 // `hasId(within(1,2,3))` scanned the graph. Asserted over EVERY access, not just the big tables, because
 // the id lookup into `nodes`/`edges` is exactly the access path at stake.
 //
 // The pin is "a SEEK with and without stats", deliberately not plan identity: `uid IS NULL AND id IN (…)`
-// is served cold by the covering `(uid, rowid)` autoindex and warm by the rowid itself — two exact seeks
-// of the same cost, and the kind of blessed-single-path churn RelIR plan §5 warns a gate must not
+// is served by the rowid itself (the partial `nodes_uid` index holds no NULL uid) — an exact seek
+// either way, and pinning one exact plan is the kind of blessed-single-path churn RelIR plan §5 warns a gate must not
 // assert. What a young graph must never get is a SCAN, and that is what fails here.
 const ID_SEEKS: Readonly<Record<string, string>> = {
   'V(uid)': "g.V('u0').id()",
