@@ -253,6 +253,11 @@ byte-stable reuse.
    `g.inject(true).project('b').by(fold())` gives `{"b":[1]}`; `project().by(out().count().fold())`
    frames the count as Int. `group().by().by(fold())` and `map(fold())` keep the type. Carry the tag
    through the one map/record lowering, not per host.
+   ✅ **Landed 2026-11-25 (`d232b713`).** `listNodeExpr` emits `{t:'list', m:<tag>, v}` once per list
+   when the static member type is not implied by the storage class (`LOSSLESS_VTYPES`). One JS helper,
+   `taggedMembers`/`listMembers` (`src/gremlin/types.ts`), serves every list framer. The group value path
+   drops `selfDescribingList`. Tests: `test/compiler/nested-list-member-type.exec.test.ts`,
+   `test/L4-addendum/nested-list-member-type.feature`. Remains: nothing.
 2. **Run-time equality sets, part A: unwrap folded-set members** (`decimal-arm-runtime-bounds` A). A
    folded set of doubles or dates compares wrongly. Land before part B.
    ✅ **Landed 2026-11-25 (`27d0e19e`).** `foldedListSet` reads each member through `list.ts`
