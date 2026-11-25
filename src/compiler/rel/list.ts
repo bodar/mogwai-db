@@ -108,7 +108,7 @@ const memberPayload = (of: ListOf, members: Rel): Expr =>
 
 /** `memberPayload` over any explode's (value, JSON type) column pair — the set-op family's operand side
  *  is an explode of its own, with its own column names. */
-const payloadOf = (of: ListOf, value: Expr, jsonType: Expr): Expr =>
+export const payloadOf = (of: ListOf, value: Expr, jsonType: Expr): Expr =>
   isTypedList(of)
     ? {
       kind: 'case',

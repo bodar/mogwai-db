@@ -7,7 +7,7 @@ import { atMostOneRow, exactlyOneRow } from '../../../rel/bounds.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import { forEachRel, isSelfContained } from '../../../rel/walk.ts';
-import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, UNKNOWN, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
+import { meetScalarTypes, PER_ROW, STATIC, staticTypeOf, hasTypedMembers, TYPED_MEMBERS, UNKNOWN, type ListOf, type MapOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
 import type { Elem } from '../../elem.ts';
 import { labelsBoundBefore, scopeKeyReads } from '../../ir/labels.ts';
@@ -23,7 +23,7 @@ import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeA
 import { constLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
-import { correlatedListMembers, firstScalarMember, LIST_COL } from '../list.ts';
+import { correlatedListMembers, firstScalarMember, LIST_COL, payloadOf } from '../list.ts';
 import { collectionReaderOf, continueAs, dropPath, lowerChain, mapKeyCollided, mapKeyCollision, namedBeyondMap, sideEffectConstant, serviceValue, streamRowTag } from '../lower.ts';
 import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
@@ -465,10 +465,10 @@ export function childRows(
  *
  * The folded traversal is ROOTED (it re-sources, `__.V(x)…`, so it is one fixed set for every incoming
  * traverser, correlated to nothing): lower it as a rooted read, take its ONE list value as a scalar
- * subquery, and explode it sole-from. A member value compares raw against the subject exactly as an
- * inline `within` list does — `Contains.within` is `.equals`, and a scalar fold's members are bare
- * (`[27,32]`). A non-list framing (not a fold), an effectful body (a write operand), or a body that does
- * not lower all decline — the resolver is `null`-total like every seam.
+ * subquery, and explode it sole-from. A member's PAYLOAD compares against the subject exactly as an
+ * inline `within` list does — `Contains.within` is `.equals` on the value. A bare member (`[27,32]`) is
+ * its own payload; a `{t,v}` envelope (a Double, a Date) reads its `v` (`setMembers`). A non-list
+ * framing (not a fold), an effectful body (a write operand), or a body that does not lower all decline — the resolver is `null`-total like every seam.
  *
  * Calcite prior art, and it matches EXACTLY: a value `IN` a collection is `RexSubQuery.in(rel, …)` over
  * an `Uncollect` — the `UNNEST` of the collection into rows (`vendor/calcite/core/.../sql2rel/SqlToRelConverter.java:6370`,
@@ -484,22 +484,8 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/Contains.java`).
   if (ctx.entryValue && body?.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
     && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') {
-    const members = make.explode({
-      id: fresh('evs'), channels: [], expr: ctx.entryValue, as: { value: 'sv' },
-      type: typeOf(meta('sv', 'any', true)),
-    });
-    const value = col(members.id, 'sv');
-    return make.project({
-      id: fresh('evp'), input: members, channels: [], type: typeOf(meta('sv', 'any', true)),
-      exprs: [['sv', {
-        kind: 'case',
-        whens: [[
-          { kind: 'binary', op: '=', left: { kind: 'call', fn: 'json_type', args: [value] }, right: compilerText('object') },
-          { kind: 'call', fn: 'json_extract', args: [value, compilerText('$.v')] },
-        ]],
-        else: value,
-      }]],
-    });
+    // A stored map entry's list holds self-describing `{t,v}` members, so it reads as `TYPED_MEMBERS`.
+    return setMembers(ctx.entryValue, TYPED_MEMBERS, fresh);
   }
   // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.
   const steps = rootedSteps(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
@@ -510,9 +496,27 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
     id: fresh('wls'), input: read.rel, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
     exprs: [[LIST_COL, col(read.rel.id, LIST_COL)]],
   }) };
-  return make.explode({
-    id: fresh('wle'), channels: [], expr: listValue, as: { value: 'sv' },
-    type: typeOf(meta('sv', 'any', true)),
+  return setMembers(listValue, read.framing.of, fresh);
+}
+
+/**
+ * A run-time list as the SET relation `predicateExpr` reads (`sv`): one row per member, holding the
+ * member's PAYLOAD. A typed list can hold `{t,v}` envelopes (a Double, a Date, a Long held as text), and
+ * `Contains.within` compares the member's VALUE, never its envelope, so each member reads through
+ * `payloadOf` — the list module's one PAYLOAD authority. An untyped list reads the raw member, so its
+ * SQL is unchanged.
+ */
+function setMembers(list: Expr, of: ListOf, fresh: Minter): Rel {
+  if (!hasTypedMembers(of)) return make.explode({
+    id: fresh('wle'), channels: [], expr: list, as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)),
+  });
+  const members = make.explode({
+    id: fresh('wle'), channels: [], expr: list, as: { value: 'sm', type: 'smt' },
+    type: typeOf(meta('sm', 'any', true), meta('smt', 'text', true)),
+  });
+  return make.project({
+    id: fresh('wlp'), input: members, channels: [], type: typeOf(meta('sv', 'any', true)),
+    exprs: [['sv', payloadOf(of, col(members.id, 'sm'), col(members.id, 'smt'))]],
   });
 }
 
