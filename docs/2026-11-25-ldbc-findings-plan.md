@@ -121,8 +121,8 @@ value), and fix it where every Boolean passes, not per step.
   disjuncts that each hold a NESTED `OR` (raw compare or decimal arm). `seekArms`
   (`src/rel/passes/semijoin.ts`) expands one disjunction only, never a general DNF (arm count against
   the 100 KB statement cap). `within(1, 2)` is the common spelling and seeks. Revisit only with evidence.
-- **Check if `write.ts` `decimalTextSeeks` can seek `vp_decimal` (from L1).** Its BigDecimal half may
-  use the new index. It also covers the long-as-TEXT tail, so it is not a drop-in deletion.
+- **Check if `write.ts` `decimalTextSeeks` can seek `vp_decimal` (from L1).** ✅ Done by Next round
+  item 1.
 - **L2 v2 — pin-on-read parameters.** v1 keys on every parameter value. So one text sent with
   different parameter values gets no hit. In v2, the compile records which parameters it read the
   VALUE of (pinned, as TinkerPop's `GValueManager` does). The key holds only the pinned values. A hit
@@ -179,6 +179,13 @@ The reuse sweep proposed these. Each one changes no answer.
    `spanned` arm to the long/bigint TEXT tail (|c| >= 2^53). The residual still decides. Test:
    mergeV/mergeE matching `1m`, `2^60` as a long, and a string key, in the style of
    `test/compiler/numeric-eq-seek.exec.test.ts`. About 25 lines removed.
+   **✅ LANDED (2026-11-25, `7d6b0bc9`, `722b7da8`).** `decimalTextSeeks` (`src/compiler/rel/write.ts`)
+   has one arm per stored tail. The BigDecimal arm is one point seek on `vp_decimal`/`ep_decimal` at
+   every magnitude. The long/bigint TEXT arm is gated on |c| >= 2^53. The integer-part Explode is
+   deleted. `stringifyExact` (`src/json-exact.ts`) now spools a whole number in [2^53, 2^63) as its
+   exact digits. This fixes a duplicate upsert keyed on `2^55m` or a stored double `2^55`.
+   This also closes the Deferred item "Check if `write.ts` `decimalTextSeeks` can seek `vp_decimal`".
+   Remains: nothing.
 2. **One bounded LRU for the parse cache and the plan cache.** `parseGremlin`
    (`src/gremlin/frontend.ts`, `parseCache`, count limit only) and `PlanCache`
    (`src/compiler/plan-cache.ts`, count + bytes) use the same delete-then-set `Map` idiom. Extract a
