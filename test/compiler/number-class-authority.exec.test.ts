@@ -347,9 +347,9 @@ describe('a Float is ONE value whichever carrier it came by — a literal, a typ
   };
   const answer = (store: ReturnType<typeof seededStore>, q: string, params = {}, types = {}) =>
     executeFramed(store, q, params, types).map((frame) => render(frame.buf, { i: 0 }));
-  test("has('f',0.1f) finds both", () => expect(answer(seeded(), "g.V().has('f',0.1f).values('name')")).toEqual(['"marko"', '"vadas"']));
-  test("has('f',p) finds both", () => expect(answer(seeded(), "g.V().has('f',p).values('name')", p, t)).toEqual(['"marko"', '"vadas"']));
-  test("has('f',eq(p)) finds both", () => expect(answer(seeded(), "g.V().has('f',eq(p)).values('name')", p, t)).toEqual(['"marko"', '"vadas"']));
+  test("has('f',0.1f) finds both", () => expect(answer(seeded(), "g.V().has('f',0.1f).values('name')").sort()).toEqual(['"marko"', '"vadas"']));
+  test("has('f',p) finds both", () => expect(answer(seeded(), "g.V().has('f',p).values('name')", p, t).sort()).toEqual(['"marko"', '"vadas"']));
+  test("has('f',eq(p)) finds both", () => expect(answer(seeded(), "g.V().has('f',eq(p)).values('name')", p, t).sort()).toEqual(['"marko"', '"vadas"']));
   test("has('f',within(p)) over a typed list parameter finds both", () => expect(answer(seeded(),
     "g.V().has('f',within(p)).values('name')", { p: [Math.fround(0.1)] }, { p: { t: 'list', items: ['float'] } }).sort()).toEqual(['"marko"', '"vadas"']));
   test('dedup sees one value', () => expect(answer(seeded(), "g.V().values('f').dedup().count()")).toEqual(['1L']));

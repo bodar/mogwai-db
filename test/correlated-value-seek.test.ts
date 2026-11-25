@@ -148,7 +148,8 @@ describe('the access path', () => {
       expect(details.some((d) => /^SEARCH kd\d+ USING AUTOMATIC .*INDEX \(value=\?\)/.test(d))).toBe(true);
       const constant = details.findIndex((d) => d.startsWith('LIST SUBQUERY'));
       expect(constant).toBeGreaterThanOrEqual(0);
-      expect(details[constant + 1]).toContain('vp_key_value (key=?');
+      // The numeric constant is a UNION ALL of seeks (`seekArms`): its raw arm seeks (key, value).
+      expect(details.slice(constant + 1).find((d) => d.includes('vp_key_value'))).toContain('vp_key_value (key=? AND value=?)');
     });
   }
 

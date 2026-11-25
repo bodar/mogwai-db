@@ -613,6 +613,57 @@ function seekable(e: Expr, props: RelId, local: SeekTarget['local']): boolean {
   return ok;
 }
 
+/** The one column an owner seek projects: the owner element's id. */
+const SEEK_OWNERS = { cols: [{ name: 'sid', type: 'int' as const, nullable: false }] };
+
+/** Does `e` read column `name` of the property row (any column when `name` is omitted)? */
+function readsProperty(e: Expr, props: RelId, name?: string): boolean {
+  let reads = false;
+  forEachExpr(e, (n) => { if (n.kind === 'col' && n.rel === props && (name === undefined || n.name === name)) reads = true; });
+  return reads;
+}
+const readsValue = (e: Expr, props: RelId): boolean => readsProperty(e, props, 'value');
+
+/** An `OR` tree flattened to its disjuncts — `conjuncts` read the other way. */
+const disjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'or' ? [...disjuncts(e.left), ...disjuncts(e.right)] : [e]);
+
+/** Does conjunct `e` pin the property `value` by EQUALITY — `value = x`, `value IN (…)`, or the same over an
+ *  expression of `value` (the decimal arm's `CAST(value AS REAL)`, which `vp_decimal`/`ep_decimal` index) —
+ *  against operands that do not read the property row? That is what an index on `(key, <value expr>)` seeks;
+ *  any other constraint (an ordered `CASE`, a `LIKE`) reads the key's whole slice. */
+function pinsValue(e: Expr, props: RelId): boolean {
+  if (e.kind === 'binary' && e.op === '=') {
+    return (readsValue(e.left, props) && !readsProperty(e.right, props))
+      || (readsValue(e.right, props) && !readsProperty(e.left, props));
+  }
+  return e.kind === 'in-list' && readsValue(e.expr, props) && !e.values.some((v) => readsProperty(v, props));
+}
+
+/**
+ * The ARMS an owner seek reads, each a conjunct list: `free` itself, or — when ONE top-level conjunct is a
+ * disjunction whose every disjunct, beside the other conjuncts, pins `value` by equality (`pinsValue`) — one arm
+ * per disjunct. A raw compare OR-ed with the decimal arm (`decimalTextArm`, `src/compiler/rel/predicate.ts`) is
+ * such a disjunction: as one predicate SQLite serves it only by reading the key's every row through `(key=?)`;
+ * as a `UNION ALL` each arm is a seek — `vp_key_value(key, value)` for the raw compare, the partial
+ * `vp_decimal(key, CAST(value AS REAL))` for the decimal arm. It is the form SQLite's own multi-index OR
+ * (`WHERE_MULTI_OR`) takes, but only with statistics, which a young DO graph does not have (RelIR plan §1 P4).
+ *
+ * Exactly ONE conjunct is expanded, never a general DNF: DNF multiplies arms, and each arm is statement text
+ * under the 100 KB cap. A nested `OR` stays inside its arm. The equality test keeps the expansion from costing:
+ * an arm that cannot seek re-reads the key's slice, so `has(k, lt(10).or(gt(90)))` stays one read.
+ */
+function seekArms(free: readonly Expr[], props: RelId): readonly (readonly Expr[])[] {
+  // A conjunct that already pins `value` makes the one predicate a seek; nothing to expand.
+  if (free.some((c) => pinsValue(c, props))) return [free];
+  for (const [i, term] of free.entries()) {
+    const alternatives = disjuncts(term).map(conjuncts);
+    if (alternatives.length < 2 || !alternatives.every((alt) => alt.some((c) => pinsValue(c, props)))) continue;
+    const rest = free.filter((_, j) => j !== i);
+    return alternatives.map((alt) => [...rest, ...alt]);
+  }
+  return [free];
+}
+
 /**
  * A correlated property `EXISTS` over the base property table, as a `DISTINCT` relation of owner ids
  * — or `null` if this term is not one, or is one the strategy declines to lift.
@@ -628,7 +679,8 @@ function seekable(e: Expr, props: RelId, local: SeekTarget['local']): boolean {
  *
  * A correlated value may hold a subplan (a federated sibling reads its key through a one-row scalar
  * subquery); it is COPIED (`freshCopy`), since the original stays in the `EXISTS` and two relations may
- * not share a `RelId`.
+ * not share a `RelId`. A disjunctive value predicate is read as a `UNION ALL` of arms (`seekArms`) under
+ * the one `DISTINCT`.
  */
 export const indexSeek: OwnerSeek = (term, target, mint) => {
   const properties = SEEK_PROPERTIES[target.table];
@@ -645,27 +697,30 @@ export const indexSeek: OwnerSeek = (term, target, mint) => {
   const correlations = inner.filter((e) => isCorrelation(e, props.id, properties.owner, target.rel, target.name));
   if (correlations.length !== 1) return null;
   const free = inner.filter((e) => !correlations.includes(e));
-  const conjoined = conjoin(free);
-  if (!conjoined || free.some((e) => !seekable(e, props.id, target.local))) return null;
+  if (!free.length || free.some((e) => !seekable(e, props.id, target.local))) return null;
   // A VALUE constraint is what makes this a seek rather than a re-read of the whole key.
-  let constrainsValue = false;
-  for (const e of free) forEachExpr(e, (n) => { if (n.kind === 'col' && n.rel === props.id && n.name === 'value') constrainsValue = true; });
-  if (!constrainsValue) return null;
-  const pred = freshCopy(conjoined, mint);
-  if (!pred) return null;
+  if (!free.some((e) => readsValue(e, props.id))) return null;
 
-  // The scan is REBUILT with a fresh id and alias rather than reused: it now appears in two places
-  // (inside the EXISTS, and here), and two relations may not share a RelId.
-  const scan = make.scan({ id: mint.id('sk'), table: props.table, alias: mint.alias('rsk'), channels: [], type: props.type });
-  const filtered = make.filter({
-    id: mint.id('sf'), input: scan, channels: [], type: scan.type,
-    pred: substRelId(pred, props.id, scan.id),
-  });
-  const owners = make.project({
-    id: mint.id('sp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] },
-    exprs: [['sid', col(filtered.id, properties.owner)]],
-  });
-  return make.distinct({ id: mint.id('sd'), input: owners, channels: [], type: owners.type });
+  // One seek per ARM (`seekArms`): `free` itself, or one per disjunct of the one disjunction it expands. Each
+  // arm's scan is REBUILT with a fresh id and alias rather than reused: it now appears in two places (inside
+  // the EXISTS, and here), and two relations may not share a RelId.
+  const arms: Rel[] = [];
+  for (const arm of seekArms(free, props.id)) {
+    const pred = freshCopy(conjoin(arm)!, mint);
+    if (!pred) return null;
+    const scan = make.scan({ id: mint.id('sk'), table: props.table, alias: mint.alias('rsk'), channels: [], type: props.type });
+    const filtered = make.filter({
+      id: mint.id('sf'), input: scan, channels: [], type: scan.type,
+      pred: substRelId(pred, props.id, scan.id),
+    });
+    arms.push(make.project({
+      id: mint.id('sp'), input: filtered, channels: [], type: SEEK_OWNERS,
+      exprs: [['sid', col(filtered.id, properties.owner)]],
+    }));
+  }
+  // The DISTINCT already removes an owner two arms both match, so the arms need no anti-join.
+  const owners = arms.length === 1 ? arms[0]! : make.union({ id: mint.id('su'), inputs: arms, all: true, channels: [], type: SEEK_OWNERS });
+  return make.distinct({ id: mint.id('sd'), input: owners, channels: [], type: SEEK_OWNERS });
 };
 
 // ---------- trigramSeek: the property_fts trigram index (`ftsSubstringPredicate`) ----------

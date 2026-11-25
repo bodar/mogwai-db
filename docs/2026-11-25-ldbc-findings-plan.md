@@ -86,4 +86,17 @@ has no Boolean storage class; the type must come from the value's carried type, 
 value), and fix it where every Boolean passes, not per step.
 
 ## Deferred / follow-ups
-(none yet)
+
+- **Derive a sargable seek range for an ordered numeric predicate (from L1).** `has(k, gt(29))` lowers
+  to a type-dispatching `CASE` (`ordered`, `src/compiler/rel/predicate.ts`). No index can serve a
+  `CASE`, so the owner seek reads `vp_key_value(key=?)`: every row of the key. The fix needs a range
+  derivation: a native arm `value > X AND value < ''` plus the decimal arm on `vp_decimal`. That is a
+  different mechanism from L1's OR expansion (Calcite's `Sarg`/`RexSimplify` family,
+  `vendor/calcite/core/src/main/java/org/apache/calcite/rex/RexSimplify.java`). Measured cost today:
+  linear in the key's rows (0.9 ms at 1k, 6.2 ms at 8k). It is not a regression.
+- **A user `or()` of equalities keeps the key-wide seek (from L1).** `has(k, eq(1).or(eq(2)))` gives
+  disjuncts that each hold a NESTED `OR` (raw compare or decimal arm). `seekArms`
+  (`src/rel/passes/semijoin.ts`) expands one disjunction only, never a general DNF (arm count against
+  the 100 KB statement cap). `within(1, 2)` is the common spelling and seeks. Revisit only with evidence.
+- **Check if `write.ts` `decimalTextSeeks` can seek `vp_decimal` (from L1).** Its BigDecimal half may
+  use the new index. It also covers the long-as-TEXT tail, so it is not a drop-in deletion.

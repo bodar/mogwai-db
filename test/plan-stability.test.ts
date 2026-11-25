@@ -137,6 +137,31 @@ describe('id routing: every id question is a seek', () => {
   });
 });
 
+// A NUMERIC equality keeps its (key, value) SEEK. A plain number also matches a stored BigDecimal by its REAL
+// (`decimalTextArm`, src/compiler/rel/predicate.ts), so the predicate is `value = n OR (vtype = 'bigdecimal'
+// AND CAST(value AS REAL) = n)`. As ONE predicate SQLite served that OR only through `vp_key_value(key=?)`:
+// every row of the key, per query (LDBC `has('Post','ID',x)`: 87 ms against 0.018 ms). The owner seek reads
+// each disjunct as its own arm (`seekArms`, src/rel/passes/semijoin.ts), so each arm is a seek: the raw compare
+// on `(key, value)`, the decimal arm on the partial `vp_decimal`/`ep_decimal`.
+describe('a numeric equality seeks (key, value), never the bare key', () => {
+  const NUMERIC_SEEK: Readonly<Record<string, readonly [string, string, string]>> = {
+    'vertex eq': ["g.V().has('person','age',29).count()", 'vp_key_value', 'vp_decimal'],
+    'vertex within': ["g.V().has('age',within(29,30)).count()", 'vp_key_value', 'vp_decimal'],
+    'edge eq': ["g.E().has('weight',0.5).count()", 'ep_key_value', 'ep_decimal'],
+    'edge within': ["g.E().has('weight',within(0.5,1.0)).count()", 'ep_key_value', 'ep_decimal'],
+  };
+  for (const [name, [gremlin, raw, decimal]] of Object.entries(NUMERIC_SEEK)) {
+    test(`${name}: ${raw} on (key, value) and ${decimal} on (key, <expr>), cold and warm`, () => {
+      const { sql, binds } = read(gremlin);
+      for (const store of [noStats, withStats]) {
+        const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
+        expect(details.filter((d) => d.includes(raw))).toEqual([expect.stringContaining('(key=? AND value=?)')]);
+        expect(details.filter((d) => d.includes(decimal))).toEqual([expect.stringContaining('(key=? AND <expr>=?)')]);
+      }
+    });
+  }
+});
+
 // A LITERAL String set keeps its index MULTI-SEEK. A String member that some text-carried value could
 // spell (`'CA'` is a Binary's hex carrier, a canonical UUID is a UUID's text) carries a type guard, and
 // while that guard rode PER MEMBER the set was a disjunction SQLite could serve only by seeking the KEY

@@ -241,6 +241,14 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS vp_key_value ON vertex_properties(key, value)`,
   `CREATE INDEX IF NOT EXISTS vp_node_key  ON vertex_properties(node, key)`,
   `CREATE INDEX IF NOT EXISTS ep_key_value ON edge_properties(key, value)`,
+  // The decimal half of a numeric equality. A plain number compares a stored BigDecimal by its REAL
+  // (`decimalTextArm`, src/compiler/rel/predicate.ts), so `has(k, 1)` is `value = 1 OR (vtype =
+  // 'bigdecimal' AND CAST(value AS REAL) = 1)`. The owner seek reads each disjunct as its own arm
+  // (`seekArms`, src/rel/passes/semijoin.ts): the raw compare seeks (key, value) above, the decimal arm
+  // seeks here. Without it that arm read every row of the key. SQLite's planner chooses it; no lowering
+  // names it. PARTIAL, so it holds zero rows on a graph that never writes a BigDecimal.
+  `CREATE INDEX IF NOT EXISTS vp_decimal ON vertex_properties(key, CAST(value AS REAL)) WHERE vtype = 'bigdecimal'`,
+  `CREATE INDEX IF NOT EXISTS ep_decimal ON edge_properties(key, CAST(value AS REAL)) WHERE vtype = 'bigdecimal'`,
   // A single FTS5 trigram index over property TEXT, maintained in the write path (see
   // services/fts-index.ts) — the shared substrate for tinker.search and the TextP substring
   // predicates. `text` is the ONLY tokenized column; the rest are UNINDEXED (stored, not tokenized).
