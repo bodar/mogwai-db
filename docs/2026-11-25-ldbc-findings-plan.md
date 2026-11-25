@@ -45,7 +45,12 @@ and the code that emits the big-decimal arm.
 
 ### L2. Cache compiled plans
 
-**Status: v1 LANDED.** `src/compiler/plan-cache.ts`, used by `compilePlan`, held on the app scope.
+**✅ LANDED (2026-11-25, `0caf17ad`).** `compilePlan` looks a request up in a bounded LRU on the app
+scope (`planCache`, `src/compiler/plan-cache.ts`) before it compiles. One path serves Bun, the DO and
+the CF edge. Gate: `test/compiler/plan-cache.exec.test.ts`.
+
+**What remains.** Nothing in this item. v2 and segment-plan heads are in "Deferred" below.
+
 - The key is the text, each parameter's value and type, the federation depth and the detached mode.
 - Only a single-statement plan is cached. A segment plan, a failed compile, a query with a
   no-argument `datetime()`, and a parameter set larger than 4 KB are never cached.
