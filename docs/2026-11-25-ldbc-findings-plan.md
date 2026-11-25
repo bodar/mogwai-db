@@ -185,6 +185,10 @@ The reuse sweep proposed these. Each one changes no answer.
    `BoundedLru<K,V>` with an optional size function. The parse cache then gets a byte limit (today 512
    texts of 100 KB can outgrow the plan cache's whole budget) and hit/miss stats. Do the per-entry
    size limit above in the same primitive.
+   **✅ LANDED (2026-11-25, `ed9ff04e`).** `BoundedLru<K,V>` (`src/bounded-lru.ts`) holds both caches.
+   It has an entry limit, a size limit, a per-entry limit and hit/miss stats. The size wording now
+   says "UTF-16 units", not bytes. The parse cache holds 512 entries, 256K units, 64K per entry.
+   This also closes the round-1 follow-up "Per-entry size limit for the plan cache". Remains: nothing.
 3. **Move `disjuncts` beside `conjuncts` in `src/rel/expr.ts`.** It is a private copy in
    `src/rel/passes/semijoin.ts` with `or` in place of `and`. The Deferred `eq().or(eq())` case and the
    rowid/uid disjunction in `src/compiler/rel/source.ts` (a private `disjunction` builder) will need
