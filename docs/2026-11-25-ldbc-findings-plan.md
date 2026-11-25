@@ -189,6 +189,9 @@ The reuse sweep proposed these. Each one changes no answer.
    `src/rel/passes/semijoin.ts` with `or` in place of `and`. The Deferred `eq().or(eq())` case and the
    rowid/uid disjunction in `src/compiler/rel/source.ts` (a private `disjunction` builder) will need
    it there. Move only.
+   **✅ LANDED (2026-11-25, `11e1b3e3`).** `disjuncts` and `disjoin` (the OR twin of `conjoin`) are in
+   `src/rel/expr.ts`. The private OR and AND folds now use them. The SQL is byte-stable. Remains:
+   nothing.
 
 ## Needs a human
 
