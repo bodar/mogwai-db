@@ -17,6 +17,14 @@ property, 1,118 MB against Relate's 35 MB) is NOT in this plan. The owner decide
 
 ### L1. A numeric equality must keep the `(key, value)` index seek
 
+**✅ LANDED (2026-11-25, `e5933675`).** The owner seek (`indexSeek`, `src/rel/passes/semijoin.ts`,
+`seekArms`) reads a value-pinning OR as a UNION ALL of seek arms under its DISTINCT. New partial
+indexes `vp_decimal`/`ep_decimal` (`src/storage.ts`) serve the BigDecimal arm. One rule serves eq
+and within, on vertex and edge properties. Gates: `test/plan-stability.test.ts`,
+`test/compiler/numeric-eq-seek.exec.test.ts`.
+
+**What remains.** Nothing in this item. Follow-ups are in "Deferred" below.
+
 **Fact.** `has('Post','ID',962077547172)` lowers to
 `value = ? OR (vtype = 'bigdecimal' AND CAST(value AS REAL) = ?)`. The `OR` stops the
 `vp_key_value(key, value)` seek. SQLite reads every `ID` row (327,588) through `vp_key_value(key=?)`.
