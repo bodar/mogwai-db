@@ -1,6 +1,6 @@
 # Storage density — make a graph smaller without changing an answer
 
-**Status: PROPOSED (2026-11-25). Owner-approved scope and order (2026-11-25).**
+**Status: IN PROGRESS (2026-11-25). S2, S3, S4 landed. S1, S5, S6 wait on the owner (round 1).**
 
 **Source.** The LDBC SNB sf0.1 head-to-head against Relate 1.2.0
 (`docs/2026-11-25-ldbc-findings-plan.md`). The mogwai store for 327,588 vertices and 1,477,965 edges is
@@ -35,6 +35,9 @@ Where the bytes go (`dbstat`, MB):
 ## Items, in order
 
 ### S1. Index only string values in FTS
+
+⏸ **NEEDS HUMAN (round 1, 2026-11-25).** Not built. S1 changes one answer, so it breaks the rule "No
+answer changes". See "Needs-human questions" below. Unblocks: the owner's answer to Q1.
 `TextP` applies only to strings, so a non-string value in `property_fts` is dead weight. Write FTS rows
 for string values only, at every insert site (`src/refresh.ts`, `src/storage.ts`, the bulk loader).
 Cite the vendored reference for what `TextP` does on a non-string (`vendor/tinkerpop/gremlin-core`).
@@ -85,6 +88,11 @@ Store `rev` as an integer generation plus a binary hash (8–16 bytes), not 87 B
 only for a graph that replicates. Expected: about 120 MB on such a graph.
 
 ### S5. FTS on demand, per property key
+
+⏸ **DEFERRED, NEEDS HUMAN (round 1, 2026-11-25).** The scout hit the stop rule. "Ready keys as a compile
+input" cannot work on the Cloudflare edge, because the edge compiles without the store. A one-SQL
+guarded seek/scan union was measured: SQLite still runs the guarded scan (10–20 ms vs 0 ms at 400k
+rows). Prerequisite: **S4b. DO-side plan selection** (below, ordered before S5). See Q2.
 The first `TextP` predicate on key `k` answers correctly by scan and marks `k` wanted. The scan path
 exists already (a needle under 3 characters uses it). A bounded backfill slice runs after each request
 to that graph (not a DO alarm: an alarm blocks the DO's single SQL thread, `src/scheduler.ts` header).
@@ -97,6 +105,11 @@ passing the key state in).
   scout or the build finds either, stop and report with the measured line count and saving; do not land.
 
 ### S6. Intern property keys
+
+⏸ **DEFERRED, NEEDS HUMAN (round 1, 2026-11-25).** The scout gate failed. About 100 SQL sites name the
+key column. Labels do not resolve once: about 25 separate label scans in 7 files. The seek passes match
+the key literal on the property scan. Prerequisite: **S5b. One interning authority for labels and keys**
+(below, ordered before S6). See Q3.
 Store a property key as an integer id in a keys table, as `labels` already does. Apply it to
 `vertex_properties.key`, `edge_properties.key`, their indexes and `property_fts.pk` if it holds the key.
 One interning rule for labels and keys. A key literal resolves once, as a label does; an unknown key
@@ -113,5 +126,92 @@ resolves to "no rows", never to an error.
   safe part of it. Owner agreed, 2026-11-25.
 - **Removing `e_pair` / `e_label`.** Measured reasons to keep both; see S2.
 
-## Deferred / follow-ups
-(none yet)
+## Prerequisite items (proposed, round 1)
+
+S5 and S6 do not share a root cause. Each has its own prerequisite.
+
+### S4b. DO-side plan selection (before S5)
+A compiled plan may carry alternative SQL. A small store-side fact chooses one at execute time, on the
+DO. This keeps a store-dependent access path out of the store-free edge compile
+(`src/compiler/plan-cache.ts`). Plan it as its own item and measure it first. S5 then needs: a key-state
+table, write guards at 3 sites, a post-request backfill, and a scan fallback in `tinker.search`.
+Re-measure the S5 saving after S1 before you build this.
+
+### S5b. One interning authority for labels and property keys (before S6)
+The scan factory resolves a name literal once. The seek passes match that one form. Move labels onto it
+first: this removes the ~25 duplicated label scans, and is worth doing alone. Then S6 is one central
+change. If the owner agrees, record it in `docs/outstanding-work.md` with S6 deferred behind it.
+
+## Needs-human questions (round 1, verbatim)
+
+**Q1 (S1).** S1 changes one answer. Today g.call('tinker.search',[search:'35']) matches peter's age=35, as
+TinkerGraph does (TinkerHelper.java:240). Your plan says 'No answer changes'. Do you accept one §3 row,
+'tinker.search matches string and collection values only'? It saves about 90 MB at sf0.1. Our numeric
+and date matching is already approximate (JS number spelling, dates as epoch-ms). If you decline, S1
+shrinks to the answer-preserving part only (no row for text shorter than 3 characters), which saves much
+less.
+
+**Q2 (S5).** S5 meets your stop rule. 'Ready keys as a compile input' cannot work on the Cloudflare edge,
+which compiles without the store. A one-SQL guarded seek/scan union was measured: SQLite still runs the
+guarded scan (10-20 ms vs 0 ms at 400k rows). A working design needs a DO-side choice between two plans,
+a key-state table, write guards at 3 sites, a post-request backfill, and a scan fallback in
+tinker.search. Do you want (A) the dual-plan design built as a later item (after a 'DO-side plan
+selection' substrate item), or S5 dropped? Re-measure the saving after S1 before you decide.
+
+**Q3 (S6).** S6 fails its scout gate: about 100 SQL sites name the key column, labels do not resolve once
+(about 25 separate label scans in 7 files), and the seek passes match the key literal on the property
+scan. Do you want a prerequisite item, 'one interning authority for labels and keys' (labels first, a
+consolidation worth doing alone), put in docs/outstanding-work.md with S6 deferred behind it?
+
+## Follow-ups from review (round 1)
+
+Major first.
+
+1. **F1 (major, S3). Filter validation backfills the whole graph.** `validateReplicationFilter`
+   (`src/replicate.ts`) calls `source.changes(0, undefined, filter.limit(1))`. That feed is unpaged, so
+   `exposeIdentity(store)` backfills every element in one request. Measured first save vs trunk: 64k
+   elements 5035 ms vs 19 ms. At sf0.1 (30 s backfill) one DO request reaches the CPU limit, and the user
+   sees "replication filter rejected: <cpu limit>". This depends on data size. Fix: validate with a paged
+   call, e.g. `source.changes(0, 1, …)`. The same applies to a filtered `runReplication` with
+   `batchSize <= 0`.
+2. **F2 (major, S3). First GraphSON export backfills in one DO turn.** `graphsonLines`
+   (`src/formats/graphson.ts`) runs `exposeIdentity(store)` in full before the first line. On a DO the
+   whole backfill is one synchronous turn and one implicit transaction. A first `g.io(…).write()` on a
+   graph of about 1M elements can exceed the request CPU budget. If it aborts, the transaction rolls back
+   and every retry fails the same way. Fix: in `writeGraphsonToSink`, drain the backfill page by page with
+   an await between pages (`while (!exposeIdentity(store, PAGE)) await yieldTurn()`).
+3. **F3 (pre-existing, not S4). Replication batch can carry an edge before its endpoint.** Repro: turn
+   replication on, add 300 `p→q` pairs, run `g.V().property('m',1)`, then replicate to a new graph. A
+   bare `Error: bulk load: edge 101 references unknown vertex 201` reaches the caller and 0 edges land.
+   The vertex update re-sequences vertices after their edges, so a 500-entry batch holds the edge first.
+   Reproduced before S3. Route it to `docs/outstanding-work.md`.
+4. **F4 (minor, S4). A leaf-only carried rev is now refused.** `storedRev` (`src/rev.ts`) refuses a rev
+   with no `ids`; trunk accepted it. Only a pre-rev-tree GraphSON backup or a third-party `_bulk_docs`
+   writer sends one. The refusal is clear and atomic. Optional: seed `ids = [hash]` (one line) instead.
+5. **F5 (minor, S3). Stale planner comments.** `src/rel/passes/leading.ts:32` says a scan uses
+   `nodes_gid`. That index is now partial, so a never-replicated graph scans `sqlite_autoindex_nodes_1`.
+   Results and timings do not change. Update the comment.
+6. **F6 (minor, S3). Stale `applyUids` comment.** A pre-enable holder now gets a fresh, later uuid_v7 at
+   collision time, so "gid is uuid_v7, so first to claim the name" is no longer true for it. Peers still
+   converge. Update the comment, or take proposal P4.
+7. **F7 (minor, docs only).** `src/api.ts:268,292` and `src/formats/graphson.ts:554` still describe the
+   wire rev as `{gen, hash}`. `src/compiler/rel/source.ts:331,582` say "`uid`-UNIQUE seek"; name the
+   partial `nodes_uid`/`edges_uid` index.
+
+## Next round — reuse-sweep proposals
+
+- **P1. One gid-keyed element read in `src/replicate.ts`.** Merge `resolveGids`, `localRevs` and
+  `liveRevs` into one `rowsByGid(store, table, gids) -> Map<hexGid, {id, rev: Rev|null}>`. `applyDeletes`
+  reads the same rows twice today. Removes about 12 lines and one `json_each` round-trip per table on the
+  delete path. Same index seek, same answers.
+- **P2. Move `leafRev`/`fullRev` into `src/rev.ts`.** They live in `src/manager.ts`. Use them where
+  `liveRevs` and `conflictsFeed` (`src/replicate.ts`) hand-roll `{gen: rev.gen, hash: rev.hash}`. One
+  wire-shape authority; byte-identical output.
+- **P3. One exported `GID`/`REV` SetColumn pair.** Export them from `src/refresh.ts`. Replace
+  `BULK_REV` and the `isBlob` name test in `src/bulk.ts`, and the inline specs in the tombstone
+  `insertSet` and `matchSetGids` (`src/replicate.ts`). About 5 literals become 2 imports. No SQL change.
+- **P4. One "mint a gid the backfill has not reached" write.** Add `ensureGids(store, table, rows)` to
+  `src/refresh.ts` (one `updateSet` over `GID`). Use it in `applyUids` (now row-at-a-time) and
+  `matchSetGids`. Keeps `src/refresh.ts` the single metadata authority. Closes F6.
+
+Branches: no unlanded branch from round 1 (S1, S5 and S6 were not built).
