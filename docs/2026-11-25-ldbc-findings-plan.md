@@ -276,6 +276,14 @@ byte-stable reuse.
    and it stops a duplicate upsert of a plain double.
    No migration (pre-alpha). Done when: the witnesses above return the right rows, a BigDecimal still
    round-trips exactly, and LDBC q3/q7/q21/q26 keep their plain seek.
+   ✅ **Landed 2026-11-25 (`88bc891c`, `d3aa060e`, `c2e13ae8`).** `value` holds the comparable form
+   (REAL for a BigDecimal or a BigInteger past int64, INTEGER for a long). A nullable `exact` column
+   holds the digits for output only. `storedForm` (`src/compiler/rel/build.ts`) is the one write
+   conversion. `storedPayload` (`COALESCE(exact, value)`) is the one read for output. A nested operand
+   converts by its tag through `comparableOf`. Deleted: `vp_decimal`/`ep_decimal`, `decimalTextSeeks`,
+   the stored-row `decimalTextArm`, and the `seekArms` reason. Two divergences are added to
+   `docs/limitations.md`. Test: `test/compiler/comparable-storage.exec.test.ts`. Every witness is at
+   most 7.5× from 1k to 8k. Remains: nothing.
 4. *(Cut by owner review — subsumed by item 3.)*
 5. **Parse-cache bounds for memory** (follow-up above). Small.
 6. **GraphBinary frames a boolean tag through `booleanOfStored`; name `vp_decimal`/`ep_decimal` in the
