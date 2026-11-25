@@ -3,8 +3,8 @@
 // SINK over the `GraphSource` + carried-channel vocabulary: nothing here re-enters the fold, so it is
 // the cleanest slice of the old lower.ts. Extracted from lower.ts; see ./chain.ts for the vocabulary.
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, elementCols, eq, labelSetArgs, meta, or, renumber, typeOf, type Minter } from '../build.ts';
+import { col, compilerInt, disjoin, type Expr } from '../../../rel/expr.ts';
+import { and, carriedCols, elementCols, eq, labelSetArgs, meta, renumber, typeOf, type Minter } from '../build.ts';
 import { withChannel } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { ColMeta } from '../../../rel/types.ts';
@@ -396,8 +396,7 @@ function directionsJoin(
   const restriction = restrict(e);
   const on = !dirs || froms.every((name) => name === froms[0])
     ? and(eq(col(e.id, froms[0]!), incoming), restriction)
-    : froms.reduce<Expr | undefined>((acc, name, i) =>
-      or(acc, and(and(eq(col(driver!.id, 'dir'), compilerInt(i)), eq(col(e.id, name), incoming)), restriction)), undefined)!;
+    : disjoin(froms.map((name, i) => and(and(eq(col(driver!.id, 'dir'), compilerInt(i)), eq(col(e.id, name), incoming)), restriction)))!;
   // A correlated single-direction hop FILTERS the edge table against the outer id; every other form JOINS.
   const source = driver
     ? make.join({

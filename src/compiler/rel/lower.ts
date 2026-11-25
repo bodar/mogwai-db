@@ -2,7 +2,7 @@ import { NO_PARAMS, type ParamEnv } from '../../gremlin/param-env.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { entryValue, type TraverserObject } from './history.ts';
-import { col, compilerInt, compilerNull, compilerText, compilerParamName, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, compilerParamName, conjoin, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { renderLowered, type RenderedPlan } from '../../rel/emit.ts';
@@ -1077,7 +1077,7 @@ function sortTerms(
     if (!drop) return null;
     if (drop.keep) drops.push(drop.keep);
   }
-  const drop = drops.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
+  const drop = conjoin(drops);
   return drop ? { terms, drop } : { terms };
 }
 
@@ -6536,7 +6536,7 @@ function aliasValueWhere(
   };
   const clause = aliasPred(pred, leaf);
   if (!clause) return 'decline';
-  const kept = prod.reduce<Expr | undefined>((a, b) => (a ? and(a, b) : b), undefined);
+  const kept = conjoin(prod);
   return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: kept ? and(kept, clause) : clause });
 }
 

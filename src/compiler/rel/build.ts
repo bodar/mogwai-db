@@ -1,5 +1,5 @@
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, disjoin, lit, param, type Expr } from '../../rel/expr.ts';
 import { jsonChunks, jsonTextChunks, type JsonChunk } from '../../json-chunks.ts';
 import { CF_MAX_VALUE_BYTES, fitsUtf8 } from '../../do-limits.ts';
 import { SAFE_INT } from './reducer.ts';
@@ -564,7 +564,7 @@ export function labelIds(args: readonly Arg[], fresh: Minter): Rel {
     }
   }
   if (inline.length) clauses.unshift({ kind: 'in-list', expr: nameCol, values: inline.map(compilerText) });
-  const pred = clauses.reduce<Expr | undefined>((left, right) => (left ? { kind: 'binary', op: 'or', left, right } : right), undefined);
+  const pred = disjoin(clauses);
   const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: pred! });
   return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
 }

@@ -1,7 +1,7 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, type Expr } from '../../../rel/expr.ts';
-import { and, carriedCols, eq, meta, notProduced, or, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
+import { col, compilerInt, compilerNull, disjoin, type Expr } from '../../../rel/expr.ts';
+import { and, carriedCols, eq, meta, notProduced, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
 import { groupableChannels, mergePeerArms, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { Binding } from '../../../rel/plan.ts';
@@ -985,7 +985,7 @@ export function chooseOptions(
     // option, so one arm serves both.
     const unclaimed = [NONE, ...(canBeUnproductive ? [UNPRODUCTIVE] : [])]
       .filter((ordinal) => !claimed.includes(ordinal));
-    if (policy.implicitPassThrough && unclaimed.length) passThrough = unclaimed.map(takes).reduce((left, right) => or(left, right));
+    if (policy.implicitPassThrough && unclaimed.length) passThrough = disjoin(unclaimed.map(takes))!;
   } else {
     // EVERY ADMITTING OPTION RUNS (`BranchStep.pickBranches` with no `subList`), so a start is a member of
     // several arms and no single ordinal can name its route. Each KEY's test is instead projected ONCE, as
@@ -1008,7 +1008,7 @@ export function chooseOptions(
     const fenced = make.materialize({ id: fresh('okm'), input: flagged, channels: flagged.channels, type: flagged.type });
     over = fenced;
     const productive = col(fenced.id, PRESENT);
-    const admitted = flagCols.reduce<Expr | undefined>((all, name) => or(all, col(fenced.id, name)), undefined);
+    const admitted = disjoin(flagCols.map((name) => col(fenced.id, name)));
     // `Pick.none` takes a productive start no key admitted — and an UNPRODUCTIVE start too where no
     // `Pick.unproductive` is written: `pickBranches(Pick.unproductive)` finds no list and falls to `Pick.none`
     // (`BranchStep.java:206-219`). Null-safe (`notProduced`): a key test may be NULL, which admits nothing.

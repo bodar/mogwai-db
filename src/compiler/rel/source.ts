@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, disjoin, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relChildren } from '../../rel/walk.ts';
@@ -11,7 +11,7 @@ import { CONSTANT, storedCompareOn } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, or, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -321,7 +321,7 @@ function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Min
   const text: Expr[] = [];
   if (inlineStrs.length) text.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
   text.push(...strParams);
-  return routedExternalId(uidCol, disjunction(numeric), disjunction(text)) ?? (nonEmpty ? CONSTANT.false : undefined);
+  return routedExternalId(uidCol, disjoin(numeric), disjoin(text)) ?? (nonEmpty ? CONSTANT.false : undefined);
 }
 
 /**
@@ -332,7 +332,7 @@ function idMembership(idCol: Expr, uidCol: Expr, ids: readonly Arg[], fresh: Min
  * index serves. `idMembership` hands it compile-time sets; `externalIdIs` a per-row value's keys.
  */
 const routedExternalId = (uidCol: Expr, numeric: Expr | undefined, text: Expr | undefined): Expr | undefined =>
-  disjunction([...(numeric ? [and(numeric, rowidOnly(uidCol))] : []), ...(text ? [text] : [])]);
+  disjoin([...(numeric ? [and(numeric, rowidOnly(uidCol))] : []), ...(text ? [text] : [])]);
 
 /**
  * A run-time id VALUE's two routing KEYS — the value itself where its Gremlin type (`evidence`) is a Number
@@ -364,9 +364,6 @@ export const externalIdIs = (idCol: Expr, uidCol: Expr, keys: ExternalIdKeys): E
 
 /** `uid IS NULL` — the row's external id IS its rowid (see `idMembership`). */
 const rowidOnly = (uidCol: Expr): Expr => ({ kind: 'binary', op: 'is', left: uidCol, right: compilerNull() });
-
-const disjunction = (clauses: readonly Expr[]): Expr | undefined =>
-  clauses.reduce<Expr | undefined>((left, right) => or(left, right), undefined);
 
 /** A `T.id` RANGE over the base schema: `uid IS NULL AND id <op> n`. Equal to comparing
  *  `COALESCE(uid, id)` against a NUMBER, because a uid is TEXT and the numeric comparison is confined to

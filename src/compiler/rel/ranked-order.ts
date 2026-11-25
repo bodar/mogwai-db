@@ -34,7 +34,7 @@
 // sorting another. Whatever slips past both — a key the resume meets that the head never ranked — fails
 // the resume statement (`rankJoin`), never sorts as an unranked NULL.
 
-import { col, compilerInt, compilerNull, compilerText, eq, isNot, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, conjoin, eq, isNot, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -112,13 +112,12 @@ export function orderKeyTuple(
  *  non-productive `by()` leaves SQL NULL, which `json_array` stores as JSON `null` and `json_extract`
  *  reads back as SQL NULL — a produced node is always an object). `undefined` when nothing can drop. */
 export function keyProductive(keyText: Expr, required: readonly number[]): Expr | undefined {
-  return required
+  return conjoin(required
     .map((i): Expr => ({
       kind: 'binary', op: 'is not',
       left: { kind: 'call', fn: 'json_extract', args: [keyText, compilerText(`$[${i}]`)] },
       right: compilerNull(),
-    }))
-    .reduce<Expr | undefined>((left, right) => (left ? { kind: 'binary', op: 'and', left, right } : right), undefined);
+    })));
 }
 
 /** A bare `by()`'s key — the traverser itself as a member node. */

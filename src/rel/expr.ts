@@ -147,6 +147,11 @@ export const and = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'an
 export const conjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'and' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e]);
 /** `left OR right`. */
 export const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
+/** `or`'s inverse: an `OR` tree flattened to its disjuncts — `conjuncts` read the other way. */
+export const disjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'or' ? [...disjuncts(e.left), ...disjuncts(e.right)] : [e]);
 /** Fold `terms` with AND; `undefined` for no terms (an absent predicate). */
 export const conjoin = (terms: readonly Expr[]): Expr | undefined =>
   terms.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
+/** Fold `terms` with OR — `conjoin`'s twin, the same left fold; `undefined` for no terms. */
+export const disjoin = (terms: readonly Expr[]): Expr | undefined =>
+  terms.reduce<Expr | undefined>((left, right) => (left ? or(left, right) : right), undefined);

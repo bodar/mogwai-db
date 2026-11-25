@@ -1,4 +1,4 @@
-import { col, compilerNull, compilerReal, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerNull, compilerReal, compilerText, conjoin, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { constLit } from './const.ts';
 import { compileMath, mathVars, type MathOps } from '../../gremlin/math.ts';
@@ -347,8 +347,7 @@ function formatValue(
     ? pieces.reduce((left, right) => ({ kind: 'binary', op: '||', left, right }))
     : compilerText('');
   // CAST so a lone value token frames as a string rather than as whatever it was stored as.
-  const keep = raws.map((raw): Expr => ({ kind: 'binary', op: 'is not', left: raw, right: compilerNull() }))
-    .reduce<Expr | undefined>((left, right) => left ? { kind: 'binary', op: 'and', left, right } : right, undefined);
+  const keep = conjoin(raws.map((raw): Expr => ({ kind: 'binary', op: 'is not', left: raw, right: compilerNull() })));
   return { expr: { kind: 'cast', arg: joined, to: 'text' }, tokens, ...(keep ? { keep } : {}) };
 }
 /** The step names this module owns — the set a fold checks membership in BEFORE asking for a

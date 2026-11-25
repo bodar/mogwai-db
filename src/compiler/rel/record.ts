@@ -1,10 +1,10 @@
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, conjoin, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { perRowColumn, type MapOf, type MixedArm, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
-import { and, carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
@@ -578,7 +578,7 @@ export function selectKeys(
     if (!there) return null;
     present.push(there);
   }
-  const fieldGuard = present.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
+  const fieldGuard = conjoin(present);
   const domain = fieldGuard ? make.filter({ id: fresh('sk'), input: rel, channels: rel.channels, type: rel.type, pred: fieldGuard }) : rel;
 
   for (const [index, label] of spec.labels.entries()) {
@@ -632,7 +632,7 @@ export function selectKeys(
     ...bound.map((column) => aliasPresent(col(projected.id, column))),
     ...required.map((column) => ({ kind: 'binary', op: 'is not', left: col(projected.id, column), right: compilerNull() }) as Expr),
   ];
-  const guard = guards.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
+  const guard = conjoin(guards);
   return {
     rel: guard
       ? make.filter({ id: fresh('sf'), input: projected, channels: projected.channels, type: projected.type, pred: guard })

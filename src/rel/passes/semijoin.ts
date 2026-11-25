@@ -1,4 +1,4 @@
-import { type Expr, and, col, compilerText, conjoin, conjuncts, eq, isNot, or } from '../expr.ts';
+import { type Expr, and, col, compilerText, conjoin, conjuncts, disjuncts, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
@@ -623,9 +623,6 @@ function readsProperty(e: Expr, props: RelId, name?: string): boolean {
   return reads;
 }
 const readsValue = (e: Expr, props: RelId): boolean => readsProperty(e, props, 'value');
-
-/** An `OR` tree flattened to its disjuncts — `conjuncts` read the other way. */
-const disjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'or' ? [...disjuncts(e.left), ...disjuncts(e.right)] : [e]);
 
 /** Does conjunct `e` pin the property `value` by EQUALITY — `value = x`, `value IN (…)`, or the same over an
  *  expression of `value` (the decimal arm's `CAST(value AS REAL)`, which `vp_decimal`/`ep_decimal` index) —
