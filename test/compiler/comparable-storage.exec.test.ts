@@ -122,6 +122,49 @@ describe('at depth: a stored compare composes under every host', () => {
   }
 });
 
+// A NESTED operand hands on the value's PAYLOAD — a BigDecimal's or a wide long's decimal TEXT — while the
+// stored row holds its comparable REAL/INTEGER, so the compare is by Gremlin type (`valueTheta`,
+// `scalarMembership`), never raw: a raw `=` dropped every row here, including a row equal to itself.
+describe('a nested operand meets a stored BigDecimal or wide long', () => {
+  const prices = (): GraphStore => store(
+    "g.addV('p').property('i', 1).property('price', 10.00m).property('list', 10.00m)",
+    "g.addV('p').property('i', 2).property('price', 12.50m).property('list', 10m)",
+    "g.addV('p').property('i', 3).property('price', 8).property('list', 8.0m)",
+    "g.addV('p').property('i', 4).property('price', 12345678901234567L).property('list', 12345678901234567L)");
+  const sorted = async (s: GraphStore, q: string): Promise<string[]> => (await answer(s, q)).sort();
+  for (const [q, want] of [
+    ["g.V().has('price', P.eq(__.values('list'))).values('i')", ['1', '3', '4']],
+    ["g.V().has('price', __.values('list')).values('i')", ['1', '3', '4']],
+    ["g.V().has('price', P.eq(__.values('price'))).values('i')", ['1', '2', '3', '4']],
+    ["g.V().has('price', P.gt(__.values('list'))).values('i')", ['2']],
+    ["g.V().has('price', P.lte(__.values('list'))).values('i')", ['1', '3', '4']],
+    ["g.V().has('price', P.eq(__.V().has('i', 4).values('list'))).values('i')", ['4']],
+    ["g.V().has('price', P.within(__.V().values('list').fold())).values('i')", ['1', '3', '4']],
+    ["g.V().has('price', P.without(__.V().values('list').fold())).values('i')", ['2']],
+    ["g.V().has('price', P.within(__.values('list'), __.constant(99))).values('i')", ['1', '3', '4']],
+    ["g.V().has('i', 1).values('price').as('pp').V().has('price', select('pp')).values('i')", ['1']],
+    ["g.V().as('a').V().has('price', P.eq(__.select('a').values('list'))).values('i')", ['1', '1', '3', '4']],
+    ["g.V().where(has('price', P.eq(__.values('list')))).values('i')", ['1', '3', '4']],
+    ["g.V().local(has('price', P.within(__.V().values('list').fold()))).values('i')", ['1', '3', '4']],
+    ["g.V().has('price', P.not(P.lt(__.values('list')))).values('i')", ['1', '2', '3', '4']],
+  ] as const) {
+    test(q, async () => {
+      expect(await sorted(prices(), q)).toEqual([...want]);
+    });
+  }
+  test('a wide long and a String spelling a BigDecimal', async () => {
+    const s = store(
+      "g.addV('p').property('k', 'x').property('w', 9007199254740993L).property('d', 1.5m)",
+      "g.addV('p').property('k', 'y').property('w', 9007199254740993L).property('d', 1.5)",
+      "g.addV('p').property('k', 'z').property('d', '1.5').property('w', 5L)");
+    expect(await sorted(s, "g.V().has('k', 'x').values('w').as('ww').V().has('w', select('ww')).values('k')")).toEqual(['"x"', '"y"']);
+    expect(await sorted(s, "g.V().has('k', 'x').as('a').V().has('w', gte(__.select('a').values('w'))).values('k')")).toEqual(['"x"', '"y"']);
+    expect(await sorted(s, "g.V().has('w', within(__.V().has('k', 'x').values('w').fold())).values('k')")).toEqual(['"x"', '"y"']);
+    // `1.5m` equals the Double `1.5` and never the String '1.5'.
+    expect(await sorted(s, "g.V().has('k', 'x').as('a').V().has('d', __.select('a').values('d')).values('k')")).toEqual(['"x"', '"y"']);
+  });
+});
+
 describe('a merge by a BigDecimal key upserts one element', () => {
   test('a constant map and a computed project', async () => {
     const t = store("g.addV('p').property('sku', 'a').property('price', 2.50m)");
@@ -137,6 +180,14 @@ describe('the plan', () => {
     const { sql, binds } = read("g.V().has('Post','ID',962077547172).count()");
     const details = s.query<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, [...binds]).map((r) => r.detail);
     expect(details.filter((d) => d.includes('vp_key_value'))).toEqual([expect.stringContaining('(key=? AND value=?)')]);
+  });
+  test('an ordering against a nested operand seeks the element\'s (node, key) row, never a value range', () => {
+    const s = fresh();
+    for (const q of ["g.V().has('price', gt(__.values('list'))).count()", "g.V().has('price', gt(__.V().has('i', 4).values('list'))).count()"]) {
+      const { sql, binds } = read(q);
+      const details = s.query<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, [...binds]).map((r) => r.detail);
+      expect(details.filter((d) => d.includes('value>'))).toEqual([]);
+    }
   });
   test('no decimal index exists', () => {
     expect(fresh().query("SELECT name FROM sqlite_master WHERE name LIKE '%decimal%'", [])).toEqual([]);

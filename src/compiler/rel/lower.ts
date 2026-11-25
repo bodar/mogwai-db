@@ -2513,7 +2513,7 @@ function scalarTail(
         return continueAs(retyped.rel, retyped.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }
       if (asserted && subjectType().kind !== 'static') return null;
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh, (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, null, ctx, fresh, NO_ALIASES, typed));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -2563,7 +2563,7 @@ function scalarTail(
         continue;
       }
       if (step.name === 'where' && whereHasScopeKey(args[0])) return null;
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, null, ctx, fresh));
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh, (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, null, ctx, fresh, NO_ALIASES, typed));
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;

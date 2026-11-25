@@ -322,7 +322,10 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     // The list-member-predicate seam (`list.ts` resolveScalar → firstRootedValue) — the one that drifted.
     expect(read('g.inject([1,2,3]).none(P.eq(__.V().values("age").order()))').sql).toMatch(orderedFirst);
     // The predicate-operand seam (`nestedFirstValue` → firstRootedValue) — behaviour-preserved.
-    expect(read('g.V().has("name", P.gt(__.V().values("age").order()))').sql).toMatch(orderedFirst);
+    expect(read('g.V().values("name").is(P.gt(__.V().values("age").order()))').sql).toMatch(orderedFirst);
+    // Against a STORED row the operand also reads its tag (`firstRootedValue`'s typed form), whose fenced
+    // first row orders by the encounter projected as `k`.
+    expect(read('g.V().has("name", P.gt(__.V().values("age").order()))').sql).toMatch(/AS k FROM[^)]*\) \w+ ORDER BY \w+\.k ASC LIMIT 1/i);
   });
 
 });

@@ -23,13 +23,13 @@ import { ALWAYS_PRODUCTIVE, caseWhen, gatedByHost, hostPresence, hostTag, mayBeA
 import { constLit, declaredScalarType } from '../const.ts';
 import { edgeEndpoint } from '../element.ts';
 import { fieldNamed, framingCols, mayHoldKey, recordKeyFacts, type RelFraming } from '../framing.ts';
-import { correlatedListMembers, firstScalarMember, LIST_COL, payloadOf } from '../list.ts';
+import { correlatedListMembers, firstScalarMember, LIST_COL, ownTagOf, payloadOf } from '../list.ts';
 import { collectionReaderOf, continueAs, dropPath, lowerChain, mapKeyCollided, mapKeyCollision, namedBeyondMap, sideEffectConstant, serviceValue, streamRowTag } from '../lower.ts';
 import { constantNode, correlatedMapKey, elementHost, elementValueMap, MAP_COL } from '../map.ts';
 import { byExpr, byNode, propertyFirstPassing, propertyVtype, scalarNode, scopedHost } from '../modulator.ts';
 import { foldDeclared, PLAIN_FOLD } from '../operator.ts';
 import { PATH_CHANNEL, pathCarried, subPathMembers } from '../path.ts';
-import { perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from '../predicate.ts';
+import { perRowSubject, predicateExpr, SUBJECT_UNKNOWN, type SubjectType, type TypedOperand } from '../predicate.ts';
 import { projectorValue, REL_PROJECTORS } from '../projector.ts';
 import { metaPropertyRead, propertyMetaBag, propertyReadOf, propertyRowId } from '../property.ts';
 import { raisingWhen, transformOffences } from '../receiver.ts';
@@ -475,7 +475,7 @@ export function childRows(
  * `vendor/calcite/core/.../rel/core/Uncollect.java:60`). `json_each` IS SQLite's `UNNEST`, so
  * `subject IN (SELECT sv FROM json_each(<list>))` is that lowering spelled in SQLite's dialect.
  */
-export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): Rel | null {
+export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter, typed = false): Rel | null {
   const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   // `Column.values` returns the map entry's value unchanged
   // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java`).
@@ -485,7 +485,7 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
   if (ctx.entryValue && body?.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
     && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') {
     // A stored map entry's list holds self-describing `{t,v}` members, so it reads as `TYPED_MEMBERS`.
-    return setMembers(ctx.entryValue, TYPED_MEMBERS, fresh);
+    return setMembers(ctx.entryValue, TYPED_MEMBERS, fresh, typed);
   }
   // The operand is the tagged `{nested}` arg; `rootedSteps` takes the inner ANTLR/Step[] payload.
   const steps = rootedSteps(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
@@ -496,7 +496,7 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
     id: fresh('wls'), input: read.rel, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
     exprs: [[LIST_COL, col(read.rel.id, LIST_COL)]],
   }) };
-  return setMembers(listValue, read.framing.of, fresh);
+  return setMembers(listValue, read.framing.of, fresh, typed);
 }
 
 /**
@@ -505,18 +505,24 @@ export function foldedListSet(operand: unknown, ctx: ChainCtx, fresh: Minter): R
  * `Contains.within` compares the member's VALUE, never its envelope, so each member reads through
  * `payloadOf` — the list module's one PAYLOAD authority. An untyped list reads the raw member, so its
  * SQL is unchanged.
+ *
+ * `typed` also lands each member's OWN tag as `st` (`ownTagOf` — NULL where the storage class says it), for
+ * a consumer that compares by Gremlin type rather than raw (`predicateExpr` over a STORED row, whose
+ * BigDecimal is its REAL while the member's is its decimal TEXT payload).
  */
-function setMembers(list: Expr, of: ListOf, fresh: Minter): Rel {
-  if (!hasTypedMembers(of)) return make.explode({
+function setMembers(list: Expr, of: ListOf, fresh: Minter, typed = false): Rel {
+  if (!typed && !hasTypedMembers(of)) return make.explode({
     id: fresh('wle'), channels: [], expr: list, as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)),
   });
   const members = make.explode({
     id: fresh('wle'), channels: [], expr: list, as: { value: 'sm', type: 'smt' },
     type: typeOf(meta('sm', 'any', true), meta('smt', 'text', true)),
   });
+  const [value, jsonType] = [col(members.id, 'sm'), col(members.id, 'smt')];
   return make.project({
-    id: fresh('wlp'), input: members, channels: [], type: typeOf(meta('sv', 'any', true)),
-    exprs: [['sv', payloadOf(of, col(members.id, 'sm'), col(members.id, 'smt'))]],
+    id: fresh('wlp'), input: members, channels: [],
+    type: typed ? typeOf(meta('sv', 'any', true), meta('st', 'text', true)) : typeOf(meta('sv', 'any', true)),
+    exprs: [['sv', payloadOf(of, value, jsonType)], ...(typed ? [['st', ownTagOf(of, value, jsonType)] as const] : [])],
   });
 }
 
@@ -542,22 +548,28 @@ function setMembers(list: Expr, of: ListOf, fresh: Minter): Rel {
  * has no scalar arm and declines, which is the right answer for a mutation inside a read predicate. A
  * member produced by nothing is a NULL scalar, inert in the caller's `IN`/`=` idiom exactly as the
  * reference's dropped-unproductive-operand is.
+ *
+ * `typed` also answers the value's TAG (`TypedOperand`; `null` where the value's storage class says it), for
+ * a consumer that compares by Gremlin type: a STORED row's BigDecimal is its REAL while the operand hands on
+ * the decimal-TEXT payload, so a raw `=` would miss it. Untyped, the tag is not read and the SQL is unchanged.
  */
-export function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES): Expr | null {
+export function nestedFirstValue(operand: unknown, host: ElementSubject | null, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES, typed = false): TypedOperand | null {
   const body = bodyOf(isNested(operand) ? operand.nested : operand, ctx.params, ctx.sideEffects);
   if (!body?.length) return null;
   // A map-entry value is the ordinary scope value of `select(Column.values)`: Column returns the
   // entry's value unchanged (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/
   // gremlin/structure/Column.java`). The entry-rooted V()/E() arm supplies that correlated value.
   if (ctx.entryValue && body.length === 1 && body[0]!.name === 'select' && body[0]!.args.length === 1
-    && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') return ctx.entryValue;
+    && isColumnArg(body[0]!.args[0]!.value) && body[0]!.args[0]!.value.column === 'values') return { value: ctx.entryValue, tag: null };
   if (body[0]!.name === 'V' || body[0]!.name === 'E') {
     const read = rootedRead(body, ctx, fresh, rootedHosts(host?.rel));
     if (!read) return null;
     // `P.resolve(traverser)` takes the operand's FIRST result (ORDER BY encounter, LIMIT 1); the whole
     // rule — and the decline for an effectful or non-scalar body — is `firstRootedValue` (`build.ts`),
     // shared with `list.ts`'s member-predicate operand so the two cannot drift.
-    return firstRootedValue(read, fresh)?.value ?? null;
+    if (!typed) { const first = firstRootedValue(read, fresh); return first && { value: first.value, tag: null }; }
+    const first = firstRootedValue(read, fresh, true);
+    return first && { value: first.value, tag: hostTag(read.framing.kind === 'scalar' ? read.framing.type : undefined, first.vtype) ?? null };
   }
   if (!host) return null;
   // The alias scope rides on the host's `row` so a `select(<label>)`-led operand can RE-ROOT to the
@@ -566,7 +578,8 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   // alias `a`'s value for the current traverser. A correlated `__.values(k)` operand still resolves
   // against the element host exactly as before (the `row` is inert for it).
   const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id, row: { rel: host.rel, aliases } }, ctx, fresh);
-  return value && value.framing.kind === 'scalar' ? value.expr : null;
+  return value && value.framing.kind === 'scalar'
+    ? { value: value.expr, tag: typed ? hostTag(value.framing.type, value.vtype) ?? null : null } : null;
 }
 
 /**
@@ -1937,7 +1950,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
         let all: Expr | undefined;
         for (const t of tests) {
           const one = predicateExpr(stored, t.pred, perRowSubject(storedType, stored), t.arg.type ?? null, t.arg.name ?? null, fresh,
-            (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, operandHost, ctx, fresh, host.row?.aliases ?? NO_ALIASES));
+            (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, operandHost, ctx, fresh, host.row?.aliases ?? NO_ALIASES, typed));
           if (!one) return null;
           all = and(all, one);
         }

@@ -7,7 +7,7 @@ import type { GraphSource, IdQuery } from '../source.ts';
 import type { IRStep } from '../../ir/strategies.ts';
 import { collectionAssert, membershipOf } from '../../ir/step.ts';
 import type { ChildHost, Subject } from '../child.ts';
-import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, typedValueKey, type TypedOperand } from '../predicate.ts';
+import { CONSTANT, framingTypeOf, perRowSubject, predicateExpr, subjectOperand, SUBJECT_UNKNOWN, typedValueKey, type NestedScalar, type NestedSet, type TypedOperand } from '../predicate.ts';
 import { inferredVtype } from '../tag.ts';
 import { perRowColumnOf } from '../../../sql/kernel/render.ts';
 import type { AliasMap } from '../../alias.ts';
@@ -166,7 +166,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     }
     if (args.length !== 1 || collectionAssert(step)) return null;
     return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh,
-      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
+      (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases, typed));
   }
 
   // `where(P.within('x'))` / `where(P.without('x'))` naming a SIDE EFFECT — membership in the collection.
@@ -282,14 +282,14 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([step.args[0]!], element, ctx.source, fresh);
-      const valued = hasPropertyClause(args[1], args[2], element, ctx.source, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+      const valued = hasPropertyClause(args[1], args[2], element, ctx.source, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null, (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, element, ctx, fresh, aliases, typed));
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, ctx.source, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, ctx.source, fresh, valType, valParam, (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, element, ctx, fresh, aliases, typed));
     // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
     // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
     // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
@@ -297,7 +297,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     // no vertex carrying that key).
     if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, element, ctx.source, fresh, valType, valParam, (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+    return hasPropertyClause(key, val, element, ctx.source, fresh, valType, valParam, (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, element, ctx, fresh, aliases, typed));
   }
 
   // `hasId(...)` reads the element's EXTERNAL id (`COALESCE(uid, id)`), the same row `has(T.id, …)`
@@ -314,7 +314,7 @@ export function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx:
     const val: unknown = single && isPred(single.value) ? single.value
       : { op: 'within', operands: idArgs };
     return hasTokenClause('id', val, element, ctx.source, fresh, single?.type ?? null, single?.name ?? null,
-      (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, element, ctx, fresh, aliases));
+      (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, element, ctx, fresh, aliases, typed));
   }
 
   return null;
@@ -489,10 +489,10 @@ function metaFilterClause(step: IRStep, rowid: Expr, rel: Rel, ctx: ChainCtx, fr
   if (typeof key !== 'string') return null;
   const { value, vtype } = metaPropertyRead(propertyMetaBag(rowid, rel, fresh), key);
   return predicateExpr(value, val, perRowSubject(vtype, value), step.args[1]?.type ?? null, step.args[1]?.name ?? null, fresh,
-    (nested) => foldedListSet(nested, ctx, fresh));
+    (nested, typed) => foldedListSet(nested, ctx, fresh, typed));
 }
 
-function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
+function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: NestedSet, resolveScalar?: NestedScalar): Expr | null {
   // The VALUE COMPARISON is the vocabulary's — Gremlin `P` semantics, vtype-aware compare, a bare
   // value's declared type/param name riding through so it inlines (a literal) or binds (a `$x`). The
   // source owns the physical property row and the EXISTS scaffold; it hands the comparison the graph's
@@ -516,7 +516,7 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, s
  * correlated scan so the clause is the same in the source position and after a movement (where the
  * relation carries the rowid alone).
  */
-function hasTokenClause(token: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: (nested: unknown) => Rel | null, resolveScalar?: (nested: unknown) => Expr | null): Expr | null {
+function hasTokenClause(token: string, val: unknown, subject: ElementSubject, source: GraphSource, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null, resolveListSet?: NestedSet, resolveScalar?: NestedScalar): Expr | null {
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
   if (val === undefined) return null;

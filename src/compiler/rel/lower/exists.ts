@@ -403,7 +403,7 @@ export function valuePredicate(
       // not a cast key, but still what says a `constant(true)` arm is a Boolean, not the Number 1.
       : produced.vtype ? { kind: 'unknown', tag: produced.vtype } : SUBJECT_UNKNOWN;
   const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh,
-    (nested) => foldedListSet(nested, ctx, fresh), (nested) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases));
+    (nested, typed) => foldedListSet(nested, ctx, fresh, typed), (nested, typed) => nestedFirstValue(nested, elementSubject(subject), ctx, fresh, aliases, typed));
   if (!pred) return null;
   /**
    * PRODUCTIVITY IS ITS OWN CONJUNCT, not a property of the comparison — and the paragraph above,

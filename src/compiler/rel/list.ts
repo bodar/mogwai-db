@@ -16,7 +16,7 @@ import type { RelFraming } from './framing.ts';
 import { raiseInRow } from '../../rel/raise.ts';
 import { mapHoldsRowids, mapNodePayload } from './map.ts';
 import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedColumn, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
-import { comparabilityClass, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { comparabilityClass, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type NestedScalar } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { realJsonText, stringifyExact } from '../../json-exact.ts';
 import { byProjection, modulations, productivityFilter, type ByProjection } from './modulator.ts';
@@ -161,8 +161,8 @@ const memberVtype = (of: ListOf, members: Rel): Expr | undefined => {
 const memberOwnTag = (of: ListOf, members: Rel): Expr =>
   ownTagOf(of, col(members.id, MEMBER.value), col(members.id, MEMBER.type));
 
-/** `memberOwnTag` over any explode's (value, JSON type) column pair (`payloadOf`'s reason). */
-const ownTagOf = (of: ListOf, value: Expr, jsonType: Expr): Expr => {
+/** `memberOwnTag` over any explode's (value, JSON type) column pair (`payloadOf`'s reason) — also a run-time set's member tag (`foldedListSet`). */
+export const ownTagOf = (of: ListOf, value: Expr, jsonType: Expr): Expr => {
   const type = memberTypeOf(of);
   if (type?.kind === 'static') return compilerText(type.type);
   return {
@@ -287,7 +287,7 @@ export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
  * `Objects.equals`. Getting this wrong answered `IS NULL` for EVERY `eq` — see
  * `test/L4-addendum/list-member-predicate.feature`.
  */
-const memberPredicate = (member: Expr, pred: unknown, resolveScalar?: (nested: unknown) => Expr | null): Expr | null => {
+const memberPredicate = (member: Expr, pred: unknown, resolveScalar?: NestedScalar): Expr | null => {
   if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands[0]?.value === null)
     return { kind: 'binary', op: pred.op === 'eq' ? 'is' : 'is not', left: member, right: compilerNull() };
   return predicateExpr(member, pred, SUBJECT_UNKNOWN, null, null, undefined, undefined, resolveScalar);
@@ -631,11 +631,13 @@ export function listMemberOp(
     // (`build.ts`) is the ONE authority for that first-value rule, shared with `nestedFirstValue`; a
     // hand-rolled copy here had drifted, projecting `v` with no `ORDER BY encounter`/`LIMIT 1` so an
     // ordered operand (`none(P.eq(__.V(x).values(k).order()))`) took a scan-order value.
-    const resolveScalar = child ? (nested: unknown): Expr | null => {
+    // An untyped member subject never asks for the operand's tag (`NestedScalar`'s `typed`).
+    const resolveScalar: NestedScalar | undefined = child ? (nested) => {
       const steps = child.body(isNested(nested) ? nested.nested : nested, 'rooted');
       if (!steps?.length) return null;
       const read = child.rooted(steps);
-      return read ? firstRootedValue(read, fresh)?.value ?? null : null;
+      const first = read ? firstRootedValue(read, fresh) : null;
+      return first && { value: first.value, tag: null };
     } : undefined;
     const pred = memberPredicate(memberPayload(of, members), args[0], resolveScalar);
     if (!pred) return null;

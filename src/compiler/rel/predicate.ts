@@ -1,5 +1,5 @@
 import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { jsonEachSet, meta, storedForm, typeOf, type Minter } from './build.ts';
+import { comparableOf, jsonEachSet, meta, storedForm, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
@@ -8,6 +8,7 @@ import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gre
 import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, isBinaryCarrier, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 import { likeEscaped } from '../../rel/like.ts';
+import { exprHasSubquery } from '../../rel/walk.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -828,6 +829,23 @@ export const typedValueKey = (value: Expr, vtype: Expr): readonly [Expr, Expr] =
  *  bridges INTEGER and REAL (`30` and `30.0`), which is `NumberHelper`'s one number space. */
 const comparableNumber = (value: Expr, vtype: Expr): Expr => storedForm(value, vtype).value;
 
+/** `subject <op> operand` with the operand in a stored row's comparable form (`comparableOf`), decided in ONE
+ *  `VALUES` row that holds the subject, the operand's value and its tag: a correlated read spelled in each arm
+ *  of the conversion would re-run per arm. `subject` is `null` for the operand's comparable form alone. A bare
+ *  column subject is a value there (the emitter writes it `+col`), never a column a range index is chosen on. */
+const comparedOnce = (op: Extract<Expr, { kind: 'binary' }>['op'] | null, subject: Expr | null, operand: TypedOperand, fresh: Minter): Expr => {
+  const one = make.values({
+    id: fresh('cno'), channels: [], type: typeOf(meta('s', 'any', true), meta('v', 'any', true), meta('t', 'text', true)),
+    rows: [[subject ?? compilerNull(), operand.value, operand.tag ?? compilerNull('text')]],
+  });
+  const value = col(one.id, 'v');
+  const comparable = operand.tag ? comparableOf(value, col(one.id, 't')) : value;
+  return { kind: 'scalar', plan: make.project({
+    id: fresh('cnp'), input: one, channels: [], type: typeOf(meta('k', 'any', true)),
+    exprs: [['k', op && subject ? binary(op, col(one.id, 's'), comparable) : comparable]],
+  }) };
+};
+
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped (`likeEscaped`). A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
  * compiler constant. */
@@ -1040,18 +1058,38 @@ export function elementPredicate(pred: unknown): Expr | null {
   return answer === null ? null : answer ? CONSTANT.true : CONSTANT.false;
 }
 
+/** Resolves a NESTED-traversal `within`/`without` operand (`within(__.…fold())`) to the SET relation it
+ *  produces at run time, exploded by json_each (`sv`) — the caller owns it because it holds the child seam.
+ *  `typed` asks for each member's own tag beside it (`st`, NULL where the storage class says it). */
+export type NestedSet = (nested: unknown, typed: boolean) => Rel | null;
+
+/** Resolves a NESTED-traversal operand that is NOT a fold to the CORRELATED FIRST VALUE it produces for the
+ *  current traverser — a comparison's operand (`P.gt(__.values(k))`) or a vararg member (`within(__.values(k),
+ *  __.constant(v))`). The caller owns it because it holds both the child seam and the element host. `typed`
+ *  asks for the value's tag too; untyped, `tag` is `null` and the SQL reads the value alone. */
+export type NestedScalar = (nested: unknown, typed: boolean) => TypedOperand | null;
+
 export function predicateExpr(
   subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
   opType: TypeNode | null = null, opParam: string | null = null, fresh?: Minter,
-  /** Resolves a NESTED-traversal `within`/`without` operand (`within(__.…fold())`) to the SET relation it
-   *  produces at run time, exploded by json_each — the caller owns it because it holds the child seam. */
-  resolveListSet?: (nested: unknown) => Rel | null,
-  /** Resolves a NESTED-traversal `within`/`without` operand that is NOT a fold to the CORRELATED FIRST
-   *  VALUE it produces for the current traverser — the vararg-member form (`within(__.values(k),
-   *  __.constant(v))`), each operand a scalar correlated to the subject element rather than one rooted
-   *  fold. The caller owns it because it holds both the child seam and the element host. */
-  resolveScalar?: (nested: unknown) => Expr | null,
+  resolveListSet?: NestedSet,
+  resolveScalar?: NestedScalar,
 ): Expr | null {
+  // A NESTED operand against a STORED row compares in the row's COMPARABLE form: the row holds a BigDecimal
+  // as its REAL and a wide long as its INTEGER (`storedForm`), while the operand hands on its PAYLOAD — a
+  // BigDecimal's or a wide long's decimal TEXT — so a raw compare would miss a row equal to itself
+  // (`has('price', eq(__.values('price')))`). The operand converts by its own tag (`comparableOf`, an
+  // expression of the outer row, so a correlated equality still seeks `(key, value)`); the compare itself
+  // stays the direct one every nested operand takes. `null` declines.
+  const comparableAt = isStoredRow(type) && fresh ? fresh : null;
+  const nestedValue = (nested: unknown): Expr | null => {
+    const resolved = resolveScalar?.(nested, comparableAt !== null);
+    if (!resolved || !comparableAt || !resolved.tag) return resolved?.value ?? null;
+    // A correlated READ (a scalar subquery) converts once (`comparedOnce`); an expression of the outer row
+    // converts inline, so the equality keeps its `(key, value)` seek.
+    return exprHasSubquery(resolved.value) || exprHasSubquery(resolved.tag)
+      ? comparedOnce(null, null, resolved, comparableAt) : comparableOf(resolved.value, resolved.tag);
+  };
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
   // A BARE NULL value is `eq(null)` — `has(k, null)`/`is(null)` desugar to `P.eq(null)`, whose null-space
@@ -1064,7 +1102,7 @@ export function predicateExpr(
     // A BARE TRAVERSAL value is `is(P.eq(traversal))` (`GraphTraversal.is(Object)` wraps a non-`P` in
     // `P.eq`), so it takes the same FIRST-value resolution a `P.eq(traversal)` operand does below.
     if (isNested(pred)) {
-      const nested = resolveScalar ? resolveScalar(pred) : null;
+      const nested = nestedValue(pred);
       return nested && binary('=', subject, nested);
     }
     // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
@@ -1127,8 +1165,15 @@ export function predicateExpr(
     // whose `IS NOT 1` negation would read a NULL as true — so `neq` over a traversal declines (no corpus
     // pairs one, and mis-answering an empty operand is worse than a gap).
     if (isNested(operands[0].value)) {
-      if (op === 'neq' || !resolveScalar) return null;
-      const nested = resolveScalar(operands[0].value);
+      if (op === 'neq') return null;
+      // An ORDERING against a stored row is decided inside the operand's once-evaluated row, so the row's
+      // `value` there is no range bound: SQLite would otherwise seek `(key, value > ?)` and scan every row
+      // past the bound once per element — quadratic — where the element's own `(node, key)` row is one seek.
+      if (comparableAt && ORDERING.has(op)) {
+        const resolved = resolveScalar?.(operands[0].value, true);
+        return resolved ? comparedOnce(comparison, subject, resolved, comparableAt) : null;
+      }
+      const nested = nestedValue(operands[0].value);
       return nested && binary(comparison, subject, nested);
     }
     // The operand inlines as a TYPED literal, storage class following its declared canonical type —
@@ -1168,8 +1213,14 @@ export function predicateExpr(
     // exploded by json_each. The caller resolves it (it holds the child seam); a NON-fold single
     // operand, or a mix of traversals and literals, FALLS THROUGH to the vararg member path below.
     if (operands.length === 1 && isNested(operands[0].value) && resolveListSet) {
-      const set = resolveListSet(operands[0].value);
-      if (set) return settle({ kind: 'in-query', negated: false, expr: subject, plan: set }, false);
+      const set = resolveListSet(operands[0].value, comparableAt !== null);
+      // Over a STORED row each member converts to the row's comparable form by its own tag (`nestedValue`'s
+      // reason) — once per member, in the set's own projection.
+      const plan = set && comparableAt ? make.project({
+        id: comparableAt('wlc'), input: set, channels: [], type: typeOf(meta('sv', 'any', true)),
+        exprs: [['sv', comparableOf(col(set.id, 'sv'), col(set.id, 'st'))]],
+      }) : set;
+      if (plan) return settle({ kind: 'in-query', negated: false, expr: subject, plan }, false);
     }
     // A single collection operand — the faithful front-end leaves it whole. A bound list-PARAMETER
     // crosses as ONE `jsonb(?)` bind exploded by `json_each` (the parameter stays a bind of any size and
@@ -1206,7 +1257,7 @@ export function predicateExpr(
     // null is (an unproductive operand can neither add a `within` match nor remove a `without` one), so
     // "drop the non-producing operand" and "leave its NULL in the list" are the same answer.
     const members = memberArgs.map((o) =>
-      isNested(o.value) ? (resolveScalar ? resolveScalar(o.value) : null) : operand(o.value, o.type, o.name, type));
+      isNested(o.value) ? nestedValue(o.value) : operand(o.value, o.type, o.name, type));
     if (members.some((m) => !m)) return null;
     // Membership is `eq` per member (`Contains.within`), so a literal member whose equality is not the
     // raw compare (`equality` — a TEXT-carried number, a String spelling a number) cannot ride an `IN` list.

@@ -354,7 +354,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
     return out;
   };
   /** Does `reader` read a column of `b` MORE THAN ONCE whose spelling there runs a subquery? */
-  const rereadsSubquery = (reader: Rel, b: Block): boolean => {
+  const rereadsSubquery = (reader: Rel, b: Block, outer: Scope): boolean => {
     // A FILTER keeps its input's select list, so a column its predicate reads is spelled twice — in the
     // WHERE and again in the output. A WINDOW spells its spec twice itself (SQLite's window rewrite
     // evaluates an `OVER (ORDER BY …)` subquery for the sorter and again for the row — measured,
@@ -374,7 +374,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       // NOT under a FILTER over a JOIN: the fence would keep its predicate out of the join, and a predicate there
       // is what SQLite drives the join's index seeks from (measured: a value join `V().values('name').as('e')
       // .V().has('name', select('e'))` fenced its product of every vertex with every name, 1k → 8k 66× slower).
-      if (spelled && n > 1 && render(spelled).sql.length > COMPUTED_TEXT && !(reader.kind === 'filter' && b.joins.length)) return true;
+      // Nor for a FILTER reading an OUTER row's value (a correlated `has(k, select('e'))` compares the block's
+      // `value` against it): the fence would only move the block's own columns behind `OFFSET 0`, where the
+      // predicate can no longer seek them — the value join's `(key, value = ?)` became a scan per outer row.
+      if (spelled && n > 1 && render(spelled).sql.length > COMPUTED_TEXT && !(reader.kind === 'filter' && (b.joins.length || outer.get(rel)?.get(name) === spelled))) return true;
       // A FILTER over an AGGREGATE is `HAVING`, which spells the aggregate column it tests a second time beside
       // the select list's own — so ONE read is already a repeat, as for a subquery column. Closed, the filter is
       // a `WHERE` on the aggregate's output and reads the column by name (an arg-extremum's guarded row count,
@@ -673,7 +676,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
   const inputBlock = (input: Rel, outer: Scope, blocked: (b: Block) => boolean, reader?: Rel): Block => {
     const built = build(input, outer);
     const walkFree = !fromTree(input).some((source) => source.kind === 'self-ref');
-    const fence = built.kind === 'block' && reader !== undefined && rereadsSubquery(reader, built) && walkFree;
+    const fence = built.kind === 'block' && reader !== undefined && rereadsSubquery(reader, built, outer) && walkFree;
     const shadowed = built.kind === 'block' && reader !== undefined && walkFree && shadowsOuter(reader, input, built, outer);
     if (built.kind === 'block' && !blocked(built) && !fence && !shadowed) return built;
     const closed = fence && built.kind === 'block' ? fenced(reader!, input, built, outer, input.id, []) : undefined;
