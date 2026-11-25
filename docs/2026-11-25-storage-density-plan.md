@@ -1,8 +1,8 @@
 # Storage density — make a graph smaller without changing an answer
 
-**Status: IN PROGRESS (2026-11-25). S2, S3, S4 landed. Owner answers (2026-11-25): S1 go, with a
-`docs/limitations.md` §3 row; S5 dropped; S6 moved to `docs/outstanding-work.md` (`name-interning`, then
-`property-key-interning`). F1, F2, F3 are to be fixed.**
+**Status: IN PROGRESS (2026-11-25). S1, S2, S3, S4 landed. F1, F2, F3 landed. Owner answers
+(2026-11-25): S5 dropped; S6 moved to `docs/outstanding-work.md` (`name-interning`, then
+`property-key-interning`). Open: F4, F5, F6, F7 (part).**
 
 **Source.** The LDBC SNB sf0.1 head-to-head against Relate 1.2.0
 (`docs/2026-11-25-ldbc-findings-plan.md`). The mogwai store for 327,588 vertices and 1,477,965 edges is
@@ -38,7 +38,12 @@ Where the bytes go (`dbstat`, MB):
 
 ### S1. Index only string values in FTS
 
-✅ **OWNER: GO (2026-11-25).** Add the §3 row "`tinker.search` matches string values only". Was: S1 changes one answer, so it breaks the rule "No
+✅ **LANDED (2026-11-25, `180c0b68`).** `ftsTextOf` (`src/services/fts-index.ts`) gives a text only for a
+non-empty string value, so every writer indexes strings only. New `docs/limitations.md` §3 row:
+`tinker.search` matches string values only. Measured at LDBC sf0.1: 716.0 → 669.9 MB by `dbstat`
+(−46.1 MB, not 90: the 614k integers are short texts); `property_fts` rows 2,126,799 → 1,507,945. 30-query
+lane 30/30 correct, p50 sum 322.5 → 328.6 ms (noise). Net −23 production lines. Remaining: nothing.
+**OWNER: GO (2026-11-25).** Add the §3 row "`tinker.search` matches string values only". Was: S1 changes one answer, so it breaks the rule "No
 answer changes". See "Needs-human questions" below. Unblocks: the owner's answer to Q1.
 `TextP` applies only to strings, so a non-string value in `property_fts` is dead weight. Write FTS rows
 for string values only, at every insert site (`src/refresh.ts`, `src/storage.ts`, the bulk loader).
@@ -169,20 +174,32 @@ consolidation worth doing alone), put in docs/outstanding-work.md with S6 deferr
 
 Major first.
 
-1. **F1 (major, S3). Filter validation backfills the whole graph.** `validateReplicationFilter`
+1. ✅ **LANDED (`0bbbfd9b`).** The probe pages (`limit` 1); a filtered pass with `batchSize <= 0` pages
+   at the default batch. Validation on 64k never-replicated vertices: 726.8 → 64.2 ms, 64,000 → 1
+   element backfilled. Net +4 lines.
+   **F1 (major, S3). Filter validation backfills the whole graph.** `validateReplicationFilter`
    (`src/replicate.ts`) calls `source.changes(0, undefined, filter.limit(1))`. That feed is unpaged, so
    `exposeIdentity(store)` backfills every element in one request. Measured first save vs trunk: 64k
    elements 5035 ms vs 19 ms. At sf0.1 (30 s backfill) one DO request reaches the CPU limit, and the user
    sees "replication filter rejected: <cpu limit>". This depends on data size. Fix: validate with a paged
    call, e.g. `source.changes(0, 1, …)`. The same applies to a filtered `runReplication` with
    `batchSize <= 0`.
-2. **F2 (major, S3). First GraphSON export backfills in one DO turn.** `graphsonLines`
+2. ✅ **LANDED (`66d73257`).** `writeGraphsonToSink` drains the backfill with `exposeIdentityByPage`
+   (`src/refresh.ts`), one page per macrotask turn. First export of 64k + 64k: first synchronous turn
+   1395.7 → 24.9 ms; whole export 1851 → 2005 ms. Net +12 lines.
+   **F2 (major, S3). First GraphSON export backfills in one DO turn.** `graphsonLines`
    (`src/formats/graphson.ts`) runs `exposeIdentity(store)` in full before the first line. On a DO the
    whole backfill is one synchronous turn and one implicit transaction. A first `g.io(…).write()` on a
    graph of about 1M elements can exceed the request CPU budget. If it aborts, the transaction rolls back
    and every retry fails the same way. Fix: in `writeGraphsonToSink`, drain the backfill page by page with
    an await between pages (`while (!exposeIdentity(store, PAGE)) await yieldTurn()`).
-3. **F3 (pre-existing, not S4). Replication batch can carry an edge before its endpoint.** Repro: turn
+3. ✅ **LANDED (`a7155223`), fixed rather than routed.** A truncated `changesFeed` page also carries the
+   endpoint vertices of its live edges whose seq is after the page (`endpointsAhead`, index seeks);
+   `last_seq` is unchanged. Apply refuses an edge whose endpoint neither graph nor batch holds, naming
+   both gids. The repro now lands 600 vertices + 300 edges. Net +28 lines. Possible residue (from reading, not reproduced): a FILTERED
+   feed whose closure gains an endpoint with seq ≤ `since` does not re-ship it, so that edge still cannot
+   land on the target (now with the clear refusal).
+   **F3 (pre-existing, not S4). Replication batch can carry an edge before its endpoint.** Repro: turn
    replication on, add 300 `p→q` pairs, run `g.V().property('m',1)`, then replicate to a new graph. A
    bare `Error: bulk load: edge 101 references unknown vertex 201` reaches the caller and 0 edges land.
    The vertex update re-sequences vertices after their edges, so a 500-entry batch holds the edge first.
@@ -196,7 +213,9 @@ Major first.
 6. **F6 (minor, S3). Stale `applyUids` comment.** A pre-enable holder now gets a fresh, later uuid_v7 at
    collision time, so "gid is uuid_v7, so first to claim the name" is no longer true for it. Peers still
    converge. Update the comment, or take proposal P4.
-7. **F7 (minor, docs only).** `src/api.ts:268,292` and `src/formats/graphson.ts:554` still describe the
+7. Part landed with F2: `src/formats/graphson.ts` names `{gen, hash, ids}`. Open: `src/api.ts`,
+   `src/compiler/rel/source.ts`.
+   **F7 (minor, docs only).** `src/api.ts:268,292` and `src/formats/graphson.ts:554` still describe the
    wire rev as `{gen, hash}`. `src/compiler/rel/source.ts:331,582` say "`uid`-UNIQUE seek"; name the
    partial `nodes_uid`/`edges_uid` index.
 
